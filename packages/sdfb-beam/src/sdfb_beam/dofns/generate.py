@@ -29,6 +29,12 @@ from sdfb_core.engines import (
     get_engine,
 )
 
+# Where B.1's embedder weights land after the GCS warm-pull. Offline loaders
+# (`transformers`) read from a local directory only — they cannot open a
+# gs:// URI — so the DoFn pulls the prefix here before the engine builds its
+# embedder. Mirrors the vLLM client's `/local-ssd/model` convention.
+EMBEDDER_LOCAL_DIR = "/local-ssd/embedder"
+
 
 class GenerateRecordsDoFn(beam.DoFn):
     """Wraps a `GenerationEngine` inside Beam's worker lifecycle."""
@@ -53,9 +59,23 @@ class GenerateRecordsDoFn(beam.DoFn):
         self._failed = Metrics.counter("generation", "failed")
 
     def setup(self):
+        # The engine's embedder loads from a local directory only, so a gs://
+        # `embedder_uri` must be warm-pulled to worker-local disk and the ctx
+        # rewritten to the local path before the engine builds its embedder
+        # (see GenerationContext.embedder_uri: "local paths … pulled by the
+        # DoFn"). The LLM weights need no equivalent here — the ModelClient
+        # pulls those itself in its own setup().
+        ctx = self.ctx
+        if ctx.embedder_uri.startswith("gs://"):
+            from sdfb_beam.gcs import localize_gcs_prefix
+
+            local_dir = localize_gcs_prefix(ctx.embedder_uri, EMBEDDER_LOCAL_DIR)
+            ctx = ctx.model_copy(update={"embedder_uri": local_dir})
+            self.ctx = ctx  # cache so a re-entrant setup() skips the pull
+
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
-        self._engine.setup(self.model_client, self.ctx)
+        self._engine.setup(self.model_client, ctx)
 
     def process(self, request):
         n = int(request["n"])

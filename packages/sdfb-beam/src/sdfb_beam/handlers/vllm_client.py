@@ -50,7 +50,8 @@ import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+
+from sdfb_beam.gcs import localize_gcs_prefix, split_gs_uri
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import
     import subprocess
@@ -249,40 +250,8 @@ class VLLMModelClient:
     # ------------------------------------------------------------------
 
     def _pull_weights(self) -> None:
-        """Warm-pull `model_uri` (gs://) → `local_model_dir` via the GCS client.
-
-        Uses the `google-cloud-storage` Python client (ADR 0012), authenticated
-        via ADC on the worker. Never shells out to gsutil.
-        """
-        from pathlib import Path
-
-        from google.cloud import storage
-
-        bucket_name, prefix = _split_gs_uri(self.model_uri)
-        logger.info(
-            "Warm-pulling weights from gs://%s/%s → %s",
-            bucket_name,
-            prefix,
-            self.local_model_dir,
-        )
-        client = storage.Client()
-        dest_root = Path(self.local_model_dir)
-        n_files = 0
-        for blob in client.list_blobs(bucket_name, prefix=prefix):
-            rel = blob.name[len(prefix):].lstrip("/")
-            if not rel:
-                # The prefix "directory" placeholder blob, if present.
-                continue
-            dest = dest_root / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            blob.download_to_filename(str(dest))
-            n_files += 1
-        if n_files == 0:
-            raise RuntimeError(
-                f"No blobs found under gs://{bucket_name}/{prefix} — check the "
-                f"model_uri. Nothing was pulled to {self.local_model_dir}."
-            )
-        logger.info("Pulled %d files to %s", n_files, self.local_model_dir)
+        """Warm-pull `model_uri` (gs://) → `local_model_dir` (ADR 0012)."""
+        localize_gcs_prefix(self.model_uri, self.local_model_dir)
 
     def _server_command(self) -> list[str]:
         """Build the `python -m vllm.entrypoints.openai.api_server ...` argv."""
@@ -374,17 +343,5 @@ class VLLMModelClient:
         return parsed if isinstance(parsed, dict) else None
 
 
-def _split_gs_uri(uri: str) -> tuple[str, str]:
-    """Split `gs://bucket/path/to/prefix/` → `("bucket", "path/to/prefix/")`.
-
-    The returned prefix keeps any trailing slash so `blob.name[len(prefix):]`
-    yields paths relative to the model directory.
-    """
-    if not uri.startswith("gs://"):
-        raise ValueError(f"Not a gs:// URI: {uri!r}")
-    parts = urlsplit(uri)
-    bucket = parts.netloc
-    prefix = parts.path.lstrip("/")
-    if not bucket:
-        raise ValueError(f"gs:// URI has no bucket: {uri!r}")
-    return bucket, prefix
+# Re-exported for backwards compatibility; the canonical home is `sdfb_beam.gcs`.
+_split_gs_uri = split_gs_uri

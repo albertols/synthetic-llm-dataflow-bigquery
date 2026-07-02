@@ -72,7 +72,10 @@
       "Bash(echo \"=== exit: $? \\(grep found nothing => clean\\) ===\")",
       "Bash(sh -n docker/entrypoint.sh)",
       "Bash(echo \"SYNTAX ERROR \\(exit $?\\)\")",
-      "Bash(sed -n '$p' docker/entrypoint.sh)"
+      "Bash(sed -n '$p' docker/entrypoint.sh)",
+      "Bash(.venv/bin/pip list *)",
+      "Bash(command -v ruff)",
+      "Bash(ruff check *)"
     ]
   }
 }
