@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# uv / virtualenvs
+.venv/
+.venv-*/
+uv.lock.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# direnv — real .envrc is per-machine and may contain proxy URLs / cert paths
+# (template is .envrc.example, committed)
+.envrc
+.direnv/
+
+# Local pipeline artifacts
+output/
+temp/
+*.log
+local-ssd/
+.beam/
+
+# NEVER commit model weights — they live in gs://{project}-models/
+models/
+*.safetensors
+*.gguf
+*.bin
+*.pt
+
+# GCP / credentials — should never reach the repo
+*.json.key
+service-account-*.json
+.gcloud/
+application_default_credentials.json
+
+.github/workflows/*
+docs/superpowers/specs

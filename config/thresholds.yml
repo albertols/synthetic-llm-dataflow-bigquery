@@ -1,0 +1,70 @@
+# Mode A validation thresholds — env-scoped severity gates.
+#
+# Loaded by the Beam pipeline at job start (M1 §12 — wiring not yet implemented;
+# this file is the contract).
+#
+# Severity ladder (see .claude/skills/validation-mode-a.md and the brief §8):
+#   BLOCKER  → raises BlockerThresholdExceeded → Dataflow job FAILED
+#   CRITICAL → DLQ + metric + Mode-B-fails-CI (Mode B = M2)
+#   MAJOR    → metric only; alerts in Mode B
+#   MINOR    → counter only; trend
+#
+# Each rule id maps to the check catalog in the brief §6. Add new rules
+# only after adding them to the catalog and a corresponding check.
+
+defaults:
+  # Fraction of records that fail any BLOCKER-severity rule before the
+  # whole Dataflow job is failed. Stricter in prod.
+  blocker_failure_ratio:
+    dev: 0.20
+    uat: 0.05
+    prd: 0.01
+
+rules:
+  schema.types:
+    dimension: validity
+    severity: BLOCKER
+    threshold: 1.0   # 100% type match required
+
+  null.required:
+    dimension: completeness
+    severity: BLOCKER
+    threshold: 0.0   # 0% nulls on REQUIRED columns
+
+  pk.duplicate:
+    dimension: uniqueness
+    severity: BLOCKER
+    threshold: 0     # 0 duplicates on declared primary keys
+
+  schema.batch:
+    dimension: validity
+    severity: CRITICAL
+    threshold: 1.0   # 100% of batch passes the Pandera-derived schema
+
+  null.optional:
+    dimension: completeness
+    severity: MAJOR
+    threshold:
+      dev: 0.10
+      uat: 0.07
+      prd: 0.05    # ≤ 5% null on NULLABLE columns
+
+  range.numeric:
+    dimension: validity
+    severity: CRITICAL
+    threshold: 1.0
+
+  enum.member:
+    dimension: validity
+    severity: CRITICAL
+    threshold: 1.0
+
+  regex.format:
+    dimension: validity
+    severity: MAJOR
+    threshold: 0.999  # ≥ 99.9% format match
+
+  engine_failure:
+    dimension: validity
+    severity: CRITICAL
+    threshold: 0      # 0 unhandled engine exceptions

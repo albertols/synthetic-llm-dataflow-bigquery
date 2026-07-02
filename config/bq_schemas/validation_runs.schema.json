@@ -1,0 +1,18 @@
+[
+  {"name": "run_id", "type": "STRING", "mode": "REQUIRED", "description": "Pipeline run id; joins to dead_letter.run_id."},
+  {"name": "reference_digest", "type": "STRING", "mode": "NULLABLE", "description": "SHA-256 of the canonical reference sample (provenance)."},
+  {"name": "reference_table", "type": "STRING", "mode": "NULLABLE", "description": "Source table the reference rows were SELECTed from."},
+  {"name": "landing_table", "type": "STRING", "mode": "NULLABLE", "description": "Destination table for valid synthetic rows."},
+  {"name": "engine", "type": "STRING", "mode": "NULLABLE", "description": "b1_rag | b2_library."},
+  {"name": "model_uri", "type": "STRING", "mode": "NULLABLE", "description": "gs:// URI of the LLM weights used."},
+  {"name": "env", "type": "STRING", "mode": "NULLABLE", "description": "dev | uat | prd — threshold tier applied."},
+  {"name": "num_rows_requested", "type": "INTEGER", "mode": "NULLABLE", "description": "Rows the run was asked to generate."},
+  {"name": "valid_count", "type": "INTEGER", "mode": "NULLABLE", "description": "Rows that passed all Mode-A checks and landed."},
+  {"name": "dlq_count", "type": "INTEGER", "mode": "NULLABLE", "description": "Total dead-lettered records."},
+  {"name": "blocker_count", "type": "INTEGER", "mode": "NULLABLE", "description": "DLQ records whose rule_id is BLOCKER-severity."},
+  {"name": "dlq_by_rule", "type": "STRING", "mode": "NULLABLE", "description": "JSON map rule_id -> count (PARSE_JSON to query)."},
+  {"name": "blocker_failure_ratio", "type": "FLOAT", "mode": "NULLABLE", "description": "Configured gate for this env (from thresholds.yml)."},
+  {"name": "observed_blocker_ratio", "type": "FLOAT", "mode": "NULLABLE", "description": "blocker_count / (valid_count + dlq_count)."},
+  {"name": "status", "type": "STRING", "mode": "NULLABLE", "description": "PASSED | FAILED_BLOCKER."},
+  {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Row write time (UTC); DAY partition key."}
+]
