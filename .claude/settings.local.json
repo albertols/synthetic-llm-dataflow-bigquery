@@ -75,7 +75,8 @@
       "Bash(sed -n '$p' docker/entrypoint.sh)",
       "Bash(.venv/bin/pip list *)",
       "Bash(command -v ruff)",
-      "Bash(ruff check *)"
+      "Bash(ruff check *)",
+      "WebFetch(domain:www.kaggle.com)"
     ]
   }
 }
