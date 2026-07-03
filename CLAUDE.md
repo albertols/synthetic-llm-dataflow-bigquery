@@ -90,6 +90,7 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 
 ## When in doubt
 
+- **What infra to provision before a run** (GCS buckets, BQ datasets/tables, IAM) → [`docs/DEPLOYMENT_PREREQUISITES.md`](docs/DEPLOYMENT_PREREQUISITES.md).
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Cross-session preferences and project context** → `~/.claude/projects/.../memory/MEMORY.md`.

@@ -76,7 +76,8 @@
       "Bash(.venv/bin/pip list *)",
       "Bash(command -v ruff)",
       "Bash(ruff check *)",
-      "WebFetch(domain:www.kaggle.com)"
+      "WebFetch(domain:www.kaggle.com)",
+      "Bash(grep -vE '\\\\.\\(lock\\)$')"
     ]
   }
 }

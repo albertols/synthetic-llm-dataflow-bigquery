@@ -191,6 +191,7 @@ After #9 + #10 are stable. This is the M1 finish line.
 
 When you need information on a concern, go here — don't restate it elsewhere.
 
+- **Infra to provision beforehand** — GCS buckets, BigQuery datasets/tables, IAM (per env) → [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md)
 - **CI/CD pipeline** (image build, Flex Template deploy, DAG import); L4 quota; region flags → [`CICD.md`](CICD.md)
 - **Local smoke test on M4 with a real model** (no Dataflow) → [`M4_LOCAL_SMOKE.md`](M4_LOCAL_SMOKE.md)
 - **Model weights** — GCS layout, Kaggle download, runtime load, Apple-Silicon caveat → [`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)
