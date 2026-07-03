@@ -41,8 +41,10 @@ gs://{bucket}/synthetic/models/
 └── embedders/
     └── bge-small-en-v1.5/v1/    # For B.1 RAG (M1 §7)
         ├── config.json
+        ├── model.safetensors
         ├── tokenizer.json
-        └── model.safetensors
+        ├── tokenizer_config.json
+        └── special_tokens_map.json
 ```
 
 Rules:
@@ -128,6 +130,25 @@ For AWQ-quantized variants, additionally:
 
 For GGUF (llama.cpp / Ollama path):
 - Single `*.gguf` file is sufficient. No accompanying `config.json` — GGUF is self-describing. Tokenizer is embedded.
+
+### Embedders (B.1 RAG) — bge-small checklist
+
+The embedder is **not** loaded via sentence-transformers. `BgeEmbedder`
+(`sdfb_core/engines/b1_rag/embedder.py`) uses raw `transformers`
+`AutoModel` + `AutoTokenizer` and does its own mean-pool + L2-normalize, so
+only the files those two loaders read are needed. Deploy exactly these 5:
+
+- `config.json` — architecture for `AutoModel` (builds the `BertModel`)
+- `model.safetensors` — weights (prefer `.safetensors`; drop the redundant `pytorch_model.bin`)
+- `tokenizer.json` — fast WordPiece tokenizer (self-contained; embeds the vocab)
+- `tokenizer_config.json` — tokenizer wrapper config (`do_lower_case`, max length)
+- `special_tokens_map.json` — `[CLS]/[SEP]/[PAD]/[UNK]/[MASK]` ids used by padding/truncation
+
+Do **not** upload the sentence-transformers layout files (`modules.json`,
+`config_sentence_transformers.json`, `sentence_bert_config.json`,
+`1_Pooling/`), the ONNX export (`onnx/model.onnx`), the duplicate
+`pytorch_model.bin`, or the Kaggle download archive — none are read by this
+loader. `vocab.txt` is optional (the fast tokenizer already embeds it).
 
 ## Runtime load — Dataflow / vLLM
 
