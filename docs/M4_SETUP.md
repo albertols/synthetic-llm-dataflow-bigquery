@@ -187,6 +187,19 @@ Depends on having weights in GCS. Layout, download procedure, and runtime-load s
 
 After #9 + #10 are stable. This is the M1 finish line.
 
+**Gate it first with the predeployment preflight** — one read-only command that generates the schema files and verifies every GCS/BigQuery/weights prerequisite exists, printing an OK/KO report with clickable paths (no DataflowRunner, no `bq mk`):
+
+```bash
+uv run python scripts/deployment_prerequisites.py \
+    --project "$(gcloud config get-value project)" \
+    --source-table <project.dataset.table> \
+    --model-uri gs://<bucket>/synthetic/models/gemma4/e4b-it/v1/ \
+    --staging-bucket <…-dataflow-staging> --templates-bucket <…-dataflow-templates> \
+    --ddl-uri gs://<bucket>/…/ddl.json
+```
+
+Exit 0 = ready to launch; 1 = KO (see the `## Actions needed` section of the report). Full checklist + remediation → [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md). It supersedes Step A's manual extract (it runs `extract_ddl.py` for you unless `--no-extract`).
+
 ## Cross-doc map
 
 When you need information on a concern, go here — don't restate it elsewhere.

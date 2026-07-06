@@ -9,8 +9,10 @@ clickable paths. Nothing in GCP is mutated.
 The ordered checklist below is the SINGLE source of truth — it is mirrored 1:1
 in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sync.
 
-  1. Source DDL      — run extract_ddl.py → `_ddl.json`; write source BQ schema to config/bq_schemas/
-  2. Landing schema  — run derive_landing_schema.py → config/bq_schemas/landing.schema.json
+  1. Source DDL      — run extract_ddl.py → `_ddl.json`; write source BQ schema to
+                       config/bq_schema/{source_dataset}/{table}.schema.json
+  2. Landing schema  — run derive_landing_schema.py →
+                       config/bq_schema/synthetic_data/{table}.schema.json (mirrors source)
   3. Local weights   — required model (+ embedder) files present under ./models/
   4. BigQuery tables — source, landing, dlq, validation_runs exist
   5. Staging bucket  — …-dataflow-staging exists
@@ -175,7 +177,7 @@ def step1_source_ddl(ctx: Ctx) -> None:
     ctx.ddl_json_path = ddl_path
     ctx.table_schema = TableSchema.model_validate(json.loads(ddl_path.read_text()))
 
-    schema_file = Path(a.schemas_dir) / f"{table}.schema.json"
+    schema_file = Path(a.schemas_dir) / dataset / f"{table}.schema.json"
     schema_file.parent.mkdir(parents=True, exist_ok=True)
     schema_file.write_text(json.dumps(derive_bq_schema(ctx.table_schema)["fields"], indent=2) + "\n")
     ctx.add("1", "Source DDL + BQ schema", OK,
@@ -188,7 +190,9 @@ def step2_landing_schema(ctx: Ctx) -> None:
         ctx.add("2", "Landing schema", ACTION, "no _ddl.json (step 1 failed)",
                 "resolve step 1 first")
         return
-    landing_file = Path(a.schemas_dir) / "landing.schema.json"
+    _, ld_dataset, ld_table = a.landing_table.split(".", 2)
+    landing_file = Path(a.schemas_dir) / ld_dataset / f"{ld_table}.schema.json"
+    landing_file.parent.mkdir(parents=True, exist_ok=True)
     mod = _load_sibling("derive_landing_schema")
     rc = mod.main([str(ctx.ddl_json_path), "-o", str(landing_file)])
     if rc != 0 or not landing_file.exists():
@@ -221,7 +225,7 @@ def step4_bq_tables(ctx: Ctx) -> None:
             ctx.add(step, f"BQ table · {label}", OK, bq_table_link(fqn))
         except NotFound:
             ctx.add(step, f"BQ table · {label}", ACTION, f"{bq_table_link(fqn)} — not found",
-                    _table_action(label))
+                    _table_action(label, fqn))
         except Exception as e:
             ctx.add(step, f"BQ table · {label}", SKIP,
                     f"{bq_table_link(fqn)} — {short(f'{type(e).__name__}: {e}')}")
@@ -277,8 +281,8 @@ def step8_others(ctx: Ctx) -> None:
         ctx.add("8b", "_ddl.json staged in GCS", SKIP, "no --ddl-uri given")
     # 8c — committed local config artifacts.
     missing = [f for f in (
-        Path(a.schemas_dir) / "dead_letter.schema.json",
-        Path(a.schemas_dir) / "validation_runs.schema.json",
+        Path(a.schemas_dir) / "synthetic_data_quality" / "dlq.schema.json",
+        Path(a.schemas_dir) / "synthetic_data_quality" / "validation_runs.schema.json",
         REPO_ROOT / "config" / "thresholds.yml",
     ) if not f.exists()]
     if missing:
@@ -287,7 +291,8 @@ def step8_others(ctx: Ctx) -> None:
                 "restore the committed config files")
     else:
         ctx.add("8c", "Local config artifacts", OK,
-                "thresholds.yml · dead_letter.schema.json · validation_runs.schema.json")
+                "thresholds.yml · synthetic_data_quality/dlq.schema.json · "
+                "synthetic_data_quality/validation_runs.schema.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -365,12 +370,14 @@ def _gcs_object(ctx, step, label, uri, project, action):
         ctx.add(step, label, SKIP, f"{link} — {short(f'{type(e).__name__}: {e}')}")
 
 
-def _table_action(label: str) -> str:
+def _table_action(label: str, fqn: str) -> str:
     if label == "source":
         return "point --source-table at an existing table"
+    _, dataset, table = fqn.split(".", 2)
+    path = f"config/bq_schema/{dataset}/{table}.schema.json"
     if label == "landing":
-        return "create it from config/bq_schemas/landing.schema.json (DEPLOYMENT_PREREQUISITES.md)"
-    return f"create it from config/bq_schemas/{label}.schema.json"
+        return f"create it from {path} (mirrors source; DEPLOYMENT_PREREQUISITES.md)"
+    return f"create it from {path}"
 
 
 def _load_sibling(name: str):
@@ -420,7 +427,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--project", required=True, help="GCP project (billing + console links).")
     p.add_argument("--source-table", required=True, help="project.dataset.table of the reference table.")
-    p.add_argument("--landing-table", default=None, help="Default {project}.synthetic_data.landing")
+    p.add_argument("--landing-table", default=None,
+                   help="Default {project}.synthetic_data.{source table name}")
     p.add_argument("--dlq-table", default=None, help="Default {project}.synthetic_data_quality.dlq")
     p.add_argument("--validation-runs-table", default=None,
                    help="Default {project}.synthetic_data_quality.validation_runs")
@@ -430,14 +438,18 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--templates-bucket", default="", help="name or gs:// of the dataflow-templates bucket")
     p.add_argument("--ddl-uri", default="", help="gs:// path where the _ddl.json must be staged (launcher --ddl_uri)")
     p.add_argument("--models-dir", default=str(REPO_ROOT / "models"), help="Local weights root (default ./models).")
-    p.add_argument("--schemas-dir", default=str(REPO_ROOT / "config" / "bq_schemas"),
-                   help="Where step 1/2 drop schema files (default config/bq_schemas).")
+    p.add_argument("--schemas-dir", default=str(REPO_ROOT / "config" / "bq_schema"),
+                   help="Root under which step 1/2 drop {dataset}/{table}.schema.json "
+                        "(default config/bq_schema).")
     p.add_argument("--report-dir", default=str(REPO_ROOT / "output"), help="Report output dir (default ./output).")
     p.add_argument("--ddl-json", default="", help="Reuse an existing _ddl.json instead of extracting.")
     p.add_argument("--no-extract", action="store_true", help="Skip running extract_ddl.py (reuse existing).")
     p.add_argument("--timeout", type=float, default=50.0, help="BigQuery timeout (s).")
     args = p.parse_args(argv)
-    args.landing_table = args.landing_table or f"{args.project}.synthetic_data.landing"
+    # Landing defaults to the source table's *name* in synthetic_data (mirrors
+    # the DDL table) — override with --landing-table (launcher's landing_table).
+    source_table_name = args.source_table.split(".")[-1]
+    args.landing_table = args.landing_table or f"{args.project}.synthetic_data.{source_table_name}"
     args.dlq_table = args.dlq_table or f"{args.project}.synthetic_data_quality.dlq"
     args.validation_runs_table = (args.validation_runs_table
                                   or f"{args.project}.synthetic_data_quality.validation_runs")
