@@ -77,7 +77,8 @@
       "Bash(command -v ruff)",
       "Bash(ruff check *)",
       "WebFetch(domain:www.kaggle.com)",
-      "Bash(grep -vE '\\\\.\\(lock\\)$')"
+      "Bash(grep -vE '\\\\.\\(lock\\)$')",
+      "Bash(git mv *)"
     ]
   }
 }

@@ -15,7 +15,7 @@ Substitution markers (workflow 3 seds these at import time):
   {{SDFB_EMBEDDER_URI}}       gs://<bucket>/synthetic/models/embedders/… (B.1; empty ⇒ HashingEmbedder)
   {{SDFB_DEFAULT_TABLE_FQN}}  project.dataset.table
   {{SDFB_DDL_URI}}            gs://…/ddl.json
-  {{SDFB_LANDING_TABLE}}      project.synthetic_data.landing
+  {{SDFB_LANDING_TABLE}}      project.synthetic_data.<table> (defaults to the source table name)
   {{SDFB_DLQ_TABLE}}          project.synthetic_data_quality.dlq
   {{SDFB_VALIDATION_RUNS_TABLE}} project.synthetic_data_quality.validation_runs
 

@@ -34,17 +34,17 @@ All sinks are `FILE_LOADS` + `WRITE_APPEND` + `CREATE_NEVER`, so the three desti
 | Table | FQN pattern | Schema source | Provision |
 |---|---|---|---|
 | **Reference / source** | `project.dataset.table` (`--reference_table`) | *pre-existing* | The table you clone. Read `SELECT * … LIMIT N` (`sdfb_beam/io/bq_sources.py`). Read access only. |
-| **Landing** | `project.synthetic_data.landing` | **derived from the target DDL** | `sdfb_core/codegen/derive_bq_ddl.py` turns the `_ddl.json` into a BQ `TableSchema` → `bq mk`. **No committed schema file** — it's per-target. |
-| **DLQ** | `project.synthetic_data_quality.dlq` | `config/bq_schemas/dead_letter.schema.json` | DAY-partition on `dlq_inserted_at`. |
-| **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schemas/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. |
+| **Landing** | `project.synthetic_data.<source table>` (defaults to the DDL table name; override with `landing_table`) | **derived from the target DDL** | `sdfb_core/codegen/derive_bq_ddl.py` turns the `_ddl.json` into a BQ `TableSchema` → `bq mk`. **No committed schema file** — it's per-target (the preflight writes `config/bq_schema/synthetic_data/<table>.schema.json`). |
+| **DLQ** | `project.synthetic_data_quality.dlq` | `config/bq_schema/synthetic_data_quality/dlq.schema.json` | DAY-partition on `dlq_inserted_at`. |
+| **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. |
 
-Datasets to create: **`synthetic_data`** (landing) and **`synthetic_data_quality`** (dlq + validation_runs), in the reference data's region (`europe-west3` here). The two DQ tables map 1:1 to committed JSON schemas:
+Datasets to create: **`synthetic_data`** (landing) and **`synthetic_data_quality`** (dlq + validation_runs), in the reference data's region (`europe-west3` here). Schema files are laid out by dataset under `config/bq_schema/<dataset>/<table>.schema.json`. The two DQ tables map 1:1 to committed JSON schemas:
 
 ```bash
-bq mk --schema config/bq_schemas/dead_letter.schema.json \
+bq mk --schema config/bq_schema/synthetic_data_quality/dlq.schema.json \
       --time_partitioning_field dlq_inserted_at \
       project:synthetic_data_quality.dlq
-bq mk --schema config/bq_schemas/validation_runs.schema.json \
+bq mk --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.json \
       --time_partitioning_field created_at \
       project:synthetic_data_quality.validation_runs
 ```
@@ -70,7 +70,7 @@ DDL_JSON=./output/<source_dataset>/ddl_metadata_<source_dataset>_<source_table>.
 
 uv run python scripts/derive_landing_schema.py "$DDL_JSON" \
     -o landing_ddl.json \
-    --print-bq project:synthetic_data.landing
+    --print-bq project:synthetic_data.<source_table>   # landing mirrors the source table name
 ```
 
 For the `customers` fixture this prints `partitioning: DAY signup_at`, `clustering: country,tier`, a matching `bq mk` command, and writes a `landing_ddl.json` like:
@@ -93,7 +93,7 @@ bq mk --table \
     --schema landing_ddl.json \
     --time_partitioning_type DAY --time_partitioning_field signup_at \
     --clustering_fields country,tier \
-    project:synthetic_data.landing
+    project:synthetic_data.customers   # landing table = source table name (customers)
 ```
 
 **3b. Or with Terraform** — `landing_ddl.json` drops straight into the `schema` argument:
@@ -102,7 +102,7 @@ bq mk --table \
 resource "google_bigquery_table" "landing" {
   project    = var.project
   dataset_id = "synthetic_data"
-  table_id   = "landing"
+  table_id   = "customers"   # landing table = source table name
   schema     = file("${path.module}/landing_ddl.json")
 
   time_partitioning {           # from step 2's partitioning printout
@@ -157,8 +157,8 @@ uv run python scripts/deployment_prerequisites.py \
 
 | # | Check | Tool does | Missing → action |
 |---|-------|-----------|------------------|
-| 1 | **Source DDL** — extract `_ddl.json`, write source BQ schema to `config/bq_schemas/<table>.schema.json` | runs `extract_ddl.py` (unless `--no-extract`) | check BQ creds/connectivity |
-| 2 | **Landing schema** — `config/bq_schemas/landing.schema.json` (mirrors source) | runs `derive_landing_schema.py` | resolve #1 first |
+| 1 | **Source DDL** — extract `_ddl.json`, write source BQ schema to `config/bq_schema/<source_dataset>/<table>.schema.json` | runs `extract_ddl.py` (unless `--no-extract`) | check BQ creds/connectivity |
+| 2 | **Landing schema** — `config/bq_schema/synthetic_data/<table>.schema.json` (mirrors source) | runs `derive_landing_schema.py` | resolve #1 first |
 | 3 | **Local weights** — required LLM (+ embedder) files under `./models/…` | verifies file checklist | download weights ([`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)) |
 | 4 | **BigQuery tables** — source, landing, dlq, validation_runs exist | verifies (read-only) | create them (① → tables) |
 | 5 | **Staging bucket** — `…-dataflow-staging` exists | verifies | create bucket |

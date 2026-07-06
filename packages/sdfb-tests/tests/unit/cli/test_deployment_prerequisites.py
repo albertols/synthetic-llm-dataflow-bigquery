@@ -59,11 +59,15 @@ def test_links_carry_project_and_console_host():
 # --- steps 1 & 2: derive + drop schema files ---------------------------------
 def test_steps_1_2_write_bare_array_schemas(tmp_path, ddl_file):
     ctx = dp.Ctx(args=_args(tmp_path, ddl_file))
+    # landing defaults to the source table name in synthetic_data
+    assert ctx.args.landing_table == "demo.synthetic_data.customers"
     dp.step1_source_ddl(ctx)
     dp.step2_landing_schema(ctx)
 
-    src = json.loads((tmp_path / "schemas" / "customers.schema.json").read_text())
-    landing = json.loads((tmp_path / "schemas" / "landing.schema.json").read_text())
+    # dataset-nested: source under its own dataset, landing under synthetic_data
+    src = json.loads((tmp_path / "schemas" / "raw" / "customers.schema.json").read_text())
+    landing = json.loads(
+        (tmp_path / "schemas" / "synthetic_data" / "customers.schema.json").read_text())
     assert isinstance(src, list) and isinstance(landing, list)     # bare arrays
     assert src == landing                                          # landing mirrors source
     assert {r.status for r in ctx.results} == {dp.OK}
