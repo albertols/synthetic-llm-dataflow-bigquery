@@ -54,11 +54,12 @@ def fake_gcs(monkeypatch):
 class _FakeGeneratedRecord:
     """Minimal stand-in for a `GeneratedRecord` — only needs `model_dump()`."""
 
-    def __init__(self, i: int) -> None:
+    def __init__(self, i: int, seed: int | None = None) -> None:
         self._i = i
+        self._seed = seed
 
     def model_dump(self, mode: str = "python") -> dict:
-        return {"i": self._i}
+        return {"i": self._i, "seed": self._seed}
 
 
 class _RecordingEngine:
@@ -70,8 +71,11 @@ class _RecordingEngine:
         type(self).last_ctx = ctx
 
     def generate_batch(self, n, cfg):
+        # Embed cfg.seed so tests can assert generation output actually
+        # varies with the derived per-batch seed (not just that a seed value
+        # was computed somewhere).
         for i in range(n):
-            yield _FakeGeneratedRecord(i)
+            yield _FakeGeneratedRecord(i, seed=cfg.seed)
 
     def teardown(self):
         pass
@@ -151,3 +155,26 @@ def test_setup_and_process_emit_milestones(
     assert "SDFB_MILESTONE name=dofn_setup_done" in text
     assert "SDFB_MILESTONE name=batch_start" in text and "batch_id=0" in text
     assert "SDFB_MILESTONE name=batch_done" in text and "rows=4" in text
+
+
+def test_no_explicit_seed_derives_distinct_seed_per_batch(
+    recording_engine, customers_schema
+):
+    """Regression test for the batch-replay defect: with no `--seed`, the
+    DoFn previously passed `seed=None` for every batch, and the engines'
+    `_mix_seed(None) -> 0` fallback made every batch replay an identical
+    draw. Batch 0 and batch 1 must now derive different seeds (and thus
+    different output) from `(ctx.pipeline_run_id, batch_id)`.
+    """
+    ctx = GenerationContext(
+        table_schema=customers_schema,
+        embedder_uri="",
+        pipeline_run_id="run-xyz",
+    )
+    dofn = _dofn(ctx)
+    dofn.setup()
+
+    batch0 = list(dofn.process({"n": 4, "batch_id": 0}))
+    batch1 = list(dofn.process({"n": 4, "batch_id": 1}))
+
+    assert batch0 != batch1
