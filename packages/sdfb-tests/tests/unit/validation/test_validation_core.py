@@ -140,6 +140,18 @@ class TestDlqNormalize:
         assert json.loads(out["raw_record"]) == {"batch_id": 0, "n": 5}
         assert out["pipeline_step"] == "GenerateRecordsDoFn"
 
+    def test_uniqueness_envelope_maps_pipeline_step(self):
+        raw = {
+            "raw_request": {"id": 1}, "error_type": "uniqueness",
+            "error_detail": "row.duplicate: duplicate of an earlier record in this run",
+            "rule_id": "row.duplicate", "stage": "pre_write",
+        }
+        out = normalize_dlq_record(raw, run_id="r3")
+        assert json.loads(out["raw_record"]) == {"id": 1}
+        assert out["error_type"] == "uniqueness"
+        assert out["pipeline_step"] == "EnforceUniqueness"
+        assert out["rule_id"] == "row.duplicate"
+
     def test_explicit_inserted_at_and_step(self):
         out = normalize_dlq_record(
             {"error_type": "pandera"}, run_id="r",
