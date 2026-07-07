@@ -551,6 +551,35 @@ def test_setup_skips_guard_without_cuda(tmp_path, monkeypatch):
     spawn.assert_called_once()
 
 
+def test_setup_raises_for_local_model_uri_distinct_from_local_model_dir(
+    tmp_path, fake_torch
+):
+    """Already-local weights branch: the guard must inspect the directory
+    actually served (the local `model_uri`), NOT `local_model_dir` — those
+    differ in the documented L4-local-weights workflow, and reading the
+    wrong one silently skips the fatal-init guarantee."""
+    fake_torch((7, 5))  # T4
+    served_dir = tmp_path / "staged-weights"  # dir A — actually served
+    served_dir.mkdir()
+    (served_dir / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+    other_dir = tmp_path / "unrelated"  # dir B — default pull target, unused
+    other_dir.mkdir()
+
+    c = VLLMModelClient(model_uri=str(served_dir), local_model_dir=str(other_dir))
+    with (
+        mock.patch.object(c, "_pull_weights") as pull,
+        mock.patch.object(c, "_spawn_server") as spawn,
+        # Mocked so a non-raising (buggy) guard fails the assertions below
+        # instead of hanging in the real readiness poll loop.
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+        pytest.raises(ModelGpuIncompatibleError, match="qwen3_4b_instruct_2507"),
+    ):
+        c.setup()
+    pull.assert_not_called()  # local path — no GCS pull
+    spawn.assert_not_called()  # fatal BEFORE the server spawn
+
+
 def test_setup_guard_noop_when_config_missing(tmp_path, fake_torch):
     """No config.json (e.g. local-path dev model) → guard can't inspect dtype,
     skip rather than fail closed with no signal."""

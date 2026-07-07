@@ -314,7 +314,11 @@ class VLLMModelClient:
             import json as _json
             from pathlib import Path as _Path
 
-            cfg_path = _Path(self.local_model_dir) / "config.json"
+            # Inspect the directory vLLM will actually serve: local_model_dir
+            # after a gs:// pull, but the raw model_uri in the already-local
+            # weights branch — reading local_model_dir there would silently
+            # skip the guard.
+            cfg_path = _Path(self._served_model_name) / "config.json"
             if cfg_path.exists():
                 dtype = _json.loads(cfg_path.read_text()).get("torch_dtype", "")
                 _assert_dtype_supported(dtype, torch.cuda.get_device_capability())
