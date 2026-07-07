@@ -85,7 +85,7 @@ def test_end_to_end_customers_happy_path(tmp_path, customers_schema, customers_r
     for entry in dlq:
         assert {"raw_record", "error_type", "rule_id", "stage"} <= set(entry.keys())
         assert entry["stage"] == "pre_write"
-        assert entry["error_type"] in {"pydantic", "pandera", "engine"}
+        assert entry["error_type"] in {"pydantic", "pandera", "engine", "uniqueness"}
 
 
 @pytest.mark.integration
