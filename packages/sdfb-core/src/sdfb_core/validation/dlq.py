@@ -24,6 +24,7 @@ _STEP_BY_ERROR_TYPE = {
     "engine": "GenerateRecordsDoFn",
     "pydantic": "ValidateRecordDoFn",
     "pandera": "PanderaValidateBatchDoFn",
+    "uniqueness": "EnforceUniqueness",
 }
 
 

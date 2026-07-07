@@ -48,3 +48,77 @@ def test_enforce_uniqueness_diverts_row_and_identity_duplicates():
             equal_to([True, True]),
             label="duplicate_envelope_shape",
         )
+
+
+def test_no_identity_columns_still_dedups_rows():
+    """PipelineConfig default (identity_columns=()) — row-dedup alone runs.
+
+    Repeated identity values must NOT divert when no identity columns are
+    configured; only the exact-duplicate row does.
+    """
+    records = [
+        {"id": 1, "value": "a"},
+        {"id": 1, "value": "a"},  # exact row duplicate → diverted
+        {"id": 1, "value": "b"},  # same id, different row → kept (no identity stage)
+    ]
+    with TestPipeline() as p:
+        result = (
+            p
+            | "Create" >> beam.Create(records)
+            | "EnforceUniqueness" >> EnforceUniqueness(identity_columns=[])
+        )
+        assert_that(
+            result["unique"] | "CountUnique" >> beam.combiners.Count.Globally(),
+            equal_to([2]),
+            label="unique_count",
+        )
+        assert_that(
+            result["duplicates"] | "RuleIds" >> beam.Map(lambda d: d["rule_id"]),
+            equal_to(["row.duplicate"]),
+            label="duplicate_rule_ids",
+        )
+
+
+def test_multi_column_identity_key():
+    """Identity is the combined (region, code) tuple — duplicate on the full
+    tuple diverts; rows differing on any one identity column are kept."""
+    records = [
+        {"region": "eu", "code": 1, "value": "a"},
+        {"region": "eu", "code": 1, "value": "b"},  # same (eu, 1) → diverted
+        {"region": "eu", "code": 2, "value": "c"},  # differs on code → kept
+        {"region": "us", "code": 1, "value": "d"},  # differs on region → kept
+    ]
+    with TestPipeline() as p:
+        result = (
+            p
+            | "Create" >> beam.Create(records)
+            | "EnforceUniqueness"
+            >> EnforceUniqueness(identity_columns=["region", "code"])
+        )
+        assert_that(
+            result["unique"] | "CountUnique" >> beam.combiners.Count.Globally(),
+            equal_to([3]),
+            label="unique_count",
+        )
+        assert_that(
+            result["duplicates"] | "RuleIds" >> beam.Map(lambda d: d["rule_id"]),
+            equal_to(["identity.unique"]),
+            label="duplicate_rule_ids",
+        )
+
+
+def test_duplicate_free_input_passes_through_untouched():
+    """No duplicates in ⇒ every row lands unchanged and zero envelopes out."""
+    records = [
+        {"id": 1, "value": "a"},
+        {"id": 2, "value": "b"},
+        {"id": 3, "value": "c"},
+    ]
+    with TestPipeline() as p:
+        result = (
+            p
+            | "Create" >> beam.Create(records)
+            | "EnforceUniqueness" >> EnforceUniqueness(identity_columns=["id"])
+        )
+        assert_that(result["unique"], equal_to(records), label="all_rows_land")
+        assert_that(result["duplicates"], equal_to([]), label="no_duplicates")
