@@ -92,6 +92,9 @@ class GenerationContext(BaseModel):
     # (e.g. HashingEmbedder), which is what the contract tests exercise.
     model_uri: str = ""
     embedder_uri: str = ""
+    # Columns that must be per-row-unique and NEVER sampled from reference
+    # data (PK / UUID / account-number style). See engines/identity.py.
+    identity_columns: list[str] = Field(default_factory=list)
 
 
 class GenerationEngine(ABC):

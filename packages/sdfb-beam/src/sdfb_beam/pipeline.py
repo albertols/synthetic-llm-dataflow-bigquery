@@ -57,6 +57,9 @@ class PipelineConfig:
     batch_size: int = 16
     similarity: float = 0.5
     seed: int | None = None
+    # Per-row-unique columns (PK/UUID) synthesized fresh each row; never
+    # sampled from reference data. See engines/identity.py.
+    identity_columns: tuple[str, ...] = ()
     run_id: str = "local-run"
     # Worker-local model paths surfaced to engines via GenerationContext.
     # model_uri = the LLM (also given to the ModelClient); embedder_uri =
@@ -93,6 +96,7 @@ def build_pipeline(
         pipeline_run_id=config.run_id,
         model_uri=config.model_uri,
         embedder_uri=config.embedder_uri,
+        identity_columns=list(config.identity_columns),
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.

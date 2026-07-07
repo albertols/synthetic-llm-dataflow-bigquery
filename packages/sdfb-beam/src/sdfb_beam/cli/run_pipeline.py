@@ -74,6 +74,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--similarity", type=float, default=0.5)
     p.add_argument("--run_id", required=True)
+    p.add_argument("--identity-cols", default="",
+                   help="Comma-separated per-row-unique columns synthesized "
+                        "fresh each row (PK/UUID); never sampled from "
+                        "reference data")
     p.add_argument("--engine", default="b1_rag",
                    help="Engine name registered in ENGINE_REGISTRY")
     p.add_argument("--model_uri", required=True,
@@ -231,6 +235,9 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         similarity=args.similarity,
         run_id=args.run_id,
+        identity_columns=tuple(
+            c.strip() for c in args.identity_cols.split(",") if c.strip()
+        ),
         model_uri=args.model_uri,
         embedder_uri=args.embedder_uri,
         reference_table=args.reference_table,

@@ -178,3 +178,36 @@ def test_no_explicit_seed_derives_distinct_seed_per_batch(
     batch1 = list(dofn.process({"n": 4, "batch_id": 1}))
 
     assert batch0 != batch1
+
+
+def test_identity_columns_overwrite_engine_output(
+    recording_engine, customers_schema
+):
+    """Regression test for the 2026-07 E2E privacy leak: identity columns
+    (declared via `ctx.identity_columns`) must never surface the engine's
+    own value for that field — `process()` overwrites them per-row from
+    `(run_id, batch_id, row_index, column)`, unique across rows and batches.
+    """
+    ctx = GenerationContext(
+        table_schema=customers_schema,
+        embedder_uri="",
+        pipeline_run_id="run-privacy",
+        identity_columns=["i"],
+    )
+    dofn = _dofn(ctx)
+    dofn.setup()
+
+    batch0 = list(dofn.process({"n": 4, "batch_id": 0}))
+    batch1 = list(dofn.process({"n": 4, "batch_id": 1}))
+
+    # The engine-produced value for "i" (0, 1, 2, 3) is never what comes out.
+    engine_values = {0, 1, 2, 3}
+    for row in batch0 + batch1:
+        assert row["i"] not in engine_values
+
+    # Deterministic per (batch_id, row_index) and unique across all rows.
+    all_ids = [row["i"] for row in batch0 + batch1]
+    assert len(set(all_ids)) == len(all_ids) == 8
+
+    # Non-identity fields ("seed") are untouched by the overwrite.
+    assert all("seed" in row for row in batch0 + batch1)
