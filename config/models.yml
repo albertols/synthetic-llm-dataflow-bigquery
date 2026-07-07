@@ -24,6 +24,7 @@ models:
     gcs_uri: "gs://{bucket}/synthetic/models/gemma4/e4b-it/v1/"
     quantization: null            # FP16
     expected_vram_gb: 9
+    min_compute_capability: "8.0"  # bf16; T4 (7.5) cannot run this — see RUN_PLAYBOOK.md
     license: gemma-tos
     source: kaggle
     # MUST be the `-it` (instruction-tuned) variant — the base `gemma-4-e4b`
@@ -42,6 +43,7 @@ models:
     gcs_uri: "gs://{bucket}/synthetic/models/gemma4/26b-a4b-awq/v1/"
     quantization: awq
     expected_vram_gb: 16
+    min_compute_capability: "8.0"  # bf16; T4 (7.5) cannot run this — see RUN_PLAYBOOK.md
     license: gemma-tos
     source: kaggle
     download_hint: |
