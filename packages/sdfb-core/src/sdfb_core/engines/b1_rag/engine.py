@@ -36,6 +36,7 @@ imports at module scope. Heavy deps are deferred into the seams.
 
 from __future__ import annotations
 
+import logging
 import random
 from typing import TYPE_CHECKING
 
@@ -50,6 +51,7 @@ from sdfb_core.engines.b1_rag.profile import (
 )
 from sdfb_core.engines.b1_rag.serialize import serialize_rows
 from sdfb_core.engines.base import GenerationEngine
+from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Iterator
@@ -300,7 +302,16 @@ class B1RagEngine(GenerationEngine):
                 val = r.get(prof.name) if isinstance(r, dict) else None
                 if isinstance(val, str) and val:
                     pool.append(val)
-        except Exception:
+        except Exception as e:
+            # Per-call generation failure: exemplar fallback is allowed, but
+            # NEVER silently — a run where the LLM contributed nothing must be
+            # visible in worker logs (E2E report §4.2: 100 % memorization).
+            log_milestone(
+                "freetext_llm_fallback",
+                level=logging.WARNING,
+                column=prof.name,
+                error=type(e).__name__,
+            )
             pool = []
 
         # Always fold in observed exemplars so fidelity holds even if the LLM
