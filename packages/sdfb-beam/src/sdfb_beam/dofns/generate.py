@@ -30,6 +30,7 @@ from sdfb_core.engines import (
     get_engine,
 )
 from sdfb_core.observability import log_milestone
+from sdfb_core.seeding import derive_batch_seed
 
 # Where B.1's embedder weights land after the GCS warm-pull. Offline loaders
 # (`transformers`) read from a local directory only — they cannot open a
@@ -96,7 +97,12 @@ class GenerateRecordsDoFn(beam.DoFn):
     def process(self, request):
         n = int(request["n"])
         batch_id = int(request["batch_id"])
-        seed = None if self.base_seed is None else self.base_seed + batch_id
+        if self.base_seed is None:
+            # No explicit seed: derive one so batches never replay each other
+            # while the run stays reproducible per run_id (E2E report §2).
+            seed = derive_batch_seed(self.ctx.pipeline_run_id, batch_id)
+        else:
+            seed = self.base_seed + batch_id
         cfg = GenerationConfig(
             seed=seed,
             batch_size=n,
