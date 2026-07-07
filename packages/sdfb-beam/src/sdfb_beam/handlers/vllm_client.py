@@ -51,6 +51,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from sdfb_core.observability import log_milestone
+
 from sdfb_beam.gcs import localize_gcs_prefix, split_gs_uri
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import
@@ -144,8 +146,16 @@ class VLLMModelClient:
         if self._client is not None:
             return
 
+        t0 = time.monotonic()
+
         if self.model_uri.startswith("gs://"):
+            log_milestone("model_pull_start", uri=self.model_uri)
+            t_pull = time.monotonic()
             self._pull_weights()
+            log_milestone(
+                "model_pull_done",
+                seconds=round(time.monotonic() - t_pull, 1),
+            )
             self._served_model_name = self.local_model_dir
         else:
             # Already-local weights; serve them in place.
@@ -156,9 +166,11 @@ class VLLMModelClient:
             )
             self._served_model_name = self.model_uri
 
+        log_milestone("vllm_spawn")
         self._spawn_server()
         self._wait_until_ready()
         self._client = self._build_openai_client()
+        log_milestone("vllm_ready", seconds=round(time.monotonic() - t0, 1))
         logger.info("vLLM server ready at %s", self.base_url)
 
     def teardown(self) -> None:

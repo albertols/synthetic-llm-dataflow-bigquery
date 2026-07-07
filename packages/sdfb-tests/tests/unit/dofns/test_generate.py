@@ -51,6 +51,16 @@ def fake_gcs(monkeypatch):
     return recorder
 
 
+class _FakeGeneratedRecord:
+    """Minimal stand-in for a `GeneratedRecord` — only needs `model_dump()`."""
+
+    def __init__(self, i: int) -> None:
+        self._i = i
+
+    def model_dump(self, mode: str = "python") -> dict:
+        return {"i": self._i}
+
+
 class _RecordingEngine:
     """Stand-in engine that captures the ctx it was set up with."""
 
@@ -58,6 +68,10 @@ class _RecordingEngine:
 
     def setup(self, model_client, ctx):
         type(self).last_ctx = ctx
+
+    def generate_batch(self, n, cfg):
+        for i in range(n):
+            yield _FakeGeneratedRecord(i)
 
     def teardown(self):
         pass
@@ -120,3 +134,20 @@ def test_setup_passes_local_embedder_uri_through(
     ctx = GenerationContext(table_schema=customers_schema, embedder_uri=local)
     _dofn(ctx).setup()
     assert recording_engine.last_ctx.embedder_uri == local
+
+
+def test_setup_and_process_emit_milestones(
+    caplog, recording_engine, customers_schema
+):
+    import logging
+
+    ctx = GenerationContext(table_schema=customers_schema, embedder_uri="")
+    dofn = _dofn(ctx)
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        dofn.setup()
+        list(dofn.process({"n": 4, "batch_id": 0}))
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=dofn_setup_start" in text
+    assert "SDFB_MILESTONE name=dofn_setup_done" in text
+    assert "SDFB_MILESTONE name=batch_start" in text and "batch_id=0" in text
+    assert "SDFB_MILESTONE name=batch_done" in text and "rows=4" in text
