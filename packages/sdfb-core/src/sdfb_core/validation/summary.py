@@ -20,7 +20,15 @@ from sdfb_core.validation.thresholds import Thresholds
 
 # rule_ids whose failures count toward the BLOCKER gate. Mirrors the
 # BLOCKER-severity rows in config/thresholds.yml.
-BLOCKER_RULE_IDS = frozenset({"schema.types", "null.required", "pk.duplicate"})
+BLOCKER_RULE_IDS = frozenset(
+    {
+        "schema.types",
+        "null.required",
+        "pk.duplicate",
+        "row.duplicate",
+        "identity.unique",
+    }
+)
 
 STATUS_PASSED = "PASSED"
 STATUS_FAILED_BLOCKER = "FAILED_BLOCKER"

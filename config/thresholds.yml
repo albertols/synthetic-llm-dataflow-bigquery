@@ -36,6 +36,16 @@ rules:
     severity: BLOCKER
     threshold: 0     # 0 duplicates on declared primary keys
 
+  row.duplicate:
+    dimension: uniqueness
+    severity: BLOCKER
+    threshold: 0     # duplicates divert to DLQ; ratio gated by blocker_failure_ratio
+
+  identity.unique:
+    dimension: uniqueness
+    severity: BLOCKER
+    threshold: 0
+
   schema.batch:
     dimension: validity
     severity: CRITICAL
