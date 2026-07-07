@@ -34,6 +34,7 @@ from sdfb_core.validation import (
 )
 
 from sdfb_beam.dofns import (
+    EnforceUniqueness,
     GenerateRecordsDoFn,
     PanderaValidateBatchDoFn,
     ValidateRecordDoFn,
@@ -142,13 +143,24 @@ def build_pipeline(
         ).with_outputs("invalid", main="main")
     )
 
-    # Landing sink — valid records only.
-    _ = batch_validated.main | "WriteLanding" >> landing_sink
+    # Line 3 of defense — full-row and identity-column duplicates divert to
+    # the DLQ instead of landing (first occurrence per key wins).
+    uniq = batch_validated.main | "EnforceUniqueness" >> EnforceUniqueness(
+        identity_columns=list(config.identity_columns)
+    )
 
-    # DLQ — flatten the three failure tags, then normalize the heterogeneous
+    # Landing sink — valid, unique records only.
+    _ = uniq["unique"] | "WriteLanding" >> landing_sink
+
+    # DLQ — flatten the four failure tags, then normalize the heterogeneous
     # envelopes into the uniform dead_letter schema before writing.
     dlq_raw = (
-        (generated.failed, record_validated.invalid, batch_validated.invalid)
+        (
+            generated.failed,
+            record_validated.invalid,
+            batch_validated.invalid,
+            uniq["duplicates"],
+        )
         | "FlattenDLQ" >> beam.Flatten()
     )
     dlq = dlq_raw | "NormalizeDLQ" >> beam.Map(
@@ -159,7 +171,7 @@ def build_pipeline(
     result: dict[str, Any] = {
         "reference_digest": digest,
         "run_id": config.run_id,
-        "valid": batch_validated.main,
+        "valid": uniq["unique"],
         "dlq": dlq,
     }
 
@@ -171,7 +183,7 @@ def build_pipeline(
             env="dev", blocker_failure_ratio=1.0
         )
         valid_count = (
-            batch_validated.main | "CountValid" >> beam.combiners.Count.Globally()
+            uniq["unique"] | "CountValid" >> beam.combiners.Count.Globally()
         )
         dlq_by_rule = (
             dlq_raw
