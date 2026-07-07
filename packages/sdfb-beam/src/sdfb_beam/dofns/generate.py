@@ -29,6 +29,7 @@ from sdfb_core.engines import (
     ModelClient,
     get_engine,
 )
+from sdfb_core.engines.identity import apply_identity_columns
 from sdfb_core.observability import log_milestone
 from sdfb_core.seeding import derive_batch_seed
 
@@ -88,6 +89,12 @@ class GenerateRecordsDoFn(beam.DoFn):
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
         self._engine.setup(self.model_client, ctx)
+        # Column name → BQ type, used to shape synthesized identity values
+        # (STRING → UUIDv4, INTEGER/INT64 → non-negative int). Built once per
+        # worker rather than per row.
+        self._column_types = {
+            column.name: column.bq_type for column in self.ctx.table_schema.columns
+        }
         log_milestone(
             "dofn_setup_done",
             engine=self.engine_name,
@@ -112,13 +119,25 @@ class GenerateRecordsDoFn(beam.DoFn):
         t0 = time.monotonic()
         count = 0
         try:
-            for record in self._engine.generate_batch(n, cfg):  # type: ignore[union-attr]
+            for row_index, record in enumerate(
+                self._engine.generate_batch(n, cfg)  # type: ignore[union-attr]
+            ):
                 self._yielded.inc()
                 count += 1
                 # Python-mode dump keeps datetime / Decimal as Python
                 # objects; downstream stages convert to DataFrame and
                 # back as needed.
-                yield record.model_dump(mode="python")
+                row = record.model_dump(mode="python")
+                if self.ctx.identity_columns:
+                    row = apply_identity_columns(
+                        row,
+                        identity_columns=self.ctx.identity_columns,
+                        column_types=self._column_types,
+                        run_id=self.ctx.pipeline_run_id,
+                        batch_id=batch_id,
+                        row_index=row_index,
+                    )
+                yield row
             log_milestone(
                 "batch_done",
                 batch_id=batch_id,
