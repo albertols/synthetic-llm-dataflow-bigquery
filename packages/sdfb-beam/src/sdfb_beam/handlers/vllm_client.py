@@ -71,6 +71,32 @@ DEFAULT_POLL_INTERVAL_S = 2.0
 _HTTP_OK = 200
 
 
+class ModelGpuIncompatibleError(RuntimeError):
+    """The pulled model's dtype cannot run on this worker's GPU.
+
+    Raised BEFORE the vLLM server spawn so the Dataflow job fails fast with an
+    actionable message instead of stalling for ~24 min and letting the engines
+    silently fall back to copying reference exemplars (E2E report §4.2)."""
+
+
+_MIN_BF16_CAPABILITY = (8, 0)
+
+
+def _assert_dtype_supported(torch_dtype: str, capability: tuple[int, int]) -> None:
+    """Raise `ModelGpuIncompatibleError` if `torch_dtype` cannot run on a GPU
+    reporting `capability` (major, minor). Pure function — no torch import
+    required, unit-testable on the laptop.
+    """
+    if torch_dtype == "bfloat16" and capability < _MIN_BF16_CAPABILITY:
+        raise ModelGpuIncompatibleError(
+            f"model dtype bfloat16 needs GPU compute capability >= 8.0 "
+            f"(Ampere/L4+); this worker reports {capability[0]}.{capability[1]} "
+            "(e.g. T4/Turing). Run with gpu=l4, or point SDFB_MODEL_URI at a "
+            "T4-safe fp16 model (see config/models.yml: qwen3_4b_instruct_2507). "
+            "Do NOT force --dtype=half for Gemma: it silently emits empty output."
+        )
+
+
 class VLLMModelClient:
     """`ModelClient` impl that owns a vLLM OpenAI-compatible server.
 
@@ -165,6 +191,10 @@ class VLLMModelClient:
                 self.model_uri,
             )
             self._served_model_name = self.model_uri
+
+        # Fail fast on T4+bf16 instead of letting vLLM stall and the engines
+        # fall back to memorizing reference data.
+        self._assert_gpu_dtype_compatible()
 
         log_milestone("vllm_spawn")
         self._spawn_server()
@@ -264,6 +294,30 @@ class VLLMModelClient:
     def _pull_weights(self) -> None:
         """Warm-pull `model_uri` (gs://) → `local_model_dir` (ADR 0012)."""
         localize_gcs_prefix(self.model_uri, self.local_model_dir)
+
+    def _assert_gpu_dtype_compatible(self) -> None:
+        """Fatal init guard: bf16 weights on a sub-Ampere GPU (e.g. T4) must
+        raise `ModelGpuIncompatibleError` here — BEFORE `_spawn_server()` —
+        rather than let vLLM stall for ~24 min and the engines silently fall
+        back to copying reference exemplars (E2E report §4.2).
+
+        No-ops when torch is absent (laptop), no CUDA device is visible, or
+        the pulled model has no `config.json` to inspect — those cases have
+        no dtype signal to act on, so we let `_spawn_server()` surface the
+        real failure instead of guessing.
+        """
+        try:
+            import torch  # GPU-only path; absent on the laptop
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
+            import json as _json
+            from pathlib import Path as _Path
+
+            cfg_path = _Path(self.local_model_dir) / "config.json"
+            if cfg_path.exists():
+                dtype = _json.loads(cfg_path.read_text()).get("torch_dtype", "")
+                _assert_dtype_supported(dtype, torch.cuda.get_device_capability())
 
     def _server_command(self) -> list[str]:
         """Build the `python -m vllm.entrypoints.openai.api_server ...` argv."""

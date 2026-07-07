@@ -22,10 +22,13 @@ Engines import only the ``ModelClient`` Protocol — never ``vllm``.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from sdfb_core.engines.b2_library.fidelity import ColumnProfile
 from sdfb_core.engines.base import GenerationConfig, ModelClient
+from sdfb_core.observability import log_milestone
 
 # Bounded pool size — the LLM emits at most this many unique candidates per
 # free-text column regardless of N (the O(1) cost cap). Sized small so the
@@ -141,7 +144,16 @@ class FreeTextHook:
                 n=1,
                 seed=cfg.seed,
             )
-        except Exception:
+        except Exception as e:
+            # Per-call generation failure: exemplar fallback is allowed, but
+            # NEVER silently — a run where the LLM contributed nothing must be
+            # visible in worker logs (E2E report §4.2: 100 % memorization).
+            log_milestone(
+                "freetext_llm_fallback",
+                level=logging.WARNING,
+                column=profile.name,
+                error=type(e).__name__,
+            )
             return exemplars
 
         pool = _extract_values(responses)

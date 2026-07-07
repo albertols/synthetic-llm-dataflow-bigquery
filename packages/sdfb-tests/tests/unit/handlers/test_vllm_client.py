@@ -20,12 +20,18 @@ deferred into method bodies — that property is itself part of the contract
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from unittest import mock
 
 import pytest
-from sdfb_beam.handlers.vllm_client import VLLMModelClient, _split_gs_uri
+from sdfb_beam.handlers.vllm_client import (
+    ModelGpuIncompatibleError,
+    VLLMModelClient,
+    _assert_dtype_supported,
+    _split_gs_uri,
+)
 from sdfb_core.engines import ModelClient
 
 # ---------------------------------------------------------------------------
@@ -441,6 +447,125 @@ def test_split_gs_uri_rejects_non_gs():
 def test_split_gs_uri_rejects_missing_bucket():
     with pytest.raises(ValueError, match="no bucket"):
         _split_gs_uri("gs:///path/only")
+
+
+# ---------------------------------------------------------------------------
+# _assert_dtype_supported — pure function, no torch import required to test.
+# ---------------------------------------------------------------------------
+
+
+def test_assert_dtype_supported_raises_bf16_on_turing():
+    with pytest.raises(ModelGpuIncompatibleError, match="qwen3_4b_instruct_2507"):
+        _assert_dtype_supported("bfloat16", (7, 5))
+
+
+def test_assert_dtype_supported_passes_bf16_on_ampere_plus():
+    _assert_dtype_supported("bfloat16", (8, 9))  # must not raise
+
+
+def test_assert_dtype_supported_passes_fp16_on_turing():
+    _assert_dtype_supported("float16", (7, 5))  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# setup() — fatal GPU/dtype guard, fires BEFORE the vLLM server spawn.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_torch(monkeypatch):
+    """Inject a fake `torch` module reporting a Turing (T4-class) GPU."""
+
+    def _install(capability):
+        mod = types.ModuleType("torch")
+        mod.cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_device_capability=lambda: capability,
+        )
+        monkeypatch.setitem(sys.modules, "torch", mod)
+        return mod
+
+    return _install
+
+
+def test_setup_raises_on_bf16_turing_before_spawn(tmp_path, fake_torch):
+    fake_torch((7, 5))  # T4
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/gemma4/e4b-it/v1/",
+        local_model_dir=str(model_dir),
+    )
+    with (
+        mock.patch.object(c, "_pull_weights"),
+        mock.patch.object(c, "_spawn_server") as spawn,
+        pytest.raises(ModelGpuIncompatibleError, match="qwen3_4b_instruct_2507"),
+    ):
+        c.setup()
+    spawn.assert_not_called()
+
+
+def test_setup_allows_bf16_on_ampere_or_newer(tmp_path, fake_torch):
+    fake_torch((8, 9))  # L4 (Ada) — well above the bf16 floor.
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/gemma4/e4b-it/v1/",
+        local_model_dir=str(model_dir),
+    )
+    with (
+        mock.patch.object(c, "_pull_weights"),
+        mock.patch.object(c, "_spawn_server") as spawn,
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+    ):
+        c.setup()
+    spawn.assert_called_once()
+
+
+def test_setup_skips_guard_without_cuda(tmp_path, monkeypatch):
+    """No CUDA (e.g. CPU-only worker, or torch absent) → guard is a no-op."""
+    mod = types.ModuleType("torch")
+    mod.cuda = types.SimpleNamespace(is_available=lambda: False)
+    monkeypatch.setitem(sys.modules, "torch", mod)
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/gemma4/e4b-it/v1/",
+        local_model_dir=str(model_dir),
+    )
+    with (
+        mock.patch.object(c, "_pull_weights"),
+        mock.patch.object(c, "_spawn_server") as spawn,
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+    ):
+        c.setup()
+    spawn.assert_called_once()
+
+
+def test_setup_guard_noop_when_config_missing(tmp_path, fake_torch):
+    """No config.json (e.g. local-path dev model) → guard can't inspect dtype,
+    skip rather than fail closed with no signal."""
+    fake_torch((7, 5))  # even on a T4, absence of config.json must not raise.
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+
+    c = VLLMModelClient(model_uri=str(model_dir), local_model_dir=str(model_dir))
+    with (
+        mock.patch.object(c, "_spawn_server") as spawn,
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+    ):
+        c.setup()
+    spawn.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
