@@ -19,15 +19,17 @@ REF: .claude/skills/beam-dofn.md
 
 from __future__ import annotations
 
+import time
+
 import apache_beam as beam
 from apache_beam.metrics import Metrics
-
 from sdfb_core.engines import (
     GenerationConfig,
     GenerationContext,
     ModelClient,
     get_engine,
 )
+from sdfb_core.observability import log_milestone
 
 # Where B.1's embedder weights land after the GCS warm-pull. Offline loaders
 # (`transformers`) read from a local directory only — they cannot open a
@@ -57,6 +59,7 @@ class GenerateRecordsDoFn(beam.DoFn):
 
         self._yielded = Metrics.counter("generation", "yielded")
         self._failed = Metrics.counter("generation", "failed")
+        self._batch_seconds = Metrics.distribution("generation", "batch_msec")
 
     def setup(self):
         # The engine's embedder loads from a local directory only, so a gs://
@@ -65,17 +68,30 @@ class GenerateRecordsDoFn(beam.DoFn):
         # (see GenerationContext.embedder_uri: "local paths … pulled by the
         # DoFn"). The LLM weights need no equivalent here — the ModelClient
         # pulls those itself in its own setup().
+        t0 = time.monotonic()
+        log_milestone("dofn_setup_start", engine=self.engine_name)
         ctx = self.ctx
         if ctx.embedder_uri.startswith("gs://"):
             from sdfb_beam.gcs import localize_gcs_prefix
 
+            log_milestone("embedder_pull_start", uri=ctx.embedder_uri)
+            t_pull = time.monotonic()
             local_dir = localize_gcs_prefix(ctx.embedder_uri, EMBEDDER_LOCAL_DIR)
+            log_milestone(
+                "embedder_pull_done",
+                seconds=round(time.monotonic() - t_pull, 1),
+            )
             ctx = ctx.model_copy(update={"embedder_uri": local_dir})
             self.ctx = ctx  # cache so a re-entrant setup() skips the pull
 
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
         self._engine.setup(self.model_client, ctx)
+        log_milestone(
+            "dofn_setup_done",
+            engine=self.engine_name,
+            seconds=round(time.monotonic() - t0, 1),
+        )
 
     def process(self, request):
         n = int(request["n"])
@@ -86,14 +102,25 @@ class GenerateRecordsDoFn(beam.DoFn):
             batch_size=n,
             similarity=self.similarity,
         )
+        log_milestone("batch_start", batch_id=batch_id, n=n)
+        t0 = time.monotonic()
+        count = 0
         try:
             for record in self._engine.generate_batch(n, cfg):  # type: ignore[union-attr]
                 self._yielded.inc()
+                count += 1
                 # Python-mode dump keeps datetime / Decimal as Python
                 # objects; downstream stages convert to DataFrame and
                 # back as needed.
                 yield record.model_dump(mode="python")
-        except Exception as e:  # noqa: BLE001  — defensive at engine boundary
+            log_milestone(
+                "batch_done",
+                batch_id=batch_id,
+                rows=count,
+                seconds=round(time.monotonic() - t0, 1),
+            )
+            self._batch_seconds.update(int((time.monotonic() - t0) * 1000))
+        except Exception as e:
             self._failed.inc()
             yield beam.pvalue.TaggedOutput(
                 "failed",

@@ -224,6 +224,25 @@ def test_setup_is_idempotent():
     spawn.assert_not_called()
 
 
+def test_setup_emits_milestones(caplog):
+    import logging
+
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    with (
+        mock.patch.object(c, "_pull_weights"),
+        mock.patch.object(c, "_spawn_server"),
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+        caplog.at_level(logging.INFO, logger="sdfb.milestone"),
+    ):
+        c.setup()
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=model_pull_start" in text
+    assert "SDFB_MILESTONE name=model_pull_done" in text
+    assert "SDFB_MILESTONE name=vllm_spawn" in text
+    assert "SDFB_MILESTONE name=vllm_ready" in text
+
+
 def test_setup_local_path_skips_pull_and_serves_in_place():
     c = VLLMModelClient(model_uri="/already/local/model")
     with (
