@@ -227,6 +227,11 @@ def _collect_identifiers(gcp: dict[str, Any], bq: dict[str, Any], m: Mapping) ->
         m.add_identifier(job.get("job_id"), f"JOB_{i}")
         m.add_identifier(job.get("name"), f"job-{i}")
 
+    for job in gcp.get("dataflow") or []:
+        img = (job.get("environment") or {}).get("worker_image")
+        if img:
+            m.add_identifier(img, "WORKER_IMAGE")
+
 
 def _collect_columns(
     gcp: dict[str, Any],
@@ -365,7 +370,7 @@ def _leak_scan(oss_dir: Path, mapping: Mapping) -> list[tuple[str, str]]:
     """Fail-safe: confirm no real identifier/column survived into oss/."""
     reals = list(mapping.identifiers) + list(mapping.columns)
     hits: list[tuple[str, str]] = []
-    for f in oss_dir.iterdir():
+    for f in (f for f in oss_dir.rglob("*") if f.is_file()):
         text = f.read_text()
         for real in reals:
             if real and real in text:
