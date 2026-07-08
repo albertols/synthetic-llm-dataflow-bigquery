@@ -49,6 +49,17 @@ class EnforceUniqueness(beam.PTransform):
 
     Returns a ``dict`` with ``"unique"`` (main, deduplicated records) and
     ``"duplicates"`` (DLQ-envelope dicts) PCollections.
+
+    The ROW digest is computed with identity columns excluded
+    (``{k: v for k, v in r.items() if k not in identity_set}``). Identity
+    columns (see ``sdfb_core.engines.identity``) are synthesized fresh per
+    row from ``(run_id, batch_id, row_index, column)``, so two rows that are
+    an exact engine-batch-replay in every OTHER field would still carry
+    distinct identity values — including them in the row digest would mask
+    the replay from ``row.duplicate`` entirely. Excluding them keeps the two
+    rules covering disjoint failure modes: ``row.duplicate`` catches
+    non-identity-field replay, ``identity.unique`` catches identity-value
+    collisions, keyed on the final (post-identity-synthesis) rows.
     """
 
     def __init__(self, identity_columns: list[str] | None = None) -> None:
@@ -56,9 +67,14 @@ class EnforceUniqueness(beam.PTransform):
         self.identity_columns = list(identity_columns or [])
 
     def expand(self, records):
+        identity_set = set(self.identity_columns)
+
+        def _row_key(r, ids=identity_set):
+            return row_digest({k: v for k, v in r.items() if k not in ids})
+
         by_row = (
             records
-            | "KeyByRowDigest" >> beam.Map(lambda r: (row_digest(r), r))
+            | "KeyByRowDigest" >> beam.Map(lambda r: (_row_key(r), r))
             | "GroupByRowDigest" >> beam.GroupByKey()
             | "FirstRowWins"
             >> beam.ParDo(_FirstWins(RULE_ROW_DUPLICATE)).with_outputs(
