@@ -57,7 +57,18 @@ _DEFAULT_MILESTONES: list[tuple[str, str]] = [
     ("sdgx_fit", r"(?i)Fitting|CTGAN.*epoch|sdgx.*synthesizer|Sampling \d+"),
     ("faiss_loaded", r"Loading faiss"),
     ("generation_stall", r"Bundle processor .* has been creating for at least"),
+    (
+        "vllm_error",
+        r"Bfloat16 is only supported|out of resource: shared memory|"
+        r"head size \d+ is not supported|CUDA out of memory",
+    ),
 ]
+
+# First-class contract with sdfb_core.observability.log_milestone: any line
+# "SDFB_MILESTONE name=<x> ..." is captured generically, one timestamp per
+# distinct name. Legacy wording regexes above remain as fallback for jobs
+# that predate the instrumented image.
+_SDFB_MILESTONE_RE = re.compile(r"SDFB_MILESTONE name=(?P<name>[a-z0-9_]+)")
 
 _DATAFLOW_BASE = "https://dataflow.googleapis.com/v1b3"
 _LOGGING_URL = "https://logging.googleapis.com/v2/entries:list"
@@ -250,15 +261,24 @@ def bq_quality(client, quality_dataset: str, run_ids: list[str]) -> dict[str, An
         return {}
     out: dict[str, Any] = {}
     proj, ds, _ = _split_fqn(quality_dataset + ".x")
+    job_config = None
+    if run_ids:
+        from google.cloud import bigquery
+
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("run_ids", "STRING", run_ids)]
+        )
     for table in ("validation_runs", "dlq"):
         fqn = f"{proj}.{ds}.{table}"
+        if run_ids:
+            sql = (
+                f"SELECT * FROM {_quote(fqn)} "
+                "WHERE run_id IN UNNEST(@run_ids) ORDER BY 1 DESC LIMIT 50"
+            )
+        else:
+            sql = f"SELECT * FROM {_quote(fqn)} ORDER BY 1 DESC LIMIT 50"
         try:
-            rows = [
-                dict(r)
-                for r in client.query(
-                    f"SELECT * FROM {_quote(fqn)} ORDER BY 1 DESC LIMIT 50"
-                ).result()
-            ]
+            rows = [dict(r) for r in client.query(sql, job_config=job_config).result()]
             out[table] = _jsonable(rows)
         except Exception as e:
             out[table] = {"error": f"{type(e).__name__}: {e}"}
@@ -491,6 +511,9 @@ def _worker_log_milestones(
             scanned += 1
             text = _entry_text(e)
             ts = e.get("timestamp")
+            sm2 = _SDFB_MILESTONE_RE.search(text)
+            if sm2:
+                found.setdefault(f"sdfb.{sm2.group('name')}", ts)
             for label, rx in compiled:
                 if label not in found and rx.search(text):
                     found[label] = ts
@@ -617,6 +640,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pk", default="", help="comma-separated PK columns")
     ap.add_argument("--run-id", action="append", default=[], dest="run_ids")
     ap.add_argument(
+        "--engine-label",
+        action="append",
+        default=[],
+        dest="engine_labels",
+        help="repeatable 'label=job_id' mapping stamped onto the matching dataflow result",
+    )
+    ap.add_argument(
         "--milestones",
         default="",
         help="optional 'label=regex;label=regex' overrides for log mining",
@@ -626,10 +656,17 @@ def main(argv: list[str] | None = None) -> int:
 
     pk_columns = [c.strip() for c in args.pk.split(",") if c.strip()]
     milestones = _parse_milestones(args.milestones) or _DEFAULT_MILESTONES
+    engine_labels = _parse_engine_labels(args.engine_labels)
 
     session, _ = preflight_adc(args.project)
     identity = _whoami(session)
     client = _bq_client(args.project)
+
+    dataflow_results = [
+        dataflow_job(session, args.project, args.region, jid, milestones)
+        for jid in args.job_ids
+    ]
+    _annotate_engine_labels(dataflow_results, engine_labels)
 
     report: dict[str, Any] = {
         "project": args.project,
@@ -638,10 +675,7 @@ def main(argv: list[str] | None = None) -> int:
             client, args.source_fqn, args.landing_fqn, pk_columns=pk_columns
         ),
         "quality": bq_quality(client, args.quality_dataset, args.run_ids),
-        "dataflow": [
-            dataflow_job(session, args.project, args.region, jid, milestones)
-            for jid in args.job_ids
-        ],
+        "dataflow": dataflow_results,
     }
 
     from pathlib import Path
@@ -675,6 +709,24 @@ def _parse_milestones(spec: str) -> list[tuple[str, str]]:
             label, pat = part.split("=", 1)
             out.append((label.strip(), pat.strip()))
     return out
+
+
+def _parse_engine_labels(specs: list[str]) -> dict[str, str]:
+    """Repeatable --engine-label label=job_id → {job_id: label}."""
+    out: dict[str, str] = {}
+    for spec in specs:
+        if "=" in spec:
+            label, job_id = spec.split("=", 1)
+            out[job_id.strip()] = label.strip()
+    return out
+
+
+def _annotate_engine_labels(results: list[dict[str, Any]], labels: dict[str, str]) -> None:
+    """Stamp ``engine_label`` on each dataflow result whose job_id matches."""
+    for r in results:
+        job_id = r.get("job_id")
+        if job_id in labels:
+            r["engine_label"] = labels[job_id]
 
 
 if __name__ == "__main__":
