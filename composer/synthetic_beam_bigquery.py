@@ -108,6 +108,13 @@ default_dag_params = {
         type="string",
         description="Similarity to reference (0.0 random → 1.0 mimic).",
     ),
+    "identity_cols": Param(
+        default="",
+        type="string",
+        description="Comma-separated per-row-unique columns synthesized "
+                    "fresh each row (PK/UUID); never sampled from reference "
+                    "data. Empty disables identity-column synthesis.",
+    ),
     "client_type": Param(
         default="vllm",
         type="string",
@@ -207,6 +214,7 @@ with models.DAG(
                     "batch_size": "{{ params.batch_size }}",
                     "similarity": "{{ params.similarity }}",
                     "run_id": "{{ dag_run.run_id }}",
+                    "identity_cols": "{{ params.identity_cols }}",
                     "engine": "{{ params.engine }}",
                     "model_uri": model_uri,
                     "embedder_uri": embedder_uri,

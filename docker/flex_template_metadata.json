@@ -60,6 +60,13 @@
       "regexes": ["^[a-zA-Z0-9_-]+$"]
     },
     {
+      "name": "identity_cols",
+      "label": "Identity columns",
+      "helpText": "Comma-separated per-row-unique columns synthesized fresh each row (PK/UUID); never sampled from reference data. Optional; empty means no identity-column synthesis.",
+      "isOptional": true,
+      "regexes": ["^([a-zA-Z0-9_]+(,[a-zA-Z0-9_]+)*)?$"]
+    },
+    {
       "name": "engine",
       "label": "Generation engine",
       "helpText": "b1_rag (RAG over reference rows) or b2_library (CTGAN/SDV-family wrapper).",

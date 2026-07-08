@@ -65,6 +65,24 @@ def test_parse_args_passes_unknown_to_beam():
     assert "DirectRunner" in beam_argv
 
 
+def test_parse_args_identity_cols_uses_underscore_flag():
+    """Flex Template launchers pass underscore-named params
+    (``--identity_cols=...``, never ``--identity-cols``). Every sibling flag
+    on this parser uses underscores; if this one didn't match, argparse's
+    `parse_known_args` would silently divert it into `beam_argv` instead of
+    populating `args.identity_cols`, and the value would never reach
+    `PipelineConfig.identity_columns`."""
+    argv = [*_common_args(), "--identity_cols", "customer_id,email"]
+    args, beam_argv = parse_args(argv)
+    assert args.identity_cols == "customer_id,email"
+    assert beam_argv == []
+
+
+def test_parse_args_identity_cols_defaults_empty():
+    args, _ = parse_args(_common_args())
+    assert args.identity_cols == ""
+
+
 def test_parse_args_rejects_unknown_engine_value():
     """argparse-level rejection of bad client_type; engine is free-form."""
     argv = _common_args() + ["--client_type", "made-up"]

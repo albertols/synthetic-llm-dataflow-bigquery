@@ -59,7 +59,10 @@ class _FakeGeneratedRecord:
         self._seed = seed
 
     def model_dump(self, mode: str = "python") -> dict:
-        return {"i": self._i, "seed": self._seed}
+        # "country" mirrors `customers_schema`'s STRING(max_length=2) column
+        # so identity-overwrite tests can exercise the max_length-truncation
+        # path without disturbing the "i"/"seed"-only assertions elsewhere.
+        return {"i": self._i, "seed": self._seed, "country": "ZZ"}
 
 
 class _RecordingEngine:
@@ -211,3 +214,32 @@ def test_identity_columns_overwrite_engine_output(
 
     # Non-identity fields ("seed") are untouched by the overwrite.
     assert all("seed" in row for row in batch0 + batch1)
+
+
+def test_identity_column_max_length_truncates_string_value(
+    recording_engine, customers_schema
+):
+    """Regression test: a STRING identity column with a schema `max_length`
+    narrower than the 36-char UUID (e.g. `customers_schema`'s `country`,
+    max_length=2) must come out truncated to that width, not overflow it.
+    `_column_max_lengths` is built once in `setup()` from the table schema's
+    `FieldSchema.max_length` and forwarded into `apply_identity_columns`.
+    """
+    ctx = GenerationContext(
+        table_schema=customers_schema,
+        embedder_uri="",
+        pipeline_run_id="run-maxlen",
+        identity_columns=["country"],
+    )
+    dofn = _dofn(ctx)
+    dofn.setup()
+
+    assert dofn._column_max_lengths["country"] == 2
+
+    batch = list(dofn.process({"n": 4, "batch_id": 0}))
+    for row in batch:
+        assert len(row["country"]) == 2
+        assert row["country"] != "ZZ"
+
+    # Still unique per row.
+    assert len({row["country"] for row in batch}) == len(batch)

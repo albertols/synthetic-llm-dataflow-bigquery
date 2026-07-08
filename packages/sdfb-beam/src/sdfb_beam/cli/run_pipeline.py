@@ -74,7 +74,7 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--similarity", type=float, default=0.5)
     p.add_argument("--run_id", required=True)
-    p.add_argument("--identity-cols", default="",
+    p.add_argument("--identity_cols", default="",
                    help="Comma-separated per-row-unique columns synthesized "
                         "fresh each row (PK/UUID); never sampled from "
                         "reference data")
