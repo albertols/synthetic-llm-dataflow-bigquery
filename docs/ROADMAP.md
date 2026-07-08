@@ -32,6 +32,23 @@ Single source of truth for milestone scope. Locked decisions per milestone live 
 - All laptop tests passing in CI on every push.
 - Reference digest and run metadata in `synthetic_data_quality.validation_runs`.
 
+**2026-07 cycle — engine fixes + E2E tooling + observability**: fixed the
+seed-replay defect (`derive_batch_seed(run_id, batch_id)` in
+`sdfb_core/seeding.py` — no-`--seed` runs no longer replay an identical draw
+per batch) and the silent-LLM-fallback defect (`freetext_llm_fallback`
+milestone + fatal `ModelGpuIncompatibleError` on a bf16-vs-Turing mismatch at
+vLLM init, instead of silently copying reference exemplars); added a
+`SDFB_MILESTONE` structured-logging contract (`sdfb_core/observability.py`)
+so worker-log mining no longer depends on wording regexes; added per-row
+identity-column synthesis (`--identity-cols`) and `row.duplicate` /
+`identity.unique` BLOCKER gate rules; landed the `scripts/e2e_gcp_probe.py` +
+`scripts/e2e_validation_analysis.py` + `scripts/e2e_bundle_export.py` E2E
+validation toolchain and `docs/RUN_PLAYBOOK.md`. Two design specs came out of
+this cycle for M2 scoping:
+[`docs/designs/2026-07-07-rag-layer-design.md`](designs/2026-07-07-rag-layer-design.md)
+and
+[`docs/designs/2026-07-07-evaluation-framework-design.md`](designs/2026-07-07-evaluation-framework-design.md).
+
 ## M2 — Mode B validation + scale + breadth
 
 **Goal**: production-grade validation, broader use cases, foundations for managed adoption.
