@@ -8,6 +8,7 @@ Companion docs (don't restate — link):
 - **Model weights** — GCS layout, download, file checklist → [`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)
 - **Build / deploy / run** — image, Flex Template, DAG import, secrets → [`CICD.md`](CICD.md)
 - **Dev env setup** → [`M4_SETUP.md`](M4_SETUP.md)
+- **Run playbook** — GPU verdict, run matrix, Dataflow options, L4 capacity strategy, report recipe → [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md)
 
 Two layers below: **① the portable core** (needed anywhere) and **② the enterprise wrapper** (db.com-specific — strip for OSS).
 
