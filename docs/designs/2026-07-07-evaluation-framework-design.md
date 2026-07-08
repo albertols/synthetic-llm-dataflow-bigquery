@@ -560,6 +560,15 @@ New package `packages/sdfb-core/src/sdfb_core/evaluation/`:
 | `metrics_t3.py` | `syntheval_privacy`, `evidently_drift_report` | `syntheval`/`evidently` — **deferred imports inside each function body**, `try/except ImportError` raising a clear "install `sdfb-beam[eval-extra]`" message |
 | `gate.py` | `MemorizationThresholdExceeded`, `evaluate_memorization_gate` | stdlib only |
 
+**Caveat — audit before implementing.** Before landing `sdmetrics` as a base
+dependency, audit its transitive dependency tree for the version pinned here
+(`>=0.16.0`): recent `sdmetrics` releases can pull in `torch` transitively,
+which would violate `sdfb-core`'s "no torch" rule (CLAUDE.md package map) the
+same way this whole paragraph argues the other three libraries don't. If the
+audited version does pull `torch`, move `sdmetrics` (and `metrics_t2.py`)
+behind the `[eval-extra]` tier alongside Tier 3 instead of base — do not land
+it as a base dependency in that case.
+
 `sdfb-core/pyproject.toml` gains four new base dependencies:
 `scipy>=1.11.0`, `scikit-learn>=1.4.0`, `sdmetrics>=0.16.0`, `pandas>=2.2.0`.
 This is a real (if narrow) widening of `sdfb-core`'s footprint — CLAUDE.md's

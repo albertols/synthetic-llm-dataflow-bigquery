@@ -1,6 +1,7 @@
 """Contract tests for the SDFB_MILESTONE worker-log line format."""
 import logging
 
+import pytest
 from sdfb_core.observability import (
     MILESTONE_PREFIX,
     format_milestone,
@@ -41,6 +42,24 @@ def test_log_milestone_emits_via_std_logging(caplog):
         line = log_milestone("dofn_setup_start", engine="b1_rag")
     assert line.startswith(MILESTONE_PREFIX)
     assert any(line in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Bad-Name", "has space", "UPPERCASE", "trailing-dash-", "dotted.name", ""],
+)
+def test_format_milestone_rejects_non_conforming_names(name):
+    """`name` is the parser's own anchor (`_MILESTONE_RE`'s
+    `[a-z0-9_]+`) — every in-repo emitter already only ever passes
+    lowercase_underscore names, so this is pure guard-rail: a non-conforming
+    name would silently produce a log line the probe's miner can't parse
+    back out (`parse_milestone` re-derives `name` via the same pattern)."""
+    with pytest.raises(ValueError):
+        format_milestone(name)
+
+
+def test_format_milestone_accepts_conforming_name():
+    assert format_milestone("dofn_setup_start") == "SDFB_MILESTONE name=dofn_setup_start"
 
 
 def test_warning_level_supported(caplog):

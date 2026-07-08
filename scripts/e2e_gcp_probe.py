@@ -181,7 +181,7 @@ def bq_cross_validation(
               COUNT(DISTINCT {col}) AS distinct_n,
               COUNTIF({col} IS NULL) AS null_n,
               {zero_expr} AS zero_n,
-              APPROX_TOP_COUNT({col}, 1)[OFFSET(0)].count AS top_count
+              APPROX_TOP_COUNT({col}, 1)[SAFE_OFFSET(0)].count AS top_count
             FROM {_quote(landing_fqn)}
             """,
         )
@@ -587,7 +587,11 @@ def _row(client, sql: str) -> dict[str, Any]:
 
 def _ratio(num, den) -> float | None:
     if not den:
-        return 0.0
+        # An empty (or all-excluded) denominator means nothing was measured —
+        # returning 0.0 here would read as "measured and found to be zero"
+        # (e.g. copy_ratio=0.0 misreported as "no memorization" on an empty
+        # landing table). None means "not computable", not "computed as zero".
+        return None
     if num is None:
         return None
     return round(num / den, 6)
