@@ -118,14 +118,17 @@ as expected LLM sampling noise.
   abundant CPU capacity while L4s are short. The `:5xx` driver pin on T4 is
   required by the Dataflow vLLM notebook's own driver guidance — don't drop
   it if you ever touch that experiment string.
-- **Machine type / `g2-standard-4` vs `-8`.** `gpu=l4` maps to
-  `g2-standard-8`; both `-4` and `-8` ship exactly one L4, so the choice is
-  pure headroom, not GPU count — `-8` gives the CPU-side steps (BQ read,
-  Pandera validation, `sdgx` fit for B.2) more room to avoid becoming the
-  bottleneck next to the GPU, at roughly double the non-GPU cost. Default to
-  `-8` for the fidelity runs (R1–R3); `-4` is an acceptable downgrade only for
-  the T4 plumbing run (R4), which maps to `n1-standard-8` regardless (the
-  `gpu=t4` branch doesn't use the `g2-standard` family at all).
+- **Machine type / `g2-standard-4` vs `-8`.** Today the DAG offers no
+  `g2-standard-4` toggle at all: `gpu=l4` hardcodes `g2-standard-8` in the
+  DAG's `machineType` ternary, and `gpu=t4` maps to `n1-standard-8` — the T4
+  plumbing run (R4) never touches the `g2-standard` family. The `-4` vs `-8`
+  trade-off is therefore informational, relevant only if someone edits that
+  ternary: both sizes carry exactly one L4, so the choice is pure headroom,
+  not GPU count — `-8` gives the CPU-side steps (BQ read, Pandera validation,
+  `sdgx` fit for B.2, the Beam harness alongside vLLM) more vCPU/RAM to avoid
+  becoming the bottleneck next to the GPU, at roughly double the non-GPU
+  cost. The hardcoded `-8` is the right default for the fidelity runs
+  (R1–R3); don't downgrade it without a measured reason.
 - **Worker disk.** The Flex Template's `environment.diskSizeGb` field does
   **not** propagate to the worker harness — it's set on the launch request
   but ignored (confirmed at `packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:57`,
@@ -175,7 +178,7 @@ an unpredictable time. Use this for one-off runs and for anything where a
 delayed start is tolerable.
 
 **(b) The `automatically_use_created_reservation` experiment — already in the
-DAG, inert by default.** `composer/synthetic_beam_bigquery.py:182` already
+DAG, inert by default.** `composer/synthetic_beam_bigquery.py:183` already
 templates this experiment onto every `client_type=vllm` launch:
 
 ```python
@@ -211,8 +214,9 @@ Two things to know before doing this:
   reservations require an allowlist grant from the platform team — this is
   called out directly in the DAG comment next to the
   `automatically_use_created_reservation` line
-  (`composer/synthetic_beam_bigquery.py`, the block immediately above line
-  182). Request the allowlist before assuming the reservation will actually
+  (`composer/synthetic_beam_bigquery.py`, the comment block at lines 175–182,
+  immediately above the experiment string on line 183). Request the allowlist
+  before assuming the reservation will actually
   be consumed; without it, Dataflow will silently fall back to on-demand even
   with a reservation sitting idle.
 - **Idle-billing caveat.** A Compute Engine reservation bills for the
