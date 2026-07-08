@@ -123,11 +123,12 @@ default_dag_params = {
         enum=["l4", "t4"],
         description="GPU profile when client_type=vllm. l4 = g2-standard-8 + "
                     "NVIDIA L4 (24GB) — the ONLY GPU in europe-west3 that runs "
-                    "Gemma 4. t4 = n1-standard-8 + NVIDIA T4 (16GB), a real-GPU "
-                    "PLUMBING smoke only: Gemma 4 CANNOT run on T4 (Turing "
-                    "SM 7.5, attention head_size 512 > shared-mem ceiling — "
-                    "vLLM #38918), so pair t4 with a small Turing-compatible "
-                    "model. Ignored when client_type=fake.",
+                    "Gemma 4. t4 = n1-standard-8 + NVIDIA T4 (16GB): plumbing "
+                    "profile. Gemma CANNOT run on T4 (bf16/SM7.5 + shared-memory "
+                    "limits — the vLLM client now fails fast, see "
+                    "handlers/vllm_client.py ModelGpuIncompatibleError); pair t4 "
+                    "with the qwen3_4b_instruct_2507 registry model via "
+                    "SDFB_MODEL_URI. Ignored when client_type=fake.",
     ),
 }
 

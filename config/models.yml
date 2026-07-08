@@ -60,6 +60,22 @@ models:
     download_hint: |
       Pull tarball from https://github.com/QwenLM/Qwen2.5/releases
 
+  qwen3_4b_instruct_2507:
+    # T4-safe profile — the ONLY registry entry that runs on Turing (SM 7.5).
+    # Gemma cannot run on T4 in any form (bf16 needs SM>=8.0 and fp16 Gemma
+    # silently emits empty output; attention head sizes exceed Turing's 64KB
+    # shared memory — vLLM #38918/#38887). Use this to exercise the REAL vLLM
+    # path cheaply on gpu=t4; keep Gemma-on-L4 as the fidelity profile.
+    description: Qwen3 4B Instruct (2507). T4-compatible fp16; guided-JSON clean.
+    gcs_uri: "gs://{bucket}/synthetic/models/qwen3/4b-instruct-2507/v1/"
+    quantization: null            # FP16 (fp16-safe family, unlike Gemma)
+    expected_vram_gb: 9
+    min_compute_capability: "7.5"
+    license: apache-2.0
+    source: huggingface           # pulled once on the M4, never at runtime
+    download_hint: |
+      hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir qwen3-4b-instruct-2507
+
 # Embedding models for B.1 RAG (M1 §7).
 embedders:
   bge_small_en_v1_5:
