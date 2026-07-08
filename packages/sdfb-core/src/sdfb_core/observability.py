@@ -31,6 +31,13 @@ _logger = logging.getLogger("sdfb.milestone")
 
 
 def format_milestone(name: str, **fields) -> str:
+    if not re.fullmatch(r"[a-z0-9_]+", name):
+        raise ValueError(
+            f"milestone name {name!r} must fully match [a-z0-9_]+ "
+            "(lowercase_underscore only) — the parser anchors on this "
+            "pattern, so a non-conforming name would produce a line "
+            "`parse_milestone` can't mine back out"
+        )
     parts = [f"{MILESTONE_PREFIX} name={name}"]
     for key in sorted(fields):
         value = str(fields[key]).replace("\n", " ")

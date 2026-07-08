@@ -200,3 +200,34 @@ def test_annotate_engine_labels_stamps_matching_job_only(probe_module):
     probe_module._annotate_engine_labels(results, {"job-123": "b1-rag"})
     assert results[0]["engine_label"] == "b1-rag"
     assert "engine_label" not in results[1]
+
+
+# --------------------------------------------------------------------------
+# Fix 5/6: SAFE_OFFSET + zero-denominator ratio semantics
+# --------------------------------------------------------------------------
+def test_ratio_zero_denominator_returns_none(probe_module):
+    """An empty landing table (n=0) must not report a ratio of 0.0 — that
+    reads as "measured and found to be zero" (e.g. copy_ratio=0.0 == "no
+    memorization"), when in truth nothing was measured at all."""
+    assert probe_module._ratio(0, 0) is None
+    assert probe_module._ratio(5, 0) is None
+
+
+def test_ratio_none_numerator_returns_none(probe_module):
+    assert probe_module._ratio(None, 10) is None
+
+
+def test_ratio_normal_division(probe_module):
+    assert probe_module._ratio(5, 10) == 0.5
+    assert probe_module._ratio(0, 10) == 0.0  # a real, measured zero is fine
+
+
+def test_bq_cross_validation_top_count_uses_safe_offset(probe_module):
+    """`APPROX_TOP_COUNT(col, 1)[OFFSET(0)]` throws on an all-NULL column
+    (empty array; `OFFSET(0)` is a hard index and dies with no rows) — must
+    be `[SAFE_OFFSET(0)]`, which returns NULL instead of killing the probe."""
+    import inspect
+
+    src = inspect.getsource(probe_module.bq_cross_validation)
+    assert "SAFE_OFFSET(0)" in src
+    assert "[OFFSET(0)]" not in src
