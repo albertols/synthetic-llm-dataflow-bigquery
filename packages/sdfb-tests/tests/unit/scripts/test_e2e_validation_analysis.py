@@ -102,7 +102,8 @@ def test_entropy_reported(tmp_path):
     m = json.loads(out.read_text())
     cols = m["engines"]["eng"]["columns"]
     assert cols["const_col"]["normalized_entropy"] == 0.0
-    assert cols["diverse_col"]["normalized_entropy"] > 0.9
+    # Uniform all-distinct column: h = log2(n), normalized = exactly 1.0.
+    assert cols["diverse_col"]["normalized_entropy"] == 1.0
 
 
 def test_entropy_empty_column_is_zero(tmp_path):
@@ -149,3 +150,17 @@ def test_identity_column_non_sequential(tmp_path):
     assert rc == 0
     m = json.loads(out.read_text())
     assert m["engines"]["eng"]["identity_columns"]["id"]["sequential"] is False
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (["7"], False),  # single value: no step to compare
+        (["1", "2"], True),  # minimal strictly increasing pair
+        (["5", "5", "5"], False),  # constant column: step 0 is not increasing
+        (["9", "6", "3"], False),  # strictly decreasing: negative step
+    ],
+    ids=["single-value", "two-increasing", "constant-step-zero", "decreasing"],
+)
+def test_is_sequential_edge_branches(values, expected):
+    assert analysis_module._is_sequential(values) is expected
