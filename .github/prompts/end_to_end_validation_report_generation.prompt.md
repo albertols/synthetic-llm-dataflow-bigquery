@@ -51,10 +51,15 @@ inputs.
 | `JOB_IDS` | `2026-…-…` (one per engine run) | Dataflow job ids |
 | `PK` | `<PK_COL[,PK_COL2]>` | primary-key column(s) |
 | `IDENTITY_COLS` | `<UUID_COL[,…]>` | per-row-unique columns |
+| `BATCH_SIZE` | `500` | Beam/RunInference batch size (enables the `equals_batch_size` run-length flag) |
+| `RUN_IDS` | `<run_id>` (optional, one per engine run) | scopes `validation_runs`/`dlq` lookups |
+| `ENGINE_LABEL=JOB_ID` | `b1_rag=<job_id>` (optional, repeatable) | stamps a readable engine name on the matching Dataflow result |
 
 If a param is unknown, discover it: `SCHEMA`/columns via the schema JSON or
 `INFORMATION_SCHEMA`; `LANDING_FQN` via the `synthetic_data` dataset; `JOB_IDS`
-from the user. If only one engine was deployed, run the single-engine subset.
+from the user; `BATCH_SIZE` from the pipeline launch params (composer /
+`3_import_dag.yaml`); `RUN_IDS` from `validation_runs` or the pipeline launch
+logs. If only one engine was deployed, run the single-engine subset.
 
 ---
 
@@ -102,11 +107,15 @@ Read these and summarise what each engine is *designed* to do (ground
    the `_blend_pools` reference-copy mass, and the LLM-failure fallback to
    observed exemplars (the memorization path).
 5. `config/thresholds.yml` — BLOCKER/CRITICAL rules; whether a PK is registered.
-6. `.github/workflows/3_db_import_dag.yaml` + `composer/synthetic_beam_bigquery.py`
+6. `.github/workflows/3_import_dag.yaml` + `composer/synthetic_beam_bigquery.py`
    — the **actual default params** (`num_rows`, `batch_size`, `similarity`,
    `seed`, `client_type`, `gpu`) the runs used. Note the **`gpu` default**:
    a T4 cannot run Gemma 4, so an LLM run on T4 silently falls back to copying
    reference exemplars.
+7. `packages/sdfb-core/src/sdfb_core/observability.py` — the `SDFB_MILESTONE
+   name=<x> k=v` log-mining contract every worker milestone conforms to.
+8. `docs/RUN_PLAYBOOK.md` — the operational run recipe (GPU verdict, run
+   matrix, Dataflow options) this report cross-checks against.
 
 Write a short "Expected behaviour" note per engine.
 
@@ -118,6 +127,7 @@ Write a short "Expected behaviour" note per engine.
 python scripts/e2e_validation_analysis.py \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --schema <SCHEMA> --pk <PK> --identity-cols <IDENTITY_COLS> \
+  --batch-size <BATCH_SIZE> \
   --out output/e2e_validation_metrics.json
 ```
 
@@ -139,8 +149,15 @@ python scripts/e2e_gcp_probe.py \
   --quality-dataset <QUALITY_DATASET> \
   --region <REGION> --pk <PK> \
   $(for j in <JOB_IDS>; do echo --job-id $j; done) \
+  $(for r in <RUN_IDS>; do echo --run-id $r; done) \
+  $(for e in <ENGINE_LABEL=JOB_ID>; do echo --engine-label $e; done) \
   --out output/e2e_gcp_metrics.json
 ```
+
+`--run-id` (repeatable) scopes the `validation_runs`/`dlq` query to this
+deployment's runs; `--engine-label label=job_id` (repeatable) stamps a
+human-readable engine name onto the matching Dataflow result so Step 5's
+scorecard doesn't have to cross-reference job ids by hand.
 
 It uses ADC to compute, generically (schema introspected from
 `INFORMATION_SCHEMA`, no column names hard-coded):
@@ -163,6 +180,12 @@ It uses ADC to compute, generically (schema introspected from
   **generation-stall max seconds** — with chronological durations between them,
   plus the worker image package versions (vllm/torch/transformers/faiss/sdgx).
 
+Milestones from images built on the `SDFB_MILESTONE` contract
+(`sdfb_core/observability.py`) arrive pre-parsed as `sdfb.<name>` keys (e.g.
+`sdfb.batch_start`, `sdfb.freetext_llm_fallback`) — the legacy wording regexes
+above only matter for jobs from a pre-contract image. Prefer the `sdfb.*` keys
+when both are present.
+
 Note which engine's data the landing table currently holds (match on
 `IDENTITY_COLS` distinct count) and say so.
 
@@ -172,15 +195,33 @@ Note which engine's data the landing table currently holds (match on
 
 For every anomaly: **evidence → root cause (file:symbol) → fix**. Check for:
 
-- **Block-replay duplication**: PK run-lengths = batch size + dup ratio ≈ 1 +
-  identity columns replayed ⇒ constant RNG seed (`seed=None` → `_mix_seed(None)→0`).
+- **Block-replay duplication**: seed replay is fixed by
+  `derive_batch_seed(run_id, batch_id)` (`sdfb_core/seeding.py`) — if PK
+  run-lengths still equal the batch size (`equals_batch_size` in the offline
+  metrics), check the `sdfb.batch_start` seeds in the worker logs for repeats
+  across batches rather than assuming a constant-seed regression.
 - **Memorization / privacy leak**: `copy_ratio≈1.0` on non-numeric columns,
   especially identity/PK. Cross-check the **GPU** — a T4 run means Gemma 4 never
   loaded and free text is 100 % reference-copied via the exemplar fallback.
+- **Silent LLM fallback**: check the `sdfb.freetext_llm_fallback` milestone
+  count — any occurrence means the LLM contributed nothing for that column on
+  that batch (copied an observed exemplar instead); a nonzero count on a run
+  that claims LLM generation is itself a finding.
+- **GPU/dtype guard regression**: a `vllm_error` / `ModelGpuIncompatibleError`
+  worker-log line means the job **should have died** at vLLM init
+  (bf16-vs-Turing mismatch). If the job instead shows `validation_runs.status
+  = PASSED`, the guard in `sdfb_beam/handlers/vllm_client.py` regressed —
+  treat this as a BLOCKER-severity finding, not a perf note.
 - **Gate blind spots**: duplication / memorization not scored; PK not registered
   so `pk.duplicate` never fires; runs `PASSED` despite the above.
 - **Perf**: unnecessary embedder warm-pull for the library engine; long
   generation stall; startup-bound wall time.
+
+> **Forward-looking**: this step hand-computes fidelity from the offline CSV
+> (Step 2) and live BQ (Step 3). Once `--enable-evaluation` lands (see
+> `docs/designs/2026-07-07-evaluation-framework-design.md`), pull the fidelity
+> numbers from `synthetic_data_quality.validation_data_history` instead of
+> recomputing them here.
 
 ---
 

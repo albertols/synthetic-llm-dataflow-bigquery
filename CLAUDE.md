@@ -27,7 +27,7 @@ Mark M4-only tests with `@pytest.mark.gpu` or `@pytest.mark.gcp`. The default `p
 
 ```bash
 uv sync --group dev
-uv run pytest -m "not gpu and not gcp" -q   # expect "73 passed"
+uv run pytest -m "not gpu and not gcp" -q   # expect all green (285+ tests)
 uv run ruff check .
 ```
 
@@ -92,6 +92,7 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 
 - **What infra to provision before a run** (GCS buckets, BQ datasets/tables, IAM) → [`docs/DEPLOYMENT_PREREQUISITES.md`](docs/DEPLOYMENT_PREREQUISITES.md).
 - **How to actually run a deployment** (GPU verdict, run matrix, Dataflow options, L4 capacity strategy, report recipe) → [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md).
+- **How to validate a run after it lands** (duplication/memorization/schema defects traced to code + Dataflow observability) → [`.github/prompts/end_to_end_validation_report_generation.prompt.md`](.github/prompts/end_to_end_validation_report_generation.prompt.md).
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Cross-session preferences and project context** → `~/.claude/projects/.../memory/MEMORY.md`.
