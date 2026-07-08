@@ -89,6 +89,15 @@ def build_pipeline(
     handles to the resulting PCollections (`valid`, `dlq`) for callers
     that want to attach further transforms (metrics, additional sinks).
     """
+    if config.identity_columns:
+        valid_columns = {c.name for c in config.table_schema.columns}
+        unknown = [c for c in config.identity_columns if c not in valid_columns]
+        if unknown:
+            raise ValueError(
+                f"identity_columns not found on {config.table_schema.fqn}: "
+                f"{unknown}. Valid columns: {sorted(valid_columns)}"
+            )
+
     digest = compute_reference_digest(reference_rows)
     ctx = GenerationContext(
         table_schema=config.table_schema,

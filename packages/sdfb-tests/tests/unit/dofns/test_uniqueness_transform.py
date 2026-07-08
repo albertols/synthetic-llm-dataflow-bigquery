@@ -107,6 +107,38 @@ def test_multi_column_identity_key():
         )
 
 
+def test_row_digest_excludes_identity_columns():
+    """Regression test: identity columns are synthesized per row (see
+    engines/identity.py) and therefore differ on every row even when the
+    REST of the record is an exact engine-batch-replay. If the row digest
+    included the identity column, two rows that are otherwise identical
+    would never collide on the row digest (masked by the synthesized
+    identity value) and the replay would slip past `row.duplicate` entirely.
+    With identity columns excluded from the row digest, the second row must
+    divert as `row.duplicate` even though its identity value differs.
+    """
+    records = [
+        {"id": "identity-1", "value": "a"},
+        {"id": "identity-2", "value": "a"},  # same non-identity content
+    ]
+    with TestPipeline() as p:
+        result = (
+            p
+            | "Create" >> beam.Create(records)
+            | "EnforceUniqueness" >> EnforceUniqueness(identity_columns=["id"])
+        )
+        assert_that(
+            result["unique"] | "CountUnique" >> beam.combiners.Count.Globally(),
+            equal_to([1]),
+            label="unique_count",
+        )
+        assert_that(
+            result["duplicates"] | "RuleIds" >> beam.Map(lambda d: d["rule_id"]),
+            equal_to(["row.duplicate"]),
+            label="duplicate_rule_ids",
+        )
+
+
 def test_duplicate_free_input_passes_through_untouched():
     """No duplicates in ⇒ every row lands unchanged and zero envelopes out."""
     records = [
