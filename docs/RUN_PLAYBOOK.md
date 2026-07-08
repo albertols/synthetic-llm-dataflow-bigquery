@@ -76,8 +76,13 @@ at its `gcs_uri` before a `gpu=t4` run; the DAG's `gpu` param docstring
 All four runs launch through the same DAG
 (`composer/synthetic_beam_bigquery.py`), whose `default_dag_params` are:
 `table_fqn`, `num_rows`, `engine` (`b1_rag` | `b2_library`), `batch_size`,
-`similarity`, `client_type` (`vllm` | `fake`), and `gpu` (`l4` | `t4`, only
-consulted when `client_type=vllm`). **There is no `seed` Airflow param and no
+`similarity`, `identity_cols`, `client_type` (`vllm` | `fake`), and `gpu`
+(`l4` | `t4`, only consulted when `client_type=vllm`). `identity_cols`
+defaults to empty (no identity-column synthesis); every fidelity run
+(R1/R2/R3a-c) should set it to the target table's PK/UUID column(s) —
+e.g. `customer_id` — so that column is synthesized fresh per row instead of
+copied from the reference sample (see `packages/sdfb-core/src/sdfb_core/engines/identity.py`).
+**There is no `seed` Airflow param and no
 `--seed` CLI flag** — `PipelineConfig.seed` defaults to `None` and stays that
 way on every real run. That is deliberate: with no explicit seed,
 `GenerateRecordsDoFn` derives a per-batch seed from `(run_id, batch_id)` via
