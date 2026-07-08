@@ -95,6 +95,13 @@ class GenerateRecordsDoFn(beam.DoFn):
         self._column_types = {
             column.name: column.bq_type for column in self.ctx.table_schema.columns
         }
+        # Column name → BQ max_length, so a narrow STRING identity column
+        # (e.g. VARCHAR(10)-style constraints) gets a truncated deterministic
+        # value instead of the 36-char UUID overflowing it. Built once per
+        # worker alongside `_column_types`.
+        self._column_max_lengths = {
+            column.name: column.max_length for column in self.ctx.table_schema.columns
+        }
         log_milestone(
             "dofn_setup_done",
             engine=self.engine_name,
@@ -133,6 +140,7 @@ class GenerateRecordsDoFn(beam.DoFn):
                         row,
                         identity_columns=self.ctx.identity_columns,
                         column_types=self._column_types,
+                        column_max_lengths=self._column_max_lengths,
                         run_id=self.ctx.pipeline_run_id,
                         batch_id=batch_id,
                         row_index=row_index,
