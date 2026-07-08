@@ -35,7 +35,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from itertools import groupby
+import math
+from itertools import groupby, pairwise
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,9 @@ _NUMERIC_BQ_TYPES = frozenset(
 _NEAR_CONSTANT_SHARE = 0.98
 # Minimum engine samples required for a cross-sample overlap comparison.
 _MIN_ENGINES_FOR_OVERLAP = 2
+# Minimum non-empty values needed to judge a column "sequential" (need at
+# least one gap to have a step to compare).
+_MIN_VALUES_FOR_SEQUENTIAL = 2
 
 
 def _load_schema(path: Path) -> list[dict[str, str]]:
@@ -66,14 +70,22 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False, na_values=[])
 
 
-def _run_lengths(series: pd.Series) -> dict[str, Any]:
+def _run_lengths(series: pd.Series, batch_size: int = 0) -> dict[str, Any]:
     """Longest consecutive run of an identical value + run-length histogram.
 
     A histogram dominated by a single large run-length is the signature of
-    batch-level replay (every batch draws the same sequence)."""
+    batch-level replay (every batch draws the same sequence). When the
+    pipeline's batch size is known (``--batch-size``), ``equals_batch_size``
+    flags the sharper case: the longest run exactly matches the batch size,
+    i.e. every batch replayed the identical value."""
     runs = [(key, len(list(grp))) for key, grp in groupby(series.tolist())]
     if not runs:
-        return {"max_run": 0, "top_runs": [], "run_length_histogram": {}}
+        return {
+            "max_run": 0,
+            "top_runs": [],
+            "run_length_histogram": {},
+            "equals_batch_size": False,
+        }
     runs_sorted = sorted(runs, key=lambda kv: kv[1], reverse=True)
     hist: dict[int, int] = {}
     for _, length in runs:
@@ -85,6 +97,7 @@ def _run_lengths(series: pd.Series) -> dict[str, Any]:
             for v, length in runs_sorted[:5]
         ],
         "run_length_histogram": {str(k): v for k, v in sorted(hist.items())},
+        "equals_batch_size": batch_size > 0 and runs_sorted[0][1] == batch_size,
     }
 
 
@@ -138,8 +151,32 @@ def _column_report(df: pd.DataFrame, schema: list[dict[str, str]]) -> dict[str, 
         }
         if bq_type in _INT_BQ_TYPES:
             entry["int_type_conformance"] = _int_conformance(non_empty)
+        if len(non_empty) and distinct > 1:
+            probs = (vc / len(non_empty)).tolist()
+            h = -sum(p * math.log2(p) for p in probs if p > 0)
+            entry["normalized_entropy"] = round(h / math.log2(distinct), 6)
+        else:
+            entry["normalized_entropy"] = 0.0
         cols[name] = entry
     return cols
+
+
+def _is_sequential(values: list[str]) -> bool:
+    """True when non-empty values are all-numeric and strictly increasing
+    with a constant step (e.g. 1, 2, 3, ... or 100, 200, 300, ...).
+
+    Kept deliberately simple: no gap-tolerance, no reordering, no float
+    epsilon handling — just the textbook autoincrement-id signature."""
+    if len(values) < _MIN_VALUES_FOR_SEQUENTIAL:
+        return False
+    try:
+        nums = [float(v) for v in values]
+    except (TypeError, ValueError):
+        return False
+    step = nums[1] - nums[0]
+    if step <= 0:
+        return False
+    return all(b - a == step for a, b in pairwise(nums))
 
 
 def _analyze_one(
@@ -147,6 +184,7 @@ def _analyze_one(
     schema: list[dict[str, str]],
     pk_cols: list[str],
     identity_cols: list[str],
+    batch_size: int = 0,
 ) -> dict[str, Any]:
     n = len(df)
     full_dupes = int(df.duplicated(keep="first").sum())
@@ -155,15 +193,19 @@ def _analyze_one(
         "full_row_duplicates": full_dupes,
         "full_row_duplicate_ratio": round(full_dupes / n, 6) if n else 0.0,
         "distinct_full_rows": int(df.drop_duplicates().shape[0]),
-        "primary_key": _key_report(df, pk_cols),
+        "primary_key": _key_report(df, pk_cols, batch_size),
         "identity_columns": {
-            c: _identity_report(df[c]) for c in identity_cols if c in df.columns
+            c: _identity_report(df[c], batch_size)
+            for c in identity_cols
+            if c in df.columns
         },
         "columns": _column_report(df, schema),
     }
 
 
-def _key_report(df: pd.DataFrame, pk_cols: list[str]) -> dict[str, Any]:
+def _key_report(
+    df: pd.DataFrame, pk_cols: list[str], batch_size: int = 0
+) -> dict[str, Any]:
     present = [c for c in pk_cols if c in df.columns]
     if not present:
         return {"declared": bool(pk_cols), "present": False}
@@ -180,13 +222,14 @@ def _key_report(df: pd.DataFrame, pk_cols: list[str]) -> dict[str, Any]:
         "distinct": distinct,
         "distinct_ratio": round(distinct / n, 6) if n else 0.0,
         "duplicates": int(key.duplicated(keep="first").sum()),
-        "run_lengths": _run_lengths(key),
+        "run_lengths": _run_lengths(key, batch_size),
     }
 
 
-def _identity_report(series: pd.Series) -> dict[str, Any]:
+def _identity_report(series: pd.Series, batch_size: int = 0) -> dict[str, Any]:
     n = len(series)
     distinct = int(series.nunique())
+    non_empty = [v for v in series.tolist() if v != ""]
     return {
         "distinct": distinct,
         "distinct_ratio": round(distinct / n, 6) if n else 0.0,
@@ -194,7 +237,11 @@ def _identity_report(series: pd.Series) -> dict[str, Any]:
         # Run-lengths on the identity column detect batch-replay even when no
         # primary key is declared (a per-row-unique column replayed in blocks
         # equal to the batch size is the clearest block-replay signature).
-        "run_lengths": _run_lengths(series),
+        "run_lengths": _run_lengths(series, batch_size),
+        # A per-row-unique column that is also a plain autoincrement (1, 2,
+        # 3, ...) is a strong "this is a real ID, not a generated one" or
+        # "the generator copied the reference table's own PK" signal.
+        "sequential": _is_sequential(non_empty),
     }
 
 
@@ -257,6 +304,13 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="comma-separated per-row-unique columns (e.g. UUID, id)",
     )
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="Beam/RunInference batch size, if known (0 = unknown; disables "
+        "the equals_batch_size run-length flag)",
+    )
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args(argv)
 
@@ -276,7 +330,9 @@ def main(argv: list[str] | None = None) -> int:
         "engines": {
             label: {
                 "file": str(paths[label]),
-                **_analyze_one(df, schema, pk_cols, identity_cols),
+                **_analyze_one(
+                    df, schema, pk_cols, identity_cols, args.batch_size
+                ),
             }
             for label, df in frames.items()
         },
