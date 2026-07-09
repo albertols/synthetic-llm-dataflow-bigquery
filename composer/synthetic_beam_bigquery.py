@@ -63,7 +63,31 @@ project_version = "{{PROJECT_VERSION}}"
 dag_version = "{{DAG_VERSION}}"
 env_name = "{{ENV}}"
 
-job_name = f"{app_domain}-{app_name}-v{project_version.replace('.', '-').lower()}"
+def _model_slug(uri: str, max_len: int = 24) -> str:
+    """Job-name-safe model slug from the baked SDFB_MODEL_URI.
+
+    Dataflow job names must match ``[a-z]([-a-z0-9]{0,61}[a-z0-9])?`` —
+    lowercase/digits/hyphens only, NO underscores or dots — so
+    ``qwen2.5/7b-instruct`` becomes ``qwen2-5-7b-instruct``. Derived from the
+    already-substituted `model_uri` constant: no new workflow sed marker.
+    Returns "" (no suffix) when the URI is not a gs:// model path.
+    """
+    import re
+
+    if not uri.startswith("gs://") or "synthetic/models/" not in uri:
+        return ""
+    parts = [p for p in uri.split("synthetic/models/", 1)[1].split("/") if p]
+    if parts and re.fullmatch(r"v\d+", parts[-1]):
+        parts = parts[:-1]          # drop the weights version (…/v1/)
+    slug = "-".join(parts[:2]).lower()   # {family}-{model}
+    slug = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]+", "-", slug))
+    return slug.strip("-")[:max_len].rstrip("-")
+
+
+# e.g. synthetic-sdfb-v0-5-0-qwen3-4b-instruct-2507 (63-char Dataflow cap).
+_base_job_name = f"{app_domain}-{app_name}-v{project_version.replace('.', '-').lower()}"
+_slug = _model_slug(model_uri)
+job_name = f"{_base_job_name}-{_slug}"[:63].rstrip("-") if _slug else _base_job_name
 flex_template = f"sdfb-{project_version}-template.json"
 dag_id = f"{app_domain}_{app_name}_{dag_version}"
 
