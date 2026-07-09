@@ -205,3 +205,24 @@ def test_configure_options_directrunner_leaves_disk_size_unset():
     opts = PipelineOptions(["--runner=DirectRunner"])
     configure_pipeline_options(opts, "DirectRunner", "r1")
     assert opts.view_as(WorkerOptions).disk_size_gb is None
+
+
+def test_parse_args_vllm_dtype_defaults_auto():
+    args, _ = parse_args(_common_args())
+    assert args.vllm_dtype == "auto"
+
+
+def test_parse_args_vllm_dtype_accepts_float16():
+    args, beam_argv = parse_args([*_common_args(), "--vllm_dtype", "float16"])
+    assert args.vllm_dtype == "float16"
+    assert beam_argv == []
+
+
+def test_build_model_client_vllm_passes_dtype_override():
+    client = build_model_client("vllm", "gs://b/m/v1/", vllm_dtype="float16")
+    assert client.vllm_server_kwargs.get("dtype") == "float16"
+
+
+def test_build_model_client_vllm_auto_dtype_sends_no_flag():
+    client = build_model_client("vllm", "gs://b/m/v1/")
+    assert "dtype" not in client.vllm_server_kwargs

@@ -610,3 +610,67 @@ def test_real_vllm_roundtrip_deferred_to_m1_section_11():  # pragma: no cover
         "validated end-to-end on an L4 at M1 §11; CUDA-only, not runnable "
         "on the laptop."
     )
+
+
+def test_assert_dtype_supported_fp16_override_allows_bf16_checkpoint_on_turing():
+    # Qwen ships bf16 checkpoints but is fp16-safe: an explicit --dtype
+    # float16 downcast must pass the guard on SM 7.5.
+    _assert_dtype_supported(
+        "bfloat16", (7, 5), dtype_override="float16", model_type="qwen3"
+    )
+
+
+def test_assert_dtype_supported_fp16_override_still_rejects_gemma():
+    # Gemma in fp16 silently emits empty/pad output — the override must NOT
+    # bypass the guard for gemma-family checkpoints.
+    with pytest.raises(ModelGpuIncompatibleError, match="empty output"):
+        _assert_dtype_supported(
+            "bfloat16", (7, 5), dtype_override="float16", model_type="gemma3_text"
+        )
+
+
+def test_setup_fp16_override_spawns_bf16_qwen_on_turing(tmp_path, fake_torch):
+    fake_torch((7, 5))  # T4
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps({"torch_dtype": "bfloat16", "model_type": "qwen3"})
+    )
+    c = VLLMModelClient(
+        model_uri=str(model_dir),
+        local_model_dir=str(model_dir),
+        vllm_server_kwargs={"dtype": "float16"},
+    )
+    with (
+        mock.patch.object(c, "_pull_weights"),
+        mock.patch.object(c, "_spawn_server") as spawn,
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+    ):
+        c.setup()
+    spawn.assert_called_once()
+    cmd = c._server_command()
+    assert "--dtype" in cmd and "float16" in cmd
+
+
+def test_setup_fp16_override_still_fatal_for_gemma_on_turing(tmp_path, fake_torch):
+    fake_torch((7, 5))  # T4
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps({"torch_dtype": "bfloat16", "model_type": "gemma3_text"})
+    )
+    c = VLLMModelClient(
+        model_uri=str(model_dir),
+        local_model_dir=str(model_dir),
+        vllm_server_kwargs={"dtype": "float16"},
+    )
+    with (
+        mock.patch.object(c, "_pull_weights"),
+        mock.patch.object(c, "_spawn_server") as spawn,
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+        pytest.raises(ModelGpuIncompatibleError, match="empty output"),
+    ):
+        c.setup()
+    spawn.assert_not_called()

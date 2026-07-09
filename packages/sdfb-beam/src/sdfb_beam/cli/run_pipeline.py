@@ -94,6 +94,12 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="gs:// or local path to thresholds.yml")
     p.add_argument("--client_type", default="vllm",
                    choices=["vllm", "mlx", "fake"])
+    p.add_argument("--vllm_dtype", default="auto",
+                   choices=["auto", "float16", "bfloat16"],
+                   help="vLLM --dtype override. auto = checkpoint dtype "
+                        "(bf16 for Gemma/Qwen). float16 is REQUIRED on T4 "
+                        "for fp16-safe bf16 checkpoints (Qwen); refused for "
+                        "gemma-family models (fp16 Gemma emits empty output)")
     return p.parse_known_args(argv)
 
 
@@ -111,7 +117,9 @@ def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
         return Thresholds(env=env, blocker_failure_ratio=1.0)
 
 
-def build_model_client(client_type: str, model_uri: str) -> ModelClient:
+def build_model_client(
+    client_type: str, model_uri: str, vllm_dtype: str = "auto"
+) -> ModelClient:
     """Lazy factory — avoids importing vLLM / MLX on machines that don't have them."""
     if client_type == "fake":
         from sdfb_beam.handlers.fake_client import FakeModelClient
@@ -119,7 +127,11 @@ def build_model_client(client_type: str, model_uri: str) -> ModelClient:
         return FakeModelClient(reference_pool=[{}])
     if client_type == "vllm":
         from sdfb_beam.handlers.vllm_client import VLLMModelClient
-        return VLLMModelClient(model_uri=model_uri)
+        # "auto" = vLLM picks the checkpoint dtype. float16 = explicit
+        # downcast so fp16-safe bf16 checkpoints (Qwen) run on T4/SM 7.5;
+        # the client's init guard still refuses fp16 for gemma-family.
+        kwargs = {} if vllm_dtype == "auto" else {"dtype": vllm_dtype}
+        return VLLMModelClient(model_uri=model_uri, vllm_server_kwargs=kwargs)
     if client_type == "mlx":
         from sdfb_beam.handlers.mlx_client import MLXModelClient
         return MLXModelClient(model_uri=model_uri)
@@ -213,8 +225,11 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 
-    logger.info("Building model client (client_type=%s)", args.client_type)
-    model_client = build_model_client(args.client_type, args.model_uri)
+    logger.info("Building model client (client_type=%s, vllm_dtype=%s)",
+                args.client_type, args.vllm_dtype)
+    model_client = build_model_client(
+        args.client_type, args.model_uri, vllm_dtype=args.vllm_dtype
+    )
 
     logger.info("Loading reference rows from %s (limit=%d)",
                 args.reference_table, args.reference_rows_limit)

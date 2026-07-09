@@ -88,6 +88,7 @@ def test_step3_complete_dir_is_ok(tmp_path, ddl_file):
     mdir.mkdir(parents=True)
     for f in dp.LLM_REQUIRED:
         (mdir / f).write_text("{}")
+    (mdir / "tokenizer.json").write_text("{}")            # gemma-style tokenizer asset
     (mdir / "model.safetensors").write_bytes(b"\x00")     # single shard → no index needed
     ctx = dp.Ctx(args=_args(tmp_path, ddl_file,
                             model_uri="gs://b/synthetic/models/gemma4/e4b-it/v1/"))
@@ -134,3 +135,40 @@ def test_main_writes_report_and_returns_ko(tmp_path, ddl_file, offline, capsys):
     assert "KO — actions required" in body
     assert "## Actions needed" in body
     assert "report:" in capsys.readouterr().out
+
+
+def test_step3_qwen_modelscope_layout_without_special_tokens_map_is_ok(tmp_path, ddl_file):
+    """Qwen checkpoints (HF + ModelScope) ship NO special_tokens_map.json —
+    special tokens live in tokenizer_config.json. The preflight must not
+    demand it (it is gemma/bge that ship one, not every family)."""
+    mdir = tmp_path / "models" / "qwen3" / "4b-instruct-2507" / "v1"
+    mdir.mkdir(parents=True)
+    for f in ("config.json", "tokenizer_config.json", "generation_config.json",
+              "tokenizer.json", "vocab.json", "merges.txt", "configuration.json"):
+        (mdir / f).write_text("{}")
+    for shard in ("model-00001-of-00002.safetensors",
+                  "model-00002-of-00002.safetensors"):
+        (mdir / shard).write_bytes(b"\x00")
+    (mdir / "model.safetensors.index.json").write_text("{}")
+    ctx = dp.Ctx(args=_args(tmp_path, ddl_file,
+                            model_uri="gs://b/synthetic/models/qwen3/4b-instruct-2507/v1/"))
+    dp.step3_local_weights(ctx)
+    llm = next(r for r in ctx.results if r.step == "3a")
+    assert llm.status == dp.OK
+
+
+def test_step3_missing_tokenizer_assets_is_action(tmp_path, ddl_file):
+    """config+tokenizer_config alone are not a loadable tokenizer: at least
+    tokenizer.json / tokenizer.model, or the BPE pair vocab.json+merges.txt,
+    must be present."""
+    mdir = tmp_path / "models" / "qwen3" / "4b-instruct-2507" / "v1"
+    mdir.mkdir(parents=True)
+    for f in dp.LLM_REQUIRED:
+        (mdir / f).write_text("{}")
+    (mdir / "model.safetensors").write_bytes(b"\x00")
+    ctx = dp.Ctx(args=_args(tmp_path, ddl_file,
+                            model_uri="gs://b/synthetic/models/qwen3/4b-instruct-2507/v1/"))
+    dp.step3_local_weights(ctx)
+    llm = next(r for r in ctx.results if r.step == "3a")
+    assert llm.status == dp.ACTION
+    assert "tokenizer" in llm.resource

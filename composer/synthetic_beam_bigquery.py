@@ -115,6 +115,17 @@ default_dag_params = {
                     "fresh each row (PK/UUID); never sampled from reference "
                     "data. Empty disables identity-column synthesis.",
     ),
+    "vllm_dtype": Param(
+        default="auto",
+        type="string",
+        enum=["auto", "float16", "bfloat16"],
+        description="vLLM --dtype override. auto = checkpoint dtype (bf16 for "
+                    "Gemma/Qwen). Set float16 for gpu=t4 + Qwen: Qwen ships "
+                    "bf16 checkpoints (bf16 needs SM>=8.0) but is fp16-safe, "
+                    "so the explicit downcast is what makes it run on Turing. "
+                    "The worker refuses float16 for gemma-family checkpoints "
+                    "(fp16 Gemma silently emits empty output).",
+    ),
     "client_type": Param(
         default="vllm",
         type="string",
@@ -221,6 +232,7 @@ with models.DAG(
                     "validation_runs_table": validation_runs_table,
                     "env": env_name,
                     "client_type": "{{ params.client_type }}",
+                    "vllm_dtype": "{{ params.vllm_dtype }}",
                 },
             }
         },

@@ -82,11 +82,34 @@ class ModelGpuIncompatibleError(RuntimeError):
 _MIN_BF16_CAPABILITY = (8, 0)
 
 
-def _assert_dtype_supported(torch_dtype: str, capability: tuple[int, int]) -> None:
+def _assert_dtype_supported(
+    torch_dtype: str,
+    capability: tuple[int, int],
+    *,
+    dtype_override: str = "",
+    model_type: str = "",
+) -> None:
     """Raise `ModelGpuIncompatibleError` if `torch_dtype` cannot run on a GPU
     reporting `capability` (major, minor). Pure function — no torch import
     required, unit-testable on the laptop.
+
+    ``dtype_override`` is the explicit ``--dtype`` the server will be launched
+    with (from ``vllm_server_kwargs``). An explicit fp16 downcast makes a bf16
+    checkpoint runnable on Turing for fp16-safe families (Qwen ships bf16
+    checkpoints but is numerically stable in fp16) — EXCEPT gemma, whose fp16
+    activations overflow and silently emit empty/pad output, so the override
+    never bypasses the guard for gemma-family ``model_type``s.
     """
+    if dtype_override in {"float16", "half"}:
+        if model_type.startswith("gemma"):
+            raise ModelGpuIncompatibleError(
+                f"refusing --dtype={dtype_override} for a gemma-family "
+                f"checkpoint (model_type={model_type!r}): fp16 Gemma silently "
+                "emits empty output (HF gemma-3-4b-it #33, vLLM #40290). Run "
+                "Gemma on gpu=l4, or point SDFB_MODEL_URI at an fp16-safe "
+                "model (config/models.yml: qwen3_4b_instruct_2507)."
+            )
+        return  # explicit fp16 serve dtype — checkpoint bf16 no longer applies
     if torch_dtype == "bfloat16" and capability < _MIN_BF16_CAPABILITY:
         raise ModelGpuIncompatibleError(
             f"model dtype bfloat16 needs GPU compute capability >= 8.0 "
@@ -320,8 +343,15 @@ class VLLMModelClient:
             # skip the guard.
             cfg_path = _Path(self._served_model_name) / "config.json"
             if cfg_path.exists():
-                dtype = _json.loads(cfg_path.read_text()).get("torch_dtype", "")
-                _assert_dtype_supported(dtype, torch.cuda.get_device_capability())
+                cfg = _json.loads(cfg_path.read_text())
+                _assert_dtype_supported(
+                    cfg.get("torch_dtype", ""),
+                    torch.cuda.get_device_capability(),
+                    dtype_override=str(
+                        self.vllm_server_kwargs.get("dtype", "")
+                    ).lower(),
+                    model_type=cfg.get("model_type", ""),
+                )
 
     def _server_command(self) -> list[str]:
         """Build the `python -m vllm.entrypoints.openai.api_server ...` argv."""

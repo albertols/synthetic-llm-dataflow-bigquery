@@ -55,7 +55,13 @@ OK, ACTION, SKIP = "OK", "ACTION", "SKIP"
 _BADGE = {OK: "✅ OK", ACTION: "⚠️ ACTION", SKIP: "⏭️ SKIP"}
 
 # Minimum on-disk files per docs/MODEL_LAYOUT.md (file-level checklist).
-LLM_REQUIRED = ["config.json", "tokenizer_config.json", "special_tokens_map.json"]
+# NOTE: special_tokens_map.json is NOT universally shipped — gemma/bge include
+# it, Qwen (HF + ModelScope) does not (special tokens live in
+# tokenizer_config.json) — so it is only required for embedders. LLMs instead
+# need SOME loadable tokenizer asset (see _TOKENIZER_ANY / _TOKENIZER_BPE_PAIR).
+LLM_REQUIRED = ["config.json", "tokenizer_config.json"]
+_TOKENIZER_ANY = ("tokenizer.json", "tokenizer.model")
+_TOKENIZER_BPE_PAIR = ("vocab.json", "merges.txt")
 EMBEDDER_REQUIRED = [
     "config.json", "model.safetensors", "tokenizer.json",
     "tokenizer_config.json", "special_tokens_map.json",
@@ -312,6 +318,12 @@ def _local_model(ctx, step, label, uri, required, *, need_safetensors, optional=
     safet = list(mdir.glob("*.safetensors"))
     if need_safetensors and not safet:
         missing.append("*.safetensors")
+    if need_safetensors:  # LLM: any loadable tokenizer asset (family-agnostic)
+        has_tokenizer = any((mdir / f).exists() for f in _TOKENIZER_ANY) or all(
+            (mdir / f).exists() for f in _TOKENIZER_BPE_PAIR
+        )
+        if not has_tokenizer:
+            missing.append("tokenizer.json|tokenizer.model|vocab.json+merges.txt")
     if len(safet) > 1 and not (mdir / "model.safetensors.index.json").exists():
         missing.append("model.safetensors.index.json")
     if missing:

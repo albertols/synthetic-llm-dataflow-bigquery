@@ -108,7 +108,7 @@ The non-HuggingFace source for Gemma is **Kaggle** (Google-hosted, license-clean
    gsutil -m cp -r models/gemma4/e4b-it/v1/ gs://{bucket}/synthetic/models/gemma4/e4b-it/v1/
    ```
 
-For Qwen 2.5 (not on Kaggle), use the official Qwen GitHub release tarball: https://github.com/QwenLM/Qwen2.5/releases (download → extract → same layout).
+For Qwen (not on Kaggle), download from ModelScope (works behind the corporate network): `modelscope download --model Qwen/Qwen3-4B-Instruct-2507 --local_dir models/qwen3/4b-instruct-2507/v1` (same for `Qwen/Qwen2.5-7B-Instruct` → `models/qwen2.5/7b-instruct/v1`). The local path MUST mirror the registry `gcs_uri` suffix — `scripts/deployment_prerequisites.py` step 3 checks `models/{family}/{model}/{version}` derived from that URI.
 
 ## File-level checklist
 
@@ -117,7 +117,7 @@ Every `{family}/{model}/{version}/` directory MUST contain, at minimum:
 - `config.json` — model architecture + hyperparameters
 - `tokenizer.json` (or `tokenizer.model` for SentencePiece-based tokenizers)
 - `tokenizer_config.json` — tokenizer wrapper config
-- `special_tokens_map.json` — BOS / EOS / PAD token ids
+- `special_tokens_map.json` — BOS / EOS / PAD token ids — **gemma-family only**: Qwen checkpoints (HF and ModelScope) do not ship it; their special tokens live in `tokenizer_config.json`, and `transformers`/vLLM load fine without it. The preflight requires it only for embedders.
 - One or more `*.safetensors` files — model weights
 - `model.safetensors.index.json` — required when weights are sharded across multiple `*.safetensors` files
 
@@ -127,6 +127,22 @@ Recommended:
 
 For AWQ-quantized variants, additionally:
 - `quant_config.json` — AWQ quantization parameters (`zero_point`, `q_group_size`, `w_bit`, etc.)
+
+### Qwen from ModelScope — expected file set
+
+Verified against the 2026-07 downloads (`qwen2.5/7b-instruct`, 4 shards, 14.2GB;
+`qwen3/4b-instruct-2507`, 3 shards, 7.5GB):
+
+- `config.json`, `generation_config.json`, `tokenizer_config.json`
+- `tokenizer.json` **plus** the BPE pair `vocab.json` + `merges.txt`
+- `model-0000N-of-0000M.safetensors` + `model.safetensors.index.json`
+- `configuration.json` — ModelScope catalog metadata (2-73 bytes); harmless,
+  upload or skip
+- NO `special_tokens_map.json` — expected, see the checklist note above
+
+Serving note: both checkpoints are **bf16**. On T4 pass `vllm_dtype=float16`
+(fp16-safe family; the DAG exposes the param). Qwen2.5-7B does not fit a T4
+at all (weights 14.2GB > the 13.6GB budget) — L4 only.
 
 For GGUF (llama.cpp / Ollama path):
 - Single `*.gguf` file is sufficient. No accompanying `config.json` — GGUF is self-describing. Tokenizer is embedded.

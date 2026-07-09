@@ -49,16 +49,22 @@ models:
     download_hint: |
       kaggle models instances versions download google/gemma-4/transformers/26b-a4b-awq/1  # TODO: confirm -it slug
 
-  qwen2_5_7b_it:
-    # Optional cross-family comparison. Not in M1 critical path.
-    description: Qwen 2.5 7B Instruct, 128K context. Apache-2.0 fallback.
-    gcs_uri: "gs://{bucket}/synthetic/models/qwen2.5/7b-it/v1/"
-    quantization: null
-    expected_vram_gb: 14
+  qwen2_5_7b_instruct:
+    # Cross-family comparison on L4. Downloaded 2026-07 from ModelScope
+    # (4 bf16 shards, 14.2GB + index). L4 ONLY: weights alone exceed the T4
+    # budget (14.2GB > 16GB x gpu_memory_utilization 0.85 = 13.6GB), before
+    # any KV cache — do not pair with gpu=t4 regardless of dtype.
+    # Ships NO special_tokens_map.json (Qwen convention — special tokens live
+    # in tokenizer_config.json); configuration.json is ModelScope metadata.
+    description: Qwen 2.5 7B Instruct, 128K context. Apache-2.0. L4-only (VRAM).
+    gcs_uri: "gs://{bucket}/synthetic/models/qwen2.5/7b-instruct/v1/"
+    quantization: null            # bf16 checkpoint; runs native bf16 on L4
+    expected_vram_gb: 15
+    min_compute_capability: "8.0"  # not dtype-limited (fp16-safe family) but VRAM-limited to L4-class
     license: apache-2.0
-    source: qwen-github
+    source: modelscope            # pulled once on the M4, never at runtime
     download_hint: |
-      Pull tarball from https://github.com/QwenLM/Qwen2.5/releases
+      modelscope download --model Qwen/Qwen2.5-7B-Instruct --local_dir models/qwen2.5/7b-instruct/v1
 
   qwen3_4b_instruct_2507:
     # T4-safe profile — the ONLY registry entry that runs on Turing (SM 7.5).
@@ -66,15 +72,23 @@ models:
     # silently emits empty output; attention head sizes exceed Turing's 64KB
     # shared memory — vLLM #38918/#38887). Use this to exercise the REAL vLLM
     # path cheaply on gpu=t4; keep Gemma-on-L4 as the fidelity profile.
-    description: Qwen3 4B Instruct (2507). T4-compatible fp16; guided-JSON clean.
+    # Downloaded 2026-07 from ModelScope (3 bf16 shards, 7.5GB + index).
+    # T4 fit: ~7.5GB weights + ~6GB KV within the 13.6GB budget (16GB x 0.85).
+    # REQUIRES vllm_dtype=float16 on T4: the checkpoint is bf16 (SM>=8.0) but
+    # the family is fp16-safe, so the explicit --dtype float16 downcast is
+    # what makes it run on Turing (the DAG exposes the `vllm_dtype` param).
+    # Native context is 262K — keep max_model_len at the 8192 default or the
+    # KV allocation will not fit. Ships NO special_tokens_map.json (Qwen
+    # convention); configuration.json is ModelScope metadata.
+    description: Qwen3 4B Instruct (2507). T4-compatible via vllm_dtype=float16; guided-JSON clean.
     gcs_uri: "gs://{bucket}/synthetic/models/qwen3/4b-instruct-2507/v1/"
-    quantization: null            # FP16 (fp16-safe family, unlike Gemma)
+    quantization: null            # bf16 checkpoint; serve fp16 on T4, bf16 on L4
     expected_vram_gb: 9
-    min_compute_capability: "7.5"
+    min_compute_capability: "7.5"  # with vllm_dtype=float16
     license: apache-2.0
-    source: huggingface           # pulled once on the M4, never at runtime
+    source: modelscope            # pulled once on the M4, never at runtime
     download_hint: |
-      hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir qwen3-4b-instruct-2507
+      modelscope download --model Qwen/Qwen3-4B-Instruct-2507 --local_dir models/qwen3/4b-instruct-2507/v1
 
 # Embedding models for B.1 RAG (M1 §7).
 embedders:
