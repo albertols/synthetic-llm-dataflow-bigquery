@@ -6,105 +6,146 @@
       "name": "ddl_uri",
       "label": "DDL JSON URI",
       "helpText": "gs:// path to the _ddl.json produced by scripts/extract_ddl.py.",
-      "regexes": ["^gs://[^/]+/.+\\.json$"]
+      "regexes": [
+        "^gs://[^/]+/.+\\.json$"
+      ]
     },
     {
       "name": "reference_table",
       "label": "Reference table FQN",
       "helpText": "Source BigQuery table for live SELECT reference rows. project.dataset.table.",
-      "regexes": ["^[a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+$"]
+      "regexes": [
+        "^[a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+$"
+      ]
     },
     {
       "name": "reference_rows_limit",
       "label": "Reference rows LIMIT",
       "helpText": "Cap on rows pulled by SELECT ... LIMIT N. Default 10000.",
       "isOptional": true,
-      "regexes": ["^[0-9]+$"]
+      "regexes": [
+        "^[0-9]+$"
+      ]
     },
     {
       "name": "landing_table",
       "label": "Landing table FQN",
       "helpText": "Destination BigQuery table for valid synthetic rows. project.dataset.table.",
-      "regexes": ["^[a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+$"]
+      "regexes": [
+        "^[a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+$"
+      ]
     },
     {
       "name": "dlq_table",
       "label": "DLQ table FQN",
       "helpText": "Destination BigQuery table for dead-lettered rows. project.dataset.table.",
-      "regexes": ["^[a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+$"]
+      "regexes": [
+        "^[a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+$"
+      ]
     },
     {
       "name": "num_rows",
       "label": "Number of synthetic rows to generate",
       "helpText": "Positive integer.",
-      "regexes": ["^[1-9][0-9]*$"]
+      "regexes": [
+        "^[1-9][0-9]*$"
+      ]
     },
     {
       "name": "batch_size",
       "label": "Batch size per generate_batch call",
       "helpText": "Records per LLM batch. Default 16.",
       "isOptional": true,
-      "regexes": ["^[1-9][0-9]*$"]
+      "regexes": [
+        "^[1-9][0-9]*$"
+      ]
     },
     {
       "name": "similarity",
-      "label": "Similarity to reference (0.0–1.0)",
+      "label": "Similarity to reference (0.0\u20131.0)",
       "helpText": "0=pure random within schema, 1=mimic reference closely. Default 0.5.",
       "isOptional": true,
-      "regexes": ["^(0(\\.[0-9]+)?|1(\\.0+)?)$"]
+      "regexes": [
+        "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
+      ]
     },
     {
       "name": "run_id",
       "label": "Run ID",
       "helpText": "Unique identifier propagated to validation_runs and reference_digest provenance.",
-      "regexes": ["^[a-zA-Z0-9_-]+$"]
+      "regexes": [
+        "^[a-zA-Z0-9_-]+$"
+      ]
     },
     {
       "name": "identity_cols",
       "label": "Identity columns",
       "helpText": "Comma-separated per-row-unique columns synthesized fresh each row (PK/UUID); never sampled from reference data. Optional; empty means no identity-column synthesis.",
       "isOptional": true,
-      "regexes": ["^([a-zA-Z0-9_]+(,[a-zA-Z0-9_]+)*)?$"]
+      "regexes": [
+        "^([a-zA-Z0-9_]+(,[a-zA-Z0-9_]+)*)?$"
+      ]
     },
     {
       "name": "engine",
       "label": "Generation engine",
       "helpText": "b1_rag (RAG over reference rows) or b2_library (CTGAN/SDV-family wrapper).",
-      "regexes": ["^(b1_rag|b2_library)$"]
+      "regexes": [
+        "^(b1_rag|b2_library)$"
+      ]
     },
     {
       "name": "model_uri",
       "label": "Model URI",
       "helpText": "gs://<bucket>/synthetic/models/<family>/<model>/<version>/.",
-      "regexes": ["^gs://[^/]+/.+/$"]
+      "regexes": [
+        "^gs://[^/]+/.+/$"
+      ]
     },
     {
       "name": "embedder_uri",
       "label": "Embedder URI (B.1 RAG)",
-      "helpText": "gs://<bucket>/synthetic/models/embedders/<model>/<version>/ — optional; empty uses the dependency-free HashingEmbedder.",
+      "helpText": "gs://<bucket>/synthetic/models/embedders/<model>/<version>/ \u2014 optional; empty uses the dependency-free HashingEmbedder.",
       "isOptional": true,
-      "regexes": ["^(gs://[^/]+/.+/|)$"]
+      "regexes": [
+        "^(gs://[^/]+/.+/|)$"
+      ]
     },
     {
       "name": "validation_runs_table",
       "label": "validation_runs table FQN",
       "helpText": "Destination BigQuery table for the run-level summary row. project.dataset.table. Optional; empty skips the write.",
       "isOptional": true,
-      "regexes": ["^([a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+)?$"]
+      "regexes": [
+        "^([a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+)?$"
+      ]
     },
     {
       "name": "env",
       "label": "Environment tier",
-      "helpText": "dev | uat | prd — selects the threshold tier from config/thresholds.yml.",
+      "helpText": "dev | uat | prd \u2014 selects the threshold tier from config/thresholds.yml.",
       "isOptional": true,
-      "regexes": ["^(dev|uat|prd)$"]
+      "regexes": [
+        "^(dev|uat|prd)$"
+      ]
     },
     {
       "name": "client_type",
       "label": "Model client type",
       "helpText": "vllm (production), mlx (M4 local smoke), fake (CI fixture).",
       "isOptional": true,
-      "regexes": ["^(vllm|mlx|fake)$"]
+      "regexes": [
+        "^(vllm|mlx|fake)$"
+      ]
+    },
+    {
+      "name": "vllm_dtype",
+      "label": "vLLM serve dtype override",
+      "helpText": "auto (default) = checkpoint dtype (bf16 for Gemma/Qwen). float16 = explicit downcast REQUIRED on T4 for fp16-safe bf16 checkpoints (Qwen); refused for gemma-family models.",
+      "isOptional": true,
+      "regexes": [
+        "^(auto|float16|bfloat16)$"
+      ]
     }
   ]
 }
