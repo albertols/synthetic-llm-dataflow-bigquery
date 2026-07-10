@@ -182,6 +182,13 @@ default_dag_params = {
                     "with the qwen3_4b_instruct_2507 registry model via "
                     "SDFB_MODEL_URI. Ignored when client_type=fake.",
     ),
+    "seed": Param(
+        default="",
+        type="string",
+        description="Explicit base RNG seed (integer) for deliberate "
+                    "reproduction of a run. Empty (default) derives a fresh "
+                    "seed per (run_id, batch) — recommended.",
+    ),
 }
 
 with models.DAG(
@@ -258,7 +265,12 @@ with models.DAG(
                     "num_rows": "{{ params.num_rows }}",
                     "batch_size": "{{ params.batch_size }}",
                     "similarity": "{{ params.similarity }}",
-                    "run_id": "{{ dag_run.run_id }}",
+                    # Salted per trigger: retriggering the same logical date
+                    # reuses dag_run.run_id, and seed=None derives batch seeds
+                    # from run_id — identical run_id replayed identical data
+                    # (E2E 2026-07-10). The uuid suffix also makes each
+                    # validation_runs row uniquely attributable to one job.
+                    "run_id": "{{ dag_run.run_id }}-{{ macros.uuid.uuid4().hex[:8] }}",
                     "identity_cols": "{{ params.identity_cols }}",
                     "pk_cols": "{{ params.pk_cols }}",
                     "engine": "{{ params.engine }}",
@@ -268,6 +280,7 @@ with models.DAG(
                     "env": env_name,
                     "client_type": "{{ params.client_type }}",
                     "vllm_dtype": "{{ params.vllm_dtype }}",
+                    "seed": "{{ params.seed }}",
                 },
             }
         },
