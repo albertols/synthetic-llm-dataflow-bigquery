@@ -61,6 +61,9 @@ class PipelineConfig:
     # Per-row-unique columns (PK/UUID) synthesized fresh each row; never
     # sampled from reference data. See engines/identity.py.
     identity_columns: tuple[str, ...] = ()
+    # Real-LLM runs re-raise on free-text LLM failure instead of silently
+    # copying exemplars. Set from client_type at the CLI boundary.
+    strict_freetext: bool = False
     run_id: str = "local-run"
     # Worker-local model paths surfaced to engines via GenerationContext.
     # model_uri = the LLM (also given to the ModelClient); embedder_uri =
@@ -107,6 +110,7 @@ def build_pipeline(
         model_uri=config.model_uri,
         embedder_uri=config.embedder_uri,
         identity_columns=list(config.identity_columns),
+        strict_freetext=config.strict_freetext,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.
