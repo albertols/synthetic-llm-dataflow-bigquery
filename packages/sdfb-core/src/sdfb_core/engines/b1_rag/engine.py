@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from typing import TYPE_CHECKING
 
 from sdfb_core.codegen import derive_record_model
@@ -121,15 +122,32 @@ class B1RagEngine(GenerationEngine):
         else:
             self._embedder = HashingEmbedder(dim=384)
         if ctx.reference_rows:
+            t_embed = time.monotonic()
             texts = serialize_rows(ctx.reference_rows, self._column_order)
             self._ref_vectors = self._embedder.embed(texts)
+            log_milestone(
+                "b1_embed_done",
+                rows=len(texts),
+                seconds=round(time.monotonic() - t_embed, 1),
+            )
+            t_index = time.monotonic()
             self._index = build_index(self._ref_vectors, self._embedder.dim)
+            log_milestone(
+                "b1_index_built",
+                seconds=round(time.monotonic() - t_index, 1),
+            )
         else:
             self._ref_vectors = []
             self._index = None
 
         # 4. infer free-text pools ONCE (the only O(1) LLM use in setup).
+        t_pools = time.monotonic()
         self._free_text_pools = self._build_free_text_pools(ctx)
+        log_milestone(
+            "b1_pools_built",
+            seconds=round(time.monotonic() - t_pools, 1),
+            freetext_cols=len(self._free_text_pools),
+        )
 
         self._ready = True
 
