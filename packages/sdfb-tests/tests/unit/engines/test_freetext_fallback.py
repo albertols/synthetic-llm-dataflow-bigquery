@@ -152,3 +152,19 @@ def test_b1_strict_reraises(free_text_ctx):
     engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
     with pytest.raises(RuntimeError, match="boom"):
         engine.setup(_BoomClient(), strict_ctx)
+
+
+# ---------------------------------------------------------------------------
+# B.1 setup phase milestones — embed / index / pool timings
+# ---------------------------------------------------------------------------
+
+
+def test_b1_setup_emits_phase_milestones(caplog, free_text_ctx):
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(_BoomClient(), free_text_ctx)
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=b1_embed_done" in text
+    assert "rows=12" in text
+    assert "SDFB_MILESTONE name=b1_index_built" in text
+    assert "SDFB_MILESTONE name=b1_pools_built" in text
