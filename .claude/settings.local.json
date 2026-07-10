@@ -114,7 +114,9 @@
       "Bash(xargs cat)",
       "Bash(/Users/serna/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/review-package 9846070 *)",
       "Bash(gh pr create --base master --head e2e-hardening --title 'E2E hardening: engine fixes \\(seed replay, identity leak, silent LLM fallback\\), milestone contract, e2e tooling, run playbook' --body ' *)",
-      "Bash(gh pr *)"
+      "Bash(gh pr *)",
+      "Read(//Users/serna/IdeaProjects/**)",
+      "Read(//Users/serna/**)"
     ]
   }
 }
