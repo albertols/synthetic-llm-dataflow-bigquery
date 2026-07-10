@@ -71,45 +71,26 @@ at its `gcs_uri` before a `gpu=t4` run; the DAG's `gpu` param docstring
 
 ---
 
-## 2. Run matrix — the four M1 §11 validation runs
+## 2. Post-remediation run matrix (branch e2e-hardening, after Tasks 1-5)
 
-All four runs launch through the same DAG
-(`composer/synthetic_beam_bigquery.py`), whose `default_dag_params` are:
-`table_fqn`, `num_rows`, `engine` (`b1_rag` | `b2_library`), `batch_size`,
-`similarity`, `identity_cols`, `client_type` (`vllm` | `fake`), and `gpu`
-(`l4` | `t4`, only consulted when `client_type=vllm`). `identity_cols`
-defaults to empty (no identity-column synthesis); every fidelity run
-(R1/R2/R3a-c) should set it to the target table's PK/UUID column(s) —
-e.g. `customer_id` — so that column is synthesized fresh per row instead of
-copied from the reference sample (see `packages/sdfb-core/src/sdfb_core/engines/identity.py`).
-**There is no `seed` Airflow param and no
-`--seed` CLI flag** — `PipelineConfig.seed` defaults to `None` and stays that
-way on every real run. That is deliberate: with no explicit seed,
-`GenerateRecordsDoFn` derives a per-batch seed from `(run_id, batch_id)` via
-`sdfb_core.seeding.derive_batch_seed()`
-(`packages/sdfb-beam/src/sdfb_beam/dofns/generate.py`), so batches never
-replay each other within a run, and re-running the identical `run_id`
-reproduces the identical output byte-for-byte. The "seed" column below is
-therefore always "derived (no override)" — this is the fixed, intended
-behavior, not a gap to fill in later.
+Common params: `num_rows=1000`, `identity_cols=ID_COL`,
+`pk_cols=<PK_COL>,<PK_COL_2>`, `seed=""` (derived), landing table truncated
+between runs (or fresh run_id verified in validation_runs).
 
-| # | engine | client_type | gpu | num_rows | batch_size | similarity | seed | Expected insight |
-|---|---|---|---|---|---|---|---|---|
-| R1 | `b1_rag` | `vllm` | `l4` | `1000` | `16` | `0.5` | derived (no override) | B.1 (RAG) fidelity on the real Gemma-on-L4 path: retrieval-grounded free text, schema-conformant rows, no exemplar fallback. |
-| R2 | `b2_library` | `vllm` | `l4` | `1000` | `16` | `0.5` | derived (no override) | B.2 (library-wrapper) fidelity on the same Gemma-on-L4 path: `sdgx`-fitted tabular sampling + LLM-patched free text, for direct comparison against R1 on identical `num_rows`/`batch_size`. |
-| R3a/b/c | `b2_library` | `vllm` | `l4` | `300` | `16` | `0.0` / `0.5` / `0.9` | derived (no override) | Similarity sweep isolating `_blend_pools()` (`packages/sdfb-core/src/sdfb_core/engines/b2_library/freetext.py`): mass `similarity` goes to the reference pool, `1 - similarity` to the LLM pool. `0.0` should read as ~all-LLM free text, `0.9` as ~all-reference-copied, `0.5` as the midpoint — quantify with the probe's `copy_ratio` (§5) across the three runs. |
-| R4 | `b1_rag` or `b2_library` | `vllm` | `t4` | `200` | `16` | `0.5` | derived (no override) | Plumbing-only: confirms the real vLLM server, GCS model pull, and BigQuery write path all work on T4 when `SDFB_MODEL_URI` points at `qwen3_4b_instruct_2507` (never Gemma — §1) **and `vllm_dtype=float16` is set** — Qwen ships bf16 checkpoints (SM>=8.0) but is fp16-safe; without the explicit downcast the worker fails fast with `ModelGpuIncompatibleError`. Not a fidelity run; keep `num_rows` small. |
+| Run | Engine | Model | GPU | Expect |
+|---|---|---|---|---|
+| R1' | b1_rag | qwen3-4b (`vllm_dtype=float16`) | t4 | `vllm_ready` present; NO `freetext_llm_fallback`; job FAILS if vLLM can't start (strict) |
+| R2' | b1_rag | qwen3-4b | t4 (repeat of R1') | output DIFFERS from R1' (salted run_id → new seeds) |
+| R3' | b2_library | qwen3-4b (`vllm_dtype=float16`) | t4 | same as R1' plus pk.duplicate rule live |
+| R4' | b1_rag | gemma4-e4b-it | l4 | bf16 path; guard must NOT fire on L4 |
 
-**Reproducibility check (run alongside R1 or R2, not a fifth row):** trigger
-the DAG twice with the **same** explicit Airflow `run_id` (e.g.
-`gcloud composer environments run <env> --location <region> dags trigger --
-<dag_id> --run-id repro-check-001`, invoked twice) and no seed override. Both
-runs must produce byte-identical landing rows for every `batch_id`, because
-`derive_batch_seed(run_id, batch_id)` is a pure function of those two inputs.
-A mismatch means either the DAG stopped passing a stable `run_id` through to
-`--run_id` on the Flex Template, or something upstream (retrieval order,
-`sdgx` fit) is not deterministic given a fixed seed — treat it as a bug, not
-as expected LLM sampling noise.
+Pass criteria per run:
+1. `model_client_setup_start/done`, `model_pull_*`, `vllm_spawn`, `vllm_ready` all present in worker logs.
+2. Zero `freetext_llm_fallback` milestones (a vLLM run that falls back now crashes instead).
+3. `copy_ratio < 0.3` on every non-constant STRING column with `source_distinct > 100` (probe step 3).
+4. `validation_runs.run_id` unique per Dataflow job (salted suffix visible).
+5. `pk.duplicate` present in `dlq_by_rule` if and only if PK collisions occurred; PASSED requires ~0.
+6. `b1_embed_done rows=` equals `reference_rows_limit` (10000), not the full source count.
 
 ---
 
@@ -126,14 +107,14 @@ as expected LLM sampling noise.
 - **Machine type / `g2-standard-4` vs `-8`.** Today the DAG offers no
   `g2-standard-4` toggle at all: `gpu=l4` hardcodes `g2-standard-8` in the
   DAG's `machineType` ternary, and `gpu=t4` maps to `n1-standard-8` — the T4
-  plumbing run (R4) never touches the `g2-standard` family. The `-4` vs `-8`
+  plumbing run (R4') never touches the `g2-standard` family. The `-4` vs `-8`
   trade-off is therefore informational, relevant only if someone edits that
   ternary: both sizes carry exactly one L4, so the choice is pure headroom,
   not GPU count — `-8` gives the CPU-side steps (BQ read, Pandera validation,
   `sdgx` fit for B.2, the Beam harness alongside vLLM) more vCPU/RAM to avoid
   becoming the bottleneck next to the GPU, at roughly double the non-GPU
   cost. The hardcoded `-8` is the right default for the fidelity runs
-  (R1–R3); don't downgrade it without a measured reason.
+  (R1'–R3'); don't downgrade it without a measured reason.
 - **Worker disk.** The Flex Template's `environment.diskSizeGb` field does
   **not** propagate to the worker harness — it's set on the launch request
   but ignored (confirmed at `packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:57`,
@@ -157,7 +138,7 @@ as expected LLM sampling noise.
   reservation-affinity ladder in §4, rather than letting Dataflow's own
   zone-spread retry logic hunt across all of `europe-west3`.
 - **`maxWorkers` for 1000-row runs.** The DAG currently hardcodes
-  `maxWorkers: 4`. For the R1/R2 fidelity runs at `num_rows=1000` with
+  `maxWorkers: 4`. For the R1'/R2' fidelity runs at `num_rows=1000` with
   `batch_size=16` (~63 batches), **1–2 workers is the right target** — the
   per-batch LLM call dominates wall time and more GPU workers just means more
   idle vLLM cold-starts and more L4 capacity contended for no throughput
