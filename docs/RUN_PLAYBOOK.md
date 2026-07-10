@@ -141,12 +141,14 @@ Pass criteria per run:
 - **`maxWorkers` for 1000-row runs.** The DAG currently hardcodes
   `maxWorkers: 4`. For the R1'/R2' replay-check runs at `num_rows=1000` with
   `batch_size=16` (~63 batches), **1–2 workers is the right target** — the
-  per-batch LLM call dominates wall time and more GPU workers just means more
-  idle vLLM cold-starts and more L4 capacity contended for no throughput
-  gain; `num_rows` at this scale doesn't need horizontal scale-out. Treat the
+  per-batch LLM call dominates wall time and more GPU workers just means
+  more idle vLLM cold-starts and more GPU spend for no throughput gain;
+  `num_rows` at this scale doesn't need horizontal scale-out. Treat the
   hardcoded `4` as a ceiling, not a target — Dataflow won't launch more
-  workers than the graph can use, but requesting fewer up front reduces
-  contention against the L4 stockout (§4).
+  workers than the graph can use. For the T4 runs (R1'–R3') the cap is
+  purely a cold-start/cost matter; for the L4 run (R4') requesting fewer
+  workers up front additionally reduces contention against the L4 stockout
+  (§4).
 
 ---
 
