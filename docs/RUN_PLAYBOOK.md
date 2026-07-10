@@ -73,8 +73,9 @@ at its `gcs_uri` before a `gpu=t4` run; the DAG's `gpu` param docstring
 
 ## 2. Post-remediation run matrix (branch e2e-hardening, after Tasks 1-5)
 
-Common params: `num_rows=1000`, `identity_cols=ID_COL`,
-`pk_cols=<PK_COL>,<PK_COL_2>`, `seed=""` (derived), landing table truncated
+Common params: `num_rows=1000`, `identity_cols=<ID_COL>`,
+`pk_cols=<PK_COL>,<PK_COL_2>` (substitute the target table's real
+identity/PK columns), `seed=""` (derived), landing table truncated
 between runs (or fresh run_id verified in validation_runs).
 
 | Run | Engine | Model | GPU | Expect |
