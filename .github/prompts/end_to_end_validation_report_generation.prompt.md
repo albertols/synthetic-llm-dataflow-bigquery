@@ -10,9 +10,10 @@ description: >
   job metrics + worker logs for execution milestones (startup, model / vLLM
   ignition, embedder load, generation stall, BigQuery load). ADC access to the
   target GCP project is a PREREQUISITE and is verified first.
-  Inputs: engine CSVs, project, source/landing/quality FQNs, Dataflow job_ids,
-  region, PK + identity columns. Output:
-  output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md.
+  Inputs: engine CSVs (under integration_test/<job_id>/), project,
+  source/landing/quality FQNs, Dataflow job_ids, region, PK + identity
+  columns. Output: output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md +
+  the integration_test/<job_id>/{real,oss}/ bundle.
 ---
 
 # /end_to_end_validation_report_generation — E2E Engine Validation Report
@@ -41,7 +42,7 @@ inputs.
 
 | Param | Example | Notes |
 |---|---|---|
-| `CSVS` | `b1_rag=…/sample.csv b2_library=…/sample.csv` | `engine_label=path`, repeatable |
+| `CSVS` | `b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv …` | `engine_label=path`, repeatable; sample CSVs live under `integration_test/<JOB_ID>/` |
 | `PROJECT` | `db-<env>-…-pwcclake-es` | GCP project id |
 | `SOURCE_FQN` | `<project>.<dataset>.<TABLE>` | live source table |
 | `LANDING_FQN` | `<project>.synthetic_data.<TABLE>` | synthetic landing table |
@@ -60,6 +61,13 @@ If a param is unknown, discover it: `SCHEMA`/columns via the schema JSON or
 from the user; `BATCH_SIZE` from the pipeline launch params (composer /
 `3_import_dag.yaml`); `RUN_IDS` from `validation_runs` or the pipeline launch
 logs. If only one engine was deployed, run the single-engine subset.
+
+**Per-deployment artifact folder**: every deployment's artifacts share one
+folder named after the primary Dataflow job id (`<JOB_ID>` = first of
+`JOB_IDS`), e.g. `integration_test/2026-07-09_11_32_56-17188177770294375504/`.
+The sample CSVs (`*.csv`), `e2e_validation_metrics.json`,
+`e2e_gcp_metrics.json`, and the exported `real/` + `oss/` bundles (Step 6) all
+live there. Only the report itself stays under `output/`.
 
 ---
 
@@ -128,7 +136,7 @@ python scripts/e2e_validation_analysis.py \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --schema <SCHEMA> --pk <PK> --identity-cols <IDENTITY_COLS> \
   --batch-size <BATCH_SIZE> \
-  --out output/e2e_validation_metrics.json
+  --out integration_test/<JOB_ID>/e2e_validation_metrics.json
 ```
 
 Per engine it computes: full-row duplicate ratio + distinct rows; **REPETITION**
@@ -151,7 +159,7 @@ python scripts/e2e_gcp_probe.py \
   $(for j in <JOB_IDS>; do echo --job-id $j; done) \
   $(for r in <RUN_IDS>; do echo --run-id $r; done) \
   $(for e in <ENGINE_LABEL=JOB_ID>; do echo --engine-label $e; done) \
-  --out output/e2e_gcp_metrics.json
+  --out integration_test/<JOB_ID>/e2e_gcp_metrics.json
 ```
 
 `--run-id` (repeatable) scopes the `validation_runs`/`dlq` query to this
@@ -250,28 +258,36 @@ code ref; keep it tight; no dashboards / Vertex / external LLM suggestions
 
 ## Step 6 — Export a shareable bundle (internal `real/` + de-identified `oss/`)
 
-The report + metrics contain the real project / dataset / table / column names
-and sampled data values. Before sharing with the OSS team, split them into two
-sibling folders with `scripts/e2e_bundle_export.py` (generic — the mapping is
-derived from the artifacts, so it works for any table / environment):
+The report + metrics + sample CSVs contain the real project / dataset / table
+/ column names and sampled data values. Before sharing with the OSS team,
+split them into two sibling folders with `scripts/e2e_bundle_export.py`
+(generic — the mapping is derived from the artifacts, so it works for any
+table / environment):
 
 ```bash
 python scripts/e2e_bundle_export.py \
-  --metrics gcp=output/e2e_gcp_metrics.json \
-  --metrics offline=output/e2e_validation_metrics.json \
+  --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
+  --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
+  $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
-  --out-root integration_tests \
+  --out-root integration_test \
   --no-redact-values
-  # writes integration_tests/YYYY_MM_DD_HH_MM/{real,oss}/
+  # writes integration_test/<JOB_ID>/{real,oss}/
 ```
 
-- `real/` — verbatim `*_metrics.json` + `report.md` **and** `mapping.json`
-  (the decode key) for internal use.
+The bundle folder name defaults to the first Dataflow job id in the gcp
+metrics (`--job-id` overrides), so everything for one deployment sits under
+`integration_test/<JOB_ID>/` next to the metrics JSONs and sample CSVs.
+
+- `real/` — verbatim `*_metrics.json` + `*_sample.csv` + `report.md` **and**
+  `mapping.json` (the decode key) for internal use.
 - `oss/` — the same artifacts with IDENTIFIERS (project/dataset/table/bucket/
-  caller email/job ids+names/reference digests/file paths), COLUMN NAMES
+  caller email/reference digests/file paths), COLUMN NAMES
   (`COL_NNN`; PK→`PK_COL`, identity→`ID_COL`), and DATA VALUES (`VAL_NNNN`)
   deterministically redacted. A generic email regex catches any caller PII even
-  when the metrics captured it as `unknown`.
+  when the metrics captured it as `unknown`. **Dataflow job ids and job names
+  are kept as-is** (never redacted) — they name the bundle folder and keep the
+  oss/ artifacts correlatable with the job.
 
 Metadata (project / dataset / table / column names + identifiers) is **always**
 hidden. Data-value redaction is toggleable: pass `--no-redact-values` to keep
@@ -291,8 +307,12 @@ Hand the OSS team the `oss/` folder + the three scripts; keep `real/` local.
    `e2e_gcp_metrics.json`.
 3. Each defect has a code-level root cause + fix.
 4. The bundle export printed `leak scan: clean ✅` and `oss/` is free of the
-   real project / dataset / table / column names.
-5. Print a one-line summary: report path + the single most important finding.
+   real project / dataset / table / column names (Dataflow job ids and job
+   names are the deliberate exception — they stay verbatim).
+5. `integration_test/<JOB_ID>/` holds the sample CSVs,
+   `e2e_validation_metrics.json`, `e2e_gcp_metrics.json`, and the `real/` +
+   `oss/` bundles.
+6. Print a one-line summary: report path + the single most important finding.
 
 ---
 
@@ -309,3 +329,7 @@ Hand the OSS team the `oss/` folder + the three scripts; keep `real/` local.
 - **Expected-vs-reality** framing throughout.
 - Report filename is always `end_to_end_validation_report_YYYY_MM_DD_HH_MM.md`
   under `output/`.
+- **Per-deployment artifacts live under `integration_test/<JOB_ID>/`** —
+  sample CSVs, both metrics JSONs, and the exported `real/` + `oss/` bundles.
+- **Dataflow job ids and job names are never redacted** — they stay verbatim
+  in the `oss/` bundle.
