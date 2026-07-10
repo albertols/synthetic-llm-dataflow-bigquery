@@ -255,6 +255,11 @@ copy the values for `<CSVS>`, `<SCHEMA>`, `<PK>`, `<IDENTITY_COLS>`,
 `<PROJECT>`, `<SOURCE_FQN>`, `<LANDING_FQN>`, `<QUALITY_DATASET>`, `<REGION>`,
 `<JOB_IDS>` from the run you just launched.
 
+All per-deployment artifacts share one folder named after the primary
+Dataflow job id: put the sample CSVs at `integration_test/<JOB_ID>/*.csv`,
+write both metrics JSONs there, and the bundle export adds `real/` + `oss/`
+alongside them.
+
 **1. Offline analysis** (table-agnostic; computes duplicate ratio, repetition,
 singularity, sparsity, identity-column uniqueness, cross-sample Jaccard —
 `--batch-size` enables the run-length-equals-batch-size replay flag,
@@ -265,7 +270,7 @@ python scripts/e2e_validation_analysis.py \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --schema <SCHEMA> --pk <PK> --identity-cols <IDENTITY_COLS> \
   --batch-size <BATCH_SIZE> \
-  --out output/e2e_validation_metrics.json
+  --out integration_test/<JOB_ID>/e2e_validation_metrics.json
 ```
 
 **2. Live GCP cross-validation + Dataflow observability** (ADC-authenticated;
@@ -282,20 +287,24 @@ python scripts/e2e_gcp_probe.py \
   $(for j in <JOB_IDS>; do echo --job-id $j; done) \
   --run-id <RUN_ID> \
   --engine-label b1_rag=<JOB_ID_1> --engine-label b2_library=<JOB_ID_2> \
-  --out output/e2e_gcp_metrics.json
+  --out integration_test/<JOB_ID>/e2e_gcp_metrics.json
 ```
 
-**3. Bundle export** (splits the report + metrics into an internal `real/`
-folder and a de-identified `oss/` folder safe to hand to the OSS team; exits
-non-zero unless the leak scan is clean):
+**3. Bundle export** (splits the report + metrics + sample CSVs into an
+internal `real/` folder and a de-identified `oss/` folder safe to hand to the
+OSS team; exits non-zero unless the leak scan is clean. Dataflow job ids and
+job names are kept verbatim in `oss/` — the bundle folder is named after the
+primary job id):
 
 ```bash
 python scripts/e2e_bundle_export.py \
-  --metrics gcp=output/e2e_gcp_metrics.json \
-  --metrics offline=output/e2e_validation_metrics.json \
+  --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
+  --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
+  $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
-  --out-root integration_tests \
+  --out-root integration_test \
   --no-redact-values
+  # writes integration_test/<JOB_ID>/{real,oss}/
 ```
 
 Only the `oss/` folder produced by step 3 is shareable outside the team; keep
