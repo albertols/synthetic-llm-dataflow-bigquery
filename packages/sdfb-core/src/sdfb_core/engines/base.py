@@ -95,6 +95,11 @@ class GenerationContext(BaseModel):
     # Columns that must be per-row-unique and NEVER sampled from reference
     # data (PK / UUID / account-number style). See engines/identity.py.
     identity_columns: list[str] = Field(default_factory=list)
+    # When True (real-LLM runs), a failed free-text LLM call re-raises
+    # instead of silently falling back to reference exemplars. The 2026-07-10
+    # E2E runs shipped 100% memorized identifiers because the fallback was
+    # only a WARNING. Fake/mock clients keep the lenient default.
+    strict_freetext: bool = False
 
 
 class GenerationEngine(ABC):

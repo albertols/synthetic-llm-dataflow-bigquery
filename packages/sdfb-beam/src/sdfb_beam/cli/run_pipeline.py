@@ -253,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         identity_columns=tuple(
             c.strip() for c in args.identity_cols.split(",") if c.strip()
         ),
+        strict_freetext=args.client_type == "vllm",
         model_uri=args.model_uri,
         embedder_uri=args.embedder_uri,
         reference_table=args.reference_table,
