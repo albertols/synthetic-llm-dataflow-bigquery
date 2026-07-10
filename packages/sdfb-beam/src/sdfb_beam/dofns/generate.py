@@ -86,6 +86,26 @@ class GenerateRecordsDoFn(beam.DoFn):
             ctx = ctx.model_copy(update={"embedder_uri": local_dir})
             self.ctx = ctx  # cache so a re-entrant setup() skips the pull
 
+        # The vLLM client owns a server subprocess that must be started ONCE
+        # per worker — engines only see the narrow ModelClient Protocol
+        # (generate_json), so the lifecycle is the DoFn's job. Duck-typed:
+        # FakeModelClient has no lifecycle; MLX self-initializes lazily.
+        # Failures propagate — a worker that cannot start its LLM must crash
+        # the job, not degrade into copying reference exemplars (E2E
+        # 2026-07-10: every live run fell back because nobody called setup()).
+        client_setup = getattr(self.model_client, "setup", None)
+        if callable(client_setup):
+            log_milestone(
+                "model_client_setup_start",
+                client=type(self.model_client).__name__,
+            )
+            t_client = time.monotonic()
+            client_setup()
+            log_milestone(
+                "model_client_setup_done",
+                seconds=round(time.monotonic() - t_client, 1),
+            )
+
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
         self._engine.setup(self.model_client, ctx)
@@ -167,8 +187,13 @@ class GenerateRecordsDoFn(beam.DoFn):
             )
 
     def teardown(self):
-        if self._engine is not None:
-            try:
-                self._engine.teardown()
-            finally:
-                self._engine = None
+        try:
+            if self._engine is not None:
+                try:
+                    self._engine.teardown()
+                finally:
+                    self._engine = None
+        finally:
+            client_teardown = getattr(self.model_client, "teardown", None)
+            if callable(client_teardown):
+                client_teardown()
