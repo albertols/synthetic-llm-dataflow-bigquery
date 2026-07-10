@@ -15,7 +15,7 @@ import apache_beam as beam
 import pytest
 from apache_beam.options.pipeline_options import PipelineOptions
 from sdfb_beam.io.local_sinks import WriteToJsonLines
-from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+from sdfb_beam.pipeline import PipelineConfig, _dlq_rule_weight, build_pipeline
 from sdfb_tests import fakes  # noqa: F401  registers "minimal" engine
 from sdfb_tests.fakes import FakeModelClient
 
@@ -95,3 +95,29 @@ def test_build_pipeline_rejects_unknown_pk_column(tmp_path, customers_schema):
         )
     assert "pk_columns" in str(exc_info.value)
     assert "bogus" in str(exc_info.value)
+
+
+class TestDlqRuleWeight:
+    """`_dlq_rule_weight` feeds the BLOCKER-gate rule counts (§12). A crashed
+    batch loses its whole `n`-row batch, not one row — so `engine_failure`
+    envelopes must weight by the lost batch size, not count as 1 like every
+    other rule."""
+
+    def test_engine_failure_weighted_by_batch_n(self):
+        envelope = {"rule_id": "engine_failure", "raw_request": {"batch_id": 3, "n": 16}}
+        assert _dlq_rule_weight(envelope) == ("engine_failure", 16)
+
+    def test_engine_failure_missing_raw_request_defaults_to_one(self):
+        envelope = {"rule_id": "engine_failure"}
+        assert _dlq_rule_weight(envelope) == ("engine_failure", 1)
+
+    def test_engine_failure_non_numeric_n_defaults_to_one(self):
+        envelope = {"rule_id": "engine_failure", "raw_request": {"n": "oops"}}
+        assert _dlq_rule_weight(envelope) == ("engine_failure", 1)
+
+    def test_other_rule_weighted_one_per_envelope(self):
+        envelope = {"rule_id": "row.duplicate", "raw_request": {"n": 16}}
+        assert _dlq_rule_weight(envelope) == ("row.duplicate", 1)
+
+    def test_unknown_rule_id_defaults(self):
+        assert _dlq_rule_weight({}) == ("unknown", 1)

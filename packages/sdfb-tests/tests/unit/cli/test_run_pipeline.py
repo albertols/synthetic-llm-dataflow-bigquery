@@ -16,6 +16,7 @@ from sdfb_beam.cli.run_pipeline import (
     build_model_client,
     configure_pipeline_options,
     parse_args,
+    resolve_engine_strictness,
 )
 
 
@@ -261,3 +262,19 @@ def test_parse_args_seed_uses_underscore_flag():
 def test_parse_args_seed_defaults_empty():
     args, _ = parse_args(_common_args())
     assert args.seed == ""
+
+
+@pytest.mark.parametrize(
+    "client_type,expected",
+    [
+        ("vllm", True),
+        ("mlx", True),
+        ("fake", False),
+    ],
+)
+def test_resolve_engine_strictness(client_type, expected):
+    """vllm and mlx are real-LLM paths (Dataflow/L4 and M4 DirectRunner
+    respectively) — a failed generation must be loud, not silently
+    degrade into memorized reference data. Only the deterministic fake
+    client (CPU smoke) stays lenient."""
+    assert resolve_engine_strictness(client_type) is expected

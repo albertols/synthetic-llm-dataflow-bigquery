@@ -152,6 +152,15 @@ def load_ddl(ddl_uri: str) -> TableSchema:
         return TableSchema.model_validate(json.loads(f.read()))
 
 
+def resolve_engine_strictness(client_type: str) -> bool:
+    """True for real-LLM client types (``vllm`` on Dataflow/L4, ``mlx`` on
+    the M4 DirectRunner) — a failed generation must be loud (strict
+    free-text fallback, BLOCKER gate fails the job), not silently degrade
+    into memorized reference data. Only the deterministic ``fake`` client
+    (CPU smoke run, produces fake data regardless) stays lenient."""
+    return client_type != "fake"
+
+
 def sanitize_job_name(prefix: str, run_id: str) -> str:
     """Build a Dataflow-legal job name: ``[-a-z0-9]``, starts with a letter,
     ends alphanumeric, ≤63 chars. Airflow run_ids carry ``:`` / ``+`` / ``__``
@@ -265,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         pk_columns=tuple(
             c.strip() for c in args.pk_cols.split(",") if c.strip()
         ),
-        strict_freetext=args.client_type == "vllm",
+        strict_freetext=resolve_engine_strictness(args.client_type),
         model_uri=args.model_uri,
         embedder_uri=args.embedder_uri,
         reference_table=args.reference_table,
@@ -274,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         # A fake-client (CPU smoke) run produces fake data, so failing the job
         # on the BLOCKER gate is meaningless — keep it informational (the
         # validation_runs row still records the status). Real engines gate.
-        fail_on_blocker=args.client_type != "fake",
+        fail_on_blocker=resolve_engine_strictness(args.client_type),
     )
 
     landing_sink = WriteToBigQuery(

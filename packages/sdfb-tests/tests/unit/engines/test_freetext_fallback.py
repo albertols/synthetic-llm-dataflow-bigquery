@@ -165,6 +165,8 @@ def test_b1_setup_emits_phase_milestones(caplog, free_text_ctx):
         engine.setup(_BoomClient(), free_text_ctx)
     text = "\n".join(r.message for r in caplog.records)
     assert "SDFB_MILESTONE name=b1_embed_done" in text
-    assert "rows=12" in text
+    # Trailing space delimiter — a loose "rows=12" substring would also
+    # match "rows=120" and silently stop catching a wrong row count.
+    assert "rows=12 " in text
     assert "SDFB_MILESTONE name=b1_index_built" in text
     assert "SDFB_MILESTONE name=b1_pools_built" in text
