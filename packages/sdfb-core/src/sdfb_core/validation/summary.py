@@ -27,6 +27,10 @@ BLOCKER_RULE_IDS = frozenset(
         "pk.duplicate",
         "row.duplicate",
         "identity.unique",
+        # An engine crash (incl. strict_freetext re-raise reaching the DoFn)
+        # loses the whole batch — that must count toward the gate, not PASS
+        # with fewer rows.
+        "engine_failure",
     }
 )
 

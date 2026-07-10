@@ -164,3 +164,9 @@ class TestDlqNormalize:
 def test_blocker_rule_ids_constant():
     assert "schema.types" in BLOCKER_RULE_IDS
     assert "schema.batch" not in BLOCKER_RULE_IDS
+
+
+def test_engine_failure_counts_as_blocker():
+    from sdfb_core.validation.summary import BLOCKER_RULE_IDS
+
+    assert "engine_failure" in BLOCKER_RULE_IDS
