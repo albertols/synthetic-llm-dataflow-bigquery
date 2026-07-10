@@ -79,3 +79,19 @@ def test_build_pipeline_accepts_valid_identity_column(tmp_path, customers_schema
             dlq_sink=WriteToJsonLines(str(tmp_path / "dlq")),
         )
     assert result["run_id"] == "test-identity-validation"
+
+
+def test_build_pipeline_rejects_unknown_pk_column(tmp_path, customers_schema):
+    config = _config(customers_schema, pk_columns=("bogus",))
+
+    options = PipelineOptions(["--runner=DirectRunner"])
+    with pytest.raises(ValueError) as exc_info, beam.Pipeline(options=options) as p:
+        build_pipeline(
+            p,
+            reference_rows=[],
+            config=config,
+            landing_sink=WriteToJsonLines(str(tmp_path / "landing")),
+            dlq_sink=WriteToJsonLines(str(tmp_path / "dlq")),
+        )
+    assert "pk_columns" in str(exc_info.value)
+    assert "bogus" in str(exc_info.value)
