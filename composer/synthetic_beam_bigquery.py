@@ -11,6 +11,7 @@ Substitution markers (workflow 3 seds these at import time):
   {{ENV}}                     dev | uat | prd
   {{GCS_DATAFLOW_STAGING}}    db-<env>-…-dataflow-staging bucket name
   {{GCS_DATAFLOW_TEMPLATES}}  db-<env>-…-dataflow-templates bucket name
+  {{GPU}}                     default of the `gpu` DAG param (l4 | t4; still runtime-overridable)
   {{SDFB_MODEL_URI}}          gs://<bucket>/synthetic/models/gemma4/…
   {{SDFB_EMBEDDER_URI}}       gs://<bucket>/synthetic/models/embedders/… (B.1; empty ⇒ HashingEmbedder)
   {{SDFB_DEFAULT_TABLE_FQN}}  project.dataset.table
@@ -42,6 +43,8 @@ from airflow.utils.dates import days_ago
 bucket_path = "{{GCS_DATAFLOW_STAGING}}"        # …-dataflow-staging
 templates_path = "{{GCS_DATAFLOW_TEMPLATES}}"   # …-dataflow-templates
 model_uri = "{{SDFB_MODEL_URI}}"                # gs://<bucket>/synthetic/models/gemma4/e4b-it/v1/
+GPU_DEFAULT = "{{GPU}}"                         # default of the `gpu` param (l4 | t4)
+ENGINE_DEFAULT = "{{ENGINE}}"                   # default of the `engine` param (b1_rag | b2_library)
 embedder_uri = "{{SDFB_EMBEDDER_URI}}"          # B.1 embedder; empty ⇒ HashingEmbedder
 default_table_fqn = "{{SDFB_DEFAULT_TABLE_FQN}}"
 validation_runs_table = "{{SDFB_VALIDATION_RUNS_TABLE}}"  # synthetic_data_quality.validation_runs
@@ -117,7 +120,7 @@ default_dag_params = {
         description="Number of synthetic rows to generate.",
     ),
     "engine": Param(
-        default="b1_rag",
+        default=ENGINE_DEFAULT,
         type="string",
         enum=["b1_rag", "b2_library"],
         description="Generation engine.",
@@ -160,7 +163,7 @@ default_dag_params = {
                     "capacity is short.",
     ),
     "gpu": Param(
-        default="t4",
+        default=GPU_DEFAULT,
         type="string",
         enum=["l4", "t4"],
         description="GPU profile when client_type=vllm. l4 = g2-standard-8 + "
