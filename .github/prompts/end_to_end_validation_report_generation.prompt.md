@@ -188,6 +188,27 @@ It uses ADC to compute, generically (schema introspected from
   **generation-stall max seconds** — with chronological durations between them,
   plus the worker image package versions (vllm/torch/transformers/faiss/sdgx).
 
+### LLM-lifecycle forensics (mandatory)
+
+For every run under test, extract and report:
+
+1. **The `error=` field of every `freetext_llm_fallback` milestone** — the
+   exception class name is logged (`error=RuntimeError`, `error=TimeoutError`,
+   …). Never report a fallback without its error type; the 2026-07-10 cycle
+   burned three runs because the truncated milestone hid
+   `error=RuntimeError` (= client setup never ran).
+2. **Presence/absence of the client lifecycle milestones**, in order:
+   `model_client_setup_start` → `model_pull_start` → `model_pull_done` →
+   `vllm_spawn` → `vllm_ready` → `model_client_setup_done`. Absence of
+   `vllm_ready` means NO LLM inference happened — do not infer LLM activity
+   from TotalGpuTime (GPU seconds accrue while allocated, even idle).
+3. **B.1 phase timings** from `b1_embed_done` (with `rows=`),
+   `b1_index_built`, `b1_pools_built` — attribute setup wall-time to the
+   correct phase instead of "FAISS build".
+4. **Effective launch parameters from the Dataflow job's `parameters` dict**
+   (job describe), not from DAG defaults — include `reference_rows_limit`,
+   `pk_cols`, `identity_cols`, `seed`, and the salted `run_id`.
+
 Milestones from images built on the `SDFB_MILESTONE` contract
 (`sdfb_core/observability.py`) arrive pre-parsed as `sdfb.<name>` keys (e.g.
 `sdfb.batch_start`, `sdfb.freetext_llm_fallback`) — the legacy wording regexes
