@@ -82,7 +82,9 @@ class B2LibraryEngine(GenerationEngine):
             for name, p in self._profiles.items()
             if p.kind is ColumnKind.FREE_TEXT
         ]
-        self._freetext_hook = FreeTextHook(model_client)
+        self._freetext_hook = FreeTextHook(
+            model_client, strict=ctx.strict_freetext
+        )
 
         backend = self._make_backend()
         if ctx.reference_rows:

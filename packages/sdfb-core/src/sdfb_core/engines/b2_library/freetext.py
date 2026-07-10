@@ -81,9 +81,11 @@ class FreeTextHook:
         model_client: ModelClient,
         *,
         pool_size: int = _DEFAULT_POOL_SIZE,
+        strict: bool = False,
     ) -> None:
         self._client = model_client
         self._pool_size = pool_size
+        self._strict = strict
         self._cache: dict[tuple[str, int | None, float], list[str]] = {}
 
     def sample(
@@ -145,6 +147,8 @@ class FreeTextHook:
                 seed=cfg.seed,
             )
         except Exception as e:
+            if self._strict:
+                raise
             # Per-call generation failure: exemplar fallback is allowed, but
             # NEVER silently — a run where the LLM contributed nothing must be
             # visible in worker logs (E2E report §4.2: 100 % memorization).

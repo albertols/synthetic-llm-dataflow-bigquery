@@ -46,6 +46,11 @@ rules:
     severity: BLOCKER
     threshold: 0
 
+  engine_failure:
+    dimension: reliability
+    severity: BLOCKER
+    threshold: 0     # any engine-internal crash counts toward the gate
+
   schema.batch:
     dimension: validity
     severity: CRITICAL
@@ -73,8 +78,3 @@ rules:
     dimension: validity
     severity: MAJOR
     threshold: 0.999  # ≥ 99.9% format match
-
-  engine_failure:
-    dimension: validity
-    severity: CRITICAL
-    threshold: 0      # 0 unhandled engine exceptions

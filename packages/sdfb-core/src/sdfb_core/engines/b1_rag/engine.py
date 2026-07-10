@@ -303,6 +303,8 @@ class B1RagEngine(GenerationEngine):
                 if isinstance(val, str) and val:
                     pool.append(val)
         except Exception as e:
+            if self._ctx is not None and self._ctx.strict_freetext:
+                raise
             # Per-call generation failure: exemplar fallback is allowed, but
             # NEVER silently — a run where the LLM contributed nothing must be
             # visible in worker logs (E2E report §4.2: 100 % memorization).

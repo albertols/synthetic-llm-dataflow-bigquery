@@ -132,3 +132,23 @@ def test_b1_fallback_emits_warning_milestone(caplog, free_text_ctx):
     assert "error=RuntimeError" in text
     # The pool still falls back to observed exemplars — not empty.
     assert engine._free_text_pools["bio"]
+
+
+# ---------------------------------------------------------------------------
+# strict_freetext=True — real-vLLM runs must fail loudly, never fall back.
+# ---------------------------------------------------------------------------
+
+
+def test_b2_strict_reraises(wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    hook = FreeTextHook(_BoomClient(), strict=True)
+    rng = np.random.default_rng(7)
+    with pytest.raises(RuntimeError, match="boom"):
+        hook.sample(profiles["summary"], 5, GenerationConfig(seed=7), rng)
+
+
+def test_b1_strict_reraises(free_text_ctx):
+    strict_ctx = free_text_ctx.model_copy(update={"strict_freetext": True})
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with pytest.raises(RuntimeError, match="boom"):
+        engine.setup(_BoomClient(), strict_ctx)
