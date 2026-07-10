@@ -154,3 +154,30 @@ def test_duplicate_free_input_passes_through_untouched():
         )
         assert_that(result["unique"], equal_to(records), label="all_rows_land")
         assert_that(result["duplicates"], equal_to([]), label="no_duplicates")
+
+
+def test_pk_duplicates_divert_to_dlq():
+    """Rows sharing a declared PK tuple: first wins, rest → DLQ with
+    rule_id=pk.duplicate. The 2026-07-09 run landed 722/1000 PK duplicates
+    with a PASSED gate because no stage ever emitted this rule."""
+    rows = [
+        {"pk_a": "K1", "pk_b": 1, "val": "x"},
+        {"pk_a": "K1", "pk_b": 1, "val": "y"},  # same PK, different row
+        {"pk_a": "K2", "pk_b": 2, "val": "z"},
+    ]
+    with TestPipeline() as p:
+        out = (
+            p
+            | beam.Create(rows)
+            | EnforceUniqueness(pk_columns=["pk_a", "pk_b"])
+        )
+        assert_that(
+            out["unique"] | beam.Map(lambda r: (r["pk_a"], r["pk_b"])),
+            equal_to([("K1", 1), ("K2", 2)]),
+            label="unique_pks",
+        )
+        assert_that(
+            out["duplicates"] | beam.Map(lambda d: d["rule_id"]),
+            equal_to(["pk.duplicate"]),
+            label="dlq_rule",
+        )

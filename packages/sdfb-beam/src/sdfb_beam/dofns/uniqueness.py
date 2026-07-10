@@ -20,6 +20,7 @@ from sdfb_core.validation.uniqueness import row_digest
 
 RULE_ROW_DUPLICATE = "row.duplicate"
 RULE_IDENTITY_UNIQUE = "identity.unique"
+RULE_PK_DUPLICATE = "pk.duplicate"
 
 
 def _envelope(record: dict, rule_id: str) -> dict:
@@ -62,9 +63,14 @@ class EnforceUniqueness(beam.PTransform):
     collisions, keyed on the final (post-identity-synthesis) rows.
     """
 
-    def __init__(self, identity_columns: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        identity_columns: list[str] | None = None,
+        pk_columns: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.identity_columns = list(identity_columns or [])
+        self.pk_columns = list(pk_columns or [])
 
     def expand(self, records):
         identity_set = set(self.identity_columns)
@@ -83,6 +89,20 @@ class EnforceUniqueness(beam.PTransform):
         )
         row_unique = by_row.unique
         dup_streams = [by_row.duplicates]
+        if self.pk_columns:
+            pk_cols = self.pk_columns
+            by_pk = (
+                row_unique
+                | "KeyByPk"
+                >> beam.Map(lambda r, c=pk_cols: (tuple(str(r.get(x)) for x in c), r))
+                | "GroupByPk" >> beam.GroupByKey()
+                | "FirstPkWins"
+                >> beam.ParDo(_FirstWins(RULE_PK_DUPLICATE)).with_outputs(
+                    "duplicates", main="unique"
+                )
+            )
+            row_unique = by_pk.unique
+            dup_streams.append(by_pk.duplicates)
         if self.identity_columns:
             cols = self.identity_columns
             by_id = (

@@ -78,6 +78,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="Comma-separated per-row-unique columns synthesized "
                         "fresh each row (PK/UUID); never sampled from "
                         "reference data")
+    p.add_argument("--pk_cols", default="",
+                   help="Comma-separated declared primary-key columns; "
+                        "duplicate PK tuples divert to the DLQ "
+                        "(rule_id=pk.duplicate, BLOCKER). Empty disables.")
     p.add_argument("--engine", default="b1_rag",
                    help="Engine name registered in ENGINE_REGISTRY")
     p.add_argument("--model_uri", required=True,
@@ -252,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
         run_id=args.run_id,
         identity_columns=tuple(
             c.strip() for c in args.identity_cols.split(",") if c.strip()
+        ),
+        pk_columns=tuple(
+            c.strip() for c in args.pk_cols.split(",") if c.strip()
         ),
         strict_freetext=args.client_type == "vllm",
         model_uri=args.model_uri,

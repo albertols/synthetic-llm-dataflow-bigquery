@@ -142,6 +142,13 @@ default_dag_params = {
                     "fresh each row (PK/UUID); never sampled from reference "
                     "data. Empty disables identity-column synthesis.",
     ),
+    "pk_cols": Param(
+        default="",
+        type="string",
+        description="Comma-separated declared primary-key columns. Duplicate "
+                    "PK tuples divert to the DLQ (rule_id=pk.duplicate, "
+                    "BLOCKER). Empty = PK undeclared, rule idle.",
+    ),
     "vllm_dtype": Param(
         default="auto",
         type="string",
@@ -253,6 +260,7 @@ with models.DAG(
                     "similarity": "{{ params.similarity }}",
                     "run_id": "{{ dag_run.run_id }}",
                     "identity_cols": "{{ params.identity_cols }}",
+                    "pk_cols": "{{ params.pk_cols }}",
                     "engine": "{{ params.engine }}",
                     "model_uri": model_uri,
                     "embedder_uri": embedder_uri,

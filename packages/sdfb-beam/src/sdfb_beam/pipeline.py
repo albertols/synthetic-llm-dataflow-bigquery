@@ -61,6 +61,9 @@ class PipelineConfig:
     # Per-row-unique columns (PK/UUID) synthesized fresh each row; never
     # sampled from reference data. See engines/identity.py.
     identity_columns: tuple[str, ...] = ()
+    # Declared primary-key columns; duplicate PK tuples divert to the DLQ as
+    # rule_id=pk.duplicate (BLOCKER). Empty = PK not declared (rule idle).
+    pk_columns: tuple[str, ...] = ()
     # Real-LLM runs re-raise on free-text LLM failure instead of silently
     # copying exemplars. Set from client_type at the CLI boundary.
     strict_freetext: bool = False
@@ -92,14 +95,18 @@ def build_pipeline(
     handles to the resulting PCollections (`valid`, `dlq`) for callers
     that want to attach further transforms (metrics, additional sinks).
     """
-    if config.identity_columns:
-        valid_columns = {c.name for c in config.table_schema.columns}
-        unknown = [c for c in config.identity_columns if c not in valid_columns]
-        if unknown:
-            raise ValueError(
-                f"identity_columns not found on {config.table_schema.fqn}: "
-                f"{unknown}. Valid columns: {sorted(valid_columns)}"
-            )
+    for label, cols in (
+        ("identity_columns", config.identity_columns),
+        ("pk_columns", config.pk_columns),
+    ):
+        if cols:
+            valid_columns = {c.name for c in config.table_schema.columns}
+            unknown = [c for c in cols if c not in valid_columns]
+            if unknown:
+                raise ValueError(
+                    f"{label} not found on {config.table_schema.fqn}: "
+                    f"{unknown}. Valid columns: {sorted(valid_columns)}"
+                )
 
     digest = compute_reference_digest(reference_rows)
     ctx = GenerationContext(
@@ -159,7 +166,8 @@ def build_pipeline(
     # Line 3 of defense — full-row and identity-column duplicates divert to
     # the DLQ instead of landing (first occurrence per key wins).
     uniq = batch_validated.main | "EnforceUniqueness" >> EnforceUniqueness(
-        identity_columns=list(config.identity_columns)
+        identity_columns=list(config.identity_columns),
+        pk_columns=list(config.pk_columns),
     )
 
     # Landing sink — valid, unique records only.
