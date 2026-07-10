@@ -107,14 +107,14 @@ Pass criteria per run:
 - **Machine type / `g2-standard-4` vs `-8`.** Today the DAG offers no
   `g2-standard-4` toggle at all: `gpu=l4` hardcodes `g2-standard-8` in the
   DAG's `machineType` ternary, and `gpu=t4` maps to `n1-standard-8` — the T4
-  plumbing run (R4') never touches the `g2-standard` family. The `-4` vs `-8`
+  plumbing runs (R1'–R3') never touch the `g2-standard` family. The `-4` vs `-8`
   trade-off is therefore informational, relevant only if someone edits that
   ternary: both sizes carry exactly one L4, so the choice is pure headroom,
   not GPU count — `-8` gives the CPU-side steps (BQ read, Pandera validation,
   `sdgx` fit for B.2, the Beam harness alongside vLLM) more vCPU/RAM to avoid
   becoming the bottleneck next to the GPU, at roughly double the non-GPU
-  cost. The hardcoded `-8` is the right default for the fidelity runs
-  (R1'–R3'); don't downgrade it without a measured reason.
+  cost. The hardcoded `-8` is the right default for the fidelity run
+  (R4'); don't downgrade it without a measured reason.
 - **Worker disk.** The Flex Template's `environment.diskSizeGb` field does
   **not** propagate to the worker harness — it's set on the launch request
   but ignored (confirmed at `packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:57`,
@@ -138,7 +138,7 @@ Pass criteria per run:
   reservation-affinity ladder in §4, rather than letting Dataflow's own
   zone-spread retry logic hunt across all of `europe-west3`.
 - **`maxWorkers` for 1000-row runs.** The DAG currently hardcodes
-  `maxWorkers: 4`. For the R1'/R2' fidelity runs at `num_rows=1000` with
+  `maxWorkers: 4`. For the R1'/R2' replay-check runs at `num_rows=1000` with
   `batch_size=16` (~63 batches), **1–2 workers is the right target** — the
   per-batch LLM call dominates wall time and more GPU workers just means more
   idle vLLM cold-starts and more L4 capacity contended for no throughput
@@ -255,9 +255,10 @@ python scripts/e2e_validation_analysis.py \
 ```
 
 **2. Live GCP cross-validation + Dataflow observability** (ADC-authenticated;
-`--run-id` lets the probe correlate a job against the seed/reproducibility
-check in §2, `--engine-label` stamps a human-readable label onto each job_id
-so the report can say "b1_rag" instead of a raw Dataflow job id):
+`--run-id` lets the probe correlate a job against the R1'/R2' salted-run-id
+replay-difference check in §2, `--engine-label` stamps a human-readable
+label onto each job_id so the report can say "b1_rag" instead of a raw
+Dataflow job id):
 
 ```bash
 python scripts/e2e_gcp_probe.py \
