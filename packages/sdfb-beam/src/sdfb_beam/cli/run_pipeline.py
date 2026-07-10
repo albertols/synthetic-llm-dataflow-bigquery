@@ -73,6 +73,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--num_rows", type=int, required=True)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--similarity", type=float, default=0.5)
+    p.add_argument("--seed", default="",
+                   help="Explicit base RNG seed (int). Empty = derive per "
+                        "(run_id, batch_id) — never replays across runs "
+                        "because run_id is salted per trigger.")
     p.add_argument("--run_id", required=True)
     p.add_argument("--identity_cols", default="",
                    help="Comma-separated per-row-unique columns synthesized "
@@ -253,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         num_rows=args.num_rows,
         batch_size=args.batch_size,
         similarity=args.similarity,
+        seed=int(args.seed) if str(args.seed).strip() else None,
         run_id=args.run_id,
         identity_columns=tuple(
             c.strip() for c in args.identity_cols.split(",") if c.strip()
