@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 """Bundle the E2E validation artifacts into a shareable, de-identified export.
 
-Produces two sibling folders under ``<out-root>/<timestamp>/``:
+Produces two sibling folders under ``<out-root>/<job_id>/`` (the primary
+Dataflow job id of the deployment; falls back to the report timestamp when no
+job id is available):
 
-  * ``real/`` — verbatim copies of every metrics JSON + the report, plus a
-    ``mapping.json`` decode key (so the internal team can read the real names).
+  * ``real/`` — verbatim copies of every metrics JSON + sample CSV + the
+    report, plus a ``mapping.json`` decode key (so the internal team can read
+    the real names).
   * ``oss/``  — the SAME artifacts with every environment-specific and
     data-specific token deterministically replaced by a generic placeholder,
     safe to hand to the open-source team. A run whose ``oss/`` output still
@@ -12,11 +15,13 @@ Produces two sibling folders under ``<out-root>/<timestamp>/``:
     token classes:
 
       1. IDENTIFIERS — project / dataset / table / bucket / caller email /
-         Dataflow job ids + names / reference digests / file paths.
+         reference digests / file paths. Dataflow job ids and job names are
+         deliberately KEPT verbatim (they name the bundle folder and carry no
+         environment secrets).
       2. COLUMN NAMES — every field name becomes ``COL_NNN`` (primary-key and
          identity columns keep a role prefix: ``PK_COL`` / ``ID_COL``).
       3. DATA VALUES — concrete sampled values (top-value / run-length
-         exemplars) become ``VAL_NNNN``.
+         exemplars + every non-numeric CSV cell) become ``VAL_NNNN``.
 
 Nothing is hard-coded to a table or environment: the mapping is derived
 entirely from the input artifacts, so this works for any table and any future
@@ -24,11 +29,13 @@ integration test.
 
 Usage:
     python scripts/e2e_bundle_export.py \
-        --metrics gcp=output/e2e_gcp_metrics.json \
-        --metrics offline=output/e2e_validation_metrics.json \
+        --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
+        --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
+        --csv b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv \
         --report output/end_to_end_validation_report_2026_07_07_16_26.md \
-        --out-root integration_tests
-        # --timestamp 2026_07_07_16_26   (default: derived from report / now)
+        --out-root integration_test
+        # --job-id <JOB_ID>             (default: first Dataflow job id in the
+        #                                gcp metrics, else the report timestamp)
         # --no-redact-values            (keep real dev data values in oss/;
         #                                metadata is ALWAYS hidden either way)
 """
@@ -36,6 +43,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import re
 import shutil
@@ -223,10 +232,8 @@ def _collect_identifiers(gcp: dict[str, Any], bq: dict[str, Any], m: Mapping) ->
         m.add_identifier(ds, role)
     m.add_identifier(table_name, "TARGET_TABLE")
 
-    for i, job in enumerate(gcp.get("dataflow") or [], start=1):
-        m.add_identifier(job.get("job_id"), f"JOB_{i}")
-        m.add_identifier(job.get("name"), f"job-{i}")
-
+    # Dataflow job ids / job names are intentionally NOT redacted: they name
+    # the bundle folder and must stay correlatable in the oss/ artifacts.
     for job in gcp.get("dataflow") or []:
         img = (job.get("environment") or {}).get("worker_image")
         if img:
@@ -275,6 +282,38 @@ def _collect_values(offline: dict[str, Any], m: Mapping) -> None:
     walk(offline)
 
 
+def _register_csv(m: Mapping, text: str, *, redact_values: bool) -> None:
+    """Register a sample CSV's header columns (+ cell values) in the mapping."""
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return
+    for col in rows[0]:
+        m.add_column(col)
+    if not redact_values:
+        return
+    for row in rows[1:]:
+        for cell in row:
+            if cell and not _NUMERIC_RE.match(cell):
+                m.add_value(cell)
+
+
+def _redact_csv(m: Mapping, text: str) -> str:
+    """Structurally redact a sample CSV (header via columns, cells via values)."""
+    rows = list(csv.reader(io.StringIO(text)))
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    for i, row in enumerate(rows):
+        if i == 0:
+            writer.writerow(
+                [m.columns.get(c, m.redact_scalar(c)) for c in row]
+            )
+        else:
+            writer.writerow(
+                [m.values.get(c, m.redact_scalar(c)) for c in row]
+            )
+    return out.getvalue()
+
+
 # --------------------------------------------------------------------------
 # bundle writer
 # --------------------------------------------------------------------------
@@ -286,6 +325,18 @@ def _derive_timestamp(report: Path | None) -> str:
     return datetime.now(UTC).strftime("%Y_%m_%d_%H_%M")
 
 
+def _derive_bundle_name(
+    job_id: str, metrics: dict[str, Any], report: Path | None
+) -> str:
+    """Bundle folder = the deployment's primary Dataflow job id."""
+    if job_id:
+        return job_id
+    for job in (metrics.get("gcp") or {}).get("dataflow") or []:
+        if job.get("job_id"):
+            return str(job["job_id"])
+    return _derive_timestamp(report)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -295,9 +346,21 @@ def main(argv: list[str] | None = None) -> int:
         help="label=path.json (repeatable). Use labels 'gcp' and 'offline' so "
         "the mapping can find FQNs/columns; extra labels are copied + redacted.",
     )
+    ap.add_argument(
+        "--csv",
+        action="append",
+        default=[],
+        help="engine_label=path.csv (repeatable). Sample generated-data CSVs "
+        "copied verbatim into real/ and redacted into oss/.",
+    )
     ap.add_argument("--report", type=Path, required=True)
-    ap.add_argument("--out-root", type=Path, default=Path("integration_tests"))
-    ap.add_argument("--timestamp", default="")
+    ap.add_argument("--out-root", type=Path, default=Path("integration_test"))
+    ap.add_argument(
+        "--job-id",
+        default="",
+        help="bundle folder name; default: first Dataflow job id found in the "
+        "gcp metrics, else the report timestamp.",
+    )
     ap.add_argument(
         "--redact-values",
         action=argparse.BooleanOptionalAction,
@@ -315,15 +378,24 @@ def main(argv: list[str] | None = None) -> int:
         label, path = item.split("=", 1)
         metrics_paths[label.strip()] = Path(path.strip())
 
+    csv_paths: dict[str, Path] = {}
+    for item in args.csv:
+        if "=" not in item:
+            raise SystemExit(f"--csv expects engine_label=path, got {item!r}")
+        label, path = item.split("=", 1)
+        csv_paths[label.strip()] = Path(path.strip())
+
     metrics = {
         label: json.loads(p.read_text()) for label, p in metrics_paths.items()
     }
+    csv_texts = {label: p.read_text() for label, p in csv_paths.items()}
     report_text = args.report.read_text()
 
     mapping = build_mapping(metrics, redact_values=args.redact_values)
+    for text in csv_texts.values():
+        _register_csv(mapping, text, redact_values=args.redact_values)
 
-    ts = args.timestamp or _derive_timestamp(args.report)
-    base = args.out_root / ts
+    base = args.out_root / _derive_bundle_name(args.job_id, metrics, args.report)
     real_dir, oss_dir = base / "real", base / "oss"
     real_dir.mkdir(parents=True, exist_ok=True)
     oss_dir.mkdir(parents=True, exist_ok=True)
@@ -331,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
     # real/ — verbatim + decode key
     for label, p in metrics_paths.items():
         shutil.copyfile(p, real_dir / f"{label}_metrics.json")
+    for label, p in csv_paths.items():
+        shutil.copyfile(p, real_dir / f"{label}_sample.csv")
     shutil.copyfile(args.report, real_dir / "report.md")
     (real_dir / "mapping.json").write_text(
         json.dumps(mapping.to_dict(), indent=2, ensure_ascii=False)
@@ -341,6 +415,8 @@ def main(argv: list[str] | None = None) -> int:
         (oss_dir / f"{label}_metrics.json").write_text(
             json.dumps(mapping.redact_json(obj), indent=2, ensure_ascii=False)
         )
+    for label, text in csv_texts.items():
+        (oss_dir / f"{label}_sample.csv").write_text(_redact_csv(mapping, text))
     (oss_dir / "report.md").write_text(mapping.redact_text(report_text))
 
     leaked = _leak_scan(oss_dir, mapping)
