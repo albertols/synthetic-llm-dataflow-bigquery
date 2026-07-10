@@ -244,3 +244,20 @@ def test_build_model_client_vllm_passes_dtype_override():
 def test_build_model_client_vllm_auto_dtype_sends_no_flag():
     client = build_model_client("vllm", "gs://b/m/v1/")
     assert "dtype" not in client.vllm_server_kwargs
+
+
+def test_parse_args_seed_uses_underscore_flag():
+    """Flex Template launchers pass underscore-named params
+    (``--seed=...``). Every sibling flag on this parser uses underscores;
+    if this one didn't match, argparse's `parse_known_args` would silently
+    divert it into `beam_argv` instead of populating `args.seed`, and the
+    value would never reach `PipelineConfig.seed`."""
+    argv = [*_common_args(), "--seed", "42"]
+    args, beam_argv = parse_args(argv)
+    assert args.seed == "42"
+    assert beam_argv == []
+
+
+def test_parse_args_seed_defaults_empty():
+    args, _ = parse_args(_common_args())
+    assert args.seed == ""
