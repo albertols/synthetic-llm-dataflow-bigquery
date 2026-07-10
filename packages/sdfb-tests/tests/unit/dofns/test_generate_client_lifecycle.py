@@ -14,6 +14,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import ClassVar
 
+import pytest
 from sdfb_beam.dofns import generate as generate_mod
 from sdfb_beam.dofns.generate import GenerateRecordsDoFn
 
@@ -71,6 +72,18 @@ class _NoLifecycleClient:
         return [{}]
 
 
+class _BoomOnSetupClient:
+    """A client whose setup() fails to start the LLM server (e.g. vLLM
+    subprocess boot failure). Must crash the worker (E2E 2026-07-10: the
+    prior silent-fallback defect), not be swallowed."""
+
+    def setup(self):
+        raise RuntimeError("vllm boom")
+
+    def generate_json(self, prompt, json_schema, **kw):
+        return [{}]
+
+
 def _ctx():
     # Structural stand-in; the DoFn only touches these attributes on the
     # non-gs:// path. Keeps the test free of TableSchema construction.
@@ -117,3 +130,16 @@ def test_client_without_lifecycle_still_works(monkeypatch):
     dofn.teardown()
     assert len(rows) == 2
     assert _StubEngine.events == ["engine_setup", "engine_teardown"]
+
+
+def test_client_setup_failure_propagates_and_skips_engine_setup(monkeypatch):
+    """A client.setup() exception (e.g. vLLM subprocess failed to boot)
+    must re-raise out of GenerateRecordsDoFn.setup() so the worker crashes
+    loudly — and engine.setup() must never run, so the engine can't limp
+    forward without a live LLM and silently fall back to memorized
+    reference data."""
+    _StubEngine.events = []
+    dofn = _dofn(_BoomOnSetupClient(), monkeypatch)
+    with pytest.raises(RuntimeError, match="vllm boom"):
+        dofn.setup()
+    assert _StubEngine.events == []

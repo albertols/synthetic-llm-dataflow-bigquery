@@ -29,7 +29,11 @@ BLOCKER_RULE_IDS = frozenset(
         "identity.unique",
         # An engine crash (incl. strict_freetext re-raise reaching the DoFn)
         # loses the whole batch — that must count toward the gate, not PASS
-        # with fewer rows.
+        # with fewer rows. The pipeline layer (`sdfb_beam.pipeline._dlq_rule_weight`)
+        # weights each `engine_failure` DLQ envelope by its lost batch size
+        # (not 1-per-envelope like every other rule) before it ever reaches
+        # `dlq_by_rule` here, so "loses the whole batch" is arithmetically
+        # true by the time this function sees the counts.
         "engine_failure",
     }
 )

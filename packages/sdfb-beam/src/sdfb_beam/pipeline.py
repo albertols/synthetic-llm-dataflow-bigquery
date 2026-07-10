@@ -208,7 +208,7 @@ def build_pipeline(
         )
         dlq_by_rule = (
             dlq_raw
-            | "DlqRulePairs" >> beam.Map(lambda d: (d.get("rule_id", "unknown"), 1))
+            | "DlqRulePairs" >> beam.Map(_dlq_rule_weight)
             | "DlqRuleCounts" >> beam.CombinePerKey(sum)
             | "DlqRuleDict" >> beam.combiners.ToDict()
         )
@@ -235,6 +235,27 @@ def build_pipeline(
         result["validation_run"] = summary_rows
 
     return result
+
+
+def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:
+    """Map a DLQ envelope to a ``(rule_id, weight)`` pair for the BLOCKER
+    gate's per-rule counts.
+
+    Every rule counts 1 envelope = 1 lost row, EXCEPT ``engine_failure``:
+    one such envelope represents a whole crashed batch (`raw_request` is
+    the batch request dict ``{"batch_id": ..., "n": ...}`` — see
+    `GenerateRecordsDoFn`'s ``failed`` tagged output), so it must weight by
+    the batch's row count or a half-failed run scores a misleadingly low
+    observed_blocker_ratio and wrongly PASSES. Module-level (not a
+    lambda) to stay picklable for the Dataflow worker harness.
+    """
+    rule_id = envelope.get("rule_id", "unknown")
+    if rule_id == "engine_failure":
+        try:
+            return (rule_id, max(1, int(envelope.get("raw_request", {}).get("n", 1))))
+        except (TypeError, ValueError):
+            return (rule_id, 1)
+    return (rule_id, 1)
 
 
 def _build_validation_run_row(
