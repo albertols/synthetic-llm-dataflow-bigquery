@@ -155,6 +155,15 @@
       "regexes": [
         "^(auto|float16|bfloat16)$"
       ]
+    },
+    {
+      "name": "seed",
+      "label": "Explicit base RNG seed",
+      "helpText": "Explicit base RNG seed (integer) for deliberate reproduction of a run. Empty (default) derives a fresh seed per (run_id, batch) — recommended.",
+      "isOptional": true,
+      "regexes": [
+        "^([0-9]+)?$"
+      ]
     }
   ]
 }
