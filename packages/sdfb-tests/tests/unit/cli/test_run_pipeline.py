@@ -83,6 +83,24 @@ def test_parse_args_identity_cols_defaults_empty():
     assert args.identity_cols == ""
 
 
+def test_parse_args_pk_cols_uses_underscore_flag():
+    """Flex Template launchers pass underscore-named params
+    (``--pk_cols=...``, never ``--pk-cols``). Every sibling flag
+    on this parser uses underscores; if this one didn't match, argparse's
+    `parse_known_args` would silently divert it into `beam_argv` instead of
+    populating `args.pk_cols`, and the value would never reach
+    `PipelineConfig.pk_columns`."""
+    argv = [*_common_args(), "--pk_cols", "id,sku"]
+    args, beam_argv = parse_args(argv)
+    assert args.pk_cols == "id,sku"
+    assert beam_argv == []
+
+
+def test_parse_args_pk_cols_defaults_empty():
+    args, _ = parse_args(_common_args())
+    assert args.pk_cols == ""
+
+
 def test_parse_args_rejects_unknown_engine_value():
     """argparse-level rejection of bad client_type; engine is free-form."""
     argv = _common_args() + ["--client_type", "made-up"]

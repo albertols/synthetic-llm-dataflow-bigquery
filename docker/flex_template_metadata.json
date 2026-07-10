@@ -87,6 +87,15 @@
       ]
     },
     {
+      "name": "pk_cols",
+      "label": "Primary-key columns",
+      "helpText": "Comma-separated declared primary-key columns; duplicate PK tuples divert to the DLQ (rule_id=pk.duplicate, BLOCKER). Optional; empty means PK not declared.",
+      "isOptional": true,
+      "regexes": [
+        "^([a-zA-Z0-9_]+(,[a-zA-Z0-9_]+)*)?$"
+      ]
+    },
+    {
       "name": "engine",
       "label": "Generation engine",
       "helpText": "b1_rag (RAG over reference rows) or b2_library (CTGAN/SDV-family wrapper).",
