@@ -115,3 +115,16 @@ def test_storage_bq_dry_run_stages_snapshots_ddl_landing():
     assert "derive_landing_schema.py" in out
     assert "output/synthetic_source/ddl_metadata_synthetic_source_citibike_trips_50k.json" in out
     assert "synthetic_data.citibike_trips_50k" in out
+
+
+def test_budget_killswitch_dry_run():
+    r = run_script("04_budget_killswitch.sh")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "+ gcloud pubsub topics create budget-alerts" in out
+    assert "billing budgets create" in out
+    assert "percent=0.5" in out and "percent=0.8" in out and "percent=0.9" in out
+    assert "--budget-amount 25" in out
+    assert "functions deploy billing-killswitch" in out
+    assert "--trigger-topic budget-alerts" in out
+    assert "GCP_PROJECT_ID=sdfb-e2e-test123" in out
