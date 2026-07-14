@@ -149,3 +149,27 @@ def test_stage_models_dry_run_submits_build():
     assert "builds submit" in r.stdout
     assert "stage_models.yaml" in r.stdout
     assert "_MODELS_BUCKET=sdfb-e2e-test123-models" in r.stdout
+
+
+def test_build_image_cloudbuild_yaml_retargets_pip_index_failloud():
+    cfg = yaml.safe_load((GCP_DIR / "cloudbuild" / "build_image.yaml").read_text())
+    sed_step = cfg["steps"][0]
+    assert "artifactory/api/pypi/pypi-all/simple" in sed_step["script"]
+    assert "pypi.org/simple" in sed_step["script"]
+    assert "grep -q" in sed_step["script"]  # fail-loud if upstream line changes
+    build_args = " ".join(cfg["steps"][1]["args"])
+    assert "BEAM_SDK_IMAGE=docker.io/apache/beam_python3.11_sdk:2.71.0" in build_args
+    assert "SDFB_SDK_CONTAINER_IMAGE_ARG=${_IMAGE_URI}" in build_args
+    assert cfg["images"] == ["${_IMAGE_URI}"]
+
+
+def test_build_and_template_scripts_dry_run():
+    r = run_script("06_build_image.sh")
+    assert r.returncode == 0, r.stderr
+    assert "builds submit" in r.stdout and "build_image.yaml" in r.stdout
+    assert "_IMAGE_URI=us-central1-docker.pkg.dev/sdfb-e2e-test123/sdfb/sdfb-python:testtag" in r.stdout
+
+    r = run_script("07_build_flex_template.sh")
+    assert r.returncode == 0, r.stderr
+    assert "flex-template build gs://sdfb-e2e-test123-dataflow/templates/sdfb-testtag-template.json" in r.stdout
+    assert "docker/flex_template_metadata.json" in r.stdout
