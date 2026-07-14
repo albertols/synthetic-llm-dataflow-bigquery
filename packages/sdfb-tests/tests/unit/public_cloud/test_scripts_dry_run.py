@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import yaml
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -128,3 +129,23 @@ def test_budget_killswitch_dry_run():
     assert "functions deploy billing-killswitch" in out
     assert "--trigger-topic budget-alerts" in out
     assert "GCP_PROJECT_ID=sdfb-e2e-test123" in out
+
+
+def test_stage_models_cloudbuild_yaml_is_valid_and_complete():
+    p = GCP_DIR / "cloudbuild" / "stage_models.yaml"
+    cfg = yaml.safe_load(p.read_text())
+    scripts = " ".join(s.get("script", "") for s in cfg["steps"])
+    assert "Qwen/Qwen3-4B-Instruct-2507" in scripts          # ModelScope id
+    assert "bge-small-en-v1.5" in scripts
+    assert "model.safetensors.index.json" in scripts          # qwen manifest
+    assert '"model.safetensors"' in scripts                   # bge manifest (the missing-file bug)
+    assert "special_tokens_map.json" in scripts               # bge yes / qwen no (Qwen convention)
+    assert cfg["options"]["logging"] == "CLOUD_LOGGING_ONLY"  # custom build SA requirement
+
+
+def test_stage_models_dry_run_submits_build():
+    r = run_script("05_stage_models.sh")
+    assert r.returncode == 0, r.stderr
+    assert "builds submit" in r.stdout
+    assert "stage_models.yaml" in r.stdout
+    assert "_MODELS_BUCKET=sdfb-e2e-test123-models" in r.stdout
