@@ -1,0 +1,59 @@
+# Run-matrix presets: tier x table -> full Flex Template parameter set.
+# Rendered by lib/render_tier.py ({VAR} placeholders come from env.sh).
+# Tier names are shell-safe: R1p == R1' etc. (docs/E2E_TEST_MATRIX.md).
+# Empty-string values mean "omit the parameter" (template optionals).
+# job.expect FAIL marks negative tiers (run_e2e.sh inverts the verdict).
+
+defaults:
+  job:
+    machine_type: n1-standard-8
+    accelerator: "type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx"
+    max_workers: "1"          # cost cap: override per tier only if needed
+    expect: SUCCESS
+  params:
+    reference_rows_limit: "10000"
+    num_rows: "1000"
+    batch_size: "16"
+    similarity: "0.5"
+    env: dev
+    engine: b1_rag
+    client_type: vllm
+    vllm_dtype: float16        # T4 requirement for the bf16 qwen3 checkpoint
+    vllm_max_model_len: "8192" # KV-cache cap — REQUIRED on T4 (RUN_PLAYBOOK)
+    seed: ""
+    model_uri: "gs://{MODELS_BUCKET}/synthetic/models/qwen3/4b-instruct-2507/v1/"
+    embedder_uri: "gs://{MODELS_BUCKET}/synthetic/models/embedders/bge-small-en-v1.5/v1/"
+    dlq_table: "{PROJECT_ID}.synthetic_data_quality.dlq"
+    validation_runs_table: "{PROJECT_ID}.synthetic_data_quality.validation_runs"
+
+tables:
+  citibike:
+    params:
+      reference_table: "{PROJECT_ID}.synthetic_source.citibike_trips_50k"
+      landing_table: "{PROJECT_ID}.synthetic_data.citibike_trips_50k"
+      ddl_uri: "gs://{DATAFLOW_BUCKET}/ddl/citibike_trips_50k_ddl.json"
+      pk_cols: trip_id
+      identity_cols: trip_id
+  hacker_news:
+    params:
+      reference_table: "{PROJECT_ID}.synthetic_source.hacker_news_50k"
+      landing_table: "{PROJECT_ID}.synthetic_data.hacker_news_50k"
+      ddl_uri: "gs://{DATAFLOW_BUCKET}/ddl/hacker_news_50k_ddl.json"
+      pk_cols: id
+      identity_cols: id
+
+tiers:
+  S0:      # CPU smoke: fake client, full BQ write path, always run first
+    params: {client_type: fake, vllm_dtype: "", vllm_max_model_len: "", embedder_uri: ""}
+    job: {machine_type: e2-standard-8, accelerator: ""}
+  R1p: {}  # b1_rag / qwen3-4b / T4 / fp16 — the workhorse
+  R2p: {}  # identical rerun of R1p: anti-replay (fresh salted run_id)
+  R3p:     # b2_library engine; LLM only patches free text
+    params: {engine: b2_library, embedder_uri: ""}
+  N4:      # negative guard: bad model_uri -> strict mode must kill the job
+    params: {model_uri: "gs://{MODELS_BUCKET}/synthetic/models/qwen3/DOES-NOT-EXIST/v1/"}
+    job: {expect: FAIL}
+  P6:      # explicit-seed reproducibility — run TWICE, compare
+    params: {seed: "42"}
+  P7:      # pk gate isolated from identity synthesis
+    params: {identity_cols: ""}
