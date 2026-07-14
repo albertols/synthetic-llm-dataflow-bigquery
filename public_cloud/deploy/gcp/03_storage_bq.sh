@@ -60,4 +60,51 @@ else
     "${PROJECT_ID}:${QUALITY_DATASET}.validation_runs"
 fi
 
-log "storage + datasets + DQ tables done"
+# --- one-time public-table snapshots (spec: snapshot-once cost strategy) -----
+# Frozen 50k-row copies; reruns are no-ops via IF NOT EXISTS. citibike has no
+# natural PK -> GENERATE_UUID() trip_id (pk_cols/identity_cols in tiers.yaml).
+run bq query --use_legacy_sql=false --location="${BQ_LOCATION}" --project_id="${PROJECT_ID}" \
+  "CREATE TABLE IF NOT EXISTS \`${PROJECT_ID}.${SRC_DATASET}.citibike_trips_50k\` AS
+   SELECT GENERATE_UUID() AS trip_id,
+          tripduration, starttime, stoptime,
+          start_station_id, start_station_name,
+          end_station_id, end_station_name,
+          bikeid, usertype, birth_year, gender
+   FROM \`bigquery-public-data.new_york_citibike.citibike_trips\`
+   WHERE tripduration IS NOT NULL
+   LIMIT 50000"
+
+run bq query --use_legacy_sql=false --location="${BQ_LOCATION}" --project_id="${PROJECT_ID}" \
+  "CREATE TABLE IF NOT EXISTS \`${PROJECT_ID}.${SRC_DATASET}.hacker_news_50k\` AS
+   SELECT id, type, \`by\`, title, text, url, score, descendants, \`timestamp\`
+   FROM \`bigquery-public-data.hacker_news.full\`
+   WHERE type = 'story' AND text IS NOT NULL AND \`by\` IS NOT NULL
+   LIMIT 50000"
+
+# --- DDL extraction + landing tables ----------------------------------------
+stage_table() {  # <table_name>
+  local table="$1"
+  local ddl_gcs="gs://${DATAFLOW_BUCKET}/ddl/${table}_ddl.json"
+  run uv run --no-sync python3 "${REPO_ROOT}/scripts/extract_ddl.py" \
+    --project "${PROJECT_ID}" --dataset "${SRC_DATASET}" --table "${table}" \
+    --output_base "${REPO_ROOT}/output"
+  local ddl_local
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    ddl_local="${REPO_ROOT}/output/${table}_ddl.json"
+  else
+    ddl_local="$(ls "${REPO_ROOT}"/output/*"${table}"*_ddl.json | head -1)"
+  fi
+  run gsutil cp "${ddl_local}" "${ddl_gcs}"
+  run uv run --no-sync python3 "${REPO_ROOT}/scripts/derive_landing_schema.py" \
+    "${ddl_local}" -o "${REPO_ROOT}/output/${table}_landing_schema.json"
+  if probe bq show "${PROJECT_ID}:${LANDING_DATASET}.${table}"; then
+    log "landing ${LANDING_DATASET}.${table} exists"
+  else
+    run bq mk --table --schema "${REPO_ROOT}/output/${table}_landing_schema.json" \
+      "${PROJECT_ID}:${LANDING_DATASET}.${table}"
+  fi
+}
+stage_table "citibike_trips_50k"
+stage_table "hacker_news_50k"
+
+log "storage + datasets + DQ tables + snapshots + landing tables done"
