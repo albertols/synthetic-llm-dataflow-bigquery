@@ -99,3 +99,18 @@ def test_storage_bq_dry_run_creates_buckets_datasets_dq():
         assert f"mk --dataset sdfb-e2e-test123:{ds}" in out
     assert "dlq_inserted_at" in out and "created_at" in out  # DQ partition fields
     assert "objectViewer" in out and "objectAdmin" in out    # bucket-level SA grants
+
+
+def test_storage_bq_dry_run_stages_snapshots_ddl_landing():
+    r = run_script("03_storage_bq.sh")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "GENERATE_UUID() AS trip_id" in out
+    assert "bigquery-public-data.new_york_citibike.citibike_trips" in out
+    assert "bigquery-public-data.hacker_news.full" in out
+    assert "LIMIT 50000" in out
+    assert "extract_ddl.py" in out
+    assert "gs://sdfb-e2e-test123-dataflow/ddl/citibike_trips_50k_ddl.json" in out
+    assert "gs://sdfb-e2e-test123-dataflow/ddl/hacker_news_50k_ddl.json" in out
+    assert "derive_landing_schema.py" in out
+    assert "synthetic_data.citibike_trips_50k" in out
