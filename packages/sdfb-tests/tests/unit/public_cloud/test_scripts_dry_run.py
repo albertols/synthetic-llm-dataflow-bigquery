@@ -73,3 +73,16 @@ def test_bootstrap_dry_run_prints_expected_commands():
     assert "+ gcloud artifacts repositories create sdfb" in out
     assert "set-cleanup-policies" in out
     assert "MANUAL STEP" in out  # trial upgrade + T4 quota reminder
+
+
+def test_iam_dry_run_grants_expected_roles():
+    r = run_script("02_iam.sh")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    for sa in ("sdfb-dataflow-worker", "sdfb-build", "sdfb-killswitch"):
+        assert f"+ gcloud iam service-accounts create {sa}" in out
+    for role in ("roles/dataflow.worker", "roles/dataflow.developer",
+                 "roles/bigquery.dataEditor", "roles/bigquery.jobUser",
+                 "roles/artifactregistry.reader"):
+        assert role in out
+    assert "roles/billing.admin" in out  # killswitch SA on the billing account
