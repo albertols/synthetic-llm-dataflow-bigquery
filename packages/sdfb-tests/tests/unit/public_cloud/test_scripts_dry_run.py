@@ -61,3 +61,15 @@ def test_all_scripts_pass_bash_syntax_check():
     for s in scripts:
         r = subprocess.run(["bash", "-n", str(s)], capture_output=True, text=True)
         assert r.returncode == 0, f"{s.name}: {r.stderr}"
+
+
+def test_bootstrap_dry_run_prints_expected_commands():
+    r = run_script("01_bootstrap_project.sh")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "+ gcloud projects create sdfb-e2e-test123" in out
+    assert "+ gcloud billing projects link sdfb-e2e-test123 --billing-account 000000-AAAAAA-BBBBBB" in out
+    assert "dataflow.googleapis.com" in out and "billingbudgets.googleapis.com" in out
+    assert "+ gcloud artifacts repositories create sdfb" in out
+    assert "set-cleanup-policies" in out
+    assert "MANUAL STEP" in out  # trial upgrade + T4 quota reminder
