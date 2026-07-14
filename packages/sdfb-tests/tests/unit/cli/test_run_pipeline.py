@@ -247,6 +247,63 @@ def test_build_model_client_vllm_auto_dtype_sends_no_flag():
     assert "dtype" not in client.vllm_server_kwargs
 
 
+# --- vllm_max_model_len: cap the KV-cache context allocation ------------------
+# Qwen3-4B-Instruct-2507 ships max_position_embeddings=262144; vLLM defaults
+# max_model_len to that and needs a 36GiB KV cache — a T4 has ~5GiB free after
+# weights, so the EngineCore dies at startup (E2E 2026-07-14, R-run on T4).
+# The registry default in config/models.yml (max_model_len: 8192) is
+# documentation-only; the cap must be plumbed CLI → Flex Template → DAG like
+# vllm_dtype was.
+
+
+def test_parse_args_vllm_max_model_len_defaults_8192():
+    args, _ = parse_args(_common_args())
+    assert args.vllm_max_model_len == "8192"
+
+
+def test_parse_args_vllm_max_model_len_accepts_override():
+    args, beam_argv = parse_args(
+        [*_common_args(), "--vllm_max_model_len", "16384"]
+    )
+    assert args.vllm_max_model_len == "16384"
+    assert beam_argv == []
+
+
+def test_build_model_client_vllm_passes_max_model_len():
+    client = build_model_client(
+        "vllm", "gs://b/m/v1/", vllm_max_model_len="8192"
+    )
+    assert client.vllm_server_kwargs.get("max-model-len") == "8192"
+
+
+def test_build_model_client_vllm_empty_max_model_len_sends_no_flag():
+    """Empty = escape hatch: let vLLM use the checkpoint's native context."""
+    client = build_model_client(
+        "vllm", "gs://b/m/v1/", vllm_max_model_len=""
+    )
+    assert "max-model-len" not in client.vllm_server_kwargs
+
+
+def test_build_model_client_vllm_combines_dtype_and_max_model_len():
+    """The T4+Qwen profile needs BOTH flags on the server command."""
+    client = build_model_client(
+        "vllm", "gs://b/m/v1/",
+        vllm_dtype="float16", vllm_max_model_len="8192",
+    )
+    assert client.vllm_server_kwargs.get("dtype") == "float16"
+    assert client.vllm_server_kwargs.get("max-model-len") == "8192"
+
+
+def test_build_model_client_vllm_rejects_non_integer_max_model_len():
+    """Fail at launch, not 10 minutes later inside DoFn.setup() on a GPU
+    worker — a garbled value would otherwise ride the Flex Template all the
+    way to the vLLM server spawn."""
+    with pytest.raises(ValueError, match="vllm_max_model_len"):
+        build_model_client(
+            "vllm", "gs://b/m/v1/", vllm_max_model_len="lots"
+        )
+
+
 def test_parse_args_seed_uses_underscore_flag():
     """Flex Template launchers pass underscore-named params
     (``--seed=...``). Every sibling flag on this parser uses underscores;

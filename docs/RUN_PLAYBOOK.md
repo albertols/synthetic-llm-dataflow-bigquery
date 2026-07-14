@@ -77,6 +77,10 @@ Common params: `num_rows=1000`, `identity_cols=<ID_COL>`,
 `pk_cols=<PK_COL>,<PK_COL_2>` (substitute the target table's real
 identity/PK columns), `seed=""` (derived), landing table truncated
 between runs (or fresh run_id verified in validation_runs).
+Leave `vllm_max_model_len` at its `8192` default for every vLLM run: it caps
+the KV-cache allocation, and uncapped Qwen3-2507 (native 262K context) needs
+a 36GiB KV cache — the T4 EngineCore exits 1 at startup (observed 2026-07-14,
+4 bundle retries then job failure, each retry re-pulling ~7.5GB of weights).
 
 | Run | Engine | Model | GPU | Expect |
 |---|---|---|---|---|

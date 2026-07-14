@@ -108,6 +108,13 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "(bf16 for Gemma/Qwen). float16 is REQUIRED on T4 "
                         "for fp16-safe bf16 checkpoints (Qwen); refused for "
                         "gemma-family models (fp16 Gemma emits empty output)")
+    p.add_argument("--vllm_max_model_len", default="8192",
+                   help="vLLM --max-model-len cap. Without it vLLM sizes the "
+                        "KV cache for the checkpoint's NATIVE context "
+                        "(Qwen3-2507: 262K → 36GiB KV, kills the T4 "
+                        "EngineCore at startup). 8192 fits every registry "
+                        "model/GPU pairing and dwarfs the synthesis prompts. "
+                        "Empty = no cap (native context).")
     return p.parse_known_args(argv)
 
 
@@ -126,7 +133,10 @@ def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
 
 
 def build_model_client(
-    client_type: str, model_uri: str, vllm_dtype: str = "auto"
+    client_type: str,
+    model_uri: str,
+    vllm_dtype: str = "auto",
+    vllm_max_model_len: str = "8192",
 ) -> ModelClient:
     """Lazy factory — avoids importing vLLM / MLX on machines that don't have them."""
     if client_type == "fake":
@@ -139,6 +149,18 @@ def build_model_client(
         # downcast so fp16-safe bf16 checkpoints (Qwen) run on T4/SM 7.5;
         # the client's init guard still refuses fp16 for gemma-family.
         kwargs = {} if vllm_dtype == "auto" else {"dtype": vllm_dtype}
+        # Cap the context so the KV cache fits the GPU; without this vLLM
+        # allocates for the checkpoint's native max_position_embeddings
+        # (Qwen3-2507: 262K → 36GiB KV vs ~5GiB free on a T4) and the
+        # EngineCore exits 1 at startup. Empty = no cap.
+        max_len = str(vllm_max_model_len).strip()
+        if max_len:
+            if not max_len.isdigit() or int(max_len) <= 0:
+                raise ValueError(
+                    f"vllm_max_model_len must be a positive integer or "
+                    f"empty, got {vllm_max_model_len!r}"
+                )
+            kwargs["max-model-len"] = max_len
         return VLLMModelClient(model_uri=model_uri, vllm_server_kwargs=kwargs)
     if client_type == "mlx":
         from sdfb_beam.handlers.mlx_client import MLXModelClient
@@ -242,10 +264,14 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 
-    logger.info("Building model client (client_type=%s, vllm_dtype=%s)",
-                args.client_type, args.vllm_dtype)
+    logger.info("Building model client (client_type=%s, vllm_dtype=%s, "
+                "vllm_max_model_len=%s)",
+                args.client_type, args.vllm_dtype, args.vllm_max_model_len)
     model_client = build_model_client(
-        args.client_type, args.model_uri, vllm_dtype=args.vllm_dtype
+        args.client_type,
+        args.model_uri,
+        vllm_dtype=args.vllm_dtype,
+        vllm_max_model_len=args.vllm_max_model_len,
     )
 
     logger.info("Loading reference rows from %s (limit=%d)",
