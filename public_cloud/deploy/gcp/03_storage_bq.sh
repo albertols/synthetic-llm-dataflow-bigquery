@@ -88,11 +88,11 @@ stage_table() {  # <table_name>
   run uv run --no-sync python3 "${REPO_ROOT}/scripts/extract_ddl.py" \
     --project "${PROJECT_ID}" --dataset "${SRC_DATASET}" --table "${table}" \
     --output_base "${REPO_ROOT}/output"
-  local ddl_local
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    ddl_local="${REPO_ROOT}/output/${table}_ddl.json"
-  else
-    ddl_local="$(ls "${REPO_ROOT}"/output/*"${table}"*_ddl.json | head -1)"
+  # extract_ddl.py writes {output_base}/{dataset}/ddl_metadata_{dataset}_{table}.json
+  # (see sdfb_beam/ddl/pipeline.py get_output_path).
+  local ddl_local="${REPO_ROOT}/output/${SRC_DATASET}/ddl_metadata_${SRC_DATASET}_${table}.json"
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    [[ -f "${ddl_local}" ]] || die "extract_ddl.py did not produce ${ddl_local}"
   fi
   run gsutil cp "${ddl_local}" "${ddl_gcs}"
   run uv run --no-sync python3 "${REPO_ROOT}/scripts/derive_landing_schema.py" \

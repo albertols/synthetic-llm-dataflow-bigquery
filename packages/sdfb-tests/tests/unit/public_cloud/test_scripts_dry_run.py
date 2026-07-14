@@ -113,4 +113,5 @@ def test_storage_bq_dry_run_stages_snapshots_ddl_landing():
     assert "gs://sdfb-e2e-test123-dataflow/ddl/citibike_trips_50k_ddl.json" in out
     assert "gs://sdfb-e2e-test123-dataflow/ddl/hacker_news_50k_ddl.json" in out
     assert "derive_landing_schema.py" in out
+    assert "output/synthetic_source/ddl_metadata_synthetic_source_citibike_trips_50k.json" in out
     assert "synthetic_data.citibike_trips_50k" in out
