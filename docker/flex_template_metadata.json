@@ -157,6 +157,15 @@
       ]
     },
     {
+      "name": "vllm_max_model_len",
+      "label": "vLLM max-model-len cap",
+      "helpText": "Caps the KV-cache context allocation. Without it vLLM sizes for the checkpoint's native context (Qwen3-2507: 262K needs 36GiB KV and kills the T4 EngineCore at startup). Default 8192 fits every registry model/GPU pairing. Empty = no cap.",
+      "isOptional": true,
+      "regexes": [
+        "^([0-9]+)?$"
+      ]
+    },
+    {
       "name": "seed",
       "label": "Explicit base RNG seed",
       "helpText": "Explicit base RNG seed (integer) for deliberate reproduction of a run. Empty (default) derives a fresh seed per (run_id, batch) — recommended.",
