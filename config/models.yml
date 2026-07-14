@@ -77,8 +77,10 @@ models:
     # REQUIRES vllm_dtype=float16 on T4: the checkpoint is bf16 (SM>=8.0) but
     # the family is fp16-safe, so the explicit --dtype float16 downcast is
     # what makes it run on Turing (the DAG exposes the `vllm_dtype` param).
-    # Native context is 262K — keep max_model_len at the 8192 default or the
-    # KV allocation will not fit. Ships NO special_tokens_map.json (Qwen
+    # Native context is 262K — the DAG's `vllm_max_model_len` param (default
+    # 8192) MUST stay set or the KV allocation will not fit: uncapped, vLLM
+    # sizes the KV cache for 262K (36GiB) and the T4 EngineCore exits 1 at
+    # startup (E2E 2026-07-14). Ships NO special_tokens_map.json (Qwen
     # convention); configuration.json is ModelScope metadata.
     description: Qwen3 4B Instruct (2507). T4-compatible via vllm_dtype=float16; guided-JSON clean.
     gcs_uri: "gs://{bucket}/synthetic/models/qwen3/4b-instruct-2507/v1/"

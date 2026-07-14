@@ -160,6 +160,17 @@ default_dag_params = {
                     "The worker refuses float16 for gemma-family checkpoints "
                     "(fp16 Gemma silently emits empty output).",
     ),
+    "vllm_max_model_len": Param(
+        default="8192",
+        type="string",
+        description="vLLM --max-model-len cap. Without it vLLM sizes the KV "
+                    "cache for the checkpoint's NATIVE context — Qwen3-2507 "
+                    "ships 262K, which needs a 36GiB KV cache and kills the "
+                    "T4 EngineCore at startup (E2E 2026-07-14). 8192 fits "
+                    "every registry model/GPU pairing (config/models.yml "
+                    "defaults) and dwarfs the synthesis prompts. Empty = no "
+                    "cap (checkpoint-native context).",
+    ),
     "client_type": Param(
         default="vllm",
         type="string",
@@ -280,6 +291,7 @@ with models.DAG(
                     "env": env_name,
                     "client_type": "{{ params.client_type }}",
                     "vllm_dtype": "{{ params.vllm_dtype }}",
+                    "vllm_max_model_len": "{{ params.vllm_max_model_len }}",
                     "seed": "{{ params.seed }}",
                 },
             }
