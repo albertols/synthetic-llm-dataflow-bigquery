@@ -51,3 +51,4 @@ application_default_credentials.json
 
 .github/workflows/*
 docs/superpowers/specs
+public_cloud/deploy/gcp/journal/*.jsonl
