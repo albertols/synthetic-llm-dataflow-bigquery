@@ -86,3 +86,16 @@ def test_iam_dry_run_grants_expected_roles():
                  "roles/artifactregistry.reader"):
         assert role in out
     assert "roles/billing.admin" in out  # killswitch SA on the billing account
+
+
+def test_storage_bq_dry_run_creates_buckets_datasets_dq():
+    r = run_script("03_storage_bq.sh")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "+ gcloud storage buckets create gs://sdfb-e2e-test123-models" in out
+    assert "+ gcloud storage buckets create gs://sdfb-e2e-test123-dataflow" in out
+    assert "lifecycle" in out
+    for ds in ("synthetic_source", "synthetic_data", "synthetic_data_quality"):
+        assert f"mk --dataset sdfb-e2e-test123:{ds}" in out
+    assert "dlq_inserted_at" in out and "created_at" in out  # DQ partition fields
+    assert "objectViewer" in out and "objectAdmin" in out    # bucket-level SA grants
