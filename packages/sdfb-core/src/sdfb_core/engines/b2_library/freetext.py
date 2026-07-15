@@ -136,9 +136,12 @@ class FreeTextHook:
     ) -> list[str]:
         exemplars = list(profile.text_pool[: self._pool_size])
         prompt = (
-            f"Generate up to {self._pool_size} realistic, fictitious but "
-            f"plausible values for the column '{profile.name}'. Stay "
-            f"consistent in style and format with these reference examples: "
+            f"You generate synthetic tabular data. First identify the exact "
+            f"format of these example values for the column '{profile.name}' "
+            f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
+            f"timestamp, natural-language text), then generate up to "
+            f"{self._pool_size} NEW, distinct, fictitious values in exactly "
+            f"that format. Never copy an example verbatim. Examples: "
             f"{exemplars}. Return JSON {{\"values\": [...]}}."
         )
         try:
@@ -164,7 +167,12 @@ class FreeTextHook:
             )
             return exemplars
 
-        pool = _extract_values(responses)
+        # Novelty filter: LLM values that equal observed reference values are
+        # copies, not generations. The LLM pool is the "diverge" side of the
+        # similarity blend — observed values reach the output only via the
+        # reference pool, weighted by `cfg.similarity`.
+        observed = set(profile.text_pool)
+        pool = [v for v in _extract_values(responses) if v not in observed]
         if not pool:
             # The call "succeeded" (no exception) yet yielded nothing usable
             # — e.g. every choice dropped at JSON parse. Exactly as loud as
@@ -182,10 +190,11 @@ class FreeTextHook:
                 error="EmptyYield",
             )
             return exemplars
-        # Always fold in observed exemplars so the pool is never empty and
-        # the column stays plausibly in-distribution even if the LLM whiffs.
-        merged = _dedupe_stable(pool + exemplars)
-        return merged[: self._pool_size] if merged else exemplars
+        # The LLM pool stays novel-only; `_blend_pools` already mixes the
+        # observed reference pool back in proportionally to `cfg.similarity`,
+        # so folding exemplars HERE double-counted them and turned the
+        # "diverge" side of the blend into more memorization.
+        return _dedupe_stable(pool)[: self._pool_size]
 
 
 def _extract_values(responses: list[dict]) -> list[str]:
