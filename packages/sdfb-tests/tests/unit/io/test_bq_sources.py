@@ -45,6 +45,20 @@ def test_query_uses_limit_and_table():
     assert "WHERE" not in sent_query
 
 
+def test_query_spreads_sample_deterministically():
+    # A bare `LIMIT n` returns a storage-contiguous slice (the 2026-07-15
+    # run sampled essentially one load batch: 51 % of rows shared a single
+    # load date). The sample must be spread across the whole table, and
+    # deterministically so — same table contents ⇒ same sample ⇒ stable
+    # reference_digest.
+    client = MagicMock()
+    client.query.return_value.result.return_value = iter([])
+    load_reference_rows(table="proj.ds.tbl", limit=42, client=client)
+    sent_query = client.query.call_args[0][0]
+    assert "ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(ref))" in sent_query
+    assert sent_query.index("ORDER BY") < sent_query.index("LIMIT")
+
+
 def test_extra_filters_become_where_clause():
     client = MagicMock()
     client.query.return_value.result.return_value = iter([])
@@ -56,6 +70,8 @@ def test_extra_filters_become_where_clause():
     )
     sent_query = client.query.call_args[0][0]
     assert "WHERE tier = 'ENTERPRISE'" in sent_query
+    # WHERE filters first, then the deterministic spread, then the cap.
+    assert sent_query.index("WHERE") < sent_query.index("ORDER BY")
 
 
 def test_returns_empty_list_when_no_rows():

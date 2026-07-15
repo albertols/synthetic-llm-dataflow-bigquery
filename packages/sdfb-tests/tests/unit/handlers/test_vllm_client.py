@@ -8,9 +8,10 @@ tests would carry `@pytest.mark.gpu`). Here we mock every heavy boundary:
   - the server subprocess (`subprocess.Popen`),
   - the `google.cloud.storage` client (injected into `sys.modules`),
 
-and assert the contract: the request SHAPE (chat `messages`, `extra_body`
-carrying `guided_json` + `chat_template_kwargs.enable_thinking=False` +
-`guided_decoding_backend`), JSON parsing, `n` handling, the
+and assert the contract: the request SHAPE (chat `messages`,
+`response_format` json_schema for vLLM >= 0.10 structured outputs,
+`extra_body` carrying `chat_template_kwargs.enable_thinking=False`, no
+request seed unless explicit), JSON parsing, `n` handling, the
 not-set-up guard, and teardown subprocess termination.
 
 The class is importable here precisely because all heavy imports are
@@ -114,14 +115,23 @@ def test_generate_json_uses_chat_endpoint_with_user_message():
     assert kwargs["model"] == "/local-ssd/model"
 
 
-def test_generate_json_extra_body_carries_guided_json_and_thinking_off():
+def test_generate_json_request_uses_response_format_json_schema():
+    # vLLM ≥ 0.10 structured outputs: the schema constraint travels in the
+    # OpenAI-standard `response_format`, NOT the legacy `guided_json`
+    # extra_body field — vLLM 0.24 silently ignores the legacy field, which
+    # produced free-form text and 100 % parse-drop in the 2026-07-15 E2E run.
     schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
     c, fake_openai = _client_with_fake_openai(['{"x": 7}'])
     c.generate_json("p", schema)
-    extra_body = fake_openai.chat.completions.create.call_args.kwargs["extra_body"]
-    assert extra_body["guided_json"] == schema
+    kwargs = fake_openai.chat.completions.create.call_args.kwargs
+    assert kwargs["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "sdfb_record", "schema": schema},
+    }
+    extra_body = kwargs["extra_body"]
     assert extra_body["chat_template_kwargs"] == {"enable_thinking": False}
-    assert extra_body["guided_decoding_backend"] == "outlines"
+    assert "guided_json" not in extra_body
+    assert "guided_decoding_backend" not in extra_body
 
 
 def test_generate_json_passes_sampling_params():
@@ -133,13 +143,23 @@ def test_generate_json_passes_sampling_params():
     assert kwargs["seed"] == 99
 
 
-def test_guided_decoding_backend_is_configurable():
+def test_generate_json_omits_seed_when_none():
+    # A per-request seed with n>1 collapses all n choices to one completion
+    # on vLLM — no seed in the request unless a caller explicitly sets one.
+    c, fake_openai = _client_with_fake_openai(['{"a": 1}'])
+    c.generate_json("p", {}, n=4)
+    assert "seed" not in fake_openai.chat.completions.create.call_args.kwargs
+
+
+def test_guided_decoding_backend_param_accepted_but_not_sent():
+    # Constructor param kept for flex-template compatibility; per-request
+    # backend selection no longer exists in vLLM 0.24 (server-side config).
     c, fake_openai = _client_with_fake_openai(
         ['{"a": 1}'], guided_decoding_backend="lm-format-enforcer"
     )
     c.generate_json("p", {})
-    extra_body = fake_openai.chat.completions.create.call_args.kwargs["extra_body"]
-    assert extra_body["guided_decoding_backend"] == "lm-format-enforcer"
+    kwargs = fake_openai.chat.completions.create.call_args.kwargs
+    assert "guided_decoding_backend" not in kwargs.get("extra_body", {})
 
 
 # ---------------------------------------------------------------------------

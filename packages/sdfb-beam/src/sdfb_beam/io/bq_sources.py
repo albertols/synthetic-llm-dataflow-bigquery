@@ -66,7 +66,17 @@ def load_reference_rows(
         client = bigquery.Client(project=project)
 
     where = f"WHERE {extra_filters}" if extra_filters else ""
-    query = f"SELECT * FROM `{table}` {where} LIMIT {int(limit)}"
+    # A bare `LIMIT n` returns a storage-contiguous slice — in the
+    # 2026-07-15 E2E run 51 % of the sample came from a single load batch,
+    # which skewed column profiling (897-distinct columns classified as
+    # ≤9-distinct categoricals) and fidelity. `FARM_FINGERPRINT` of the
+    # whole row spreads the sample across the table *deterministically*:
+    # the same table contents always yield the same sample, keeping
+    # `reference_digest` stable across retriggers (unlike `RAND()`).
+    query = (
+        f"SELECT * FROM `{table}` AS ref {where} "
+        f"ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(ref)) LIMIT {int(limit)}"
+    )
 
     logger.info("Loading reference rows from %s (limit=%d)", table, limit)
     job = client.query(query)
