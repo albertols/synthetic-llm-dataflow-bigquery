@@ -1,13 +1,17 @@
 """Column profiling for the distribution-estimator spine.
 
-Profiles each schema column from the reference rows into one of four kinds
+Profiles each schema column from the reference rows into one of five kinds
 (see `ColumnKind`). Profiling is the cheap O(N_ref) pass that decides which
 fidelity primitive samples the column at `generate_batch` time:
 
   - CONSTANT     → literal copy (``nunique() == 1``); never sent to the LLM.
-  - NUMERIC      → clip-to-observed-range empirical sampling.
+  - NUMERIC      → in-observed-range empirical sampling (low-cardinality
+                   numeric enums are demoted to CATEGORICAL).
   - CATEGORICAL  → empirical-frequency sampling from the observed value set.
   - FREE_TEXT    → bounded LLM-generated pool, sampled with replacement.
+  - TEMPORAL     → novel values sampled within the observed time range
+                   (high-cardinality DATE/DATETIME/TIME/TIMESTAMP; verbatim
+                   copies are linkage quasi-identifiers).
 
 Pure-Python (stdlib only) so it lives in `sdfb-core`. Numeric stats are
 computed without NumPy here; the vectorized *sampling* (in the engine) is
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -44,6 +49,15 @@ _FREE_TEXT_MIN_MEAN_LEN = 20
 # Above this absolute distinct count a string column is high-cardinality and
 # treated as free text even if short (e.g. emails, ids-as-strings).
 _FREE_TEXT_MAX_CATEGORIES = 50
+# BQ temporal types: high-cardinality columns get range-sampled novel values
+# (verbatim copies of real event timestamps are linkage quasi-identifiers —
+# 2026-07-15 E2E report: COL_052 landed 935 real microsecond timestamps).
+_TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIME", "TIMESTAMP"})
+# At or below this distinct count a temporal / numeric column is an enum in
+# disguise (load dates, status codes): sample the observed values instead of
+# inventing in-between ones (COL_002: 2 source codes -> 5 landing codes).
+_TEMPORAL_MAX_CATEGORIES = 20
+_NUMERIC_MAX_CATEGORIES = 20
 
 
 class ColumnKind(StrEnum):
@@ -51,6 +65,7 @@ class ColumnKind(StrEnum):
     NUMERIC = "numeric"
     CATEGORICAL = "categorical"
     FREE_TEXT = "free_text"
+    TEMPORAL = "temporal"
 
 
 @dataclass(frozen=True)
@@ -79,6 +94,10 @@ class ColumnProfile:
     categories: dict[object, int] = field(default_factory=dict)
     # FREE_TEXT — a deduped sample of observed values (the retrieval seed pool).
     text_examples: tuple[str, ...] = ()
+    # FREE_TEXT — nearly every reference value is distinct (unique ratio >=
+    # the free-text threshold): identifier-like or personal prose. Folding
+    # observed values into the generated pool would memorize them.
+    is_unique_valued: bool = False
     # All non-null observed values, original order — used for sampling fallbacks.
     observed_values: tuple[object, ...] = ()
 
@@ -130,7 +149,10 @@ def _profile_one(col: FieldSchema, values: list[object]) -> ColumnProfile:
     if col.bq_type in _STRINGY_BQ_TYPES:
         return _profile_string(col, non_null, nullable, null_fraction)
 
-    # BOOL, DATE, DATETIME, TIME, TIMESTAMP → categorical over observed values.
+    if col.bq_type in _TEMPORAL_BQ_TYPES:
+        return _profile_temporal(col, non_null, nullable, null_fraction)
+
+    # BOOL (and anything unrecognized) → categorical over observed values.
     return _profile_categorical(col, non_null, nullable, null_fraction)
 
 
@@ -153,6 +175,14 @@ def _profile_numeric(
     if not numbers:
         # No parseable numbers (all null / unparseable) — treat as categorical.
         return _profile_categorical(col, non_null, nullable, null_fraction)
+    # A numeric column whose observed support is a small, repeating value set
+    # is an enum in disguise (status codes, flags): interpolating over its
+    # range invents category codes that do not exist in the source
+    # (2026-07-15 E2E: COL_002 had 2 source values, landed 5). `distinct <
+    # len` keeps all-distinct columns (PKs, tiny fixtures) numeric.
+    n_distinct = len(set(numbers))
+    if n_distinct <= _NUMERIC_MAX_CATEGORIES and n_distinct < len(numbers):
+        return _profile_categorical(col, non_null, nullable, null_fraction)
     # Use the DDL scale when present; default to 2 places for NUMERIC currency.
     decimal_scale = col.scale if (is_decimal and col.scale is not None) else (2 if is_decimal else None)
     return ColumnProfile(
@@ -168,6 +198,69 @@ def _profile_numeric(
         decimal_scale=decimal_scale,
         observed_values=tuple(non_null),
     )
+
+
+def _profile_temporal(
+    col: FieldSchema,
+    non_null: list[object],
+    nullable: bool,
+    null_fraction: float,
+) -> ColumnProfile:
+    """DATE/DATETIME/TIME/TIMESTAMP → TEMPORAL (range-sampled novel values)
+    when high-cardinality, CATEGORICAL when the column is an enum in disguise
+    (load dates, partition stamps).
+
+    Verbatim copies of high-cardinality timestamps are linkage
+    quasi-identifiers (2026-07-15 E2E: COL_052 landed 935 real microsecond
+    event timestamps); range sampling keeps the marginal support without
+    reproducing real instants.
+    """
+    distinct = _ordered_distinct(non_null)
+    floats = [f for f in (temporal_to_float(v) for v in non_null) if f is not None]
+    if len(distinct) <= _TEMPORAL_MAX_CATEGORIES or not floats:
+        return _profile_categorical(col, non_null, nullable, null_fraction)
+    return ColumnProfile(
+        name=col.name,
+        bq_type=col.bq_type,
+        kind=ColumnKind.TEMPORAL,
+        nullable=nullable,
+        null_fraction=null_fraction,
+        numeric_min=min(floats),
+        numeric_max=max(floats),
+        observed_values=tuple(non_null),
+    )
+
+
+def temporal_to_float(v: object) -> float | None:
+    """Temporal value → float on a per-type axis (epoch seconds; TIME uses
+    seconds-since-midnight). Naive datetimes are pinned to UTC so the
+    round-trip through `temporal_from_float` is exact. Non-temporal values
+    (e.g. ISO strings from odd sources) return None — the caller falls back
+    to categorical profiling."""
+    if isinstance(v, datetime):  # before `date`: datetime IS a date subclass
+        dt = v if v.tzinfo is not None else v.replace(tzinfo=UTC)
+        return dt.timestamp()
+    if isinstance(v, date):
+        return datetime(v.year, v.month, v.day, tzinfo=UTC).timestamp()
+    if isinstance(v, time):
+        return v.hour * 3600 + v.minute * 60 + v.second + v.microsecond / 1e6
+    return None
+
+
+def temporal_from_float(v: float, bq_type: str) -> object:
+    """Inverse of `temporal_to_float`, coercing to the BQ type's Python shape
+    (TIMESTAMP → aware datetime, DATETIME → naive, DATE → date, TIME → time)."""
+    if bq_type == "TIMESTAMP":
+        return datetime.fromtimestamp(v, tz=UTC)
+    if bq_type == "DATETIME":
+        return datetime.fromtimestamp(v, tz=UTC).replace(tzinfo=None)
+    if bq_type == "DATE":
+        return datetime.fromtimestamp(v, tz=UTC).date()
+    # TIME — seconds since midnight, clamped to one day.
+    total = max(0.0, min(float(v), 86_399.999999))
+    seconds = int(total)
+    micros = min(round((total - seconds) * 1e6), 999_999)
+    return time(seconds // 3600, seconds % 3600 // 60, seconds % 60, micros)
 
 
 def _profile_string(
@@ -196,6 +289,9 @@ def _profile_string(
             nullable=nullable,
             null_fraction=null_fraction,
             text_examples=examples,
+            # Nearly-all-distinct reference values (ids, unique prose): the
+            # engine must not fold observed values into the generated pool.
+            is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
             observed_values=tuple(strings),
         )
     return _profile_categorical(col, non_null, nullable, null_fraction)

@@ -220,6 +220,47 @@ def test_b2_strict_raises_on_empty_yield(wide_ctx):
 
 
 # ---------------------------------------------------------------------------
+# All-copies yield — the LLM "succeeds" but every value is a verbatim
+# exemplar copy. After the novelty filter that is an empty yield: same
+# milestone, same strict behavior.
+# ---------------------------------------------------------------------------
+
+
+class _CopyingClient:
+    """A `ModelClient` that only echoes observed reference values."""
+
+    def __init__(self, copies: list[dict]):
+        self._copies = copies
+
+    def generate_json(self, *a, **k):
+        return list(self._copies)
+
+
+def test_b1_all_copy_yield_counts_as_empty(caplog, free_text_ctx):
+    copies = [{"bio": r["bio"]} for r in free_text_ctx.reference_rows[:4]]
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        engine.setup(_CopyingClient(copies), free_text_ctx)
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=freetext_llm_fallback" in text
+    assert "error=EmptyYield" in text
+
+
+def test_b2_pool_excludes_verbatim_copies(wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    exemplar = profiles["summary"].text_pool[0]
+    client = _CopyingClient(
+        [{"values": [exemplar, "A fresh, clearly novel ticket summary."]}]
+    )
+    hook = FreeTextHook(client)
+    pool = hook._pool_for(profiles["summary"], GenerationConfig(seed=1))
+    assert "A fresh, clearly novel ticket summary." in pool
+    # The LLM pool is the "diverge" side of B.2's similarity blend — observed
+    # values reach the output via the reference pool, never via the LLM pool.
+    assert exemplar not in pool
+
+
+# ---------------------------------------------------------------------------
 # B.1 pool inference must not pin a request seed — a fixed seed with n>1
 # collapses all n vLLM choices to a single completion (2026-07-15 run:
 # identical choice lengths per request).
