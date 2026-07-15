@@ -12,6 +12,7 @@ Both must pass the contract tests in
 """
 
 from sdfb_core.engines.base import (
+    FreeTextEmptyYieldError,
     GenerationConfig,
     GenerationContext,
     GenerationEngine,
@@ -58,6 +59,7 @@ def get_engine(name: str) -> type[GenerationEngine]:
 
 __all__ = [
     "ENGINE_REGISTRY",
+    "FreeTextEmptyYieldError",
     "GenerationConfig",
     "GenerationContext",
     "GenerationEngine",

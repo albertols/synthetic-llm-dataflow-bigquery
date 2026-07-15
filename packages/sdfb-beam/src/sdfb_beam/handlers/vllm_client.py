@@ -30,8 +30,10 @@ Constraints honoured here:
     chat template — required to suppress the chain-of-thought channel via
     `chat_template_kwargs={"enable_thinking": False}` (ADR 0014; the
     completions endpoint does not apply the chat template).
-  - Guided JSON via `extra_body={"guided_json": schema, ...}` — vLLM's
-    OpenAI-server extension for schema-constrained decoding.
+  - Guided JSON via the OpenAI-standard `response_format={"type":
+    "json_schema", ...}` — vLLM >= 0.10 structured outputs. The legacy
+    `extra_body={"guided_json": ...}` spelling is silently ignored by
+    vLLM 0.24 (2026-07-15 E2E run: free-form output, 100 % parse-drop).
 
 REFs:
   - docs/adr/0014-vllm-model-client-owns-server.md (THE design)
@@ -156,8 +158,11 @@ class VLLMModelClient:
             local_model_dir: where weights land / where vLLM reads them.
             port / host: where the spawned server listens.
             startup_timeout_s / poll_interval_s: readiness-poll budget.
-            guided_decoding_backend: vLLM guided-decoding backend (ADR 0011
-                fallback chain: vLLM guided JSON → outlines → repair loop).
+            guided_decoding_backend: retained for flex-template parameter
+                compatibility only. vLLM ≥ 0.10 selects the structured-output
+                backend server-side (`structured_outputs_config`, default
+                `auto`); per-request backend selection no longer exists, so
+                this value is not sent with requests.
         """
         self.model_uri = model_uri
         self.vllm_server_kwargs: dict[str, Any] = dict(vllm_server_kwargs or {})
@@ -277,23 +282,35 @@ class VLLMModelClient:
                 "worker before generate_batch()."
             )
 
-        response = self._client.chat.completions.create(
-            model=self._served_model_name,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-            n=n,
-            seed=seed,
-            extra_body={
-                # vLLM guided-decoding: constrain output to the JSON schema.
-                "guided_json": json_schema,
-                # vLLM applies the chat template on this endpoint; pass
-                # template kwargs through to suppress Gemma 4's chain-of-thought
-                # channel (ADR 0014). Unknown kwargs are ignored by Jinja.
-                "chat_template_kwargs": {"enable_thinking": False},
-                "guided_decoding_backend": self.guided_decoding_backend,
+        request: dict = {
+            "model": self._served_model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "n": n,
+            # vLLM ≥ 0.10 structured outputs: the schema constraint travels
+            # in the OpenAI-standard `response_format`. The legacy
+            # `guided_json` / `guided_decoding_backend` extra_body fields are
+            # silently ignored by vLLM 0.24 — sending them yields free-form
+            # text that fails the strict parse below (2026-07-15 E2E run:
+            # 256/256 choices dropped, exemplar-only pools).
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "sdfb_record", "schema": json_schema},
             },
-        )
+            "extra_body": {
+                # vLLM applies the chat template on this endpoint; pass
+                # template kwargs through to suppress the thinking channel on
+                # models that have one (ADR 0014). Unknown kwargs are ignored
+                # by Jinja.
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        }
+        # A per-request seed with n>1 makes vLLM emit n identical
+        # completions — only send one when a caller explicitly asks.
+        if seed is not None:
+            request["seed"] = seed
+        response = self._client.chat.completions.create(**request)
 
         out: list[dict] = []
         for choice in response.choices:

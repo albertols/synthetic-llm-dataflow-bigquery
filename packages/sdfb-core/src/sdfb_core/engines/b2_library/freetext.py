@@ -27,7 +27,11 @@ import logging
 import numpy as np
 
 from sdfb_core.engines.b2_library.fidelity import ColumnProfile
-from sdfb_core.engines.base import GenerationConfig, ModelClient
+from sdfb_core.engines.base import (
+    FreeTextEmptyYieldError,
+    GenerationConfig,
+    ModelClient,
+)
 from sdfb_core.observability import log_milestone
 
 # Bounded pool size — the LLM emits at most this many unique candidates per
@@ -161,6 +165,23 @@ class FreeTextHook:
             return exemplars
 
         pool = _extract_values(responses)
+        if not pool:
+            # The call "succeeded" (no exception) yet yielded nothing usable
+            # — e.g. every choice dropped at JSON parse. Exactly as loud as
+            # the exception path: the 2026-07-15 E2E run memorized 100 % of
+            # free-text values through this hole.
+            if self._strict:
+                raise FreeTextEmptyYieldError(
+                    f"LLM call for free-text column {profile.name!r} "
+                    f"returned no usable values (all choices dropped/empty)."
+                )
+            log_milestone(
+                "freetext_llm_fallback",
+                level=logging.WARNING,
+                column=profile.name,
+                error="EmptyYield",
+            )
+            return exemplars
         # Always fold in observed exemplars so the pool is never empty and
         # the column stays plausibly in-distribution even if the LLM whiffs.
         merged = _dedupe_stable(pool + exemplars)
