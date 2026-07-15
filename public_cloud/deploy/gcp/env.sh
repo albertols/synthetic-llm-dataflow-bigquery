@@ -5,6 +5,7 @@
 # everything else is convention. Keep names Terraform-friendly (future port).
 # Spec: docs/superpowers/specs/2026-07-14-personal-gcp-e2e-design.md
 # ---------------------------------------------------------------------------
+_GCP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- user-provided (export or edit) ---------------------------------------
 PROJECT_SUFFIX="${PROJECT_SUFFIX:-}"           # e.g. "serna-01"
@@ -22,7 +23,10 @@ MODELS_BUCKET="${PROJECT_ID}-models"
 DATAFLOW_BUCKET="${PROJECT_ID}-dataflow"
 GAR_REPO="sdfb"
 IMAGE_NAME="sdfb-python"
-IMAGE_TAG="${IMAGE_TAG:-personal-$(git rev-parse --short HEAD 2>/dev/null || echo dev)}"
+# Prefer a persisted tag (written by 06_build_image.sh after a real build) so
+# IMAGE_TAG can't drift with HEAD between "build the image" and "run the job"
+# — falls back to deriving from HEAD only if nothing was ever persisted.
+IMAGE_TAG="${IMAGE_TAG:-$( [ -f "${_GCP_DIR}/journal/image_tag" ] && cat "${_GCP_DIR}/journal/image_tag" || echo "personal-$(git rev-parse --short HEAD 2>/dev/null || echo dev)" )}"
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 WORKER_SA_NAME="sdfb-dataflow-worker"

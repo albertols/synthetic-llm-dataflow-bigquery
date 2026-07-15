@@ -20,7 +20,7 @@ RENDERED="$(uv run --no-sync python3 "${SCRIPT_DIR}/lib/render_tier.py" \
 eval "${RENDERED}"
 
 TIER_LC="$(echo "${TIER}" | tr '[:upper:]' '[:lower:]')"
-RUN_ID="${TIER_LC}-${TABLE}-$(date +%Y%m%dT%H%M%S)"
+RUN_ID="${TIER_LC}-${TABLE//_/-}-$(date -u +%Y%m%d-%H%M%S)"
 JOB_NAME="sdfb-${RUN_ID}"
 
 CMD=(gcloud dataflow flex-template run "${JOB_NAME}"
@@ -54,25 +54,41 @@ if [[ "${DRY_RUN}" != "1" ]]; then
     esac
   done
   log "terminal state: ${STATE}"
-  # Journal every run, pass or fail (the deployed-commands ledger).
+
+  # A non-terminal state here means the poll loop exhausted its 90 iterations
+  # with the job still running — cancel it (best-effort) so it doesn't burn
+  # money unattended, then journal and die.
+  TIMED_OUT=0
+  case "${STATE}" in
+    JOB_STATE_DONE|JOB_STATE_FAILED|JOB_STATE_CANCELLED|JOB_STATE_DRAINED) ;;
+    *)
+      TIMED_OUT=1
+      run gcloud dataflow jobs cancel "${JOB_ID}" --project "${PROJECT_ID}" --region "${REGION}" || true
+      ;;
+  esac
+
+  # Journal every run, pass or fail (the deployed-commands ledger) — before verdict.
   printf '{"ts":"%s","tier":"%s","table":"%s","run_id":"%s","job_id":"%s","state":"%s","command":"%s"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TIER}" "${TABLE}" "${RUN_ID}" "${JOB_ID}" "${STATE}" \
     "$(echo "${CMD[*]}" | sed 's/"/\\"/g')" >> "${SCRIPT_DIR}/journal/runs.jsonl"
-  if [[ "${STATE}" != "JOB_STATE_DONE" && "${EXPECT}" == "SUCCESS" ]]; then
+
+  [[ "${TIMED_OUT}" == "1" ]] && die "poll timed out; job ${JOB_ID} cancel requested (state ${STATE})"
+
+  if [[ "${EXPECT}" == "SUCCESS" && "${STATE}" != "JOB_STATE_DONE" ]]; then
     log "FAILED — last 50 error log lines (full mining belongs to e2e_gcp_probe.py):"
     gcloud logging read \
       "resource.type=dataflow_step AND resource.labels.job_id=${JOB_ID} AND severity>=ERROR" \
       --project "${PROJECT_ID}" --limit 50 --format 'value(timestamp,textPayload)' || true
     die "tier ${TIER} expected SUCCESS, got ${STATE} (job ${JOB_ID})"
   fi
-  if [[ "${EXPECT}" == "FAIL" && "${STATE}" == "JOB_STATE_DONE" ]]; then
-    die "tier ${TIER} expected FAILURE but the job succeeded — negative guard broken"
+  if [[ "${EXPECT}" == "FAIL" && "${STATE}" != "JOB_STATE_FAILED" ]]; then
+    die "tier ${TIER} expected FAILURE, got ${STATE} (job ${JOB_ID})"
   fi
 fi
 
 log "verdict: ${TIER}/${TABLE} matched EXPECT=${EXPECT}"
 log "next — report recipe (RUN_PLAYBOOK §5):"
 log "  uv run --no-sync python3 scripts/e2e_gcp_probe.py --project ${PROJECT_ID} \\"
-log "    --source-fqn \$(SOURCE_FQN) --landing-fqn \$(LANDING_FQN) --quality-dataset ${QUALITY_DATASET} \\"
-log "    --region ${REGION} --job-id ${JOB_ID} --run-id ${RUN_ID} --out integration_test/${JOB_ID}/e2e_gcp_metrics.json"
+log "    --source-fqn <SOURCE_FQN> --landing-fqn <LANDING_FQN> --quality-dataset ${PROJECT_ID}.${QUALITY_DATASET} \\"
+log "    --region ${REGION} --pk <pk_cols> --job-id ${JOB_ID} --run-id ${RUN_ID} --out integration_test/${JOB_ID}/e2e_gcp_metrics.json"
 log "  then e2e_validation_analysis.py + e2e_bundle_export.py -> integration_test/${JOB_ID}/"

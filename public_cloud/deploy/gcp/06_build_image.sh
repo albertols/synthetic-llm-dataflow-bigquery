@@ -16,4 +16,8 @@ run gcloud builds submit . \
   --service-account "projects/${PROJECT_ID}/serviceAccounts/${BUILD_SA}" \
   --project "${PROJECT_ID}" --region "${REGION}"
 
+# Persist the tag so 07/run_e2e.sh pick up THIS build, not whatever HEAD is
+# at their invocation time (env.sh reads this file back).
+[[ "${DRY_RUN}" == "1" ]] || printf '%s' "${IMAGE_TAG}" > "${SCRIPT_DIR}/journal/image_tag"
+
 log "image: ${IMAGE_URI}"
