@@ -6,6 +6,7 @@ installs are needed. Each task appends assertions for its script here.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -88,6 +89,7 @@ def test_iam_dry_run_grants_expected_roles():
                  "roles/artifactregistry.reader"):
         assert role in out
     assert "roles/billing.admin" in out  # killswitch SA on the billing account
+    assert "roles/billing.projectManager" in out  # killswitch SA reads project billing info
 
 
 def test_storage_bq_dry_run_creates_buckets_datasets_dq():
@@ -188,6 +190,20 @@ def test_run_e2e_dry_run_assembles_submit_command():
     assert "engine=b1_rag" in out and "vllm_dtype=float16" in out
     assert "run_id=r1p-citibike-" in out
     assert "e2e_gcp_probe.py" in out  # report recipe printed
+
+
+def test_run_e2e_job_name_is_dataflow_safe_for_both_tables():
+    # Dataflow job names must match [a-z]([-a-z0-9]*[a-z0-9])? — no uppercase,
+    # no underscores. hacker_news is the table that used to break this.
+    job_name_re = re.compile(r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
+    for table in ("citibike", "hacker_news"):
+        r = run_script("run_e2e.sh", "R1p", table)
+        assert r.returncode == 0, r.stderr
+        match = re.search(r"flex-template run (\S+)", r.stdout)
+        assert match, r.stdout
+        job_name = match.group(1)
+        assert job_name.startswith("sdfb-"), job_name
+        assert job_name_re.match(job_name), job_name
 
 
 def test_run_e2e_s0_has_no_accelerator():

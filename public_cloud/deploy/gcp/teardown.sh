@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 source "${SCRIPT_DIR}/lib/common.sh" "$@"
 
-require_env PROJECT_SUFFIX
+require_env PROJECT_SUFFIX BILLING_ACCOUNT_ID
 
 FULL=0
 for arg in "$@"; do [[ "${arg}" == "--full" ]] && FULL=1; done
@@ -13,17 +13,6 @@ for arg in "$@"; do [[ "${arg}" == "--full" ]] && FULL=1; done
 if [[ "${DRY_RUN}" != "1" ]]; then
   read -r -p "Type the project id (${PROJECT_ID}) to confirm teardown: " CONFIRM
   [[ "${CONFIRM}" == "${PROJECT_ID}" ]] || die "confirmation mismatch — aborting"
-fi
-
-run gcloud functions delete "${KILL_FUNCTION}" --gen2 --region "${REGION}" --project "${PROJECT_ID}" --quiet
-run gcloud pubsub topics delete "${BUDGET_TOPIC}" --project "${PROJECT_ID}" --quiet
-# Budget lives on the billing account — delete by looked-up id (skip in dry-run).
-if [[ "${DRY_RUN}" != "1" ]]; then
-  BUDGET_ID="$(gcloud billing budgets list --billing-account "${BILLING_ACCOUNT_ID}" \
-    --filter 'displayName=sdfb-e2e-budget' --format 'value(name)' | head -1)"
-  [[ -n "${BUDGET_ID}" ]] && run gcloud billing budgets delete "${BUDGET_ID}" --quiet
-else
-  echo "+ gcloud billing budgets delete <looked-up sdfb-e2e-budget id> --quiet"
 fi
 
 run bq rm -r -f --dataset "${PROJECT_ID}:${QUALITY_DATASET}"
@@ -34,6 +23,19 @@ run gcloud storage rm --recursive "gs://${DATAFLOW_BUCKET}" --project "${PROJECT
 run gcloud storage rm --recursive "gs://${MODELS_BUCKET}" --project "${PROJECT_ID}"
 
 run gcloud artifacts repositories delete "${GAR_REPO}" --location "${REGION}" --project "${PROJECT_ID}" --quiet
+
+# Kill-switch function + topic go LAST — keep the cost cap armed while the
+# buckets/GAR/BQ deletes above run, in case teardown itself misbehaves.
+run gcloud functions delete "${KILL_FUNCTION}" --gen2 --region "${REGION}" --project "${PROJECT_ID}" --quiet
+run gcloud pubsub topics delete "${BUDGET_TOPIC}" --project "${PROJECT_ID}" --quiet
+# Budget lives on the billing account — delete by looked-up id (skip in dry-run).
+if [[ "${DRY_RUN}" != "1" ]]; then
+  BUDGET_ID="$(gcloud billing budgets list --billing-account "${BILLING_ACCOUNT_ID}" \
+    --filter 'displayName=sdfb-e2e-budget' --format 'value(name)' | head -1)"
+  [[ -n "${BUDGET_ID}" ]] && run gcloud billing budgets delete "${BUDGET_ID}" --quiet
+else
+  echo "+ gcloud billing budgets delete <looked-up sdfb-e2e-budget id> --quiet"
+fi
 
 if [[ "${FULL}" == "1" ]]; then
   run gcloud projects delete "${PROJECT_ID}" --quiet

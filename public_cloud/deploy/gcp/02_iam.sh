@@ -38,7 +38,10 @@ grant "${BUILD_SA}" roles/artifactregistry.writer
 grant "${BUILD_SA}" roles/storage.objectAdmin
 grant "${BUILD_SA}" roles/secretmanager.secretAccessor
 
-# Killswitch: detach billing — needs billing.admin ON THE BILLING ACCOUNT.
+# Killswitch: needs billing.projectManager on the PROJECT to read/describe
+# the project's billing info, plus billing.admin ON THE BILLING ACCOUNT to
+# actually detach it (CloudBillingClient.update_project_billing_info).
+grant "${KILL_SA}" roles/billing.projectManager
 run gcloud billing accounts add-iam-policy-binding "${BILLING_ACCOUNT_ID}" \
   --member "serviceAccount:${KILL_SA}" --role roles/billing.admin
 

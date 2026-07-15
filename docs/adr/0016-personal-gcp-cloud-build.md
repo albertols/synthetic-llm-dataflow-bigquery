@@ -30,3 +30,10 @@ Local `docker build`/`push` remains forbidden on both paths.
 - If the Dockerfile bootstrap line changes upstream, the personal build fails
   loudly at the grep, pointing at the sed to update.
 - Personal images live only in the personal GAR repo (keep-newest-1 policy).
+- Two accepted deviations from the corporate spec, scoped to the personal
+  path only: `run.googleapis.com` + `eventarc.googleapis.com` are enabled
+  (`01_bootstrap_project.sh`) because the gen2 `billing-killswitch` Cloud
+  Function requires them; and `BUILD_SA` holds project-level
+  `roles/storage.objectAdmin` (`02_iam.sh`) rather than a bucket-scoped grant,
+  because Cloud Build's auto-created source-staging bucket doesn't exist yet
+  when IAM is provisioned.

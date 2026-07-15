@@ -39,9 +39,11 @@ WHERE EXTRACT(MONTH FROM creation_time)=EXTRACT(MONTH FROM CURRENT_TIMESTAMP())'
 
 ```bash
 gcloud compute regions describe us-central1 --project $PROJECT_ID \
-  --format 'table(quotas.filter("metric:NVIDIA_T4_GPUS"))'
+  --flatten 'quotas' --filter 'quotas.metric=NVIDIA_T4_GPUS' \
+  --format 'table(quotas.metric,quotas.usage,quotas.limit)'
 gcloud compute project-info describe --project $PROJECT_ID \
-  --format 'value(quotas.filter("metric:GPUS_ALL_REGIONS"))'
+  --flatten 'quotas' --filter 'quotas.metric=GPUS_ALL_REGIONS' \
+  --format 'table(quotas.metric,quotas.usage,quotas.limit)'
 ```
 
 ## Cost model cheat-sheet (us-central1, batch)
