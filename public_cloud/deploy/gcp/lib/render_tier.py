@@ -16,7 +16,7 @@ JOB_KEYS = ("machine_type", "accelerator", "max_workers", "expect")
 
 def _expand(value: str, variables: dict[str, str]) -> str:
     for k, v in variables.items():
-        value = value.replace("{%s}" % k, v)
+        value = value.replace(f"{{{k}}}", v)
     return value
 
 

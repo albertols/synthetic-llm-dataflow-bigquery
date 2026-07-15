@@ -48,3 +48,4 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0013 — Synthesis engines use an LLM-as-distribution-estimator spine](0013-distribution-estimator-spine.md)
 - [0014 — `VLLMModelClient` owns the vLLM OpenAI server (amends 0011)](0014-vllm-model-client-owns-server.md)
 - [0015 — Dataflow worker image served via Artifact Registry (amends 0003)](0015-worker-image-via-artifact-registry.md)
+- [0016 — Personal-project images build on Cloud Build (ADR 0008 carve-out)](0016-personal-gcp-cloud-build.md)

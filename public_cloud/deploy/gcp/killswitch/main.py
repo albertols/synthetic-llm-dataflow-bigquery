@@ -11,7 +11,6 @@ import os
 
 import functions_framework
 from google.cloud import billing_v1
-
 from logic import should_kill
 
 PROJECT_ID = os.environ["GCP_PROJECT_ID"]
