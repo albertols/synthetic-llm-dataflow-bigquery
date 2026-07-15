@@ -21,6 +21,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from sdfb_core.contracts import GeneratedRecord, TableSchema
 
 
+class FreeTextEmptyYieldError(RuntimeError):
+    """The LLM call for a free-text pool succeeded but yielded zero usable
+    values (e.g. every choice was dropped at JSON parse).
+
+    Raised under ``strict_freetext`` so a run whose LLM contributes nothing
+    fails loudly instead of silently degrading to exemplar memorization —
+    the 2026-07-15 E2E failure mode (all 8x32 guided-JSON choices dropped,
+    gates PASSED, copy_ratio=1.0 on every free-text column).
+    """
+
+
 @runtime_checkable
 class ModelClient(Protocol):
     """Thin facade engines call to invoke the LLM.

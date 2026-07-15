@@ -13,13 +13,23 @@ Reference rows are pulled live every job (no caching). The digest captures *what
 ref_rows = (
     p
     | "ReadReference" >> beam.io.ReadFromBigQuery(
-        query=f"SELECT * FROM `{args.table}` LIMIT {args.reference_rows}",
+        query=(
+            f"SELECT * FROM `{args.table}` AS ref "
+            f"ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(ref)) "
+            f"LIMIT {args.reference_rows}"
+        ),
         use_standard_sql=True,
     )
 )
 ```
 
-Default N = 10_000 (override via `--reference_rows`). PII columns are NOT masked in M1 (DEV-only assumption); revisit before any PRD use.
+Default N = 10_000 (override via `--reference_rows`). The `FARM_FINGERPRINT`
+ordering is mandatory: a bare `LIMIT` returns a storage-contiguous slice
+(2026-07-15 run: 51 % of the sample from one load batch → column
+misclassification + skewed fidelity), while fingerprint ordering spreads the
+sample across the table *deterministically* — same table contents ⇒ same
+sample ⇒ stable `reference_digest`. PII columns are NOT masked in M1
+(DEV-only assumption); revisit before any PRD use.
 
 REF: https://beam.apache.org/releases/pydoc/current/apache_beam.io.gcp.bigquery.html
 
