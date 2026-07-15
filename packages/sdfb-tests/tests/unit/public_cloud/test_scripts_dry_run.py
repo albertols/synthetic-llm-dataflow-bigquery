@@ -199,3 +199,21 @@ def test_run_e2e_s0_has_no_accelerator():
 def test_run_e2e_rejects_unknown_tier():
     r = run_script("run_e2e.sh", "R99", "citibike")
     assert r.returncode != 0
+
+
+def test_teardown_dry_run_deletes_in_reverse_order():
+    r = run_script("teardown.sh")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "functions delete billing-killswitch" in out
+    assert "pubsub topics delete budget-alerts" in out
+    assert "bq rm -r -f" in out
+    assert "buckets delete" in out or "rm --recursive" in out
+    assert "artifacts repositories delete sdfb" in out
+    assert "projects delete" not in out  # only with --full
+
+
+def test_teardown_full_dry_run_deletes_project():
+    r = run_script("teardown.sh", "--full")
+    assert r.returncode == 0, r.stderr
+    assert "+ gcloud projects delete sdfb-e2e-test123" in r.stdout
