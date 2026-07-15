@@ -51,7 +51,7 @@ from sdfb_core.engines.b1_rag.profile import (
     profile_columns,
 )
 from sdfb_core.engines.b1_rag.serialize import serialize_rows
-from sdfb_core.engines.base import GenerationEngine
+from sdfb_core.engines.base import FreeTextEmptyYieldError, GenerationEngine
 from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -309,12 +309,14 @@ class B1RagEngine(GenerationEngine):
         }
         pool: list[str] = []
         try:
+            # No request seed: a pinned seed with n>1 collapses all n vLLM
+            # choices into one completion (2026-07-15 run: identical choice
+            # lengths per request → at most one distinct pool value).
             results = self._client.generate_json(
                 prompt=prompt,
                 json_schema=json_schema,
                 n=_DEFAULT_FREE_TEXT_POOL,
                 max_tokens=256,
-                seed=0,
             )
             for r in results:
                 val = r.get(prof.name) if isinstance(r, dict) else None
@@ -333,6 +335,24 @@ class B1RagEngine(GenerationEngine):
                 error=type(e).__name__,
             )
             pool = []
+        else:
+            if not pool:
+                # The call "succeeded" (no exception) yet yielded nothing
+                # usable — e.g. every choice dropped at JSON parse. Exactly
+                # as loud as the exception path: the 2026-07-15 E2E run
+                # memorized 100 % of free-text values through this hole.
+                if self._ctx is not None and self._ctx.strict_freetext:
+                    raise FreeTextEmptyYieldError(
+                        f"LLM call for free-text column {prof.name!r} "
+                        f"returned no usable values "
+                        f"(0 of {_DEFAULT_FREE_TEXT_POOL} choices parsed)."
+                    )
+                log_milestone(
+                    "freetext_llm_fallback",
+                    level=logging.WARNING,
+                    column=prof.name,
+                    error="EmptyYield",
+                )
 
         # Always fold in observed exemplars so fidelity holds even if the LLM
         # is unavailable / returns junk (the FakeModelClient canned-mode case).

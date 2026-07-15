@@ -16,7 +16,11 @@ import logging
 import numpy as np
 import pytest
 from sdfb_core.contracts import TableSchema
-from sdfb_core.engines import GenerationConfig, GenerationContext
+from sdfb_core.engines import (
+    FreeTextEmptyYieldError,
+    GenerationConfig,
+    GenerationContext,
+)
 from sdfb_core.engines.b1_rag import B1RagEngine, HashingEmbedder
 from sdfb_core.engines.b2_library.fidelity import profile_table
 from sdfb_core.engines.b2_library.freetext import FreeTextHook
@@ -27,6 +31,22 @@ class _BoomClient:
 
     def generate_json(self, *a, **k):
         raise RuntimeError("boom")
+
+
+class _EmptyYieldClient:
+    """A `ModelClient` whose `generate_json` succeeds but yields nothing.
+
+    Models the 2026-07-15 E2E failure: vLLM answered HTTP 200 but every
+    choice was dropped at JSON parse, so the call returns `[]` without
+    raising — the second silent-memorization path.
+    """
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def generate_json(self, *a, **k):
+        self.calls.append(k)
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +172,72 @@ def test_b1_strict_reraises(free_text_ctx):
     engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
     with pytest.raises(RuntimeError, match="boom"):
         engine.setup(_BoomClient(), strict_ctx)
+
+
+# ---------------------------------------------------------------------------
+# Empty yield — generate_json returns [] without raising (all choices were
+# dropped at parse). Must be as loud as an exception: milestone in lax mode,
+# FreeTextEmptyYieldError under strict_freetext.
+# ---------------------------------------------------------------------------
+
+
+def test_b1_empty_yield_emits_fallback_milestone(caplog, free_text_ctx):
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        engine.setup(_EmptyYieldClient(), free_text_ctx)
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=freetext_llm_fallback" in text
+    assert "error=EmptyYield" in text
+    # Exemplar fallback still fills the pool — the run degrades, not crashes.
+    assert engine._free_text_pools["bio"]
+
+
+def test_b1_strict_raises_on_empty_yield(free_text_ctx):
+    strict_ctx = free_text_ctx.model_copy(update={"strict_freetext": True})
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with pytest.raises(FreeTextEmptyYieldError, match="bio"):
+        engine.setup(_EmptyYieldClient(), strict_ctx)
+
+
+def test_b2_empty_yield_emits_fallback_milestone(caplog, wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    hook = FreeTextHook(_EmptyYieldClient())
+    rng = np.random.default_rng(7)
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        pool = hook.sample(profiles["summary"], 5, GenerationConfig(seed=7), rng)
+    assert pool
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=freetext_llm_fallback" in text
+    assert "error=EmptyYield" in text
+
+
+def test_b2_strict_raises_on_empty_yield(wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    hook = FreeTextHook(_EmptyYieldClient(), strict=True)
+    rng = np.random.default_rng(7)
+    with pytest.raises(FreeTextEmptyYieldError, match="summary"):
+        hook.sample(profiles["summary"], 5, GenerationConfig(seed=7), rng)
+
+
+# ---------------------------------------------------------------------------
+# B.1 pool inference must not pin a request seed — a fixed seed with n>1
+# collapses all n vLLM choices to a single completion (2026-07-15 run:
+# identical choice lengths per request).
+# ---------------------------------------------------------------------------
+
+
+def test_b1_pool_inference_does_not_pin_seed(free_text_ctx):
+    class _RecordingClient(_EmptyYieldClient):
+        def generate_json(self, *a, **k):
+            self.calls.append(k)
+            return [{"bio": f"generated value {i}"} for i in range(3)]
+
+    client = _RecordingClient()
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(client, free_text_ctx)
+    assert client.calls, "expected a pool-inference LLM call for 'bio'"
+    for call in client.calls:
+        assert call.get("seed") is None
 
 
 # ---------------------------------------------------------------------------
