@@ -5,8 +5,8 @@
     "mostRecentVersions": {"keepCount": 1}
   },
   {
-    "name": "delete-older-than-30d",
+    "name": "delete-older-than-1d",
     "action": {"type": "Delete"},
-    "condition": {"olderThan": "2592000s"}
+    "condition": {"olderThan": "86400s"}
   }
 ]

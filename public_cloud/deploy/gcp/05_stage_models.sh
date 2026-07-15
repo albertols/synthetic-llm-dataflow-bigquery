@@ -10,8 +10,10 @@ require_env PROJECT_SUFFIX
 
 # availableSecrets resolution happens BEFORE any step runs — missing secrets
 # hard-fail the build, so gate here with instructions (dry-run: probe says
-# absent but we only log, since no build is submitted).
-if ! probe gcloud secrets describe kaggle-username --project "${PROJECT_ID}"; then
+# absent but we only log, since no build is submitted). Probe BOTH secrets —
+# either one missing hard-fails the Cloud Build the same way.
+if ! probe gcloud secrets describe kaggle-username --project "${PROJECT_ID}" \
+   || ! probe gcloud secrets describe kaggle-key --project "${PROJECT_ID}"; then
   MSG="secrets kaggle-username/kaggle-key missing. Create them first:
   printf '%s' '<kaggle user>' | gcloud secrets create kaggle-username --data-file=- --project ${PROJECT_ID}
   printf '%s' '<kaggle key>'  | gcloud secrets create kaggle-key --data-file=- --project ${PROJECT_ID}"

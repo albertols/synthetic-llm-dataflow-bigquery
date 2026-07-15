@@ -52,6 +52,20 @@ and project already filled in):
    `GPUs (all regions) >= 1` and `NVIDIA T4 GPUs (us-central1) >= 1`. Count-1
    requests are usually auto-approved within minutes.
 
+**Arm-and-drill the kill switch (one-time, free).** After `04_budget_killswitch.sh`
+has run for real (not `--dry-run`), prove the topic→function→detach chain
+works end-to-end *before* trusting it to protect a real T4 run — publishing a
+fake budget-alert message doesn't cost anything:
+
+```bash
+gcloud pubsub topics publish budget-alerts --project $PROJECT_ID \
+  --message '{"costAmount": 99, "budgetAmount": 25}'
+# wait ~30s, then confirm billing actually detached:
+gcloud billing projects describe $PROJECT_ID   # billingEnabled should be false
+# relink before doing anything else (see §6):
+gcloud billing projects link $PROJECT_ID --billing-account $BILLING_ACCOUNT_ID
+```
+
 `05_stage_models.sh` needs Kaggle credentials in Secret Manager first (bge
 falls back to ModelScope if Kaggle is unavailable, but the secrets must
 still exist or the Cloud Build fails loud before any step runs):
@@ -60,6 +74,11 @@ still exist or the Cloud Build fails loud before any step runs):
 printf '%s' '<kaggle user>' | gcloud secrets create kaggle-username --data-file=- --project $PROJECT_ID
 printf '%s' '<kaggle key>'  | gcloud secrets create kaggle-key --data-file=- --project $PROJECT_ID
 ```
+
+`06_build_image.sh` pins the built `IMAGE_TAG` to `journal/image_tag` on a
+real (non-dry-run) submit, so `07_build_flex_template.sh` and `run_e2e.sh`
+pick up that exact build instead of whatever `git rev-parse HEAD` resolves to
+at their own invocation time.
 
 Full recipe (bootstrap, kill-switch recovery, teardown): skill
 `.claude/skills/gcp-project-ops.md`. Preflight audit (read-only, reusable
@@ -84,6 +103,9 @@ Four independent layers, in order of severity:
    Dataflow jobs get killed, BQ/GCS writes error out — until it is manually
    relinked (§6). The function is idempotent (no-ops if billing is already
    detached) and logs `BILLING DETACHED for <project> at <cost>/<budget>`.
+   Budget evaluation lags real spend by up to several hours, so the cap can
+   overshoot before it detaches — `run_e2e.sh`'s poll-timeout cancel (90 min
+   cap) bounds how long any single runaway job can burn money in that gap.
 2. **Alert emails.** The budget's threshold rules (50/80/90%) also trigger
    GCP's standard billing-alert emails to the billing account's admins,
    independent of the kill-switch — an early warning before the hard cap
@@ -151,6 +173,12 @@ If the kill-switch fires (billing detaches at 90% of budget):
    burned the budget before spending more.
 3. **Relink**: `gcloud billing projects link $PROJECT_ID --billing-account $BILLING_ACCOUNT_ID`.
 4. **Re-verify**: `./01_bootstrap_project.sh` (idempotent) then resume.
+
+**Mid-month recovery.** Budget `costAmount` is calendar-month cumulative —
+if you're recovering mid-month, relinking alone reproduces the fire almost
+immediately. Raise `BUDGET_AMOUNT` and re-run `./04_budget_killswitch.sh`
+(which now updates the existing budget's amount instead of no-opping)
+**before** step 3 above, or the function re-detaches within hours of relink.
 
 ## 7. Teardown
 
