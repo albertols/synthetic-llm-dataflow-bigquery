@@ -173,3 +173,29 @@ def test_build_and_template_scripts_dry_run():
     assert r.returncode == 0, r.stderr
     assert "flex-template build gs://sdfb-e2e-test123-dataflow/templates/sdfb-testtag-template.json" in r.stdout
     assert "docker/flex_template_metadata.json" in r.stdout
+
+
+def test_run_e2e_dry_run_assembles_submit_command():
+    r = run_script("run_e2e.sh", "R1p", "citibike")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "dataflow flex-template run" in out
+    assert "--template-file-gcs-location gs://sdfb-e2e-test123-dataflow/templates/sdfb-testtag-template.json" in out
+    assert "--worker-machine-type n1-standard-8" in out
+    assert "worker_accelerator=type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx" in out
+    assert "--max-workers 1" in out
+    assert "engine=b1_rag" in out and "vllm_dtype=float16" in out
+    assert "run_id=r1p-citibike-" in out
+    assert "e2e_gcp_probe.py" in out  # report recipe printed
+
+
+def test_run_e2e_s0_has_no_accelerator():
+    r = run_script("run_e2e.sh", "S0", "citibike")
+    assert r.returncode == 0, r.stderr
+    assert "worker_accelerator" not in r.stdout
+    assert "--worker-machine-type e2-standard-8" in r.stdout
+
+
+def test_run_e2e_rejects_unknown_tier():
+    r = run_script("run_e2e.sh", "R99", "citibike")
+    assert r.returncode != 0
