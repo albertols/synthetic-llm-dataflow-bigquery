@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import os
 from collections import Counter
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sdfb_beam.handlers.fake_client import FakeModelClient
 from sdfb_core.contracts import GeneratedRecord, TableSchema
 from sdfb_core.engines import GenerationConfig, GenerationContext, get_engine
 from sdfb_core.engines.b1_rag import B1RagEngine, ColumnKind, HashingEmbedder
+from sdfb_core.engines.b1_rag._fidelity import ColumnSampler
 from sdfb_core.engines.b1_rag.index import build_index
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.b1_rag.serialize import serialize_row
@@ -296,3 +298,231 @@ def test_similarity_widens_distribution(customers_ctx):
     high = rare_rate(1.0)
     low = rare_rate(0.0)
     assert low >= high  # widening lifts the rare category toward uniform
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-15 E2E remediation — profiling & sampling fidelity, generic rules.
+#
+# The live run exposed three generic sampler defects (report §2/§3):
+#   - low-cardinality INT columns treated as continuous invented category
+#     codes (COL_002: 2 source values -> 5 landing values);
+#   - TIMESTAMP/DATE columns sampled categorically -> verbatim copies of
+#     real event timestamps at microsecond precision (COL_052);
+#   - clip-to-observed-range piled ~5 % of numeric draws exactly on the
+#     min/max bounds (COL_007/009/016/047/057 single-value spikes).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def events_schema() -> TableSchema:
+    return TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.events"},
+            "schema": [
+                {"name": "event_id", "type": "INT64", "mode": "REQUIRED"},
+                {"name": "code", "type": "INT64", "mode": "REQUIRED"},
+                {"name": "amount", "type": "INT64", "mode": "REQUIRED"},
+                {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+                {"name": "load_date", "type": "DATE", "mode": "REQUIRED"},
+            ],
+            "primary_keys": ["event_id"],
+        }
+    )
+
+
+@pytest.fixture
+def events_rows() -> list[dict]:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    return [
+        {
+            "event_id": i,
+            "code": [1, 2][i % 2],  # 2 distinct over 200 rows — a code enum
+            "amount": (i * 37) % 10_000,  # 200 distinct — genuinely continuous
+            "created_at": base
+            + timedelta(minutes=13 * i, seconds=i % 60, microseconds=i),
+            "load_date": (base + timedelta(days=i % 60)).date(),  # 60 distinct
+        }
+        for i in range(200)
+    ]
+
+
+@pytest.fixture
+def events_ctx(events_schema, events_rows) -> GenerationContext:
+    return GenerationContext(
+        table_schema=events_schema,
+        reference_rows=events_rows,
+        reference_digest="events-digest",
+        pipeline_run_id="b1-events",
+    )
+
+
+def test_profile_low_cardinality_int_is_categorical(events_schema, events_rows):
+    profiles = profile_columns(events_schema, events_rows)
+    code = profiles["code"]
+    assert code.kind is ColumnKind.CATEGORICAL
+    assert set(code.categories) == {1, 2}
+
+
+def test_profile_full_cardinality_int_stays_numeric(events_schema, events_rows):
+    profiles = profile_columns(events_schema, events_rows)
+    assert profiles["amount"].kind is ColumnKind.NUMERIC
+    # PK-like all-distinct integers must also stay numeric (novel values are
+    # the point there), even though the distinct count is small in fixtures.
+    assert profiles["event_id"].kind is ColumnKind.NUMERIC
+
+
+def test_generated_low_cardinality_ints_never_invent_codes(events_ctx):
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(FakeModelClient(responses=[]), events_ctx)
+    out = list(engine.generate_batch(300, GenerationConfig(seed=11)))
+    assert len(out) == 300
+    assert {r.code for r in out} <= {1, 2}
+
+
+def test_profile_high_cardinality_timestamp_is_temporal(events_schema, events_rows):
+    profiles = profile_columns(events_schema, events_rows)
+    created = profiles["created_at"]
+    assert created.kind is ColumnKind.TEMPORAL
+    assert created.numeric_min is not None
+    assert created.numeric_max is not None
+    assert created.numeric_max > created.numeric_min
+
+
+def test_profile_low_cardinality_timestamp_stays_categorical():
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.loads"},
+            "schema": [
+                {"name": "id", "type": "INT64", "mode": "REQUIRED"},
+                {"name": "loaded_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+            ],
+            "primary_keys": ["id"],
+        }
+    )
+    stamps = [datetime(2026, 7, d, 12, 0, tzinfo=UTC) for d in range(1, 6)]
+    rows = [{"id": i, "loaded_at": stamps[i % 5]} for i in range(100)]
+    profiles = profile_columns(schema, rows)
+    # 5 distinct load timestamps over 100 rows — an enum in disguise; verbatim
+    # categorical sampling is the faithful (and harmless) treatment.
+    assert profiles["loaded_at"].kind is ColumnKind.CATEGORICAL
+
+
+def test_temporal_sampling_novel_in_range_and_typed(events_ctx, events_rows):
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(FakeModelClient(responses=[]), events_ctx)
+    out = list(engine.generate_batch(200, GenerationConfig(seed=13)))
+
+    observed_ts = {r["created_at"] for r in events_rows}
+    ts = [r.created_at for r in out]
+    assert all(isinstance(v, datetime) for v in ts)
+    assert min(ts) >= min(observed_ts)
+    assert max(ts) <= max(observed_ts)
+    # Verbatim microsecond-precision copies are linkage quasi-identifiers —
+    # the bulk of generated timestamps must be novel.
+    novel_share = sum(v not in observed_ts for v in ts) / len(ts)
+    assert novel_share >= 0.5
+
+    observed_dates = {r["load_date"] for r in events_rows}
+    dates = [r.load_date for r in out]
+    assert all(isinstance(v, date) and not isinstance(v, datetime) for v in dates)
+    assert min(dates) >= min(observed_dates)
+    assert max(dates) <= max(observed_dates)
+
+
+def test_numeric_sampling_does_not_pile_on_bounds(events_schema, events_rows):
+    import numpy as np
+
+    profiles = profile_columns(events_schema, events_rows)
+    sampler = ColumnSampler(profiles["amount"])
+    rng = np.random.default_rng(42)
+    vals = sampler.sample_numpy(rng, 2000, similarity=0.5)
+    lo = round(profiles["amount"].numeric_min)
+    hi = round(profiles["amount"].numeric_max)
+    bound_share = sum(v in (lo, hi) for v in vals) / len(vals)
+    # Clipping out-of-range blends used to stack ~5 % of draws exactly on the
+    # observed min/max (the COL_007/009/… spikes); out-of-range draws must be
+    # redrawn inside the range instead.
+    assert bound_share < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Free-text pools — LLM-identified format, novel-only for unique-valued
+# columns (generic: UUIDs, hex ids, unique prose — no type hardcoding).
+# ---------------------------------------------------------------------------
+
+
+class _RecordingPoolClient:
+    """Returns canned pool dicts and records every generate_json call."""
+
+    def __init__(self, responses: list[dict]):
+        self._responses = responses
+        self.prompts: list[str] = []
+
+    def generate_json(self, prompt, json_schema, **kwargs):
+        self.prompts.append(prompt)
+        return list(self._responses)
+
+
+def test_b1_pool_filters_verbatim_exemplar_copies(free_text_ctx):
+    observed = [r["bio"] for r in free_text_ctx.reference_rows]
+    responses = [
+        {"bio": observed[0]},  # verbatim copy — must be dropped
+        {"bio": observed[1]},  # verbatim copy — must be dropped
+        {"bio": "Novel synthetic biography A"},
+        {"bio": "Novel synthetic biography B"},
+    ]
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(_RecordingPoolClient(responses), free_text_ctx)
+    pool = engine._free_text_pools["bio"]
+    assert "Novel synthetic biography A" in pool
+    assert "Novel synthetic biography B" in pool
+    # `bio` is unique-valued in the reference (every row distinct): observed
+    # values must not appear in the pool — neither via the LLM echoing them
+    # nor via exemplar folding.
+    assert observed[0] not in pool
+    assert observed[1] not in pool
+    assert not set(observed) & set(pool)
+
+
+def test_b1_non_unique_freetext_folds_exemplars():
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.feedback"},
+            "schema": [
+                {"name": "id", "type": "INT64", "mode": "REQUIRED"},
+                {"name": "comment", "type": "STRING", "mode": "REQUIRED"},
+            ],
+            "primary_keys": ["id"],
+        }
+    )
+    # 60 distinct comments over 240 rows: free text by cardinality (>50) but
+    # NOT unique-valued (unique ratio 0.25) — exemplar folding is fidelity-
+    # preserving here, not memorization of one-per-row values.
+    rows = [
+        {"id": i, "comment": f"Observed comment number {i % 60}"}
+        for i in range(240)
+    ]
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=rows,
+        reference_digest="fb-digest",
+        pipeline_run_id="b1-fb",
+    )
+    responses = [{"comment": f"Fresh comment {i}"} for i in range(10)]
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(_RecordingPoolClient(responses), ctx)
+    pool = engine._free_text_pools["comment"]
+    assert any(v.startswith("Fresh comment") for v in pool)
+    assert any(v.startswith("Observed comment") for v in pool)
+
+
+def test_b1_pool_prompt_demands_format_identification_and_novelty(free_text_ctx):
+    client = _RecordingPoolClient([{"bio": "Novel value"}])
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(client, free_text_ctx)
+    assert client.prompts, "expected a pool-inference call for 'bio'"
+    prompt = client.prompts[0].lower()
+    # The LLM identifies the column's format and generates accordingly —
+    # never copying exemplars verbatim (generic across UUIDs/dates/codes).
+    assert "format" in prompt
+    assert "verbatim" in prompt

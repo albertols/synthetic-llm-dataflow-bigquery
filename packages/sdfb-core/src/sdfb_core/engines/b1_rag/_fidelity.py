@@ -26,7 +26,12 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sdfb_core.engines.b1_rag.profile import ColumnKind, ColumnProfile
+from sdfb_core.engines.b1_rag.profile import (
+    ColumnKind,
+    ColumnProfile,
+    temporal_from_float,
+    temporal_to_float,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Sequence
@@ -56,6 +61,17 @@ class ColumnSampler:
 
     def __init__(self, profile: ColumnProfile) -> None:
         self.profile = profile
+        self._temporal_floats: list[float] | None = None
+
+    def _temporal_obs_floats(self) -> list[float]:
+        """Observed TEMPORAL values on the float axis (computed once)."""
+        if self._temporal_floats is None:
+            self._temporal_floats = [
+                f
+                for f in (temporal_to_float(v) for v in self.profile.observed_values)
+                if f is not None
+            ]
+        return self._temporal_floats
 
     # -- NumPy (vectorized) backend ----------------------------------------
 
@@ -73,35 +89,58 @@ class ColumnSampler:
         p = self.profile
         if p.kind is ColumnKind.NUMERIC:
             return self._numeric_numpy(np, rng, n, similarity)
+        if p.kind is ColumnKind.TEMPORAL:
+            return self._temporal_numpy(np, rng, n, similarity)
         if p.kind is ColumnKind.CATEGORICAL:
             return self._categorical_numpy(np, rng, n, similarity)
         # FREE_TEXT fallback (engine normally patches these via the LLM pool).
         return self._from_pool_numpy(np, rng, p.text_examples or p.observed_values, n)
 
+    def _blend_floats_numpy(
+        self, np, rng, obs, lo: float, hi: float, n: int, similarity: float
+    ) -> list:
+        """Anchored/uniform blend of n floats within [lo, hi].
+
+        similarity→1: sample observed values + small jitter (tight).
+        similarity→0: uniform over [lo, hi] (wide). Out-of-range blends are
+        REDRAWN uniformly inside the range, not clipped — clipping stacked
+        ~5 % of draws exactly on the observed min/max (2026-07-15 E2E:
+        single-value spikes at the bounds on COL_007/009/016/047/057).
+        """
+        if hi <= lo:
+            return [lo] * n
+        if not obs.size:
+            return rng.uniform(lo, hi, size=n).tolist()
+        idx = rng.integers(0, obs.size, size=n)
+        anchored = obs[idx]
+        spread = hi - lo
+        jitter = rng.uniform(-0.5, 0.5, size=n) * spread * (1.0 - similarity)
+        uniform = rng.uniform(lo, hi, size=n)
+        blended = similarity * (anchored + jitter) + (1.0 - similarity) * uniform
+        oob = (blended < lo) | (blended > hi)
+        n_oob = int(oob.sum())
+        if n_oob:
+            blended[oob] = rng.uniform(lo, hi, size=n_oob)
+        return blended.tolist()
+
     def _numeric_numpy(self, np, rng, n: int, similarity: float) -> list:
         p = self.profile
         lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
         hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
-        if hi <= lo:
-            base = [lo] * n
-        else:
-            obs = np.asarray(
-                [float(x) for x in p.observed_values if _is_number(x)],
-                dtype="float64",
-            )
-            if obs.size:
-                # similarity→1: sample observed values + small jitter (tight).
-                # similarity→0: uniform over [lo, hi] (wide). Blend the two.
-                idx = rng.integers(0, obs.size, size=n)
-                anchored = obs[idx]
-                spread = (hi - lo)
-                jitter = rng.uniform(-0.5, 0.5, size=n) * spread * (1.0 - similarity)
-                uniform = rng.uniform(lo, hi, size=n)
-                blended = similarity * (anchored + jitter) + (1.0 - similarity) * uniform
-                base = np.clip(blended, lo, hi).tolist()
-            else:
-                base = rng.uniform(lo, hi, size=n).tolist()
+        obs = np.asarray(
+            [float(x) for x in p.observed_values if _is_number(x)],
+            dtype="float64",
+        )
+        base = self._blend_floats_numpy(np, rng, obs, lo, hi, n, similarity)
         return [self._coerce_numeric(v) for v in base]
+
+    def _temporal_numpy(self, np, rng, n: int, similarity: float) -> list:
+        p = self.profile
+        lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
+        hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
+        obs = np.asarray(self._temporal_obs_floats(), dtype="float64")
+        base = self._blend_floats_numpy(np, rng, obs, lo, hi, n, similarity)
+        return [temporal_from_float(v, p.bq_type) for v in base]
 
     def _categorical_numpy(self, np, rng, n: int, similarity: float) -> list:
         p = self.profile
@@ -143,16 +182,18 @@ class ColumnSampler:
         p = self.profile
         if p.kind is ColumnKind.NUMERIC:
             return self._numeric_python(rng, n, similarity)
+        if p.kind is ColumnKind.TEMPORAL:
+            return self._temporal_python(rng, n, similarity)
         if p.kind is ColumnKind.CATEGORICAL:
             return self._categorical_python(rng, n, similarity)
         return self._from_pool_python(rng, p.text_examples or p.observed_values, n)
 
-    def _numeric_python(self, rng, n: int, similarity: float) -> list:
-        p = self.profile
-        lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
-        hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
-        obs = [float(x) for x in p.observed_values if _is_number(x)]
-        out: list = []
+    def _blend_floats_python(
+        self, rng, obs: list[float], lo: float, hi: float, n: int, similarity: float
+    ) -> list[float]:
+        """Pure-Python mirror of `_blend_floats_numpy` (same redraw-not-clip
+        semantics; not bit-identical to the NumPy backend, but seeded)."""
+        out: list[float] = []
         spread = hi - lo
         for _ in range(n):
             if hi <= lo:
@@ -162,11 +203,29 @@ class ColumnSampler:
                 jitter = (rng.random() - 0.5) * spread * (1.0 - similarity)
                 uniform = rng.uniform(lo, hi)
                 v = similarity * (anchored + jitter) + (1.0 - similarity) * uniform
-                v = min(max(v, lo), hi)
+                if v < lo or v > hi:
+                    v = rng.uniform(lo, hi)
             else:
                 v = rng.uniform(lo, hi)
-            out.append(self._coerce_numeric(v))
+            out.append(v)
         return out
+
+    def _numeric_python(self, rng, n: int, similarity: float) -> list:
+        p = self.profile
+        lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
+        hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
+        obs = [float(x) for x in p.observed_values if _is_number(x)]
+        base = self._blend_floats_python(rng, obs, lo, hi, n, similarity)
+        return [self._coerce_numeric(v) for v in base]
+
+    def _temporal_python(self, rng, n: int, similarity: float) -> list:
+        p = self.profile
+        lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
+        hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
+        base = self._blend_floats_python(
+            rng, self._temporal_obs_floats(), lo, hi, n, similarity
+        )
+        return [temporal_from_float(v, p.bq_type) for v in base]
 
     def _categorical_python(self, rng, n: int, similarity: float) -> list:
         p = self.profile

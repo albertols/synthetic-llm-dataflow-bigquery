@@ -297,9 +297,13 @@ class B1RagEngine(GenerationEngine):
             seed_examples = list(prof.text_examples[:_DEFAULT_TOP_K])
 
         prompt = (
-            f"Generate {_DEFAULT_FREE_TEXT_POOL} realistic, distinct values for "
-            f"the column '{prof.name}'. Match the style and format of these "
-            f"examples: {seed_examples}. Return JSON objects each with a "
+            f"You generate synthetic tabular data. First identify the exact "
+            f"format of these example values for the column '{prof.name}' "
+            f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
+            f"timestamp, natural-language text), then generate "
+            f"{_DEFAULT_FREE_TEXT_POOL} NEW, distinct, fictitious values in "
+            f"exactly that format. Never copy an example verbatim. "
+            f"Examples: {seed_examples}. Return JSON objects each with a "
             f"'{prof.name}' field."
         )
         json_schema = {
@@ -318,10 +322,7 @@ class B1RagEngine(GenerationEngine):
                 n=_DEFAULT_FREE_TEXT_POOL,
                 max_tokens=256,
             )
-            for r in results:
-                val = r.get(prof.name) if isinstance(r, dict) else None
-                if isinstance(val, str) and val:
-                    pool.append(val)
+            pool = _novel_string_values(results, prof)
         except Exception as e:
             if self._ctx is not None and self._ctx.strict_freetext:
                 raise
@@ -354,11 +355,16 @@ class B1RagEngine(GenerationEngine):
                     error="EmptyYield",
                 )
 
-        # Always fold in observed exemplars so fidelity holds even if the LLM
-        # is unavailable / returns junk (the FakeModelClient canned-mode case).
-        for ex in prof.text_examples:
-            if ex not in pool:
-                pool.append(ex)
+        # Fold observed exemplars in for fidelity — EXCEPT when the column is
+        # unique-valued (ids, one-per-row prose) and the LLM delivered: there
+        # every folded exemplar is a memorized real value (2026-07-15 E2E:
+        # copy_ratio=1.0 on all 8 free-text columns). An empty pool still
+        # falls back to exemplars in lax mode — loudly, via the fallback
+        # milestone emitted above.
+        if not pool or not prof.is_unique_valued:
+            for ex in prof.text_examples:
+                if ex not in pool:
+                    pool.append(ex)
         # De-dup, preserve order, bound the pool size.
         seen: dict[str, None] = {}
         for v in pool:
@@ -375,6 +381,20 @@ class B1RagEngine(GenerationEngine):
 
             return np.random.default_rng(mixed)
         return random.Random(mixed)
+
+
+def _novel_string_values(results: list, prof: ColumnProfile) -> list[str]:
+    """Extract the column's string values from LLM results, keeping only
+    NOVEL ones. An LLM value that equals an observed reference value is a
+    copy, not a generation — dropping copies here means an all-copies
+    response counts as an empty yield (loud, never silent memorization)."""
+    observed = set(prof.observed_values)
+    out: list[str] = []
+    for r in results:
+        val = r.get(prof.name) if isinstance(r, dict) else None
+        if isinstance(val, str) and val and val not in observed:
+            out.append(val)
+    return out
 
 
 def _mix_seed(seed: int | None, salt: str) -> int:
