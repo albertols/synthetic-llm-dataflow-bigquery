@@ -21,6 +21,8 @@ Single source of truth for milestone scope. Locked decisions per milestone live 
 | 11 | E2E Dataflow run: Gemma 4 E4B → 26B-A4B MoE | 🔒 pending | M4 |
 | 12 | `thresholds.yml` wiring + `validation_runs` BQ table | ✅ done | laptop (DirectRunner; BQ write verified in §11) |
 
+Personal-GCP T4 E2E layer (public_cloud/deploy/gcp) — spec 2026-07-14, ADR 0016; unblocks the matrix without corporate LZ/M4.
+
 **Hard constraints (immutable for M1)** — see [`adr/0001-no-managed-gcp-services.md`](adr/0001-no-managed-gcp-services.md):
 - No Vertex AI, Dataplex, Looker.
 - No HuggingFace Hub at runtime.
