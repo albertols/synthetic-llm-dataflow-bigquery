@@ -4,7 +4,6 @@
 #   tiers:  S0 R1p R2p R3p N4 P6 P7   (R1p == R1' — shell-safe names)
 #   tables: citibike hacker_news
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 source "${SCRIPT_DIR}/lib/common.sh" "$@"
 
@@ -48,7 +47,7 @@ if [[ "${DRY_RUN}" != "1" ]]; then
   # Poll to a terminal state (image+model pull can take ~10 min; cap 90 min).
   for _ in $(seq 1 90); do
     STATE="$(gcloud dataflow jobs describe "${JOB_ID}" --project "${PROJECT_ID}" \
-      --region "${REGION}" --format 'value(currentState)')"
+      --region "${REGION}" --format 'value(currentState)' || echo JOB_STATE_UNKNOWN)"
     case "${STATE}" in
       JOB_STATE_DONE|JOB_STATE_FAILED|JOB_STATE_CANCELLED|JOB_STATE_DRAINED) break ;;
       *) sleep 60 ;;
