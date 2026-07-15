@@ -62,6 +62,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `validation-mode-a.md` — three lines of defense, DLQ, whylogs merge
 - `reference-data.md` — live BQ SELECT + canonical provenance digest
 - `gpu-dockerfile.md` — L4 + vLLM custom-container recipe
+- `gcp-project-ops.md` / `gcp-e2e-run.md` / `gcp-cost-audit.md` — personal-GCP E2E layer (bootstrap/run/cost; see `public_cloud/deploy/gcp/`)
 
 `.claude/agents/` — bounded sub-agent definitions (use the `Agent` tool with `subagent_type` matching the file's `name:`). Each agent owns one concern; do not let them sprawl.
 - `ddl-codegen-agent` — schema → contracts, pure laptop work
@@ -69,6 +70,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `b1-rag-engineer` — owns `worktrees/b1-rag`
 - `b2-library-engineer` — owns `worktrees/b2-library`
 - `gpu-image-builder` — owns `docker/Dockerfile` + the vLLM handler (build itself happens in CI, see ADR 0008)
+- `gcp-deploy-runner` / `e2e-interpreter` / `gcp-po-auditor` — personal-GCP E2E campaign (deploy → interpret → audit)
 
 ## Critical path
 
@@ -96,3 +98,4 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Cross-session preferences and project context** → `~/.claude/projects/.../memory/MEMORY.md`.
+- **Personal-GCP E2E runs (T4, cost-capped)** → [`public_cloud/deploy/gcp/README.md`](public_cloud/deploy/gcp/README.md).

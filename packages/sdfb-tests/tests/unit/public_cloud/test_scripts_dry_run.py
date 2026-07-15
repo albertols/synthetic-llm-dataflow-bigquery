@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import os
 import subprocess
-import yaml
 from pathlib import Path
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 GCP_DIR = REPO_ROOT / "public_cloud" / "deploy" / "gcp"
@@ -28,14 +29,14 @@ FAKE_ENV = {
 def run_script(name: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(GCP_DIR / name), *args, "--dry-run"],
-        capture_output=True, text=True, env=FAKE_ENV, cwd=REPO_ROOT,
+        capture_output=True, text=True, env=FAKE_ENV, cwd=REPO_ROOT, check=False,
     )
 
 
 def test_env_sh_derives_names():
     out = subprocess.run(
         ["bash", "-c", f'source "{GCP_DIR}/env.sh" && echo "$PROJECT_ID|$IMAGE_URI|$TEMPLATE_PATH|$MODEL_URI"'],
-        capture_output=True, text=True, env=FAKE_ENV,
+        capture_output=True, text=True, env=FAKE_ENV, check=False,
     )
     assert out.returncode == 0, out.stderr
     project, image, template, model = out.stdout.strip().split("|")
@@ -50,7 +51,7 @@ def test_common_sh_run_and_probe_honor_dry_run():
         f'source "{GCP_DIR}/env.sh" && source "{GCP_DIR}/lib/common.sh" --dry-run && '
         'run gcloud projects create x && (probe gcloud projects describe x && echo FOUND || echo ABSENT)'
     )
-    out = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, env=FAKE_ENV)
+    out = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, env=FAKE_ENV, check=False)
     assert out.returncode == 0, out.stderr
     assert "+ gcloud projects create x" in out.stdout
     assert "ABSENT" in out.stdout  # probe pretends resources are absent in dry-run
@@ -60,7 +61,7 @@ def test_all_scripts_pass_bash_syntax_check():
     scripts = sorted(GCP_DIR.glob("*.sh")) + sorted((GCP_DIR / "lib").glob("*.sh"))
     assert scripts, "no scripts found"
     for s in scripts:
-        r = subprocess.run(["bash", "-n", str(s)], capture_output=True, text=True)
+        r = subprocess.run(["bash", "-n", str(s)], capture_output=True, text=True, check=False)
         assert r.returncode == 0, f"{s.name}: {r.stderr}"
 
 
