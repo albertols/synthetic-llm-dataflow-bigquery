@@ -251,6 +251,20 @@ with models.DAG(
                         # additionalExperiments — the same proven channel as
                         # worker_accelerator above. CPU smoke path: harmless dup.
                         "{{ 'automatically_use_created_reservation' if params.client_type == 'vllm' else 'upload_graph' }}",
+                        # ONE SDK process per GPU worker (RUN_PLAYBOOK §3).
+                        # Runner v2's default spawns one sibling SDK process
+                        # per vCPU (8 on n1/g2-standard-8) and EVERY sibling
+                        # runs DoFn setup(): its own 7.5GB weight pull, its
+                        # own vLLM spawn into the single GPU (all but the
+                        # first die with CUDA OOM), its own CPU embedding pass
+                        # fighting the other seven for the same 8 vCPUs. Each
+                        # Dataflow bundle retry lands on a DIFFERENT sibling
+                        # and repeats the full ~1.5h setup — the 2026-07-16
+                        # run burned 5.4h across 4 retries on exactly this
+                        # (job ..._13_23_14-11053114042412770609). The CPU
+                        # smoke keeps the default: siblings parallelize the
+                        # fake path — harmless duplicate again.
+                        "{{ 'no_use_multiple_sdk_containers' if params.client_type == 'vllm' else 'upload_graph' }}",
                         f"use_network_tags={network_tags_chain}",
                         f"use_network_tags_for_flex_templates={network_tags_chain}",
                     ],
