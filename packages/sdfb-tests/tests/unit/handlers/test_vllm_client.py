@@ -143,6 +143,28 @@ def test_generate_json_passes_sampling_params():
     assert kwargs["seed"] == 99
 
 
+def test_generate_json_passes_top_p_and_top_k_when_set():
+    # A served model can pin sampling truncation via its generation_config
+    # (Qwen3-4B: top_k=20, top_p=0.8 — vLLM's override warning in the
+    # 2026-07-16 run). Escalated pool retries must be able to send explicit
+    # overrides; top_p is OpenAI-standard, top_k is vLLM-specific extra_body
+    # (0 = consider all tokens).
+    c, fake_openai = _client_with_fake_openai(['{"a": 1}'])
+    c.generate_json("p", {}, temperature=1.3, top_p=1.0, top_k=0)
+    kwargs = fake_openai.chat.completions.create.call_args.kwargs
+    assert kwargs["top_p"] == 1.0
+    assert kwargs["extra_body"]["top_k"] == 0
+
+
+def test_generate_json_omits_top_p_and_top_k_by_default():
+    # Default requests keep the served model's vendor-tuned sampling defaults.
+    c, fake_openai = _client_with_fake_openai(['{"a": 1}'])
+    c.generate_json("p", {})
+    kwargs = fake_openai.chat.completions.create.call_args.kwargs
+    assert "top_p" not in kwargs
+    assert "top_k" not in kwargs["extra_body"]
+
+
 def test_generate_json_omits_seed_when_none():
     # A per-request seed with n>1 collapses all n choices to one completion
     # on vLLM — no seed in the request unless a caller explicitly sets one.

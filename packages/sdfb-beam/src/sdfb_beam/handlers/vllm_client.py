@@ -288,6 +288,8 @@ class VLLMModelClient:
         temperature: float = 0.7,
         n: int = 1,
         seed: int | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
     ) -> list[dict]:
         """Return up to `n` JSON dicts conforming to `json_schema`.
 
@@ -333,6 +335,16 @@ class VLLMModelClient:
         # completions — only send one when a caller explicitly asks.
         if seed is not None:
             request["seed"] = seed
+        # Truncation overrides. A served model can pin top_k/top_p through its
+        # generation_config.json (Qwen3-4B ships top_k=20, top_p=0.8), which
+        # collapses the nucleus onto exemplar echoes and makes temperature
+        # escalation inert (2026-07-16 run: 96/96 verbatim copies at 0.7-1.3).
+        # top_p is OpenAI-standard; top_k is vLLM-specific and travels in
+        # extra_body (0 = consider all tokens).
+        if top_p is not None:
+            request["top_p"] = top_p
+        if top_k is not None:
+            request["extra_body"]["top_k"] = top_k
         response = self._client.chat.completions.create(**request)
 
         out: list[dict] = []

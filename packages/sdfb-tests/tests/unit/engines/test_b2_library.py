@@ -228,7 +228,8 @@ def test_free_text_hook_temperature_tracks_similarity(wide_ctx):
         call_count = 0
 
         def generate_json(self, prompt, json_schema, *, max_tokens=2048,
-                           temperature=0.7, n=1, seed=None):
+                           temperature=0.7, n=1, seed=None,
+                           top_p=None, top_k=None):
             self.call_count += 1
             captured.append(temperature)
             return [{"values": ["alpha", "beta", "gamma"]}]

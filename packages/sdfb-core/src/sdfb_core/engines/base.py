@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,6 +49,41 @@ def escalating_temperatures(start: float = 0.7) -> tuple[float, ...]:
     return (start, *(t for t in steps if t > start + 1e-9))
 
 
+class SamplingLevel(NamedTuple):
+    """One free-text pool attempt's sampling configuration.
+
+    ``None`` for ``top_p`` / ``top_k`` leaves the served model's own defaults
+    (its ``generation_config.json``) in force; explicit values override them
+    per-request.
+    """
+
+    temperature: float
+    top_p: float | None = None
+    top_k: int | None = None
+
+
+def escalating_sampling(start: float = 0.7) -> tuple[SamplingLevel, ...]:
+    """Sampling configurations for free-text pool retries.
+
+    Temperature alone is NOT enough: a served model can pin sampling
+    truncation via its shipped ``generation_config.json`` (Qwen3-4B:
+    ``top_k=20, top_p=0.8`` — vLLM logs an override warning). When the model
+    is confident in echoing an exemplar, that nucleus collapses to the echo
+    token and temperature has nothing left to diversify — the 2026-07-16 corp
+    run produced 96/96 verbatim copies at 0.7, 1.0 AND 1.3. So the first
+    attempt keeps the vendor-tuned defaults, and every retry escalates
+    temperature (via `escalating_temperatures`) with the truncation fully
+    unclamped: ``top_p=1.0`` and ``top_k=0`` (vLLM: consider all tokens). A
+    ``start`` already at the temperature ceiling still gets one unclamped
+    retry — that is the retry that can actually change the outcome.
+    """
+    temps = escalating_temperatures(start)
+    retries = [SamplingLevel(t, top_p=1.0, top_k=0) for t in temps[1:]]
+    if not retries:
+        retries = [SamplingLevel(temps[0], top_p=1.0, top_k=0)]
+    return (SamplingLevel(temps[0]), *retries)
+
+
 @runtime_checkable
 class ModelClient(Protocol):
     """Thin facade engines call to invoke the LLM.
@@ -77,8 +112,16 @@ class ModelClient(Protocol):
         temperature: float = 0.7,
         n: int = 1,
         seed: int | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
     ) -> list[dict]:
-        """Return up to `n` JSON dicts conforming to `json_schema`."""
+        """Return up to `n` JSON dicts conforming to `json_schema`.
+
+        ``top_p`` / ``top_k`` are per-request truncation overrides: ``None``
+        keeps the served model's defaults (its ``generation_config.json``);
+        explicit values override them (``top_k=0`` = consider all tokens).
+        See `escalating_sampling` for why retries must send them.
+        """
         ...
 
 

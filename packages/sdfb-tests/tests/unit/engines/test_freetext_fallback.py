@@ -366,6 +366,65 @@ def test_b2_pool_excludes_verbatim_copies(wide_ctx):
 
 
 # ---------------------------------------------------------------------------
+# Sampling-truncation unclamp — a served model can pin top_k/top_p via its own
+# generation_config.json (Qwen3-4B ships top_k=20, top_p=0.8; the 2026-07-16
+# corp run logged vLLM's override warning). Under that truncation the nucleus
+# collapses to the echo token and temperature escalation is inert: 96/96
+# verbatim copies at 0.7, 1.0 AND 1.3. Retries must therefore send explicit
+# top_p/top_k overrides; only the first attempt keeps the vendor defaults.
+# ---------------------------------------------------------------------------
+
+
+def test_escalating_sampling_unclamps_truncation_on_retries():
+    from sdfb_core.engines.base import escalating_sampling
+
+    levels = escalating_sampling()
+    assert [lv.temperature for lv in levels] == [0.7, 1.0, 1.3]
+    # First attempt: vendor-tuned model defaults stay in force.
+    assert levels[0].top_p is None
+    assert levels[0].top_k is None
+    # Retries: full nucleus, no top-k truncation (0 = vLLM "all tokens").
+    assert all(lv.top_p == 1.0 and lv.top_k == 0 for lv in levels[1:])
+
+
+def test_escalating_sampling_at_ceiling_still_gets_an_unclamped_retry():
+    from sdfb_core.engines.base import escalating_sampling
+
+    # B.2 with similarity=0 starts at the 1.3 ceiling — temperature alone has
+    # nowhere to go, but the truncation unclamp must still get its retry.
+    levels = escalating_sampling(1.3)
+    assert len(levels) == 2
+    assert levels[0] == (1.3, None, None)
+    assert levels[1] == (1.3, 1.0, 0)
+
+
+def test_b1_retry_unclamps_sampling_truncation(free_text_ctx):
+    copies = [{"bio": r["bio"]} for r in free_text_ctx.reference_rows[:4]]
+    client = _CopyThenNovelClient(copies, [{"bio": "A brand-new synthetic bio."}])
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(client, free_text_ctx)
+    first, second = client.calls[0], client.calls[1]
+    assert first.get("top_p") is None and first.get("top_k") is None
+    assert second.get("top_p") == 1.0
+    assert second.get("top_k") == 0
+
+
+def test_b2_retry_unclamps_sampling_truncation(wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    exemplar = profiles["summary"].text_pool[0]
+    client = _CopyThenNovelClient(
+        [{"values": [exemplar]}],
+        [{"values": ["A clearly novel ticket summary."]}],
+    )
+    hook = FreeTextHook(client)
+    hook._pool_for(profiles["summary"], GenerationConfig(seed=1))
+    first, second = client.calls[0], client.calls[1]
+    assert first.get("top_p") is None and first.get("top_k") is None
+    assert second.get("top_p") == 1.0
+    assert second.get("top_k") == 0
+
+
+# ---------------------------------------------------------------------------
 # B.1 pool inference must not pin a request seed — a fixed seed with n>1
 # collapses all n vLLM choices to a single completion (2026-07-15 run:
 # identical choice lengths per request).

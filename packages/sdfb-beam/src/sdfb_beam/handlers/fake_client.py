@@ -68,6 +68,8 @@ class FakeModelClient:
         temperature: float = 0.7,
         n: int = 1,
         seed: int | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
     ) -> list[dict]:
         self.call_count += 1
         if self._mode == "canned":

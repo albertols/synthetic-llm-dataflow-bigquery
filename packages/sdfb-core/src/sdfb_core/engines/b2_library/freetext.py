@@ -31,7 +31,7 @@ from sdfb_core.engines.base import (
     FreeTextEmptyYieldError,
     GenerationConfig,
     ModelClient,
-    escalating_temperatures,
+    escalating_sampling,
 )
 from sdfb_core.observability import log_milestone
 
@@ -158,7 +158,7 @@ class FreeTextHook:
         n_copies = 0
         attempts = 0
         try:
-            for temp in escalating_temperatures(
+            for level in escalating_sampling(
                 similarity_to_temperature(cfg.similarity)
             ):
                 attempts += 1
@@ -166,9 +166,11 @@ class FreeTextHook:
                     prompt=prompt,
                     json_schema=_pool_schema(profile.name),
                     max_tokens=2048,
-                    temperature=temp,
+                    temperature=level.temperature,
                     n=1,
                     seed=cfg.seed,
+                    top_p=level.top_p,
+                    top_k=level.top_k,
                 )
                 values = _extract_values(responses)
                 novel = [v for v in values if v not in observed]
