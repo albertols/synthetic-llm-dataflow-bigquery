@@ -153,9 +153,12 @@ class FreeTextHook:
         # before falling back (2026-07-16 corp run: the model echoed the seed
         # exemplars verbatim at the base temperature).
         observed = set(profile.text_pool)
+        shown = set(exemplars)
         pool: list[str] = []
+        seen: set[str] = set()
         n_parsed = 0
         n_copies = 0
+        n_echoes = 0
         attempts = 0
         try:
             for level in escalating_sampling(
@@ -176,6 +179,8 @@ class FreeTextHook:
                 novel = [v for v in values if v not in observed]
                 n_parsed += len(values)
                 n_copies += len(values) - len(novel)
+                n_echoes += sum(1 for v in values if v in shown)
+                seen.update(values)
                 pool.extend(novel)
                 if pool:
                     break
@@ -196,14 +201,17 @@ class FreeTextHook:
         if not pool:
             # The calls "succeeded" (no exception) yet yielded nothing usable.
             # Counts (never values — reference data must not leak into logs)
-            # say WHY: verbatim_copies==parsed means the model only echoed
-            # reference values; parsed=0 means every choice was dropped at
-            # JSON parse. Exactly as loud as the exception path: the
-            # 2026-07-15 E2E run memorized 100 % of free-text values through
-            # this hole.
+            # say WHY: parsed=0 means every choice was dropped at JSON parse;
+            # low distinct with prompt_echoes == verbatim_copies means the
+            # model parroted the shown exemplars; high distinct with low
+            # prompt_echoes means in-format generations collided with the
+            # full reference pool — a saturated key space. Exactly as loud as
+            # the exception path: the 2026-07-15 E2E run memorized 100 % of
+            # free-text values through this hole.
             diagnosis = (
                 f"attempts={attempts}, parsed={n_parsed}, "
-                f"verbatim_copies={n_copies}, novel=0"
+                f"distinct={len(seen)}, verbatim_copies={n_copies}, "
+                f"prompt_echoes={n_echoes}, novel=0"
             )
             if self._strict:
                 raise FreeTextEmptyYieldError(
@@ -217,7 +225,9 @@ class FreeTextHook:
                 error="EmptyYield",
                 attempts=attempts,
                 parsed=n_parsed,
+                distinct=len(seen),
                 verbatim_copies=n_copies,
+                prompt_echoes=n_echoes,
             )
             return exemplars
         # The LLM pool stays novel-only; `_blend_pools` already mixes the

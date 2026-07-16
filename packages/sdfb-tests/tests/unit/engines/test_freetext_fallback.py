@@ -425,6 +425,76 @@ def test_b2_retry_unclamps_sampling_truncation(wide_ctx):
 
 
 # ---------------------------------------------------------------------------
+# Echo-vs-collision diagnostics — `verbatim_copies` alone conflates two very
+# different failures: the model parroting the few exemplars it was SHOWN
+# (sampling/prompt defect) vs. in-format generations that happen to exist in
+# the full reference sample it never saw (saturated key space — per-column
+# novelty is unattainable there). The 2026-07-16 rerun kept reporting 96/96
+# copies even with truncation unclamped, which only a distinct/prompt_echoes
+# breakdown can explain. Counts only — never values.
+# ---------------------------------------------------------------------------
+
+
+class _KeyProf:
+    """Minimal stand-in for ColumnProfile in direct _pool_llm_yield tests."""
+
+    name = "key"
+    observed_values = tuple(f"K-{i:04d}" for i in range(100))
+
+
+def test_b1_pool_yield_separates_prompt_echoes_from_reference_collisions():
+    from sdfb_core.engines.b1_rag.engine import _pool_llm_yield
+
+    class _CollidingClient:
+        # K-0050 / K-0060 exist in the reference but were NOT shown to the
+        # model; K-0001 is a shown exemplar. All are copies, only one an echo.
+        def generate_json(self, *a, **k):
+            return [{"key": "K-0050"}, {"key": "K-0060"}, {"key": "K-0001"}]
+
+    y = _pool_llm_yield(
+        _CollidingClient(), "p", {}, _KeyProf(), ["K-0001", "K-0002"]
+    )
+    assert y.pool == []
+    assert y.parsed == 3 * y.attempts
+    assert y.copies == y.parsed
+    assert y.prompt_echoes == 1 * y.attempts
+    assert y.distinct == 3
+
+
+def test_b1_pool_yield_counts_pure_echo():
+    from sdfb_core.engines.b1_rag.engine import _pool_llm_yield
+
+    class _EchoClient:
+        def generate_json(self, *a, **k):
+            return [{"key": "K-0001"}, {"key": "K-0001"}, {"key": "K-0002"}]
+
+    y = _pool_llm_yield(_EchoClient(), "p", {}, _KeyProf(), ["K-0001", "K-0002"])
+    assert y.prompt_echoes == y.parsed
+    assert y.distinct == 2
+
+
+def test_b1_strict_message_reports_distinct_and_prompt_echoes(free_text_ctx):
+    strict_ctx = free_text_ctx.model_copy(update={"strict_freetext": True})
+    copies = [{"bio": r["bio"]} for r in free_text_ctx.reference_rows[:4]]
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with pytest.raises(
+        FreeTextEmptyYieldError, match=r"distinct=4.*prompt_echoes=\d+"
+    ):
+        engine.setup(_CopyingClient(copies), strict_ctx)
+
+
+def test_b2_strict_message_reports_distinct_and_prompt_echoes(wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    exemplar = profiles["summary"].text_pool[0]
+    hook = FreeTextHook(_CopyingClient([{"values": [exemplar]}]), strict=True)
+    # The exemplar IS in the prompt for B.2, so every copy is also an echo.
+    with pytest.raises(
+        FreeTextEmptyYieldError, match=r"distinct=1.*prompt_echoes=3"
+    ):
+        hook._pool_for(profiles["summary"], GenerationConfig(seed=1))
+
+
+# ---------------------------------------------------------------------------
 # B.1 pool inference must not pin a request seed — a fixed seed with n>1
 # collapses all n vLLM choices to a single completion (2026-07-15 run:
 # identical choice lengths per request).

@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from sdfb_core.codegen import derive_record_model
 from sdfb_core.engines.b1_rag._fidelity import ColumnSampler, numpy_available
@@ -329,8 +329,8 @@ class B1RagEngine(GenerationEngine):
             "required": [prof.name],
         }
         try:
-            pool, n_parsed, n_copies, attempts = _pool_llm_yield(
-                self._client, prompt, json_schema, prof
+            y = _pool_llm_yield(
+                self._client, prompt, json_schema, prof, seed_examples
             )
         except Exception as e:
             if self._ctx is not None and self._ctx.strict_freetext:
@@ -346,16 +346,22 @@ class B1RagEngine(GenerationEngine):
             )
             pool = []
         else:
+            pool = y.pool
             if not pool:
                 # The calls "succeeded" (no exception) yet yielded nothing
                 # usable. Counts (never values — reference data must not
-                # leak into logs) say WHY: verbatim_copies==parsed means the
-                # model only echoed reference values; parsed=0 means every
-                # choice was dropped at JSON parse.
+                # leak into logs) say WHY: parsed=0 means every choice was
+                # dropped at JSON parse; low distinct with prompt_echoes ==
+                # verbatim_copies means the model parroted the few exemplars
+                # it was SHOWN (sampling/prompt defect); high distinct with
+                # prompt_echoes ~ 0 means in-format generations collided with
+                # the FULL reference sample the model never saw — a saturated
+                # key space where per-column novelty is unattainable.
                 diagnosis = (
-                    f"attempts={attempts}, choices_per_attempt="
-                    f"{_DEFAULT_FREE_TEXT_POOL}, parsed={n_parsed}, "
-                    f"verbatim_copies={n_copies}, novel=0"
+                    f"attempts={y.attempts}, choices_per_attempt="
+                    f"{_DEFAULT_FREE_TEXT_POOL}, parsed={y.parsed}, "
+                    f"distinct={y.distinct}, verbatim_copies={y.copies}, "
+                    f"prompt_echoes={y.prompt_echoes}, novel=0"
                 )
                 if self._ctx is not None and self._ctx.strict_freetext:
                     raise FreeTextEmptyYieldError(
@@ -367,9 +373,11 @@ class B1RagEngine(GenerationEngine):
                     level=logging.WARNING,
                     column=prof.name,
                     error="EmptyYield",
-                    attempts=attempts,
-                    parsed=n_parsed,
-                    verbatim_copies=n_copies,
+                    attempts=y.attempts,
+                    parsed=y.parsed,
+                    distinct=y.distinct,
+                    verbatim_copies=y.copies,
+                    prompt_echoes=y.prompt_echoes,
                 )
 
         # Fold observed exemplars in for fidelity — EXCEPT when the column is
@@ -400,28 +408,47 @@ class B1RagEngine(GenerationEngine):
         return random.Random(mixed)
 
 
+class _PoolYield(NamedTuple):
+    """Outcome counts of the escalating-sampling pool calls for one column.
+
+    ``copies`` are values found anywhere in the FULL observed reference
+    sample; ``prompt_echoes`` is the subset that was actually SHOWN to the
+    model as a seed exemplar. The gap between the two separates parroting
+    (sampling/prompt defect) from reference collisions (saturated key space).
+    """
+
+    pool: list[str]
+    parsed: int
+    distinct: int
+    copies: int
+    prompt_echoes: int
+    attempts: int
+
+
 def _pool_llm_yield(
     client: ModelClient,
     prompt: str,
     json_schema: dict,
     prof: ColumnProfile,
-) -> tuple[list[str], int, int, int]:
-    """Run the pool call at escalating temperatures until a novel value lands.
-
-    Returns ``(novel_pool, parsed, verbatim_copies, attempts)``. An empty
-    NOVEL yield (the model echoed reference values verbatim, or every choice
-    dropped at parse) is retried hotter before giving up — the 2026-07-16
-    corp run failed strict after Qwen3-4B copied the seed exemplars on all
-    32 choices at the default temperature.
+    seed_examples: list[str],
+) -> _PoolYield:
+    """Run the pool call at escalating sampling levels until a novel value
+    lands. An empty NOVEL yield (every value found in the reference, or every
+    choice dropped at parse) is retried with hotter, unclamped sampling
+    before giving up — the 2026-07-16 corp runs failed strict on all-copy
+    yields at every level.
 
     No request seed: a pinned seed with n>1 collapses all n vLLM choices
     into one completion (2026-07-15 run: identical choice lengths per
     request → at most one distinct pool value).
     """
     observed = set(prof.observed_values)
+    shown = set(seed_examples)
     pool: list[str] = []
+    seen: set[str] = set()
     n_parsed = 0
     n_copies = 0
+    n_echoes = 0
     attempts = 0
     for level in escalating_sampling():
         attempts += 1
@@ -438,10 +465,12 @@ def _pool_llm_yield(
         novel = [v for v in values if v not in observed]
         n_parsed += len(values)
         n_copies += len(values) - len(novel)
+        n_echoes += sum(1 for v in values if v in shown)
+        seen.update(values)
         pool.extend(novel)
         if pool:
             break
-    return pool, n_parsed, n_copies, attempts
+    return _PoolYield(pool, n_parsed, len(seen), n_copies, n_echoes, attempts)
 
 
 def _string_values(results: list, name: str) -> list[str]:
