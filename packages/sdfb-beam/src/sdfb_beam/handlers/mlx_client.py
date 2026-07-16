@@ -91,6 +91,8 @@ class MLXModelClient:
         temperature: float = 0.7,
         n: int = 1,
         seed: int | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
     ) -> list[dict]:
         """Call the LLM `n` times, parse each output as JSON.
 

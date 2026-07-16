@@ -54,7 +54,7 @@ from sdfb_core.engines.b1_rag.serialize import serialize_rows
 from sdfb_core.engines.base import (
     FreeTextEmptyYieldError,
     GenerationEngine,
-    escalating_temperatures,
+    escalating_sampling,
 )
 from sdfb_core.observability import log_milestone
 
@@ -423,14 +423,16 @@ def _pool_llm_yield(
     n_parsed = 0
     n_copies = 0
     attempts = 0
-    for temp in escalating_temperatures():
+    for level in escalating_sampling():
         attempts += 1
         results = client.generate_json(
             prompt=prompt,
             json_schema=json_schema,
             n=_DEFAULT_FREE_TEXT_POOL,
             max_tokens=256,
-            temperature=temp,
+            temperature=level.temperature,
+            top_p=level.top_p,
+            top_k=level.top_k,
         )
         values = _string_values(results, prof.name)
         novel = [v for v in values if v not in observed]
