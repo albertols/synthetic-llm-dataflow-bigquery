@@ -299,6 +299,13 @@ class VLLMModelClient:
         Each `choices[*].message.content` is parsed as JSON; entries that fail
         to parse to a dict are dropped (the engine's repair loop handles
         shortfalls — yielding fewer than `n` is allowed by the contract).
+
+        CAUTION: do NOT rely on `n>1` for output diversity. Under structured
+        outputs the V1 engine (which runs seeded, `seed=0`) returned n
+        IDENTICAL choices at every temperature/top_p/top_k in the 2026-07-16
+        runs — each choice is blind to its siblings, so a "distinct values"
+        instruction is unsatisfiable per choice. Callers that need a diverse
+        set should request ONE completion carrying an array of values.
         """
         if self._client is None:
             raise RuntimeError(

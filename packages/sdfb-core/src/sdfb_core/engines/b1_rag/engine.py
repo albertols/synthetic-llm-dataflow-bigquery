@@ -320,13 +320,20 @@ class B1RagEngine(GenerationEngine):
             f"timestamp, natural-language text), then generate "
             f"{_DEFAULT_FREE_TEXT_POOL} NEW, distinct, fictitious values in "
             f"exactly that format. Never copy an example verbatim. "
-            f"Examples: {seed_examples}. Return JSON objects each with a "
-            f"'{prof.name}' field."
+            f'Examples: {seed_examples}. Return JSON {{"values": [...]}}.'
         )
+        # ONE completion carrying the whole pool as an array — not n parallel
+        # single-value choices. Each of n>1 choices is blind to its siblings,
+        # so "distinct" is unsatisfiable per completion and vLLM collapsed
+        # all 32 into the identical modal exemplar echo at every sampling
+        # level (2026-07-16 runs: distinct=1, prompt_echoes=96). Inside one
+        # array completion the model sees what it already wrote.
         json_schema = {
             "type": "object",
-            "properties": {prof.name: {"type": "string"}},
-            "required": [prof.name],
+            "properties": {
+                "values": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["values"],
         }
         try:
             y = _pool_llm_yield(
@@ -358,7 +365,7 @@ class B1RagEngine(GenerationEngine):
                 # the FULL reference sample the model never saw — a saturated
                 # key space where per-column novelty is unattainable.
                 diagnosis = (
-                    f"attempts={y.attempts}, choices_per_attempt="
+                    f"attempts={y.attempts}, requested_per_attempt="
                     f"{_DEFAULT_FREE_TEXT_POOL}, parsed={y.parsed}, "
                     f"distinct={y.distinct}, verbatim_copies={y.copies}, "
                     f"prompt_echoes={y.prompt_echoes}, novel=0"
@@ -455,8 +462,8 @@ def _pool_llm_yield(
         results = client.generate_json(
             prompt=prompt,
             json_schema=json_schema,
-            n=_DEFAULT_FREE_TEXT_POOL,
-            max_tokens=256,
+            n=1,
+            max_tokens=2048,
             temperature=level.temperature,
             top_p=level.top_p,
             top_k=level.top_k,
@@ -474,15 +481,22 @@ def _pool_llm_yield(
 
 
 def _string_values(results: list, name: str) -> list[str]:
-    """Extract the named column's non-empty string values from LLM results.
+    """Extract non-empty string values from LLM pool results.
 
-    Novelty filtering (dropping values that equal observed reference values
-    — copies, not generations) happens in the caller so parsed-vs-copied
-    counts stay visible: an all-copies response must be diagnosable as such,
-    not misreported as a parse failure (2026-07-16 corp run)."""
+    Primary shape is the guided ``{"values": [...]}`` array; column-keyed
+    dicts (the FakeModelClient's echo mode) are tolerated. Novelty filtering
+    (dropping values that equal observed reference values — copies, not
+    generations) happens in the caller so parsed-vs-copied counts stay
+    visible: an all-copies response must be diagnosable as such, not
+    misreported as a parse failure (2026-07-16 corp run)."""
     out: list[str] = []
     for r in results:
-        val = r.get(name) if isinstance(r, dict) else None
+        if not isinstance(r, dict):
+            continue
+        if isinstance(r.get("values"), list):
+            out.extend(str(v) for v in r["values"] if v)
+            continue
+        val = r.get(name)
         if isinstance(val, str) and val:
             out.append(val)
     return out
