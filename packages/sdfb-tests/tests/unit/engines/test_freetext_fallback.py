@@ -246,6 +246,111 @@ def test_b1_all_copy_yield_counts_as_empty(caplog, free_text_ctx):
     assert "error=EmptyYield" in text
 
 
+# ---------------------------------------------------------------------------
+# Escalating-temperature retries — an empty NOVEL yield (all verbatim copies
+# or all parse-drops) retries the pool call at higher temperatures before
+# giving up. 2026-07-16 corp run: Qwen3-4B echoed the seed exemplars verbatim
+# for BUSI_CONTR_KEY on every choice → strict kill after a 90-min setup.
+# ---------------------------------------------------------------------------
+
+
+class _CopyThenNovelClient:
+    """Echoes observed values on the first call, novel values afterwards."""
+
+    def __init__(self, copies: list[dict], novel: list[dict]):
+        self._copies = copies
+        self._novel = novel
+        self.calls: list[dict] = []
+
+    def generate_json(self, *a, **k):
+        self.calls.append(k)
+        if len(self.calls) == 1:
+            return list(self._copies)
+        return list(self._novel)
+
+
+def test_b1_retries_with_escalating_temperature_on_all_copies(free_text_ctx):
+    copies = [{"bio": r["bio"]} for r in free_text_ctx.reference_rows[:4]]
+    client = _CopyThenNovelClient(copies, [{"bio": "A brand-new synthetic bio."}])
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(client, free_text_ctx)
+    assert len(client.calls) == 2, "expected a retry after the all-copies yield"
+    temps = [c.get("temperature") for c in client.calls]
+    assert all(t is not None for t in temps)
+    assert temps[1] > temps[0], f"retry must escalate temperature, got {temps}"
+    assert "A brand-new synthetic bio." in engine._free_text_pools["bio"]
+
+
+def test_b1_stops_retrying_once_pool_is_novel(free_text_ctx):
+    client = _CopyThenNovelClient([], [])
+
+    class _NovelFirstClient(_CopyThenNovelClient):
+        def generate_json(self, *a, **k):
+            self.calls.append(k)
+            return [{"bio": "Immediately novel."}]
+
+    client = _NovelFirstClient([], [])
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(client, free_text_ctx)
+    assert len(client.calls) == 1
+
+
+def test_b1_strict_all_copy_message_reports_counts(free_text_ctx):
+    strict_ctx = free_text_ctx.model_copy(update={"strict_freetext": True})
+    copies = [{"bio": r["bio"]} for r in free_text_ctx.reference_rows[:4]]
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    # 3 escalation attempts x 4 parsed-but-copied values each: the error must
+    # say WHY the yield was unusable (copies, not parse failures) — the
+    # 2026-07-16 run's "0 of 32 choices parsed" message misdiagnosed itself.
+    with pytest.raises(
+        FreeTextEmptyYieldError, match=r"parsed=12.*verbatim_copies=12"
+    ):
+        engine.setup(_CopyingClient(copies), strict_ctx)
+
+
+def test_b1_strict_empty_yield_message_reports_zero_parsed(free_text_ctx):
+    strict_ctx = free_text_ctx.model_copy(update={"strict_freetext": True})
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with pytest.raises(FreeTextEmptyYieldError, match=r"parsed=0"):
+        engine.setup(_EmptyYieldClient(), strict_ctx)
+
+
+def test_b1_fallback_milestone_reports_counts(caplog, free_text_ctx):
+    copies = [{"bio": r["bio"]} for r in free_text_ctx.reference_rows[:4]]
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        engine.setup(_CopyingClient(copies), free_text_ctx)
+    text = "\n".join(r.message for r in caplog.records)
+    assert "parsed=12" in text
+    assert "verbatim_copies=12" in text
+    assert "attempts=3" in text
+
+
+def test_b2_retries_with_escalating_temperature_on_all_copies(wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    exemplar = profiles["summary"].text_pool[0]
+    client = _CopyThenNovelClient(
+        [{"values": [exemplar]}],
+        [{"values": ["A clearly novel ticket summary."]}],
+    )
+    hook = FreeTextHook(client)
+    pool = hook._pool_for(profiles["summary"], GenerationConfig(seed=1))
+    assert "A clearly novel ticket summary." in pool
+    assert len(client.calls) == 2
+    temps = [c.get("temperature") for c in client.calls]
+    assert temps[1] > temps[0], f"retry must escalate temperature, got {temps}"
+
+
+def test_b2_strict_all_copy_message_reports_counts(wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    exemplar = profiles["summary"].text_pool[0]
+    hook = FreeTextHook(_CopyingClient([{"values": [exemplar]}]), strict=True)
+    with pytest.raises(
+        FreeTextEmptyYieldError, match=r"parsed=3.*verbatim_copies=3"
+    ):
+        hook._pool_for(profiles["summary"], GenerationConfig(seed=1))
+
+
 def test_b2_pool_excludes_verbatim_copies(wide_ctx):
     profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
     exemplar = profiles["summary"].text_pool[0]
