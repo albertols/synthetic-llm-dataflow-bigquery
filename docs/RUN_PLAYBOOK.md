@@ -137,6 +137,21 @@ Pass criteria per run:
   unconditionally — required for the custom `ModelHandler`/DoFn `setup()`
   lifecycle this pipeline relies on to build the vLLM client once per worker
   rather than per bundle. Don't remove it.
+- **ONE SDK process per GPU worker — add `no_use_multiple_sdk_containers`.**
+  Runner v2's default spawns one sibling SDK process per vCPU (8 on
+  `n1-standard-8` / `g2-standard-8`), and **every sibling runs the full DoFn
+  `setup()`**: its own 7.5 GB weight pull, its own vLLM server spawn into the
+  single GPU (all but the first crash with CUDA OOM — `Free memory on device
+  cuda:0 (0.66/14.56 GiB)`), and its own CPU embedding pass fighting the
+  other seven for the same 8 vCPUs. The 2026-07-16 corp T4 run
+  (`..._13_23_14-11053114042412770609`) paid 26–92 min *per bundle attempt*
+  in `embedder.embed` because of exactly this contention; four Dataflow
+  bundle retries — each landing on a *different* sibling and repeating the
+  whole setup — turned one strict-mode failure into a 5.4 h job. Add
+  `no_use_multiple_sdk_containers` to `additionalExperiments` whenever
+  `client_type=vllm` (any GPU tier). The `sdfb-beam` code side is hardened
+  too (vLLM server reuse + bounded embed sample), but a single SDK process
+  is the correct topology for a one-GPU worker regardless.
 - **Zone pinning.** The DAG sets `workerRegion` to the `REGION` Composer
   Variable (`europe-west3` per [ADR 0004](adr/0004-europe-west3-region.md))
   but does not pin a specific zone — Dataflow picks within the region. For L4

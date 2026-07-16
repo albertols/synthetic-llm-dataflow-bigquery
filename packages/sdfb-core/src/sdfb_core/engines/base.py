@@ -32,6 +32,23 @@ class FreeTextEmptyYieldError(RuntimeError):
     """
 
 
+def escalating_temperatures(start: float = 0.7) -> tuple[float, ...]:
+    """Sampling temperatures for free-text pool retries, ascending from
+    ``start`` up to 1.3.
+
+    An LLM pool call whose NOVEL yield is empty (every value a verbatim copy
+    of a reference value — the 2026-07-16 corp run, where Qwen3-4B echoed
+    the seed exemplars on all 32 choices) is retried at each successive
+    temperature before the engine gives up. Higher temperature diversifies
+    sampling away from the exemplar echoes; 1.3 is the ceiling B.2 already
+    uses for maximum divergence (`similarity_to_temperature`).
+    """
+    ceiling = 1.3
+    start = min(max(start, 0.0), ceiling)
+    steps = (1.0, ceiling)
+    return (start, *(t for t in steps if t > start + 1e-9))
+
+
 @runtime_checkable
 class ModelClient(Protocol):
     """Thin facade engines call to invoke the LLM.

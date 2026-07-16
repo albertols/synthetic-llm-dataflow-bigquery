@@ -202,6 +202,29 @@ class VLLMModelClient:
 
         t0 = time.monotonic()
 
+        # A previous bundle attempt in this container may have left a healthy
+        # server behind (Beam retries a failed bundle in a sibling SDK
+        # process; the old subprocess keeps running). Spawning a second
+        # server into the GPU it still owns fails with CUDA OOM — the
+        # 2026-07-16 corp run logged exactly that on every retry, while each
+        # retry also re-pulled 7.5 GB of weights. Reuse the survivor instead.
+        expected_model = (
+            self.local_model_dir
+            if self.model_uri.startswith("gs://")
+            else self.model_uri
+        )
+        if self._probe_reusable_server(expected_model):
+            self._served_model_name = expected_model
+            self._client = self._build_openai_client()
+            log_milestone("vllm_reuse", seconds=round(time.monotonic() - t0, 1))
+            logger.info(
+                "Reusing healthy vLLM server already serving %r at %s "
+                "(skipping weight pull and spawn).",
+                expected_model,
+                self.base_url,
+            )
+            return
+
         if self.model_uri.startswith("gs://"):
             log_milestone("model_pull_start", uri=self.model_uri)
             t_pull = time.monotonic()
@@ -334,6 +357,27 @@ class VLLMModelClient:
     def _pull_weights(self) -> None:
         """Warm-pull `model_uri` (gs://) → `local_model_dir` (ADR 0012)."""
         localize_gcs_prefix(self.model_uri, self.local_model_dir)
+
+    def _probe_reusable_server(self, expected_model: str) -> bool:
+        """True when a healthy vLLM server on `host:port` already serves
+        `expected_model`. Any failure (nothing listening, non-JSON body,
+        different model) means "not reusable" — setup falls through to the
+        normal pull → spawn path."""
+        from urllib.request import urlopen
+
+        try:
+            with urlopen(
+                f"{self.base_url}/models", timeout=self.poll_interval_s
+            ) as resp:
+                if resp.status != _HTTP_OK:
+                    return False
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return False
+        models = payload.get("data", []) if isinstance(payload, dict) else []
+        return any(
+            isinstance(m, dict) and m.get("id") == expected_model for m in models
+        )
 
     def _assert_gpu_dtype_compatible(self) -> None:
         """Fatal init guard: bf16 weights on a sub-Ampere GPU (e.g. T4) must

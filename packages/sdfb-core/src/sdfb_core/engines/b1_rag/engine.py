@@ -51,7 +51,11 @@ from sdfb_core.engines.b1_rag.profile import (
     profile_columns,
 )
 from sdfb_core.engines.b1_rag.serialize import serialize_rows
-from sdfb_core.engines.base import FreeTextEmptyYieldError, GenerationEngine
+from sdfb_core.engines.base import (
+    FreeTextEmptyYieldError,
+    GenerationEngine,
+    escalating_temperatures,
+)
 from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -68,6 +72,14 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 _DEFAULT_TOP_K = 8
 # Bounded unique free-text pool size requested from the LLM (sampled w/ repl).
 _DEFAULT_FREE_TEXT_POOL = 32
+# Setup embeds at most this many reference rows. The index those vectors
+# feed serves ONLY centroid top-k exemplar retrieval in M1 (generation
+# samples marginals — no per-batch retrieval), so embedding the full 10k
+# reference sample bought nothing but wall-clock: the 2026-07-16 corp run
+# spent 26-92 min PER Dataflow bundle attempt in `embedder.embed`. The
+# reference SELECT is fingerprint-ordered (deterministic spread), so a
+# prefix is a representative sample.
+_MAX_EMBED_ROWS = 1024
 
 
 class B1RagEngine(GenerationEngine):
@@ -123,11 +135,16 @@ class B1RagEngine(GenerationEngine):
             self._embedder = HashingEmbedder(dim=384)
         if ctx.reference_rows:
             t_embed = time.monotonic()
-            texts = serialize_rows(ctx.reference_rows, self._column_order)
+            # Prefix of the (fingerprint-ordered) reference sample — the
+            # exemplar ids returned by `_retrieve_exemplars` index into this
+            # same prefix, so `ctx.reference_rows[i]` stays valid.
+            embed_rows = ctx.reference_rows[:_MAX_EMBED_ROWS]
+            texts = serialize_rows(embed_rows, self._column_order)
             self._ref_vectors = self._embedder.embed(texts)
             log_milestone(
                 "b1_embed_done",
                 rows=len(texts),
+                rows_total=len(ctx.reference_rows),
                 seconds=round(time.monotonic() - t_embed, 1),
             )
             t_index = time.monotonic()
@@ -311,18 +328,10 @@ class B1RagEngine(GenerationEngine):
             "properties": {prof.name: {"type": "string"}},
             "required": [prof.name],
         }
-        pool: list[str] = []
         try:
-            # No request seed: a pinned seed with n>1 collapses all n vLLM
-            # choices into one completion (2026-07-15 run: identical choice
-            # lengths per request → at most one distinct pool value).
-            results = self._client.generate_json(
-                prompt=prompt,
-                json_schema=json_schema,
-                n=_DEFAULT_FREE_TEXT_POOL,
-                max_tokens=256,
+            pool, n_parsed, n_copies, attempts = _pool_llm_yield(
+                self._client, prompt, json_schema, prof
             )
-            pool = _novel_string_values(results, prof)
         except Exception as e:
             if self._ctx is not None and self._ctx.strict_freetext:
                 raise
@@ -338,21 +347,29 @@ class B1RagEngine(GenerationEngine):
             pool = []
         else:
             if not pool:
-                # The call "succeeded" (no exception) yet yielded nothing
-                # usable — e.g. every choice dropped at JSON parse. Exactly
-                # as loud as the exception path: the 2026-07-15 E2E run
-                # memorized 100 % of free-text values through this hole.
+                # The calls "succeeded" (no exception) yet yielded nothing
+                # usable. Counts (never values — reference data must not
+                # leak into logs) say WHY: verbatim_copies==parsed means the
+                # model only echoed reference values; parsed=0 means every
+                # choice was dropped at JSON parse.
+                diagnosis = (
+                    f"attempts={attempts}, choices_per_attempt="
+                    f"{_DEFAULT_FREE_TEXT_POOL}, parsed={n_parsed}, "
+                    f"verbatim_copies={n_copies}, novel=0"
+                )
                 if self._ctx is not None and self._ctx.strict_freetext:
                     raise FreeTextEmptyYieldError(
-                        f"LLM call for free-text column {prof.name!r} "
-                        f"returned no usable values "
-                        f"(0 of {_DEFAULT_FREE_TEXT_POOL} choices parsed)."
+                        f"LLM calls for free-text column {prof.name!r} "
+                        f"yielded no usable values ({diagnosis})."
                     )
                 log_milestone(
                     "freetext_llm_fallback",
                     level=logging.WARNING,
                     column=prof.name,
                     error="EmptyYield",
+                    attempts=attempts,
+                    parsed=n_parsed,
+                    verbatim_copies=n_copies,
                 )
 
         # Fold observed exemplars in for fidelity — EXCEPT when the column is
@@ -383,16 +400,59 @@ class B1RagEngine(GenerationEngine):
         return random.Random(mixed)
 
 
-def _novel_string_values(results: list, prof: ColumnProfile) -> list[str]:
-    """Extract the column's string values from LLM results, keeping only
-    NOVEL ones. An LLM value that equals an observed reference value is a
-    copy, not a generation — dropping copies here means an all-copies
-    response counts as an empty yield (loud, never silent memorization)."""
+def _pool_llm_yield(
+    client: ModelClient,
+    prompt: str,
+    json_schema: dict,
+    prof: ColumnProfile,
+) -> tuple[list[str], int, int, int]:
+    """Run the pool call at escalating temperatures until a novel value lands.
+
+    Returns ``(novel_pool, parsed, verbatim_copies, attempts)``. An empty
+    NOVEL yield (the model echoed reference values verbatim, or every choice
+    dropped at parse) is retried hotter before giving up — the 2026-07-16
+    corp run failed strict after Qwen3-4B copied the seed exemplars on all
+    32 choices at the default temperature.
+
+    No request seed: a pinned seed with n>1 collapses all n vLLM choices
+    into one completion (2026-07-15 run: identical choice lengths per
+    request → at most one distinct pool value).
+    """
     observed = set(prof.observed_values)
+    pool: list[str] = []
+    n_parsed = 0
+    n_copies = 0
+    attempts = 0
+    for temp in escalating_temperatures():
+        attempts += 1
+        results = client.generate_json(
+            prompt=prompt,
+            json_schema=json_schema,
+            n=_DEFAULT_FREE_TEXT_POOL,
+            max_tokens=256,
+            temperature=temp,
+        )
+        values = _string_values(results, prof.name)
+        novel = [v for v in values if v not in observed]
+        n_parsed += len(values)
+        n_copies += len(values) - len(novel)
+        pool.extend(novel)
+        if pool:
+            break
+    return pool, n_parsed, n_copies, attempts
+
+
+def _string_values(results: list, name: str) -> list[str]:
+    """Extract the named column's non-empty string values from LLM results.
+
+    Novelty filtering (dropping values that equal observed reference values
+    — copies, not generations) happens in the caller so parsed-vs-copied
+    counts stay visible: an all-copies response must be diagnosable as such,
+    not misreported as a parse failure (2026-07-16 corp run)."""
     out: list[str] = []
     for r in results:
-        val = r.get(prof.name) if isinstance(r, dict) else None
-        if isinstance(val, str) and val and val not in observed:
+        val = r.get(name) if isinstance(r, dict) else None
+        if isinstance(val, str) and val:
             out.append(val)
     return out
 

@@ -31,6 +31,7 @@ from sdfb_core.engines.base import (
     FreeTextEmptyYieldError,
     GenerationConfig,
     ModelClient,
+    escalating_temperatures,
 )
 from sdfb_core.observability import log_milestone
 
@@ -144,15 +145,38 @@ class FreeTextHook:
             f"that format. Never copy an example verbatim. Examples: "
             f"{exemplars}. Return JSON {{\"values\": [...]}}."
         )
+        # Novelty filter: LLM values that equal observed reference values are
+        # copies, not generations. The LLM pool is the "diverge" side of the
+        # similarity blend — observed values reach the output only via the
+        # reference pool, weighted by `cfg.similarity`. An empty NOVEL yield
+        # (all copies / all parse-drops) is retried at escalating temperature
+        # before falling back (2026-07-16 corp run: the model echoed the seed
+        # exemplars verbatim at the base temperature).
+        observed = set(profile.text_pool)
+        pool: list[str] = []
+        n_parsed = 0
+        n_copies = 0
+        attempts = 0
         try:
-            responses = self._client.generate_json(
-                prompt=prompt,
-                json_schema=_pool_schema(profile.name),
-                max_tokens=2048,
-                temperature=similarity_to_temperature(cfg.similarity),
-                n=1,
-                seed=cfg.seed,
-            )
+            for temp in escalating_temperatures(
+                similarity_to_temperature(cfg.similarity)
+            ):
+                attempts += 1
+                responses = self._client.generate_json(
+                    prompt=prompt,
+                    json_schema=_pool_schema(profile.name),
+                    max_tokens=2048,
+                    temperature=temp,
+                    n=1,
+                    seed=cfg.seed,
+                )
+                values = _extract_values(responses)
+                novel = [v for v in values if v not in observed]
+                n_parsed += len(values)
+                n_copies += len(values) - len(novel)
+                pool.extend(novel)
+                if pool:
+                    break
         except Exception as e:
             if self._strict:
                 raise
@@ -167,27 +191,31 @@ class FreeTextHook:
             )
             return exemplars
 
-        # Novelty filter: LLM values that equal observed reference values are
-        # copies, not generations. The LLM pool is the "diverge" side of the
-        # similarity blend — observed values reach the output only via the
-        # reference pool, weighted by `cfg.similarity`.
-        observed = set(profile.text_pool)
-        pool = [v for v in _extract_values(responses) if v not in observed]
         if not pool:
-            # The call "succeeded" (no exception) yet yielded nothing usable
-            # — e.g. every choice dropped at JSON parse. Exactly as loud as
-            # the exception path: the 2026-07-15 E2E run memorized 100 % of
-            # free-text values through this hole.
+            # The calls "succeeded" (no exception) yet yielded nothing usable.
+            # Counts (never values — reference data must not leak into logs)
+            # say WHY: verbatim_copies==parsed means the model only echoed
+            # reference values; parsed=0 means every choice was dropped at
+            # JSON parse. Exactly as loud as the exception path: the
+            # 2026-07-15 E2E run memorized 100 % of free-text values through
+            # this hole.
+            diagnosis = (
+                f"attempts={attempts}, parsed={n_parsed}, "
+                f"verbatim_copies={n_copies}, novel=0"
+            )
             if self._strict:
                 raise FreeTextEmptyYieldError(
-                    f"LLM call for free-text column {profile.name!r} "
-                    f"returned no usable values (all choices dropped/empty)."
+                    f"LLM calls for free-text column {profile.name!r} "
+                    f"yielded no usable values ({diagnosis})."
                 )
             log_milestone(
                 "freetext_llm_fallback",
                 level=logging.WARNING,
                 column=profile.name,
                 error="EmptyYield",
+                attempts=attempts,
+                parsed=n_parsed,
+                verbatim_copies=n_copies,
             )
             return exemplars
         # The LLM pool stays novel-only; `_blend_pools` already mixes the
