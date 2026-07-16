@@ -495,6 +495,47 @@ def test_b2_strict_message_reports_distinct_and_prompt_echoes(wide_ctx):
 
 
 # ---------------------------------------------------------------------------
+# One array completion, not n blind siblings — B.1 used to request n=32
+# choices whose schema allowed exactly ONE value each: every choice was blind
+# to the others, so "generate 32 distinct values" was unsatisfiable per
+# completion and vLLM collapsed all 32 into the identical modal echo
+# (2026-07-16 runs: distinct=1, prompt_echoes=96 at every sampling level).
+# The pool must be ONE completion carrying a values array, where the model
+# sees what it already wrote and can actually be distinct (B.2's shape).
+# ---------------------------------------------------------------------------
+
+
+def test_b1_pool_requests_one_array_completion_not_n_choices(free_text_ctx):
+    class _RecordingNovelClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def generate_json(self, prompt, json_schema, **k):
+            self.calls.append({"json_schema": json_schema, **k})
+            return [{"values": ["A fresh synthetic bio."]}]
+
+    client = _RecordingNovelClient()
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(client, free_text_ctx)
+    call = client.calls[0]
+    assert call["n"] == 1
+    assert call["json_schema"]["properties"]["values"]["type"] == "array"
+    assert "A fresh synthetic bio." in engine._free_text_pools["bio"]
+
+
+def test_b1_string_values_extracts_array_and_column_shapes():
+    from sdfb_core.engines.b1_rag.engine import _string_values
+
+    results = [
+        {"values": ["a", "b", ""]},  # the guided array shape
+        {"bio": "c"},  # echoed column-keyed dict (FakeModelClient echo mode)
+        {"other": 1},
+        "junk",
+    ]
+    assert _string_values(results, "bio") == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
 # B.1 pool inference must not pin a request seed — a fixed seed with n>1
 # collapses all n vLLM choices to a single completion (2026-07-15 run:
 # identical choice lengths per request).
