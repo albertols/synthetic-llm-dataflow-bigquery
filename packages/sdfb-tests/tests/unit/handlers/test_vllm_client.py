@@ -283,6 +283,104 @@ def test_setup_local_path_skips_pull_and_serves_in_place():
 
 
 # ---------------------------------------------------------------------------
+# setup() — reuse of an already-healthy server on this worker.
+#
+# 2026-07-16 corp run: each Dataflow bundle retry ran in a fresh sibling SDK
+# process that re-pulled 7.5 GB of weights and spawned a NEW vLLM server into
+# the GPU still owned by the first attempt's server — EngineCore crashed with
+# "Free memory on device cuda:0 (0.66/14.56 GiB)" on every retry while the
+# health check accidentally passed against the surviving first server. setup()
+# must detect that surviving server and reuse it instead.
+# ---------------------------------------------------------------------------
+
+
+class _FakeModelsResponse:
+    def __init__(self, payload: dict, status: int = 200):
+        self.status = status
+        self._payload = payload
+
+    def read(self):
+        return json.dumps(self._payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_setup_reuses_existing_healthy_server(monkeypatch, caplog):
+    import logging
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *a, **k: _FakeModelsResponse({"data": [{"id": "/local-ssd/model"}]}),
+    )
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    sentinel = object()
+    with (
+        mock.patch.object(c, "_pull_weights") as pull,
+        mock.patch.object(c, "_spawn_server") as spawn,
+        mock.patch.object(c, "_build_openai_client", return_value=sentinel),
+        caplog.at_level(logging.INFO, logger="sdfb.milestone"),
+    ):
+        c.setup()
+    pull.assert_not_called()
+    spawn.assert_not_called()
+    assert c._client is sentinel
+    assert c._served_model_name == "/local-ssd/model"
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=vllm_reuse" in text
+
+
+def test_setup_spawns_when_existing_server_serves_a_different_model(monkeypatch):
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *a, **k: _FakeModelsResponse({"data": [{"id": "/other/model"}]}),
+    )
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    with (
+        mock.patch.object(c, "_pull_weights") as pull,
+        mock.patch.object(c, "_spawn_server") as spawn,
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+    ):
+        c.setup()
+    pull.assert_called_once()
+    spawn.assert_called_once()
+
+
+def test_probe_reusable_server_false_on_connection_error(monkeypatch):
+    import urllib.request
+
+    def _refuse(*a, **k):
+        raise ConnectionRefusedError("nothing listening")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    assert c._probe_reusable_server("/local-ssd/model") is False
+
+
+def test_probe_reusable_server_false_on_non_json_body(monkeypatch):
+    import urllib.request
+
+    class _HtmlResponse(_FakeModelsResponse):
+        def read(self):
+            return b"<html>not a vllm server</html>"
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *a, **k: _HtmlResponse({})
+    )
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    assert c._probe_reusable_server("/local-ssd/model") is False
+
+
+# ---------------------------------------------------------------------------
 # _server_command — argv construction from vllm_server_kwargs.
 # ---------------------------------------------------------------------------
 
