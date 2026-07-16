@@ -32,7 +32,11 @@ CMD=(gcloud dataflow flex-template run "${JOB_NAME}"
   --additional-user-labels "tier=${TIER_LC},table=${TABLE}"
   --parameters "${PARAMS},run_id=${RUN_ID}"
   --format 'value(job.id)')
-[[ -n "${ACCELERATOR}" ]] && CMD+=(--additional-experiments "worker_accelerator=${ACCELERATOR}")
+# GPU tiers: exactly ONE SDK process per worker. Runner v2's default sibling
+# SDK processes each re-run DoFn setup (weight pull, vLLM spawn into the
+# occupied GPU → CUDA OOM, CPU-thrashed embedding) — the 2026-07-16 corp run
+# burned 5.4h across 4 bundle retries on that topology (RUN_PLAYBOOK §3).
+[[ -n "${ACCELERATOR}" ]] && CMD+=(--additional-experiments "worker_accelerator=${ACCELERATOR},no_use_multiple_sdk_containers")
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   echo "+ ${CMD[*]}"
