@@ -231,3 +231,123 @@ def test_bq_cross_validation_top_count_uses_safe_offset(probe_module):
     src = inspect.getsource(probe_module.bq_cross_validation)
     assert "SAFE_OFFSET(0)" in src
     assert "[OFFSET(0)]" not in src
+
+
+# --------------------------------------------------------------------------
+# Memorization flags — the 2026-07-16 report's CRITICAL gate gap: nothing
+# scored copy_ratio, so 9 columns at 0.475-0.939 sailed through PASSED.
+# --------------------------------------------------------------------------
+def test_memorization_flags_flags_high_copy_ratio_high_cardinality(probe_module):
+    columns = {
+        "COL_048": {  # the worst 2026-07-16 leak: 93.9 % source values
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.939,
+            "source_distinct": 19_815,
+        },
+        "COL_042": {  # just above both thresholds
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.475,
+            "source_distinct": 1_142,
+        },
+    }
+    flags = probe_module.memorization_flags(columns)
+    assert [f["column"] for f in flags] == ["COL_048", "COL_042"]
+    assert all(f["severity"] == "CRITICAL" for f in flags)
+    assert flags[0]["copy_ratio"] == 0.939
+    assert flags[0]["source_distinct"] == 19_815
+
+
+def test_memorization_flags_skips_enums_constants_and_unmeasured(probe_module):
+    columns = {
+        "enum_by_design": {  # source_distinct <= 100: full coverage expected
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 1.0,
+            "source_distinct": 60,
+        },
+        "constant": {  # constants carry no signal
+            "type": "STRING",
+            "is_constant": True,
+            "copy_ratio": 1.0,
+            "source_distinct": 5_000,
+        },
+        "below_ratio": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.29,
+            "source_distinct": 5_000,
+        },
+        "not_measured": {  # no copy_ratio (not in source schema / empty)
+            "type": "STRING",
+            "is_constant": False,
+        },
+        "unmeasured_ratio_none": {  # _ratio(_, 0) → None must not compare
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": None,
+            "source_distinct": 5_000,
+        },
+    }
+    assert probe_module.memorization_flags(columns) == []
+
+
+def test_memorization_flags_sorted_by_copy_ratio_desc(probe_module):
+    columns = {
+        "a": {"is_constant": False, "copy_ratio": 0.4, "source_distinct": 200},
+        "b": {"is_constant": False, "copy_ratio": 0.9, "source_distinct": 200},
+    }
+    flags = probe_module.memorization_flags(columns)
+    assert [f["column"] for f in flags] == ["b", "a"]
+
+
+# --------------------------------------------------------------------------
+# Dataflow job `parameters` — the 2026-07-16 report's MAJOR probe gap:
+# launch params (reference_rows_limit, pk_cols, identity_cols, seed) were
+# unconfirmable from e2e_gcp_metrics.json.
+# --------------------------------------------------------------------------
+def test_job_params_extracts_sdk_pipeline_options_display_data(probe_module):
+    job = {
+        "environment": {
+            "sdkPipelineOptions": {
+                "display_data": [
+                    {
+                        "key": "reference_rows_limit",
+                        "namespace": "sdfb_beam.pipeline._SdfbOptions",
+                        "type": "INTEGER",
+                        "value": 2000,
+                    },
+                    {
+                        "key": "pk_cols",
+                        "namespace": "sdfb_beam.pipeline._SdfbOptions",
+                        "type": "STRING",
+                        "value": "id",
+                    },
+                ]
+            }
+        }
+    }
+    params = probe_module._job_params(job)
+    assert params["reference_rows_limit"] == 2000
+    assert params["pk_cols"] == "id"
+
+
+def test_job_params_reads_pipeline_description_typed_values(probe_module):
+    job = {
+        "pipelineDescription": {
+            "displayData": [
+                {"key": "seed", "namespace": "ns", "int64Value": "42"},
+                {"key": "engine", "namespace": "ns", "strValue": "b1_rag"},
+                {"key": "strict", "namespace": "ns", "boolValue": True},
+            ]
+        }
+    }
+    params = probe_module._job_params(job)
+    assert params["seed"] == "42"
+    assert params["engine"] == "b1_rag"
+    assert params["strict"] is True
+
+
+def test_job_params_empty_job_yields_empty_dict(probe_module):
+    assert probe_module._job_params({}) == {}
