@@ -30,6 +30,8 @@ from sdfb_core.engines.b1_rag.profile import (
     ColumnKind,
     ColumnProfile,
     temporal_from_float,
+    temporal_string_from_float,
+    temporal_string_to_float,
     temporal_to_float,
 )
 
@@ -66,12 +68,25 @@ class ColumnSampler:
     def _temporal_obs_floats(self) -> list[float]:
         """Observed TEMPORAL values on the float axis (computed once)."""
         if self._temporal_floats is None:
-            self._temporal_floats = [
-                f
-                for f in (temporal_to_float(v) for v in self.profile.observed_values)
-                if f is not None
-            ]
+            fmt = self.profile.temporal_format
+            if fmt is not None:  # date-shaped STRING column
+                self._temporal_floats = [
+                    temporal_string_to_float(str(v), fmt)
+                    for v in self.profile.observed_values
+                ]
+            else:
+                self._temporal_floats = [
+                    f
+                    for f in (temporal_to_float(v) for v in self.profile.observed_values)
+                    if f is not None
+                ]
         return self._temporal_floats
+
+    def _render_temporal(self, base: list[float]) -> list:
+        p = self.profile
+        if p.temporal_format is not None:
+            return [temporal_string_from_float(v, p.temporal_format) for v in base]
+        return [temporal_from_float(v, p.bq_type) for v in base]
 
     # -- NumPy (vectorized) backend ----------------------------------------
 
@@ -140,7 +155,7 @@ class ColumnSampler:
         hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
         obs = np.asarray(self._temporal_obs_floats(), dtype="float64")
         base = self._blend_floats_numpy(np, rng, obs, lo, hi, n, similarity)
-        return [temporal_from_float(v, p.bq_type) for v in base]
+        return self._render_temporal(base)
 
     def _categorical_numpy(self, np, rng, n: int, similarity: float) -> list:
         p = self.profile
@@ -225,7 +240,7 @@ class ColumnSampler:
         base = self._blend_floats_python(
             rng, self._temporal_obs_floats(), lo, hi, n, similarity
         )
-        return [temporal_from_float(v, p.bq_type) for v in base]
+        return self._render_temporal(base)
 
     def _categorical_python(self, rng, n: int, similarity: float) -> list:
         p = self.profile
