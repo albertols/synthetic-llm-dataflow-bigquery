@@ -274,22 +274,20 @@ def test_b1_retries_with_escalating_temperature_on_all_copies(free_text_ctx):
     client = _CopyThenNovelClient(copies, [{"bio": "A brand-new synthetic bio."}])
     engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
     engine.setup(client, free_text_ctx)
-    assert len(client.calls) == 2, "expected a retry after the all-copies yield"
+    assert len(client.calls) >= 2, "expected a retry after the all-copies yield"
     temps = [c.get("temperature") for c in client.calls]
     assert all(t is not None for t in temps)
     assert temps[1] > temps[0], f"retry must escalate temperature, got {temps}"
     assert "A brand-new synthetic bio." in engine._free_text_pools["bio"]
 
 
-def test_b1_stops_retrying_once_pool_is_novel(free_text_ctx):
-    client = _CopyThenNovelClient([], [])
-
-    class _NovelFirstClient(_CopyThenNovelClient):
+def test_b1_stops_once_pool_reaches_target(free_text_ctx):
+    class _FullYieldClient(_CopyThenNovelClient):
         def generate_json(self, *a, **k):
             self.calls.append(k)
-            return [{"bio": "Immediately novel."}]
+            return [{"values": [f"Novel bio {j}" for j in range(32)]}]
 
-    client = _NovelFirstClient([], [])
+    client = _FullYieldClient([], [])
     engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
     engine.setup(client, free_text_ctx)
     assert len(client.calls) == 1
@@ -336,7 +334,7 @@ def test_b2_retries_with_escalating_temperature_on_all_copies(wide_ctx):
     hook = FreeTextHook(client)
     pool = hook._pool_for(profiles["summary"], GenerationConfig(seed=1))
     assert "A clearly novel ticket summary." in pool
-    assert len(client.calls) == 2
+    assert len(client.calls) >= 2
     temps = [c.get("temperature") for c in client.calls]
     assert temps[1] > temps[0], f"retry must escalate temperature, got {temps}"
 
@@ -554,6 +552,91 @@ def test_b1_pool_inference_does_not_pin_seed(free_text_ctx):
     assert client.calls, "expected a pool-inference LLM call for 'bio'"
     for call in client.calls:
         assert call.get("seed") is None
+
+
+# ---------------------------------------------------------------------------
+# Pool fill-to-target — accepting the FIRST non-empty yield let one
+# conservative completion (still under Qwen's generation_config pin) define
+# the whole pool: the 2026-07-17 B.1 run landed COL_048 with 4 distinct
+# values over 1000 rows, and the unclamp retries of 71aaaa1 never ran. The
+# escalation loop must accumulate novel values ACROSS levels until the pool
+# target is met, and exhausting all levels below target must be loud.
+# ---------------------------------------------------------------------------
+
+
+class _NovelBatchClient:
+    """Returns `per_call` FRESH novel values on every call (batch i differs
+    from batch i-1), so accumulation across escalation levels is testable."""
+
+    def __init__(self, per_call: int, repeat: bool = False):
+        self._per_call = per_call
+        self._repeat = repeat
+        self.calls: list[dict] = []
+
+    def generate_json(self, *a, **k):
+        i = 0 if self._repeat else len(self.calls)
+        self.calls.append(k)
+        return [
+            {"values": [f"Novel value {i}-{j}" for j in range(self._per_call)]}
+        ]
+
+
+def test_b1_pool_accumulates_across_levels_until_target(free_text_ctx):
+    client = _NovelBatchClient(per_call=20)
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(client, free_text_ctx)
+    # 20 novel at level 1 < 32 target → keep escalating; 40 ≥ 32 → stop.
+    assert len(client.calls) == 2
+    assert len(engine._free_text_pools["bio"]) == 32
+
+
+def test_b1_pool_undersized_emits_milestone(caplog, free_text_ctx):
+    # The same 4 novel values on every attempt: levels exhaust below target.
+    client = _NovelBatchClient(per_call=4, repeat=True)
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        engine.setup(client, free_text_ctx)
+    assert len(client.calls) == 3, "all escalation levels must run"
+    assert len(engine._free_text_pools["bio"]) == 4
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=freetext_pool_undersized" in text
+    assert "column=bio" in text
+    assert "pool_size=4" in text
+    assert "target=32" in text
+
+
+def test_b1_full_first_yield_emits_no_undersized_milestone(caplog, free_text_ctx):
+    client = _NovelBatchClient(per_call=32)
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        engine.setup(client, free_text_ctx)
+    assert len(client.calls) == 1
+    text = "\n".join(r.message for r in caplog.records)
+    assert "freetext_pool_undersized" not in text
+
+
+def test_b2_pool_accumulates_across_levels_until_target(wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    client = _NovelBatchClient(per_call=5)
+    hook = FreeTextHook(client, pool_size=8)
+    pool = hook._pool_for(profiles["summary"], GenerationConfig(seed=1))
+    assert len(client.calls) == 2
+    assert len(pool) == 8
+
+
+def test_b2_pool_undersized_emits_milestone(caplog, wide_ctx):
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    client = _NovelBatchClient(per_call=3, repeat=True)
+    hook = FreeTextHook(client, pool_size=8)
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        pool = hook._pool_for(profiles["summary"], GenerationConfig(seed=1))
+    assert len(client.calls) == 3
+    assert len(pool) == 3
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=freetext_pool_undersized" in text
+    assert "column=summary" in text
+    assert "pool_size=3" in text
+    assert "target=8" in text
 
 
 # ---------------------------------------------------------------------------
