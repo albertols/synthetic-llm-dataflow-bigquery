@@ -29,6 +29,11 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from sdfb_core.engines.text_shapes import (
+    detect_identifier_shape,
+    detect_temporal_format,
+)
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sdfb_core.contracts import FieldSchema, TableSchema
 
@@ -98,6 +103,13 @@ class ColumnProfile:
     # the free-text threshold): identifier-like or personal prose. Folding
     # observed values into the generated pool would memorize them.
     is_unique_valued: bool = False
+    # FREE_TEXT — fixed per-position character template (engines/text_shapes):
+    # identifier-shaped columns generate format-preserving values per row and
+    # never touch the LLM (2026-07-17 E2E: the pool route collapses them).
+    identifier_shape: tuple[str, ...] | None = None
+    # TEMPORAL — strftime format when the column is a date-shaped STRING;
+    # range-sampled floats render back to strings in the observed format.
+    temporal_format: str | None = None
     # All non-null observed values, original order — used for sampling fallbacks.
     observed_values: tuple[object, ...] = ()
 
@@ -247,6 +259,18 @@ def temporal_to_float(v: object) -> float | None:
     return None
 
 
+def temporal_string_to_float(s: str, fmt: str) -> float:
+    """Date-shaped STRING value → epoch seconds (naive parses pin to UTC,
+    matching `temporal_to_float`)."""
+    return datetime.strptime(s, fmt).replace(tzinfo=UTC).timestamp()
+
+
+def temporal_string_from_float(v: float, fmt: str) -> str:
+    """Inverse of `temporal_string_to_float`: render an epoch-seconds float
+    back into the column's observed string format."""
+    return datetime.fromtimestamp(v, tz=UTC).strftime(fmt)
+
+
 def temporal_from_float(v: float, bq_type: str) -> object:
     """Inverse of `temporal_to_float`, coercing to the BQ type's Python shape
     (TIMESTAMP → aware datetime, DATETIME → naive, DATE → date, TIME → time)."""
@@ -280,6 +304,37 @@ def _profile_string(
         or (unique_ratio >= _FREE_TEXT_UNIQUE_RATIO and mean_len >= _FREE_TEXT_MIN_MEAN_LEN)
     )
     if is_free_text:
+        # Shaped strings leave the LLM route before it can fail on them
+        # (2026-07-17 E2E): date-shaped columns range-sample as TEMPORAL,
+        # fixed-alphabet identifiers generate from a per-position template.
+        fmt = detect_temporal_format(distinct)
+        if fmt is not None:
+            floats = [temporal_string_to_float(s, fmt) for s in strings]
+            return ColumnProfile(
+                name=col.name,
+                bq_type=col.bq_type,
+                kind=ColumnKind.TEMPORAL,
+                nullable=nullable,
+                null_fraction=null_fraction,
+                numeric_min=min(floats),
+                numeric_max=max(floats),
+                temporal_format=fmt,
+                observed_values=tuple(strings),
+            )
+        shape = detect_identifier_shape(distinct)
+        if shape is not None:
+            # text_examples stays empty on purpose: there is no LLM call to
+            # seed and no fallback that may ever fold reference identifiers.
+            return ColumnProfile(
+                name=col.name,
+                bq_type=col.bq_type,
+                kind=ColumnKind.FREE_TEXT,
+                nullable=nullable,
+                null_fraction=null_fraction,
+                identifier_shape=shape,
+                is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
+                observed_values=tuple(strings),
+            )
         # Cap the seed pool — exemplars condition the LLM, they aren't the bulk.
         examples = tuple(distinct[:64])
         return ColumnProfile(

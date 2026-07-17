@@ -33,6 +33,7 @@ from sdfb_core.engines.base import (
     ModelClient,
     escalating_sampling,
 )
+from sdfb_core.engines.text_shapes import sample_identifier
 from sdfb_core.observability import log_milestone
 
 # Bounded pool size — the LLM emits at most this many unique candidates per
@@ -105,7 +106,24 @@ class FreeTextHook:
         Builds (or reuses) the bounded pool via the LLM, then draws ``n``
         values with replacement. ``cfg.similarity`` biases the mix between
         the LLM-generated pool and the observed reference pool.
+
+        Identifier-shaped columns never reach the LLM (or the reference
+        blend — reference identifiers in the output are the leak): they
+        generate format-preserving values per row from the profile's
+        per-position template.
         """
+        if profile.identifier_shape is not None:
+            values = [
+                sample_identifier(
+                    profile.identifier_shape, lambda k: int(rng.integers(0, k))
+                )
+                for _ in range(n)
+            ]
+            if profile.nullable and profile.null_fraction > 0.0:
+                null_mask = rng.random(n) < profile.null_fraction
+                return [None if null_mask[i] else values[i] for i in range(n)]
+            return values
+
         pool = self._pool_for(profile, cfg)
         ref_pool = list(profile.text_pool)
 
@@ -155,6 +173,7 @@ class FreeTextHook:
         observed = set(profile.text_pool)
         shown = set(exemplars)
         pool: list[str] = []
+        pool_seen: set[str] = set()
         seen: set[str] = set()
         n_parsed = 0
         n_copies = 0
@@ -181,8 +200,16 @@ class FreeTextHook:
                 n_copies += len(values) - len(novel)
                 n_echoes += sum(1 for v in values if v in shown)
                 seen.update(values)
-                pool.extend(novel)
-                if pool:
+                # Accumulate ACROSS levels until the pool target is met —
+                # breaking on the first non-empty yield let one conservative
+                # completion define the whole pool (2026-07-17 B.1 run: 4
+                # distinct values over 1000 rows) and the unclamped retry
+                # levels never executed.
+                for v in novel:
+                    if v not in pool_seen:
+                        pool_seen.add(v)
+                        pool.append(v)
+                if len(pool) >= self._pool_size:
                     break
         except Exception as e:
             if self._strict:
@@ -230,11 +257,26 @@ class FreeTextHook:
                 prompt_echoes=n_echoes,
             )
             return exemplars
+        if len(pool) < self._pool_size:
+            # Levels exhausted below target: the column lands with whatever
+            # novelty the LLM delivered, but never silently.
+            log_milestone(
+                "freetext_pool_undersized",
+                level=logging.WARNING,
+                column=profile.name,
+                pool_size=len(pool),
+                target=self._pool_size,
+                attempts=attempts,
+                parsed=n_parsed,
+                distinct=len(seen),
+                verbatim_copies=n_copies,
+                prompt_echoes=n_echoes,
+            )
         # The LLM pool stays novel-only; `_blend_pools` already mixes the
         # observed reference pool back in proportionally to `cfg.similarity`,
         # so folding exemplars HERE double-counted them and turned the
         # "diverge" side of the blend into more memorization.
-        return _dedupe_stable(pool)[: self._pool_size]
+        return pool[: self._pool_size]
 
 
 def _extract_values(responses: list[dict]) -> list[str]:
