@@ -403,6 +403,116 @@ def test_probe_reusable_server_false_on_non_json_body(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# setup() — concurrent DoFn threads must share ONE server per worker.
+#
+# 2026-07-16 b2_library run: a freshly-autoscaled worker handed bundles to 8
+# DoFn threads at once. Every thread failed the (unlocked) reuse probe within
+# the same instant, so 3+ vLLM servers spawned onto one 14.56 GiB T4 — each
+# loaded ~4.8 GiB of weights and all of them OOMed allocating KV cache, exit
+# code 1, four bundle-retry strikes, job FAILED. setup() must serialize the
+# probe → pull → spawn → ready window process-wide so exactly one server
+# exists and late threads bind to it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fresh_server_registry(monkeypatch):
+    """Isolate the module-level shared-server registry per test."""
+    import sdfb_beam.handlers.vllm_client as mod
+
+    monkeypatch.setattr(mod, "_SERVER_REFS", {})
+    monkeypatch.setattr(mod, "_PARKED_SERVERS", {})
+
+
+def test_concurrent_setup_spawns_exactly_one_server(monkeypatch):
+    import threading
+    import time as _time
+    import urllib.request
+
+    spawned: list = []
+    pulled: list = []
+
+    def fake_urlopen(*a, **k):
+        # No server listening until the first spawn lands.
+        if not spawned:
+            raise ConnectionRefusedError("nothing listening yet")
+        return _FakeModelsResponse({"data": [{"id": "/local-ssd/model"}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    def fake_pull(self):
+        _time.sleep(0.02)  # widen the race window
+        pulled.append(self)
+
+    def fake_spawn(self):
+        _time.sleep(0.05)  # widen the race window
+        spawned.append(self)
+
+    with (
+        mock.patch.object(VLLMModelClient, "_pull_weights", fake_pull),
+        mock.patch.object(VLLMModelClient, "_spawn_server", fake_spawn),
+        mock.patch.object(VLLMModelClient, "_wait_until_ready", lambda self: None),
+        mock.patch.object(
+            VLLMModelClient, "_build_openai_client", lambda self: object()
+        ),
+    ):
+        clients = [
+            VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+            for _ in range(8)
+        ]
+        threads = [threading.Thread(target=c.setup) for c in clients]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert len(spawned) == 1, "concurrent setup() must spawn exactly one server"
+    assert len(pulled) == 1, "concurrent setup() must pull weights exactly once"
+    assert all(c._client is not None for c in clients)
+
+
+def test_teardown_owner_parks_server_while_reusers_active(monkeypatch):
+    """The spawning client's teardown must NOT kill a server that sibling
+    clients (reusers) are still bound to — the 2026-07-16 b2 run terminated
+    pid=109 out from under 7 reusing threads. The LAST client out kills it."""
+    import urllib.request
+
+    fake_proc = mock.MagicMock()
+    fake_proc.pid = 4321
+    server_up: list = []
+
+    def fake_urlopen(*a, **k):
+        if not server_up:
+            raise ConnectionRefusedError("nothing listening yet")
+        return _FakeModelsResponse({"data": [{"id": "/local-ssd/model"}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    def fake_spawn(self):
+        self._server = fake_proc
+        server_up.append(True)
+
+    with (
+        mock.patch.object(VLLMModelClient, "_pull_weights", lambda self: None),
+        mock.patch.object(VLLMModelClient, "_spawn_server", fake_spawn),
+        mock.patch.object(VLLMModelClient, "_wait_until_ready", lambda self: None),
+        mock.patch.object(
+            VLLMModelClient, "_build_openai_client", lambda self: object()
+        ),
+    ):
+        owner = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+        owner.setup()  # spawns
+        reuser = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+        reuser.setup()  # binds to the same server
+
+    owner.teardown()
+    fake_proc.terminate.assert_not_called()  # reuser still active
+
+    reuser.teardown()
+    fake_proc.terminate.assert_called_once()  # last one out kills it
+
+
+# ---------------------------------------------------------------------------
 # _server_command — argv construction from vllm_server_kwargs.
 # ---------------------------------------------------------------------------
 
