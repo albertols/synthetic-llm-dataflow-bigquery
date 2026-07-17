@@ -23,6 +23,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
+from sdfb_core.engines.text_shapes import detect_identifier_shape
 
 # Free-text heuristics. A STRING column is routed to the LLM free-text hook
 # when the LLM can plausibly do better than empirical resampling: either the
@@ -83,6 +84,11 @@ class ColumnProfile:
     # FREE_TEXT: the observed pool (deduped, order-stable) the LLM hook
     # conditions on / falls back to.
     text_pool: tuple[str, ...] = ()
+    # FREE_TEXT: fixed per-position character template (engines/text_shapes).
+    # Identifier-shaped columns generate format-preserving values instead of
+    # calling the LLM — qwen3-4b echoed COL_001's exemplars verbatim on every
+    # escalation attempt in the 2026-07-17 E2E run (novel=0, 872 rows dead).
+    identifier_shape: tuple[str, ...] | None = None
 
 
 def _non_null(values: list[object]) -> list[object]:
@@ -198,6 +204,7 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             nullable=nullable,
             null_fraction=null_fraction,
             text_pool=tuple(pool),
+            identifier_shape=detect_identifier_shape(pool),
         )
 
     # CATEGORICAL — empirical frequency table, order-stable for determinism.

@@ -56,6 +56,7 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     escalating_sampling,
 )
+from sdfb_core.engines.text_shapes import sample_identifier
 from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -241,15 +242,25 @@ class B1RagEngine(GenerationEngine):
         rng = random.Random(_mix_seed(cfg.seed, "freetext"))
         for name in self._column_order:
             sampler = self._samplers[name]
-            if sampler.profile.kind is not ColumnKind.FREE_TEXT:
+            prof = sampler.profile
+            if prof.kind is not ColumnKind.FREE_TEXT:
                 continue
-            pool = self._free_text_pools.get(name) or list(
-                sampler.profile.text_examples
-            )
+            null_frac = prof.null_fraction if prof.nullable else 0.0
+            if prof.identifier_shape is not None:
+                # Format-preserving per-row generation — a bounded pool
+                # sampled with replacement collapses an identifier column's
+                # distinctness (2026-07-17 E2E: ID_COL 30 distinct / 1000).
+                out[name] = [
+                    None
+                    if null_frac > 0.0 and rng.random() < null_frac
+                    else sample_identifier(prof.identifier_shape, rng.randrange)
+                    for _ in range(n)
+                ]
+                continue
+            pool = self._free_text_pools.get(name) or list(prof.text_examples)
             if not pool:
                 out[name] = [None] * n
                 continue
-            null_frac = sampler.profile.null_fraction if sampler.profile.nullable else 0.0
             drawn: list = []
             for _ in range(n):
                 if null_frac > 0.0 and rng.random() < null_frac:
@@ -266,7 +277,9 @@ class B1RagEngine(GenerationEngine):
         assert self._profiles is not None
         pools: dict[str, list[str]] = {}
         free_text_cols = [
-            p for p in self._profiles.values() if p.kind is ColumnKind.FREE_TEXT
+            p
+            for p in self._profiles.values()
+            if p.kind is ColumnKind.FREE_TEXT and p.identifier_shape is None
         ]
         if not free_text_cols:
             return pools
@@ -386,6 +399,23 @@ class B1RagEngine(GenerationEngine):
                     verbatim_copies=y.copies,
                     prompt_echoes=y.prompt_echoes,
                 )
+            elif len(pool) < _DEFAULT_FREE_TEXT_POOL:
+                # Every escalation level ran and the pool is still short of
+                # target: the column lands with whatever novelty the LLM
+                # delivered, but never silently — the 2026-07-17 E2E run
+                # accepted a 4-value pool for COL_048 without a trace.
+                log_milestone(
+                    "freetext_pool_undersized",
+                    level=logging.WARNING,
+                    column=prof.name,
+                    pool_size=len(pool),
+                    target=_DEFAULT_FREE_TEXT_POOL,
+                    attempts=y.attempts,
+                    parsed=y.parsed,
+                    distinct=y.distinct,
+                    verbatim_copies=y.copies,
+                    prompt_echoes=y.prompt_echoes,
+                )
 
         # Fold observed exemplars ONLY when the LLM delivered nothing (lax
         # mode) — loudly, via the fallback milestone emitted above. Every
@@ -440,12 +470,14 @@ def _pool_llm_yield(
     json_schema: dict,
     prof: ColumnProfile,
     seed_examples: list[str],
+    target: int = _DEFAULT_FREE_TEXT_POOL,
 ) -> _PoolYield:
-    """Run the pool call at escalating sampling levels until a novel value
-    lands. An empty NOVEL yield (every value found in the reference, or every
-    choice dropped at parse) is retried with hotter, unclamped sampling
-    before giving up — the 2026-07-16 corp runs failed strict on all-copy
-    yields at every level.
+    """Run the pool call at escalating sampling levels, accumulating novel
+    values until the pool reaches ``target``. Breaking on the FIRST
+    non-empty yield let one conservative completion (still under the served
+    model's generation_config truncation pin) define the whole pool — the
+    2026-07-17 E2E run landed a 4-value pool over 1000 rows and the
+    unclamped retry levels never executed.
 
     No request seed: a pinned seed with n>1 collapses all n vLLM choices
     into one completion (2026-07-15 run: identical choice lengths per
@@ -454,6 +486,7 @@ def _pool_llm_yield(
     observed = set(prof.observed_values)
     shown = set(seed_examples)
     pool: list[str] = []
+    pool_seen: set[str] = set()
     seen: set[str] = set()
     n_parsed = 0
     n_copies = 0
@@ -476,8 +509,11 @@ def _pool_llm_yield(
         n_copies += len(values) - len(novel)
         n_echoes += sum(1 for v in values if v in shown)
         seen.update(values)
-        pool.extend(novel)
-        if pool:
+        for v in novel:
+            if v not in pool_seen:
+                pool_seen.add(v)
+                pool.append(v)
+        if len(pool) >= target:
             break
     return _PoolYield(pool, n_parsed, len(seen), n_copies, n_echoes, attempts)
 
