@@ -484,7 +484,9 @@ def test_b1_pool_filters_verbatim_exemplar_copies(free_text_ctx):
     assert not set(observed) & set(pool)
 
 
-def test_b1_non_unique_freetext_folds_exemplars():
+def _shared_key_ctx():
+    """60 distinct comments over 240 rows: free text by cardinality (>50)
+    but NOT unique-valued (unique ratio 0.25) — the shared-key band."""
     schema = TableSchema.model_validate(
         {
             "table_info": {"table_id": "demo.feedback"},
@@ -495,25 +497,41 @@ def test_b1_non_unique_freetext_folds_exemplars():
             "primary_keys": ["id"],
         }
     )
-    # 60 distinct comments over 240 rows: free text by cardinality (>50) but
-    # NOT unique-valued (unique ratio 0.25) — exemplar folding is fidelity-
-    # preserving here, not memorization of one-per-row values.
     rows = [
         {"id": i, "comment": f"Observed comment number {i % 60}"}
         for i in range(240)
     ]
-    ctx = GenerationContext(
+    return GenerationContext(
         table_schema=schema,
         reference_rows=rows,
         reference_digest="fb-digest",
         pipeline_run_id="b1-fb",
     )
+
+
+def test_b1_non_unique_freetext_does_not_fold_exemplars():
+    # Shared-key free-text columns are still high-cardinality source data:
+    # folding real exemplars on top of a small LLM pool made them 47.5-93.9 %
+    # verbatim source values in the 2026-07-16 E2E run (COL_048 et al.). When
+    # the LLM delivers, the pool must contain ONLY generated values.
+    ctx = _shared_key_ctx()
     responses = [{"comment": f"Fresh comment {i}"} for i in range(10)]
     engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
     engine.setup(_RecordingPoolClient(responses), ctx)
     pool = engine._free_text_pools["comment"]
     assert any(v.startswith("Fresh comment") for v in pool)
-    assert any(v.startswith("Observed comment") for v in pool)
+    assert not any(v.startswith("Observed comment") for v in pool)
+
+
+def test_b1_non_unique_freetext_empty_yield_still_falls_back_to_exemplars():
+    # Lax mode, LLM yielded nothing usable: the exemplar fallback keeps the
+    # column populated — loudly, via the freetext_llm_fallback milestone.
+    ctx = _shared_key_ctx()
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
+    engine.setup(_RecordingPoolClient([]), ctx)
+    pool = engine._free_text_pools["comment"]
+    assert pool
+    assert all(v.startswith("Observed comment") for v in pool)
 
 
 def test_b1_pool_prompt_demands_format_identification_and_novelty(free_text_ctx):
