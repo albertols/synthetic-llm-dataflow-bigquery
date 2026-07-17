@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -71,6 +72,20 @@ DEFAULT_PORT = 8000
 DEFAULT_STARTUP_TIMEOUT_S = 600.0
 DEFAULT_POLL_INTERVAL_S = 2.0
 _HTTP_OK = 200
+
+# One vLLM server per (host, port) per SDK worker PROCESS. Beam hands bundles
+# to many DoFn threads at once, and each DoFn owns its own VLLMModelClient —
+# without process-wide serialization every thread fails the reuse probe in
+# the same instant and spawns its own server onto the one GPU (2026-07-16
+# b2_library run: 3 concurrent spawns x ~4.8 GiB weights on a 14.56 GiB T4 →
+# mutual CUDA OOM, exit code 1, 4 bundle-retry strikes, job FAILED).
+# `_SETUP_LOCK` serializes the probe → pull → spawn → ready window;
+# `_SERVER_REFS` counts live clients bound to each server so teardown() only
+# kills a server the LAST client releases (`_PARKED_SERVERS` holds a spawner's
+# subprocess handle when its owner tears down while siblings are still bound).
+_SETUP_LOCK = threading.Lock()
+_SERVER_REFS: dict[str, int] = {}
+_PARKED_SERVERS: dict[str, Any] = {}
 
 
 class ModelGpuIncompatibleError(RuntimeError):
@@ -176,6 +191,9 @@ class VLLMModelClient:
         # Populated by setup(); reset by teardown().
         self._server: subprocess.Popen[bytes] | None = None
         self._client: Any = None  # openai.OpenAI
+        # True once this client is counted in `_SERVER_REFS` (spawner or
+        # reuser alike); teardown() decrements exactly once.
+        self._bound = False
         # The model identifier the OpenAI client must send. vLLM registers the
         # served model under the path/name it was launched with, so it equals
         # the local model dir after a GCS pull.
@@ -192,6 +210,12 @@ class VLLMModelClient:
     def setup(self) -> None:
         """Per-worker init. Idempotent (a second call is a no-op).
 
+        Process-wide serialized (`_SETUP_LOCK`): concurrent DoFn threads on a
+        fresh worker must not each pull weights and spawn a server — one
+        thread does the pull → spawn → ready sequence while the rest block,
+        then bind to the now-healthy server via the reuse probe (2026-07-16
+        b2_library run: 3 unserialized spawns OOMed each other off one T4).
+
         1. Pull weights GCS → `local_model_dir` (skipped for a local path).
         2. Spawn the vLLM OpenAI server subprocess.
         3. Poll `/v1/models` until ready (or time out).
@@ -199,70 +223,109 @@ class VLLMModelClient:
         """
         if self._client is not None:
             return
+        with _SETUP_LOCK:
+            if self._client is not None:  # pragma: no cover - defensive
+                return
 
-        t0 = time.monotonic()
+            t0 = time.monotonic()
 
-        # A previous bundle attempt in this container may have left a healthy
-        # server behind (Beam retries a failed bundle in a sibling SDK
-        # process; the old subprocess keeps running). Spawning a second
-        # server into the GPU it still owns fails with CUDA OOM — the
-        # 2026-07-16 corp run logged exactly that on every retry, while each
-        # retry also re-pulled 7.5 GB of weights. Reuse the survivor instead.
-        expected_model = (
-            self.local_model_dir
-            if self.model_uri.startswith("gs://")
-            else self.model_uri
-        )
-        if self._probe_reusable_server(expected_model):
-            self._served_model_name = expected_model
+            # A previous bundle attempt in this container may have left a
+            # healthy server behind, and while this thread waited on
+            # _SETUP_LOCK a sibling thread may have finished spawning one.
+            # Spawning a second server into the GPU it still owns fails with
+            # CUDA OOM — the 2026-07-16 corp run logged exactly that on every
+            # retry, while each retry also re-pulled 7.5 GB of weights. Reuse
+            # the survivor instead.
+            expected_model = (
+                self.local_model_dir
+                if self.model_uri.startswith("gs://")
+                else self.model_uri
+            )
+            if self._probe_reusable_server(expected_model):
+                self._served_model_name = expected_model
+                self._client = self._build_openai_client()
+                self._bind_server_locked()
+                log_milestone(
+                    "vllm_reuse", seconds=round(time.monotonic() - t0, 1)
+                )
+                logger.info(
+                    "Reusing healthy vLLM server already serving %r at %s "
+                    "(skipping weight pull and spawn).",
+                    expected_model,
+                    self.base_url,
+                )
+                return
+
+            if self.model_uri.startswith("gs://"):
+                log_milestone("model_pull_start", uri=self.model_uri)
+                t_pull = time.monotonic()
+                self._pull_weights()
+                log_milestone(
+                    "model_pull_done",
+                    seconds=round(time.monotonic() - t_pull, 1),
+                )
+                self._served_model_name = self.local_model_dir
+            else:
+                # Already-local weights; serve them in place.
+                logger.info(
+                    "model_uri %r is not a gs:// URI — serving it as a local "
+                    "path (skipping GCS pull).",
+                    self.model_uri,
+                )
+                self._served_model_name = self.model_uri
+
+            # Fail fast on T4+bf16 instead of letting vLLM stall and the
+            # engines fall back to memorizing reference data.
+            self._assert_gpu_dtype_compatible()
+
+            log_milestone("vllm_spawn")
+            self._spawn_server()
+            self._wait_until_ready()
             self._client = self._build_openai_client()
-            log_milestone("vllm_reuse", seconds=round(time.monotonic() - t0, 1))
-            logger.info(
-                "Reusing healthy vLLM server already serving %r at %s "
-                "(skipping weight pull and spawn).",
-                expected_model,
-                self.base_url,
-            )
-            return
+            self._bind_server_locked()
+            log_milestone("vllm_ready", seconds=round(time.monotonic() - t0, 1))
+            logger.info("vLLM server ready at %s", self.base_url)
 
-        if self.model_uri.startswith("gs://"):
-            log_milestone("model_pull_start", uri=self.model_uri)
-            t_pull = time.monotonic()
-            self._pull_weights()
-            log_milestone(
-                "model_pull_done",
-                seconds=round(time.monotonic() - t_pull, 1),
-            )
-            self._served_model_name = self.local_model_dir
-        else:
-            # Already-local weights; serve them in place.
-            logger.info(
-                "model_uri %r is not a gs:// URI — serving it as a local "
-                "path (skipping GCS pull).",
-                self.model_uri,
-            )
-            self._served_model_name = self.model_uri
+    def _bind_server_locked(self) -> None:
+        """Register this client against the process-wide server refcount.
 
-        # Fail fast on T4+bf16 instead of letting vLLM stall and the engines
-        # fall back to memorizing reference data.
-        self._assert_gpu_dtype_compatible()
-
-        log_milestone("vllm_spawn")
-        self._spawn_server()
-        self._wait_until_ready()
-        self._client = self._build_openai_client()
-        log_milestone("vllm_ready", seconds=round(time.monotonic() - t0, 1))
-        logger.info("vLLM server ready at %s", self.base_url)
+        Caller must hold `_SETUP_LOCK`."""
+        if not self._bound:
+            self._bound = True
+            _SERVER_REFS[self.base_url] = _SERVER_REFS.get(self.base_url, 0) + 1
 
     def teardown(self) -> None:
-        """Terminate the server subprocess and drop the client.
+        """Release this client's hold on the shared server; terminate the
+        server subprocess only when this client is the LAST one bound to it
+        (the 2026-07-16 b2 run killed pid=109 out from under 7 sibling
+        threads that were still generating against it).
 
         Safe to call when `setup()` never ran or already torn down.
         """
-        self._client = None
-        server, self._server = self._server, None
-        if server is None:
-            return
+        with _SETUP_LOCK:
+            self._client = None
+            if self._bound:
+                self._bound = False
+                _SERVER_REFS[self.base_url] = _SERVER_REFS.get(self.base_url, 1) - 1
+            still_bound = _SERVER_REFS.get(self.base_url, 0) > 0
+            server, self._server = self._server, None
+            if server is None:
+                # Last client out also reaps a server parked by its spawner.
+                if not still_bound:
+                    server = _PARKED_SERVERS.pop(self.base_url, None)
+            elif still_bound:
+                # This client spawned the server but siblings still use it —
+                # park the handle for the last one out instead of killing it.
+                _PARKED_SERVERS[self.base_url] = server
+                logger.info(
+                    "Parking vLLM server subprocess (pid=%s): %d sibling "
+                    "client(s) still bound.",
+                    server.pid,
+                    _SERVER_REFS.get(self.base_url, 0),
+                )
+                return
+            if server is None:
+                return
         logger.info("Terminating vLLM server subprocess (pid=%s)", server.pid)
         server.terminate()
         try:

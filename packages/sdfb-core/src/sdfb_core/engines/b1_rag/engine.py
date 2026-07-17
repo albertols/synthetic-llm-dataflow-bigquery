@@ -387,13 +387,15 @@ class B1RagEngine(GenerationEngine):
                     prompt_echoes=y.prompt_echoes,
                 )
 
-        # Fold observed exemplars in for fidelity — EXCEPT when the column is
-        # unique-valued (ids, one-per-row prose) and the LLM delivered: there
-        # every folded exemplar is a memorized real value (2026-07-15 E2E:
-        # copy_ratio=1.0 on all 8 free-text columns). An empty pool still
-        # falls back to exemplars in lax mode — loudly, via the fallback
-        # milestone emitted above.
-        if not pool or not prof.is_unique_valued:
+        # Fold observed exemplars ONLY when the LLM delivered nothing (lax
+        # mode) — loudly, via the fallback milestone emitted above. Every
+        # FREE_TEXT column is high-cardinality by classification, so folding
+        # real values on top of a delivered pool is memorization, not
+        # fidelity: the earlier is_unique_valued-only guard left shared-key
+        # columns folding 64 real exemplars each (2026-07-16 E2E: 9 columns
+        # at copy_ratio 0.475-0.939; 2026-07-15: copy_ratio=1.0 on all 8
+        # unique-valued ones).
+        if not pool:
             for ex in prof.text_examples:
                 if ex not in pool:
                     pool.append(ex)

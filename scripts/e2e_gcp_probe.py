@@ -225,7 +225,51 @@ def bq_cross_validation(
         "pk_columns": pk_columns,
         "pk_analysis": _pk_analysis(client, landing_fqn, pk_columns),
         "columns": per_col,
+        "memorization_flags": memorization_flags(per_col),
     }
+
+
+# A non-constant column whose source support is genuinely large (> 100
+# distinct values — not an enum whose full coverage is by-design) must not
+# land > 30 % verbatim source values. 2026-07-16 b1_rag run: 9 such columns
+# sat at copy_ratio 0.475-0.939 while validation_runs said PASSED, because
+# no rule anywhere scored memorization.
+_MEM_MIN_SOURCE_DISTINCT = 100
+_MEM_COPY_RATIO_THRESHOLD = 0.3
+
+
+def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
+    """CRITICAL memorization findings from `bq_cross_validation` per-column
+    entries: non-constant, source_distinct > 100, copy_ratio >= 0.3. Sorted
+    worst-first. Columns without a measured copy_ratio (not in the source
+    schema, or an empty landing table → `_ratio` returned None) are skipped —
+    absence of measurement is not evidence of safety, but it is not a flag."""
+    flags = []
+    for name, entry in columns.items():
+        copy_ratio = entry.get("copy_ratio")
+        source_distinct = entry.get("source_distinct")
+        if copy_ratio is None or source_distinct is None:
+            continue
+        if entry.get("is_constant"):
+            continue
+        if (
+            source_distinct > _MEM_MIN_SOURCE_DISTINCT
+            and copy_ratio >= _MEM_COPY_RATIO_THRESHOLD
+        ):
+            flags.append(
+                {
+                    "column": name,
+                    "type": entry.get("type"),
+                    "copy_ratio": copy_ratio,
+                    "source_distinct": source_distinct,
+                    "severity": "CRITICAL",
+                    "rule": (
+                        f"copy_ratio >= {_MEM_COPY_RATIO_THRESHOLD} AND "
+                        f"source_distinct > {_MEM_MIN_SOURCE_DISTINCT}"
+                    ),
+                }
+            )
+    return sorted(flags, key=lambda f: f["copy_ratio"], reverse=True)
 
 
 def _pk_analysis(client, landing_fqn: str, pk_columns: list[str]) -> dict[str, Any]:
@@ -304,6 +348,7 @@ def dataflow_job(
         "state": j.get("currentState"),
         "timing": timing,
         "environment": _job_env(j),
+        "parameters": _job_params(j),
         "step_count": len(j.get("steps", [])),
         "job_phases": _job_messages(session, base),
         "metrics": _job_metrics(session, base),
@@ -350,6 +395,46 @@ def _job_env(j: dict) -> dict[str, Any]:
             None,
         ),
     }
+
+
+def _job_params(j: dict) -> dict[str, Any]:
+    """Launch/effective pipeline parameters from the job's display data.
+
+    Custom flex-template options (`reference_rows_limit`, `pk_cols`,
+    `identity_cols`, `seed`, ...) surface only here, under their options-class
+    namespace — the 2026-07-16 report could not confirm what the run was
+    launched with because the probe never extracted them. Two shapes exist:
+    `environment.sdkPipelineOptions.display_data` entries carry a plain
+    `value`; `pipelineDescription.displayData` entries carry typed fields
+    (`strValue` / `int64Value` / `boolValue` / ...). First occurrence of a
+    key wins."""
+    entries: list = []
+    env = j.get("environment") or {}
+    sdk = env.get("sdkPipelineOptions") or {}
+    entries.extend(sdk.get("display_data") or [])
+    entries.extend((j.get("pipelineDescription") or {}).get("displayData") or [])
+    params: dict[str, Any] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        key = e.get("key")
+        if not key or key in params:
+            continue
+        for field in (
+            "value",
+            "strValue",
+            "int64Value",
+            "boolValue",
+            "floatValue",
+            "timestampValue",
+            "durationValue",
+            "javaClassValue",
+            "shortStrValue",
+        ):
+            if e.get(field) is not None:
+                params[str(key)] = e[field]
+                break
+    return params
 
 
 # Job-message text markers → milestone label. Applied to JOB_MESSAGE_BASIC text
