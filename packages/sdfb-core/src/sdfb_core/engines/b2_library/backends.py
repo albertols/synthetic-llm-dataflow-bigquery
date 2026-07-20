@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Protocol
 import numpy as np
 
 from sdfb_core.engines.b2_library.fidelity import ColumnKind, ColumnProfile
+from sdfb_core.engines.b2_library.temporal import sample_temporal
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -134,6 +135,11 @@ class EmpiricalBackend:
 
         elif p.kind is ColumnKind.CATEGORICAL:
             values = _sample_categorical(p, n, rng, temperature)
+
+        elif p.kind is ColumnKind.TEMPORAL:
+            values = sample_temporal(
+                p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+            )
 
         else:  # FREE_TEXT shouldn't reach here (filtered in fit()).
             values = [None] * n
@@ -255,10 +261,16 @@ class SdgxBackend:
         return None
 
     def _reference_frame(self, reference_rows: list[dict], pd_module) -> pd.DataFrame:
-        """Reference rows → DataFrame, dropping free-text columns (the LLM
-        hook owns them; feeding high-cardinality prose to CTGAN is wasteful
-        and degrades the fit)."""
-        keep = set(self._profiles)
+        """Reference rows → DataFrame, dropping free-text and temporal columns.
+
+        Temporal columns are jitter-sampled from their profile, never fed
+        to CTGAN — fitting raw timestamps makes the model resample the
+        observed table (the 2026-07-20 memorization defect).
+        """
+        keep = {
+            name for name, p in self._profiles.items()
+            if p.kind is not ColumnKind.TEMPORAL
+        }
         rows = [{k: v for k, v in row.items() if k in keep} for row in reference_rows]
         return pd_module.DataFrame(rows)
 
@@ -280,7 +292,15 @@ class SdgxBackend:
         sampled = self._synthesizer.sample(n)  # pandas DataFrame
         out: dict[str, list] = {}
         for name, p in self._profiles.items():
-            if name in sampled.columns:
+            if p.kind is ColumnKind.TEMPORAL:
+                values = sample_temporal(
+                    p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+                )
+                if p.nullable and p.null_fraction > 0.0:
+                    null_mask = rng.random(n) < p.null_fraction
+                    values = [None if null_mask[i] else values[i] for i in range(n)]
+                out[name] = values
+            elif name in sampled.columns:
                 out[name] = list(sampled[name])
             else:
                 # CTGAN dropped a column (e.g. constant) — fill from profile.
