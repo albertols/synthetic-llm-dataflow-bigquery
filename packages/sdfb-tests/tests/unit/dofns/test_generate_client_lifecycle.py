@@ -103,6 +103,8 @@ def _ctx():
         table_schema=SimpleNamespace(columns=[]),
         identity_columns=[],
         pipeline_run_id="lifecycle-test",
+        rag_chunks_table=None,
+        chunk_store=None,
     )
 
 

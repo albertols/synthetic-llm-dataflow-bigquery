@@ -90,13 +90,11 @@ class GenerateRecordsDoFn(beam.DoFn):
         # the pickled graph — attach it worker-side, mirroring the
         # embedder localization above. Engines see only the ChunkStore
         # Protocol; an empty table just means the engine's fallback runs.
-        rag_chunks_table = getattr(ctx, "rag_chunks_table", None)
-        chunk_store = getattr(ctx, "chunk_store", None)
-        if rag_chunks_table and chunk_store is None:
+        if ctx.rag_chunks_table and ctx.chunk_store is None:
             from sdfb_beam.rag import store as rag_store
 
             ctx = ctx.model_copy(
-                update={"chunk_store": rag_store.BigQueryChunkStore(rag_chunks_table)}
+                update={"chunk_store": rag_store.BigQueryChunkStore(ctx.rag_chunks_table)}
             )
             self.ctx = ctx
 
