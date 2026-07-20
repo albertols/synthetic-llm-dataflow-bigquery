@@ -341,8 +341,11 @@ class B1RagEngine(GenerationEngine):
             return pools
 
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
+        chunks_by_column = self._fetch_free_text_chunks(ctx)
         for prof in free_text_cols:
-            seed_examples = self._column_seed_examples(prof, ctx, _DEFAULT_TOP_K)
+            seed_examples = self._column_seed_examples(
+                prof, ctx, _DEFAULT_TOP_K, chunks_by_column.get(prof.name)
+            )
             if not seed_examples:
                 seed_examples = [
                     e[prof.name]
@@ -354,35 +357,52 @@ class B1RagEngine(GenerationEngine):
             )
         return pools
 
+    def _fetch_free_text_chunks(self, ctx: GenerationContext) -> dict[str, list]:
+        """Fetch persisted `free_text_col` chunks ONCE for all columns and
+        group by `metadata["column"]` (WS2 review: `_column_seed_examples`
+        used to issue one identical store query per free-text column — N
+        redundant BQ reads per worker setup). Empty dict when there is no
+        store or no reference digest to key the fetch."""
+        store = ctx.chunk_store
+        if store is None or not ctx.reference_digest:
+            return {}
+        chunks = store.fetch(
+            ctx.reference_digest,
+            CHUNK_KIND_FREE_TEXT_COL,
+            ctx.embedder_id,
+            ctx.embedder_version,
+        )
+        by_column: dict[str, list] = {}
+        for c in chunks:
+            column = c.metadata.get("column")
+            if column is None or not c.embedding:
+                continue
+            by_column.setdefault(column, []).append(c)
+        return by_column
+
     def _column_seed_examples(
-        self, prof: ColumnProfile, ctx: GenerationContext, k: int
+        self,
+        prof: ColumnProfile,
+        ctx: GenerationContext,
+        k: int,
+        column_chunks: list | None,
     ) -> list[str]:
         """Column-relevant seed exemplars for one free-text column
-        (WS2 §4b.3): persisted `free_text_col` chunks when the store has
-        them, else the column's own values embedded locally. Empty list ⇒
-        caller falls back to row-doc exemplars."""
-        store = ctx.chunk_store
-        if store is not None and ctx.reference_digest:
-            chunks = [
-                c
-                for c in store.fetch(
-                    ctx.reference_digest,
-                    CHUNK_KIND_FREE_TEXT_COL,
-                    ctx.embedder_id,
-                    ctx.embedder_version,
-                )
-                if c.metadata.get("column") == prof.name and c.embedding
-            ]
-            if chunks:
-                vectors = [list(c.embedding) for c in chunks]
-                texts = [c.chunk_text for c in chunks]
-                if len(texts) <= k:
-                    return texts
-                index = build_index(vectors, len(vectors[0]))
-                try:
-                    return retrieve_centroid_top_k(index, vectors, texts, k)
-                finally:
-                    index.release()
+        (WS2 §4b.3): persisted `free_text_col` chunks — pre-fetched ONCE for
+        all columns by `_fetch_free_text_chunks` and passed in as
+        ``column_chunks`` — when present, else the column's own values
+        embedded locally. Empty list ⇒ caller falls back to row-doc
+        exemplars."""
+        if column_chunks:
+            vectors = [list(c.embedding) for c in column_chunks]
+            texts = [c.chunk_text for c in column_chunks]
+            if len(texts) <= k:
+                return texts
+            index = build_index(vectors, len(vectors[0]))
+            try:
+                return retrieve_centroid_top_k(index, vectors, texts, k)
+            finally:
+                index.release()
         if self._embedder is not None:
             values: list[str] = []
             seen: set[str] = set()

@@ -1,5 +1,5 @@
 [
-  {"name": "chunk_id", "type": "STRING", "mode": "REQUIRED", "description": "blake2b-256 hex of source_fqn:row_digest:chunk_index; deterministic key, dedupes retries."},
+  {"name": "chunk_id", "type": "STRING", "mode": "REQUIRED", "description": "blake2b-256 hex of source_fqn:row_digest:chunk_index; deterministic identity key. WRITE_APPEND means duplicate rows are possible across retried/racing runs; readers dedupe by keying on row_digest."},
   {"name": "source_fqn", "type": "STRING", "mode": "REQUIRED", "description": "Fully-qualified source table, e.g. project.dataset.table."},
   {"name": "source_pk", "type": "JSON", "mode": "NULLABLE", "description": "Primary-key column -> value map for the source row; NULL when no PK declared."},
   {"name": "row_digest", "type": "STRING", "mode": "REQUIRED", "description": "SHA-256 of the canonical-encoded source row (content identity, chunking-independent)."},
