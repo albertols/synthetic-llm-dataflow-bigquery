@@ -23,6 +23,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
+from sdfb_core.engines.b2_library.temporal import classify_temporal_values, to_epoch
 from sdfb_core.engines.text_shapes import detect_identifier_shape
 
 # Free-text heuristics. A STRING column is routed to the LLM free-text hook
@@ -32,6 +33,15 @@ from sdfb_core.engines.text_shapes import detect_identifier_shape
 _HIGH_CARDINALITY_RATIO = 0.9  # distinct / non-null count above this ⇒ free-text
 _FREE_TEXT_MIN_LEN = 40  # mean string length above this ⇒ likely prose
 
+# Cardinality caps (mirror b1_rag/profile.py:64-65). At or below the cap a
+# discrete column is an enum-in-disguise and verbatim empirical resampling
+# is the intended fidelity primitive. Above it, resampling IS memorization
+# (2026-07-20 E2E: 11 columns at copy_ratio=1.0) — temporal columns jitter
+# within the observed range, other strings go to the LLM free-text hook.
+_TEMPORAL_MAX_CATEGORIES = 20
+_CATEGORICAL_MAX_CATEGORIES = 20
+_TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIME", "TIMESTAMP"})
+
 
 class ColumnKind(StrEnum):
     """How a column is synthesized in B.2.
@@ -39,12 +49,14 @@ class ColumnKind(StrEnum):
     - ``CONSTANT``: a single observed value across the reference → copied.
     - ``NUMERIC``: int/float/decimal → sampled then clipped to observed range.
     - ``CATEGORICAL``: low-cardinality discrete → empirical-frequency sample.
+    - ``TEMPORAL``: high-cardinality date/time → novel-range jitter within [min, max].
     - ``FREE_TEXT``: prose / JSON / very-high-cardinality string → LLM hook.
     """
 
     CONSTANT = "constant"
     NUMERIC = "numeric"
     CATEGORICAL = "categorical"
+    TEMPORAL = "temporal"
     FREE_TEXT = "free_text"
 
 
@@ -89,6 +101,10 @@ class ColumnProfile:
     # calling the LLM — qwen3-4b echoed COL_001's exemplars verbatim on every
     # escalation attempt in the 2026-07-17 E2E run (novel=0, 872 rows dead).
     identifier_shape: tuple[str, ...] | None = None
+    # TEMPORAL: how to render sampled epoch floats back into values.
+    # minimum/maximum hold epoch floats (units per temporal.py) for this kind.
+    temporal_value_type: str | None = None
+    temporal_format: str | None = None
 
 
 def _non_null(values: list[object]) -> list[object]:
@@ -115,6 +131,11 @@ def _classify(  # noqa: PLR0911 — type classifier; sequential returns read cle
     if field.bq_type in {"BOOLEAN", "BOOL"}:
         return ColumnKind.CATEGORICAL
 
+    if field.bq_type in _TEMPORAL_BQ_TYPES:
+        if distinct <= _TEMPORAL_MAX_CATEGORIES:
+            return ColumnKind.CATEGORICAL  # enum-in-disguise (load-date partitions)
+        return ColumnKind.TEMPORAL
+
     if field.bq_type in _STRINGY_BQ_TYPES:
         # JSON columns always go to the free-text hook — empirical resampling
         # of structured blobs is meaningless.
@@ -125,11 +146,16 @@ def _classify(  # noqa: PLR0911 — type classifier; sequential returns read cle
         mean_len = sum(len(s) for s in strs) / max(len(strs), 1)
         if cardinality_ratio >= _HIGH_CARDINALITY_RATIO or mean_len >= _FREE_TEXT_MIN_LEN:
             return ColumnKind.FREE_TEXT
-        return ColumnKind.CATEGORICAL
+        if distinct <= _CATEGORICAL_MAX_CATEGORIES:
+            return ColumnKind.CATEGORICAL
+        # Above the cap: date-shaped strings jitter as TEMPORAL; anything
+        # else is high-cardinality discrete text the LLM must synthesize —
+        # resampling it verbatim is the 2026-07-20 memorization defect.
+        if classify_temporal_values(strs) is not None:
+            return ColumnKind.TEMPORAL
+        return ColumnKind.FREE_TEXT
 
-    # DATE/TIME/TIMESTAMP and anything else: treat as categorical over the
-    # observed pool (empirical resampling keeps values in-support; numeric
-    # interpolation of timestamps is out of M1 scope).
+    # Everything else (BOOL handled above): categorical over the observed pool.
     return ColumnKind.CATEGORICAL
 
 
@@ -194,6 +220,27 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             is_integer=is_int,
             decimal_scale=decimal_scale,
         )
+
+    if kind is ColumnKind.TEMPORAL:
+        spec = classify_temporal_values(non_null)
+        if spec is None:
+            # BQ-typed temporal whose observed values are mixed/unparseable:
+            # stay in-support rather than guessing an epoch mapping.
+            kind = ColumnKind.CATEGORICAL
+        else:
+            value_type, fmt = spec
+            epochs = [to_epoch(v, value_type, fmt) for v in non_null]
+            return ColumnProfile(
+                name=field.name,
+                bq_type=field.bq_type,
+                kind=ColumnKind.TEMPORAL,
+                nullable=nullable,
+                null_fraction=null_fraction,
+                minimum=min(epochs),
+                maximum=max(epochs),
+                temporal_value_type=value_type,
+                temporal_format=fmt,
+            )
 
     if kind is ColumnKind.FREE_TEXT:
         pool = _dedupe_stable([str(v) for v in non_null])
