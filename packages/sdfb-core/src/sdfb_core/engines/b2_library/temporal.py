@@ -1,0 +1,112 @@
+"""Temporal profiling + novel-range sampling for B.2 (WS1, spec §3a).
+
+High-cardinality DATE/TIME/TIMESTAMP columns (and date-shaped STRING
+columns) must never be resampled verbatim from the observed value table —
+the 2026-07-20 E2E run landed 8 such columns at copy_ratio=1.0. Instead
+the profile records the observed [min, max] as epoch floats and the
+backend samples uniformly within it, rendering back to the column's
+native value type / observed string format. Mirrors B.1's temporal
+novel-range behavior (b1_rag/profile.py `_profile_temporal`).
+
+Pure stdlib + the shared text_shapes detector. No Beam, no GCP, no torch.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, time, timedelta
+from typing import TYPE_CHECKING
+
+from sdfb_core.engines.text_shapes import detect_temporal_format
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import numpy as np
+
+# ColumnProfile.temporal_value_type values. Epoch units per type:
+# seconds since 1970 (datetimes and rendered strings), proleptic ordinal
+# days (dates), seconds-of-day (times). from_epoch mirrors to_epoch, so
+# the unit never leaks outside this module.
+VT_DATETIME = "datetime"          # tz-naive datetime objects
+VT_DATETIME_UTC = "datetime_utc"  # tz-aware datetime objects (rendered UTC)
+VT_DATE = "date"                  # datetime.date objects
+VT_TIME = "time"                  # datetime.time objects
+VT_STR = "str"                    # strings in one strftime format
+
+_EPOCH_NAIVE = datetime(1970, 1, 1)
+_MAX_SECONDS_OF_DAY = 86_399.999_999
+
+
+def classify_temporal_values(values: list[object]) -> tuple[str, str | None] | None:  # noqa: PLR0911 — type classifier; sequential returns read clearer than nesting
+    """``(value_type, strftime_format)`` when EVERY value is uniformly
+    temporal, else ``None`` (mixed types/formats stay on their existing
+    route — same all-or-nothing contract as ``detect_temporal_format``)."""
+    if not values:
+        return None
+    first = values[0]
+    if isinstance(first, datetime):  # before date: datetime IS a date
+        if not all(isinstance(v, datetime) for v in values):
+            return None
+        aware = first.tzinfo is not None
+        if any((v.tzinfo is not None) != aware for v in values):
+            return None
+        return (VT_DATETIME_UTC if aware else VT_DATETIME, None)
+    if isinstance(first, date):
+        if not all(isinstance(v, date) and not isinstance(v, datetime) for v in values):
+            return None
+        return (VT_DATE, None)
+    if isinstance(first, time):
+        if not all(isinstance(v, time) for v in values):
+            return None
+        return (VT_TIME, None)
+    if isinstance(first, str):
+        if not all(isinstance(v, str) for v in values):
+            return None
+        fmt = detect_temporal_format(values)
+        return (VT_STR, fmt) if fmt else None
+    return None
+
+
+def to_epoch(value: object, value_type: str, fmt: str | None) -> float:
+    if value_type == VT_DATETIME_UTC:
+        return value.timestamp()
+    if value_type == VT_DATETIME:
+        return (value - _EPOCH_NAIVE).total_seconds()
+    if value_type == VT_DATE:
+        return float(value.toordinal())
+    if value_type == VT_TIME:
+        return (
+            value.hour * 3600 + value.minute * 60 + value.second
+            + value.microsecond / 1e6
+        )
+    return (datetime.strptime(value, fmt) - _EPOCH_NAIVE).total_seconds()
+
+
+def from_epoch(x: float, value_type: str, fmt: str | None) -> object:
+    if value_type == VT_DATETIME_UTC:
+        return datetime.fromtimestamp(x, tz=UTC)
+    if value_type == VT_DATETIME:
+        return _EPOCH_NAIVE + timedelta(seconds=x)
+    if value_type == VT_DATE:
+        return date.fromordinal(round(x))
+    if value_type == VT_TIME:
+        s = max(0.0, min(x, _MAX_SECONDS_OF_DAY))
+        whole = int(s)
+        return time(whole // 3600, (whole % 3600) // 60, whole % 60,
+                    round((s - whole) * 1e6))
+    return (_EPOCH_NAIVE + timedelta(seconds=x)).strftime(fmt)
+
+
+def sample_temporal(
+    minimum: float | None,
+    maximum: float | None,
+    value_type: str,
+    fmt: str | None,
+    n: int,
+    rng: np.random.Generator,
+) -> list:
+    """``n`` novel values uniformly within the observed epoch bounds."""
+    if minimum is None or maximum is None:
+        return [None] * n
+    if maximum <= minimum:
+        return [from_epoch(minimum, value_type, fmt)] * n
+    draws = rng.uniform(minimum, maximum, size=n)
+    return [from_epoch(float(x), value_type, fmt) for x in draws]
