@@ -12,7 +12,10 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import numpy as np
 import pandas as pd
+from sdfb_beam.handlers.fake_client import FakeModelClient
 from sdfb_core.contracts import TableSchema
+from sdfb_core.engines import GenerationConfig, GenerationContext
+from sdfb_core.engines.b2_library import B2LibraryEngine
 from sdfb_core.engines.b2_library.backends import (
     EmpiricalBackend,
     SdgxBackend,
@@ -21,6 +24,8 @@ from sdfb_core.engines.b2_library.backends import (
 from sdfb_core.engines.b2_library.fidelity import (
     ColumnKind,
     ColumnProfile,
+    _representative,
+    enforce_value,
     profile_table,
 )
 from sdfb_core.engines.b2_library.temporal import (
@@ -218,3 +223,39 @@ def test_sdgx_backend_temporal_branch_injects_nulls():
     null_rate = sum(v is None for v in out["ts"]) / 400
     assert 0.2 < null_rate < 0.4  # nulls reinjected, not dropped
     assert any(v is not None for v in out["ts"])  # and real values sampled
+
+
+# ---------------------------------------------------------------------------
+# Fidelity enforcement + end-to-end integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_enforce_value_passes_temporal_through_and_representative_renders():
+    schema = TableSchema.model_validate(_SCHEMA)
+    profiles = profile_table(schema, _reference_rows())
+    p = profiles["d_str"]
+    assert enforce_value(p, "2024-06-15") == "2024-06-15"
+    rep = _representative(p)
+    assert datetime.strptime(rep, "%Y-%m-%d")  # renders minimum, parseable
+
+
+def test_engine_end_to_end_yields_novel_temporal_rows():
+    rows = _reference_rows()
+    ctx = GenerationContext(
+        table_schema=TableSchema.model_validate(_SCHEMA),
+        reference_rows=rows,
+        reference_digest="temporal-digest",
+        pipeline_run_id="ws1-temporal-run",
+    )
+    engine = B2LibraryEngine(use_sdgx=False)
+    engine.setup(FakeModelClient(responses=rows), ctx)
+    records = list(engine.generate_batch(50, GenerationConfig(seed=3, batch_size=50)))
+    assert len(records) == 50  # no rows dropped by record-model validation
+
+    dumped = [r.model_dump(mode="python") for r in records]
+    observed_ts = {r["ts"] for r in rows}
+    sampled_ts = [d["ts"] for d in dumped]
+    copy_ratio = sum(v in observed_ts for v in sampled_ts) / len(sampled_ts)
+    assert copy_ratio < 0.3  # the 2026-07-20 defect was 1.0
+    assert all(datetime.strptime(d["d_str"], "%Y-%m-%d") for d in dumped)
+    assert all(isinstance(d["code"], str) and d["code"] for d in dumped)  # hook ran

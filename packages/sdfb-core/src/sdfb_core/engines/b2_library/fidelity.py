@@ -23,7 +23,11 @@ from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
-from sdfb_core.engines.b2_library.temporal import classify_temporal_values, to_epoch
+from sdfb_core.engines.b2_library.temporal import (
+    classify_temporal_values,
+    from_epoch,
+    to_epoch,
+)
 from sdfb_core.engines.text_shapes import detect_identifier_shape
 
 # Free-text heuristics. A STRING column is routed to the LLM free-text hook
@@ -303,7 +307,7 @@ def enforce_value(profile: ColumnProfile, value: object) -> object:
     Defense-in-depth on top of the Pandera Mode-A contract: constants are
     copied verbatim, numerics are clipped to ``[min, max]``, categoricals
     are snapped to a known category if a backend produced something unseen.
-    Free-text values are passed through (the LLM hook owns their support).
+    Free-text and temporal values are passed through (their samplers own support).
     """
     if profile.kind is ColumnKind.CONSTANT:
         return profile.constant_value
@@ -320,9 +324,11 @@ def enforce_value(profile: ColumnProfile, value: object) -> object:
         known = {_hashable(c) for c in profile.categories}
         return value if _hashable(value) in known else _representative(profile)
 
-    # FREE_TEXT — pass through, but coerce a JSON-string back to a dict so it
-    # validates against the JSON column's `dict` record-model type (the LLM
-    # hook and the text_pool both carry JSON as a string).
+    # TEMPORAL and FREE_TEXT — pass through, but coerce a JSON-string back to a dict
+    # so it validates against the JSON column's `dict` record-model type (the LLM
+    # hook and the text_pool both carry JSON as a string). TEMPORAL values are
+    # rendered from in-range epoch draws by construction; re-parsing them here
+    # would just repeat temporal.py.
     if profile.bq_type == "JSON":
         return _coerce_json(value, profile)
     return value
@@ -384,6 +390,10 @@ def _representative(profile: ColumnProfile) -> object:
     if profile.kind is ColumnKind.NUMERIC:
         lo = profile.minimum if profile.minimum is not None else 0.0
         return round(lo) if profile.is_integer else lo
+    if profile.kind is ColumnKind.TEMPORAL and profile.minimum is not None:
+        return from_epoch(
+            profile.minimum, profile.temporal_value_type, profile.temporal_format
+        )
     if profile.kind is ColumnKind.CATEGORICAL and profile.categories:
         return profile.categories[0]
     if profile.kind is ColumnKind.FREE_TEXT and profile.text_pool:
