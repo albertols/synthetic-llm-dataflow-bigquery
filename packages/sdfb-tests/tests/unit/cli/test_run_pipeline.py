@@ -44,7 +44,8 @@ def test_parse_args_minimal():
 
 
 def test_parse_args_overrides():
-    argv = _common_args() + [
+    argv = [
+        *_common_args(),
         "--engine", "b2_library",
         "--batch_size", "32",
         "--similarity", "0.9",
@@ -60,7 +61,7 @@ def test_parse_args_overrides():
 
 
 def test_parse_args_passes_unknown_to_beam():
-    argv = _common_args() + ["--runner", "DirectRunner", "--project", "demo"]
+    argv = [*_common_args(), "--runner", "DirectRunner", "--project", "demo"]
     _, beam_argv = parse_args(argv)
     assert "--runner" in beam_argv
     assert "DirectRunner" in beam_argv
@@ -104,7 +105,7 @@ def test_parse_args_pk_cols_defaults_empty():
 
 def test_parse_args_rejects_unknown_engine_value():
     """argparse-level rejection of bad client_type; engine is free-form."""
-    argv = _common_args() + ["--client_type", "made-up"]
+    argv = [*_common_args(), "--client_type", "made-up"]
     with pytest.raises(SystemExit):
         parse_args(argv)
 

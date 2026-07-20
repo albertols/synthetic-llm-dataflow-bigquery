@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-
 from sdfb_core.codegen import derive_record_model
 from sdfb_core.contracts import TableSchema
 from sdfb_tests.fixtures import load_ddl

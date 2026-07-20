@@ -33,7 +33,7 @@ def test_bigquery_connection(project: str, timeout: float = DEFAULT_TIMEOUT) -> 
     try:
         client = bigquery.Client(project=project)
         client.query("SELECT 1", timeout=timeout).result(timeout=timeout)
-    except Exception as e:  # noqa: BLE001  — diagnostic boundary
+    except Exception as e:
         elapsed = time.time() - start
         logger.error(
             "BigQuery connection FAILED after %.1fs: %s: %s",

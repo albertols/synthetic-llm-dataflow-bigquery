@@ -5,7 +5,6 @@ at the per-record line of defense."""
 from __future__ import annotations
 
 import apache_beam as beam
-
 from sdfb_beam.dofns.validate_record import ValidateRecordDoFn
 
 

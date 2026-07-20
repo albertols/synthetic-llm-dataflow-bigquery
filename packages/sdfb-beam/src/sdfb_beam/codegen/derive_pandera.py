@@ -13,7 +13,6 @@ REFs:
 from __future__ import annotations
 
 import pandera.pandas as pa  # type: ignore[import-untyped]
-
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
 
 # BQ type → pandera dtype string. STRUCT and REPEATED are handled via

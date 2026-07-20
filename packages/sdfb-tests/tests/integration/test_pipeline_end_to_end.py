@@ -14,13 +14,13 @@ from pathlib import Path
 import apache_beam as beam
 import pytest
 from apache_beam.options.pipeline_options import PipelineOptions
+from sdfb_beam.io.local_sinks import WriteToJsonLines
+from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+from sdfb_core.codegen import derive_record_model
 
 # Importing this module registers `MinimalEngine` under "minimal" — the
 # Beam DoFn looks it up via `get_engine()` in `setup()`.
 from sdfb_tests import fakes  # noqa: F401
-from sdfb_beam.io.local_sinks import WriteToJsonLines
-from sdfb_beam.pipeline import PipelineConfig, build_pipeline
-from sdfb_core.codegen import derive_record_model
 from sdfb_tests.fakes import FakeModelClient
 
 

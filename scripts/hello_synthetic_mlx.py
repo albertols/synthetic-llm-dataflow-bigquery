@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("Loading DDL from %s", args.ddl_path)
     schema = TableSchema.model_validate(json.loads(Path(args.ddl_path).read_text()))
-    Record = derive_record_model(schema)
+    Record = derive_record_model(schema)  # noqa: N806 — a dynamically derived class
     record_schema = Record.model_json_schema()
     logger.info("Schema parsed: %s (%d columns)", schema.fqn, len(schema.columns))
 
