@@ -55,10 +55,14 @@ from sdfb_core.engines.base import (
 )
 from sdfb_core.engines.text_shapes import sample_identifier
 from sdfb_core.observability import log_milestone
-from sdfb_core.rag.chunking import CHUNK_KIND_ROW_DOC, compute_row_digest
+from sdfb_core.rag.chunking import (
+    CHUNK_KIND_FREE_TEXT_COL,
+    CHUNK_KIND_ROW_DOC,
+    compute_row_digest,
+)
 from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
 from sdfb_core.rag.index import build_index
-from sdfb_core.rag.retrieval import retrieve_centroid_top_k
+from sdfb_core.rag.retrieval import retrieve_centroid_top_k, retrieve_column_exemplars
 from sdfb_core.rag.serialize import serialize_rows
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -338,17 +342,58 @@ class B1RagEngine(GenerationEngine):
 
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
         for prof in free_text_cols:
-            seed_examples = [
-                e[prof.name]
-                for e in exemplars
-                if e.get(prof.name) not in (None, "")
-            ][:_DEFAULT_TOP_K]
+            seed_examples = self._column_seed_examples(prof, ctx, _DEFAULT_TOP_K)
             if not seed_examples:
-                seed_examples = list(prof.text_examples[:_DEFAULT_TOP_K])
+                seed_examples = [
+                    e[prof.name]
+                    for e in exemplars
+                    if e.get(prof.name) not in (None, "")
+                ][:_DEFAULT_TOP_K] or list(prof.text_examples[:_DEFAULT_TOP_K])
             pools[prof.name] = self._infer_free_text_pool(
                 prof, seed_examples, self._pool_target(prof, ctx)
             )
         return pools
+
+    def _column_seed_examples(
+        self, prof: ColumnProfile, ctx: GenerationContext, k: int
+    ) -> list[str]:
+        """Column-relevant seed exemplars for one free-text column
+        (WS2 §4b.3): persisted `free_text_col` chunks when the store has
+        them, else the column's own values embedded locally. Empty list ⇒
+        caller falls back to row-doc exemplars."""
+        store = ctx.chunk_store
+        if store is not None and ctx.reference_digest:
+            chunks = [
+                c
+                for c in store.fetch(
+                    ctx.reference_digest,
+                    CHUNK_KIND_FREE_TEXT_COL,
+                    ctx.embedder_id,
+                    ctx.embedder_version,
+                )
+                if c.metadata.get("column") == prof.name and c.embedding
+            ]
+            if chunks:
+                vectors = [list(c.embedding) for c in chunks]
+                texts = [c.chunk_text for c in chunks]
+                if len(texts) <= k:
+                    return texts
+                index = build_index(vectors, len(vectors[0]))
+                try:
+                    return retrieve_centroid_top_k(index, vectors, texts, k)
+                finally:
+                    index.release()
+        if self._embedder is not None:
+            values: list[str] = []
+            seen: set[str] = set()
+            for row in ctx.reference_rows[:_MAX_EMBED_ROWS]:
+                v = row.get(prof.name)
+                if v not in (None, "") and v not in seen:
+                    seen.add(v)
+                    values.append(str(v))
+            if values:
+                return retrieve_column_exemplars(values, self._embedder, k)
+        return []
 
     def _pool_target(self, prof: ColumnProfile, ctx: GenerationContext) -> int:
         """min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX), skipping
