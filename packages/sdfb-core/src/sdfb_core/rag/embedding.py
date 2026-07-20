@@ -175,4 +175,25 @@ class BgeEmbedder:
         return out
 
 
-__all__ = ["BgeEmbedder", "Embedder", "HashingEmbedder"]
+_DEFAULT_EMBEDDER_IDENTITY = ("hashing-384", "v1")
+_MIN_PARTS_FOR_IDENTITY = 2
+
+
+def embedder_identity(embedder_uri: str) -> tuple[str, str]:
+    """``(embedder_id, embedder_version)`` from a MODEL_LAYOUT embedder URI.
+
+    The layout pins ``.../embedders/{id}/{version}/`` — the last two
+    non-empty path segments. Must be derived from the ORIGINAL URI at
+    graph-construction time: on the worker the path is already localized
+    (``/local-ssd/embedder``) and the identity is gone. Empty URI ⇒ the
+    dependency-free HashingEmbedder's fixed identity.
+    """
+    if not embedder_uri:
+        return _DEFAULT_EMBEDDER_IDENTITY
+    parts = [s for s in embedder_uri.replace("gs://", "").split("/") if s]
+    if len(parts) >= _MIN_PARTS_FOR_IDENTITY:
+        return (parts[-2], parts[-1])
+    return (parts[0], "v1")
+
+
+__all__ = ["BgeEmbedder", "Embedder", "HashingEmbedder", "embedder_identity"]

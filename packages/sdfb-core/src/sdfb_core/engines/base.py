@@ -150,7 +150,7 @@ class GenerationContext(BaseModel):
     rows + digest + run id) and handed to `setup()`.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     table_schema: TableSchema
     reference_rows: list[dict] = Field(default_factory=list)
@@ -171,6 +171,19 @@ class GenerationContext(BaseModel):
     # E2E runs shipped 100% memorized identifiers because the fallback was
     # only a WARNING. Fake/mock clients keep the lenient default.
     strict_freetext: bool = False
+    # --- RAG layer (WS2 §4b) -------------------------------------------
+    # Requested synthetic row count — bounds the free-text pool target
+    # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.
+    num_rows: int = 0
+    # Pinned vector space for rag_chunks reads. Derived DRIVER-side from
+    # the original embedder URI (the worker only sees the localized path).
+    embedder_id: str = ""
+    embedder_version: str = ""
+    # FQN of synthetic_rag.rag_chunks; empty ⇒ the read path is off. The
+    # live store object is attached worker-side (it cannot be pickled):
+    # the DoFn does ctx.model_copy(update={"chunk_store": store}).
+    rag_chunks_table: str = ""
+    chunk_store: object | None = None
 
 
 class GenerationEngine(ABC):
