@@ -336,3 +336,20 @@ def test_resolve_engine_strictness(client_type, expected):
     degrade into memorized reference data. Only the deterministic fake
     client (CPU smoke) stays lenient."""
     assert resolve_engine_strictness(client_type) is expected
+
+
+def test_parse_args_rag_layer_flags_default_off():
+    args, _ = parse_args(_common_args())
+    assert args.build_rag_layer is False
+    assert args.rag_chunks_table == ""
+
+
+def test_parse_args_rag_layer_flags():
+    argv = [
+        *_common_args(),
+        "--build_rag_layer",
+        "--rag_chunks_table", "proj.synthetic_rag.rag_chunks",
+    ]
+    args, _ = parse_args(argv)
+    assert args.build_rag_layer is True
+    assert args.rag_chunks_table == "proj.synthetic_rag.rag_chunks"

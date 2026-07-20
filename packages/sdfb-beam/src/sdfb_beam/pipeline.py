@@ -40,6 +40,7 @@ from sdfb_beam.dofns import (
     ValidateRecordDoFn,
 )
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_beam.rag.population import ChunkReferenceRowsDoFn, EmbedChunksDoFn
 
 
 @dataclass
@@ -78,6 +79,12 @@ class PipelineConfig:
     landing_table: str = ""
     thresholds: Thresholds | None = None
     fail_on_blocker: bool = True
+    # RAG layer (WS2 §4b). rag_chunks_table threads the READ path into the
+    # worker ctx (self-gating on data); embedder identity pins the vector
+    # space and must come from the ORIGINAL embedder URI (driver-side).
+    rag_chunks_table: str = ""
+    embedder_id: str = ""
+    embedder_version: str = ""
 
 
 def build_pipeline(
@@ -88,6 +95,7 @@ def build_pipeline(
     landing_sink: beam.PTransform,
     dlq_sink: beam.PTransform,
     validation_runs_sink: beam.PTransform | None = None,
+    rag_chunks_sink: beam.PTransform | None = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -118,6 +126,10 @@ def build_pipeline(
         embedder_uri=config.embedder_uri,
         identity_columns=list(config.identity_columns),
         strict_freetext=config.strict_freetext,
+        num_rows=config.num_rows,
+        embedder_id=config.embedder_id,
+        embedder_version=config.embedder_version,
+        rag_chunks_table=config.rag_chunks_table,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.
@@ -189,6 +201,34 @@ def build_pipeline(
     )
     _ = dlq | "WriteDLQ" >> dlq_sink
 
+    # WS2 §4b.1 — optional rag_chunks population branch. The driver decides
+    # (existence check) whether to pass a sink; None ⇒ branch absent, DAG
+    # unchanged (the validation_runs_sink precedent).
+    if rag_chunks_sink is not None:
+        free_text_columns = _rag_free_text_columns(
+            config.table_schema, reference_rows
+        )
+        chunks = (
+            p
+            | "RagReferenceRows" >> beam.Create(reference_rows)
+            | "RagChunkRows"
+            >> beam.ParDo(
+                ChunkReferenceRowsDoFn(
+                    source_fqn=config.table_schema.fqn,
+                    reference_digest=digest,
+                    column_order=[c.name for c in config.table_schema.columns],
+                    free_text_columns=free_text_columns,
+                    pk_columns=list(config.pk_columns),
+                    embedder_id=config.embedder_id,
+                    embedder_version=config.embedder_version,
+                )
+            )
+            | "RagBatchChunks"
+            >> beam.BatchElements(min_batch_size=32, max_batch_size=256)
+            | "RagEmbedChunks" >> beam.ParDo(EmbedChunksDoFn(config.embedder_uri))
+        )
+        _ = chunks | "WriteRagChunks" >> rag_chunks_sink
+
     result: dict[str, Any] = {
         "reference_digest": digest,
         "run_id": config.run_id,
@@ -235,6 +275,22 @@ def build_pipeline(
         result["validation_run"] = summary_rows
 
     return result
+
+
+def _rag_free_text_columns(
+    table_schema: TableSchema, reference_rows: list[dict]
+) -> list[str]:
+    """Columns that get `free_text_col` chunks — B.1's own FREE_TEXT
+    classification, minus identifier-shaped ones (retrieval-worthy prose,
+    not per-row IDs)."""
+    from sdfb_core.engines.b1_rag.profile import ColumnKind, profile_columns
+
+    profiles = profile_columns(table_schema, reference_rows)
+    return [
+        p.name
+        for p in profiles.values()
+        if p.kind is ColumnKind.FREE_TEXT and p.identifier_shape is None
+    ]
 
 
 def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:
