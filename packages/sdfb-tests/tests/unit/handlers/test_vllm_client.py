@@ -11,8 +11,8 @@ tests would carry `@pytest.mark.gpu`). Here we mock every heavy boundary:
 and assert the contract: the request SHAPE (chat `messages`,
 `response_format` json_schema for vLLM >= 0.10 structured outputs,
 `extra_body` carrying `chat_template_kwargs.enable_thinking=False`, no
-request seed unless explicit), JSON parsing, `n` handling, the
-not-set-up guard, and teardown subprocess termination.
+request seed unless explicit), JSON parsing, `n` handling, lazy
+self-ignition on first use, and teardown subprocess termination.
 
 The class is importable here precisely because all heavy imports are
 deferred into method bodies — that property is itself part of the contract
@@ -222,17 +222,22 @@ def test_generate_json_handles_none_and_empty_content():
     assert out == [{"ok": 1}]
 
 
-def test_generate_json_before_setup_raises():
+def test_generate_json_self_ignites_when_not_set_up(monkeypatch):
+    """WS1 §3b: generate_json() must call setup() itself instead of raising.
+    A ready client is borrowed to stand in for what setup() would build."""
+    ready, _ = _client_with_fake_openai([json.dumps({"values": ["x"]})])
     c = VLLMModelClient(model_uri="gs://bucket/m/v1/")
-    with pytest.raises(RuntimeError, match="before setup"):
-        c.generate_json("p", {})
+    calls: list[str] = []
 
+    def fake_setup():
+        calls.append("setup")
+        c._client = ready._client
+        c._served_model_name = ready._served_model_name
 
-def test_generate_json_after_teardown_raises():
-    c, _ = _client_with_fake_openai(['{"a": 1}'])
-    c.teardown()  # drops the client
-    with pytest.raises(RuntimeError, match="before setup"):
-        c.generate_json("p", {})
+    monkeypatch.setattr(c, "setup", fake_setup)
+    out = c.generate_json(prompt="p", json_schema={"type": "object"})
+    assert calls == ["setup"]
+    assert out == [{"values": ["x"]}]
 
 
 # ---------------------------------------------------------------------------

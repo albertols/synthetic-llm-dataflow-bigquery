@@ -86,25 +86,13 @@ class GenerateRecordsDoFn(beam.DoFn):
             ctx = ctx.model_copy(update={"embedder_uri": local_dir})
             self.ctx = ctx  # cache so a re-entrant setup() skips the pull
 
-        # The vLLM client owns a server subprocess that must be started ONCE
-        # per worker — engines only see the narrow ModelClient Protocol
-        # (generate_json), so the lifecycle is the DoFn's job. Duck-typed:
-        # FakeModelClient has no lifecycle; MLX self-initializes lazily.
-        # Failures propagate — a worker that cannot start its LLM must crash
-        # the job, not degrade into copying reference exemplars (E2E
-        # 2026-07-10: every live run fell back because nobody called setup()).
-        client_setup = getattr(self.model_client, "setup", None)
-        if callable(client_setup):
-            log_milestone(
-                "model_client_setup_start",
-                client=type(self.model_client).__name__,
-            )
-            t_client = time.monotonic()
-            client_setup()
-            log_milestone(
-                "model_client_setup_done",
-                seconds=round(time.monotonic() - t_client, 1),
-            )
+        # LLM ignition is LAZY (WS1 §3b): VLLMModelClient.generate_json()
+        # calls its own idempotent, lock-serialized setup() on first use, so
+        # a run whose columns never reach the LLM (b2 with only empirical/
+        # identifier/jitter columns) never pays the vLLM bring-up — the
+        # 2026-07-20 run spent 519 GPU-s igniting a server that generated
+        # nothing. Failure stays loud: under strict_freetext a boot error
+        # raises out of the first pool call. teardown() remains unconditional.
 
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
