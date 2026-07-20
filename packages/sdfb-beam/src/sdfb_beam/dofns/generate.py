@@ -86,6 +86,20 @@ class GenerateRecordsDoFn(beam.DoFn):
             ctx = ctx.model_copy(update={"embedder_uri": local_dir})
             self.ctx = ctx  # cache so a re-entrant setup() skips the pull
 
+        # RAG read path (WS2 §4b.1): the BQ-backed ChunkStore cannot ride
+        # the pickled graph — attach it worker-side, mirroring the
+        # embedder localization above. Engines see only the ChunkStore
+        # Protocol; an empty table just means the engine's fallback runs.
+        rag_chunks_table = getattr(ctx, "rag_chunks_table", None)
+        chunk_store = getattr(ctx, "chunk_store", None)
+        if rag_chunks_table and chunk_store is None:
+            from sdfb_beam.rag import store as rag_store
+
+            ctx = ctx.model_copy(
+                update={"chunk_store": rag_store.BigQueryChunkStore(rag_chunks_table)}
+            )
+            self.ctx = ctx
+
         # LLM ignition is LAZY (WS1 §3b): VLLMModelClient.generate_json()
         # calls its own idempotent, lock-serialized setup() on first use, so
         # a run whose columns never reach the LLM (b2 with only empirical/
