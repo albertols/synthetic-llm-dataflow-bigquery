@@ -8,10 +8,9 @@ because pandera + pandas belong to the Beam-layer dep surface.
 from __future__ import annotations
 
 import pandas as pd
-import pandera.pandas as pa
 import pandera.errors as pa_err
+import pandera.pandas as pa
 import pytest
-
 from sdfb_beam.codegen import derive_pandera_schema
 from sdfb_core.contracts import TableSchema
 

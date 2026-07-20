@@ -19,7 +19,7 @@ def _canonical(field: dict) -> dict:
         if opt in field:
             # Normalize the snake/camel variants.
             out[{"max_length": "maxLength"}.get(opt, opt)] = field[opt]
-    if "fields" in field and field["fields"]:
+    if field.get("fields"):
         out["fields"] = [_canonical(sub) for sub in field["fields"]]
     return out
 

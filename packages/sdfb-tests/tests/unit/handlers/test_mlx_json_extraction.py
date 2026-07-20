@@ -8,7 +8,6 @@ So they run on the laptop + CI without the `[mlx]` extra — no `@pytest.mark.gp
 from __future__ import annotations
 
 import pytest
-
 from sdfb_beam.handlers.mlx_client import MLXModelClient
 
 extract = MLXModelClient._extract_first_json_object

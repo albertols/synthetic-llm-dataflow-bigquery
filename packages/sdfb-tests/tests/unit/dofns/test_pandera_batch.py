@@ -5,7 +5,6 @@ which is structurally impossible to catch at the per-record stage."""
 from __future__ import annotations
 
 import apache_beam as beam
-
 from sdfb_beam.dofns.pandera_batch import PanderaValidateBatchDoFn
 
 

@@ -68,7 +68,10 @@ select = ["E", "F", "I", "B", "UP", "N", "RUF", "SIM", "PL"]
 ignore = ["E501", "PLR0913", "PLC0415"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["PLR2004"]  # magic-number checks are noise in tests
+# PLR2004: magic-number checks are noise in tests.
+# N806: `Record = derive_record_model(...)` binds a dynamically derived class —
+# PascalCase is the correct name for a class object, even in a local.
+"**/tests/**" = ["PLR2004", "N806"]
 
 [tool.mypy]
 python_version = "3.11"
