@@ -73,8 +73,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 # Top-k exemplars retrieved to condition the LLM's free-text inference.
 _DEFAULT_TOP_K = 8
-# Bounded unique free-text pool size requested from the LLM (sampled w/ repl).
-_DEFAULT_FREE_TEXT_POOL = 32
+# Free-text pool scaling (WS2 §4b.2). Per-column target =
+# min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX); the 32-value pool
+# of the 2026-07-19 run oversampled 3 columns 28-619x. Each LLM call stays
+# bounded at _POOL_VALUES_PER_CALL values — multiple bounded calls, never
+# per-row work (ADR 0013's FASTGEN spine).
+_FREE_TEXT_POOL_MAX = 512
+_POOL_VALUES_PER_CALL = 32
+# Back-compat alias: the historical single-call pool size == one call's batch.
+_DEFAULT_FREE_TEXT_POOL = _POOL_VALUES_PER_CALL
 # Setup embeds at most this many reference rows. The index those vectors
 # feed serves ONLY centroid top-k exemplar retrieval in M1 (generation
 # samples marginals — no per-batch retrieval), so embedding the full 10k
@@ -316,8 +323,8 @@ class B1RagEngine(GenerationEngine):
         return out
 
     def _build_free_text_pools(self, ctx: GenerationContext) -> dict[str, list[str]]:
-        """For each FREE_TEXT column, retrieve top-k exemplars and ask the
-        LLM once for a bounded unique pool. Falls back to observed examples
+        """For each FREE_TEXT column, retrieve exemplars and fill a bounded
+        unique pool from batched LLM calls. Falls back to observed examples
         when the LLM returns nothing usable."""
         assert self._profiles is not None
         pools: dict[str, list[str]] = {}
@@ -331,8 +338,30 @@ class B1RagEngine(GenerationEngine):
 
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
         for prof in free_text_cols:
-            pools[prof.name] = self._infer_free_text_pool(prof, exemplars)
+            seed_examples = [
+                e[prof.name]
+                for e in exemplars
+                if e.get(prof.name) not in (None, "")
+            ][:_DEFAULT_TOP_K]
+            if not seed_examples:
+                seed_examples = list(prof.text_examples[:_DEFAULT_TOP_K])
+            pools[prof.name] = self._infer_free_text_pool(
+                prof, seed_examples, self._pool_target(prof, ctx)
+            )
         return pools
+
+    def _pool_target(self, prof: ColumnProfile, ctx: GenerationContext) -> int:
+        """min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX), skipping
+        unknown (zero/empty) bounds. `observed_values` distinct within the
+        reference sample is the closest available stand-in for
+        source_distinct (the engine never sees full-table stats)."""
+        bounds = [_FREE_TEXT_POOL_MAX]
+        if ctx.num_rows > 0:
+            bounds.append(ctx.num_rows)
+        distinct = len(set(prof.observed_values))
+        if distinct > 0:
+            bounds.append(distinct)
+        return max(min(bounds), 1)
 
     def _retrieve_exemplars(
         self, ctx: GenerationContext, k: int
@@ -352,25 +381,18 @@ class B1RagEngine(GenerationEngine):
         )
 
     def _infer_free_text_pool(
-        self, prof: ColumnProfile, exemplars: list[dict]
+        self, prof: ColumnProfile, seed_examples: list[str], target: int
     ) -> list[str]:
-        """Ask the LLM (guided JSON) for a bounded unique pool of values for
-        one free-text column, conditioned on retrieved exemplars."""
+        """Fill a bounded unique pool for one free-text column from batched
+        LLM calls conditioned on retrieved exemplars."""
         assert self._client is not None
-        seed_examples = [
-            e[prof.name]
-            for e in exemplars
-            if e.get(prof.name) not in (None, "")
-        ][:_DEFAULT_TOP_K]
-        if not seed_examples:
-            seed_examples = list(prof.text_examples[:_DEFAULT_TOP_K])
-
+        per_call = min(target, _POOL_VALUES_PER_CALL)
         prompt = (
             f"You generate synthetic tabular data. First identify the exact "
             f"format of these example values for the column '{prof.name}' "
             f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
             f"timestamp, natural-language text), then generate "
-            f"{_DEFAULT_FREE_TEXT_POOL} NEW, distinct, fictitious values in "
+            f"{per_call} NEW, distinct, fictitious values in "
             f"exactly that format. Never copy an example verbatim. "
             f'Examples: {seed_examples}. Return JSON {{"values": [...]}}.'
         )
@@ -389,7 +411,7 @@ class B1RagEngine(GenerationEngine):
         }
         try:
             y = _pool_llm_yield(
-                self._client, prompt, json_schema, prof, seed_examples
+                self._client, prompt, json_schema, prof, seed_examples, target=target
             )
         except Exception as e:
             if self._ctx is not None and self._ctx.strict_freetext:
@@ -418,7 +440,7 @@ class B1RagEngine(GenerationEngine):
                 # key space where per-column novelty is unattainable.
                 diagnosis = (
                     f"attempts={y.attempts}, requested_per_attempt="
-                    f"{_DEFAULT_FREE_TEXT_POOL}, parsed={y.parsed}, "
+                    f"{per_call}, parsed={y.parsed}, "
                     f"distinct={y.distinct}, verbatim_copies={y.copies}, "
                     f"prompt_echoes={y.prompt_echoes}, novel=0"
                 )
@@ -438,7 +460,7 @@ class B1RagEngine(GenerationEngine):
                     verbatim_copies=y.copies,
                     prompt_echoes=y.prompt_echoes,
                 )
-            elif len(pool) < _DEFAULT_FREE_TEXT_POOL:
+            elif len(pool) < target:
                 # Every escalation level ran and the pool is still short of
                 # target: the column lands with whatever novelty the LLM
                 # delivered, but never silently — the 2026-07-17 E2E run
@@ -448,7 +470,7 @@ class B1RagEngine(GenerationEngine):
                     level=logging.WARNING,
                     column=prof.name,
                     pool_size=len(pool),
-                    target=_DEFAULT_FREE_TEXT_POOL,
+                    target=target,
                     attempts=y.attempts,
                     parsed=y.parsed,
                     distinct=y.distinct,
@@ -473,7 +495,7 @@ class B1RagEngine(GenerationEngine):
         for v in pool:
             if v not in seen:
                 seen[v] = None
-        return list(seen.keys())[: max(_DEFAULT_FREE_TEXT_POOL, len(prof.text_examples))]
+        return list(seen.keys())[: max(target, len(prof.text_examples))]
 
     # -- helpers ------------------------------------------------------------
 
@@ -518,6 +540,9 @@ def _pool_llm_yield(
     2026-07-17 E2E run landed a 4-value pool over 1000 rows and the
     unclamped retry levels never executed.
 
+    Calls are bounded at `max(len(levels), 2*ceil(target/_POOL_VALUES_PER_CALL))`,
+    cycling the escalation ladder (last level repeats).
+
     No request seed: a pinned seed with n>1 collapses all n vLLM choices
     into one completion (2026-07-15 run: identical choice lengths per
     request → at most one distinct pool value).
@@ -531,7 +556,10 @@ def _pool_llm_yield(
     n_copies = 0
     n_echoes = 0
     attempts = 0
-    for level in escalating_sampling():
+    levels = escalating_sampling()
+    max_calls = max(len(levels), 2 * -(-target // _POOL_VALUES_PER_CALL))
+    while attempts < max_calls and len(pool) < target:
+        level = levels[min(attempts, len(levels) - 1)]
         attempts += 1
         results = client.generate_json(
             prompt=prompt,
@@ -552,8 +580,6 @@ def _pool_llm_yield(
             if v not in pool_seen:
                 pool_seen.add(v)
                 pool.append(v)
-        if len(pool) >= target:
-            break
     return _PoolYield(pool, n_parsed, len(seen), n_copies, n_echoes, attempts)
 
 
