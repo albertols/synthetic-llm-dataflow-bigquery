@@ -105,7 +105,7 @@ across every source table the pipeline has ever run against, distinguished by
 ```sql
 CREATE TABLE `{project}.synthetic_rag.rag_chunks` (
   chunk_id          STRING    NOT NULL
-    OPTIONS(description="blake2b-256 hex digest of source_fqn || row_digest || chunk_index; deterministic primary key, dedupes retries."),
+    OPTIONS(description="blake2b-256 hex digest of source_fqn || row_digest || chunk_index; deterministic identity key. WRITE_APPEND means duplicate rows are possible across retried/racing runs; readers dedupe by keying on row_digest."),
   source_fqn        STRING    NOT NULL
     OPTIONS(description="Fully-qualified source table this chunk was derived from, e.g. project.dataset.table (== TableSchema.fqn / table_info.table_id)."),
   source_pk         JSON
@@ -453,8 +453,8 @@ Key properties:
 - **Row-as-document serialization** (`chunk_kind='row_doc'`): identical to
   today's GReaT-style sentence — `"col is value, col is value, ..."` in
   declared schema column order, nulls rendered as `"is null"`
-  (`serialize_row()`, `serialize.py:20-31`). One `row_doc` chunk per reference
-  row (`chunk_index=0`).
+  (`serialize_row()` in `sdfb_core/rag/serialize.py`). One `row_doc` chunk per
+  reference row (`chunk_index=0`).
 - **Per-free-text-column chunks** (`chunk_kind='free_text_col'`): one chunk
   per non-null value of each column the DDL-derived profiler classifies as
   `ColumnKind.FREE_TEXT` (`profile.py`). `chunk_index` increments per row
@@ -470,27 +470,27 @@ Key properties:
 - **Normalization**: all embeddings are L2-normalized before write (mirrors
   `HashingEmbedder`/`BgeEmbedder`'s existing normalize-on-embed behavior —
   `BgeEmbedder.embed()` calls `torch.nn.functional.normalize(..., p=2, dim=1)`
-  at `embedder.py:173`), so `COSINE` distance in `VECTOR_SEARCH` and inner
-  product both agree — consistent with `build_index()`'s
-  `IndexFlatIP`-over-normalized-vectors convention
-  (`index.py:1-17,96-100`).
+  in `sdfb_core/rag/embedding.py`), so `COSINE` distance in `VECTOR_SEARCH`
+  and inner product both agree — consistent with `build_index()`'s
+  `IndexFlatIP`-over-normalized-vectors convention (`sdfb_core/rag/index.py`).
 - **Retrieval granularity, generation-time vs. downstream**: B.1's internal
   retrieval (exemplar lookup for free-text pool inference,
-  `_retrieve_exemplars()` in `engine.py:244-265`) stays **exact** local FAISS
+  `B1RagEngine._retrieve_exemplars()` in
+  `sdfb_core/engines/b1_rag/engine.py`) stays **exact** local FAISS
   `IndexFlatIP` search regardless of whether vectors were read from BQ or
   freshly embedded — never BigQuery `VECTOR_SEARCH` in the hot generation
   path (that would add network RPCs per worker `setup()` call and reintroduce
-  the nondeterminism `IndexFlatIP` was chosen to avoid, per `index.py`'s
+  the nondeterminism `IndexFlatIP` was chosen to avoid, per `sdfb_core/rag/index.py`'s
   "deterministic top-k" comment). BigQuery `VECTOR_SEARCH` (approximate, IVF)
   is exclusively the **downstream/external** query surface described in §2 —
   the two retrieval paths are deliberately different (exact-local for the
   pipeline's own generation, approximate-BQ for everyone else) because they
   have different latency/determinism requirements.
 - **Top-k convention**: unchanged from today — `_DEFAULT_TOP_K = 8` exemplars
-  retrieved to condition free-text pool inference
-  (`engine.py:67`). This design does not introduce a new top-k parameter for
-  the pipeline's own use; §2's example `VECTOR_SEARCH` query's `top_k => 8` is
-  a suggested downstream default, not a contract.
+  retrieved to condition free-text pool inference in
+  `sdfb_core/engines/b1_rag/engine.py`. This design does not introduce a new
+  top-k parameter for the pipeline's own use; §2's example `VECTOR_SEARCH`
+  query's `top_k => 8` is a suggested downstream default, not a contract.
 
 ## 5a. Phase A generation-quality changes (WS2 §4b.2-3)
 

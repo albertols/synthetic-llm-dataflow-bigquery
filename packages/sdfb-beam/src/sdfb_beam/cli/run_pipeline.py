@@ -127,7 +127,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "EngineCore at startup). 8192 fits every registry "
                         "model/GPU pairing and dwarfs the synthesis prompts. "
                         "Empty = no cap (native context).")
-    return p.parse_known_args(argv)
+    args, beam_args = p.parse_known_args(argv)
+    if args.build_rag_layer and not args.rag_chunks_table:
+        p.error("--build_rag_layer requires --rag_chunks_table")
+    return args, beam_args
 
 
 def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:

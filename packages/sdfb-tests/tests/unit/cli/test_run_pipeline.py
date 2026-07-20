@@ -353,3 +353,8 @@ def test_parse_args_rag_layer_flags():
     args, _ = parse_args(argv)
     assert args.build_rag_layer is True
     assert args.rag_chunks_table == "proj.synthetic_rag.rag_chunks"
+
+
+def test_parse_args_build_rag_layer_requires_table():
+    with pytest.raises(SystemExit):
+        parse_args([*_common_args(), "--build_rag_layer"])
