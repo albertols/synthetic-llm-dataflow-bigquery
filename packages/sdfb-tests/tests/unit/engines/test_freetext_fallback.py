@@ -110,7 +110,13 @@ def free_text_ctx() -> GenerationContext:
             "region": "EU",
             "bio": f"User number {i} enjoys long-form descriptive prose and writes a lot.",
         }
-        for i in range(1, 13)
+        # 32 distinct bios, not 12: with pool-target scaling (WS2 §4b.2, Task
+        # 7) the target is min(num_rows, distinct(bio), 512); num_rows is
+        # unset (0 = unknown) here, so distinct(bio) is the binding bound.
+        # 32 rows keeps that bound at exactly 32, preserving the pre-Task-7
+        # escalation-ladder tests below that assert today's target=32
+        # behavior verbatim.
+        for i in range(1, 33)
     ]
     return GenerationContext(
         table_schema=schema,
@@ -650,8 +656,8 @@ def test_b1_setup_emits_phase_milestones(caplog, free_text_ctx):
         engine.setup(_BoomClient(), free_text_ctx)
     text = "\n".join(r.message for r in caplog.records)
     assert "SDFB_MILESTONE name=b1_embed_done" in text
-    # Trailing space delimiter — a loose "rows=12" substring would also
-    # match "rows=120" and silently stop catching a wrong row count.
-    assert "rows=12 " in text
+    # Trailing space delimiter — a loose "rows=32" substring would also
+    # match "rows=320" and silently stop catching a wrong row count.
+    assert "rows=32 " in text
     assert "SDFB_MILESTONE name=b1_index_built" in text
     assert "SDFB_MILESTONE name=b1_pools_built" in text
