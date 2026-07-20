@@ -43,14 +43,11 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from sdfb_core.codegen import derive_record_model
 from sdfb_core.engines.b1_rag._fidelity import ColumnSampler, numpy_available
-from sdfb_core.engines.b1_rag.embedder import BgeEmbedder, Embedder, HashingEmbedder
-from sdfb_core.engines.b1_rag.index import build_index
 from sdfb_core.engines.b1_rag.profile import (
     ColumnKind,
     ColumnProfile,
     profile_columns,
 )
-from sdfb_core.engines.b1_rag.serialize import serialize_rows
 from sdfb_core.engines.base import (
     FreeTextEmptyYieldError,
     GenerationEngine,
@@ -58,6 +55,9 @@ from sdfb_core.engines.base import (
 )
 from sdfb_core.engines.text_shapes import sample_identifier
 from sdfb_core.observability import log_milestone
+from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
+from sdfb_core.rag.index import build_index
+from sdfb_core.rag.serialize import serialize_rows
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Iterator
