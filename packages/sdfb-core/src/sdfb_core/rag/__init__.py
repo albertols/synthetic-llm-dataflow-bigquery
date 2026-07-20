@@ -17,15 +17,18 @@ from sdfb_core.rag.chunking import (
 from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
 from sdfb_core.rag.index import ExactIPIndex, build_index
 from sdfb_core.rag.serialize import serialize_row, serialize_rows
+from sdfb_core.rag.store import ChunkStore, InMemoryChunkStore
 
 __all__ = [
     "CHUNK_KIND_FREE_TEXT_COL",
     "CHUNK_KIND_ROW_DOC",
     "BgeEmbedder",
     "Chunk",
+    "ChunkStore",
     "Embedder",
     "ExactIPIndex",
     "HashingEmbedder",
+    "InMemoryChunkStore",
     "build_index",
     "chunk_row",
     "compute_chunk_id",
