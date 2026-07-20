@@ -41,10 +41,14 @@ from apache_beam.options.pipeline_options import (
     WorkerOptions,
 )
 from sdfb_core.contracts import TableSchema
+from sdfb_core.observability import log_milestone
+from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.validation import Thresholds
 
 from sdfb_beam.io.bq_sources import load_reference_rows
+from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+from sdfb_beam.rag.store import BigQueryChunkStore
 
 if TYPE_CHECKING:
     from sdfb_core.engines import ModelClient
@@ -93,6 +97,14 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--embedder_uri", default="",
                    help="gs://<bucket>/synthetic/models/embedders/<model>/<version>/ "
                         "for the B.1 RAG embedder (optional; empty → HashingEmbedder)")
+    p.add_argument("--build_rag_layer", action="store_true",
+                   help="Populate synthetic_rag.rag_chunks from this run's "
+                        "reference sample (skipped if the reference_digest "
+                        "is already present for this embedder id+version).")
+    p.add_argument("--rag_chunks_table", default="",
+                   help="FQN of synthetic_rag.rag_chunks. Enables the "
+                        "read-instead-of-reembed path; with "
+                        "--build_rag_layer also enables population.")
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
@@ -285,6 +297,26 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
                 thresholds.env, thresholds.blocker_failure_ratio)
 
+    embedder_id, embedder_version = embedder_identity(args.embedder_uri)
+
+    rag_chunks_sink = None
+    if args.build_rag_layer and args.rag_chunks_table:
+        digest = compute_reference_digest(reference_rows)
+        store = BigQueryChunkStore(args.rag_chunks_table)
+        if store.exists(digest, embedder_id, embedder_version):
+            log_milestone(
+                "rag_population_skipped",
+                reference_digest=digest[:12],
+                embedder_id=embedder_id,
+            )
+        else:
+            rag_chunks_sink = WriteToBigQuery(
+                table=args.rag_chunks_table,
+                method=WriteToBigQuery.Method.FILE_LOADS,
+                write_disposition=BigQueryDisposition.WRITE_APPEND,
+                create_disposition=BigQueryDisposition.CREATE_NEVER,
+            )
+
     config = PipelineConfig(
         table_schema=table_schema,
         engine_name=args.engine,
@@ -310,6 +342,9 @@ def main(argv: list[str] | None = None) -> int:
         # on the BLOCKER gate is meaningless — keep it informational (the
         # validation_runs row still records the status). Real engines gate.
         fail_on_blocker=resolve_engine_strictness(args.client_type),
+        rag_chunks_table=args.rag_chunks_table,
+        embedder_id=embedder_id,
+        embedder_version=embedder_version,
     )
 
     landing_sink = WriteToBigQuery(
@@ -341,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
             landing_sink=landing_sink,
             dlq_sink=dlq_sink,
             validation_runs_sink=validation_runs_sink,
+            rag_chunks_sink=rag_chunks_sink,
         )
         logger.info(
             "Pipeline launched: run_id=%s reference_digest=%s",
