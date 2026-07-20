@@ -55,6 +55,7 @@ from sdfb_core.engines.base import (
 )
 from sdfb_core.engines.text_shapes import sample_identifier
 from sdfb_core.observability import log_milestone
+from sdfb_core.rag.chunking import CHUNK_KIND_ROW_DOC, compute_row_digest
 from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
 from sdfb_core.rag.index import build_index
 from sdfb_core.rag.retrieval import retrieve_centroid_top_k
@@ -136,19 +137,23 @@ class B1RagEngine(GenerationEngine):
         else:
             self._embedder = HashingEmbedder(dim=384)
         if ctx.reference_rows:
-            t_embed = time.monotonic()
             # Prefix of the (fingerprint-ordered) reference sample — the
             # exemplar ids returned by `_retrieve_exemplars` index into this
             # same prefix, so `ctx.reference_rows[i]` stays valid.
             embed_rows = ctx.reference_rows[:_MAX_EMBED_ROWS]
-            texts = serialize_rows(embed_rows, self._column_order)
-            self._ref_vectors = self._embedder.embed(texts)
-            log_milestone(
-                "b1_embed_done",
-                rows=len(texts),
-                rows_total=len(ctx.reference_rows),
-                seconds=round(time.monotonic() - t_embed, 1),
-            )
+            reused = self._vectors_from_store(ctx, embed_rows)
+            if reused is not None:
+                self._ref_vectors = reused
+            else:
+                t_embed = time.monotonic()
+                texts = serialize_rows(embed_rows, self._column_order)
+                self._ref_vectors = self._embedder.embed(texts)
+                log_milestone(
+                    "b1_embed_done",
+                    rows=len(texts),
+                    rows_total=len(ctx.reference_rows),
+                    seconds=round(time.monotonic() - t_embed, 1),
+                )
             t_index = time.monotonic()
             self._index = build_index(self._ref_vectors, self._embedder.dim)
             log_milestone(
@@ -184,6 +189,45 @@ class B1RagEngine(GenerationEngine):
         self._free_text_pools = {}
         self._column_order = []
         self._ready = False
+
+    def _vectors_from_store(
+        self, ctx: GenerationContext, embed_rows: list[dict]
+    ) -> list[list[float]] | None:
+        """Row-doc vectors from the persisted RAG layer, or None.
+
+        All-or-nothing: every embed-prefix row must have a chunk in the
+        PINNED (embedder_id, embedder_version) space with the embedder's
+        exact dim — a partial read would silently mix vector spaces, which
+        is worse than re-embedding (WS2 §4b; 2026-07-07 design §4).
+        """
+        store = ctx.chunk_store
+        if store is None or not ctx.reference_digest:
+            return None
+        t0 = time.monotonic()
+        chunks = store.fetch(
+            ctx.reference_digest,
+            CHUNK_KIND_ROW_DOC,
+            ctx.embedder_id,
+            ctx.embedder_version,
+        )
+        by_digest = {
+            c.row_digest: c.embedding for c in chunks if c.embedding
+        }
+        if not by_digest:
+            return None
+        assert self._embedder is not None
+        vectors: list[list[float]] = []
+        for row in embed_rows:
+            emb = by_digest.get(compute_row_digest(row))
+            if emb is None or len(emb) != self._embedder.dim:
+                return None
+            vectors.append(list(emb))
+        log_milestone(
+            "b1_chunks_reused",
+            rows=len(vectors),
+            seconds=round(time.monotonic() - t0, 1),
+        )
+        return vectors
 
     # -- generation ---------------------------------------------------------
 
