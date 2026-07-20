@@ -57,6 +57,7 @@ from sdfb_core.engines.text_shapes import sample_identifier
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
 from sdfb_core.rag.index import build_index
+from sdfb_core.rag.retrieval import retrieve_centroid_top_k
 from sdfb_core.rag.serialize import serialize_rows
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -300,17 +301,11 @@ class B1RagEngine(GenerationEngine):
         """
         if self._index is None or not self._ref_vectors or self._embedder is None:
             return list(ctx.reference_rows[:k])
-        dim = self._embedder.dim
-        # Centroid query: reuse the row vectors built in setup() (no re-embed),
-        # average them in pure Python to avoid a NumPy hard-dep here.
-        vectors = self._ref_vectors
-        centroid = [0.0] * dim
-        for vec in vectors:
-            for j in range(dim):
-                centroid[j] += vec[j]
-        centroid = [c / len(vectors) for c in centroid]
-        ids = self._index.search(centroid, k)
-        return [ctx.reference_rows[i] for i in ids]
+        # Exemplar ids index into the same _MAX_EMBED_ROWS prefix the
+        # vectors were built from, so ctx.reference_rows[i] stays valid.
+        return retrieve_centroid_top_k(
+            self._index, self._ref_vectors, ctx.reference_rows, k
+        )
 
     def _infer_free_text_pool(
         self, prof: ColumnProfile, exemplars: list[dict]

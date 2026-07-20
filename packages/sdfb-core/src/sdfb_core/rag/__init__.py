@@ -16,6 +16,11 @@ from sdfb_core.rag.chunking import (
 )
 from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
 from sdfb_core.rag.index import ExactIPIndex, build_index
+from sdfb_core.rag.retrieval import (
+    centroid,
+    retrieve_centroid_top_k,
+    retrieve_column_exemplars,
+)
 from sdfb_core.rag.serialize import serialize_row, serialize_rows
 from sdfb_core.rag.store import ChunkStore, InMemoryChunkStore
 
@@ -30,9 +35,12 @@ __all__ = [
     "HashingEmbedder",
     "InMemoryChunkStore",
     "build_index",
+    "centroid",
     "chunk_row",
     "compute_chunk_id",
     "compute_row_digest",
+    "retrieve_centroid_top_k",
+    "retrieve_column_exemplars",
     "serialize_row",
     "serialize_rows",
 ]
