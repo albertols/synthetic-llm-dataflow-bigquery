@@ -8,6 +8,7 @@ seeded uniform sampler that stays inside the observed [min, max].
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime, time, timedelta
 
 import numpy as np
@@ -259,3 +260,29 @@ def test_engine_end_to_end_yields_novel_temporal_rows():
     assert copy_ratio < 0.3  # the 2026-07-20 defect was 1.0
     assert all(datetime.strptime(d["d_str"], "%Y-%m-%d") for d in dumped)
     assert all(isinstance(d["code"], str) and d["code"] for d in dumped)  # hook ran
+
+
+def _one_string_col_schema(name: str = "blob") -> TableSchema:
+    return TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.blobs"},
+            "schema": [{"name": name, "type": "STRING", "mode": "REQUIRED"}],
+            "primary_keys": None,
+        }
+    )
+
+
+def test_nonprintable_string_column_emits_milestone(caplog):
+    # The COL_048 signature: C0/C1 control bytes round-tripped as STRING.
+    rows = [{"blob": f"S1\x8e\x9d\x07x{i}"} for i in range(10)]
+    with caplog.at_level(logging.WARNING):
+        profile_table(_one_string_col_schema(), rows)
+    hits = [r for r in caplog.records if "column_nonprintable" in r.getMessage()]
+    assert hits and "column=blob" in hits[0].getMessage()
+
+
+def test_accented_text_does_not_trigger_nonprintable(caplog):
+    rows = [{"blob": f"Städte-Übersicht émission {i}"} for i in range(10)]
+    with caplog.at_level(logging.WARNING):
+        profile_table(_one_string_col_schema(), rows)
+    assert not [r for r in caplog.records if "column_nonprintable" in r.getMessage()]

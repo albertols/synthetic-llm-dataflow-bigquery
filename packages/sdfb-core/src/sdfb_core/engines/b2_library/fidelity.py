@@ -17,6 +17,8 @@ this module must succeed with only ``sdfb-core``'s base deps present.
 from __future__ import annotations
 
 import json
+import logging
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -29,6 +31,7 @@ from sdfb_core.engines.b2_library.temporal import (
     to_epoch,
 )
 from sdfb_core.engines.text_shapes import detect_identifier_shape
+from sdfb_core.observability import log_milestone
 
 # Free-text heuristics. A STRING column is routed to the LLM free-text hook
 # when the LLM can plausibly do better than empirical resampling: either the
@@ -45,6 +48,12 @@ _FREE_TEXT_MIN_LEN = 40  # mean string length above this ⇒ likely prose
 _TEMPORAL_MAX_CATEGORIES = 20
 _CATEGORICAL_MAX_CATEGORIES = 20
 _TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIME", "TIMESTAMP"})
+
+# Control-character guard (WS1 §3c): values containing C0/C1 control bytes
+# in a STRING column usually mean binary data mis-declared upstream
+# (2026-07-20 E2E: COL_048 landed garbled bytes verbatim). Accented /
+# non-ASCII text is NOT flagged — only control ranges.
+_NONPRINTABLE_RATIO_THRESHOLD = 0.05
 
 
 class ColumnKind(StrEnum):
@@ -119,6 +128,27 @@ def _column_values(reference_rows: list[dict], name: str) -> list[object]:
     return [row.get(name) for row in reference_rows]
 
 
+def _has_control_chars(s: str) -> bool:
+    # Unicode category Cc is exactly the C0 controls, DEL, and C1 controls.
+    return any(
+        unicodedata.category(ch) == "Cc" and ch not in "\t\n\r" for ch in s
+    )
+
+
+def _warn_if_nonprintable(field: FieldSchema, non_null: list[object]) -> None:
+    if field.bq_type not in {"STRING", "BYTES"} or not non_null:
+        return
+    strs = [str(v) for v in non_null]
+    ratio = sum(1 for s in strs if _has_control_chars(s)) / len(strs)
+    if ratio >= _NONPRINTABLE_RATIO_THRESHOLD:
+        log_milestone(
+            "column_nonprintable",
+            level=logging.WARNING,
+            column=field.name,
+            ratio=round(ratio, 3),
+        )
+
+
 def _classify(  # noqa: PLR0911 — type classifier; sequential returns read clearer than nesting
     field: FieldSchema,
     non_null_values: list[object],
@@ -176,6 +206,7 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
     """Profile a single column over the reference rows (the O(1) fit step)."""
     raw = _column_values(reference_rows, field.name)
     non_null = _non_null(raw)
+    _warn_if_nonprintable(field, non_null)
     total = len(raw)
     null_fraction = (total - len(non_null)) / total if total else 0.0
     nullable = field.is_nullable
