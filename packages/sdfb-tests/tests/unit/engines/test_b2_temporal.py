@@ -11,8 +11,18 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 
 import numpy as np
+import pandas as pd
 from sdfb_core.contracts import TableSchema
-from sdfb_core.engines.b2_library.fidelity import ColumnKind, profile_table
+from sdfb_core.engines.b2_library.backends import (
+    EmpiricalBackend,
+    SdgxBackend,
+    _samplable_profiles,
+)
+from sdfb_core.engines.b2_library.fidelity import (
+    ColumnKind,
+    ColumnProfile,
+    profile_table,
+)
 from sdfb_core.engines.b2_library.temporal import (
     VT_DATE,
     VT_DATETIME,
@@ -141,3 +151,70 @@ def test_unparseable_high_card_temporal_demotes_to_categorical():
     rows = [{"w": f"junk-{i}" if i % 2 else f"2024-01-{(i % 28) + 1:02d}"} for i in range(50)]
     profiles = profile_table(schema, rows)
     assert profiles["w"].kind is ColumnKind.CATEGORICAL
+
+
+def test_empirical_backend_samples_novel_in_range_temporal():
+    schema = TableSchema.model_validate(_SCHEMA)
+    rows = _reference_rows()
+    profiles = profile_table(schema, rows)
+    backend = EmpiricalBackend()
+    backend.fit(rows, profiles)
+    out = backend.sample_columns(500, np.random.default_rng(11))
+
+    observed_ts = {r["ts"] for r in rows}
+    sampled_ts = [v for v in out["ts"] if v is not None]
+    assert all(isinstance(v, datetime) and v.tzinfo is not None for v in sampled_ts)
+    lo, hi = min(observed_ts), max(observed_ts)
+    assert all(lo <= v <= hi for v in sampled_ts)
+    # Novel-range jitter, not the verbatim observed table (60 distinct
+    # observed instants in a 59-hour continuous range → collisions ≈ 0).
+    copy_ratio = sum(v in observed_ts for v in sampled_ts) / len(sampled_ts)
+    assert copy_ratio < 0.3
+
+    sampled_d = [v for v in out["d_str"] if v is not None]
+    assert all(datetime.strptime(v, "%Y-%m-%d") for v in sampled_d)
+    # 30 observed days inside a 29-day span is a saturated keyspace, so
+    # membership is unavoidable — the defect was FREQUENCY copying; assert
+    # the draw is range-uniform, not the empirical table (distinct spread).
+    assert len(set(sampled_d)) >= 20
+
+    # Below-cap timestamp column stays empirical (in observed support).
+    observed_low = {r["ts_low"] for r in rows}
+    assert set(v for v in out["ts_low"] if v is not None) <= observed_low
+
+
+def test_sdgx_reference_frame_excludes_temporal_columns():
+    schema = TableSchema.model_validate(_SCHEMA)
+    rows = _reference_rows()
+    profiles = profile_table(schema, rows)
+    backend = SdgxBackend()
+    backend._profiles = _samplable_profiles(profiles)
+    frame = backend._reference_frame(rows, pd)
+    assert "ts" not in frame.columns and "d_str" not in frame.columns
+    assert "enum_col" in frame.columns and "event_id" in frame.columns
+
+
+def test_sdgx_backend_temporal_branch_injects_nulls():
+    schema = TableSchema.model_validate(_SCHEMA)
+    rows = _reference_rows()
+    profiles = profile_table(schema, rows)
+    # Nullable temporal with a 30% observed null rate, hand-tuned.
+    profiles = dict(profiles)
+    p = profiles["ts"]
+    profiles["ts"] = ColumnProfile(
+        name=p.name, bq_type=p.bq_type, kind=p.kind, nullable=True,
+        null_fraction=0.3, minimum=p.minimum, maximum=p.maximum,
+        temporal_value_type=p.temporal_value_type, temporal_format=p.temporal_format,
+    )
+    backend = SdgxBackend()
+    backend._profiles = _samplable_profiles(profiles)
+
+    class _StubSynth:
+        def sample(self, n):
+            return pd.DataFrame({"event_id": [1] * n})
+
+    backend._synthesizer = _StubSynth()
+    out = backend.sample_columns(400, np.random.default_rng(5))
+    null_rate = sum(v is None for v in out["ts"]) / 400
+    assert 0.2 < null_rate < 0.4  # nulls reinjected, not dropped
+    assert any(v is not None for v in out["ts"])  # and real values sampled
