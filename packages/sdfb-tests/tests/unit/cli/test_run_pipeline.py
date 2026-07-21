@@ -401,3 +401,48 @@ def test_resolve_landing_dispositions_matrix():
         BigQueryDisposition.WRITE_TRUNCATE,
         BigQueryDisposition.CREATE_IF_NEEDED,
     )
+
+
+# --- ddl_uri optional with live-extraction precedence (WS4 §6b) ---------
+
+
+def _args_without_ddl_uri() -> list[str]:
+    args = _common_args()
+    i = args.index("--ddl_uri")
+    return args[:i] + args[i + 2:]
+
+
+def test_parse_args_ddl_uri_optional_defaults_empty():
+    args, beam_argv = parse_args(_args_without_ddl_uri())
+    assert args.ddl_uri == ""
+    assert beam_argv == []
+
+
+def test_resolve_table_schema_prefers_explicit_uri(monkeypatch):
+    from sdfb_beam.cli import run_pipeline as rp
+
+    sentinel = object()
+    monkeypatch.setattr(rp, "load_ddl", lambda uri: sentinel)
+
+    def fake_extract(fqn: str):
+        live_calls.append(fqn)
+
+    live_calls: list[str] = []
+    monkeypatch.setattr(
+        "sdfb_beam.ddl.extract_table_schema",
+        fake_extract,
+    )
+    assert rp.resolve_table_schema("gs://b/d.json", "p.d.t") is sentinel
+    assert live_calls == []  # precedence: pin wins, live never touched
+
+
+def test_resolve_table_schema_live_extracts_when_uri_empty(monkeypatch):
+    from types import SimpleNamespace
+
+    from sdfb_beam.cli import run_pipeline as rp
+
+    sentinel = SimpleNamespace(columns=[1, 2], fqn="p.d.t")
+    monkeypatch.setattr(
+        "sdfb_beam.ddl.extract_table_schema", lambda fqn: sentinel
+    )
+    assert rp.resolve_table_schema("", "p.d.t") is sentinel
