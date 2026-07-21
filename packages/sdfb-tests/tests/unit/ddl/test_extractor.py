@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
 from sdfb_beam.ddl.extractor import _field_to_dict, extract_ddl_metadata
 from sdfb_core.contracts import TableSchema
 
@@ -64,6 +65,35 @@ def _make_table(schema_fields, *, primary_keys=None, partitioning=None, clusteri
     else:
         t.table_constraints = None
     return t
+
+
+def _fake_extraction_client():
+    """Build a mocked `bigquery.Client` for standard extraction tests.
+
+    Returns a client configured with a customers table: three columns
+    (customer_id REQUIRED INT64, email REQUIRED STRING(255),
+    lifetime_value NULLABLE NUMERIC(18,2)) with primary key on
+    customer_id. INFORMATION_SCHEMA queries return empty result.
+    """
+    table = _make_table(
+        schema_fields=[
+            _make_field("customer_id", "INT64", mode="REQUIRED"),
+            _make_field("email", "STRING", mode="REQUIRED", max_length=255),
+            _make_field(
+                "lifetime_value",
+                "NUMERIC",
+                mode="NULLABLE",
+                precision=18,
+                scale=2,
+            ),
+        ],
+        primary_keys=["customer_id"],
+    )
+    client = MagicMock()
+    client.get_table.return_value = table
+    # INFORMATION_SCHEMA query should not crash — return empty result.
+    client.query.return_value.result.return_value = iter([])
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -131,24 +161,7 @@ def test_field_to_dict_omits_unset_constraints():
 
 def test_extractor_output_parses_as_table_schema():
     """The strongest gate: extractor → TableSchema is identity (no glue needed)."""
-    table = _make_table(
-        schema_fields=[
-            _make_field("customer_id", "INT64", mode="REQUIRED"),
-            _make_field("email", "STRING", mode="REQUIRED", max_length=255),
-            _make_field(
-                "lifetime_value",
-                "NUMERIC",
-                mode="NULLABLE",
-                precision=18,
-                scale=2,
-            ),
-        ],
-        primary_keys=["customer_id"],
-    )
-    client = MagicMock()
-    client.get_table.return_value = table
-    # INFORMATION_SCHEMA query should not crash — return empty result.
-    client.query.return_value.result.return_value = iter([])
+    client = _fake_extraction_client()
 
     result = extract_ddl_metadata(
         project="demo_project",
@@ -235,3 +248,27 @@ def test_extractor_continues_when_partition_query_fails():
         project="p", dataset="d", table="t", client=client
     )
     assert result["storage_info"]["num_partitions"] is None
+
+
+# ---------------------------------------------------------------------------
+# extract_table_schema — FQN parsing + validation wrapper (WS4 §6b).
+# ---------------------------------------------------------------------------
+
+
+def test_extract_table_schema_rejects_malformed_fqn():
+    """FQN validation: must be exactly 'project.dataset.table' format."""
+    from sdfb_beam.ddl import extract_table_schema
+
+    for bad in ("dataset.table", "a.b.c.d", "a..c", "", "solo"):
+        with pytest.raises(ValueError, match=r"project\.dataset\.table"):
+            extract_table_schema(bad)
+
+
+def test_extract_table_schema_returns_validated_schema():
+    """extract_table_schema returns a live validated TableSchema."""
+    from sdfb_beam.ddl import extract_table_schema
+
+    client = _fake_extraction_client()
+    schema = extract_table_schema("proj.ds.tbl", client=client)
+    assert schema.fqn  # a real TableSchema, not a dict
+    assert [c.name for c in schema.columns]  # columns materialized
