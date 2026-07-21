@@ -13,9 +13,12 @@ import pandas as pd
 from scipy import stats
 from scipy.spatial.distance import jensenshannon
 
+from sdfb_core.validation.uniqueness import row_digest
+
 _EPS = 1e-6
 _DEFAULT_BINS = 10
 _MIN_COLS = 2
+_MIN_REAL_ROWS = 2
 
 
 def numeric_and_categorical_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:
@@ -157,3 +160,122 @@ def mi_matrix_diff(
             rm[i, j] = rm[j, i] = mutual_info_score(r[cols[i]], r[cols[j]])
             sm[i, j] = sm[j, i] = mutual_info_score(s[cols[i]], s[cols[j]])
     return float(np.linalg.norm(rm - sm, ord="fro"))
+
+
+def _gower_embed(
+    real_df: pd.DataFrame, synth_df: pd.DataFrame
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """ONE concatenated feature matrix per side: min-max-normalized numerics
+    (bounds fit on the real side) + one-hot categoricals scaled by 1/√2 (a
+    category mismatch then contributes distance 1, like a full numeric span).
+    Gower-STYLE approximation (design §3); never metric='precomputed' — a
+    dense nxn distance matrix would blow the single-worker memory bound."""
+    numeric, categorical = numeric_and_categorical_columns(real_df)
+    numeric = [c for c in numeric if c in synth_df.columns]
+    categorical = [c for c in categorical if c in synth_df.columns]
+    if not numeric and not categorical:
+        return None
+    blocks_r: list[np.ndarray] = []
+    blocks_s: list[np.ndarray] = []
+    for c in numeric:
+        r = pd.to_numeric(real_df[c], errors="coerce")
+        s = pd.to_numeric(synth_df[c], errors="coerce")
+        lo = float(r.min()) if r.notna().any() else 0.0
+        hi = float(r.max()) if r.notna().any() else 0.0
+        span = (hi - lo) or 1.0
+        blocks_r.append(((r.fillna(lo) - lo) / span).clip(0.0, 1.0).to_numpy()[:, None])
+        blocks_s.append(((s.fillna(lo) - lo) / span).clip(0.0, 1.0).to_numpy()[:, None])
+    for c in categorical:
+        cats = sorted(set(real_df[c].astype(str)) | set(synth_df[c].astype(str)))
+        index = {v: i for i, v in enumerate(cats)}
+        onehot_r = np.zeros((len(real_df), len(cats)))
+        onehot_s = np.zeros((len(synth_df), len(cats)))
+        for row_idx, v in enumerate(real_df[c].astype(str)):
+            onehot_r[row_idx, index[v]] = 1.0
+        for row_idx, v in enumerate(synth_df[c].astype(str)):
+            onehot_s[row_idx, index[v]] = 1.0
+        blocks_r.append(onehot_r / math.sqrt(2.0))
+        blocks_s.append(onehot_s / math.sqrt(2.0))
+    return np.hstack(blocks_r), np.hstack(blocks_s)
+
+
+def dcr_nndr(
+    real_df: pd.DataFrame, synth_df: pd.DataFrame
+) -> tuple[float | None, float | None]:
+    """(mean Distance to Closest Record, mean Nearest-Neighbor Distance
+    Ratio) of the synthetic sample vs the real sample. Tree-based
+    NearestNeighbors — O(n log n), never a dense pairwise matrix."""
+    from sklearn.neighbors import NearestNeighbors
+
+    if len(real_df) < _MIN_REAL_ROWS or len(synth_df) == 0:
+        return None, None
+    embedded = _gower_embed(real_df, synth_df)
+    if embedded is None:
+        return None, None
+    real_matrix, synth_matrix = embedded
+    nn = NearestNeighbors(n_neighbors=2).fit(real_matrix)
+    dist, _ = nn.kneighbors(synth_matrix)
+    d1, d2 = dist[:, 0], dist[:, 1]
+    avg_dcr = float(np.mean(d1))
+    nndr = float(np.mean(d1 / np.maximum(d2, 1e-12)))
+    return avg_dcr, nndr
+
+
+def identical_match_rate(
+    real_rows: list[dict], synth_rows: list[dict]
+) -> float | None:
+    """Fraction of sampled synthetic rows whose full-row content digest
+    exactly matches a sampled real row's — feeds the §5a gate."""
+    if not real_rows or not synth_rows:
+        return None
+    real_digests = {row_digest(r) for r in real_rows}
+    hits = sum(1 for r in synth_rows if row_digest(r) in real_digests)
+    return hits / len(synth_rows)
+
+
+def column_copy_ratios(
+    real_rows: list[dict],
+    synth_rows: list[dict],
+    *,
+    min_source_distinct: int = 100,
+) -> dict[str, float]:
+    """Spec §5b — per-column verbatim-copy ratio vs the reference sample, for
+    columns whose reference distinct count exceeds min_source_distinct (the
+    offline probe's exact rule; low-cardinality enums are legitimately
+    verbatim). Ratio = fraction of non-null synthetic values present in the
+    reference sample's value set."""
+    if not real_rows or not synth_rows:
+        return {}
+    out: dict[str, float] = {}
+    for col in real_rows[0]:
+        real_values = {r.get(col) for r in real_rows if r.get(col) is not None}
+        if len(real_values) <= min_source_distinct:
+            continue
+        synth_values = [r.get(col) for r in synth_rows if r.get(col) is not None]
+        if not synth_values:
+            continue
+        out[col] = sum(1 for v in synth_values if v in real_values) / len(synth_values)
+    return out
+
+
+def cardinality_floor(
+    real_rows: list[dict],
+    synth_rows: list[dict],
+    *,
+    free_text_columns: list[str],
+    num_rows: int,
+) -> dict[str, float]:
+    """Spec §5c — landing_distinct / min(num_rows, source_distinct) per
+    FREE_TEXT column. MAJOR recorded metric; never job-failing. Values well
+    below 1.0 expose bounded-pool collapse (the 2026-07-19 b1 residual)."""
+    out: dict[str, float] = {}
+    for col in free_text_columns:
+        source_distinct = len({r.get(col) for r in real_rows if r.get(col) is not None})
+        denominator = min(num_rows, source_distinct) if num_rows > 0 else source_distinct
+        if denominator <= 0:
+            continue
+        landing_distinct = len(
+            {r.get(col) for r in synth_rows if r.get(col) is not None}
+        )
+        out[col] = landing_distinct / denominator
+    return out
