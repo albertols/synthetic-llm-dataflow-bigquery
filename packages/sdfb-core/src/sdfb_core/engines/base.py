@@ -200,6 +200,10 @@ class GenerationEngine(ABC):
     """
 
     name: str = ""
+    # Engine CODE version — bumped by hand when engine logic changes
+    # materially. Distinct from validation_runs.model_uri (LLM weights).
+    # Feeds validation_data_history.engine_version (WS3).
+    version: str = "0.1.0"
 
     @abstractmethod
     def setup(self, model_client: ModelClient, ctx: GenerationContext) -> None:

@@ -57,6 +57,7 @@ class B2LibraryEngine(GenerationEngine):
     """
 
     name = "b2_library"
+    version = "0.2.0"  # WS1: temporal jitter, cardinality caps, free-text rerouting, lazy ignition
 
     def __init__(self, *, use_sdgx: bool = True) -> None:
         self._use_sdgx = use_sdgx

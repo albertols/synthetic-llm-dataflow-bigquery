@@ -100,6 +100,7 @@ class B1RagEngine(GenerationEngine):
     """Retrieval-augmented, distribution-estimator synthesis engine (B.1)."""
 
     name = "b1_rag"
+    version = "0.2.0"  # WS2 Phase A: pool scaling + per-column retrieval + ChunkStore read path
 
     def __init__(self, *, embedder: Embedder | None = None) -> None:
         # `embedder` lets tests inject a deterministic fake. Production wires

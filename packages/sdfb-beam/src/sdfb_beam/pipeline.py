@@ -314,6 +314,30 @@ def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:
     return (rule_id, 1)
 
 
+def _build_feature_flag_tags(config: PipelineConfig) -> list[str]:
+    """Sorted, human-diffable run-configuration tags for
+    validation_data_history.feature_flag_tags — two identical configs
+    produce byte-identical arrays (queryable via IN UNNEST)."""
+    tags = [
+        f"engine:{config.engine_name}",
+        f"similarity:{config.similarity:.2f}",
+        f"strict_freetext:{str(config.strict_freetext).lower()}",
+    ]
+    if config.identity_columns:
+        tags.append("identity_columns:" + ",".join(config.identity_columns))
+    if config.embedder_id:
+        tags.append(f"embedder:{config.embedder_id}-{config.embedder_version}")
+    if config.rag_chunks_table:
+        tags.append("rag_read_path:on")
+    return sorted(tags)
+
+
+def _engine_version(engine_name: str) -> str:
+    from sdfb_core.engines import ENGINE_REGISTRY
+
+    return getattr(ENGINE_REGISTRY.get(engine_name), "version", "unknown")
+
+
 def _build_validation_run_row(
     _seed,
     *,
