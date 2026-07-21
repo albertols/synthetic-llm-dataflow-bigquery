@@ -20,6 +20,8 @@ from sdfb_beam.cli.run_pipeline import (
     resolve_engine_strictness,
     resolve_landing_dispositions,
 )
+from sdfb_core.codegen import derive_bq_load_schema
+from sdfb_core.contracts import TableSchema
 
 
 def _common_args() -> list[str]:
@@ -370,6 +372,37 @@ def test_parse_args_write_disposition_default_and_choices():
     assert args.write_disposition == "overwrite"
     with pytest.raises(SystemExit):
         parse_args([*_common_args(), "--write_disposition", "truncate"])
+
+
+def test_landing_sink_schema_uses_load_safe_projection(narrow_ddl_dict):
+    """WS4 final-review CRITICAL-1: the landing sink for CREATE_IF_NEEDED
+    must be built from `derive_bq_load_schema`, not `derive_bq_schema` —
+    the FILE_LOADS runtime path (vendored apitools `TableFieldSchema`)
+    rejects `maxLength`/`precision`/`scale`/`defaultValueExpression` at
+    load-job time even though Beam accepts them at graph construction.
+
+    `run_pipeline.main()` calls `derive_bq_load_schema(table_schema)`
+    directly to build `landing_kwargs["schema"]`; exercise that same call
+    here against a parameterized fixture (STRING max_length + NUMERIC
+    precision/scale) rather than driving the whole pipeline.
+    """
+    import sdfb_beam.cli.run_pipeline as run_pipeline_module
+
+    # Regression guard: the module must not have re-imported the unsafe
+    # `derive_bq_schema` under the name used to build the landing schema.
+    assert run_pipeline_module.derive_bq_load_schema is derive_bq_load_schema
+    assert not hasattr(run_pipeline_module, "derive_bq_schema")
+
+    ts = TableSchema.model_validate(narrow_ddl_dict)
+    schema = run_pipeline_module.derive_bq_load_schema(ts)
+
+    forbidden = {"maxLength", "precision", "scale", "defaultValueExpression"}
+    for field in schema["fields"]:
+        assert not forbidden & set(field.keys()), field
+    email = next(f for f in schema["fields"] if f["name"] == "email")
+    assert email["type"] == "STRING"
+    ltv = next(f for f in schema["fields"] if f["name"] == "lifetime_value")
+    assert ltv["type"] == "NUMERIC"
 
 
 def test_parse_bool_flag_truthy_set():
