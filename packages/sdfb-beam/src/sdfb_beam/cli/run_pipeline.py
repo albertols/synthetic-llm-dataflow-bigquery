@@ -66,8 +66,12 @@ _DEFAULT_WORKER_DISK_GB = 200
 
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p = argparse.ArgumentParser(description="Synthetic Dataflow BigQuery — pipeline launcher")
-    p.add_argument("--ddl_uri", required=True,
-                   help="gs:// or local path to _ddl.json")
+    p.add_argument("--ddl_uri", default="",
+                   help="gs:// or local path to _ddl.json. OPTIONAL "
+                        "(WS4 §6b): empty = live INFORMATION_SCHEMA "
+                        "extraction from --reference_table at "
+                        "graph-construction time. An explicit URI is the "
+                        "pin/air-gap escape hatch and always wins.")
     p.add_argument("--reference_table", required=True,
                    help="FQN of source table for live SELECT reference rows")
     p.add_argument("--reference_rows_limit", type=int, default=10_000)
@@ -202,6 +206,28 @@ def load_ddl(ddl_uri: str) -> TableSchema:
         return TableSchema.model_validate(json.loads(f.read()))
 
 
+def resolve_table_schema(ddl_uri: str, reference_table: str) -> TableSchema:
+    """WS4 §6b precedence: explicit ``--ddl_uri`` (pin/air-gap) > live
+    INFORMATION_SCHEMA extraction from the source table."""
+    if ddl_uri:
+        logger.info("Loading DDL from %s", ddl_uri)
+        schema = load_ddl(ddl_uri)
+        log_milestone("ddl_loaded_from_uri", uri=ddl_uri)
+        return schema
+    logger.info(
+        "No --ddl_uri; live-extracting schema from %s", reference_table
+    )
+    from sdfb_beam.ddl import extract_table_schema
+
+    schema = extract_table_schema(reference_table)
+    log_milestone(
+        "ddl_live_extracted",
+        table=reference_table,
+        columns=len(schema.columns),
+    )
+    return schema
+
+
 def resolve_engine_strictness(client_type: str) -> bool:
     """True for real-LLM client types (``vllm`` on Dataflow/L4, ``mlx`` on
     the M4 DirectRunner) — a failed generation must be loud (strict
@@ -317,8 +343,7 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_pipeline_options(options, runner, args.run_id)
 
-    logger.info("Loading DDL from %s", args.ddl_uri)
-    table_schema = load_ddl(args.ddl_uri)
+    table_schema = resolve_table_schema(args.ddl_uri, args.reference_table)
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 
