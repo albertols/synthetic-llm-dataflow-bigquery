@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import sys
+import uuid
 from typing import TYPE_CHECKING
 
 import apache_beam as beam
@@ -132,6 +133,14 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
+    p.add_argument("--enable_evaluation", action="store_true",
+                   help="Post-WriteLanding fidelity/privacy evaluation branch "
+                        "(WS3): one validation_data_history row per run + the "
+                        "always-BLOCKER memorization gate.")
+    p.add_argument("--validation_data_history_table", default="",
+                   help="BQ table for the evaluation row "
+                        "(project.dataset.validation_data_history). Required "
+                        "with --enable_evaluation.")
     p.add_argument("--env", default="dev",
                    help="Environment tier selecting thresholds (dev|uat|prd)")
     p.add_argument("--thresholds_uri", default="config/thresholds.yml",
@@ -154,6 +163,8 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     args, beam_args = p.parse_known_args(argv)
     if args.build_rag_layer and not args.rag_chunks_table:
         p.error("--build_rag_layer requires --rag_chunks_table")
+    if args.enable_evaluation and not args.validation_data_history_table:
+        p.error("--enable_evaluation requires --validation_data_history_table")
     return args, beam_args
 
 
@@ -423,6 +434,10 @@ def main(argv: list[str] | None = None) -> int:
         rag_chunks_table=args.rag_chunks_table,
         embedder_id=embedder_id,
         embedder_version=embedder_version,
+        enable_evaluation=args.enable_evaluation,
+        execution_id=f"{args.run_id}-{uuid.uuid4().hex[:12]}",
+        validation_runs_table=args.validation_runs_table,
+        validation_data_history_table=args.validation_data_history_table,
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
@@ -467,6 +482,19 @@ def main(argv: list[str] | None = None) -> int:
             create_disposition=BigQueryDisposition.CREATE_NEVER,
         )
 
+    validation_data_history_sink = None
+    if args.enable_evaluation:
+        validation_data_history_sink = WriteToBigQuery(
+            table=args.validation_data_history_table,
+            method=WriteToBigQuery.Method.FILE_LOADS,
+            write_disposition=BigQueryDisposition.WRITE_APPEND,
+            create_disposition=BigQueryDisposition.CREATE_NEVER,
+        )
+        log_milestone(
+            "evaluation_enabled",
+            history_table=args.validation_data_history_table,
+        )
+
     with beam.Pipeline(options=options) as p:
         result = build_pipeline(
             p,
@@ -476,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
             dlq_sink=dlq_sink,
             validation_runs_sink=validation_runs_sink,
             rag_chunks_sink=rag_chunks_sink,
+            validation_data_history_sink=validation_data_history_sink,
         )
         logger.info(
             "Pipeline launched: run_id=%s reference_digest=%s",
