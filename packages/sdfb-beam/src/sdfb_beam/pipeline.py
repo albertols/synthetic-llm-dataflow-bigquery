@@ -19,12 +19,16 @@ REFs:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
 import apache_beam as beam
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext, ModelClient
+from sdfb_core.evaluation.gate import raise_if_blocker
+from sdfb_core.evaluation.profile import choose_stratification_column
+from sdfb_core.evaluation.sampling import per_stratum_cap
 from sdfb_core.validation import (
     STATUS_FAILED_BLOCKER,
     BlockerThresholdExceeded,
@@ -35,8 +39,10 @@ from sdfb_core.validation import (
 
 from sdfb_beam.dofns import (
     EnforceUniqueness,
+    EvaluationDoFn,
     GenerateRecordsDoFn,
     PanderaValidateBatchDoFn,
+    StratifiedReservoirFn,
     ValidateRecordDoFn,
 )
 from sdfb_beam.io.digest import compute_reference_digest
@@ -85,9 +91,20 @@ class PipelineConfig:
     rag_chunks_table: str = ""
     embedder_id: str = ""
     embedder_version: str = ""
+    # WS3 — post-WriteLanding evaluation branch. enable_evaluation and the
+    # sink are independent (both required for the branch); execution_id is
+    # the append-only natural key (a run_id may be re-evaluated).
+    enable_evaluation: bool = False
+    execution_id: str = ""
+    validation_runs_table: str = ""
+    validation_data_history_table: str = ""
 
 
-def build_pipeline(
+def build_pipeline(  # noqa: PLR0915 — one linear DAG-composition pass across
+    # the four sibling optional branches (rag_chunks, validation_runs,
+    # validation_data_history); splitting would scatter the "same
+    # Create([None]) + AsSingleton collapse" shape they share across
+    # helpers that would each need the same digest/uniq/config state.
     p: beam.Pipeline,
     *,
     reference_rows: list[dict],
@@ -96,6 +113,7 @@ def build_pipeline(
     dlq_sink: beam.PTransform,
     validation_runs_sink: beam.PTransform | None = None,
     rag_chunks_sink: beam.PTransform | None = None,
+    validation_data_history_sink: beam.PTransform | None = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -274,6 +292,53 @@ def build_pipeline(
             _ = summary_rows | "BlockerGate" >> beam.ParDo(_BlockerGateDoFn())
         result["validation_run"] = summary_rows
 
+    # WS3 — post-WriteLanding evaluation branch. Sibling of the
+    # validation_runs block: same Create([None]) + AsSingleton collapse.
+    if config.enable_evaluation and validation_data_history_sink is not None:
+        eval_thresholds = config.thresholds or Thresholds(
+            env="dev", blocker_failure_ratio=1.0
+        )
+        plan = choose_stratification_column(config.table_schema, reference_rows)
+        cap = per_stratum_cap(max(len(plan.values), 1))
+        real_sample = (
+            p
+            | "EvalReferenceRows" >> beam.Create(reference_rows)
+            | "EvalSampleReference"
+            >> beam.CombineGlobally(StratifiedReservoirFn(plan, config.run_id, cap))
+        )
+        synth_sample = uniq["unique"] | "EvalSampleSynthetic" >> beam.CombineGlobally(
+            StratifiedReservoirFn(plan, config.run_id, cap)
+        )
+        eval_rows = (
+            p
+            | "EvalSeed" >> beam.Create([None])
+            | "Evaluate"
+            >> beam.ParDo(
+                EvaluationDoFn(
+                    table_schema=config.table_schema,
+                    run_id=config.run_id,
+                    execution_id=config.execution_id or config.run_id,
+                    engine=config.engine_name,
+                    engine_version=_engine_version(config.engine_name),
+                    feature_flag_tags=_build_feature_flag_tags(config),
+                    thresholds=eval_thresholds,
+                    free_text_columns=_rag_free_text_columns(
+                        config.table_schema, reference_rows
+                    ),
+                    num_rows=config.num_rows,
+                    landing_table=config.landing_table,
+                    history_table=config.validation_data_history_table,
+                    validation_runs_table=config.validation_runs_table,
+                ),
+                real_sample=beam.pvalue.AsSingleton(real_sample),
+                synth_sample=beam.pvalue.AsSingleton(synth_sample),
+            )
+        )
+        _ = eval_rows | "WriteValidationDataHistory" >> validation_data_history_sink
+        if config.fail_on_blocker:
+            _ = eval_rows | "MemorizationGate" >> beam.ParDo(_MemorizationGateDoFn())
+        result["validation_data_history"] = eval_rows
+
     return result
 
 
@@ -378,4 +443,16 @@ class _BlockerGateDoFn(beam.DoFn):
                 f"observed={row.get('observed_blocker_ratio')} > "
                 f"gate={row.get('blocker_failure_ratio')} (env={row.get('env')})"
             )
+        yield row
+
+
+class _MemorizationGateDoFn(beam.DoFn):
+    """Fails the job when the eval row's memorization gate tripped at BLOCKER
+    severity (§5a). Downstream of the sink write, so the row always lands."""
+
+    def process(self, row: dict):
+        raw = json.loads(row.get("raw_metrics_json") or "{}")
+        raise_if_blocker(
+            raw.get("memorization_gate") or {}, run_id=str(row.get("run_id"))
+        )
         yield row
