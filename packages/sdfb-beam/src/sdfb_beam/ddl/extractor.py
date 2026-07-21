@@ -27,10 +27,14 @@ from typing import Any
 
 from google.api_core.retry import Retry
 from google.cloud import bigquery
+from sdfb_core.contracts import TableSchema
 
 from sdfb_beam.ddl.connection import DEFAULT_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+# FQN format: project.dataset.table
+_FQN_PARTS = 3
 
 
 def extract_ddl_metadata(
@@ -78,6 +82,31 @@ def extract_ddl_metadata(
     }
     logger.info("DDL extraction complete in %.1fs", time.time() - start)
     return result
+
+
+def extract_table_schema(
+    table_fqn: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    client: bigquery.Client | None = None,
+) -> TableSchema:
+    """Live-extract a validated ``TableSchema`` for ``project.dataset.table``
+    (WS4 §6b).
+
+    The launch-time twin of the offline extract → stage → ``--ddl_uri``
+    flow: same extractor, no GCS artifact. Runs at graph-construction time
+    on the driver — the same lifecycle stage as the live reference read.
+    """
+    parts = table_fqn.split(".")
+    if len(parts) != _FQN_PARTS or not all(parts):
+        raise ValueError(
+            f"table_fqn must be 'project.dataset.table', got {table_fqn!r}"
+        )
+    project, dataset, table = parts
+    metadata = extract_ddl_metadata(
+        project, dataset, table, timeout=timeout, client=client
+    )
+    return TableSchema.model_validate(metadata)
 
 
 # ---------------------------------------------------------------------------

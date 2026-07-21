@@ -31,14 +31,12 @@ tables:
     params:
       reference_table: "{PROJECT_ID}.synthetic_source.citibike_trips_50k"
       landing_table: "{PROJECT_ID}.synthetic_data.citibike_trips_50k"
-      ddl_uri: "gs://{DATAFLOW_BUCKET}/ddl/citibike_trips_50k_ddl.json"
       pk_cols: trip_id
       identity_cols: trip_id
   hacker_news:
     params:
       reference_table: "{PROJECT_ID}.synthetic_source.hacker_news_50k"
       landing_table: "{PROJECT_ID}.synthetic_data.hacker_news_50k"
-      ddl_uri: "gs://{DATAFLOW_BUCKET}/ddl/hacker_news_50k_ddl.json"
       pk_cols: id
       identity_cols: id
 
