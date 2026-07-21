@@ -40,6 +40,7 @@ from apache_beam.options.pipeline_options import (
     StandardOptions,
     WorkerOptions,
 )
+from sdfb_core.codegen import derive_bq_schema
 from sdfb_core.contracts import TableSchema
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.embedding import embedder_identity
@@ -74,6 +75,18 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="BQ table for synthetic rows (project.dataset.table)")
     p.add_argument("--dlq_table", required=True,
                    help="BQ DLQ table (project.dataset.table)")
+    p.add_argument("--write_disposition", default="append",
+                   choices=["append", "overwrite"],
+                   help="Landing-table write mode. append = WRITE_APPEND "
+                        "(default, today's behavior); overwrite = "
+                        "WRITE_TRUNCATE (FILE_LOADS-compatible). DLQ, "
+                        "validation_runs and rag_chunks always append.")
+    p.add_argument("--create_if_not_exists", default="false",
+                   help="true/1/yes: create the landing table on first "
+                        "write (CREATE_IF_NEEDED) carrying the landing "
+                        "schema derived in-pipeline from the DDL. Anything "
+                        "else: CREATE_NEVER (default). Quality/RAG tables "
+                        "are never auto-created.")
     p.add_argument("--num_rows", type=int, required=True)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--similarity", type=float, default=0.5)
@@ -196,6 +209,36 @@ def resolve_engine_strictness(client_type: str) -> bool:
     into memorized reference data. Only the deterministic ``fake`` client
     (CPU smoke run, produces fake data regardless) stays lenient."""
     return client_type != "fake"
+
+
+# Flex Template parameters are strings; this is the accepted truthy set for
+# string-valued boolean flags threaded through the template/DAG chain.
+_TRUTHY_FLAG_VALUES = frozenset({"true", "1", "yes"})
+
+
+def parse_bool_flag(value: str) -> bool:
+    """Normalize a string-valued boolean Flex-Template parameter."""
+    return str(value).strip().lower() in _TRUTHY_FLAG_VALUES
+
+
+def resolve_landing_dispositions(
+    write_disposition: str, create_if_not_exists: bool
+) -> tuple[str, str]:
+    """Landing-sink ``(write, create)`` dispositions (WS4 §6a/§6c).
+
+    Landing ONLY — the DLQ, validation_runs and rag_chunks sinks stay
+    WRITE_APPEND/CREATE_NEVER unconditionally (blast-radius rule)."""
+    write = (
+        BigQueryDisposition.WRITE_TRUNCATE
+        if write_disposition == "overwrite"
+        else BigQueryDisposition.WRITE_APPEND
+    )
+    create = (
+        BigQueryDisposition.CREATE_IF_NEEDED
+        if create_if_not_exists
+        else BigQueryDisposition.CREATE_NEVER
+    )
+    return write, create
 
 
 def sanitize_job_name(prefix: str, run_id: str) -> str:
@@ -350,11 +393,27 @@ def main(argv: list[str] | None = None) -> int:
         embedder_version=embedder_version,
     )
 
+    create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
+    landing_write, landing_create = resolve_landing_dispositions(
+        args.write_disposition, create_if_not_exists
+    )
+    landing_kwargs: dict = {}
+    if create_if_not_exists:
+        # CREATE_IF_NEEDED must carry the target schema — derived
+        # in-pipeline from the resolved TableSchema (WS4 §6c), never
+        # hand-provisioned.
+        landing_kwargs["schema"] = derive_bq_schema(table_schema)
+    log_milestone(
+        "landing_sink_config",
+        write_disposition=landing_write,
+        create_disposition=landing_create,
+    )
     landing_sink = WriteToBigQuery(
         table=args.landing_table,
         method=WriteToBigQuery.Method.FILE_LOADS,
-        write_disposition=BigQueryDisposition.WRITE_APPEND,
-        create_disposition=BigQueryDisposition.CREATE_NEVER,
+        write_disposition=landing_write,
+        create_disposition=landing_create,
+        **landing_kwargs,
     )
     dlq_sink = WriteToBigQuery(
         table=args.dlq_table,
