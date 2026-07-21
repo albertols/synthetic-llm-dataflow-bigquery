@@ -78,3 +78,13 @@ rules:
     dimension: validity
     severity: MAJOR
     threshold: 0.999  # ≥ 99.9% format match
+
+  memorization.copy_ratio:
+    dimension: privacy
+    severity: BLOCKER  # spec §5a — BLOCKER in EVERY env, deliberately no per-env dict
+    threshold: 0.0     # any exact sampled-row copy trips; column copy_ratio >= 0.3 also trips (§5b)
+
+  column.cardinality_floor:
+    dimension: fidelity
+    severity: MAJOR    # recorded in validation_data_history; never job-failing (§5c)
+    threshold: 0.5     # landing_distinct / min(num_rows, source_distinct) per FREE_TEXT column
