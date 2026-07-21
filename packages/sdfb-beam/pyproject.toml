@@ -53,6 +53,13 @@ embedding = [
 library = [
     "sdgx>=0.2.0",  # hitsz-ids/synthetic-data-generator; revisit vs DataDreamer
 ]
+# Tier-3 evaluation extras — SynthEval + Evidently. Off by default; the
+# functions importing these are deferred-import (metrics_t3.py) so their
+# absence never breaks a Tier 1/2 evaluation run.
+eval-extra = [
+    "syntheval>=1.5.0",
+    "evidently>=0.4.0",
+]
 # Apple Silicon local smoke test backend — see docs/M4_LOCAL_SMOKE.md.
 # Installed ONLY on the M4; NEVER baked into the GPU image (would conflict
 # with vllm + torch on linux/amd64).

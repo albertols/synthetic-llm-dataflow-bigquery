@@ -10,6 +10,14 @@ dependencies = [
     "pydantic>=2.7,<3.0",
     "pyyaml>=6.0",
     "numpy>=1.26",  # vectorized bulk sampling — distribution-estimator spine (ADR 0013)
+    # WS3 evaluation — Tier 1 (scipy/sklearn) + Tier 2 (sdmetrics) are base
+    # per the locked decision. Audit 2026-07-21: sdmetrics 0.28.x declares
+    # torch ONLY under its optional [torch] extra, so the "no torch in
+    # sdfb-core" rule holds with a base install.
+    "scipy>=1.11.0",
+    "scikit-learn>=1.4.0",
+    "pandas>=2.2.0",
+    "sdmetrics>=0.28.0",
 ]
 
 [build-system]
