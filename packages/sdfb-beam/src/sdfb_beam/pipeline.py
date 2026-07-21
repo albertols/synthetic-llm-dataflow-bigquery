@@ -448,7 +448,11 @@ class _BlockerGateDoFn(beam.DoFn):
 
 class _MemorizationGateDoFn(beam.DoFn):
     """Fails the job when the eval row's memorization gate tripped at BLOCKER
-    severity (§5a). Downstream of the sink write, so the row always lands."""
+    severity (§5a). Wired as a sibling of the sink write — on Dataflow, stage
+    fusion means a tripped gate can fail the bundle before the FILE_LOADS
+    write commits, so the eval row is NOT guaranteed to land on a gate-trip
+    (same latent caveat as _BlockerGateDoFn). Follow-up: sequence both gates
+    on the write result and verify landing on the first real M4 gate-trip."""
 
     def process(self, row: dict):
         raw = json.loads(row.get("raw_metrics_json") or "{}")
