@@ -25,7 +25,8 @@ def test_r1p_citibike_is_t4_vllm_b1_rag():
     assert params["vllm_dtype"] == "float16"
     assert params["vllm_max_model_len"] == "8192"
     assert params["reference_table"] == "p1.synthetic_source.citibike_trips_50k"
-    assert params["ddl_uri"] == "gs://db/ddl/citibike_trips_50k_ddl.json"
+    # WS4 §6b: no DDL staging in the happy path — the launcher live-extracts.
+    assert "ddl_uri" not in params
     assert params["pk_cols"] == "trip_id" and params["identity_cols"] == "trip_id"
     assert job["machine_type"] == "n1-standard-8"
     assert job["accelerator"].startswith("type:nvidia-tesla-t4;count:1;install-nvidia-driver")
