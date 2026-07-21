@@ -146,3 +146,12 @@ def test_teardown_releases_state(engine_class, model_client, ctx):
     engine.teardown()
     with pytest.raises(RuntimeError):
         list(engine.generate_batch(1, GenerationConfig(seed=42)))
+
+
+def test_every_registered_engine_declares_a_version():
+    import sdfb_core.engines  # noqa: F401 — populates the registry
+    from sdfb_core.engines import ENGINE_REGISTRY
+
+    for name, engine_class in ENGINE_REGISTRY.items():
+        version = getattr(engine_class, "version", "")
+        assert isinstance(version, str) and version, f"{name} missing version"
