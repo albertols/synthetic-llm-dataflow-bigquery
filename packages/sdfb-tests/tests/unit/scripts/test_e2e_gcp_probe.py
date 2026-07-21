@@ -20,6 +20,7 @@ import importlib.util
 import re
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -151,7 +152,7 @@ def test_bq_quality_no_run_id_uses_bare_limit_fallback(probe_module):
     client = _FakeBqClient()
     out = probe_module.bq_quality(client, "proj.synthetic_data_quality", [])
     sqls = [sql for sql, _cfg in client.calls]
-    assert len(sqls) == 2  # validation_runs, dlq
+    assert len(sqls) == 3  # validation_runs, dlq, validation_data_history
     for sql in sqls:
         assert "LIMIT 50" in sql
         assert "run_id" not in sql
@@ -164,7 +165,7 @@ def test_bq_quality_with_run_ids_uses_parameterized_in_unnest(probe_module):
         client, "proj.synthetic_data_quality", ["run-a", "run-b"]
     )
     sqls_and_cfgs = client.calls
-    assert len(sqls_and_cfgs) == 2
+    assert len(sqls_and_cfgs) == 3  # validation_runs, dlq, validation_data_history
     for sql, cfg in sqls_and_cfgs:
         assert "WHERE run_id IN UNNEST(@run_ids)" in sql
         assert "LIMIT 50" in sql
@@ -351,3 +352,34 @@ def test_job_params_reads_pipeline_description_typed_values(probe_module):
 
 def test_job_params_empty_job_yields_empty_dict(probe_module):
     assert probe_module._job_params({}) == {}
+
+
+# --------------------------------------------------------------------------
+# WS3 §5d — derive_run_ids + validation_data_history fetch
+# --------------------------------------------------------------------------
+def test_derive_run_ids_matches_job_name_slug(probe_module):
+    client = MagicMock()
+    client.query.return_value.result.return_value = iter(
+        [
+            {"run_id": "manual__2026-07-19T07:42:28+00:00-5608"},
+            {"run_id": "unrelated-run"},
+        ]
+    )
+    dataflow_results = [{"job_id": "j1", "name": "sdfb-manual-2026-07-19t07-42-28-00-00-5608"}]
+    assert probe_module.derive_run_ids(
+        client, "p.synthetic_data_quality", dataflow_results
+    ) == ["manual__2026-07-19T07:42:28+00:00-5608"]
+
+
+def test_derive_run_ids_empty_without_inputs(probe_module):
+    assert probe_module.derive_run_ids(MagicMock(), "", [{"name": "x"}]) == []
+    assert probe_module.derive_run_ids(MagicMock(), "p.d", []) == []
+
+
+def test_bq_quality_fetches_history_table(probe_module):
+    client = MagicMock()
+    client.query.return_value.result.return_value = iter([])
+    out = probe_module.bq_quality(client, "p.synthetic_data_quality", ["r1"])
+    assert "validation_data_history" in out
+    queried = " ".join(str(c[0][0]) for c in client.query.call_args_list)
+    assert "validation_data_history" in queried

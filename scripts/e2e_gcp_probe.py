@@ -312,7 +312,7 @@ def bq_quality(client, quality_dataset: str, run_ids: list[str]) -> dict[str, An
         job_config = bigquery.QueryJobConfig(
             query_parameters=[bigquery.ArrayQueryParameter("run_ids", "STRING", run_ids)]
         )
-    for table in ("validation_runs", "dlq"):
+    for table in ("validation_runs", "dlq", "validation_data_history"):
         fqn = f"{proj}.{ds}.{table}"
         if run_ids:
             sql = (
@@ -715,6 +715,33 @@ def _jsonable(obj):
     return json.loads(json.dumps(obj, default=str))
 
 
+def derive_run_ids(
+    client, quality_dataset: str, dataflow_results: list[dict]
+) -> list[str]:
+    """WS3 §5d — when --run-id is absent, derive it from validation_runs:
+    Dataflow job names are sanitize_job_name slugs of run_id
+    (run_pipeline.py), so match recent run_id slugs against the job names.
+    Retires the recurring unscoped-DLQ gap (2026-07-19/20 reports)."""
+    job_names = [r.get("name") or "" for r in dataflow_results if r.get("name")]
+    if not (quality_dataset and job_names):
+        return []
+    proj, ds, _ = _split_fqn(quality_dataset + ".x")
+    try:
+        rows = client.query(
+            f"SELECT run_id FROM {_quote(f'{proj}.{ds}.validation_runs')} "
+            "ORDER BY created_at DESC LIMIT 200"
+        ).result()
+    except Exception:
+        return []
+    derived: set[str] = set()
+    for row in rows:
+        run_id = str(row["run_id"])
+        slug = re.sub(r"[^a-z0-9]+", "-", run_id.lower()).strip("-")
+        if slug and any(slug in name for name in job_names):
+            derived.add(run_id)
+    return sorted(derived)
+
+
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
@@ -757,13 +784,19 @@ def main(argv: list[str] | None = None) -> int:
     ]
     _annotate_engine_labels(dataflow_results, engine_labels)
 
+    run_ids = args.run_ids
+    if not run_ids and args.quality_dataset:
+        run_ids = derive_run_ids(client, args.quality_dataset, dataflow_results)
+        if run_ids:
+            print(f"derived run_ids from validation_runs: {run_ids}")
+
     report: dict[str, Any] = {
         "project": args.project,
         "caller_identity": identity,
         "bigquery": bq_cross_validation(
             client, args.source_fqn, args.landing_fqn, pk_columns=pk_columns
         ),
-        "quality": bq_quality(client, args.quality_dataset, args.run_ids),
+        "quality": bq_quality(client, args.quality_dataset, run_ids),
         "dataflow": dataflow_results,
     }
 

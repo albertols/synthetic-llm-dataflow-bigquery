@@ -53,8 +53,9 @@ inputs.
 | `PK` | `<PK_COL[,PK_COL2]>` | primary-key column(s) |
 | `IDENTITY_COLS` | `<UUID_COL[,…]>` | per-row-unique columns |
 | `BATCH_SIZE` | `500` | Beam/RunInference batch size (enables the `equals_batch_size` run-length flag) |
-| `RUN_IDS` | `<run_id>` (optional, one per engine run) | scopes `validation_runs`/`dlq` lookups |
+| `RUN_IDS` | `<run_id>` (optional, one per engine run) | scopes `validation_runs`/`dlq` lookups *(optional since WS3 — the probe auto-derives run_ids from validation_runs when omitted)* |
 | `ENGINE_LABEL=JOB_ID` | `b1_rag=<job_id>` (optional, repeatable) | stamps a readable engine name on the matching Dataflow result |
+| `HISTORY_FQN` | `<project>.synthetic_data_quality.validation_data_history` | per-run evaluation rows (present for runs launched with --enable_evaluation) |
 
 If a param is unknown, discover it: `SCHEMA`/columns via the schema JSON or
 `INFORMATION_SCHEMA`; `LANDING_FQN` via the `synthetic_data` dataset; `JOB_IDS`
@@ -167,6 +168,12 @@ deployment's runs; `--engine-label label=job_id` (repeatable) stamps a
 human-readable engine name onto the matching Dataflow result so Step 5's
 scorecard doesn't have to cross-reference job ids by hand.
 
+The probe auto-derives `run_id` from the `validation_runs` rows whose
+sanitized slug matches each Dataflow job name when `--run-id` is not passed,
+and fetches the matching `validation_data_history` rows into the
+`quality.validation_data_history` key — never analyze DLQ/validation rows
+unscoped by run_id.
+
 It uses ADC to compute, generically (schema introspected from
 `INFORMATION_SCHEMA`, no column names hard-coded):
 
@@ -246,11 +253,9 @@ For every anomaly: **evidence → root cause (file:symbol) → fix**. Check for:
 - **Perf**: unnecessary embedder warm-pull for the library engine; long
   generation stall; startup-bound wall time.
 
-> **Forward-looking**: this step hand-computes fidelity from the offline CSV
-> (Step 2) and live BQ (Step 3). Once `--enable-evaluation` lands (see
-> `docs/designs/2026-07-07-evaluation-framework-design.md`), pull the fidelity
-> numbers from `synthetic_data_quality.validation_data_history` instead of
-> recomputing them here.
+> Pull fidelity/privacy numbers from the run's `validation_data_history` row
+> when present (`quality.validation_data_history` in the probe JSON);
+> hand-compute them only for runs that predate `--enable_evaluation`.
 
 ---
 
@@ -262,6 +267,8 @@ Create `output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md`
 0. **Runs under test** — engine / CSV / rows / job_id / wall time / launch
    params + which engine the landing table holds + caller identity.
 1. **Executive verdict** — side-by-side scorecard 🟢/🟡/🔴 + a 3-point bottom line.
+   Include `fidelity_overall_score`, `avg_dcr`, `nndr`, `identical_match_rate`,
+   and `max_psi` columns, sourced from the eval row; `n/a` for pre-WS3 runs.
 2. **Per-engine findings** — evidence tables from Steps 2–3.
 3. **Memorization** — the source-copy table (copy_ratio) + the GPU/LLM-fallback
    root cause + fixes.
@@ -341,7 +348,8 @@ Hand the OSS team the `oss/` folder + the three scripts; keep `real/` local.
 
 - **ADC access is a prerequisite** (Step 0). If missing, stop with the exact
   `gcloud auth application-default …` commands — never fabricate live results.
-- **Numbers come from the analyzer/probe JSON**, never from eyeballing a CSV.
+- **Numbers come from the analyzer/probe JSON or the validation_data_history
+  row**, never from eyeballing a CSV or from memory.
 - **Every defect traces to `packages/` code** (file + symbol).
 - **Generic always**: table columns, datasets, project ids arrive as inputs;
   the scripts introspect the schema — nothing is hard-coded.
