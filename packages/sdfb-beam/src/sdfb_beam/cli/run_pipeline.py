@@ -40,7 +40,7 @@ from apache_beam.options.pipeline_options import (
     StandardOptions,
     WorkerOptions,
 )
-from sdfb_core.codegen import derive_bq_schema
+from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.embedding import embedder_identity
@@ -90,7 +90,14 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "write (CREATE_IF_NEEDED) carrying the landing "
                         "schema derived in-pipeline from the DDL. Anything "
                         "else: CREATE_NEVER (default). Quality/RAG tables "
-                        "are never auto-created.")
+                        "are never auto-created. NOTE: the auto-created "
+                        "table only gets name/type/mode/description per "
+                        "column — parameterized constraints (STRING "
+                        "max_length, NUMERIC precision/scale, column "
+                        "default expressions) are NOT carried over, "
+                        "because the FILE_LOADS load-job API rejects them "
+                        "at runtime. Pre-provision the table out-of-band "
+                        "(e.g. `bq mk`/DDL) if those constraints matter.")
     p.add_argument("--num_rows", type=int, required=True)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--similarity", type=float, default=0.5)
@@ -426,8 +433,13 @@ def main(argv: list[str] | None = None) -> int:
     if create_if_not_exists:
         # CREATE_IF_NEEDED must carry the target schema — derived
         # in-pipeline from the resolved TableSchema (WS4 §6c), never
-        # hand-provisioned.
-        landing_kwargs["schema"] = derive_bq_schema(table_schema)
+        # hand-provisioned. Must be the load-safe projection: the
+        # FILE_LOADS runtime path (vendored apitools `TableFieldSchema`)
+        # rejects `maxLength`/`precision`/`scale`/`defaultValueExpression`
+        # with an `AttributeError` at load-job time, even though Beam
+        # accepts the fuller `derive_bq_schema` dict at graph construction
+        # (WS4 final-review CRITICAL-1).
+        landing_kwargs["schema"] = derive_bq_load_schema(table_schema)
     log_milestone(
         "landing_sink_config",
         write_disposition=landing_write,
