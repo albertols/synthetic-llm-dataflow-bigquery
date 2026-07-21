@@ -11,9 +11,23 @@ from sdfb_core.evaluation.profile import (
     choose_stratification_column,
     stratum_key,
 )
+from sdfb_core.evaluation.sampling import (
+    ReservoirAccumulator,
+    add_row,
+    extract_sample,
+    merge_accumulators,
+    per_stratum_cap,
+    sort_key,
+)
 
 __all__ = [
+    "ReservoirAccumulator",
     "StratificationPlan",
+    "add_row",
     "choose_stratification_column",
+    "extract_sample",
+    "merge_accumulators",
+    "per_stratum_cap",
+    "sort_key",
     "stratum_key",
 ]
