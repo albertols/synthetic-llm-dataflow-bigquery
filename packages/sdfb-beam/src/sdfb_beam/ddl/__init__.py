@@ -11,7 +11,7 @@ REF: https://docs.cloud.google.com/bigquery/docs/schemas#creating_a_JSON_schema_
 REF: https://docs.cloud.google.com/bigquery/docs/primary-foreign-keys
 """
 
-from sdfb_beam.ddl.extractor import extract_ddl_metadata
+from sdfb_beam.ddl.extractor import extract_ddl_metadata, extract_table_schema
 from sdfb_beam.ddl.pipeline import (
     ExtractDDLMetadataDoFn,
     WriteDDLToJSON,
@@ -24,5 +24,6 @@ __all__ = [
     "WriteDDLToJSON",
     "build_pipeline",
     "extract_ddl_metadata",
+    "extract_table_schema",
     "get_output_path",
 ]
