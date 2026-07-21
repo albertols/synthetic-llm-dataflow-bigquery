@@ -16,7 +16,9 @@ from sdfb_beam.cli.run_pipeline import (
     build_model_client,
     configure_pipeline_options,
     parse_args,
+    parse_bool_flag,
     resolve_engine_strictness,
+    resolve_landing_dispositions,
 )
 
 
@@ -358,3 +360,44 @@ def test_parse_args_rag_layer_flags():
 def test_parse_args_build_rag_layer_requires_table():
     with pytest.raises(SystemExit):
         parse_args([*_common_args(), "--build_rag_layer"])
+
+
+def test_parse_args_write_disposition_default_and_choices():
+    args, _ = parse_args(_common_args())
+    assert args.write_disposition == "append"
+    assert args.create_if_not_exists == "false"
+    args, _ = parse_args([*_common_args(), "--write_disposition", "overwrite"])
+    assert args.write_disposition == "overwrite"
+    with pytest.raises(SystemExit):
+        parse_args([*_common_args(), "--write_disposition", "truncate"])
+
+
+def test_parse_bool_flag_truthy_set():
+    assert parse_bool_flag("true")
+    assert parse_bool_flag("1")
+    assert parse_bool_flag(" YES ")
+    assert not parse_bool_flag("false")
+    assert not parse_bool_flag("0")
+    assert not parse_bool_flag("")
+    assert not parse_bool_flag("no")
+
+
+def test_resolve_landing_dispositions_matrix():
+    from apache_beam.io.gcp.bigquery import BigQueryDisposition
+
+    assert resolve_landing_dispositions("append", False) == (
+        BigQueryDisposition.WRITE_APPEND,
+        BigQueryDisposition.CREATE_NEVER,
+    )
+    assert resolve_landing_dispositions("overwrite", False) == (
+        BigQueryDisposition.WRITE_TRUNCATE,
+        BigQueryDisposition.CREATE_NEVER,
+    )
+    assert resolve_landing_dispositions("append", True) == (
+        BigQueryDisposition.WRITE_APPEND,
+        BigQueryDisposition.CREATE_IF_NEEDED,
+    )
+    assert resolve_landing_dispositions("overwrite", True) == (
+        BigQueryDisposition.WRITE_TRUNCATE,
+        BigQueryDisposition.CREATE_IF_NEEDED,
+    )
