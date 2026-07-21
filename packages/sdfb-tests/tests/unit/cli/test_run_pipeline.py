@@ -479,3 +479,30 @@ def test_resolve_table_schema_live_extracts_when_uri_empty(monkeypatch):
         "sdfb_beam.ddl.extract_table_schema", lambda fqn: sentinel
     )
     assert rp.resolve_table_schema("", "p.d.t") is sentinel
+
+
+# --- enable_evaluation + validation_data_history_table (WS3 §2) ---------
+
+
+def test_enable_evaluation_flags_default_off():
+    args, _ = parse_args(_common_args())
+    assert args.enable_evaluation is False
+    assert args.validation_data_history_table == ""
+
+
+def test_enable_evaluation_requires_history_table():
+    with pytest.raises(SystemExit):
+        parse_args([*_common_args(), "--enable_evaluation"])
+
+
+def test_enable_evaluation_with_table_parses():
+    args, _ = parse_args(
+        [
+            *_common_args(),
+            "--enable_evaluation",
+            "--validation_data_history_table",
+            "p.q.validation_data_history",
+        ]
+    )
+    assert args.enable_evaluation is True
+    assert args.validation_data_history_table == "p.q.validation_data_history"
