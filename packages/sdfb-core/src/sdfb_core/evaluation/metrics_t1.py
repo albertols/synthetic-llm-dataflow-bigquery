@@ -15,6 +15,7 @@ from scipy.spatial.distance import jensenshannon
 
 _EPS = 1e-6
 _DEFAULT_BINS = 10
+_MIN_COLS = 2
 
 
 def numeric_and_categorical_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:
@@ -109,3 +110,50 @@ def jsd(curr: dict, prev: dict) -> float | None:
         return None
     p, q = aligned
     return float(jensenshannon(p, q, base=math.e) ** 2)
+
+
+def corr_diff_frobenius(
+    real_df: pd.DataFrame, synth_df: pd.DataFrame, *, method: str = "pearson"
+) -> float | None:
+    """‖corr_real - corr_synth‖_F over the shared numeric columns."""
+    numeric, _ = numeric_and_categorical_columns(real_df)
+    cols = [c for c in numeric if c in synth_df.columns]
+    if len(cols) < _MIN_COLS:
+        return None
+    r = real_df[cols].corr(method=method).fillna(0.0)
+    s = synth_df[cols].corr(method=method).fillna(0.0)
+    return float(np.linalg.norm(r.to_numpy() - s.to_numpy(), ord="fro"))
+
+
+def _discretize(df: pd.DataFrame, *, bins: int = _DEFAULT_BINS) -> pd.DataFrame:
+    """Quantile-bin high-cardinality numerics so a single mutual_info_score
+    call covers every column pair (numeric↔numeric, mixed, cat↔cat)."""
+    out: dict[str, pd.Series] = {}
+    for c in df.columns:
+        s = df[c]
+        if pd.api.types.is_numeric_dtype(s) and s.nunique() > bins:
+            out[c] = pd.qcut(s, q=bins, labels=False, duplicates="drop").astype(str)
+        else:
+            out[c] = s.astype(str)
+    return pd.DataFrame(out)
+
+
+def mi_matrix_diff(
+    real_df: pd.DataFrame, synth_df: pd.DataFrame, *, bins: int = _DEFAULT_BINS
+) -> float | None:
+    """Frobenius diff of pairwise mutual-information matrices — catches
+    nonlinear dependency loss that Pearson/Spearman miss."""
+    from sklearn.metrics import mutual_info_score
+
+    cols = [c for c in real_df.columns if c in synth_df.columns]
+    if len(cols) < _MIN_COLS:
+        return None
+    r = _discretize(real_df[cols], bins=bins)
+    s = _discretize(synth_df[cols], bins=bins)
+    n = len(cols)
+    rm, sm = np.zeros((n, n)), np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            rm[i, j] = rm[j, i] = mutual_info_score(r[cols[i]], r[cols[j]])
+            sm[i, j] = sm[j, i] = mutual_info_score(s[cols[i]], s[cols[j]])
+    return float(np.linalg.norm(rm - sm, ord="fro"))
