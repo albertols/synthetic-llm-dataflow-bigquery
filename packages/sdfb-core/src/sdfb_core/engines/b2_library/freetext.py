@@ -105,7 +105,8 @@ class FreeTextHook:
     batch's call retries the build rather than being poisoned by a
     permanently-missing/empty cache entry.
 
-    Caching contract (2026-07-21 review hardening): genuine LLM pools —
+    Caching contract (2026-07-21 review hardening; strict-failure caching
+    added after the 2026-07-22 b2 E2E incident): genuine LLM pools —
     full-size or undersized-but-nonempty — ARE cached, since they represent
     real (if degraded) novel generation. Exemplar-fallback results (the
     caught-exception path and the empty-novel-yield path in non-strict mode)
@@ -113,6 +114,17 @@ class FreeTextHook:
     permanently lock a column to exemplar-only values for the worker's
     lifetime — the next batch retries the build instead. The fallback value
     is still used for the *current* batch; only the caching is skipped.
+
+    Strict mode splits failure by shape. A raised client exception is
+    transient-shaped: it re-raises uncached, so the next batch retries. An
+    empty NOVEL yield after every escalation level is deterministic-shaped
+    (saturated key space / exemplar echo — same outcome on every rebuild):
+    it is negative-cached in ``_failed``, so subsequent batches on this
+    worker re-raise ``FreeTextEmptyYieldError`` immediately instead of
+    re-paying the full escalation ladder. The 2026-07-22 b2 E2E run paid 63
+    batches x 3 LLM calls (~35 min of GPU) rebuilding a pool that could
+    never succeed, on a run the BLOCKER gate was already guaranteed to
+    fail.
     Concurrent DoFn threads on one worker race ``_pool_for``'s check-then-act
     over the plain-dict cache (see ``_SETUP_LOCK`` in
     ``sdfb_beam.handlers.vllm_client`` for the same class of race); ``_lock``
@@ -140,6 +152,9 @@ class FreeTextHook:
         self._pool_size = pool_size
         self._strict = strict
         self._cache: dict[tuple[str, float], list[str]] = {}
+        # Negative cache: key → the FreeTextEmptyYieldError message of a
+        # deterministic strict-mode build failure (see class docstring).
+        self._failed: dict[tuple[str, float], str] = {}
         self._lock = threading.Lock()
 
     def __getstate__(self) -> dict:
@@ -210,6 +225,9 @@ class FreeTextHook:
         cached = self._cache.get(key)
         if cached is not None:
             return cached
+        failed = self._failed.get(key)
+        if failed is not None:
+            raise FreeTextEmptyYieldError(failed)
         with self._lock:
             # Re-check: a sibling thread may have built this key while we
             # waited on the lock (double-checked locking — pool builds are
@@ -219,7 +237,19 @@ class FreeTextHook:
             cached = self._cache.get(key)
             if cached is not None:
                 return cached
-            pool, cacheable = self._generate_pool(profile, cfg)
+            failed = self._failed.get(key)
+            if failed is not None:
+                raise FreeTextEmptyYieldError(failed)
+            try:
+                pool, cacheable = self._generate_pool(profile, cfg)
+            except FreeTextEmptyYieldError as e:
+                # Deterministic-shaped: every escalation level yielded zero
+                # novel values. Rebuilding cannot succeed — cache the failure
+                # so later batches fail fast instead of re-paying the LLM
+                # ladder (2026-07-22 b2 E2E). Client exceptions (transient-
+                # shaped) are NOT caught here and stay uncached.
+                self._failed[key] = str(e)
+                raise
             if cacheable:
                 self._cache[key] = pool
             return pool
@@ -315,6 +345,20 @@ class FreeTextHook:
                 f"prompt_echoes={n_echoes}, novel=0"
             )
             if self._strict:
+                # As loud in worker logs as the lax fallback path: the raise
+                # itself lands in a DLQ envelope in BigQuery, which the
+                # 2026-07-22 b2 E2E showed is invisible when triaging from
+                # worker logs alone.
+                log_milestone(
+                    "freetext_pool_empty",
+                    level=logging.ERROR,
+                    column=profile.name,
+                    attempts=attempts,
+                    parsed=n_parsed,
+                    distinct=len(seen),
+                    verbatim_copies=n_copies,
+                    prompt_echoes=n_echoes,
+                )
                 raise FreeTextEmptyYieldError(
                     f"LLM calls for free-text column {profile.name!r} "
                     f"yielded no usable values ({diagnosis})."

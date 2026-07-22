@@ -103,6 +103,7 @@ _SCHEMA = {
         {"name": "ts_low", "type": "TIMESTAMP", "mode": "REQUIRED"},
         {"name": "d_str", "type": "STRING", "mode": "REQUIRED"},
         {"name": "code", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "code_hc", "type": "STRING", "mode": "REQUIRED"},
         {"name": "enum_col", "type": "STRING", "mode": "REQUIRED", "max_length": 8},
     ],
     "primary_keys": ["event_id"],
@@ -120,8 +121,14 @@ def _reference_rows(n: int = 100) -> list[dict]:
             "ts_low": base + timedelta(days=i % 10),
             # 30 distinct date strings, ratio 0.3 (< 0.9) → TEMPORAL via shape
             "d_str": f"2024-06-{(i % 30) + 1:02d}",
-            # 30 distinct short non-date strings, ratio 0.3 → FREE_TEXT (new cap route)
+            # 30 distinct short non-date strings (21..50 band) → CATEGORICAL:
+            # a mid-cardinality enum (the CURRENCY_ISO_CODE shape, 2026-07-22
+            # b2 E2E). Routing these to the LLM asks it to invent codes for a
+            # saturated domain — empty novel yield → strict batch death.
             "code": f"br {i % 30:03d} x",
+            # 60 distinct short non-date strings (> 50, b1's string cap) →
+            # FREE_TEXT (the genuine high-cardinality LLM route).
+            "code_hc": f"hc {i % 60:03d} y",
             # 5 distinct → CATEGORICAL as before
             "enum_col": ["A", "B", "C", "D", "E"][i % 5],
         }
@@ -140,7 +147,8 @@ def test_classifier_caps_route_families_correctly():
     assert profiles["d_str"].kind is ColumnKind.TEMPORAL
     assert profiles["d_str"].temporal_value_type == VT_STR
     assert profiles["d_str"].temporal_format == "%Y-%m-%d"
-    assert profiles["code"].kind is ColumnKind.FREE_TEXT
+    assert profiles["code"].kind is ColumnKind.CATEGORICAL
+    assert profiles["code_hc"].kind is ColumnKind.FREE_TEXT
     assert profiles["enum_col"].kind is ColumnKind.CATEGORICAL
 
 
@@ -198,6 +206,8 @@ def test_sdgx_reference_frame_excludes_temporal_columns():
     frame = backend._reference_frame(rows, pd)
     assert "ts" not in frame.columns and "d_str" not in frame.columns
     assert "enum_col" in frame.columns and "event_id" in frame.columns
+    assert "code" in frame.columns  # mid-band enum: backend-sampled
+    assert "code_hc" not in frame.columns  # free-text: LLM hook owns it
 
 
 def test_sdgx_backend_temporal_branch_injects_nulls():
@@ -224,6 +234,41 @@ def test_sdgx_backend_temporal_branch_injects_nulls():
     null_rate = sum(v is None for v in out["ts"]) / 400
     assert 0.2 < null_rate < 0.4  # nulls reinjected, not dropped
     assert any(v is not None for v in out["ts"])  # and real values sampled
+
+
+def test_sdgx_fit_failure_falls_back_with_milestone(caplog, monkeypatch):
+    # The 2026-07-22 b2 E2E run left no trace of WHICH backend actually ran
+    # (setup finished in 3 s — no CTGAN fit is that fast). The fallback must
+    # be loud, like every other fallback in the engine.
+    schema = TableSchema.model_validate(_SCHEMA)
+    rows = _reference_rows()
+    profiles = profile_table(schema, rows)
+
+    def _boom(self, reference_rows):
+        raise RuntimeError("sdgx unavailable")
+
+    monkeypatch.setattr(SdgxBackend, "_fit_sdgx", _boom)
+    backend = SdgxBackend()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        backend.fit(rows, profiles)
+    assert backend.used_fallback
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SDFB_MILESTONE name=b2_backend_fallback" in text
+    assert "error=RuntimeError" in text
+
+
+def test_sdgx_fit_success_emits_backend_milestone(caplog, monkeypatch):
+    schema = TableSchema.model_validate(_SCHEMA)
+    rows = _reference_rows()
+    profiles = profile_table(schema, rows)
+    monkeypatch.setattr(SdgxBackend, "_fit_sdgx", lambda self, reference_rows: None)
+    backend = SdgxBackend()
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        backend.fit(rows, profiles)
+    assert not backend.used_fallback
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SDFB_MILESTONE name=b2_backend_fitted" in text
+    assert "backend=sdgx" in text
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +304,9 @@ def test_engine_end_to_end_yields_novel_temporal_rows():
     copy_ratio = sum(v in observed_ts for v in sampled_ts) / len(sampled_ts)
     assert copy_ratio < 0.3  # the 2026-07-20 defect was 1.0
     assert all(datetime.strptime(d["d_str"], "%Y-%m-%d") for d in dumped)
-    assert all(isinstance(d["code"], str) and d["code"] for d in dumped)  # hook ran
+    observed_codes = {r["code"] for r in rows}
+    assert all(d["code"] in observed_codes for d in dumped)  # enum: in-support
+    assert all(isinstance(d["code_hc"], str) and d["code_hc"] for d in dumped)  # hook ran
 
 
 def _one_string_col_schema(name: str = "blob") -> TableSchema:

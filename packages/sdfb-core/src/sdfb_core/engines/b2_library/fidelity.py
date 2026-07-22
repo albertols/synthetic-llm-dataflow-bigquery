@@ -40,13 +40,23 @@ from sdfb_core.observability import log_milestone
 _HIGH_CARDINALITY_RATIO = 0.9  # distinct / non-null count above this ⇒ free-text
 _FREE_TEXT_MIN_LEN = 40  # mean string length above this ⇒ likely prose
 
-# Cardinality caps (mirror b1_rag/profile.py:64-65). At or below the cap a
-# discrete column is an enum-in-disguise and verbatim empirical resampling
-# is the intended fidelity primitive. Above it, resampling IS memorization
-# (2026-07-20 E2E: 11 columns at copy_ratio=1.0) — temporal columns jitter
-# within the observed range, other strings go to the LLM free-text hook.
+# Cardinality caps. At or below the cap a discrete column is an
+# enum-in-disguise and verbatim empirical resampling is the intended
+# fidelity primitive. Above it, resampling IS memorization (2026-07-20 E2E:
+# 11 columns at copy_ratio=1.0) — temporal columns jitter within the
+# observed range, genuinely high-cardinality strings go to the LLM hook.
+#
+# The temporal cap mirrors b1_rag/profile.py's `_TEMPORAL_MAX_CATEGORIES`
+# (20). The STRING cap mirrors b1's `_FREE_TEXT_MAX_CATEGORIES` (50), NOT
+# the numeric/temporal 20: WS1 originally set 20 here, which routed
+# mid-cardinality enums (CURRENCY_ISO_CODE, 41 distinct) to the LLM — a
+# saturated domain the model cannot generate novel values for, so under
+# strict_freetext every batch died on FreeTextEmptyYieldError and the
+# 2026-07-22 b2 E2E run failed with blocker_ratio=1.0. 21-50-distinct
+# enums resample empirically, exactly as b1 does on the same table (its
+# memorization gate only scores columns with source_distinct > 100).
 _TEMPORAL_MAX_CATEGORIES = 20
-_CATEGORICAL_MAX_CATEGORIES = 20
+_CATEGORICAL_MAX_CATEGORIES = 50
 _TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIME", "TIMESTAMP"})
 
 # Control-character guard (WS1 §3c): values containing C0/C1 control bytes
@@ -180,13 +190,18 @@ def _classify(  # noqa: PLR0911 — type classifier; sequential returns read cle
         mean_len = sum(len(s) for s in strs) / max(len(strs), 1)
         if cardinality_ratio >= _HIGH_CARDINALITY_RATIO or mean_len >= _FREE_TEXT_MIN_LEN:
             return ColumnKind.FREE_TEXT
+        # Date-shaped strings follow the (stricter) temporal cap: ≤20
+        # distinct is an enum-in-disguise (load-date partitions); above it
+        # they jitter as TEMPORAL — the 2026-07-20 memorization defect was
+        # resampling them verbatim.
+        if classify_temporal_values(strs) is not None:
+            if distinct <= _TEMPORAL_MAX_CATEGORIES:
+                return ColumnKind.CATEGORICAL
+            return ColumnKind.TEMPORAL
         if distinct <= _CATEGORICAL_MAX_CATEGORIES:
             return ColumnKind.CATEGORICAL
-        # Above the cap: date-shaped strings jitter as TEMPORAL; anything
-        # else is high-cardinality discrete text the LLM must synthesize —
-        # resampling it verbatim is the 2026-07-20 memorization defect.
-        if classify_temporal_values(strs) is not None:
-            return ColumnKind.TEMPORAL
+        # Above the string cap: high-cardinality discrete text the LLM must
+        # synthesize — resampling it verbatim is the memorization defect.
         return ColumnKind.FREE_TEXT
 
     # Everything else (BOOL handled above): categorical over the observed pool.

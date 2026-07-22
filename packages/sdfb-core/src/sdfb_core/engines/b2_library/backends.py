@@ -27,12 +27,14 @@ by the ``ModelClient`` free-text hook (``freetext.py``), not sampled here.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 
 from sdfb_core.engines.b2_library.fidelity import ColumnKind, ColumnProfile
 from sdfb_core.engines.b2_library.temporal import sample_temporal
+from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -214,11 +216,22 @@ class SdgxBackend:
         }
         try:
             self._fit_sdgx(reference_rows)
-        except Exception:
+        except Exception as e:
             self._synthesizer = None
             self._fallback = EmpiricalBackend()
             self._fallback.fit(reference_rows, profiles)
             self.used_fallback = True
+            # Loud, like every other fallback: the 2026-07-22 b2 E2E run's
+            # worker logs could not tell which backend actually generated
+            # (a 3 s "fit" is the fallback, but nothing said so).
+            log_milestone(
+                "b2_backend_fallback",
+                level=logging.WARNING,
+                backend="empirical",
+                error=type(e).__name__,
+            )
+        else:
+            log_milestone("b2_backend_fitted", backend="sdgx")
 
     def _fit_sdgx(self, reference_rows: list[dict]) -> None:
         # Deferred heavy imports — only here, never at module load. ANY

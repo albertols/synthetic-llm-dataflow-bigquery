@@ -219,6 +219,63 @@ def test_b2_strict_raises_on_empty_yield(wide_ctx):
         hook.sample(profiles["summary"], 5, GenerationConfig(seed=7), rng)
 
 
+def test_b2_strict_empty_yield_emits_milestone_before_raise(caplog, wide_ctx):
+    # 2026-07-22 b2 E2E: all 63 batches died on a strict empty yield, and the
+    # worker logs never named the column — the raise went straight into the
+    # DLQ envelope. The strict path must be as visible in logs as the lax one.
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    hook = FreeTextHook(_EmptyYieldClient(), strict=True)
+    with (
+        caplog.at_level(logging.ERROR, logger="sdfb.milestone"),
+        pytest.raises(FreeTextEmptyYieldError),
+    ):
+        hook._pool_for(profiles["summary"], GenerationConfig(seed=7))
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=freetext_pool_empty" in text
+    assert "column=summary" in text
+
+
+def test_b2_strict_empty_yield_is_negative_cached(wide_ctx):
+    # A deterministic empty yield (saturated domain / exemplar echo) fails
+    # identically on every rebuild. 2026-07-22 b2 E2E: 63 batches each
+    # re-paid 3 escalating LLM calls (~35 min GPU) against a run the gate
+    # was already guaranteed to fail. The failure must be cached so later
+    # batches on the worker re-raise immediately.
+    client = _EmptyYieldClient()
+    hook = FreeTextHook(client, strict=True)
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    cfg = GenerationConfig(seed=7)
+    with pytest.raises(FreeTextEmptyYieldError, match="summary"):
+        hook._pool_for(profiles["summary"], cfg)
+    calls_after_first = len(client.calls)
+    assert calls_after_first > 0
+    with pytest.raises(FreeTextEmptyYieldError, match="summary"):
+        hook._pool_for(profiles["summary"], cfg)
+    assert len(client.calls) == calls_after_first  # no fresh LLM spend
+
+
+def test_b2_strict_transient_error_is_not_negative_cached(wide_ctx):
+    # Transport/client exceptions are transient-shaped: the next batch must
+    # retry the build rather than inherit a poisoned cache entry.
+    class _CountingBoomClient:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_json(self, *a, **k):
+            self.calls += 1
+            raise RuntimeError("boom")
+
+    client = _CountingBoomClient()
+    hook = FreeTextHook(client, strict=True)
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    with pytest.raises(RuntimeError, match="boom"):
+        hook._pool_for(profiles["summary"], GenerationConfig(seed=7))
+    first = client.calls
+    with pytest.raises(RuntimeError, match="boom"):
+        hook._pool_for(profiles["summary"], GenerationConfig(seed=7))
+    assert client.calls == 2 * first  # retried, not cached
+
+
 # ---------------------------------------------------------------------------
 # All-copies yield — the LLM "succeeds" but every value is a verbatim
 # exemplar copy. After the novelty filter that is an empty yield: same
