@@ -117,9 +117,16 @@ class FreeTextHook:
     over the plain-dict cache (see ``_SETUP_LOCK`` in
     ``sdfb_beam.handlers.vllm_client`` for the same class of race); ``_lock``
     double-checks under an instance lock so at most one genuine build happens
-    per key. Explicit-``--seed`` runs are unaffected by this first-builder-
-    wins behavior: every batch carries the same seed, so there is nothing
-    for a later batch to diverge on even if it lost the race.
+    per key. First-builder-wins is harmless regardless of which batch
+    triggers the build: the pool build itself uses the batch-*independent*
+    ``cfg.engine_specific["pool_seed"]`` (``GenerateRecordsDoFn.process`` sets
+    it to the explicit base seed, or to a run_id-derived value at a reserved
+    ``batch_id=-1`` namespace, never a per-batch seed) — so the pool's
+    content does not depend on which batch happens to win the race. Explicit
+    ``--seed`` reruns therefore reproduce the pool build (modulo LLM-server
+    determinism) regardless of Beam's non-deterministic batch-to-worker
+    scheduling (P6); derived-mode runs still vary run-to-run via the salted
+    ``run_id``.
     """
 
     def __init__(
@@ -257,7 +264,7 @@ class FreeTextHook:
                     max_tokens=2048,
                     temperature=level.temperature,
                     n=1,
-                    seed=cfg.seed,
+                    seed=cfg.engine_specific.get("pool_seed", cfg.seed),
                     top_p=level.top_p,
                     top_k=level.top_k,
                 )
