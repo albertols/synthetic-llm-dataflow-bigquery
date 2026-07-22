@@ -55,6 +55,32 @@ class _PartialFailureEngine(GenerationEngine):
 register_engine("partial_failure", _PartialFailureEngine)
 
 
+class _WriteResultLike:
+    """Minimal stand-in for `apache_beam.io.gcp.bigquery.WriteResult` —
+    only the attribute `build_pipeline`'s gate wiring probes for."""
+
+    def __init__(self, destination_load_jobid_pairs):
+        self.destination_load_jobid_pairs = destination_load_jobid_pairs
+
+
+class _FakeBQFileLoadsSink(beam.PTransform):
+    """Test double for `WriteToBigQuery(method=FILE_LOADS)`: writes the
+    summary row through (identity `Map`, result discarded) and returns an
+    object exposing `.destination_load_jobid_pairs` as a real PCollection —
+    exactly the shape `build_pipeline` probes via
+    ``getattr(write_result, "destination_load_jobid_pairs", None)`` to
+    decide whether to wire the `AsIter` ordering edge in front of the
+    BLOCKER gate (see pipeline.py ~line 232 / `_BlockerGateDoFn`).
+    """
+
+    def expand(self, pcoll):  # type: ignore[override]
+        _ = pcoll | "FakeBQWrite" >> beam.Map(lambda row: row)
+        load_jobs = pcoll.pipeline | "FakeLoadJobIds" >> beam.Create(
+            [("proj.ds.validation_runs", "job-1")]
+        )
+        return _WriteResultLike(load_jobs)
+
+
 def _read_jsonl(directory):
     out = []
     for f in sorted(directory.glob("*.jsonl")):
@@ -123,6 +149,81 @@ def test_blocker_gate_fails_pipeline():
     # DirectRunner wraps the DoFn raise, so match broadly (B017).
     with pytest.raises(Exception), beam.Pipeline(options=options) as p:  # noqa: B017
         _ = p | beam.Create([failed_row]) | beam.ParDo(_BlockerGateDoFn())
+
+
+@pytest.mark.integration
+def test_blocker_gate_waits_on_bq_write_result(
+    tmp_path, customers_schema, customers_reference
+):
+    """A WriteResult-shaped `validation_runs_sink` (the real FILE_LOADS
+    shape) wires the AsIter ordering edge and the run still completes
+    cleanly when no blocker trips — proving the wiring is valid Beam graph,
+    not just that the PDone-shaped fallback (`WriteToJsonLines`) works."""
+    landing, dlq = (tmp_path / d for d in ("landing", "dlq"))
+    for d in (landing, dlq):
+        d.mkdir()
+
+    config = PipelineConfig(
+        table_schema=customers_schema,
+        engine_name="minimal",
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        num_rows=20,
+        batch_size=5,
+        seed=42,
+        run_id="vr-write-result-pass",
+        reference_table="proj.ds.src",
+        landing_table="proj.ds.landing",
+        thresholds=Thresholds(env="dev", blocker_failure_ratio=0.20),
+    )
+
+    options = PipelineOptions(["--runner=DirectRunner"])
+    with beam.Pipeline(options=options) as p:
+        result = build_pipeline(
+            p,
+            reference_rows=customers_reference,
+            config=config,
+            landing_sink=WriteToJsonLines(str(landing / "l"), num_shards=1),
+            dlq_sink=WriteToJsonLines(str(dlq / "d"), num_shards=1),
+            validation_runs_sink=_FakeBQFileLoadsSink(),
+        )
+    assert result["run_id"] == "vr-write-result-pass"
+
+
+@pytest.mark.integration
+def test_blocker_gate_still_raises_with_write_result_sink(
+    tmp_path, customers_schema, customers_reference
+):
+    """Regression guard for the AsIter wiring itself: a WriteResult-shaped
+    sink must not swallow or delay the gate's raise — the job still fails
+    on a blocker breach (2026-07-20 b2 E2E: the gate must fail the JOB)."""
+    landing, dlq = (tmp_path / d for d in ("landing", "dlq"))
+    for d in (landing, dlq):
+        d.mkdir()
+
+    config = PipelineConfig(
+        table_schema=customers_schema,
+        engine_name="partial_failure",
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        num_rows=64,
+        batch_size=16,
+        seed=0,
+        run_id="vr-write-result-blocker",
+        reference_table="proj.ds.src",
+        landing_table="proj.ds.landing",
+        thresholds=Thresholds(env="dev", blocker_failure_ratio=0.20),
+    )
+
+    options = PipelineOptions(["--runner=DirectRunner"])
+    # DirectRunner wraps the DoFn raise, so match broadly (B017).
+    with pytest.raises(Exception), beam.Pipeline(options=options) as p:  # noqa: B017
+        build_pipeline(
+            p,
+            reference_rows=customers_reference,
+            config=config,
+            landing_sink=WriteToJsonLines(str(landing / "l"), num_shards=1),
+            dlq_sink=WriteToJsonLines(str(dlq / "d"), num_shards=1),
+            validation_runs_sink=_FakeBQFileLoadsSink(),
+        )
 
 
 @pytest.mark.integration

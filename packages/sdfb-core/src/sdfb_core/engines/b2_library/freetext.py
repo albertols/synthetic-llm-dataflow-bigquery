@@ -23,6 +23,7 @@ Engines import only the ``ModelClient`` Protocol — never ``vllm``.
 from __future__ import annotations
 
 import logging
+import threading
 
 import numpy as np
 
@@ -77,9 +78,48 @@ class FreeTextHook:
 
     Built in the engine's ``setup`` (so the O(1) LLM call can happen once
     per worker per column the first time a column is sampled) and consumed
-    in ``generate_batch``. The pool is cached keyed by ``(column, seed,
-    similarity)`` so repeated batches with the same config reuse it
-    (idempotent, reproducible).
+    in ``generate_batch``. The pool is cached keyed by ``(column,
+    similarity)`` — NOT ``seed`` — so it is built genuinely **once per
+    worker per column** (the FASTGEN O(1) guarantee, ADR 0013). Batch-to-
+    batch value diversity does not come from rebuilding the pool: it comes
+    from the per-batch-seeded with-replacement *draw* in :meth:`sample`
+    (the ``rng`` argument), which is reseeded per batch by the caller
+    (``derive_batch_seed(run_id, batch_id)`` in
+    ``GenerateRecordsDoFn.process``) precisely so that repeated draws over
+    the same pool do not repeat the same rows.
+
+    Defect history (2026-07-20 b2 E2E run, JOB_STATE_FAILED): the cache used
+    to be keyed ``(column, seed, similarity)``. Because ``cfg.seed`` is
+    deliberately re-derived per batch (anti-replay design — a fixed seed
+    across ~63 batches would replay the same draw every batch), that key
+    never repeated, so the cache never hit: every one of ~63 batches
+    rebuilt every FREE_TEXT column's pool via a fresh LLM call (63x the
+    intended O(1) cost), and under ``strict_freetext`` each rebuild was a
+    fresh chance for ``FreeTextEmptyYieldError`` to kill the whole batch
+    (~60/63 batches failed). Dropping ``seed`` from the key fixes both: the
+    cost regression and the failure amplification.
+
+    A failed or empty-strict-yield build (see ``_generate_pool``'s
+    exception path and its ``FreeTextEmptyYieldError`` raise) never reaches
+    ``self._cache[key] = pool`` — the entry is left unset, so the next
+    batch's call retries the build rather than being poisoned by a
+    permanently-missing/empty cache entry.
+
+    Caching contract (2026-07-21 review hardening): genuine LLM pools —
+    full-size or undersized-but-nonempty — ARE cached, since they represent
+    real (if degraded) novel generation. Exemplar-fallback results (the
+    caught-exception path and the empty-novel-yield path in non-strict mode)
+    are NEVER cached: a transient LLM hiccup on the first build must not
+    permanently lock a column to exemplar-only values for the worker's
+    lifetime — the next batch retries the build instead. The fallback value
+    is still used for the *current* batch; only the caching is skipped.
+    Concurrent DoFn threads on one worker race ``_pool_for``'s check-then-act
+    over the plain-dict cache (see ``_SETUP_LOCK`` in
+    ``sdfb_beam.handlers.vllm_client`` for the same class of race); ``_lock``
+    double-checks under an instance lock so at most one genuine build happens
+    per key. Explicit-``--seed`` runs are unaffected by this first-builder-
+    wins behavior: every batch carries the same seed, so there is nothing
+    for a later batch to diverge on even if it lost the race.
     """
 
     def __init__(
@@ -92,7 +132,21 @@ class FreeTextHook:
         self._client = model_client
         self._pool_size = pool_size
         self._strict = strict
-        self._cache: dict[tuple[str, int | None, float], list[str]] = {}
+        self._cache: dict[tuple[str, float], list[str]] = {}
+        self._lock = threading.Lock()
+
+    def __getstate__(self) -> dict:
+        # `threading.Lock` is not picklable (Beam workers pickle the fitted
+        # engine, e.g. across `generate_batch` boundaries in tests / bundle
+        # snapshotting) — drop it from the pickled state and rebuild a fresh
+        # one on unpickle rather than carrying lock state across processes.
+        state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
 
     def sample(
         self,
@@ -143,16 +197,29 @@ class FreeTextHook:
         return values
 
     def _pool_for(self, profile: ColumnProfile, cfg: GenerationConfig) -> list[str]:
-        key = (profile.name, cfg.seed, round(cfg.similarity, 4))
-        if key in self._cache:
-            return self._cache[key]
-        pool = self._generate_pool(profile, cfg)
-        self._cache[key] = pool
-        return pool
+        key = (profile.name, round(cfg.similarity, 4))
+        # Fast path: no lock. Safe because dict reads never race a dict
+        # write in CPython, and a cached entry is never mutated in place.
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        with self._lock:
+            # Re-check: a sibling thread may have built this key while we
+            # waited on the lock (double-checked locking — pool builds are
+            # seconds-long LLM calls; serializing duplicate builds is the
+            # point, contention beyond that is negligible at ≤1 build per
+            # column per worker).
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+            pool, cacheable = self._generate_pool(profile, cfg)
+            if cacheable:
+                self._cache[key] = pool
+            return pool
 
     def _generate_pool(
         self, profile: ColumnProfile, cfg: GenerationConfig
-    ) -> list[str]:
+    ) -> tuple[list[str], bool]:
         exemplars = list(profile.text_pool[: self._pool_size])
         prompt = (
             f"You generate synthetic tabular data. First identify the exact "
@@ -223,7 +290,7 @@ class FreeTextHook:
                 column=profile.name,
                 error=type(e).__name__,
             )
-            return exemplars
+            return exemplars, False
 
         if not pool:
             # The calls "succeeded" (no exception) yet yielded nothing usable.
@@ -256,7 +323,7 @@ class FreeTextHook:
                 verbatim_copies=n_copies,
                 prompt_echoes=n_echoes,
             )
-            return exemplars
+            return exemplars, False
         if len(pool) < self._pool_size:
             # Levels exhausted below target: the column lands with whatever
             # novelty the LLM delivered, but never silently.
@@ -276,7 +343,7 @@ class FreeTextHook:
         # observed reference pool back in proportionally to `cfg.similarity`,
         # so folding exemplars HERE double-counted them and turned the
         # "diverge" side of the blend into more memorization.
-        return pool[: self._pool_size]
+        return pool[: self._pool_size], True
 
 
 def _extract_values(responses: list[dict]) -> list[str]:
