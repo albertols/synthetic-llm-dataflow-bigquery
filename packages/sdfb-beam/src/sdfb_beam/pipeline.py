@@ -345,9 +345,24 @@ def build_pipeline(  # noqa: PLR0915 — one linear DAG-composition pass across
                 synth_sample=beam.pvalue.AsSingleton(synth_sample),
             )
         )
-        _ = eval_rows | "WriteValidationDataHistory" >> validation_data_history_sink
+        history_write_result = (
+            eval_rows | "WriteValidationDataHistory" >> validation_data_history_sink
+        )
         if config.fail_on_blocker:
-            _ = eval_rows | "MemorizationGate" >> beam.ParDo(_MemorizationGateDoFn())
+            eval_gate_kwargs = {}
+            history_load_jobs = getattr(
+                history_write_result, "destination_load_jobid_pairs", None
+            )
+            if history_load_jobs is not None:
+                # Same ordering edge as BlockerGate: the tripped gate must
+                # fail the JOB, not suppress the eval row that is the
+                # forensic record of the trip (2026-07-20 b2 run precedent).
+                eval_gate_kwargs["wait_on_write"] = beam.pvalue.AsIter(
+                    history_load_jobs
+                )
+            _ = eval_rows | "MemorizationGate" >> beam.ParDo(
+                _MemorizationGateDoFn(), **eval_gate_kwargs
+            )
         result["validation_data_history"] = eval_rows
 
     return result
@@ -470,13 +485,18 @@ class _BlockerGateDoFn(beam.DoFn):
 
 class _MemorizationGateDoFn(beam.DoFn):
     """Fails the job when the eval row's memorization gate tripped at BLOCKER
-    severity (§5a). Wired as a sibling of the sink write — on Dataflow, stage
-    fusion means a tripped gate can fail the bundle before the FILE_LOADS
-    write commits, so the eval row is NOT guaranteed to land on a gate-trip
-    (same latent caveat as _BlockerGateDoFn). Follow-up: sequence both gates
-    on the write result and verify landing on the first real M4 gate-trip."""
+    severity (§5a).
 
-    def process(self, row: dict):
+    ``wait_on_write`` is an optional ``AsIter`` side input over the history
+    sink's ``destination_load_jobid_pairs`` — intentionally unread; its only
+    job is the graph ordering edge that makes the gate run AFTER the
+    FILE_LOADS load jobs commit, so a tripped gate fails the JOB without
+    suppressing the eval row that is the forensic record of the trip (the
+    2026-07-20 b2 run showed the sibling-wiring variant of this for
+    _BlockerGateDoFn: a FAILED run left zero validation_runs trace).
+    Non-BQ test sinks expose no write result and keep the sibling wiring."""
+
+    def process(self, row: dict, wait_on_write=None):
         raw = json.loads(row.get("raw_metrics_json") or "{}")
         raise_if_blocker(
             raw.get("memorization_gate") or {}, run_id=str(row.get("run_id"))

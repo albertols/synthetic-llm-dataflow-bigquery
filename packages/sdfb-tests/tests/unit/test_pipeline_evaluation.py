@@ -195,3 +195,96 @@ def test_gate_trips_and_fails_the_job_on_verbatim_copies(tmp_path):
         exc_info.value
     ).lower()
     assert "identical_match_rate" in str(cause)
+
+
+# ---------------------------------------------------------------------------
+# Write-ordering edge (mirrors integration/test_validation_runs.py's
+# _FakeBQFileLoadsSink coverage for _BlockerGateDoFn): when the history sink
+# returns a WriteResult-like object, the MemorizationGate is wired with an
+# AsIter side input over destination_load_jobid_pairs so it cannot run
+# before the load jobs commit. Non-BQ sinks keep the sibling wiring.
+# ---------------------------------------------------------------------------
+
+
+class _WriteResultLike:
+    """Minimal stand-in for `WriteToBigQuery`'s FILE_LOADS `WriteResult`."""
+
+    def __init__(self, destination_load_jobid_pairs):
+        self.destination_load_jobid_pairs = destination_load_jobid_pairs
+
+
+class _FakeBQFileLoadsSink(beam.PTransform):
+    """Writes rows through and exposes `.destination_load_jobid_pairs`."""
+
+    def expand(self, pcoll):  # type: ignore[override]
+        _ = pcoll | "FakeHistoryWrite" >> beam.Map(lambda row: row)
+        load_jobs = pcoll.pipeline | "FakeHistoryLoadJobIds" >> beam.Create(
+            [("proj.ds.validation_data_history", "job-1")]
+        )
+        return _WriteResultLike(load_jobs)
+
+
+def test_memorization_gate_waits_on_history_write_result(
+    tmp_path, customers_schema, customers_reference
+):
+    """AsIter ordering edge builds and runs clean when the gate does not
+    trip (customers rows never digest-match: TIMESTAMP/NUMERIC round-trip
+    differs — and 10 reference rows keep every column below the >100
+    distinct copy-ratio rule)."""
+    landing, dlq = (tmp_path / d for d in ("landing", "dlq"))
+    for d in (landing, dlq):
+        d.mkdir()
+    config = _config(
+        customers_schema,
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        enable_evaluation=True,
+        execution_id="exec-ordered",
+        fail_on_blocker=True,
+    )
+    options = PipelineOptions(["--runner=DirectRunner"])
+    with beam.Pipeline(options=options) as p:
+        result = build_pipeline(
+            p,
+            reference_rows=customers_reference,
+            config=config,
+            landing_sink=WriteToJsonLines(str(landing / "l"), num_shards=1),
+            dlq_sink=WriteToJsonLines(str(dlq / "d"), num_shards=1),
+            validation_data_history_sink=_FakeBQFileLoadsSink(),
+        )
+    assert "validation_data_history" in result
+
+
+def test_memorization_gate_still_raises_with_write_result_sink(tmp_path):
+    """The ordering edge must not defuse the gate: verbatim copies still
+    fail the job through the WriteResult-sink wiring."""
+    landing, dlq = (tmp_path / d for d in ("landing", "dlq"))
+    for d in (landing, dlq):
+        d.mkdir()
+    config = PipelineConfig(
+        table_schema=_GATE_SCHEMA,
+        engine_name="minimal",
+        model_client=FakeModelClient(reference_pool=_GATE_POOL),
+        num_rows=16,
+        batch_size=16,
+        seed=7,
+        run_id="gate-trip-ordered",
+        enable_evaluation=True,
+        execution_id="gate-trip-ordered-exec",
+        fail_on_blocker=True,
+    )
+    options = PipelineOptions(["--runner=DirectRunner"])
+    with pytest.raises(Exception) as exc_info, beam.Pipeline(options=options) as p:
+        build_pipeline(
+            p,
+            reference_rows=_GATE_POOL,
+            config=config,
+            landing_sink=WriteToJsonLines(str(landing / "l"), num_shards=1),
+            dlq_sink=WriteToJsonLines(str(dlq / "d"), num_shards=1),
+            validation_data_history_sink=_FakeBQFileLoadsSink(),
+        )
+    cause = exc_info.value
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    assert isinstance(cause, MemorizationThresholdExceeded) or "memorization" in str(
+        exc_info.value
+    ).lower()
