@@ -18,6 +18,15 @@ authors = [{ name = "synthetic-dataflow-bigquery contributors" }]
 [tool.uv]
 package = false
 
+# apache-beam 2.74.0 → envoy-data-plane >=1.0.3 → betterproto==2.0.0b6, a
+# PRE-RELEASE. uv's default strategy (if-necessary-or-explicit) only accepts
+# pre-releases pinned explicitly in first-party requirements or constraints —
+# a transitive pin does not qualify and resolution fails with "no version of
+# betterproto==2.0.0b6". Surfacing the pin here is the canonical uv pattern
+# for transitive pre-release deps. Drop when beam's envoy-data-plane chain
+# moves to a stable betterproto.
+constraint-dependencies = ["betterproto==2.0.0b6"]
+
 # Corporate package index. Direct pypi.org / files.pythonhosted.org are
 # unreachable from the M4 (and from CI behind the corp network); JFrog
 # `pypi-all` is a virtual repo that proxies pypi through the company
