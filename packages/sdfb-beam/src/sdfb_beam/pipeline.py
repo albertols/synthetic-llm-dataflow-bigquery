@@ -287,9 +287,20 @@ def build_pipeline(  # noqa: PLR0915 — one linear DAG-composition pass across
                 model_uri=config.model_uri,
             )
         )
-        _ = summary_rows | "WriteValidationRun" >> validation_runs_sink
+        write_result = summary_rows | "WriteValidationRun" >> validation_runs_sink
         if config.fail_on_blocker:
-            _ = summary_rows | "BlockerGate" >> beam.ParDo(_BlockerGateDoFn())
+            gate_kwargs = {}
+            load_jobs = getattr(write_result, "destination_load_jobid_pairs", None)
+            if load_jobs is not None:
+                # Order the gate AFTER the FILE_LOADS load jobs commit — a
+                # tripped gate must fail the JOB, not suppress the FAILED
+                # run's own summary row (2026-07-20 b2 run: zero
+                # validation_runs trace). Non-BQ sinks (DirectRunner tests)
+                # expose no WriteResult and keep the sibling wiring.
+                gate_kwargs["wait_on_write"] = beam.pvalue.AsIter(load_jobs)
+            _ = summary_rows | "BlockerGate" >> beam.ParDo(
+                _BlockerGateDoFn(), **gate_kwargs
+            )
         result["validation_run"] = summary_rows
 
     # WS3 — post-WriteLanding evaluation branch. Sibling of the
@@ -434,9 +445,20 @@ def _build_validation_run_row(
 
 
 class _BlockerGateDoFn(beam.DoFn):
-    """Fails the Dataflow job when the run summary tripped the BLOCKER gate."""
+    """Fails the Dataflow job when the run summary tripped the BLOCKER gate.
 
-    def process(self, row: dict):
+    ``wait_on_write`` is an optional ``AsIter`` side input over the
+    upstream sink's FILE_LOADS ``destination_load_jobid_pairs`` (see
+    `build_pipeline`). It is never read in the body — its only purpose is
+    the Dataflow-graph ordering edge it creates, forcing this DoFn's stage
+    to run after the load jobs commit. Without it, a tripped gate tears
+    the job down concurrently with (and can race ahead of) the
+    `validation_runs` FILE_LOADS write, so a FAILED run's own summary row
+    never lands — exactly what happened on the 2026-07-20 b2 E2E run,
+    which left zero trace in `synthetic_data_quality.validation_runs`.
+    """
+
+    def process(self, row: dict, wait_on_write=None):
         if row.get("status") == STATUS_FAILED_BLOCKER:
             raise BlockerThresholdExceeded(
                 f"run_id={row.get('run_id')} blocker_count={row.get('blocker_count')} "
