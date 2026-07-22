@@ -123,12 +123,21 @@ class GenerateRecordsDoFn(beam.DoFn):
             # No explicit seed: derive one so batches never replay each other
             # while the run stays reproducible per run_id (E2E report §2).
             seed = derive_batch_seed(self.ctx.pipeline_run_id, batch_id)
+            # Batch-independent seed for once-per-worker artifacts (the B.2
+            # free-text pool build): stable within a run, varies across runs
+            # via the salted run_id. batch_id=-1 keeps it outside every real
+            # batch's seed namespace.
+            pool_seed = derive_batch_seed(self.ctx.pipeline_run_id, -1)
         else:
             seed = self.base_seed + batch_id
+            # Explicit seed ⇒ the pool build is reproducible across reruns
+            # regardless of which batch reaches the worker first (P6).
+            pool_seed = self.base_seed
         cfg = GenerationConfig(
             seed=seed,
             batch_size=n,
             similarity=self.similarity,
+            engine_specific={"pool_seed": pool_seed},
         )
         log_milestone("batch_start", batch_id=batch_id, n=n)
         t0 = time.monotonic()
