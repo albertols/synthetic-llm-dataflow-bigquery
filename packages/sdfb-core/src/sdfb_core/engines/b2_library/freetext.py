@@ -77,9 +77,32 @@ class FreeTextHook:
 
     Built in the engine's ``setup`` (so the O(1) LLM call can happen once
     per worker per column the first time a column is sampled) and consumed
-    in ``generate_batch``. The pool is cached keyed by ``(column, seed,
-    similarity)`` so repeated batches with the same config reuse it
-    (idempotent, reproducible).
+    in ``generate_batch``. The pool is cached keyed by ``(column,
+    similarity)`` — NOT ``seed`` — so it is built genuinely **once per
+    worker per column** (the FASTGEN O(1) guarantee, ADR 0013). Batch-to-
+    batch value diversity does not come from rebuilding the pool: it comes
+    from the per-batch-seeded with-replacement *draw* in :meth:`sample`
+    (the ``rng`` argument), which is reseeded per batch by the caller
+    (``derive_batch_seed(run_id, batch_id)`` in
+    ``GenerateRecordsDoFn.process``) precisely so that repeated draws over
+    the same pool do not repeat the same rows.
+
+    Defect history (2026-07-20 b2 E2E run, JOB_STATE_FAILED): the cache used
+    to be keyed ``(column, seed, similarity)``. Because ``cfg.seed`` is
+    deliberately re-derived per batch (anti-replay design — a fixed seed
+    across ~63 batches would replay the same draw every batch), that key
+    never repeated, so the cache never hit: every one of ~63 batches
+    rebuilt every FREE_TEXT column's pool via a fresh LLM call (63x the
+    intended O(1) cost), and under ``strict_freetext`` each rebuild was a
+    fresh chance for ``FreeTextEmptyYieldError`` to kill the whole batch
+    (~60/63 batches failed). Dropping ``seed`` from the key fixes both: the
+    cost regression and the failure amplification.
+
+    A failed or empty-strict-yield build (see ``_generate_pool``'s
+    exception path and its ``FreeTextEmptyYieldError`` raise) never reaches
+    ``self._cache[key] = pool`` — the entry is left unset, so the next
+    batch's call retries the build rather than being poisoned by a
+    permanently-missing/empty cache entry.
     """
 
     def __init__(
@@ -92,7 +115,7 @@ class FreeTextHook:
         self._client = model_client
         self._pool_size = pool_size
         self._strict = strict
-        self._cache: dict[tuple[str, int | None, float], list[str]] = {}
+        self._cache: dict[tuple[str, float], list[str]] = {}
 
     def sample(
         self,
@@ -143,7 +166,7 @@ class FreeTextHook:
         return values
 
     def _pool_for(self, profile: ColumnProfile, cfg: GenerationConfig) -> list[str]:
-        key = (profile.name, cfg.seed, round(cfg.similarity, 4))
+        key = (profile.name, round(cfg.similarity, 4))
         if key in self._cache:
             return self._cache[key]
         pool = self._generate_pool(profile, cfg)
