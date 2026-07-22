@@ -132,8 +132,71 @@ def sample_identifier(
     return "".join(a if len(a) == 1 else a[pick(len(a))] for a in shape)
 
 
+# A (weight, per-position template) pair per observed length bucket.
+RelaxedShapes = tuple[tuple[int, tuple[str, ...]], ...]
+
+
+def build_relaxed_shapes(values: Iterable[str]) -> RelaxedShapes | None:
+    """Length-bucketed per-position templates for identifier-ish columns the
+    strict detector rejects, or None.
+
+    Last-resort route for LLM-echo-saturated free-text pools (2026-07-22 b2
+    E2E: CHANGE_USERID — the model returned the shown exemplars verbatim on
+    every escalation attempt, killing the whole run). Relaxations vs
+    :func:`detect_identifier_shape`: mixed lengths become weighted buckets,
+    there is no minimum length, and a position whose characters fit no
+    known class falls back to the observed character set at that position
+    instead of disqualifying the column. The whitespace (prose) guard and
+    the two-value minimum stay — and apply per bucket, because a
+    single-value bucket is all-literal and can only regenerate its own
+    observed value, which any novelty filter must reject.
+    """
+    vals = [v for v in values if v]
+    if len(vals) < _MIN_VALUES:
+        return None
+    if any(" " in v or "\t" in v for v in vals):
+        return None
+    buckets: dict[int, list[str]] = {}
+    for v in vals:
+        buckets.setdefault(len(v), []).append(v)
+    shapes: list[tuple[int, tuple[str, ...]]] = []
+    for length, bucket in sorted(buckets.items()):
+        if len(bucket) < _MIN_VALUES:
+            continue
+        shape: list[str] = []
+        for i in range(length):
+            chars = {v[i] for v in bucket}
+            if len(chars) == 1:
+                shape.append(next(iter(chars)))
+                continue
+            for cls in _CHAR_CLASSES:
+                if chars <= set(cls):
+                    shape.append(cls)
+                    break
+            else:
+                shape.append("".join(sorted(chars)))
+        shapes.append((len(bucket), tuple(shape)))
+    return tuple(shapes) or None
+
+
+def sample_relaxed_identifier(
+    shapes: RelaxedShapes, pick: Callable[[int], int]
+) -> str:
+    """One value from a relaxed template: draw a length bucket proportionally
+    to its observed weight, then fill it position-by-position."""
+    total = sum(w for w, _ in shapes)
+    r = pick(total)
+    for w, shape in shapes:
+        if r < w:
+            return sample_identifier(shape, pick)
+        r -= w
+    return sample_identifier(shapes[-1][1], pick)
+
+
 __all__ = [
+    "build_relaxed_shapes",
     "detect_identifier_shape",
     "detect_temporal_format",
     "sample_identifier",
+    "sample_relaxed_identifier",
 ]

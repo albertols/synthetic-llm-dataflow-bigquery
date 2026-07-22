@@ -229,6 +229,10 @@ class SdgxBackend:
                 level=logging.WARNING,
                 backend="empirical",
                 error=type(e).__name__,
+                # The message names WHAT failed (e.g. the missing module) —
+                # the 2026-07-22 re-run logged only the type, leaving the
+                # actual sdgx import defect unknowable from worker logs.
+                detail=str(e)[:160],
             )
         else:
             log_milestone("b2_backend_fitted", backend="sdgx")

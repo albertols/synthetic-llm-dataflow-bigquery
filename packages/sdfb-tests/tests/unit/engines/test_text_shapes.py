@@ -20,9 +20,11 @@ import re
 from datetime import datetime
 
 from sdfb_core.engines.text_shapes import (
+    build_relaxed_shapes,
     detect_identifier_shape,
     detect_temporal_format,
     sample_identifier,
+    sample_relaxed_identifier,
 )
 
 # ---------------------------------------------------------------------------
@@ -138,3 +140,70 @@ def test_sample_identifier_is_deterministic_for_a_seeded_pick():
     a = [sample_identifier(shape, random.Random(9).randrange) for _ in range(1)]
     b = [sample_identifier(shape, random.Random(9).randrange) for _ in range(1)]
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# build_relaxed_shapes / sample_relaxed_identifier — the last-resort template
+# for LLM-echo-saturated free-text columns (2026-07-22 b2 E2E: CHANGE_USERID,
+# 96/96 prompt echoes over all escalation attempts → whole run FAILED).
+# The strict detector rejects mixed lengths / short codes / punctuation
+# variation; the relaxed builder buckets by length and keeps per-position
+# observed character sets instead of disqualifying.
+# ---------------------------------------------------------------------------
+
+
+def test_relaxed_accepts_mixed_lengths_strict_detector_rejects():
+    values = [f"USR{i}" for i in range(5, 250)]  # lengths 4..6, mixed
+    assert detect_identifier_shape(values) is None
+    shapes = build_relaxed_shapes(values)
+    assert shapes is not None
+    pick = random.Random(3).randrange
+    for _ in range(30):
+        out = sample_relaxed_identifier(shapes, pick)
+        assert re.fullmatch(r"USR\d{1,3}", out)
+
+
+def test_relaxed_accepts_short_codes():
+    values = [f"U{i:03d}" for i in range(120)]  # length 4 < strict minimum 8
+    assert detect_identifier_shape(values) is None
+    shapes = build_relaxed_shapes(values)
+    assert shapes is not None
+    pick = random.Random(5).randrange
+    assert re.fullmatch(r"U\d{3}", sample_relaxed_identifier(shapes, pick))
+
+
+def test_relaxed_keeps_observed_set_for_unclassifiable_positions():
+    # Punctuation variation at one position defeats the strict char classes.
+    values = [f"AA{p}{i:05d}" for i in range(60) for p in "._-"]
+    assert detect_identifier_shape(values) is None
+    shapes = build_relaxed_shapes(values)
+    assert shapes is not None
+    pick = random.Random(7).randrange
+    for _ in range(30):
+        assert re.fullmatch(r"AA[._-]\d{5}", sample_relaxed_identifier(shapes, pick))
+
+
+def test_relaxed_rejects_prose_and_tiny_input():
+    assert build_relaxed_shapes([f"Ticket about issue {i}" for i in range(50)]) is None
+    assert build_relaxed_shapes([]) is None
+    assert build_relaxed_shapes(["LONESOME_VALUE_01"]) is None
+
+
+def test_relaxed_skips_single_value_length_buckets():
+    # A one-value bucket is all-literal — it can only regenerate that exact
+    # observed value, which the novelty filter would always reject.
+    values = [f"GRP{i:04d}" for i in range(80)] + ["ODDLENGTHONE"]
+    shapes = build_relaxed_shapes(values)
+    assert shapes is not None
+    assert all(len(shape) == 7 for _, shape in shapes)  # 12-char bucket dropped
+
+
+def test_relaxed_sampling_is_deterministic_and_weighted():
+    values = [f"A{i:03d}" for i in range(90)] + [f"BB{i:04d}" for i in range(10)]
+    shapes = build_relaxed_shapes(values)
+    a = [sample_relaxed_identifier(shapes, random.Random(9).randrange) for _ in range(20)]
+    b = [sample_relaxed_identifier(shapes, random.Random(9).randrange) for _ in range(20)]
+    assert a == b
+    # 90:10 length weighting → the short bucket dominates a seeded sample.
+    lengths = [len(v) for v in a]
+    assert lengths.count(4) > lengths.count(6)

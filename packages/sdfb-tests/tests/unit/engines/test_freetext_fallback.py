@@ -12,6 +12,7 @@ now emit a WARNING milestone ``freetext_llm_fallback`` (Task 1's
 from __future__ import annotations
 
 import logging
+import re
 
 import numpy as np
 import pytest
@@ -235,7 +236,7 @@ def test_b2_strict_empty_yield_emits_milestone_before_raise(caplog, wide_ctx):
     assert "column=summary" in text
 
 
-def test_b2_strict_empty_yield_is_negative_cached(wide_ctx):
+def test_b2_strict_empty_yield_is_negative_cached(caplog, wide_ctx):
     # A deterministic empty yield (saturated domain / exemplar echo) fails
     # identically on every rebuild. 2026-07-22 b2 E2E: 63 batches each
     # re-paid 3 escalating LLM calls (~35 min GPU) against a run the gate
@@ -249,9 +250,115 @@ def test_b2_strict_empty_yield_is_negative_cached(wide_ctx):
         hook._pool_for(profiles["summary"], cfg)
     calls_after_first = len(client.calls)
     assert calls_after_first > 0
-    with pytest.raises(FreeTextEmptyYieldError, match="summary"):
+    with (
+        caplog.at_level(logging.DEBUG, logger="sdfb.milestone"),
+        pytest.raises(FreeTextEmptyYieldError, match="summary"),
+    ):
         hook._pool_for(profiles["summary"], cfg)
     assert len(client.calls) == calls_after_first  # no fresh LLM spend
+    # The cached fail-fast is envelope-only in the DLQ; a DEBUG milestone
+    # keeps it findable in worker logs (2026-07-22 re-run: 55 silent deaths).
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=freetext_pool_empty_cached" in text
+    assert "column=summary" in text
+
+
+# ---------------------------------------------------------------------------
+# Shape-template fallback — copy-saturated pools (2026-07-22 b2 E2E:
+# CHANGE_USERID, 96/96 prompt echoes on every escalation attempt, run FAILED
+# with blocker_ratio=1.0). When the LLM parses values but every one is an
+# observed copy, a relaxed per-position template generates novel in-format
+# values instead of killing the batch. Parse failures (parsed=0) still raise.
+# ---------------------------------------------------------------------------
+
+
+class _EchoShownClient:
+    """Echoes exactly the exemplars it was built with — the CHANGE_USERID
+    signature (prompt_echoes == parsed, novel = 0, identically every call)."""
+
+    def __init__(self, shown):
+        self._shown = list(shown)
+        self.calls: list[dict] = []
+
+    def generate_json(self, *a, **k):
+        self.calls.append(k)
+        return [{"values": list(self._shown)}]
+
+
+def _userid_profiles():
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.audit"},
+            "schema": [
+                {"name": "change_userid", "type": "STRING", "mode": "REQUIRED"}
+            ],
+            "primary_keys": None,
+        }
+    )
+    # 60 distinct 7-char ids: unique-ratio 1.0 → FREE_TEXT, but below the
+    # strict identifier-shape minimum length → the LLM pool route.
+    rows = [{"change_userid": f"USR_{i}"} for i in range(100, 160)]
+    return profile_table(schema, rows)
+
+
+def test_b2_echo_saturated_pool_falls_back_to_shape_template(caplog):
+    profiles = _userid_profiles()
+    p = profiles["change_userid"]
+    assert p.identifier_shape is None  # would never reach the LLM otherwise
+    client = _EchoShownClient(p.text_pool[:8])
+    hook = FreeTextHook(client, pool_size=8, strict=True)
+    cfg = GenerationConfig(seed=3, engine_specific={"pool_seed": 41})
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        pool = hook._pool_for(p, cfg)
+    assert len(pool) == 8
+    observed = set(p.text_pool)
+    assert all(v not in observed for v in pool)  # novel by construction
+    assert all(re.fullmatch(r"USR_\d{3}", v) for v in pool)  # format-preserving
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=freetext_pool_shape_fallback" in text
+    assert "column=change_userid" in text
+    # A genuine novel pool → cached: the next batch pays no LLM calls.
+    n_calls = len(client.calls)
+    assert hook._pool_for(p, cfg) == pool
+    assert len(client.calls) == n_calls
+
+
+def test_b2_shape_fallback_applies_in_lax_mode_over_exemplars(caplog):
+    # Non-strict used to degrade to exemplar memorization; novel-by-template
+    # is strictly better and must win when a template exists.
+    profiles = _userid_profiles()
+    p = profiles["change_userid"]
+    hook = FreeTextHook(_EchoShownClient(p.text_pool[:8]), pool_size=8)
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        pool = hook._pool_for(p, GenerationConfig(seed=3))
+    assert all(v not in set(p.text_pool) for v in pool)
+    text = "\n".join(r.message for r in caplog.records)
+    assert "freetext_pool_shape_fallback" in text
+    assert "freetext_llm_fallback" not in text
+
+
+def test_b2_prose_echo_saturation_still_raises_strict(wide_ctx):
+    # Prose has no relaxed template (whitespace guard) — the strict raise
+    # path is unchanged when the shape fallback cannot apply.
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    p = profiles["summary"]
+    hook = FreeTextHook(_EchoShownClient(p.text_pool[:8]), pool_size=8, strict=True)
+    with pytest.raises(FreeTextEmptyYieldError, match="summary"):
+        hook._pool_for(p, GenerationConfig(seed=1))
+
+
+def test_b2_escalation_attempts_vary_seed(wide_ctx):
+    # All three escalation attempts used to share one pinned seed, so a
+    # seeded echo repeated identically and the ladder's diversity was
+    # partly illusory. Attempts must walk the seed (base, base+1, base+2)
+    # while staying P6-reproducible from the same base.
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    client = _EmptyYieldClient()
+    hook = FreeTextHook(client, strict=True)
+    cfg = GenerationConfig(seed=3, engine_specific={"pool_seed": 100})
+    with pytest.raises(FreeTextEmptyYieldError):
+        hook._pool_for(profiles["summary"], cfg)
+    assert [c["seed"] for c in client.calls] == [100, 101, 102]
 
 
 def test_b2_strict_transient_error_is_not_negative_cached(wide_ctx):

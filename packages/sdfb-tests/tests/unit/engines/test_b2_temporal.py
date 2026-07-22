@@ -245,7 +245,7 @@ def test_sdgx_fit_failure_falls_back_with_milestone(caplog, monkeypatch):
     profiles = profile_table(schema, rows)
 
     def _boom(self, reference_rows):
-        raise RuntimeError("sdgx unavailable")
+        raise ModuleNotFoundError("No module named 'dask'")
 
     monkeypatch.setattr(SdgxBackend, "_fit_sdgx", _boom)
     backend = SdgxBackend()
@@ -254,7 +254,11 @@ def test_sdgx_fit_failure_falls_back_with_milestone(caplog, monkeypatch):
     assert backend.used_fallback
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "SDFB_MILESTONE name=b2_backend_fallback" in text
-    assert "error=RuntimeError" in text
+    assert "error=ModuleNotFoundError" in text
+    # The 2026-07-22 re-run logged only the exception TYPE — which module
+    # was missing stayed unknowable from worker logs. The message must ride
+    # along.
+    assert "No module named" in text and "dask" in text
 
 
 def test_sdgx_fit_success_emits_backend_milestone(caplog, monkeypatch):
