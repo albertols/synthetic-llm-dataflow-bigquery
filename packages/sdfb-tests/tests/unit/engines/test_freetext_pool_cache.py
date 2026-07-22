@@ -19,6 +19,8 @@ rebuilding the pool.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
 from sdfb_core.contracts import TableSchema
@@ -153,3 +155,152 @@ def test_failed_strict_build_not_cached_retries_next_batch(
     out = hook.sample(profiles["summary"], 5, GenerationConfig(seed=2), np.random.default_rng(2))
     assert out
     assert client.calls == 2, "exactly two pool-build calls: failed + retried"
+
+
+class _UndersizedClient:
+    """Fake ``ModelClient`` that always yields the SAME small handful of
+    novel values (fewer than ``pool_size``) — models a column where the LLM
+    genuinely can't fill the bounded pool, but what it did yield is real,
+    novel generation (not a fallback) and must stay cacheable."""
+
+    def __init__(self, n_values: int = 5) -> None:
+        self.calls = 0
+        self._n_values = n_values
+
+    def generate_json(self, *a, **k):
+        self.calls += 1
+        return [{"values": [f"novel-{i}" for i in range(self._n_values)]}]
+
+
+def test_nonstrict_fallback_not_cached_retries_and_recovers(
+    wide_ctx_schema, wide_reference
+):
+    """Non-strict mode: a transient LLM failure on the first build must fall
+    back to exemplars for the CURRENT batch without poisoning the cache —
+    the next batch retries the build and, once it succeeds, that genuine
+    pool (not the fallback) is what gets cached."""
+    profiles = profile_table(wide_ctx_schema, wide_reference)
+    client = _RaiseThenSucceedClient()
+    hook = FreeTextHook(client, strict=False)
+
+    # similarity=0.0 => all sampling mass goes to the LLM-side pool passed
+    # into `_blend_pools` (the exemplar fallback on the first call, the
+    # genuine novel pool on the second) — makes the source attributable.
+    cfg = GenerationConfig(seed=1, similarity=0.0)
+
+    out1 = hook.sample(profiles["summary"], 5, cfg, np.random.default_rng(1))
+    assert client.calls == 1, "first call attempts exactly one (failed) build"
+    ref_pool = set(profiles["summary"].text_pool)
+    assert all(v is None or v in ref_pool for v in out1), (
+        "degraded first batch must be exemplar-derived, not novel"
+    )
+
+    out2 = hook.sample(
+        profiles["summary"], 5, GenerationConfig(seed=2, similarity=0.0),
+        np.random.default_rng(2),
+    )
+    assert client.calls == 2, "fallback must not be cached: second call retries the build"
+    assert all(v is None or v.startswith("novel-") for v in out2), (
+        "recovered second batch must draw from the genuine novel pool"
+    )
+
+    out3 = hook.sample(
+        profiles["summary"], 5, GenerationConfig(seed=3, similarity=0.0),
+        np.random.default_rng(3),
+    )
+    assert client.calls == 2, "third call must hit the cache from the genuine build"
+    assert all(v is None or v.startswith("novel-") for v in out3)
+
+
+def test_undersized_pool_still_cached(wide_ctx_schema, wide_reference):
+    """A genuine pool that never reaches ``pool_size`` (but is non-empty) is
+    still real LLM generation — it must be cached like a full pool, not
+    treated as a fallback."""
+    profiles = profile_table(wide_ctx_schema, wide_reference)
+    client = _UndersizedClient(n_values=5)
+    hook = FreeTextHook(client)
+
+    cfg = GenerationConfig(seed=1, similarity=0.0)
+    out1 = hook.sample(profiles["summary"], 5, cfg, np.random.default_rng(1))
+    calls_after_first = client.calls
+    assert calls_after_first > 0
+    assert all(v is None or v.startswith("novel-") for v in out1)
+
+    out2 = hook.sample(
+        profiles["summary"], 5, GenerationConfig(seed=2, similarity=0.0),
+        np.random.default_rng(2),
+    )
+    assert client.calls == calls_after_first, (
+        "undersized-but-genuine pool must be cached: no rebuild on the second batch"
+    )
+    assert all(v is None or v.startswith("novel-") for v in out2)
+
+
+class _SlowFirstBuildClient:
+    """Fake ``ModelClient`` whose first ``generate_json`` call blocks on a
+    ``threading.Event`` until released — simulates a slow LLM pool build so
+    a concurrent second thread reliably contends on ``FreeTextHook._lock``
+    instead of racing past a fast, already-finished build."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._count_lock = threading.Lock()
+        self.entered_first_call = threading.Event()
+        self.release_first_call = threading.Event()
+
+    def generate_json(self, *a, **k):
+        with self._count_lock:
+            self.calls += 1
+            is_first = self.calls == 1
+        if is_first:
+            self.entered_first_call.set()
+            # Bounded wait keeps the test deterministic even if the release
+            # signal is somehow missed.
+            self.release_first_call.wait(timeout=5.0)
+        return [{"values": [f"novel-{i}" for i in range(32)]}]
+
+
+def test_concurrent_sample_builds_pool_exactly_once(wide_ctx_schema, wide_reference):
+    """Two threads calling ``sample()`` concurrently on a fresh hook must
+    serialize on the pool build: exactly ONE ``generate_json`` call, not one
+    per thread (the check-then-act race this fix closes)."""
+    profiles = profile_table(wide_ctx_schema, wide_reference)
+    client = _SlowFirstBuildClient()
+    hook = FreeTextHook(client)
+    cfg = GenerationConfig(seed=1, similarity=0.0)
+
+    results: dict[str, list] = {}
+    errors: list[BaseException] = []
+
+    def _call_a():
+        try:
+            results["a"] = hook.sample(
+                profiles["summary"], 5, cfg, np.random.default_rng(1)
+            )
+        except BaseException as e:
+            errors.append(e)
+
+    def _call_b():
+        try:
+            results["b"] = hook.sample(
+                profiles["summary"], 5, cfg, np.random.default_rng(2)
+            )
+        except BaseException as e:
+            errors.append(e)
+
+    thread_a = threading.Thread(target=_call_a)
+    thread_b = threading.Thread(target=_call_b)
+
+    thread_a.start()
+    # Only start B once A is inside its (slow) build call — guarantees B
+    # contends on the lock rather than racing the fast-path cache read.
+    assert client.entered_first_call.wait(timeout=5.0), "thread A never entered its build"
+    thread_b.start()
+
+    client.release_first_call.set()
+    thread_a.join(timeout=5.0)
+    thread_b.join(timeout=5.0)
+
+    assert not errors, f"unexpected errors from worker threads: {errors}"
+    assert client.calls == 1, "exactly one pool build must happen under concurrency"
+    assert results["a"] and results["b"]
