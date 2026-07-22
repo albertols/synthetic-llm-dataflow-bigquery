@@ -260,6 +260,44 @@ class _SlowFirstBuildClient:
         return [{"values": [f"novel-{i}" for i in range(32)]}]
 
 
+class _SeedRecordingClient:
+    """Fake ``ModelClient`` that records the ``seed`` kwarg passed to each
+    pool-build call — lets a test assert which seed actually reached the LLM
+    call, independent of the batch-level ``cfg.seed``."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seeds_seen: list[int | None] = []
+
+    def generate_json(self, *a, seed=None, **k):
+        self.calls += 1
+        self.seeds_seen.append(seed)
+        return [{"values": [f"novel-{i}" for i in range(32)]}]
+
+
+def test_pool_build_uses_batch_independent_seed(wide_ctx_schema, wide_reference):
+    """The pool-build LLM call must use ``cfg.engine_specific["pool_seed"]``,
+    NOT ``cfg.seed`` — two batches with different ``cfg.seed`` but the same
+    ``pool_seed`` (mirroring two Beam batches under an explicit ``--seed``,
+    per ``GenerateRecordsDoFn.process``) must share one build, and that
+    build's recorded seed must be the shared ``pool_seed``, not either
+    batch's own seed."""
+    profiles = profile_table(wide_ctx_schema, wide_reference)
+    client = _SeedRecordingClient()
+    hook = FreeTextHook(client)
+
+    cfg1 = GenerationConfig(seed=42, similarity=0.0, engine_specific={"pool_seed": 7})
+    cfg2 = GenerationConfig(seed=43, similarity=0.0, engine_specific={"pool_seed": 7})
+
+    hook.sample(profiles["summary"], 5, cfg1, np.random.default_rng(1))
+    hook.sample(profiles["summary"], 5, cfg2, np.random.default_rng(2))
+
+    assert client.calls == 1, "pool must be built once across batches sharing pool_seed"
+    assert client.seeds_seen == [7], (
+        "pool-build seed must be the batch-independent pool_seed, not cfg.seed (42/43)"
+    )
+
+
 def test_concurrent_sample_builds_pool_exactly_once(wide_ctx_schema, wide_reference):
     """Two threads calling ``sample()`` concurrently on a fresh hook must
     serialize on the pool build: exactly ONE ``generate_json`` call, not one

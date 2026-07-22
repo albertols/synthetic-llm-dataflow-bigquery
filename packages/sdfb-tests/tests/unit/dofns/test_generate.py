@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import types
+from typing import ClassVar
 
 import pytest
 from sdfb_beam.dofns import generate as generate_mod
@@ -68,7 +69,8 @@ class _FakeGeneratedRecord:
 class _RecordingEngine:
     """Stand-in engine that captures the ctx it was set up with."""
 
-    last_ctx: GenerationContext | None = None
+    last_ctx: ClassVar[GenerationContext | None] = None
+    last_cfgs: ClassVar[list] = []
 
     def setup(self, model_client, ctx):
         type(self).last_ctx = ctx
@@ -77,6 +79,7 @@ class _RecordingEngine:
         # Embed cfg.seed so tests can assert generation output actually
         # varies with the derived per-batch seed (not just that a seed value
         # was computed somewhere).
+        type(self).last_cfgs.append(cfg)
         for i in range(n):
             yield _FakeGeneratedRecord(i, seed=cfg.seed)
 
@@ -87,17 +90,19 @@ class _RecordingEngine:
 @pytest.fixture
 def recording_engine(monkeypatch):
     _RecordingEngine.last_ctx = None
+    _RecordingEngine.last_cfgs = []
     monkeypatch.setattr(
         generate_mod, "get_engine", lambda _name: _RecordingEngine
     )
     return _RecordingEngine
 
 
-def _dofn(ctx):
+def _dofn(ctx, seed=None):
     return GenerateRecordsDoFn(
         engine_name="b1_rag",
         model_client=FakeModelClient(reference_pool=[{"x": 1}]),
         ctx=ctx,
+        seed=seed,
     )
 
 
@@ -243,3 +248,55 @@ def test_identity_column_max_length_truncates_string_value(
 
     # Still unique per row.
     assert len({row["country"] for row in batch}) == len(batch)
+
+
+def test_explicit_seed_pool_seed_equals_base_seed_across_batches(
+    recording_engine, customers_schema
+):
+    """Explicit ``--seed`` mode: every batch's cfg must carry the SAME
+    ``engine_specific["pool_seed"]`` (the base seed), decoupled from that
+    batch's own `cfg.seed` (base_seed + batch_id) — the P6 fix. Before this
+    fix the pool build used `cfg.seed` directly, so it varied per batch."""
+    ctx = GenerationContext(
+        table_schema=customers_schema,
+        embedder_uri="",
+        pipeline_run_id="run-explicit-seed",
+    )
+    dofn = _dofn(ctx, seed=100)
+    dofn.setup()
+
+    list(dofn.process({"n": 2, "batch_id": 0}))
+    list(dofn.process({"n": 2, "batch_id": 1}))
+
+    cfgs = recording_engine.last_cfgs
+    assert len(cfgs) == 2
+    assert cfgs[0].seed == 100 and cfgs[1].seed == 101, "per-batch seed still varies"
+    assert cfgs[0].engine_specific["pool_seed"] == 100
+    assert cfgs[1].engine_specific["pool_seed"] == 100
+    assert cfgs[0].engine_specific["pool_seed"] == cfgs[1].engine_specific["pool_seed"]
+
+
+def test_derived_seed_pool_seed_stable_and_differs_from_batch_seed(
+    recording_engine, customers_schema
+):
+    """Derived-mode (no explicit ``--seed``): `pool_seed` must be identical
+    across batches (derived from `(run_id, -1)`, a reserved namespace outside
+    any real batch_id) and must differ from each batch's own derived seed."""
+    ctx = GenerationContext(
+        table_schema=customers_schema,
+        embedder_uri="",
+        pipeline_run_id="run-derived-seed",
+    )
+    dofn = _dofn(ctx)
+    dofn.setup()
+
+    list(dofn.process({"n": 2, "batch_id": 0}))
+    list(dofn.process({"n": 2, "batch_id": 1}))
+
+    cfgs = recording_engine.last_cfgs
+    assert len(cfgs) == 2
+    pool_seed_0 = cfgs[0].engine_specific["pool_seed"]
+    pool_seed_1 = cfgs[1].engine_specific["pool_seed"]
+    assert pool_seed_0 == pool_seed_1, "pool_seed must be stable across batches"
+    assert pool_seed_0 != cfgs[0].seed
+    assert pool_seed_1 != cfgs[1].seed
