@@ -161,7 +161,7 @@ def test_build_image_cloudbuild_yaml_retargets_pip_index_failloud():
     assert "pypi.org/simple" in sed_step["script"]
     assert "grep -q" in sed_step["script"]  # fail-loud if upstream line changes
     build_args = " ".join(cfg["steps"][1]["args"])
-    assert "BEAM_SDK_IMAGE=docker.io/apache/beam_python3.11_sdk:2.71.0" in build_args
+    assert "BEAM_SDK_IMAGE=docker.io/apache/beam_python3.11_sdk:2.74.0" in build_args
     assert "SDFB_SDK_CONTAINER_IMAGE_ARG=${_IMAGE_URI}" in build_args
     assert cfg["images"] == ["${_IMAGE_URI}"]
 

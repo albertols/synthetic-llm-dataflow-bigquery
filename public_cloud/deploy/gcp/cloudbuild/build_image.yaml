@@ -20,7 +20,7 @@ steps:
       - -f=docker/Dockerfile
       - -t=${_IMAGE_URI}
       - --build-arg=ENV_NAME_ARG=dev
-      - --build-arg=BEAM_SDK_IMAGE=docker.io/apache/beam_python3.11_sdk:2.71.0
+      - --build-arg=BEAM_SDK_IMAGE=docker.io/apache/beam_python3.11_sdk:2.74.0
       - --build-arg=SDFB_SDK_CONTAINER_IMAGE_ARG=${_IMAGE_URI}
       - .
 
