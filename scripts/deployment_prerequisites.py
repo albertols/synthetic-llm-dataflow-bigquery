@@ -18,7 +18,18 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
   5. Staging bucket  — …-dataflow-staging exists
   6. Templates bucket— …-dataflow-templates exists
   7. BigQuery datasets — synthetic_data, synthetic_data_quality exist
-  8. Others          — weights staged in GCS · _ddl.json staged in GCS · local config artifacts
+  8. Others          — weights staged in GCS · _ddl.json staged in GCS (OPTIONAL at
+                       launch since WS4 §6b: the launcher live-extracts from
+                       INFORMATION_SCHEMA when --ddl_uri is empty; an explicit URI
+                       is the pin/air-gap escape hatch) · local config artifacts
+  9. RAG chunk store — {project}.synthetic_rag.rag_chunks dataset/table exist and
+                       honor the SHARED multi-table contract (WS2 §4b): chunks
+                       from ANY source dataset.table coexist in one store, scoped
+                       by source_fqn and pinned to a vector space by
+                       (embedder_id, embedder_version), DAY-partitioned on
+                       created_at; vector-index state reported (created after
+                       first population — BQ needs ≥5k rows). Pass
+                       --rag-chunks-table "" to skip for RAG-less deployments.
 
 Exit code: 0 when no ACTION items (KO=0), 1 when any ACTION (KO). SKIP (could not
 verify — offline / no creds / missing lib) never fails the run but is surfaced.
@@ -29,7 +40,8 @@ Usage:
         --model-uri gs://my-proj-models/synthetic/models/gemma4/e4b-it/v1/ \\
         --staging-bucket my-proj-dataflow-staging \\
         --templates-bucket my-proj-dataflow-templates \\
-        --ddl-uri gs://my-proj-dataflow/ddl/customers_ddl.json
+        --ddl-uri gs://my-proj-dataflow/ddl/customers_ddl.json \\
+        --rag-chunks-table my-proj.synthetic_rag.rag_chunks
 """
 
 from __future__ import annotations
@@ -66,6 +78,22 @@ EMBEDDER_REQUIRED = [
     "config.json", "model.safetensors", "tokenizer.json",
     "tokenizer_config.json", "special_tokens_map.json",
 ]
+
+# Multi-table contract of the shared RAG chunk store (WS2 §4b): chunks from
+# EVERY source dataset.table land in ONE `rag_chunks` table, scoped by
+# `source_fqn`, deduped by `row_digest`, keyed for reuse by
+# `reference_digest`, and pinned to a vector space by
+# (`embedder_id`, `embedder_version`). Retrieval-side work planned on top
+# (vector index, reranking, filtering) depends on exactly these columns
+# staying queryable — schema drift on a live table is deploy-blocking.
+# Fallback contract when config/bq_schema/synthetic_rag/rag_chunks.schema.json
+# is missing; the committed schema file wins when present.
+RAG_CHUNKS_MIN_COLUMNS = [
+    "chunk_id", "source_fqn", "row_digest", "reference_digest",
+    "chunk_index", "chunk_kind", "chunk_text",
+    "embedder_id", "embedder_version", "embedding", "created_at",
+]
+_RAG_PARTITION_FIELD = "created_at"
 
 
 @dataclass
@@ -279,16 +307,23 @@ def step8_others(ctx: Ctx) -> None:
     # 8a — weights actually staged in GCS.
     _gcs_prefix(ctx, "8a", "Weights staged in GCS", a.model_uri, a.project,
                 "upload ./models/… to the model URI (see docs/MODEL_LAYOUT.md)")
-    # 8b — _ddl.json staged in GCS (the launcher's --ddl_uri).
+    # 8b — _ddl.json staged in GCS (the launcher's --ddl_uri). OPTIONAL at
+    # launch since WS4 §6b: with an empty --ddl_uri the launcher live-extracts
+    # the schema from INFORMATION_SCHEMA at graph-construction time; an
+    # explicit URI pins the schema (air-gap / reproducibility escape hatch).
     if a.ddl_uri:
         _gcs_object(ctx, "8b", "_ddl.json staged in GCS", a.ddl_uri, a.project,
-                    "upload the extracted _ddl.json to --ddl-uri")
+                    "upload the extracted _ddl.json to --ddl-uri, or launch "
+                    "without --ddl_uri (live INFORMATION_SCHEMA extraction)")
     else:
-        ctx.add("8b", "_ddl.json staged in GCS", SKIP, "no --ddl-uri given")
+        ctx.add("8b", "_ddl.json staged in GCS", SKIP,
+                "no --ddl-uri given — optional (WS4 §6b): the launcher "
+                "live-extracts from INFORMATION_SCHEMA; pass a URI to pin")
     # 8c — committed local config artifacts.
     missing = [f for f in (
         Path(a.schemas_dir) / "synthetic_data_quality" / "dlq.schema.json",
         Path(a.schemas_dir) / "synthetic_data_quality" / "validation_runs.schema.json",
+        Path(a.schemas_dir) / "synthetic_rag" / "rag_chunks.schema.json",
         REPO_ROOT / "config" / "thresholds.yml",
     ) if not f.exists()]
     if missing:
@@ -298,7 +333,126 @@ def step8_others(ctx: Ctx) -> None:
     else:
         ctx.add("8c", "Local config artifacts", OK,
                 "thresholds.yml · synthetic_data_quality/dlq.schema.json · "
-                "synthetic_data_quality/validation_runs.schema.json")
+                "synthetic_data_quality/validation_runs.schema.json · "
+                "synthetic_rag/rag_chunks.schema.json")
+
+
+def step9_rag_layer(ctx: Ctx) -> None:
+    """WS2 §4b — the detached RAG layer's shared chunk store.
+
+    ONE `rag_chunks` table serves every source dataset.table (scoped by
+    `source_fqn`), so this step validates the store's contract rather than
+    any single table's rows: dataset + table exist, the multi-table columns
+    are live, DAY partitioning on `created_at` holds, and the vector-index
+    state is reported. The index itself can only exist after the first
+    `--build_rag_layer` population (BigQuery requires ≥5k rows), so its
+    absence is informational, never deploy-blocking — retrieval falls back
+    to brute-force COSINE until it lands. Future retrieval-side work
+    (reranking, filtering/metadata predicates) builds on the same contract.
+    """
+    a = ctx.args
+    fqn = a.rag_chunks_table
+    if not fqn:
+        ctx.add("9", "RAG chunk store", SKIP,
+                "--rag-chunks-table '' — RAG layer skipped (required for "
+                "--build_rag_layer population and b1 chunk reuse)")
+        return
+    proj, ds, table = fqn.split(".", 2)
+    ds_link = bq_dataset_link(proj, ds)
+    t_link = bq_table_link(fqn)
+    client, reason = bq_client(a.project)
+    if client is None:
+        ctx.add("9a", f"RAG dataset · {ds}", SKIP, f"{ds_link} — {reason}")
+        ctx.add("9b", f"RAG table · {table}", SKIP, f"{t_link} — {reason}")
+        ctx.add("9c", "RAG vector index", SKIP, f"{t_link} — {reason}")
+        return
+    from google.api_core.exceptions import NotFound
+
+    # 9a — dataset (shared across all source tables; one per project).
+    try:
+        client.get_dataset(f"{proj}.{ds}")
+        ctx.add("9a", f"RAG dataset · {ds}", OK, ds_link)
+    except NotFound:
+        ctx.add("9a", f"RAG dataset · {ds}", ACTION, f"{ds_link} — not found",
+                f"create dataset `{ds}` in the pipeline region (one shared "
+                "chunk store per project — serves every source dataset.table)")
+    except Exception as e:
+        ctx.add("9a", f"RAG dataset · {ds}", SKIP,
+                f"{ds_link} — {short(f'{type(e).__name__}: {e}')}")
+
+    if _rag_table_contract(ctx, client, NotFound, fqn, t_link):
+        _rag_vector_index(ctx, client, fqn, t_link)
+
+
+def _rag_table_contract(ctx, client, not_found, fqn, t_link) -> bool:
+    """9b — table exists AND honors the multi-table contract. Returns True
+    when the table is present (so 9c can query index state)."""
+    a = ctx.args
+    proj, ds, table = fqn.split(".", 2)
+    schema_file = Path(a.schemas_dir) / ds / f"{table}.schema.json"
+    if schema_file.exists():
+        required = [f["name"] for f in json.loads(schema_file.read_text())]
+    else:
+        required = list(RAG_CHUNKS_MIN_COLUMNS)
+    try:
+        live = client.get_table(fqn)
+    except not_found:
+        ctx.add("9b", f"RAG table · {table}", ACTION, f"{t_link} — not found",
+                f"bq mk --table --time_partitioning_field {_RAG_PARTITION_FIELD} "
+                f"--time_partitioning_type DAY {proj}:{ds}.{table} "
+                f"{schema_file if schema_file.exists() else 'config/bq_schema/synthetic_rag/rag_chunks.schema.json'}")
+        ctx.add("9c", "RAG vector index", SKIP, f"{t_link} — table missing")
+        return False
+    except Exception as e:
+        ctx.add("9b", f"RAG table · {table}", SKIP,
+                f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
+        ctx.add("9c", "RAG vector index", SKIP, f"{t_link} — table not verified")
+        return False
+    live_cols = {f.name for f in live.schema}
+    missing_cols = [c for c in required if c not in live_cols]
+    part = getattr(live, "time_partitioning", None)
+    issues = []
+    if missing_cols:
+        issues.append("missing columns: " + ", ".join(missing_cols))
+    if part is None or getattr(part, "field", None) != _RAG_PARTITION_FIELD:
+        issues.append(f"not DAY-partitioned on {_RAG_PARTITION_FIELD}")
+    if issues:
+        ctx.add("9b", f"RAG table · {table}", ACTION,
+                f"{t_link} — " + " · ".join(issues),
+                "align the table with config/bq_schema/synthetic_rag/"
+                "rag_chunks.schema.json — the multi-table contract "
+                "(source_fqn scoping, (embedder_id, embedder_version) "
+                "vector-space pin, created_at DAY partition) is what lets "
+                "any added dataset.table share this store")
+    else:
+        ctx.add("9b", f"RAG table · {table}", OK,
+                f"{t_link} — {len(live_cols)} cols · DAY partition on "
+                f"{_RAG_PARTITION_FIELD}")
+    return True
+
+
+def _rag_vector_index(ctx, client, fqn, t_link) -> None:
+    """9c — vector-index state (read-only INFORMATION_SCHEMA; never blocks)."""
+    proj, ds, table = fqn.split(".", 2)
+    try:
+        rows = list(client.query(
+            f"SELECT index_name, index_status "
+            f"FROM `{proj}.{ds}.INFORMATION_SCHEMA.VECTOR_INDEXES` "
+            f"WHERE table_name = '{table}'"
+        ).result())
+        if rows:
+            state = ", ".join(f"{r.index_name} ({r.index_status})" for r in rows)
+            ctx.add("9c", "RAG vector index", OK, f"{t_link} — {state}")
+        else:
+            ctx.add("9c", "RAG vector index", SKIP,
+                    f"{t_link} — none yet (BQ needs ≥5k rows; after the first "
+                    f"--build_rag_layer population run: CREATE VECTOR INDEX "
+                    f"rag_chunks_embedding_idx ON `{fqn}`(embedding) "
+                    f"OPTIONS(index_type='IVF', distance_type='COSINE') — "
+                    "brute-force COSINE retrieval works meanwhile)")
+    except Exception as e:
+        ctx.add("9c", "RAG vector index", SKIP,
+                f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
 
 
 # --------------------------------------------------------------------------- #
@@ -448,7 +602,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--embedder-uri", default="", help="gs://…/synthetic/models/embedders/{model}/{version}/")
     p.add_argument("--staging-bucket", default="", help="name or gs:// of the dataflow-staging bucket")
     p.add_argument("--templates-bucket", default="", help="name or gs:// of the dataflow-templates bucket")
-    p.add_argument("--ddl-uri", default="", help="gs:// path where the _ddl.json must be staged (launcher --ddl_uri)")
+    p.add_argument("--ddl-uri", default="",
+                   help="gs:// path where the _ddl.json is staged. OPTIONAL (WS4 §6b): "
+                        "empty = the launcher live-extracts from INFORMATION_SCHEMA; "
+                        "an explicit URI pins the schema (air-gap escape hatch).")
+    p.add_argument("--rag-chunks-table", default=None,
+                   help="FQN of the shared RAG chunk store (WS2). Default "
+                        "{project}.synthetic_rag.rag_chunks; pass '' to skip the "
+                        "RAG checks for a RAG-less deployment.")
     p.add_argument("--models-dir", default=str(REPO_ROOT / "models"), help="Local weights root (default ./models).")
     p.add_argument("--schemas-dir", default=str(REPO_ROOT / "config" / "bq_schema"),
                    help="Root under which step 1/2 drop {dataset}/{table}.schema.json "
@@ -465,6 +626,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     args.dlq_table = args.dlq_table or f"{args.project}.synthetic_data_quality.dlq"
     args.validation_runs_table = (args.validation_runs_table
                                   or f"{args.project}.synthetic_data_quality.validation_runs")
+    # None = default convention; "" = explicit opt-out (RAG-less deployment).
+    if args.rag_chunks_table is None:
+        args.rag_chunks_table = f"{args.project}.synthetic_rag.rag_chunks"
     return args
 
 
@@ -473,7 +637,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     ctx = Ctx(args=args)
     for step in (step1_source_ddl, step2_landing_schema, step3_local_weights, step4_bq_tables,
-                 step5_staging_bucket, step6_templates_bucket, step7_bq_datasets, step8_others):
+                 step5_staging_bucket, step6_templates_bucket, step7_bq_datasets, step8_others,
+                 step9_rag_layer):
         step(ctx)
 
     stamp = datetime.now(UTC)

@@ -38,8 +38,9 @@ All sinks are `FILE_LOADS` + `WRITE_APPEND` + `CREATE_NEVER`, so the three desti
 | **Landing** | `project.synthetic_data.<source table>` (defaults to the DDL table name; override with `landing_table`) | **derived from the target DDL** | `sdfb_core/codegen/derive_bq_ddl.py` turns the `_ddl.json` into a BQ `TableSchema` → `bq mk`. **No committed schema file** — it's per-target (the preflight writes `config/bq_schema/synthetic_data/<table>.schema.json`). |
 | **DLQ** | `project.synthetic_data_quality.dlq` | `config/bq_schema/synthetic_data_quality/dlq.schema.json` | DAY-partition on `dlq_inserted_at`. |
 | **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. |
+| **rag_chunks** (WS2) | `project.synthetic_rag.rag_chunks` | `config/bq_schema/synthetic_rag/rag_chunks.schema.json` | DAY-partition on `created_at`. **One shared store for the whole project**: chunks from *every* source `dataset.table` coexist, scoped by `source_fqn` and pinned to a vector space by (`embedder_id`, `embedder_version`) — adding a new source table needs **no** new RAG table. Optional (only needed for `--build_rag_layer` / b1 chunk reuse). |
 
-Datasets to create: **`synthetic_data`** (landing) and **`synthetic_data_quality`** (dlq + validation_runs), in the reference data's region (`europe-west3` here). Schema files are laid out by dataset under `config/bq_schema/<dataset>/<table>.schema.json`. The two DQ tables map 1:1 to committed JSON schemas:
+Datasets to create: **`synthetic_data`** (landing), **`synthetic_data_quality`** (dlq + validation_runs), and — for the WS2 RAG layer — **`synthetic_rag`** (rag_chunks), in the reference data's region (`europe-west3` here). Schema files are laid out by dataset under `config/bq_schema/<dataset>/<table>.schema.json`. The committed-schema tables map 1:1 to JSON files:
 
 ```bash
 bq mk --schema config/bq_schema/synthetic_data_quality/dlq.schema.json \
@@ -48,7 +49,20 @@ bq mk --schema config/bq_schema/synthetic_data_quality/dlq.schema.json \
 bq mk --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.json \
       --time_partitioning_field created_at \
       project:synthetic_data_quality.validation_runs
+bq mk --schema config/bq_schema/synthetic_rag/rag_chunks.schema.json \
+      --time_partitioning_field created_at \
+      project:synthetic_rag.rag_chunks
 ```
+
+After the **first** `--build_rag_layer` population run (BigQuery requires ≥5 000 rows before an index can be created), add the vector index — retrieval falls back to brute-force COSINE until then:
+
+```sql
+CREATE VECTOR INDEX rag_chunks_embedding_idx
+ON `project.synthetic_rag.rag_chunks`(embedding)
+OPTIONS(index_type = 'IVF', distance_type = 'COSINE');
+```
+
+Planned retrieval-side optimizations (reranking, metadata filtering) build on this same contract — `source_fqn` scoping, the embedder pin, and the vector index — so treat the `rag_chunks` schema as an API: additive changes only.
 
 #### Provisioning the landing table (step by step)
 
@@ -150,8 +164,10 @@ uv run python scripts/deployment_prerequisites.py \
     --model-uri gs://my-proj-models/synthetic/models/gemma4/e4b-it/v1/ \
     --staging-bucket my-proj-dataflow-staging \
     --templates-bucket my-proj-dataflow-templates \
-    --ddl-uri gs://my-proj-dataflow/ddl/customers_ddl.json
+    --ddl-uri gs://my-proj-dataflow/ddl/customers_ddl.json \
+    --rag-chunks-table my-proj.synthetic_rag.rag_chunks
 # → output/deployment_prerequisites_YYYY_MM_DD_HH_MM.md · exit 0 = OK, 1 = KO
+# --rag-chunks-table defaults to {project}.synthetic_rag.rag_chunks; pass '' for a RAG-less deployment
 ```
 
 **This ordered checklist is the single source of truth — it is mirrored 1:1 in the script's docstring. Keep them in sync.**
@@ -165,6 +181,7 @@ uv run python scripts/deployment_prerequisites.py \
 | 5 | **Staging bucket** — `…-dataflow-staging` exists | verifies | create bucket |
 | 6 | **Templates bucket** — `…-dataflow-templates` exists | verifies | create bucket / deploy template ([`CICD.md`](CICD.md)) |
 | 7 | **BigQuery datasets** — `synthetic_data`, `synthetic_data_quality` exist | verifies | create datasets (① → datasets) |
-| 8 | **Others** — weights staged in GCS · `_ddl.json` staged in GCS · local config artifacts present | verifies | upload weights / `_ddl.json`; restore config |
+| 8 | **Others** — weights staged in GCS · `_ddl.json` staged in GCS (*optional* at launch since WS4 §6b — empty `--ddl_uri` live-extracts from INFORMATION_SCHEMA; an explicit URI pins/air-gaps) · local config artifacts present | verifies | upload weights / `_ddl.json`; restore config |
+| 9 | **RAG chunk store** (WS2) — `synthetic_rag` dataset + `rag_chunks` table exist, multi-table contract columns + `created_at` DAY partition live, vector-index state | verifies (read-only; `--rag-chunks-table ''` skips) | create per ① → rag_chunks; index after first population |
 
 Create-order note: because #4/#7 are read-only checks, provision the create-side in dependency order — datasets → tables, buckets, weights (local → GCS), then IAM — using the `bq mk`/Terraform recipes in ①. Enterprise deploy (image, Flex Template, Composer Variables, DAG) is ② → [`CICD.md`](CICD.md).
