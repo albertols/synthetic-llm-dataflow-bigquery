@@ -34,13 +34,26 @@ from sdfb_core.engines.base import (
     ModelClient,
     escalating_sampling,
 )
-from sdfb_core.engines.text_shapes import sample_identifier
+from sdfb_core.engines.text_shapes import (
+    build_relaxed_shapes,
+    sample_identifier,
+    sample_relaxed_identifier,
+)
 from sdfb_core.observability import log_milestone
 
 # Bounded pool size — the LLM emits at most this many unique candidates per
 # free-text column regardless of N (the O(1) cost cap). Sized small so the
 # guided-JSON call stays cheap; tune on the M4.
 _DEFAULT_POOL_SIZE = 32
+
+# Reference-blend privacy bound, mirroring the memorization probe rule
+# (copy_ratio flagged when source_distinct > 100). A column whose observed
+# pool exceeds this is identity-like: blending its reference values verbatim
+# IS the leak — the 2026-07-23 b2 E2E landed COL_048/053/054 (source_distinct
+# 19 815 / 1 298 / 3 030) at copy_ratio ≈ 0.51, exactly the similarity=0.5
+# blend mass. Above the bound the blend is disabled and every landed value
+# comes from the novel LLM/shape pool, whatever `similarity` says.
+_REFERENCE_BLEND_MAX_DISTINCT = 100
 
 
 def similarity_to_temperature(similarity: float) -> float:
@@ -105,7 +118,8 @@ class FreeTextHook:
     batch's call retries the build rather than being poisoned by a
     permanently-missing/empty cache entry.
 
-    Caching contract (2026-07-21 review hardening): genuine LLM pools —
+    Caching contract (2026-07-21 review hardening; strict-failure caching
+    added after the 2026-07-22 b2 E2E incident): genuine LLM pools —
     full-size or undersized-but-nonempty — ARE cached, since they represent
     real (if degraded) novel generation. Exemplar-fallback results (the
     caught-exception path and the empty-novel-yield path in non-strict mode)
@@ -113,6 +127,25 @@ class FreeTextHook:
     permanently lock a column to exemplar-only values for the worker's
     lifetime — the next batch retries the build instead. The fallback value
     is still used for the *current* batch; only the caching is skipped.
+
+    Strict mode splits failure by shape. A raised client exception is
+    transient-shaped: it re-raises uncached, so the next batch retries. An
+    empty NOVEL yield after every escalation level is deterministic-shaped
+    (saturated key space / exemplar echo — same outcome on every rebuild).
+    A *copy-saturated* one (``parsed > 0``, every value an observed copy)
+    first tries a relaxed per-position character template
+    (``build_relaxed_shapes``) to generate verified-novel in-format values
+    without the LLM — the CHANGE_USERID failure mode of the 2026-07-22 b2
+    E2E runs, where qwen echoed the 32 shown exemplars on all 3 attempts.
+    A successful shape pool is a genuine novel pool and is cached normally.
+    Only when no template applies (prose) or the template keyspace is
+    exhausted does the strict raise happen, and that failure is
+    negative-cached in ``_failed``: subsequent batches on this worker
+    re-raise ``FreeTextEmptyYieldError`` immediately (with a DEBUG
+    ``freetext_pool_empty_cached`` milestone) instead of re-paying the
+    escalation ladder. The first 2026-07-22 run paid 63 batches x 3 LLM
+    calls (~35 min of GPU) rebuilding a pool that could never succeed, on
+    a run the BLOCKER gate was already guaranteed to fail.
     Concurrent DoFn threads on one worker race ``_pool_for``'s check-then-act
     over the plain-dict cache (see ``_SETUP_LOCK`` in
     ``sdfb_beam.handlers.vllm_client`` for the same class of race); ``_lock``
@@ -140,6 +173,9 @@ class FreeTextHook:
         self._pool_size = pool_size
         self._strict = strict
         self._cache: dict[tuple[str, float], list[str]] = {}
+        # Negative cache: key → the FreeTextEmptyYieldError message of a
+        # deterministic strict-mode build failure (see class docstring).
+        self._failed: dict[tuple[str, float], str] = {}
         self._lock = threading.Lock()
 
     def __getstate__(self) -> dict:
@@ -187,6 +223,11 @@ class FreeTextHook:
 
         pool = self._pool_for(profile, cfg)
         ref_pool = list(profile.text_pool)
+        if len(ref_pool) > _REFERENCE_BLEND_MAX_DISTINCT:
+            # Identity-like cardinality: the reference blend is the leak
+            # (see _REFERENCE_BLEND_MAX_DISTINCT). `_blend_pools` shifts all
+            # mass to the novel pool when the reference side is empty.
+            ref_pool = []
 
         # similarity high ⇒ favor the observed reference pool (mimic);
         # similarity low ⇒ favor the freshly-generated LLM pool (diverge).
@@ -210,6 +251,17 @@ class FreeTextHook:
         cached = self._cache.get(key)
         if cached is not None:
             return cached
+        failed = self._failed.get(key)
+        if failed is not None:
+            # DEBUG, once per batch: the fail-fast is otherwise visible only
+            # as DLQ envelopes (2026-07-22 re-run: 55 log-silent batch
+            # deaths).
+            log_milestone(
+                "freetext_pool_empty_cached",
+                level=logging.DEBUG,
+                column=profile.name,
+            )
+            raise FreeTextEmptyYieldError(failed)
         with self._lock:
             # Re-check: a sibling thread may have built this key while we
             # waited on the lock (double-checked locking — pool builds are
@@ -219,7 +271,24 @@ class FreeTextHook:
             cached = self._cache.get(key)
             if cached is not None:
                 return cached
-            pool, cacheable = self._generate_pool(profile, cfg)
+            failed = self._failed.get(key)
+            if failed is not None:
+                log_milestone(
+                    "freetext_pool_empty_cached",
+                    level=logging.DEBUG,
+                    column=profile.name,
+                )
+                raise FreeTextEmptyYieldError(failed)
+            try:
+                pool, cacheable = self._generate_pool(profile, cfg)
+            except FreeTextEmptyYieldError as e:
+                # Deterministic-shaped: every escalation level yielded zero
+                # novel values. Rebuilding cannot succeed — cache the failure
+                # so later batches fail fast instead of re-paying the LLM
+                # ladder (2026-07-22 b2 E2E). Client exceptions (transient-
+                # shaped) are NOT caught here and stay uncached.
+                self._failed[key] = str(e)
+                raise
             if cacheable:
                 self._cache[key] = pool
             return pool
@@ -253,6 +322,7 @@ class FreeTextHook:
         n_copies = 0
         n_echoes = 0
         attempts = 0
+        base_seed = cfg.engine_specific.get("pool_seed", cfg.seed)
         try:
             for level in escalating_sampling(
                 similarity_to_temperature(cfg.similarity)
@@ -264,7 +334,12 @@ class FreeTextHook:
                     max_tokens=2048,
                     temperature=level.temperature,
                     n=1,
-                    seed=cfg.engine_specific.get("pool_seed", cfg.seed),
+                    # Walk the seed per attempt: a pinned seed repeated the
+                    # exact same echo on every escalation level (2026-07-22
+                    # b2 E2E, CHANGE_USERID: 3 identical 32-echo responses),
+                    # making the ladder's diversity partly illusory. Still
+                    # P6-reproducible — derived from the same base.
+                    seed=None if base_seed is None else base_seed + attempts - 1,
                     top_p=level.top_p,
                     top_k=level.top_k,
                 )
@@ -314,7 +389,44 @@ class FreeTextHook:
                 f"distinct={len(seen)}, verbatim_copies={n_copies}, "
                 f"prompt_echoes={n_echoes}, novel=0"
             )
+            if n_parsed > 0:
+                # Copy-saturated: the model parsed values but every one was
+                # an observed copy (exemplar echo or keyspace collision) —
+                # deterministic on rebuild, so retrying or failing the batch
+                # buys nothing. A relaxed per-position template can still
+                # generate verified-novel in-format values without the LLM
+                # (2026-07-22 b2 E2E: CHANGE_USERID, 96/96 echoes, run
+                # FAILED). Parse failures (parsed=0) skip this — they are
+                # config/transport-shaped, not a property of the column.
+                shape_pool = self._shape_fallback_pool(profile, base_seed)
+                if shape_pool:
+                    log_milestone(
+                        "freetext_pool_shape_fallback",
+                        level=logging.WARNING,
+                        column=profile.name,
+                        pool_size=len(shape_pool),
+                        target=self._pool_size,
+                        attempts=attempts,
+                        parsed=n_parsed,
+                        verbatim_copies=n_copies,
+                        prompt_echoes=n_echoes,
+                    )
+                    return shape_pool, True
             if self._strict:
+                # As loud in worker logs as the lax fallback path: the raise
+                # itself lands in a DLQ envelope in BigQuery, which the
+                # 2026-07-22 b2 E2E showed is invisible when triaging from
+                # worker logs alone.
+                log_milestone(
+                    "freetext_pool_empty",
+                    level=logging.ERROR,
+                    column=profile.name,
+                    attempts=attempts,
+                    parsed=n_parsed,
+                    distinct=len(seen),
+                    verbatim_copies=n_copies,
+                    prompt_echoes=n_echoes,
+                )
                 raise FreeTextEmptyYieldError(
                     f"LLM calls for free-text column {profile.name!r} "
                     f"yielded no usable values ({diagnosis})."
@@ -351,6 +463,41 @@ class FreeTextHook:
         # so folding exemplars HERE double-counted them and turned the
         # "diverge" side of the blend into more memorization.
         return pool[: self._pool_size], True
+
+    def _shape_fallback_pool(
+        self, profile: ColumnProfile, seed: int | None
+    ) -> list[str] | None:
+        """A verified-novel pool from a relaxed character template, or None.
+
+        Only called for copy-saturated builds. Values are rejected against
+        the observed pool (and each other), so nothing here can memorize; a
+        template whose keyspace is too saturated to fill even one novel
+        value returns None and the caller falls through to its existing
+        raise/exemplar path. Seeded from the batch-independent pool seed —
+        deterministic per run (P6), like the LLM build it replaces.
+        """
+        shapes = build_relaxed_shapes(list(profile.text_pool))
+        if shapes is None:
+            return None
+        rng = np.random.default_rng(seed)
+
+        def pick(k: int) -> int:
+            return int(rng.integers(0, k))
+
+        observed = set(profile.text_pool)
+        pool: list[str] = []
+        seen: set[str] = set()
+        # Bounded rejection sampling: dense keyspaces stop at the cap
+        # instead of spinning.
+        for _ in range(self._pool_size * 40):
+            value = sample_relaxed_identifier(shapes, pick)
+            if value in observed or value in seen:
+                continue
+            seen.add(value)
+            pool.append(value)
+            if len(pool) >= self._pool_size:
+                break
+        return pool or None
 
 
 def _extract_values(responses: list[dict]) -> list[str]:

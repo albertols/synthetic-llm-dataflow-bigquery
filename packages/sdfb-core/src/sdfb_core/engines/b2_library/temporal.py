@@ -95,6 +95,16 @@ def from_epoch(x: float, value_type: str, fmt: str | None) -> object:
     return (_EPOCH_NAIVE + timedelta(seconds=x)).strftime(fmt)
 
 
+def value_year(value: object, value_type: str, fmt: str | None) -> int | None:
+    """The calendar year of a temporal value, or None where years don't
+    apply (VT_TIME). Used by the profiler's sentinel-year split."""
+    if value_type == VT_TIME:
+        return None
+    if value_type == VT_STR:
+        return datetime.strptime(value, fmt).year
+    return value.year
+
+
 def sample_temporal(
     minimum: float | None,
     maximum: float | None,
