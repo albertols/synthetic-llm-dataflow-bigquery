@@ -46,6 +46,15 @@ from sdfb_core.observability import log_milestone
 # guided-JSON call stays cheap; tune on the M4.
 _DEFAULT_POOL_SIZE = 32
 
+# Reference-blend privacy bound, mirroring the memorization probe rule
+# (copy_ratio flagged when source_distinct > 100). A column whose observed
+# pool exceeds this is identity-like: blending its reference values verbatim
+# IS the leak — the 2026-07-23 b2 E2E landed COL_048/053/054 (source_distinct
+# 19 815 / 1 298 / 3 030) at copy_ratio ≈ 0.51, exactly the similarity=0.5
+# blend mass. Above the bound the blend is disabled and every landed value
+# comes from the novel LLM/shape pool, whatever `similarity` says.
+_REFERENCE_BLEND_MAX_DISTINCT = 100
+
 
 def similarity_to_temperature(similarity: float) -> float:
     """Map ``cfg.similarity`` ∈ [0,1] → LLM temperature ∈ [~0.1, ~1.3].
@@ -214,6 +223,11 @@ class FreeTextHook:
 
         pool = self._pool_for(profile, cfg)
         ref_pool = list(profile.text_pool)
+        if len(ref_pool) > _REFERENCE_BLEND_MAX_DISTINCT:
+            # Identity-like cardinality: the reference blend is the leak
+            # (see _REFERENCE_BLEND_MAX_DISTINCT). `_blend_pools` shifts all
+            # mass to the novel pool when the reference side is empty.
+            ref_pool = []
 
         # similarity high ⇒ favor the observed reference pool (mimic);
         # similarity low ⇒ favor the freshly-generated LLM pool (diverge).

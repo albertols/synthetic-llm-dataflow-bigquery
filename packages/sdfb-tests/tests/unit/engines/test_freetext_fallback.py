@@ -264,6 +264,58 @@ def test_b2_strict_empty_yield_is_negative_cached(caplog, wide_ctx):
 
 
 # ---------------------------------------------------------------------------
+# Reference-blend privacy bound — the 2026-07-23 b2 E2E landed COL_048/053/054
+# (source_distinct 19 815 / 1 298 / 3 030) at copy_ratio ≈ 0.51: the
+# similarity=0.5 blend mass drawn verbatim from the reference pool. Columns
+# above the memorization rule's cardinality bound (source_distinct > 100)
+# must never blend observed values, whatever `similarity` says.
+# ---------------------------------------------------------------------------
+
+
+def _highcard_profiles():
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.requests"},
+            "schema": [{"name": "req_id", "type": "STRING", "mode": "REQUIRED"}],
+            "primary_keys": None,
+        }
+    )
+    # 150 distinct short ids: FREE_TEXT (unique-ratio 1.0), no strict
+    # identifier shape (below min length), > 100 observed distinct.
+    rows = [{"req_id": f"RQ-{i}"} for i in range(100, 250)]
+    return profile_table(schema, rows)
+
+
+def test_b2_high_cardinality_free_text_never_blends_reference():
+    profiles = _highcard_profiles()
+    p = profiles["req_id"]
+    client = _NovelBatchClient(per_call=32)
+    hook = FreeTextHook(client, strict=True)
+    rng = np.random.default_rng(5)
+    # similarity=1.0 puts ALL blend mass on the reference pool — the
+    # strongest possible leak — yet every landed value must be novel.
+    values = hook.sample(p, 200, GenerationConfig(seed=5, similarity=1.0), rng)
+    observed = set(p.text_pool)
+    non_null = [v for v in values if v is not None]
+    assert non_null
+    assert all(v not in observed for v in non_null)
+
+
+def test_b2_low_cardinality_free_text_keeps_reference_blend(wide_ctx):
+    # Below the bound the blend is the intended mimic primitive: at
+    # similarity=1.0 a small prose pool reproduces observed values.
+    profiles = profile_table(wide_ctx.table_schema, wide_ctx.reference_rows)
+    p = profiles["summary"]
+    hook = FreeTextHook(_NovelBatchClient(per_call=32))
+    rng = np.random.default_rng(5)
+    values = hook.sample(p, 200, GenerationConfig(seed=5, similarity=1.0), rng)
+    observed = set(p.text_pool)
+    non_null = [v for v in values if v is not None]
+    assert non_null
+    assert all(v in observed for v in non_null)
+
+
+# ---------------------------------------------------------------------------
 # Shape-template fallback — copy-saturated pools (2026-07-22 b2 E2E:
 # CHANGE_USERID, 96/96 prompt echoes on every escalation attempt, run FAILED
 # with blocker_ratio=1.0). When the LLM parses values but every one is an

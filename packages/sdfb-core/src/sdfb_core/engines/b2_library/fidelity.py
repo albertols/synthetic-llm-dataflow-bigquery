@@ -29,6 +29,7 @@ from sdfb_core.engines.b2_library.temporal import (
     classify_temporal_values,
     from_epoch,
     to_epoch,
+    value_year,
 )
 from sdfb_core.engines.text_shapes import detect_identifier_shape
 from sdfb_core.observability import log_milestone
@@ -58,6 +59,13 @@ _FREE_TEXT_MIN_LEN = 40  # mean string length above this ⇒ likely prose
 _TEMPORAL_MAX_CATEGORIES = 20
 _CATEGORICAL_MAX_CATEGORIES = 50
 _TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIME", "TIMESTAMP"})
+
+# Sentinel calendar years excluded from a TEMPORAL column's jitter range and
+# re-injected at their observed frequency instead. 0001-01-01 (null-substitute)
+# and 9999-12-31 (open-end) are the classic warehouse sentinels; leaving them
+# in [min, max] made the 2026-07-23 b2 E2E land uniform dates across ~2000
+# years ("50-08-23", "955-10-29") on five date-STRING columns.
+_TEMPORAL_SENTINEL_YEARS = frozenset({1, 9999})
 
 # Control-character guard (WS1 §3c): values containing C0/C1 control bytes
 # in a STRING column usually mean binary data mis-declared upstream
@@ -128,6 +136,9 @@ class ColumnProfile:
     # minimum/maximum hold epoch floats (units per temporal.py) for this kind.
     temporal_value_type: str | None = None
     temporal_format: str | None = None
+    # TEMPORAL: sentinel values (year 1 / 9999) excluded from [min, max] and
+    # re-injected at their observed fraction: ((value, fraction), ...).
+    temporal_sentinels: tuple[tuple[object, float], ...] = ()
 
 
 def _non_null(values: list[object]) -> list[object]:
@@ -279,7 +290,27 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             kind = ColumnKind.CATEGORICAL
         else:
             value_type, fmt = spec
-            epochs = [to_epoch(v, value_type, fmt) for v in non_null]
+            # Split sentinel-year values out of the jitter range; they are
+            # re-injected at sampling time at their observed fraction. A
+            # column that is ALL sentinel years has nothing to trim toward —
+            # keep the observed range and skip injection.
+            regular: list[object] = []
+            sentinel_counts: Counter = Counter()
+            for v in non_null:
+                year = value_year(v, value_type, fmt)
+                if year in _TEMPORAL_SENTINEL_YEARS:
+                    sentinel_counts[v] += 1
+                else:
+                    regular.append(v)
+            if not regular:
+                regular = list(non_null)
+                sentinel_counts = Counter()
+            epochs = [to_epoch(v, value_type, fmt) for v in regular]
+            total_non_null = len(non_null)
+            temporal_sentinels = tuple(
+                (v, count / total_non_null)
+                for v, count in sentinel_counts.items()
+            )
             return ColumnProfile(
                 name=field.name,
                 bq_type=field.bq_type,
@@ -290,6 +321,7 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
                 maximum=max(epochs),
                 temporal_value_type=value_type,
                 temporal_format=fmt,
+                temporal_sentinels=temporal_sentinels,
             )
 
     if kind is ColumnKind.FREE_TEXT:

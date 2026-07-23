@@ -139,14 +139,40 @@ class EmpiricalBackend:
             values = _sample_categorical(p, n, rng, temperature)
 
         elif p.kind is ColumnKind.TEMPORAL:
-            values = sample_temporal(
-                p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+            values = _inject_temporal_sentinels(
+                p,
+                sample_temporal(
+                    p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+                ),
+                rng,
             )
 
         else:  # FREE_TEXT shouldn't reach here (filtered in fit()).
             values = [None] * n
 
         return [None if null_mask[i] else values[i] for i in range(n)]
+
+
+def _inject_temporal_sentinels(
+    p: ColumnProfile,
+    values: list,
+    rng: np.random.Generator,
+) -> list:
+    """Overwrite jittered temporal values with the profile's sentinel values
+    at their observed fractions (0001-01-01 / 9999-12-31 style — excluded
+    from the jitter [min, max] by the profiler, reproduced here instead)."""
+    if not p.temporal_sentinels:
+        return values
+    draws = rng.random(len(values))
+    out = list(values)
+    for i, r in enumerate(draws):
+        acc = 0.0
+        for sentinel_value, fraction in p.temporal_sentinels:
+            acc += fraction
+            if r < acc:
+                out[i] = sentinel_value
+                break
+    return out
 
 
 def _sample_categorical(
@@ -310,8 +336,12 @@ class SdgxBackend:
         out: dict[str, list] = {}
         for name, p in self._profiles.items():
             if p.kind is ColumnKind.TEMPORAL:
-                values = sample_temporal(
-                    p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+                values = _inject_temporal_sentinels(
+                    p,
+                    sample_temporal(
+                        p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+                    ),
+                    rng,
                 )
                 if p.nullable and p.null_fraction > 0.0:
                     null_mask = rng.random(n) < p.null_fraction

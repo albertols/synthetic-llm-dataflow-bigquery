@@ -337,3 +337,71 @@ def test_accented_text_does_not_trigger_nonprintable(caplog):
     with caplog.at_level(logging.WARNING):
         profile_table(_one_string_col_schema(), rows)
     assert not [r for r in caplog.records if "column_nonprintable" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-aware temporal ranges — the 2026-07-23 b2 E2E landed 5 date-STRING
+# columns with uniform dates across ~2000 years ("50-08-23", "955-10-29"):
+# the source's 0001-01-01 sentinel inflated the jitter [min, max]. Sentinel
+# values (year 1 / year 9999) must be excluded from the range and re-injected
+# at their observed frequency instead.
+# ---------------------------------------------------------------------------
+
+
+def _sentinel_date_schema() -> TableSchema:
+    return TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.sentinels"},
+            "schema": [{"name": "d", "type": "STRING", "mode": "REQUIRED"}],
+            "primary_keys": None,
+        }
+    )
+
+
+def _sentinel_date_rows() -> list[dict]:
+    real = [
+        {"d": f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}"} for i in range(300)
+    ]
+    return real + [{"d": "0001-01-01"}] * 200 + [{"d": "9999-12-31"}] * 50
+
+
+def test_temporal_profile_trims_sentinel_years_from_range():
+    profiles = profile_table(_sentinel_date_schema(), _sentinel_date_rows())
+    p = profiles["d"]
+    assert p.kind is ColumnKind.TEMPORAL
+    lo = from_epoch(p.minimum, p.temporal_value_type, p.temporal_format)
+    hi = from_epoch(p.maximum, p.temporal_value_type, p.temporal_format)
+    assert str(lo).startswith("2024") and str(hi).startswith("2024")
+    sentinels = dict(p.temporal_sentinels)
+    assert abs(sentinels["0001-01-01"] - 200 / 550) < 0.01
+    assert abs(sentinels["9999-12-31"] - 50 / 550) < 0.01
+
+
+def test_empirical_backend_reinjects_sentinels_and_stays_plausible():
+    schema = _sentinel_date_schema()
+    rows = _sentinel_date_rows()
+    profiles = profile_table(schema, rows)
+    backend = EmpiricalBackend()
+    backend.fit(rows, profiles)
+    out = backend.sample_columns(2000, np.random.default_rng(13))["d"]
+    n = len(out)
+    lo_frac = sum(v == "0001-01-01" for v in out) / n
+    hi_frac = sum(v == "9999-12-31" for v in out) / n
+    assert abs(lo_frac - 200 / 550) < 0.05   # sentinel mass preserved
+    assert abs(hi_frac - 50 / 550) < 0.05
+    regular = [v for v in out if v not in ("0001-01-01", "9999-12-31")]
+    assert regular
+    # Every non-sentinel value is a plausible in-range date — no year-50s.
+    assert all(v.startswith("2024") for v in regular)
+
+
+def test_all_sentinel_year_temporal_column_keeps_full_range():
+    # Degenerate: every observed value is in a sentinel year → nothing to
+    # trim toward; the range stays as observed and no injection happens.
+    schema = _sentinel_date_schema()
+    rows = [{"d": f"9999-01-{(i % 25) + 1:02d}"} for i in range(100)]
+    profiles = profile_table(schema, rows)
+    p = profiles["d"]
+    assert p.kind is ColumnKind.TEMPORAL
+    assert p.temporal_sentinels == ()
+    assert str(from_epoch(p.minimum, p.temporal_value_type, p.temporal_format)).startswith("9999")
