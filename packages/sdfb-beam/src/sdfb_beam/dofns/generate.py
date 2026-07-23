@@ -86,25 +86,13 @@ class GenerateRecordsDoFn(beam.DoFn):
             ctx = ctx.model_copy(update={"embedder_uri": local_dir})
             self.ctx = ctx  # cache so a re-entrant setup() skips the pull
 
-        # The vLLM client owns a server subprocess that must be started ONCE
-        # per worker — engines only see the narrow ModelClient Protocol
-        # (generate_json), so the lifecycle is the DoFn's job. Duck-typed:
-        # FakeModelClient has no lifecycle; MLX self-initializes lazily.
-        # Failures propagate — a worker that cannot start its LLM must crash
-        # the job, not degrade into copying reference exemplars (E2E
-        # 2026-07-10: every live run fell back because nobody called setup()).
-        client_setup = getattr(self.model_client, "setup", None)
-        if callable(client_setup):
-            log_milestone(
-                "model_client_setup_start",
-                client=type(self.model_client).__name__,
-            )
-            t_client = time.monotonic()
-            client_setup()
-            log_milestone(
-                "model_client_setup_done",
-                seconds=round(time.monotonic() - t_client, 1),
-            )
+        # LLM ignition is LAZY (WS1 §3b): VLLMModelClient.generate_json()
+        # calls its own idempotent, lock-serialized setup() on first use, so
+        # a run whose columns never reach the LLM (b2 with only empirical/
+        # identifier/jitter columns) never pays the vLLM bring-up — the
+        # 2026-07-20 run spent 519 GPU-s igniting a server that generated
+        # nothing. Failure stays loud: under strict_freetext a boot error
+        # raises out of the first pool call. teardown() remains unconditional.
 
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
@@ -135,12 +123,21 @@ class GenerateRecordsDoFn(beam.DoFn):
             # No explicit seed: derive one so batches never replay each other
             # while the run stays reproducible per run_id (E2E report §2).
             seed = derive_batch_seed(self.ctx.pipeline_run_id, batch_id)
+            # Batch-independent seed for once-per-worker artifacts (the B.2
+            # free-text pool build): stable within a run, varies across runs
+            # via the salted run_id. batch_id=-1 keeps it outside every real
+            # batch's seed namespace.
+            pool_seed = derive_batch_seed(self.ctx.pipeline_run_id, -1)
         else:
             seed = self.base_seed + batch_id
+            # Explicit seed ⇒ the pool build is reproducible across reruns
+            # regardless of which batch reaches the worker first (P6).
+            pool_seed = self.base_seed
         cfg = GenerationConfig(
             seed=seed,
             batch_size=n,
             similarity=self.similarity,
+            engine_specific={"pool_seed": pool_seed},
         )
         log_milestone("batch_start", batch_id=batch_id, n=n)
         t0 = time.monotonic()

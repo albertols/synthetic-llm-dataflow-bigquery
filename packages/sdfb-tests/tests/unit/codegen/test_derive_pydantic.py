@@ -7,7 +7,6 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
-
 from sdfb_core.codegen import derive_record_model
 from sdfb_core.contracts import GeneratedRecord, TableSchema
 

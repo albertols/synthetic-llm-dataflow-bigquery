@@ -206,14 +206,17 @@ def _get_clustering(bq_table: bigquery.Table) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+_BYTES_PER_UNIT = 1024.0
+
+
 def _human_bytes(num_bytes: int | None) -> str | None:
     if num_bytes is None:
         return None
     val: float = float(num_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(val) < 1024.0:
+        if abs(val) < _BYTES_PER_UNIT:
             return f"{val:.2f} {unit}"
-        val /= 1024.0
+        val /= _BYTES_PER_UNIT
     return f"{val:.2f} PB"
 
 
@@ -264,7 +267,7 @@ def _get_storage_info(
         )
         if rows:
             storage_info["num_partitions"] = rows[0].num_partitions
-    except Exception as e:  # noqa: BLE001  — informational only
+    except Exception as e:
         logger.warning(
             "Could not get partition count: %s: %s", type(e).__name__, e
         )

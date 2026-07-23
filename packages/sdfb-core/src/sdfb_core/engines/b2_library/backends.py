@@ -27,11 +27,14 @@ by the ``ModelClient`` free-text hook (``freetext.py``), not sampled here.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 
 from sdfb_core.engines.b2_library.fidelity import ColumnKind, ColumnProfile
+from sdfb_core.engines.b2_library.temporal import sample_temporal
+from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -135,10 +138,41 @@ class EmpiricalBackend:
         elif p.kind is ColumnKind.CATEGORICAL:
             values = _sample_categorical(p, n, rng, temperature)
 
+        elif p.kind is ColumnKind.TEMPORAL:
+            values = _inject_temporal_sentinels(
+                p,
+                sample_temporal(
+                    p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+                ),
+                rng,
+            )
+
         else:  # FREE_TEXT shouldn't reach here (filtered in fit()).
             values = [None] * n
 
         return [None if null_mask[i] else values[i] for i in range(n)]
+
+
+def _inject_temporal_sentinels(
+    p: ColumnProfile,
+    values: list,
+    rng: np.random.Generator,
+) -> list:
+    """Overwrite jittered temporal values with the profile's sentinel values
+    at their observed fractions (0001-01-01 / 9999-12-31 style — excluded
+    from the jitter [min, max] by the profiler, reproduced here instead)."""
+    if not p.temporal_sentinels:
+        return values
+    draws = rng.random(len(values))
+    out = list(values)
+    for i, r in enumerate(draws):
+        acc = 0.0
+        for sentinel_value, fraction in p.temporal_sentinels:
+            acc += fraction
+            if r < acc:
+                out[i] = sentinel_value
+                break
+    return out
 
 
 def _sample_categorical(
@@ -208,11 +242,26 @@ class SdgxBackend:
         }
         try:
             self._fit_sdgx(reference_rows)
-        except Exception:
+        except Exception as e:
             self._synthesizer = None
             self._fallback = EmpiricalBackend()
             self._fallback.fit(reference_rows, profiles)
             self.used_fallback = True
+            # Loud, like every other fallback: the 2026-07-22 b2 E2E run's
+            # worker logs could not tell which backend actually generated
+            # (a 3 s "fit" is the fallback, but nothing said so).
+            log_milestone(
+                "b2_backend_fallback",
+                level=logging.WARNING,
+                backend="empirical",
+                error=type(e).__name__,
+                # The message names WHAT failed (e.g. the missing module) —
+                # the 2026-07-22 re-run logged only the type, leaving the
+                # actual sdgx import defect unknowable from worker logs.
+                detail=str(e)[:160],
+            )
+        else:
+            log_milestone("b2_backend_fitted", backend="sdgx")
 
     def _fit_sdgx(self, reference_rows: list[dict]) -> None:
         # Deferred heavy imports — only here, never at module load. ANY
@@ -255,10 +304,16 @@ class SdgxBackend:
         return None
 
     def _reference_frame(self, reference_rows: list[dict], pd_module) -> pd.DataFrame:
-        """Reference rows → DataFrame, dropping free-text columns (the LLM
-        hook owns them; feeding high-cardinality prose to CTGAN is wasteful
-        and degrades the fit)."""
-        keep = set(self._profiles)
+        """Reference rows → DataFrame, dropping free-text and temporal columns.
+
+        Temporal columns are jitter-sampled from their profile, never fed
+        to CTGAN — fitting raw timestamps makes the model resample the
+        observed table (the 2026-07-20 memorization defect).
+        """
+        keep = {
+            name for name, p in self._profiles.items()
+            if p.kind is not ColumnKind.TEMPORAL
+        }
         rows = [{k: v for k, v in row.items() if k in keep} for row in reference_rows]
         return pd_module.DataFrame(rows)
 
@@ -280,7 +335,19 @@ class SdgxBackend:
         sampled = self._synthesizer.sample(n)  # pandas DataFrame
         out: dict[str, list] = {}
         for name, p in self._profiles.items():
-            if name in sampled.columns:
+            if p.kind is ColumnKind.TEMPORAL:
+                values = _inject_temporal_sentinels(
+                    p,
+                    sample_temporal(
+                        p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+                    ),
+                    rng,
+                )
+                if p.nullable and p.null_fraction > 0.0:
+                    null_mask = rng.random(n) < p.null_fraction
+                    values = [None if null_mask[i] else values[i] for i in range(n)]
+                out[name] = values
+            elif name in sampled.columns:
                 out[name] = list(sampled[name])
             else:
                 # CTGAN dropped a column (e.g. constant) — fill from profile.

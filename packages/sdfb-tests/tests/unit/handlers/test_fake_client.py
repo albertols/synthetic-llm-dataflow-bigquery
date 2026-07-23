@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from sdfb_beam.handlers.fake_client import FakeModelClient
 from sdfb_core.engines import ModelClient
 

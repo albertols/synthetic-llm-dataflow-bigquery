@@ -31,15 +31,15 @@
 #   /usr/local/nvidia/). No system CUDA install needed in the image.
 #
 # Base images:
-#   Beam SDK: dkr-public-local/dkr-io/apache/beam_python3.11_sdk:2.71.0
+#   Beam SDK: dkr-public-local/dkr-io/apache/beam_python3.11_sdk:2.74.0
 #     → amd64, Debian-based, Python 3.11, /opt/apache/beam/boot included
-#     → apache-beam pinned ==2.71.0 to match (see ADR 0012)
+#     → apache-beam pinned ==2.74.0 to match (see ADR 0012)
 #   Launcher: gcr.io/dataflow-templates-base/python311-template-launcher-base
 #     → only /opt/google/dataflow/python_template_launcher is copied from it
 # ---------------------------------------------------------------------------
 
 ARG ARTIFACTORY_HOSTNAME_ARG="the-artifactory.com"
-ARG BEAM_SDK_IMAGE="${ARTIFACTORY_HOSTNAME_ARG}/dkr-public-local/dkr-io/apache/beam_python3.11_sdk:2.71.0"
+ARG BEAM_SDK_IMAGE="${ARTIFACTORY_HOSTNAME_ARG}/dkr-public-local/dkr-io/apache/beam_python3.11_sdk:2.74.0"
 ARG LAUNCHER_IMAGE="gcr.io/dataflow-templates-base/python311-template-launcher-base"
 
 # ---------------------------------------------------------------------------

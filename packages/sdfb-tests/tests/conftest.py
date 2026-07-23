@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import pytest
-
 from sdfb_tests.fixtures import load_ddl, load_reference
-
 
 # ---------------------------------------------------------------------------
 # File-backed fixtures (canonical reference data).
