@@ -228,6 +228,7 @@ class VLLMModelClient:
                 return
 
             t0 = time.monotonic()
+            log_milestone("model_client_setup_start", client=type(self).__name__)
 
             # A previous bundle attempt in this container may have left a
             # healthy server behind, and while this thread waited on
@@ -247,6 +248,10 @@ class VLLMModelClient:
                 self._bind_server_locked()
                 log_milestone(
                     "vllm_reuse", seconds=round(time.monotonic() - t0, 1)
+                )
+                log_milestone(
+                    "model_client_setup_done",
+                    seconds=round(time.monotonic() - t0, 1),
                 )
                 logger.info(
                     "Reusing healthy vLLM server already serving %r at %s "
@@ -284,6 +289,9 @@ class VLLMModelClient:
             self._client = self._build_openai_client()
             self._bind_server_locked()
             log_milestone("vllm_ready", seconds=round(time.monotonic() - t0, 1))
+            log_milestone(
+                "model_client_setup_done", seconds=round(time.monotonic() - t0, 1)
+            )
             logger.info("vLLM server ready at %s", self.base_url)
 
     def _bind_server_locked(self) -> None:
@@ -371,11 +379,10 @@ class VLLMModelClient:
         set should request ONE completion carrying an array of values.
         """
         if self._client is None:
-            raise RuntimeError(
-                "VLLMModelClient.generate_json() called before setup() (or "
-                "after teardown()). The Beam DoFn must call setup() once per "
-                "worker before generate_batch()."
-            )
+            # Lazy ignition (WS1 §3b): the first real LLM call brings the
+            # server up. setup() is idempotent and _SETUP_LOCK-serialized,
+            # so concurrent DoFn threads still share one server.
+            self.setup()
 
         request: dict = {
             "model": self._served_model_name,

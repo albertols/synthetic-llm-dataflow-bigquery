@@ -18,6 +18,15 @@ authors = [{ name = "synthetic-dataflow-bigquery contributors" }]
 [tool.uv]
 package = false
 
+# apache-beam 2.74.0 → envoy-data-plane >=1.0.3 → betterproto==2.0.0b6, a
+# PRE-RELEASE. uv's default strategy (if-necessary-or-explicit) only accepts
+# pre-releases pinned explicitly in first-party requirements or constraints —
+# a transitive pin does not qualify and resolution fails with "no version of
+# betterproto==2.0.0b6". Surfacing the pin here is the canonical uv pattern
+# for transitive pre-release deps. Drop when beam's envoy-data-plane chain
+# moves to a stable betterproto.
+constraint-dependencies = ["betterproto==2.0.0b6"]
+
 # Corporate package index. Direct pypi.org / files.pythonhosted.org are
 # unreachable from the M4 (and from CI behind the corp network); JFrog
 # `pypi-all` is a virtual repo that proxies pypi through the company
@@ -68,7 +77,10 @@ select = ["E", "F", "I", "B", "UP", "N", "RUF", "SIM", "PL"]
 ignore = ["E501", "PLR0913", "PLC0415"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["PLR2004"]  # magic-number checks are noise in tests
+# PLR2004: magic-number checks are noise in tests.
+# N806: `Record = derive_record_model(...)` binds a dynamically derived class —
+# PascalCase is the correct name for a class object, even in a local.
+"**/tests/**" = ["PLR2004", "N806"]
 
 [tool.mypy]
 python_version = "3.11"

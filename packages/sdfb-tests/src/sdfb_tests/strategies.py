@@ -13,7 +13,6 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from hypothesis import strategies as st
-
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
 
 _MIN_DT = datetime(2000, 1, 1, tzinfo=UTC)
@@ -33,7 +32,7 @@ def _decimal_strategy(precision: int, scale: int) -> st.SearchStrategy[Decimal]:
     )
 
 
-def _scalar_strategy(field: FieldSchema) -> st.SearchStrategy:
+def _scalar_strategy(field: FieldSchema) -> st.SearchStrategy:  # noqa: PLR0911 — type dispatch; sequential returns read clearer than nesting
     """Strategy for a single non-repeated, non-struct field."""
     t = field.bq_type
     if t == "STRING":
@@ -66,10 +65,11 @@ def _scalar_strategy(field: FieldSchema) -> st.SearchStrategy:
 
 def _field_strategy(field: FieldSchema) -> st.SearchStrategy:
     """Strategy for a `FieldSchema`, respecting mode (NULLABLE / REPEATED)."""
-    if field.is_struct:
-        base = _struct_strategy(field.fields or [])
-    else:
-        base = _scalar_strategy(field)
+    base = (
+        _struct_strategy(field.fields or [])
+        if field.is_struct
+        else _scalar_strategy(field)
+    )
 
     if field.is_repeated:
         return st.lists(base, min_size=0, max_size=4)

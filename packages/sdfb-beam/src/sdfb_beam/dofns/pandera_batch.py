@@ -16,9 +16,9 @@ import apache_beam as beam
 import pandas as pd
 import pandera.errors as pa_err
 from apache_beam.metrics import Metrics
+from sdfb_core.contracts import TableSchema
 
 from sdfb_beam.codegen import derive_pandera_schema
-from sdfb_core.contracts import TableSchema
 
 
 class PanderaValidateBatchDoFn(beam.DoFn):
@@ -89,7 +89,7 @@ class PanderaValidateBatchDoFn(beam.DoFn):
                 except (TypeError, ValueError):
                     continue
             return out if out else set(range(batch_size))
-        except Exception:  # noqa: BLE001
+        except Exception:
             return set(range(batch_size))
 
     @staticmethod
@@ -97,13 +97,10 @@ class PanderaValidateBatchDoFn(beam.DoFn):
         """Compact, JSON-friendly error summary for one row."""
         try:
             fc = errors.failure_cases
-            if "index" in fc.columns:
-                row_fc = fc[fc["index"] == idx]
-            else:
-                row_fc = fc
+            row_fc = fc[fc["index"] == idx] if "index" in fc.columns else fc
             return {
-                "failure_count": int(len(row_fc)),
+                "failure_count": len(row_fc),
                 "first_failures": row_fc.head(5).astype(str).to_dict("records"),
             }
-        except Exception:  # noqa: BLE001
+        except Exception:
             return {"raw": str(errors)[:500]}
