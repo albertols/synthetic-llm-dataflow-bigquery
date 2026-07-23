@@ -26,6 +26,7 @@ from enum import StrEnum
 
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
 from sdfb_core.engines.b2_library.temporal import (
+    age_floor_epoch,
     classify_temporal_values,
     from_epoch,
     to_epoch,
@@ -66,6 +67,17 @@ _TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIME", "TIMESTAMP"})
 # in [min, max] made the 2026-07-23 b2 E2E land uniform dates across ~2000
 # years ("50-08-23", "955-10-29") on five date-STRING columns.
 _TEMPORAL_SENTINEL_YEARS = frozenset({1, 9999})
+
+# Interim temporal-age policy (2026-07-23): generated dates/datetimes/
+# timestamps must not be older than this. The jitter floor becomes
+# max(observed_min, now - 10y); columns whose ENTIRE observed range is older
+# keep it unchanged (fabricated recent dates would be worse than old truth).
+# EXPLICITLY interim: per-column behavior will later come from the DDL-JSON
+# description (audit fields that must keep fixed/consistent values, FK
+# referential integrity across linked tables, M2+) and must override this
+# blanket constant — keep the policy a single constant + clamp, not a
+# config surface, until that metadata exists.
+_MAX_TEMPORAL_AGE_YEARS = 10
 
 # Control-character guard (WS1 §3c): values containing C0/C1 control bytes
 # in a STRING column usually mean binary data mis-declared upstream
@@ -228,6 +240,65 @@ def _hashable(value: object) -> object:
         return repr(value)
 
 
+def _temporal_profile(
+    field: FieldSchema,
+    non_null: list[object],
+    nullable: bool,
+    null_fraction: float,
+) -> ColumnProfile | None:
+    """The TEMPORAL profile for a column, or None when the observed values
+    are mixed/unparseable (caller demotes to CATEGORICAL).
+
+    Sentinel-year values are split out of the jitter range (re-injected at
+    sampling time at their observed fraction); a column that is ALL
+    sentinel years has nothing to trim toward and keeps the observed range.
+    The floor is then clamped to now - `_MAX_TEMPORAL_AGE_YEARS` — unless
+    the whole range is older (fully-historical columns keep old truth;
+    per-column DDL-JSON descriptions govern later).
+    """
+    spec = classify_temporal_values(non_null)
+    if spec is None:
+        return None
+    value_type, fmt = spec
+    regular: list[object] = []
+    sentinel_counts: Counter = Counter()
+    for v in non_null:
+        year = value_year(v, value_type, fmt)
+        if year in _TEMPORAL_SENTINEL_YEARS:
+            sentinel_counts[v] += 1
+        else:
+            regular.append(v)
+    if not regular:
+        regular = list(non_null)
+        sentinel_counts = Counter()
+    epochs = [to_epoch(v, value_type, fmt) for v in regular]
+    total_non_null = len(non_null)
+    temporal_sentinels = tuple(
+        (v, count / total_non_null) for v, count in sentinel_counts.items()
+    )
+    lo, hi = min(epochs), max(epochs)
+    floor = age_floor_epoch(value_type, fmt, _MAX_TEMPORAL_AGE_YEARS)
+    if floor is not None and lo < floor <= hi:
+        lo = floor
+        log_milestone(
+            "temporal_range_clamped",
+            column=field.name,
+            max_age_years=_MAX_TEMPORAL_AGE_YEARS,
+        )
+    return ColumnProfile(
+        name=field.name,
+        bq_type=field.bq_type,
+        kind=ColumnKind.TEMPORAL,
+        nullable=nullable,
+        null_fraction=null_fraction,
+        minimum=lo,
+        maximum=hi,
+        temporal_value_type=value_type,
+        temporal_format=fmt,
+        temporal_sentinels=temporal_sentinels,
+    )
+
+
 def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProfile:
     """Profile a single column over the reference rows (the O(1) fit step)."""
     raw = _column_values(reference_rows, field.name)
@@ -283,46 +354,12 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
         )
 
     if kind is ColumnKind.TEMPORAL:
-        spec = classify_temporal_values(non_null)
-        if spec is None:
-            # BQ-typed temporal whose observed values are mixed/unparseable:
-            # stay in-support rather than guessing an epoch mapping.
-            kind = ColumnKind.CATEGORICAL
-        else:
-            value_type, fmt = spec
-            # Split sentinel-year values out of the jitter range; they are
-            # re-injected at sampling time at their observed fraction. A
-            # column that is ALL sentinel years has nothing to trim toward —
-            # keep the observed range and skip injection.
-            regular: list[object] = []
-            sentinel_counts: Counter = Counter()
-            for v in non_null:
-                year = value_year(v, value_type, fmt)
-                if year in _TEMPORAL_SENTINEL_YEARS:
-                    sentinel_counts[v] += 1
-                else:
-                    regular.append(v)
-            if not regular:
-                regular = list(non_null)
-                sentinel_counts = Counter()
-            epochs = [to_epoch(v, value_type, fmt) for v in regular]
-            total_non_null = len(non_null)
-            temporal_sentinels = tuple(
-                (v, count / total_non_null)
-                for v, count in sentinel_counts.items()
-            )
-            return ColumnProfile(
-                name=field.name,
-                bq_type=field.bq_type,
-                kind=ColumnKind.TEMPORAL,
-                nullable=nullable,
-                null_fraction=null_fraction,
-                minimum=min(epochs),
-                maximum=max(epochs),
-                temporal_value_type=value_type,
-                temporal_format=fmt,
-                temporal_sentinels=temporal_sentinels,
-            )
+        profile = _temporal_profile(field, non_null, nullable, null_fraction)
+        if profile is not None:
+            return profile
+        # BQ-typed temporal whose observed values are mixed/unparseable:
+        # stay in-support rather than guessing an epoch mapping.
+        kind = ColumnKind.CATEGORICAL
 
     if kind is ColumnKind.FREE_TEXT:
         pool = _dedupe_stable([str(v) for v in non_null])
