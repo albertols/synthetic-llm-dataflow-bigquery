@@ -203,7 +203,10 @@ def build_pipeline(
 
     # WS2 §4b.1 — optional rag_chunks population branch. The driver decides
     # (existence check) whether to pass a sink; None ⇒ branch absent, DAG
-    # unchanged (the validation_runs_sink precedent).
+    # unchanged (the validation_runs_sink precedent). Feeds on
+    # `reference_rows` — the driver-loaded ≤10k sample whose digest is this
+    # run's provenance key — NOT a full-table read; scope rationale in
+    # sdfb_beam/rag/population.py.
     if rag_chunks_sink is not None:
         free_text_columns = _rag_free_text_columns(
             config.table_schema, reference_rows

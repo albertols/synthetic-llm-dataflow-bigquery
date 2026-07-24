@@ -620,6 +620,8 @@ def fake_gcs(monkeypatch):
 
         def download_to_filename(self, dest):
             self.downloaded_to = dest
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(self.name)
 
     recorder = {"list_calls": [], "blobs": []}
 
@@ -661,14 +663,15 @@ def test_pull_weights_downloads_blobs_relative_to_prefix(fake_gcs, tmp_path):
     c._pull_weights()
 
     assert fake_gcs["list_calls"] == [("my-bucket", prefix)]
-    downloaded = sorted(b.downloaded_to for b in fake_gcs["blobs"] if b.downloaded_to)
-    assert downloaded == sorted(
-        [
-            str(tmp_path / "model" / "config.json"),
-            str(tmp_path / "model" / "model-00001.safetensors"),
-            str(tmp_path / "model" / "tokenizer" / "tokenizer.json"),
-        ]
-    )
+    # Downloads stage in a temp dir and are renamed into place (the warm-pull
+    # is atomic since the 2026-07-24 SIGBUS postmortem) — assert the final
+    # layout, not where the blob API wrote.
+    for rel in (
+        "config.json",
+        "model-00001.safetensors",
+        "tokenizer/tokenizer.json",
+    ):
+        assert (tmp_path / "model" / rel).is_file(), rel
 
 
 def test_pull_weights_raises_when_no_blobs(fake_gcs, tmp_path):

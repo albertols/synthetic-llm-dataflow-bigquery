@@ -8,6 +8,11 @@ what makes the generation-time read a safe substitute for re-embedding
 `sdfb_beam.io.digest.compute_reference_digest` (json.dumps sort_keys
 default=str → SHA-256) so the two provenance hashes stay comparable.
 Pure stdlib.
+
+Chunking input is the driver-loaded reference *sample* (default 10k rows,
+deterministically fingerprint-ordered), never the full source table — see
+`sdfb_beam.rag.population` for the scope rationale (provenance digest,
+distribution-inference purpose, embed cost, bounded privacy surface).
 """
 
 from __future__ import annotations

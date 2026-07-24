@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -117,6 +118,17 @@ class BgeEmbedder:
     `HashingEmbedder` instead.
     """
 
+    # Construction is serialized per process (2026-07-24 E2E postmortem):
+    # transformers v5's lazy `_LazyModule` is not thread-safe — 8 Beam bundle
+    # threads hitting the first `from transformers import AutoModel`
+    # concurrently raise `ImportError: cannot import name 'AutoModel'` for
+    # most of them (reproduced 30/30 locally on 5.8.1). Holding the lock over
+    # `from_pretrained` too keeps concurrent mmap weight-loads from stacking
+    # up. Instances stay per-caller: HF fast tokenizers are NOT safe to
+    # share across threads ("Already borrowed"), so we serialize the build,
+    # not the object.
+    _construction_lock: threading.Lock = threading.Lock()
+
     def __init__(
         self,
         model_path: str,
@@ -125,23 +137,26 @@ class BgeEmbedder:
         max_length: int = 512,
         device: str = "cpu",
     ) -> None:
-        # Lazy heavy imports — never at module scope (keeps sdfb-core pure).
-        import torch
-        from transformers import AutoModel, AutoTokenizer
+        with BgeEmbedder._construction_lock:
+            # Lazy heavy imports — never at module scope (keeps sdfb-core
+            # pure).
+            import torch
+            from transformers import AutoModel, AutoTokenizer
 
-        self._torch = torch
-        self._dim = dim
-        self._max_length = max_length
-        self._device = device
-        # local_files_only=True is belt-and-braces on top of HF_HUB_OFFLINE=1:
-        # a local path with this flag can never reach the Hub.
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            model_path, local_files_only=True
-        )
-        self._model = AutoModel.from_pretrained(
-            model_path, local_files_only=True
-        ).to(device)
-        self._model.eval()
+            self._torch = torch
+            self._dim = dim
+            self._max_length = max_length
+            self._device = device
+            # local_files_only=True is belt-and-braces on top of
+            # HF_HUB_OFFLINE=1: a local path with this flag can never reach
+            # the Hub.
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                model_path, local_files_only=True
+            )
+            self._model = AutoModel.from_pretrained(
+                model_path, local_files_only=True
+            ).to(device)
+            self._model.eval()
 
     @property
     def dim(self) -> int:

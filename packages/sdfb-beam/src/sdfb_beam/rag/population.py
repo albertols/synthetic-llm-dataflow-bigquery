@@ -5,6 +5,30 @@ DoFn with a setup()-built embedder (the same GCS warm-pull + local-only
 loading as `GenerateRecordsDoFn`) rather than a RunInference ModelHandler
 — one embedding code path, one lifecycle pattern; the rewritten RAG
 design doc records this delta from the 2026-07-07 diagram.
+
+**Scope — the sample, never the full source table.** This branch chunks
+and embeds exactly the driver-loaded reference sample (`load_reference_rows`,
+`--reference_rows_limit`, default 10k, deterministic FARM_FINGERPRINT
+ordering — see `sdfb_beam.io.bq_sources`), NOT every row of the source
+table. Deliberate, for four reasons:
+
+  1. Provenance: `reference_digest` is computed over the driver-held rows
+     before graph construction; the chunk set must be exactly that row set
+     or the digest stops describing what was embedded.
+  2. Purpose: the chunks condition per-column distribution inference and
+     exemplar retrieval (ADR 0013 — estimate once, sample vectorized);
+     a representative sample carries that signal, an exhaustive copy adds
+     rows, cost, and no new distributional information.
+  3. Cost/wall-clock: CPU-embedding is the T4/n1 bottleneck (the
+     2026-07-16 run spent 26-92 min per bundle embedding 10k rows);
+     full-table embedding scales that by the table's row count.
+  4. Privacy surface: every embedded row is source data reproduced into
+     `rag_chunks` and worker memory. After the 2026-07-10 exemplar-leak
+     postmortem, the exposure is kept bounded to the sampled subset.
+
+The in-worker retrieval index narrows further still — B.1's setup embeds
+at most `_MAX_EMBED_ROWS` (1024) of the sample (see
+`sdfb_core.engines.b1_rag.engine`).
 """
 
 from __future__ import annotations
