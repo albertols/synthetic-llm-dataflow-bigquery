@@ -95,7 +95,24 @@ def test_pool_target_respects_column_distinct():
     engine.teardown()
 
 
-def test_pool_llm_yield_stops_at_target_and_bounds_calls():
+def _free_text_prof():
+    from sdfb_core.engines.b1_rag.profile import ColumnKind, ColumnProfile
+
+    return ColumnProfile(
+        name="notes",
+        bq_type="STRING",
+        kind=ColumnKind.FREE_TEXT,
+        nullable=False,
+        null_fraction=0.0,
+    )
+
+
+def test_pool_llm_yield_empty_yield_stops_after_full_ladder():
+    """An all-empty yield used to ride the full 2*ceil(target/32)=32-call
+    budget (2026-07-23 E2E: ~30 min of T4 setup across 2 such columns).
+    Every escalation level must run once; after that, attempts that add no
+    novel values are pure waste and the ladder must stop."""
+
     class _EmptyClient:
         def __init__(self) -> None:
             self.calls = 0
@@ -104,16 +121,37 @@ def test_pool_llm_yield_stops_at_target_and_bounds_calls():
             self.calls += 1
             return [{"values": []}]
 
-    from sdfb_core.engines.b1_rag.profile import ColumnKind, ColumnProfile
+    from sdfb_core.engines.base import escalating_sampling
 
-    prof = ColumnProfile(
-        name="notes",
-        bq_type="STRING",
-        kind=ColumnKind.FREE_TEXT,
-        nullable=False,
-        null_fraction=0.0,
-    )
     client = _EmptyClient()
-    y = _pool_llm_yield(client, "p", {}, prof, [], target=512)
+    y = _pool_llm_yield(client, "p", {}, _free_text_prof(), [], target=512)
     assert y.pool == []
-    assert client.calls == 2 * -(-512 // _POOL_VALUES_PER_CALL)  # bounded, never infinite
+    assert client.calls == len(escalating_sampling())  # 3, not 32
+
+
+def test_pool_llm_yield_stops_when_novel_yield_stagnates():
+    """2026-07-23 E2E CHANGE_USERID: 32 attempts parsed 1035 values for a
+    257-value pool — after the early attempts the model only re-emitted
+    duplicates/echoes. Consecutive low-novelty attempts (after the ladder is
+    exhausted) must end the loop, keeping whatever the early attempts won."""
+
+    class _StagnantClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_json(self, prompt, json_schema, **kw):
+            self.calls += 1
+            return [{"values": [f"same value {i}" for i in range(8)]}]
+
+    client = _StagnantClient()
+    y = _pool_llm_yield(client, "p", {}, _free_text_prof(), [], target=512)
+    assert y.pool == [f"same value {i}" for i in range(8)]  # early yield kept
+    assert client.calls <= 6  # ladder (3) + stagnation window, not 32
+
+
+def test_pool_llm_yield_healthy_client_still_reaches_target():
+    """The stagnation exit must not fire while the pool is actually growing."""
+    client = _BatchClient()
+    y = _pool_llm_yield(client, "p", {}, _free_text_prof(), [], target=512)
+    assert len(y.pool) >= 512
+    assert client.calls == -(-512 // _POOL_VALUES_PER_CALL)  # 16 full-yield calls

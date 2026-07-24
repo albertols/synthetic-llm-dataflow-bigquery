@@ -16,6 +16,7 @@ Substitution markers (workflow 3 seds these at import time):
   {{SDFB_EMBEDDER_URI}}       gs://<bucket>/synthetic/models/embedders/… (B.1; empty ⇒ HashingEmbedder)
   {{SDFB_DEFAULT_TABLE_FQN}}  project.dataset.table
   {{SDFB_DDL_URI}}            gs://…/ddl.json (empty ⇒ operator omits ddl_uri; live INFORMATION_SCHEMA extraction)
+  {{SDFB_RAG_CHUNKS_TABLE}}   project.synthetic_rag.rag_chunks (B.1 chunk store; empty ⇒ params omitted, no reuse/population)
   {{WRITE_DISPOSITION}}       default of the `write_disposition` DAG param (append | overwrite)
   {{SDFB_LANDING_TABLE}}      project.synthetic_data.<table> (defaults to the source table name)
   {{SDFB_DLQ_TABLE}}          project.synthetic_data_quality.dlq
@@ -55,6 +56,10 @@ WRITE_DISPOSITION_DEFAULT = "{{WRITE_DISPOSITION}}"
 # Empty ⇒ the DAG omits the ddl_uri Flex parameter entirely and the launcher
 # live-extracts the schema from the source table (WS4 §6b).
 _DDL_URI = "{{SDFB_DDL_URI}}"
+# B.1 RAG chunk store (WS2). Empty ⇒ the DAG omits rag_chunks_table AND
+# build_rag_layer entirely: the launcher re-embeds per worker, no persisted
+# chunk reuse (the 2026-07-23 run spent 158s re-embedding for this reason).
+_RAG_CHUNKS_TABLE = "{{SDFB_RAG_CHUNKS_TABLE}}"
 
 # -----------------------------------------------------------------------------
 # Runtime infra — Composer Variables, set once per env (not build-time-baked).
@@ -221,6 +226,16 @@ default_dag_params = {
         description="Create the landing table on first write "
                     "(CREATE_IF_NEEDED + derived schema).",
     ),
+    "build_rag_layer": Param(
+        default="true",
+        type="string",
+        enum=["true", "false"],
+        description="Populate the B.1 RAG chunk store from this run's "
+                    "reference sample (skipped in-launcher when the "
+                    "reference_digest already exists for the embedder "
+                    "id+version). Ignored when the build left "
+                    "SDFB_RAG_CHUNKS_TABLE empty.",
+    ),
 }
 
 with models.DAG(
@@ -308,6 +323,16 @@ with models.DAG(
                     # empty-string value would fail the template's ddl_uri
                     # regex, so omission (not "") is the off state.
                     **({"ddl_uri": _DDL_URI} if _DDL_URI else {}),
+                    # Omitted together when the build left the chunk-store
+                    # marker empty — same off-state convention as ddl_uri.
+                    **(
+                        {
+                            "rag_chunks_table": _RAG_CHUNKS_TABLE,
+                            "build_rag_layer": "{{ params.build_rag_layer }}",
+                        }
+                        if _RAG_CHUNKS_TABLE
+                        else {}
+                    ),
                     "reference_table": "{{ params.table_fqn }}",
                     "reference_rows_limit": "10000",
                     "landing_table": "{{SDFB_LANDING_TABLE}}",

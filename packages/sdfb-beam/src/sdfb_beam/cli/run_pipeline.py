@@ -121,10 +121,13 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--embedder_uri", default="",
                    help="gs://<bucket>/synthetic/models/embedders/<model>/<version>/ "
                         "for the B.1 RAG embedder (optional; empty → HashingEmbedder)")
-    p.add_argument("--build_rag_layer", action="store_true",
-                   help="Populate synthetic_rag.rag_chunks from this run's "
+    p.add_argument("--build_rag_layer", nargs="?", const="true", default="",
+                   help="true/false (bare flag = true). Populate "
+                        "synthetic_rag.rag_chunks from this run's "
                         "reference sample (skipped if the reference_digest "
-                        "is already present for this embedder id+version).")
+                        "is already present for this embedder id+version). "
+                        "String-valued so the Flex Template/DAG chain can "
+                        "pass --build_rag_layer=true.")
     p.add_argument("--rag_chunks_table", default="",
                    help="FQN of synthetic_rag.rag_chunks. Enables the "
                         "read-instead-of-reembed path; with "
@@ -152,7 +155,7 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "model/GPU pairing and dwarfs the synthesis prompts. "
                         "Empty = no cap (native context).")
     args, beam_args = p.parse_known_args(argv)
-    if args.build_rag_layer and not args.rag_chunks_table:
+    if parse_bool_flag(args.build_rag_layer) and not args.rag_chunks_table:
         p.error("--build_rag_layer requires --rag_chunks_table")
     return args, beam_args
 
@@ -378,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     embedder_id, embedder_version = embedder_identity(args.embedder_uri)
 
     rag_chunks_sink = None
-    if args.build_rag_layer and args.rag_chunks_table:
+    if parse_bool_flag(args.build_rag_layer) and args.rag_chunks_table:
         digest = compute_reference_digest(reference_rows)
         store = BigQueryChunkStore(args.rag_chunks_table)
         if store.exists(digest, embedder_id, embedder_version):

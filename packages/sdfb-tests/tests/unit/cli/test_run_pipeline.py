@@ -344,7 +344,7 @@ def test_resolve_engine_strictness(client_type, expected):
 
 def test_parse_args_rag_layer_flags_default_off():
     args, _ = parse_args(_common_args())
-    assert args.build_rag_layer is False
+    assert parse_bool_flag(args.build_rag_layer) is False
     assert args.rag_chunks_table == ""
 
 
@@ -355,8 +355,28 @@ def test_parse_args_rag_layer_flags():
         "--rag_chunks_table", "proj.synthetic_rag.rag_chunks",
     ]
     args, _ = parse_args(argv)
-    assert args.build_rag_layer is True
+    assert parse_bool_flag(args.build_rag_layer) is True
     assert args.rag_chunks_table == "proj.synthetic_rag.rag_chunks"
+
+
+def test_parse_args_build_rag_layer_accepts_flex_template_value():
+    """Flex Templates pass every parameter as --name=value — the bare
+    store_true form can't receive one, so the flag must accept true/false
+    strings too (composer DAG: build_rag_layer param)."""
+    argv = [
+        *_common_args(),
+        "--build_rag_layer=true",
+        "--rag_chunks_table=proj.synthetic_rag.rag_chunks",
+    ]
+    args, _ = parse_args(argv)
+    assert parse_bool_flag(args.build_rag_layer) is True
+    argv = [
+        *_common_args(),
+        "--build_rag_layer=false",
+        "--rag_chunks_table=proj.synthetic_rag.rag_chunks",
+    ]
+    args, _ = parse_args(argv)
+    assert parse_bool_flag(args.build_rag_layer) is False
 
 
 def test_parse_args_build_rag_layer_requires_table():

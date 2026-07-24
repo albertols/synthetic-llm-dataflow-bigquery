@@ -199,22 +199,52 @@ def bq_cross_validation(
             "is_pk": name in pk_columns,
         }
         # Memorization: fraction of landing values that also exist in source.
+        # Sentinel-aware (2026-07-23 b1_rag run): "0001-01-01"/"9999-12-31"
+        # null-substitutes are re-injected at observed frequency BY DESIGN
+        # (engine sentinel parity) and always exist in source, so the raw
+        # copy_ratio conflates them with real copying — measure them apart.
+        # `day_shaped_n` detects day-granularity values (dates render as
+        # exactly `YYYY-MM-DD`) whose in-source collisions are a
+        # domain-size artifact, not per-row memorization (see
+        # `memorization_flags`). SAFE_CAST: BYTES columns must not kill the
+        # probe on invalid UTF-8.
         if name in src_cols:
-            copied = _scalar(
+            sentinel_re = r"'^(0001|9999)-'"
+            day_re = r"'^\d{4}-\d{2}-\d{2}$'"
+            in_src = (
+                f"{col} IN (SELECT DISTINCT {col} FROM {_quote(source_fqn)})"
+            )
+            mem = _row(
                 client,
                 f"""
-                SELECT COUNTIF({col} IN (
-                    SELECT DISTINCT {col} FROM {_quote(source_fqn)}
-                ))
+                SELECT
+                  COUNTIF({in_src}) AS copied,
+                  COUNTIF(REGEXP_CONTAINS(
+                      SAFE_CAST({col} AS STRING), {sentinel_re})) AS sentinel_n,
+                  COUNTIF({in_src} AND NOT IFNULL(REGEXP_CONTAINS(
+                      SAFE_CAST({col} AS STRING), {sentinel_re}), FALSE))
+                    AS copied_nonsentinel,
+                  COUNTIF(REGEXP_CONTAINS(
+                      SAFE_CAST({col} AS STRING), {day_re})) AS day_shaped_n
                 FROM {_quote(landing_fqn)}
                 """,
             )
             src_distinct = _scalar(
                 client, f"SELECT COUNT(DISTINCT {col}) FROM {_quote(source_fqn)}"
             )
+            copied = mem["copied"]
+            sentinel_n = mem["sentinel_n"] or 0
+            non_null = n - (agg["null_n"] or 0)
             entry["source_distinct"] = src_distinct
             entry["copy_ratio"] = _ratio(copied, n)          # memorization
             entry["novelty_ratio"] = _ratio((n - (copied or 0)), n)
+            entry["sentinel_fraction"] = _ratio(sentinel_n, n)
+            entry["copy_ratio_nonsentinel"] = _ratio(
+                mem["copied_nonsentinel"], n - sentinel_n
+            )
+            entry["temporal_day_granularity"] = bool(
+                non_null > 0 and (mem["day_shaped_n"] or 0) >= 0.99 * non_null
+            )
         per_col[name] = entry
 
     return {
@@ -239,37 +269,63 @@ _MEM_COPY_RATIO_THRESHOLD = 0.3
 
 
 def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
-    """CRITICAL memorization findings from `bq_cross_validation` per-column
-    entries: non-constant, source_distinct > 100, copy_ratio >= 0.3. Sorted
-    worst-first. Columns without a measured copy_ratio (not in the source
-    schema, or an empty landing table → `_ratio` returned None) are skipped —
-    absence of measurement is not evidence of safety, but it is not a flag."""
+    """Memorization findings from `bq_cross_validation` per-column entries:
+    non-constant, source_distinct > 100, scored ratio >= 0.3. Sorted
+    worst-first (CRITICAL before INFO). Columns without a measured
+    copy_ratio (not in the source schema, or an empty landing table →
+    `_ratio` returned None) are skipped — absence of measurement is not
+    evidence of safety, but it is not a flag.
+
+    Sentinel/temporal awareness (2026-07-23 b1_rag run: 6 date-shaped
+    columns false-flagged CRITICAL at copy_ratio 0.60-0.97): the scored
+    ratio excludes sentinel rows when measured (`copy_ratio_nonsentinel`)
+    — sentinel parity is by-design fidelity, not copying — and
+    day-granularity temporal columns downgrade to INFO: a calendar day
+    drawn from the clamped ~3650-day window collides with a dense source
+    by domain size, never identifying a source row."""
     flags = []
     for name, entry in columns.items():
         copy_ratio = entry.get("copy_ratio")
+        scored = entry.get("copy_ratio_nonsentinel")
+        if scored is None:
+            scored = copy_ratio
         source_distinct = entry.get("source_distinct")
-        if copy_ratio is None or source_distinct is None:
+        if scored is None or source_distinct is None:
             continue
         if entry.get("is_constant"):
             continue
         if (
             source_distinct > _MEM_MIN_SOURCE_DISTINCT
-            and copy_ratio >= _MEM_COPY_RATIO_THRESHOLD
+            and scored >= _MEM_COPY_RATIO_THRESHOLD
         ):
+            day_granularity = bool(entry.get("temporal_day_granularity"))
+            base_rule = (
+                f"copy_ratio >= {_MEM_COPY_RATIO_THRESHOLD} AND "
+                f"source_distinct > {_MEM_MIN_SOURCE_DISTINCT}"
+            )
             flags.append(
                 {
                     "column": name,
                     "type": entry.get("type"),
                     "copy_ratio": copy_ratio,
+                    "copy_ratio_nonsentinel": entry.get("copy_ratio_nonsentinel"),
                     "source_distinct": source_distinct,
-                    "severity": "CRITICAL",
+                    "severity": "INFO" if day_granularity else "CRITICAL",
                     "rule": (
-                        f"copy_ratio >= {_MEM_COPY_RATIO_THRESHOLD} AND "
-                        f"source_distinct > {_MEM_MIN_SOURCE_DISTINCT}"
+                        base_rule
+                        + " (day-granularity temporal domain: in-source "
+                        "collisions expected by domain size, not per-row "
+                        "memorization)"
+                        if day_granularity
+                        else base_rule
                     ),
                 }
             )
-    return sorted(flags, key=lambda f: f["copy_ratio"], reverse=True)
+    return sorted(
+        flags,
+        key=lambda f: (f["severity"] == "CRITICAL", f["copy_ratio"] or 0),
+        reverse=True,
+    )
 
 
 def _pk_analysis(client, landing_fqn: str, pk_columns: list[str]) -> dict[str, Any]:

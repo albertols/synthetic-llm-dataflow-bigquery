@@ -84,6 +84,15 @@ _DEFAULT_TOP_K = 8
 # per-row work (ADR 0013's FASTGEN spine).
 _FREE_TEXT_POOL_MAX = 512
 _POOL_VALUES_PER_CALL = 32
+# Stagnation exit (2026-07-23 E2E): 2 of 3 pool columns rode the full
+# 2*ceil(target/32)=32-call budget (~30 min of T4 setup) while marginal
+# novel yield had collapsed to cross-call duplicates and prompt echoes.
+# Once every escalation level has run, _POOL_STAGNATION_WINDOW consecutive
+# attempts each adding fewer than _POOL_STAGNATION_MIN_NOVEL novel values
+# end the ladder — more retries at the ceiling level cannot outrun the
+# yield decay.
+_POOL_STAGNATION_WINDOW = 3
+_POOL_STAGNATION_MIN_NOVEL = max(1, _POOL_VALUES_PER_CALL // 8)
 # Back-compat alias: the historical single-call pool size == one call's batch.
 _DEFAULT_FREE_TEXT_POOL = _POOL_VALUES_PER_CALL
 # Setup embeds at most this many reference rows. The index those vectors
@@ -606,7 +615,10 @@ def _pool_llm_yield(
     unclamped retry levels never executed.
 
     Calls are bounded at `max(len(levels), 2*ceil(target/_POOL_VALUES_PER_CALL))`,
-    cycling the escalation ladder (last level repeats).
+    cycling the escalation ladder (last level repeats). After every level has
+    run once, `_POOL_STAGNATION_WINDOW` consecutive low-novelty attempts end
+    the loop early (`freetext_pool_stagnated` milestone) — the 2026-07-23 E2E
+    run burned 30 min of T4 setup on attempts that only re-emitted duplicates.
 
     No request seed: a pinned seed with n>1 collapses all n vLLM choices
     into one completion (2026-07-15 run: identical choice lengths per
@@ -623,6 +635,7 @@ def _pool_llm_yield(
     attempts = 0
     levels = escalating_sampling()
     max_calls = max(len(levels), 2 * -(-target // _POOL_VALUES_PER_CALL))
+    stagnant = 0
     while attempts < max_calls and len(pool) < target:
         level = levels[min(attempts, len(levels) - 1)]
         attempts += 1
@@ -641,10 +654,23 @@ def _pool_llm_yield(
         n_copies += len(values) - len(novel)
         n_echoes += sum(1 for v in values if v in shown)
         seen.update(values)
+        added = 0
         for v in novel:
             if v not in pool_seen:
                 pool_seen.add(v)
                 pool.append(v)
+                added += 1
+        stagnant = stagnant + 1 if added < _POOL_STAGNATION_MIN_NOVEL else 0
+        if stagnant >= _POOL_STAGNATION_WINDOW and attempts >= len(levels):
+            log_milestone(
+                "freetext_pool_stagnated",
+                level=logging.WARNING,
+                column=prof.name,
+                attempts=attempts,
+                pool_size=len(pool),
+                target=target,
+            )
+            break
     return _PoolYield(pool, n_parsed, len(seen), n_copies, n_echoes, attempts)
 
 

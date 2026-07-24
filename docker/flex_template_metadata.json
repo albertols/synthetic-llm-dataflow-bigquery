@@ -122,6 +122,24 @@
       ]
     },
     {
+      "name": "rag_chunks_table",
+      "label": "RAG chunk-store table FQN (B.1)",
+      "helpText": "project.dataset.table of synthetic_rag.rag_chunks. Enables the read-instead-of-reembed path; with build_rag_layer=true also enables population. Optional; empty disables the chunk store.",
+      "isOptional": true,
+      "regexes": [
+        "^([a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+)?$"
+      ]
+    },
+    {
+      "name": "build_rag_layer",
+      "label": "Populate the RAG chunk store",
+      "helpText": "true/false. Populate rag_chunks from this run's reference sample (skipped when the reference_digest already exists for the embedder id+version). Requires rag_chunks_table.",
+      "isOptional": true,
+      "regexes": [
+        "^(true|false|1|0|yes|no)?$"
+      ]
+    },
+    {
       "name": "validation_runs_table",
       "label": "validation_runs table FQN",
       "helpText": "Destination BigQuery table for the run-level summary row. project.dataset.table. Optional; empty skips the write.",
