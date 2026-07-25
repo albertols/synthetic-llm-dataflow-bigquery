@@ -16,17 +16,23 @@ from sdfb_core.rag.embedding import HashingEmbedder
 
 
 class _BatchClient:
-    """Yields _POOL_VALUES_PER_CALL fresh values per call, like a healthy LLM."""
+    """Yields _POOL_VALUES_PER_CALL fresh values per requested choice, like
+    a healthy LLM honoring `n` (vLLM parallel sampling)."""
 
     def __init__(self) -> None:
         self.calls = 0
+        self._issued = 0
 
-    def generate_json(self, prompt, json_schema, **kw):
-        base = self.calls * _POOL_VALUES_PER_CALL
+    def generate_json(self, prompt, json_schema, *, n=1, **kw):
         self.calls += 1
-        return [
-            {"values": [f"novel value {base + i}" for i in range(_POOL_VALUES_PER_CALL)]}
-        ]
+        out = []
+        for _ in range(max(1, n)):
+            base = self._issued
+            self._issued += _POOL_VALUES_PER_CALL
+            out.append(
+                {"values": [f"novel value {base + i}" for i in range(_POOL_VALUES_PER_CALL)]}
+            )
+        return out
 
 
 def _schema_and_rows(n_rows: int = 300):
@@ -67,7 +73,8 @@ def test_pool_scales_past_32_with_batched_calls():
     pool = engine._free_text_pools["notes"]
     # target = min(num_rows=200, distinct=300, 512) = 200
     assert len(pool) >= 200
-    assert client.calls >= 200 // _POOL_VALUES_PER_CALL
+    # n=4 choices/call -> per-round yield 128: 2 calls cover target=200.
+    assert client.calls >= -(-200 // (_POOL_VALUES_PER_CALL * 4))
     engine.teardown()
 
 
@@ -151,7 +158,82 @@ def test_pool_llm_yield_stops_when_novel_yield_stagnates():
 
 def test_pool_llm_yield_healthy_client_still_reaches_target():
     """The stagnation exit must not fire while the pool is actually growing."""
+    from sdfb_core.engines.b1_rag.engine import _POOL_PARALLEL_CHOICES
+
     client = _BatchClient()
     y = _pool_llm_yield(client, "p", {}, _free_text_prof(), [], target=512)
     assert len(y.pool) >= 512
-    assert client.calls == -(-512 // _POOL_VALUES_PER_CALL)  # 16 full-yield calls
+    # 4 full-yield calls at 128 values/round (was 16 at 32/round).
+    assert client.calls == -(-512 // (_POOL_VALUES_PER_CALL * _POOL_PARALLEL_CHOICES))
+
+
+# --- n-choice batched pool calls (2026-07-25 perf fix) ---------------------
+
+
+class _RecordingArrayClient:
+    """Returns `n` distinct {"values": [...]} dicts per call and records
+    the `n` each call requested."""
+
+    def __init__(self, values_per_choice: int = 32, novel_per_call: int | None = None):
+        self.calls: list[int] = []
+        self._values_per_choice = values_per_choice
+        # When set, ONLY this many values across the whole call are novel;
+        # the rest repeat a fixed token (stagnation/cap scenarios).
+        self._novel_per_call = novel_per_call
+        self._counter = 0
+
+    def generate_json(self, prompt, json_schema, *, max_tokens=2048,
+                      temperature=0.7, n=1, seed=None, top_p=None, top_k=None):
+        self.calls.append(n)
+        out = []
+        for choice in range(n):
+            values = []
+            for i in range(self._values_per_choice):
+                if self._novel_per_call is not None and (
+                    choice * self._values_per_choice + i >= self._novel_per_call
+                ):
+                    values.append("dup-fixed-token")
+                else:
+                    self._counter += 1
+                    values.append(f"novel-{self._counter:05d}")
+            out.append({"values": values})
+        return out
+
+
+def _free_text_profile_with_observed():
+    from sdfb_core.engines.b1_rag.profile import ColumnKind, ColumnProfile
+
+    return ColumnProfile(
+        name="col_a",
+        bq_type="STRING",
+        kind=ColumnKind.FREE_TEXT,
+        nullable=False,
+        null_fraction=0.0,
+        observed_values=tuple(f"observed value number {i}" for i in range(600)),
+        text_examples=("observed value number 0", "observed value number 1"),
+    )
+
+
+def test_pool_call_requests_parallel_choices():
+    from sdfb_core.engines.b1_rag import engine as b1_engine
+
+    client = _RecordingArrayClient()
+    y = _pool_llm_yield(
+        client, "p", {}, _free_text_profile_with_observed(), ["seed"], target=512
+    )
+    assert client.calls, "expected at least one LLM call"
+    assert all(n == b1_engine._POOL_PARALLEL_CHOICES for n in client.calls)
+    assert len(y.pool) >= 512
+    # 4 choices x 32 values = 128 novel per call -> target hit in 4 calls.
+    assert y.attempts == 4
+
+
+def test_pool_call_budget_scales_with_choices():
+    # Every call yields exactly 5 novel values (>= _POOL_STAGNATION_MIN_NOVEL,
+    # so the stagnation exit never fires) -> the loop must stop at the
+    # SCALED cap: max(len(levels), 2*ceil(512/(32*4))) = 8, not 32.
+    client = _RecordingArrayClient(novel_per_call=5)
+    y = _pool_llm_yield(
+        client, "p", {}, _free_text_profile_with_observed(), ["seed"], target=512
+    )
+    assert y.attempts == 8

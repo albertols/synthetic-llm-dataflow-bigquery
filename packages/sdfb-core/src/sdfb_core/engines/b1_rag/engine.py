@@ -84,6 +84,13 @@ _DEFAULT_TOP_K = 8
 # per-row work (ADR 0013's FASTGEN spine).
 _FREE_TEXT_POOL_MAX = 512
 _POOL_VALUES_PER_CALL = 32
+# Server-side parallel sampling (2026-07-25 perf fix): each pool HTTP round
+# trip requests this many INDEPENDENT array-completions (`n=`) and de-dupes
+# across them, multiplying per-call novel yield ~4x. Safe because pool
+# requests are UNSEEDED — the 2026-07-16 collapse was n=32 single-value
+# choices under a pinned seed, a different shape entirely. The prompt stays
+# byte-identical across attempts (stable prefix ⇒ vLLM APC / LMCache-ready).
+_POOL_PARALLEL_CHOICES = 4
 # Stagnation exit (2026-07-23 E2E): 2 of 3 pool columns rode the full
 # 2*ceil(target/32)=32-call budget (~30 min of T4 setup) while marginal
 # novel yield had collapsed to cross-call duplicates and prompt echoes.
@@ -606,6 +613,7 @@ def _pool_llm_yield(
     prof: ColumnProfile,
     seed_examples: list[str],
     target: int = _DEFAULT_FREE_TEXT_POOL,
+    n_choices: int = _POOL_PARALLEL_CHOICES,
 ) -> _PoolYield:
     """Run the pool call at escalating sampling levels, accumulating novel
     values until the pool reaches ``target``. Breaking on the FIRST
@@ -621,8 +629,9 @@ def _pool_llm_yield(
     run burned 30 min of T4 setup on attempts that only re-emitted duplicates.
 
     No request seed: a pinned seed with n>1 collapses all n vLLM choices
-    into one completion (2026-07-15 run: identical choice lengths per
-    request → at most one distinct pool value).
+    into one completion (2026-07-15 run). Unseeded, the n choices sample
+    independently, so one round trip carries n distinct 32-value arrays —
+    the call budget scales down by the same factor (`per_round`).
     """
     observed = set(prof.observed_values)
     shown = set(seed_examples)
@@ -634,7 +643,8 @@ def _pool_llm_yield(
     n_echoes = 0
     attempts = 0
     levels = escalating_sampling()
-    max_calls = max(len(levels), 2 * -(-target // _POOL_VALUES_PER_CALL))
+    per_round = _POOL_VALUES_PER_CALL * max(1, n_choices)
+    max_calls = max(len(levels), 2 * -(-target // per_round))
     stagnant = 0
     while attempts < max_calls and len(pool) < target:
         level = levels[min(attempts, len(levels) - 1)]
@@ -642,7 +652,7 @@ def _pool_llm_yield(
         results = client.generate_json(
             prompt=prompt,
             json_schema=json_schema,
-            n=1,
+            n=max(1, n_choices),
             max_tokens=2048,
             temperature=level.temperature,
             top_p=level.top_p,
