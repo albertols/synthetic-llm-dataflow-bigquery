@@ -568,6 +568,7 @@ class B1RagEngine(GenerationEngine):
         """Fill a bounded unique pool for one free-text column from batched
         LLM calls conditioned on retrieved exemplars."""
         assert self._client is not None
+        t_column = time.monotonic()
         per_call = min(target, _POOL_VALUES_PER_CALL)
         prompt = (
             f"You generate synthetic tabular data. First identify the exact "
@@ -586,6 +587,7 @@ class B1RagEngine(GenerationEngine):
         # it already wrote; _pool_llm_yield rides n such arrays per round
         # trip and de-dupes across them.
         items_schema: dict = {"type": "string"}
+        pattern_guided = False
         if self._ctx is not None and self._ctx.pool_pattern_guidance:
             # Layer-2 hallucination fix (opt-in): constrain decoding itself
             # with a charset/length regex derived from the observed values,
@@ -597,6 +599,7 @@ class B1RagEngine(GenerationEngine):
             )
             if pattern_shapes is not None:
                 items_schema["pattern"] = relaxed_shapes_pattern(pattern_shapes)
+                pattern_guided = True
         json_schema = {
             "type": "object",
             "properties": {
@@ -621,8 +624,10 @@ class B1RagEngine(GenerationEngine):
                 error=type(e).__name__,
             )
             pool = []
+            format_rejected = 0
         else:
             pool = self._resolve_pool_yield(prof, y, per_call, target)
+            format_rejected = y.format_rejected
 
         # Fold observed exemplars ONLY when the LLM delivered nothing (lax
         # mode) — loudly, via the fallback milestone emitted above. Every
@@ -647,6 +652,20 @@ class B1RagEngine(GenerationEngine):
             if key is not None:
                 with _POOL_CACHE_LOCK:
                     _POOL_CACHE[key] = tuple(final)
+        # Per-column build summary — the only milestone that reports
+        # format_rejected on a CLEAN build (stagnated/undersized/fallback
+        # cover the unhealthy paths), and per-ladder seconds that
+        # disaggregate b1_pools_built (whose total absorbs the lazy vLLM
+        # ignition inside the first column's first call).
+        log_milestone(
+            "freetext_pool_built",
+            column=prof.name,
+            pool_size=len(final),
+            target=target,
+            format_rejected=format_rejected,
+            pattern_guided=pattern_guided,
+            seconds=round(time.monotonic() - t_column, 1),
+        )
         return final
 
     def _resolve_pool_yield(

@@ -191,3 +191,39 @@ def test_pattern_guidance_adds_items_pattern_when_enabled():
     import re
 
     assert re.compile(item_schema["pattern"]).fullmatch("CHG900001")
+
+
+# --- per-column freetext_pool_built milestone (observability audit) --------
+
+
+def test_clean_pool_build_logs_per_column_milestone_with_counts(caplog):
+    """A pool that fills to target cleanly used to hide its format
+    rejections (format_rejected only rode the stagnated/undersized/fallback
+    milestones). Every column build now emits freetext_pool_built with
+    counts, per-ladder seconds, and whether decode-pattern guidance was
+    active."""
+    client = _SchemaRecordingClient()
+    with caplog.at_level("INFO"):
+        B1RagEngine().setup(client, _gate_ctx(pool_pattern_guidance=True))
+    built = [
+        m for m in (parse_milestone(r.getMessage()) for r in caplog.records)
+        if m and m["name"] == "freetext_pool_built"
+    ]
+    assert built, "every free-text column must emit freetext_pool_built"
+    m = built[0]
+    assert m["column"] == "CHG_MESS_CARR_ID"
+    assert int(m["pool_size"]) >= 1
+    assert "format_rejected" in m
+    assert m["pattern_guided"] == "True"
+    assert float(m["seconds"]) >= 0.0
+
+
+def test_pool_built_milestone_reports_pattern_guided_false_by_default(caplog):
+    client = _SchemaRecordingClient()
+    with caplog.at_level("INFO"):
+        B1RagEngine().setup(client, _gate_ctx())
+    built = [
+        m for m in (parse_milestone(r.getMessage()) for r in caplog.records)
+        if m and m["name"] == "freetext_pool_built"
+    ]
+    assert built and built[0]["pattern_guided"] == "False"

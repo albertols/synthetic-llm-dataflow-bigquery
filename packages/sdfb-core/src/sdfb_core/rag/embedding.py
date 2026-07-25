@@ -31,6 +31,8 @@ import math
 import threading
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from sdfb_core.observability import log_milestone
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Sequence
 
@@ -149,6 +151,7 @@ class BgeEmbedder:
             import torch
             from transformers import AutoModel, AutoTokenizer
 
+            requested = device
             if device == "auto":
                 cuda = getattr(torch, "cuda", None)
                 device = (
@@ -156,6 +159,12 @@ class BgeEmbedder:
                     if cuda is not None and cuda.is_available()
                     else "cpu"
                 )
+            # One milestone at the seam covers every embedder user (engine
+            # setup AND the population EmbedChunksDoFn): worker logs must
+            # show whether bulk embedding actually ran on CUDA — the
+            # 2026-07-25 06:18 E2E burned 25 min on CPU with both T4s idle
+            # and nothing in the logs said so.
+            log_milestone("embedder_device", device=device, requested=requested)
             self._torch = torch
             self._dim = dim
             self._max_length = max_length
@@ -192,6 +201,9 @@ class BgeEmbedder:
         cuda = getattr(self._torch, "cuda", None)
         if cuda is not None:
             cuda.empty_cache()
+        # Logged only on a real cuda→cpu transition: its presence in worker
+        # logs proves VRAM was released BEFORE vLLM sized its KV cache.
+        log_milestone("embedder_demoted")
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         torch = self._torch

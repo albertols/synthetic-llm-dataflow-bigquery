@@ -82,3 +82,45 @@ def test_explicit_cpu_never_touches_cuda(monkeypatch, tmp_path):
     assert emb.device == "cpu"
     emb.demote_to_cpu()
     assert log.get("emptied") is None
+
+
+def _milestones(caplog) -> list[dict]:
+    from sdfb_core.observability import parse_milestone
+
+    return [
+        m for m in (parse_milestone(r.getMessage()) for r in caplog.records) if m
+    ]
+
+
+def test_construction_logs_embedder_device_milestone(monkeypatch, tmp_path, caplog):
+    from sdfb_core.rag.embedding import BgeEmbedder
+
+    log: dict = {}
+    _fake_stack(monkeypatch, cuda_available=True, log=log)
+    with caplog.at_level("INFO"):
+        BgeEmbedder(str(tmp_path), device="auto")
+    devs = [m for m in _milestones(caplog) if m["name"] == "embedder_device"]
+    assert devs and devs[0]["device"] == "cuda" and devs[0]["requested"] == "auto"
+
+
+def test_demote_logs_embedder_demoted_only_when_leaving_cuda(
+    monkeypatch, tmp_path, caplog
+):
+    from sdfb_core.rag.embedding import BgeEmbedder
+
+    log: dict = {}
+    _fake_stack(monkeypatch, cuda_available=True, log=log)
+    emb = BgeEmbedder(str(tmp_path), device="auto")
+    with caplog.at_level("INFO"):
+        emb.demote_to_cpu()
+        emb.demote_to_cpu()  # idempotent second call must not log again
+    demotes = [m for m in _milestones(caplog) if m["name"] == "embedder_demoted"]
+    assert len(demotes) == 1
+
+    caplog.clear()
+    cpu_emb = BgeEmbedder(str(tmp_path))  # explicit cpu
+    with caplog.at_level("INFO"):
+        cpu_emb.demote_to_cpu()
+    assert not [
+        m for m in _milestones(caplog) if m["name"] == "embedder_demoted"
+    ]
