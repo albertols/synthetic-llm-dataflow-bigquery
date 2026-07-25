@@ -50,3 +50,4 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0015 — Dataflow worker image served via Artifact Registry (amends 0003)](0015-worker-image-via-artifact-registry.md)
 - [0016 — Personal-project images build on Cloud Build (ADR 0008 carve-out)](0016-personal-gcp-cloud-build.md)
 - [0017 — Custom RAG layer instead of `apache_beam.ml.rag`](0017-custom-rag-layer-over-beam-ml-rag.md)
+- [0018 — Batched, parallel, cached free-text pool builds (B.1)](0018-parallel-batched-freetext-pools.md)
