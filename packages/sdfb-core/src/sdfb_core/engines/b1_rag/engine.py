@@ -104,6 +104,11 @@ _POOL_PARALLEL_CHOICES = 4
 # yield decay.
 _POOL_STAGNATION_WINDOW = 3
 _POOL_STAGNATION_MIN_NOVEL = max(1, _POOL_VALUES_PER_CALL // 8)
+# Ladders for different columns are independent — run them on a bounded
+# thread pool. vLLM continuous-batches concurrent requests on the server
+# side; the client (openai/httpx) is thread-safe; embedder work is NOT
+# (HF "Already borrowed") and therefore finishes before any thread spawns.
+_POOL_BUILD_MAX_WORKERS = 4
 # Back-compat alias: the historical single-call pool size == one call's batch.
 _DEFAULT_FREE_TEXT_POOL = _POOL_VALUES_PER_CALL
 # Setup embeds at most this many reference rows. The index those vectors
@@ -362,6 +367,10 @@ class B1RagEngine(GenerationEngine):
 
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
         chunks_by_column = self._fetch_free_text_chunks(ctx)
+        # Phase 1 — sequential: seed-example retrieval touches the embedder
+        # (HF fast tokenizers are not thread-safe), so it fully completes
+        # before any ladder thread spawns.
+        jobs: list[tuple[ColumnProfile, list[str], int]] = []
         for prof in free_text_cols:
             seed_examples = self._column_seed_examples(
                 prof, ctx, _DEFAULT_TOP_K, chunks_by_column.get(prof.name)
@@ -372,9 +381,44 @@ class B1RagEngine(GenerationEngine):
                     for e in exemplars
                     if e.get(prof.name) not in (None, "")
                 ][:_DEFAULT_TOP_K] or list(prof.text_examples[:_DEFAULT_TOP_K])
+            jobs.append((prof, seed_examples, self._pool_target(prof, ctx)))
+
+        # Phase 2 — parallel: one bounded ladder per column. Collect EVERY
+        # result before re-raising the first failure, so sibling columns'
+        # completed builds are never discarded by one column's strict raise
+        # (the 2026-07-24 16:35 E2E rebuilt all pools 3x for one column).
+        if not jobs:
+            return pools
+        if len(jobs) == 1:
+            prof, seed_examples, pool_target = jobs[0]
             pools[prof.name] = self._infer_free_text_pool(
-                prof, seed_examples, self._pool_target(prof, ctx)
+                prof, seed_examples, pool_target
             )
+            return pools
+        from concurrent.futures import ThreadPoolExecutor
+
+        first_error: Exception | None = None
+        with ThreadPoolExecutor(
+            max_workers=min(_POOL_BUILD_MAX_WORKERS, len(jobs)),
+            thread_name_prefix="sdfb-pool",
+        ) as executor:
+            futures = [
+                (
+                    prof,
+                    executor.submit(
+                        self._infer_free_text_pool, prof, seed_examples, tgt
+                    ),
+                )
+                for prof, seed_examples, tgt in jobs
+            ]
+            for prof, future in futures:
+                try:
+                    pools[prof.name] = future.result()
+                except Exception as e:  # re-raised below, after all columns land
+                    if first_error is None:
+                        first_error = e
+        if first_error is not None:
+            raise first_error
         return pools
 
     def _fetch_free_text_chunks(self, ctx: GenerationContext) -> dict[str, list]:
