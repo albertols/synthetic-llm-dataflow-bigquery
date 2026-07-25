@@ -105,13 +105,19 @@ class HashingEmbedder:
 
 
 class BgeEmbedder:
-    """Production `Embedder` wrapping `bge-small-en-v1.5` on CPU.
+    """Production `Embedder` wrapping `bge-small-en-v1.5` on CPU or CUDA.
 
     Loads from a **local directory** only (weights mirrored to GCS, warm-
     pulled on the M4). `transformers` + `torch` are imported lazily in
     `__init__` so this class can be referenced (and the module imported) on
     a laptop without the `[embedding]` extra installed. Mean-pooled,
     L2-normalized CLS-free pooling per the bge recipe.
+
+    ``device="auto"`` resolves to CUDA when available (the 2026-07-25 E2E
+    embedded 33,610 chunks on CPU for 25 min while both T4s idled) — and
+    callers MUST `demote_to_cpu()` once bulk embedding is done, because
+    vLLM's ignition sizes its KV-cache budget from free GPU memory
+    (ADR 0019).
 
     This class is exercised on the M4 (mark such tests `@pytest.mark.gpu`
     or guard on import availability); the contract tests use
@@ -143,6 +149,13 @@ class BgeEmbedder:
             import torch
             from transformers import AutoModel, AutoTokenizer
 
+            if device == "auto":
+                cuda = getattr(torch, "cuda", None)
+                device = (
+                    "cuda"
+                    if cuda is not None and cuda.is_available()
+                    else "cpu"
+                )
             self._torch = torch
             self._dim = dim
             self._max_length = max_length
@@ -161,6 +174,24 @@ class BgeEmbedder:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    def demote_to_cpu(self) -> None:
+        """Move weights to CPU and release the CUDA cache. Idempotent.
+
+        Callers demote as soon as bulk embedding is done: vLLM's ignition
+        sizes its KV-cache budget from free GPU memory, so a resident
+        embedder must not still be holding VRAM by then (ADR 0019)."""
+        if self._device != "cuda":
+            return
+        self._model = self._model.to("cpu")
+        self._device = "cpu"
+        cuda = getattr(self._torch, "cuda", None)
+        if cuda is not None:
+            cuda.empty_cache()
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         torch = self._torch
