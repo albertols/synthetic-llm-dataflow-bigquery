@@ -58,6 +58,7 @@ from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
     relaxed_shape_charset,
     relaxed_shape_lengths,
+    relaxed_shapes_pattern,
     sample_identifier,
     sample_relaxed_identifier,
 )
@@ -584,10 +585,22 @@ class B1RagEngine(GenerationEngine):
         # prompt_echoes=96). Inside one array completion the model sees what
         # it already wrote; _pool_llm_yield rides n such arrays per round
         # trip and de-dupes across them.
+        items_schema: dict = {"type": "string"}
+        if self._ctx is not None and self._ctx.pool_pattern_guidance:
+            # Layer-2 hallucination fix (opt-in): constrain decoding itself
+            # with a charset/length regex derived from the observed values,
+            # so out-of-format junk is unrepresentable. Deliberately looser
+            # than the per-position template (see relaxed_shapes_pattern) —
+            # novelty pressure stays with the sampler, not the grammar.
+            pattern_shapes = build_relaxed_shapes(
+                [str(v) for v in prof.observed_values]
+            )
+            if pattern_shapes is not None:
+                items_schema["pattern"] = relaxed_shapes_pattern(pattern_shapes)
         json_schema = {
             "type": "object",
             "properties": {
-                "values": {"type": "array", "items": {"type": "string"}}
+                "values": {"type": "array", "items": items_schema}
             },
             "required": ["values"],
         }

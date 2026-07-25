@@ -132,6 +132,14 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="FQN of synthetic_rag.rag_chunks. Enables the "
                         "read-instead-of-reembed path; with "
                         "--build_rag_layer also enables population.")
+    p.add_argument("--pool_pattern_guidance", nargs="?", const="true",
+                   default="",
+                   help="true/false (bare flag = true). Constrain "
+                        "identifier-ish free-text pool completions at "
+                        "decode time with a charset/length regex "
+                        "(vLLM structured-output items.pattern). Opt-in "
+                        "until T4 throughput is confirmed; the post-hoc "
+                        "format gate protects pools either way.")
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
@@ -426,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         rag_chunks_table=args.rag_chunks_table,
         embedder_id=embedder_id,
         embedder_version=embedder_version,
+        pool_pattern_guidance=parse_bool_flag(args.pool_pattern_guidance),
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)

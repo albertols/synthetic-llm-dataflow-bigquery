@@ -91,6 +91,10 @@ class PipelineConfig:
     rag_chunks_table: str = ""
     embedder_id: str = ""
     embedder_version: str = ""
+    # Opt-in decode-time format constraint for identifier-ish free-text
+    # pools (2026-07-25 hallucination fix, layer 2). See
+    # GenerationContext.pool_pattern_guidance.
+    pool_pattern_guidance: bool = False
 
 
 def build_pipeline(
@@ -136,6 +140,7 @@ def build_pipeline(
         embedder_id=config.embedder_id,
         embedder_version=config.embedder_version,
         rag_chunks_table=config.rag_chunks_table,
+        pool_pattern_guidance=config.pool_pattern_guidance,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.

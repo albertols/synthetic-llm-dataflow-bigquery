@@ -171,6 +171,13 @@ class GenerationContext(BaseModel):
     # E2E runs shipped 100% memorized identifiers because the fallback was
     # only a WARNING. Fake/mock clients keep the lenient default.
     strict_freetext: bool = False
+    # Opt-in (2026-07-25 hallucination fix, layer 2): for identifier-ish
+    # free-text columns, constrain pool completions at DECODE time with a
+    # charset/length regex (`items.pattern` in the guided-JSON schema) so
+    # format junk is unrepresentable. Off by default until an E2E confirms
+    # no vLLM/xgrammar throughput cliff on T4 — the post-hoc format gate in
+    # `_pool_llm_yield` protects the pool either way.
+    pool_pattern_guidance: bool = False
     # --- RAG layer (WS2 §4b) -------------------------------------------
     # Requested synthetic row count — bounds the free-text pool target
     # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.
