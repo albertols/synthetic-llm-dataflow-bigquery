@@ -51,3 +51,4 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0016 — Personal-project images build on Cloud Build (ADR 0008 carve-out)](0016-personal-gcp-cloud-build.md)
 - [0017 — Custom RAG layer instead of `apache_beam.ml.rag`](0017-custom-rag-layer-over-beam-ml-rag.md)
 - [0018 — Batched, parallel, cached free-text pool builds (B.1)](0018-parallel-batched-freetext-pools.md)
+- [0019 — RAG population scoped to consumers; CUDA embed with VRAM demote](0019-rag-population-scoped-to-consumers.md)
