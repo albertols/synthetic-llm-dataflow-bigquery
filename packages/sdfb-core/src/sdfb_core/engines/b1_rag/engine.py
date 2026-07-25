@@ -53,7 +53,11 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     escalating_sampling,
 )
-from sdfb_core.engines.text_shapes import sample_identifier
+from sdfb_core.engines.text_shapes import (
+    build_relaxed_shapes,
+    sample_identifier,
+    sample_relaxed_identifier,
+)
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
     CHUNK_KIND_FREE_TEXT_COL,
@@ -477,12 +481,13 @@ class B1RagEngine(GenerationEngine):
             f"exactly that format. Never copy an example verbatim. "
             f'Examples: {seed_examples}. Return JSON {{"values": [...]}}.'
         )
-        # ONE completion carrying the whole pool as an array — not n parallel
-        # single-value choices. Each of n>1 choices is blind to its siblings,
-        # so "distinct" is unsatisfiable per completion and vLLM collapsed
-        # all 32 into the identical modal exemplar echo at every sampling
-        # level (2026-07-16 runs: distinct=1, prompt_echoes=96). Inside one
-        # array completion the model sees what it already wrote.
+        # ARRAY completions only — never n single-value choices. A choice is
+        # blind to its siblings, so "distinct" is unsatisfiable per
+        # single-value completion and vLLM collapsed all 32 into the
+        # identical modal exemplar echo (2026-07-16 runs: distinct=1,
+        # prompt_echoes=96). Inside one array completion the model sees what
+        # it already wrote; _pool_llm_yield rides n such arrays per round
+        # trip and de-dupes across them.
         json_schema = {
             "type": "object",
             "properties": {
@@ -508,56 +513,7 @@ class B1RagEngine(GenerationEngine):
             )
             pool = []
         else:
-            pool = y.pool
-            if not pool:
-                # The calls "succeeded" (no exception) yet yielded nothing
-                # usable. Counts (never values — reference data must not
-                # leak into logs) say WHY: parsed=0 means every choice was
-                # dropped at JSON parse; low distinct with prompt_echoes ==
-                # verbatim_copies means the model parroted the few exemplars
-                # it was SHOWN (sampling/prompt defect); high distinct with
-                # prompt_echoes ~ 0 means in-format generations collided with
-                # the FULL reference sample the model never saw — a saturated
-                # key space where per-column novelty is unattainable.
-                diagnosis = (
-                    f"attempts={y.attempts}, requested_per_attempt="
-                    f"{per_call}, parsed={y.parsed}, "
-                    f"distinct={y.distinct}, verbatim_copies={y.copies}, "
-                    f"prompt_echoes={y.prompt_echoes}, novel=0"
-                )
-                if self._ctx is not None and self._ctx.strict_freetext:
-                    raise FreeTextEmptyYieldError(
-                        f"LLM calls for free-text column {prof.name!r} "
-                        f"yielded no usable values ({diagnosis})."
-                    )
-                log_milestone(
-                    "freetext_llm_fallback",
-                    level=logging.WARNING,
-                    column=prof.name,
-                    error="EmptyYield",
-                    attempts=y.attempts,
-                    parsed=y.parsed,
-                    distinct=y.distinct,
-                    verbatim_copies=y.copies,
-                    prompt_echoes=y.prompt_echoes,
-                )
-            elif len(pool) < target:
-                # Every escalation level ran and the pool is still short of
-                # target: the column lands with whatever novelty the LLM
-                # delivered, but never silently — the 2026-07-17 E2E run
-                # accepted a 4-value pool for COL_048 without a trace.
-                log_milestone(
-                    "freetext_pool_undersized",
-                    level=logging.WARNING,
-                    column=prof.name,
-                    pool_size=len(pool),
-                    target=target,
-                    attempts=y.attempts,
-                    parsed=y.parsed,
-                    distinct=y.distinct,
-                    verbatim_copies=y.copies,
-                    prompt_echoes=y.prompt_echoes,
-                )
+            pool = self._resolve_pool_yield(prof, y, per_call, target)
 
         # Fold observed exemplars ONLY when the LLM delivered nothing (lax
         # mode) — loudly, via the fallback milestone emitted above. Every
@@ -577,6 +533,137 @@ class B1RagEngine(GenerationEngine):
             if v not in seen:
                 seen[v] = None
         return list(seen.keys())[: max(target, len(prof.text_examples))]
+
+    def _resolve_pool_yield(
+        self, prof: ColumnProfile, y: _PoolYield, per_call: int, target: int
+    ) -> list[str]:
+        """Turn one column's ladder outcome into its final pool: shape
+        fallback for copy-saturated builds, shape top-up for undersized
+        ones, a strict raise (or loud lax milestone) when nothing usable
+        exists."""
+        pool = y.pool
+        if not pool and y.parsed > 0:
+            # Copy-saturated: the model parsed values but every one was
+            # an observed copy — deterministic on rebuild, so retrying or
+            # failing the bundle buys nothing (the 2026-07-24 16:35 E2E
+            # burned 2 full setup() retries exactly here). A relaxed
+            # template can still generate verified-novel in-format values.
+            shape_pool = self._shape_fallback_pool(prof, target, exclude=set())
+            if shape_pool:
+                log_milestone(
+                    "freetext_pool_shape_fallback",
+                    level=logging.WARNING,
+                    column=prof.name,
+                    pool_size=len(shape_pool),
+                    target=target,
+                    attempts=y.attempts,
+                    parsed=y.parsed,
+                    verbatim_copies=y.copies,
+                    prompt_echoes=y.prompt_echoes,
+                )
+                return shape_pool
+        if not pool:
+            # The calls "succeeded" (no exception) yet yielded nothing
+            # usable. Counts (never values — reference data must not
+            # leak into logs) say WHY: parsed=0 means every choice was
+            # dropped at JSON parse; low distinct with prompt_echoes ==
+            # verbatim_copies means the model parroted the few exemplars
+            # it was SHOWN (sampling/prompt defect); high distinct with
+            # prompt_echoes ~ 0 means in-format generations collided with
+            # the FULL reference sample the model never saw — a saturated
+            # key space where per-column novelty is unattainable.
+            diagnosis = (
+                f"attempts={y.attempts}, requested_per_attempt="
+                f"{per_call}, parsed={y.parsed}, "
+                f"distinct={y.distinct}, verbatim_copies={y.copies}, "
+                f"prompt_echoes={y.prompt_echoes}, novel=0"
+            )
+            if self._ctx is not None and self._ctx.strict_freetext:
+                raise FreeTextEmptyYieldError(
+                    f"LLM calls for free-text column {prof.name!r} "
+                    f"yielded no usable values ({diagnosis})."
+                )
+            log_milestone(
+                "freetext_llm_fallback",
+                level=logging.WARNING,
+                column=prof.name,
+                error="EmptyYield",
+                attempts=y.attempts,
+                parsed=y.parsed,
+                distinct=y.distinct,
+                verbatim_copies=y.copies,
+                prompt_echoes=y.prompt_echoes,
+            )
+        elif len(pool) < target:
+            # Top up an undersized pool from the template before
+            # accepting the shortfall — the 2026-07-24 16:35 run landed
+            # CHANGE_USERID with 31 distinct values over 1000 rows
+            # (diversity collapse).
+            top_up = self._shape_fallback_pool(
+                prof, target - len(pool), exclude=set(pool)
+            )
+            if top_up:
+                log_milestone(
+                    "freetext_pool_shape_topup",
+                    level=logging.WARNING,
+                    column=prof.name,
+                    added=len(top_up),
+                    pool_size=len(pool) + len(top_up),
+                    target=target,
+                    attempts=y.attempts,
+                )
+                pool = [*pool, *top_up]
+            if len(pool) < target:
+                # Every escalation level ran and the pool is still short
+                # of target: the column lands with whatever novelty the
+                # LLM delivered, but never silently — the 2026-07-17 E2E
+                # run accepted a 4-value pool for COL_048 without a trace.
+                log_milestone(
+                    "freetext_pool_undersized",
+                    level=logging.WARNING,
+                    column=prof.name,
+                    pool_size=len(pool),
+                    target=target,
+                    attempts=y.attempts,
+                    parsed=y.parsed,
+                    distinct=y.distinct,
+                    verbatim_copies=y.copies,
+                    prompt_echoes=y.prompt_echoes,
+                )
+        return pool
+
+    def _shape_fallback_pool(
+        self, prof: ColumnProfile, count: int, exclude: set[str]
+    ) -> list[str]:
+        """Verified-novel values from a relaxed per-position template, or [].
+
+        B.2-parity route (freetext.py:_shape_fallback_pool) for copy-saturated
+        or undersized LLM builds: mixed-length identifier-ish columns the
+        strict detector rejects still template per length bucket, and every
+        emitted value is rejected against the observed reference values (and
+        `exclude`, and itself) — nothing here can memorize. Prose columns
+        (whitespace) return [] and the caller keeps its existing raise/
+        fallback path. Deterministic per (run_id, column).
+        """
+        shapes = build_relaxed_shapes([str(v) for v in prof.observed_values])
+        if shapes is None or count <= 0:
+            return []
+        run_id = self._ctx.pipeline_run_id if self._ctx is not None else ""
+        rng = random.Random(_mix_seed(None, f"{run_id}:shape:{prof.name}"))
+        observed = {str(v) for v in prof.observed_values}
+        out: list[str] = []
+        seen: set[str] = set()
+        # Bounded rejection sampling: dense keyspaces stop at the cap
+        # instead of spinning (same 40x budget as B.2).
+        for _ in range(count * 40):
+            v = sample_relaxed_identifier(shapes, rng.randrange)
+            if v in observed or v in exclude or v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+            if len(out) >= count:
+                break
+        return out
 
     # -- helpers ------------------------------------------------------------
 
