@@ -30,6 +30,17 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 CHUNK_KIND_ROW_DOC = "row_doc"
 CHUNK_KIND_FREE_TEXT_COL = "free_text_col"
 
+# Population scope (2026-07-25 06:18 E2E postmortem). The only consumer of
+# row_doc vectors is B1RagEngine._vectors_from_store, which reads EXACTLY
+# the first MAX_ROW_DOC_ROWS fingerprint-ordered reference rows
+# (all-or-nothing); embedding more is unreadable by design. The engine's
+# _MAX_EMBED_ROWS aliases this constant — one source of truth for the
+# write/read contract.
+MAX_ROW_DOC_ROWS = 1024
+# free_text_col chunks dedupe to distinct (column, value); a pathological
+# near-unique column stays bounded here (consumers pick top-k=8 exemplars).
+MAX_FREE_TEXT_VALUES_PER_COLUMN = 1024
+
 
 @dataclass(frozen=True)
 class Chunk:
@@ -113,11 +124,76 @@ def chunk_row(
     return chunks
 
 
+def distinct_free_text_values(
+    rows: list[dict],
+    free_text_columns: Sequence[str],
+    cap: int = MAX_FREE_TEXT_VALUES_PER_COLUMN,
+) -> dict[str, list[str]]:
+    """First-seen distinct non-empty values per free-text column, capped.
+
+    Driver-side dedupe for the population branch: the 2026-07-25 E2E
+    embedded 23,610 per-occurrence value chunks where the distinct value
+    count was a fraction of that — identical strings re-embedded per row.
+    First-seen over the fingerprint-ordered sample keeps the pick
+    deterministic."""
+    out: dict[str, list[str]] = {c: [] for c in free_text_columns}
+    seen: dict[str, set[str]] = {c: set() for c in free_text_columns}
+    for row in rows:
+        for column in free_text_columns:
+            if len(out[column]) >= cap:
+                continue
+            value = row.get(column)
+            if value in (None, ""):
+                continue
+            text = str(value)
+            if text in seen[column]:
+                continue
+            seen[column].add(text)
+            out[column].append(text)
+    return out
+
+
+def chunk_free_text_value(
+    column: str,
+    value: str,
+    *,
+    source_fqn: str,
+    reference_digest: str,
+    embedder_id: str,
+    embedder_version: str,
+) -> Chunk:
+    """One deduped free_text_col `Chunk` for a distinct (column, value).
+
+    Identity is VALUE-keyed (digest of {"column","value"}), not row-keyed:
+    the consumer (`_fetch_free_text_chunks`) reads only chunk_text /
+    embedding / metadata["column"], so per-row provenance bought nothing
+    but duplicate embeds. chunk_index is fixed 0 — identity is carried by
+    the value digest."""
+    value_digest = compute_row_digest({"column": column, "value": value})
+    return Chunk(
+        chunk_id=compute_chunk_id(source_fqn, value_digest, 0),
+        source_fqn=source_fqn,
+        row_digest=value_digest,
+        reference_digest=reference_digest,
+        chunk_index=0,
+        chunk_kind=CHUNK_KIND_FREE_TEXT_COL,
+        chunk_text=value,
+        embedder_id=embedder_id,
+        embedder_version=embedder_version,
+        source_pk=None,
+        metadata={"column": column},
+    )
+
+
 __all__ = [
     "CHUNK_KIND_FREE_TEXT_COL",
     "CHUNK_KIND_ROW_DOC",
+    "MAX_FREE_TEXT_VALUES_PER_COLUMN",
+    "MAX_ROW_DOC_ROWS",
     "Chunk",
+    "chunk_free_text_value",
     "chunk_row",
     "compute_chunk_id",
     "compute_row_digest",
+    "distinct_free_text_values",
 ]

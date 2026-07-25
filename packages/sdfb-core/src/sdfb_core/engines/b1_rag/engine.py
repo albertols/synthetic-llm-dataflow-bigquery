@@ -63,6 +63,7 @@ from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
     CHUNK_KIND_FREE_TEXT_COL,
     CHUNK_KIND_ROW_DOC,
+    MAX_ROW_DOC_ROWS,
     compute_row_digest,
 )
 from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
@@ -118,8 +119,10 @@ _DEFAULT_FREE_TEXT_POOL = _POOL_VALUES_PER_CALL
 # reference sample bought nothing but wall-clock: the 2026-07-16 corp run
 # spent 26-92 min PER Dataflow bundle attempt in `embedder.embed`. The
 # reference SELECT is fingerprint-ordered (deterministic spread), so a
-# prefix is a representative sample.
-_MAX_EMBED_ROWS = 1024
+# prefix is a representative sample. Aliases the population write contract
+# (chunking.MAX_ROW_DOC_ROWS) — the persisted row_doc chunk set and this
+# read prefix must stay the same set of rows.
+_MAX_EMBED_ROWS = MAX_ROW_DOC_ROWS
 
 # Process-level pool cache (2026-07-24 16:35 E2E): a strict failure in ONE
 # column's ladder crashes DoFn.setup() and Dataflow retries the bundle with

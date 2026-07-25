@@ -74,3 +74,51 @@ def test_chunk_is_frozen():
         raise AssertionError("Chunk must be frozen")
     except AttributeError:
         pass
+
+
+# --- population scoped to consumers (2026-07-25 06:18 E2E) -----------------
+
+from sdfb_core.rag.chunking import (  # noqa: E402
+    MAX_FREE_TEXT_VALUES_PER_COLUMN,
+    MAX_ROW_DOC_ROWS,
+    chunk_free_text_value,
+    distinct_free_text_values,
+)
+
+
+def test_scope_constants_match_engine_read_contract():
+    from sdfb_core.engines.b1_rag import engine as b1_engine
+
+    assert MAX_ROW_DOC_ROWS == 1024
+    assert b1_engine._MAX_EMBED_ROWS is MAX_ROW_DOC_ROWS
+    assert MAX_FREE_TEXT_VALUES_PER_COLUMN == 1024
+
+
+def test_distinct_free_text_values_dedupes_first_seen_and_caps():
+    rows = (
+        [{"notes": "beta", "code": "x"}]
+        + [{"notes": "alpha", "code": "x"}] * 5
+        + [{"notes": None, "code": "x"}, {"notes": "", "code": "x"}]
+        + [{"notes": f"v{i}", "code": "x"} for i in range(10)]
+    )
+    out = distinct_free_text_values(rows, ["notes"], cap=4)
+    assert out == {"notes": ["beta", "alpha", "v0", "v1"]}
+
+
+def test_chunk_free_text_value_identity_is_value_keyed():
+    kw = dict(
+        source_fqn="p.d.t",
+        reference_digest="dig",
+        embedder_id="e",
+        embedder_version="v1",
+    )
+    a1 = chunk_free_text_value("notes", "hello", **kw)
+    a2 = chunk_free_text_value("notes", "hello", **kw)
+    b = chunk_free_text_value("other", "hello", **kw)
+    assert a1.chunk_id == a2.chunk_id            # same value -> same identity
+    assert a1.chunk_id != b.chunk_id             # column participates
+    assert a1.chunk_kind == "free_text_col"
+    assert a1.chunk_text == "hello"
+    assert a1.metadata == {"column": "notes"}
+    assert a1.chunk_index == 0
+    assert a1.source_pk is None
