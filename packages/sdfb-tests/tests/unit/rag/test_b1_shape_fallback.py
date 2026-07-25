@@ -84,13 +84,16 @@ def test_copy_saturated_prose_column_still_raises_strict():
 
 
 class _FewNovelThenParrotClient(_ParrotClient):
-    """First call yields 6 novel values, then parrots -> undersized pool."""
+    """First call yields 6 IN-FORMAT novel values (matching the observed
+    USR…X 8-char bucket/charset — the format gate rejects out-of-format
+    candidates before they can count as novel), then parrots ->
+    undersized pool."""
 
     def generate_json(self, prompt, json_schema, *, max_tokens=2048,
                       temperature=0.7, n=1, seed=None, top_p=None, top_k=None):
         self.call_count += 1
         if self.call_count == 1:
-            return [{"values": [f"GEN{i:04d}Z" for i in range(6)]}]
+            return [{"values": [f"USR9{i:03d}X" for i in range(6)]}]
         return [{"values": list(self._echoes[:8])} for _ in range(n)]
 
 

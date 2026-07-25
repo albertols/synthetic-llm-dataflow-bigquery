@@ -56,6 +56,8 @@ from sdfb_core.engines.base import (
 )
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
+    relaxed_shape_charset,
+    relaxed_shape_lengths,
     sample_identifier,
     sample_relaxed_identifier,
 )
@@ -676,7 +678,8 @@ class B1RagEngine(GenerationEngine):
                 f"attempts={y.attempts}, requested_per_attempt="
                 f"{per_call}, parsed={y.parsed}, "
                 f"distinct={y.distinct}, verbatim_copies={y.copies}, "
-                f"prompt_echoes={y.prompt_echoes}, novel=0"
+                f"prompt_echoes={y.prompt_echoes}, "
+                f"format_rejected={y.format_rejected}, novel=0"
             )
             if self._ctx is not None and self._ctx.strict_freetext:
                 raise FreeTextEmptyYieldError(
@@ -693,6 +696,7 @@ class B1RagEngine(GenerationEngine):
                 distinct=y.distinct,
                 verbatim_copies=y.copies,
                 prompt_echoes=y.prompt_echoes,
+                format_rejected=y.format_rejected,
             )
         elif len(pool) < target:
             # Top up an undersized pool from the template before
@@ -729,6 +733,7 @@ class B1RagEngine(GenerationEngine):
                     distinct=y.distinct,
                     verbatim_copies=y.copies,
                     prompt_echoes=y.prompt_echoes,
+                    format_rejected=y.format_rejected,
                 )
         return pool
 
@@ -791,6 +796,7 @@ class _PoolYield(NamedTuple):
     copies: int
     prompt_echoes: int
     attempts: int
+    format_rejected: int = 0
 
 
 def _pool_llm_yield(
@@ -822,12 +828,34 @@ def _pool_llm_yield(
     """
     observed = set(prof.observed_values)
     shown = set(seed_examples)
+    # Format-plausibility gate (2026-07-25 10:52 E2E): novelty alone let
+    # hallucinated meta-tokens into the pool — an echo of the COLUMN NAME
+    # from the prompt and an echo of the prompt's own format examples
+    # ('UUID-…') are trivially "novel". For identifier-ish columns (a
+    # relaxed template exists) a candidate must also match an observed
+    # length bucket, stay within the observed charset, and never contain
+    # the column name. Prose columns (no template) skip the gate.
+    shapes = build_relaxed_shapes([str(v) for v in prof.observed_values])
+    gate_lengths = relaxed_shape_lengths(shapes) if shapes else None
+    gate_charset = relaxed_shape_charset(shapes) if shapes else None
+    name_lower = prof.name.lower()
+
+    def _in_format(v: str) -> bool:
+        if gate_lengths is None or gate_charset is None:
+            return True
+        return (
+            len(v) in gate_lengths
+            and set(v) <= gate_charset
+            and name_lower not in v.lower()
+        )
+
     pool: list[str] = []
     pool_seen: set[str] = set()
     seen: set[str] = set()
     n_parsed = 0
     n_copies = 0
     n_echoes = 0
+    n_format_rejected = 0
     attempts = 0
     levels = escalating_sampling()
     per_round = _POOL_VALUES_PER_CALL * max(1, n_choices)
@@ -845,9 +873,11 @@ def _pool_llm_yield(
             top_p=level.top_p,
             top_k=level.top_k,
         )
-        values = _string_values(results, prof.name)
+        parsed_values = _string_values(results, prof.name)
+        values = [v for v in parsed_values if _in_format(v)]
+        n_format_rejected += len(parsed_values) - len(values)
         novel = [v for v in values if v not in observed]
-        n_parsed += len(values)
+        n_parsed += len(parsed_values)
         n_copies += len(values) - len(novel)
         n_echoes += sum(1 for v in values if v in shown)
         seen.update(values)
@@ -866,9 +896,13 @@ def _pool_llm_yield(
                 attempts=attempts,
                 pool_size=len(pool),
                 target=target,
+                format_rejected=n_format_rejected,
             )
             break
-    return _PoolYield(pool, n_parsed, len(seen), n_copies, n_echoes, attempts)
+    return _PoolYield(
+        pool, n_parsed, len(seen), n_copies, n_echoes, attempts,
+        n_format_rejected,
+    )
 
 
 def _string_values(results: list, name: str) -> list[str]:
