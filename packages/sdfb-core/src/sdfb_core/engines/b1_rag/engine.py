@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -119,6 +120,22 @@ _DEFAULT_FREE_TEXT_POOL = _POOL_VALUES_PER_CALL
 # reference SELECT is fingerprint-ordered (deterministic spread), so a
 # prefix is a representative sample.
 _MAX_EMBED_ROWS = 1024
+
+# Process-level pool cache (2026-07-24 16:35 E2E): a strict failure in ONE
+# column's ladder crashes DoFn.setup() and Dataflow retries the bundle with
+# a FRESH engine in the SAME worker process — without this cache the retry
+# rebuilt every sibling column's pool from scratch (~15-19 min/attempt).
+# Keyed on (reference_digest, model_uri, column, target); disabled when the
+# digest is empty. Deliberately process-lived (teardown() must not clear
+# it) — the module-level vLLM server reuse (_SERVER_REFS) is the precedent.
+_POOL_CACHE: dict[tuple[str, str, str, int], tuple[str, ...]] = {}
+_POOL_CACHE_LOCK = threading.Lock()
+
+
+def clear_free_text_pool_cache() -> None:
+    """Drop all cached pools (tests / maintenance only)."""
+    with _POOL_CACHE_LOCK:
+        _POOL_CACHE.clear()
 
 
 class B1RagEngine(GenerationEngine):
@@ -381,7 +398,20 @@ class B1RagEngine(GenerationEngine):
                     for e in exemplars
                     if e.get(prof.name) not in (None, "")
                 ][:_DEFAULT_TOP_K] or list(prof.text_examples[:_DEFAULT_TOP_K])
-            jobs.append((prof, seed_examples, self._pool_target(prof, ctx)))
+            pool_target = self._pool_target(prof, ctx)
+            key = self._pool_cache_key(ctx, prof.name, pool_target)
+            if key is not None:
+                with _POOL_CACHE_LOCK:
+                    cached = _POOL_CACHE.get(key)
+                if cached is not None:
+                    pools[prof.name] = list(cached)
+                    log_milestone(
+                        "freetext_pool_cache_hit",
+                        column=prof.name,
+                        pool_size=len(cached),
+                    )
+                    continue
+            jobs.append((prof, seed_examples, pool_target))
 
         # Phase 2 — parallel: one bounded ladder per column. Collect EVERY
         # result before re-raising the first failure, so sibling columns'
@@ -478,6 +508,13 @@ class B1RagEngine(GenerationEngine):
             if values:
                 return retrieve_column_exemplars(values, self._embedder, k)
         return []
+
+    def _pool_cache_key(
+        self, ctx: GenerationContext, column: str, target: int
+    ) -> tuple[str, str, str, int] | None:
+        if not ctx.reference_digest:
+            return None
+        return (ctx.reference_digest, ctx.model_uri, column, target)
 
     def _pool_target(self, prof: ColumnProfile, ctx: GenerationContext) -> int:
         """min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX), skipping
@@ -576,7 +613,13 @@ class B1RagEngine(GenerationEngine):
         for v in pool:
             if v not in seen:
                 seen[v] = None
-        return list(seen.keys())[: max(target, len(prof.text_examples))]
+        final = list(seen.keys())[: max(target, len(prof.text_examples))]
+        if final and self._ctx is not None:
+            key = self._pool_cache_key(self._ctx, prof.name, target)
+            if key is not None:
+                with _POOL_CACHE_LOCK:
+                    _POOL_CACHE[key] = tuple(final)
+        return final
 
     def _resolve_pool_yield(
         self, prof: ColumnProfile, y: _PoolYield, per_call: int, target: int
@@ -853,4 +896,4 @@ def _mix_seed(seed: int | None, salt: str) -> int:
     return h
 
 
-__all__ = ["B1RagEngine"]
+__all__ = ["B1RagEngine", "clear_free_text_pool_cache"]
