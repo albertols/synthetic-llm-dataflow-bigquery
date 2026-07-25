@@ -6,8 +6,14 @@ loading as `GenerateRecordsDoFn`) rather than a RunInference ModelHandler
 — one embedding code path, one lifecycle pattern; the rewritten RAG
 design doc records this delta from the 2026-07-07 diagram.
 
-**Scope — the sample, never the full source table.** This branch chunks
-and embeds exactly the driver-loaded reference sample (`load_reference_rows`,
+**Scope — the consumers' read contract, never the full sample or table.**
+Since 2026-07-25 (ADR 0019) the branch writes `row_doc` chunks only for the
+first `MAX_ROW_DOC_ROWS` (1024) fingerprint-ordered rows — exactly the
+all-or-nothing prefix `B1RagEngine._vectors_from_store` reads — and
+`free_text_col` chunks deduped to distinct (column, value) pairs (the
+2026-07-25 06:18 E2E embedded 33,610 chunks, ~90 % unreadable-by-design or
+duplicates, for 1,506 s / 60.8 % of wall clock). The input is the
+driver-loaded reference sample (`load_reference_rows`,
 `--reference_rows_limit`, default 10k, deterministic FARM_FINGERPRINT
 ordering — see `sdfb_beam.io.bq_sources`), NOT every row of the source
 table. Deliberate, for four reasons:
@@ -83,9 +89,10 @@ class EmbedChunksDoFn(beam.DoFn):
     the engine-in-setup rule from `.claude/skills/beam-dofn.md`.
     """
 
-    def __init__(self, embedder_uri: str) -> None:
+    def __init__(self, embedder_uri: str, device: str = "auto") -> None:
         super().__init__()
         self.embedder_uri = embedder_uri
+        self.device = device
         self._embedder = None
 
     def setup(self):
@@ -98,7 +105,10 @@ class EmbedChunksDoFn(beam.DoFn):
         if uri:
             from sdfb_core.rag.embedding import BgeEmbedder
 
-            self._embedder = BgeEmbedder(uri)
+            # "auto" = the worker's GPU when present (2026-07-25 06:18 E2E:
+            # both T4s idle while 33,610 chunks embedded on CPU for 25 min).
+            # teardown() demotes so vLLM ignition never contends for VRAM.
+            self._embedder = BgeEmbedder(uri, device=self.device)
         else:
             from sdfb_core.rag.embedding import HashingEmbedder
 
@@ -109,6 +119,13 @@ class EmbedChunksDoFn(beam.DoFn):
         created_at = datetime.now(UTC).isoformat()
         for chunk, vector in zip(chunks, vectors, strict=True):
             yield chunk_to_bq_row(chunk, vector, created_at)
+
+    def teardown(self):
+        # Release VRAM before anything else (vLLM) sizes its budget.
+        demote = getattr(self._embedder, "demote_to_cpu", None)
+        if callable(demote):
+            demote()
+        self._embedder = None
 
 
 def chunk_to_bq_row(chunk: Chunk, embedding: list[float], created_at: str) -> dict:

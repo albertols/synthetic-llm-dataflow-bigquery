@@ -189,7 +189,10 @@ class B1RagEngine(GenerationEngine):
         if self._injected_embedder is not None:
             self._embedder = self._injected_embedder
         elif ctx.embedder_uri:
-            self._embedder = BgeEmbedder(ctx.embedder_uri)
+            # "auto" = the worker's GPU when present — the bulk 1024-row
+            # embed runs before vLLM ignition and demotes right after
+            # (ADR 0019), so the two never contend for VRAM.
+            self._embedder = BgeEmbedder(ctx.embedder_uri, device="auto")
         else:
             self._embedder = HashingEmbedder(dim=384)
         if ctx.reference_rows:
@@ -209,6 +212,7 @@ class B1RagEngine(GenerationEngine):
                     rows=len(texts),
                     rows_total=len(ctx.reference_rows),
                     seconds=round(time.monotonic() - t_embed, 1),
+                    device=getattr(self._embedder, "device", "cpu"),
                 )
             t_index = time.monotonic()
             self._index = build_index(self._ref_vectors, self._embedder.dim)
@@ -219,6 +223,12 @@ class B1RagEngine(GenerationEngine):
         else:
             self._ref_vectors = []
             self._index = None
+        # Bulk embedding is done — release VRAM before vLLM ignition sizes
+        # its KV-cache budget (ADR 0019). Later seed-example embeds are
+        # tiny and run fine on CPU.
+        demote = getattr(self._embedder, "demote_to_cpu", None)
+        if callable(demote):
+            demote()
 
         # 4. infer free-text pools ONCE (the only O(1) LLM use in setup).
         t_pools = time.monotonic()

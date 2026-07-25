@@ -69,3 +69,74 @@ def test_chunk_to_bq_row_shape():
         "embedder_id", "embedder_version", "embedding", "metadata",
         "created_at",
     }
+
+
+def test_population_branch_dedupes_values_and_caps_row_docs():
+    """Wiring contract: row_docs only for the MAX_ROW_DOC_ROWS prefix,
+    free_text_col chunks one per distinct (column, value)."""
+    from sdfb_core.rag.chunking import (
+        MAX_ROW_DOC_ROWS,
+        chunk_free_text_value,
+        distinct_free_text_values,
+    )
+
+    rows = [{"id": i, "notes": f"note {i % 3}", "code": "A"} for i in range(50)]
+    values = distinct_free_text_values(rows, ["notes"])
+    assert values == {"notes": ["note 0", "note 1", "note 2"]}
+
+    with TestPipeline() as p:
+        row_docs = (
+            p
+            | "Rows" >> beam.Create(rows[:MAX_ROW_DOC_ROWS])
+            | "Chunk" >> beam.ParDo(
+                ChunkReferenceRowsDoFn(**{**_DOFN_KW, "free_text_columns": []})
+            )
+        )
+        value_chunks = (
+            p
+            | "Vals" >> beam.Create(
+                [(c, v) for c, vs in values.items() for v in vs]
+            )
+            | "ValChunk" >> beam.MapTuple(
+                lambda c, v: chunk_free_text_value(
+                    c, v,
+                    source_fqn=_DOFN_KW["source_fqn"],
+                    reference_digest=_DOFN_KW["reference_digest"],
+                    embedder_id=_DOFN_KW["embedder_id"],
+                    embedder_version=_DOFN_KW["embedder_version"],
+                )
+            )
+        )
+        out = (
+            (row_docs, value_chunks)
+            | beam.Flatten()
+            | "Fanout" >> beam.Reshuffle()
+            | "Batch" >> beam.BatchElements(min_batch_size=1, max_batch_size=10)
+            | "Embed" >> beam.ParDo(EmbedChunksDoFn(embedder_uri=""))
+            | beam.combiners.ToList()
+        )
+
+        def _check(rows_out):
+            kinds = [r["chunk_kind"] for r in rows_out]
+            assert kinds.count("row_doc") == 50
+            assert kinds.count("free_text_col") == 3  # deduped, not 50
+            for r in rows_out:
+                assert len(r["embedding"]) == 384
+
+        _ = out | beam.Map(lambda x, f=_check: f(x))
+
+
+def test_embed_dofn_teardown_demotes_gpu_embedder():
+    class _FakeEmbedder:
+        def __init__(self):
+            self.demoted = 0
+
+        def demote_to_cpu(self):
+            self.demoted += 1
+
+    dofn = EmbedChunksDoFn(embedder_uri="")
+    dofn._embedder = _FakeEmbedder()
+    fake = dofn._embedder
+    dofn.teardown()
+    assert fake.demoted == 1
+    assert dofn._embedder is None

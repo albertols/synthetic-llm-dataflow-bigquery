@@ -19,12 +19,18 @@ REFs:
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Any
 
 import apache_beam as beam
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext, ModelClient
+from sdfb_core.rag.chunking import (
+    MAX_ROW_DOC_ROWS,
+    chunk_free_text_value,
+    distinct_free_text_values,
+)
 from sdfb_core.validation import (
     STATUS_FAILED_BLOCKER,
     BlockerThresholdExceeded,
@@ -211,21 +217,57 @@ def build_pipeline(
         free_text_columns = _rag_free_text_columns(
             config.table_schema, reference_rows
         )
-        chunks = (
+        # Population is scoped to what its consumers can read (ADR 0019):
+        # row_doc chunks cover EXACTLY the engine's read prefix
+        # (`_vectors_from_store` is all-or-nothing over rows[:1024]) — the
+        # 2026-07-25 06:18 run embedded all 10k rows and 90 % could never
+        # be read back. free_text_col chunks dedupe to distinct
+        # (column, value), computed driver-side (reference_rows is already
+        # in memory here); Beam still fans the embed itself out across
+        # workers via the Reshuffle below.
+        distinct_values = distinct_free_text_values(
+            reference_rows, free_text_columns
+        )
+        row_doc_chunks = (
             p
-            | "RagReferenceRows" >> beam.Create(reference_rows)
+            | "RagReferenceRows"
+            >> beam.Create(reference_rows[:MAX_ROW_DOC_ROWS])
             | "RagChunkRows"
             >> beam.ParDo(
                 ChunkReferenceRowsDoFn(
                     source_fqn=config.table_schema.fqn,
                     reference_digest=digest,
                     column_order=[c.name for c in config.table_schema.columns],
-                    free_text_columns=free_text_columns,
+                    free_text_columns=[],  # value chunks come deduped below
                     pk_columns=list(config.pk_columns),
                     embedder_id=config.embedder_id,
                     embedder_version=config.embedder_version,
                 )
             )
+        )
+        value_chunks = (
+            p
+            | "RagDistinctValues"
+            >> beam.Create(
+                [(c, v) for c, vals in distinct_values.items() for v in vals]
+            )
+            | "RagValueChunks"
+            >> beam.MapTuple(
+                functools.partial(
+                    chunk_free_text_value,
+                    source_fqn=config.table_schema.fqn,
+                    reference_digest=digest,
+                    embedder_id=config.embedder_id,
+                    embedder_version=config.embedder_version,
+                )
+            )
+        )
+        chunks = (
+            (row_doc_chunks, value_chunks)
+            | "RagAllChunks" >> beam.Flatten()
+            # Spread the (now small) chunk set across workers so the embed
+            # stage keeps Beam's embarrassing parallelism.
+            | "RagFanout" >> beam.Reshuffle()
             | "RagBatchChunks"
             >> beam.BatchElements(min_batch_size=32, max_batch_size=256)
             | "RagEmbedChunks" >> beam.ParDo(EmbedChunksDoFn(config.embedder_uri))
