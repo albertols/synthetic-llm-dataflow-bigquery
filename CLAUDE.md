@@ -104,17 +104,16 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 
 Design docs are **visual documents**, not prose with optional pictures. Any doc
 covering geometry/math (embedding trigonometry, sampling distributions,
-quantile bounds), architecture/DAG shape, or a new config flag MUST carry:
+quantile bounds), architecture/DAG shape, or a new config flag MUST carry
+rendered figures, inline mermaid, and a diagram per flag mode — a parameter
+table alone is not sufficient. A stale figure is worse than none.
 
-- **Rendered figures** → `docs/designs/assets/*.png` (matplotlib), committed with
-  the doc, with a provenance section recording how to regenerate them.
-- **Inline mermaid** for DAG shape, control flow, and decision trees.
-- **A diagram per flag mode** — show what each value does to the pipeline or the
-  geometry; a parameter table alone is not sufficient.
+**The method is owned by the `visual-first-documentation` skill**
+(`.claude/skills/visual-first-documentation/SKILL.md`): the source-of-truth
+chain (a measured number is typed exactly once, in a figure script's `MEASURED`
+block), the document contract, the form heuristic, and the claim-per-figure
+rule that lets milestone reports, decks, and articles be *assembled* from the
+same assets instead of redrawn. Load it before writing or updating such a doc.
 
-Copy the pattern in [`docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md`](docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md)
-(unit-sphere panels, mermaid candidate graph, provenance table) and
-[`docs/designs/2026-07-24-reference-sample-scaling.md`](docs/designs/2026-07-24-reference-sample-scaling.md).
-Keep figures in sync with the code they describe — a stale figure is worse than
-none. Apply the same rule when *explaining* this work in conversation: lead with
-the diagram or worked geometry, then the prose.
+Apply the same rule when *explaining* this work in conversation: lead with the
+diagram or worked geometry, then the prose.
