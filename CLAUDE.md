@@ -99,3 +99,21 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Cross-session preferences and project context** → `~/.claude/projects/.../memory/MEMORY.md`.
 - **Personal-GCP E2E runs (T4, cost-capped)** → [`public_cloud/deploy/gcp/README.md`](public_cloud/deploy/gcp/README.md).
+
+## Documentation convention — visual first
+
+Design docs are **visual documents**, not prose with optional pictures. Any doc
+covering geometry/math (embedding trigonometry, sampling distributions,
+quantile bounds), architecture/DAG shape, or a new config flag MUST carry
+rendered figures, inline mermaid, and a diagram per flag mode — a parameter
+table alone is not sufficient. A stale figure is worse than none.
+
+**The method is owned by the `visual-first-documentation` skill**
+(`.claude/skills/visual-first-documentation/SKILL.md`): the source-of-truth
+chain (a measured number is typed exactly once, in a figure script's `MEASURED`
+block), the document contract, the form heuristic, and the claim-per-figure
+rule that lets milestone reports, decks, and articles be *assembled* from the
+same assets instead of redrawn. Load it before writing or updating such a doc.
+
+Apply the same rule when *explaining* this work in conversation: lead with the
+diagram or worked geometry, then the prose.
