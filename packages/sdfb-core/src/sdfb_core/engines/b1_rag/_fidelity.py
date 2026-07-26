@@ -63,7 +63,14 @@ class ColumnSampler:
 
     def __init__(self, profile: ColumnProfile) -> None:
         self.profile = profile
+        # Derived views of the (frozen) profile. Built on first use and kept
+        # for the sampler's lifetime. The 2026-07-26 1M E2E rebuilt these on
+        # EVERY generate_batch() call: 42 INT64 columns x ~10k observed
+        # values x 62,500 elements ~= 3,900 CPU-seconds. `_temporal_floats`
+        # was already memoized, but the np.asarray() around it was not.
         self._temporal_floats: list[float] | None = None
+        self._numeric_array = None  # np.ndarray | None
+        self._temporal_array = None  # np.ndarray | None
 
     def _temporal_obs_floats(self) -> list[float]:
         """Observed TEMPORAL values on the float axis (computed once).
@@ -91,6 +98,27 @@ class ColumnSampler:
                 floats = [f for f in floats if lo <= f <= hi]
             self._temporal_floats = floats
         return self._temporal_floats
+
+    def _numeric_obs_array(self, np):
+        """Observed NUMERIC values as a float64 array (built once).
+
+        The per-call rebuild of this list comprehension was the dominant
+        cost of the generation stage on the 2026-07-26 1M run.
+        """
+        if self._numeric_array is None:
+            self._numeric_array = np.asarray(
+                [float(x) for x in self.profile.observed_values if _is_number(x)],
+                dtype="float64",
+            )
+        return self._numeric_array
+
+    def _temporal_obs_array(self, np):
+        """Observed TEMPORAL values as a float64 array (built once)."""
+        if self._temporal_array is None:
+            self._temporal_array = np.asarray(
+                self._temporal_obs_floats(), dtype="float64"
+            )
+        return self._temporal_array
 
     def _render_temporal(self, base: list[float]) -> list:
         p = self.profile
@@ -171,10 +199,7 @@ class ColumnSampler:
         p = self.profile
         lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
         hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
-        obs = np.asarray(
-            [float(x) for x in p.observed_values if _is_number(x)],
-            dtype="float64",
-        )
+        obs = self._numeric_obs_array(np)
         base = self._blend_floats_numpy(np, rng, obs, lo, hi, n, similarity)
         return [self._coerce_numeric(v) for v in base]
 
@@ -182,7 +207,7 @@ class ColumnSampler:
         p = self.profile
         lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
         hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
-        obs = np.asarray(self._temporal_obs_floats(), dtype="float64")
+        obs = self._temporal_obs_array(np)
         base = self._blend_floats_numpy(np, rng, obs, lo, hi, n, similarity)
         return self._inject_temporal_sentinels(
             self._render_temporal(base), rng.random
