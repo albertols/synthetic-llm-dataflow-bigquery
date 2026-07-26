@@ -100,6 +100,8 @@ class PipelineConfig:
     # worker ctx exactly as rag_chunks_table does; the build branch is
     # gated separately by the driver passing `freetext_pools_sink`.
     freetext_pools_table: str = ""
+    # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
+    pool_seed_strategy: str = "centroid"
 
 
 def build_pipeline(
@@ -148,6 +150,7 @@ def build_pipeline(
         rag_chunks_table=config.rag_chunks_table,
         pool_pattern_guidance=config.pool_pattern_guidance,
         freetext_pools_table=config.freetext_pools_table,
+        pool_seed_strategy=config.pool_seed_strategy,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.

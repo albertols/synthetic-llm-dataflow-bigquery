@@ -190,6 +190,12 @@ class GenerationContext(BaseModel):
     # chunk_store above.
     freetext_pools_table: str = ""
     pool_store: object | None = None
+    # --- pool seeding experiment (WS5 §3) -------------------------------
+    # "centroid" (control, today's behavior) | "kcenter" | "kcenter_rotate".
+    # Retrieval runs 3x per setup and only picks 8 prompt seeds, so this is
+    # the cheapest lever on novel-yield-per-call there is. One build, three
+    # arms — the runs differ in exactly one variable.
+    pool_seed_strategy: str = "centroid"
     # --- RAG layer (WS2 §4b) -------------------------------------------
     # Requested synthetic row count — bounds the free-text pool target
     # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.

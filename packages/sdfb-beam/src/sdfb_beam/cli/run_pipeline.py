@@ -74,6 +74,22 @@ DEFAULT_BATCH_SIZE = 16
 _TARGET_ELEMENTS = 1_000
 
 
+# WS5 §3 — the seeding experiment's only variable. Three arms off ONE build
+# so the E2E runs differ in exactly one thing.
+POOL_SEED_STRATEGIES = ("centroid", "kcenter", "kcenter_rotate")
+
+
+def validate_seed_strategy(value: str) -> str:
+    """Reject a typo at launch: silently degrading to the control arm would
+    corrupt the comparison the flag exists for."""
+    if value not in POOL_SEED_STRATEGIES:
+        raise ValueError(
+            f"--pool_seed_strategy must be one of {POOL_SEED_STRATEGIES}, "
+            f"got {value!r}"
+        )
+    return value
+
+
 def resolve_batch_size(requested: int, num_rows: int) -> int:
     """Rows per element. An explicit non-default ``--batch_size`` always wins."""
     if requested != DEFAULT_BATCH_SIZE:
@@ -165,6 +181,13 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="FQN of synthetic_rag.freetext_pools. Enables the "
                         "read-instead-of-rebuild path; with "
                         "--build_pool_layer also enables the build branch.")
+    p.add_argument("--pool_seed_strategy", default="centroid",
+                   choices=list(POOL_SEED_STRATEGIES),
+                   help="How the 8 free-text prompt seeds are chosen. "
+                        "centroid = control (densest region, today). "
+                        "kcenter = seeds span the column's modes. "
+                        "kcenter_rotate = re-seeded per ladder attempt "
+                        "(forfeits vLLM prefix caching by design).")
     p.add_argument("--pool_pattern_guidance", nargs="?", const="true",
                    default="",
                    help="true/false (bare flag = true). Constrain "
@@ -534,6 +557,7 @@ def main(argv: list[str] | None = None) -> int:
         embedder_version=embedder_version,
         pool_pattern_guidance=parse_bool_flag(args.pool_pattern_guidance),
         freetext_pools_table=args.freetext_pools_table,
+        pool_seed_strategy=validate_seed_strategy(args.pool_seed_strategy),
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
