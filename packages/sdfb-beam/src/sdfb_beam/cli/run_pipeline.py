@@ -46,6 +46,7 @@ from sdfb_core.observability import log_milestone
 from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.validation import Thresholds
 
+from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
@@ -224,18 +225,63 @@ def load_ddl(ddl_uri: str) -> TableSchema:
         return TableSchema.model_validate(json.loads(f.read()))
 
 
+# A pinned --ddl_uri that does not EXIST is an operational miss (new source
+# table whose DDL was never exported) and must degrade to live extraction:
+# TEST_1 (2026-07-25 16:38) died at template launch on a 404 with a perfectly
+# good source table available. A pin that exists but is CORRUPT is a different
+# failure — the operator asked for that exact schema — and still raises.
+_MISSING_DDL_MARKERS = ("notfound", "no such object", "404", "filenotfound")
+
+
+def _is_missing_ddl(exc: BaseException) -> bool:
+    """True when `exc` means "the object isn't there", not "it's malformed"."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, FileNotFoundError):
+            return True
+        if isinstance(cur, json.JSONDecodeError):
+            return False  # parsed-but-broken: never silently swap the schema
+        blob = f"{type(cur).__name__} {cur}".lower()
+        if any(m in blob for m in _MISSING_DDL_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def resolve_table_schema(ddl_uri: str, reference_table: str) -> TableSchema:
     """WS4 §6b precedence: explicit ``--ddl_uri`` (pin/air-gap) > live
-    INFORMATION_SCHEMA extraction from the source table."""
+    INFORMATION_SCHEMA extraction from the source table.
+
+    A MISSING pin falls through to live extraction (WS5 T1); a corrupt or
+    schema-invalid pin still raises.
+    """
     if ddl_uri:
         logger.info("Loading DDL from %s", ddl_uri)
-        schema = load_ddl(ddl_uri)
-        log_milestone("ddl_loaded_from_uri", uri=ddl_uri)
-        return schema
-    logger.info(
-        "No --ddl_uri; live-extracting schema from %s", reference_table
-    )
-    from sdfb_beam.ddl import extract_table_schema
+        try:
+            schema = load_ddl(ddl_uri)
+        except Exception as exc:
+            if not _is_missing_ddl(exc):
+                raise
+            logger.warning(
+                "DDL pin %s not found; live-extracting from %s",
+                ddl_uri,
+                reference_table,
+            )
+            log_milestone(
+                "ddl_uri_miss_fallback",
+                uri=ddl_uri,
+                table=reference_table,
+                error=type(exc).__name__,
+            )
+        else:
+            log_milestone("ddl_loaded_from_uri", uri=ddl_uri)
+            return schema
+    else:
+        logger.info(
+            "No --ddl_uri; live-extracting schema from %s", reference_table
+        )
 
     schema = extract_table_schema(reference_table)
     log_milestone(
