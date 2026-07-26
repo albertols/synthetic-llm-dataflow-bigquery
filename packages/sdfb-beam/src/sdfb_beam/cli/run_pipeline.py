@@ -50,6 +50,7 @@ from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
 
 if TYPE_CHECKING:
@@ -153,6 +154,17 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="FQN of synthetic_rag.rag_chunks. Enables the "
                         "read-instead-of-reembed path; with "
                         "--build_rag_layer also enables population.")
+    p.add_argument("--build_pool_layer", nargs="?", const="true", default="",
+                   help="true/false (bare flag = true). Build free-text "
+                        "pools in their own branch and persist them to "
+                        "--freetext_pools_table (skipped if this "
+                        "reference_digest + model_uri is already present). "
+                        "Without it pools are inferred inside every worker "
+                        "process's setup().")
+    p.add_argument("--freetext_pools_table", default="",
+                   help="FQN of synthetic_rag.freetext_pools. Enables the "
+                        "read-instead-of-rebuild path; with "
+                        "--build_pool_layer also enables the build branch.")
     p.add_argument("--pool_pattern_guidance", nargs="?", const="true",
                    default="",
                    help="true/false (bare flag = true). Constrain "
@@ -186,6 +198,8 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     args, beam_args = p.parse_known_args(argv)
     if parse_bool_flag(args.build_rag_layer) and not args.rag_chunks_table:
         p.error("--build_rag_layer requires --rag_chunks_table")
+    if parse_bool_flag(args.build_pool_layer) and not args.freetext_pools_table:
+        p.error("--build_pool_layer requires --freetext_pools_table")
     return args, beam_args
 
 
@@ -472,6 +486,24 @@ def main(argv: list[str] | None = None) -> int:
                 create_disposition=BigQueryDisposition.CREATE_NEVER,
             )
 
+    freetext_pools_sink = None
+    if parse_bool_flag(args.build_pool_layer) and args.freetext_pools_table:
+        digest = compute_reference_digest(reference_rows)
+        pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
+        if pool_store.exists(digest, args.model_uri):
+            log_milestone(
+                "pool_build_skipped",
+                reference_digest=digest[:12],
+                model_uri=args.model_uri,
+            )
+        else:
+            freetext_pools_sink = WriteToBigQuery(
+                table=args.freetext_pools_table,
+                method=WriteToBigQuery.Method.FILE_LOADS,
+                write_disposition=BigQueryDisposition.WRITE_APPEND,
+                create_disposition=BigQueryDisposition.CREATE_NEVER,
+            )
+
     config = PipelineConfig(
         table_schema=table_schema,
         engine_name=args.engine,
@@ -501,6 +533,7 @@ def main(argv: list[str] | None = None) -> int:
         embedder_id=embedder_id,
         embedder_version=embedder_version,
         pool_pattern_guidance=parse_bool_flag(args.pool_pattern_guidance),
+        freetext_pools_table=args.freetext_pools_table,
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
@@ -554,6 +587,7 @@ def main(argv: list[str] | None = None) -> int:
             dlq_sink=dlq_sink,
             validation_runs_sink=validation_runs_sink,
             rag_chunks_sink=rag_chunks_sink,
+            freetext_pools_sink=freetext_pools_sink,
         )
         logger.info(
             "Pipeline launched: run_id=%s reference_digest=%s",

@@ -185,6 +185,10 @@ class GenerationContext(BaseModel):
     # run rebuilt the same three pools 36 times for 68,805 s of LLM service
     # time, because `_POOL_CACHE` is process-scoped and every autoscale wave
     # starts a fresh process. Typed `object` so sdfb-core keeps no import.
+    # `freetext_pools_table` threads the FQN through the pickled graph; the
+    # DoFn attaches the store worker-side, mirroring rag_chunks_table /
+    # chunk_store above.
+    freetext_pools_table: str = ""
     pool_store: object | None = None
     # --- RAG layer (WS2 §4b) -------------------------------------------
     # Requested synthetic row count — bounds the free-text pool target

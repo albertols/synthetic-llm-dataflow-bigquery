@@ -45,6 +45,7 @@ from sdfb_beam.dofns import (
     PanderaValidateBatchDoFn,
     ValidateRecordDoFn,
 )
+from sdfb_beam.dofns.pools import BuildFreeTextPoolsDoFn
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.rag.population import ChunkReferenceRowsDoFn, EmbedChunksDoFn
 
@@ -95,6 +96,10 @@ class PipelineConfig:
     # pools (2026-07-25 hallucination fix, layer 2). See
     # GenerationContext.pool_pattern_guidance.
     pool_pattern_guidance: bool = False
+    # Persisted free-text pools (WS5 §2). Threads the READ path into the
+    # worker ctx exactly as rag_chunks_table does; the build branch is
+    # gated separately by the driver passing `freetext_pools_sink`.
+    freetext_pools_table: str = ""
 
 
 def build_pipeline(
@@ -106,6 +111,7 @@ def build_pipeline(
     dlq_sink: beam.PTransform,
     validation_runs_sink: beam.PTransform | None = None,
     rag_chunks_sink: beam.PTransform | None = None,
+    freetext_pools_sink: beam.PTransform | None = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -141,6 +147,7 @@ def build_pipeline(
         embedder_version=config.embedder_version,
         rag_chunks_table=config.rag_chunks_table,
         pool_pattern_guidance=config.pool_pattern_guidance,
+        freetext_pools_table=config.freetext_pools_table,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.
@@ -278,6 +285,23 @@ def build_pipeline(
             | "RagEmbedChunks" >> beam.ParDo(EmbedChunksDoFn(config.embedder_uri))
         )
         _ = chunks | "WriteRagChunks" >> rag_chunks_sink
+
+    # WS5 §2 — optional free-text pool build branch. Same shape as the
+    # rag_chunks branch above: the driver decides (existence check) whether
+    # to pass a sink; None ⇒ branch absent, DAG unchanged. Runs concurrently
+    # with Generate and writes an artifact keyed on the reference digest, so
+    # the pool ladder is paid once per (digest, model) instead of once per
+    # worker PROCESS (2026-07-26 1M run: 108 rebuilds, 68,805 LLM-seconds).
+    if freetext_pools_sink is not None:
+        _ = (
+            p
+            | "PoolTrigger" >> beam.Create([None])
+            | "BuildFreeTextPools"
+            >> beam.ParDo(
+                BuildFreeTextPoolsDoFn(config.engine_name, config.model_client, ctx)
+            )
+            | "WriteFreeTextPools" >> freetext_pools_sink
+        )
 
     result: dict[str, Any] = {
         "reference_digest": digest,
