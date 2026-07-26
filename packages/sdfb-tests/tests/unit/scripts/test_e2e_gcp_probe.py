@@ -303,6 +303,91 @@ def test_memorization_flags_sorted_by_copy_ratio_desc(probe_module):
 
 
 # --------------------------------------------------------------------------
+# Sentinel/temporal awareness — the 2026-07-23 b1_rag run: the by-design
+# sentinel parity ("0001-01-01" re-injected at observed frequency) plus the
+# interim now-10y clamp pushed 6 date-shaped columns to copy_ratio 0.60-0.97
+# and the raw rule flagged all 6 CRITICAL, though none is per-row copying.
+# --------------------------------------------------------------------------
+def test_memorization_flags_sentinel_dominated_column_not_flagged(probe_module):
+    # COL_042 shape: 97 % of landing rows are the sentinel "0001-01-01".
+    columns = {
+        "COL_042": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.97,
+            "copy_ratio_nonsentinel": 0.0,
+            "sentinel_fraction": 0.97,
+            "temporal_day_granularity": True,
+            "source_distinct": 1_142,
+        },
+    }
+    assert probe_module.memorization_flags(columns) == []
+
+
+def test_memorization_flags_day_granularity_collision_downgraded_to_info(
+    probe_module,
+):
+    # COL_034 shape: non-sentinel days collide inside the clamped 10y window
+    # (~3650 possible days vs a dense 210k-row source) — expected by domain
+    # size, not per-row memorization. Stays visible, but never CRITICAL.
+    columns = {
+        "COL_034": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.604,
+            "copy_ratio_nonsentinel": 0.509,
+            "sentinel_fraction": 0.194,
+            "temporal_day_granularity": True,
+            "source_distinct": 4_830,
+        },
+    }
+    flags = probe_module.memorization_flags(columns)
+    assert len(flags) == 1
+    assert flags[0]["severity"] == "INFO"
+    assert "domain" in flags[0]["rule"]
+
+
+def test_memorization_flags_high_entropy_column_still_critical(probe_module):
+    # A non-temporal high-cardinality column with real verbatim copies must
+    # keep its CRITICAL flag even when the new fields are present.
+    columns = {
+        "leaky": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.9,
+            "copy_ratio_nonsentinel": 0.9,
+            "sentinel_fraction": 0.0,
+            "temporal_day_granularity": False,
+            "source_distinct": 19_815,
+        },
+        "temporal_info": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.7,
+            "copy_ratio_nonsentinel": 0.5,
+            "sentinel_fraction": 0.36,
+            "temporal_day_granularity": True,
+            "source_distinct": 7_574,
+        },
+    }
+    flags = probe_module.memorization_flags(columns)
+    assert [f["severity"] for f in flags] == ["CRITICAL", "INFO"]
+    assert flags[0]["column"] == "leaky"
+
+
+def test_bq_cross_validation_sql_is_sentinel_and_day_aware(probe_module):
+    """The per-column memorization SQL must measure sentinel rows (year 1 /
+    9999) separately and detect day-granularity values, with SAFE_CAST so
+    BYTES columns cannot kill the probe."""
+    import inspect
+
+    src = inspect.getsource(probe_module.bq_cross_validation)
+    assert "sentinel" in src
+    assert "SAFE_CAST" in src
+    assert "(0001|9999)-" in src
+
+
+# --------------------------------------------------------------------------
 # Dataflow job `parameters` — the 2026-07-16 report's MAJOR probe gap:
 # launch params (reference_rows_limit, pk_cols, identity_cols, seed) were
 # unconfirmable from e2e_gcp_metrics.json.

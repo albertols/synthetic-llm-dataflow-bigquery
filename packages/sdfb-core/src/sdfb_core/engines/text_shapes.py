@@ -21,6 +21,7 @@ Shared between B.1 and B.2 (like `engines/identity.py`). Pure stdlib.
 
 from __future__ import annotations
 
+import re
 import string
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -179,6 +180,43 @@ def build_relaxed_shapes(values: Iterable[str]) -> RelaxedShapes | None:
     return tuple(shapes) or None
 
 
+def relaxed_shape_lengths(shapes: RelaxedShapes) -> set[int]:
+    """Observed length buckets of a relaxed template set."""
+    return {len(shape) for _, shape in shapes}
+
+
+def relaxed_shape_charset(shapes: RelaxedShapes) -> set[str]:
+    """Union of every character any template position can emit.
+
+    Literals contribute themselves; class positions contribute the class.
+    A candidate value drawn from characters OUTSIDE this union cannot be
+    in-format for the column (the templates were built from every observed
+    value), which is what makes it a cheap plausibility gate for
+    LLM-generated pool candidates."""
+    chars: set[str] = set()
+    for _, shape in shapes:
+        for entry in shape:
+            chars.update(entry)
+    return chars
+
+
+def relaxed_shapes_pattern(shapes: RelaxedShapes) -> str:
+    """Conservative anchored regex accepting the shapes' length buckets over
+    their union charset — for vLLM structured-output ``pattern`` guidance.
+
+    Deliberately looser than the per-position templates (a per-position
+    regex would force near-verbatim reproduction and reintroduce the
+    memorization pressure the novelty filter exists to stop): any character
+    from the union charset, at any observed bucket length. Junk like
+    'UUID-…' or column-name echoes is unrepresentable; novel in-charset
+    combinations remain free."""
+    charset = sorted(relaxed_shape_charset(shapes))
+    cls = "".join(re.escape(c) for c in charset)
+    lengths = sorted(relaxed_shape_lengths(shapes))
+    alternation = "|".join(f"[{cls}]{{{n}}}" for n in lengths)
+    return f"^(?:{alternation})$"
+
+
 def sample_relaxed_identifier(
     shapes: RelaxedShapes, pick: Callable[[int], int]
 ) -> str:
@@ -197,6 +235,9 @@ __all__ = [
     "build_relaxed_shapes",
     "detect_identifier_shape",
     "detect_temporal_format",
+    "relaxed_shape_charset",
+    "relaxed_shape_lengths",
+    "relaxed_shapes_pattern",
     "sample_identifier",
     "sample_relaxed_identifier",
 ]

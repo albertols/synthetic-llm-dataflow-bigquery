@@ -105,6 +105,29 @@ def value_year(value: object, value_type: str, fmt: str | None) -> int | None:
     return value.year
 
 
+def age_floor_epoch(
+    value_type: str, fmt: str | None, max_age_years: int
+) -> float | None:
+    """The epoch (on this value type's axis) of `max_age_years` before now,
+    or None where age doesn't apply (VT_TIME).
+
+    Used by the profiler to clamp a TEMPORAL column's jitter floor —
+    profile-time `now` is deliberate: the O(1) fit runs once per worker,
+    and per-run drift of the floor is within the interim policy's
+    tolerance.
+    """
+    if value_type == VT_TIME:
+        return None
+    cutoff = datetime.now(UTC) - timedelta(days=round(max_age_years * 365.25))
+    if value_type == VT_DATETIME_UTC:
+        return cutoff.timestamp()
+    if value_type == VT_DATETIME:
+        return to_epoch(cutoff.replace(tzinfo=None), VT_DATETIME, None)
+    if value_type == VT_DATE:
+        return float(cutoff.date().toordinal())
+    return to_epoch(cutoff.strftime(fmt), VT_STR, fmt)
+
+
 def sample_temporal(
     minimum: float | None,
     maximum: float | None,

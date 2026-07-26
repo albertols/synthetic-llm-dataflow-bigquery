@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -33,6 +33,7 @@ from sdfb_core.engines.text_shapes import (
     detect_identifier_shape,
     detect_temporal_format,
 )
+from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sdfb_core.contracts import FieldSchema, TableSchema
@@ -63,6 +64,17 @@ _TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIME", "TIMESTAMP"})
 # inventing in-between ones (COL_002: 2 source codes -> 5 landing codes).
 _TEMPORAL_MAX_CATEGORIES = 20
 _NUMERIC_MAX_CATEGORIES = 20
+# Sentinel calendar years excluded from a TEMPORAL column's jitter range and
+# re-injected at their observed frequency (0001-01-01 null-substitute,
+# 9999-12-31 open-end). Leaving them in [min, max] landed b1 dates like
+# "72-08-01" in the 2026-07-23 E2E run. Mirrors b2_library/fidelity.py.
+_TEMPORAL_SENTINEL_YEARS = frozenset({1, 9999})
+# Interim temporal-age policy (2026-07-23): the jitter floor is clamped to
+# now - 10y; fully-historical columns keep their observed range. Subject to
+# per-column DDL-JSON functional descriptions later (audit fields, FK
+# referential integrity, M2+) — see b2_library/fidelity.py for the full
+# rationale.
+_MAX_TEMPORAL_AGE_YEARS = 10
 
 
 class ColumnKind(StrEnum):
@@ -110,6 +122,9 @@ class ColumnProfile:
     # TEMPORAL — strftime format when the column is a date-shaped STRING;
     # range-sampled floats render back to strings in the observed format.
     temporal_format: str | None = None
+    # TEMPORAL — sentinel values (year 1 / 9999) excluded from [min, max] and
+    # re-injected at their observed fraction: ((value, fraction), ...).
+    temporal_sentinels: tuple[tuple[object, float], ...] = ()
     # All non-null observed values, original order — used for sampling fallbacks.
     observed_values: tuple[object, ...] = ()
 
@@ -228,19 +243,64 @@ def _profile_temporal(
     reproducing real instants.
     """
     distinct = _ordered_distinct(non_null)
-    floats = [f for f in (temporal_to_float(v) for v in non_null) if f is not None]
-    if len(distinct) <= _TEMPORAL_MAX_CATEGORIES or not floats:
+    pairs = [
+        (v, f, v.year if isinstance(v, date) else None)
+        for v, f in ((v, temporal_to_float(v)) for v in non_null)
+        if f is not None
+    ]
+    if len(distinct) <= _TEMPORAL_MAX_CATEGORIES or not pairs:
         return _profile_categorical(col, non_null, nullable, null_fraction)
+    lo, hi, sentinels = _temporal_range_and_sentinels(pairs, col.name)
     return ColumnProfile(
         name=col.name,
         bq_type=col.bq_type,
         kind=ColumnKind.TEMPORAL,
         nullable=nullable,
         null_fraction=null_fraction,
-        numeric_min=min(floats),
-        numeric_max=max(floats),
+        numeric_min=lo,
+        numeric_max=hi,
+        temporal_sentinels=sentinels,
         observed_values=tuple(non_null),
     )
+
+
+def _temporal_range_and_sentinels(
+    pairs: list[tuple[object, float, int | None]],
+    column_name: str,
+) -> tuple[float, float, tuple[tuple[object, float], ...]]:
+    """(lo, hi, sentinels) for a TEMPORAL column's jitter range.
+
+    ``pairs`` are ``(value, float_axis, year)`` — year is None for TIME.
+    Sentinel-year values leave the range and come back as ``(value,
+    fraction)`` pairs the sampler re-injects; an all-sentinel column keeps
+    its observed range (nothing to trim toward). The floor is then clamped
+    to now - `_MAX_TEMPORAL_AGE_YEARS` unless the whole range is older
+    (fully-historical columns keep old truth; per-column DDL-JSON
+    descriptions will govern those later). TIME columns are untouched by
+    the clamp: their axis is seconds-of-day, far below any epoch floor.
+    """
+    regular = [(v, f) for v, f, y in pairs if y not in _TEMPORAL_SENTINEL_YEARS]
+    if regular and len(regular) < len(pairs):
+        counts = Counter(v for v, _, y in pairs if y in _TEMPORAL_SENTINEL_YEARS)
+        total = len(pairs)
+        sentinels = tuple((v, c / total) for v, c in counts.items())
+        floats = [f for _, f in regular]
+    else:
+        sentinels = ()
+        floats = [f for _, f, _ in pairs]
+    lo, hi = min(floats), max(floats)
+    floor = (
+        datetime.now(UTC)
+        - timedelta(days=round(_MAX_TEMPORAL_AGE_YEARS * 365.25))
+    ).timestamp()
+    if lo < floor <= hi:
+        lo = floor
+        log_milestone(
+            "temporal_range_clamped",
+            column=column_name,
+            max_age_years=_MAX_TEMPORAL_AGE_YEARS,
+        )
+    return lo, hi, sentinels
 
 
 def temporal_to_float(v: object) -> float | None:
@@ -309,16 +369,23 @@ def _profile_string(
         # fixed-alphabet identifiers generate from a per-position template.
         fmt = detect_temporal_format(distinct)
         if fmt is not None:
-            floats = [temporal_string_to_float(s, fmt) for s in strings]
+            pairs = []
+            for s in strings:
+                parsed = datetime.strptime(s, fmt)
+                pairs.append(
+                    (s, parsed.replace(tzinfo=UTC).timestamp(), parsed.year)
+                )
+            lo, hi, sentinels = _temporal_range_and_sentinels(pairs, col.name)
             return ColumnProfile(
                 name=col.name,
                 bq_type=col.bq_type,
                 kind=ColumnKind.TEMPORAL,
                 nullable=nullable,
                 null_fraction=null_fraction,
-                numeric_min=min(floats),
-                numeric_max=max(floats),
+                numeric_min=lo,
+                numeric_max=hi,
                 temporal_format=fmt,
+                temporal_sentinels=sentinels,
                 observed_values=tuple(strings),
             )
         shape = detect_identifier_shape(distinct)

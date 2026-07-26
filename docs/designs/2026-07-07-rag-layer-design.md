@@ -1,8 +1,10 @@
 # Design — Persistent RAG layer (`synthetic_rag.rag_chunks`)
 
-- **Status**: proposed
+- **Status**: adopted — Phase A implemented (WS2, 2026-07-20)
 - **Date**: 2026-07-07
-- **Scope**: M2 candidate. No implementation in this document — design only.
+- **Updated**: 2026-07-20
+- **Scope**: Phase A (this doc) is implemented. Phase B/C are deferred — see
+  §6 and `docs/superpowers/specs/2026-07-20-e2e-remediation-rag-eval-evolution-design.md` §4.
 - **Author context**: ACTION_4 from the M1→M2 planning pass (see project memory).
 
 ## 1. Goal & motivation
@@ -53,6 +55,39 @@ change: B.1's retrieval semantics (row-as-document GReaT serialization,
 exact cosine top-k, centroid-seeded exemplar retrieval) do not change. Only
 *where the vectors come from* changes.
 
+## 1a. Package shape (WS2 §4a)
+
+Phase A landed this design as a standalone package rather than code living
+inside `engines/b1_rag/`, so any future consumer (chatbot, KG/entity-
+resolution pass, a second engine) can depend on the RAG primitives without
+depending on `B1RagEngine` itself. `B1RagEngine` is now a **consumer** of
+this package, not its owner.
+
+`packages/sdfb-core/src/sdfb_core/rag/` (pure-Python, no Beam/GCP):
+
+- `chunking.py` — `Chunk` dataclass + chunkers (`row_doc`, `free_text_col`).
+  Row-doc `chunk_text` reuses `serialize_row()` byte-identically.
+- `embedding.py` — the `Embedder` Protocol + `BgeEmbedder` (production,
+  local-directory-only weights) / `HashingEmbedder` (dependency-free
+  fallback).
+- `index.py` — the exact FAISS `IndexFlatIP` / pure-Python top-k index.
+- `store.py` — the `ChunkStore` Protocol (`fetch`/`exists`, see §4) +
+  `InMemoryChunkStore` for tests and laptop runs.
+- `serialize.py` — GReaT-style row → text serialization.
+- `retrieval.py` — exact-local top-k exemplar retrieval (centroid and,
+  as of Phase A §5a, per-column).
+
+`packages/sdfb-beam/src/sdfb_beam/rag/` (Beam/GCP-dependent):
+
+- `store.py` — `BigQueryChunkStore`, the `ChunkStore` implementation over
+  `synthetic_rag.rag_chunks`.
+- `population.py` — the `--build_rag_layer` population DoFns
+  (`ChunkReferenceRowsDoFn`, `EmbedChunksDoFn`; see §3).
+
+The old `sdfb_core.engines.b1_rag.{embedder,index,serialize}` import paths
+survive as shims re-exporting from `sdfb_core.rag` — existing imports and
+tests written against the pre-Phase-A layout keep working.
+
 ## 2. Storage model
 
 ### Dataset
@@ -70,7 +105,7 @@ across every source table the pipeline has ever run against, distinguished by
 ```sql
 CREATE TABLE `{project}.synthetic_rag.rag_chunks` (
   chunk_id          STRING    NOT NULL
-    OPTIONS(description="blake2b-256 hex digest of source_fqn || row_digest || chunk_index; deterministic primary key, dedupes retries."),
+    OPTIONS(description="blake2b-256 hex digest of source_fqn || row_digest || chunk_index; deterministic identity key. WRITE_APPEND means duplicate rows are possible across retried/racing runs; readers dedupe by keying on row_digest."),
   source_fqn        STRING    NOT NULL
     OPTIONS(description="Fully-qualified source table this chunk was derived from, e.g. project.dataset.table (== TableSchema.fqn / table_info.table_id)."),
   source_pk         JSON
@@ -197,39 +232,47 @@ and durable.
 
 ## 3. Population path
 
-A new, **opt-in** Beam stage, gated behind a `--build_rag_layer` flag (default
-`false`) on `sdfb_beam/cli/run_pipeline.py`'s existing argparse surface
-(alongside `--ddl_uri`, `--reference_table`, etc. —
-`packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:64-95`). When set, it
-adds one branch to the DAG built by `build_pipeline()`
+A new, **opt-in** Beam stage, gated behind two flags on
+`sdfb_beam/cli/run_pipeline.py`'s existing argparse surface (alongside
+`--ddl_uri`, `--reference_table`, etc. —
+`packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:64-95`):
+
+- `--build_rag_layer` (default `false`) — populate `synthetic_rag.rag_chunks`
+  from this run's reference sample.
+- `--rag_chunks_table` (default `""`) — the FQN of `synthetic_rag.rag_chunks`.
+  The original design implied a fixed table name; implementation makes it an
+  explicit flag so laptop/DirectRunner tests and multiple environments never
+  hardcode a project-qualified name. `--rag_chunks_table` alone enables the
+  §4 read-instead-of-reembed path; paired with `--build_rag_layer` it also
+  enables population.
+
+When both are set, this adds one branch to the DAG built by `build_pipeline()`
 (`packages/sdfb-beam/src/sdfb_beam/pipeline.py`), fed from the same
 `reference_rows` PCollection the engine already consumes — no second BQ read.
 
 ```
                          ┌─────────────────────────┐
- reference_rows ────────▶│ ReferenceDigestKnown?    │  (side input: existing-rows
- (existing PCollection,  │  skip if rows already    │   count for this reference_digest,
-  side input today)      │  exist for this digest   │   read once at DAG construction)
-                         └───────────┬─────────────┘
+ reference_rows ────────▶│ ReferenceDigestKnown?    │  (driver-side store.exists()
+ (existing PCollection,  │  skip if rows already    │   check for this reference_digest
+  side input today)      │  exist for this digest   │   + embedder id/version, before
+                         └───────────┬─────────────┘   the DAG is constructed)
                                      │ (only when NOT already populated)
                                      ▼
                          ┌─────────────────────────┐
-                         │ ChunkRowsDoFn            │  row-as-doc (chunk_index=0,
+                         │ ChunkReferenceRowsDoFn   │  row-as-doc (chunk_index=0,
                          │  (sdfb-core, pure-Python)│  chunk_kind='row_doc') +
                          │                          │  one chunk per free-text column
-                         └───────────┬─────────────┘  (chunk_kind='free_text_col')
+                         └───────────┬─────────────┘  (chunk_kind='free_text_col');
+                                     │                 chunk_id/source_pk/row_digest
+                                     │                 attached here via chunk_row()
                                      ▼
                          ┌─────────────────────────┐
-                         │ RunInference             │  same EmbedderModelHandler
-                         │ (EmbedderModelHandler)   │  wrapping BgeEmbedder — the
-                         │                          │  embedder DoFn's setup() already
-                         └───────────┬─────────────┘  does the GCS warm-pull (generate.py:66-91)
-                                     ▼
-                         ┌─────────────────────────┐
-                         │ AttachIdsAndMetadata     │  chunk_id (blake2), source_pk,
-                         │ DoFn                     │  row_digest, reference_digest,
-                         │                          │  created_at
-                         └───────────┬─────────────┘
+                         │ EmbedChunksDoFn          │  setup()-built embedder (same
+                         │ (setup-built embedder)   │  GCS warm-pull + local-only
+                         │                          │  loading as GenerateRecordsDoFn);
+                         └───────────┬─────────────┘  embeds + assembles the final
+                                     │                 rag_chunks row dict (metadata,
+                                     │                 created_at) via chunk_to_bq_row()
                                      ▼
                          ┌─────────────────────────┐
                          │ WriteToBigQuery          │  FILE_LOADS, WRITE_APPEND,
@@ -248,40 +291,45 @@ Design notes:
   digest computed for *this run's* reference pull (the same digest already
   computed today by `sdfb_beam/io/digest.py` per ADR 0005, available before
   the DAG is constructed since the reference read + digest happen on the
-  driver side per the reference-data skill). If rows already exist for that
+  driver side per the reference-data skill). Implementation: this check runs
+  as `BigQueryChunkStore.exists(...)` in `run_pipeline.py`'s driver code,
+  before `PipelineConfig`/`build_pipeline()` is invoked; a hit logs the
+  `rag_population_skipped` milestone and the branch is never added to the
+  DAG. If rows already exist for that
   `(reference_digest, embedder_id, embedder_version)` triple, the branch is
-  skipped entirely — no chunking, no `RunInference`, no write. This mirrors
+  skipped entirely — no chunking, no embedding, no write. This mirrors
   the "read reference live every run, but let the digest identify re-runs
   that saw the same data" pattern already established for `validation_runs`.
   Doing the check once at DAG-construction time (not per-worker) keeps it a
   single BQ query rather than N.
 - **Why not `row_digest`-level dedup instead?** `reference_digest`-level dedup
   is coarser but matches the actual cost driver: the expensive step is
-  the RunInference embedding pass, which today runs once per *pipeline run*
+  the embedding pass, which today runs once per *pipeline run*
   regardless of row-level overlap between runs. Row-level dedup (skip
   individual rows already embedded under a *different* reference pull) is a
   legitimate future optimization but adds a per-row existence lookup that
   this design defers — out of scope per §6.
 - **Chunker reuses existing pure-Python primitives.** Row-as-document chunking
   calls the identical `serialize_row()` used today
-  (`packages/sdfb-core/src/sdfb_core/engines/b1_rag/serialize.py:20-31`), so
+  (`packages/sdfb-core/src/sdfb_core/rag/serialize.py`), so
   `chunk_text` for `chunk_kind='row_doc'` is byte-identical to what B.1
   embeds in `setup()` today — this is what makes the generation-time
   substitution in §4 safe (same text in, same vector out, modulo the embedder
-  being pinned by version). Free-text chunking is a new, small DoFn: for each
-  column the DDL-derived schema profiles as free text (reusing
-  `profile_columns` / `ColumnKind.FREE_TEXT` from
-  `packages/sdfb-core/src/sdfb_core/engines/b1_rag/profile.py`), emit one
-  chunk per non-null value with `chunk_text` = the raw column value,
-  `chunk_kind='free_text_col'`, `metadata={"column": <col_name>}`.
-- **Embedder reuse, not duplication.** The population path uses the *same*
-  `ModelHandler`/`RunInference` wrapper around `BgeEmbedder` that the
-  `model-handler.md` skill and `generate.py`'s embedder warm-pull already
-  establish (`packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:36-91` pulls
-  `ctx.embedder_uri` to `/local-ssd/embedder` before engine `setup()`) — this
-  design does not introduce a second embedding code path, only a second
-  *consumer* of the existing one (RunInference in a standalone stage instead
-  of inline inside the engine's `setup()`).
+  being pinned by version). Free-text chunking emits one chunk per non-null
+  value of each column the DDL-derived schema profiles as free text,
+  `chunk_kind='free_text_col'`, `metadata={"column": <col_name>}`. Both kinds
+  are produced by `ChunkReferenceRowsDoFn` calling
+  `sdfb_core.rag.chunking.chunk_row()`, which also computes `chunk_id`
+  (blake2b), `source_pk`, and `row_digest` per chunk — id/provenance
+  attachment happens here, not as a separate post-embed DoFn.
+- **Embedder reuse, not duplication.** The population path's `EmbedChunksDoFn`
+  builds its `BgeEmbedder` (or `HashingEmbedder` fallback) once in `setup()`,
+  reusing the *same* GCS warm-pull + local-directory-only loading that
+  `GenerateRecordsDoFn` already establishes
+  (`packages/sdfb-beam/src/sdfb_beam/dofns/generate.py`, `EMBEDDER_LOCAL_DIR`)
+  — this design does not introduce a second embedding code path, only a
+  second *consumer* of it. See "Delta from the original design" below for why
+  this is a DoFn rather than `RunInference`.
 - **Write matches the existing sink convention exactly**: `FILE_LOADS` +
   `WRITE_APPEND` + `CREATE_NEVER`
   (`packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:252-269`) — the table
@@ -292,37 +340,77 @@ Design notes:
   is implemented — not part of this document's scope to edit, since M1
   contents are frozen; noted here as the follow-on doc change.
 
+**Delta from the original design.** The 2026-07-07 diagram above put the
+embed step behind `RunInference` (`EmbedderModelHandler` wrapping
+`BgeEmbedder`). Phase A implemented it as `EmbedChunksDoFn`, a plain DoFn
+with a `setup()`-built embedder instead — matching the lifecycle convention
+`GenerateRecordsDoFn` already uses for the *generation-time* embedder
+(build-heavy-object-once-in-setup, per `.claude/skills/beam-dofn.md`), so the
+population and generation paths share one embedding code path and one
+lifecycle pattern rather than two (`RunInference`'s batching/ModelHandler
+machinery for one, `setup()` for the other). `RunInference` remains an
+option, not a rejected one, if a second consumer of embeddings (e.g. a
+higher-throughput batch backfill) ever needs its streamed-inference /
+dynamic-batching behavior — this is a "simplest thing that works for one
+consumer" choice, not a constraint against `RunInference` in general.
+
 ## 4. Generation-time path
 
 `B1RagEngine.setup()` changes from *always embed* to *prefer read, fall back
-to embed*:
+to embed*, expressed over the `ChunkStore` Protocol
+(`packages/sdfb-core/src/sdfb_core/rag/store.py`):
+
+```python
+class ChunkStore(Protocol):
+    def fetch(
+        self, reference_digest: str, chunk_kind: str,
+        embedder_id: str, embedder_version: str,
+    ) -> list[Chunk]: ...
+
+    def exists(
+        self, reference_digest: str, embedder_id: str, embedder_version: str,
+    ) -> bool: ...
+```
+
+`BigQueryChunkStore` (`sdfb_beam/rag/store.py`) is the production
+implementation; `InMemoryChunkStore` (`sdfb_core/rag/store.py`) is the
+test/laptop double.
 
 ```
 setup(model_client, ctx):
   1. profile columns (unchanged)
-  2. IF ctx.reference_rows:
-       a. query synthetic_rag.rag_chunks WHERE reference_digest = ctx.reference_digest
-          AND chunk_kind = 'row_doc'
-          AND embedder_id = <configured embedder_id>
-          AND embedder_version = <configured embedder_version>
-       b. IF rows returned (count > 0):
-            - build self._ref_vectors from the returned `embedding` arrays,
-              self._row_texts from `chunk_text` (order joined back to
-              ctx.reference_rows via row_digest, since BQ read order is not
-              guaranteed to match ctx.reference_rows order)
+  2. IF ctx.chunk_store is not None AND ctx.reference_digest:
+       a. chunks = ctx.chunk_store.fetch(ctx.reference_digest, 'row_doc',
+                                          ctx.embedder_id, ctx.embedder_version)
+       b. all-or-nothing coverage check: build a row_digest -> embedding map
+          from `chunks`; for EVERY row in the embed-prefix (the reference
+          rows the engine would otherwise embed), require a chunk whose
+          embedding both (i) exists and (ii) has len == self._embedder.dim.
+          A single missing or wrong-dim row fails the whole check.
+       c. IF the coverage check passes:
+            - self._ref_vectors = the matched embeddings, in embed-prefix order
             - build_index(self._ref_vectors, dim)   # same FAISS/py fallback as today
+            - log_milestone("b1_chunks_reused", rows=..., seconds=...)
             - SKIP the embed-on-worker path entirely
-          ELSE (table empty for this digest — first run, or --build_rag_layer
-                was never turned on, or embedder version was bumped):
+          ELSE (no store attached, empty table for this digest+version,
+                partial coverage, or a dim mismatch — first run,
+                --build_rag_layer never turned on, or embedder version bumped):
             - fall back to TODAY'S path exactly:
               texts = serialize_rows(...); self._embedder.embed(texts); build_index(...)
-  3. free-text pools built exactly as today (unchanged — §4 does not touch
-     _build_free_text_pools; that stays retrieval-conditioned on whichever
-     index was built in step 2)
+  3. free-text pools built as in §5a (unchanged by this section — retrieval-
+     conditioned on whichever index was built in step 2)
 ```
 
 Key properties:
 
+- **All-or-nothing, not partial-reuse.** A partial read (some rows found in
+  `rag_chunks`, others not) would either silently drop reference rows from
+  the index or require mixing freshly-embedded and persisted vectors in one
+  index — both are worse than a clean fallback. The dim check additionally
+  guards against a `rag_chunks` row from a stale/mismatched embedder slipping
+  through despite the `(embedder_id, embedder_version)` filter (e.g. a bug
+  upstream writing the wrong dim). Any single failure discards the whole
+  attempt and re-embeds — correctness over reuse.
 - **Correctness is order-independent of which branch ran.** Whether vectors
   came from BQ or from re-embedding, `_ref_vectors` and `_index` end up
   populated the same way (same dim, same normalization contract in
@@ -335,34 +423,38 @@ Key properties:
   re-quantized weights) in one FAISS index would silently corrupt cosine
   similarity — nearest-neighbor search across two different embedding spaces
   is meaningless even though the vectors are the same dimensionality. The
-  read query in step 2a filters on both fields explicitly so a version bump
-  is invisible to the read (it just naturally falls to the "no rows for this
+  `fetch()` call filters on both fields explicitly so a version bump is
+  invisible to the read (it just naturally falls to the "no rows for this
   digest+version" branch → re-embed), never a silent mix.
+- **The `b1_chunks_reused` milestone** (`row count`, `seconds` to fetch +
+  join) is the observable signal that a run actually benefited from the
+  persisted layer — the operational way to tell "read path" from "fallback
+  path" apart in run logs, since output rows are otherwise indistinguishable.
 - **The BQ read is a small side input, not a second big reference pull.**
   Reading `chunk_text` + `embedding` for one `reference_digest` is bounded by
   the reference sample size (same order of magnitude as the existing
   `--reference_rows_limit`, default 10k rows) and happens once per worker in
   `setup()` — the same lifecycle stage that pays the embed cost today, so
   there is no new per-batch cost.
-- **No change to `GenerationContext`'s public shape is required beyond what
-  already exists** — `ctx.reference_digest` is already a field
-  (`packages/sdfb-core/src/sdfb_core/engines/base.py:86`). The engine gains an
-  injectable "chunk reader" seam (a `Protocol`, analogous to `Embedder` and
-  `ModelClient`) so `sdfb-core` stays Beam-free: production wires a BQ-backed
-  reader constructed in `sdfb-beam` and passed to the engine the same way
-  `ctx.embedder_uri` is threaded through today; tests inject a fake that
-  returns canned chunk rows or an empty result (to exercise the fallback
-  branch). This new seam is the one piece of *interface* surface this design
-  introduces — no DDL, no Beam wiring changes beyond the new optional stage
-  in §3.
+- **Worker-side attachment pattern.** `GenerationContext` carries
+  `rag_chunks_table: str` (a plain FQN string, not a store object — the
+  context stays Beam/GCP-free per package boundaries). The store itself is
+  attached on the worker: `GenerateRecordsDoFn.setup()` checks
+  `if ctx.rag_chunks_table and ctx.chunk_store is None`, and if so rebuilds
+  `ctx` via `ctx.model_copy(update={"chunk_store": BigQueryChunkStore(ctx.rag_chunks_table)})`
+  before constructing the engine — so `BigQueryChunkStore` (and its lazy
+  `google.cloud.bigquery.Client`) is only ever instantiated inside a Beam
+  DoFn's `setup()`, never on the driver or inside `sdfb-core`. Tests construct
+  a `GenerationContext` with `chunk_store=InMemoryChunkStore(...)` directly,
+  bypassing the DoFn entirely.
 
 ## 5. Chunking & retrieval standards
 
 - **Row-as-document serialization** (`chunk_kind='row_doc'`): identical to
   today's GReaT-style sentence — `"col is value, col is value, ..."` in
   declared schema column order, nulls rendered as `"is null"`
-  (`serialize_row()`, `serialize.py:20-31`). One `row_doc` chunk per reference
-  row (`chunk_index=0`).
+  (`serialize_row()` in `sdfb_core/rag/serialize.py`). One `row_doc` chunk per
+  reference row (`chunk_index=0`).
 - **Per-free-text-column chunks** (`chunk_kind='free_text_col'`): one chunk
   per non-null value of each column the DDL-derived profiler classifies as
   `ColumnKind.FREE_TEXT` (`profile.py`). `chunk_index` increments per row
@@ -378,34 +470,69 @@ Key properties:
 - **Normalization**: all embeddings are L2-normalized before write (mirrors
   `HashingEmbedder`/`BgeEmbedder`'s existing normalize-on-embed behavior —
   `BgeEmbedder.embed()` calls `torch.nn.functional.normalize(..., p=2, dim=1)`
-  at `embedder.py:173`), so `COSINE` distance in `VECTOR_SEARCH` and inner
-  product both agree — consistent with `build_index()`'s
-  `IndexFlatIP`-over-normalized-vectors convention
-  (`index.py:1-17,96-100`).
+  in `sdfb_core/rag/embedding.py`), so `COSINE` distance in `VECTOR_SEARCH`
+  and inner product both agree — consistent with `build_index()`'s
+  `IndexFlatIP`-over-normalized-vectors convention (`sdfb_core/rag/index.py`).
 - **Retrieval granularity, generation-time vs. downstream**: B.1's internal
   retrieval (exemplar lookup for free-text pool inference,
-  `_retrieve_exemplars()` in `engine.py:244-265`) stays **exact** local FAISS
+  `B1RagEngine._retrieve_exemplars()` in
+  `sdfb_core/engines/b1_rag/engine.py`) stays **exact** local FAISS
   `IndexFlatIP` search regardless of whether vectors were read from BQ or
   freshly embedded — never BigQuery `VECTOR_SEARCH` in the hot generation
   path (that would add network RPCs per worker `setup()` call and reintroduce
-  the nondeterminism `IndexFlatIP` was chosen to avoid, per `index.py`'s
+  the nondeterminism `IndexFlatIP` was chosen to avoid, per `sdfb_core/rag/index.py`'s
   "deterministic top-k" comment). BigQuery `VECTOR_SEARCH` (approximate, IVF)
   is exclusively the **downstream/external** query surface described in §2 —
   the two retrieval paths are deliberately different (exact-local for the
   pipeline's own generation, approximate-BQ for everyone else) because they
   have different latency/determinism requirements.
 - **Top-k convention**: unchanged from today — `_DEFAULT_TOP_K = 8` exemplars
-  retrieved to condition free-text pool inference
-  (`engine.py:67`). This design does not introduce a new top-k parameter for
-  the pipeline's own use; §2's example `VECTOR_SEARCH` query's `top_k => 8` is
-  a suggested downstream default, not a contract.
+  retrieved to condition free-text pool inference in
+  `sdfb_core/engines/b1_rag/engine.py`. This design does not introduce a new
+  top-k parameter for the pipeline's own use; §2's example `VECTOR_SEARCH`
+  query's `top_k => 8` is a suggested downstream default, not a contract.
+
+## 5a. Phase A generation-quality changes (WS2 §4b.2-3)
+
+Two changes landed alongside the persistence/reuse work in this same Phase A
+pass — not because they depend on `rag_chunks`, but because both address
+free-text generation quality gaps found by the same WS1/WS2 remediation
+effort, and both reuse the retrieval primitives this design introduces.
+
+- **Pool scaling.** The free-text value pool per column now targets
+  `min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)` with
+  `_FREE_TEXT_POOL_MAX = 512` (`engines/b1_rag/engine.py`), instead of a
+  single fixed-size LLM call. The pool is filled by batched completions of
+  `_POOL_VALUES_PER_CALL = 32` values per call, cycling the existing
+  escalation ladder (retry-with-relaxed-sampling), with calls bounded at
+  `max(len(levels), 2 * ceil(target / 32))` — multiple bounded calls, never
+  a per-row LLM call, preserving ADR 0013's FASTGEN "infer distribution once"
+  spine. This directly addresses the 28–619× oversampling on high-cardinality
+  free-text columns that a fixed 32-value pool produced against larger
+  reference/output sizes.
+- **Per-column exemplar retrieval.** Free-text pool inference for column C
+  now retrieves exemplars specific to C rather than diluted whole-row
+  sentences, in seed precedence order:
+  1. `free_text_col` chunks for C from the attached `ChunkStore` (when a
+     store is attached and has coverage for C);
+  2. locally embedded values of column C (embed C's own reference values,
+     retrieve top-k against them);
+  3. row-doc exemplars (today's whole-row retrieval), as a fallback when
+     neither of the above yields anything for C;
+  4. `text_examples` (static column-level examples from the DDL/profile),
+     as the final fallback.
+  This seam is why `retrieval.py` (§1a) exists as a standalone module: the
+  per-column retrieval logic is shared by whichever exemplar source is
+  available, rather than duplicated per source.
 
 ## 6. Constraints & out of scope
 
 Reaffirming CLAUDE.md's hard constraints as they apply here:
 
 - **No Vertex AI.** Embeddings are computed exclusively by the existing
-  self-hosted `BgeEmbedder` inside a Beam `RunInference` stage — this design
+  self-hosted `BgeEmbedder`, warm-pulled and built once per worker in a Beam
+  DoFn's `setup()` (`EmbedChunksDoFn` for population, the engine's own
+  `setup()` for generation-time fallback) — this design
   adds no new inference backend, no Vertex Embeddings API, no Vertex Vector
   Search / Matching Engine. BigQuery's native `VECTOR_SEARCH` /
   `CREATE VECTOR INDEX` is a BigQuery storage/query feature, not a managed AI
@@ -418,11 +545,13 @@ Reaffirming CLAUDE.md's hard constraints as they apply here:
   remote function.
 - **No external vector databases** (Pinecone, Weaviate, pgvector, etc.) — BQ
   itself is the vector store, per the user's locked decision.
-- **No HuggingFace Hub at runtime** — the population path's embedder DoFn
+- **No HuggingFace Hub at runtime** — the population path's `EmbedChunksDoFn`
   reuses the exact same GCS-warm-pull + local-directory-only loading already
-  in place (`generate.py:66-91`, `BgeEmbedder.__init__` with
-  `local_files_only=True`, `embedder.py:138-143`). Nothing in this design
-  calls `from_pretrained("org/repo")`.
+  in place for generation (`packages/sdfb-beam/src/sdfb_beam/dofns/generate.py`,
+  `EMBEDDER_LOCAL_DIR`), and `BgeEmbedder.__init__`
+  (`packages/sdfb-core/src/sdfb_core/rag/embedding.py`) uses
+  `local_files_only=True`. Nothing in this design calls
+  `from_pretrained("org/repo")`.
 - **Single-table M1 semantics preserved.** `rag_chunks` is schematically
   table-agnostic (any `source_fqn` can write into it) but this design makes
   **no** cross-table join, no multi-table graph, no entity-resolution logic —
@@ -447,41 +576,56 @@ Reaffirming CLAUDE.md's hard constraints as they apply here:
     under a new `embedder_version` in bulk) — the read path in §4 handles a
     version bump gracefully (falls back to re-embed for that run) but nothing
     here re-backfills the table under the new version automatically.
-  - Any change to B.1's retrieval *quality* (chunk granularity beyond
-    row/free-text-column, hybrid keyword+vector search, reranking) — this is
-    a storage/reuse design, not a retrieval-quality design.
+- **Phase B/C — deferred until Phase A's E2E baseline** (not "out of scope",
+  scheduled after Phase A; spec §4c/§4d; WS3 gates the comparison — Phase C
+  ships only after Phase A's `validation_data_history` metrics establish the
+  baseline it must beat):
+  - **Phase B** (spec §4c): new `chunk_kind`s written by the population
+    stage — `column_profile` (one chunk per column: name, type, inferred
+    kind, cardinality, top values) and `table_summary` (one chunk per
+    `reference_digest`). Generation does not consume these initially; they
+    are retrieval substrate for downstream apps and future prompt-grounding.
+  - **Phase C** (spec §4d): chunk granularity beyond row/free-text-column,
+    hybrid keyword+vector search (deterministic BM25 blended with cosine),
+    and reranking of B.1's own exemplar retrieval — this Phase A document is
+    a storage/reuse design, not a retrieval-quality design; Phase C is where
+    retrieval quality itself changes.
 
 ## 7. Migration / rollout
 
 Landing this incrementally, with **B.1's default behavior completely
 unchanged** until an operator opts in:
 
-1. **Land the schema, unused.** Add `config/bq_schema/synthetic_rag/rag_chunks.schema.json`
-   (JSON array, same convention as `config/bq_schema/synthetic_data_quality/*.schema.json`)
-   and document `synthetic_rag` dataset provisioning in
-   `docs/DEPLOYMENT_PREREQUISITES.md` alongside `synthetic_data_quality`. No
-   pipeline code changes yet. Nothing reads or writes the table.
-2. **Land the population stage behind `--build_rag_layer` (default `false`).**
-   When the flag is absent/false, `build_pipeline()` behaves exactly as it
-   does today — the new branch in §3 is simply not added to the DAG. This is
-   the same "opt-in, additive DAG branch" shape already used for
-   `validation_runs_sink` (`if args.validation_runs_table: ...` in
-   `run_pipeline.py:265-271`) — a precedent for gating an optional BQ sink
+1. **[DONE] Land the schema, unused.** Added
+   `config/bq_schema/synthetic_rag/rag_chunks.schema.json`
+   (JSON array, same convention as `config/bq_schema/synthetic_data_quality/*.schema.json`).
+   `synthetic_rag` dataset provisioning in `docs/DEPLOYMENT_PREREQUISITES.md`
+   alongside `synthetic_data_quality` remains a follow-on doc change
+   (WS5, spec §7).
+2. **[DONE] Land the population stage behind `--build_rag_layer` (default
+   `false`).** When the flag is absent/false, `build_pipeline()` behaves
+   exactly as it does today — the new branch in §3 is simply not added to
+   the DAG. This is the same "opt-in, additive DAG branch" shape already
+   used for `validation_runs_sink` (`if args.validation_runs_table: ...` in
+   `run_pipeline.py`) — a precedent for gating an optional BQ sink
    behind an empty/false CLI default.
-3. **Land the generation-time read behind the same principle, but
-   self-gating on data, not a flag.** `B1RagEngine.setup()`'s new "try BQ
-   read first" branch (§4) requires **no separate CLI flag** — it always
-   tries the read when `ctx.reference_digest` is non-empty and a chunk-reader
-   seam is wired, and falls back to today's embed path when the table has no
-   matching rows. This means: until an operator has actually run a job with
-   `--build_rag_layer=true` for a given `reference_digest`, every B.1 run
-   behaves byte-for-byte as it does today (empty table → immediate fallback,
-   same code path, same output). The very first run under a new digest is
-   always a fallback-embed run; only the *second* run against the same
-   digest (or any run after a `--build_rag_layer` population job) benefits.
-   This ordering — read path lands before or alongside the write path, safe
-   by construction because of the fallback — means the two can ship as one
-   PR or two; there is no unsafe partial-rollout state.
+3. **[DONE] Land the generation-time read, self-gating on data.**
+   `GenerateRecordsDoFn.setup()`'s worker-side attachment (§4) is gated on
+   the `--rag_chunks_table` flag being set (the store is only ever attached
+   when there is a table to read from); once attached, `B1RagEngine.setup()`
+   always *tries* the read when `ctx.reference_digest` is non-empty, and
+   falls back to today's embed path when the all-or-nothing coverage check
+   (§4) fails — no separate flag governs read-vs-fallback, that part is
+   self-gating on data. This means: until an operator has actually run a job
+   with `--build_rag_layer=true` for a given `reference_digest`, every B.1
+   run with `--rag_chunks_table` set still behaves byte-for-byte as it does
+   without the flag (empty table → immediate fallback, same code path, same
+   output). The very first run under a new digest is always a fallback-embed
+   run; only the *second* run against the same digest (or any run after a
+   `--build_rag_layer` population job) benefits. This ordering — read path
+   lands before or alongside the write path, safe by construction because of
+   the fallback — means the two shipped as one PR; there is no unsafe
+   partial-rollout state.
 4. **Operational rollout**: run one job with `--build_rag_layer=true` against
    a reference table's current `reference_digest` (a cheap, isolated
    "backfill" run — it can even skip the synthetic-generation branches

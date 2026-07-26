@@ -16,8 +16,12 @@ from sdfb_beam.cli.run_pipeline import (
     build_model_client,
     configure_pipeline_options,
     parse_args,
+    parse_bool_flag,
     resolve_engine_strictness,
+    resolve_landing_dispositions,
 )
+from sdfb_core.codegen import derive_bq_load_schema
+from sdfb_core.contracts import TableSchema
 
 
 def _common_args() -> list[str]:
@@ -336,3 +340,162 @@ def test_resolve_engine_strictness(client_type, expected):
     degrade into memorized reference data. Only the deterministic fake
     client (CPU smoke) stays lenient."""
     assert resolve_engine_strictness(client_type) is expected
+
+
+def test_parse_args_rag_layer_flags_default_off():
+    args, _ = parse_args(_common_args())
+    assert parse_bool_flag(args.build_rag_layer) is False
+    assert args.rag_chunks_table == ""
+
+
+def test_parse_args_rag_layer_flags():
+    argv = [
+        *_common_args(),
+        "--build_rag_layer",
+        "--rag_chunks_table", "proj.synthetic_rag.rag_chunks",
+    ]
+    args, _ = parse_args(argv)
+    assert parse_bool_flag(args.build_rag_layer) is True
+    assert args.rag_chunks_table == "proj.synthetic_rag.rag_chunks"
+
+
+def test_parse_args_build_rag_layer_accepts_flex_template_value():
+    """Flex Templates pass every parameter as --name=value — the bare
+    store_true form can't receive one, so the flag must accept true/false
+    strings too (composer DAG: build_rag_layer param)."""
+    argv = [
+        *_common_args(),
+        "--build_rag_layer=true",
+        "--rag_chunks_table=proj.synthetic_rag.rag_chunks",
+    ]
+    args, _ = parse_args(argv)
+    assert parse_bool_flag(args.build_rag_layer) is True
+    argv = [
+        *_common_args(),
+        "--build_rag_layer=false",
+        "--rag_chunks_table=proj.synthetic_rag.rag_chunks",
+    ]
+    args, _ = parse_args(argv)
+    assert parse_bool_flag(args.build_rag_layer) is False
+
+
+def test_parse_args_build_rag_layer_requires_table():
+    with pytest.raises(SystemExit):
+        parse_args([*_common_args(), "--build_rag_layer"])
+
+
+def test_parse_args_write_disposition_default_and_choices():
+    args, _ = parse_args(_common_args())
+    assert args.write_disposition == "append"
+    assert args.create_if_not_exists == "false"
+    args, _ = parse_args([*_common_args(), "--write_disposition", "overwrite"])
+    assert args.write_disposition == "overwrite"
+    with pytest.raises(SystemExit):
+        parse_args([*_common_args(), "--write_disposition", "truncate"])
+
+
+def test_landing_sink_schema_uses_load_safe_projection(narrow_ddl_dict):
+    """WS4 final-review CRITICAL-1: the landing sink for CREATE_IF_NEEDED
+    must be built from `derive_bq_load_schema`, not `derive_bq_schema` —
+    the FILE_LOADS runtime path (vendored apitools `TableFieldSchema`)
+    rejects `maxLength`/`precision`/`scale`/`defaultValueExpression` at
+    load-job time even though Beam accepts them at graph construction.
+
+    `run_pipeline.main()` calls `derive_bq_load_schema(table_schema)`
+    directly to build `landing_kwargs["schema"]`; exercise that same call
+    here against a parameterized fixture (STRING max_length + NUMERIC
+    precision/scale) rather than driving the whole pipeline.
+    """
+    import sdfb_beam.cli.run_pipeline as run_pipeline_module
+
+    # Regression guard: the module must not have re-imported the unsafe
+    # `derive_bq_schema` under the name used to build the landing schema.
+    assert run_pipeline_module.derive_bq_load_schema is derive_bq_load_schema
+    assert not hasattr(run_pipeline_module, "derive_bq_schema")
+
+    ts = TableSchema.model_validate(narrow_ddl_dict)
+    schema = run_pipeline_module.derive_bq_load_schema(ts)
+
+    forbidden = {"maxLength", "precision", "scale", "defaultValueExpression"}
+    for field in schema["fields"]:
+        assert not forbidden & set(field.keys()), field
+    email = next(f for f in schema["fields"] if f["name"] == "email")
+    assert email["type"] == "STRING"
+    ltv = next(f for f in schema["fields"] if f["name"] == "lifetime_value")
+    assert ltv["type"] == "NUMERIC"
+
+
+def test_parse_bool_flag_truthy_set():
+    assert parse_bool_flag("true")
+    assert parse_bool_flag("1")
+    assert parse_bool_flag(" YES ")
+    assert not parse_bool_flag("false")
+    assert not parse_bool_flag("0")
+    assert not parse_bool_flag("")
+    assert not parse_bool_flag("no")
+
+
+def test_resolve_landing_dispositions_matrix():
+    from apache_beam.io.gcp.bigquery import BigQueryDisposition
+
+    assert resolve_landing_dispositions("append", False) == (
+        BigQueryDisposition.WRITE_APPEND,
+        BigQueryDisposition.CREATE_NEVER,
+    )
+    assert resolve_landing_dispositions("overwrite", False) == (
+        BigQueryDisposition.WRITE_TRUNCATE,
+        BigQueryDisposition.CREATE_NEVER,
+    )
+    assert resolve_landing_dispositions("append", True) == (
+        BigQueryDisposition.WRITE_APPEND,
+        BigQueryDisposition.CREATE_IF_NEEDED,
+    )
+    assert resolve_landing_dispositions("overwrite", True) == (
+        BigQueryDisposition.WRITE_TRUNCATE,
+        BigQueryDisposition.CREATE_IF_NEEDED,
+    )
+
+
+# --- ddl_uri optional with live-extraction precedence (WS4 §6b) ---------
+
+
+def _args_without_ddl_uri() -> list[str]:
+    args = _common_args()
+    i = args.index("--ddl_uri")
+    return args[:i] + args[i + 2:]
+
+
+def test_parse_args_ddl_uri_optional_defaults_empty():
+    args, beam_argv = parse_args(_args_without_ddl_uri())
+    assert args.ddl_uri == ""
+    assert beam_argv == []
+
+
+def test_resolve_table_schema_prefers_explicit_uri(monkeypatch):
+    from sdfb_beam.cli import run_pipeline as rp
+
+    sentinel = object()
+    monkeypatch.setattr(rp, "load_ddl", lambda uri: sentinel)
+
+    def fake_extract(fqn: str):
+        live_calls.append(fqn)
+
+    live_calls: list[str] = []
+    monkeypatch.setattr(
+        "sdfb_beam.ddl.extract_table_schema",
+        fake_extract,
+    )
+    assert rp.resolve_table_schema("gs://b/d.json", "p.d.t") is sentinel
+    assert live_calls == []  # precedence: pin wins, live never touched
+
+
+def test_resolve_table_schema_live_extracts_when_uri_empty(monkeypatch):
+    from types import SimpleNamespace
+
+    from sdfb_beam.cli import run_pipeline as rp
+
+    sentinel = SimpleNamespace(columns=[1, 2], fqn="p.d.t")
+    monkeypatch.setattr(
+        "sdfb_beam.ddl.extract_table_schema", lambda fqn: sentinel
+    )
+    assert rp.resolve_table_schema("", "p.d.t") is sentinel

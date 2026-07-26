@@ -15,7 +15,9 @@ Substitution markers (workflow 3 seds these at import time):
   {{SDFB_MODEL_URI}}          gs://<bucket>/synthetic/models/gemma4/…
   {{SDFB_EMBEDDER_URI}}       gs://<bucket>/synthetic/models/embedders/… (B.1; empty ⇒ HashingEmbedder)
   {{SDFB_DEFAULT_TABLE_FQN}}  project.dataset.table
-  {{SDFB_DDL_URI}}            gs://…/ddl.json
+  {{SDFB_DDL_URI}}            gs://…/ddl.json (empty ⇒ operator omits ddl_uri; live INFORMATION_SCHEMA extraction)
+  {{SDFB_RAG_CHUNKS_TABLE}}   project.synthetic_rag.rag_chunks (B.1 chunk store; empty ⇒ params omitted, no reuse/population)
+  {{WRITE_DISPOSITION}}       default of the `write_disposition` DAG param (append | overwrite)
   {{SDFB_LANDING_TABLE}}      project.synthetic_data.<table> (defaults to the source table name)
   {{SDFB_DLQ_TABLE}}          project.synthetic_data_quality.dlq
   {{SDFB_VALIDATION_RUNS_TABLE}} project.synthetic_data_quality.validation_runs
@@ -48,6 +50,16 @@ ENGINE_DEFAULT = "{{ENGINE}}"                   # default of the `engine` param 
 embedder_uri = "{{SDFB_EMBEDDER_URI}}"          # B.1 embedder; empty ⇒ HashingEmbedder
 default_table_fqn = "{{SDFB_DEFAULT_TABLE_FQN}}"
 validation_runs_table = "{{SDFB_VALIDATION_RUNS_TABLE}}"  # synthetic_data_quality.validation_runs
+# Landing write mode default — build-time marker (workflow 3 input), runtime
+# overridable via the write_disposition DAG param on every trigger.
+WRITE_DISPOSITION_DEFAULT = "{{WRITE_DISPOSITION}}"
+# Empty ⇒ the DAG omits the ddl_uri Flex parameter entirely and the launcher
+# live-extracts the schema from the source table (WS4 §6b).
+_DDL_URI = "{{SDFB_DDL_URI}}"
+# B.1 RAG chunk store (WS2). Empty ⇒ the DAG omits rag_chunks_table AND
+# build_rag_layer entirely: the launcher re-embeds per worker, no persisted
+# chunk reuse (the 2026-07-23 run spent 158s re-embedding for this reason).
+_RAG_CHUNKS_TABLE = "{{SDFB_RAG_CHUNKS_TABLE}}"
 
 # -----------------------------------------------------------------------------
 # Runtime infra — Composer Variables, set once per env (not build-time-baked).
@@ -200,6 +212,30 @@ default_dag_params = {
                     "reproduction of a run. Empty (default) derives a fresh "
                     "seed per (run_id, batch) — recommended.",
     ),
+    "write_disposition": Param(
+        default=WRITE_DISPOSITION_DEFAULT,
+        type="string",
+        enum=["append", "overwrite"],
+        description="Landing-table write mode; overwrite = WRITE_TRUNCATE. "
+                    "Landing only — DLQ/quality/RAG tables always append.",
+    ),
+    "create_if_not_exists": Param(
+        default="false",
+        type="string",
+        enum=["false", "true"],
+        description="Create the landing table on first write "
+                    "(CREATE_IF_NEEDED + derived schema).",
+    ),
+    "build_rag_layer": Param(
+        default="true",
+        type="string",
+        enum=["true", "false"],
+        description="Populate the B.1 RAG chunk store from this run's "
+                    "reference sample (skipped in-launcher when the "
+                    "reference_digest already exists for the embedder "
+                    "id+version). Ignored when the build left "
+                    "SDFB_RAG_CHUNKS_TABLE empty.",
+    ),
 }
 
 with models.DAG(
@@ -282,7 +318,21 @@ with models.DAG(
                     "workerRegion": region,
                 },
                 "parameters": {
-                    "ddl_uri": "{{SDFB_DDL_URI}}",
+                    # Omitted entirely when the build left the DDL marker
+                    # empty — the launcher then live-extracts (WS4 §6b). An
+                    # empty-string value would fail the template's ddl_uri
+                    # regex, so omission (not "") is the off state.
+                    **({"ddl_uri": _DDL_URI} if _DDL_URI else {}),
+                    # Omitted together when the build left the chunk-store
+                    # marker empty — same off-state convention as ddl_uri.
+                    **(
+                        {
+                            "rag_chunks_table": _RAG_CHUNKS_TABLE,
+                            "build_rag_layer": "{{ params.build_rag_layer }}",
+                        }
+                        if _RAG_CHUNKS_TABLE
+                        else {}
+                    ),
                     "reference_table": "{{ params.table_fqn }}",
                     "reference_rows_limit": "10000",
                     "landing_table": "{{SDFB_LANDING_TABLE}}",
@@ -307,6 +357,8 @@ with models.DAG(
                     "vllm_dtype": "{{ params.vllm_dtype }}",
                     "vllm_max_model_len": "{{ params.vllm_max_model_len }}",
                     "seed": "{{ params.seed }}",
+                    "write_disposition": "{{ params.write_disposition }}",
+                    "create_if_not_exists": "{{ params.create_if_not_exists }}",
                 },
             }
         },

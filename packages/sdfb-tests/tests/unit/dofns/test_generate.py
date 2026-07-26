@@ -31,6 +31,8 @@ def fake_gcs(monkeypatch):
 
         def download_to_filename(self, dest):
             self.downloaded_to = dest
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(self.name)
 
     recorder: dict = {"list_calls": [], "blobs": []}
 

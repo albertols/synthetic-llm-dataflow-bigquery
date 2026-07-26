@@ -66,10 +66,14 @@ def big_ctx() -> GenerationContext:
 
 
 def test_setup_embeds_at_most_the_row_cap(big_ctx):
+    # WS2 §4b.3: `_column_seed_examples` adds a second, independently
+    # bounded embed() call per free-text column (locally-embedded column
+    # values, no chunk_store here) alongside the row-doc embed — both stay
+    # capped at _MAX_EMBED_ROWS, which is the invariant this test guards.
     embedder = _CountingEmbedder()
     engine = B1RagEngine(embedder=embedder)
     engine.setup(_NovelClient(), big_ctx)
-    assert embedder.embedded_counts == [_MAX_EMBED_ROWS]
+    assert embedder.embedded_counts == [_MAX_EMBED_ROWS, _MAX_EMBED_ROWS]
     assert len(engine._ref_vectors) == _MAX_EMBED_ROWS
 
 
@@ -106,4 +110,6 @@ def test_small_reference_is_embedded_in_full(caplog):
     embedder = _CountingEmbedder()
     engine = B1RagEngine(embedder=embedder)
     engine.setup(_NovelClient(), ctx)
-    assert embedder.embedded_counts == [12]
+    # See test_setup_embeds_at_most_the_row_cap: two bounded embed() calls
+    # (row-doc + per-free-text-column local values) now, both == len(rows).
+    assert embedder.embedded_counts == [12, 12]

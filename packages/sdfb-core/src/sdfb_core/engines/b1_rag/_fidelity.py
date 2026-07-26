@@ -66,20 +66,30 @@ class ColumnSampler:
         self._temporal_floats: list[float] | None = None
 
     def _temporal_obs_floats(self) -> list[float]:
-        """Observed TEMPORAL values on the float axis (computed once)."""
+        """Observed TEMPORAL values on the float axis (computed once).
+
+        Filtered to the profile's [numeric_min, numeric_max]: sentinel
+        values (excluded from the range by the profiler) and pre-clamp
+        history must not survive as blend anchors — a year-1 anchor is how
+        the 2026-07-23 E2E landed "72-08-01" dates.
+        """
         if self._temporal_floats is None:
             fmt = self.profile.temporal_format
             if fmt is not None:  # date-shaped STRING column
-                self._temporal_floats = [
+                floats = [
                     temporal_string_to_float(str(v), fmt)
                     for v in self.profile.observed_values
                 ]
             else:
-                self._temporal_floats = [
+                floats = [
                     f
                     for f in (temporal_to_float(v) for v in self.profile.observed_values)
                     if f is not None
                 ]
+            lo, hi = self.profile.numeric_min, self.profile.numeric_max
+            if lo is not None and hi is not None:
+                floats = [f for f in floats if lo <= f <= hi]
+            self._temporal_floats = floats
         return self._temporal_floats
 
     def _render_temporal(self, base: list[float]) -> list:
@@ -87,6 +97,25 @@ class ColumnSampler:
         if p.temporal_format is not None:
             return [temporal_string_from_float(v, p.temporal_format) for v in base]
         return [temporal_from_float(v, p.bq_type) for v in base]
+
+    def _inject_temporal_sentinels(self, values: list, rand_many) -> list:
+        """Overwrite jittered values with the profile's sentinel values at
+        their observed fractions. ``rand_many(k)`` returns k uniforms in
+        [0, 1) — only called when sentinels exist, so sentinel-free columns
+        consume no extra RNG stream (seeded reproducibility unchanged)."""
+        sentinels = self.profile.temporal_sentinels
+        if not sentinels:
+            return values
+        draws = rand_many(len(values))
+        out = list(values)
+        for i, r in enumerate(draws):
+            acc = 0.0
+            for sentinel_value, fraction in sentinels:
+                acc += fraction
+                if r < acc:
+                    out[i] = sentinel_value
+                    break
+        return out
 
     # -- NumPy (vectorized) backend ----------------------------------------
 
@@ -155,7 +184,9 @@ class ColumnSampler:
         hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
         obs = np.asarray(self._temporal_obs_floats(), dtype="float64")
         base = self._blend_floats_numpy(np, rng, obs, lo, hi, n, similarity)
-        return self._render_temporal(base)
+        return self._inject_temporal_sentinels(
+            self._render_temporal(base), rng.random
+        )
 
     def _categorical_numpy(self, np, rng, n: int, similarity: float) -> list:
         p = self.profile
@@ -240,7 +271,10 @@ class ColumnSampler:
         base = self._blend_floats_python(
             rng, self._temporal_obs_floats(), lo, hi, n, similarity
         )
-        return self._render_temporal(base)
+        return self._inject_temporal_sentinels(
+            self._render_temporal(base),
+            lambda k: [rng.random() for _ in range(k)],
+        )
 
     def _categorical_python(self, rng, n: int, similarity: float) -> list:
         p = self.profile

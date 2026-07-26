@@ -544,3 +544,111 @@ def test_b1_pool_prompt_demands_format_identification_and_novelty(free_text_ctx)
     # never copying exemplars verbatim (generic across UUIDs/dates/codes).
     assert "format" in prompt
     assert "verbatim" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Temporal sentinels + interim age policy (2026-07-23). The 2026-07-23 b1 E2E
+# landed date-STRING columns with dates like "72-08-01": 0001-01-01 sentinels
+# inflated the jitter [min, max] to ~2000 years, and sentinel anchors leaked
+# through the blend. Sentinel-year values (1 / 9999) leave the range and are
+# re-injected at their observed frequency; the floor is additionally clamped
+# to now - 10 years (interim policy; per-column DDL-JSON descriptions will
+# govern audit/linked fields later).
+# ---------------------------------------------------------------------------
+
+
+def _ts_schema() -> TableSchema:
+    return TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.tstamps"},
+            "schema": [{"name": "ts", "type": "TIMESTAMP", "mode": "REQUIRED"}],
+            "primary_keys": None,
+        }
+    )
+
+
+def test_b1_temporal_profile_splits_sentinels_and_keeps_recent_range():
+    sentinel = datetime(1, 1, 1, tzinfo=UTC)
+    rows = [
+        {"ts": datetime(2025, 3, 1, tzinfo=UTC) + timedelta(hours=i)}
+        for i in range(60)
+    ] + [{"ts": sentinel}] * 40
+    p = profile_columns(_ts_schema(), rows)["ts"]
+    assert p.kind is ColumnKind.TEMPORAL
+    assert datetime.fromtimestamp(p.numeric_min, tz=UTC).year == 2025
+    sentinels = dict(p.temporal_sentinels)
+    assert abs(sentinels[sentinel] - 40 / 100) < 0.01
+
+
+def test_b1_sampler_reinjects_sentinels_and_stays_plausible():
+    import random
+
+    sentinel = datetime(1, 1, 1, tzinfo=UTC)
+    rows = [
+        {"ts": datetime(2025, 3, 1, tzinfo=UTC) + timedelta(hours=i)}
+        for i in range(60)
+    ] + [{"ts": sentinel}] * 40
+    p = profile_columns(_ts_schema(), rows)["ts"]
+    sampler = ColumnSampler(p)
+    out = sampler.sample_python(random.Random(3), 2000, similarity=0.5)
+    frac = sum(v == sentinel for v in out) / len(out)
+    assert abs(frac - 0.4) < 0.05
+    regular = [v for v in out if v != sentinel and v is not None]
+    assert regular
+    assert all(v.year == 2025 for v in regular)  # no year-72 leakage
+
+
+def test_b1_temporal_range_clamps_to_max_age():
+    rows = [
+        {"ts": datetime(2005, 3, 1, tzinfo=UTC) + timedelta(days=i)}
+        for i in range(40)
+    ] + [
+        {"ts": datetime(2025, 4, 1, tzinfo=UTC) + timedelta(days=i)}
+        for i in range(40)
+    ]
+    p = profile_columns(_ts_schema(), rows)["ts"]
+    assert p.kind is ColumnKind.TEMPORAL
+    now_year = datetime.now(UTC).year
+    assert datetime.fromtimestamp(p.numeric_min, tz=UTC).year >= now_year - 10
+    assert datetime.fromtimestamp(p.numeric_max, tz=UTC).year == 2025
+
+
+def test_b1_fully_historical_temporal_range_is_kept():
+    rows = [
+        {"ts": datetime(2005, 3, 1, tzinfo=UTC) + timedelta(days=i)}
+        for i in range(40)
+    ]
+    p = profile_columns(_ts_schema(), rows)["ts"]
+    assert p.kind is ColumnKind.TEMPORAL
+    assert datetime.fromtimestamp(p.numeric_min, tz=UTC).year == 2005
+
+
+def test_b1_date_string_temporal_clamps_and_drops_sentinel_anchors():
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.dstr"},
+            "schema": [{"name": "d", "type": "STRING", "mode": "REQUIRED"}],
+            "primary_keys": None,
+        }
+    )
+    # > 50 distinct date strings → free-text branch → TEMPORAL via shape.
+    rows = (
+        [{"d": f"2005-03-{(i % 28) + 1:02d}"} for i in range(28)]
+        + [{"d": f"2025-04-{(i % 28) + 1:02d}"} for i in range(28)]
+        + [{"d": "0001-01-01"}] * 30
+    )
+    p = profile_columns(schema, rows)["d"]
+    assert p.kind is ColumnKind.TEMPORAL
+    now_year = datetime.now(UTC).year
+    lo = datetime.fromtimestamp(p.numeric_min, tz=UTC).year
+    assert lo >= now_year - 10
+    sentinels = dict(p.temporal_sentinels)
+    assert abs(sentinels["0001-01-01"] - 30 / 86) < 0.01
+
+    import random
+
+    out = ColumnSampler(p).sample_python(random.Random(9), 1000, similarity=0.5)
+    non_sentinel = [v for v in out if v != "0001-01-01" and v is not None]
+    assert non_sentinel
+    years = {datetime.strptime(v, "%Y-%m-%d").year for v in non_sentinel}
+    assert min(years) >= now_year - 10  # clamp holds through the sampler

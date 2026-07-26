@@ -405,3 +405,49 @@ def test_all_sentinel_year_temporal_column_keeps_full_range():
     assert p.kind is ColumnKind.TEMPORAL
     assert p.temporal_sentinels == ()
     assert str(from_epoch(p.minimum, p.temporal_value_type, p.temporal_format)).startswith("9999")
+
+
+# ---------------------------------------------------------------------------
+# Interim temporal-age policy (2026-07-23): generated dates must not be older
+# than _MAX_TEMPORAL_AGE_YEARS (10). The jitter floor is clamped to
+# max(observed_min, now - 10y); fully-historical columns keep their observed
+# range untouched (a fabricated recent window would be worse than old truth —
+# per-column DDL-JSON functional descriptions will govern those later).
+# ---------------------------------------------------------------------------
+
+
+def _year_of(profile, epoch):
+    rendered = from_epoch(epoch, profile.temporal_value_type, profile.temporal_format)
+    return datetime.strptime(str(rendered), "%Y-%m-%d").year
+
+
+def test_temporal_profile_clamps_lower_bound_to_max_age(caplog):
+    schema = _sentinel_date_schema()
+    rows = [{"d": f"2005-03-{(i % 28) + 1:02d}"} for i in range(40)] + [
+        {"d": f"2025-04-{(i % 28) + 1:02d}"} for i in range(40)
+    ]
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        profiles = profile_table(schema, rows)
+    p = profiles["d"]
+    assert p.kind is ColumnKind.TEMPORAL
+    current_year = datetime.now(UTC).year
+    assert _year_of(p, p.minimum) >= current_year - 10  # floor engaged
+    assert _year_of(p, p.maximum) == 2025               # ceiling untouched
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SDFB_MILESTONE name=temporal_range_clamped" in text
+    assert "column=d" in text
+
+
+def test_temporal_profile_keeps_fully_historical_range(caplog):
+    schema = _sentinel_date_schema()
+    # 84 distinct over 200 rows keeps unique-ratio < 0.9 (the FREE_TEXT
+    # route) so the column classifies TEMPORAL via shape.
+    rows = [{"d": f"200{5 + (i % 3)}-06-{(i % 28) + 1:02d}"} for i in range(200)]
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        profiles = profile_table(schema, rows)
+    p = profiles["d"]
+    assert p.kind is ColumnKind.TEMPORAL
+    assert _year_of(p, p.minimum) == 2005  # whole column is historical: keep
+    assert "temporal_range_clamped" not in "\n".join(
+        r.getMessage() for r in caplog.records
+    )
