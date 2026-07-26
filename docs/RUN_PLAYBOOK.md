@@ -315,3 +315,79 @@ python scripts/e2e_bundle_export.py \
 
 Only the `oss/` folder produced by step 3 is shareable outside the team; keep
 `real/` (and its `mapping.json` decode key) local.
+
+---
+
+## 6. WS5 — free-text pool store and the seeding experiment
+
+Landed 2026-07-26 (ADR 0020, [design](designs/2026-07-26-ws5-generation-throughput.md)).
+Not yet measured on real hardware — these are the runs that measure it.
+
+### 6a. Provision the pool table (once)
+
+`synthetic_rag.freetext_pools` is **never auto-created** — the
+`CREATE_IF_NEEDED` blast-radius rule confines auto-create to the landing sink.
+Create it from the committed schema:
+
+```bash
+bq mk --table \
+  "${PROJECT}:synthetic_rag.freetext_pools" \
+  packages/sdfb-beam/src/sdfb_beam/pools/schema.json
+```
+
+### 6b. Target-table bootstrap (TEST_1 follow-up)
+
+Two independent things bit the 2026-07-25 16:38 run:
+
+- **A missing `--ddl_uri` is no longer fatal** (WS5 T1) — it falls through to
+  live `INFORMATION_SCHEMA` extraction and logs `ddl_uri_miss_fallback`. A
+  *corrupt* pin still fails loudly, by design.
+- **The landing table is still not created unless you ask.** Pass
+  `--create_if_not_exists=true`; the machinery (`derive_bq_load_schema` +
+  `CREATE_IF_NEEDED`) has been complete since WS4. TEST_1 passed `false`, so
+  it would have hit `CREATE_NEVER` even past the DDL step. The default stays
+  `false` deliberately: flipping it widens blast radius on every run.
+
+### 6c. Sequencing — do not confound the experiment
+
+Run these **in order**. Phase 1 changes throughput; the seeding arms change
+pool composition. Measuring them together tells you nothing about either.
+
+| # | Flags | What it measures |
+|---|---|---|
+| 1 | (Phase 1 only, no pool store) | sampler hoisting + batch sizing vs the 68-min baseline |
+| 2 | `--build_pool_layer=true --freetext_pools_table=…` | cold run that *populates* the store |
+| 3 | `--freetext_pools_table=…` (no build flag) | **warm** run — the ≤5 min target |
+| 4 | run 2 with `--pool_seed_strategy=kcenter` | arm B |
+| 5 | run 2 with `--pool_seed_strategy=kcenter_rotate` | arm A |
+
+Runs 2, 4 and 5 must each start from an **empty** `freetext_pools` for their
+digest, or the ladder is skipped and the arm measures nothing. Clear with:
+
+```bash
+bq query --use_legacy_sql=false \
+  "DELETE FROM \`${PROJECT}.synthetic_rag.freetext_pools\`
+   WHERE reference_digest = '<digest>'"
+```
+
+### 6d. What to read out of the logs
+
+```bash
+grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
+```
+
+| Milestone | Reads as |
+|---|---|
+| `freetext_pool_store_hit` | pool read, ladder skipped — the point of WS5 |
+| `freetext_pool_store_miss` | store attached but empty for that column |
+| `freetext_pool_store_error` | store unreachable; run degraded to building (not fatal) |
+| `pool_build_skipped` | driver found this digest+model already populated |
+| `pool_branch_setup_done` / `pool_branch_emitted` | the build branch ran |
+| `ddl_uri_miss_fallback` | the DDL pin 404'd and live extraction took over |
+| `vllm_ready` | should appear **once** on a cold run, **never** on a warm one |
+
+Per arm, report novel-yield per LLM call, final pool size per column, and
+ladder attempts to target — `freetext_pool_built` carries all three.
+
+**Exclude `ACCU_LIMIT_KEY` / `COL_048` from every comparison.** It carries
+binary characters and is a known special case.

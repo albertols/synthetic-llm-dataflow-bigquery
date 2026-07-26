@@ -1,7 +1,10 @@
 # WS5 — Generation throughput & RAG seeding campaign (visual design)
 
-> **Status: DESIGN — awaiting confirmation before implementation.** Nothing
-> here is committed work. Every number in §1 is re-derived from
+> **Status: IMPLEMENTED (laptop side), AWAITING E2E MEASUREMENT.** All ten
+> plan tasks are landed on `ws5-generation-throughput` with 683 tests green;
+> the §6 targets are *predictions* until an M4 run measures them. Decisions
+> are recorded in [ADR 0020](../adr/0020-freetext-pools-as-persisted-artifact.md).
+> Every number in §1 is re-derived from
 > `integration_tests/2026-07-26_06_54_25-14348390798392809440/worker_logs.jsonl`
 > (the 1M-row stress run); the extraction is reproducible via
 > [`scripts/make_ws5_figures.py`](../../scripts/make_ws5_figures.py), which also

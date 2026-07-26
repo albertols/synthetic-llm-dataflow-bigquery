@@ -187,7 +187,7 @@
     {
       "name": "seed",
       "label": "Explicit base RNG seed",
-      "helpText": "Explicit base RNG seed (integer) for deliberate reproduction of a run. Empty (default) derives a fresh seed per (run_id, batch) — recommended.",
+      "helpText": "Explicit base RNG seed (integer) for deliberate reproduction of a run. Empty (default) derives a fresh seed per (run_id, batch) \u2014 recommended.",
       "isOptional": true,
       "regexes": [
         "^([0-9]+)?$"
@@ -209,6 +209,33 @@
       "isOptional": true,
       "regexes": [
         "^(true|false|1|0|yes|no)$"
+      ]
+    },
+    {
+      "name": "freetext_pools_table",
+      "label": "Free-text pool store table",
+      "helpText": "project.dataset.table of synthetic_rag.freetext_pools. Enables the read-instead-of-rebuild path; with build_pool_layer=true also enables the build branch. Optional; empty disables the pool store.",
+      "isOptional": true,
+      "regexes": [
+        "^([a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+)?$"
+      ]
+    },
+    {
+      "name": "build_pool_layer",
+      "label": "Build the free-text pool store",
+      "helpText": "true/false. Build free-text pools in their own branch and persist them (skipped when this reference_digest already exists for this model_uri). Requires freetext_pools_table.",
+      "isOptional": true,
+      "regexes": [
+        "^(true|false|True|False|1|0|yes|no)?$"
+      ]
+    },
+    {
+      "name": "pool_seed_strategy",
+      "label": "Free-text pool seed strategy",
+      "helpText": "centroid (control, densest region) | kcenter (seeds span the column's modes) | kcenter_rotate (re-seeded per ladder attempt; forfeits vLLM prefix caching by design).",
+      "isOptional": true,
+      "regexes": [
+        "^(centroid|kcenter|kcenter_rotate)?$"
       ]
     }
   ]
