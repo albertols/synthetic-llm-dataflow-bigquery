@@ -64,6 +64,23 @@ logger = logging.getLogger(__name__)
 # workers booted at the 25GB default despite the DAG requesting 200).
 _DEFAULT_WORKER_DISK_GB = 200
 
+# batch_size is rows-per-element. At the historic fixed default of 16, a 1M-row
+# run produced 62,500 elements and paid per-element Python overhead 62,500
+# times over instead of amortising it across vectorized draws (2026-07-26
+# E2E). Scale toward ~1,000 elements, but never below the historic default so
+# small runs — and their goldens — are untouched.
+DEFAULT_BATCH_SIZE = 16
+_TARGET_ELEMENTS = 1_000
+
+
+def resolve_batch_size(requested: int, num_rows: int) -> int:
+    """Rows per element. An explicit non-default ``--batch_size`` always wins."""
+    if requested != DEFAULT_BATCH_SIZE:
+        return requested
+    if num_rows <= 0:
+        return DEFAULT_BATCH_SIZE
+    return max(DEFAULT_BATCH_SIZE, num_rows // _TARGET_ELEMENTS)
+
 
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p = argparse.ArgumentParser(description="Synthetic Dataflow BigQuery — pipeline launcher")
@@ -100,7 +117,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "at runtime. Pre-provision the table out-of-band "
                         "(e.g. `bq mk`/DDL) if those constraints matter.")
     p.add_argument("--num_rows", type=int, required=True)
-    p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE,
+                   help="Rows per element. Left at the default, this scales "
+                        "with --num_rows toward ~1,000 elements (never below "
+                        "the default). Pass an explicit value to pin it.")
     p.add_argument("--similarity", type=float, default=0.5)
     p.add_argument("--seed", default="",
                    help="Explicit base RNG seed (int). Empty = derive per "
@@ -457,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
         engine_name=args.engine,
         model_client=model_client,
         num_rows=args.num_rows,
-        batch_size=args.batch_size,
+        batch_size=resolve_batch_size(args.batch_size, args.num_rows),
         similarity=args.similarity,
         seed=int(args.seed) if str(args.seed).strip() else None,
         run_id=args.run_id,
