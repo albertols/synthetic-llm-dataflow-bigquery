@@ -116,7 +116,13 @@
       "Bash(gh pr create --base master --head e2e-hardening --title 'E2E hardening: engine fixes \\(seed replay, identity leak, silent LLM fallback\\), milestone contract, e2e tooling, run playbook' --body ' *)",
       "Bash(gh pr *)",
       "Read(//Users/serna/IdeaProjects/**)",
-      "Read(//Users/serna/**)"
+      "Read(//Users/serna/**)",
+      "Bash(/Users/serna/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/review-package 1a5550a *)",
+      "Bash(/Users/serna/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/review-package 3ef5f90 *)",
+      "Bash(/Users/serna/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/review-package 04f17d5 *)",
+      "Bash(/usr/local/bin/gh pr create --base ws1-b2-memorization-fix --head ws2-rag-phase-a --title 'WS2 Phase A: standalone RAG package, rag_chunks persistence, pool scaling + per-column retrieval' --body ' *)",
+      "Bash(/usr/local/bin/gh pr *)",
+      "Bash(wait)"
     ]
   }
 }

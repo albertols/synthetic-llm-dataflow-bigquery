@@ -6,6 +6,23 @@ import pytest
 from sdfb_tests.fixtures import load_ddl, load_reference
 
 # ---------------------------------------------------------------------------
+# Process-global state isolation.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fresh_b1_pool_cache():
+    """B.1's free-text pool cache is deliberately process-lived (it must
+    survive Dataflow bundle retries), so tests sharing a reference_digest
+    would cross-pollute without this reset."""
+    from sdfb_core.engines.b1_rag.engine import clear_free_text_pool_cache
+
+    clear_free_text_pool_cache()
+    yield
+    clear_free_text_pool_cache()
+
+
+# ---------------------------------------------------------------------------
 # File-backed fixtures (canonical reference data).
 # ---------------------------------------------------------------------------
 

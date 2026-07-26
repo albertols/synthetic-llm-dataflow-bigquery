@@ -40,11 +40,16 @@ from apache_beam.options.pipeline_options import (
     StandardOptions,
     WorkerOptions,
 )
+from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
+from sdfb_core.observability import log_milestone
+from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.validation import Thresholds
 
 from sdfb_beam.io.bq_sources import load_reference_rows
+from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+from sdfb_beam.rag.store import BigQueryChunkStore
 
 if TYPE_CHECKING:
     from sdfb_core.engines import ModelClient
@@ -61,8 +66,12 @@ _DEFAULT_WORKER_DISK_GB = 200
 
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p = argparse.ArgumentParser(description="Synthetic Dataflow BigQuery — pipeline launcher")
-    p.add_argument("--ddl_uri", required=True,
-                   help="gs:// or local path to _ddl.json")
+    p.add_argument("--ddl_uri", default="",
+                   help="gs:// or local path to _ddl.json. OPTIONAL "
+                        "(WS4 §6b): empty = live INFORMATION_SCHEMA "
+                        "extraction from --reference_table at "
+                        "graph-construction time. An explicit URI is the "
+                        "pin/air-gap escape hatch and always wins.")
     p.add_argument("--reference_table", required=True,
                    help="FQN of source table for live SELECT reference rows")
     p.add_argument("--reference_rows_limit", type=int, default=10_000)
@@ -70,6 +79,25 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="BQ table for synthetic rows (project.dataset.table)")
     p.add_argument("--dlq_table", required=True,
                    help="BQ DLQ table (project.dataset.table)")
+    p.add_argument("--write_disposition", default="append",
+                   choices=["append", "overwrite"],
+                   help="Landing-table write mode. append = WRITE_APPEND "
+                        "(default, today's behavior); overwrite = "
+                        "WRITE_TRUNCATE (FILE_LOADS-compatible). DLQ, "
+                        "validation_runs and rag_chunks always append.")
+    p.add_argument("--create_if_not_exists", default="false",
+                   help="true/1/yes: create the landing table on first "
+                        "write (CREATE_IF_NEEDED) carrying the landing "
+                        "schema derived in-pipeline from the DDL. Anything "
+                        "else: CREATE_NEVER (default). Quality/RAG tables "
+                        "are never auto-created. NOTE: the auto-created "
+                        "table only gets name/type/mode/description per "
+                        "column — parameterized constraints (STRING "
+                        "max_length, NUMERIC precision/scale, column "
+                        "default expressions) are NOT carried over, "
+                        "because the FILE_LOADS load-job API rejects them "
+                        "at runtime. Pre-provision the table out-of-band "
+                        "(e.g. `bq mk`/DDL) if those constraints matter.")
     p.add_argument("--num_rows", type=int, required=True)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--similarity", type=float, default=0.5)
@@ -93,6 +121,25 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--embedder_uri", default="",
                    help="gs://<bucket>/synthetic/models/embedders/<model>/<version>/ "
                         "for the B.1 RAG embedder (optional; empty → HashingEmbedder)")
+    p.add_argument("--build_rag_layer", nargs="?", const="true", default="",
+                   help="true/false (bare flag = true). Populate "
+                        "synthetic_rag.rag_chunks from this run's "
+                        "reference sample (skipped if the reference_digest "
+                        "is already present for this embedder id+version). "
+                        "String-valued so the Flex Template/DAG chain can "
+                        "pass --build_rag_layer=true.")
+    p.add_argument("--rag_chunks_table", default="",
+                   help="FQN of synthetic_rag.rag_chunks. Enables the "
+                        "read-instead-of-reembed path; with "
+                        "--build_rag_layer also enables population.")
+    p.add_argument("--pool_pattern_guidance", nargs="?", const="true",
+                   default="",
+                   help="true/false (bare flag = true). Constrain "
+                        "identifier-ish free-text pool completions at "
+                        "decode time with a charset/length regex "
+                        "(vLLM structured-output items.pattern). Opt-in "
+                        "until T4 throughput is confirmed; the post-hoc "
+                        "format gate protects pools either way.")
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
@@ -115,7 +162,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "EngineCore at startup). 8192 fits every registry "
                         "model/GPU pairing and dwarfs the synthesis prompts. "
                         "Empty = no cap (native context).")
-    return p.parse_known_args(argv)
+    args, beam_args = p.parse_known_args(argv)
+    if parse_bool_flag(args.build_rag_layer) and not args.rag_chunks_table:
+        p.error("--build_rag_layer requires --rag_chunks_table")
+    return args, beam_args
 
 
 def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
@@ -174,6 +224,28 @@ def load_ddl(ddl_uri: str) -> TableSchema:
         return TableSchema.model_validate(json.loads(f.read()))
 
 
+def resolve_table_schema(ddl_uri: str, reference_table: str) -> TableSchema:
+    """WS4 §6b precedence: explicit ``--ddl_uri`` (pin/air-gap) > live
+    INFORMATION_SCHEMA extraction from the source table."""
+    if ddl_uri:
+        logger.info("Loading DDL from %s", ddl_uri)
+        schema = load_ddl(ddl_uri)
+        log_milestone("ddl_loaded_from_uri", uri=ddl_uri)
+        return schema
+    logger.info(
+        "No --ddl_uri; live-extracting schema from %s", reference_table
+    )
+    from sdfb_beam.ddl import extract_table_schema
+
+    schema = extract_table_schema(reference_table)
+    log_milestone(
+        "ddl_live_extracted",
+        table=reference_table,
+        columns=len(schema.columns),
+    )
+    return schema
+
+
 def resolve_engine_strictness(client_type: str) -> bool:
     """True for real-LLM client types (``vllm`` on Dataflow/L4, ``mlx`` on
     the M4 DirectRunner) — a failed generation must be loud (strict
@@ -181,6 +253,36 @@ def resolve_engine_strictness(client_type: str) -> bool:
     into memorized reference data. Only the deterministic ``fake`` client
     (CPU smoke run, produces fake data regardless) stays lenient."""
     return client_type != "fake"
+
+
+# Flex Template parameters are strings; this is the accepted truthy set for
+# string-valued boolean flags threaded through the template/DAG chain.
+_TRUTHY_FLAG_VALUES = frozenset({"true", "1", "yes"})
+
+
+def parse_bool_flag(value: str) -> bool:
+    """Normalize a string-valued boolean Flex-Template parameter."""
+    return str(value).strip().lower() in _TRUTHY_FLAG_VALUES
+
+
+def resolve_landing_dispositions(
+    write_disposition: str, create_if_not_exists: bool
+) -> tuple[str, str]:
+    """Landing-sink ``(write, create)`` dispositions (WS4 §6a/§6c).
+
+    Landing ONLY — the DLQ, validation_runs and rag_chunks sinks stay
+    WRITE_APPEND/CREATE_NEVER unconditionally (blast-radius rule)."""
+    write = (
+        BigQueryDisposition.WRITE_TRUNCATE
+        if write_disposition == "overwrite"
+        else BigQueryDisposition.WRITE_APPEND
+    )
+    create = (
+        BigQueryDisposition.CREATE_IF_NEEDED
+        if create_if_not_exists
+        else BigQueryDisposition.CREATE_NEVER
+    )
+    return write, create
 
 
 def sanitize_job_name(prefix: str, run_id: str) -> str:
@@ -259,8 +361,7 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_pipeline_options(options, runner, args.run_id)
 
-    logger.info("Loading DDL from %s", args.ddl_uri)
-    table_schema = load_ddl(args.ddl_uri)
+    table_schema = resolve_table_schema(args.ddl_uri, args.reference_table)
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 
@@ -284,6 +385,26 @@ def main(argv: list[str] | None = None) -> int:
     thresholds = resolve_thresholds(args.thresholds_uri, args.env)
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
                 thresholds.env, thresholds.blocker_failure_ratio)
+
+    embedder_id, embedder_version = embedder_identity(args.embedder_uri)
+
+    rag_chunks_sink = None
+    if parse_bool_flag(args.build_rag_layer) and args.rag_chunks_table:
+        digest = compute_reference_digest(reference_rows)
+        store = BigQueryChunkStore(args.rag_chunks_table)
+        if store.exists(digest, embedder_id, embedder_version):
+            log_milestone(
+                "rag_population_skipped",
+                reference_digest=digest[:12],
+                embedder_id=embedder_id,
+            )
+        else:
+            rag_chunks_sink = WriteToBigQuery(
+                table=args.rag_chunks_table,
+                method=WriteToBigQuery.Method.FILE_LOADS,
+                write_disposition=BigQueryDisposition.WRITE_APPEND,
+                create_disposition=BigQueryDisposition.CREATE_NEVER,
+            )
 
     config = PipelineConfig(
         table_schema=table_schema,
@@ -310,13 +431,38 @@ def main(argv: list[str] | None = None) -> int:
         # on the BLOCKER gate is meaningless — keep it informational (the
         # validation_runs row still records the status). Real engines gate.
         fail_on_blocker=resolve_engine_strictness(args.client_type),
+        rag_chunks_table=args.rag_chunks_table,
+        embedder_id=embedder_id,
+        embedder_version=embedder_version,
+        pool_pattern_guidance=parse_bool_flag(args.pool_pattern_guidance),
     )
 
+    create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
+    landing_write, landing_create = resolve_landing_dispositions(
+        args.write_disposition, create_if_not_exists
+    )
+    landing_kwargs: dict = {}
+    if create_if_not_exists:
+        # CREATE_IF_NEEDED must carry the target schema — derived
+        # in-pipeline from the resolved TableSchema (WS4 §6c), never
+        # hand-provisioned. Must be the load-safe projection: the
+        # FILE_LOADS runtime path (vendored apitools `TableFieldSchema`)
+        # rejects `maxLength`/`precision`/`scale`/`defaultValueExpression`
+        # with an `AttributeError` at load-job time, even though Beam
+        # accepts the fuller `derive_bq_schema` dict at graph construction
+        # (WS4 final-review CRITICAL-1).
+        landing_kwargs["schema"] = derive_bq_load_schema(table_schema)
+    log_milestone(
+        "landing_sink_config",
+        write_disposition=landing_write,
+        create_disposition=landing_create,
+    )
     landing_sink = WriteToBigQuery(
         table=args.landing_table,
         method=WriteToBigQuery.Method.FILE_LOADS,
-        write_disposition=BigQueryDisposition.WRITE_APPEND,
-        create_disposition=BigQueryDisposition.CREATE_NEVER,
+        write_disposition=landing_write,
+        create_disposition=landing_create,
+        **landing_kwargs,
     )
     dlq_sink = WriteToBigQuery(
         table=args.dlq_table,
@@ -341,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
             landing_sink=landing_sink,
             dlq_sink=dlq_sink,
             validation_runs_sink=validation_runs_sink,
+            rag_chunks_sink=rag_chunks_sink,
         )
         logger.info(
             "Pipeline launched: run_id=%s reference_digest=%s",

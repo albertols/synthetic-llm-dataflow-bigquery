@@ -19,6 +19,8 @@ REF: .claude/skills/beam-dofn.md
 
 from __future__ import annotations
 
+import logging
+import threading
 import time
 
 import apache_beam as beam
@@ -38,6 +40,21 @@ from sdfb_core.seeding import derive_batch_seed
 # gs:// URI — so the DoFn pulls the prefix here before the engine builds its
 # embedder. Mirrors the vLLM client's `/local-ssd/model` convention.
 EMBEDDER_LOCAL_DIR = "/local-ssd/embedder"
+
+# Per-process ledger of failed setup() attempts, keyed "engine:run_id".
+# Dataflow retries a failed bundle with a FRESH DoFn in the SAME process;
+# only a setup() entered AFTER a recorded failure is a retry — Beam's
+# normal N parallel bundle processors all enter cleanly and never match.
+# (2026-07-24 16:35 E2E: two silent setup() crashes cost ~35 min with zero
+# trace in validation_runs.)
+_SETUP_FAILURES: dict[str, int] = {}
+_SETUP_FAILURES_LOCK = threading.Lock()
+
+
+def _reset_setup_failures() -> None:
+    """Test hook — production state is deliberately process-lived."""
+    with _SETUP_FAILURES_LOCK:
+        _SETUP_FAILURES.clear()
 
 
 class GenerateRecordsDoFn(beam.DoFn):
@@ -64,14 +81,43 @@ class GenerateRecordsDoFn(beam.DoFn):
         self._batch_seconds = Metrics.distribution("generation", "batch_msec")
 
     def setup(self):
+        t0 = time.monotonic()
+        log_milestone("dofn_setup_start", engine=self.engine_name)
+        failure_key = f"{self.engine_name}:{self.ctx.pipeline_run_id}"
+        with _SETUP_FAILURES_LOCK:
+            prior_failures = _SETUP_FAILURES.get(failure_key, 0)
+        if prior_failures:
+            log_milestone(
+                "dofn_setup_retry",
+                level=logging.WARNING,
+                engine=self.engine_name,
+                attempt=prior_failures + 1,
+            )
+            # Committed only when THIS (surviving) bundle commits — i.e.
+            # exactly the silent-retry-then-PASS case worker logs alone
+            # could not surface into job metrics.
+            Metrics.counter("generation", "setup_retries").inc()
+        try:
+            self._setup_inner()
+        except Exception:
+            with _SETUP_FAILURES_LOCK:
+                _SETUP_FAILURES[failure_key] = (
+                    _SETUP_FAILURES.get(failure_key, 0) + 1
+                )
+            raise
+        log_milestone(
+            "dofn_setup_done",
+            engine=self.engine_name,
+            seconds=round(time.monotonic() - t0, 1),
+        )
+
+    def _setup_inner(self):
         # The engine's embedder loads from a local directory only, so a gs://
         # `embedder_uri` must be warm-pulled to worker-local disk and the ctx
         # rewritten to the local path before the engine builds its embedder
         # (see GenerationContext.embedder_uri: "local paths … pulled by the
         # DoFn"). The LLM weights need no equivalent here — the ModelClient
         # pulls those itself in its own setup().
-        t0 = time.monotonic()
-        log_milestone("dofn_setup_start", engine=self.engine_name)
         ctx = self.ctx
         if ctx.embedder_uri.startswith("gs://"):
             from sdfb_beam.gcs import localize_gcs_prefix
@@ -85,6 +131,18 @@ class GenerateRecordsDoFn(beam.DoFn):
             )
             ctx = ctx.model_copy(update={"embedder_uri": local_dir})
             self.ctx = ctx  # cache so a re-entrant setup() skips the pull
+
+        # RAG read path (WS2 §4b.1): the BQ-backed ChunkStore cannot ride
+        # the pickled graph — attach it worker-side, mirroring the
+        # embedder localization above. Engines see only the ChunkStore
+        # Protocol; an empty table just means the engine's fallback runs.
+        if ctx.rag_chunks_table and ctx.chunk_store is None:
+            from sdfb_beam.rag import store as rag_store
+
+            ctx = ctx.model_copy(
+                update={"chunk_store": rag_store.BigQueryChunkStore(ctx.rag_chunks_table)}
+            )
+            self.ctx = ctx
 
         # LLM ignition is LAZY (WS1 §3b): VLLMModelClient.generate_json()
         # calls its own idempotent, lock-serialized setup() on first use, so
@@ -110,11 +168,6 @@ class GenerateRecordsDoFn(beam.DoFn):
         self._column_max_lengths = {
             column.name: column.max_length for column in self.ctx.table_schema.columns
         }
-        log_milestone(
-            "dofn_setup_done",
-            engine=self.engine_name,
-            seconds=round(time.monotonic() - t0, 1),
-        )
 
     def process(self, request):
         n = int(request["n"])

@@ -19,12 +19,18 @@ REFs:
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Any
 
 import apache_beam as beam
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext, ModelClient
+from sdfb_core.rag.chunking import (
+    MAX_ROW_DOC_ROWS,
+    chunk_free_text_value,
+    distinct_free_text_values,
+)
 from sdfb_core.validation import (
     STATUS_FAILED_BLOCKER,
     BlockerThresholdExceeded,
@@ -40,6 +46,7 @@ from sdfb_beam.dofns import (
     ValidateRecordDoFn,
 )
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_beam.rag.population import ChunkReferenceRowsDoFn, EmbedChunksDoFn
 
 
 @dataclass
@@ -78,6 +85,16 @@ class PipelineConfig:
     landing_table: str = ""
     thresholds: Thresholds | None = None
     fail_on_blocker: bool = True
+    # RAG layer (WS2 §4b). rag_chunks_table threads the READ path into the
+    # worker ctx (self-gating on data); embedder identity pins the vector
+    # space and must come from the ORIGINAL embedder URI (driver-side).
+    rag_chunks_table: str = ""
+    embedder_id: str = ""
+    embedder_version: str = ""
+    # Opt-in decode-time format constraint for identifier-ish free-text
+    # pools (2026-07-25 hallucination fix, layer 2). See
+    # GenerationContext.pool_pattern_guidance.
+    pool_pattern_guidance: bool = False
 
 
 def build_pipeline(
@@ -88,6 +105,7 @@ def build_pipeline(
     landing_sink: beam.PTransform,
     dlq_sink: beam.PTransform,
     validation_runs_sink: beam.PTransform | None = None,
+    rag_chunks_sink: beam.PTransform | None = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -118,6 +136,11 @@ def build_pipeline(
         embedder_uri=config.embedder_uri,
         identity_columns=list(config.identity_columns),
         strict_freetext=config.strict_freetext,
+        num_rows=config.num_rows,
+        embedder_id=config.embedder_id,
+        embedder_version=config.embedder_version,
+        rag_chunks_table=config.rag_chunks_table,
+        pool_pattern_guidance=config.pool_pattern_guidance,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.
@@ -189,6 +212,73 @@ def build_pipeline(
     )
     _ = dlq | "WriteDLQ" >> dlq_sink
 
+    # WS2 §4b.1 — optional rag_chunks population branch. The driver decides
+    # (existence check) whether to pass a sink; None ⇒ branch absent, DAG
+    # unchanged (the validation_runs_sink precedent). Feeds on
+    # `reference_rows` — the driver-loaded ≤10k sample whose digest is this
+    # run's provenance key — NOT a full-table read; scope rationale in
+    # sdfb_beam/rag/population.py.
+    if rag_chunks_sink is not None:
+        free_text_columns = _rag_free_text_columns(
+            config.table_schema, reference_rows
+        )
+        # Population is scoped to what its consumers can read (ADR 0019):
+        # row_doc chunks cover EXACTLY the engine's read prefix
+        # (`_vectors_from_store` is all-or-nothing over rows[:1024]) — the
+        # 2026-07-25 06:18 run embedded all 10k rows and 90 % could never
+        # be read back. free_text_col chunks dedupe to distinct
+        # (column, value), computed driver-side (reference_rows is already
+        # in memory here); Beam still fans the embed itself out across
+        # workers via the Reshuffle below.
+        distinct_values = distinct_free_text_values(
+            reference_rows, free_text_columns
+        )
+        row_doc_chunks = (
+            p
+            | "RagReferenceRows"
+            >> beam.Create(reference_rows[:MAX_ROW_DOC_ROWS])
+            | "RagChunkRows"
+            >> beam.ParDo(
+                ChunkReferenceRowsDoFn(
+                    source_fqn=config.table_schema.fqn,
+                    reference_digest=digest,
+                    column_order=[c.name for c in config.table_schema.columns],
+                    free_text_columns=[],  # value chunks come deduped below
+                    pk_columns=list(config.pk_columns),
+                    embedder_id=config.embedder_id,
+                    embedder_version=config.embedder_version,
+                )
+            )
+        )
+        value_chunks = (
+            p
+            | "RagDistinctValues"
+            >> beam.Create(
+                [(c, v) for c, vals in distinct_values.items() for v in vals]
+            )
+            | "RagValueChunks"
+            >> beam.MapTuple(
+                functools.partial(
+                    chunk_free_text_value,
+                    source_fqn=config.table_schema.fqn,
+                    reference_digest=digest,
+                    embedder_id=config.embedder_id,
+                    embedder_version=config.embedder_version,
+                )
+            )
+        )
+        chunks = (
+            (row_doc_chunks, value_chunks)
+            | "RagAllChunks" >> beam.Flatten()
+            # Spread the (now small) chunk set across workers so the embed
+            # stage keeps Beam's embarrassing parallelism.
+            | "RagFanout" >> beam.Reshuffle()
+            | "RagBatchChunks"
+            >> beam.BatchElements(min_batch_size=32, max_batch_size=256)
+            | "RagEmbedChunks" >> beam.ParDo(EmbedChunksDoFn(config.embedder_uri))
+        )
+        _ = chunks | "WriteRagChunks" >> rag_chunks_sink
+
     result: dict[str, Any] = {
         "reference_digest": digest,
         "run_id": config.run_id,
@@ -246,6 +336,22 @@ def build_pipeline(
         result["validation_run"] = summary_rows
 
     return result
+
+
+def _rag_free_text_columns(
+    table_schema: TableSchema, reference_rows: list[dict]
+) -> list[str]:
+    """Columns that get `free_text_col` chunks — B.1's own FREE_TEXT
+    classification, minus identifier-shaped ones (retrieval-worthy prose,
+    not per-row IDs)."""
+    from sdfb_core.engines.b1_rag.profile import ColumnKind, profile_columns
+
+    profiles = profile_columns(table_schema, reference_rows)
+    return [
+        p.name
+        for p in profiles.values()
+        if p.kind is ColumnKind.FREE_TEXT and p.identifier_shape is None
+    ]
 
 
 def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:
