@@ -51,10 +51,19 @@ PER_COLUMN = {  # freetext_pool_built totals
 WAVES = [(3.2, 1), (10.5, 8), (17.0, 24), (37.0, 8), (55.1, 3)]
 LAST_POOL_MIN = 64.2
 
-# Generate-stage re-materialization (SECTION 4). 42 INT64 columns x ~10k
-# observed values rebuilt per generate_batch() call; ~150 ns per item for a
-# Python listcomp with a predicate call.
-N_NUMERIC_COLS, N_OBSERVED, NS_PER_ITEM, N_ROWS = 42, 10_000, 150e-9, 1_000_000
+# Generate-stage re-materialization (SECTION 4), from the 67-column source:
+# 42 INT64 + 3 TIMESTAMP + 1 DATE + 21 STRING, ~10k observed values each.
+#   _numeric_numpy     rebuilds a listcomp+predicate per call  (~150 ns/item)
+#   _temporal_numpy    memoizes the LIST but re-runs np.asarray (~20 ns/item)
+#   _categorical_numpy rebuilds probs, but `categories` is CAPPED at 50 in
+#                      profile.py (_FREE_TEXT_MAX_CATEGORIES), so it is bounded
+#                      and deliberately left alone.
+N_ROWS = 1_000_000
+N_OBSERVED = 10_000
+N_NUMERIC_COLS, NS_PER_ITEM = 42, 150e-9
+N_TEMPORAL_COLS, NS_PER_ASARRAY = 4, 20e-9
+N_CAT_COLS, N_CATEGORIES = 20, 50
+N_SETUPS = 43
 
 
 def _style(ax, *, grid_axis="y"):
@@ -282,7 +291,9 @@ def fig_sampler_hoisting():
     batch = np.array([16, 32, 64, 128, 256, 512, 1024, 2048, 4096])
     calls = N_ROWS / batch
     per_call = calls * N_NUMERIC_COLS * N_OBSERVED * NS_PER_ITEM  # rebuilt every call
-    hoisted = np.full_like(per_call, N_NUMERIC_COLS * N_OBSERVED * NS_PER_ITEM * 43)
+    hoisted = np.full_like(
+        per_call, N_SETUPS * N_NUMERIC_COLS * N_OBSERVED * NS_PER_ITEM
+    )
 
     ax1.plot(batch, per_call, color=ORANGE, linewidth=2.4, marker="o", markersize=6, zorder=3,
              label="today — array rebuilt per generate_batch() call")
@@ -306,23 +317,45 @@ def fig_sampler_hoisting():
     _title(ax1, "Re-materializing observed values dominates Generate",
            f"{N_NUMERIC_COLS} INT64 columns x {N_OBSERVED:,} observed values, rebuilt on every call")
 
-    stages = ["_numeric_numpy\n(42 cols)", "_categorical_numpy\n(rebuilds probs)", "_temporal_numpy\n(memoized)"]
-    now = [per_call[0], per_call[0] * 0.18, 0.5]
-    after = [hoisted[0], hoisted[0] * 0.18, 0.5]
+    n_calls = N_ROWS / 16  # today's default
+    stages = [
+        "_numeric_numpy\n(42 cols, listcomp)",
+        "_temporal_numpy\n(4 cols, np.asarray)",
+        "_categorical_numpy\n(<=50 categories)",
+    ]
+    now = [
+        n_calls * N_NUMERIC_COLS * N_OBSERVED * NS_PER_ITEM,
+        n_calls * N_TEMPORAL_COLS * N_OBSERVED * NS_PER_ASARRAY,
+        n_calls * N_CAT_COLS * N_CATEGORIES * NS_PER_ITEM,
+    ]
+    after = [
+        N_SETUPS * N_NUMERIC_COLS * N_OBSERVED * NS_PER_ITEM,
+        N_SETUPS * N_TEMPORAL_COLS * N_OBSERVED * NS_PER_ASARRAY,
+        now[2],  # deliberately NOT hoisted — already bounded by the cap
+    ]
     x = np.arange(len(stages))
     ax2.bar(x - 0.19, now, width=0.36, color=ORANGE, zorder=3, label="today")
     ax2.bar(x + 0.19, after, width=0.36, color=BLUE, zorder=3, label="hoisted to sampler construction")
+    whole_seconds_above = 100.0  # below this, a decimal carries information
+
+    def _secs(v):
+        return f"{v:,.0f}s" if v >= whole_seconds_above else f"{v:,.1f}s"
+
     for xi, (a, b) in enumerate(zip(now, after, strict=True)):
-        ax2.text(xi - 0.19, a * 1.25, f"{a:,.0f}s", ha="center", color=INK, fontsize=8.5, fontweight="600")
-        ax2.text(xi + 0.19, b * 1.25, f"{b:,.0f}s", ha="center", color=INK, fontsize=8.5, fontweight="600")
+        ax2.text(xi - 0.19, a * 1.3, _secs(a), ha="center", color=INK, fontsize=8.5, fontweight="600")
+        ax2.text(xi + 0.19, b * 1.3, _secs(b), ha="center", color=INK, fontsize=8.5, fontweight="600")
+    ax2.text(
+        2, now[2] * 3.2, "already bounded —\nleft alone", ha="center",
+        color=MUTED, fontsize=8.5, style="italic",
+    )
     ax2.set_yscale("log")
-    ax2.set_ylim(0.1, max(now) * 12)
+    ax2.set_ylim(0.01, max(now) * 30)
     ax2.set_xticks(x, stages, fontsize=8.5)
     ax2.set_ylabel("CPU-seconds (log)", color=MUTED, fontsize=9)
     ax2.legend(frameon=False, fontsize=8.5, labelcolor=INK, loc="upper right")
     _style(ax2)
-    _title(ax2, "Only the temporal path memoizes today",
-           "at batch_size=16; the two unmemoized paths are the fix")
+    _title(ax2, "Two paths re-materialize; the third is capped",
+           "at batch_size=16 — categories cap at 50 in profile.py, so only numeric/temporal need hoisting")
 
     fig.tight_layout()
     fig.savefig(ASSETS / "ws5-sampler-hoisting.png", dpi=160, facecolor=SURFACE)

@@ -7,6 +7,12 @@
 > [`scripts/make_ws5_figures.py`](../../scripts/make_ws5_figures.py), which also
 > regenerates every figure (provenance in §7).
 >
+> **Implementation plan:** [`docs/superpowers/plans/2026-07-26-ws5-generation-throughput.md`](../superpowers/plans/2026-07-26-ws5-generation-throughput.md)
+> — 10 tasks in 4 phases, TDD, one commit per task.
+> This document is written to the `visual-first-documentation` skill
+> (`.claude/skills/visual-first-documentation/SKILL.md`), which owns the
+> source-of-truth chain, the document contract, and the figure rules.
+>
 > Companions: [ADR 0018](../adr/0018-parallel-batched-freetext-pools.md)
 > (pool builds) · [ADR 0019](../adr/0019-rag-population-scoped-to-consumers.md)
 > (population scope + CUDA embed) ·
@@ -39,6 +45,13 @@ is**, by a factor of more than 20 over every other phase.
 
 Note the last row. The FAISS index — the nominal centrepiece of the RAG layer
 — costs 2 seconds across the entire job. §3 follows that thread.
+
+> **`ACCU_LIMIT_KEY` / `COL_048` is excluded from every target in §6.** It
+> carries binary characters and is a known special case (user instruction,
+> 2026-07-26). It accounts for 26 107 s of the pool total; **excluding it, the
+> remaining two columns still cost 42 698 s over 72 rebuilds ≈ 11.9
+> GPU-hours.** The argument for §2 does not depend on the excluded column, and
+> the figures show all three only so the exclusion is auditable.
 
 ### 1.1 Why 108 rebuilds
 
@@ -106,9 +119,10 @@ rather than overloading one with a discriminator column.
 6 × ~230 s of cold spawn **and** one of the two parties in the CUDA OOM (§4.1).
 
 **2.3 Stagnation is recorded, not rediscovered.** `freetext_pool_stagnated`
-fired 34 times. A pool that stagnates at 8 distinct values is stored *as*
-stagnated, with its attempt count. Re-learning that fact 36 times is the single
-largest line item in the run.
+fired 34 times. A pool that stagnates below its target is stored *as*
+stagnated, with the attempt count that proved it — so a later worker reads the
+conclusion instead of re-running the ladder to reach it. This is what makes the
+warm-run target in §6 reachable at all.
 
 ---
 
@@ -181,10 +195,11 @@ branch, and `Generate.setup()` never touches CUDA at all.
 
 ### 4.2 Per-call re-materialization of observed values
 
-This one was mis-attributed in the earlier read of the two "Operation ongoing"
+This one was mis-attributed in the first read of the two "Operation ongoing"
 stalls (553 s and 365 s). The stack snapshots landed in `strptime`, which
 suggested a lock-contention story — but `_temporal_obs_floats()` **is**
-memoized (`_fidelity.py:67`). The unmemoized paths are the other two:
+memoized (`_fidelity.py:68`). A stack snapshot shows where a slow bundle
+happened to be, not where it spent its time. The real cost is next door:
 
 ```python
 # _fidelity.py:172 — _numeric_numpy, rebuilt on EVERY generate_batch() call
@@ -194,16 +209,23 @@ obs = np.asarray([float(x) for x in p.observed_values if _is_number(x)], dtype="
 `observed_values` has no cap (`profile.py` stores `tuple(non_null)`), so with a
 10 000-row reference sample and **42 INT64 columns**, every call to
 `generate_batch(16)` rebuilds 42 separate 10 000-element Python listcomps.
-`_categorical_numpy` likewise rebuilds its probability vector per call.
+`_temporal_numpy` is a milder version of the same bug: the float *list* is
+memoized, but the `np.asarray()` around it still runs per call.
 
 ![Sampler hoisting and batch sizing](assets/ws5-sampler-hoisting.png)
 
-At `batch_size=16`, 1M rows means 62 500 elements — so the vectorization is
-paying Python-loop overhead 62 500 times over instead of amortising it. Two
+**`_categorical_numpy` is not a problem and is deliberately left alone** —
+`categories` is capped at 50 (`_FREE_TEXT_MAX_CATEGORIES`) / 20
+(`_TEMPORAL_MAX_CATEGORIES`, `_NUMERIC_MAX_CATEGORIES`) in `profile.py`, so its
+per-call rebuild is bounded at single-digit CPU-seconds across the whole job.
+Hoisting it would be churn without benefit.
+
+At `batch_size=16`, 1M rows means 62 500 elements — so the vectorization pays
+Python-loop overhead 62 500 times over instead of amortising it. Two
 independent fixes compound: **hoist the derived arrays to sampler
-construction** (they depend only on the profile, which is immutable), and
-**scale `batch_size` with `num_rows`** (floor at today's 16 so small runs are
-unaffected).
+construction** (they depend only on the profile, which is frozen for the
+sampler's lifetime), and **scale `batch_size` with `num_rows`** (floor at
+today's 16 so small runs are unaffected).
 
 ### 4.3 Batch sizing
 
@@ -256,17 +278,23 @@ on every run.
 ## 6. Acceptance criteria
 
 Falsifiable against the existing milestones, measured per phase.
+**`ACCU_LIMIT_KEY` excluded throughout** (see §1).
 
 | Phase | 1M baseline | WS5 target |
 |---|---:|---:|
-| Pool build, total LLM service | 68 805 s / 108 rebuilds | ≤ 1 200 s / 1 build |
+| Pool build, total LLM service | 42 698 s / 72 rebuilds | ≤ 1 200 s / 1 build |
 | Cold vLLM spawns | 6 × ~230 s | 1 |
 | `dofn_setup_done`, total | 28 982 s | < 300 s |
-| Generate re-materialization | ~3 900 CPU-s | < 5 CPU-s |
+| Generate re-materialization | ~3 990 CPU-s | < 5 CPU-s |
 | Wall clock, cold | 4 050 s (68 min) | < 1 200 s (20 min) |
 | Wall clock, warm (pools cached) | n/a | < 300 s (5 min) |
 
-Plus the three-arm `--pool_seed_strategy` comparison (§3).
+Plus the three-arm `--pool_seed_strategy` comparison (§3), run off **one
+build** so the arms differ in exactly one variable.
+
+**Sequencing:** ship Phase 1 of the plan (schema fallback, sampler hoisting,
+batch sizing) and re-measure *before* starting the seeding experiment —
+otherwise the three arms are confounded with the throughput fixes.
 
 **Caveat on record:** the ≤ 20 min cold target assumes the pool build stays
 roughly one column's ladder (~400 s) now that columns build concurrently and
