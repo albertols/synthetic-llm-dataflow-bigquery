@@ -384,6 +384,44 @@ class B1RagEngine(GenerationEngine):
             out[name] = drawn
         return out
 
+    def _stored_pools(self, ctx: GenerationContext) -> dict[str, list[str]]:
+        """Pools already persisted for this (reference_digest, model_uri).
+
+        Returns column → values. Empty on any of: no store attached, no
+        digest to key on, or a store that raised — in every case the ladder
+        runs exactly as it did before WS5.
+        """
+        store = getattr(ctx, "pool_store", None)
+        if store is None or not ctx.reference_digest:
+            return {}
+        try:
+            fetched = store.fetch(ctx.reference_digest, ctx.model_uri)
+        except Exception as exc:
+            log_milestone("freetext_pool_store_error", error=type(exc).__name__)
+            return {}
+        # An empty values array is not a usable pool — build instead of
+        # silently generating from nothing.
+        return {p.column: list(p.values) for p in fetched if p.values}
+
+    def _take_stored_pool(
+        self,
+        column: str,
+        ctx: GenerationContext,
+        stored: dict[str, list[str]],
+        pools: dict[str, list[str]],
+    ) -> bool:
+        """Serve `column` from the persisted store; True when it was served."""
+        hit = stored.get(column)
+        if hit:
+            pools[column] = list(hit)
+            log_milestone(
+                "freetext_pool_store_hit", column=column, pool_size=len(hit)
+            )
+            return True
+        if getattr(ctx, "pool_store", None) is not None:
+            log_milestone("freetext_pool_store_miss", column=column)
+        return False
+
     def _build_free_text_pools(self, ctx: GenerationContext) -> dict[str, list[str]]:
         """For each FREE_TEXT column, retrieve exemplars and fill a bounded
         unique pool from batched LLM calls. Falls back to observed examples
@@ -398,6 +436,12 @@ class B1RagEngine(GenerationEngine):
         if not free_text_cols:
             return pools
 
+        # Tier 0 — the persisted store (WS5). Cross-PROCESS and
+        # authoritative; `_POOL_CACHE` below stays as the intra-process tier
+        # that survives setup() retries inside one worker. A store outage is
+        # never fatal: pools are an optimisation, not a dependency.
+        stored = self._stored_pools(ctx)
+
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
         chunks_by_column = self._fetch_free_text_chunks(ctx)
         # Phase 1 — sequential: seed-example retrieval touches the embedder
@@ -405,6 +449,8 @@ class B1RagEngine(GenerationEngine):
         # before any ladder thread spawns.
         jobs: list[tuple[ColumnProfile, list[str], int]] = []
         for prof in free_text_cols:
+            if self._take_stored_pool(prof.name, ctx, stored, pools):
+                continue
             seed_examples = self._column_seed_examples(
                 prof, ctx, _DEFAULT_TOP_K, chunks_by_column.get(prof.name)
             )

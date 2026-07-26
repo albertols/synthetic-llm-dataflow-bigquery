@@ -178,6 +178,14 @@ class GenerationContext(BaseModel):
     # no vLLM/xgrammar throughput cliff on T4 — the post-hoc format gate in
     # `_pool_llm_yield` protects the pool either way.
     pool_pattern_guidance: bool = False
+    # --- persisted free-text pools (WS5 §2) -----------------------------
+    # A `FreeTextPoolStore` (Protocol in sdfb_core.pools.store), attached
+    # worker-side by the DoFn. When it already holds this digest+model's
+    # pools, setup() reads them and never ignites vLLM: the 2026-07-26 1M
+    # run rebuilt the same three pools 36 times for 68,805 s of LLM service
+    # time, because `_POOL_CACHE` is process-scoped and every autoscale wave
+    # starts a fresh process. Typed `object` so sdfb-core keeps no import.
+    pool_store: object | None = None
     # --- RAG layer (WS2 §4b) -------------------------------------------
     # Requested synthetic row count — bounds the free-text pool target
     # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.
