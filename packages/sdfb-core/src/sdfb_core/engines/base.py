@@ -178,6 +178,24 @@ class GenerationContext(BaseModel):
     # no vLLM/xgrammar throughput cliff on T4 — the post-hoc format gate in
     # `_pool_llm_yield` protects the pool either way.
     pool_pattern_guidance: bool = False
+    # --- persisted free-text pools (WS5 §2) -----------------------------
+    # A `FreeTextPoolStore` (Protocol in sdfb_core.pools.store), attached
+    # worker-side by the DoFn. When it already holds this digest+model's
+    # pools, setup() reads them and never ignites vLLM: the 2026-07-26 1M
+    # run rebuilt the same three pools 36 times for 68,805 s of LLM service
+    # time, because `_POOL_CACHE` is process-scoped and every autoscale wave
+    # starts a fresh process. Typed `object` so sdfb-core keeps no import.
+    # `freetext_pools_table` threads the FQN through the pickled graph; the
+    # DoFn attaches the store worker-side, mirroring rag_chunks_table /
+    # chunk_store above.
+    freetext_pools_table: str = ""
+    pool_store: object | None = None
+    # --- pool seeding experiment (WS5 §3) -------------------------------
+    # "centroid" (control, today's behavior) | "kcenter" | "kcenter_rotate".
+    # Retrieval runs 3x per setup and only picks 8 prompt seeds, so this is
+    # the cheapest lever on novel-yield-per-call there is. One build, three
+    # arms — the runs differ in exactly one variable.
+    pool_seed_strategy: str = "centroid"
     # --- RAG layer (WS2 §4b) -------------------------------------------
     # Requested synthetic row count — bounds the free-text pool target
     # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.

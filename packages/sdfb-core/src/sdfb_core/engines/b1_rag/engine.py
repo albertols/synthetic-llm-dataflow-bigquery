@@ -71,7 +71,7 @@ from sdfb_core.rag.chunking import (
 )
 from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
 from sdfb_core.rag.index import build_index
-from sdfb_core.rag.retrieval import retrieve_centroid_top_k, retrieve_column_exemplars
+from sdfb_core.rag.retrieval import retrieve_centroid_top_k, select_seed_examples
 from sdfb_core.rag.serialize import serialize_rows
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -161,6 +161,11 @@ class B1RagEngine(GenerationEngine):
         self._record_model: type[GeneratedRecord] | None = None
         self._profiles: dict[str, ColumnProfile] | None = None
         self._samplers: dict[str, ColumnSampler] | None = None
+        # column -> (vectors, texts) captured during the SEQUENTIAL seed
+        # phase, so the kcenter_rotate arm can re-seed per ladder attempt
+        # without touching the (thread-unsafe) embedder from a worker
+        # thread. Written before any ladder thread spawns; read-only after.
+        self._seed_space: dict[str, tuple[list, list]] = {}
         self._index = None
         self._embedder: Embedder | None = None
         self._ref_vectors: list[list[float]] = []
@@ -384,6 +389,44 @@ class B1RagEngine(GenerationEngine):
             out[name] = drawn
         return out
 
+    def _stored_pools(self, ctx: GenerationContext) -> dict[str, list[str]]:
+        """Pools already persisted for this (reference_digest, model_uri).
+
+        Returns column → values. Empty on any of: no store attached, no
+        digest to key on, or a store that raised — in every case the ladder
+        runs exactly as it did before WS5.
+        """
+        store = getattr(ctx, "pool_store", None)
+        if store is None or not ctx.reference_digest:
+            return {}
+        try:
+            fetched = store.fetch(ctx.reference_digest, ctx.model_uri)
+        except Exception as exc:
+            log_milestone("freetext_pool_store_error", error=type(exc).__name__)
+            return {}
+        # An empty values array is not a usable pool — build instead of
+        # silently generating from nothing.
+        return {p.column: list(p.values) for p in fetched if p.values}
+
+    def _take_stored_pool(
+        self,
+        column: str,
+        ctx: GenerationContext,
+        stored: dict[str, list[str]],
+        pools: dict[str, list[str]],
+    ) -> bool:
+        """Serve `column` from the persisted store; True when it was served."""
+        hit = stored.get(column)
+        if hit:
+            pools[column] = list(hit)
+            log_milestone(
+                "freetext_pool_store_hit", column=column, pool_size=len(hit)
+            )
+            return True
+        if getattr(ctx, "pool_store", None) is not None:
+            log_milestone("freetext_pool_store_miss", column=column)
+        return False
+
     def _build_free_text_pools(self, ctx: GenerationContext) -> dict[str, list[str]]:
         """For each FREE_TEXT column, retrieve exemplars and fill a bounded
         unique pool from batched LLM calls. Falls back to observed examples
@@ -398,6 +441,12 @@ class B1RagEngine(GenerationEngine):
         if not free_text_cols:
             return pools
 
+        # Tier 0 — the persisted store (WS5). Cross-PROCESS and
+        # authoritative; `_POOL_CACHE` below stays as the intra-process tier
+        # that survives setup() retries inside one worker. A store outage is
+        # never fatal: pools are an optimisation, not a dependency.
+        stored = self._stored_pools(ctx)
+
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
         chunks_by_column = self._fetch_free_text_chunks(ctx)
         # Phase 1 — sequential: seed-example retrieval touches the embedder
@@ -405,6 +454,8 @@ class B1RagEngine(GenerationEngine):
         # before any ladder thread spawns.
         jobs: list[tuple[ColumnProfile, list[str], int]] = []
         for prof in free_text_cols:
+            if self._take_stored_pool(prof.name, ctx, stored, pools):
+                continue
             seed_examples = self._column_seed_examples(
                 prof, ctx, _DEFAULT_TOP_K, chunks_by_column.get(prof.name)
             )
@@ -503,16 +554,12 @@ class B1RagEngine(GenerationEngine):
         ``column_chunks`` — when present, else the column's own values
         embedded locally. Empty list ⇒ caller falls back to row-doc
         exemplars."""
+        strategy = getattr(ctx, "pool_seed_strategy", "centroid")
         if column_chunks:
             vectors = [list(c.embedding) for c in column_chunks]
             texts = [c.chunk_text for c in column_chunks]
-            if len(texts) <= k:
-                return texts
-            index = build_index(vectors, len(vectors[0]))
-            try:
-                return retrieve_centroid_top_k(index, vectors, texts, k)
-            finally:
-                index.release()
+            self._seed_space[prof.name] = (vectors, texts)
+            return select_seed_examples(vectors, texts, k, strategy=strategy)
         if self._embedder is not None:
             values: list[str] = []
             seen: set[str] = set()
@@ -522,7 +569,11 @@ class B1RagEngine(GenerationEngine):
                     seen.add(v)
                     values.append(str(v))
             if values:
-                return retrieve_column_exemplars(values, self._embedder, k)
+                if len(values) <= k:
+                    return values
+                vectors = self._embedder.embed(values)
+                self._seed_space[prof.name] = (vectors, values)
+                return select_seed_examples(vectors, values, k, strategy=strategy)
         return []
 
     def _pool_cache_key(
@@ -562,6 +613,30 @@ class B1RagEngine(GenerationEngine):
             self._index, self._ref_vectors, ctx.reference_rows, k
         )
 
+    def _rotating_prompt(self, prof: ColumnProfile, per_call: int):
+        """A per-attempt prompt builder for the `kcenter_rotate` arm, else
+        None.
+
+        `centroid` and `kcenter` keep a byte-identical prompt prefix so vLLM
+        prefix caching still applies (ADR 0018); only this arm trades that
+        away, which is cheap now a pool is built once per digest (WS5 §2).
+        """
+        if getattr(self._ctx, "pool_seed_strategy", "centroid") != "kcenter_rotate":
+            return None
+        space = self._seed_space.get(prof.name)
+        if space is None:
+            return None
+        vectors, texts = space
+
+        def _builder(attempt: int) -> tuple[str, list[str]]:
+            rotated = select_seed_examples(
+                vectors, texts, _DEFAULT_TOP_K,
+                strategy="kcenter_rotate", attempt=attempt,
+            )
+            return _build_pool_prompt(prof.name, per_call, rotated), rotated
+
+        return _builder
+
     def _infer_free_text_pool(
         self, prof: ColumnProfile, seed_examples: list[str], target: int
     ) -> list[str]:
@@ -570,15 +645,7 @@ class B1RagEngine(GenerationEngine):
         assert self._client is not None
         t_column = time.monotonic()
         per_call = min(target, _POOL_VALUES_PER_CALL)
-        prompt = (
-            f"You generate synthetic tabular data. First identify the exact "
-            f"format of these example values for the column '{prof.name}' "
-            f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
-            f"timestamp, natural-language text), then generate "
-            f"{per_call} NEW, distinct, fictitious values in "
-            f"exactly that format. Never copy an example verbatim. "
-            f'Examples: {seed_examples}. Return JSON {{"values": [...]}}.'
-        )
+        prompt = _build_pool_prompt(prof.name, per_call, seed_examples)
         # ARRAY completions only — never n single-value choices. A choice is
         # blind to its siblings, so "distinct" is unsatisfiable per
         # single-value completion and vLLM collapsed all 32 into the
@@ -607,9 +674,15 @@ class B1RagEngine(GenerationEngine):
             },
             "required": ["values"],
         }
+        # kcenter_rotate is the only arm that varies the prompt across
+        # attempts; centroid/kcenter keep a byte-identical prefix so vLLM
+        # prefix caching still applies (ADR 0018).
+        prompt_for_attempt = self._rotating_prompt(prof, per_call)
+
         try:
             y = _pool_llm_yield(
-                self._client, prompt, json_schema, prof, seed_examples, target=target
+                self._client, prompt, json_schema, prof, seed_examples,
+                target=target, prompt_for_attempt=prompt_for_attempt,
             )
         except Exception as e:
             if self._ctx is not None and self._ctx.strict_freetext:
@@ -831,6 +904,20 @@ class _PoolYield(NamedTuple):
     format_rejected: int = 0
 
 
+def _build_pool_prompt(column: str, per_call: int, seed_examples: list[str]) -> str:
+    """The pool prompt. One definition — the kcenter_rotate arm rebuilds it
+    per attempt with a different seed set, and the two must not drift."""
+    return (
+        f"You generate synthetic tabular data. First identify the exact "
+        f"format of these example values for the column '{column}' "
+        f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
+        f"timestamp, natural-language text), then generate "
+        f"{per_call} NEW, distinct, fictitious values in "
+        f"exactly that format. Never copy an example verbatim. "
+        f'Examples: {seed_examples}. Return JSON {{"values": [...]}}.'
+    )
+
+
 def _pool_llm_yield(
     client: ModelClient,
     prompt: str,
@@ -839,6 +926,7 @@ def _pool_llm_yield(
     seed_examples: list[str],
     target: int = _DEFAULT_FREE_TEXT_POOL,
     n_choices: int = _POOL_PARALLEL_CHOICES,
+    prompt_for_attempt=None,
 ) -> _PoolYield:
     """Run the pool call at escalating sampling levels, accumulating novel
     values until the pool reaches ``target``. Breaking on the FIRST
@@ -895,9 +983,17 @@ def _pool_llm_yield(
     stagnant = 0
     while attempts < max_calls and len(pool) < target:
         level = levels[min(attempts, len(levels) - 1)]
+        # kcenter_rotate (WS5 §3): re-seed the prompt each attempt so the
+        # model sees a different region of the column's manifold. Seeds come
+        # from a vector space captured BEFORE any thread spawned, so this
+        # never touches the (thread-unsafe) embedder from here.
+        call_prompt = prompt
+        if prompt_for_attempt is not None:
+            call_prompt, rotated_seeds = prompt_for_attempt(attempts)
+            shown.update(rotated_seeds)
         attempts += 1
         results = client.generate_json(
-            prompt=prompt,
+            prompt=call_prompt,
             json_schema=json_schema,
             n=max(1, n_choices),
             max_tokens=2048,

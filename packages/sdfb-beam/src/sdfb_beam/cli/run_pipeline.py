@@ -46,9 +46,11 @@ from sdfb_core.observability import log_milestone
 from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.validation import Thresholds
 
+from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
 
 if TYPE_CHECKING:
@@ -62,6 +64,39 @@ logger = logging.getLogger(__name__)
 # ``environment.diskSizeGb`` does NOT propagate to the worker harness (observed:
 # workers booted at the 25GB default despite the DAG requesting 200).
 _DEFAULT_WORKER_DISK_GB = 200
+
+# batch_size is rows-per-element. At the historic fixed default of 16, a 1M-row
+# run produced 62,500 elements and paid per-element Python overhead 62,500
+# times over instead of amortising it across vectorized draws (2026-07-26
+# E2E). Scale toward ~1,000 elements, but never below the historic default so
+# small runs — and their goldens — are untouched.
+DEFAULT_BATCH_SIZE = 16
+_TARGET_ELEMENTS = 1_000
+
+
+# WS5 §3 — the seeding experiment's only variable. Three arms off ONE build
+# so the E2E runs differ in exactly one thing.
+POOL_SEED_STRATEGIES = ("centroid", "kcenter", "kcenter_rotate")
+
+
+def validate_seed_strategy(value: str) -> str:
+    """Reject a typo at launch: silently degrading to the control arm would
+    corrupt the comparison the flag exists for."""
+    if value not in POOL_SEED_STRATEGIES:
+        raise ValueError(
+            f"--pool_seed_strategy must be one of {POOL_SEED_STRATEGIES}, "
+            f"got {value!r}"
+        )
+    return value
+
+
+def resolve_batch_size(requested: int, num_rows: int) -> int:
+    """Rows per element. An explicit non-default ``--batch_size`` always wins."""
+    if requested != DEFAULT_BATCH_SIZE:
+        return requested
+    if num_rows <= 0:
+        return DEFAULT_BATCH_SIZE
+    return max(DEFAULT_BATCH_SIZE, num_rows // _TARGET_ELEMENTS)
 
 
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
@@ -99,7 +134,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "at runtime. Pre-provision the table out-of-band "
                         "(e.g. `bq mk`/DDL) if those constraints matter.")
     p.add_argument("--num_rows", type=int, required=True)
-    p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE,
+                   help="Rows per element. Left at the default, this scales "
+                        "with --num_rows toward ~1,000 elements (never below "
+                        "the default). Pass an explicit value to pin it.")
     p.add_argument("--similarity", type=float, default=0.5)
     p.add_argument("--seed", default="",
                    help="Explicit base RNG seed (int). Empty = derive per "
@@ -132,6 +170,24 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="FQN of synthetic_rag.rag_chunks. Enables the "
                         "read-instead-of-reembed path; with "
                         "--build_rag_layer also enables population.")
+    p.add_argument("--build_pool_layer", nargs="?", const="true", default="",
+                   help="true/false (bare flag = true). Build free-text "
+                        "pools in their own branch and persist them to "
+                        "--freetext_pools_table (skipped if this "
+                        "reference_digest + model_uri is already present). "
+                        "Without it pools are inferred inside every worker "
+                        "process's setup().")
+    p.add_argument("--freetext_pools_table", default="",
+                   help="FQN of synthetic_rag.freetext_pools. Enables the "
+                        "read-instead-of-rebuild path; with "
+                        "--build_pool_layer also enables the build branch.")
+    p.add_argument("--pool_seed_strategy", default="centroid",
+                   choices=list(POOL_SEED_STRATEGIES),
+                   help="How the 8 free-text prompt seeds are chosen. "
+                        "centroid = control (densest region, today). "
+                        "kcenter = seeds span the column's modes. "
+                        "kcenter_rotate = re-seeded per ladder attempt "
+                        "(forfeits vLLM prefix caching by design).")
     p.add_argument("--pool_pattern_guidance", nargs="?", const="true",
                    default="",
                    help="true/false (bare flag = true). Constrain "
@@ -165,6 +221,8 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     args, beam_args = p.parse_known_args(argv)
     if parse_bool_flag(args.build_rag_layer) and not args.rag_chunks_table:
         p.error("--build_rag_layer requires --rag_chunks_table")
+    if parse_bool_flag(args.build_pool_layer) and not args.freetext_pools_table:
+        p.error("--build_pool_layer requires --freetext_pools_table")
     return args, beam_args
 
 
@@ -224,18 +282,63 @@ def load_ddl(ddl_uri: str) -> TableSchema:
         return TableSchema.model_validate(json.loads(f.read()))
 
 
+# A pinned --ddl_uri that does not EXIST is an operational miss (new source
+# table whose DDL was never exported) and must degrade to live extraction:
+# TEST_1 (2026-07-25 16:38) died at template launch on a 404 with a perfectly
+# good source table available. A pin that exists but is CORRUPT is a different
+# failure — the operator asked for that exact schema — and still raises.
+_MISSING_DDL_MARKERS = ("notfound", "no such object", "404", "filenotfound")
+
+
+def _is_missing_ddl(exc: BaseException) -> bool:
+    """True when `exc` means "the object isn't there", not "it's malformed"."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, FileNotFoundError):
+            return True
+        if isinstance(cur, json.JSONDecodeError):
+            return False  # parsed-but-broken: never silently swap the schema
+        blob = f"{type(cur).__name__} {cur}".lower()
+        if any(m in blob for m in _MISSING_DDL_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def resolve_table_schema(ddl_uri: str, reference_table: str) -> TableSchema:
     """WS4 §6b precedence: explicit ``--ddl_uri`` (pin/air-gap) > live
-    INFORMATION_SCHEMA extraction from the source table."""
+    INFORMATION_SCHEMA extraction from the source table.
+
+    A MISSING pin falls through to live extraction (WS5 T1); a corrupt or
+    schema-invalid pin still raises.
+    """
     if ddl_uri:
         logger.info("Loading DDL from %s", ddl_uri)
-        schema = load_ddl(ddl_uri)
-        log_milestone("ddl_loaded_from_uri", uri=ddl_uri)
-        return schema
-    logger.info(
-        "No --ddl_uri; live-extracting schema from %s", reference_table
-    )
-    from sdfb_beam.ddl import extract_table_schema
+        try:
+            schema = load_ddl(ddl_uri)
+        except Exception as exc:
+            if not _is_missing_ddl(exc):
+                raise
+            logger.warning(
+                "DDL pin %s not found; live-extracting from %s",
+                ddl_uri,
+                reference_table,
+            )
+            log_milestone(
+                "ddl_uri_miss_fallback",
+                uri=ddl_uri,
+                table=reference_table,
+                error=type(exc).__name__,
+            )
+        else:
+            log_milestone("ddl_loaded_from_uri", uri=ddl_uri)
+            return schema
+    else:
+        logger.info(
+            "No --ddl_uri; live-extracting schema from %s", reference_table
+        )
 
     schema = extract_table_schema(reference_table)
     log_milestone(
@@ -406,12 +509,30 @@ def main(argv: list[str] | None = None) -> int:
                 create_disposition=BigQueryDisposition.CREATE_NEVER,
             )
 
+    freetext_pools_sink = None
+    if parse_bool_flag(args.build_pool_layer) and args.freetext_pools_table:
+        digest = compute_reference_digest(reference_rows)
+        pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
+        if pool_store.exists(digest, args.model_uri):
+            log_milestone(
+                "pool_build_skipped",
+                reference_digest=digest[:12],
+                model_uri=args.model_uri,
+            )
+        else:
+            freetext_pools_sink = WriteToBigQuery(
+                table=args.freetext_pools_table,
+                method=WriteToBigQuery.Method.FILE_LOADS,
+                write_disposition=BigQueryDisposition.WRITE_APPEND,
+                create_disposition=BigQueryDisposition.CREATE_NEVER,
+            )
+
     config = PipelineConfig(
         table_schema=table_schema,
         engine_name=args.engine,
         model_client=model_client,
         num_rows=args.num_rows,
-        batch_size=args.batch_size,
+        batch_size=resolve_batch_size(args.batch_size, args.num_rows),
         similarity=args.similarity,
         seed=int(args.seed) if str(args.seed).strip() else None,
         run_id=args.run_id,
@@ -435,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
         embedder_id=embedder_id,
         embedder_version=embedder_version,
         pool_pattern_guidance=parse_bool_flag(args.pool_pattern_guidance),
+        freetext_pools_table=args.freetext_pools_table,
+        pool_seed_strategy=validate_seed_strategy(args.pool_seed_strategy),
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
@@ -488,6 +611,7 @@ def main(argv: list[str] | None = None) -> int:
             dlq_sink=dlq_sink,
             validation_runs_sink=validation_runs_sink,
             rag_chunks_sink=rag_chunks_sink,
+            freetext_pools_sink=freetext_pools_sink,
         )
         logger.info(
             "Pipeline launched: run_id=%s reference_digest=%s",

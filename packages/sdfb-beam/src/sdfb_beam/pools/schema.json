@@ -1,0 +1,46 @@
+{
+  "fields": [
+    {
+      "name": "reference_digest",
+      "type": "STRING",
+      "mode": "REQUIRED",
+      "description": "Canonical provenance digest of the reference sample the pool was inferred from. Invalidates the pool when the sample changes."
+    },
+    {
+      "name": "model_uri",
+      "type": "STRING",
+      "mode": "REQUIRED",
+      "description": "LLM weights URI that produced these values. A different model is a different pool for the same reference sample."
+    },
+    {
+      "name": "column",
+      "type": "STRING",
+      "mode": "REQUIRED",
+      "description": "Free-text column the pool belongs to."
+    },
+    {
+      "name": "target",
+      "type": "INT64",
+      "mode": "REQUIRED",
+      "description": "Requested pool size: min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)."
+    },
+    {
+      "name": "values",
+      "type": "STRING",
+      "mode": "REPEATED",
+      "description": "Deduped generated values in insertion order. REPEATED (not a JSON blob) so pools stay queryable with UNNEST."
+    },
+    {
+      "name": "stagnated",
+      "type": "BOOL",
+      "mode": "REQUIRED",
+      "description": "True when the ladder stopped yielding novel values before reaching target. Recorded so later workers read the conclusion instead of re-running the ladder to re-derive it."
+    },
+    {
+      "name": "attempts",
+      "type": "INT64",
+      "mode": "REQUIRED",
+      "description": "Ladder attempts spent producing this pool (observability; never a fetch key)."
+    }
+  ]
+}
