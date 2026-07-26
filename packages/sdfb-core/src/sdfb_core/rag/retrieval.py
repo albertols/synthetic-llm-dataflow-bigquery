@@ -62,4 +62,62 @@ def retrieve_column_exemplars(
         index.release()
 
 
-__all__ = ["centroid", "retrieve_centroid_top_k", "retrieve_column_exemplars"]
+def _sq_dist(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum((x - y) * (x - y) for x, y in zip(a, b, strict=True))
+
+
+def retrieve_kcenter_k(
+    vectors: list[list[float]],
+    items: Sequence,
+    k: int,
+    start: int | None = None,
+) -> list:
+    """Greedy k-center: each pick is the item FARTHEST from everything
+    already picked.
+
+    `retrieve_centroid_top_k` lands entirely in the densest region by
+    construction, so rare modes are never shown to the LLM — it is asked
+    for novel values while looking at the most average ones. k-center
+    trades typicality for coverage.
+
+    `start` re-seeds the walk (the `kcenter_rotate` arm) and is taken
+    modulo the population so callers can pass an attempt counter. Default
+    starts at the medoid, so the dominant mode is still represented.
+
+    Deterministic: ties break on the lower index.
+    """
+    items = list(items)
+    if not items or k <= 0 or not vectors:
+        return []
+    if len(items) <= k:
+        return items
+
+    if start is None:
+        c = centroid(vectors)
+        start = min(range(len(vectors)), key=lambda i: _sq_dist(vectors[i], c))
+    start %= len(vectors)
+
+    chosen = [start]
+    best = [_sq_dist(v, vectors[start]) for v in vectors]
+    # -1 marks "already chosen". Without this the START could be re-picked
+    # once every remaining candidate has collapsed to distance 0 (a column
+    # with few DISTINCT values but many rows — exactly the stagnating shape).
+    best[start] = -1.0
+    for _ in range(k - 1):
+        nxt = max(range(len(vectors)), key=lambda i: (best[i], -i))
+        chosen.append(nxt)
+        best[nxt] = -1.0  # never re-pick
+        for i, v in enumerate(vectors):
+            if best[i] < 0:
+                continue
+            d = _sq_dist(v, vectors[nxt])
+            best[i] = min(best[i], d)
+    return [items[i] for i in chosen]
+
+
+__all__ = [
+    "centroid",
+    "retrieve_centroid_top_k",
+    "retrieve_column_exemplars",
+    "retrieve_kcenter_k",
+]
