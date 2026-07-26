@@ -513,7 +513,26 @@ def main(argv: list[str] | None = None) -> int:
     if parse_bool_flag(args.build_pool_layer) and args.freetext_pools_table:
         digest = compute_reference_digest(reference_rows)
         pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
-        if pool_store.exists(digest, args.model_uri):
+        # A MISSING pool table must not surface as a cryptic NotFound out of
+        # the driver — that is exactly how TEST_1 (2026-07-25 16:38) died on
+        # a 404. The table is never auto-created (the CREATE_IF_NEEDED
+        # blast-radius rule confines auto-create to the landing sink), so
+        # say what to run. The READ path degrades silently and correctly on
+        # its own; only an explicit --build_pool_layer reaches here.
+        try:
+            already_built = pool_store.exists(digest, args.model_uri)
+        except Exception as exc:
+            proj, ds, tbl = args.freetext_pools_table.split(".", 2)
+            raise SystemExit(
+                f"--build_pool_layer needs {args.freetext_pools_table}, which "
+                f"could not be read ({type(exc).__name__}: {exc}).\n"
+                f"Create it once:\n"
+                f"  bq mk --table {proj}:{ds}.{tbl} "
+                f"config/bq_schema/synthetic_rag/freetext_pools.schema.json\n"
+                f"Or drop --build_pool_layer: pools are an optimisation, and "
+                f"the run works without them (they are rebuilt per worker)."
+            ) from exc
+        if already_built:
             log_milestone(
                 "pool_build_skipped",
                 reference_digest=digest[:12],

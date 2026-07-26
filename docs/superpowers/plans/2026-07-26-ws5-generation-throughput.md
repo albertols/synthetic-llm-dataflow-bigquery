@@ -38,7 +38,7 @@ build confounds the experiment.
 | `packages/sdfb-core/src/sdfb_core/pools/store.py` *(new)* | `FreeTextPoolStore` Protocol + `InMemoryFreeTextPoolStore` (T4) |
 | `packages/sdfb-core/src/sdfb_core/pools/record.py` *(new)* | `FreeTextPool` dataclass (T4) |
 | `packages/sdfb-beam/src/sdfb_beam/pools/store.py` *(new)* | `BigQueryFreeTextPoolStore` (T5) |
-| `packages/sdfb-beam/src/sdfb_beam/pools/schema.json` *(new)* | BQ table schema (T5) |
+| `config/bq_schema/synthetic_rag/freetext_pools.schema.json` *(new)* | BQ table schema (T5) |
 | `packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py` | store-first pool resolution (T6), seed strategy (T9) |
 | `packages/sdfb-beam/src/sdfb_beam/dofns/pools.py` *(new)* | `BuildFreeTextPoolsDoFn` (T7) |
 | `packages/sdfb-core/src/sdfb_core/rag/retrieval.py` | `retrieve_kcenter_k` (T8) |
@@ -687,7 +687,7 @@ git commit -m "feat(pools): FreeTextPool record + FreeTextPoolStore Protocol (WS
 **Files:**
 - Create: `packages/sdfb-beam/src/sdfb_beam/pools/__init__.py`
 - Create: `packages/sdfb-beam/src/sdfb_beam/pools/store.py`
-- Create: `packages/sdfb-beam/src/sdfb_beam/pools/schema.json`
+- Create: `config/bq_schema/synthetic_rag/freetext_pools.schema.json`
 - Test: `packages/sdfb-tests/tests/unit/pools/test_bq_pool_store.py` (create)
 
 **Interfaces:**
@@ -762,7 +762,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'sdfb_beam.pools'`.
 
 - [ ] **Step 3: Implement**
 
-`packages/sdfb-beam/src/sdfb_beam/pools/schema.json`:
+`config/bq_schema/synthetic_rag/freetext_pools.schema.json`:
 
 ```json
 {
@@ -1223,7 +1223,7 @@ Add the predicate to the DoFn:
 In `run_pipeline.py`, add the flag beside `--build_rag_layer` and wire the
 branch to `WriteToBigQuery(..., method=FILE_LOADS, create_disposition=CREATE_IF_NEEDED,
 write_disposition=WRITE_APPEND)` against `synthetic_rag.freetext_pools`, using
-`pools/schema.json` exactly as the rag_chunks branch uses its schema file.
+`config/bq_schema/synthetic_rag/freetext_pools.schema.json` exactly as the rag_chunks branch uses its schema file.
 
 - [ ] **Step 4: Run tests**
 
