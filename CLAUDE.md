@@ -99,3 +99,22 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Cross-session preferences and project context** → `~/.claude/projects/.../memory/MEMORY.md`.
 - **Personal-GCP E2E runs (T4, cost-capped)** → [`public_cloud/deploy/gcp/README.md`](public_cloud/deploy/gcp/README.md).
+
+## Documentation convention — visual first
+
+Design docs are **visual documents**, not prose with optional pictures. Any doc
+covering geometry/math (embedding trigonometry, sampling distributions,
+quantile bounds), architecture/DAG shape, or a new config flag MUST carry:
+
+- **Rendered figures** → `docs/designs/assets/*.png` (matplotlib), committed with
+  the doc, with a provenance section recording how to regenerate them.
+- **Inline mermaid** for DAG shape, control flow, and decision trees.
+- **A diagram per flag mode** — show what each value does to the pipeline or the
+  geometry; a parameter table alone is not sufficient.
+
+Copy the pattern in [`docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md`](docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md)
+(unit-sphere panels, mermaid candidate graph, provenance table) and
+[`docs/designs/2026-07-24-reference-sample-scaling.md`](docs/designs/2026-07-24-reference-sample-scaling.md).
+Keep figures in sync with the code they describe — a stale figure is worse than
+none. Apply the same rule when *explaining* this work in conversation: lead with
+the diagram or worked geometry, then the prose.
