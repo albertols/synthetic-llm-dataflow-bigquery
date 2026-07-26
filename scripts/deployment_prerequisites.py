@@ -30,6 +30,15 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
                        created_at; vector-index state reported (created after
                        first population — BQ needs ≥5k rows). Pass
                        --rag-chunks-table "" to skip for RAG-less deployments.
+ 10. Free-text pools — {project}.synthetic_rag.freetext_pools (WS5, ADR 0020).
+                       OPTIONAL BY DESIGN: it is a memo pad, not a data store —
+                       one row per (reference_digest, model_uri, column). Absent,
+                       every worker process rebuilds its pools exactly as before
+                       WS5 (that is the 19.1 GPU-hour / 68-minute behaviour the
+                       artifact exists to remove). Reported as SKIP, never
+                       ACTION, when the table is missing — it is a performance
+                       opt-in, not a prerequisite. Pass --freetext-pools-table
+                       "" to omit the check entirely.
 
 Exit code: 0 when no ACTION items (KO=0), 1 when any ACTION (KO). SKIP (could not
 verify — offline / no creds / missing lib) never fails the run but is surfaced.
@@ -94,6 +103,16 @@ RAG_CHUNKS_MIN_COLUMNS = [
     "embedder_id", "embedder_version", "embedding", "created_at",
 ]
 _RAG_PARTITION_FIELD = "created_at"
+
+# WS5 / ADR 0020 — free-text pool store contract. Deliberately NOT
+# partitioned: the table holds one row per (reference_digest, model_uri,
+# column), i.e. a handful per run, so a partition would add a required
+# column and buy nothing. Fallback when the committed schema file is
+# missing; the committed file wins when present.
+FREETEXT_POOLS_MIN_COLUMNS = [
+    "reference_digest", "model_uri", "column", "target",
+    "values", "stagnated", "attempts",
+]
 
 
 @dataclass
@@ -324,6 +343,7 @@ def step8_others(ctx: Ctx) -> None:
         Path(a.schemas_dir) / "synthetic_data_quality" / "dlq.schema.json",
         Path(a.schemas_dir) / "synthetic_data_quality" / "validation_runs.schema.json",
         Path(a.schemas_dir) / "synthetic_rag" / "rag_chunks.schema.json",
+        Path(a.schemas_dir) / "synthetic_rag" / "freetext_pools.schema.json",
         REPO_ROOT / "config" / "thresholds.yml",
     ) if not f.exists()]
     if missing:
@@ -334,7 +354,8 @@ def step8_others(ctx: Ctx) -> None:
         ctx.add("8c", "Local config artifacts", OK,
                 "thresholds.yml · synthetic_data_quality/dlq.schema.json · "
                 "synthetic_data_quality/validation_runs.schema.json · "
-                "synthetic_rag/rag_chunks.schema.json")
+                "synthetic_rag/rag_chunks.schema.json · "
+                "synthetic_rag/freetext_pools.schema.json")
 
 
 def step9_rag_layer(ctx: Ctx) -> None:
@@ -453,6 +474,66 @@ def _rag_vector_index(ctx, client, fqn, t_link) -> None:
     except Exception as e:
         ctx.add("9c", "RAG vector index", SKIP,
                 f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
+
+
+def step10_freetext_pools(ctx: Ctx) -> None:
+    """WS5 / ADR 0020 — the persisted free-text pool store.
+
+    Unlike every other check here, a missing table is **SKIP, not ACTION**.
+    The pool store is a pure optimisation with tested graceful degradation:
+    no table (or an unreadable one) makes the engine build pools in
+    `setup()` exactly as it did before WS5. Reporting it as ACTION would
+    claim the deployment is broken when it is merely slower.
+
+    The one case that DOES fail is `--build_pool_layer=true` against a
+    missing table — the launcher raises with the `bq mk` line rather than a
+    cryptic NotFound. That is a launch-time concern, not a preflight one.
+    """
+    a = ctx.args
+    fqn = a.freetext_pools_table
+    if not fqn:
+        ctx.add("10", "Free-text pool store", SKIP,
+                "--freetext-pools-table '' — check omitted")
+        return
+    proj, ds, table = fqn.split(".", 2)
+    t_link = bq_table_link(fqn)
+    schema_file = Path(a.schemas_dir) / ds / f"{table}.schema.json"
+    client, reason = bq_client(a.project)
+    if client is None:
+        ctx.add("10", "Free-text pool store", SKIP, f"{t_link} — {reason}")
+        return
+    from google.api_core.exceptions import NotFound
+
+    try:
+        live = client.get_table(fqn)
+    except NotFound:
+        ctx.add("10", "Free-text pool store", SKIP,
+                f"{t_link} — not found; pools will be rebuilt per worker "
+                f"process (pre-WS5 behaviour). To enable: "
+                f"`bq mk --table {proj}:{ds}.{table} "
+                f"config/bq_schema/synthetic_rag/{table}.schema.json`")
+        return
+    except Exception as e:
+        ctx.add("10", "Free-text pool store", SKIP,
+                f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
+        return
+
+    # Present ⇒ the contract DOES matter: a drifted table silently degrades
+    # every run back to rebuilding, which is invisible without this check.
+    if schema_file.exists():
+        required = [f["name"] for f in json.loads(schema_file.read_text())]
+    else:
+        required = list(FREETEXT_POOLS_MIN_COLUMNS)
+    missing_cols = [c for c in required if c not in {f.name for f in live.schema}]
+    if missing_cols:
+        ctx.add("10", "Free-text pool store", ACTION,
+                f"{t_link} — missing columns: {', '.join(missing_cols)}",
+                f"align the table with {schema_file if schema_file.exists() else 'config/bq_schema/synthetic_rag/freetext_pools.schema.json'} "
+                "— a drifted pool table degrades every run back to "
+                "rebuilding pools per worker, silently")
+    else:
+        ctx.add("10", "Free-text pool store", OK,
+                f"{t_link} — {len(required)} cols · pools read instead of rebuilt")
 
 
 # --------------------------------------------------------------------------- #
@@ -610,6 +691,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="FQN of the shared RAG chunk store (WS2). Default "
                         "{project}.synthetic_rag.rag_chunks; pass '' to skip the "
                         "RAG checks for a RAG-less deployment.")
+    p.add_argument("--freetext-pools-table", default=None,
+                   help="FQN of the free-text pool store (WS5/ADR 0020). Default "
+                        "{project}.synthetic_rag.freetext_pools; pass '' to omit "
+                        "the check. Optional by design — absent, pools are "
+                        "rebuilt per worker process (pre-WS5 behaviour).")
     p.add_argument("--models-dir", default=str(REPO_ROOT / "models"), help="Local weights root (default ./models).")
     p.add_argument("--schemas-dir", default=str(REPO_ROOT / "config" / "bq_schema"),
                    help="Root under which step 1/2 drop {dataset}/{table}.schema.json "
@@ -629,6 +715,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     # None = default convention; "" = explicit opt-out (RAG-less deployment).
     if args.rag_chunks_table is None:
         args.rag_chunks_table = f"{args.project}.synthetic_rag.rag_chunks"
+    if args.freetext_pools_table is None:
+        args.freetext_pools_table = f"{args.project}.synthetic_rag.freetext_pools"
     return args
 
 
@@ -638,7 +726,7 @@ def main(argv: list[str] | None = None) -> int:
     ctx = Ctx(args=args)
     for step in (step1_source_ddl, step2_landing_schema, step3_local_weights, step4_bq_tables,
                  step5_staging_bucket, step6_templates_bucket, step7_bq_datasets, step8_others,
-                 step9_rag_layer):
+                 step9_rag_layer, step10_freetext_pools):
         step(ctx)
 
     stamp = datetime.now(UTC)

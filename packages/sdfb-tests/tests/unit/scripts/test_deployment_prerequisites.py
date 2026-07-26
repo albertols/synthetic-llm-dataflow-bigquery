@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -162,3 +163,78 @@ def test_ddl_uri_skip_message_says_optional():
     assert r8b.status == _mod.SKIP
     assert "optional" in r8b.resource
     assert "INFORMATION_SCHEMA" in r8b.resource
+
+
+# --------------------------------------------------------------------------- #
+# step 10 — free-text pool store (WS5 / ADR 0020)
+# --------------------------------------------------------------------------- #
+def _pool_ctx(fqn):
+    args = argparse.Namespace(
+        project="p",
+        freetext_pools_table=fqn,
+        schemas_dir=str(_REPO_ROOT / "config" / "bq_schema"),
+    )
+    return _mod.Ctx(args=args)
+
+
+def _pool_table(columns):
+    return SimpleNamespace(schema=[SimpleNamespace(name=c) for c in columns])
+
+
+def test_step10_missing_table_is_skip_not_action(monkeypatch):
+    """The pool store is a performance opt-in with tested graceful
+    degradation — calling a deployment KO because it is absent would claim
+    the deployment is broken when it is merely slower."""
+    fqn = "p.synthetic_rag.freetext_pools"
+    _patch_bq(monkeypatch, _FakeBQ(tables={}))
+    ctx = _pool_ctx(fqn)
+    _mod.step10_freetext_pools(ctx)
+    (result,) = ctx.results
+    assert result.status == _mod.SKIP
+    assert "rebuilt per worker" in result.resource
+    assert "bq mk" in result.resource
+
+
+def test_step10_present_and_correct_is_ok(monkeypatch):
+    fqn = "p.synthetic_rag.freetext_pools"
+    _patch_bq(
+        monkeypatch,
+        _FakeBQ(tables={fqn: _pool_table(_mod.FREETEXT_POOLS_MIN_COLUMNS)}),
+    )
+    ctx = _pool_ctx(fqn)
+    _mod.step10_freetext_pools(ctx)
+    (result,) = ctx.results
+    assert result.status == _mod.OK
+
+
+def test_step10_drifted_table_is_an_action(monkeypatch):
+    """A table that EXISTS but lost a column silently degrades every run
+    back to rebuilding — invisible without this check."""
+    fqn = "p.synthetic_rag.freetext_pools"
+    columns = [c for c in _mod.FREETEXT_POOLS_MIN_COLUMNS if c != "stagnated"]
+    _patch_bq(monkeypatch, _FakeBQ(tables={fqn: _pool_table(columns)}))
+    ctx = _pool_ctx(fqn)
+    _mod.step10_freetext_pools(ctx)
+    (result,) = ctx.results
+    assert result.status == _mod.ACTION
+    assert "stagnated" in result.resource
+
+
+def test_step10_opt_out_is_skip(monkeypatch):
+    ctx = _pool_ctx("")
+    _mod.step10_freetext_pools(ctx)
+    (result,) = ctx.results
+    assert result.status == _mod.SKIP
+
+
+def test_committed_pool_schema_matches_the_contract():
+    """The committed schema file is what `bq mk` consumes — it must carry
+    exactly the columns the store's fetch() selects."""
+    schema = json.loads(
+        (
+            _REPO_ROOT / "config" / "bq_schema" / "synthetic_rag"
+            / "freetext_pools.schema.json"
+        ).read_text()
+    )
+    assert [f["name"] for f in schema] == _mod.FREETEXT_POOLS_MIN_COLUMNS
+    assert all(f.get("description") for f in schema), "every column documented"

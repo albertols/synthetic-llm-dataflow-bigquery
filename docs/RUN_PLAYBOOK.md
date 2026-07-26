@@ -325,15 +325,29 @@ Not yet measured on real hardware — these are the runs that measure it.
 
 ### 6a. Provision the pool table (once)
 
-`synthetic_rag.freetext_pools` is **never auto-created** — the
-`CREATE_IF_NEEDED` blast-radius rule confines auto-create to the landing sink.
-Create it from the committed schema:
+**The pool store is OPTIONAL.** Without it the pipeline behaves exactly as it
+did before WS5 — every worker process rebuilds its pools in `setup()`, which is
+the 19.1 GPU-hour / 68-minute behaviour WS5 exists to remove. It is a
+performance opt-in, not a prerequisite: `deployment_prerequisites.py` step 10
+reports a missing table as **SKIP, never ACTION**.
+
+To enable it, create the table once from the committed schema (never
+auto-created — the `CREATE_IF_NEEDED` blast-radius rule confines auto-create to
+the landing sink):
 
 ```bash
 bq mk --table \
   "${PROJECT}:synthetic_rag.freetext_pools" \
-  packages/sdfb-beam/src/sdfb_beam/pools/schema.json
+  config/bq_schema/synthetic_rag/freetext_pools.schema.json
 ```
+
+No partitioning: the table holds one row per
+`(reference_digest, model_uri, column)` — a handful per run — so a partition
+would add a required column and buy nothing.
+
+`--build_pool_layer=true` against a missing table fails at launch with the
+`bq mk` line above rather than a cryptic `NotFound`. The read path degrades
+silently and correctly on its own.
 
 ### 6b. Target-table bootstrap (TEST_1 follow-up)
 
