@@ -144,6 +144,26 @@ class GenerateRecordsDoFn(beam.DoFn):
             )
             self.ctx = ctx
 
+        # WS5 §2 — same worker-side attachment for the persisted pool store.
+        # When it answers for this (digest, model), setup() reads pools
+        # instead of running the ladder, so the LAZY vLLM ignition below is
+        # never triggered and the embedder has the card to itself (the
+        # 2026-07-26 CUDA OOM was the embedder asking for 20 MiB while vLLM
+        # already held 13.80 of 14.56 GiB in the same process).
+        if getattr(ctx, "freetext_pools_table", "") and (
+            getattr(ctx, "pool_store", None) is None
+        ):
+            from sdfb_beam.pools import store as pool_store_mod
+
+            ctx = ctx.model_copy(
+                update={
+                    "pool_store": pool_store_mod.BigQueryFreeTextPoolStore(
+                        ctx.freetext_pools_table
+                    )
+                }
+            )
+            self.ctx = ctx
+
         # LLM ignition is LAZY (WS1 §3b): VLLMModelClient.generate_json()
         # calls its own idempotent, lock-serialized setup() on first use, so
         # a run whose columns never reach the LLM (b2 with only empirical/

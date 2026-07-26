@@ -495,7 +495,7 @@ def test_resolve_table_schema_live_extracts_when_uri_empty(monkeypatch):
     from sdfb_beam.cli import run_pipeline as rp
 
     sentinel = SimpleNamespace(columns=[1, 2], fqn="p.d.t")
-    monkeypatch.setattr(
-        "sdfb_beam.ddl.extract_table_schema", lambda fqn: sentinel
-    )
+    # Bound at module scope in run_pipeline since WS5 T1 (the 404 fallback
+    # needs one call site), so patch it there rather than in sdfb_beam.ddl.
+    monkeypatch.setattr(rp, "extract_table_schema", lambda fqn: sentinel)
     assert rp.resolve_table_schema("", "p.d.t") is sentinel
