@@ -1,7 +1,10 @@
 # WS6 — Pipeline shape: the setup gap, the retry cascade, and the GroupByKey barrier
 
-> **Status: DESIGN — awaiting confirmation before implementation.** Nothing here
-> is committed work. Every number is re-derived from
+> **Status: IMPLEMENTED (laptop side), AWAITING E2E MEASUREMENT.** All five
+> items are landed on `ws6-pipeline-shape` with 710 tests green; the §6
+> targets are *predictions* until a run measures them.
+>
+> **W5 changed from investigation to fix during implementation** — see §5. Every number is re-derived from
 > `integration_tests/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
 > (first GPU/CPU-separated 1M-row run on the GCP LZ) via
 > [`scripts/make_ws6_figures.py`](../../scripts/make_ws6_figures.py), which also
@@ -219,11 +222,22 @@ setup and the barrier, not batch geometry.
 | W2 | `device="auto"` means *CUDA if there is room*; OOM → CPU fallback | bug fix | 12 OOMs, 11 setup retries |
 | W3 | `--uniqueness_mode=exact\|streaming` — incremental landing + measured duplicate rate | feature, flagged | removes the barrier and up to 3 full-dataset shuffles |
 | W4 | `CombinePerKey` in the `exact` path | optimisation | map-side combining; keeps exact semantics |
-| W5 | Diagnose the 2 failed vLLM spawns (`exited during startup with code 1`) | investigation | root cause not yet in the filtered log; needs the vLLM stderr |
+| W5 | Losing the port race is reuse, not a startup failure | **bug fix** | head of the whole cascade |
 
-W5 is deliberately an investigation, not a fix: the filtered log carries the
-wrapper's error but not the server's own stderr, so any "fix" now would be a
-guess.
+**W5 was scoped as an investigation and became a fix.** Digging past the
+wrapper error found the root cause: three spawns hit the fixed `--port 8000`
+within 72 seconds, and at the moment of each "startup failure" a healthy
+server was already serving four requests (`APIServer pid=421`, KV cache
+1.0–1.7 %). The losers exited *address already in use* and
+`_wait_until_ready()` raised immediately, because it never re-checks whether
+a healthy server already owns the port.
+
+That is the head of the cascade: `setup()` crashes → Dataflow retries the
+bundle in the SAME process → the winning vLLM still holds 13.80 GiB → the
+embedder OOMs on 2 MiB. **Four startup failures, 11 setup retries and 12
+CUDA OOMs all trace to one unchecked assumption.** `_wait_until_ready` now
+re-probes on subprocess death and adopts the winner, emitting
+`vllm_spawn_lost_race`. A genuinely bad model path still raises.
 
 ---
 
