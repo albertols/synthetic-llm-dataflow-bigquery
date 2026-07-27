@@ -1093,17 +1093,17 @@ def test_third_consecutive_failure_suppresses_further_spawns(monkeypatch):
     for _ in range(mod._MAX_CONSECUTIVE_SPAWN_FAILURES):
         c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
         patches = _failing_setup_parts(c)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
-            with pytest.raises(RuntimeError):
-                c.setup()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                pytest.raises(RuntimeError):
+            c.setup()
     assert len(spawn_calls) == mod._MAX_CONSECUTIVE_SPAWN_FAILURES
 
     # The next client must fail WITHOUT spawning (or pulling) again.
     c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
     patches = _failing_setup_parts(c)
-    with patches[0], patches[1], patches[2], patches[3], patches[4]:
-        with pytest.raises(RuntimeError, match="consecutive"):
-            c.setup()
+    with patches[0], patches[1], patches[2], patches[3], patches[4], \
+            pytest.raises(RuntimeError, match="consecutive"):
+        c.setup()
     assert len(spawn_calls) == mod._MAX_CONSECUTIVE_SPAWN_FAILURES
 
 

@@ -191,7 +191,13 @@ def build_pipeline(
 
     batched = (
         record_validated.main
-        | "Batch" >> beam.BatchElements(min_batch_size=10, max_batch_size=100)
+        # WS6 F3 (2026-07-27_10_42_52 E2E): 10-100-row batches meant Pandera
+        # validated 1M rows as 10k-100k MICRO-DataFrames — the per-frame
+        # construction + schema-compile overhead made PanderaValidate the
+        # funnel inside the fused Generate->KeyByRowDigest stage (~0.88k
+        # rows/s). Pandera's cost is amortized over rows in the frame, so
+        # validate thousands at a time, not tens.
+        | "Batch" >> beam.BatchElements(min_batch_size=1_000, max_batch_size=10_000)
     )
     batch_validated = (
         batched
