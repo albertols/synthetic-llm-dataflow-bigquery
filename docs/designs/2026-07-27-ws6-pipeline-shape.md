@@ -4,7 +4,9 @@
 > items are landed on `ws6-pipeline-shape` with 710 tests green; the §6
 > targets are *predictions* until a run measures them.
 >
-> **W5 changed from investigation to fix during implementation** — see §5. Every number is re-derived from
+> **W5 changed from investigation to fix during implementation** — see §5.
+>
+> Every number is re-derived from
 > `integration_tests/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
 > (first GPU/CPU-separated 1M-row run on the GCP LZ) via
 > [`scripts/make_ws6_figures.py`](../../scripts/make_ws6_figures.py), which also
@@ -100,8 +102,13 @@ allocation fails.
 **Fix (W2), independent of everything else:** `auto` must mean *CUDA if there is
 room*. Query free VRAM (`torch.cuda.mem_get_info`) against the model's footprint
 plus a margin, and catch `torch.OutOfMemoryError` around the `.to(device)` with
-a CPU fallback and a loud `embedder_device_demoted` milestone. Never let VRAM
-pressure turn into a failed bundle — bge-small on CPU is slower, not wrong.
+a CPU fallback. Never let VRAM pressure turn into a failed bundle — bge-small on
+CPU is slower, not wrong, whereas a raise makes Dataflow retry the whole bundle.
+
+*As implemented:* `_resolve_auto_device` requires **512 MiB** free
+(`_MIN_FREE_VRAM_BYTES`) and emits `embedder_cuda_no_room` when it steps aside;
+the `.to(device)` is wrapped and emits `embedder_cuda_oom_fallback` if the card
+fills between the check and the move.
 
 This is worth fixing regardless of the pool store: WS5 removes the *usual*
 trigger (no ladder ⇒ no ignition), but any future retry after any vLLM use
@@ -155,7 +162,7 @@ keyed shuffle to co-locate).
 | Concern | Today | Proposed |
 |---|---|---|
 | Identity / PK columns unique | GBK dedup | **unique by construction** — already synthesized from `(run_id, batch_id, row_index, column)`, which is globally unique; collisions are impossible, so the shuffle proves something already guaranteed |
-| Full-row (non-identity) duplicates | GBK dedup, rows dropped to DLQ | **measured, not removed** — an approximate-distinct combiner over `row_digest` gives the duplicate *rate* with logarithmic state and map-side combining, no full-dataset shuffle |
+| Full-row (non-identity) duplicates | GBK dedup, rows dropped to DLQ | **measured, not removed** — `Count.PerElement` over `row_digest` combines map-side and shuffles 32-byte digests instead of whole rows, and never gates the write |
 | Landing | after all barriers | **written as generated** |
 | Exact dedup, when genuinely required | in Beam | **post-hoc in BigQuery** (`SELECT DISTINCT` / `MERGE`) — off the critical path, and BigQuery is far better at it than a Beam shuffle |
 
@@ -169,13 +176,21 @@ flowchart LR
   A[CreateRequests] --> B[Generate]
   B --> C[ValidateRecord] --> D[Batch] --> E[PanderaValidate]
   E --> W[WriteLanding<br/>incremental, no barrier]
-  E --> M["DuplicateRate<br/>ApproximateCountDistinct(row_digest)<br/>combiner — no full shuffle"]
+  E --> M["Count.PerElement(row_digest)<br/>map-side combine, digests not rows<br/>never gates the write"]
   M --> G[BlockerGate + validation_runs]
 ```
 
 **Kept behind a flag.** `--uniqueness_mode=exact|streaming`, defaulting to
 `exact` (today's behaviour, byte-identical) until an E2E proves the streaming
-path. One build, one variable — the WS5 `--pool_seed_strategy` pattern.
+path.
+
+*One subtlety found while implementing:* duplicates LAND in streaming mode, so
+feeding their count into `dlq_by_rule` while `valid_count` still counted every
+landed row would push `total = valid + dlq` above the rows generated and quietly
+**dilute** the blocker ratio — a silently weaker gate. The transform therefore
+also publishes `distinct_count`, which `_gate_inputs` uses as `valid_count` in
+streaming mode; `distinct + excess` is exactly the rows generated, so the ratio
+is computed identically in both modes. One build, one variable — the WS5 `--pool_seed_strategy` pattern.
 
 **The honest trade-off, on record:** in `streaming` mode rows land *before* the
 BLOCKER gate evaluates, so a failing run leaves rows in the landing table. Two
