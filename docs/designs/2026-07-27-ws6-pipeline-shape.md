@@ -1,0 +1,268 @@
+# WS6 — Pipeline shape: the setup gap, the retry cascade, and the GroupByKey barrier
+
+> **Status: DESIGN — awaiting confirmation before implementation.** Nothing here
+> is committed work. Every number is re-derived from
+> `integration_tests/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
+> (first GPU/CPU-separated 1M-row run on the GCP LZ) via
+> [`scripts/make_ws6_figures.py`](../../scripts/make_ws6_figures.py), which also
+> regenerates every figure (provenance in §7).
+>
+> Written to the `visual-first-documentation` skill.
+> Companions: [ADR 0018](../adr/0018-parallel-batched-freetext-pools.md) ·
+> [ADR 0020](../adr/0020-freetext-pools-as-persisted-artifact.md) ·
+> [WS5 design](2026-07-26-ws5-generation-throughput.md).
+
+---
+
+## 0. The headline, before anything else
+
+**The single largest win in this run needs no new code — it needs a flag.**
+
+This run emitted **zero** `freetext_pool_store_*` milestones. The WS5 pool store
+was never switched on, so all 51 pool rebuilds still happened. That accounts for
+**26 of the 53 minutes**. Everything else in this document is worth roughly half
+of what simply passing `--freetext_pools_table` and `--build_pool_layer` is
+worth.
+
+WS5's batch-size scaling *was* active (exactly 1,000 batches of 1,000 rows), so
+the deployed image carries the code — the run just didn't opt in.
+
+---
+
+## 1. What the run actually did
+
+53.3 minutes, 1M rows, 67-column source, batch_size 1,000, autoscaling 1→5.
+
+![Run timeline](assets/ws6-run-timeline.png)
+
+Three generation hills separated by two dead gaps, then a spike at the end. The
+gaps are not scheduling noise — they are **new worker waves paying the free-text
+pool ladder before they can emit a single row** (mean 574 s per column build).
+
+![Where the time went](assets/ws6-where-time-went.png)
+
+| Signal | Value |
+|---|---|
+| Wall clock | 53.3 min |
+| Minutes with any batch completing | **26** |
+| `freetext_pool_built` | 51 (mean 574 s) → 29,280 s LLM service |
+| `dofn_setup_done` | 24 → 12,562 s |
+| `batch_done` | 1,000 → **7,257 CPU-s total** (mean 7.3 s) |
+| `dofn_setup_retry` | **11** |
+| `vllm_spawn` / `vllm_ready` | 5 / **3** — two spawns failed |
+| CUDA OOM occurrences | 12 |
+
+**Row generation is 7,257 CPU-seconds — about 3 minutes spread over the pool.**
+It is not the bottleneck and was never close to being the bottleneck.
+
+---
+
+## 2. The retry cascade — a real, independent bug
+
+The 12 OOMs and the 4 vLLM startup failures are **one causal chain**, not two
+problems:
+
+```mermaid
+sequenceDiagram
+    participant D as Dataflow
+    participant S as DoFn.setup() attempt 1
+    participant V as vLLM (module-level _SERVER_REFS)
+    participant R as DoFn.setup() retry
+    S->>V: ignite for the pool ladder
+    V-->>S: exits code 1 (startup failure)
+    S-->>D: setup() raises
+    Note over V: a PRIOR successful server<br/>still holds 13.80 of 14.56 GiB
+    D->>R: retry bundle, FRESH DoFn, SAME process
+    R->>R: BgeEmbedder(device="auto")
+    R->>V: torch .to("cuda") asks for 2 MiB
+    V-->>R: CUDA OOM — 2.81 MiB free
+    R-->>D: setup() raises again → cascade
+```
+
+Measured: first vLLM failure at **t+8.8 min**, then 11 setup retries clustered
+t+8.8 → t+14.4, with the OOM storm at t+13.8–14.4.
+
+The defect is one line — `rag/embedding.py:155`:
+
+```python
+device = "cuda" if cuda is not None and cuda.is_available() else "cpu"
+```
+
+`is_available()` answers *"does a CUDA device exist"*, **not** *"is there room
+on it"*. On a first setup the embedder loads before vLLM ignites, so `auto` is
+correct. On any **retry** in the same process, the module-level server reuse
+(`_SERVER_REFS`, ADR 0014) means vLLM is already resident — and a 2 MiB
+allocation fails.
+
+**Fix (W2), independent of everything else:** `auto` must mean *CUDA if there is
+room*. Query free VRAM (`torch.cuda.mem_get_info`) against the model's footprint
+plus a margin, and catch `torch.OutOfMemoryError` around the `.to(device)` with
+a CPU fallback and a loud `embedder_device_demoted` milestone. Never let VRAM
+pressure turn into a failed bundle — bge-small on CPU is slower, not wrong.
+
+This is worth fixing regardless of the pool store: WS5 removes the *usual*
+trigger (no ladder ⇒ no ignition), but any future retry after any vLLM use
+re-opens exactly the same window.
+
+---
+
+## 3. The GroupByKey barrier — why you see no rows until the end
+
+Your observation is precisely right, and it is structural.
+
+```mermaid
+flowchart LR
+  A[CreateRequests] --> B[Generate]
+  B --> C[ValidateRecord]
+  C --> D[Batch] --> E[PanderaValidate]
+  E --> F["EnforceUniqueness<br/>KeyByRowDigest"]
+  F --> G{{"GroupByRowDigest<br/>GroupByKey — BARRIER"}}
+  G --> H["FirstRowWins"]
+  H --> I{{"GroupByPk<br/>GroupByKey — BARRIER"}}
+  I --> J{{"GroupByIdentity<br/>GroupByKey — BARRIER"}}
+  J --> K[WriteLanding]
+```
+
+`EnforceUniqueness` chains **up to three GroupByKeys** (row digest → PK →
+identity, `dofns/uniqueness.py:81-108`). In batch Beam a GroupByKey is a full
+materialization barrier: *no* output until *all* input has arrived. So:
+
+- rows cannot land while generation is still running — hence nothing visible
+  until the end;
+- the entire dataset is written to and read back from shuffle **once per GBK**;
+- the measured signature is exactly this — ~1.65 MiB/s through
+  `KeyByRowDigest` during the hills, then a narrow spike at t+50 where
+  `GroupByRowDigest/Read` hits **12.77 MiB/s** and
+  `BigQueryBatchFileLoads/AppendDestination` hits **13.97 MiB/s**.
+
+### Why a SideInput does *not* solve this
+
+A side input must be **fully computed before the main input is processed**. Using
+one to hold seen PKs/hashes would impose the same barrier and add a broadcast of
+the whole key set to every worker. It is strictly worse than the GBK. Same for
+`beam.Distinct` (a GBK underneath) and for a stateful `DoFn` (still needs a
+keyed shuffle to co-locate).
+
+### What actually works
+
+![Dedup options](assets/ws6-dedup-options.png)
+
+**Separate the two concerns that are currently conflated.**
+
+| Concern | Today | Proposed |
+|---|---|---|
+| Identity / PK columns unique | GBK dedup | **unique by construction** — already synthesized from `(run_id, batch_id, row_index, column)`, which is globally unique; collisions are impossible, so the shuffle proves something already guaranteed |
+| Full-row (non-identity) duplicates | GBK dedup, rows dropped to DLQ | **measured, not removed** — an approximate-distinct combiner over `row_digest` gives the duplicate *rate* with logarithmic state and map-side combining, no full-dataset shuffle |
+| Landing | after all barriers | **written as generated** |
+| Exact dedup, when genuinely required | in Beam | **post-hoc in BigQuery** (`SELECT DISTINCT` / `MERGE`) — off the critical path, and BigQuery is far better at it than a Beam shuffle |
+
+This matches what you asked for: write as we go, check at the end, re-run if the
+check fails. `run_id` already salts every run, so a re-run is safe.
+
+**Proposed shape:**
+
+```mermaid
+flowchart LR
+  A[CreateRequests] --> B[Generate]
+  B --> C[ValidateRecord] --> D[Batch] --> E[PanderaValidate]
+  E --> W[WriteLanding<br/>incremental, no barrier]
+  E --> M["DuplicateRate<br/>ApproximateCountDistinct(row_digest)<br/>combiner — no full shuffle"]
+  M --> G[BlockerGate + validation_runs]
+```
+
+**Kept behind a flag.** `--uniqueness_mode=exact|streaming`, defaulting to
+`exact` (today's behaviour, byte-identical) until an E2E proves the streaming
+path. One build, one variable — the WS5 `--pool_seed_strategy` pattern.
+
+**The honest trade-off, on record:** in `streaming` mode rows land *before* the
+BLOCKER gate evaluates, so a failing run leaves rows in the landing table. Two
+ways out, and this needs your call: (a) accept it — the run is marked
+`FAILED_BLOCKER` in `validation_runs` and re-run with `--write_disposition=overwrite`;
+or (b) land into a per-run staging table and promote with a metadata-only
+BigQuery copy once the gate passes. (b) is safer and costs one more table plus
+a post-gate step; (a) is simpler and matches "repeat the generation if needed".
+
+### A cheaper intermediate, if exact dedup must stay in Beam
+
+Replace `GroupByKey + FirstRowWins` with a **`CombinePerKey`** taking the first
+element. `CombinePerKey` combines **map-side** before the shuffle, so each worker
+collapses its own duplicates first and the shuffle carries roughly the unique
+set rather than every row. Same semantics — `FirstRowWins` already picks an
+arbitrary element from an unordered iterable, so "first" is nondeterministic
+today too. This keeps exact dedup and still removes most of the shuffle volume,
+but it does **not** remove the barrier: rows still land only at the end.
+
+---
+
+## 4. Batch size — the evidence says leave it alone
+
+You asked whether to push it further. No.
+
+- 1M rows at `batch_size=1000` ⇒ 1,000 elements, mean `batch_done` **7.3 s**,
+  max 63 s. Total generation 7,257 CPU-s.
+- With ~5 workers × 8 bundle threads ≈ 40-way concurrency, 1,000 elements gives
+  25 elements per thread — enough for load balancing with a short tail.
+- Doubling `batch_size` halves the element count to 500 and roughly doubles the
+  tail element (63 s → ~2 min), buying back only per-element overhead that is
+  already amortised.
+
+`_TARGET_ELEMENTS = 1000` (WS5 T3) is landing in the right place. The lever is
+setup and the barrier, not batch geometry.
+
+---
+
+## 5. Proposed WS6 work
+
+| # | Item | Type | Why |
+|---|---|---|---|
+| W1 | Turn the WS5 pool store on; make its *absence* visible in `validation_runs` | config + 1 milestone | 26 of 53 min; no new machinery |
+| W2 | `device="auto"` means *CUDA if there is room*; OOM → CPU fallback | bug fix | 12 OOMs, 11 setup retries |
+| W3 | `--uniqueness_mode=exact\|streaming` — incremental landing + measured duplicate rate | feature, flagged | removes the barrier and up to 3 full-dataset shuffles |
+| W4 | `CombinePerKey` in the `exact` path | optimisation | map-side combining; keeps exact semantics |
+| W5 | Diagnose the 2 failed vLLM spawns (`exited during startup with code 1`) | investigation | root cause not yet in the filtered log; needs the vLLM stderr |
+
+W5 is deliberately an investigation, not a fix: the filtered log carries the
+wrapper's error but not the server's own stderr, so any "fix" now would be a
+guess.
+
+---
+
+## 6. Acceptance
+
+Measured per phase from existing milestones. `ACCU_LIMIT_KEY` excluded (known
+binary-char special case).
+
+| Phase | This run | WS6 target |
+|---|---|---|
+| Minutes with no batch completing | 27 of 53 | < 5 |
+| `freetext_pool_built` | 51 | ≤ 3 (W1) |
+| `dofn_setup_retry` | 11 | 0 |
+| CUDA OOM occurrences | 12 | 0 |
+| Time before the first row lands | 100 % of wall clock | < 30 % (W3) |
+| Full-dataset shuffle passes | up to 3 | 0 in `streaming`, ≲ 0.5 in `exact` |
+| Wall clock, 1M rows, warm pools | 53 min | < 15 min |
+
+**Caveat on record:** the wall-clock target assumes W1 lands the pool store. If
+the store is not enabled, none of W2–W4 gets this run under ~40 minutes, because
+the pool ladder alone is 26 minutes of it.
+
+---
+
+## 7. Figure provenance
+
+```bash
+uv run --no-sync python3 scripts/make_ws6_figures.py
+```
+
+Palette matches the WS5 / 2026-07-24 / 2026-07-25 assets (blue `#2a78d6`,
+orange `#eb6834`, aqua `#1baf7a`); the script prints OKLab ΔE separation for all
+three pairs on every run (33.6 / 24.0 / 27.6, floor 15).
+
+| Figure | File | Content |
+|---|---|---|
+| 1 | `assets/ws6-run-timeline.png` | `batch_done` per 2-min bucket with idle bands and the barrier release |
+| 2 | `assets/ws6-where-time-went.png` | wall-clock split; measured phase totals |
+| 3 | `assets/ws6-dedup-options.png` | shuffle cost and time-to-first-row per strategy, with the guarantee matrix |
+
+Measured constants live in the `MEASURED` block of the script; a superseding run
+is a one-place edit.
