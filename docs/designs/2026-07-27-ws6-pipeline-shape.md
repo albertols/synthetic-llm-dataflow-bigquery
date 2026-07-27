@@ -295,3 +295,49 @@ three pairs on every run (33.6 / 24.0 / 27.6, floor 15).
 
 Measured constants live in the `MEASURED` block of the script; a superseding run
 is a one-place edit.
+
+---
+
+## 8. 2026-07-27 three-run postmortem (first runs ON the WS6 build)
+
+Three E2E runs exercised the code above and one another's blind spots.
+
+| Signal | `10_42_52` (known table) | `11_32_51` (**new** table) | `12_26_04` (known, log truncated) |
+|---|---:|---:|---:|
+| Outcome | 53 min, completed | **FAILED** | running at log end |
+| `vllm_spawn` / `vllm_ready` | 5 / 3 | **52 / 0** | 2 / 1 |
+| CUDA OOM | **0** (was 12) | 0 | 0 |
+| `embedder_cuda_no_room` | 8 | 0 | 3 |
+| `freetext_pool_store_absent` | **25** | 4 | 16 |
+| `batch_done` mean | 7.3 s / 1,000 rows | — | similar |
+
+**Verified in production:** W2 works — the embedder stepped aside 8× and the
+OOM count went 12 → 0. W1 works — the pool-store-absent warning fired, and
+the run *still* paid 45 pool rebuilds because the flag still wasn't passed.
+W4 is visible in the job graph (`CombineByRowDigest`). W5's adopt path never
+fired — correctly, because these spawn failures were real, not races.
+
+**The crash (`11_32_51`) was table-dependent for a structural reason.** A
+new `source_table` ⇒ its digest is absent from `rag_chunks` ⇒ the population
+branch runs **concurrently** with Generate. Its embedder CUDA contexts hold
+part of the card; vLLM asks for `0.9 × total` regardless of what is free;
+EngineCore init fails — 52 times over 50 minutes, because every ladder
+attempt re-entered the lazy `setup()`. The two same-table runs reused
+existing chunks (`b1_chunks_reused`), had no concurrent branch, and ignited.
+Fixes: **F1** (utilization derived from `mem_get_info`, capped at 0.9) and
+**F2** (3 consecutive failures ⇒ suppress further spawns, fail the bundle in
+seconds with `vllm_spawn_suppressed`).
+
+**The funnel (`10_42_52`).** The fused `Generate→KeyByRowDigest` stage ran
+at ~0.88k rows/s with PanderaValidate the visible choke: `BatchElements(10,
+100)` turned 1M rows into 10k–100k micro-DataFrames. **F3** moves the bounds
+to 1,000–10,000.
+
+**Candidates deliberately not implemented** (each needs its own decision):
+triple row validation (engine `model_validate` → `ValidateRecordDoFn` →
+Pandera validate the same row three times; collapsing to two needs a
+three-lines-of-defense discussion), and vectorised `generate_batch` output
+(dict-of-lists → list-of-dicts conversion cost at 1M rows).
+
+**Still unmeasured on hardware:** the pool store (never yet enabled — the
+warning now fires 25× per run) and `--uniqueness_mode=streaming`.
