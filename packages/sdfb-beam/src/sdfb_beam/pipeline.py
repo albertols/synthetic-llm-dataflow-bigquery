@@ -102,6 +102,10 @@ class PipelineConfig:
     freetext_pools_table: str = ""
     # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
     pool_seed_strategy: str = "centroid"
+    # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
+    # behind up to three shuffle barriers; "streaming" lands rows as they
+    # are generated and measures the duplicate rate instead.
+    uniqueness_mode: str = "exact"
 
 
 def build_pipeline(
@@ -201,6 +205,7 @@ def build_pipeline(
     uniq = batch_validated.main | "EnforceUniqueness" >> EnforceUniqueness(
         identity_columns=list(config.identity_columns),
         pk_columns=list(config.pk_columns),
+        mode=config.uniqueness_mode,
     )
 
     # Landing sink — valid, unique records only.
@@ -320,14 +325,8 @@ def build_pipeline(
         thresholds = config.thresholds or Thresholds(
             env="dev", blocker_failure_ratio=1.0
         )
-        valid_count = (
-            uniq["unique"] | "CountValid" >> beam.combiners.Count.Globally()
-        )
-        dlq_by_rule = (
-            dlq_raw
-            | "DlqRulePairs" >> beam.Map(_dlq_rule_weight)
-            | "DlqRuleCounts" >> beam.CombinePerKey(sum)
-            | "DlqRuleDict" >> beam.combiners.ToDict()
+        valid_count, dlq_by_rule = _gate_inputs(
+            uniq, dlq_raw, config.uniqueness_mode
         )
         summary_rows = (
             p
@@ -379,6 +378,35 @@ def _rag_free_text_columns(
         for p in profiles.values()
         if p.kind is ColumnKind.FREE_TEXT and p.identifier_shape is None
     ]
+
+
+def _gate_inputs(uniq: dict, dlq_raw, uniqueness_mode: str):
+    """`(valid_count, dlq_by_rule)` singletons for the BLOCKER gate.
+
+    `build_run_summary` computes ``total = valid_count + dlq_count``. In
+    STREAMING mode duplicates land instead of diverting, so counting landed
+    rows would push `total` above the rows actually generated and quietly
+    dilute the blocker ratio — a silently weaker gate. `EnforceUniqueness`
+    publishes `distinct_count` for exactly this reason: distinct + excess is
+    the number of rows generated, so the arithmetic is identical in both
+    modes.
+    """
+    if uniqueness_mode == "streaming":
+        valid_count = uniq["distinct_count"]
+    else:
+        valid_count = uniq["unique"] | "CountValid" >> beam.combiners.Count.Globally()
+    dlq_by_rule = (
+        (
+            dlq_raw | "DlqRulePairs" >> beam.Map(_dlq_rule_weight),
+            # Streaming reports duplicates as measured counts rather than
+            # diverted envelopes; the gate folds them identically.
+            uniq["rule_counts"],
+        )
+        | "AllRulePairs" >> beam.Flatten()
+        | "DlqRuleCounts" >> beam.CombinePerKey(sum)
+        | "DlqRuleDict" >> beam.combiners.ToDict()
+    )
+    return valid_count, dlq_by_rule
 
 
 def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:

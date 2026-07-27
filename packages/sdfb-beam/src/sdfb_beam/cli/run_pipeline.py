@@ -47,6 +47,7 @@ from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.validation import Thresholds
 
 from sdfb_beam.ddl import extract_table_schema
+from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
@@ -181,6 +182,15 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="FQN of synthetic_rag.freetext_pools. Enables the "
                         "read-instead-of-rebuild path; with "
                         "--build_pool_layer also enables the build branch.")
+    p.add_argument("--uniqueness_mode", default="exact",
+                   choices=list(UNIQUENESS_MODES),
+                   help="exact = divert every duplicate to the DLQ "
+                        "(default, today). streaming = land rows as they "
+                        "are generated and MEASURE the duplicate rate "
+                        "instead of removing it, so no GroupByKey barrier "
+                        "sits between generation and BigQuery. In streaming mode duplicate rows LAND — the run is still marked "
+                        "FAILED_BLOCKER, so re-run with "
+                        "--write_disposition=overwrite.")
     p.add_argument("--pool_seed_strategy", default="centroid",
                    choices=list(POOL_SEED_STRATEGIES),
                    help="How the 8 free-text prompt seeds are chosen. "
@@ -577,6 +587,7 @@ def main(argv: list[str] | None = None) -> int:
         pool_pattern_guidance=parse_bool_flag(args.pool_pattern_guidance),
         freetext_pools_table=args.freetext_pools_table,
         pool_seed_strategy=validate_seed_strategy(args.pool_seed_strategy),
+        uniqueness_mode=args.uniqueness_mode,
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)

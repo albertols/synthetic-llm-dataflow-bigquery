@@ -32,6 +32,14 @@ RULE_ROW_DUPLICATE = "row.duplicate"
 RULE_IDENTITY_UNIQUE = "identity.unique"
 RULE_PK_DUPLICATE = "pk.duplicate"
 
+# WS6 W3. `exact` is today's behaviour and stays the default: every
+# duplicate is diverted to the DLQ, at the cost of up to three
+# full-dataset shuffle barriers. `streaming` lands rows as they are
+# generated and MEASURES the duplicate rate instead of removing it.
+MODE_EXACT = "exact"
+MODE_STREAMING = "streaming"
+UNIQUENESS_MODES = (MODE_EXACT, MODE_STREAMING)
+
 
 def _envelope(record: dict, rule_id: str) -> dict:
     return {
@@ -134,16 +142,25 @@ class EnforceUniqueness(beam.PTransform):
         self,
         identity_columns: list[str] | None = None,
         pk_columns: list[str] | None = None,
+        mode: str = MODE_EXACT,
     ) -> None:
         super().__init__()
+        if mode not in UNIQUENESS_MODES:
+            raise ValueError(
+                f"uniqueness_mode must be one of {UNIQUENESS_MODES}, got {mode!r}"
+            )
         self.identity_columns = list(identity_columns or [])
         self.pk_columns = list(pk_columns or [])
+        self.mode = mode
 
     def expand(self, records):
         identity_set = set(self.identity_columns)
 
         def _row_key(r, ids=identity_set):
             return row_digest({k: v for k, v in r.items() if k not in ids})
+
+        if self.mode == MODE_STREAMING:
+            return self._expand_streaming(records, _row_key)
 
         by_row = (
             records
@@ -185,4 +202,47 @@ class EnforceUniqueness(beam.PTransform):
             row_unique = by_id.unique
             dup_streams.append(by_id.duplicates)
         duplicates = dup_streams | "FlattenDuplicates" >> beam.Flatten()
-        return {"unique": row_unique, "duplicates": duplicates}
+        return {
+            "unique": row_unique,
+            "duplicates": duplicates,
+            # Exact mode reports through diverted envelopes, so it has no
+            # separate counts to contribute.
+            "rule_counts": duplicates | "NoRuleCounts" >> beam.FlatMap(lambda _: []),
+            "distinct_count": row_unique
+            | "NoDistinctCount" >> beam.FlatMap(lambda _: []),
+        }
+
+    def _expand_streaming(self, records, row_key):
+        """No barrier on the landing path.
+
+        Rows pass straight through, so BigQuery sees them as they are
+        generated. Duplicates are MEASURED on a parallel branch that
+        shuffles 32-byte digests rather than whole rows, and the measurement
+        never gates the write.
+
+        The gate's arithmetic stays honest: `build_run_summary` computes
+        ``total = valid_count + dlq_count``. Feeding the duplicate count in
+        while `valid_count` still counted every landed row would inflate the
+        denominator and quietly weaken the blocker ratio, so streaming also
+        publishes `distinct_count` for the caller to use as `valid_count` —
+        distinct + excess is exactly the number of rows generated.
+        """
+        per_digest = (
+            records
+            | "DigestOnly" >> beam.Map(row_key)
+            # Count.PerElement combines map-side, and the values crossing
+            # the shuffle are digests, not rows.
+            | "CountPerDigest" >> beam.combiners.Count.PerElement()
+        )
+        excess = (
+            per_digest
+            | "ExcessPerDigest" >> beam.Map(lambda kv: kv[1] - 1)
+            | "SumExcess" >> beam.CombineGlobally(sum)
+        )
+        return {
+            "unique": records,
+            "duplicates": records | "NoDuplicates" >> beam.FlatMap(lambda _: []),
+            "rule_counts": excess
+            | "AsRuleCount" >> beam.Map(lambda n: (RULE_ROW_DUPLICATE, n)),
+            "distinct_count": per_digest | "CountDistinct" >> beam.combiners.Count.Globally(),
+        }
