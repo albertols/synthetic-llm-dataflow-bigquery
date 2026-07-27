@@ -2,15 +2,25 @@
 
 Full-row duplicates and repeated identity values are the two block-replay /
 memorization signatures the 2026-07 E2E report found unguarded. Keying by
-digest + GroupByKey keeps memory flat regardless of run size; the first
+digest + ``CombinePerKey`` keeps memory flat regardless of run size; one
 occurrence lands, the rest become DLQ rows whose ``rule_id`` feeds
 ``build_run_summary`` → the BLOCKER gate.
 
-Iteration order within a ``GroupByKey`` group is not guaranteed by Beam —
-"first occurrence wins" therefore means an arbitrary (but single) survivor
-per key, not necessarily the record that appeared earliest in the input.
-That is acceptable here: the goal is "keep exactly one", not "keep the
-lexicographically/temporally first one".
+``CombinePerKey``, not ``GroupByKey`` (WS6 W4): a GroupByKey materializes
+every value for a key reducer-side, so the whole dataset crosses the
+shuffle — the 2026-07-26 1M run peaked at 12.77 MiB/s reading it back.
+Combining runs MAP-side first, so each worker collapses its own duplicates
+and the shuffle carries roughly the unique set.
+
+Which record survives is arbitrary (Beam orders neither GroupByKey values
+nor combiner inputs) — the goal is "keep exactly one", not "keep the
+temporally first one". Duplicate DLQ envelopes carry the survivor's
+payload: equal ``row_digest`` means identical non-identity fields, so the
+only thing not preserved is the dropped rows' freshly-synthesized identity
+values. Duplicate COUNTS are exact, which is what the gate folds.
+
+This transform is still a barrier — every ``CombinePerKey`` is a shuffle.
+See ``--uniqueness_mode=streaming`` for the non-barrier path.
 """
 
 from __future__ import annotations
@@ -33,16 +43,73 @@ def _envelope(record: dict, rule_id: str) -> dict:
     }
 
 
-class _FirstWins(beam.DoFn):
+class _FirstWinsCombineFn(beam.CombineFn):
+    """Keep ONE survivor per key and count everything else.
+
+    `GroupByKey` materializes every value for a key on the reducer side, so
+    the whole dataset crosses the shuffle (2026-07-26 1M run:
+    `GroupByRowDigest/Read` peaked at 12.77 MiB/s). `CombinePerKey` combines
+    **map-side** first, so each worker collapses its own duplicates and the
+    shuffle carries roughly the unique set.
+
+    The accumulator is `(survivor, seen)`. `seen` is the EXACT number of
+    records for the key — the BLOCKER gate folds `dlq_by_rule` counts
+    (`validation/summary.py`), so the count is the part that must be
+    preserved bit-for-bit.
+
+    Which record survives is arbitrary, exactly as it was under
+    `GroupByKey` (Beam does not order values within a group).
+    """
+
+    def create_accumulator(self) -> tuple[dict | None, int]:
+        return (None, 0)
+
+    def add_input(
+        self, accumulator: tuple[dict | None, int], element: dict
+    ) -> tuple[dict | None, int]:
+        survivor, seen = accumulator
+        return (element if survivor is None else survivor, seen + 1)
+
+    def merge_accumulators(
+        self, accumulators
+    ) -> tuple[dict | None, int]:
+        survivor: dict | None = None
+        seen = 0
+        for acc_survivor, acc_seen in accumulators:
+            if survivor is None and acc_survivor is not None:
+                survivor = acc_survivor
+            seen += acc_seen
+        return (survivor, seen)
+
+    def extract_output(
+        self, accumulator: tuple[dict | None, int]
+    ) -> tuple[dict | None, int]:
+        return accumulator
+
+
+class _ExpandCombined(beam.DoFn):
+    """Turn `(key, (survivor, seen))` back into one survivor + `seen - 1`
+    DLQ envelopes.
+
+    The envelopes carry the SURVIVOR's payload rather than each dropped
+    record's. For `row.duplicate` that is the same content by construction —
+    equal `row_digest` means the non-identity fields are identical — the
+    only loss being the dropped rows' freshly-synthesized identity values,
+    which are meaningless by definition. Counts, which is what the gate
+    folds, are exact.
+    """
+
     def __init__(self, rule_id: str) -> None:
         self.rule_id = rule_id
 
     def process(self, kv):
-        _key, records = kv
-        it = iter(records)
-        yield next(it)
-        for dup in it:
-            yield beam.pvalue.TaggedOutput("duplicates", _envelope(dup, self.rule_id))
+        _key, (survivor, seen) = kv
+        if survivor is None:  # pragma: no cover - defensive
+            return
+        yield survivor
+        envelope = _envelope(survivor, self.rule_id)
+        for _ in range(seen - 1):
+            yield beam.pvalue.TaggedOutput("duplicates", envelope)
 
 
 class EnforceUniqueness(beam.PTransform):
@@ -81,9 +148,9 @@ class EnforceUniqueness(beam.PTransform):
         by_row = (
             records
             | "KeyByRowDigest" >> beam.Map(lambda r: (_row_key(r), r))
-            | "GroupByRowDigest" >> beam.GroupByKey()
+            | "CombineByRowDigest" >> beam.CombinePerKey(_FirstWinsCombineFn())
             | "FirstRowWins"
-            >> beam.ParDo(_FirstWins(RULE_ROW_DUPLICATE)).with_outputs(
+            >> beam.ParDo(_ExpandCombined(RULE_ROW_DUPLICATE)).with_outputs(
                 "duplicates", main="unique"
             )
         )
@@ -95,9 +162,9 @@ class EnforceUniqueness(beam.PTransform):
                 row_unique
                 | "KeyByPk"
                 >> beam.Map(lambda r, c=pk_cols: (tuple(str(r.get(x)) for x in c), r))
-                | "GroupByPk" >> beam.GroupByKey()
+                | "CombineByPk" >> beam.CombinePerKey(_FirstWinsCombineFn())
                 | "FirstPkWins"
-                >> beam.ParDo(_FirstWins(RULE_PK_DUPLICATE)).with_outputs(
+                >> beam.ParDo(_ExpandCombined(RULE_PK_DUPLICATE)).with_outputs(
                     "duplicates", main="unique"
                 )
             )
@@ -109,9 +176,9 @@ class EnforceUniqueness(beam.PTransform):
                 row_unique
                 | "KeyByIdentity"
                 >> beam.Map(lambda r, c=cols: (tuple(str(r.get(x)) for x in c), r))
-                | "GroupByIdentity" >> beam.GroupByKey()
+                | "CombineByIdentity" >> beam.CombinePerKey(_FirstWinsCombineFn())
                 | "FirstIdentityWins"
-                >> beam.ParDo(_FirstWins(RULE_IDENTITY_UNIQUE)).with_outputs(
+                >> beam.ParDo(_ExpandCombined(RULE_IDENTITY_UNIQUE)).with_outputs(
                     "duplicates", main="unique"
                 )
             )
