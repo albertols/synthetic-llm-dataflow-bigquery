@@ -549,9 +549,36 @@ class VLLMModelClient:
         last_err: Exception | None = None
         while time.monotonic() < deadline:
             if self._server is not None and self._server.poll() is not None:
+                # Our subprocess died. Before calling that fatal, check
+                # whether we simply LOST A RACE for the fixed port: a sibling
+                # attempt's server may already be healthy and serving, in
+                # which case ours exited "address already in use" and the
+                # right move is to adopt the winner (2026-07-26_17_10_37 E2E:
+                # 3 spawns on --port 8000 in 72s; the losers raised here,
+                # crashing DoFn.setup(), and the retry then OOMed the
+                # embedder against the winner's VRAM — 11 retries, 12 OOMs,
+                # while a healthy server was serving 4 requests throughout).
+                returncode = self._server.returncode
+                if self._probe_reusable_server(self._served_model_name):
+                    log_milestone(
+                        "vllm_spawn_lost_race",
+                        returncode=returncode,
+                        url=self.base_url,
+                    )
+                    logger.warning(
+                        "Our vLLM subprocess exited (code %s) but a healthy "
+                        "server is already serving %r at %s — adopting it.",
+                        returncode,
+                        self._served_model_name,
+                        self.base_url,
+                    )
+                    # Not ours to terminate: teardown() must never kill a
+                    # server another client spawned and still depends on.
+                    self._server = None
+                    return
                 raise RuntimeError(
                     "vLLM server subprocess exited during startup with code "
-                    f"{self._server.returncode}. Check the model path "
+                    f"{returncode}. Check the model path "
                     f"({self._served_model_name!r}) and vllm_server_kwargs."
                 )
             try:

@@ -932,3 +932,63 @@ def test_setup_fp16_override_still_fatal_for_gemma_on_turing(tmp_path, fake_torc
     ):
         c.setup()
     spawn.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# WS6 W5 — a duplicate spawn losing the port race must ADOPT the winner.
+#
+# 2026-07-26_17_10_37 E2E: three spawns hit the fixed --port 8000 within 72s.
+# The losers exited "address already in use" (code 1) and _wait_until_ready
+# raised immediately, crashing DoFn.setup(). Dataflow then retried the bundle
+# in the SAME process, where the winning vLLM still held 13.80 of 14.56 GiB —
+# so BgeEmbedder(device="auto") OOMed on 2 MiB and the whole thing cascaded:
+# 4 startup failures -> 11 setup retries -> 12 CUDA OOMs.
+#
+# At the moment of each "startup failure" a HEALTHY server was serving
+# (APIServer pid=421, 4 running requests). Losing the race is reuse, not
+# failure.
+# ---------------------------------------------------------------------------
+class _DeadProcess:
+    returncode = 1
+
+    def poll(self):
+        return 1
+
+
+def test_wait_until_ready_adopts_a_healthy_server_when_our_spawn_lost_the_race():
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    c._served_model_name = "/local-ssd/model"
+    c._server = _DeadProcess()
+    with mock.patch.object(
+        VLLMModelClient, "_probe_reusable_server", return_value=True
+    ):
+        c._wait_until_ready()  # must NOT raise
+    assert c._server is None, "adopted server must not be tracked as ours to kill"
+
+
+def test_wait_until_ready_still_raises_when_nothing_healthy_is_listening():
+    """A genuinely bad model path / dtype must stay loud."""
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    c._served_model_name = "/local-ssd/model"
+    c._server = _DeadProcess()
+    with (
+        mock.patch.object(
+            VLLMModelClient, "_probe_reusable_server", return_value=False
+        ),
+        pytest.raises(RuntimeError, match="exited during startup"),
+    ):
+        c._wait_until_ready()
+
+
+def test_adoption_emits_a_milestone(caplog):
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    c._served_model_name = "/local-ssd/model"
+    c._server = _DeadProcess()
+    with (
+        mock.patch.object(
+            VLLMModelClient, "_probe_reusable_server", return_value=True
+        ),
+        caplog.at_level("INFO"),
+    ):
+        c._wait_until_ready()
+    assert "vllm_spawn_lost_race" in caplog.text
