@@ -85,6 +85,23 @@ _HTTP_OK = 200
 # subprocess handle when its owner tears down while siblings are still bound).
 _SETUP_LOCK = threading.Lock()
 _SERVER_REFS: dict[str, int] = {}
+
+# WS6 F2 (2026-07-27_11_32_51 E2E): a doomed server was re-pulled and
+# re-spawned on EVERY generate_json() call — 52 cycles over 50 minutes with
+# zero vllm_ready, because each ladder attempt re-entered setup() fresh.
+# After this many consecutive startup failures per (host, port) the process
+# raises immediately with the remembered error instead of thrashing the GPU;
+# the bundle then fails in seconds and Dataflow surfaces the real cause.
+_MAX_CONSECUTIVE_SPAWN_FAILURES = 3
+_SPAWN_FAILURES: dict[str, int] = {}
+
+# WS6 F1 (same run): vLLM sizes its allocation as gpu_memory_utilization x
+# TOTAL device memory (default 0.9). When sibling processes / the population
+# branch's embedder contexts hold part of the card, free < 0.9 x total and
+# EngineCore init fails before serving a byte. Unless the caller pinned the
+# flag, we derive it from what is actually FREE, minus this margin.
+_VLLM_VRAM_MARGIN_BYTES = 512 * 1024**2
+_VLLM_DEFAULT_UTILIZATION = 0.90
 _PARKED_SERVERS: dict[str, Any] = {}
 
 
@@ -283,9 +300,30 @@ class VLLMModelClient:
             # engines fall back to memorizing reference data.
             self._assert_gpu_dtype_compatible()
 
+            failures = _SPAWN_FAILURES.get(self.base_url, 0)
+            if failures >= _MAX_CONSECUTIVE_SPAWN_FAILURES:
+                log_milestone(
+                    "vllm_spawn_suppressed",
+                    level=logging.ERROR,
+                    failures=failures,
+                    url=self.base_url,
+                )
+                raise RuntimeError(
+                    f"vLLM startup failed {failures} consecutive times in "
+                    f"this process for {self.base_url}; suppressing further "
+                    "spawn attempts. See the first failure's log for the "
+                    "root cause (2026-07-27 run: 52 doomed spawn cycles "
+                    "burned 50 minutes before the job failed)."
+                )
+
             log_milestone("vllm_spawn")
-            self._spawn_server()
-            self._wait_until_ready()
+            try:
+                self._spawn_server()
+                self._wait_until_ready()
+            except Exception:
+                _SPAWN_FAILURES[self.base_url] = failures + 1
+                raise
+            _SPAWN_FAILURES[self.base_url] = 0
             self._client = self._build_openai_client()
             self._bind_server_locked()
             log_milestone("vllm_ready", seconds=round(time.monotonic() - t0, 1))
@@ -526,7 +564,43 @@ class VLLMModelClient:
                 continue
             else:
                 cmd.extend([flag, str(value)])
+        pinned = any(
+            k in self.vllm_server_kwargs
+            for k in ("gpu-memory-utilization", "gpu_memory_utilization")
+        )
+        if not pinned:
+            frac = self._dynamic_gpu_memory_utilization()
+            if frac is not None:
+                cmd.extend(["--gpu-memory-utilization", f"{frac:.3f}"])
         return cmd
+
+    def _dynamic_gpu_memory_utilization(self) -> float | None:
+        """Utilization fraction derived from FREE VRAM (WS6 F1).
+
+        vLLM interprets the flag as a fraction of TOTAL device memory, so on
+        a card where sibling CUDA contexts (population-branch embedders, a
+        prior bundle's residue) hold memory, the 0.9 default over-asks and
+        EngineCore init fails. `(free - margin) / total`, capped at the
+        vLLM default, keeps ignition honest about what it can get. None
+        (no torch / no CUDA / query failed) omits the flag entirely —
+        today's behaviour.
+        """
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return None
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+        except Exception:
+            return None
+        frac = (free_bytes - _VLLM_VRAM_MARGIN_BYTES) / total_bytes
+        frac = min(_VLLM_DEFAULT_UTILIZATION, frac)
+        log_milestone(
+            "vllm_gpu_memory_utilization",
+            fraction=round(frac, 3),
+            free_mib=round(free_bytes / 1024**2),
+        )
+        return max(0.05, frac)
 
     def _spawn_server(self) -> None:
         import subprocess

@@ -992,3 +992,147 @@ def test_adoption_emits_a_milestone(caplog):
     ):
         c._wait_until_ready()
     assert "vllm_spawn_lost_race" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# WS6 F1 — vLLM ignition on a partially-occupied card (2026-07-27_11_32_51).
+#
+# vLLM sizes its allocation as gpu_memory_utilization x TOTAL memory
+# (default 0.9). When sibling embedders' CUDA contexts hold part of the card,
+# free < 0.9 x total and EngineCore init fails — the crashed run logged
+# "Engine core initialization failed" and burned 52 pull+spawn cycles over
+# 50 minutes without a single vllm_ready. The utilization must be computed
+# from what is actually FREE.
+# ---------------------------------------------------------------------------
+def _patch_torch_mem(monkeypatch, free_gib: float, total_gib: float = 14.56):
+    import sys
+    import types
+
+    torch_mod = types.ModuleType("torch")
+    torch_mod.cuda = types.SimpleNamespace(
+        is_available=lambda: True,
+        mem_get_info=lambda: (int(free_gib * 1024**3), int(total_gib * 1024**3)),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch_mod)
+
+
+def test_utilization_derived_from_free_vram(monkeypatch):
+    _patch_torch_mem(monkeypatch, free_gib=10.0)
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    frac = c._dynamic_gpu_memory_utilization()
+    assert frac is not None
+    assert 0.60 < frac < 0.69  # (10.0 - 0.5 margin) / 14.56 ~= 0.652
+
+
+def test_utilization_never_exceeds_the_vllm_default(monkeypatch):
+    _patch_torch_mem(monkeypatch, free_gib=14.5)
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    assert c._dynamic_gpu_memory_utilization() <= 0.90
+
+
+def test_explicit_kwarg_is_never_overridden(monkeypatch):
+    _patch_torch_mem(monkeypatch, free_gib=2.0)
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/m/v1/",
+        vllm_server_kwargs={"gpu-memory-utilization": "0.85"},
+    )
+    c._served_model_name = "/local-ssd/model"
+    cmd = c._server_command()
+    assert cmd.count("--gpu-memory-utilization") == 1
+    assert "0.85" in cmd
+
+
+def test_command_carries_the_computed_utilization(monkeypatch):
+    _patch_torch_mem(monkeypatch, free_gib=10.0)
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    c._served_model_name = "/local-ssd/model"
+    cmd = c._server_command()
+    i = cmd.index("--gpu-memory-utilization")
+    assert 0.60 < float(cmd[i + 1]) < 0.69
+
+
+def test_no_torch_means_no_flag_and_no_crash(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "torch", None)
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    c._served_model_name = "/local-ssd/model"
+    assert c._dynamic_gpu_memory_utilization() is None
+    assert "--gpu-memory-utilization" not in c._server_command()
+
+
+# ---------------------------------------------------------------------------
+# WS6 F2 — repeated spawn failure fails FAST, not for 50 minutes.
+#
+# 2026-07-27_11_32_51: every generate_json() re-entered setup(), re-pulled
+# weights and re-spawned a doomed server — 52 times. After
+# _MAX_CONSECUTIVE_SPAWN_FAILURES the client must raise immediately with
+# the remembered error instead of thrashing the GPU.
+# ---------------------------------------------------------------------------
+def test_third_consecutive_failure_suppresses_further_spawns(monkeypatch):
+    from sdfb_beam.handlers import vllm_client as mod
+
+    monkeypatch.setattr(mod, "_SPAWN_FAILURES", {})
+    spawn_calls = []
+
+    def _failing_setup_parts(c):
+        return (
+            mock.patch.object(c, "_probe_reusable_server", return_value=False),
+            mock.patch.object(c, "_pull_weights"),
+            mock.patch.object(c, "_assert_gpu_dtype_compatible"),
+            mock.patch.object(
+                c, "_spawn_server",
+                side_effect=lambda: spawn_calls.append(1),
+            ),
+            mock.patch.object(
+                c, "_wait_until_ready",
+                side_effect=RuntimeError("vLLM server subprocess exited during startup with code 1"),
+            ),
+        )
+
+    for _ in range(mod._MAX_CONSECUTIVE_SPAWN_FAILURES):
+        c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+        patches = _failing_setup_parts(c)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            with pytest.raises(RuntimeError):
+                c.setup()
+    assert len(spawn_calls) == mod._MAX_CONSECUTIVE_SPAWN_FAILURES
+
+    # The next client must fail WITHOUT spawning (or pulling) again.
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    patches = _failing_setup_parts(c)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with pytest.raises(RuntimeError, match="consecutive"):
+            c.setup()
+    assert len(spawn_calls) == mod._MAX_CONSECUTIVE_SPAWN_FAILURES
+
+
+def test_a_success_resets_the_failure_count(monkeypatch):
+    from sdfb_beam.handlers import vllm_client as mod
+
+    monkeypatch.setattr(mod, "_SPAWN_FAILURES", {})
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    with (
+        mock.patch.object(c, "_probe_reusable_server", return_value=False),
+        mock.patch.object(c, "_pull_weights"),
+        mock.patch.object(c, "_assert_gpu_dtype_compatible"),
+        mock.patch.object(c, "_spawn_server"),
+        mock.patch.object(
+            c, "_wait_until_ready",
+            side_effect=RuntimeError("exited during startup"),
+        ),pytest.raises(RuntimeError)
+    ):
+        c.setup()
+    assert mod._SPAWN_FAILURES  # one failure recorded
+
+    c2 = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    with (
+        mock.patch.object(c2, "_probe_reusable_server", return_value=False),
+        mock.patch.object(c2, "_pull_weights"),
+        mock.patch.object(c2, "_assert_gpu_dtype_compatible"),
+        mock.patch.object(c2, "_spawn_server"),
+        mock.patch.object(c2, "_wait_until_ready"),
+        mock.patch.object(c2, "_build_openai_client", return_value=object()),
+    ):
+        c2.setup()
+    assert not any(mod._SPAWN_FAILURES.values())
