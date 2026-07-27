@@ -408,6 +408,28 @@ class B1RagEngine(GenerationEngine):
         # silently generating from nothing.
         return {p.column: list(p.values) for p in fetched if p.values}
 
+    def _resolve_stored_pools(
+        self, ctx: GenerationContext, free_text_columns: int
+    ) -> dict[str, list[str]]:
+        """Persisted pools for this run, announcing the store's absence.
+
+        The 2026-07-26 1M run spent 26 of its 53 minutes rebuilding pools
+        per worker PROCESS purely because nobody passed
+        ``--freetext_pools_table`` — and nothing in the logs said so. The
+        absence was only discoverable by noticing that
+        ``freetext_pool_store_*`` milestones never appeared, which is
+        exactly the silence a milestone exists to break.
+        """
+        if getattr(ctx, "pool_store", None) is None:
+            log_milestone(
+                "freetext_pool_store_absent",
+                level=logging.WARNING,
+                free_text_columns=free_text_columns,
+                num_rows=ctx.num_rows,
+            )
+            return {}
+        return self._stored_pools(ctx)
+
     def _take_stored_pool(
         self,
         column: str,
@@ -445,7 +467,7 @@ class B1RagEngine(GenerationEngine):
         # authoritative; `_POOL_CACHE` below stays as the intra-process tier
         # that survives setup() retries inside one worker. A store outage is
         # never fatal: pools are an optimisation, not a dependency.
-        stored = self._stored_pools(ctx)
+        stored = self._resolve_stored_pools(ctx, len(free_text_cols))
 
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
         chunks_by_column = self._fetch_free_text_chunks(ctx)
