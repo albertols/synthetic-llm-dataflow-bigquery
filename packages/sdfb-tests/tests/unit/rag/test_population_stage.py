@@ -140,3 +140,36 @@ def test_embed_dofn_teardown_demotes_gpu_embedder():
     dofn.teardown()
     assert fake.demoted == 1
     assert dofn._embedder is None
+
+
+def test_embed_dofn_localizes_a_gcs_embedder_before_building_it(monkeypatch):
+    """2026-07-28 R1 rerun: setup() imported EMBEDDER_LOCAL_DIR from
+    dofns.generate, which no longer exports it (moved to dofns.localize in
+    d2e1711) — ImportError killed RagEmbedChunks on every bundle. The gs://
+    branch must resolve against the localize module and never a stale
+    re-export."""
+    import sdfb_beam.gcs as gcs_mod
+    import sdfb_core.rag.embedding as embedding_mod
+    from sdfb_beam.dofns import localize as localize_mod
+
+    pulled = {}
+
+    def _fake_pull(uri, dest):
+        pulled["uri"] = uri
+        pulled["dest"] = dest
+        return dest
+
+    class _SpyEmbedder:
+        def __init__(self, uri, device="auto"):
+            pulled["built_from"] = uri
+
+    monkeypatch.setattr(gcs_mod, "localize_gcs_prefix", _fake_pull)
+    monkeypatch.setattr(embedding_mod, "BgeEmbedder", _SpyEmbedder)
+
+    dofn = EmbedChunksDoFn(embedder_uri="gs://bucket/models/embedders/bge/v1")
+    dofn.setup()
+
+    assert pulled["dest"] == localize_mod.EMBEDDER_LOCAL_DIR
+    assert pulled["built_from"] == localize_mod.EMBEDDER_LOCAL_DIR, (
+        "the embedder must be built from the local pull, never the gs:// URI"
+    )
