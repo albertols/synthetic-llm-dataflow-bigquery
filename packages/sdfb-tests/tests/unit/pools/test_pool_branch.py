@@ -156,3 +156,61 @@ def test_dag_gains_the_branch_only_when_a_sink_is_passed():
     with_sink = _labels(beam.Map(lambda r: r))
     assert any("BuildFreeTextPools" in lbl for lbl in with_sink)
     assert any("WriteFreeTextPools" in lbl for lbl in with_sink)
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-28 R1 crash: the pool branch handed the engine the RAW gs://
+# embedder_uri. GenerateRecordsDoFn warm-pulls it to /local-ssd/embedder and
+# rewrites the ctx BEFORE engine.setup(); BuildFreeTextPoolsDoFn skipped that
+# localization, so BgeEmbedder passed the gs:// URI to
+# AutoTokenizer.from_pretrained, which treats it as a HuggingFace repo id ->
+# HFValidationError -> 4 bundle retries -> job FAILED.
+# ---------------------------------------------------------------------------
+def test_pool_branch_localizes_a_gcs_embedder_before_engine_setup(monkeypatch):
+    from sdfb_beam.dofns import localize as localize_mod
+    from sdfb_beam.dofns import pools as pools_mod
+
+    pulled = {}
+    monkeypatch.setattr(
+        localize_mod,
+        "localize_gcs_prefix",
+        lambda uri, dest: pulled.setdefault("dir", "/local-ssd/embedder-test"),
+    )
+
+    seen = {}
+
+    class _SpyEngine:
+        def setup(self, client, ctx):
+            seen["embedder_uri"] = ctx.embedder_uri
+            self._free_text_pools = {}
+
+        def teardown(self):
+            pass
+
+    monkeypatch.setattr(pools_mod, "get_engine", lambda name: _SpyEngine)
+
+    ctx = _ctx(embedder_uri="gs://bucket/synthetic/models/embedders/bge/v1")
+    dofn = pools_mod.BuildFreeTextPoolsDoFn("b1_rag", _StubClient(), ctx)
+    dofn.setup()
+    assert seen["embedder_uri"] == "/local-ssd/embedder-test", (
+        "engine must never see a gs:// embedder_uri"
+    )
+
+
+def test_pool_branch_leaves_a_local_embedder_uri_untouched(monkeypatch):
+    from sdfb_beam.dofns import pools as pools_mod
+
+    seen = {}
+
+    class _SpyEngine:
+        def setup(self, client, ctx):
+            seen["embedder_uri"] = ctx.embedder_uri
+            self._free_text_pools = {}
+
+        def teardown(self):
+            pass
+
+    monkeypatch.setattr(pools_mod, "get_engine", lambda name: _SpyEngine)
+    ctx = _ctx(embedder_uri="/local-ssd/embedder")
+    pools_mod.BuildFreeTextPoolsDoFn("b1_rag", _StubClient(), ctx).setup()
+    assert seen["embedder_uri"] == "/local-ssd/embedder"

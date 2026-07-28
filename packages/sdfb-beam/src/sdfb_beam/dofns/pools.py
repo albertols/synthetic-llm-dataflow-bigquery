@@ -17,6 +17,7 @@ from sdfb_core.engines import get_engine
 from sdfb_core.observability import log_milestone
 from sdfb_core.pools import FreeTextPool
 
+from sdfb_beam.dofns.localize import localize_embedder
 from sdfb_beam.pools.store import pool_to_row
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -38,9 +39,14 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
         self._engine: Any = None
 
     def setup(self) -> None:
+        # A gs:// embedder_uri must become a worker-local path BEFORE the
+        # engine builds its embedder (2026-07-28 R1: skipping this handed
+        # the raw gs:// URI to AutoTokenizer.from_pretrained and killed the
+        # job on HFValidationError). Shared with GenerateRecordsDoFn.
+        ctx = localize_embedder(self.ctx)
         # The build branch must never read its own output — otherwise it
         # would short-circuit itself into writing nothing on a re-run.
-        ctx = self.ctx.model_copy(
+        ctx = ctx.model_copy(
             update={"pool_store": None, "freetext_pools_table": ""}
         )
         self.ctx = ctx
