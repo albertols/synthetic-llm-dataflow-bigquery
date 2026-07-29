@@ -129,3 +129,28 @@ def test_in_memory_store_write_rows_round_trips_into_fetch():
     store = InMemoryFreeTextPoolStore()
     store.write_rows([pool_to_row(_pool())])
     assert store.fetch("d1", "gs://b/m") == [_pool()]
+
+
+def test_store_pickles_even_after_the_lazy_client_materialized():
+    """2026-07-29 R1 launch failure: the driver's exists() digest check
+    materialized the real bigquery.Client inside the store, and the
+    BuildFreeTextPoolsDoFn carrying that store died at graph-pickling time
+    ("Pickling client objects is explicitly not supported"). The lazy
+    client is a cache, not state — it must be dropped on pickle and
+    rebuilt on demand."""
+    import pickle
+
+    class _RefusesPickling:
+        """Mimics google.cloud.client.Client.__getstate__."""
+
+        def __getstate__(self):
+            raise pickle.PicklingError(
+                "Pickling client objects is explicitly not supported."
+            )
+
+    store = BigQueryFreeTextPoolStore(
+        "p.synthetic_rag.freetext_pools", client=_RefusesPickling()
+    )
+    clone = pickle.loads(pickle.dumps(store))
+    assert clone.table_fqn == "p.synthetic_rag.freetext_pools"
+    assert clone._client is None, "the client cache must not survive pickling"

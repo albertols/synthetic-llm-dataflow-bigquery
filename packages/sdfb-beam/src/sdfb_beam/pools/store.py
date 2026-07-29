@@ -56,6 +56,17 @@ class BigQueryFreeTextPoolStore:
         self.table_fqn = table_fqn
         self._client = client  # injectable for tests; lazy real client
 
+    def __getstate__(self) -> dict:
+        # The lazy client is a CACHE, not state: google.cloud clients refuse
+        # to pickle, and the 2026-07-29 R1 launch died exactly here — the
+        # driver's exists() digest check materialized the client, then the
+        # BuildFreeTextPoolsDoFn carrying this store failed graph pickling.
+        # Dropped on dump, rebuilt on demand by _bq(). (An injected test
+        # client is dropped too — re-inject after unpickling if needed.)
+        state = self.__dict__.copy()
+        state["_client"] = None
+        return state
+
     def _bq(self):
         if self._client is None:
             from google.cloud import bigquery
