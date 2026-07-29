@@ -9,6 +9,7 @@ because `_POOL_CACHE` lives for exactly one worker process.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -32,10 +33,15 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
     already produced.
     """
 
-    def __init__(self, engine_name: str, model_client, ctx) -> None:
+    def __init__(self, engine_name: str, model_client, ctx, store=None) -> None:
         self.engine_name = engine_name
         self.model_client = model_client
         self.ctx = ctx
+        # The branch's own write path (2026-07-29): rows land via a blocking
+        # `store.write_rows` BEFORE they are emitted, so the DAG gate fed by
+        # this DoFn's output releases Generate only once a store fetch hits.
+        # Distinct from ctx.pool_store, which setup() blanks (self-read guard).
+        self.store = store
         self._engine: Any = None
 
     def setup(self) -> None:
@@ -62,24 +68,44 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
 
     def process(self, _element) -> Iterator[dict]:
         pools = getattr(self._engine, "_free_text_pools", None) or {}
+        build_info = getattr(self._engine, "_pool_build_info", None) or {}
+        rows = []
         for column, values in pools.items():
             if not values:
                 continue
-            yield pool_to_row(
-                FreeTextPool(
-                    reference_digest=self.ctx.reference_digest,
-                    model_uri=self.ctx.model_uri,
-                    column=column,
-                    target=len(values),
-                    values=tuple(values),
-                    stagnated=bool(
-                        getattr(self._engine, "_pool_stagnated", {}).get(column, False)
-                    ),
-                    attempts=int(
-                        getattr(self._engine, "_pool_attempts", {}).get(column, 0)
-                    ),
+            info = build_info.get(column, {})
+            rows.append(
+                pool_to_row(
+                    FreeTextPool(
+                        reference_digest=self.ctx.reference_digest,
+                        model_uri=self.ctx.model_uri,
+                        column=column,
+                        target=int(info.get("target", len(values))),
+                        values=tuple(values),
+                        stagnated=bool(info.get("stagnated", False)),
+                        attempts=int(info.get("attempts", 0)),
+                    )
                 )
             )
+        if self.store is not None and rows:
+            t_write = time.monotonic()
+            try:
+                self.store.write_rows(rows)
+                log_milestone(
+                    "freetext_pool_store_written",
+                    rows=len(rows),
+                    seconds=round(time.monotonic() - t_write, 1),
+                )
+            except Exception as e:
+                # Pools are an optimisation, never a dependency: emit the
+                # rows anyway so the AwaitFreeTextPools gate opens and
+                # Generate falls back to building pools itself.
+                log_milestone(
+                    "freetext_pool_store_write_error",
+                    level=logging.WARNING,
+                    error=type(e).__name__,
+                )
+        yield from rows
         log_milestone("pool_branch_emitted", columns=len(pools))
 
     def teardown(self) -> None:

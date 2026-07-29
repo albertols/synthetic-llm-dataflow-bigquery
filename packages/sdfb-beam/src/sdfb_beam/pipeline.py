@@ -98,7 +98,7 @@ class PipelineConfig:
     pool_pattern_guidance: bool = False
     # Persisted free-text pools (WS5 §2). Threads the READ path into the
     # worker ctx exactly as rag_chunks_table does; the build branch is
-    # gated separately by the driver passing `freetext_pools_sink`.
+    # gated separately by the driver passing `freetext_pools_store`.
     freetext_pools_table: str = ""
     # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
     pool_seed_strategy: str = "centroid"
@@ -117,7 +117,7 @@ def build_pipeline(
     dlq_sink: beam.PTransform,
     validation_runs_sink: beam.PTransform | None = None,
     rag_chunks_sink: beam.PTransform | None = None,
-    freetext_pools_sink: beam.PTransform | None = None,
+    freetext_pools_store: Any = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -168,6 +168,35 @@ def build_pipeline(
         batch_id += 1
 
     requests = p | "CreateRequests" >> beam.Create(request_specs)
+
+    # WS5 §2 / 2026-07-29 four-run postmortem — optional free-text pool
+    # build branch. The driver decides (digest existence check) whether to
+    # pass a store; None ⇒ branch absent, DAG unchanged. The branch builds
+    # the pool ladder ONCE, writes `freetext_pools` itself (blocking load
+    # job inside the DoFn), and its OUTPUT gates Generate below: on the
+    # R1/R3 cold runs an ungated Generate raced the branch and every pool
+    # was built twice concurrently on the same GPU (R3: 2x 13 ladders,
+    # 2,005 s + 2,026 s of duplicated LLM time). The AsList side input is a
+    # runner-level barrier — Generate bundles are not scheduled until the
+    # branch (build + store write) completes, so every Generate setup's
+    # store fetch hits.
+    if freetext_pools_store is not None:
+        pool_rows = (
+            p
+            | "PoolTrigger" >> beam.Create([None])
+            | "BuildFreeTextPools"
+            >> beam.ParDo(
+                BuildFreeTextPoolsDoFn(
+                    config.engine_name,
+                    config.model_client,
+                    ctx,
+                    store=freetext_pools_store,
+                )
+            )
+        )
+        requests = requests | "AwaitFreeTextPools" >> beam.Map(
+            lambda spec, _pools: spec, _pools=beam.pvalue.AsList(pool_rows)
+        )
 
     generated = (
         requests
@@ -299,23 +328,6 @@ def build_pipeline(
             | "RagEmbedChunks" >> beam.ParDo(EmbedChunksDoFn(config.embedder_uri))
         )
         _ = chunks | "WriteRagChunks" >> rag_chunks_sink
-
-    # WS5 §2 — optional free-text pool build branch. Same shape as the
-    # rag_chunks branch above: the driver decides (existence check) whether
-    # to pass a sink; None ⇒ branch absent, DAG unchanged. Runs concurrently
-    # with Generate and writes an artifact keyed on the reference digest, so
-    # the pool ladder is paid once per (digest, model) instead of once per
-    # worker PROCESS (2026-07-26 1M run: 108 rebuilds, 68,805 LLM-seconds).
-    if freetext_pools_sink is not None:
-        _ = (
-            p
-            | "PoolTrigger" >> beam.Create([None])
-            | "BuildFreeTextPools"
-            >> beam.ParDo(
-                BuildFreeTextPoolsDoFn(config.engine_name, config.model_client, ctx)
-            )
-            | "WriteFreeTextPools" >> freetext_pools_sink
-        )
 
     result: dict[str, Any] = {
         "reference_digest": digest,

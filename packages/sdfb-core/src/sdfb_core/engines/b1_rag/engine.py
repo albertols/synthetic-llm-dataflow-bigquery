@@ -40,7 +40,7 @@ import logging
 import random
 import threading
 import time
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sdfb_core.codegen import derive_record_model
 from sdfb_core.engines.b1_rag._fidelity import ColumnSampler, numpy_available
@@ -170,6 +170,13 @@ class B1RagEngine(GenerationEngine):
         self._embedder: Embedder | None = None
         self._ref_vectors: list[list[float]] = []
         self._free_text_pools: dict[str, list[str]] = {}
+        # column -> {"target", "attempts", "stagnated"} recorded by
+        # `_infer_free_text_pool` so the pool-branch rows persist the REAL
+        # build outcome (2026-07-29 postmortem: stored rows carried
+        # attempts=0 / stagnated=false / target=achieved-size because these
+        # were never recorded). Written from ladder threads — per-key dict
+        # assignment, atomic under the GIL.
+        self._pool_build_info: dict[str, dict[str, Any]] = {}
         self._column_order: list[str] = []
         self._ready: bool = False
 
@@ -720,9 +727,17 @@ class B1RagEngine(GenerationEngine):
             )
             pool = []
             format_rejected = 0
+            self._pool_build_info[prof.name] = {
+                "target": target, "attempts": 0, "stagnated": False,
+            }
         else:
             pool = self._resolve_pool_yield(prof, y, per_call, target)
             format_rejected = y.format_rejected
+            self._pool_build_info[prof.name] = {
+                "target": target,
+                "attempts": y.attempts,
+                "stagnated": y.stagnated,
+            }
 
         # Fold observed exemplars ONLY when the LLM delivered nothing (lax
         # mode) — loudly, via the fallback milestone emitted above. Every
@@ -924,6 +939,11 @@ class _PoolYield(NamedTuple):
     prompt_echoes: int
     attempts: int
     format_rejected: int = 0
+    # True when the ladder exited on yield-decay (the stagnation break), as
+    # opposed to reaching target or exhausting the attempt budget. Persisted
+    # per column into `freetext_pools.stagnated` (2026-07-29: rows stored
+    # hardcoded false because nothing recorded this).
+    stagnated: bool = False
 
 
 def _build_pool_prompt(column: str, per_call: int, seed_examples: list[str]) -> str:
@@ -1003,6 +1023,7 @@ def _pool_llm_yield(
     per_round = _POOL_VALUES_PER_CALL * max(1, n_choices)
     max_calls = max(len(levels), 2 * -(-target // per_round))
     stagnant = 0
+    hit_stagnation = False
     while attempts < max_calls and len(pool) < target:
         level = levels[min(attempts, len(levels) - 1)]
         # kcenter_rotate (WS5 §3): re-seed the prompt each attempt so the
@@ -1048,10 +1069,11 @@ def _pool_llm_yield(
                 target=target,
                 format_rejected=n_format_rejected,
             )
+            hit_stagnation = True
             break
     return _PoolYield(
         pool, n_parsed, len(seen), n_copies, n_echoes, attempts,
-        n_format_rejected,
+        n_format_rejected, hit_stagnation,
     )
 
 

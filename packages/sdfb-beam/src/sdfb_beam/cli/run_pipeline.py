@@ -519,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
                 create_disposition=BigQueryDisposition.CREATE_NEVER,
             )
 
-    freetext_pools_sink = None
+    freetext_pools_store = None
     if parse_bool_flag(args.build_pool_layer) and args.freetext_pools_table:
         digest = compute_reference_digest(reference_rows)
         pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
@@ -549,12 +549,12 @@ def main(argv: list[str] | None = None) -> int:
                 model_uri=args.model_uri,
             )
         else:
-            freetext_pools_sink = WriteToBigQuery(
-                table=args.freetext_pools_table,
-                method=WriteToBigQuery.Method.FILE_LOADS,
-                write_disposition=BigQueryDisposition.WRITE_APPEND,
-                create_disposition=BigQueryDisposition.CREATE_NEVER,
-            )
+            # The branch writes the store itself (blocking load job inside
+            # the DoFn) so the pipeline's AwaitFreeTextPools gate releases
+            # Generate only once the rows are readable — a sibling
+            # WriteToBigQuery sink raced Generate on the 2026-07-28/29 cold
+            # runs and every pool was built twice.
+            freetext_pools_store = pool_store
 
     config = PipelineConfig(
         table_schema=table_schema,
@@ -641,7 +641,7 @@ def main(argv: list[str] | None = None) -> int:
             dlq_sink=dlq_sink,
             validation_runs_sink=validation_runs_sink,
             rag_chunks_sink=rag_chunks_sink,
-            freetext_pools_sink=freetext_pools_sink,
+            freetext_pools_store=freetext_pools_store,
         )
         logger.info(
             "Pipeline launched: run_id=%s reference_digest=%s",

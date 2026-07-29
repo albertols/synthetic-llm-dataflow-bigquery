@@ -22,7 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 @runtime_checkable
 class FreeTextPoolStore(Protocol):
-    """Read surface over `synthetic_rag.freetext_pools`."""
+    """Store surface over `synthetic_rag.freetext_pools`."""
 
     def fetch(self, reference_digest: str, model_uri: str) -> list[FreeTextPool]:
         """Every persisted pool for this reference sample + LLM."""
@@ -30,6 +30,12 @@ class FreeTextPoolStore(Protocol):
 
     def exists(self, reference_digest: str, model_uri: str) -> bool:
         """True when ANY pool exists (the build stage's idempotency check)."""
+        ...
+
+    def write_rows(self, rows: list[dict]) -> None:
+        """Append `pool_to_row`-shaped rows, blocking until they are
+        readable by a subsequent `fetch` (the build branch's write path —
+        the pipeline gate downstream relies on this blocking contract)."""
         ...
 
 
@@ -53,6 +59,22 @@ class InMemoryFreeTextPoolStore:
         return any(
             p.reference_digest == reference_digest and p.model_uri == model_uri
             for p in self._pools
+        )
+
+    def write_rows(self, rows: list[dict]) -> None:
+        from sdfb_core.pools.record import FreeTextPool
+
+        self._pools.extend(
+            FreeTextPool(
+                reference_digest=r["reference_digest"],
+                model_uri=r["model_uri"],
+                column=r["column"],
+                target=int(r["target"]),
+                values=tuple(r["values"] or ()),
+                stagnated=bool(r["stagnated"]),
+                attempts=int(r["attempts"]),
+            )
+            for r in rows
         )
 
 

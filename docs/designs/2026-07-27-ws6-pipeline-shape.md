@@ -341,3 +341,87 @@ three-lines-of-defense discussion), and vectorised `generate_batch` output
 
 **Still unmeasured on hardware:** the pool store (never yet enabled — the
 warning now fires 25× per run) and `--uniqueness_mode=streaming`.
+
+## 9. 2026-07-28/29 four-run postmortem — the pool store works; the cold build ran twice
+
+Four runs on the `7b81855` build, two per source table, cold then warm:
+
+| Run | Table | Free-text cols | Worker-log span | Pool phase | Store behaviour |
+|-----|-------|---------------:|----------------:|-----------:|-----------------|
+| R1 cold | A | 3 | 23 min | 632 s + 694 s (**duplicated**) | 3 misses → branch wrote 3 rows; 21 hits later in-run |
+| R2 warm | A | 3 | 12.5 min | 9–119 s (reads) | 24/24 hits, branch skipped (`pool_build_skipped`) |
+| R3 cold | B | 13 | 45 min | 2,005 s + 2,026 s (**duplicated**) | 13 misses → 13 rows written |
+| R4 warm | B | 13 | 11.5 min | reads only | 104/104 hits, branch skipped |
+
+Two findings, one fix each:
+
+**(a) The cold build ran TWICE, concurrently, on one GPU.** The pool branch
+and the first Generate setup raced: Generate's engine store-missed (the
+branch hadn't written yet — its `WriteFreeTextPools` sink ran *after* the
+build) and fell through to building every pool itself. Both builders ran
+4-thread ladders against the same vLLM server — 8 concurrent ladders on one
+T4 for a token-throughput-bound workload, i.e. every cold build paid ~2x.
+The fix is a **runner-level barrier**: the branch now writes
+`freetext_pools` itself (blocking load job inside the DoFn — never
+streaming inserts, so the seeding-arm digest DELETE works immediately) and
+`CreateRequests` is gated on the branch's output via an `AsList` side input
+(`AwaitFreeTextPools`). Generate bundles are not *scheduled* until the rows
+are readable, so every Generate setup's store fetch hits.
+
+```mermaid
+graph LR
+    PT[PoolTrigger] --> BP["BuildFreeTextPools<br/>ladder ONCE + blocking store write"]
+    BP -- "rows (AsList side input)" --> GATE[AwaitFreeTextPools]
+    CR[CreateRequests] --> GATE
+    GATE --> GEN["Generate<br/>store fetch → 13/13 hits"]
+    BP -.->|load job| BQ[(freetext_pools)]
+    BQ -.-> GEN
+```
+
+No wall-clock is lost to the ordering: Generate could not produce real rows
+without pools anyway — it was just burning the GPU rebuilding them. A store
+write failure is loud but non-fatal (`freetext_pool_store_write_error`):
+rows still flow, the gate opens, Generate store-misses and rebuilds — the
+pre-gate behaviour becomes the fallback.
+
+**(b) Stored rows lied about the build.** `freetext_pools` rows carried
+`attempts=0`, `stagnated=false`, and `target` set to the *achieved* size
+(ACCU_LIMIT_KEY: stored "target 386" for a 512-target build that ran 8
+attempts and ended undersized) — the engine never recorded any of it. The
+engine now keeps `_pool_build_info[column] = {target, attempts, stagnated}`
+(stagnated = the yield-decay break fired, a new `_PoolYield` field) and the
+branch persists it.
+
+**Answering "21 STRING columns but only 3 pool rows":** by design. The
+profiler classifies most STRINGs as shaped/categorical (constants, dates,
+coded IDs) and routes them off the LLM entirely; only true FREE_TEXT columns
+(3 on table A, 13 on table B) get LLM pools, and only those are persisted.
+
+## 10. WS7 proposal — per-column pool fan-out (the multi-table scaling step)
+
+The cold pool build is now single-builder but still **single-worker**: one
+DoFn runs all N ladders on one GPU while every other worker's GPU idles
+(R3: 13 ladders, ~2,000 s on one T4 with a second T4 idle). The ladder work
+is embarrassingly parallel across columns, and tomorrow across tables:
+
+- **Stage A — Plan** (1 element, CPU+embedder only): profile the reference
+  sample, select seeds per free-text column, emit one `PoolJob(column,
+  seed_examples, target)` element per column. No vLLM.
+- **Reshuffle** — spread jobs across workers.
+- **Stage B — BuildOnePool** (per element, GPU): model client in `setup()`
+  (spawn or adopt the worker's vLLM), one ladder per element, one
+  `freetext_pools` row out. The gate then feeds on Stage B's output.
+
+With `max_num_workers=4` T4s, R3's 13 ladders drop from ~2,000 s serial-ish
+on one GPU to ~4 concurrent ladders per GPU across 2–4 GPUs — a further
+2–4x on the dominant cold-run phase. The same `(table, column)` job shape is
+exactly what multi-table generation (PK/FK, post-WS7) needs: one pool DAG
+for all tables, keyed per table digest. Requires extracting the ladder from
+`engine._infer_free_text_pool` into a standalone function both callers
+share, and a light "plan-only" engine entry point — deliberately NOT bundled
+into this PR.
+
+Remaining smaller candidates: REFERENCE_2-style echo decay (556 verbatim
+copies across 8 attempts for a final 222/512 pool — a marginal-yield
+forecast could cut the last ~3 attempts), and verifying vLLM prefix caching
+is active on the pool prompts (byte-identical prefixes across attempts).
