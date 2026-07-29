@@ -425,3 +425,25 @@ Remaining smaller candidates: REFERENCE_2-style echo decay (556 verbatim
 copies across 8 attempts for a final 222/512 pool — a marginal-yield
 forecast could cut the last ~3 attempts), and verifying vLLM prefix caching
 is active on the pool prompts (byte-identical prefixes across attempts).
+
+### 9b. The `generation_plan` milestone (2026-07-29)
+
+One INFO line per (digest, table) per worker process — the per-column
+strategy map that every postmortem previously re-derived from scattered
+milestones:
+
+```
+SDFB_MILESTONE name=generation_plan engine=b1_rag table=p.d.t columns=64
+  seed_strategy=centroid top_k=8
+  plan={"categorical":[...],"constant":[...],"freetext_llm_pool":[...],
+        "numeric":[...],"shaped_identifier":[...],"temporal":[...]}
+  pool_sources={"NOTES":"store","CHANGE_USERID":"llm_ladder"}
+```
+
+Labels map 1:1 onto the engine's dispatch: `constant` (literal copy),
+`categorical` (empirical-frequency sampler), `numeric` (in-range empirical
+sampler), `temporal` (jittered range sampler, sentinel-aware — includes
+date-shaped STRINGs), `shaped_identifier` (per-position template, routed
+off the LLM), `freetext_llm_pool` (RAG-seeded LLM pool; `seed_strategy` /
+`top_k` name the run's retrieval arm, `pool_sources` says whether each pool
+came from the persisted store, the process cache, or a fresh ladder).

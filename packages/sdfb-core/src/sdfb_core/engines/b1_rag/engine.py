@@ -36,6 +36,7 @@ imports at module scope. Heavy deps are deferred into the seams.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import threading
@@ -144,6 +145,19 @@ def clear_free_text_pool_cache() -> None:
         _POOL_CACHE.clear()
 
 
+# One `generation_plan` milestone per (digest, table) per worker PROCESS
+# (2026-07-29 request): the per-column strategy map would otherwise repeat
+# once per DoFn-thread setup — 8x per worker — for identical content.
+_PLAN_LOGGED: set[tuple[str, str]] = set()
+_PLAN_LOGGED_LOCK = threading.Lock()
+
+
+def clear_generation_plan_log() -> None:
+    """Forget which plans were logged (tests / maintenance only)."""
+    with _PLAN_LOGGED_LOCK:
+        _PLAN_LOGGED.clear()
+
+
 class B1RagEngine(GenerationEngine):
     """Retrieval-augmented, distribution-estimator synthesis engine (B.1)."""
 
@@ -177,6 +191,10 @@ class B1RagEngine(GenerationEngine):
         # were never recorded). Written from ladder threads — per-key dict
         # assignment, atomic under the GIL.
         self._pool_build_info: dict[str, dict[str, Any]] = {}
+        # column -> where its free-text pool came from this setup:
+        # "store" | "process_cache" | "llm_ladder". Feeds the
+        # generation_plan milestone's pool_sources field.
+        self._pool_sources: dict[str, str] = {}
         self._column_order: list[str] = []
         self._ready: bool = False
 
@@ -253,8 +271,58 @@ class B1RagEngine(GenerationEngine):
             seconds=round(time.monotonic() - t_pools, 1),
             freetext_cols=len(self._free_text_pools),
         )
+        self._log_generation_plan(ctx)
 
         self._ready = True
+
+    def _log_generation_plan(self, ctx: GenerationContext) -> None:
+        """ONE milestone mapping every column to its generation strategy.
+
+        Answers, without re-deriving it from scattered per-column milestones,
+        which fields are LLM free-text pools (and where this run's pools came
+        from), which are shaped identifiers routed off the LLM, and which are
+        plain samplers. Logged once per (digest, table) per worker process —
+        not once per DoFn-thread setup.
+        """
+        assert self._profiles is not None
+        key = (ctx.reference_digest or "", ctx.table_schema.fqn)
+        with _PLAN_LOGGED_LOCK:
+            if key in _PLAN_LOGGED:
+                return
+            _PLAN_LOGGED.add(key)
+        kind_labels = {
+            ColumnKind.CONSTANT: "constant",
+            ColumnKind.CATEGORICAL: "categorical",
+            ColumnKind.NUMERIC: "numeric",
+            ColumnKind.TEMPORAL: "temporal",
+        }
+        plan: dict[str, list[str]] = {}
+        for name, prof in self._profiles.items():
+            if prof.kind is ColumnKind.FREE_TEXT:
+                label = (
+                    "freetext_llm_pool"
+                    if prof.identifier_shape is None
+                    else "shaped_identifier"
+                )
+            else:
+                label = kind_labels[prof.kind]
+            plan.setdefault(label, []).append(name)
+        log_milestone(
+            "generation_plan",
+            engine="b1_rag",
+            table=ctx.table_schema.fqn,
+            columns=len(self._profiles),
+            seed_strategy=getattr(ctx, "pool_seed_strategy", "centroid"),
+            top_k=_DEFAULT_TOP_K,
+            plan=json.dumps(
+                {k: sorted(v) for k, v in sorted(plan.items())},
+                separators=(",", ":"),
+            ),
+            pool_sources=json.dumps(
+                dict(sorted(self._pool_sources.items())),
+                separators=(",", ":"),
+            ),
+        )
 
     def teardown(self) -> None:
         if self._index is not None:
@@ -448,6 +516,7 @@ class B1RagEngine(GenerationEngine):
         hit = stored.get(column)
         if hit:
             pools[column] = list(hit)
+            self._pool_sources[column] = "store"
             log_milestone(
                 "freetext_pool_store_hit", column=column, pool_size=len(hit)
             )
@@ -501,6 +570,7 @@ class B1RagEngine(GenerationEngine):
                     cached = _POOL_CACHE.get(key)
                 if cached is not None:
                     pools[prof.name] = list(cached)
+                    self._pool_sources[prof.name] = "process_cache"
                     log_milestone(
                         "freetext_pool_cache_hit",
                         column=prof.name,
@@ -673,6 +743,7 @@ class B1RagEngine(GenerationEngine):
         LLM calls conditioned on retrieved exemplars."""
         assert self._client is not None
         t_column = time.monotonic()
+        self._pool_sources[prof.name] = "llm_ladder"
         per_call = min(target, _POOL_VALUES_PER_CALL)
         prompt = _build_pool_prompt(prof.name, per_call, seed_examples)
         # ARRAY completions only — never n single-value choices. A choice is
