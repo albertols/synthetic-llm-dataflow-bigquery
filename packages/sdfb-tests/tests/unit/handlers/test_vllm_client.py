@@ -1136,3 +1136,258 @@ def test_a_success_resets_the_failure_count(monkeypatch):
     ):
         c2.setup()
     assert not any(mod._SPAWN_FAILURES.values())
+
+
+# ---------------------------------------------------------------------------
+# WS6 F3 — ignition on a contended T4 (2026-07-29_09_30_47 E2E).
+#
+# Three spawns, three distinct deaths on one job: (1) util 0.655 left a
+# 1.11 GiB KV cache, 10 MB short of max_model_len=8192; (2) profiling ran in
+# the window where sibling embedders had just demoted, sized a 5.52 GiB KV
+# cache, then CUDA-graph capture collided with the Beam harness's residual
+# 622 MiB CUDA context; (3) util 0.90 on the "free" card overflowed during
+# warmup by ~150 MiB. Fixes under test:
+#   - the free-VRAM margin must exceed the 622 MiB harness context (1 GiB);
+#   - the derived fraction is capped at 0.85, never vLLM's 0.90 default;
+#   - the spawned server gets PYTORCH_CUDA_ALLOC_CONF=expandable_segments;
+#   - --max-model-len is clamped to what the measured budget can actually
+#     fit (vLLM told us the fix: "estimated maximum model length is 8048"),
+#     and an unfittable card raises BEFORE the spawn, without consuming a
+#     spawn-failure strike (bundle retries re-measure a draining card).
+# ---------------------------------------------------------------------------
+_GIB = 1024**3
+
+
+def _qwen3_model_dir(tmp_path, *, weights_gib: float, max_pos: int = 32768) -> str:
+    """A fake local model dir: Qwen3-4B geometry config + sparse weights."""
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3",
+                "torch_dtype": "bfloat16",
+                "num_hidden_layers": 36,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "hidden_size": 2560,
+                "max_position_embeddings": max_pos,
+            }
+        )
+    )
+    with open(tmp_path / "model.safetensors", "wb") as f:  # sparse: st_size only
+        f.seek(int(weights_gib * _GIB) - 1)
+        f.write(b"\0")
+    return str(tmp_path)
+
+
+def test_margin_covers_the_harness_cuda_context(monkeypatch):
+    # 622 MiB of harness CUDA context survived embedder demotion on the
+    # 2026-07-29 run; the old 512 MiB margin was smaller than that residue.
+    _patch_torch_mem(monkeypatch, free_gib=10.0)
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    frac = c._dynamic_gpu_memory_utilization()
+    assert frac is not None
+    assert 0.61 < frac < 0.625  # (10.0 - 1.0 margin) / 14.56 ~= 0.618
+
+
+def test_dynamic_utilization_capped_at_085(monkeypatch):
+    # Spawn #3 died at 0.90 on a "free" card: graphs + non-torch overhead +
+    # the harness context overflowed by ~150 MiB. 0.85 leaves real headroom.
+    _patch_torch_mem(monkeypatch, free_gib=14.5)
+    c = VLLMModelClient(model_uri="gs://bucket/synthetic/models/m/v1/")
+    assert c._dynamic_gpu_memory_utilization() == pytest.approx(0.85)
+
+
+def test_spawn_env_enables_expandable_segments(monkeypatch):
+    captured = {}
+
+    def _fake_popen(cmd, env=None, **kwargs):
+        captured["env"] = env
+        return mock.Mock()
+
+    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+    c = VLLMModelClient(model_uri="/local-ssd/model")
+    c._spawn_server()
+    assert captured["env"] is not None
+    assert captured["env"]["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+    assert "PATH" in captured["env"]  # inherited, not replaced
+
+
+def test_spawn_env_never_clobbers_an_explicit_alloc_conf(monkeypatch):
+    captured = {}
+
+    def _fake_popen(cmd, env=None, **kwargs):
+        captured["env"] = env
+        return mock.Mock()
+
+    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:64")
+    c = VLLMModelClient(model_uri="/local-ssd/model")
+    c._spawn_server()
+    assert captured["env"]["PYTORCH_CUDA_ALLOC_CONF"] == "max_split_size_mb:64"
+
+
+def test_kv_bytes_per_token_matches_qwen3_4b_geometry():
+    from sdfb_beam.handlers import vllm_client as mod
+
+    cfg = {"num_hidden_layers": 36, "num_key_value_heads": 8, "head_dim": 128}
+    # 2 (K+V) x 36 layers x 8 kv-heads x 128 head-dim x 2 bytes = 144 KiB —
+    # exactly vLLM's "1.12 GiB KV cache needed" for 8192 tokens on the run.
+    assert mod._kv_bytes_per_token(cfg) == 147456
+
+
+def test_kv_bytes_per_token_derives_head_dim_from_hidden_size():
+    from sdfb_beam.handlers import vllm_client as mod
+
+    cfg = {
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 4,
+        "num_attention_heads": 32,
+        "hidden_size": 4096,  # head_dim = 4096 / 32 = 128
+    }
+    assert mod._kv_bytes_per_token(cfg) == 2 * 2 * 4 * 128 * 2
+
+
+def test_kv_bytes_per_token_none_without_layer_count():
+    from sdfb_beam.handlers import vllm_client as mod
+
+    assert mod._kv_bytes_per_token({}) is None
+
+
+def test_fit_max_model_len_reproduces_the_contended_t4():
+    from sdfb_beam.handlers import vllm_client as mod
+
+    # free 10 GiB - 1 GiB margin = 9 GiB budget; 7 GiB weights; 1.25 GiB
+    # non-KV overhead -> 0.75 GiB KV -> 5461 tokens, floored to a 16-multiple.
+    fitted = mod._fit_max_model_len(
+        8192,
+        budget_bytes=9 * _GIB,
+        weights_bytes=7 * _GIB,
+        kv_bytes_per_token=147456,
+        overhead_bytes=int(1.25 * _GIB),
+    )
+    assert fitted == 5456
+
+
+def test_fit_max_model_len_keeps_requested_when_it_fits():
+    from sdfb_beam.handlers import vllm_client as mod
+
+    fitted = mod._fit_max_model_len(
+        8192,
+        budget_bytes=14 * _GIB,
+        weights_bytes=7 * _GIB,
+        kv_bytes_per_token=147456,
+        overhead_bytes=int(1.25 * _GIB),
+    )
+    assert fitted == 8192
+
+
+def test_fit_max_model_len_zero_when_weights_alone_overflow():
+    from sdfb_beam.handlers import vllm_client as mod
+
+    fitted = mod._fit_max_model_len(
+        8192,
+        budget_bytes=8 * _GIB,
+        weights_bytes=9 * _GIB,
+        kv_bytes_per_token=147456,
+        overhead_bytes=int(1.25 * _GIB),
+    )
+    assert fitted == 0
+
+
+def test_server_command_clamps_max_model_len_on_a_contended_card(
+    tmp_path, monkeypatch, caplog
+):
+    import logging
+
+    _patch_torch_mem(monkeypatch, free_gib=10.0)
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/m/v1/",
+        vllm_server_kwargs={"max-model-len": "8192", "dtype": "float16"},
+    )
+    c._served_model_name = _qwen3_model_dir(tmp_path, weights_gib=7.0)
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        cmd = c._server_command()
+    assert cmd[cmd.index("--max-model-len") + 1] == "5456"
+    assert "SDFB_MILESTONE name=vllm_max_model_len_clamped" in caplog.text
+
+
+def test_server_command_keeps_max_model_len_on_a_free_card(tmp_path, monkeypatch):
+    _patch_torch_mem(monkeypatch, free_gib=14.5)
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/m/v1/",
+        vllm_server_kwargs={"max-model-len": "8192", "dtype": "float16"},
+    )
+    c._served_model_name = _qwen3_model_dir(tmp_path, weights_gib=7.0)
+    cmd = c._server_command()
+    assert cmd[cmd.index("--max-model-len") + 1] == "8192"
+
+
+def test_server_command_adds_the_flag_when_kwargs_omit_it(tmp_path, monkeypatch):
+    # No explicit cap: the model's native max_position_embeddings (32768)
+    # can't fit either, so the fitted value must be injected.
+    _patch_torch_mem(monkeypatch, free_gib=10.0)
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/m/v1/",
+        vllm_server_kwargs={"dtype": "float16"},
+    )
+    c._served_model_name = _qwen3_model_dir(tmp_path, weights_gib=7.0)
+    cmd = c._server_command()
+    assert cmd[cmd.index("--max-model-len") + 1] == "5456"
+
+
+def test_server_command_never_clamps_when_utilization_is_pinned(
+    tmp_path, monkeypatch
+):
+    _patch_torch_mem(monkeypatch, free_gib=10.0)
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/m/v1/",
+        vllm_server_kwargs={
+            "gpu-memory-utilization": "0.85",
+            "max-model-len": "8192",
+        },
+    )
+    c._served_model_name = _qwen3_model_dir(tmp_path, weights_gib=7.0)
+    cmd = c._server_command()
+    assert cmd[cmd.index("--max-model-len") + 1] == "8192"
+
+
+def test_no_torch_leaves_max_model_len_untouched(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", None)
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/m/v1/",
+        vllm_server_kwargs={"max-model-len": "8192"},
+    )
+    c._served_model_name = _qwen3_model_dir(tmp_path, weights_gib=7.0)
+    cmd = c._server_command()
+    assert cmd[cmd.index("--max-model-len") + 1] == "8192"
+
+
+def test_unfittable_len_raises_before_spawn_without_a_strike(
+    tmp_path, monkeypatch
+):
+    from sdfb_beam.handlers import vllm_client as mod
+
+    monkeypatch.setattr(mod, "_SPAWN_FAILURES", {})
+    # 7.5 GiB weights on a 9 GiB budget fit ~1808 tokens — below the 4096
+    # floor (pool builds complete with max_tokens=2048; the prompt needs the
+    # rest). Must raise BEFORE Popen and must NOT count as a spawn failure,
+    # so the next bundle retry re-measures the (draining) card.
+    _patch_torch_mem(monkeypatch, free_gib=10.0)
+    popen = mock.Mock()
+    monkeypatch.setattr("subprocess.Popen", popen)
+    model_dir = _qwen3_model_dir(tmp_path, weights_gib=7.5)
+    c = VLLMModelClient(
+        model_uri="gs://bucket/synthetic/models/m/v1/",
+        local_model_dir=model_dir,
+        vllm_server_kwargs={"max-model-len": "8192", "dtype": "float16"},
+    )
+    with (
+        mock.patch.object(c, "_probe_reusable_server", return_value=False),
+        mock.patch.object(c, "_pull_weights"),
+        mock.patch.object(c, "_assert_gpu_dtype_compatible"),
+        pytest.raises(mod.ModelLenUnfittableError, match="4096"),
+    ):
+        c.setup()
+    popen.assert_not_called()
+    assert not any(mod._SPAWN_FAILURES.values())

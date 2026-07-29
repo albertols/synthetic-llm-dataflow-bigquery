@@ -100,9 +100,80 @@ _SPAWN_FAILURES: dict[str, int] = {}
 # branch's embedder contexts hold part of the card, free < 0.9 x total and
 # EngineCore init fails before serving a byte. Unless the caller pinned the
 # flag, we derive it from what is actually FREE, minus this margin.
-_VLLM_VRAM_MARGIN_BYTES = 512 * 1024**2
-_VLLM_DEFAULT_UTILIZATION = 0.90
+#
+# WS6 F3 (2026-07-29_09_30_47 E2E): the margin must exceed the Beam harness's
+# residual CUDA context — 622 MiB survives embedder demotion (a context can't
+# be released without killing the process), so 512 MiB was not enough. And a
+# fully-free card must never get vLLM's 0.90 default: spawn #3 at 0.90
+# overflowed by ~150 MiB during warmup once CUDA graphs + non-torch overhead
+# landed on top of the budget. 0.85 caps the derived fraction with real
+# headroom for both.
+_VLLM_VRAM_MARGIN_BYTES = 1024 * 1024**2
+_VLLM_MAX_DYNAMIC_UTILIZATION = 0.85
+# vLLM's own non-KV usage beyond the checkpoint bytes: fp16 load overhead,
+# activation peak during profiling, CUDA-graph private pools, non-torch
+# allocations. Measured ~0.94 GiB on the 2026-07-29 T4 run (Qwen3-4B);
+# 1.25 GiB keeps the fitted length ~2k tokens inside vLLM's own estimate.
+_VLLM_NON_KV_OVERHEAD_BYTES = int(1.25 * 1024**3)
+# Floor for a clamped --max-model-len: pool builds complete with
+# max_tokens=2048, so anything shorter leaves no room for the prompt.
+_VLLM_MIN_MODEL_LEN = 4096
+# vLLM rounds KV capacity to 16-token blocks; keep the clamp aligned.
+_VLLM_LEN_ALIGN = 16
 _PARKED_SERVERS: dict[str, Any] = {}
+
+
+class ModelLenUnfittableError(RuntimeError):
+    """The measured VRAM budget cannot host even `_VLLM_MIN_MODEL_LEN`.
+
+    Raised BEFORE the server spawn (2026-07-29_09_30_47: three doomed spawns
+    burned the whole `_MAX_CONSECUTIVE_SPAWN_FAILURES` budget on a card that
+    was only transiently contended). Deliberately NOT counted as a spawn
+    failure — each bundle retry re-measures the card, and an embedder that
+    has since demoted frees the budget the next attempt needs."""
+
+
+def _kv_bytes_per_token(cfg: dict, dtype_bytes: int = 2) -> int | None:
+    """KV-cache bytes one token costs, from a HF `config.json` dict.
+
+    2 (K and V) x layers x kv-heads x head-dim x dtype bytes. Qwen3-4B
+    (36 x 8 x 128, fp16) -> 144 KiB/token — exactly the "1.12 GiB KV cache
+    is needed" vLLM reported for max_model_len=8192 on the 2026-07-29 run.
+    Returns None when the config lacks the geometry (nothing to size by).
+    """
+    layers = cfg.get("num_hidden_layers")
+    kv_heads = cfg.get("num_key_value_heads") or cfg.get("num_attention_heads")
+    head_dim = cfg.get("head_dim")
+    if head_dim is None:
+        hidden = cfg.get("hidden_size")
+        heads = cfg.get("num_attention_heads")
+        if hidden and heads:
+            head_dim = hidden // heads
+    if not (layers and kv_heads and head_dim):
+        return None
+    return 2 * int(layers) * int(kv_heads) * int(head_dim) * dtype_bytes
+
+
+def _fit_max_model_len(
+    requested: int,
+    *,
+    budget_bytes: int,
+    weights_bytes: int,
+    kv_bytes_per_token: int,
+    overhead_bytes: int = _VLLM_NON_KV_OVERHEAD_BYTES,
+) -> int:
+    """The longest --max-model-len the VRAM budget can host, <= `requested`.
+
+    Pure arithmetic mirror of vLLM's `_check_enough_kv_cache_memory`: what is
+    left of the budget after weights and non-KV overhead, divided by the KV
+    cost per token, floored to a block multiple. 0 means not even one block
+    fits. Never exceeds `requested` (a clamp, not a promotion).
+    """
+    kv_budget = budget_bytes - weights_bytes - overhead_bytes
+    if kv_budget <= 0:
+        return 0
+    fitted = (kv_budget // kv_bytes_per_token) // _VLLM_LEN_ALIGN * _VLLM_LEN_ALIGN
+    return min(int(requested), int(fitted))
 
 
 class ModelGpuIncompatibleError(RuntimeError):
@@ -320,6 +391,11 @@ class VLLMModelClient:
             try:
                 self._spawn_server()
                 self._wait_until_ready()
+            except ModelLenUnfittableError:
+                # Pre-flight, nothing was spawned: the card is (possibly
+                # transiently) too contended. Not a strike — the next bundle
+                # attempt re-measures free VRAM.
+                raise
             except Exception:
                 _SPAWN_FAILURES[self.base_url] = failures + 1
                 raise
@@ -572,29 +648,62 @@ class VLLMModelClient:
             frac = self._dynamic_gpu_memory_utilization()
             if frac is not None:
                 cmd.extend(["--gpu-memory-utilization", f"{frac:.3f}"])
+                self._clamp_max_model_len(cmd)
         return cmd
 
-    def _dynamic_gpu_memory_utilization(self) -> float | None:
-        """Utilization fraction derived from FREE VRAM (WS6 F1).
+    def _model_sizing(self) -> tuple[dict, int] | None:
+        """(config dict, checkpoint bytes on disk) for the served model dir,
+        or None when the dir cannot be sized (missing/unreadable config.json,
+        no *.safetensors / *.bin checkpoint files)."""
+        import json as _json
+        from pathlib import Path as _Path
 
-        vLLM interprets the flag as a fraction of TOTAL device memory, so on
-        a card where sibling CUDA contexts (population-branch embedders, a
-        prior bundle's residue) hold memory, the 0.9 default over-asks and
-        EngineCore init fails. `(free - margin) / total`, capped at the
-        vLLM default, keeps ignition honest about what it can get. None
-        (no torch / no CUDA / query failed) omits the flag entirely —
-        today's behaviour.
-        """
+        model_dir = _Path(self._served_model_name)
+        cfg_path = model_dir / "config.json"
+        if not cfg_path.exists():
+            return None
+        try:
+            cfg = _json.loads(cfg_path.read_text())
+        except (OSError, ValueError):
+            return None
+        weights_bytes = sum(
+            f.stat().st_size for f in model_dir.glob("*.safetensors")
+        ) or sum(f.stat().st_size for f in model_dir.glob("*.bin"))
+        if not weights_bytes:
+            return None
+        return cfg, weights_bytes
+
+    def _query_vram(self) -> tuple[int, int] | None:
+        """(free_bytes, total_bytes) for the visible CUDA device, else None
+        (no torch on the laptop / no CUDA / query failed)."""
         try:
             import torch
 
             if not torch.cuda.is_available():
                 return None
-            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            return torch.cuda.mem_get_info()
         except Exception:
             return None
+
+    def _dynamic_gpu_memory_utilization(self) -> float | None:
+        """Utilization fraction derived from FREE VRAM (WS6 F1 + F3).
+
+        vLLM interprets the flag as a fraction of TOTAL device memory, so on
+        a card where sibling CUDA contexts (population-branch embedders, a
+        prior bundle's residue) hold memory, the 0.9 default over-asks and
+        EngineCore init fails. `(free - margin) / total` keeps ignition
+        honest about what it can get; the cap stays below vLLM's default
+        because CUDA graphs + non-torch overhead land ON TOP of the budget
+        (2026-07-29 spawn #3 overflowed a "free" T4 at 0.90 by ~150 MiB).
+        None (no torch / no CUDA / query failed) omits the flag entirely —
+        today's behaviour.
+        """
+        vram = self._query_vram()
+        if vram is None:
+            return None
+        free_bytes, total_bytes = vram
         frac = (free_bytes - _VLLM_VRAM_MARGIN_BYTES) / total_bytes
-        frac = min(_VLLM_DEFAULT_UTILIZATION, frac)
+        frac = min(_VLLM_MAX_DYNAMIC_UTILIZATION, frac)
         log_milestone(
             "vllm_gpu_memory_utilization",
             fraction=round(frac, 3),
@@ -602,12 +711,109 @@ class VLLMModelClient:
         )
         return max(0.05, frac)
 
+    def _clamp_max_model_len(self, cmd: list[str]) -> None:
+        """Shrink --max-model-len to what the VRAM budget can host (WS6 F3).
+
+        2026-07-29_09_30_47: with embedders holding the T4, the derived
+        budget left a 1.11 GiB KV cache — 10 MB short of the 1.12 GiB that
+        max_model_len=8192 needs, and vLLM's error even printed the fix
+        ("the estimated maximum model length is 8048"). This computes that
+        estimate BEFORE the spawn from the served config.json + checkpoint
+        bytes on disk, lowers the flag in place (never raises it), and
+        raises `ModelLenUnfittableError` when even `_VLLM_MIN_MODEL_LEN`
+        cannot fit — a doomed spawn must not burn a spawn-failure strike.
+
+        Best-effort: missing config/weights/geometry leaves `cmd` untouched
+        (vLLM then reports whatever is really wrong). Only called on the
+        dynamic-utilization path — a pinned utilization means the operator
+        took manual control of memory, so we keep our hands off the length.
+        """
+        vram = self._query_vram()
+        sizing = self._model_sizing()
+        if vram is None or sizing is None:
+            return
+        cfg, weights_bytes = sizing
+        free_bytes, total_bytes = vram
+        budget_bytes = int(
+            min(
+                free_bytes - _VLLM_VRAM_MARGIN_BYTES,
+                _VLLM_MAX_DYNAMIC_UTILIZATION * total_bytes,
+            )
+        )
+        dtype = str(
+            self.vllm_server_kwargs.get("dtype", "")
+            or self.vllm_server_kwargs.get("--dtype", "")
+            or cfg.get("torch_dtype", "")
+        ).lower()
+        kv_bpt = _kv_bytes_per_token(cfg, dtype_bytes=4 if "32" in dtype else 2)
+        if kv_bpt is None:
+            return
+
+        flag_idx = next(
+            (
+                i
+                for i, arg in enumerate(cmd)
+                if arg in ("--max-model-len", "--max_model_len")
+            ),
+            None,
+        )
+        try:
+            requested = int(
+                cmd[flag_idx + 1]
+                if flag_idx is not None
+                else cfg.get("max_position_embeddings")
+            )
+        except (TypeError, ValueError):
+            return
+
+        fitted = _fit_max_model_len(
+            requested,
+            budget_bytes=budget_bytes,
+            weights_bytes=weights_bytes,
+            kv_bytes_per_token=kv_bpt,
+        )
+        if fitted >= requested:
+            return
+        if fitted < _VLLM_MIN_MODEL_LEN:
+            log_milestone(
+                "vllm_max_model_len_unfittable",
+                level=logging.ERROR,
+                requested=requested,
+                fitted=fitted,
+                free_mib=round(free_bytes / 1024**2),
+            )
+            raise ModelLenUnfittableError(
+                f"The measured VRAM budget ({budget_bytes / 1024**3:.2f} GiB) "
+                f"fits a max_model_len of {fitted}, below the minimum viable "
+                f"{_VLLM_MIN_MODEL_LEN} (pool builds need max_tokens=2048 "
+                "plus the prompt). Not spawning a doomed server; the next "
+                "bundle attempt re-measures the card — sibling embedders "
+                "may have released it by then."
+            )
+        log_milestone(
+            "vllm_max_model_len_clamped",
+            level=logging.WARNING,
+            requested=requested,
+            fitted=fitted,
+            free_mib=round(free_bytes / 1024**2),
+        )
+        if flag_idx is not None:
+            cmd[flag_idx + 1] = str(fitted)
+        else:
+            cmd.extend(["--max-model-len", str(fitted)])
+
     def _spawn_server(self) -> None:
+        import os
         import subprocess
 
         cmd = self._server_command()
+        # Expandable segments avoid the allocator fragmentation both OOM
+        # spawns of 2026-07-29 pointed at ("If reserved but unallocated
+        # memory is large try setting PYTORCH_CUDA_ALLOC_CONF...").
+        env = os.environ.copy()
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         logger.info("Spawning vLLM server: %s", " ".join(cmd))
-        self._server = subprocess.Popen(cmd)
+        self._server = subprocess.Popen(cmd, env=env)
 
     def _wait_until_ready(self) -> None:
         """Poll `/v1/models` until the server answers 200, or time out.
