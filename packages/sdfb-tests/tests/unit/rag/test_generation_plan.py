@@ -14,11 +14,9 @@ import pytest
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import get_engine
 from sdfb_core.engines.b1_rag import engine as engine_mod
-from sdfb_core.engines.b1_rag.engine import (
-    clear_free_text_pool_cache,
-    clear_generation_plan_log,
-)
+from sdfb_core.engines.b1_rag.engine import clear_free_text_pool_cache
 from sdfb_core.engines.base import GenerationContext
+from sdfb_core.engines.generation_plan import clear_generation_plan_log
 
 _DIGEST = "digest-plan"
 _MODEL = "gs://m/qwen3/v1"

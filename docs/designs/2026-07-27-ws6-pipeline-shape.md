@@ -447,3 +447,10 @@ date-shaped STRINGs), `shaped_identifier` (per-position template, routed
 off the LLM), `freetext_llm_pool` (RAG-seeded LLM pool; `seed_strategy` /
 `top_k` name the run's retrieval arm, `pool_sources` says whether each pool
 came from the persisted store, the process cache, or a fresh ladder).
+
+`b2_library` emits the same milestone from one shared implementation
+(`sdfb_core.engines.generation_plan` — label mapping + per-engine
+once-guard). B.2 differences: `backend=` reports the bulk sampler that
+actually serves the run (`empirical` | `sdgx_ctgan` |
+`sdgx_fallback_empirical` — the silent-CTGAN-fallback lesson), and there is
+no `pool_sources` field because B.2 free-text pools build lazily per batch.

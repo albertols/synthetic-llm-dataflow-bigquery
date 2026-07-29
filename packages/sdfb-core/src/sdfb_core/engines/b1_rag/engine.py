@@ -55,6 +55,8 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     escalating_sampling,
 )
+from sdfb_core.engines.generation_plan import build_plan as _build_plan
+from sdfb_core.engines.generation_plan import should_log_plan as _should_log_plan
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
     relaxed_shape_charset,
@@ -145,17 +147,6 @@ def clear_free_text_pool_cache() -> None:
         _POOL_CACHE.clear()
 
 
-# One `generation_plan` milestone per (digest, table) per worker PROCESS
-# (2026-07-29 request): the per-column strategy map would otherwise repeat
-# once per DoFn-thread setup — 8x per worker — for identical content.
-_PLAN_LOGGED: set[tuple[str, str]] = set()
-_PLAN_LOGGED_LOCK = threading.Lock()
-
-
-def clear_generation_plan_log() -> None:
-    """Forget which plans were logged (tests / maintenance only)."""
-    with _PLAN_LOGGED_LOCK:
-        _PLAN_LOGGED.clear()
 
 
 class B1RagEngine(GenerationEngine):
@@ -285,28 +276,10 @@ class B1RagEngine(GenerationEngine):
         not once per DoFn-thread setup.
         """
         assert self._profiles is not None
-        key = (ctx.reference_digest or "", ctx.table_schema.fqn)
-        with _PLAN_LOGGED_LOCK:
-            if key in _PLAN_LOGGED:
-                return
-            _PLAN_LOGGED.add(key)
-        kind_labels = {
-            ColumnKind.CONSTANT: "constant",
-            ColumnKind.CATEGORICAL: "categorical",
-            ColumnKind.NUMERIC: "numeric",
-            ColumnKind.TEMPORAL: "temporal",
-        }
-        plan: dict[str, list[str]] = {}
-        for name, prof in self._profiles.items():
-            if prof.kind is ColumnKind.FREE_TEXT:
-                label = (
-                    "freetext_llm_pool"
-                    if prof.identifier_shape is None
-                    else "shaped_identifier"
-                )
-            else:
-                label = kind_labels[prof.kind]
-            plan.setdefault(label, []).append(name)
+        if not _should_log_plan(
+            "b1_rag", ctx.reference_digest, ctx.table_schema.fqn
+        ):
+            return
         log_milestone(
             "generation_plan",
             engine="b1_rag",
@@ -315,8 +288,7 @@ class B1RagEngine(GenerationEngine):
             seed_strategy=getattr(ctx, "pool_seed_strategy", "centroid"),
             top_k=_DEFAULT_TOP_K,
             plan=json.dumps(
-                {k: sorted(v) for k, v in sorted(plan.items())},
-                separators=(",", ":"),
+                _build_plan(self._profiles), separators=(",", ":")
             ),
             pool_sources=json.dumps(
                 dict(sorted(self._pool_sources.items())),
