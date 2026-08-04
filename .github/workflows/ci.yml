@@ -1,0 +1,95 @@
+name: CI
+
+# Laptop-side gate: every push and PR runs the no-GPU / no-GCP test suite plus
+# lint and type checks. GPU and GCP tests (`@pytest.mark.gpu` /
+# `@pytest.mark.gcp`) are intentionally skipped here — they require real
+# Dataflow / L4 / BigQuery infrastructure (M1 §11).
+#
+# Triggers on push to main + every PR. Fail-fast: lint/type before tests.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        # v6 runs on Node 24 (the v3 we used previously is being deprecated;
+        # see the Node 20 deprecation notice on prior CI runs).
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          enable-cache: true
+          # Cache key falls back to pyproject.toml if uv.lock is absent.
+          # Avoids a CI failure during the brief window between a new
+          # dependency landing in a pyproject and the uv.lock being committed.
+          cache-dependency-glob: |
+            **/uv.lock
+            **/pyproject.toml
+          python-version: "3.11"
+
+      - name: Sync workspace
+        run: uv sync --group dev
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Mypy (sdfb-core only — strict surface)
+        run: uv run mypy packages/sdfb-core/src
+        continue-on-error: true   # promote to hard-fail once type debt is paid
+
+      - name: Pytest (laptop-side suite)
+        run: uv run pytest -m "not gpu and not gcp" -q
+
+      - name: Doc / code drift check
+        # Fails the build if any string in `.github/drift-check.txt` still
+        # appears in a tracked file outside `docs/adr/` (where historical
+        # references are allowed). See `.claude/skills/refactor-cleanup.md`
+        # for the workflow when you delete or rename anything.
+        run: |
+          PATTERNS=.github/drift-check.txt
+          if [[ ! -s "$PATTERNS" ]]; then
+              echo "No drift-check patterns to enforce."
+              exit 0
+          fi
+          # Strip comments + blank lines into a sibling temp file.
+          GREP_FILE=$(mktemp)
+          grep -v '^\s*#' "$PATTERNS" | grep -v '^\s*$' > "$GREP_FILE"
+          if [[ ! -s "$GREP_FILE" ]]; then
+              echo "drift-check.txt has only comments — nothing to enforce."
+              exit 0
+          fi
+          # Scan every text source. Exclude docs/adr (history may reference
+          # removed names) and the patterns file itself.
+          HITS=$(grep -rnHF -f "$GREP_FILE" \
+              --include='*.md' --include='*.yaml' --include='*.yml' \
+              --include='*.py' --include='*.toml' --include='*.sh' \
+              --include='*.json' --include='*.txt' \
+              --exclude-dir=.venv --exclude-dir=.git \
+              --exclude-dir=__pycache__ --exclude-dir=adr \
+              --exclude='drift-check.txt' --exclude='initial_prompt.md' \
+              . || true)
+          if [[ -n "$HITS" ]]; then
+              echo "::error::Doc/code drift detected — these tracked files still reference removed identifiers:"
+              echo "$HITS"
+              echo
+              echo "Either fix the references, or — if a pattern is no longer a drift"
+              echo "indicator (long-cleaned) — remove it from .github/drift-check.txt."
+              exit 1
+          fi
+          echo "No drift detected."
+
+      - name: Pytest summary
+        if: always()
+        run: echo "Test job complete. See above for pass/fail and counts."
