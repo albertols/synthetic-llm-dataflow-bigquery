@@ -1,8 +1,9 @@
 # WS6 — Pipeline shape: the setup gap, the retry cascade, and the GroupByKey barrier
 
-> **Status: IMPLEMENTED (laptop side), AWAITING E2E MEASUREMENT.** All five
-> items are landed on `ws6-pipeline-shape` with 710 tests green; the §6
-> targets are *predictions* until a run measures them.
+> **Status: IMPLEMENTED + E2E MEASURED.** All five items are landed on
+> `ws6-pipeline-shape` (748 tests green as of 2026-08-05); the §6 targets are
+> measured by the 2026-07-31 → 2026-08-03 five-run matrix in **§11** — warm
+> 1M in 12.6 min (target < 15) and the first 10M-row run at 26.4 min.
 >
 > **W5 changed from investigation to fix during implementation** — see §5.
 >
@@ -454,3 +455,80 @@ once-guard). B.2 differences: `backend=` reports the bulk sampler that
 actually serves the run (`empirical` | `sdgx_ctgan` |
 `sdgx_fallback_empirical` — the silent-CTGAN-fallback lesson), and there is
 no `pool_sources` field because B.2 free-text pools build lazily per batch.
+
+## 11. 2026-07-31 → 08-03 five-run postmortem — the funnel closes, and 10M rows lands
+
+Five runs on the `9b441e6`+ build (`d08040e` head). Every number below is
+re-derived from `integration_tests/<JOB_ID>/worker_logs.jsonl` by the same
+sweep used for §9 (severity histogram, milestone inventory, batch timeline).
+
+| Signal | R1′ `07-31_05_20` cold A | R2′ `07-31_05_33` cold B | R3′ `07-31_09_11` | R4′ `08-03_09_03` warm B | R5′ `08-03_11_27` warm B **10M** |
+|---|---:|---:|---:|---:|---:|
+| Rows / free-text cols | 1M / 3 | 1M / 13 | — | 1M / 13 | **10M** / 13 |
+| Worker-log span | 22.0 min | 36.7 min | **log export failed (2-byte file)** | **12.6 min** | **26.4 min** (32 workers) |
+| First `batch_done` | +13.1 min | ~+28 min after workers up | — | **+4.3 min** | n/a (split lines) |
+| `batch_done` window | 5.6 min / 1,000 batches | 5.4 min / 1,000 | — | 5.5 min / 1,000 | 1,000 × 10k rows (WS5 scaling) |
+| `vllm_spawn` → `vllm_ready` | 1 → 1 | 14 → 1 (13 refused, see below) | — | **0 → 0** | **0 → 0** |
+| Pool store | absent → 3 built + written | absent → 13 built + written | — | **104/104 hits** | **416/416 hits** |
+| CUDA OOM / setup retries | 0 / 0 | 0 / 1 bundle retried | — | 0 / 0 | 0 / 0 |
+| ERROR lines (real) | 0 (1 benign SDK-progress) | 17 (one causal chain) | — | **0** | 0 (1 benign SDK-progress) |
+
+**§6 acceptance, measured:** warm 1M wall clock **12.6 min** (target < 15 ✓);
+`freetext_pool_built` ≤ cols, cold-only ✓; CUDA OOM **0** ✓; setup retries 0
+warm ✓. The 10M run sustains **~6.3k rows/s** end-to-end — 10× the rows for
+2.1× the wall clock of the warm 1M run, with zero vLLM ignitions.
+
+### The LLM lifecycle + pool failover funnel, as observed
+
+```mermaid
+flowchart TD
+  S[Generate DoFn.setup] --> Q{pool store hit?}
+  Q -- "warm: 104/104, 416/416" --> SKIP["no vLLM at all<br/>R4′ 12.6 min, R5′ 26.4 min"]
+  Q -- "cold: store_absent" --> G{VRAM fits<br/>max_model_len ≥ 4096?}
+  G -- yes --> SP[vllm_spawn → vllm_ready] --> L["pool ladder<br/>(≤8 attempts)"]
+  G -- "no: fitted 3136 &lt; 4096" --> REF["vllm_max_model_len_unfittable<br/>refuse doomed spawn, fail bundle fast<br/>13× in ~2 min on R2′"]
+  REF -.Dataflow bundle retry.-> S
+  L --> T{target 512 met?}
+  T -- yes --> W[freetext_pool_built → store_written]
+  T -- "no: stagnation / echoes" --> U["freetext_pool_undersized<br/>accept + shape top-up"] --> W
+```
+
+**What R2′ proves:** the 9b441e6 VRAM guard converts the §8 doom loop
+(52 spawns / 0 ready / 50 min / job FAILED) into 13 fail-fast refusals inside
+~2 minutes, one bundle retry, and a completed job. The guard *works*. The
+residual cost is real but bounded: 13 wasted bundle attempts while the winning
+server igniting elsewhere held the card. Candidate (small): setup attempts that
+measure an unfittable card while a sibling *is igniting* should wait on the
+ignition latch instead of failing the bundle.
+
+**Also verified on R2′:** `ddl_uri_miss_fallback` → `ddl_live_extracted` —
+a missing DDL JSON in GCS degraded to live extraction and the run proceeded.
+
+### Findings feeding the next cycle
+
+1. **The pool cap is now the diversity ceiling** (measured, 2026-08-04
+   free-text crosscheck vs the R5′ 10M table): synthetic `distinct` per
+   free-text column **equals its pool size** (95–512) against source distincts
+   of 4k–146k; 11/13 columns also show `empty_fraction` source 15–99% vs
+   synthetic ~0%. Both are generation-design gaps, not run failures — owned by
+   the 2026-08-05 relational-metadata/fidelity design spec.
+2. **Echo burn:** R2′ `REFERENCE_2` parsed 1,065 values but rejected 439
+   prompt echoes + verbatim copies → pool 296/512 after 8 attempts. §10's
+   marginal-yield decay candidate stands.
+3. **`generation_plan` fired 4× on R5′** — the once-guard is per-process;
+   32 workers ⇒ multiple emissions. Fine for grep, but rename the intent or
+   dedupe run-level if "one per run" is to be literal.
+4. **Log-export tooling:** R3′'s `worker_logs.jsonl` is 2 bytes and R5′'s has
+   17,621 line-split records (multi-line messages not JSON-escaped). The
+   export script needs a re-pull + escape fix before the next postmortem.
+
+### PR #11 merge readiness (2026-08-05)
+
+- 748 laptop tests green, `ruff` clean, branch rebased state `CLEAN`/`MERGEABLE`.
+- **CI never ran on the PR** — zero workflow runs for the branch, and
+  `ci.yml`'s push trigger watches `main` while the default branch is `master`.
+  Fix the trigger (or re-push) and require one green check before merge.
+- PR title still says "design only, do not merge" — retitle before merging;
+  the branch long since became the WS5/WS6 implementation vehicle.
+- Head commit `d08040e` unpushed at analysis time.
+- Repo squash-merges: review with the two-dot diff (`git diff master ws6-pipeline-shape`).
