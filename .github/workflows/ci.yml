@@ -20,6 +20,12 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # pyproject.toml defaults to the corporate JFrog index (ADR 0003),
+      # which only resolves inside the corp network / M4. GitHub-hosted
+      # runners go straight to PyPI; env-level --default-index overrides
+      # the pyproject [[tool.uv.index]] default (verified with uv 0.12).
+      UV_DEFAULT_INDEX: https://pypi.org/simple
 
     steps:
       - uses: actions/checkout@v5
