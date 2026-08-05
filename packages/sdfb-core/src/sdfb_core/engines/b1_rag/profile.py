@@ -30,6 +30,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sdfb_core.engines.text_shapes import (
+    RelaxedShapes,
+    build_shape_mix,
     detect_identifier_shape,
     detect_temporal_format,
 )
@@ -98,6 +100,12 @@ class ColumnProfile:
     kind: ColumnKind
     nullable: bool
     null_fraction: float
+    # Fraction of ALL sampled rows whose value is a string that is empty
+    # after .strip() (2026-08-04 crosscheck: 11/13 columns were mostly
+    # empty in source, ~0% empty synthetic). Empties are EXCLUDED from
+    # pools/examples and re-emitted at this rate — except on CATEGORICAL
+    # routes, where the frequency table carries them and this stays 0.0.
+    empty_fraction: float = 0.0
     # CONSTANT
     constant_value: object | None = None
     # NUMERIC — observed bounds + whether values are integral.
@@ -119,6 +127,9 @@ class ColumnProfile:
     # identifier-shaped columns generate format-preserving values per row and
     # never touch the LLM (2026-07-17 E2E: the pool route collapses them).
     identifier_shape: tuple[str, ...] | None = None
+    # FREE_TEXT — observed exact-shape mix (weight, template) for the
+    # shape-preserving expander + pattern guidance (2026-08-05 spec C2/C3).
+    shape_mix: RelaxedShapes | None = None
     # TEMPORAL — strftime format when the column is a date-shaped STRING;
     # range-sampled floats render back to strings in the observed format.
     temporal_format: str | None = None
@@ -150,6 +161,13 @@ def _profile_one(col: FieldSchema, values: list[object]) -> ColumnProfile:
     non_null = [v for v in values if v is not None]
     null_fraction = (n - len(non_null)) / n if n else 0.0
     nullable = col.is_nullable
+    # Trimmed-empty strings are sparsity, not content: they leave the value
+    # stream here and re-enter at sampling time via `empty_fraction`.
+    empties = sum(1 for v in non_null if isinstance(v, str) and not v.strip())
+    empty_fraction = empties / n if n else 0.0
+    substantive = [
+        v for v in non_null if not (isinstance(v, str) and not v.strip())
+    ]
 
     distinct = _ordered_distinct(non_null)
 
@@ -174,7 +192,14 @@ def _profile_one(col: FieldSchema, values: list[object]) -> ColumnProfile:
         )
 
     if col.bq_type in _STRINGY_BQ_TYPES:
-        return _profile_string(col, non_null, nullable, null_fraction)
+        return _profile_string(
+            col,
+            substantive,
+            nullable,
+            null_fraction,
+            empty_fraction=empty_fraction,
+            with_empties=non_null,
+        )
 
     if col.bq_type in _TEMPORAL_BQ_TYPES:
         return _profile_temporal(col, non_null, nullable, null_fraction)
@@ -352,7 +377,12 @@ def _profile_string(
     non_null: list[object],
     nullable: bool,
     null_fraction: float,
+    empty_fraction: float = 0.0,
+    with_empties: list[object] | None = None,
 ) -> ColumnProfile:
+    """`non_null` arrives with trimmed-empty strings already removed;
+    `with_empties` keeps them for the CATEGORICAL fallthrough, where the
+    frequency table (not `empty_fraction`) owns the parity."""
     strings = [str(v) for v in non_null]
     distinct = _ordered_distinct(strings)
     n = len(strings)
@@ -382,6 +412,7 @@ def _profile_string(
                 kind=ColumnKind.TEMPORAL,
                 nullable=nullable,
                 null_fraction=null_fraction,
+                empty_fraction=empty_fraction,
                 numeric_min=lo,
                 numeric_max=hi,
                 temporal_format=fmt,
@@ -398,6 +429,7 @@ def _profile_string(
                 kind=ColumnKind.FREE_TEXT,
                 nullable=nullable,
                 null_fraction=null_fraction,
+                empty_fraction=empty_fraction,
                 identifier_shape=shape,
                 is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
                 observed_values=tuple(strings),
@@ -410,13 +442,20 @@ def _profile_string(
             kind=ColumnKind.FREE_TEXT,
             nullable=nullable,
             null_fraction=null_fraction,
+            empty_fraction=empty_fraction,
             text_examples=examples,
             # Nearly-all-distinct reference values (ids, unique prose): the
             # engine must not fold observed values into the generated pool.
             is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
             observed_values=tuple(strings),
+            shape_mix=build_shape_mix(distinct),
         )
-    return _profile_categorical(col, non_null, nullable, null_fraction)
+    return _profile_categorical(
+        col,
+        with_empties if with_empties is not None else non_null,
+        nullable,
+        null_fraction,
+    )
 
 
 def _profile_categorical(
