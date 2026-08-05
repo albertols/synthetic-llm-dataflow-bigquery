@@ -34,6 +34,7 @@ from sdfb_core.contracts import GeneratedRecord
 from sdfb_core.engines.b2_library.backends import EmpiricalBackend, SdgxBackend
 from sdfb_core.engines.b2_library.fidelity import (
     ColumnKind,
+    ColumnProfile,
     enforce_value,
     profile_table,
 )
@@ -84,6 +85,22 @@ class B2LibraryEngine(GenerationEngine):
         self._ctx = ctx
         self._record_model = derive_record_model(ctx.table_schema)
         self._profiles = profile_table(ctx.table_schema, ctx.reference_rows)
+        # FK columns sample from the parent's landed keys (ADR 0021) —
+        # uniform categorical over exactly the parent pool, mirroring B.1.
+        for fk_name, fk_values in getattr(ctx, "fk_pools", {}).items():
+            if fk_name in self._profiles and fk_values:
+                base = self._profiles[fk_name]
+                self._profiles[fk_name] = ColumnProfile(
+                    name=base.name,
+                    bq_type=base.bq_type,
+                    kind=ColumnKind.CATEGORICAL,
+                    nullable=base.nullable,
+                    null_fraction=0.0,
+                    categories=tuple(fk_values),
+                    weights=tuple(
+                        1.0 / len(fk_values) for _ in fk_values
+                    ),
+                )
         self._free_text_cols = [
             name
             for name, p in self._profiles.items()

@@ -207,6 +207,21 @@ class B1RagEngine(GenerationEngine):
 
         # 3. profile columns (cheap O(N_ref) pass).
         self._profiles = profile_columns(ctx.table_schema, ctx.reference_rows)
+        # FK columns sample from the parent's landed keys (ADR 0021):
+        # override the profiled kind with a uniform categorical over
+        # exactly the parent pool — integrity beats the child marginal.
+        for fk_name, fk_values in getattr(ctx, "fk_pools", {}).items():
+            if fk_name in self._profiles and fk_values:
+                base = self._profiles[fk_name]
+                self._profiles[fk_name] = ColumnProfile(
+                    name=base.name,
+                    bq_type=base.bq_type,
+                    kind=ColumnKind.CATEGORICAL,
+                    nullable=base.nullable,
+                    null_fraction=0.0,
+                    categories={v: 1 for v in fk_values},
+                    observed_values=tuple(fk_values),
+                )
         self._samplers = {
             name: ColumnSampler(prof) for name, prof in self._profiles.items()
         }

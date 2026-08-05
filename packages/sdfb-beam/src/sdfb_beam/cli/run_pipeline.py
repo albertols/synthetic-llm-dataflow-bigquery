@@ -51,6 +51,7 @@ from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_beam.io.fk_pools import load_fk_pools
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
 from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
@@ -220,6 +221,11 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="Attach per-column llm_prompt_constraint (parsed "
                         "from column-description JSON) to pool prompts "
                         "(spec C5). Prefix-cache-safe constant suffix.")
+    p.add_argument("--fk_parent_landing", default="",
+                   help="project.dataset holding already-landed synthetic "
+                        "parent tables (ADR 0021). With a contract that "
+                        "declares FKs, child FK columns sample from the "
+                        "parents' landed keys. Empty = FK pools off.")
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
@@ -495,7 +501,10 @@ def _load_reference_and_preflight(args, table_schema):
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
-    return reference_rows, pf
+    fk_pools: dict = {}
+    if pf.contract and pf.contract.fk and args.fk_parent_landing:
+        fk_pools = load_fk_pools(pf.contract.fk, args.fk_parent_landing)
+    return reference_rows, pf, fk_pools
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -524,7 +533,9 @@ def main(argv: list[str] | None = None) -> int:
         vllm_max_model_len=args.vllm_max_model_len,
     )
 
-    reference_rows, pf = _load_reference_and_preflight(args, table_schema)
+    reference_rows, pf, fk_pools = _load_reference_and_preflight(
+        args, table_schema
+    )
 
     thresholds = resolve_thresholds(args.thresholds_uri, args.env)
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
@@ -617,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         uniqueness_mode=args.uniqueness_mode,
         freetext_expansion=args.freetext_expansion,
         prompt_constraints=args.prompt_constraints == "on",
+        fk_pools=fk_pools,
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
