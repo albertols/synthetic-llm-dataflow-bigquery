@@ -14,6 +14,8 @@ class _FakeBqClient:
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
         self.queries: list[tuple[str, dict]] = []
+        self.loads: list[tuple[list[dict], str, object]] = []
+        self.load_results = 0
 
     def query(self, sql, job_config=None):
         params = {
@@ -24,6 +26,16 @@ class _FakeBqClient:
 
     def result(self):
         return list(self.rows)
+
+    def load_table_from_json(self, rows, table, job_config=None):
+        self.loads.append((list(rows), table, job_config))
+        client = self
+
+        class _Job:
+            def result(self):
+                client.load_results += 1
+
+        return _Job()
 
 
 def _pool() -> FreeTextPool:
@@ -91,3 +103,54 @@ def test_row_to_pool_tolerates_a_null_repeated_field():
     row = pool_to_row(_pool())
     row["values"] = None
     assert row_to_pool(row).values == ()
+
+
+def test_write_rows_uses_a_load_job_never_streaming_inserts():
+    """2026-07-29 four-run postmortem: the branch now writes its own rows.
+    A LOAD job keeps the rows out of the streaming buffer, so the digest
+    DELETE between seeding arms (RUN_PLAYBOOK §6c) works immediately —
+    insert_rows_json rows are undeletable for up to ~90 min."""
+    client = _FakeBqClient([])
+    store = BigQueryFreeTextPoolStore("p.synthetic_rag.freetext_pools", client=client)
+    rows = [pool_to_row(_pool())]
+    store.write_rows(rows)
+    assert client.loads, "write_rows must issue a load job"
+    loaded_rows, table, job_config = client.loads[0]
+    assert loaded_rows == rows
+    assert table == "p.synthetic_rag.freetext_pools"
+    assert job_config.write_disposition == "WRITE_APPEND"
+    assert client.load_results == 1, "write_rows must block until the load lands"
+    assert not getattr(client, "inserts", []), "streaming inserts are forbidden"
+
+
+def test_in_memory_store_write_rows_round_trips_into_fetch():
+    from sdfb_core.pools import InMemoryFreeTextPoolStore
+
+    store = InMemoryFreeTextPoolStore()
+    store.write_rows([pool_to_row(_pool())])
+    assert store.fetch("d1", "gs://b/m") == [_pool()]
+
+
+def test_store_pickles_even_after_the_lazy_client_materialized():
+    """2026-07-29 R1 launch failure: the driver's exists() digest check
+    materialized the real bigquery.Client inside the store, and the
+    BuildFreeTextPoolsDoFn carrying that store died at graph-pickling time
+    ("Pickling client objects is explicitly not supported"). The lazy
+    client is a cache, not state — it must be dropped on pickle and
+    rebuilt on demand."""
+    import pickle
+
+    class _RefusesPickling:
+        """Mimics google.cloud.client.Client.__getstate__."""
+
+        def __getstate__(self):
+            raise pickle.PicklingError(
+                "Pickling client objects is explicitly not supported."
+            )
+
+    store = BigQueryFreeTextPoolStore(
+        "p.synthetic_rag.freetext_pools", client=_RefusesPickling()
+    )
+    clone = pickle.loads(pickle.dumps(store))
+    assert clone.table_fqn == "p.synthetic_rag.freetext_pools"
+    assert clone._client is None, "the client cache must not survive pickling"

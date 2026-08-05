@@ -124,3 +124,90 @@ def test_demote_logs_embedder_demoted_only_when_leaving_cuda(
     assert not [
         m for m in _milestones(caplog) if m["name"] == "embedder_demoted"
     ]
+
+
+# ---------------------------------------------------------------------------
+# WS6 W2 — "auto" must mean CUDA IF THERE IS ROOM, not "a GPU exists".
+#
+# 2026-07-26_17_10_37 E2E: on a DoFn.setup() RETRY the module-level vLLM
+# server reuse (ADR 0014) means vLLM is still resident and holds 13.80 of
+# 14.56 GiB. cuda.is_available() is still True, so the embedder tried CUDA
+# and OOMed asking for 2 MiB — 12 times. Availability is not capacity.
+# ---------------------------------------------------------------------------
+def _with_mem(monkeypatch, *, free_bytes: int, cuda_available: bool, log: dict):
+    _fake_stack(monkeypatch, cuda_available=cuda_available, log=log)
+    import sys
+
+    torch_mod = sys.modules["torch"]
+    torch_mod.cuda.mem_get_info = lambda: (free_bytes, 16 * 1024**3)
+    return torch_mod
+
+
+def test_auto_stays_on_cpu_when_the_gpu_is_full(monkeypatch, tmp_path):
+    """The exact 2026-07-26 condition: a GPU exists but vLLM owns it."""
+    from sdfb_core.rag.embedding import BgeEmbedder
+
+    log: dict = {}
+    _with_mem(monkeypatch, free_bytes=2 * 1024**2, cuda_available=True, log=log)
+    emb = BgeEmbedder(str(tmp_path), device="auto")
+    assert emb.device == "cpu"
+    assert log.get("moves") == ["cpu"], "must never attempt the .to(cuda)"
+
+
+def test_auto_uses_cuda_when_there_is_ample_room(monkeypatch, tmp_path):
+    from sdfb_core.rag.embedding import BgeEmbedder
+
+    log: dict = {}
+    _with_mem(monkeypatch, free_bytes=8 * 1024**3, cuda_available=True, log=log)
+    emb = BgeEmbedder(str(tmp_path), device="auto")
+    assert emb.device == "cuda"
+
+
+def test_auto_still_works_when_mem_get_info_is_unavailable(monkeypatch, tmp_path):
+    """Older/stubbed torch: fall back to today's availability check rather
+    than refusing the GPU outright."""
+    from sdfb_core.rag.embedding import BgeEmbedder
+
+    log: dict = {}
+    _fake_stack(monkeypatch, cuda_available=True, log=log)
+    emb = BgeEmbedder(str(tmp_path), device="auto")
+    assert emb.device == "cuda"
+
+
+def test_an_oom_on_move_degrades_to_cpu_instead_of_failing_the_bundle(
+    monkeypatch, tmp_path, caplog
+):
+    """Belt and braces: a race can still fill the card between the check and
+    the move. bge-small on CPU is slower, not wrong — never fail setup()."""
+    import sys
+
+    from sdfb_core.rag.embedding import BgeEmbedder
+
+    log: dict = {}
+    _with_mem(monkeypatch, free_bytes=8 * 1024**3, cuda_available=True, log=log)
+
+    class _OomError(RuntimeError):
+        pass
+
+    sys.modules["torch"].OutOfMemoryError = _OomError
+    real_to = None
+
+    class _FlakyModel:
+        def to(self, device):
+            log["moves"] = [*log.get("moves", []), device]
+            if device == "cuda":
+                raise _OomError("CUDA out of memory. Tried to allocate 2.00 MiB")
+            return self
+
+        def eval(self):
+            return self
+
+    sys.modules["transformers"].AutoModel = type(
+        "_L", (), {"from_pretrained": staticmethod(lambda p, **k: _FlakyModel())}
+    )
+    del real_to
+    with caplog.at_level("WARNING"):
+        emb = BgeEmbedder(str(tmp_path), device="auto")
+    assert emb.device == "cpu"
+    assert log["moves"] == ["cuda", "cpu"]
+    assert "embedder_cuda_oom_fallback" in caplog.text

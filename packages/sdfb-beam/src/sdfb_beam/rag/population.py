@@ -98,7 +98,11 @@ class EmbedChunksDoFn(beam.DoFn):
     def setup(self):
         uri = self.embedder_uri
         if uri.startswith("gs://"):
-            from sdfb_beam.dofns.generate import EMBEDDER_LOCAL_DIR
+            # Import from the localization module itself — importing the old
+            # re-export off dofns.generate is what killed the 2026-07-28 R1
+            # rerun (ImportError on every RagEmbedChunks bundle after the
+            # constant moved to dofns.localize in d2e1711).
+            from sdfb_beam.dofns.localize import EMBEDDER_LOCAL_DIR
             from sdfb_beam.gcs import localize_gcs_prefix
 
             uri = localize_gcs_prefix(uri, EMBEDDER_LOCAL_DIR)

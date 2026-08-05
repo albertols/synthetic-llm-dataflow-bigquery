@@ -24,6 +24,7 @@ module works on a laptop with only base deps installed.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
 import numpy as np
@@ -43,6 +44,8 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     ModelClient,
 )
+from sdfb_core.engines.generation_plan import build_plan, should_log_plan
+from sdfb_core.observability import log_milestone
 
 
 class B2LibraryEngine(GenerationEngine):
@@ -90,12 +93,40 @@ class B2LibraryEngine(GenerationEngine):
         if ctx.reference_rows:
             backend.fit(ctx.reference_rows, self._profiles)
         self._backend = backend
+        self._log_generation_plan(ctx)
         self._fitted = True
 
     def _make_backend(self):
         if self._use_sdgx:
             return SdgxBackend()
         return EmpiricalBackend()
+
+    def _backend_descriptor(self) -> str:
+        """Which bulk sampler actually serves this run — sdgx's silent
+        empirical fallback (2026-07-22: CTGAN had never run in prod) must be
+        visible here, not just in the b2_backend_fallback milestone."""
+        if isinstance(self._backend, SdgxBackend):
+            fell_back = getattr(self._backend, "_fallback", None) is not None
+            return "sdgx_fallback_empirical" if fell_back else "sdgx_ctgan"
+        return "empirical"
+
+    def _log_generation_plan(self, ctx: GenerationContext) -> None:
+        """ONE milestone mapping every column to its generation strategy —
+        the b2 mirror of b1_rag's. B.2 free-text pools build lazily per
+        batch (no pool_sources at setup); the run's bulk sampler is
+        reported via `backend=` instead of a RAG seed strategy."""
+        if not should_log_plan(
+            self.name, ctx.reference_digest, ctx.table_schema.fqn
+        ):
+            return
+        log_milestone(
+            "generation_plan",
+            engine=self.name,
+            table=ctx.table_schema.fqn,
+            columns=len(self._profiles),
+            backend=self._backend_descriptor(),
+            plan=json.dumps(build_plan(self._profiles), separators=(",", ":")),
+        )
 
     # -- pickling across the Beam worker boundary ---------------------------
     #

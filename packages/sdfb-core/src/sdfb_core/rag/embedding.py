@@ -27,11 +27,54 @@ REFs:
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import threading
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sdfb_core.observability import log_milestone
+
+# bge-small-en-v1.5 is ~130 MB of fp32 weights; activations and CUDA context
+# push the real footprint higher. Require this much FREE VRAM before "auto"
+# picks CUDA. The 2026-07-26 E2E asked for 2 MiB with 2.81 MiB free and
+# OOMed: cuda.is_available() answers "does a GPU exist", never "is there
+# room", and on a DoFn.setup() RETRY the module-level vLLM server reuse
+# (ADR 0014) means the card is already spoken for.
+_MIN_FREE_VRAM_BYTES = 512 * 1024**2
+
+
+def _resolve_auto_device(torch) -> str:
+    """``device="auto"`` = CUDA **if there is room**, else CPU."""
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not cuda.is_available():
+        return "cpu"
+    mem_get_info = getattr(cuda, "mem_get_info", None)
+    if mem_get_info is None:
+        # Older/stubbed torch: no way to ask. Keep the historical behaviour
+        # rather than refusing the GPU outright.
+        return "cuda"
+    try:
+        free_bytes = mem_get_info()[0]
+    except Exception:
+        return "cuda"
+    if free_bytes >= _MIN_FREE_VRAM_BYTES:
+        return "cuda"
+    log_milestone(
+        "embedder_cuda_no_room",
+        level=logging.WARNING,
+        free_mib=round(free_bytes / 1024**2, 1),
+        needed_mib=round(_MIN_FREE_VRAM_BYTES / 1024**2),
+    )
+    return "cpu"
+
+
+def _is_cuda_oom(torch, exc: BaseException) -> bool:
+    """True for torch's CUDA OOM, however this torch version spells it."""
+    oom = getattr(torch, "OutOfMemoryError", None)
+    if oom is not None and isinstance(exc, oom):
+        return True
+    return "out of memory" in str(exc).lower()
+
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Sequence
@@ -153,12 +196,7 @@ class BgeEmbedder:
 
             requested = device
             if device == "auto":
-                cuda = getattr(torch, "cuda", None)
-                device = (
-                    "cuda"
-                    if cuda is not None and cuda.is_available()
-                    else "cpu"
-                )
+                device = _resolve_auto_device(torch)
             # One milestone at the seam covers every embedder user (engine
             # setup AND the population EmbedChunksDoFn): worker logs must
             # show whether bulk embedding actually ran on CUDA — the
@@ -175,9 +213,25 @@ class BgeEmbedder:
             self._tokenizer = AutoTokenizer.from_pretrained(
                 model_path, local_files_only=True
             )
-            self._model = AutoModel.from_pretrained(
-                model_path, local_files_only=True
-            ).to(device)
+            model = AutoModel.from_pretrained(model_path, local_files_only=True)
+            # Belt and braces on top of the free-VRAM check above: another
+            # process can fill the card between the check and the move. A
+            # slower CPU embedder is right; a failed DoFn.setup() is not —
+            # it makes Dataflow retry the bundle, which is how the
+            # 2026-07-26 run turned one OOM into 11 retries.
+            try:
+                self._model = model.to(device)
+            except Exception as exc:
+                if device != "cuda" or not _is_cuda_oom(torch, exc):
+                    raise
+                log_milestone(
+                    "embedder_cuda_oom_fallback",
+                    level=logging.WARNING,
+                    error=type(exc).__name__,
+                )
+                device = "cpu"
+                self._device = device
+                self._model = model.to(device)
             self._model.eval()
 
     @property

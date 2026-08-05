@@ -98,10 +98,14 @@ class PipelineConfig:
     pool_pattern_guidance: bool = False
     # Persisted free-text pools (WS5 §2). Threads the READ path into the
     # worker ctx exactly as rag_chunks_table does; the build branch is
-    # gated separately by the driver passing `freetext_pools_sink`.
+    # gated separately by the driver passing `freetext_pools_store`.
     freetext_pools_table: str = ""
     # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
     pool_seed_strategy: str = "centroid"
+    # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
+    # behind up to three shuffle barriers; "streaming" lands rows as they
+    # are generated and measures the duplicate rate instead.
+    uniqueness_mode: str = "exact"
 
 
 def build_pipeline(
@@ -113,7 +117,7 @@ def build_pipeline(
     dlq_sink: beam.PTransform,
     validation_runs_sink: beam.PTransform | None = None,
     rag_chunks_sink: beam.PTransform | None = None,
-    freetext_pools_sink: beam.PTransform | None = None,
+    freetext_pools_store: Any = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -165,6 +169,35 @@ def build_pipeline(
 
     requests = p | "CreateRequests" >> beam.Create(request_specs)
 
+    # WS5 §2 / 2026-07-29 four-run postmortem — optional free-text pool
+    # build branch. The driver decides (digest existence check) whether to
+    # pass a store; None ⇒ branch absent, DAG unchanged. The branch builds
+    # the pool ladder ONCE, writes `freetext_pools` itself (blocking load
+    # job inside the DoFn), and its OUTPUT gates Generate below: on the
+    # R1/R3 cold runs an ungated Generate raced the branch and every pool
+    # was built twice concurrently on the same GPU (R3: 2x 13 ladders,
+    # 2,005 s + 2,026 s of duplicated LLM time). The AsList side input is a
+    # runner-level barrier — Generate bundles are not scheduled until the
+    # branch (build + store write) completes, so every Generate setup's
+    # store fetch hits.
+    if freetext_pools_store is not None:
+        pool_rows = (
+            p
+            | "PoolTrigger" >> beam.Create([None])
+            | "BuildFreeTextPools"
+            >> beam.ParDo(
+                BuildFreeTextPoolsDoFn(
+                    config.engine_name,
+                    config.model_client,
+                    ctx,
+                    store=freetext_pools_store,
+                )
+            )
+        )
+        requests = requests | "AwaitFreeTextPools" >> beam.Map(
+            lambda spec, _pools: spec, _pools=beam.pvalue.AsList(pool_rows)
+        )
+
     generated = (
         requests
         | "Generate" >> beam.ParDo(
@@ -187,7 +220,13 @@ def build_pipeline(
 
     batched = (
         record_validated.main
-        | "Batch" >> beam.BatchElements(min_batch_size=10, max_batch_size=100)
+        # WS6 F3 (2026-07-27_10_42_52 E2E): 10-100-row batches meant Pandera
+        # validated 1M rows as 10k-100k MICRO-DataFrames — the per-frame
+        # construction + schema-compile overhead made PanderaValidate the
+        # funnel inside the fused Generate->KeyByRowDigest stage (~0.88k
+        # rows/s). Pandera's cost is amortized over rows in the frame, so
+        # validate thousands at a time, not tens.
+        | "Batch" >> beam.BatchElements(min_batch_size=1_000, max_batch_size=10_000)
     )
     batch_validated = (
         batched
@@ -201,6 +240,7 @@ def build_pipeline(
     uniq = batch_validated.main | "EnforceUniqueness" >> EnforceUniqueness(
         identity_columns=list(config.identity_columns),
         pk_columns=list(config.pk_columns),
+        mode=config.uniqueness_mode,
     )
 
     # Landing sink — valid, unique records only.
@@ -289,23 +329,6 @@ def build_pipeline(
         )
         _ = chunks | "WriteRagChunks" >> rag_chunks_sink
 
-    # WS5 §2 — optional free-text pool build branch. Same shape as the
-    # rag_chunks branch above: the driver decides (existence check) whether
-    # to pass a sink; None ⇒ branch absent, DAG unchanged. Runs concurrently
-    # with Generate and writes an artifact keyed on the reference digest, so
-    # the pool ladder is paid once per (digest, model) instead of once per
-    # worker PROCESS (2026-07-26 1M run: 108 rebuilds, 68,805 LLM-seconds).
-    if freetext_pools_sink is not None:
-        _ = (
-            p
-            | "PoolTrigger" >> beam.Create([None])
-            | "BuildFreeTextPools"
-            >> beam.ParDo(
-                BuildFreeTextPoolsDoFn(config.engine_name, config.model_client, ctx)
-            )
-            | "WriteFreeTextPools" >> freetext_pools_sink
-        )
-
     result: dict[str, Any] = {
         "reference_digest": digest,
         "run_id": config.run_id,
@@ -320,14 +343,8 @@ def build_pipeline(
         thresholds = config.thresholds or Thresholds(
             env="dev", blocker_failure_ratio=1.0
         )
-        valid_count = (
-            uniq["unique"] | "CountValid" >> beam.combiners.Count.Globally()
-        )
-        dlq_by_rule = (
-            dlq_raw
-            | "DlqRulePairs" >> beam.Map(_dlq_rule_weight)
-            | "DlqRuleCounts" >> beam.CombinePerKey(sum)
-            | "DlqRuleDict" >> beam.combiners.ToDict()
+        valid_count, dlq_by_rule = _gate_inputs(
+            uniq, dlq_raw, config.uniqueness_mode
         )
         summary_rows = (
             p
@@ -379,6 +396,35 @@ def _rag_free_text_columns(
         for p in profiles.values()
         if p.kind is ColumnKind.FREE_TEXT and p.identifier_shape is None
     ]
+
+
+def _gate_inputs(uniq: dict, dlq_raw, uniqueness_mode: str):
+    """`(valid_count, dlq_by_rule)` singletons for the BLOCKER gate.
+
+    `build_run_summary` computes ``total = valid_count + dlq_count``. In
+    STREAMING mode duplicates land instead of diverting, so counting landed
+    rows would push `total` above the rows actually generated and quietly
+    dilute the blocker ratio — a silently weaker gate. `EnforceUniqueness`
+    publishes `distinct_count` for exactly this reason: distinct + excess is
+    the number of rows generated, so the arithmetic is identical in both
+    modes.
+    """
+    if uniqueness_mode == "streaming":
+        valid_count = uniq["distinct_count"]
+    else:
+        valid_count = uniq["unique"] | "CountValid" >> beam.combiners.Count.Globally()
+    dlq_by_rule = (
+        (
+            dlq_raw | "DlqRulePairs" >> beam.Map(_dlq_rule_weight),
+            # Streaming reports duplicates as measured counts rather than
+            # diverted envelopes; the gate folds them identically.
+            uniq["rule_counts"],
+        )
+        | "AllRulePairs" >> beam.Flatten()
+        | "DlqRuleCounts" >> beam.CombinePerKey(sum)
+        | "DlqRuleDict" >> beam.combiners.ToDict()
+    )
+    return valid_count, dlq_by_rule
 
 
 def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:

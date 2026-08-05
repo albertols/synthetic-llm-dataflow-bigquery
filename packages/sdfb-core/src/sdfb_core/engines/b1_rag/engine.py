@@ -36,11 +36,12 @@ imports at module scope. Heavy deps are deferred into the seams.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import threading
 import time
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sdfb_core.codegen import derive_record_model
 from sdfb_core.engines.b1_rag._fidelity import ColumnSampler, numpy_available
@@ -54,6 +55,8 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     escalating_sampling,
 )
+from sdfb_core.engines.generation_plan import build_plan as _build_plan
+from sdfb_core.engines.generation_plan import should_log_plan as _should_log_plan
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
     relaxed_shape_charset,
@@ -144,6 +147,8 @@ def clear_free_text_pool_cache() -> None:
         _POOL_CACHE.clear()
 
 
+
+
 class B1RagEngine(GenerationEngine):
     """Retrieval-augmented, distribution-estimator synthesis engine (B.1)."""
 
@@ -170,6 +175,17 @@ class B1RagEngine(GenerationEngine):
         self._embedder: Embedder | None = None
         self._ref_vectors: list[list[float]] = []
         self._free_text_pools: dict[str, list[str]] = {}
+        # column -> {"target", "attempts", "stagnated"} recorded by
+        # `_infer_free_text_pool` so the pool-branch rows persist the REAL
+        # build outcome (2026-07-29 postmortem: stored rows carried
+        # attempts=0 / stagnated=false / target=achieved-size because these
+        # were never recorded). Written from ladder threads — per-key dict
+        # assignment, atomic under the GIL.
+        self._pool_build_info: dict[str, dict[str, Any]] = {}
+        # column -> where its free-text pool came from this setup:
+        # "store" | "process_cache" | "llm_ladder". Feeds the
+        # generation_plan milestone's pool_sources field.
+        self._pool_sources: dict[str, str] = {}
         self._column_order: list[str] = []
         self._ready: bool = False
 
@@ -246,8 +262,39 @@ class B1RagEngine(GenerationEngine):
             seconds=round(time.monotonic() - t_pools, 1),
             freetext_cols=len(self._free_text_pools),
         )
+        self._log_generation_plan(ctx)
 
         self._ready = True
+
+    def _log_generation_plan(self, ctx: GenerationContext) -> None:
+        """ONE milestone mapping every column to its generation strategy.
+
+        Answers, without re-deriving it from scattered per-column milestones,
+        which fields are LLM free-text pools (and where this run's pools came
+        from), which are shaped identifiers routed off the LLM, and which are
+        plain samplers. Logged once per (digest, table) per worker process —
+        not once per DoFn-thread setup.
+        """
+        assert self._profiles is not None
+        if not _should_log_plan(
+            "b1_rag", ctx.reference_digest, ctx.table_schema.fqn
+        ):
+            return
+        log_milestone(
+            "generation_plan",
+            engine="b1_rag",
+            table=ctx.table_schema.fqn,
+            columns=len(self._profiles),
+            seed_strategy=getattr(ctx, "pool_seed_strategy", "centroid"),
+            top_k=_DEFAULT_TOP_K,
+            plan=json.dumps(
+                _build_plan(self._profiles), separators=(",", ":")
+            ),
+            pool_sources=json.dumps(
+                dict(sorted(self._pool_sources.items())),
+                separators=(",", ":"),
+            ),
+        )
 
     def teardown(self) -> None:
         if self._index is not None:
@@ -408,6 +455,28 @@ class B1RagEngine(GenerationEngine):
         # silently generating from nothing.
         return {p.column: list(p.values) for p in fetched if p.values}
 
+    def _resolve_stored_pools(
+        self, ctx: GenerationContext, free_text_columns: int
+    ) -> dict[str, list[str]]:
+        """Persisted pools for this run, announcing the store's absence.
+
+        The 2026-07-26 1M run spent 26 of its 53 minutes rebuilding pools
+        per worker PROCESS purely because nobody passed
+        ``--freetext_pools_table`` — and nothing in the logs said so. The
+        absence was only discoverable by noticing that
+        ``freetext_pool_store_*`` milestones never appeared, which is
+        exactly the silence a milestone exists to break.
+        """
+        if getattr(ctx, "pool_store", None) is None:
+            log_milestone(
+                "freetext_pool_store_absent",
+                level=logging.WARNING,
+                free_text_columns=free_text_columns,
+                num_rows=ctx.num_rows,
+            )
+            return {}
+        return self._stored_pools(ctx)
+
     def _take_stored_pool(
         self,
         column: str,
@@ -419,6 +488,7 @@ class B1RagEngine(GenerationEngine):
         hit = stored.get(column)
         if hit:
             pools[column] = list(hit)
+            self._pool_sources[column] = "store"
             log_milestone(
                 "freetext_pool_store_hit", column=column, pool_size=len(hit)
             )
@@ -445,7 +515,7 @@ class B1RagEngine(GenerationEngine):
         # authoritative; `_POOL_CACHE` below stays as the intra-process tier
         # that survives setup() retries inside one worker. A store outage is
         # never fatal: pools are an optimisation, not a dependency.
-        stored = self._stored_pools(ctx)
+        stored = self._resolve_stored_pools(ctx, len(free_text_cols))
 
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
         chunks_by_column = self._fetch_free_text_chunks(ctx)
@@ -472,6 +542,7 @@ class B1RagEngine(GenerationEngine):
                     cached = _POOL_CACHE.get(key)
                 if cached is not None:
                     pools[prof.name] = list(cached)
+                    self._pool_sources[prof.name] = "process_cache"
                     log_milestone(
                         "freetext_pool_cache_hit",
                         column=prof.name,
@@ -644,6 +715,7 @@ class B1RagEngine(GenerationEngine):
         LLM calls conditioned on retrieved exemplars."""
         assert self._client is not None
         t_column = time.monotonic()
+        self._pool_sources[prof.name] = "llm_ladder"
         per_call = min(target, _POOL_VALUES_PER_CALL)
         prompt = _build_pool_prompt(prof.name, per_call, seed_examples)
         # ARRAY completions only — never n single-value choices. A choice is
@@ -698,9 +770,17 @@ class B1RagEngine(GenerationEngine):
             )
             pool = []
             format_rejected = 0
+            self._pool_build_info[prof.name] = {
+                "target": target, "attempts": 0, "stagnated": False,
+            }
         else:
             pool = self._resolve_pool_yield(prof, y, per_call, target)
             format_rejected = y.format_rejected
+            self._pool_build_info[prof.name] = {
+                "target": target,
+                "attempts": y.attempts,
+                "stagnated": y.stagnated,
+            }
 
         # Fold observed exemplars ONLY when the LLM delivered nothing (lax
         # mode) — loudly, via the fallback milestone emitted above. Every
@@ -902,6 +982,11 @@ class _PoolYield(NamedTuple):
     prompt_echoes: int
     attempts: int
     format_rejected: int = 0
+    # True when the ladder exited on yield-decay (the stagnation break), as
+    # opposed to reaching target or exhausting the attempt budget. Persisted
+    # per column into `freetext_pools.stagnated` (2026-07-29: rows stored
+    # hardcoded false because nothing recorded this).
+    stagnated: bool = False
 
 
 def _build_pool_prompt(column: str, per_call: int, seed_examples: list[str]) -> str:
@@ -981,6 +1066,7 @@ def _pool_llm_yield(
     per_round = _POOL_VALUES_PER_CALL * max(1, n_choices)
     max_calls = max(len(levels), 2 * -(-target // per_round))
     stagnant = 0
+    hit_stagnation = False
     while attempts < max_calls and len(pool) < target:
         level = levels[min(attempts, len(levels) - 1)]
         # kcenter_rotate (WS5 §3): re-seed the prompt each attempt so the
@@ -1026,10 +1112,11 @@ def _pool_llm_yield(
                 target=target,
                 format_rejected=n_format_rejected,
             )
+            hit_stagnation = True
             break
     return _PoolYield(
         pool, n_parsed, len(seen), n_copies, n_echoes, attempts,
-        n_format_rejected,
+        n_format_rejected, hit_stagnation,
     )
 
 

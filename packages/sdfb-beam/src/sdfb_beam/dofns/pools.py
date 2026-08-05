@@ -9,6 +9,7 @@ because `_POOL_CACHE` lives for exactly one worker process.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,7 @@ from sdfb_core.engines import get_engine
 from sdfb_core.observability import log_milestone
 from sdfb_core.pools import FreeTextPool
 
+from sdfb_beam.dofns.localize import localize_embedder
 from sdfb_beam.pools.store import pool_to_row
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -31,16 +33,26 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
     already produced.
     """
 
-    def __init__(self, engine_name: str, model_client, ctx) -> None:
+    def __init__(self, engine_name: str, model_client, ctx, store=None) -> None:
         self.engine_name = engine_name
         self.model_client = model_client
         self.ctx = ctx
+        # The branch's own write path (2026-07-29): rows land via a blocking
+        # `store.write_rows` BEFORE they are emitted, so the DAG gate fed by
+        # this DoFn's output releases Generate only once a store fetch hits.
+        # Distinct from ctx.pool_store, which setup() blanks (self-read guard).
+        self.store = store
         self._engine: Any = None
 
     def setup(self) -> None:
+        # A gs:// embedder_uri must become a worker-local path BEFORE the
+        # engine builds its embedder (2026-07-28 R1: skipping this handed
+        # the raw gs:// URI to AutoTokenizer.from_pretrained and killed the
+        # job on HFValidationError). Shared with GenerateRecordsDoFn.
+        ctx = localize_embedder(self.ctx)
         # The build branch must never read its own output — otherwise it
         # would short-circuit itself into writing nothing on a re-run.
-        ctx = self.ctx.model_copy(
+        ctx = ctx.model_copy(
             update={"pool_store": None, "freetext_pools_table": ""}
         )
         self.ctx = ctx
@@ -56,24 +68,44 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
 
     def process(self, _element) -> Iterator[dict]:
         pools = getattr(self._engine, "_free_text_pools", None) or {}
+        build_info = getattr(self._engine, "_pool_build_info", None) or {}
+        rows = []
         for column, values in pools.items():
             if not values:
                 continue
-            yield pool_to_row(
-                FreeTextPool(
-                    reference_digest=self.ctx.reference_digest,
-                    model_uri=self.ctx.model_uri,
-                    column=column,
-                    target=len(values),
-                    values=tuple(values),
-                    stagnated=bool(
-                        getattr(self._engine, "_pool_stagnated", {}).get(column, False)
-                    ),
-                    attempts=int(
-                        getattr(self._engine, "_pool_attempts", {}).get(column, 0)
-                    ),
+            info = build_info.get(column, {})
+            rows.append(
+                pool_to_row(
+                    FreeTextPool(
+                        reference_digest=self.ctx.reference_digest,
+                        model_uri=self.ctx.model_uri,
+                        column=column,
+                        target=int(info.get("target", len(values))),
+                        values=tuple(values),
+                        stagnated=bool(info.get("stagnated", False)),
+                        attempts=int(info.get("attempts", 0)),
+                    )
                 )
             )
+        if self.store is not None and rows:
+            t_write = time.monotonic()
+            try:
+                self.store.write_rows(rows)
+                log_milestone(
+                    "freetext_pool_store_written",
+                    rows=len(rows),
+                    seconds=round(time.monotonic() - t_write, 1),
+                )
+            except Exception as e:
+                # Pools are an optimisation, never a dependency: emit the
+                # rows anyway so the AwaitFreeTextPools gate opens and
+                # Generate falls back to building pools itself.
+                log_milestone(
+                    "freetext_pool_store_write_error",
+                    level=logging.WARNING,
+                    error=type(e).__name__,
+                )
+        yield from rows
         log_milestone("pool_branch_emitted", columns=len(pools))
 
     def teardown(self) -> None:

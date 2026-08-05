@@ -237,6 +237,15 @@
       "regexes": [
         "^(centroid|kcenter|kcenter_rotate)?$"
       ]
+    },
+    {
+      "name": "uniqueness_mode",
+      "label": "Uniqueness enforcement mode",
+      "helpText": "exact (default) diverts every duplicate to the DLQ behind up to three shuffle barriers, so no row lands until generation finishes. streaming lands rows as they are generated and measures the duplicate rate instead; duplicate rows LAND, the run is still marked FAILED_BLOCKER, so re-run with write_disposition=overwrite.",
+      "isOptional": true,
+      "regexes": [
+        "^(exact|streaming)?$"
+      ]
     }
   ]
 }

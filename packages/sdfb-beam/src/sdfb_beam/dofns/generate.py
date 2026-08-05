@@ -39,7 +39,11 @@ from sdfb_core.seeding import derive_batch_seed
 # (`transformers`) read from a local directory only — they cannot open a
 # gs:// URI — so the DoFn pulls the prefix here before the engine builds its
 # embedder. Mirrors the vLLM client's `/local-ssd/model` convention.
-EMBEDDER_LOCAL_DIR = "/local-ssd/embedder"
+# Re-exported from the shared localization module (WS6: one definition
+# for every engine-building DoFn — see dofns/localize.py).
+from sdfb_beam.dofns.localize import (
+    localize_embedder,
+)
 
 # Per-process ledger of failed setup() attempts, keyed "engine:run_id".
 # Dataflow retries a failed bundle with a FRESH DoFn in the SAME process;
@@ -118,18 +122,8 @@ class GenerateRecordsDoFn(beam.DoFn):
         # (see GenerationContext.embedder_uri: "local paths … pulled by the
         # DoFn"). The LLM weights need no equivalent here — the ModelClient
         # pulls those itself in its own setup().
-        ctx = self.ctx
-        if ctx.embedder_uri.startswith("gs://"):
-            from sdfb_beam.gcs import localize_gcs_prefix
-
-            log_milestone("embedder_pull_start", uri=ctx.embedder_uri)
-            t_pull = time.monotonic()
-            local_dir = localize_gcs_prefix(ctx.embedder_uri, EMBEDDER_LOCAL_DIR)
-            log_milestone(
-                "embedder_pull_done",
-                seconds=round(time.monotonic() - t_pull, 1),
-            )
-            ctx = ctx.model_copy(update={"embedder_uri": local_dir})
+        ctx = localize_embedder(self.ctx)
+        if ctx is not self.ctx:
             self.ctx = ctx  # cache so a re-entrant setup() skips the pull
 
         # RAG read path (WS2 §4b.1): the BQ-backed ChunkStore cannot ride

@@ -10,6 +10,12 @@ Two engines coexist behind one `GenerationEngine` interface:
 - **B.1 — RAG**: embeds the reference sample, retrieves top-k exemplars per generation request, prompts Gemma 4 with schema + exemplars under JSON-schema-guided decoding.
 - **B.2 — library-wrapper**: wraps a battle-tested tabular synthesis library (`sdgx` or DataDreamer — bake-off scheduled for M1 §6) and patches free-text columns via the LLM `ModelClient`.
 
+## Beam Summit 2025
+
+This solution was accepted for presentation at [Beam Summit 2025](https://beamsummit.org) as the session **"Building Banking Synthetic Data for a Lakehouse with Gemma"**:
+
+![Beam Summit 2025 acceptance email](docs/assets/beam-summit-2025-acceptance.png)
+
 ## Status
 
 Milestone 1 — in progress. See `CLAUDE.md` for the locked scope and `.claude/skills/` / `.claude/agents/` for the work breakdown.
