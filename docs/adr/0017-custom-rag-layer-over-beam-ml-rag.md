@@ -1,6 +1,9 @@
 # ADR 0017 — Custom RAG layer instead of `apache_beam.ml.rag`
 
 - **Status**: accepted (2026-07-24)
+- **Figures**: the retrieval geometry this layer implements (centroid top-k
+  cones, k-center coverage, conditioning trade-offs) is drawn in
+  [`2026-07-25-rag-retrieval-geometry-roadmap.md`](../designs/2026-07-25-rag-retrieval-geometry-roadmap.md).
 
 ## Context
 

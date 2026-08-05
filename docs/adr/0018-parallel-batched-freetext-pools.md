@@ -2,6 +2,11 @@
 
 Date: 2026-07-25
 Status: accepted
+Figures: pool-build cost anatomy and seed strategies in
+[`2026-07-26-ws5-generation-throughput.md`](../designs/2026-07-26-ws5-generation-throughput.md);
+the prefix-cache prompt anatomy this ADR's byte-identical-prefix rule
+protects is drawn in
+[`2026-08-05-source-table-stats.md`](../designs/2026-08-05-source-table-stats.md).
 
 ## Context
 

@@ -1,6 +1,11 @@
 # ADR 0013 — Synthesis engines use an LLM-as-distribution-estimator spine, not per-row LLM generation
 
 - **Status**: accepted (2026-05-21)
+- **Figures**: the spine's fidelity primitives and the rejected per-row-LLM
+  alternative (GReaT) are drawn in
+  [`2026-08-05-source-table-stats.md`](../designs/2026-08-05-source-table-stats.md)
+  (inverse-CDF concept set + appendix schematics); retrieval-side geometry in
+  [`2026-07-25-rag-retrieval-geometry-roadmap.md`](../designs/2026-07-25-rag-retrieval-geometry-roadmap.md).
 
 ## Context
 
