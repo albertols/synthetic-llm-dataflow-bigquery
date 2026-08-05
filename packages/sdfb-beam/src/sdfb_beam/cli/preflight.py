@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sdfb_core.contracts.description_json import DescriptionJsonError
+from sdfb_core.contracts.relational import parse_llm_prompt_constraint
 from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -41,16 +42,55 @@ def _missing(cols: tuple[str, ...], valid: set[str]) -> list[str]:
     return [c for c in cols if c not in valid]
 
 
+def _report_prompt_constraints(
+    table_schema: TableSchema, enabled: bool
+) -> None:
+    """Say aloud whether any column carries an `llm_prompt_constraint`.
+
+    C5 is prompt refinement, never a requirement: `--prompt_constraints=on`
+    against a DDL with no constraints anywhere is a perfectly healthy
+    no-op — but a silent one reads as 'did it even look?'. One informative
+    milestone answers that. A column whose description carries a MARKED but
+    unparseable constraint object stops loudly (the P1 posture, per column).
+    """
+    found: list[str] = []
+    for col in table_schema.columns:
+        try:
+            if parse_llm_prompt_constraint(col.description):
+                found.append(col.name)
+        except DescriptionJsonError as exc:
+            raise SystemExit(
+                f"[preflight P1] {table_schema.fqn}.{col.name}: column "
+                f"description carries an 'llm_prompt_constraint'-marked JSON "
+                f"object that does not parse.\n{exc}"
+            ) from exc
+    if found:
+        log_milestone(
+            "prompt_constraints_found",
+            columns=",".join(found),
+            count=len(found),
+            enabled=enabled,
+        )
+    elif enabled:
+        log_milestone(
+            "prompt_constraints_none",
+            note="no column description carries llm_prompt_constraint — "
+            "--prompt_constraints=on is a no-op, generation unchanged",
+        )
+
+
 def preflight(
     table_schema: TableSchema,
     pk_cols: tuple[str, ...],
     identity_cols: tuple[str, ...],
     reference_rows: list[dict],
     fk_parents_resolved: dict[str, bool] | None = None,
+    prompt_constraints_enabled: bool = True,
 ) -> PreflightResult:
     """Run P1-P5; returns the effective pk/identity columns."""
     warnings: list[str] = []
     fqn = table_schema.fqn
+    _report_prompt_constraints(table_schema, prompt_constraints_enabled)
 
     # P1 — parse. A marked-but-invalid contract is a stop, not a warning.
     try:

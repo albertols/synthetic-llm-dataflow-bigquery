@@ -246,6 +246,51 @@
       "regexes": [
         "^(exact|streaming)?$"
       ]
+    },
+    {
+      "name": "freetext_expansion",
+      "label": "Free-text shape expander",
+      "helpText": "off = pool draws only (distinct capped at pool size). identifiers (default) = code-like columns expand from their observed shape mix, breaking the pool-size distinct ceiling. all = also mutate digit runs inside texty pool draws. Never adds an LLM call (2026-08-05 spec C3).",
+      "isOptional": true,
+      "regexes": [
+        "^(off|identifiers|all)?$"
+      ]
+    },
+    {
+      "name": "prompt_constraints",
+      "label": "Per-column LLM prompt constraints",
+      "helpText": "on (default) attaches each column's llm_prompt_constraint (parsed from its DDL description JSON) to the pool prompt as a constant, prefix-cache-safe suffix. Columns without a constraint are untouched \u2014 with none anywhere, 'on' is a no-op (spec C5).",
+      "isOptional": true,
+      "regexes": [
+        "^(on|off)?$"
+      ]
+    },
+    {
+      "name": "source_stats",
+      "label": "Source-table stats computation",
+      "helpText": "sample (default) computes per-column source_table_stats from the reference sample driver-side (zero DAG cost); off disables entirely (WS8 spec WS-B).",
+      "isOptional": true,
+      "regexes": [
+        "^(off|sample)?$"
+      ]
+    },
+    {
+      "name": "source_stats_table",
+      "label": "Source stats BQ table",
+      "helpText": "project.dataset.table for source_table_stats rows; empty/omitted skips the BQ write (stats still land as milestone + JSON artifact). Existing (table, digest) rows are never rewritten. Never auto-created: bq mk from config/bq_schema/synthetic_rag/source_table_stats.schema.json.",
+      "isOptional": true
+    },
+    {
+      "name": "source_stats_json",
+      "label": "Source stats JSON artifact path",
+      "helpText": "gs:// or local path for the per-run stats JSON artifact; empty/omitted skips it.",
+      "isOptional": true
+    },
+    {
+      "name": "fk_parent_landing",
+      "label": "FK parent landing dataset",
+      "helpText": "project.dataset holding already-landed synthetic parent tables (ADR 0021). With a relational contract that declares FKs, child FK columns sample from the parents' landed keys. Empty/omitted = FK pools off.",
+      "isOptional": true
     }
   ]
 }

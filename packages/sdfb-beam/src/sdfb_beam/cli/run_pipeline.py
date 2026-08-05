@@ -512,6 +512,7 @@ def _load_reference_and_preflight(args, table_schema):
         tuple(c.strip() for c in args.pk_cols.split(",") if c.strip()),
         tuple(c.strip() for c in args.identity_cols.split(",") if c.strip()),
         reference_rows,
+        prompt_constraints_enabled=args.prompt_constraints == "on",
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)

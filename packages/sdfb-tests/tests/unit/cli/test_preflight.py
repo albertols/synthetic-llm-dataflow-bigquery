@@ -73,3 +73,72 @@ def test_absent_contract_passthrough():
     result = preflight(_schema("just prose"), ("A",), (), [])
     assert result.contract is None
     assert result.pk_cols == ("A",)
+
+
+# --------------------------------------------------------------------------- #
+# prompt-constraint discovery (C5 — refinement, never a requirement)
+# --------------------------------------------------------------------------- #
+def _capture_milestones(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(
+        "sdfb_beam.cli.preflight.log_milestone",
+        lambda name, **kw: calls.append((name, kw)),
+    )
+    return calls
+
+
+def test_constraints_on_but_none_found_is_a_logged_noop(monkeypatch):
+    calls = _capture_milestones(monkeypatch)
+    result = preflight(_schema("just prose"), (), (), _rows())
+    assert result.contract is None  # generation proceeds unchanged
+    names = [n for n, _ in calls]
+    assert "prompt_constraints_none" in names
+    (_, kw) = next(c for c in calls if c[0] == "prompt_constraints_none")
+    assert "no-op" in kw["note"]
+
+
+def test_constraints_found_are_listed(monkeypatch):
+    calls = _capture_milestones(monkeypatch)
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.d.t"},
+            "schema": [
+                {"name": "ID", "type": "STRING", "mode": "REQUIRED"},
+                {
+                    "name": "NOTES",
+                    "type": "STRING",
+                    "mode": "NULLABLE",
+                    "description": 'x {"llm_prompt_constraint": "SWIFT refs"}',
+                },
+            ],
+        }
+    )
+    preflight(schema, (), (), [])
+    (_, kw) = next(c for c in calls if c[0] == "prompt_constraints_found")
+    assert kw["columns"] == "NOTES"
+    assert kw["count"] == 1
+
+
+def test_constraints_disabled_and_none_found_stays_silent(monkeypatch):
+    calls = _capture_milestones(monkeypatch)
+    preflight(_schema("just prose"), (), (), _rows(),
+              prompt_constraints_enabled=False)
+    assert "prompt_constraints_none" not in [n for n, _ in calls]
+
+
+def test_malformed_column_constraint_stops_loudly():
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.d.t"},
+            "schema": [
+                {
+                    "name": "NOTES",
+                    "type": "STRING",
+                    "mode": "NULLABLE",
+                    "description": '{"llm_prompt_constraint": BROKEN}',
+                }
+            ],
+        }
+    )
+    with pytest.raises(SystemExit, match="NOTES"):
+        preflight(schema, (), (), [])

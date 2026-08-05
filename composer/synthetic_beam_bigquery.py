@@ -18,6 +18,7 @@ Substitution markers (workflow 3 seds these at import time):
   {{SDFB_DDL_URI}}            gs://…/ddl.json (empty ⇒ operator omits ddl_uri; live INFORMATION_SCHEMA extraction)
   {{SDFB_RAG_CHUNKS_TABLE}}   project.synthetic_rag.rag_chunks (B.1 chunk store; empty ⇒ params omitted, no reuse/population)
   {{SDFB_FREETEXT_POOLS_TABLE}} project.synthetic_rag.freetext_pools (WS5 pool store; empty ⇒ params omitted, pools rebuild per worker)
+  {{SDFB_SOURCE_STATS_TABLE}}  project.synthetic_rag.source_table_stats (WS8 stats store; empty ⇒ param omitted, stats land as milestone + JSON artifact only)
   {{WRITE_DISPOSITION}}       default of the `write_disposition` DAG param (append | overwrite)
   {{SDFB_LANDING_TABLE}}      project.synthetic_data.<table> (defaults to the source table name)
   {{SDFB_DLQ_TABLE}}          project.synthetic_data_quality.dlq
@@ -67,6 +68,12 @@ _RAG_CHUNKS_TABLE = "{{SDFB_RAG_CHUNKS_TABLE}}"
 # paid 45 rebuilds (~26 of 53 min) exactly this way, warning
 # freetext_pool_store_absent 25 times.
 _FREETEXT_POOLS_TABLE = "{{SDFB_FREETEXT_POOLS_TABLE}}"
+# WS8 source_table_stats store (2026-08-05 spec WS-B). Empty ⇒ the DAG omits
+# source_stats_table entirely: stats still compute driver-side and land as
+# the source_table_stats milestone + optional JSON artifact — only the BQ
+# persistence is skipped. The table is NEVER auto-created (bq mk from
+# config/bq_schema/synthetic_rag/source_table_stats.schema.json).
+_SOURCE_STATS_TABLE = "{{SDFB_SOURCE_STATS_TABLE}}"
 
 # -----------------------------------------------------------------------------
 # Runtime infra — Composer Variables, set once per env (not build-time-baked).
@@ -267,6 +274,48 @@ default_dag_params = {
                     "still marks the run FAILED_BLOCKER; recover by "
                     "re-triggering with write_disposition=overwrite.",
     ),
+    "freetext_expansion": Param(
+        default="identifiers",
+        type="string",
+        enum=["off", "identifiers", "all"],
+        description="Shape-preserving expander (WS8 spec C3). off = pool "
+                    "draws only, synthetic distinct is capped at the pool "
+                    "size (the 2026-08-03 10M-run ceiling). identifiers "
+                    "(default) = code-like columns (no whitespace, >=2 "
+                    "varying positions) draw fresh values from their "
+                    "observed shape mix — distinct scales with rows, shape "
+                    "precision stays 1.0 by construction. all = additionally "
+                    "mutates digit runs inside texty pool draws. Zero LLM "
+                    "calls added on every setting.",
+    ),
+    "prompt_constraints": Param(
+        default="on",
+        type="string",
+        enum=["on", "off"],
+        description="Attach each column's llm_prompt_constraint (parsed "
+                    "from its DDL description JSON) to the pool prompt as a "
+                    "constant suffix (WS8 spec C5, prefix-cache-safe). "
+                    "Columns without a constraint are untouched; with none "
+                    "anywhere 'on' is a logged no-op — prompt refinement, "
+                    "never a requirement.",
+    ),
+    "source_stats": Param(
+        default="sample",
+        type="string",
+        enum=["sample", "off"],
+        description="Per-column source_table_stats from the reference "
+                    "sample, computed driver-side before the graph (WS8 "
+                    "spec WS-B; zero DAG cost). Ignored table-write-wise "
+                    "when the build left SDFB_SOURCE_STATS_TABLE empty.",
+    ),
+    "fk_parent_landing": Param(
+        default="",
+        type="string",
+        description="project.dataset of already-landed synthetic parent "
+                    "tables (ADR 0021). Set by run_tableset.py-style "
+                    "multi-table triggers so child FK columns sample the "
+                    "parents' landed keys; empty = FK pools off.",
+    ),
     "pool_seed_strategy": Param(
         default="centroid",
         type="string",
@@ -385,6 +434,18 @@ with models.DAG(
                         if _FREETEXT_POOLS_TABLE
                         else {}
                     ),
+                    # WS8 stats store — same off-state convention: the
+                    # param is omitted when the build left the marker empty
+                    # (stats still land as milestone + JSON artifact).
+                    **(
+                        {"source_stats_table": _SOURCE_STATS_TABLE}
+                        if _SOURCE_STATS_TABLE
+                        else {}
+                    ),
+                    "source_stats": "{{ params.source_stats }}",
+                    "freetext_expansion": "{{ params.freetext_expansion }}",
+                    "prompt_constraints": "{{ params.prompt_constraints }}",
+                    "fk_parent_landing": "{{ params.fk_parent_landing }}",
                     "uniqueness_mode": "{{ params.uniqueness_mode }}",
                     "pool_seed_strategy": "{{ params.pool_seed_strategy }}",
                     "reference_table": "{{ params.table_fqn }}",
