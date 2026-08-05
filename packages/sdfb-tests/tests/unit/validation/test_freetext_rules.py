@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sdfb_core.validation.thresholds import load_thresholds
 
-_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e_gcp_probe.py"
+_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e" / "e2e_gcp_probe.py"
 _spec = importlib.util.spec_from_file_location("e2e_gcp_probe_ft", _SCRIPT)
 _probe = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _probe

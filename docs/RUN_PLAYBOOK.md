@@ -271,7 +271,7 @@ singularity, sparsity, identity-column uniqueness, cross-sample Jaccard —
 `--identity-cols` scopes the per-row-uniqueness check to PK/UUID columns):
 
 ```bash
-python scripts/e2e_validation_analysis.py \
+python scripts/e2e/e2e_validation_analysis.py \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --schema <SCHEMA> --pk <PK> --identity-cols <IDENTITY_COLS> \
   --batch-size <BATCH_SIZE> \
@@ -285,7 +285,7 @@ label onto each job_id so the report can say "b1_rag" instead of a raw
 Dataflow job id):
 
 ```bash
-python scripts/e2e_gcp_probe.py \
+python scripts/e2e/e2e_gcp_probe.py \
   --project <PROJECT> \
   --source-fqn <SOURCE_FQN> --landing-fqn <LANDING_FQN> \
   --quality-dataset <QUALITY_DATASET> \
@@ -303,7 +303,7 @@ job names are kept verbatim in `oss/` — the bundle folder is named after the
 primary job id):
 
 ```bash
-python scripts/e2e_bundle_export.py \
+python scripts/e2e/e2e_bundle_export.py \
   --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
   --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
   $(for c in <CSVS>; do echo --csv $c; done) \

@@ -37,16 +37,16 @@ bq query --use_legacy_sql=false --format=csv --max_rows=500 --project_id=$PROJEC
   "SELECT * FROM \`${PROJECT_ID}.synthetic_data.${T}\` LIMIT 500" \
   > integration_test/$JOB/b1_rag_sample.csv
 
-uv run --no-sync python3 scripts/e2e_gcp_probe.py --project $PROJECT_ID \
+uv run --no-sync python3 scripts/e2e/e2e_gcp_probe.py --project $PROJECT_ID \
   --source-fqn $PROJECT_ID.synthetic_source.$T --landing-fqn $PROJECT_ID.synthetic_data.$T \
   --quality-dataset $PROJECT_ID.synthetic_data_quality --region us-central1 \
   --job-id $JOB --run-id $RUN --pk trip_id --out integration_test/$JOB/e2e_gcp_metrics.json
 
-uv run --no-sync python3 scripts/e2e_validation_analysis.py --csv eng=integration_test/$JOB/b1_rag_sample.csv \
+uv run --no-sync python3 scripts/e2e/e2e_validation_analysis.py --csv eng=integration_test/$JOB/b1_rag_sample.csv \
   --schema output/${T}_landing_schema.json --pk trip_id --batch-size 16 \
   --out integration_test/$JOB/e2e_validation_metrics.json
 
-uv run --no-sync python3 scripts/e2e_bundle_export.py \
+uv run --no-sync python3 scripts/e2e/e2e_bundle_export.py \
   --metrics gcp=integration_test/$JOB/e2e_gcp_metrics.json \
   --metrics offline=integration_test/$JOB/e2e_validation_metrics.json \
   --report output/<end_to_end_validation_report_YYYY_MM_DD_HH_MM>.md \

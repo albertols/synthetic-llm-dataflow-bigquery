@@ -4,7 +4,7 @@ One stable, greppable line per milestone:
 
     SDFB_MILESTONE name=<milestone> key=value key='quoted value' ...
 
-``scripts/e2e_gcp_probe.py`` mines Dataflow worker logs for this prefix to
+``scripts/e2e/e2e_gcp_probe.py`` mines Dataflow worker logs for this prefix to
 derive engine execution timings. The format is therefore an API: fields are
 emitted in sorted order, values containing whitespace are single-quoted via
 ``shlex.quote``, and the line never contains a newline. Change nothing here

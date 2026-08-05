@@ -43,8 +43,8 @@ vLLM init, instead of silently copying reference exemplars); added a
 `SDFB_MILESTONE` structured-logging contract (`sdfb_core/observability.py`)
 so worker-log mining no longer depends on wording regexes; added per-row
 identity-column synthesis (`--identity_cols`) and `row.duplicate` /
-`identity.unique` BLOCKER gate rules; landed the `scripts/e2e_gcp_probe.py` +
-`scripts/e2e_validation_analysis.py` + `scripts/e2e_bundle_export.py` E2E
+`identity.unique` BLOCKER gate rules; landed the `scripts/e2e/e2e_gcp_probe.py` +
+`scripts/e2e/e2e_validation_analysis.py` + `scripts/e2e/e2e_bundle_export.py` E2E
 validation toolchain and `docs/RUN_PLAYBOOK.md`. Two design specs came out of
 this cycle for M2 scoping:
 [`docs/designs/2026-07-07-rag-layer-design.md`](designs/2026-07-07-rag-layer-design.md)

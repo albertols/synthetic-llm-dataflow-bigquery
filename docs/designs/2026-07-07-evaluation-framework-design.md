@@ -33,10 +33,10 @@ Concretely, this design exists to:
    preservation, did the B.1→B.2 fidelity gap close — without a dashboard,
    just SQL (per CLAUDE.md's no-Looker/no-Dataplex constraint).
 3. **Be the sign-off basis for new engine features.** Today the only artifact
-   for "did this change make things better or worse" is `scripts/e2e_validation_analysis.py`
+   for "did this change make things better or worse" is `scripts/e2e/e2e_validation_analysis.py`
    run by hand against exported CSVs (see its `_cross_overlap` docstring:
    *"a memorization proxy when the live source is not queried here"* —
-   `scripts/e2e_validation_analysis.py:248-282`). This design turns that manual,
+   `scripts/e2e/e2e_validation_analysis.py:248-282`). This design turns that manual,
    best-effort, offline step into an automated, per-run, machine-gated BigQuery
    row computed against the *actual* live reference sample for that run.
 
@@ -533,7 +533,7 @@ posture too strict while iterating in dev.
 
 ### Complements the e2e probe scripts
 
-`scripts/e2e_validation_analysis.py`'s `_cross_overlap` (line 248) is an
+`scripts/e2e/e2e_validation_analysis.py`'s `_cross_overlap` (line 248) is an
 offline, manually-invoked, per-column Jaccard-overlap heuristic — its own
 docstring calls it *"a memorization proxy when the live source is not queried
 here."* It exists because that script has no live BQ access in its intended

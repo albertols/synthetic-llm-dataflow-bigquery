@@ -1,4 +1,4 @@
-"""Unit tests for `scripts/e2e_gcp_probe.py` (the vendored Dataflow/BQ probe).
+"""Unit tests for `scripts/e2e/e2e_gcp_probe.py` (the vendored Dataflow/BQ probe).
 
 Loaded via importlib the same way `test_deployment_prerequisites.py` loads
 `scripts/deployment_prerequisites.py` (see that file's docstring/idiom). The
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e_gcp_probe.py"
+_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e" / "e2e_gcp_probe.py"
 _spec = importlib.util.spec_from_file_location("e2e_gcp_probe", _SCRIPT)
 _probe_module = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _probe_module

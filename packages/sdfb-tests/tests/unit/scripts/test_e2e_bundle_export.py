@@ -1,4 +1,4 @@
-"""Unit tests for `scripts/e2e_bundle_export.py` (the vendored e2e bundle exporter).
+"""Unit tests for `scripts/e2e/e2e_bundle_export.py` (the vendored e2e bundle exporter).
 
 Loaded via importlib the same way `test_deployment_prerequisites.py` loads
 `scripts/deployment_prerequisites.py` (see that file's docstring/idiom).
@@ -24,7 +24,7 @@ import json
 import sys
 from pathlib import Path
 
-_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e_bundle_export.py"
+_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e" / "e2e_bundle_export.py"
 _spec = importlib.util.spec_from_file_location("e2e_bundle_export", _SCRIPT)
 bundle_module = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = bundle_module

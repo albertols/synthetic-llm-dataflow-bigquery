@@ -342,7 +342,7 @@ def test_mutate_digit_runs_preserves_shape_and_prefix_zero():
 
 **Files:**
 - Modify: `config/thresholds.yml` — three new rules with `scope: post_run`: `freetext.empty_parity` (MAJOR, `max_abs_delta: 0.10`), `freetext.distinct_floor` (MAJOR, `min_ratio_of_source: 0.5`, applies where source `distinct_ratio > 0.5`), `freetext.copy_fraction` (BLOCKER, `max: 0.0`, applies where source `distinct > 100`).
-- Modify: `scripts/e2e_gcp_probe.py` — evaluate the three rules from metrics it already computes (`null_fraction`/`distinct_ratio`/`copy_ratio_nonsentinel`; add `empty_fraction` to its per-column aggregates) and print a PASS/FAIL line per rule.
+- Modify: `scripts/e2e/e2e_gcp_probe.py` — evaluate the three rules from metrics it already computes (`null_fraction`/`distinct_ratio`/`copy_ratio_nonsentinel`; add `empty_fraction` to its per-column aggregates) and print a PASS/FAIL line per rule.
 - Modify: `sdfb_core/validation/thresholds.py` loader only if the schema requires registering new ids.
 - Test: unit test that the loader accepts the new catalog; probe function-level test with canned metrics dicts.
 

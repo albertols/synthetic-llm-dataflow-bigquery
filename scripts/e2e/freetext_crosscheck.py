@@ -39,7 +39,7 @@ Nothing is hard-coded to a table or environment: pass ``--source-fqn``,
 ``--synthetic-fqn`` and ``--columns`` and it works anywhere.
 
 Usage:
-    python scripts/freetext_crosscheck.py \
+    python scripts/e2e/freetext_crosscheck.py \
         --source-fqn    project.dataset.TABLE \
         --synthetic-fqn project.synthetic_data.TABLE \
         --columns COL_A,COL_B,COL_C \
@@ -54,7 +54,7 @@ import argparse
 import json
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 _SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
@@ -67,6 +67,10 @@ _SHAPE_PRECISION_WARN = 0.90  # below this, the generator invents formats
 _FRACTION_DELTA_WARN = 0.10   # null/empty/charclass delta that matters
 _LEN_RATIO_WARN = 0.20        # relative mean-length divergence
 _COPY_FRACTION_WARN = 0.30    # literal copy fraction that reads as memorization
+# Above this source distinct-ratio a column counts as high-cardinality for
+# the memorization / diversity findings (mirrors thresholds.yml
+# freetext.distinct_floor `applies_above_source_distinct_ratio`).
+_HIGH_CARDINALITY_RATIO = 0.5
 
 
 # --------------------------------------------------------------------------
@@ -134,7 +138,7 @@ def _existing_columns(client, fqn: str) -> dict[str, str]:
 
 
 def _row_count(client, fqn: str) -> int:
-    return list(client.query(f"SELECT COUNT(*) AS n FROM `{fqn}`").result())[0].n
+    return next(iter(client.query(f"SELECT COUNT(*) AS n FROM `{fqn}`").result())).n
 
 
 def _aggregate(client, fqn: str, columns: list[str], top_k: int) -> dict[str, Any]:
@@ -156,7 +160,7 @@ def _aggregate(client, fqn: str, columns: list[str], top_k: int) -> dict[str, An
             """
         )
     sql = "SELECT " + ",".join(selects) + f" FROM `{fqn}`"
-    r = list(client.query(sql).result())[0]
+    r = next(iter(client.query(sql).result()))
     out: dict[str, Any] = {}
     for col in columns:
         top = json.loads(getattr(r, f"{col}__top") or "[]")
@@ -309,9 +313,8 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
         key=lambda kv: -kv[1],
     )[:10]
 
-    # --- literal copy fraction (memorization signal) ---
-    src_vals = set(v for v in src_prof.get("_shape_counts_full", {}))  # placeholder
-    # Recompute from actual sample values captured on the profile.
+    # --- literal copy fraction (memorization signal), from the actual
+    # sample values captured on the profile ---
     src_sample_set = set(src_prof.get("_all_values", []))
     syn_sample_vals = syn_prof.get("_all_values", [])
     copy_fraction = None
@@ -352,10 +355,10 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
         if abs(d) > _FRACTION_DELTA_WARN:
             add("LOW", f"charclass '{k}' presence delta {d:+.2f} "
                        f"(source {src_cc.get(k, 0):.2f} → synthetic {syn_cc.get(k, 0):.2f})")
-    if copy_fraction is not None and copy_fraction > _COPY_FRACTION_WARN and (src_distinct_ratio or 0) > 0.5:
+    if copy_fraction is not None and copy_fraction > _COPY_FRACTION_WARN and (src_distinct_ratio or 0) > _HIGH_CARDINALITY_RATIO:
         add("HIGH", f"literal copy fraction {copy_fraction:.2f} on a high-cardinality column "
                     f"(source distinct ratio {src_distinct_ratio:.2f}) — possible memorization")
-    if (src_distinct_ratio or 0) > 0.5 and (syn_distinct_ratio or 0) < 0.5 * (src_distinct_ratio or 0):
+    if (src_distinct_ratio or 0) > _HIGH_CARDINALITY_RATIO and (syn_distinct_ratio or 0) < 0.5 * (src_distinct_ratio or 0):
         add("MEDIUM", f"distinct ratio collapsed {syn_distinct_ratio:.3f} vs source "
                       f"{src_distinct_ratio:.3f} — synthetic under-diversifies")
 
@@ -443,7 +446,7 @@ def _shape_table(mass: dict[str, float], limit: int = 6) -> str:
     return "<br>".join(f"`{s}` ({m * 100:.1f}%)" for s, m in items)
 
 
-def render_markdown(meta: dict[str, Any], columns: dict[str, Any]) -> str:
+def render_markdown(meta: dict[str, Any], columns: dict[str, Any]) -> str:  # noqa: PLR0915 — linear report assembly reads clearer unsplit
     ranked = sorted(columns.items(), key=lambda kv: -kv[1]["score"])
     lines: list[str] = []
     a = lines.append
@@ -558,7 +561,7 @@ def run(args) -> dict[str, Any]:
     preflight_adc(project)
     client = _bq_client(project)
     try:
-        caller = list(client.query("SELECT SESSION_USER() AS u").result())[0].u or "unknown"
+        caller = next(iter(client.query("SELECT SESSION_USER() AS u").result())).u or "unknown"
     except Exception:
         caller = "unknown"
 
@@ -607,7 +610,7 @@ def run(args) -> dict[str, Any]:
         "sample_size": args.sample_size,
         "top_k": args.top_k,
         "caller": caller,
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
     }
     return {"meta": meta, "columns": columns_out}
 

@@ -24,7 +24,7 @@ Nothing here is specific to any one table or environment: pass ``--project``,
 ``--source-fqn``, ``--landing-fqn`` and ``--job-id`` and it works anywhere.
 
 Usage:
-    python scripts/e2e_gcp_probe.py \
+    python scripts/e2e/e2e_gcp_probe.py \
         --project project \
         --source-fqn project.dataset.table \
         --landing-fqn project.synthetic_data.table \

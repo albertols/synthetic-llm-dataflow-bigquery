@@ -80,7 +80,7 @@ rules:
     threshold: 0.999  # ≥ 99.9% format match
 
   # --- post-run free-text fidelity (2026-08-05 spec C4) -------------------
-  # scope: post_run — evaluated OFFLINE by scripts/e2e_gcp_probe.py against
+  # scope: post_run — evaluated OFFLINE by scripts/e2e/e2e_gcp_probe.py against
   # the landed table (they need full-table aggregates the in-DAG gate never
   # sees). Values start at the 2026-08-04 crosscheck's warn thresholds.
 

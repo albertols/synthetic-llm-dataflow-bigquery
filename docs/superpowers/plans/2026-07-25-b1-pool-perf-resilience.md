@@ -15,7 +15,7 @@
 - Lint: `uv run ruff check .` must pass after every task.
 - `sdfb-core` must NOT import `apache_beam`, `torch`, `vllm`, `faiss`, `numpy` at module scope (`threading`/`concurrent.futures` are stdlib and fine).
 - Milestone names must fully match `[a-z0-9_]+` (enforced by `sdfb_core.observability.format_milestone`).
-- Existing milestone names (`freetext_pool_undersized`, `freetext_pool_stagnated`, `b1_pools_built`, …) are a log-mining API consumed by `scripts/e2e_gcp_probe.py` — only ADD names, never rename/remove.
+- Existing milestone names (`freetext_pool_undersized`, `freetext_pool_stagnated`, `b1_pools_built`, …) are a log-mining API consumed by `scripts/e2e/e2e_gcp_probe.py` — only ADD names, never rename/remove.
 - Never log reference VALUES in milestones — counts only (privacy contract, repeated in engine.py comments).
 - Prompts must keep a stable prefix across attempts for a column (vLLM automatic-prefix-caching / future LMCache KV reuse) — vary only sampling params per attempt, never prepend text.
 - Commit messages end with:

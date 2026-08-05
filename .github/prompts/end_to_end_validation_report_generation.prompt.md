@@ -92,7 +92,7 @@ gcloud auth application-default set-quota-project <PROJECT>
 ```
 
 Note: the `bq`/`gcloud` CLIs may require interactive re-auth under org policy;
-the Python clients use ADC directly, so `scripts/e2e_gcp_probe.py` drives all
+the Python clients use ADC directly, so `scripts/e2e/e2e_gcp_probe.py` drives all
 live access (BigQuery client + Dataflow/Logging REST) and sends an
 `x-goog-user-project` quota header. Prefer it over the CLIs.
 
@@ -132,7 +132,7 @@ Write a short "Expected behaviour" note per engine.
 ## Step 2 — Offline data analysis (table-agnostic)
 
 ```bash
-python scripts/e2e_validation_analysis.py \
+python scripts/e2e/e2e_validation_analysis.py \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --schema <SCHEMA> --pk <PK> --identity-cols <IDENTITY_COLS> \
   --batch-size <BATCH_SIZE> \
@@ -151,7 +151,7 @@ the headline numbers from the JSON — never eyeball the CSV.
 ## Step 3 — Live GCP cross-validation + Dataflow observability
 
 ```bash
-python scripts/e2e_gcp_probe.py \
+python scripts/e2e/e2e_gcp_probe.py \
   --project <PROJECT> \
   --source-fqn <SOURCE_FQN> --landing-fqn <LANDING_FQN> \
   --quality-dataset <QUALITY_DATASET> \
@@ -281,12 +281,12 @@ code ref; keep it tight; no dashboards / Vertex / external LLM suggestions
 
 The report + metrics + sample CSVs contain the real project / dataset / table
 / column names and sampled data values. Before sharing with the OSS team,
-split them into two sibling folders with `scripts/e2e_bundle_export.py`
+split them into two sibling folders with `scripts/e2e/e2e_bundle_export.py`
 (generic — the mapping is derived from the artifacts, so it works for any
 table / environment):
 
 ```bash
-python scripts/e2e_bundle_export.py \
+python scripts/e2e/e2e_bundle_export.py \
   --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
   --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
   $(for c in <CSVS>; do echo --csv $c; done) \

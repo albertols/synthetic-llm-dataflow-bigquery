@@ -1,4 +1,4 @@
-"""Smoke tests for `scripts/e2e_validation_analysis.py` (vendored e2e analysis).
+"""Smoke tests for `scripts/e2e/e2e_validation_analysis.py` (vendored e2e analysis).
 
 Offline-only: no CSV/schema paths ever leave the tmp_path fixture. Loaded via
 importlib the same way `test_deployment_prerequisites.py` loads
@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("pandas")
 
-_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e_validation_analysis.py"
+_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e" / "e2e_validation_analysis.py"
 _spec = importlib.util.spec_from_file_location("e2e_validation_analysis", _SCRIPT)
 analysis_module = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = analysis_module

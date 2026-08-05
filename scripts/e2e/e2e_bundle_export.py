@@ -28,7 +28,7 @@ entirely from the input artifacts, so this works for any table and any future
 integration test.
 
 Usage:
-    python scripts/e2e_bundle_export.py \
+    python scripts/e2e/e2e_bundle_export.py \
         --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
         --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
         --csv b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv \

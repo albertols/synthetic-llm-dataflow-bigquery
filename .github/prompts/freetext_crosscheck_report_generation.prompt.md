@@ -76,7 +76,7 @@ gcloud auth application-default login
 gcloud auth application-default set-quota-project <PROJECT>
 ```
 
-The analysis script (`scripts/freetext_crosscheck.py`) uses the BigQuery Python
+The analysis script (`scripts/e2e/freetext_crosscheck.py`) uses the BigQuery Python
 client via ADC directly and routes quota to `PROJECT`.
 
 ---
@@ -106,7 +106,7 @@ fraction**, and **cardinality** — without copying real values verbatim.
 
 ```bash
 TS=$(date +%Y_%m_%d_%H_%M)
-python scripts/freetext_crosscheck.py \
+python scripts/e2e/freetext_crosscheck.py \
   --source-fqn    <SOURCE_FQN> \
   --synthetic-fqn <SYNTHETIC_FQN> \
   --columns "<COLUMNS>" \

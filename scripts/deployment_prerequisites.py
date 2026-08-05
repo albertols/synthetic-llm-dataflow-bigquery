@@ -39,6 +39,13 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
                        ACTION, when the table is missing — it is a performance
                        opt-in, not a prerequisite. Pass --freetext-pools-table
                        "" to omit the check entirely.
+ 11. Source stats     — {project}.synthetic_rag.source_table_stats (WS8,
+                       2026-08-05 spec WS-B). OPTIONAL BY DESIGN like step 10:
+                       absent, per-column stats still land as a milestone +
+                       JSON artifact, only the BQ persistence is skipped
+                       (SKIP, never ACTION). A PRESENT-but-drifted table IS
+                       an ACTION — the driver's write_rows load job would
+                       fail mid-launch. Pass --source-stats-table "" to omit.
 
 Exit code: 0 when no ACTION items (KO=0), 1 when any ACTION (KO). SKIP (could not
 verify — offline / no creds / missing lib) never fails the run but is surfaced.
@@ -112,6 +119,16 @@ _RAG_PARTITION_FIELD = "created_at"
 FREETEXT_POOLS_MIN_COLUMNS = [
     "reference_digest", "model_uri", "column", "target",
     "values", "stagnated", "attempts",
+]
+
+# source_table_stats contract (WS8 / ADR 0021 sibling, 2026-08-05 spec WS-B).
+# One row per (table_fqn, reference_digest, column); headline numerics are
+# real columns, the full entry rides in `stats` as JSON. Fallback when the
+# committed schema file is missing; the committed file wins when present.
+SOURCE_STATS_MIN_COLUMNS = [
+    "table_fqn", "reference_digest", "run_id", "column", "generation_plan",
+    "null_fraction", "empty_fraction", "distinct", "distinct_ratio",
+    "is_pk", "is_fk", "stats", "computed_at",
 ]
 
 
@@ -536,6 +553,60 @@ def step10_freetext_pools(ctx: Ctx) -> None:
                 f"{t_link} — {len(required)} cols · pools read instead of rebuilt")
 
 
+def step11_source_stats(ctx: Ctx) -> None:
+    """WS8 / 2026-08-05 spec WS-B — the persisted source_table_stats store.
+
+    Same posture as step 10: a missing table is **SKIP, not ACTION** —
+    stats persistence is optional (`--source_stats_table ''` at launch
+    skips the write; the milestone + JSON artifact still fire). A table
+    that EXISTS but drifted is an ACTION: `write_rows` load jobs would
+    start failing mid-run, which is the launcher's worst failure shape.
+    """
+    a = ctx.args
+    fqn = a.source_stats_table
+    if not fqn:
+        ctx.add("11", "Source stats store", SKIP,
+                "--source-stats-table '' — check omitted")
+        return
+    proj, ds, table = fqn.split(".", 2)
+    t_link = bq_table_link(fqn)
+    schema_file = Path(a.schemas_dir) / ds / f"{table}.schema.json"
+    client, reason = bq_client(a.project)
+    if client is None:
+        ctx.add("11", "Source stats store", SKIP, f"{t_link} — {reason}")
+        return
+    from google.api_core.exceptions import NotFound
+
+    try:
+        live = client.get_table(fqn)
+    except NotFound:
+        ctx.add("11", "Source stats store", SKIP,
+                f"{t_link} — not found; stats land as milestone + JSON "
+                f"artifact only. To persist: "
+                f"`bq mk --table {proj}:{ds}.{table} "
+                f"config/bq_schema/synthetic_rag/{table}.schema.json`")
+        return
+    except Exception as e:
+        ctx.add("11", "Source stats store", SKIP,
+                f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
+        return
+
+    if schema_file.exists():
+        required = [f["name"] for f in json.loads(schema_file.read_text())]
+    else:
+        required = list(SOURCE_STATS_MIN_COLUMNS)
+    missing_cols = [c for c in required if c not in {f.name for f in live.schema}]
+    if missing_cols:
+        ctx.add("11", "Source stats store", ACTION,
+                f"{t_link} — missing columns: {', '.join(missing_cols)}",
+                f"align the table with {schema_file if schema_file.exists() else 'config/bq_schema/synthetic_rag/source_table_stats.schema.json'} "
+                "— a drifted stats table fails the driver's write_rows load "
+                "job mid-launch")
+    else:
+        ctx.add("11", "Source stats store", OK,
+                f"{t_link} — {len(required)} cols · stats rows will persist")
+
+
 # --------------------------------------------------------------------------- #
 # shared check primitives
 # --------------------------------------------------------------------------- #
@@ -696,6 +767,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                         "{project}.synthetic_rag.freetext_pools; pass '' to omit "
                         "the check. Optional by design — absent, pools are "
                         "rebuilt per worker process (pre-WS5 behaviour).")
+    p.add_argument("--source-stats-table", default=None,
+                   help="FQN of the source_table_stats store (WS8, 2026-08-05 "
+                        "spec WS-B). Default {project}.synthetic_rag."
+                        "source_table_stats; pass '' to omit the check. "
+                        "Optional by design — absent, stats land as milestone "
+                        "+ JSON artifact only.")
     p.add_argument("--models-dir", default=str(REPO_ROOT / "models"), help="Local weights root (default ./models).")
     p.add_argument("--schemas-dir", default=str(REPO_ROOT / "config" / "bq_schema"),
                    help="Root under which step 1/2 drop {dataset}/{table}.schema.json "
@@ -717,6 +794,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         args.rag_chunks_table = f"{args.project}.synthetic_rag.rag_chunks"
     if args.freetext_pools_table is None:
         args.freetext_pools_table = f"{args.project}.synthetic_rag.freetext_pools"
+    if args.source_stats_table is None:
+        args.source_stats_table = f"{args.project}.synthetic_rag.source_table_stats"
     return args
 
 
@@ -726,7 +805,7 @@ def main(argv: list[str] | None = None) -> int:
     ctx = Ctx(args=args)
     for step in (step1_source_ddl, step2_landing_schema, step3_local_weights, step4_bq_tables,
                  step5_staging_bucket, step6_templates_bucket, step7_bq_datasets, step8_others,
-                 step9_rag_layer, step10_freetext_pools):
+                 step9_rag_layer, step10_freetext_pools, step11_source_stats):
         step(ctx)
 
     stamp = datetime.now(UTC)

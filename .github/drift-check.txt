@@ -38,6 +38,14 @@ vllm_spike
 project}-models
 project>-models
 
+# 2026-08-05 — E2E analysis scripts consolidated under scripts/e2e/
+# (WS8 follow-up). The old flat paths must not reappear; the new
+# scripts/e2e/<name> paths do NOT match these fixed strings.
+scripts/e2e_gcp_probe.py
+scripts/e2e_validation_analysis.py
+scripts/e2e_bundle_export.py
+scripts/freetext_crosscheck.py
+
 # 2026-06-30 — dispatch ENTRYPOINT (ADR 0009). Dataflow does NOT override the
 # worker entrypoint; it appends FnAPI boot flags, so docker/entrypoint.sh
 # dispatches boot vs launcher. The old (disproven) claim that Dataflow uses an

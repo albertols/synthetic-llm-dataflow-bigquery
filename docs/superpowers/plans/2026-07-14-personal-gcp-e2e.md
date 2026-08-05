@@ -1677,7 +1677,7 @@ fi
 
 log "verdict: ${TIER}/${TABLE} matched EXPECT=${EXPECT}"
 log "next — report recipe (RUN_PLAYBOOK §5):"
-log "  uv run --no-sync python3 scripts/e2e_gcp_probe.py --project ${PROJECT_ID} \\"
+log "  uv run --no-sync python3 scripts/e2e/e2e_gcp_probe.py --project ${PROJECT_ID} \\"
 log "    --source-fqn \$(SOURCE_FQN) --landing-fqn \$(LANDING_FQN) --quality-dataset ${QUALITY_DATASET} \\"
 log "    --region ${REGION} --job-id ${JOB_ID} --run-id ${RUN_ID} --out integration_test/${JOB_ID}/e2e_gcp_metrics.json"
 log "  then e2e_validation_analysis.py + e2e_bundle_export.py -> integration_test/${JOB_ID}/"
@@ -1830,7 +1830,7 @@ model: sonnet
 ## Token-efficiency rules (hard)
 
 - Poll ONLY with `--format 'value(currentState)'`; never `describe` without a format.
-- NEVER dump raw worker logs into context. `scripts/e2e_gcp_probe.py` owns log mining; run_e2e.sh already caps failure output at 50 error lines.
+- NEVER dump raw worker logs into context. `scripts/e2e/e2e_gcp_probe.py` owns log mining; run_e2e.sh already caps failure output at 50 error lines.
 - Read `journal/runs.jsonl` with `tail`, not whole-file.
 
 ## NOT in scope
@@ -1967,14 +1967,14 @@ Stop the campaign at the first unexpected FAIL; hand the landed artifacts to
 
 ```bash
 JOB=<job_id>; RUN=<run_id>; T=citibike_trips_50k
-uv run --no-sync python3 scripts/e2e_gcp_probe.py --project $PROJECT_ID \
+uv run --no-sync python3 scripts/e2e/e2e_gcp_probe.py --project $PROJECT_ID \
   --source-fqn $PROJECT_ID.synthetic_source.$T --landing-fqn $PROJECT_ID.synthetic_data.$T \
   --quality-dataset synthetic_data_quality --region us-central1 \
   --job-id $JOB --run-id $RUN --pk trip_id --out integration_test/$JOB/e2e_gcp_metrics.json
-uv run --no-sync python3 scripts/e2e_validation_analysis.py --csv eng=integration_test/$JOB/<export>.csv \
+uv run --no-sync python3 scripts/e2e/e2e_validation_analysis.py --csv eng=integration_test/$JOB/<export>.csv \
   --schema output/${T}_landing_schema.json --pk trip_id --batch-size 16 \
   --out integration_test/$JOB/e2e_validation_metrics.json
-uv run --no-sync python3 scripts/e2e_bundle_export.py --metrics gcp=integration_test/$JOB/e2e_gcp_metrics.json \
+uv run --no-sync python3 scripts/e2e/e2e_bundle_export.py --metrics gcp=integration_test/$JOB/e2e_gcp_metrics.json \
   --metrics validation=integration_test/$JOB/e2e_validation_metrics.json --out-root integration_test/$JOB --job-id $JOB
 ```
 
