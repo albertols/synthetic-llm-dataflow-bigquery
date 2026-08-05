@@ -46,6 +46,7 @@ from sdfb_core.observability import log_milestone
 from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.validation import Thresholds
 
+from sdfb_beam.cli.preflight import preflight
 from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
@@ -475,6 +476,28 @@ def configure_pipeline_options(
             )
 
 
+def _load_reference_and_preflight(args, table_schema):
+    """Eager reference read + relational preflight (ADR 0021): parse and
+    validate the description contract, default pk/identity from it
+    (explicit CLI wins), fail fast on unknown columns — all driver-side,
+    before any graph exists."""
+    logger.info("Loading reference rows from %s (limit=%d)",
+                args.reference_table, args.reference_rows_limit)
+    reference_rows = load_reference_rows(
+        table=args.reference_table,
+        limit=args.reference_rows_limit,
+    )
+    pf = preflight(
+        table_schema,
+        tuple(c.strip() for c in args.pk_cols.split(",") if c.strip()),
+        tuple(c.strip() for c in args.identity_cols.split(",") if c.strip()),
+        reference_rows,
+    )
+    for warning in pf.warnings:
+        logger.warning("preflight: %s", warning)
+    return reference_rows, pf
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -501,12 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         vllm_max_model_len=args.vllm_max_model_len,
     )
 
-    logger.info("Loading reference rows from %s (limit=%d)",
-                args.reference_table, args.reference_rows_limit)
-    reference_rows = load_reference_rows(
-        table=args.reference_table,
-        limit=args.reference_rows_limit,
-    )
+    reference_rows, pf = _load_reference_and_preflight(args, table_schema)
 
     thresholds = resolve_thresholds(args.thresholds_uri, args.env)
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
@@ -578,12 +596,8 @@ def main(argv: list[str] | None = None) -> int:
         similarity=args.similarity,
         seed=int(args.seed) if str(args.seed).strip() else None,
         run_id=args.run_id,
-        identity_columns=tuple(
-            c.strip() for c in args.identity_cols.split(",") if c.strip()
-        ),
-        pk_columns=tuple(
-            c.strip() for c in args.pk_cols.split(",") if c.strip()
-        ),
+        identity_columns=pf.identity_cols,
+        pk_columns=pf.pk_cols,
         strict_freetext=resolve_engine_strictness(args.client_type),
         model_uri=args.model_uri,
         embedder_uri=args.embedder_uri,
