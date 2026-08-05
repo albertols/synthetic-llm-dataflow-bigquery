@@ -60,6 +60,48 @@ assemblable into a report or deck later.
 | Enumerable facts with no magnitude relation | **table** | a chart would add nothing |
 | A single number that *is* the point | **one sentence** | resist charting one value |
 
+## Mermaid house style — icons + node classes
+
+Inline mermaid is diffable and renders on GitHub, but unstyled boxes make a
+Beam DAG, a BigQuery table and a plain value look identical. Every mermaid
+diagram in this repo uses ONE shared visual vocabulary so a reader who has
+seen one diagram can read them all. First applied:
+`docs/designs/2026-08-05-freetext-expansion-modes.md`.
+
+**Node classes** (declare the `classDef` block inline in EVERY diagram —
+GitHub renders each fence standalone; explicit `fill` + `color` keeps both
+light and dark themes legible):
+
+```text
+classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+```
+
+| Class | Color | Means | Typical icons |
+|---|---|---|---|
+| `beam` | 🟠 orange (the repo palette's `#eb6834`) | **Apache Beam code** — DoFns, transforms, `PCollection`s, DAG stages | 🔀 transform/DoFn · 🧺 PCollection |
+| `store` | 🔵 blue `#2a78d6` | Persistent stores — BigQuery tables/datasets, GCS, files | 🗄️ BQ table · 🪣 GCS bucket · 📄 file/JSON artifact |
+| `gpu` | 🟣 purple `#7a3fd1` | GPU work — vLLM, LLM calls, CUDA-resident components | 🧠 LLM/vLLM · ⚡ ignition |
+| `cpu` | 🟢 aqua (palette `#1baf7a`) | Pure-Python/NumPy engine work on CPU workers | ⚙️ compute · 🎲 seeded draw · 🛡️ guard/gate |
+| `data` | ⚪ gray `#6b7280` | Plain values / in-memory data structures | ⚪ value · ∅ null/empty · 🐼 DataFrame |
+
+Rules:
+
+- **Beam code is always orange** — the one non-negotiable mapping; it is
+  also Beam's brand color, so DAG shapes read instantly.
+- **Text must fit the box**: ≤3 short lines per node (`<br/>` breaks), no
+  parentheticals — detail belongs in the prose under the figure, not inside
+  the node. If a label needs a fourth line, split the node.
+- Stores use the cylinder shape where mermaid allows it: `[("🗄️ name")]`.
+- Icons are emoji, never FontAwesome (`fa:` classes need a stylesheet
+  GitHub does not load; emoji render everywhere).
+- One icon per node, leading the label; don't decorate every word.
+- Subgraphs mark lifecycle phases (e.g. `❄️ cold run` vs `🔥 every batch`),
+  not ownership — ownership is the node class.
+
 ## Every figure carries a claim
 
 Write the one-sentence claim **before** generating the figure. If you cannot
