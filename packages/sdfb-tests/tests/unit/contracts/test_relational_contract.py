@@ -1,7 +1,6 @@
 """RelationalContract + llm_prompt_constraint parsing (Task 2)."""
 
 import pytest
-
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.relational import (
     parse_llm_prompt_constraint,

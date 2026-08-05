@@ -196,6 +196,16 @@ class GenerationContext(BaseModel):
     # the cheapest lever on novel-yield-per-call there is. One build, three
     # arms — the runs differ in exactly one variable.
     pool_seed_strategy: str = "centroid"
+    # Shape-preserving expander (2026-08-05 spec C3): "off" draws from the
+    # bounded pool only (distinct capped at pool size — the 10M-run
+    # diversity ceiling), "identifiers" (default) expands code-like columns
+    # from their observed shape mix, "all" also mutates digit runs inside
+    # texty pool draws. Never adds an LLM call on any setting.
+    freetext_expansion: str = "identifiers"
+    # Attach the per-column llm_prompt_constraint (parsed from the column's
+    # DDL description JSON) to pool prompts. Per-column CONSTANT suffix —
+    # prefix-cache-safe (ADR 0018).
+    prompt_constraints: bool = True
     # --- RAG layer (WS2 §4b) -------------------------------------------
     # Requested synthetic row count — bounds the free-text pool target
     # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.

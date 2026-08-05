@@ -1,7 +1,6 @@
 """Embedded-JSON extraction from BQ descriptions (Task 1, 2026-08-05 plan)."""
 
 import pytest
-
 from sdfb_core.contracts.description_json import (
     DescriptionJsonError,
     extract_embedded_json,

@@ -1,7 +1,6 @@
 """B.1 profiler: empty_fraction + empties leave the pools (Task 5)."""
 
 import pytest
-
 from sdfb_core.contracts.schema import TableSchema
 from sdfb_core.engines.b1_rag.profile import ColumnKind, profile_columns
 
