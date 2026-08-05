@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
+from sdfb_core.contracts.relational import parse_llm_prompt_constraint
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
 from sdfb_core.engines.b2_library.temporal import (
     age_floor_epoch,
@@ -156,6 +157,9 @@ class ColumnProfile:
     # FREE_TEXT: observed exact-shape mix for the shape-preserving expander
     # (2026-08-05 spec C2/C3).
     shape_mix: RelaxedShapes | None = None
+    # FREE_TEXT: per-column prompt steering from the column's DDL
+    # description JSON (spec C5). Empty = no constraint.
+    llm_prompt_constraint: str = ""
     # TEMPORAL: how to render sampled epoch floats back into values.
     # minimum/maximum hold epoch floats (units per temporal.py) for this kind.
     temporal_value_type: str | None = None
@@ -392,6 +396,9 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             text_pool=tuple(pool),
             identifier_shape=detect_identifier_shape(pool),
             shape_mix=build_shape_mix(pool),
+            llm_prompt_constraint=parse_llm_prompt_constraint(
+                field.description
+            ),
         )
 
     # CATEGORICAL — empirical frequency table, order-stable for determinism.

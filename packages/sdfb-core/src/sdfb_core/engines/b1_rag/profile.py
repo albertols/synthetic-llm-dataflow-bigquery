@@ -29,6 +29,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from sdfb_core.contracts.relational import parse_llm_prompt_constraint
 from sdfb_core.engines.text_shapes import (
     RelaxedShapes,
     build_shape_mix,
@@ -130,6 +131,10 @@ class ColumnProfile:
     # FREE_TEXT — observed exact-shape mix (weight, template) for the
     # shape-preserving expander + pattern guidance (2026-08-05 spec C2/C3).
     shape_mix: RelaxedShapes | None = None
+    # FREE_TEXT — per-column prompt steering parsed from the column's DDL
+    # description JSON (spec C5); attached to pool prompts when
+    # ctx.prompt_constraints is on. Empty = no constraint.
+    llm_prompt_constraint: str = ""
     # TEMPORAL — strftime format when the column is a date-shaped STRING;
     # range-sampled floats render back to strings in the observed format.
     temporal_format: str | None = None
@@ -383,6 +388,7 @@ def _profile_string(
     """`non_null` arrives with trimmed-empty strings already removed;
     `with_empties` keeps them for the CATEGORICAL fallthrough, where the
     frequency table (not `empty_fraction`) owns the parity."""
+    constraint = parse_llm_prompt_constraint(col.description)
     strings = [str(v) for v in non_null]
     distinct = _ordered_distinct(strings)
     n = len(strings)
@@ -433,6 +439,7 @@ def _profile_string(
                 identifier_shape=shape,
                 is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
                 observed_values=tuple(strings),
+                llm_prompt_constraint=constraint,
             )
         # Cap the seed pool — exemplars condition the LLM, they aren't the bulk.
         examples = tuple(distinct[:64])
@@ -449,6 +456,7 @@ def _profile_string(
             is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
             observed_values=tuple(strings),
             shape_mix=build_shape_mix(distinct),
+            llm_prompt_constraint=constraint,
         )
     return _profile_categorical(
         col,
