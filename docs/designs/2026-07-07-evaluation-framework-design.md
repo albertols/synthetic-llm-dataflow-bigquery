@@ -1,12 +1,19 @@
 # Design — Evaluation framework (`synthetic_data_quality.validation_data_history`)
 
-- **Status**: proposed
-- **Date**: 2026-07-07
-- **Scope**: M2 candidate — formalizes and supersedes the fidelity/privacy portion of the
+> **Status: DESIGN** (proposed 2026-07-07, M2 candidate — no implementation yet)
+> · visuals retrofitted 2026-08-05 per the `visual-first-documentation` skill
+> · related: [ADR 0022](../adr/0022-stats-driven-generation.md) (the
+> source-side stats this framework's landing-side metrics mirror),
+> [`2026-08-05-source-table-stats.md`](2026-08-05-source-table-stats.md)
+> (entropy/decile concept figures — the same mathematics, source side).
+> Concept figures regenerate via
+> `uv run --no-sync python3 scripts/make_eval_figures.py`.
+
+- **Scope**: formalizes and supersedes the fidelity/privacy portion of the
   "Mode B validation pipeline" bullet in [`docs/ROADMAP.md`](../ROADMAP.md) M2 (the
   GX/Soda structural-DQ portion of that bullet is untouched by this design — Mode A
   already owns schema/null/range/enum checks pre-write; this design does not
-  duplicate them). No implementation in this document — design only.
+  duplicate them).
 - **Author context**: ACTION_5 from the M1→M2 planning pass (see project memory).
 
 ## 1. Goal
@@ -44,6 +51,40 @@ This is explicitly **not** a replacement for Mode A. Mode A's row-level gate
 stays exactly as implemented; this design adds a second, coarser-grained,
 opt-in signal that Mode A structurally cannot produce (see §5 for the precise
 division of labor).
+
+### Where the branch sits
+
+Claim: *evaluation is a post-`WriteLanding` sibling branch — it measures what
+landed, never gates what is being written (Mode A already owns that).*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  GEN["🔀 GenerateRecordsDoFn"]:::beam --> MODEA["🛡️ Mode A gate<br/>schema · nulls · uniqueness"]:::cpu
+  MODEA --> WL["🔀 WriteLanding<br/>FILE_LOADS"]:::beam
+  MODEA -. rejected rows .-> DLQ[("🗄️ dead_letter")]:::store
+  WL --> LAND[("🗄️ landing table")]:::store
+  subgraph eval ["--enable-evaluation branch (post-write, opt-in)"]
+    SREAL["🔀 SampleReference<br/>CombineGlobally reservoir"]:::beam
+    SSYN["🔀 SampleSynthetic<br/>CombineGlobally reservoir"]:::beam
+    EV["🔀 EvaluationDoFn<br/>one worker, whole-sample stats"]:::beam
+    GATE["🛡️ memorization gate<br/>BLOCKER only in prd"]:::cpu
+    SREAL --> EV
+    SSYN --> EV
+    EV --> GATE
+  end
+  REF["⚪ reference_rows<br/>driver-side list"]:::data --> SREAL
+  MODEA -- "uniq['unique'] (what landed)" --> SSYN
+  EV --> HIST[("🗄️ validation_data_history")]:::store
+```
+
+The two inputs are already materialized elsewhere in the DAG (no new full BQ
+read); the single-worker `EvaluationDoFn` exists because every §3 metric is a
+whole-sample function — details in the sections below.
 
 ## 2. Execution model
 
@@ -192,6 +233,25 @@ shape already required of `MergeProfilesFn` in the whylogs merge
 `compute_canonical_digest`'s "associative by construction" note
 (`.claude/skills/reference-data.md`).
 
+The sampling mechanism, end to end — deterministic bottom-k per stratum,
+then a global re-trim:
+
+```mermaid
+flowchart LR
+  classDef cpu  fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data fill:#6b7280,color:#fff,stroke:#4b5563
+  ROWS["⚪ rows (either side)"]:::data --> KEY["⚙️ stratum_key<br/>one categorical column"]:::cpu
+  KEY --> PRI["🎲 sort_key = blake2b<br/>(run_id : stratum : row_digest)"]:::cpu
+  PRI --> HEAP["⚙️ bounded bottom-k<br/>per stratum (max-heap)"]:::cpu
+  HEAP --> UNION["⚙️ union → re-sort<br/>→ trim to 50k"]:::cpu
+  UNION --> OUT["⚪ deterministic sample<br/>same run_id ⇒ same rows"]:::data
+```
+
+The hash priority is what makes this a *deterministic* reservoir: bottom-k
+by a content-keyed hash is a uniform random sample for any fixed `run_id`
+(each row's priority is an i.i.d. 64-bit value), yet re-running evaluation
+for the same run reproduces it bit-for-bit — no RNG state to persist.
+
 **Beam wiring** (`packages/sdfb-beam/src/sdfb_beam/dofns/evaluation.py`):
 
 ```python
@@ -286,6 +346,32 @@ as "not evaluated," never as an implicit pass.
 
 ## 3. Metric tiers
 
+### Why the fidelity family needs BOTH a sup-statistic and a mass-statistic
+
+**Claim: two failure modes with the same Wasserstein distance can differ 5×
+in KS — the two statistics see different failures, so the framework tracks
+both.**
+
+![KS vs Wasserstein: same W1, 5x different KS](assets/eval-ks-vs-wasserstein.png)
+
+*Entry level:* both panels compare a real CDF (blue) to a synthetic one
+(orange). KS is the tallest **vertical gap** between the curves (the black
+bar); Wasserstein-1 is the **entire shaded area** between them. A shifted
+twin moves every value a little (big gap, small-per-value area); a tail
+escape moves 5% of values a long way (tiny gap — only 5% of mass is ever
+displaced at any x — but the same total area). One number stays at 5.0 in
+both panels; the other changes 5×.
+
+*Research level:* `KS = supₓ|F(x) − G(x)|` (two-sample
+Kolmogorov–Smirnov, [`scipy.stats.ks_2samp`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ks_2samp.html));
+`W₁ = ∫|F(x) − G(x)|dx` — for one-dimensional marginals the earth-mover
+distance *is* the area between the CDFs
+([`scipy.stats.wasserstein_distance`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wasserstein_distance.html)),
+which is why both read off the same picture. A sampler that clamps the tail
+(e.g. inverse-CDF's p90→p100 linearization, see the
+[source-stats doc](2026-08-05-source-table-stats.md)) shows up in W₁ long
+before KS notices.
+
 ### Tier 1 — always-on (`scipy` + `scikit-learn`, laptop-testable, no extras)
 
 | Metric | Definition | Why tracked | Call |
@@ -300,6 +386,33 @@ as "not evaluated," never as an implicit pass.
 | **DCR** (Distance to Closest Record) | For each synthetic row, the minimum Gower-style mixed distance to any real row, averaged over the synthetic sample | Low DCR ⇒ a synthetic row sits very close to some real row ⇒ memorization/near-duplication risk (the core privacy signal) | Numeric block: min-max-normalize then `sklearn.neighbors.NearestNeighbors` (Manhattan/Euclidean); categorical block: indicator mismatch; combined as an equal-weighted average per column ("Gower-style" — an approximation kept deliberately dependency-light for Tier 1's scipy/sklearn-only constraint; Tier 3's SynthEval computes the exact form). Implementation constraint: build ONE concatenated feature matrix (normalized numerics + one-hot categoricals) and query a fitted `NearestNeighbors` tree — never `metric='precomputed'`, whose dense n×n distance matrix would blow the single-worker memory bound |
 | **NNDR** (Nearest-Neighbor Distance Ratio) | Per synthetic row: `dist(1st-nearest real neighbor) / dist(2nd-nearest real neighbor)`, averaged | Near 0 ⇒ one specific real record is uniquely, unambiguously the closest match ⇒ re-identification risk for *that* record; near 1 ⇒ no single record stands out. Standard SDV/anonymeter privacy-metric definition | `sklearn.neighbors.NearestNeighbors(n_neighbors=2).fit(real_matrix).kneighbors(synth_matrix)` on the same Gower-embedded space as DCR |
 | **Identical-match rate** | Fraction of sampled synthetic rows whose full-row content digest exactly matches a sampled real row's digest | Direct reuse of the existing content hash (`sdfb_core.validation.uniqueness.row_digest`, already used by `EnforceUniqueness`); `0` ⇒ no verbatim leakage, `>0` ⇒ exact copy of a real row — the strongest privacy red flag, and the metric that feeds `memorization.copy_ratio` (§5) | `row_digest(synth_row) in {row_digest(r) for r in real_sample}` |
+
+### The privacy pair, geometrically
+
+**Claim: DCR flags a synthetic row parked on a real record; NNDR flags a
+row for which ONE real record is unambiguously closest — different privacy
+failures, one embedded space.**
+
+![DCR and NNDR geometry over the Gower-embedded space](assets/eval-dcr-nndr.png)
+
+*Entry level:* left panel — the orange × sits on top of a real row: its
+distance to the closest record is ~0, the memorization signal. Right
+panel — the orange × is not on any real row, but its nearest real neighbor
+(solid line) is far closer than its second-nearest (dashed): whoever that
+one record belongs to is singled out. The aqua × is safe on both readings:
+comfortably distant, and ambiguous between neighbors.
+
+*Research level:* both metrics live in the Gower-style mixed-feature
+embedding ([Gower 1971](https://doi.org/10.2307/2528823)): min-max-normalized
+numerics + one-hot categoricals. `DCR = min_r d(s, r)`;
+`NNDR = d₍₁₎/d₍₂₎ ∈ (0, 1]` — the standard SDV/anonymeter definitions
+([Giomi et al. 2022](https://arxiv.org/abs/2211.10459)). The §2 memory
+bound is why the design mandates a fitted
+`sklearn.neighbors.NearestNeighbors` tree (`O(n log n)` build, bounded
+per-query) and forbids the dense 50k×50k distance matrix (~20 GB).
+`identical_match_rate` is the degenerate DCR=0 case caught exactly, via the
+same `row_digest` used by `EnforceUniqueness` — memorization risk made
+gate-able ([Carlini et al. 2021](https://arxiv.org/abs/2012.07805)).
 
 ### Tier 2 — SDMetrics (primary suite; new base `sdfb-core` dependency, §6)
 
@@ -663,3 +776,27 @@ New `packages/sdfb-tests/tests/unit/evaluation/` (mirrors the existing
   Tier 1 marginal stats, run only DCR/NNDR/identical-match) for repeated
   privacy-only checks; and `engine_version` migration tooling if that
   attribute's semantics change. Natural next increments, not blockers here.
+
+## Figure provenance
+
+Regenerate: `uv run --no-sync python3 scripts/make_eval_figures.py` (prints
+OKLab palette separation on every run). Concept figures: seeded,
+deterministic, parameters in the script's `CONCEPT` block; no measured run
+numbers (this design is not implemented — there are no runs to measure).
+
+| Figure | File | Claim |
+|---|---|---|
+| 1 | `assets/eval-ks-vs-wasserstein.png` | same W₁, 5× different KS — the two statistics see different failures |
+| 2 | `assets/eval-dcr-nndr.png` | DCR catches the parked copy; NNDR catches the unambiguous neighbor |
+| inline | mermaid (house classes) | evaluation branch placement; deterministic stratified reservoir |
+
+External references:
+[`scipy.stats.ks_2samp`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ks_2samp.html) ·
+[`scipy.stats.wasserstein_distance`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wasserstein_distance.html) ·
+[Gower 1971](https://doi.org/10.2307/2528823) ·
+[Giomi et al. 2022 (anonymeter)](https://arxiv.org/abs/2211.10459) ·
+[Carlini et al. 2021](https://arxiv.org/abs/2012.07805) ·
+[SDMetrics QualityReport](https://docs.sdv.dev/sdmetrics/reports/quality-report) ·
+[SDMetrics KSComplement](https://docs.sdv.dev/sdmetrics/metrics/quality-metrics/kscomplement) ·
+[Evidently](https://docs.evidentlyai.com/) —
+retrieval date for all URLs: 2026-08-05.
