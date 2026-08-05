@@ -128,7 +128,8 @@ FREETEXT_POOLS_MIN_COLUMNS = [
 SOURCE_STATS_MIN_COLUMNS = [
     "table_fqn", "reference_digest", "run_id", "column", "generation_plan",
     "null_fraction", "empty_fraction", "distinct", "distinct_ratio",
-    "is_pk", "is_fk", "stats", "computed_at",
+    "is_pk", "is_fk", "stats", "sample_rows", "stats_tier",
+    "profiler_version", "computed_at",
 ]
 
 

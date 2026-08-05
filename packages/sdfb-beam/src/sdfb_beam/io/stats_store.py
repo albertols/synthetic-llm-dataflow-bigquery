@@ -35,22 +35,46 @@ class BigQuerySourceStatsStore:
             self._client = bigquery.Client()
         return self._client
 
-    def exists(self, table_fqn: str, reference_digest: str) -> bool:
+    def exists(
+        self,
+        table_fqn: str,
+        reference_digest: str,
+        *,
+        profiler_version: str | None = None,
+        stats_tier: str | None = None,
+    ) -> bool:
+        """True when stats rows already cover this (table, digest) — and,
+        when given, this profiler version / tier. The digest hashes reference
+        ROWS only, so callers must pass ``profiler_version`` or upgraded
+        profilers will skip forever; ``stats_tier`` keeps a Tier-1 row from
+        blocking the later exact pass (ADR 0022)."""
         from google.cloud import bigquery
 
         sql = (
             f"SELECT 1 AS n FROM `{self.table_fqn}` "
             "WHERE `table_fqn` = @table_fqn "
-            "AND `reference_digest` = @reference_digest LIMIT 1"
+            "AND `reference_digest` = @reference_digest"
         )
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("table_fqn", "STRING", table_fqn),
+        params = [
+            bigquery.ScalarQueryParameter("table_fqn", "STRING", table_fqn),
+            bigquery.ScalarQueryParameter(
+                "reference_digest", "STRING", reference_digest
+            ),
+        ]
+        if profiler_version is not None:
+            sql += " AND `profiler_version` = @profiler_version"
+            params.append(
                 bigquery.ScalarQueryParameter(
-                    "reference_digest", "STRING", reference_digest
-                ),
-            ]
-        )
+                    "profiler_version", "STRING", profiler_version
+                )
+            )
+        if stats_tier is not None:
+            sql += " AND `stats_tier` = @stats_tier"
+            params.append(
+                bigquery.ScalarQueryParameter("stats_tier", "STRING", stats_tier)
+            )
+        sql += " LIMIT 1"
+        job_config = bigquery.QueryJobConfig(query_parameters=params)
         return bool(list(self._bq().query(sql, job_config=job_config).result()))
 
     def write_rows(self, rows: list[dict[str, Any]]) -> None:

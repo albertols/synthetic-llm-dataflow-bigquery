@@ -1,10 +1,15 @@
 """source_table_stats pure profiler (Task 4)."""
 
 import json
+from pathlib import Path
 
 from sdfb_core.contracts.relational import parse_relational_contract
 from sdfb_core.contracts.schema import TableSchema
-from sdfb_core.stats.source_stats import profile_source_table, stats_rows
+from sdfb_core.stats.source_stats import (
+    PROFILER_VERSION,
+    profile_source_table,
+    stats_rows,
+)
 
 _SCHEMA = {
     "table_info": {"table_id": "demo_project.demo_dataset.t"},
@@ -82,7 +87,7 @@ def test_generation_plan_labels_merged():
 def test_stats_rows_flatten():
     stats = profile_source_table(_table_schema(), _rows(), contract=_CONTRACT)
     rows = stats_rows("p.d.t", "digest123", "run-1", stats)
-    assert len(rows) == 6
+    assert len(rows) == len(stats)
     by_col = {r["column"]: r for r in rows}
     assert by_col["PK_COL"]["is_pk"] is True
     assert by_col["NOTES"]["empty_fraction"] == 0.9
@@ -90,3 +95,32 @@ def test_stats_rows_flatten():
     assert payload["distinct"] == 10
     assert all(r["reference_digest"] == "digest123" for r in rows)
     assert all("computed_at" in r for r in rows)
+
+
+def test_stats_rows_carry_provenance_columns():
+    """sample_rows/stats_tier/profiler_version are headline BQ columns:
+    distinct_ratio is not comparable across runs without sample_rows, and
+    the versioned skip key needs profiler_version broken out (ADR 0022)."""
+    stats = profile_source_table(_table_schema(), _rows())
+    rows = stats_rows("p.d.t", "digest123", "run-1", stats)
+    by_col = {r["column"]: r for r in rows}
+    notes = by_col["NOTES"]
+    assert notes["sample_rows"] == 100
+    assert notes["stats_tier"] == "sample"
+    assert notes["profiler_version"] == PROFILER_VERSION
+    payload = json.loads(notes["stats"])
+    assert payload["stats_tier"] == "sample"
+    assert payload["profiler_version"] == PROFILER_VERSION
+
+
+def test_schema_file_matches_stats_rows_columns():
+    """The committed BQ schema and stats_rows must never drift — a missing
+    column fails the write_rows load job mid-launch (step 11 rationale)."""
+    schema_path = (
+        Path(__file__).resolve().parents[5]
+        / "config/bq_schema/synthetic_rag/source_table_stats.schema.json"
+    )
+    schema_cols = {f["name"] for f in json.loads(schema_path.read_text())}
+    stats = profile_source_table(_table_schema(), _rows())
+    row = stats_rows("p.d.t", "d", "r", stats)[0]
+    assert set(row) == schema_cols

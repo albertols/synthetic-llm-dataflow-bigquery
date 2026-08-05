@@ -19,5 +19,11 @@
   {"name": "is_fk", "type": "BOOL", "mode": "NULLABLE"},
   {"name": "stats", "type": "STRING", "mode": "NULLABLE",
    "description": "Full per-column stats entry as JSON (source of truth for fields not broken out)."},
+  {"name": "sample_rows", "type": "INT64", "mode": "NULLABLE",
+   "description": "Rows the fractions were computed over: reference-sample size (tier=sample) or full-table count (tier=exact). Without it distinct_ratio is not comparable across runs with different --reference-limit."},
+  {"name": "stats_tier", "type": "STRING", "mode": "NULLABLE",
+   "description": "sample = computed from the eager reference sample (distinct is sample-bound); exact = merged with the one-scan full-table aggregate pass (--source_stats=exact)."},
+  {"name": "profiler_version", "type": "STRING", "mode": "NULLABLE",
+   "description": "profile_source_table version; part of the append-skip key so profiler upgrades re-write stats for an unchanged reference_digest."},
   {"name": "computed_at", "type": "TIMESTAMP", "mode": "REQUIRED"}
 ]

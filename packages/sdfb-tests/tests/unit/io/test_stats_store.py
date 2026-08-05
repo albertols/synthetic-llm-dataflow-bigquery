@@ -21,6 +21,37 @@ def test_exists_and_write_rows_use_load_jobs():
     assert client.insert_rows_json.call_count == 0  # never streaming
 
 
+def test_exists_versioned_skip_key_filters():
+    """profiler_version/stats_tier must reach the WHERE clause: the digest
+    hashes reference rows only, so without these filters an upgraded
+    profiler (or the exact tier) is skipped forever (ADR 0022)."""
+    client = MagicMock()
+    client.query.return_value.result.return_value = []
+    store = BigQuerySourceStatsStore("p.synthetic_rag.source_table_stats", client=client)
+    assert store.exists(
+        "p.d.t", "digest1", profiler_version="2", stats_tier="exact"
+    ) is False
+    sql = client.query.call_args[0][0]
+    assert "`profiler_version` = @profiler_version" in sql
+    assert "`stats_tier` = @stats_tier" in sql
+    params = {
+        p.name: p.value
+        for p in client.query.call_args[1]["job_config"].query_parameters
+    }
+    assert params["profiler_version"] == "2"
+    assert params["stats_tier"] == "exact"
+
+
+def test_exists_without_filters_keeps_legacy_shape():
+    client = MagicMock()
+    client.query.return_value.result.return_value = [1]
+    store = BigQuerySourceStatsStore("p.d.s", client=client)
+    assert store.exists("p.d.t", "digest1") is True
+    sql = client.query.call_args[0][0]
+    assert "profiler_version" not in sql
+    assert "stats_tier" not in sql
+
+
 def test_pickle_drops_the_client():
     store = BigQuerySourceStatsStore("p.d.s", client=MagicMock())
     restored = pickle.loads(pickle.dumps(store))

@@ -31,6 +31,11 @@ _TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIMESTAMP"})
 _SHAPE_MIX_TOP_K = 8
 _LEN_PCTS = (0.05, 0.50, 0.95)
 
+# Part of the stats-table append-skip key: the reference digest hashes ROWS,
+# not this module, so a profiler upgrade must bump this or already-profiled
+# tables keep stale stats forever (ADR 0022).
+PROFILER_VERSION = "2"
+
 
 def _is_empty_str(v: object) -> bool:
     return isinstance(v, str) and not v.strip()
@@ -112,6 +117,8 @@ def profile_source_table(
             "shape_mix": [],
             "temporal_day_granularity": False,
             "generation_plan": plan.get(col.name, ""),
+            "stats_tier": "sample",
+            "profiler_version": PROFILER_VERSION,
         }
 
         if col.bq_type in _NUMERIC_BQ_TYPES:
@@ -186,10 +193,15 @@ def stats_rows(
                 "is_pk": entry["is_pk"],
                 "is_fk": entry["is_fk"],
                 "stats": json.dumps(entry, default=str, sort_keys=True),
+                "sample_rows": entry.get("sample_rows"),
+                "stats_tier": entry.get("stats_tier", "sample"),
+                "profiler_version": entry.get(
+                    "profiler_version", PROFILER_VERSION
+                ),
                 "computed_at": computed_at,
             }
         )
     return rows
 
 
-__all__ = ["profile_source_table", "stats_rows"]
+__all__ = ["PROFILER_VERSION", "profile_source_table", "stats_rows"]

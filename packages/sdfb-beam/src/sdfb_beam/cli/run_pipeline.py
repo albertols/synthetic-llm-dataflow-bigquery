@@ -44,7 +44,7 @@ from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.embedding import embedder_identity
-from sdfb_core.stats import profile_source_table, stats_rows
+from sdfb_core.stats import PROFILER_VERSION, profile_source_table, stats_rows
 from sdfb_core.validation import Thresholds
 
 from sdfb_beam.cli.preflight import preflight
@@ -551,7 +551,12 @@ def _emit_source_stats(args, table_schema, reference_rows, pf) -> None:
             fh.write(json.dumps(stats, indent=2, default=str).encode())
     if args.source_stats_table:
         store = BigQuerySourceStatsStore(args.source_stats_table)
-        if store.exists(table_schema.fqn, digest):
+        if store.exists(
+            table_schema.fqn,
+            digest,
+            profiler_version=PROFILER_VERSION,
+            stats_tier=args.source_stats,
+        ):
             log_milestone("source_stats_skipped", reference_digest=digest[:12])
         else:
             store.write_rows(
