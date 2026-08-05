@@ -308,7 +308,7 @@ with models.DAG(
                         "upload_graph",
                         "enable_secure_boot",
                         # GPU accelerator, chosen by the `gpu` param when
-                        # client_type=vllm (see docs/GPU_CONTAINER.md):
+                        # client_type=vllm (see docker/Dockerfile + ADR 0009):
                         #   l4 → NVIDIA L4 (Gemma-4-capable),
                         #   t4 → NVIDIA T4 (plumbing smoke ONLY — Gemma 4 can't
                         #        run on Turing; see the `gpu` param docstring).

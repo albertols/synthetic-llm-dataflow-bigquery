@@ -13,12 +13,14 @@
 # file too — the goal is to catch fresh drift, not maintain a memorial.
 
 # 2026-05-19 — single-image refactor (ADR 0008 + ADR 0009)
+# 2026-08-05: `build_image.sh` / `push_image.sh` entries retired — the
+# personal-GCP Cloud Build script `06_build_image.sh` (2026-07-14, sanctioned
+# by ADR 0016) legitimately carries the substring; the actually-removed
+# laptop scripts remain covered by the two *_gpu_* patterns.
 Dockerfile.gpu
 GPU_CONTAINER.md
 build_gpu_image.sh
 push_gpu_image.sh
-build_image.sh
-push_image.sh
 
 # Image tag rename. Patterns are bounded by `:` and `/` to avoid
 # false positives on substrings like `sdfb-gpu-something`.
