@@ -118,3 +118,10 @@ same assets instead of redrawn. Load it before writing or updating such a doc.
 
 Apply the same rule when *explaining* this work in conversation: lead with the
 diagram or worked geometry, then the prose.
+
+**Cite primary sources.** A design decision that leans on an external method
+(a paper, an algorithm, a vendor mechanism like vLLM prefix caching or BQ
+HLL++) links the primary source at the decision site — ADRs and design docs
+carry the links; code comments name the ADR, not the URL. First applied
+repo-wide in [ADR 0022](docs/adr/0022-stats-driven-generation.md). The rule
+lives in the `visual-first-documentation` skill (§ Citations).

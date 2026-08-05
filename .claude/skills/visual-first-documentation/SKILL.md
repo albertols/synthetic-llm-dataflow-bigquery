@@ -132,6 +132,25 @@ across successive runs, with estimates hatched rather than solid (see
 makes regression visible and stops the doc from becoming a snapshot of one
 lucky run.
 
+## Citations — link the primary source at the decision site
+
+A design decision that leans on an external method must link its **primary
+source** where the decision is recorded (first applied: ADR 0022):
+
+- **Papers** → the canonical archive page (arXiv abstract, publisher DOI),
+  never a blog summary. Name authors + venue + year in the link text.
+- **Vendor mechanisms** (vLLM automatic prefix caching, BigQuery HLL++ /
+  approximate aggregates) → the official docs page for the *version-stable*
+  concept, plus the underlying paper when one exists (e.g. Heule et al. 2013
+  behind `APPROX_COUNT_DISTINCT`).
+- **Where links live**: ADRs carry them in Decision/Alternatives (the
+  rejected alternative deserves its citation too); design docs carry them
+  inline where the mechanism is used and in the provenance section with a
+  retrieval date. **Code comments name the ADR, never the URL** — URLs rot
+  and code comments outlive them; the ADR is the indirection layer.
+- A claim of the form "X is the industry-standard way" with no link is an
+  orphan claim — same defect as an orphan number.
+
 ## External images
 
 Default to a tailored PNG — anything about *your* system, measurements, or
