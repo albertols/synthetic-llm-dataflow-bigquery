@@ -44,6 +44,7 @@ from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.embedding import embedder_identity
+from sdfb_core.stats import profile_source_table, stats_rows
 from sdfb_core.validation import Thresholds
 
 from sdfb_beam.cli.preflight import preflight
@@ -52,6 +53,7 @@ from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.io.fk_pools import load_fk_pools
+from sdfb_beam.io.stats_store import BigQuerySourceStatsStore
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
 from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
@@ -221,6 +223,18 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="Attach per-column llm_prompt_constraint (parsed "
                         "from column-description JSON) to pool prompts "
                         "(spec C5). Prefix-cache-safe constant suffix.")
+    p.add_argument("--source_stats", default="sample",
+                   choices=["off", "sample"],
+                   help="Compute per-column source_table_stats from the "
+                        "reference sample (driver-side, zero DAG cost). "
+                        "off disables entirely.")
+    p.add_argument("--source_stats_table", default="",
+                   help="BQ table for source_table_stats rows "
+                        "(project.dataset.table); empty skips the BQ write. "
+                        "Existing (table, digest) rows are never rewritten.")
+    p.add_argument("--source_stats_json", default="",
+                   help="gs:// or local path for the stats JSON artifact; "
+                        "empty skips it.")
     p.add_argument("--fk_parent_landing", default="",
                    help="project.dataset holding already-landed synthetic "
                         "parent tables (ADR 0021). With a contract that "
@@ -504,7 +518,47 @@ def _load_reference_and_preflight(args, table_schema):
     fk_pools: dict = {}
     if pf.contract and pf.contract.fk and args.fk_parent_landing:
         fk_pools = load_fk_pools(pf.contract.fk, args.fk_parent_landing)
+    _emit_source_stats(args, table_schema, reference_rows, pf)
     return reference_rows, pf, fk_pools
+
+
+def _emit_source_stats(args, table_schema, reference_rows, pf) -> None:
+    """WS-B: one profiling pass over the already-loaded reference sample —
+    milestone always, JSON artifact and BQ rows when configured. A digest
+    that already has rows is skipped (pool-store exists() idiom)."""
+    if args.source_stats == "off" or not reference_rows:
+        return
+    stats = profile_source_table(
+        table_schema, reference_rows, contract=pf.contract
+    )
+    sparse = sorted(
+        stats.items(), key=lambda kv: -kv[1]["empty_fraction"]
+    )[:5]
+    log_milestone(
+        "source_table_stats",
+        table=table_schema.fqn,
+        columns=len(stats),
+        sparsest=",".join(
+            f"{name}:{entry['empty_fraction']:.2f}" for name, entry in sparse
+        ),
+    )
+    digest = compute_reference_digest(reference_rows)
+    if args.source_stats_json:
+        with FileSystems.create(args.source_stats_json) as fh:
+            fh.write(json.dumps(stats, indent=2, default=str).encode())
+    if args.source_stats_table:
+        store = BigQuerySourceStatsStore(args.source_stats_table)
+        if store.exists(table_schema.fqn, digest):
+            log_milestone("source_stats_skipped", reference_digest=digest[:12])
+        else:
+            store.write_rows(
+                stats_rows(table_schema.fqn, digest, args.run_id, stats)
+            )
+            log_milestone(
+                "source_stats_written",
+                reference_digest=digest[:12],
+                rows=len(stats),
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
