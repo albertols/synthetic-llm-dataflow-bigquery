@@ -108,6 +108,9 @@ class PipelineConfig:
     # Attach per-column llm_prompt_constraint (from column-description
     # JSON) to pool prompts (spec C5). See GenerationContext.prompt_constraints.
     prompt_constraints: bool = True
+    # Tier-2 exact per-column distinct counts (--source_stats=exact,
+    # ADR 0022) — feeds free-text pool sizing. Empty = Tier 1 only.
+    source_distinct: dict = field(default_factory=dict)
     # FK columns → parent synthetic key values (ADR 0021), loaded
     # driver-side by io/fk_pools when the contract declares FKs.
     fk_pools: dict = field(default_factory=dict)
@@ -167,6 +170,7 @@ def build_pipeline(
         freetext_expansion=config.freetext_expansion,
         prompt_constraints=config.prompt_constraints,
         fk_pools=config.fk_pools,
+        source_distinct=config.source_distinct,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.

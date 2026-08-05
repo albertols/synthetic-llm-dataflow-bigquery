@@ -268,10 +268,10 @@
     {
       "name": "source_stats",
       "label": "Source-table stats computation",
-      "helpText": "sample (default) computes per-column source_table_stats from the reference sample driver-side (zero DAG cost); off disables entirely (WS8 spec WS-B).",
+      "helpText": "sample (default) computes per-column source_table_stats from the reference sample driver-side (zero DAG cost); exact adds ONE aggregate scan of the live table (HLL distinct, deciles, top-k) and feeds exact distinct into free-text pool sizing (ADR 0022); off disables entirely (WS8 spec WS-B).",
       "isOptional": true,
       "regexes": [
-        "^(off|sample)?$"
+        "^(off|sample|exact)?$"
       ]
     },
     {

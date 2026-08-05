@@ -226,9 +226,12 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "from column-description JSON) to pool prompts "
                         "(spec C5). Prefix-cache-safe constant suffix.")
     p.add_argument("--source_stats", default="sample",
-                   choices=["off", "sample"],
+                   choices=["off", "sample", "exact"],
                    help="Compute per-column source_table_stats from the "
                         "reference sample (driver-side, zero DAG cost). "
+                        "exact adds ONE aggregate scan of the live table "
+                        "(HLL distinct, deciles, top-k; ADR 0022) and "
+                        "feeds exact distinct into free-text pool sizing. "
                         "off disables entirely.")
     p.add_argument("--source_stats_table", default="",
                    help="BQ table for source_table_stats rows "
@@ -521,19 +524,54 @@ def _load_reference_and_preflight(args, table_schema):
     fk_pools: dict = {}
     if pf.contract and pf.contract.fk and args.fk_parent_landing:
         fk_pools = load_fk_pools(pf.contract.fk, args.fk_parent_landing)
-    _emit_source_stats(args, table_schema, reference_rows, pf)
-    return reference_rows, pf, fk_pools
+    source_distinct = _emit_source_stats(args, table_schema, reference_rows, pf)
+    return reference_rows, pf, fk_pools, source_distinct
 
 
-def _emit_source_stats(args, table_schema, reference_rows, pf) -> None:
+def _emit_source_stats(
+    args, table_schema, reference_rows, pf
+) -> dict[str, int]:
     """WS-B: one profiling pass over the already-loaded reference sample —
     milestone always, JSON artifact and BQ rows when configured. A digest
-    that already has rows is skipped (pool-store exists() idiom)."""
+    that already has rows is skipped (pool-store exists() idiom).
+
+    Returns per-column EXACT distinct counts when ``--source_stats=exact``
+    ran (ADR 0022 — they feed free-text pool sizing via
+    ``GenerationContext.source_distinct``); empty dict otherwise.
+    """
     if args.source_stats == "off" or not reference_rows:
-        return
+        return {}
     stats = profile_source_table(
         table_schema, reference_rows, contract=pf.contract
     )
+    source_distinct: dict[str, int] = {}
+    if args.source_stats == "exact":
+        from sdfb_beam.io.exact_stats import compute_exact_stats
+
+        # A failed exact pass degrades LOUDLY to sample-tier stats: the run
+        # is still valid, just without exact pool sizing.
+        try:
+            stats = compute_exact_stats(
+                args.reference_table, table_schema, stats
+            )
+        except Exception as exc:
+            log_milestone(
+                "source_stats_exact_failed",
+                level=logging.WARNING,
+                table=args.reference_table,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        else:
+            source_distinct = {
+                name: int(entry["distinct"])
+                for name, entry in stats.items()
+                if entry.get("stats_tier") == "exact"
+            }
+            log_milestone(
+                "source_stats_exact",
+                table=args.reference_table,
+                columns=len(source_distinct),
+            )
     sparse = sorted(
         stats.items(), key=lambda kv: -kv[1]["empty_fraction"]
     )[:5]
@@ -551,11 +589,14 @@ def _emit_source_stats(args, table_schema, reference_rows, pf) -> None:
             fh.write(json.dumps(stats, indent=2, default=str).encode())
     if args.source_stats_table:
         store = BigQuerySourceStatsStore(args.source_stats_table)
+        # Skip on the tier actually ACHIEVED (a degraded exact run writes
+        # sample-tier rows and stays retryable), never the requested one.
+        achieved_tier = "exact" if source_distinct else "sample"
         if store.exists(
             table_schema.fqn,
             digest,
             profiler_version=PROFILER_VERSION,
-            stats_tier=args.source_stats,
+            stats_tier=achieved_tier,
         ):
             log_milestone("source_stats_skipped", reference_digest=digest[:12])
         else:
@@ -567,6 +608,7 @@ def _emit_source_stats(args, table_schema, reference_rows, pf) -> None:
                 reference_digest=digest[:12],
                 rows=len(stats),
             )
+    return source_distinct
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -595,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
         vllm_max_model_len=args.vllm_max_model_len,
     )
 
-    reference_rows, pf, fk_pools = _load_reference_and_preflight(
+    reference_rows, pf, fk_pools, source_distinct = _load_reference_and_preflight(
         args, table_schema
     )
 
@@ -691,6 +733,7 @@ def main(argv: list[str] | None = None) -> int:
         freetext_expansion=args.freetext_expansion,
         prompt_constraints=args.prompt_constraints == "on",
         fk_pools=fk_pools,
+        source_distinct=source_distinct,
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
