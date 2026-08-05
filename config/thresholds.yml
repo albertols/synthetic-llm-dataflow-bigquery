@@ -78,3 +78,33 @@ rules:
     dimension: validity
     severity: MAJOR
     threshold: 0.999  # ≥ 99.9% format match
+
+  # --- post-run free-text fidelity (2026-08-05 spec C4) -------------------
+  # scope: post_run — evaluated OFFLINE by scripts/e2e_gcp_probe.py against
+  # the landed table (they need full-table aggregates the in-DAG gate never
+  # sees). Values start at the 2026-08-04 crosscheck's warn thresholds.
+
+  freetext.empty_parity:
+    dimension: fidelity
+    severity: MAJOR
+    scope: post_run
+    max_abs_delta: 0.10   # |empty_fraction(synthetic) - empty_fraction(source)|
+
+  freetext.distinct_floor:
+    dimension: fidelity
+    severity: MAJOR
+    scope: post_run
+    # Applies where the source column is genuinely high-cardinality
+    # (source distinct_ratio > 0.5). Synthetic distinct must reach
+    # min(min_ratio_of_source x source_distinct, floor_distinct) —
+    # the 10M run landed distinct == pool size (512) on all 13 columns.
+    applies_above_source_distinct_ratio: 0.5
+    min_ratio_of_source: 0.5
+    floor_distinct: 5120  # 10x the 512 LLM pool cap
+
+  freetext.copy_fraction:
+    dimension: privacy
+    severity: BLOCKER
+    scope: post_run
+    max: 0.0              # verbatim source values on high-cardinality columns
+    applies_above_source_distinct: 100
