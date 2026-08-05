@@ -168,6 +168,21 @@ class ColumnProfile:
     # TEMPORAL: sentinel values (year 1 / 9999) excluded from [min, max] and
     # re-injected at their observed fraction: ((value, fraction), ...).
     temporal_sentinels: tuple[tuple[object, float], ...] = ()
+    # NUMERIC/TEMPORAL: 11-point empirical quantile vector (p0..p100; epoch
+    # floats for TEMPORAL, clamped like [minimum, maximum]). Samplers
+    # inverse-transform uniform draws through it so skewed source marginals
+    # land skewed (uniform-in-range flattened them — ADR 0022); () falls
+    # back to uniform.
+    quantiles: tuple[float, ...] = ()
+
+
+def _decile_points(ordered: list[float]) -> tuple[float, ...]:
+    """11 evenly-spaced empirical quantiles (p0..p100) from an ALREADY
+    sorted list — one sort serves min/max and the inverse-CDF vector."""
+    if not ordered:
+        return ()
+    last = len(ordered) - 1
+    return tuple(ordered[round(i * last / 10)] for i in range(11))
 
 
 def _non_null(values: list[object]) -> list[object]:
@@ -293,7 +308,8 @@ def _temporal_profile(
     temporal_sentinels = tuple(
         (v, count / total_non_null) for v, count in sentinel_counts.items()
     )
-    lo, hi = min(epochs), max(epochs)
+    ordered = sorted(epochs)
+    lo, hi = ordered[0], ordered[-1]
     floor = age_floor_epoch(value_type, fmt, _MAX_TEMPORAL_AGE_YEARS)
     if floor is not None and lo < floor <= hi:
         lo = floor
@@ -302,6 +318,9 @@ def _temporal_profile(
             column=field.name,
             max_age_years=_MAX_TEMPORAL_AGE_YEARS,
         )
+    # Quantile points below the clamp floor collapse onto it — same
+    # semantics as the [minimum, maximum] clamp, applied to the CDF vector.
+    quantiles = tuple(max(q, lo) for q in _decile_points(ordered))
     return ColumnProfile(
         name=field.name,
         bq_type=field.bq_type,
@@ -313,6 +332,7 @@ def _temporal_profile(
         temporal_value_type=value_type,
         temporal_format=fmt,
         temporal_sentinels=temporal_sentinels,
+        quantiles=quantiles,
     )
 
 
@@ -359,7 +379,7 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
     if kind is ColumnKind.NUMERIC:
         # NUMERIC verdicts come from _classify, which already proved every
         # value parses; float() re-raising here would be a classifier bug.
-        nums = [float(cast("Any", v)) for v in non_null]
+        nums = sorted(float(cast("Any", v)) for v in non_null)
         is_int = field.bq_type in {"INTEGER", "INT64"}
         # NUMERIC/BIGNUMERIC: respect the declared scale (default 2 places
         # for fixed-point money-like columns) so sampled values pass the
@@ -373,10 +393,11 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             kind=kind,
             nullable=nullable,
             null_fraction=null_fraction,
-            minimum=min(nums),
-            maximum=max(nums),
+            minimum=nums[0],
+            maximum=nums[-1],
             is_integer=is_int,
             decimal_scale=decimal_scale,
+            quantiles=_decile_points(nums),
         )
 
     if kind is ColumnKind.TEMPORAL:

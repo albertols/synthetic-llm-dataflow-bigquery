@@ -132,7 +132,18 @@ class EmpiricalBackend:
         elif p.kind is ColumnKind.NUMERIC:
             lo = p.minimum if p.minimum is not None else 0.0
             hi = p.maximum if p.maximum is not None else lo
-            draws = rng.uniform(lo, hi, size=n) if hi > lo else np.full(n, lo)
+            if len(p.quantiles) >= 2:
+                # Inverse transform sampling over the empirical CDF: uniform
+                # draws map through the observed decile vector, so a skewed
+                # source marginal lands skewed. Plain uniform-in-range put
+                # ~99% of a 90/10 heavy-tailed column above its true p90
+                # (ADR 0022).
+                grid = np.linspace(0.0, 1.0, len(p.quantiles))
+                draws = np.interp(rng.random(n), grid, np.asarray(p.quantiles))
+            elif hi > lo:
+                draws = rng.uniform(lo, hi, size=n)
+            else:
+                draws = np.full(n, lo)
             values = [round(x) for x in draws] if p.is_integer else [float(x) for x in draws]
 
         elif p.kind is ColumnKind.CATEGORICAL:
@@ -149,6 +160,7 @@ class EmpiricalBackend:
                     p.temporal_format,
                     n,
                     rng,
+                    quantiles=p.quantiles,
                 ),
                 rng,
             )

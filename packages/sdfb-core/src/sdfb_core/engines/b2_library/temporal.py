@@ -145,11 +145,24 @@ def sample_temporal(
     fmt: str | None,
     n: int,
     rng: np.random.Generator,
+    quantiles: tuple[float, ...] = (),
 ) -> list:
-    """``n`` novel values uniformly within the observed epoch bounds."""
+    """``n`` novel values within the observed epoch bounds.
+
+    With a quantile vector: inverse transform sampling over the empirical
+    CDF, so the density of instants follows the source (burst months stay
+    bursty) while every draw is still a novel in-range value. Without one:
+    uniform (pre-ADR-0022 behavior).
+    """
     if minimum is None or maximum is None:
         return [None] * n
     if maximum <= minimum:
         return [from_epoch(minimum, value_type, fmt)] * n
-    draws = rng.uniform(minimum, maximum, size=n)
+    if len(quantiles) >= 2:
+        import numpy as np  # deferred: sdfb-core stays numpy-free at import
+
+        grid = np.linspace(0.0, 1.0, len(quantiles))
+        draws = np.interp(rng.random(n), grid, np.asarray(quantiles))
+    else:
+        draws = rng.uniform(minimum, maximum, size=n)
     return [from_epoch(float(x), value_type, fmt) for x in draws]
