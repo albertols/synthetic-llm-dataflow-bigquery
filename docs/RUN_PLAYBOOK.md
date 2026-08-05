@@ -1,5 +1,10 @@
 # Run playbook — GPU verdict, run matrix, Dataflow options, report recipe
 
+> **Running the WS8 validation campaign** (relational contract, tiered
+> source stats, inverse-CDF, expansion arms, 10M)? The run matrix lives in
+> [`RUN_PLAYBOOK_WS8.md`](RUN_PLAYBOOK_WS8.md); this doc keeps the GPU
+> verdict, Dataflow options, capacity ladder, and report recipe it builds on.
+
 The operational companion to [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md)
 (what must exist before a run) — this doc is about the run itself: which GPU to
 pick, what the four M1 §11 validation runs are, which Dataflow launch knobs
