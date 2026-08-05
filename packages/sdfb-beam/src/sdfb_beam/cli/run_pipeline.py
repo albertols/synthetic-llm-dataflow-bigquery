@@ -217,7 +217,9 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "(distinct capped at pool size). identifiers "
                         "(default) = code-like columns expand from their "
                         "observed shape mix. all = also mutate digit runs "
-                        "inside texty pool draws. Never adds an LLM call.")
+                        "inside texty pool draws. Never adds an LLM call. "
+                        "Mode-by-mode panels, guarantees and trade-offs: "
+                        "docs/designs/2026-08-05-freetext-expansion-modes.md")
     p.add_argument("--prompt_constraints", default="on",
                    choices=["on", "off"],
                    help="Attach per-column llm_prompt_constraint (parsed "
