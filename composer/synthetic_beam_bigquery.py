@@ -176,7 +176,7 @@ default_dag_params = {
                     "BLOCKER). Empty = PK undeclared, rule idle.",
     ),
     "vllm_dtype": Param(
-        default="auto",
+        default="float16",
         type="string",
         enum=["auto", "float16", "bfloat16"],
         description="vLLM --dtype override. auto = checkpoint dtype (bf16 for "
