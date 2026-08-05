@@ -202,6 +202,11 @@ class GenerationContext(BaseModel):
     # from their observed shape mix, "all" also mutates digit runs inside
     # texty pool draws. Never adds an LLM call on any setting.
     freetext_expansion: str = "identifiers"
+    # FK columns → the parent's landed synthetic key values (ADR 0021,
+    # loaded driver-side by io/fk_pools). A column present here samples
+    # uniformly from EXACTLY these values, whatever its profiled kind —
+    # referential integrity beats the child's marginal in v1.
+    fk_pools: dict[str, tuple] = Field(default_factory=dict)
     # Attach the per-column llm_prompt_constraint (parsed from the column's
     # DDL description JSON) to pool prompts. Per-column CONSTANT suffix —
     # prefix-cache-safe (ADR 0018).

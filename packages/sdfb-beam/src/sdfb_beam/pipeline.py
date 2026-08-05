@@ -20,7 +20,7 @@ REFs:
 from __future__ import annotations
 
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import apache_beam as beam
@@ -108,6 +108,9 @@ class PipelineConfig:
     # Attach per-column llm_prompt_constraint (from column-description
     # JSON) to pool prompts (spec C5). See GenerationContext.prompt_constraints.
     prompt_constraints: bool = True
+    # FK columns → parent synthetic key values (ADR 0021), loaded
+    # driver-side by io/fk_pools when the contract declares FKs.
+    fk_pools: dict = field(default_factory=dict)
     # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
     # behind up to three shuffle barriers; "streaming" lands rows as they
     # are generated and measures the duplicate rate instead.
@@ -163,6 +166,7 @@ def build_pipeline(
         pool_seed_strategy=config.pool_seed_strategy,
         freetext_expansion=config.freetext_expansion,
         prompt_constraints=config.prompt_constraints,
+        fk_pools=config.fk_pools,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.
