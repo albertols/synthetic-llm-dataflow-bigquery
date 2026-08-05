@@ -59,11 +59,13 @@ from sdfb_core.engines.generation_plan import build_plan as _build_plan
 from sdfb_core.engines.generation_plan import should_log_plan as _should_log_plan
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
+    mutate_digit_runs,
     relaxed_shape_charset,
     relaxed_shape_lengths,
     relaxed_shapes_pattern,
     sample_identifier,
     sample_relaxed_identifier,
+    shape_mix_is_identifier_like,
 )
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
@@ -78,7 +80,7 @@ from sdfb_core.rag.retrieval import retrieve_centroid_top_k, select_seed_example
 from sdfb_core.rag.serialize import serialize_rows
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from sdfb_core.contracts import GeneratedRecord
     from sdfb_core.engines.base import (
@@ -406,35 +408,86 @@ class B1RagEngine(GenerationEngine):
         # A dedicated seeded RNG so free-text draws don't perturb the bulk
         # column RNG stream (keeps both reproducible & independent).
         rng = random.Random(_mix_seed(cfg.seed, "freetext"))
+        expansion = getattr(self._ctx, "freetext_expansion", "identifiers")
         for name in self._column_order:
             sampler = self._samplers[name]
             prof = sampler.profile
             if prof.kind is not ColumnKind.FREE_TEXT:
                 continue
             null_frac = prof.null_fraction if prof.nullable else 0.0
+            # Trimmed-empty parity (2026-08-04 crosscheck dominant root
+            # cause): one uniform draw decides null → empty → value, so the
+            # two sparsity modes never double-count.
+            empty_frac = prof.empty_fraction
             if prof.identifier_shape is not None:
                 # Format-preserving per-row generation — a bounded pool
                 # sampled with replacement collapses an identifier column's
                 # distinctness (2026-07-17 E2E: ID_COL 30 distinct / 1000).
                 out[name] = [
-                    None
-                    if null_frac > 0.0 and rng.random() < null_frac
-                    else sample_identifier(prof.identifier_shape, rng.randrange)
+                    self._sparsity_or(
+                        rng, null_frac, empty_frac,
+                        lambda shape=prof.identifier_shape: sample_identifier(
+                            shape, rng.randrange
+                        ),
+                    )
                     for _ in range(n)
                 ]
                 continue
             pool = self._free_text_pools.get(name) or list(prof.text_examples)
-            if not pool:
+            expand = (
+                prof.shape_mix is not None
+                and expansion != "off"
+                and (
+                    expansion == "all"
+                    or shape_mix_is_identifier_like(prof.shape_mix)
+                )
+            )
+            if not pool and not expand:
                 out[name] = [None] * n
                 continue
-            drawn: list = []
-            for _ in range(n):
-                if null_frac > 0.0 and rng.random() < null_frac:
-                    drawn.append(None)
-                else:
-                    drawn.append(pool[rng.randrange(len(pool))])
-            out[name] = drawn
+            observed = set(prof.observed_values) if expand else frozenset()
+            mutate = expansion == "all" and prof.shape_mix is None and pool
+
+            def _value(
+                prof=prof, pool=pool, expand=expand,
+                observed=observed, mutate=mutate,
+            ):
+                if expand:
+                    # Draw from the observed shape mix: distinct scales with
+                    # rows, not with the LLM pool cap (2026-08-03 10M run:
+                    # synthetic distinct == pool size on all 13 columns).
+                    for _ in range(3):
+                        v = sample_relaxed_identifier(
+                            prof.shape_mix, rng.randrange
+                        )
+                        if v not in observed:
+                            return v
+                    return v
+                v = pool[rng.randrange(len(pool))]
+                if mutate:
+                    v = mutate_digit_runs(v, rng.randrange)
+                return v
+
+            out[name] = [
+                self._sparsity_or(rng, null_frac, empty_frac, _value)
+                for _ in range(n)
+            ]
         return out
+
+    @staticmethod
+    def _sparsity_or(
+        rng: random.Random,
+        null_frac: float,
+        empty_frac: float,
+        value: Callable[[], object],
+    ):
+        """One draw → None / "" / a generated value, at observed rates."""
+        r = rng.random()
+        if r < null_frac:
+            return None
+        if r < null_frac + empty_frac:
+            return ""
+        return value()
 
     def _stored_pools(self, ctx: GenerationContext) -> dict[str, list[str]]:
         """Pools already persisted for this (reference_digest, model_uri).

@@ -1,7 +1,6 @@
 """B.2 profiler: empty_fraction + empties leave the text_pool (Task 5)."""
 
 import pytest
-
 from sdfb_core.contracts.schema import FieldSchema
 from sdfb_core.engines.b2_library.fidelity import ColumnKind, profile_column
 

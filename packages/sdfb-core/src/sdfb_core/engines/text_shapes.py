@@ -44,6 +44,10 @@ _TEMPORAL_FORMATS: tuple[str, ...] = (
 
 # One value proves nothing about a shared shape.
 _MIN_VALUES = 2
+# A shape must carry at least this many varying (class) positions,
+# mass-weighted, before expansion can diversify it — an all-literal
+# template can only regenerate its own observed values.
+_EXPAND_MIN_CLASS_POSITIONS = 2.0
 # Below this length "identifier" vs enum-code is ambiguous — short codes
 # stay on their existing (categorical / LLM) routes.
 _MIN_IDENTIFIER_LENGTH = 8
@@ -267,22 +271,30 @@ def build_shape_mix(
 
 
 def shape_mix_is_identifier_like(shapes: RelaxedShapes | None) -> bool:
-    """True when the mix is code-like: no template position can emit a
-    space, and at least half the positions (mass-weighted) are class
-    positions rather than literals. Only such columns are safe for
-    unbounded shape expansion — prose-ish mixes stay on the pool route."""
+    """True when the mix is code-like and expandable: no template position
+    can emit whitespace (prose tell), and the mass-weighted average shape
+    carries at least two class positions (an all-literal template can only
+    regenerate its own observed values — nothing to expand). Literal
+    prefixes do NOT disqualify: real identifiers share long constant heads
+    (COL_08's ``000190…``) with variation concentrated in a few positions.
+    """
     if not shapes:
         return False
-    total_positions = 0.0
-    class_positions = 0.0
+    total_weight = 0.0
+    class_weight = 0.0
     for weight, shape in shapes:
+        class_count = 0
         for entry in shape:
             if " " in entry or "\t" in entry:
                 return False
-            total_positions += weight
             if len(entry) > 1:
-                class_positions += weight
-    return total_positions > 0 and class_positions / total_positions >= 0.5
+                class_count += 1
+        total_weight += weight
+        class_weight += weight * class_count
+    return (
+        total_weight > 0
+        and class_weight / total_weight >= _EXPAND_MIN_CLASS_POSITIONS
+    )
 
 
 _DIGIT_RUN = re.compile(r"\d{2,}")
