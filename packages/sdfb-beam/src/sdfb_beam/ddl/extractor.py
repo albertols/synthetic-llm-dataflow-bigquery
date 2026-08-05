@@ -28,6 +28,7 @@ from typing import Any
 from google.api_core.retry import Retry
 from google.cloud import bigquery
 from sdfb_core.contracts import TableSchema
+from sdfb_core.contracts.relational import parse_relational_contract
 
 from sdfb_beam.ddl.connection import DEFAULT_TIMEOUT
 
@@ -170,18 +171,32 @@ def _build_table_info(bq_table: bigquery.Table, full_table_id: str) -> dict[str,
             else None
         ),
         "default_collation": getattr(bq_table, "default_collation_name", None),
+        # Parsed relational contract (ADR 0021) — a convenience mirror for
+        # humans reading _ddl.json; the runtime re-parses the description.
+        # A marked-but-invalid contract raises here (driver-side, loud).
+        "relational": (
+            contract.model_dump(mode="json")
+            if (contract := parse_relational_contract(bq_table.description or ""))
+            else None
+        ),
     }
 
 
 def _get_primary_keys(bq_table: bigquery.Table) -> list[str] | None:
-    """Extract primary keys from BQ table constraints, with description fallback.
+    """Extract primary keys: relational contract → constraints → legacy text.
 
-    BQ stores PKs in `table.table_constraints.primary_key.columns` when set
-    via `ALTER TABLE … ADD PRIMARY KEY`. As a fallback, parse
-    `PRIMARY KEY: col1, col2` from the table description.
+    The enterprise BQ plugin cannot declare real constraints, so the
+    description may carry the versioned `{"sdfb": 1, ...}` contract
+    (ADR 0021) — it wins when present. `table.table_constraints` (set via
+    `ALTER TABLE … ADD PRIMARY KEY`) is next, and the legacy
+    `PRIMARY KEY: col1, col2` description line stays as the last fallback.
 
     REF: https://docs.cloud.google.com/bigquery/docs/primary-foreign-keys
     """
+    contract = parse_relational_contract(bq_table.description or "")
+    if contract is not None and contract.pk:
+        return list(contract.pk)
+
     constraints = getattr(bq_table, "table_constraints", None)
     if constraints is not None:
         pk = getattr(constraints, "primary_key", None)
