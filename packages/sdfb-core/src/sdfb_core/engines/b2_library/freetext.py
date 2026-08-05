@@ -36,8 +36,10 @@ from sdfb_core.engines.base import (
 )
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
+    mutate_digit_runs,
     sample_identifier,
     sample_relaxed_identifier,
+    shape_mix_is_identifier_like,
 )
 from sdfb_core.observability import log_milestone
 
@@ -209,40 +211,92 @@ class FreeTextHook:
         generate format-preserving values per row from the profile's
         per-position template.
         """
+        # One uniform draw decides null → empty → value, so the two sparsity
+        # modes never double-count (2026-08-05 spec C1; mirrors B.1).
+        null_frac = profile.null_fraction if profile.nullable else 0.0
+        empty_frac = profile.empty_fraction
+        u = rng.random(n)
+        null_mask = u < null_frac
+        empty_mask = ~null_mask & (u < null_frac + empty_frac)
+        fill = int(n - int(null_mask.sum()) - int(empty_mask.sum()))
+
+        def pick(k: int) -> int:
+            return int(rng.integers(0, k))
+
+        generated = self._generate_fill(profile, cfg, fill, pick, rng)
+        if generated is None:
+            return [None] * n
+
+        out: list[str | None] = []
+        gen_iter = iter(generated)
+        for i in range(n):
+            if null_mask[i]:
+                out.append(None)
+            elif empty_mask[i]:
+                out.append("")
+            else:
+                out.append(next(gen_iter))
+        return out
+
+    def _generate_fill(
+        self,
+        profile: ColumnProfile,
+        cfg: GenerationConfig,
+        fill: int,
+        pick,
+        rng: np.random.Generator,
+    ) -> list[str | None] | None:
+        """The `fill` substantive values of one batch, or None when no
+        source of values exists (caller emits all-None)."""
+        expansion = str(
+            cfg.engine_specific.get("freetext_expansion", "identifiers")
+        )
+
         if profile.identifier_shape is not None:
-            values = [
-                sample_identifier(
-                    profile.identifier_shape, lambda k: int(rng.integers(0, k))
-                )
-                for _ in range(n)
+            return [
+                sample_identifier(profile.identifier_shape, pick)
+                for _ in range(fill)
             ]
-            if profile.nullable and profile.null_fraction > 0.0:
-                null_mask = rng.random(n) < profile.null_fraction
-                return [None if null_mask[i] else values[i] for i in range(n)]
-            return values
+
+        if (
+            profile.shape_mix is not None
+            and expansion != "off"
+            and (
+                expansion == "all"
+                or shape_mix_is_identifier_like(profile.shape_mix)
+            )
+        ):
+            # Shape-preserving expansion: distinct scales with rows, not
+            # with the pool cap, and the LLM is never called (spec C3).
+            observed = set(profile.text_pool)
+            generated: list[str | None] = []
+            for _ in range(fill):
+                v = ""
+                for _ in range(3):
+                    v = sample_relaxed_identifier(profile.shape_mix, pick)
+                    if v not in observed:
+                        break
+                generated.append(v)
+            return generated
 
         pool = self._pool_for(profile, cfg)
         ref_pool = list(profile.text_pool)
         if len(ref_pool) > _REFERENCE_BLEND_MAX_DISTINCT:
             # Identity-like cardinality: the reference blend is the leak
-            # (see _REFERENCE_BLEND_MAX_DISTINCT). `_blend_pools` shifts all
-            # mass to the novel pool when the reference side is empty.
+            # (see _REFERENCE_BLEND_MAX_DISTINCT). `_blend_pools` shifts
+            # all mass to the novel pool when the reference is empty.
             ref_pool = []
 
         # similarity high ⇒ favor the observed reference pool (mimic);
         # similarity low ⇒ favor the freshly-generated LLM pool (diverge).
         combined, probs = _blend_pools(pool, ref_pool, cfg.similarity)
         if not combined:
-            return [None] * n
-
-        picks = rng.choice(len(combined), size=n, p=probs)
-        values: list[str | None] = [combined[int(i)] for i in picks]
-
-        # Honor the marginal null-rate where the schema allows it.
-        if profile.nullable and profile.null_fraction > 0.0:
-            null_mask = rng.random(n) < profile.null_fraction
-            values = [None if null_mask[i] else values[i] for i in range(n)]
-        return values
+            return None
+        picks = rng.choice(len(combined), size=fill, p=probs)
+        drawn = [combined[int(i)] for i in picks]
+        if expansion == "all":
+            drawn = [mutate_digit_runs(v, pick) if v else v for v in drawn]
+        return drawn
 
     def _pool_for(self, profile: ColumnProfile, cfg: GenerationConfig) -> list[str]:
         key = (profile.name, round(cfg.similarity, 4))
