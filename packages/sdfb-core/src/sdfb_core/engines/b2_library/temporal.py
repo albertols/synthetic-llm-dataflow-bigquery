@@ -34,6 +34,8 @@ VT_TIME = "time"                  # datetime.time objects
 VT_STR = "str"                    # strings in one strftime format
 
 _EPOCH_NAIVE = datetime(1970, 1, 1)
+# An inverse-CDF needs at least two quantile points to interpolate between.
+_MIN_QUANTILE_POINTS = 2
 _MAX_SECONDS_OF_DAY = 86_399.999_999
 
 
@@ -158,7 +160,7 @@ def sample_temporal(
         return [None] * n
     if maximum <= minimum:
         return [from_epoch(minimum, value_type, fmt)] * n
-    if len(quantiles) >= 2:
+    if len(quantiles) >= _MIN_QUANTILE_POINTS:
         import numpy as np  # deferred: sdfb-core stays numpy-free at import
 
         grid = np.linspace(0.0, 1.0, len(quantiles))

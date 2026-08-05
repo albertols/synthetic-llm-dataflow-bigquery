@@ -54,7 +54,7 @@ _TOP_VALUES_TOP_K = 8
 
 # Row-level null co-occurrence: per-row is-null bitstrings, top-K patterns.
 # Skipped above the column cap — the bitstring alphabet grows with width and
-# the pass is O(rows × cols).
+# the pass is O(rows x cols).
 _NULL_PATTERN_MAX_COLS = 64
 _NULL_PATTERN_TOP_K = 8
 

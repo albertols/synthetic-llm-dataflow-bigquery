@@ -333,7 +333,7 @@ def sample_relaxed_identifier(
 def length_hint(values: Iterable[object], *, min_samples: int = 8) -> str:
     """Measured length band for free-text pool prompts.
 
-    Steers the LLM's length marginal toward the source's observed p05–p95
+    Steers the LLM's length marginal toward the source's observed p05-p95
     band (the 2026-08-04 crosscheck: synthetic prose ran systematically
     shorter than source). Returns "" below ``min_samples`` or when the band
     is degenerate — fixed-width values already carry their length in the

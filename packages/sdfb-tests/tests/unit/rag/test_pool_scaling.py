@@ -7,12 +7,12 @@ from __future__ import annotations
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext
 from sdfb_core.engines.b1_rag import B1RagEngine
-from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.b1_rag.engine import (
     _FREE_TEXT_POOL_MAX,
     _POOL_VALUES_PER_CALL,
     _pool_llm_yield,
 )
+from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.rag.embedding import HashingEmbedder
 
 

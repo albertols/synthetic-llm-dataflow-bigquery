@@ -364,11 +364,12 @@ class FreeTextHook:
         if cfg.engine_specific.get("prompt_constraints", True):
             # Per-column constant suffixes (spec C5 + measured length band,
             # ADR 0022) — appended after the shared prefix, prefix-cache-safe.
-            if profile.llm_prompt_constraint:
-                prompt += f" Column constraint: {profile.llm_prompt_constraint}."
-            hint = length_hint(profile.text_pool)
-            if hint:
-                prompt += f" {hint}"
+            constraint, hint = profile.llm_prompt_constraint, length_hint(
+                profile.text_pool
+            )
+            prompt += (
+                f" Column constraint: {constraint}." if constraint else ""
+            ) + (f" {hint}" if hint else "")
         # Novelty filter: LLM values that equal observed reference values are
         # copies, not generations. The LLM pool is the "diverge" side of the
         # similarity blend — observed values reach the output only via the

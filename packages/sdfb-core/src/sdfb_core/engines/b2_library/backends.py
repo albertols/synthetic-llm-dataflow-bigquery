@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 # Below this temperature, categorical sampling collapses to the modal value
 # (maximal mimicry) instead of softmax-reweighting — avoids divide-by-tiny.
 _TEMP_EPSILON = 1e-9
+# An inverse-CDF needs at least two quantile points to interpolate between.
+_MIN_QUANTILE_POINTS = 2
 # Smoothing added to weights before the log in temperature reweighting.
 _LOG_SMOOTHING = 1e-12
 
@@ -132,7 +134,7 @@ class EmpiricalBackend:
         elif p.kind is ColumnKind.NUMERIC:
             lo = p.minimum if p.minimum is not None else 0.0
             hi = p.maximum if p.maximum is not None else lo
-            if len(p.quantiles) >= 2:
+            if len(p.quantiles) >= _MIN_QUANTILE_POINTS:
                 # Inverse transform sampling over the empirical CDF: uniform
                 # draws map through the observed decile vector, so a skewed
                 # source marginal lands skewed. Plain uniform-in-range put
