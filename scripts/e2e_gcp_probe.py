@@ -180,6 +180,7 @@ def bq_cross_validation(
               COUNT(*) AS n,
               COUNT(DISTINCT {col}) AS distinct_n,
               COUNTIF({col} IS NULL) AS null_n,
+              COUNTIF(TRIM(SAFE_CAST({col} AS STRING)) = '') AS empty_n,
               {zero_expr} AS zero_n,
               APPROX_TOP_COUNT({col}, 1)[SAFE_OFFSET(0)].count AS top_count
             FROM {_quote(landing_fqn)}
@@ -193,6 +194,8 @@ def bq_cross_validation(
             "distinct": agg["distinct_n"],
             "distinct_ratio": _ratio(agg["distinct_n"], n),
             "null_fraction": _ratio(agg["null_n"], n),
+            # Trimmed-empty parity signal (2026-08-05 spec C4).
+            "empty_fraction": _ratio(agg["empty_n"], n),
             "zero_fraction": _ratio(agg["zero_n"], n) if is_numeric else None,
             "top_value_share": _ratio(agg["top_count"], n),  # repetition
             "is_constant": (agg["distinct_n"] or 0) <= 1,     # singularity
@@ -229,9 +232,18 @@ def bq_cross_validation(
                 FROM {_quote(landing_fqn)}
                 """,
             )
-            src_distinct = _scalar(
-                client, f"SELECT COUNT(DISTINCT {col}) FROM {_quote(source_fqn)}"
+            src_agg = _row(
+                client,
+                f"""
+                SELECT
+                  COUNT(DISTINCT {col}) AS distinct_n,
+                  COUNTIF(TRIM(SAFE_CAST({col} AS STRING)) = '') AS empty_n
+                FROM {_quote(source_fqn)}
+                """,
             )
+            src_distinct = src_agg["distinct_n"]
+            entry["source_empty_fraction"] = _ratio(src_agg["empty_n"], src_n)
+            entry["source_distinct_ratio"] = _ratio(src_distinct, src_n)
             copied = mem["copied"]
             sentinel_n = mem["sentinel_n"] or 0
             non_null = n - (agg["null_n"] or 0)
@@ -256,7 +268,92 @@ def bq_cross_validation(
         "pk_analysis": _pk_analysis(client, landing_fqn, pk_columns),
         "columns": per_col,
         "memorization_flags": memorization_flags(per_col),
+        "freetext_rules": evaluate_freetext_rules(per_col),
     }
+
+
+# --- post-run free-text fidelity rules (2026-08-05 spec C4) ---------------
+# Mirrors config/thresholds.yml `scope: post_run` entries. Defaults are
+# duplicated here because the probe is a standalone script (no project
+# imports at runtime); pass a `rules` dict parsed from thresholds.yml to
+# override.
+_FREETEXT_RULE_DEFAULTS: dict[str, dict] = {
+    "freetext.empty_parity": {"severity": "MAJOR", "max_abs_delta": 0.10},
+    "freetext.distinct_floor": {
+        "severity": "MAJOR",
+        "applies_above_source_distinct_ratio": 0.5,
+        "min_ratio_of_source": 0.5,
+        "floor_distinct": 5120,
+    },
+    "freetext.copy_fraction": {
+        "severity": "BLOCKER",
+        "max": 0.0,
+        "applies_above_source_distinct": 100,
+    },
+}
+
+
+def evaluate_freetext_rules(
+    per_col: dict[str, dict], rules: dict[str, dict] | None = None
+) -> list[dict]:
+    """Evaluate the post_run freetext rules over per-column cross-validation
+    entries. Pure + offline: returns one result dict per (rule, column)
+    where the rule applies; a column absent from the source is skipped."""
+    cfg = {**_FREETEXT_RULE_DEFAULTS, **(rules or {})}
+    results: list[dict] = []
+
+    def add(rule: str, column: str, value, passed: bool) -> None:
+        results.append(
+            {
+                "rule": rule,
+                "column": column,
+                "value": value,
+                "passed": passed,
+                "severity": cfg[rule].get(
+                    "severity", _FREETEXT_RULE_DEFAULTS[rule]["severity"]
+                ),
+            }
+        )
+
+    for name, e in per_col.items():
+        if not e.get("in_source_schema"):
+            continue
+        ep = cfg["freetext.empty_parity"]
+        src_empty = e.get("source_empty_fraction")
+        lnd_empty = e.get("empty_fraction")
+        if src_empty is not None and lnd_empty is not None:
+            delta = round(abs(lnd_empty - src_empty), 4)
+            add(
+                "freetext.empty_parity", name, delta,
+                delta <= ep.get("max_abs_delta", 0.10),
+            )
+        df = cfg["freetext.distinct_floor"]
+        sdr = e.get("source_distinct_ratio")
+        src_distinct = e.get("source_distinct")
+        if (
+            sdr is not None
+            and src_distinct
+            and sdr > df.get("applies_above_source_distinct_ratio", 0.5)
+        ):
+            floor = min(
+                df.get("min_ratio_of_source", 0.5) * src_distinct,
+                df.get("floor_distinct", 5120),
+            )
+            add(
+                "freetext.distinct_floor", name, e.get("distinct"),
+                (e.get("distinct") or 0) >= floor,
+            )
+        cf = cfg["freetext.copy_fraction"]
+        copy = e.get("copy_ratio_nonsentinel")
+        if (
+            copy is not None
+            and (src_distinct or 0) > cf.get("applies_above_source_distinct", 100)
+        ):
+            add(
+                "freetext.copy_fraction", name, round(copy, 4),
+                copy <= cf.get("max", 0.0),
+            )
+    return results
 
 
 # A non-constant column whose source support is genuinely large (> 100
