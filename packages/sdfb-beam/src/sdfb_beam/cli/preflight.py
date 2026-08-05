@@ -1,0 +1,144 @@
+"""Driver-side relational preflight — before any Beam graph is built.
+
+The checks are metadata-only (milliseconds, zero DAG cost) and fail with
+the exact fix, following the pool-table precedent in ``run_pipeline.py``
+(the 2026-07-25 TEST_1 lesson: a cryptic driver NotFound costs a run).
+
+Check ladder (2026-08-05 spec, WS-A A3):
+  P1  contract parses + validates          → SystemExit (loud, with snippet)
+  P2  contract columns exist in the schema → SystemExit naming them
+  P3  FK parents resolved (when a resolver is provided) → SystemExit
+  P5  PK tuple unique in the reference sample → WARNING milestone only
+      (source data may legitimately violate an undeclared PK)
+
+CLI-provided ``--pk_cols`` / ``--identity_cols`` always win over the
+contract; the override is logged, never silent.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from sdfb_core.contracts.description_json import DescriptionJsonError
+from sdfb_core.observability import log_milestone
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from sdfb_core.contracts import TableSchema
+    from sdfb_core.contracts.relational import RelationalContract
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    pk_cols: tuple[str, ...]
+    identity_cols: tuple[str, ...]
+    contract: RelationalContract | None
+    warnings: list[str] = field(default_factory=list)
+
+
+def _missing(cols: tuple[str, ...], valid: set[str]) -> list[str]:
+    return [c for c in cols if c not in valid]
+
+
+def preflight(
+    table_schema: TableSchema,
+    pk_cols: tuple[str, ...],
+    identity_cols: tuple[str, ...],
+    reference_rows: list[dict],
+    fk_parents_resolved: dict[str, bool] | None = None,
+) -> PreflightResult:
+    """Run P1-P5; returns the effective pk/identity columns."""
+    warnings: list[str] = []
+    fqn = table_schema.fqn
+
+    # P1 — parse. A marked-but-invalid contract is a stop, not a warning.
+    try:
+        contract = table_schema.relational_contract()
+    except DescriptionJsonError as exc:
+        raise SystemExit(
+            f"[preflight P1] {fqn}: the table description carries an "
+            f"'sdfb'-marked JSON object that does not validate.\n{exc}\n"
+            f"Fix the Terraform description (use jsonencode) or remove the "
+            f"marker."
+        ) from exc
+
+    if contract is None:
+        log_milestone("relational_contract_absent", table=fqn)
+        return PreflightResult(pk_cols, identity_cols, None, warnings)
+
+    # P2 — every contract column must exist in the schema.
+    valid = {c.name for c in table_schema.columns}
+    fk_cols = tuple(c for fk in contract.fk for c in fk.cols)
+    for label, cols in (
+        ("pk", contract.pk),
+        ("identity", contract.identity),
+        ("fk.cols", fk_cols),
+    ):
+        missing = _missing(cols, valid)
+        if missing:
+            raise SystemExit(
+                f"[preflight P2] {fqn}: contract {label} references unknown "
+                f"columns {missing}. Schema columns: {sorted(valid)}"
+            )
+
+    # P3 — FK closure, when the caller resolved parents (multi-table runs).
+    if fk_parents_resolved is not None and contract.fk:
+        unresolved = sorted(
+            {fk.ref for fk in contract.fk if not fk_parents_resolved.get(fk.ref)}
+        )
+        if unresolved:
+            raise SystemExit(
+                f"[preflight P3] {fqn}: FK parents not resolved: {unresolved}. "
+                f"Generate parents first (run_tableset orders this) or land "
+                f"their synthetic tables before this run."
+            )
+
+    # CLI wins; the contract fills the gaps.
+    effective_pk = pk_cols or contract.pk
+    effective_identity = identity_cols or contract.identity
+    if pk_cols and contract.pk and tuple(pk_cols) != contract.pk:
+        warnings.append(
+            f"--pk_cols {list(pk_cols)} overrides contract pk {list(contract.pk)}"
+        )
+        log_milestone(
+            "relational_contract_overridden",
+            level=logging.WARNING,
+            table=fqn,
+            cli_pk=",".join(pk_cols),
+            contract_pk=",".join(contract.pk),
+        )
+
+    # P5 — PK sanity against the reference sample (warning only).
+    if effective_pk and reference_rows:
+        tuples = {
+            tuple(r.get(c) for c in effective_pk) for r in reference_rows
+        }
+        if len(tuples) < len(reference_rows):
+            dupes = len(reference_rows) - len(tuples)
+            warnings.append(
+                f"PK {list(effective_pk)} not unique in the reference sample "
+                f"({dupes} duplicate tuples of {len(reference_rows)} rows)"
+            )
+            log_milestone(
+                "preflight_pk_not_unique_in_sample",
+                level=logging.WARNING,
+                table=fqn,
+                pk=",".join(effective_pk),
+                duplicates=dupes,
+                sample_rows=len(reference_rows),
+            )
+
+    log_milestone(
+        "relational_contract_loaded",
+        table=fqn,
+        pk=",".join(contract.pk),
+        fk_count=len(contract.fk),
+        identity=",".join(contract.identity),
+    )
+    return PreflightResult(
+        tuple(effective_pk), tuple(effective_identity), contract, warnings
+    )
+
+
+__all__ = ["PreflightResult", "preflight"]
