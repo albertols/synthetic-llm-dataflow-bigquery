@@ -217,6 +217,93 @@ def relaxed_shapes_pattern(shapes: RelaxedShapes) -> str:
     return f"^(?:{alternation})$"
 
 
+def build_shape_mix(
+    values: Iterable[str], top_k: int = 8
+) -> RelaxedShapes | None:
+    """Per-EXACT-SHAPE templates with observed weights, or None.
+
+    The 2026-08-04 crosscheck's core recall finding: the primary free-text
+    routes collapse a column's observed *mix* of formats to one or two.
+    This builder groups values by their exact character-class mask
+    (digit→``9``, upper→``A``, lower→``a``, everything else literal —
+    the crosscheck's own masking), keeps the ``top_k`` heaviest masks with
+    their observed counts, and emits per-position templates compatible with
+    :func:`sample_relaxed_identifier` — a draw reproduces the observed
+    shape mass by construction.
+
+    Differences vs :func:`build_relaxed_shapes` (which stays the LLM-pool
+    gate): buckets are per-mask, not per-length; single-value buckets are
+    KEPT (a mask generalizes, an all-literal length bucket does not);
+    spaces are allowed and stay literal (this feeds free-text columns).
+    """
+    vals = [v for v in values if v]
+    if not vals:
+        return None
+    buckets: dict[str, list[str]] = {}
+    for v in vals:
+        mask = "".join(
+            "9" if ch.isdigit() else "A" if ch.isupper() else "a" if ch.islower() else ch
+            for ch in v
+        )
+        buckets.setdefault(mask, []).append(v)
+    heaviest = sorted(buckets.values(), key=len, reverse=True)[:top_k]
+    shapes: list[tuple[int, tuple[str, ...]]] = []
+    for bucket in heaviest:
+        length = len(bucket[0])
+        shape: list[str] = []
+        for i in range(length):
+            chars = {v[i] for v in bucket}
+            if len(chars) == 1:
+                shape.append(next(iter(chars)))
+                continue
+            for cls in _CHAR_CLASSES:
+                if chars <= set(cls):
+                    shape.append(cls)
+                    break
+            else:
+                shape.append("".join(sorted(chars)))
+        shapes.append((len(bucket), tuple(shape)))
+    return tuple(shapes) or None
+
+
+def shape_mix_is_identifier_like(shapes: RelaxedShapes | None) -> bool:
+    """True when the mix is code-like: no template position can emit a
+    space, and at least half the positions (mass-weighted) are class
+    positions rather than literals. Only such columns are safe for
+    unbounded shape expansion — prose-ish mixes stay on the pool route."""
+    if not shapes:
+        return False
+    total_positions = 0.0
+    class_positions = 0.0
+    for weight, shape in shapes:
+        for entry in shape:
+            if " " in entry or "\t" in entry:
+                return False
+            total_positions += weight
+            if len(entry) > 1:
+                class_positions += weight
+    return total_positions > 0 and class_positions / total_positions >= 0.5
+
+
+_DIGIT_RUN = re.compile(r"\d{2,}")
+
+
+def mutate_digit_runs(value: str, pick: Callable[[int], int]) -> str:
+    """Replace every maximal run of ≥2 digits with fresh digits of the same
+    length. The first digit keeps its zero/nonzero-ness so fixed prefixes
+    like ``0001…`` survive; runs of one digit and non-digits are untouched.
+    The cardinality lever of `--freetext_expansion=all` (2026-08-05 spec C3).
+    """
+
+    def _fresh(m: re.Match[str]) -> str:
+        run = m.group(0)
+        first = "0" if run[0] == "0" else "123456789"[pick(9)]
+        rest = "".join("0123456789"[pick(10)] for _ in run[1:])
+        return first + rest
+
+    return _DIGIT_RUN.sub(_fresh, value)
+
+
 def sample_relaxed_identifier(
     shapes: RelaxedShapes, pick: Callable[[int], int]
 ) -> str:
@@ -233,11 +320,14 @@ def sample_relaxed_identifier(
 
 __all__ = [
     "build_relaxed_shapes",
+    "build_shape_mix",
     "detect_identifier_shape",
     "detect_temporal_format",
+    "mutate_digit_runs",
     "relaxed_shape_charset",
     "relaxed_shape_lengths",
     "relaxed_shapes_pattern",
     "sample_identifier",
     "sample_relaxed_identifier",
+    "shape_mix_is_identifier_like",
 ]
