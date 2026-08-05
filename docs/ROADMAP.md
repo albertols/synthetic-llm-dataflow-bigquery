@@ -57,7 +57,7 @@ and
 
 Themes (order TBD; targets are 4–6 weeks after M1 ships):
 - **Mode B validation pipeline** — GX 1.x Checkpoint + Soda Core scan + SDMetrics fidelity (`QualityReport` + `DiagnosticReport`) + Evidently drift report. Results to `synthetic_data_quality.*` tables; HTML / JSON artifacts to GCS.
-- **Multi-table mode** — FK awareness, cross-table referential checks (`fk.exists`, `logic.cross`), DAG composition for parent-first generation.
+- **Multi-table mode** — IN PROGRESS (2026-08-05, `ws8-fidelity-relational`): relational contract in description JSON + preflight + FK pools + parent-first orchestrator landed laptop-side ([ADR 0021](adr/0021-relational-contract-in-descriptions.md)). Remaining: E2E table-set run on M4, `fk.exists` post-run check wiring, composite-FK joint draws, level-parallel scheduling, `--source_stats=exact` warehouse tier.
 - **Constrained-decoding fallback chain** — `outlines` and `lm-format-enforcer` for schema edge cases that beat vLLM's guided JSON.
 - **Reference snapshot pattern** — cached parquet under `gs://{project}-dataflow/reference/{table}/sample.parquet` as a deterministic alternative to live SELECT.
 - **PII allow-list** — mask / format-template sensitive columns before they touch embeddings or validation reports.
