@@ -211,6 +211,14 @@ class GenerationContext(BaseModel):
     # DDL description JSON) to pool prompts. Per-column CONSTANT suffix —
     # prefix-cache-safe (ADR 0018).
     prompt_constraints: bool = True
+    # Full-table distinct counts per column, driver-populated from the
+    # Tier-2 exact stats pass (--source_stats=exact, ADR 0022). The 10k
+    # reference sample under-estimates cardinality (five-run verdict:
+    # sample distinct 95 vs source 4k starved the pool at 95); these lift
+    # the pool target back toward _FREE_TEXT_POOL_MAX. Empty = Tier 1 only,
+    # sample-distinct behavior unchanged. Workers stay stats-TABLE-agnostic:
+    # the value arrives through this context, never a BQ read.
+    source_distinct: dict[str, int] = Field(default_factory=dict)
     # --- RAG layer (WS2 §4b) -------------------------------------------
     # Requested synthetic row count — bounds the free-text pool target
     # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.

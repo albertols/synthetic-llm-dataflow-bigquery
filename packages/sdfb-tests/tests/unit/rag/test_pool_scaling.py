@@ -7,6 +7,7 @@ from __future__ import annotations
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext
 from sdfb_core.engines.b1_rag import B1RagEngine
+from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.b1_rag.engine import (
     _FREE_TEXT_POOL_MAX,
     _POOL_VALUES_PER_CALL,
@@ -76,6 +77,30 @@ def test_pool_scales_past_32_with_batched_calls():
     # n=4 choices/call -> per-round yield 128: 2 calls cover target=200.
     assert client.calls >= -(-200 // (_POOL_VALUES_PER_CALL * 4))
     engine.teardown()
+
+
+def test_pool_target_prefers_exact_source_distinct():
+    """Tier-2 exact distinct lifts a sample-starved target (ADR 0022):
+    60 sample-distinct notes + source_distinct 4000 → num_rows bound (500),
+    not the sample's 60. Missing/zero hints keep sample behavior."""
+    schema, rows = _schema_and_rows(300)
+    for i, r in enumerate(rows):
+        r["notes"] = f"repeating customer note body number {i % 60} with extended details"
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=32))
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=rows,
+        reference_digest="d",
+        pipeline_run_id="pool-exact",
+        num_rows=500,
+        source_distinct={"notes": 4000},
+    )
+    prof = profile_columns(schema, rows)["notes"]
+    assert engine._pool_target(prof, ctx) == 500
+    ctx_no_hint = ctx.model_copy(update={"source_distinct": {}})
+    assert engine._pool_target(prof, ctx_no_hint) == 60
+    ctx_zero = ctx.model_copy(update={"source_distinct": {"notes": 0}})
+    assert engine._pool_target(prof, ctx_zero) == 60
 
 
 def test_pool_target_respects_column_distinct():

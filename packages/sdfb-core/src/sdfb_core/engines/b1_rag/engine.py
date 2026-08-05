@@ -735,13 +735,17 @@ class B1RagEngine(GenerationEngine):
 
     def _pool_target(self, prof: ColumnProfile, ctx: GenerationContext) -> int:
         """min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX), skipping
-        unknown (zero/empty) bounds. `observed_values` distinct within the
-        reference sample is the closest available stand-in for
-        source_distinct (the engine never sees full-table stats)."""
+        unknown (zero/empty) bounds. `column_distinct` prefers the Tier-2
+        exact count (`ctx.source_distinct`, ADR 0022) — the sample distinct
+        under-estimates true cardinality and starved pools (five-run
+        verdict: sample 95 vs source 4k). Without exact stats the sample
+        distinct remains the stand-in."""
         bounds = [_FREE_TEXT_POOL_MAX]
         if ctx.num_rows > 0:
             bounds.append(ctx.num_rows)
-        distinct = len(set(prof.observed_values))
+        distinct = ctx.source_distinct.get(prof.name, 0) or len(
+            set(prof.observed_values)
+        )
         if distinct > 0:
             bounds.append(distinct)
         return max(min(bounds), 1)
