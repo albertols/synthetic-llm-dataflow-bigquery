@@ -1239,7 +1239,7 @@ in `validation_runs`.
   builder already keeps prompts prefix-stable per column, which is the
   property prefix/KV reuse (vLLM APC today, LMCache later) rewards. The
   `ModelClient` Protocol stays transport-agnostic.
-- **`turbovec`** (TurboQuant ANN index, Rust/Python): the swap point is the
+- **``turbovec``** (TurboQuant ANN index, Rust/Python): the swap point is the
   `sdfb_core.rag.index.build_index()` / `ExactIPIndex` seam
   (`search(query, k)` / `release()`), which nothing outside
   `rag/index.py` bypasses. Caveats for a future adapter: turbovec is
