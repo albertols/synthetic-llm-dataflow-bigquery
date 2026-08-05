@@ -24,7 +24,7 @@ REF: spec §2 sampling-backend seam; cuDF/CuPy is the M1-optional GPU backend
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard, cast
 
 from sdfb_core.engines.b1_rag.profile import (
     ColumnKind,
@@ -182,7 +182,7 @@ class ColumnSampler:
         if hi <= lo:
             return [lo] * n
         if not obs.size:
-            return rng.uniform(lo, hi, size=n).tolist()
+            return cast("list", rng.uniform(lo, hi, size=n).tolist())
         idx = rng.integers(0, obs.size, size=n)
         anchored = obs[idx]
         spread = hi - lo
@@ -193,7 +193,7 @@ class ColumnSampler:
         n_oob = int(oob.sum())
         if n_oob:
             blended[oob] = rng.uniform(lo, hi, size=n_oob)
-        return blended.tolist()
+        return cast("list", blended.tolist())
 
     def _numeric_numpy(self, np, rng, n: int, similarity: float) -> list:
         p = self.profile
@@ -314,7 +314,7 @@ class ColumnSampler:
             similarity * empirical[i] + (1.0 - similarity) * uniform
             for i in range(len(cats))
         ]
-        return rng.choices(cats, weights=weights, k=n)
+        return cast("list", rng.choices(cats, weights=weights, k=n))
 
     def _from_pool_python(self, rng, pool: Sequence, n: int) -> list:
         pool = list(pool)
@@ -345,7 +345,7 @@ class ColumnSampler:
         return float(v)
 
 
-def _is_number(x: object) -> bool:
+def _is_number(x: object) -> TypeGuard[int | float | Decimal | str]:
     if isinstance(x, bool):
         return False
     if isinstance(x, (int, float, Decimal)):

@@ -42,7 +42,7 @@ import random
 import threading
 import time
 from functools import partial
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sdfb_core.codegen import derive_record_model
 from sdfb_core.engines.b1_rag._fidelity import ColumnSampler, numpy_available
@@ -92,6 +92,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         GenerationContext,
         ModelClient,
     )
+    from sdfb_core.rag.index import ExactIPIndex
+    from sdfb_core.rag.store import ChunkStore
 
 # Top-k exemplars retrieved to condition the LLM's free-text inference.
 _DEFAULT_TOP_K = 8
@@ -177,7 +179,7 @@ class B1RagEngine(GenerationEngine):
         # without touching the (thread-unsafe) embedder from a worker
         # thread. Written before any ladder thread spawns; read-only after.
         self._seed_space: dict[str, tuple[list, list]] = {}
-        self._index = None
+        self._index: ExactIPIndex | None = None
         self._embedder: Embedder | None = None
         self._ref_vectors: list[list[float]] = []
         self._free_text_pools: dict[str, list[str]] = {}
@@ -345,7 +347,9 @@ class B1RagEngine(GenerationEngine):
         exact dim — a partial read would silently mix vector spaces, which
         is worse than re-embedding (WS2 §4b; 2026-07-07 design §4).
         """
-        store = ctx.chunk_store
+        # GenerationContext types the store as `object` to keep base.py free
+        # of rag imports; the DoFn only ever injects a ChunkStore.
+        store = cast("ChunkStore | None", ctx.chunk_store)
         if store is None or not ctx.reference_digest:
             return None
         t0 = time.monotonic()
@@ -668,7 +672,7 @@ class B1RagEngine(GenerationEngine):
         used to issue one identical store query per free-text column — N
         redundant BQ reads per worker setup). Empty dict when there is no
         store or no reference digest to key the fetch."""
-        store = ctx.chunk_store
+        store = cast("ChunkStore | None", ctx.chunk_store)
         if store is None or not ctx.reference_digest:
             return {}
         chunks = store.fetch(
@@ -706,7 +710,8 @@ class B1RagEngine(GenerationEngine):
             return select_seed_examples(vectors, texts, k, strategy=strategy)
         if self._embedder is not None:
             values: list[str] = []
-            seen: set[str] = set()
+            # raw values, not str(v): "5" must not dedup against int 5.
+            seen: set[object] = set()
             for row in ctx.reference_rows[:_MAX_EMBED_ROWS]:
                 v = row.get(prof.name)
                 if v not in (None, "") and v not in seen:

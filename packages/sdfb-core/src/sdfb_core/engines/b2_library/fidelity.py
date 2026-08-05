@@ -23,6 +23,7 @@ from collections import Counter
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
+from typing import Any, cast
 
 from sdfb_core.contracts.relational import parse_llm_prompt_constraint
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
@@ -356,7 +357,9 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
         )
 
     if kind is ColumnKind.NUMERIC:
-        nums = [float(v) for v in non_null]
+        # NUMERIC verdicts come from _classify, which already proved every
+        # value parses; float() re-raising here would be a classifier bug.
+        nums = [float(cast("Any", v)) for v in non_null]
         is_int = field.bq_type in {"INTEGER", "INT64"}
         # NUMERIC/BIGNUMERIC: respect the declared scale (default 2 places
         # for fixed-point money-like columns) so sampled values pass the
@@ -480,7 +483,7 @@ def enforce_value(profile: ColumnProfile, value: object) -> object:
 def _enforce_numeric(profile: ColumnProfile, value: object) -> object:
     """Clip a sampled numeric to ``[min, max]`` and pin its type/scale."""
     try:
-        num = float(value)
+        num = float(cast("Any", value))
     except (TypeError, ValueError):
         return _representative(profile)
     if profile.minimum is not None:
@@ -534,8 +537,11 @@ def _representative(profile: ColumnProfile) -> object:
         lo = profile.minimum if profile.minimum is not None else 0.0
         return round(lo) if profile.is_integer else lo
     if profile.kind is ColumnKind.TEMPORAL and profile.minimum is not None:
+        # TEMPORAL profiles always carry a value type (set beside kind).
         return from_epoch(
-            profile.minimum, profile.temporal_value_type, profile.temporal_format
+            profile.minimum,
+            cast("str", profile.temporal_value_type),
+            profile.temporal_format,
         )
     if profile.kind is ColumnKind.CATEGORICAL and profile.categories:
         return profile.categories[0]

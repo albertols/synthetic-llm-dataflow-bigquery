@@ -28,7 +28,7 @@ by the ``ModelClient`` free-text hook (``freetext.py``), not sampled here.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
 
@@ -139,10 +139,16 @@ class EmpiricalBackend:
             values = _sample_categorical(p, n, rng, temperature)
 
         elif p.kind is ColumnKind.TEMPORAL:
+            # TEMPORAL profiles always carry a value type (set beside kind).
             values = _inject_temporal_sentinels(
                 p,
                 sample_temporal(
-                    p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+                    p.minimum,
+                    p.maximum,
+                    cast("str", p.temporal_value_type),
+                    p.temporal_format,
+                    n,
+                    rng,
                 ),
                 rng,
             )

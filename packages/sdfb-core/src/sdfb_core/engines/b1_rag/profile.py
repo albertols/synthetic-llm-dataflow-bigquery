@@ -405,7 +405,7 @@ def _profile_string(
         # fixed-alphabet identifiers generate from a per-position template.
         fmt = detect_temporal_format(distinct)
         if fmt is not None:
-            pairs = []
+            pairs: list[tuple[object, float, int | None]] = []
             for s in strings:
                 parsed = datetime.strptime(s, fmt)
                 pairs.append(

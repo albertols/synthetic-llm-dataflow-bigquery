@@ -14,11 +14,13 @@ Pure stdlib + the shared text_shapes detector. No Beam, no GCP, no torch.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from sdfb_core.engines.text_shapes import detect_temporal_format
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Sequence
+
     import numpy as np
 
 # ColumnProfile.temporal_value_type values. Epoch units per type:
@@ -35,7 +37,7 @@ _EPOCH_NAIVE = datetime(1970, 1, 1)
 _MAX_SECONDS_OF_DAY = 86_399.999_999
 
 
-def classify_temporal_values(values: list[object]) -> tuple[str, str | None] | None:  # noqa: PLR0911 — type classifier; sequential returns read clearer than nesting
+def classify_temporal_values(values: Sequence[object]) -> tuple[str, str | None] | None:  # noqa: PLR0911 — type classifier; sequential returns read clearer than nesting
     """``(value_type, strftime_format)`` when EVERY value is uniformly
     temporal, else ``None`` (mixed types/formats stay on their existing
     route — same all-or-nothing contract as ``detect_temporal_format``)."""
@@ -43,10 +45,11 @@ def classify_temporal_values(values: list[object]) -> tuple[str, str | None] | N
         return None
     first = values[0]
     if isinstance(first, datetime):  # before date: datetime IS a date
-        if not all(isinstance(v, datetime) for v in values):
+        dts = [v for v in values if isinstance(v, datetime)]
+        if len(dts) != len(values):
             return None
         aware = first.tzinfo is not None
-        if any((v.tzinfo is not None) != aware for v in values):
+        if any((v.tzinfo is not None) != aware for v in dts):
             return None
         return (VT_DATETIME_UTC if aware else VT_DATETIME, None)
     if isinstance(first, date):
@@ -58,26 +61,33 @@ def classify_temporal_values(values: list[object]) -> tuple[str, str | None] | N
             return None
         return (VT_TIME, None)
     if isinstance(first, str):
-        if not all(isinstance(v, str) for v in values):
+        strs = [v for v in values if isinstance(v, str)]
+        if len(strs) != len(values):
             return None
-        fmt = detect_temporal_format(values)
+        fmt = detect_temporal_format(strs)
         return (VT_STR, fmt) if fmt else None
     return None
 
 
 def to_epoch(value: object, value_type: str, fmt: str | None) -> float:
+    # casts, not isinstance: value_type is the classifier's verdict on the
+    # whole column — by contract it names the runtime type, and VT_STR
+    # always carries a format.
     if value_type == VT_DATETIME_UTC:
-        return value.timestamp()
+        return cast("datetime", value).timestamp()
     if value_type == VT_DATETIME:
-        return (value - _EPOCH_NAIVE).total_seconds()
+        return (cast("datetime", value) - _EPOCH_NAIVE).total_seconds()
     if value_type == VT_DATE:
-        return float(value.toordinal())
+        return float(cast("date", value).toordinal())
     if value_type == VT_TIME:
+        t = cast("time", value)
         return (
-            value.hour * 3600 + value.minute * 60 + value.second
-            + value.microsecond / 1e6
+            t.hour * 3600 + t.minute * 60 + t.second
+            + t.microsecond / 1e6
         )
-    return (datetime.strptime(value, fmt) - _EPOCH_NAIVE).total_seconds()
+    return (
+        datetime.strptime(cast("str", value), cast("str", fmt)) - _EPOCH_NAIVE
+    ).total_seconds()
 
 
 def from_epoch(x: float, value_type: str, fmt: str | None) -> object:
@@ -92,7 +102,7 @@ def from_epoch(x: float, value_type: str, fmt: str | None) -> object:
         whole = int(s)
         return time(whole // 3600, (whole % 3600) // 60, whole % 60,
                     round((s - whole) * 1e6))
-    return (_EPOCH_NAIVE + timedelta(seconds=x)).strftime(fmt)
+    return (_EPOCH_NAIVE + timedelta(seconds=x)).strftime(cast("str", fmt))
 
 
 def value_year(value: object, value_type: str, fmt: str | None) -> int | None:
@@ -101,8 +111,8 @@ def value_year(value: object, value_type: str, fmt: str | None) -> int | None:
     if value_type == VT_TIME:
         return None
     if value_type == VT_STR:
-        return datetime.strptime(value, fmt).year
-    return value.year
+        return datetime.strptime(cast("str", value), cast("str", fmt)).year
+    return cast("date", value).year
 
 
 def age_floor_epoch(
@@ -125,7 +135,7 @@ def age_floor_epoch(
         return to_epoch(cutoff.replace(tzinfo=None), VT_DATETIME, None)
     if value_type == VT_DATE:
         return float(cutoff.date().toordinal())
-    return to_epoch(cutoff.strftime(fmt), VT_STR, fmt)
+    return to_epoch(cutoff.strftime(cast("str", fmt)), VT_STR, fmt)
 
 
 def sample_temporal(

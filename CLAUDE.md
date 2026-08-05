@@ -27,8 +27,9 @@ Mark M4-only tests with `@pytest.mark.gpu` or `@pytest.mark.gcp`. The default `p
 
 ```bash
 uv sync --group dev
-uv run pytest -m "not gpu and not gcp" -q   # expect all green (285+ tests)
+uv run pytest -m "not gpu and not gcp" -q   # expect all green (845+ tests)
 uv run ruff check .
+uv run mypy packages/sdfb-core/src          # hard CI gate — expect 0 errors
 ```
 
 Full machine setup: [`docs/M4_SETUP.md`](docs/M4_SETUP.md).
