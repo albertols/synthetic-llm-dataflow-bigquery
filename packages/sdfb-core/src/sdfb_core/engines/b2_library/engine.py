@@ -44,7 +44,11 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     ModelClient,
 )
-from sdfb_core.engines.generation_plan import build_plan, should_log_plan
+from sdfb_core.engines.generation_plan import (
+    build_plan,
+    build_plan_detail,
+    should_log_plan,
+)
 from sdfb_core.observability import log_milestone
 
 
@@ -126,6 +130,9 @@ class B2LibraryEngine(GenerationEngine):
             columns=len(self._profiles),
             backend=self._backend_descriptor(),
             plan=json.dumps(build_plan(self._profiles), separators=(",", ":")),
+            columns_detail=json.dumps(
+                build_plan_detail(self._profiles), separators=(",", ":")
+            ),
         )
 
     # -- pickling across the Beam worker boundary ---------------------------

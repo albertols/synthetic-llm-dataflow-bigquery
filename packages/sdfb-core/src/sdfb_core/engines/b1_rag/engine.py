@@ -56,6 +56,9 @@ from sdfb_core.engines.base import (
     escalating_sampling,
 )
 from sdfb_core.engines.generation_plan import build_plan as _build_plan
+from sdfb_core.engines.generation_plan import (
+    build_plan_detail as _build_plan_detail,
+)
 from sdfb_core.engines.generation_plan import should_log_plan as _should_log_plan
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
@@ -295,6 +298,9 @@ class B1RagEngine(GenerationEngine):
             pool_sources=json.dumps(
                 dict(sorted(self._pool_sources.items())),
                 separators=(",", ":"),
+            ),
+            columns_detail=json.dumps(
+                _build_plan_detail(self._profiles), separators=(",", ":")
             ),
         )
 
