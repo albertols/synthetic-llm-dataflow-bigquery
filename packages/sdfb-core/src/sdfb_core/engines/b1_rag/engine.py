@@ -63,6 +63,7 @@ from sdfb_core.engines.generation_plan import (
 from sdfb_core.engines.generation_plan import should_log_plan as _should_log_plan
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
+    length_hint,
     mutate_digit_runs,
     relaxed_shape_charset,
     relaxed_shape_lengths,
@@ -745,6 +746,22 @@ class B1RagEngine(GenerationEngine):
             bounds.append(distinct)
         return max(min(bounds), 1)
 
+    def _column_constraint(self, prof: ColumnProfile) -> str:
+        """Per-column prompt steering: DDL constraint (spec C5) + measured
+        length band. Gated together by ``prompt_constraints``; both are
+        constant per column, so the pool prompt keeps a byte-identical
+        shared prefix for vLLM automatic prefix caching (ADR 0018)."""
+        if not getattr(self._ctx, "prompt_constraints", True):
+            return ""
+        return " ".join(
+            s
+            for s in (
+                prof.llm_prompt_constraint,
+                length_hint(prof.observed_values),
+            )
+            if s
+        )
+
     def _retrieve_exemplars(
         self, ctx: GenerationContext, k: int
     ) -> list[dict]:
@@ -777,11 +794,7 @@ class B1RagEngine(GenerationEngine):
             return None
         vectors, texts = space
 
-        constraint = (
-            prof.llm_prompt_constraint
-            if getattr(self._ctx, "prompt_constraints", True)
-            else ""
-        )
+        constraint = self._column_constraint(prof)
 
         def _builder(attempt: int) -> tuple[str, list[str]]:
             rotated = select_seed_examples(
@@ -806,11 +819,7 @@ class B1RagEngine(GenerationEngine):
         t_column = time.monotonic()
         self._pool_sources[prof.name] = "llm_ladder"
         per_call = min(target, _POOL_VALUES_PER_CALL)
-        constraint = (
-            prof.llm_prompt_constraint
-            if getattr(self._ctx, "prompt_constraints", True)
-            else ""
-        )
+        constraint = self._column_constraint(prof)
         prompt = _build_pool_prompt(
             prof.name, per_call, seed_examples, constraint=constraint
         )

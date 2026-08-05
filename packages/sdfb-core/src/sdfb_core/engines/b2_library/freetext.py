@@ -36,6 +36,7 @@ from sdfb_core.engines.base import (
 )
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
+    length_hint,
     mutate_digit_runs,
     sample_identifier,
     sample_relaxed_identifier,
@@ -360,11 +361,14 @@ class FreeTextHook:
             f"that format. Never copy an example verbatim. Examples: "
             f"{exemplars}. Return JSON {{\"values\": [...]}}."
         )
-        if profile.llm_prompt_constraint and cfg.engine_specific.get(
-            "prompt_constraints", True
-        ):
-            # Per-column constant suffix (spec C5) — prefix-cache-safe.
-            prompt += f" Column constraint: {profile.llm_prompt_constraint}."
+        if cfg.engine_specific.get("prompt_constraints", True):
+            # Per-column constant suffixes (spec C5 + measured length band,
+            # ADR 0022) — appended after the shared prefix, prefix-cache-safe.
+            if profile.llm_prompt_constraint:
+                prompt += f" Column constraint: {profile.llm_prompt_constraint}."
+            hint = length_hint(profile.text_pool)
+            if hint:
+                prompt += f" {hint}"
         # Novelty filter: LLM values that equal observed reference values are
         # copies, not generations. The LLM pool is the "diverge" side of the
         # similarity blend — observed values reach the output only via the

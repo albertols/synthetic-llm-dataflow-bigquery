@@ -105,3 +105,36 @@ def test_b2_pool_prompt_carries_constraint_when_enabled():
 def test_b2_pool_prompt_clean_when_disabled():
     prompts = _b2_sample(_DESC, constraints_on=False)
     assert prompts and all("Column constraint" not in p for p in prompts)
+    assert all("characters long" not in p for p in prompts)
+
+
+def test_length_hint_bands_and_gates():
+    from sdfb_core.engines.text_shapes import length_hint
+
+    varied = [f"{'x' * (10 + (i % 40))}" for i in range(50)]
+    hint = length_hint(varied)
+    assert "characters long" in hint and "median" in hint
+    assert length_hint(["abc"] * 50) == ""  # fixed width → shape owns it
+    assert length_hint(["ab", "abcd"]) == ""  # below min_samples
+
+
+def test_b2_pool_prompt_carries_length_hint():
+    """Measured length band rides the same prompt_constraints gate and is
+    APPENDED (per-column constant suffix, vLLM prefix-cache-safe)."""
+    prompts = _b2_sample(_DESC, constraints_on=True)
+    assert prompts and all("characters long (median" in p for p in prompts)
+    for p in prompts:
+        assert p.index("You generate synthetic") < p.index("characters long")
+
+
+def test_b1_column_constraint_joins_ddl_and_length():
+    from sdfb_core.engines.b1_rag.engine import B1RagEngine
+
+    prof = profile_columns(_schema(_DESC), _prose_rows())["NOTES"]
+    engine = B1RagEngine.__new__(B1RagEngine)
+    engine._ctx = type("Ctx", (), {"prompt_constraints": True})()
+    joined = engine._column_constraint(prof)
+    assert joined.startswith("uppercase SWIFT-style refs")
+    assert "characters long" in joined
+    engine._ctx = type("Ctx", (), {"prompt_constraints": False})()
+    assert engine._column_constraint(prof) == ""

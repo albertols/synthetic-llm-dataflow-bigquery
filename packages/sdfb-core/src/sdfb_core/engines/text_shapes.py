@@ -330,11 +330,35 @@ def sample_relaxed_identifier(
     return sample_identifier(shapes[-1][1], pick)
 
 
+def length_hint(values: Iterable[object], *, min_samples: int = 8) -> str:
+    """Measured length band for free-text pool prompts.
+
+    Steers the LLM's length marginal toward the source's observed p05–p95
+    band (the 2026-08-04 crosscheck: synthetic prose ran systematically
+    shorter than source). Returns "" below ``min_samples`` or when the band
+    is degenerate — fixed-width values already carry their length in the
+    shape template. Callers must APPEND this after the shared instruction
+    prefix: a per-column constant suffix keeps vLLM automatic prefix caching
+    serving the common prefix (ADR 0018).
+    """
+    lengths = sorted(len(str(v)) for v in values)
+    if len(lengths) < min_samples:
+        return ""
+    last = len(lengths) - 1
+    p05 = lengths[int(0.05 * last)]
+    p50 = lengths[int(0.50 * last)]
+    p95 = lengths[int(0.95 * last)]
+    if p05 == p95:
+        return ""
+    return f"Most values are {p05}-{p95} characters long (median {p50})."
+
+
 __all__ = [
     "build_relaxed_shapes",
     "build_shape_mix",
     "detect_identifier_shape",
     "detect_temporal_format",
+    "length_hint",
     "mutate_digit_runs",
     "relaxed_shape_charset",
     "relaxed_shape_lengths",
