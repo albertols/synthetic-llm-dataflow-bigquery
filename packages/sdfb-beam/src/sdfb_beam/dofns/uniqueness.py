@@ -2,15 +2,25 @@
 
 Full-row duplicates and repeated identity values are the two block-replay /
 memorization signatures the 2026-07 E2E report found unguarded. Keying by
-digest + GroupByKey keeps memory flat regardless of run size; the first
+digest + ``CombinePerKey`` keeps memory flat regardless of run size; one
 occurrence lands, the rest become DLQ rows whose ``rule_id`` feeds
 ``build_run_summary`` → the BLOCKER gate.
 
-Iteration order within a ``GroupByKey`` group is not guaranteed by Beam —
-"first occurrence wins" therefore means an arbitrary (but single) survivor
-per key, not necessarily the record that appeared earliest in the input.
-That is acceptable here: the goal is "keep exactly one", not "keep the
-lexicographically/temporally first one".
+``CombinePerKey``, not ``GroupByKey`` (WS6 W4): a GroupByKey materializes
+every value for a key reducer-side, so the whole dataset crosses the
+shuffle — the 2026-07-26 1M run peaked at 12.77 MiB/s reading it back.
+Combining runs MAP-side first, so each worker collapses its own duplicates
+and the shuffle carries roughly the unique set.
+
+Which record survives is arbitrary (Beam orders neither GroupByKey values
+nor combiner inputs) — the goal is "keep exactly one", not "keep the
+temporally first one". Duplicate DLQ envelopes carry the survivor's
+payload: equal ``row_digest`` means identical non-identity fields, so the
+only thing not preserved is the dropped rows' freshly-synthesized identity
+values. Duplicate COUNTS are exact, which is what the gate folds.
+
+This transform is still a barrier — every ``CombinePerKey`` is a shuffle.
+See ``--uniqueness_mode=streaming`` for the non-barrier path.
 """
 
 from __future__ import annotations
@@ -21,6 +31,14 @@ from sdfb_core.validation.uniqueness import row_digest
 RULE_ROW_DUPLICATE = "row.duplicate"
 RULE_IDENTITY_UNIQUE = "identity.unique"
 RULE_PK_DUPLICATE = "pk.duplicate"
+
+# WS6 W3. `exact` is today's behaviour and stays the default: every
+# duplicate is diverted to the DLQ, at the cost of up to three
+# full-dataset shuffle barriers. `streaming` lands rows as they are
+# generated and MEASURES the duplicate rate instead of removing it.
+MODE_EXACT = "exact"
+MODE_STREAMING = "streaming"
+UNIQUENESS_MODES = (MODE_EXACT, MODE_STREAMING)
 
 
 def _envelope(record: dict, rule_id: str) -> dict:
@@ -33,16 +51,73 @@ def _envelope(record: dict, rule_id: str) -> dict:
     }
 
 
-class _FirstWins(beam.DoFn):
+class _FirstWinsCombineFn(beam.CombineFn):
+    """Keep ONE survivor per key and count everything else.
+
+    `GroupByKey` materializes every value for a key on the reducer side, so
+    the whole dataset crosses the shuffle (2026-07-26 1M run:
+    `GroupByRowDigest/Read` peaked at 12.77 MiB/s). `CombinePerKey` combines
+    **map-side** first, so each worker collapses its own duplicates and the
+    shuffle carries roughly the unique set.
+
+    The accumulator is `(survivor, seen)`. `seen` is the EXACT number of
+    records for the key — the BLOCKER gate folds `dlq_by_rule` counts
+    (`validation/summary.py`), so the count is the part that must be
+    preserved bit-for-bit.
+
+    Which record survives is arbitrary, exactly as it was under
+    `GroupByKey` (Beam does not order values within a group).
+    """
+
+    def create_accumulator(self) -> tuple[dict | None, int]:
+        return (None, 0)
+
+    def add_input(
+        self, accumulator: tuple[dict | None, int], element: dict
+    ) -> tuple[dict | None, int]:
+        survivor, seen = accumulator
+        return (element if survivor is None else survivor, seen + 1)
+
+    def merge_accumulators(
+        self, accumulators
+    ) -> tuple[dict | None, int]:
+        survivor: dict | None = None
+        seen = 0
+        for acc_survivor, acc_seen in accumulators:
+            if survivor is None and acc_survivor is not None:
+                survivor = acc_survivor
+            seen += acc_seen
+        return (survivor, seen)
+
+    def extract_output(
+        self, accumulator: tuple[dict | None, int]
+    ) -> tuple[dict | None, int]:
+        return accumulator
+
+
+class _ExpandCombined(beam.DoFn):
+    """Turn `(key, (survivor, seen))` back into one survivor + `seen - 1`
+    DLQ envelopes.
+
+    The envelopes carry the SURVIVOR's payload rather than each dropped
+    record's. For `row.duplicate` that is the same content by construction —
+    equal `row_digest` means the non-identity fields are identical — the
+    only loss being the dropped rows' freshly-synthesized identity values,
+    which are meaningless by definition. Counts, which is what the gate
+    folds, are exact.
+    """
+
     def __init__(self, rule_id: str) -> None:
         self.rule_id = rule_id
 
     def process(self, kv):
-        _key, records = kv
-        it = iter(records)
-        yield next(it)
-        for dup in it:
-            yield beam.pvalue.TaggedOutput("duplicates", _envelope(dup, self.rule_id))
+        _key, (survivor, seen) = kv
+        if survivor is None:  # pragma: no cover - defensive
+            return
+        yield survivor
+        envelope = _envelope(survivor, self.rule_id)
+        for _ in range(seen - 1):
+            yield beam.pvalue.TaggedOutput("duplicates", envelope)
 
 
 class EnforceUniqueness(beam.PTransform):
@@ -67,10 +142,16 @@ class EnforceUniqueness(beam.PTransform):
         self,
         identity_columns: list[str] | None = None,
         pk_columns: list[str] | None = None,
+        mode: str = MODE_EXACT,
     ) -> None:
         super().__init__()
+        if mode not in UNIQUENESS_MODES:
+            raise ValueError(
+                f"uniqueness_mode must be one of {UNIQUENESS_MODES}, got {mode!r}"
+            )
         self.identity_columns = list(identity_columns or [])
         self.pk_columns = list(pk_columns or [])
+        self.mode = mode
 
     def expand(self, records):
         identity_set = set(self.identity_columns)
@@ -78,12 +159,15 @@ class EnforceUniqueness(beam.PTransform):
         def _row_key(r, ids=identity_set):
             return row_digest({k: v for k, v in r.items() if k not in ids})
 
+        if self.mode == MODE_STREAMING:
+            return self._expand_streaming(records, _row_key)
+
         by_row = (
             records
             | "KeyByRowDigest" >> beam.Map(lambda r: (_row_key(r), r))
-            | "GroupByRowDigest" >> beam.GroupByKey()
+            | "CombineByRowDigest" >> beam.CombinePerKey(_FirstWinsCombineFn())
             | "FirstRowWins"
-            >> beam.ParDo(_FirstWins(RULE_ROW_DUPLICATE)).with_outputs(
+            >> beam.ParDo(_ExpandCombined(RULE_ROW_DUPLICATE)).with_outputs(
                 "duplicates", main="unique"
             )
         )
@@ -95,9 +179,9 @@ class EnforceUniqueness(beam.PTransform):
                 row_unique
                 | "KeyByPk"
                 >> beam.Map(lambda r, c=pk_cols: (tuple(str(r.get(x)) for x in c), r))
-                | "GroupByPk" >> beam.GroupByKey()
+                | "CombineByPk" >> beam.CombinePerKey(_FirstWinsCombineFn())
                 | "FirstPkWins"
-                >> beam.ParDo(_FirstWins(RULE_PK_DUPLICATE)).with_outputs(
+                >> beam.ParDo(_ExpandCombined(RULE_PK_DUPLICATE)).with_outputs(
                     "duplicates", main="unique"
                 )
             )
@@ -109,13 +193,56 @@ class EnforceUniqueness(beam.PTransform):
                 row_unique
                 | "KeyByIdentity"
                 >> beam.Map(lambda r, c=cols: (tuple(str(r.get(x)) for x in c), r))
-                | "GroupByIdentity" >> beam.GroupByKey()
+                | "CombineByIdentity" >> beam.CombinePerKey(_FirstWinsCombineFn())
                 | "FirstIdentityWins"
-                >> beam.ParDo(_FirstWins(RULE_IDENTITY_UNIQUE)).with_outputs(
+                >> beam.ParDo(_ExpandCombined(RULE_IDENTITY_UNIQUE)).with_outputs(
                     "duplicates", main="unique"
                 )
             )
             row_unique = by_id.unique
             dup_streams.append(by_id.duplicates)
         duplicates = dup_streams | "FlattenDuplicates" >> beam.Flatten()
-        return {"unique": row_unique, "duplicates": duplicates}
+        return {
+            "unique": row_unique,
+            "duplicates": duplicates,
+            # Exact mode reports through diverted envelopes, so it has no
+            # separate counts to contribute.
+            "rule_counts": duplicates | "NoRuleCounts" >> beam.FlatMap(lambda _: []),
+            "distinct_count": row_unique
+            | "NoDistinctCount" >> beam.FlatMap(lambda _: []),
+        }
+
+    def _expand_streaming(self, records, row_key):
+        """No barrier on the landing path.
+
+        Rows pass straight through, so BigQuery sees them as they are
+        generated. Duplicates are MEASURED on a parallel branch that
+        shuffles 32-byte digests rather than whole rows, and the measurement
+        never gates the write.
+
+        The gate's arithmetic stays honest: `build_run_summary` computes
+        ``total = valid_count + dlq_count``. Feeding the duplicate count in
+        while `valid_count` still counted every landed row would inflate the
+        denominator and quietly weaken the blocker ratio, so streaming also
+        publishes `distinct_count` for the caller to use as `valid_count` —
+        distinct + excess is exactly the number of rows generated.
+        """
+        per_digest = (
+            records
+            | "DigestOnly" >> beam.Map(row_key)
+            # Count.PerElement combines map-side, and the values crossing
+            # the shuffle are digests, not rows.
+            | "CountPerDigest" >> beam.combiners.Count.PerElement()
+        )
+        excess = (
+            per_digest
+            | "ExcessPerDigest" >> beam.Map(lambda kv: kv[1] - 1)
+            | "SumExcess" >> beam.CombineGlobally(sum)
+        )
+        return {
+            "unique": records,
+            "duplicates": records | "NoDuplicates" >> beam.FlatMap(lambda _: []),
+            "rule_counts": excess
+            | "AsRuleCount" >> beam.Map(lambda n: (RULE_ROW_DUPLICATE, n)),
+            "distinct_count": per_digest | "CountDistinct" >> beam.combiners.Count.Globally(),
+        }

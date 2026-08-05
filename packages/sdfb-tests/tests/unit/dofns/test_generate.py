@@ -111,7 +111,11 @@ def _dofn(ctx, seed=None):
 def test_setup_localizes_gs_embedder_uri(
     fake_gcs, recording_engine, monkeypatch, tmp_path, customers_schema
 ):
-    monkeypatch.setattr(generate_mod, "EMBEDDER_LOCAL_DIR", str(tmp_path / "emb"))
+    # The localization moved to the shared dofns/localize module (2026-07-28
+    # R1 fix: BuildFreeTextPoolsDoFn skipped it), so patch it THERE.
+    from sdfb_beam.dofns import localize as localize_mod
+
+    monkeypatch.setattr(localize_mod, "EMBEDDER_LOCAL_DIR", str(tmp_path / "emb"))
     prefix = "synthetic/models/embedders/bge-small-en-v1.5/v1/"
     blob_cls = fake_gcs["blob_cls"]
     fake_gcs["blobs"] = [blob_cls(prefix + "config.json")]

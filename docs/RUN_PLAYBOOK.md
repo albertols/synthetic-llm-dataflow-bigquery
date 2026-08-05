@@ -405,3 +405,43 @@ ladder attempts to target — `freetext_pool_built` carries all three.
 
 **Exclude `ACCU_LIMIT_KEY` / `COL_048` from every comparison.** It carries
 binary characters and is a known special case.
+
+---
+
+## 7. WS6 — pipeline shape (landed 2026-07-27, not yet measured)
+
+### 7a. The flag that matters most is still WS5's
+
+The 2026-07-26_17_10_37 run spent **26 of its 53 minutes** rebuilding
+free-text pools because `--freetext_pools_table` was never passed. b1_rag now
+emits `freetext_pool_store_absent` (WARNING) when that happens — grep for it
+before blaming anything else:
+
+```bash
+grep -c 'name=freetext_pool_store_absent' worker_logs.jsonl   # expect 0
+```
+
+### 7b. `--uniqueness_mode`
+
+| Value | Landing | Duplicates | Use when |
+|---|---|---|---|
+| `exact` (default) | after up to 3 shuffle barriers | diverted to the DLQ | you need duplicates removed |
+| `streaming` | **incremental, as generated** | **land**, rate measured and gated | you want rows visible early and will re-run on a gate failure |
+
+In `streaming`, duplicate rows land. The run is still marked
+`FAILED_BLOCKER` in `validation_runs`, so recover with
+`--write_disposition=overwrite`. The gate ratio is computed identically in
+both modes (the transform publishes `distinct_count` so
+`total = valid + dlq` stays equal to the rows generated).
+
+### 7c. New milestones to read out
+
+| Milestone | Reads as |
+|---|---|
+| `freetext_pool_store_absent` | this run will rebuild pools per worker process |
+| `vllm_spawn_lost_race` | a duplicate spawn adopted the healthy server — **benign**, and previously fatal |
+| `embedder_cuda_no_room` | the GPU was too full for the embedder; it used CPU instead of OOMing |
+| `embedder_cuda_oom_fallback` | the move to CUDA OOMed and degraded to CPU rather than failing the bundle |
+
+Expect `dofn_setup_retry` and CUDA OOM occurrences to be **0** now. If either
+is non-zero, the cascade is back and the run is worth a postmortem.

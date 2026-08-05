@@ -181,3 +181,79 @@ def test_pk_duplicates_divert_to_dlq():
             equal_to(["pk.duplicate"]),
             label="dlq_rule",
         )
+
+
+# ---------------------------------------------------------------------------
+# WS6 W4 — the exact path combines MAP-SIDE before the shuffle.
+#
+# GroupByKey materializes every value for a key on the reducer side, so the
+# 2026-07-26 1M run pushed the whole dataset through shuffle (measured:
+# GroupByRowDigest/Read peaked at 12.77 MiB/s). CombinePerKey lets each
+# worker collapse its own duplicates first, so the shuffle carries roughly
+# the unique set.
+#
+# The gate consumes dlq_by_rule COUNTS (validation/summary.py), not payloads,
+# so exact counts are what must be preserved.
+# ---------------------------------------------------------------------------
+def test_combining_preserves_exact_duplicate_counts():
+    from sdfb_beam.dofns.uniqueness import _FirstWinsCombineFn
+
+    fn = _FirstWinsCombineFn()
+    acc = fn.create_accumulator()
+    for rec in ({"a": 1}, {"a": 1}, {"a": 1}):
+        acc = fn.add_input(acc, rec)
+    survivor, seen = fn.extract_output(acc)
+    assert survivor == {"a": 1}
+    assert seen == 3, "one survivor + two duplicates"
+
+
+def test_combining_merges_across_workers_without_losing_count():
+    """merge_accumulators runs when Dataflow combines partial results from
+    different bundles — the count must survive the merge."""
+    from sdfb_beam.dofns.uniqueness import _FirstWinsCombineFn
+
+    fn = _FirstWinsCombineFn()
+    a = fn.add_input(fn.add_input(fn.create_accumulator(), {"a": 1}), {"a": 1})
+    b = fn.add_input(fn.create_accumulator(), {"a": 1})
+    empty = fn.create_accumulator()
+    survivor, seen = fn.extract_output(fn.merge_accumulators([a, empty, b]))
+    assert survivor == {"a": 1}
+    assert seen == 3
+
+
+def test_empty_accumulator_yields_no_survivor():
+    from sdfb_beam.dofns.uniqueness import _FirstWinsCombineFn
+
+    fn = _FirstWinsCombineFn()
+    assert fn.extract_output(fn.create_accumulator()) == (None, 0)
+
+
+def test_exact_mode_output_matches_the_pre_ws6_contract():
+    """Same unique rows and the same number of DLQ envelopes as the
+    GroupByKey implementation produced."""
+    import apache_beam as beam
+    from apache_beam.testing.test_pipeline import TestPipeline
+    from apache_beam.testing.util import assert_that, equal_to
+    from sdfb_beam.dofns.uniqueness import EnforceUniqueness
+
+    rows = [
+        {"id": "1", "v": "x"},
+        {"id": "2", "v": "x"},  # duplicate of row 1 once id is excluded
+        {"id": "3", "v": "y"},
+    ]
+    with TestPipeline() as p:
+        out = (
+            p
+            | beam.Create(rows)
+            | EnforceUniqueness(identity_columns=["id"])
+        )
+        assert_that(
+            out["unique"] | "V" >> beam.Map(lambda r: r["v"]),
+            equal_to(["x", "y"]),
+            label="unique",
+        )
+        assert_that(
+            out["duplicates"] | "R" >> beam.Map(lambda d: d["rule_id"]),
+            equal_to(["row.duplicate"]),
+            label="dups",
+        )

@@ -17,6 +17,7 @@ Substitution markers (workflow 3 seds these at import time):
   {{SDFB_DEFAULT_TABLE_FQN}}  project.dataset.table
   {{SDFB_DDL_URI}}            gs://…/ddl.json (empty ⇒ operator omits ddl_uri; live INFORMATION_SCHEMA extraction)
   {{SDFB_RAG_CHUNKS_TABLE}}   project.synthetic_rag.rag_chunks (B.1 chunk store; empty ⇒ params omitted, no reuse/population)
+  {{SDFB_FREETEXT_POOLS_TABLE}} project.synthetic_rag.freetext_pools (WS5 pool store; empty ⇒ params omitted, pools rebuild per worker)
   {{WRITE_DISPOSITION}}       default of the `write_disposition` DAG param (append | overwrite)
   {{SDFB_LANDING_TABLE}}      project.synthetic_data.<table> (defaults to the source table name)
   {{SDFB_DLQ_TABLE}}          project.synthetic_data_quality.dlq
@@ -60,6 +61,12 @@ _DDL_URI = "{{SDFB_DDL_URI}}"
 # build_rag_layer entirely: the launcher re-embeds per worker, no persisted
 # chunk reuse (the 2026-07-23 run spent 158s re-embedding for this reason).
 _RAG_CHUNKS_TABLE = "{{SDFB_RAG_CHUNKS_TABLE}}"
+# WS5/ADR 0020 free-text pool store. Empty ⇒ the DAG omits
+# freetext_pools_table AND build_pool_layer entirely: every worker PROCESS
+# then rebuilds its pools in DoFn.setup() — the 2026-07-27_10_42_52 run
+# paid 45 rebuilds (~26 of 53 min) exactly this way, warning
+# freetext_pool_store_absent 25 times.
+_FREETEXT_POOLS_TABLE = "{{SDFB_FREETEXT_POOLS_TABLE}}"
 
 # -----------------------------------------------------------------------------
 # Runtime infra — Composer Variables, set once per env (not build-time-baked).
@@ -236,6 +243,41 @@ default_dag_params = {
                     "id+version). Ignored when the build left "
                     "SDFB_RAG_CHUNKS_TABLE empty.",
     ),
+    "build_pool_layer": Param(
+        default="true",
+        type="string",
+        enum=["true", "false"],
+        description="Build free-text pools in their own branch and persist "
+                    "them to synthetic_rag.freetext_pools (skipped "
+                    "in-launcher when this reference_digest + model_uri is "
+                    "already present — so 'true' is safe to leave on). "
+                    "Ignored when the build left SDFB_FREETEXT_POOLS_TABLE "
+                    "empty. The table is NEVER auto-created: bq mk it from "
+                    "config/bq_schema/synthetic_rag/freetext_pools.schema.json.",
+    ),
+    "uniqueness_mode": Param(
+        default="exact",
+        type="string",
+        enum=["exact", "streaming"],
+        description="exact = divert every duplicate to the DLQ behind up to "
+                    "three shuffle barriers; no row lands until generation "
+                    "finishes. streaming = rows land AS GENERATED and the "
+                    "duplicate rate is measured instead of removed (WS6 W3). "
+                    "In streaming mode duplicate rows LAND — a failing gate "
+                    "still marks the run FAILED_BLOCKER; recover by "
+                    "re-triggering with write_disposition=overwrite.",
+    ),
+    "pool_seed_strategy": Param(
+        default="centroid",
+        type="string",
+        enum=["centroid", "kcenter", "kcenter_rotate"],
+        description="How the 8 free-text prompt seeds are chosen (WS5 §3). "
+                    "centroid = control (today). kcenter = seeds span the "
+                    "column's modes. kcenter_rotate = re-seeded per ladder "
+                    "attempt (forfeits vLLM prefix caching by design). "
+                    "Change ONE arm per run, with the pool digest cleared "
+                    "first (RUN_PLAYBOOK §6c), or the arm measures nothing.",
+    ),
 }
 
 with models.DAG(
@@ -266,7 +308,7 @@ with models.DAG(
                         "upload_graph",
                         "enable_secure_boot",
                         # GPU accelerator, chosen by the `gpu` param when
-                        # client_type=vllm (see docs/GPU_CONTAINER.md):
+                        # client_type=vllm (see docker/Dockerfile + ADR 0009):
                         #   l4 → NVIDIA L4 (Gemma-4-capable),
                         #   t4 → NVIDIA T4 (plumbing smoke ONLY — Gemma 4 can't
                         #        run on Turing; see the `gpu` param docstring).
@@ -333,6 +375,18 @@ with models.DAG(
                         if _RAG_CHUNKS_TABLE
                         else {}
                     ),
+                    # WS5 pool store — same off-state convention: both
+                    # params omitted when the build left the marker empty.
+                    **(
+                        {
+                            "freetext_pools_table": _FREETEXT_POOLS_TABLE,
+                            "build_pool_layer": "{{ params.build_pool_layer }}",
+                        }
+                        if _FREETEXT_POOLS_TABLE
+                        else {}
+                    ),
+                    "uniqueness_mode": "{{ params.uniqueness_mode }}",
+                    "pool_seed_strategy": "{{ params.pool_seed_strategy }}",
                     "reference_table": "{{ params.table_fqn }}",
                     "reference_rows_limit": "10000",
                     "landing_table": "{{SDFB_LANDING_TABLE}}",

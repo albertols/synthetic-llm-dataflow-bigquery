@@ -124,11 +124,15 @@ def test_branch_ignores_an_attached_store_so_it_cannot_short_circuit_itself():
     assert all("stale" not in v for r in rows for v in r["values"])
 
 
-def test_dag_gains_the_branch_only_when_a_sink_is_passed():
-    """None sink => DAG unchanged, exactly like rag_chunks (WS5 §2)."""
+def test_dag_gains_the_branch_and_gate_only_when_a_store_is_passed():
+    """None store => DAG unchanged, exactly like rag_chunks (WS5 §2). A
+    store => the branch appears AND Generate's input is gated on its output
+    (AwaitFreeTextPools) — the R1/R3 cold runs proved that an ungated
+    Generate rebuilds every pool concurrently with the branch. The branch
+    writes the store itself, so no WriteFreeTextPools sink exists anymore."""
     from sdfb_beam.pipeline import PipelineConfig, build_pipeline
 
-    def _labels(freetext_pools_sink):
+    def _labels(freetext_pools_store):
         cfg = PipelineConfig(
             table_schema=_ctx().table_schema,
             engine_name="b1_rag",
@@ -146,13 +150,141 @@ def test_dag_gains_the_branch_only_when_a_sink_is_passed():
                 config=cfg,
                 landing_sink=beam.Map(lambda x: x),
                 dlq_sink=beam.Map(lambda x: x),
-                freetext_pools_sink=freetext_pools_sink,
+                freetext_pools_store=freetext_pools_store,
             )
             return {str(t.full_label) for t in p.transforms_stack[0].parts}
 
     without = _labels(None)
     assert not any("BuildFreeTextPools" in lbl for lbl in without)
+    assert not any("AwaitFreeTextPools" in lbl for lbl in without)
 
-    with_sink = _labels(beam.Map(lambda r: r))
-    assert any("BuildFreeTextPools" in lbl for lbl in with_sink)
-    assert any("WriteFreeTextPools" in lbl for lbl in with_sink)
+    with_store = _labels(InMemoryFreeTextPoolStore())
+    assert any("BuildFreeTextPools" in lbl for lbl in with_store)
+    assert any("AwaitFreeTextPools" in lbl for lbl in with_store)
+    assert not any("WriteFreeTextPools" in lbl for lbl in with_store)
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-28 R1 crash: the pool branch handed the engine the RAW gs://
+# embedder_uri. GenerateRecordsDoFn warm-pulls it to /local-ssd/embedder and
+# rewrites the ctx BEFORE engine.setup(); BuildFreeTextPoolsDoFn skipped that
+# localization, so BgeEmbedder passed the gs:// URI to
+# AutoTokenizer.from_pretrained, which treats it as a HuggingFace repo id ->
+# HFValidationError -> 4 bundle retries -> job FAILED.
+# ---------------------------------------------------------------------------
+def test_pool_branch_localizes_a_gcs_embedder_before_engine_setup(monkeypatch):
+    from sdfb_beam.dofns import localize as localize_mod
+    from sdfb_beam.dofns import pools as pools_mod
+
+    pulled = {}
+    monkeypatch.setattr(
+        localize_mod,
+        "localize_gcs_prefix",
+        lambda uri, dest: pulled.setdefault("dir", "/local-ssd/embedder-test"),
+    )
+
+    seen = {}
+
+    class _SpyEngine:
+        def setup(self, client, ctx):
+            seen["embedder_uri"] = ctx.embedder_uri
+            self._free_text_pools = {}
+
+        def teardown(self):
+            pass
+
+    monkeypatch.setattr(pools_mod, "get_engine", lambda name: _SpyEngine)
+
+    ctx = _ctx(embedder_uri="gs://bucket/synthetic/models/embedders/bge/v1")
+    dofn = pools_mod.BuildFreeTextPoolsDoFn("b1_rag", _StubClient(), ctx)
+    dofn.setup()
+    assert seen["embedder_uri"] == "/local-ssd/embedder-test", (
+        "engine must never see a gs:// embedder_uri"
+    )
+
+
+def test_pool_branch_leaves_a_local_embedder_uri_untouched(monkeypatch):
+    from sdfb_beam.dofns import pools as pools_mod
+
+    seen = {}
+
+    class _SpyEngine:
+        def setup(self, client, ctx):
+            seen["embedder_uri"] = ctx.embedder_uri
+            self._free_text_pools = {}
+
+        def teardown(self):
+            pass
+
+    monkeypatch.setattr(pools_mod, "get_engine", lambda name: _SpyEngine)
+    ctx = _ctx(embedder_uri="/local-ssd/embedder")
+    pools_mod.BuildFreeTextPoolsDoFn("b1_rag", _StubClient(), ctx).setup()
+    assert seen["embedder_uri"] == "/local-ssd/embedder"
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-29 four-run postmortem: the branch writes its own rows (blocking)
+# so the AwaitFreeTextPools gate downstream can only open once a Generate
+# setup's store fetch will hit. R1/R3 evidence for why the gate exists: with
+# WriteFreeTextPools as a sibling sink, Generate raced the branch and every
+# cold pool was built TWICE on one T4 (R3: 2x 13 ladders, 2,005 s + 2,026 s).
+# ---------------------------------------------------------------------------
+def test_branch_writes_rows_through_the_store_before_emitting():
+    written: dict = {}
+
+    class _SpyStore:
+        def write_rows(self, rows):
+            written["rows"] = list(rows)
+
+    dofn = BuildFreeTextPoolsDoFn(
+        "b1_rag", _StubClient(), _ctx(), store=_SpyStore()
+    )
+    dofn.setup()
+    rows = list(dofn.process(None))
+    assert rows
+    assert written["rows"] == rows, "the store write must cover every emitted row"
+
+
+def test_a_store_write_failure_is_loud_but_never_fatal():
+    """Pools are an optimisation: a dead store must not kill the bundle,
+    and rows must still be emitted so the DAG gate opens and Generate can
+    fall back to building pools itself."""
+
+    class _BrokenStore:
+        def write_rows(self, rows):
+            raise RuntimeError("bq down")
+
+    dofn = BuildFreeTextPoolsDoFn(
+        "b1_rag", _StubClient(), _ctx(), store=_BrokenStore()
+    )
+    dofn.setup()
+    rows = list(dofn.process(None))
+    assert rows, "rows must still flow on a failed store write"
+
+
+def test_rows_record_the_real_build_info_not_defaults():
+    """2026-07-29 postmortem, freetext_pools screenshots: every stored row
+    had attempts=0 / stagnated=false, and `target` was silently set to the
+    ACHIEVED size (ACCU_LIMIT_KEY: stored target=386 for a 512-target build
+    that ran 8 attempts and ended undersized). The engine must record per-
+    column build info and the branch must persist it."""
+
+    class _ParrotClient:
+        """Always the same 5 values — the ladder can never reach target."""
+
+        def generate_json(self, prompt, json_schema, *, max_tokens=2048,
+                          temperature=0.7, n=1, seed=None, top_p=None,
+                          top_k=None):
+            return [{"values": [f"fixed-{i}" for i in range(5)]}
+                    for _ in range(n)]
+
+    dofn = BuildFreeTextPoolsDoFn("b1_rag", _ParrotClient(), _ctx())
+    dofn.setup()
+    rows = list(dofn.process(None))
+    assert rows
+    info = dofn._engine._pool_build_info
+    for row in rows:
+        col_info = info[row["column"]]
+        assert row["attempts"] == col_info["attempts"] >= 1
+        assert row["target"] == col_info["target"] >= 1
+        assert row["stagnated"] == col_info["stagnated"]
