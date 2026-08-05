@@ -41,6 +41,7 @@ import logging
 import random
 import threading
 import time
+from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sdfb_core.codegen import derive_record_model
@@ -444,13 +445,11 @@ class B1RagEngine(GenerationEngine):
                 # Format-preserving per-row generation — a bounded pool
                 # sampled with replacement collapses an identifier column's
                 # distinctness (2026-07-17 E2E: ID_COL 30 distinct / 1000).
+                draw_one = partial(
+                    sample_identifier, prof.identifier_shape, rng.randrange
+                )
                 out[name] = [
-                    self._sparsity_or(
-                        rng, null_frac, empty_frac,
-                        lambda shape=prof.identifier_shape: sample_identifier(
-                            shape, rng.randrange
-                        ),
-                    )
+                    self._sparsity_or(rng, null_frac, empty_frac, draw_one)
                     for _ in range(n)
                 ]
                 continue

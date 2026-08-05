@@ -293,7 +293,7 @@ class FreeTextHook:
         if not combined:
             return None
         picks = rng.choice(len(combined), size=fill, p=probs)
-        drawn = [combined[int(i)] for i in picks]
+        drawn: list[str | None] = [combined[int(i)] for i in picks]
         if expansion == "all":
             drawn = [mutate_digit_runs(v, pick) if v else v for v in drawn]
         return drawn
