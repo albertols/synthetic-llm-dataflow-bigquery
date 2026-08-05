@@ -758,12 +758,23 @@ class B1RagEngine(GenerationEngine):
             return None
         vectors, texts = space
 
+        constraint = (
+            prof.llm_prompt_constraint
+            if getattr(self._ctx, "prompt_constraints", True)
+            else ""
+        )
+
         def _builder(attempt: int) -> tuple[str, list[str]]:
             rotated = select_seed_examples(
                 vectors, texts, _DEFAULT_TOP_K,
                 strategy="kcenter_rotate", attempt=attempt,
             )
-            return _build_pool_prompt(prof.name, per_call, rotated), rotated
+            return (
+                _build_pool_prompt(
+                    prof.name, per_call, rotated, constraint=constraint
+                ),
+                rotated,
+            )
 
         return _builder
 
@@ -776,7 +787,14 @@ class B1RagEngine(GenerationEngine):
         t_column = time.monotonic()
         self._pool_sources[prof.name] = "llm_ladder"
         per_call = min(target, _POOL_VALUES_PER_CALL)
-        prompt = _build_pool_prompt(prof.name, per_call, seed_examples)
+        constraint = (
+            prof.llm_prompt_constraint
+            if getattr(self._ctx, "prompt_constraints", True)
+            else ""
+        )
+        prompt = _build_pool_prompt(
+            prof.name, per_call, seed_examples, constraint=constraint
+        )
         # ARRAY completions only — never n single-value choices. A choice is
         # blind to its siblings, so "distinct" is unsatisfiable per
         # single-value completion and vLLM collapsed all 32 into the
@@ -1051,10 +1069,20 @@ class _PoolYield(NamedTuple):
     stagnated: bool = False
 
 
-def _build_pool_prompt(column: str, per_call: int, seed_examples: list[str]) -> str:
+def _build_pool_prompt(
+    column: str,
+    per_call: int,
+    seed_examples: list[str],
+    constraint: str = "",
+) -> str:
     """The pool prompt. One definition — the kcenter_rotate arm rebuilds it
-    per attempt with a different seed set, and the two must not drift."""
-    return (
+    per attempt with a different seed set, and the two must not drift.
+
+    `constraint` is a per-column CONSTANT (parsed from the DDL description,
+    spec C5): the prompt stays byte-identical across attempts, preserving
+    vLLM prefix caching (ADR 0018). Empty ⇒ byte-identical to the pre-C5
+    prompt (regression-pinned in tests)."""
+    prompt = (
         f"You generate synthetic tabular data. First identify the exact "
         f"format of these example values for the column '{column}' "
         f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
@@ -1063,6 +1091,9 @@ def _build_pool_prompt(column: str, per_call: int, seed_examples: list[str]) -> 
         f"exactly that format. Never copy an example verbatim. "
         f'Examples: {seed_examples}. Return JSON {{"values": [...]}}.'
     )
+    if constraint:
+        prompt += f" Column constraint: {constraint}."
+    return prompt
 
 
 def _pool_llm_yield(

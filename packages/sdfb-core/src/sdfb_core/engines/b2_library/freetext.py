@@ -360,6 +360,11 @@ class FreeTextHook:
             f"that format. Never copy an example verbatim. Examples: "
             f"{exemplars}. Return JSON {{\"values\": [...]}}."
         )
+        if profile.llm_prompt_constraint and cfg.engine_specific.get(
+            "prompt_constraints", True
+        ):
+            # Per-column constant suffix (spec C5) — prefix-cache-safe.
+            prompt += f" Column constraint: {profile.llm_prompt_constraint}."
         # Novelty filter: LLM values that equal observed reference values are
         # copies, not generations. The LLM pool is the "diverge" side of the
         # similarity blend — observed values reach the output only via the
