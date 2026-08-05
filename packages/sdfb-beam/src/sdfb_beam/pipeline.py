@@ -102,6 +102,12 @@ class PipelineConfig:
     freetext_pools_table: str = ""
     # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
     pool_seed_strategy: str = "centroid"
+    # Shape-preserving expander (2026-08-05 spec C3): off | identifiers
+    # (default) | all. See GenerationContext.freetext_expansion.
+    freetext_expansion: str = "identifiers"
+    # Attach per-column llm_prompt_constraint (from column-description
+    # JSON) to pool prompts (spec C5). See GenerationContext.prompt_constraints.
+    prompt_constraints: bool = True
     # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
     # behind up to three shuffle barriers; "streaming" lands rows as they
     # are generated and measures the duplicate rate instead.
@@ -155,6 +161,8 @@ def build_pipeline(
         pool_pattern_guidance=config.pool_pattern_guidance,
         freetext_pools_table=config.freetext_pools_table,
         pool_seed_strategy=config.pool_seed_strategy,
+        freetext_expansion=config.freetext_expansion,
+        prompt_constraints=config.prompt_constraints,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.

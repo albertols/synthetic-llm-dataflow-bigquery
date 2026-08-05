@@ -204,7 +204,17 @@ class GenerateRecordsDoFn(beam.DoFn):
             seed=seed,
             batch_size=n,
             similarity=self.similarity,
-            engine_specific={"pool_seed": pool_seed},
+            engine_specific={
+                "pool_seed": pool_seed,
+                # B.2 reads per-batch config, not the worker ctx — mirror
+                # the ctx flag so both engines see one setting (spec C3).
+                "freetext_expansion": getattr(
+                    self.ctx, "freetext_expansion", "identifiers"
+                ),
+                "prompt_constraints": getattr(
+                    self.ctx, "prompt_constraints", True
+                ),
+            },
         )
         log_milestone("batch_start", batch_id=batch_id, n=n)
         t0 = time.monotonic()

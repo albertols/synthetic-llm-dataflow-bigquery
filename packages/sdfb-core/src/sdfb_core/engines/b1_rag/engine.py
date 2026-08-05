@@ -786,7 +786,10 @@ class B1RagEngine(GenerationEngine):
             # so out-of-format junk is unrepresentable. Deliberately looser
             # than the per-position template (see relaxed_shapes_pattern) —
             # novelty pressure stays with the sampler, not the grammar.
-            pattern_shapes = build_relaxed_shapes(
+            # Prefer the exact shape mix (2026-08-05 spec C2) — its union
+            # pattern is tighter than the length-bucket relaxation; fall
+            # back to the relaxed builder when no mix exists (e.g. prose).
+            pattern_shapes = prof.shape_mix or build_relaxed_shapes(
                 [str(v) for v in prof.observed_values]
             )
             if pattern_shapes is not None:

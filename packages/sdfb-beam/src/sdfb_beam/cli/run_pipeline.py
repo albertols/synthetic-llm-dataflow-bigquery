@@ -206,6 +206,19 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "(vLLM structured-output items.pattern). Opt-in "
                         "until T4 throughput is confirmed; the post-hoc "
                         "format gate protects pools either way.")
+    p.add_argument("--freetext_expansion", default="identifiers",
+                   choices=["off", "identifiers", "all"],
+                   help="Shape-preserving expander for free-text columns "
+                        "(2026-08-05 spec C3). off = pool draws only "
+                        "(distinct capped at pool size). identifiers "
+                        "(default) = code-like columns expand from their "
+                        "observed shape mix. all = also mutate digit runs "
+                        "inside texty pool draws. Never adds an LLM call.")
+    p.add_argument("--prompt_constraints", default="on",
+                   choices=["on", "off"],
+                   help="Attach per-column llm_prompt_constraint (parsed "
+                        "from column-description JSON) to pool prompts "
+                        "(spec C5). Prefix-cache-safe constant suffix.")
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
@@ -588,6 +601,8 @@ def main(argv: list[str] | None = None) -> int:
         freetext_pools_table=args.freetext_pools_table,
         pool_seed_strategy=validate_seed_strategy(args.pool_seed_strategy),
         uniqueness_mode=args.uniqueness_mode,
+        freetext_expansion=args.freetext_expansion,
+        prompt_constraints=args.prompt_constraints == "on",
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)
