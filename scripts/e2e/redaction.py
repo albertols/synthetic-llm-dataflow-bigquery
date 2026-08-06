@@ -172,9 +172,48 @@ def build_mapping(
 
     _collect_identifiers(gcp, bq, m)
     _collect_columns(gcp, offline, pk_cols, id_cols, m)
+    _collect_stats_diff_columns(metrics, m)
     if redact_values:
         _collect_values(offline, m)
     return m
+
+
+def _is_stats_diff_shaped(obj: Any) -> bool:
+    """Structural check for a `stats_diff.json`-shaped dict
+    (`source_synthetic_stats_diff.py::diff_profiles`'s output: a top-level
+    ``columns`` dict + a ``table`` key). Checked by shape, not by requiring
+    the caller to have used the label ``"stats_diff"`` — any metrics dict
+    that flows through `build_mapping` this-shaped gets its column names
+    registered."""
+    return (
+        isinstance(obj, dict)
+        and isinstance(obj.get("columns"), dict)
+        and "table" in obj
+    )
+
+
+def _collect_stats_diff_columns(metrics: dict[str, Any], m: Mapping) -> None:
+    """Register source-only column names carried by a stats-diff artifact.
+
+    `_collect_columns` only walks landing-side schema (`gcp.bigquery.columns`)
+    and offline per-engine columns, so a column present ONLY on the source
+    side — one BigQuery never wrote to the landing table — is invisible to
+    it. `source_synthetic_stats_diff.py::diff_profiles` still names every
+    such column: every profiled name is a key of `stats_diff["columns"]`,
+    and source-only-or-unsupported-type names land in
+    `stats_diff["table"]["skipped"]`. Without this, both sets pass through
+    the `oss/` bundle export unredacted (real column names leak via
+    `table.skipped` and the `columns` dict keys of a copied
+    `stats_diff_metrics.json`).
+    """
+    for obj in metrics.values():
+        if not _is_stats_diff_shaped(obj):
+            continue
+        for col in obj.get("columns") or {}:
+            m.add_column(col)
+        table = obj.get("table") or {}
+        for col in table.get("skipped") or []:
+            m.add_column(col)
 
 
 def _collect_identifiers(gcp: dict[str, Any], bq: dict[str, Any], m: Mapping) -> None:

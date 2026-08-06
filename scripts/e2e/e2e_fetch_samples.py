@@ -159,12 +159,18 @@ def fetch_sample(
 
 
 def _parse_engine_labels(specs: list[str]) -> dict[str, str]:
-    """Repeatable --engine-label label=run_id → {label: run_id}."""
+    """Repeatable --engine-label label=run_id → {label: run_id}.
+
+    A spec missing the ``=`` is a malformed CLI invocation, not something to
+    silently drop — dropping it would leave that engine out of the fetch
+    entirely with no diagnostic.
+    """
     out: dict[str, str] = {}
     for spec in specs:
-        if "=" in spec:
-            label, run_id = spec.split("=", 1)
-            out[label.strip()] = run_id.strip()
+        if "=" not in spec:
+            _die(f"--engine-label expects 'label=run_id', got {spec!r}")
+        label, run_id = spec.split("=", 1)
+        out[label.strip()] = run_id.strip()
     return out
 
 
@@ -190,6 +196,20 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     engine_labels = _parse_engine_labels(args.engine_labels) or {"sample": None}
+
+    # Fail fast, before touching BQ: an --engine-label carrying a run_id
+    # with no --run-id-col would make `fetch_sample` build an unfiltered
+    # query (build_sample_sql only filters when *both* run_id_col and
+    # run_id are set) — every engine's CSV would then come back identical
+    # despite the per-engine labels, silently invalidating the report's
+    # "per-engine rows" claim.
+    if not args.run_id_col and any(engine_labels.values()):
+        _die(
+            "--engine-label carries a run_id but --run-id-col was not given "
+            "- the fetch would be unfiltered and every engine would receive "
+            "the same unfiltered sample. Pass --run-id-col <column> (e.g. "
+            "--run-id-col run_id)."
+        )
 
     session, _ = preflight_adc(args.project)
     del session  # only needed to fail fast on missing/invalid ADC

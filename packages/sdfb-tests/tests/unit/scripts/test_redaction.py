@@ -65,3 +65,60 @@ def test_leak_scan_catches_text_leak_next_to_a_binary_png(tmp_path):
 
     hits = red.leak_scan(tmp_path, m)
     assert ("report.md", "secret-dataset") in hits
+
+
+# --------------------------------------------------------------------------
+# build_mapping + stats_diff.json: source-only column names (table.skipped)
+# and every profiled column name (columns dict keys) must be registered, not
+# just the landing-side columns _collect_columns already walks.
+# --------------------------------------------------------------------------
+def _stats_diff_metrics() -> dict:
+    return {
+        "stats_diff": {
+            "columns": {"amount": {"entropy_gap": 0.05, "decile_ks": 0.1}},
+            "table": {
+                "skipped": ["source_only_ssn_col"],
+                "source_rows": 100,
+                "synthetic_rows": 100,
+            },
+            "evaluation": None,
+        },
+    }
+
+
+def test_build_mapping_registers_stats_diff_skipped_column():
+    m = red.build_mapping(_stats_diff_metrics())
+    assert "source_only_ssn_col" in m.columns
+    assert "amount" in m.columns
+
+
+def test_redact_text_replaces_stats_diff_skipped_column():
+    m = red.build_mapping(_stats_diff_metrics())
+    out = red.redact_text(
+        m, "column source_only_ssn_col diverged badly; amount also drifted"
+    )
+    assert "source_only_ssn_col" not in out
+    assert "amount" not in out
+
+
+def test_leak_scan_catches_stats_diff_skipped_column_survivor(tmp_path):
+    m = red.build_mapping(_stats_diff_metrics())
+    # Simulate a bundle export that forgot to redact the raw stats_diff.json
+    # copy (the exact bug this fix closes): the source-only column name
+    # survives verbatim into an oss/ artifact.
+    (tmp_path / "stats_diff_metrics.json").write_text(
+        '{"table": {"skipped": ["source_only_ssn_col"]}}'
+    )
+    hits = red.leak_scan(tmp_path, m)
+    assert ("stats_diff_metrics.json", "source_only_ssn_col") in hits
+
+
+def test_build_mapping_ignores_non_stats_diff_shaped_metrics():
+    # gcp/offline dicts have no top-level "columns" + "table" pair — must
+    # not be misdetected as stats_diff-shaped.
+    metrics = {
+        "gcp": {"project": "p", "bigquery": {}},
+        "offline": {"primary_key": [], "identity_columns": [], "engines": {}},
+    }
+    m = red.build_mapping(metrics)
+    assert m.columns == {}

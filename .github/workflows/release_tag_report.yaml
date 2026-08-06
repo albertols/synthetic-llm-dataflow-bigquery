@@ -35,7 +35,7 @@ jobs:
       - name: Compute version
         id: ver
         run: |
-          PREV=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          PREV=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
           TITLE=$(git log -1 --pretty=%s)
           case "$TITLE" in
             *"[release-report]"*) echo "skip=true" >> "$GITHUB_OUTPUT"; echo "head commit is the release-report commit; skipping"; exit 0;;
@@ -74,5 +74,11 @@ jobs:
           for i in 1 2 3; do
             if git push origin master --tags; then pushed=1; break; fi
             git pull --rebase origin master
+            # `git pull --rebase` replays the report commit onto the new
+            # master tip, giving it a new sha — the tag created above still
+            # points at the OLD (now orphaned) commit unless re-pointed here.
+            # `git describe`/tag-based lookups on master would otherwise
+            # silently miss this release.
+            git tag -f "${{ steps.ver.outputs.version }}"
           done
           [ -n "$pushed" ] || { echo "push failed after 3 attempts" >&2; exit 1; }

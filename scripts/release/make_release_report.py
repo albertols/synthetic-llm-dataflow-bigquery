@@ -891,7 +891,13 @@ def _resolve_base_ref(args: argparse.Namespace) -> str | None:
     failure."""
     if args.base_ref is not None:
         return args.base_ref or None
-    described = _run_git("describe", "--tags", "--abbrev=0", f"{args.head_ref}^")
+    # --match restricts the lookup to SemVer release tags (v1.2.3): without
+    # it, any non-SemVer tag reachable from head_ref^ (e.g. a stray "latest"
+    # or a third-party tool's tag) would win `--abbrev=0`'s "nearest tag"
+    # search and crash next_version()'s "v".lstrip/split(".") parse.
+    described = _run_git(
+        "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", f"{args.head_ref}^"
+    )
     return described.strip() if described and described.strip() else None
 
 

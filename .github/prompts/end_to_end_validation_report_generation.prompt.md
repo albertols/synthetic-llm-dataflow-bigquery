@@ -58,13 +58,16 @@ inputs.
 | `RUN_IDS` | `<run_id>` (optional, one per engine run) | scopes `validation_runs`/`dlq` lookups |
 | `ENGINE_LABEL=JOB_ID` | `b1_rag=<job_id>` (optional, repeatable) | stamps a readable engine name on the matching Dataflow result |
 | `ENGINE_LABEL=RUN_ID` | `b1_rag=<run_id>` (optional, repeatable) | pairs an engine label with its `run_id` so Step 1.5 fetches only that engine's rows from `LANDING_FQN` |
+| `RUN_ID_COL` | `run_id` | column in `LANDING_FQN` holding the salted run id; **required** by Step 1.5 whenever any `ENGINE_LABEL=RUN_ID` pair is given — without it the fetch is unfiltered and every engine's CSV would silently contain the same rows despite the per-engine labels |
 | `FREETEXT_COLS` | `COL_A,COL_B,COL_C` | comma-separated free-text/STRING columns for Step 3.5's crosscheck (optional — discovered from the free-text subset found in Steps 2–3 if omitted) |
 
 If a param is unknown, discover it: `SCHEMA`/columns via the schema JSON or
 `INFORMATION_SCHEMA`; `LANDING_FQN` via the `synthetic_data` dataset; `JOB_IDS`
 from the user; `BATCH_SIZE` from the pipeline launch params (composer /
 `3_import_dag.yaml`); `RUN_IDS` from `validation_runs` or the pipeline launch
-logs; `FREETEXT_COLS` from the free-text subset discovered in Steps 2–3. If
+logs; `RUN_ID_COL` from the landing table schema or the pipeline launch params
+(the composer/DAG's `run_id` output column — usually named `run_id`);
+`FREETEXT_COLS` from the free-text subset discovered in Steps 2–3. If
 only one engine was deployed, run the single-engine subset.
 
 **Per-deployment artifact folder**: every deployment's artifacts share one
@@ -143,12 +146,17 @@ For every engine whose CSV under `integration_test/<JOB_ID>/` is missing:
 ```bash
 python scripts/e2e/e2e_fetch_samples.py \
   --project <PROJECT> --landing-fqn <LANDING_FQN> --job-id <JOB_ID> \
+  --run-id-col <RUN_ID_COL> \
   $(for e in <ENGINE_LABEL=RUN_ID>; do echo --engine-label $e; done) \
   --rows 10000
 ```
 
-Deterministic (hash-ordered) — re-runs fetch the same rows. Only stop if the
-fetch itself fails; never hand-copy CSVs again.
+Deterministic (hash-ordered) — re-runs fetch the same rows. `--run-id-col` is
+**mandatory** whenever any `--engine-label` pairs a label with a `run_id` —
+omitting it means every engine's CSV would come back unfiltered (the same
+rows for every engine label); the script now refuses to run in that
+configuration rather than silently producing misleading per-engine samples.
+Only stop if the fetch itself fails; never hand-copy CSVs again.
 
 ---
 

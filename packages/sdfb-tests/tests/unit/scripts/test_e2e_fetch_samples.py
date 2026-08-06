@@ -38,3 +38,65 @@ def test_write_csv_refuses_empty(tmp_path):
     with pytest.raises(SystemExit):
         fetch.write_csv([], ["a"], out)
     assert not out.exists()
+
+
+def test_parse_engine_labels_dies_on_malformed_spec():
+    with pytest.raises(SystemExit):
+        fetch._parse_engine_labels(["b1_rag_missing_equals"])
+
+
+# --------------------------------------------------------------------------
+# main()-level guards: both new validation errors must fire BEFORE any BQ
+# client/session is created (preflight_adc / _bq_client), so a malformed
+# invocation never touches the network. Monkeypatching preflight_adc to
+# raise proves that ordering — if the guard didn't run first, the test
+# itself would fail with the injected AssertionError instead of SystemExit.
+# --------------------------------------------------------------------------
+def _boom(*_a, **_k):
+    raise AssertionError("preflight_adc must not run before CLI validation")
+
+
+def test_main_dies_on_malformed_engine_label_before_touching_bq(monkeypatch, capsys):
+    monkeypatch.setattr(fetch, "preflight_adc", _boom)
+    with pytest.raises(SystemExit) as exc:
+        fetch.main(
+            [
+                "--landing-fqn", "p.d.t",
+                "--project", "p",
+                "--job-id", "j",
+                "--engine-label", "b1_rag_missing_equals",
+            ]
+        )
+    assert exc.value.code == 2
+    assert "engine-label" in capsys.readouterr().err.lower()
+
+
+def test_main_dies_when_run_id_given_without_run_id_col(monkeypatch, capsys):
+    monkeypatch.setattr(fetch, "preflight_adc", _boom)
+    with pytest.raises(SystemExit) as exc:
+        fetch.main(
+            [
+                "--landing-fqn", "p.d.t",
+                "--project", "p",
+                "--job-id", "j",
+                "--engine-label", "b1_rag=r-1",
+            ]
+        )
+    assert exc.value.code == 2
+    assert "run-id-col" in capsys.readouterr().err.lower()
+
+
+def test_main_allows_run_id_when_run_id_col_given(monkeypatch):
+    # The guard must not false-positive when --run-id-col IS supplied; let it
+    # reach (and stop at) preflight_adc, proving the guard passed.
+    monkeypatch.setattr(fetch, "preflight_adc", _boom)
+    with pytest.raises(AssertionError):
+        fetch.main(
+            [
+                "--landing-fqn", "p.d.t",
+                "--project", "p",
+                "--job-id", "j",
+                "--run-id-col", "run_id",
+                "--engine-label", "b1_rag=r-1",
+            ]
+        )

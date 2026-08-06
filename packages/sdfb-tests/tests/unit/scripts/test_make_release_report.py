@@ -35,6 +35,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -436,6 +437,38 @@ def test_dry_run_writes_nothing(tmp_path, capsys):
     assert not out_dir.exists()
     out = capsys.readouterr().out
     assert "version:" in out
+
+
+# --------------------------------------------------------------------------
+# _resolve_base_ref — --match filter (mechanical fix: non-SemVer tags, e.g. a
+# stray "latest" or third-party tool tag, must not win `--abbrev=0`'s
+# "nearest tag" search and crash next_version()'s parse). No real tags are
+# needed in this repo's history — `_run_git` is monkeypatched so the test is
+# hermetic and only asserts the arg list `_resolve_base_ref` builds.
+# --------------------------------------------------------------------------
+def test_resolve_base_ref_passes_semver_match_filter_to_git_describe(monkeypatch):
+    captured: dict[str, tuple] = {}
+
+    def fake_run_git(*args):
+        captured["args"] = args
+
+    monkeypatch.setattr(rel, "_run_git", fake_run_git)
+    args = types.SimpleNamespace(base_ref=None, head_ref="HEAD")
+    result = rel._resolve_base_ref(args)
+
+    assert result is None  # fake_run_git returns None -> degrades gracefully
+    assert "--match" in captured["args"]
+    match_idx = captured["args"].index("--match")
+    assert captured["args"][match_idx + 1] == "v[0-9]*"
+
+
+def test_resolve_base_ref_explicit_base_ref_skips_git_describe(monkeypatch):
+    def boom(*_a):
+        raise AssertionError("_run_git should not be called with an explicit --base-ref")
+
+    monkeypatch.setattr(rel, "_run_git", boom)
+    args = types.SimpleNamespace(base_ref="v1.2.3", head_ref="HEAD")
+    assert rel._resolve_base_ref(args) == "v1.2.3"
 
 
 def _tree_with_gcp_metrics(job_id: str, execution_seconds: float) -> str:
