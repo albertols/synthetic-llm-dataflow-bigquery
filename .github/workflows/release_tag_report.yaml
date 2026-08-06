@@ -70,7 +70,9 @@ jobs:
           git diff --cached --quiet || git commit -m "docs(releases): ${{ steps.ver.outputs.version }} report [release-report]"
           git tag "${{ steps.ver.outputs.version }}"
           # Retry push to handle non-fast-forward races
+          pushed=""
           for i in 1 2 3; do
-            git push origin master --tags && break
+            if git push origin master --tags; then pushed=1; break; fi
             git pull --rebase origin master
           done
+          [ -n "$pushed" ] || { echo "push failed after 3 attempts" >&2; exit 1; }
