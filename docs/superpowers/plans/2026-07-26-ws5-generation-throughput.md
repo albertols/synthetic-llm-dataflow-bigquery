@@ -1557,7 +1557,7 @@ git commit -m "feat(b1): --pool_seed_strategy centroid|kcenter|kcenter_rotate (W
 - Create: `docs/adr/0020-freetext-pools-as-persisted-artifact.md`
 - Modify: `docs/adr/README.md` (index row)
 - Modify: `docs/designs/2026-07-26-ws5-generation-throughput.md` (status → ACCEPTED; measured-vs-target table)
-- Modify: `scripts/make_ws5_figures.py` (`MEASURED` block → post-WS5 run)
+- Modify: `scripts/doc/make_ws5_figures.py` (`MEASURED` block → post-WS5 run)
 - Modify: `docs/RUN_PLAYBOOK.md` (`create_if_not_exists=true`; the three-arm run matrix)
 
 Follow the `visual-first-documentation` skill: update `MEASURED` and regenerate
@@ -1578,7 +1578,7 @@ relax, which is what `kcenter_rotate` tests.
 
 ```bash
 # update the MEASURED block to the new job id first
-uv run --no-sync python3 scripts/make_ws5_figures.py
+uv run --no-sync python3 scripts/doc/make_ws5_figures.py
 ```
 
 Add an evolution figure (`ws5-wallclock-evolution.png`) plotting wall clock and
@@ -1591,7 +1591,7 @@ against.
 ```bash
 uv run --no-sync python3 -m pytest -m "not gpu and not gcp" -q
 uv run --no-sync ruff check .
-git add docs scripts/make_ws5_figures.py
+git add docs scripts/doc/make_ws5_figures.py
 git commit -m "docs(adr): 0020 — free-text pools as a persisted artifact (WS5)"
 ```
 

@@ -1,6 +1,6 @@
 """Regenerate the source_table_stats concept figures (ADR 0022).
 
-    uv run --no-sync python3 scripts/make_source_stats_figures.py
+    uv run --no-sync python3 scripts/doc/make_source_stats_figures.py
 
 Writes PNGs into docs/designs/assets/. These are CONCEPT figures (see the
 visual-first-documentation skill): they demonstrate the mathematics behind
@@ -17,7 +17,7 @@ no measured run numbers. Evidence numbers live with their own docs
   4. stats-null-patterns.png    — independent per-column null draws invent
      ghost patterns and starve real joint sparsity.
 
-Palette matches the WS5/WS6 assets (scripts/make_ws6_figures.py) so the
+Palette matches the WS5/WS6 assets (scripts/doc/make_ws6_figures.py) so the
 design-doc set reads as one system; the same OKLab separation check runs
 on every regeneration. Color follows the entity across all four figures:
 BLUE = source truth, ORANGE = the naive/degenerate model, AQUA = the
@@ -36,7 +36,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-ASSETS = Path(__file__).resolve().parents[1] / "docs" / "designs" / "assets"
+ASSETS = Path(__file__).resolve().parents[2] / "docs" / "designs" / "assets"
 
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 INK, MUTED, GRID, SURFACE = "#1c2530", "#5b6672", "#dfe4ea", "#ffffff"

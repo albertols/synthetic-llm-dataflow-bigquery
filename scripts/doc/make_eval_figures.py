@@ -1,6 +1,6 @@
 """Regenerate the evaluation-framework concept figures.
 
-    uv run --no-sync python3 scripts/make_eval_figures.py
+    uv run --no-sync python3 scripts/doc/make_eval_figures.py
 
 Writes PNGs into docs/designs/assets/. CONCEPT figures (see the
 visual-first-documentation skill): seeded, deterministic synthetic data —
@@ -13,7 +13,7 @@ no measured run numbers. The two claims:
      record; NNDR flags a row for which ONE real record is uniquely
      closest. They catch different privacy failures.
 
-Palette matches the repo asset set (scripts/make_ws6_figures.py); the same
+Palette matches the repo asset set (scripts/doc/make_ws6_figures.py); the same
 OKLab separation check runs on every regeneration. Color follows the
 entity: BLUE = real/reference, ORANGE = the risky/degenerate case,
 AQUA = the safe/derived quantity.
@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import ks_2samp, wasserstein_distance
 
-ASSETS = Path(__file__).resolve().parents[1] / "docs" / "designs" / "assets"
+ASSETS = Path(__file__).resolve().parents[2] / "docs" / "designs" / "assets"
 
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 INK, MUTED, GRID, SURFACE = "#1c2530", "#5b6672", "#dfe4ea", "#ffffff"

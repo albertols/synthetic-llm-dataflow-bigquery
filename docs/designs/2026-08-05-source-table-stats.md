@@ -9,7 +9,7 @@
 > This doc doubles as learning material: each concept carries an entry-level
 > reading (the figure), a research-level formulation (the formula + primary
 > source), and the exact code site that implements it. Figures regenerate via
-> `uv run --no-sync python3 scripts/make_source_stats_figures.py`.
+> `uv run --no-sync python3 scripts/doc/make_source_stats_figures.py`.
 
 ## Evidence (measured elsewhere, cited here)
 
@@ -372,7 +372,7 @@ concept-figure rule; this doc adds only the prompt-suffix contract above.
 
 ## Figure provenance
 
-Regenerate: `uv run --no-sync python3 scripts/make_source_stats_figures.py`
+Regenerate: `uv run --no-sync python3 scripts/doc/make_source_stats_figures.py`
 (prints OKLab palette separation on every run — all pairs ≥ the CVD floor).
 Concept figures: seeded, deterministic, parameters in the script's
 `CONCEPT` block; no measured run numbers.

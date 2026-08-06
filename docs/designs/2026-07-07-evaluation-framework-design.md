@@ -7,7 +7,7 @@
 > [`2026-08-05-source-table-stats.md`](2026-08-05-source-table-stats.md)
 > (entropy/decile concept figures — the same mathematics, source side).
 > Concept figures regenerate via
-> `uv run --no-sync python3 scripts/make_eval_figures.py`.
+> `uv run --no-sync python3 scripts/doc/make_eval_figures.py`.
 
 - **Scope**: formalizes and supersedes the fidelity/privacy portion of the
   "Mode B validation pipeline" bullet in [`docs/ROADMAP.md`](../ROADMAP.md) M2 (the
@@ -779,7 +779,7 @@ New `packages/sdfb-tests/tests/unit/evaluation/` (mirrors the existing
 
 ## Figure provenance
 
-Regenerate: `uv run --no-sync python3 scripts/make_eval_figures.py` (prints
+Regenerate: `uv run --no-sync python3 scripts/doc/make_eval_figures.py` (prints
 OKLab palette separation on every run). Concept figures: seeded,
 deterministic, parameters in the script's `CONCEPT` block; no measured run
 numbers (this design is not implemented — there are no runs to measure).
