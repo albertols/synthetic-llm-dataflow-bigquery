@@ -172,6 +172,23 @@ Every run emits one structured `generation_plan` milestone log line (engine, per
 - **Generation plan** — the per-run structured log of which strategy every column got; makes each run's synthesis auditable.
 - **PSI (population stability index)** — drift of a column's distribution vs the previous run; tracked in the run history table.
 - **Determinism / seeding** — all sampling flows from `blake2b(run_id, batch_id)`-derived seeds: same inputs → same synthetic output, distinct batches → distinct draws.
+- **Source-table statistics (`source_table_stats`)** — the persisted per-column profile (entropy, deciles, null/empty fractions, temporal mixes) measured once driver-side; workers never query it — stats reach generation only through worker-local profiles and driver-populated context.
+- **Stats tier (`--source_stats=sample|exact`)** — `sample` (default) profiles the 10k reference sample at zero extra query cost; `exact` adds ONE approximate-aggregate `SELECT` over the live table for true cardinality. A failed exact pass degrades loudly to sample, never kills the run.
+- **Shannon entropy** — `H(X) = −Σᵢ pᵢ log₂ pᵢ` bits: how evenly a column's values spread across its categories. Distinct count alone cannot tell a balanced enum from one with 85% of rows on a single value; entropy can.
+- **Normalised entropy (`entropy_norm`)** — `H / log₂(distinct)`, scaled to `[0, 1]` (1 = perfectly uniform). Cardinality-independent, so skew is comparable across columns of different sizes.
+- **`top1_share`** — the fraction of rows holding the single most frequent value; the complementary skew view (as `top1_share` rises, normalised entropy falls). Triggers frequency-weighted FK sampling and mode-collapse checks.
+- **Quantile** — the value below which a given fraction of the data falls (the p10 quantile has 10% of values beneath it). Quantiles from a 10k sample are statistically tight; distinct counts are not.
+- **Decile vector** — the 11-point quantile vector `(q₀, q₁₀, …, q₁₀₀)` stored per numeric and temporal column: a compact summary of the whole distribution *shape* that contains no raw source values beyond the 11 boundary points.
+- **Decile spacing** — where consecutive deciles crowd together the source data is dense; wide gaps mean sparse regions. On timestamps this is what lets a June burst of events survive into the synthetic output instead of being smeared across the year.
+- **Inverse CDF / inverse transform sampling** — draw a uniform number `u ∈ (0,1)` and map it through the inverse cumulative distribution function `F⁻¹` (piecewise-linear interpolation over the decile vector): draws land where the source is dense. Replaces uniform-in-range sampling, which flattens skewed columns; every draw stays novel and in-range.
+- **Epoch decile vector** — the decile vector computed on the epoch-seconds axis for dates/timestamps, after sentinel-year extraction and the now−10y floor, so temporal burst density is preserved by the same inverse-CDF machine.
+- **Null-pattern mix** — the one *joint* statistic in M1: which columns are null *together* per row (top-8 observed patterns). Independent per-column null draws invent row patterns that never occur in the source and starve real ones.
+- **HyperLogLog++ (`APPROX_COUNT_DISTINCT`)** — sketch-based approximate distinct counting (~0.5% typical error) that lets the exact tier measure true cardinality of every column in a single table scan instead of costly exact `COUNT(DISTINCT)`.
+- **DKW bound (sampling error)** — the Dvoretzky–Kiefer–Wolfowitz inequality: an n=10k sample pins every fraction and quantile within ≈±1.4 pp of truth at 95% confidence *regardless of table size* — but gives no bound on distinct counts, which is exactly why the exact tier exists.
+- **Pool starvation** — when a sample-capped distinct estimate (e.g. 95 seen of a true 146k) under-sizes a freetext pool, so synthetic distinct == pool size. Fixed by the exact tier's `source_distinct` lifting the pool target (still capped, since GPU cost is linear in pool size).
+- **Length hint** — the measured p05–p95 character-length band of a freetext column, appended to the pool prompt so generated prose matches observed lengths instead of running short.
+- **Prefix caching (vLLM)** — the inference server reuses the attention state of any byte-identical prompt prefix across calls; all measured hints are therefore appended as per-column *suffixes*, keeping the shared prefix cached and LLM cost flat.
+- **Entropy gap (mode-collapse oracle)** — a synthetic column whose entropy sits far below the source's has collapsed onto few values even when its distinct count looks healthy; the entropy delta between source-tier and landing-table profiles is a free per-column fidelity check.
 
 ---
 
@@ -187,3 +204,4 @@ Every run emits one structured `generation_plan` milestone log line (engine, per
 | Machine matrix, SDK-container and worker caps | `docs/RUN_PLAYBOOK.md`, `composer/synthetic_beam_bigquery.py`, `public_cloud/deploy/gcp/tiers.yaml` |
 | Engine-owned vLLM server (not Beam RunInference) | `docs/adr/0014-vllm-model-client-owns-server.md` |
 | Beam Summit 2025 acceptance | `assets/beam-summit-2025-acceptance.png` (email, 2025-05-10) |
+| Stats glossary terms (entropy, decile vectors, inverse CDF, DKW, HLL++, null patterns, length hints, prefix caching) + primary-source citations (Shannon 1948, Devroye 1986, Heule et al. 2013) | `docs/adr/0022-stats-driven-generation.md`, `docs/designs/2026-08-05-source-table-stats.md` (concept figures: `stats-entropy-skew.png`, `stats-inverse-cdf.png`, `stats-epoch-deciles.png`, `stats-null-patterns.png`) |
