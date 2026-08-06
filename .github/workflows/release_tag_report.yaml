@@ -1,0 +1,60 @@
+name: Release tag + report
+
+# Post-merge release layer (spec: docs/superpowers/specs/
+# 2026-08-06-e2e-reporting-scripts-release-design.md). Tags every merge to
+# master with SemVer derived from the squash-merge title, generates the
+# redacted before/after release report from committed integration_test/
+# artifacts (NO GCP access), and commits docs/releases/<version>/.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag-and-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Self-trigger guard: the report commit below carries this marker.
+    if: ${{ !contains(github.event.head_commit.message, '[release-report]') }}
+    env:
+      UV_DEFAULT_INDEX: https://pypi.org/simple
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history: tags + git show at base ref
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --group dev
+      - name: Compute version
+        id: ver
+        run: |
+          PREV=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          TITLE=$(git log -1 --pretty=%s)
+          VERSION=$(uv run --no-sync python3 scripts/release/make_release_report.py \
+            --print-next-version --title "$TITLE" ${PREV:+--prev "$PREV"})
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+      - name: Generate report
+        run: |
+          PREV="${{ steps.ver.outputs.prev }}"
+          uv run --no-sync python3 scripts/release/make_release_report.py \
+            --version "${{ steps.ver.outputs.version }}" \
+            --date "$(date -u +%Y-%m-%d)" \
+            ${PREV:+--base-ref "$PREV"} \
+            --head-ref "${{ github.sha }}" \
+            --out-dir docs/releases
+      - name: Tag, commit report, push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/releases
+          git commit -m "docs(releases): ${{ steps.ver.outputs.version }} report [release-report]"
+          git tag "${{ steps.ver.outputs.version }}"
+          git push origin master --tags
