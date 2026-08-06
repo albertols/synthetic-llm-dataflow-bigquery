@@ -268,6 +268,62 @@ def test_compute_deltas_tokens_per_s_none_when_unmeasured():
     assert d["vllm"]["tokens_per_s"] == {"base": None, "head": None, "delta": None}
 
 
+def test_compute_deltas_counters_resolve_real_namespaced_keys():
+    # Real e2e_gcp_probe.py output namespaces every Beam custom counter as
+    # f"{namespace}.{metric}" (_job_metrics, scripts/e2e/e2e_gcp_probe.py)
+    # because the DoFns that emit them use Metrics.counter("generation",
+    # "yielded") / Metrics.counter("generation", "failed")
+    # (packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:83-84) — never a
+    # bare "yielded"/"failed" key. compute_deltas must resolve those
+    # namespaced keys, not silently read them as unmeasured.
+    base = {
+        "gcp": {
+            "dataflow": [
+                {
+                    "metrics": {
+                        "custom_counters": {
+                            "generation.yielded": 900,
+                            "generation.failed": 50,
+                        }
+                    }
+                }
+            ]
+        }
+    }
+    head = {
+        "gcp": {
+            "dataflow": [
+                {
+                    "metrics": {
+                        "custom_counters": {
+                            "generation.yielded": 950,
+                            "generation.failed": 10,
+                        }
+                    }
+                }
+            ]
+        }
+    }
+    d = rel.compute_deltas(base, head)
+    assert d["performance"]["counter_yielded"] == {"base": 900, "head": 950, "delta": 50}
+    assert d["performance"]["counter_failed"] == {"base": 50, "head": 10, "delta": -40}
+
+
+def test_compute_deltas_tokens_per_s_zero_duration_is_none_not_zerodiv():
+    # Minor fix: a measured-but-zero milestone duration must not be treated
+    # as "unmeasured" via a falsy check, and must not raise ZeroDivisionError
+    # — it's an explicit divide-by-zero guard, distinct from "no duration
+    # observed at all".
+    job = {
+        "metrics": {"custom_counters": {"tokens": 100}},
+        "engine_milestones": {
+            "durations_seconds": {"vllm_engine_init->vllm_ready": 0.0}
+        },
+    }
+    d = rel.compute_deltas({"gcp": {"jobs": [job]}}, {"gcp": {"jobs": [job]}})
+    assert d["vllm"]["tokens_per_s"] == {"base": None, "head": None, "delta": None}
+
+
 def test_compute_deltas_stamps_base_job_and_head_job_when_provided():
     d = rel.compute_deltas(None, None, base_job="j1", head_job="j2")
     assert d["base_job"] == "j1"

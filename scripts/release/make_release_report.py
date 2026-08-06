@@ -16,7 +16,11 @@ scripts (not guessed key names):
   * `scripts/e2e/e2e_gcp_probe.py` → `e2e_gcp_metrics.json` ("gcp"): a
     `dataflow` list of per-Dataflow-job dicts, each carrying
     `timing.execution_seconds`, `job_phases.dominant_stages[].seconds`,
-    `metrics.custom_counters.{generated,failed,...}`, and
+    `metrics.custom_counters.{namespace}.{metric}` (e.g.
+    `generation.yielded`, `generation.failed` — see
+    `packages/sdfb-beam/src/sdfb_beam/dofns/generate.py`; the probe
+    namespaces every Beam counter as `f"{namespace}.{metric}"`, so lookups
+    here match by bare metric-name suffix, not exact key), and
     `engine_milestones.durations_seconds["label_a->label_b"]`.
   * `scripts/e2e/e2e_validation_analysis.py` → `e2e_validation_metrics.json`
     ("offline"): `engines.<label>.full_row_duplicate_ratio` and
@@ -188,8 +192,19 @@ def _dominant_stage_seconds(job: dict) -> float | None:
 
 
 def _custom_counter(job: dict, name: str) -> float | None:
+    """Look up a Beam custom counter by its bare metric name, tolerant of the
+    `f"{namespace}.{metric}"` key format `e2e_gcp_probe.py`'s `_job_metrics`
+    actually writes (e.g. `Metrics.counter("generation", "failed")` lands as
+    `"generation.failed"`, never bare `"failed"`). Exact match wins first
+    (covers any future un-namespaced counter); otherwise the first key whose
+    namespace-qualified suffix matches."""
     counters = (job.get("metrics") or {}).get("custom_counters") or {}
-    return counters.get(name)
+    if name in counters:
+        return counters[name]
+    return next(
+        (v for k, v in counters.items() if k == name or k.endswith(f".{name}")),
+        None,
+    )
 
 
 def _milestone_durations(job: dict) -> dict[str, float]:
@@ -206,7 +221,11 @@ def _tokens_per_s(job: dict) -> float | None:
     # answer, not a bug: it becomes a live metric the moment one does.
     tokens = _custom_counter(job, "tokens")
     duration = _vllm_ignition_seconds(job)
-    if tokens is None or not duration:
+    # `is not None` (not `not duration`) matches this module's convention
+    # elsewhere — a falsy-but-measured 0.0 must not silently read as
+    # "unmeasured"; a zero duration is instead an explicit divide-by-zero
+    # guard.
+    if tokens is None or duration is None or duration == 0:
         return None
     return tokens / duration
 
@@ -306,9 +325,14 @@ def compute_deltas(
         "dominant_stage_seconds": _metric(
             _dominant_stage_seconds(base_job_data), _dominant_stage_seconds(head_job_data)
         ),
-        "counter_generated": _metric(
-            _custom_counter(base_job_data, "generated"),
-            _custom_counter(head_job_data, "generated"),
+        # "generated" is not a counter any DoFn emits — the real analog is
+        # `generation.yielded` (packages/sdfb-beam/src/sdfb_beam/dofns/
+        # generate.py:83); `_custom_counter` matches on the bare suffix, so
+        # passing "yielded"/"failed" resolves the namespaced
+        # "generation.yielded"/"generation.failed" keys the probe writes.
+        "counter_yielded": _metric(
+            _custom_counter(base_job_data, "yielded"),
+            _custom_counter(head_job_data, "yielded"),
         ),
         "counter_failed": _metric(
             _custom_counter(base_job_data, "failed"), _custom_counter(head_job_data, "failed")
