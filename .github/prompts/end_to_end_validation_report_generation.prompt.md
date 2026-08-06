@@ -373,7 +373,8 @@ dev data) — metadata stays hidden either way. Default is to redact values.
 
 The tool runs a **leak scan** over `oss/` and exits non-zero if any real token
 survived — the export is only shareable when it prints `leak scan: clean ✅`.
-Hand the OSS team the `oss/` folder + the three scripts; keep `real/` local.
+Hand the OSS team the `oss/` folder + the `scripts/e2e/` toolchain; keep
+`real/` local.
 
 ---
 
