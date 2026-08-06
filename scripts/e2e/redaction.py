@@ -298,11 +298,20 @@ def redact_csv(m: Mapping, text: str) -> str:
 
 
 def leak_scan(oss_dir: Path, mapping: Mapping) -> list[tuple[str, str]]:
-    """Fail-safe: confirm no real identifier/column survived into oss_dir."""
+    """Fail-safe: confirm no real identifier/column survived into oss_dir.
+
+    Binary-tolerant: reads every file as bytes and decodes with
+    ``errors="ignore"`` rather than `Path.read_text()`'s strict UTF-8. Text
+    files (the common case — JSON/CSV/md) decode identically either way, so
+    behavior there is unchanged; a binary file (e.g. a chart PNG sitting
+    alongside the report) no longer crashes the scan with
+    `UnicodeDecodeError` and is instead scanned for any decodable token
+    remnant, same as a text file.
+    """
     reals = list(mapping.identifiers) + list(mapping.columns)
     hits: list[tuple[str, str]] = []
     for f in (f for f in oss_dir.rglob("*") if f.is_file()):
-        text = f.read_text()
+        text = f.read_bytes().decode("utf-8", errors="ignore")
         for real in reals:
             if real and real in text:
                 hits.append((f.name, real))

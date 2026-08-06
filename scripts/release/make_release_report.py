@@ -904,6 +904,7 @@ def _print_dry_run_plan(
     print(f"would write: {report_path}")
     print(f"would write: {assets_dir / 'step_time_before_after.png'}")
     print(f"would write: {assets_dir / 'metric_evolution.png'}")
+    print(f"would write: {report_path.parent / 'summary.json'}")
     print(f"would regenerate: {args.out_dir / 'README.md'}")
 
 
@@ -915,25 +916,19 @@ def _discover_side(ref: str | None) -> tuple[str | None, dict]:
     return job, (sets.get(job, {}) if job else {})
 
 
-def _run_redaction_gate(version_dir: Path, report_path: Path, report_md: str, head_artifacts: dict) -> list:
-    """Build the mapping from the HEAD artifacts, redact the report, write
-    it, then leak-scan the version dir for anything that survived. Returns
-    the (possibly empty) list of leak hits; the caller decides what to do.
-
-    Charts are deliberately NOT on disk yet when this runs: `leak_scan` reads
-    every file in `version_dir` as text, and a PNG is not valid text, so the
-    report (the only text this generator writes, and the only place a real
-    identifier could leak in from a git commit title) must be the only thing
-    on disk while the gate runs.
-    """
+def _write_redacted_report(report_path: Path, report_md: str, head_artifacts: dict) -> redaction.Mapping:
+    """Build the mapping from the HEAD artifacts, redact the report, and
+    write it — the first artifact `main()` puts on disk, so the redaction
+    mapping exists before anything else does."""
     metrics_for_mapping = {"gcp": head_artifacts.get("gcp"), "offline": head_artifacts.get("offline")}
     mapping = redaction.build_mapping(metrics_for_mapping)
     report_path.write_text(redaction.redact_text(mapping, report_md))
-    return redaction.leak_scan(version_dir, mapping)
+    return mapping
 
 
-def _finalize_release(version_dir: Path, assets_dir: Path, out_dir: Path, version: str, date: str, deltas: dict, history: list[tuple[str, dict]]) -> None:
-    make_charts(deltas, history, assets_dir)
+def _write_summary_and_index(
+    version_dir: Path, out_dir: Path, version: str, date: str, deltas: dict
+) -> None:
     (version_dir / "summary.json").write_text(
         json.dumps(
             {"version": version, "date": date, "headline_delta": _headline_delta(deltas)},
@@ -976,10 +971,21 @@ def main(argv: list[str] | None = None) -> int:
     change_log = build_change_log(base_ref, args.head_ref)
     history = build_history(_sorted_version_tags())
 
+    # Write order matches the brief exactly: render -> redact -> write
+    # report -> write charts -> leak-scan the COMPLETE version dir (report +
+    # charts, everything this generator is about to commit) -> on a hit,
+    # exit 3 and remove the whole dir (nothing committable left; the index
+    # is only touched after the gate passes, so a failed release never
+    # contaminates it). `redaction.leak_scan` is binary-tolerant (decodes
+    # with `errors="ignore"` instead of crashing on a PNG's byte signature),
+    # so scanning the chart images alongside the report is safe — the gate
+    # covers the whole committed artifact set, not just the text file.
     version_dir.mkdir(parents=True, exist_ok=True)
     report_md = render_report(version, change_log, deltas, history)
+    mapping = _write_redacted_report(report_path, report_md, head_artifacts)
+    make_charts(deltas, history, assets_dir)
 
-    leaks = _run_redaction_gate(version_dir, report_path, report_md, head_artifacts)
+    leaks = redaction.leak_scan(version_dir, mapping)
     if leaks:
         print("release report leak scan failed — nothing committed:", file=sys.stderr)
         for fname, token in leaks:
@@ -987,7 +993,7 @@ def main(argv: list[str] | None = None) -> int:
         shutil.rmtree(version_dir, ignore_errors=True)
         return 3
 
-    _finalize_release(version_dir, assets_dir, args.out_dir, version, date, deltas, history)
+    _write_summary_and_index(version_dir, args.out_dir, version, date, deltas)
     print(f"wrote {report_path}")
     return 0
 

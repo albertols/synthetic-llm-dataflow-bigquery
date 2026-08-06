@@ -30,3 +30,38 @@ def test_leak_scan_flags_surviving_token(tmp_path):
     (tmp_path / "r.md").write_text("still says secret-dataset")
     hits = red.leak_scan(tmp_path, m)
     assert hits
+
+
+def _write_real_png(path):
+    """A real matplotlib-rendered PNG (Agg backend) — proves `leak_scan`
+    tolerates binary files instead of crashing with `UnicodeDecodeError` on
+    a non-UTF8 byte sequence (e.g. the PNG magic bytes `\\x89PNG`, which is
+    guaranteed to raise under strict `Path.read_text()` decoding)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    ax.plot([1, 2, 3], [1, 4, 9])
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def test_leak_scan_tolerates_a_real_binary_png(tmp_path):
+    _write_real_png(tmp_path / "chart.png")
+    m = red.Mapping()
+    m.identifiers["secret-dataset"] = "DATASET_1"
+    # Must not raise UnicodeDecodeError, and a chart with no textual content
+    # carries no identifiers to flag.
+    assert red.leak_scan(tmp_path, m) == []
+
+
+def test_leak_scan_catches_text_leak_next_to_a_binary_png(tmp_path):
+    _write_real_png(tmp_path / "chart.png")
+    m = red.Mapping()
+    m.identifiers["secret-dataset"] = "DATASET_1"
+    (tmp_path / "report.md").write_text("still mentions secret-dataset in prose")
+
+    hits = red.leak_scan(tmp_path, m)
+    assert ("report.md", "secret-dataset") in hits

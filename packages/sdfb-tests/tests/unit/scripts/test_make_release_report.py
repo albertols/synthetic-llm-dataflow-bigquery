@@ -493,9 +493,16 @@ def test_main_redaction_gate_exits_3_and_cleans_up(tmp_path, monkeypatch):
     tree = _tree_with_gcp_metrics("2026-01-01_00_00_00-1", 42.0)
     out_dir = tmp_path / "releases"
 
-    monkeypatch.setattr(
-        rel.redaction, "leak_scan", lambda oss_dir, mapping: [("report.md", "SEEDED_LEAK_TOKEN")]
-    )
+    # Capture what's actually on disk at the moment leak_scan runs, to prove
+    # the brief's write order (render -> redact -> write report -> write
+    # charts -> leak-scan the COMPLETE version dir) — NOT the report alone.
+    seen_at_scan_time: list[str] = []
+
+    def fake_leak_scan(oss_dir, mapping):
+        seen_at_scan_time.extend(sorted(p.name for p in oss_dir.rglob("*") if p.is_file()))
+        return [("report.md", "SEEDED_LEAK_TOKEN")]
+
+    monkeypatch.setattr(rel.redaction, "leak_scan", fake_leak_scan)
 
     rc = rel.main(
         [
@@ -506,8 +513,19 @@ def test_main_redaction_gate_exits_3_and_cleans_up(tmp_path, monkeypatch):
         ]
     )
     assert rc == 3
+    assert "report.md" in seen_at_scan_time
+    assert "step_time_before_after.png" in seen_at_scan_time
+    assert "metric_evolution.png" in seen_at_scan_time
     # Nothing left behind for commit: the version dir is fully removed, and
     # the index (which is only regenerated after the gate passes) never
     # picked up this failed release.
     assert not (out_dir / "v9.9.8").exists()
     assert not (out_dir / "README.md").exists()
+
+
+def test_main_dry_run_plan_includes_summary_json(tmp_path, capsys):
+    out_dir = tmp_path / "releases"
+    rc = rel.main(["--dry-run", "--version", "v9.9.6", "--out-dir", str(out_dir)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert str(out_dir / "v9.9.6" / "summary.json") in out
