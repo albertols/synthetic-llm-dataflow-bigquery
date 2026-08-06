@@ -1,10 +1,22 @@
 #!/usr/bin/env python
-"""Release report logic: SemVer bump parsing, artifact discovery at git refs,
-and metric-delta computation.
+"""Release report generator: SemVer bump parsing, artifact discovery at git
+refs, metric-delta computation (Task 6 — the "logic half"), and report
+rendering, evolution charts, the redaction gate, and the CLI (Task 7 — the
+"rendering half").
 
-This is the "logic half" of the release report generator — pure functions
-with no matplotlib, no BigQuery, no redaction. `render_report` / `make_charts`
-/ the CLI `main` are Task 7's job and land in this same module later.
+Usage (see `main()` / `--help` for the full flag set):
+
+    # invoked by .github/workflows/release_tag_report.yaml to compute the tag
+    python scripts/release/make_release_report.py \
+        --print-next-version --title "<merge title>" [--prev vX.Y.Z]
+
+    # invoked by the same workflow to render+commit the report
+    python scripts/release/make_release_report.py \
+        --version vX.Y.Z --date YYYY-MM-DD --head-ref <sha> [--base-ref vW.Y.Z] \
+        --out-dir docs/releases
+
+    # local dry run — prints the plan, writes nothing
+    python scripts/release/make_release_report.py --dry-run
 
 Artifact discovery reads committed `integration_test/<JOB_ID>/*.json` files
 straight out of git (via `git ls-tree` + `git show` against an arbitrary
@@ -38,10 +50,26 @@ metric must render as `None` ("not measured"), never raise.
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
+import shutil
 import subprocess
+import sys
+from pathlib import Path
 from typing import Any
+
+import matplotlib
+
+matplotlib.use("Agg")  # headless-safe: set before any pyplot import, module-wide.
+import matplotlib.pyplot as plt  # must follow matplotlib.use("Agg")
+import numpy as np
+
+# Sibling import (scripts/e2e/ is not a package): the redaction gate reuses
+# the exact Mapping/build_mapping/redact_text/leak_scan machinery
+# e2e_bundle_export.py uses, extracted in Task 5 for this purpose.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "e2e"))
+import redaction  # sibling import; path must be set up first
 
 # --------------------------------------------------------------------------
 # SemVer bump parsing (Conventional Commits merge-commit title -> bump size)
@@ -381,3 +409,588 @@ def compute_deltas(
         "base_job": base_job,
         "head_job": head_job,
     }
+
+
+# ==========================================================================
+# Rendering half (Task 7): report markdown, evolution charts, redaction
+# gate, and the CLI. Everything above this line is pure (no matplotlib, no
+# subprocess side effects beyond read-only `git show`/`git log`/`git tag`).
+# ==========================================================================
+
+# Direction of "improvement" is NOT uniform across metric names: quality
+# metrics use `_max` suffixes for worst-case-HIGH ratios (e.g.
+# `copy_fraction_max`, `entropy_gap_max` — lower is better) but
+# `shape_recall_min` / `shape_precision_min` are worst-case-LOW (recall and
+# precision — higher is better). `counter_yielded` (more generated rows) and
+# `tokens_per_s` (throughput) are the other explicit higher-is-better
+# metrics. Everything else (wall-clock `_seconds` timings, `counter_failed`,
+# every `_max` quality ratio) defaults to lower-is-better.
+_HIGHER_IS_BETTER = frozenset({"counter_yielded", "tokens_per_s"})
+
+# The single "spine" metric used consistently as the release-over-release
+# headline: the evolution chart, the index's "headline delta" column, and
+# `_headline_delta()` are one source of truth pointing at this same
+# (section, metric_name) pair. Wall-clock execution time is measured on
+# every real E2E run and is universally comparable release to release.
+_HEADLINE_METRIC = ("performance", "execution_seconds")
+
+
+def _lower_is_better(name: str) -> bool:
+    """`True` when a lower value of metric `name` is the improvement."""
+    return not (name.endswith("_min") or name in _HIGHER_IS_BETTER)
+
+
+def _delta_tag(name: str, delta: float | None) -> str:
+    """"better" | "worse" | "unchanged" | "not measured" — direction-aware,
+    per `_lower_is_better`, so an improvement reads as an improvement
+    regardless of which way the raw number moved."""
+    if delta is None:
+        return "not measured"
+    if delta == 0:
+        return "unchanged"
+    improved = (_lower_is_better(name) and delta < 0) or (
+        not _lower_is_better(name) and delta > 0
+    )
+    return "better" if improved else "worse"
+
+
+def _fmt(v: Any) -> str:
+    """Render a metric leaf value; `None` always reads as the explicit
+    "not measured" sentinel, never a bare "None" string."""
+    if v is None:
+        return "not measured"
+    if isinstance(v, float):
+        return f"{v:.4g}"
+    return str(v)
+
+
+def _headline_delta(deltas: dict) -> str:
+    section, name = _HEADLINE_METRIC
+    m = (deltas.get(section) or {}).get(name) or {}
+    delta = m.get("delta")
+    tag = _delta_tag(name, delta)
+    if delta is None:
+        return f"{name}: not measured"
+    return f"{name} Δ{delta:+.3g} ({tag})"
+
+
+# --------------------------------------------------------------------------
+# render_report — deterministic markdown, no matplotlib, no I/O
+# --------------------------------------------------------------------------
+_CHANGE_TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "chore")
+_CHANGE_TYPE_LABELS = {
+    "feat": "Features",
+    "fix": "Fixes",
+    "perf": "Performance",
+    "refactor": "Refactors",
+    "docs": "Docs",
+    "test": "Tests",
+    "chore": "Chores",
+    "other": "Other",
+}
+
+
+def _render_change_summary(change_log: list[dict]) -> str:
+    lines = ["## Change summary", ""]
+    if not change_log:
+        lines.append("_No commits recorded between base and head._")
+        return "\n".join(lines)
+    grouped: dict[str, list[str]] = {}
+    for entry in change_log:
+        change_type = entry.get("type") or "other"
+        grouped.setdefault(change_type, []).append(entry.get("title") or "(untitled commit)")
+    order = [t for t in _CHANGE_TYPE_ORDER if t in grouped]
+    order += sorted(t for t in grouped if t not in order)
+    for change_type in order:
+        lines.append(f"### {_CHANGE_TYPE_LABELS.get(change_type, change_type.title())}")
+        lines.extend(f"- {title}" for title in grouped[change_type])
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _metric_row(name: str, m: dict) -> str:
+    base, head, delta = m.get("base"), m.get("head"), m.get("delta")
+    tag = _delta_tag(name, delta)
+    delta_cell = "not measured" if delta is None else f"{_fmt(delta)} ({tag})"
+    return f"| {name} | {_fmt(base)} | {_fmt(head)} | {delta_cell} |"
+
+
+_SECTION_HEADINGS = (("performance", "Performance"), ("vllm", "vLLM"), ("quality", "Quality"))
+
+
+def _render_before_after(deltas: dict) -> str:
+    lines = ["## Before / after", ""]
+    missing = deltas.get("missing") or []
+    # A missing side renders the explicit sentence below (never a silently
+    # empty/zeroed table) — one bullet per missing side.
+    for side in missing:
+        lines.append(f"- **{side.capitalize()}:** no integration run landed for this release.")
+    if missing:
+        lines.append("")
+    lines.append(
+        f"Base job: `{deltas.get('base_job') or 'n/a'}` · "
+        f"Head job: `{deltas.get('head_job') or 'n/a'}`"
+    )
+    lines.append("")
+    for key, heading in _SECTION_HEADINGS:
+        section = deltas.get(key) or {}
+        lines.append(f"### {heading}")
+        lines.append("")
+        lines.append("| Metric | Base | Head | Delta |")
+        lines.append("|---|---|---|---|")
+        if not section:
+            lines.append("| _(no metrics in this section)_ | | | |")
+        else:
+            lines.extend(_metric_row(name, m) for name, m in section.items())
+        lines.append("")
+    return "\n".join(lines)
+
+
+_CHART_FILES = (
+    ("step_time_before_after.png", "Step time — before vs after"),
+    ("metric_evolution.png", "Metric evolution across releases"),
+)
+
+
+def _render_charts(history: list[tuple[str, dict]]) -> str:
+    lines = ["## Charts", ""]
+    for filename, caption in _CHART_FILES:
+        lines.append(f"![{caption}](assets/{filename})")
+        lines.append("")
+    lines.append(
+        f"_Evolution chart spans {len(history)} prior tagged release(s) plus this one "
+        f"({_HEADLINE_METRIC[1]}, lower is better)._"
+    )
+    return "\n".join(lines)
+
+
+def render_report(
+    version: str,
+    change_log: list[dict],
+    deltas: dict,
+    history: list[tuple[str, dict]],
+) -> str:
+    """Deterministic release-report markdown.
+
+    `deltas["date"]` supplies the report date the same way `compute_deltas`
+    already threads `base_job`/`head_job` through for the caller to label the
+    report with (see that function's docstring) — `main()` stamps
+    `deltas["date"]` from `--date` (never a hidden `datetime.now()`) before
+    calling this function, so `render_report` itself stays a pure function of
+    its four arguments. A fixture built by hand with no "date" key falls back
+    to the explicit "unknown" sentinel rather than crashing.
+    """
+    date = deltas.get("date") or "unknown"
+    parts = [
+        f"# Release {version}",
+        "",
+        f"**Date:** {date}",
+        "",
+        _render_change_summary(change_log),
+        "",
+        _render_before_after(deltas),
+        "",
+        _render_charts(history),
+        "",
+        "---",
+        "_Generated deterministically by `scripts/release/make_release_report.py` — "
+        "insights layer: `.claude/skills/release-report/SKILL.md`._",
+    ]
+    return "\n".join(parts) + "\n"
+
+
+# --------------------------------------------------------------------------
+# make_charts — matplotlib (Agg), dataviz-skill-conformant
+# --------------------------------------------------------------------------
+# Palette: the dataviz skill's validated default categorical slots 1 (blue)
+# and 2 (orange) — `references/palette.md` in the `dataviz` skill.
+# Re-validated for this exact pair via `scripts/validate_palette.py
+# "#2a78d6,#eb6834" --mode light` before use: all five checks (lightness
+# band, chroma floor, CVD separation, normal-vision floor, contrast) pass —
+# worst adjacent CVD ΔE 24.7, normal-vision ΔE 33.6, well clear of the ≥8 /
+# ≥15 gates. Charts are a static PNG embed (no dark-mode variant possible for
+# a single raster), so they render on the light chart surface only — same
+# convention as the existing `docs/designs/assets/` figure set.
+_BLUE, _ORANGE = "#2a78d6", "#eb6834"
+_INK, _MUTED, _GRID, _SURFACE = "#0b0b0b", "#898781", "#e1e0d9", "#fcfcfb"
+
+
+def _style_axes(ax) -> None:
+    ax.set_facecolor(_SURFACE)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(_GRID)
+    ax.tick_params(colors=_MUTED, labelsize=9, length=0)
+    ax.set_axisbelow(True)
+
+
+def _title_axes(ax, text: str, sub: str | None = None) -> None:
+    ax.set_title(text, color=_INK, fontsize=12.5, fontweight="600", loc="left", pad=26)
+    if sub:
+        ax.text(
+            0, 1.025, sub, transform=ax.transAxes, color=_MUTED, fontsize=9, va="bottom"
+        )
+
+
+def _empty_axes(ax, message: str) -> None:
+    """Shared placeholder for the "nothing measured yet" case — both charts
+    must render a valid PNG even with zero data points (empty history, no
+    metric measured on both sides), never crash or skip the file."""
+    ax.set_facecolor(_SURFACE)  # matches the non-empty branch's _style_axes;
+    # skipping it would leave matplotlib's default white axes rectangle
+    # visible against the cream figure background.
+    ax.text(
+        0.5, 0.5, message, ha="center", va="center", color=_MUTED, fontsize=11,
+        transform=ax.transAxes, wrap=True,
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
+def _timing_rows(deltas: dict) -> list[tuple[str, float, float]]:
+    """(metric_name, base_seconds, head_seconds) for every `*_seconds` metric
+    measured on BOTH sides, from the sections that actually carry step/stage
+    timings (performance + vllm) — quality ratios are not "time"."""
+    rows: list[tuple[str, float, float]] = []
+    for section in ("performance", "vllm"):
+        for name, m in (deltas.get(section) or {}).items():
+            if not name.endswith("_seconds"):
+                continue
+            base, head = m.get("base"), m.get("head")
+            if base is None or head is None:
+                continue
+            rows.append((name, base, head))
+    return rows
+
+
+def _chart_step_time_before_after(deltas: dict, assets_dir: Path) -> Path:
+    rows = _timing_rows(deltas)
+    fig, ax = plt.subplots(figsize=(9, 5), facecolor=_SURFACE)
+    if not rows:
+        _empty_axes(ax, "no step timing measured on both sides for this release")
+    else:
+        labels = [r[0] for r in rows]
+        base_vals = [r[1] for r in rows]
+        head_vals = [r[2] for r in rows]
+        x = np.arange(len(labels))
+        width = 0.34
+        bars_base = ax.bar(x - width / 2, base_vals, width, color=_BLUE, label="base", zorder=3)
+        bars_head = ax.bar(x + width / 2, head_vals, width, color=_ORANGE, label="head", zorder=3)
+        ax.bar_label(bars_base, fmt="%.1f", padding=3, color=_MUTED, fontsize=8)
+        ax.bar_label(bars_head, fmt="%.1f", padding=3, color=_MUTED, fontsize=8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9, color=_INK)
+        ax.set_ylabel("seconds", color=_MUTED, fontsize=9)
+        ax.grid(axis="y", color=_GRID, linewidth=0.8, alpha=0.9)
+        ax.legend(frameon=False, loc="upper right", fontsize=9, labelcolor=_INK)
+        _style_axes(ax)
+    _title_axes(ax, "Step time — before vs after", "lower is better")
+    fig.tight_layout()
+    out = assets_dir / "step_time_before_after.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return out
+
+
+def _evolution_points(
+    deltas: dict, history: list[tuple[str, dict]]
+) -> list[tuple[str, float]]:
+    """(tag_or_"current", head_value) across every prior tagged release
+    (oldest first) plus this release, for the headline metric — points with
+    no measurement on either side are skipped (never plotted as a false 0)."""
+    section, name = _HEADLINE_METRIC
+    points: list[tuple[str, float]] = []
+    for tag, d in history:
+        value = ((d.get(section) or {}).get(name) or {}).get("head")
+        if value is not None:
+            points.append((tag, value))
+    current = ((deltas.get(section) or {}).get(name) or {}).get("head")
+    if current is not None:
+        points.append(("current", current))
+    return points
+
+
+def _chart_metric_evolution(
+    deltas: dict, history: list[tuple[str, dict]], assets_dir: Path
+) -> Path:
+    points = _evolution_points(deltas, history)
+    fig, ax = plt.subplots(figsize=(9, 5), facecolor=_SURFACE)
+    if not points:
+        _empty_axes(ax, "no tagged release history yet")
+    else:
+        labels = [p[0] for p in points]
+        values = [p[1] for p in points]
+        x = np.arange(len(labels))
+        if len(points) == 1:
+            ax.scatter(x, values, s=64, color=_BLUE, zorder=3)
+        else:
+            ax.plot(
+                x, values, color=_BLUE, linewidth=2, marker="o", markersize=6,
+                markeredgecolor=_SURFACE, markeredgewidth=1.5, zorder=3,
+            )
+        ax.annotate(
+            f"{values[-1]:.3g}", (x[-1], values[-1]), textcoords="offset points",
+            xytext=(6, 6), color=_INK, fontsize=9,
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9, color=_INK)
+        ax.set_ylabel(f"{_HEADLINE_METRIC[1]} (head, seconds)", color=_MUTED, fontsize=9)
+        ax.grid(axis="y", color=_GRID, linewidth=0.8, alpha=0.9)
+        _style_axes(ax)
+    _title_axes(ax, "Metric evolution across releases", f"{_HEADLINE_METRIC[1]} · lower is better")
+    fig.tight_layout()
+    out = assets_dir / "metric_evolution.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return out
+
+
+def make_charts(deltas: dict, history: list[tuple[str, dict]], assets_dir: Path) -> list[Path]:
+    """Write `step_time_before_after.png` (bar) and `metric_evolution.png`
+    (line) into `assets_dir`, creating it if needed. Always returns both
+    paths, existing on disk — an empty/single-point `history` or a `deltas`
+    with nothing measured on both sides renders a labeled placeholder axes
+    rather than raising or skipping a file."""
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    return [
+        _chart_step_time_before_after(deltas, assets_dir),
+        _chart_metric_evolution(deltas, history, assets_dir),
+    ]
+
+
+# --------------------------------------------------------------------------
+# CLI plumbing: change-log discovery, tag history, index regeneration, main
+# --------------------------------------------------------------------------
+def _derive_date() -> str:
+    """Deterministic report date when `--date` is not given: the HEAD
+    commit's own committer date (`%cs`, `YYYY-MM-DD`) — never
+    `datetime.now()`, which would make the report non-reproducible from the
+    same git state."""
+    out = _run_git("log", "-1", "--format=%cs", "HEAD")
+    return (out or "").strip() or "unknown-date"
+
+
+def _change_log_entry(title: str) -> dict:
+    m = _TITLE_RE.match(title.strip())
+    return {"type": m.group("type") if m else "other", "title": title.strip()}
+
+
+def build_change_log(base_ref: str | None, head_ref: str) -> list[dict]:
+    """Conventional-commit-typed subject lines between `base_ref` (exclusive)
+    and `head_ref` (inclusive). `base_ref=None` -> just the head commit
+    itself (first release, nothing to diff against). Any git failure (e.g.
+    `head_ref` is a bare tree, not a commit) degrades to `[]`, never a
+    crash — mirrors `_run_git`'s convention."""
+    rng = f"{base_ref}..{head_ref}" if base_ref else head_ref
+    out = _run_git("log", "--format=%s", rng)
+    if not out:
+        return []
+    return [_change_log_entry(line) for line in out.splitlines() if line.strip()]
+
+
+def _version_key(tag: str) -> tuple[int, int, int]:
+    try:
+        parts = [int(x) for x in tag.lstrip("v").split(".")]
+        return (parts[0], parts[1], parts[2])
+    except (ValueError, IndexError):
+        return (0, 0, 0)
+
+
+def _sorted_version_tags() -> list[str]:
+    out = _run_git("tag", "--list", "v*")
+    tags = [t.strip() for t in (out or "").splitlines() if t.strip()]
+    return sorted(tags, key=_version_key)
+
+
+def build_history(tags: list[str]) -> list[tuple[str, dict]]:
+    """`(tag, deltas)` for every already-tagged release, oldest first — each
+    tag's own deltas are computed against the tag immediately before it (the
+    same base/head shape `main()` uses for the current release), so the
+    evolution chart is one consistent series across the full tag history."""
+    history: list[tuple[str, dict]] = []
+    prev_tag: str | None = None
+    for tag in tags:
+        prev_sets = discover_artifact_sets(prev_tag) if prev_tag else {}
+        prev_job = latest_job(prev_sets)
+        prev_artifacts = prev_sets.get(prev_job, {}) if prev_job else {}
+
+        cur_sets = discover_artifact_sets(tag)
+        cur_job = latest_job(cur_sets)
+        cur_artifacts = cur_sets.get(cur_job, {}) if cur_job else {}
+
+        d = compute_deltas(prev_artifacts, cur_artifacts, base_job=prev_job, head_job=cur_job)
+        history.append((tag, d))
+        prev_tag = tag
+    return history
+
+
+def _write_index(out_dir: Path) -> Path:
+    """Regenerate `docs/releases/README.md` from every `<out_dir>/v*/
+    summary.json` sidecar present on disk (one per release `main()` has
+    written) — never hand-maintained, never accumulated in memory across
+    runs, so the index always reflects exactly what's on disk."""
+    rows = []
+    for summary_path in out_dir.glob("v*/summary.json"):
+        try:
+            rows.append(json.loads(summary_path.read_text()))
+        except (OSError, json.JSONDecodeError):
+            continue
+    rows.sort(key=lambda r: _version_key(r.get("version", "v0.0.0")))
+
+    lines = [
+        "# Release history",
+        "",
+        "Generated by `scripts/release/make_release_report.py` (via "
+        "`.github/workflows/release_tag_report.yaml`); this index is regenerated on "
+        "every release — do not hand-edit rows.",
+        "",
+        "| Version | Date | Headline delta |",
+        "|---|---|---|",
+    ]
+    lines.extend(
+        f"| {r.get('version', '?')} | {r.get('date', '?')} | {r.get('headline_delta', '?')} |"
+        for r in rows
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "README.md"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--print-next-version",
+        action="store_true",
+        help="print the computed next SemVer tag to stdout and exit — no other "
+        "output (the release Action's version-compute step calls this).",
+    )
+    ap.add_argument("--title", default=None, help="merge-commit title, for --print-next-version")
+    ap.add_argument("--prev", default=None, help="previous tag, for --print-next-version")
+    ap.add_argument("--base-ref", default=None, help="default: previous tag reachable from HEAD^")
+    ap.add_argument("--head-ref", default="HEAD")
+    ap.add_argument("--version", default=None, help="default: computed from the head commit title")
+    ap.add_argument(
+        "--date",
+        default=None,
+        help="report date (YYYY-MM-DD); default: HEAD's own committer date, never "
+        "datetime.now()",
+    )
+    ap.add_argument("--out-dir", type=Path, default=Path("docs/releases"))
+    ap.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
+    return ap
+
+
+def _resolve_base_ref(args: argparse.Namespace) -> str | None:
+    """An explicit `--base-ref` (including a blank one) wins outright;
+    omitted means "try to auto-detect the previous tag reachable from
+    `head_ref^`", which itself degrades to `None` (first release) on any git
+    failure."""
+    if args.base_ref is not None:
+        return args.base_ref or None
+    described = _run_git("describe", "--tags", "--abbrev=0", f"{args.head_ref}^")
+    return described.strip() if described and described.strip() else None
+
+
+def _print_dry_run_plan(
+    version: str, base_ref: str | None, args: argparse.Namespace, report_path: Path, assets_dir: Path
+) -> None:
+    print(f"version: {version}")
+    print(f"base-ref: {base_ref or '(none — first release)'}")
+    print(f"head-ref: {args.head_ref}")
+    print(f"would write: {report_path}")
+    print(f"would write: {assets_dir / 'step_time_before_after.png'}")
+    print(f"would write: {assets_dir / 'metric_evolution.png'}")
+    print(f"would regenerate: {args.out_dir / 'README.md'}")
+
+
+def _discover_side(ref: str | None) -> tuple[str | None, dict]:
+    if not ref:
+        return None, {}
+    sets = discover_artifact_sets(ref)
+    job = latest_job(sets)
+    return job, (sets.get(job, {}) if job else {})
+
+
+def _run_redaction_gate(version_dir: Path, report_path: Path, report_md: str, head_artifacts: dict) -> list:
+    """Build the mapping from the HEAD artifacts, redact the report, write
+    it, then leak-scan the version dir for anything that survived. Returns
+    the (possibly empty) list of leak hits; the caller decides what to do.
+
+    Charts are deliberately NOT on disk yet when this runs: `leak_scan` reads
+    every file in `version_dir` as text, and a PNG is not valid text, so the
+    report (the only text this generator writes, and the only place a real
+    identifier could leak in from a git commit title) must be the only thing
+    on disk while the gate runs.
+    """
+    metrics_for_mapping = {"gcp": head_artifacts.get("gcp"), "offline": head_artifacts.get("offline")}
+    mapping = redaction.build_mapping(metrics_for_mapping)
+    report_path.write_text(redaction.redact_text(mapping, report_md))
+    return redaction.leak_scan(version_dir, mapping)
+
+
+def _finalize_release(version_dir: Path, assets_dir: Path, out_dir: Path, version: str, date: str, deltas: dict, history: list[tuple[str, dict]]) -> None:
+    make_charts(deltas, history, assets_dir)
+    (version_dir / "summary.json").write_text(
+        json.dumps(
+            {"version": version, "date": date, "headline_delta": _headline_delta(deltas)},
+            indent=2,
+        )
+        + "\n"
+    )
+    _write_index(out_dir)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_arg_parser().parse_args(argv)
+
+    if args.print_next_version:
+        if not args.title:
+            print("--print-next-version requires --title", file=sys.stderr)
+            return 2
+        print(next_version(args.prev, parse_bump(args.title)))
+        return 0
+
+    base_ref = _resolve_base_ref(args)
+    head_title = (_run_git("log", "-1", "--format=%s", args.head_ref) or "").strip()
+    version = args.version or next_version(base_ref, parse_bump(head_title))
+    date = args.date or _derive_date()
+
+    version_dir = args.out_dir / version
+    assets_dir = version_dir / "assets"
+    report_path = version_dir / "report.md"
+
+    if args.dry_run:
+        _print_dry_run_plan(version, base_ref, args, report_path, assets_dir)
+        return 0
+
+    head_job, head_artifacts = _discover_side(args.head_ref)
+    base_job, base_artifacts = _discover_side(base_ref)
+
+    deltas = compute_deltas(base_artifacts, head_artifacts, base_job=base_job, head_job=head_job)
+    deltas["date"] = date
+
+    change_log = build_change_log(base_ref, args.head_ref)
+    history = build_history(_sorted_version_tags())
+
+    version_dir.mkdir(parents=True, exist_ok=True)
+    report_md = render_report(version, change_log, deltas, history)
+
+    leaks = _run_redaction_gate(version_dir, report_path, report_md, head_artifacts)
+    if leaks:
+        print("release report leak scan failed — nothing committed:", file=sys.stderr)
+        for fname, token in leaks:
+            print(f"  {fname}: {token!r}", file=sys.stderr)
+        shutil.rmtree(version_dir, ignore_errors=True)
+        return 3
+
+    _finalize_release(version_dir, assets_dir, args.out_dir, version, date, deltas, history)
+    print(f"wrote {report_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

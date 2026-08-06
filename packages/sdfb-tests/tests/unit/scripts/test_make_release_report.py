@@ -334,3 +334,180 @@ def test_compute_deltas_base_job_head_job_default_none():
     d = rel.compute_deltas({"gcp": {"jobs": []}}, {"gcp": {"jobs": []}})
     assert d["base_job"] is None
     assert d["head_job"] is None
+
+
+# --------------------------------------------------------------------------
+# Task 7 — brief's verbatim tests (render_report / make_charts / CLI)
+# --------------------------------------------------------------------------
+def _fixture_deltas():
+    return {
+        "performance": {"execution_seconds": {"base": 100.0, "head": 80.0, "delta": -20.0}},
+        "vllm": {"tokens_per_s": {"base": None, "head": None, "delta": None}},
+        "quality": {"copy_fraction_max": {"base": 0.1, "head": 0.05, "delta": -0.05}},
+        "missing": [],
+        "base_job": "j1", "head_job": "j2",
+    }
+
+
+def test_render_report_has_sections_and_no_placeholders():
+    md = rel.render_report("v0.2.0", [{"type": "feat", "title": "feat: x"}],
+                           _fixture_deltas(), history=[("v0.1.0", _fixture_deltas())])
+    for section in ("# Release v0.2.0", "Change summary", "Before / after", "Charts"):
+        assert section in md
+
+
+def test_render_report_states_missing_runs():
+    d = _fixture_deltas() | {"missing": ["base"]}
+    md = rel.render_report("v0.2.0", [], d, history=[])
+    assert "no integration run" in md.lower()
+
+
+def test_make_charts_writes_pngs(tmp_path):
+    paths = rel.make_charts(_fixture_deltas(), [("v0.1.0", _fixture_deltas())], tmp_path)
+    assert paths and all(p.exists() and p.suffix == ".png" for p in paths)
+
+
+def test_print_next_version_mode(capsys):
+    rc = rel.main(["--print-next-version", "--title", "feat: x", "--prev", "v0.1.0"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "v0.2.0"
+
+
+# --------------------------------------------------------------------------
+# Task 7 — additional coverage: --print-next-version error path, direction-
+# aware delta labeling, chart placeholder branches, --dry-run purity, full
+# main() generation + index regeneration, and the redaction-gate exit 3.
+# --------------------------------------------------------------------------
+def test_print_next_version_requires_title(capsys):
+    rc = rel.main(["--print-next-version"])
+    assert rc != 0
+    assert capsys.readouterr().out == ""
+
+
+def test_render_report_direction_aware_delta_labels():
+    # copy_fraction_max / entropy_gap_max are worst-case-HIGH (lower is
+    # better); shape_recall_min / shape_precision_min are worst-case-LOW
+    # (higher is better) — the renderer must not assume uniform "_max"
+    # semantics, so an improvement reads as "better" in BOTH directions.
+    d = {
+        "performance": {},
+        "vllm": {},
+        "quality": {
+            "copy_fraction_max": {"base": 0.10, "head": 0.05, "delta": -0.05},  # improved
+            "entropy_gap_max": {"base": 0.05, "head": 0.10, "delta": 0.05},  # regressed
+            "shape_recall_min": {"base": 0.80, "head": 0.85, "delta": 0.05},  # improved
+            "shape_precision_min": {"base": 0.85, "head": 0.80, "delta": -0.05},  # regressed
+        },
+        "missing": [], "base_job": "j1", "head_job": "j2",
+    }
+    md = rel.render_report("v0.2.0", [], d, history=[])
+    rows = {
+        line.split("|")[1].strip(): line
+        for line in md.splitlines()
+        if line.startswith("| ") and "Metric" not in line and "---" not in line
+    }
+    assert "better" in rows["copy_fraction_max"].lower()
+    assert "worse" in rows["entropy_gap_max"].lower()
+    assert "better" in rows["shape_recall_min"].lower()
+    assert "worse" in rows["shape_precision_min"].lower()
+
+
+def test_render_report_empty_change_log_does_not_crash():
+    md = rel.render_report("v0.1.0", [], _fixture_deltas(), history=[])
+    assert "Change summary" in md
+
+
+def test_make_charts_handles_empty_history_and_all_unmeasured(tmp_path):
+    d = {
+        "performance": {"execution_seconds": {"base": None, "head": None, "delta": None}},
+        "vllm": {},
+        "quality": {},
+        "missing": ["base", "head"],
+        "base_job": None, "head_job": None,
+    }
+    paths = rel.make_charts(d, [], tmp_path)
+    assert paths and all(p.exists() and p.suffix == ".png" for p in paths)
+
+
+def test_dry_run_writes_nothing(tmp_path, capsys):
+    out_dir = tmp_path / "releases"
+    rc = rel.main(["--dry-run", "--out-dir", str(out_dir)])
+    assert rc == 0
+    assert not out_dir.exists()
+    out = capsys.readouterr().out
+    assert "version:" in out
+
+
+def _tree_with_gcp_metrics(job_id: str, execution_seconds: float) -> str:
+    return _make_tree(
+        {
+            f"integration_test/{job_id}/e2e_gcp_metrics.json": json.dumps(
+                {
+                    "dataflow": [
+                        {
+                            "job_id": job_id,
+                            "timing": {"execution_seconds": execution_seconds},
+                            "metrics": {
+                                "custom_counters": {
+                                    "generation.yielded": 900,
+                                    "generation.failed": 5,
+                                }
+                            },
+                        }
+                    ]
+                }
+            )
+        }
+    )
+
+
+def test_main_generates_report_charts_and_index(tmp_path):
+    tree = _tree_with_gcp_metrics("2026-01-01_00_00_00-1", 42.0)
+    out_dir = tmp_path / "releases"
+    rc = rel.main(
+        [
+            "--head-ref", tree,
+            "--version", "v9.9.9",
+            "--date", "2026-08-06",
+            "--out-dir", str(out_dir),
+        ]
+    )
+    assert rc == 0
+
+    version_dir = out_dir / "v9.9.9"
+    report_md = (version_dir / "report.md").read_text()
+    assert "# Release v9.9.9" in report_md
+    # no prior tag exists at this synthetic ref, so the base side is missing.
+    assert "no integration run" in report_md.lower()
+
+    assert (version_dir / "assets" / "step_time_before_after.png").exists()
+    assert (version_dir / "assets" / "metric_evolution.png").exists()
+    assert (version_dir / "summary.json").exists()
+
+    index_md = (out_dir / "README.md").read_text()
+    assert "v9.9.9" in index_md
+    assert "2026-08-06" in index_md
+
+
+def test_main_redaction_gate_exits_3_and_cleans_up(tmp_path, monkeypatch):
+    tree = _tree_with_gcp_metrics("2026-01-01_00_00_00-1", 42.0)
+    out_dir = tmp_path / "releases"
+
+    monkeypatch.setattr(
+        rel.redaction, "leak_scan", lambda oss_dir, mapping: [("report.md", "SEEDED_LEAK_TOKEN")]
+    )
+
+    rc = rel.main(
+        [
+            "--head-ref", tree,
+            "--version", "v9.9.8",
+            "--date", "2026-08-06",
+            "--out-dir", str(out_dir),
+        ]
+    )
+    assert rc == 3
+    # Nothing left behind for commit: the version dir is fully removed, and
+    # the index (which is only regenerated after the gate passes) never
+    # picked up this failed release.
+    assert not (out_dir / "v9.9.8").exists()
+    assert not (out_dir / "README.md").exists()
