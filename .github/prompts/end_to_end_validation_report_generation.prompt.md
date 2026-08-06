@@ -6,13 +6,15 @@ description: >
   Cross-validates the generation-engine output samples against the live source
   + landing BigQuery tables AND against the packages/ engine codebase,
   quantifies duplication / repetition / singularity / sparsity / memorization /
-  schema defects, traces each to concrete engine code, and mines Dataflow
-  job metrics + worker logs for execution milestones (startup, model / vLLM
-  ignition, embedder load, generation stall, BigQuery load). ADC access to the
-  target GCP project is a PREREQUISITE and is verified first.
-  Inputs: engine CSVs (under integration_test/<job_id>/), project,
-  source/landing/quality FQNs, Dataflow job_ids, region, PK + identity
-  columns. Output: output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md +
+  schema defects, chains a free-text pattern crosscheck + source-vs-synthetic
+  statistics diff, traces each finding to concrete engine code, and mines
+  Dataflow job metrics + worker logs for execution milestones (startup,
+  model / vLLM ignition, embedder load, generation stall, BigQuery load). ADC
+  access to the target GCP project is a PREREQUISITE and is verified first.
+  Inputs: engine CSVs (under integration_test/<job_id>/, auto-fetched from
+  BigQuery via ADC when a file is missing), project, source/landing/quality
+  FQNs, Dataflow job_ids, region, PK + identity columns. Output:
+  output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md +
   the integration_test/<job_id>/{real,oss}/ bundle.
 ---
 
@@ -42,7 +44,7 @@ inputs.
 
 | Param | Example | Notes |
 |---|---|---|
-| `CSVS` | `b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv …` | `engine_label=path`, repeatable; sample CSVs live under `integration_test/<JOB_ID>/` |
+| `CSVS` | `b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv …` | `engine_label=path`, repeatable; sample CSVs live under `integration_test/<JOB_ID>/`; optional: when omitted (or a file is missing), Step 1.5 fetches the samples from `LANDING_FQN` via ADC |
 | `PROJECT` | `db-<env>-…-pwcclake-es` | GCP project id |
 | `SOURCE_FQN` | `<project>.<dataset>.<TABLE>` | live source table |
 | `LANDING_FQN` | `<project>.synthetic_data.<TABLE>` | synthetic landing table |
@@ -55,19 +57,27 @@ inputs.
 | `BATCH_SIZE` | `500` | Beam/RunInference batch size (enables the `equals_batch_size` run-length flag) |
 | `RUN_IDS` | `<run_id>` (optional, one per engine run) | scopes `validation_runs`/`dlq` lookups |
 | `ENGINE_LABEL=JOB_ID` | `b1_rag=<job_id>` (optional, repeatable) | stamps a readable engine name on the matching Dataflow result |
+| `ENGINE_LABEL=RUN_ID` | `b1_rag=<run_id>` (optional, repeatable) | pairs an engine label with its `run_id` so Step 1.5 fetches only that engine's rows from `LANDING_FQN` |
+| `RUN_ID_COL` | `run_id` | column in `LANDING_FQN` holding the salted run id; **required** by Step 1.5 whenever any `ENGINE_LABEL=RUN_ID` pair is given — without it the fetch is unfiltered and every engine's CSV would silently contain the same rows despite the per-engine labels |
+| `FREETEXT_COLS` | `COL_A,COL_B,COL_C` | comma-separated free-text/STRING columns for Step 3.5's crosscheck (optional — discovered from the free-text subset found in Steps 2–3 if omitted) |
 
 If a param is unknown, discover it: `SCHEMA`/columns via the schema JSON or
 `INFORMATION_SCHEMA`; `LANDING_FQN` via the `synthetic_data` dataset; `JOB_IDS`
 from the user; `BATCH_SIZE` from the pipeline launch params (composer /
 `3_import_dag.yaml`); `RUN_IDS` from `validation_runs` or the pipeline launch
-logs. If only one engine was deployed, run the single-engine subset.
+logs; `RUN_ID_COL` from the landing table schema or the pipeline launch params
+(the composer/DAG's `run_id` output column — usually named `run_id`);
+`FREETEXT_COLS` from the free-text subset discovered in Steps 2–3. If
+only one engine was deployed, run the single-engine subset.
 
 **Per-deployment artifact folder**: every deployment's artifacts share one
 folder named after the primary Dataflow job id (`<JOB_ID>` = first of
 `JOB_IDS`), e.g. `integration_test/2026-07-09_11_32_56-17188177770294375504/`.
 The sample CSVs (`*.csv`), `e2e_validation_metrics.json`,
-`e2e_gcp_metrics.json`, and the exported `real/` + `oss/` bundles (Step 6) all
-live there. Only the report itself stays under `output/`.
+`e2e_gcp_metrics.json`, `stats_diff.json`/`.md`,
+`freetext_crosscheck_metrics.json`/`_report.md`, and the exported `real/` +
+`oss/` bundles (Step 6) all live there. Only the report itself stays under
+`output/`.
 
 ---
 
@@ -126,6 +136,27 @@ Read these and summarise what each engine is *designed* to do (ground
    matrix, Dataflow options) this report cross-checks against.
 
 Write a short "Expected behaviour" note per engine.
+
+---
+
+## Step 1.5 — Materialize missing sample CSVs from BigQuery (no manual export)
+
+For every engine whose CSV under `integration_test/<JOB_ID>/` is missing:
+
+```bash
+python scripts/e2e/e2e_fetch_samples.py \
+  --project <PROJECT> --landing-fqn <LANDING_FQN> --job-id <JOB_ID> \
+  --run-id-col <RUN_ID_COL> \
+  $(for e in <ENGINE_LABEL=RUN_ID>; do echo --engine-label $e; done) \
+  --rows 10000
+```
+
+Deterministic (hash-ordered) — re-runs fetch the same rows. `--run-id-col` is
+**mandatory** whenever any `--engine-label` pairs a label with a `run_id` —
+omitting it means every engine's CSV would come back unfiltered (the same
+rows for every engine label); the script now refuses to run in that
+configuration rather than silently producing misleading per-engine samples.
+Only stop if the fetch itself fails; never hand-copy CSVs again.
 
 ---
 
@@ -220,6 +251,29 @@ Note which engine's data the landing table currently holds (match on
 
 ---
 
+## Step 3.5 — Free-text crosscheck + source-vs-synthetic stats diff (mandatory)
+
+Chain the free-text pattern crosscheck (its own prompt:
+`freetext_crosscheck_report_generation.prompt.md`) and the stats diff — both
+write into the per-deployment folder when run from E2E:
+
+```bash
+python scripts/e2e/freetext_crosscheck.py \
+  --source-fqn <SOURCE_FQN> --synthetic-fqn <LANDING_FQN> \
+  --columns "<FREETEXT_COLS>" \
+  --out-json integration_test/<JOB_ID>/freetext_crosscheck_metrics.json \
+  --out-md   integration_test/<JOB_ID>/freetext_crosscheck_report.md
+
+python scripts/e2e/source_synthetic_stats_diff.py \
+  --source-fqn <SOURCE_FQN> --synthetic-fqn <LANDING_FQN> --project <PROJECT> \
+  --out-json integration_test/<JOB_ID>/stats_diff.json \
+  --out-md   integration_test/<JOB_ID>/stats_diff.md
+```
+
+`FREETEXT_COLS` defaults to the free-text subset discovered in Steps 2–3.
+
+---
+
 ## Step 4 — Diagnose defects and trace each to code
 
 For every anomaly: **evidence → root cause (file:symbol) → fix**. Check for:
@@ -265,10 +319,13 @@ Create `output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md`
 2. **Per-engine findings** — evidence tables from Steps 2–3.
 3. **Memorization** — the source-copy table (copy_ratio) + the GPU/LLM-fallback
    root cause + fixes.
+3.5. **Source vs synthetic statistics** — stats-diff + crosscheck headline
+   numbers, each finding traced to a generation code area, feeding the
+   backlog.
 4. **Schema, gates & quality tables** — conformance, gate blind spots, `validation_runs`/`dlq`.
 5. **Dataflow execution insights** — per-job phase timings, engine milestones,
    resource/GPU seconds, and cost/value commentary.
-6. **Reproduce** — the exact two commands (incl. the ADC login).
+6. **Reproduce** — the exact commands, in order (incl. the ADC login).
 7. **Prioritized backlog** — severity-ranked, area-tagged, one-line fix + §ref.
 
 Rules: relative links; every claim backed by a JSON number or a `file:symbol`
@@ -289,12 +346,19 @@ table / environment):
 python scripts/e2e/e2e_bundle_export.py \
   --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
   --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
+  --metrics stats_diff=integration_test/<JOB_ID>/stats_diff.json \
+  --metrics freetext_crosscheck=integration_test/<JOB_ID>/freetext_crosscheck_metrics.json \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
   --out-root integration_test \
   --no-redact-values
   # writes integration_test/<JOB_ID>/{real,oss}/
 ```
+
+`--metrics` ingests JSON only — `stats_diff.md` and
+`freetext_crosscheck_report.md` are not redacted into `oss/`; they stay as
+markdown artifacts directly under `integration_test/<JOB_ID>/` next to the
+bundle (Step 7 checks for their presence).
 
 The bundle folder name defaults to the first Dataflow job id in the gcp
 metrics (`--job-id` overrides), so everything for one deployment sits under
@@ -317,7 +381,8 @@ dev data) — metadata stays hidden either way. Default is to redact values.
 
 The tool runs a **leak scan** over `oss/` and exits non-zero if any real token
 survived — the export is only shareable when it prints `leak scan: clean ✅`.
-Hand the OSS team the `oss/` folder + the three scripts; keep `real/` local.
+Hand the OSS team the `oss/` folder + the `scripts/e2e/` toolchain; keep
+`real/` local.
 
 ---
 
@@ -325,7 +390,7 @@ Hand the OSS team the `oss/` folder + the three scripts; keep `real/` local.
 
 1. Report opens; relative links resolve.
 2. Every headline number matches `e2e_validation_metrics.json` /
-   `e2e_gcp_metrics.json`.
+   `e2e_gcp_metrics.json` / `stats_diff.json` / `freetext_crosscheck_metrics.json`.
 3. Each defect has a code-level root cause + fix.
 4. The bundle export printed `leak scan: clean ✅` and `oss/` is free of the
    real project / dataset / table / column names (Dataflow job ids and job
@@ -333,7 +398,9 @@ Hand the OSS team the `oss/` folder + the three scripts; keep `real/` local.
 5. `integration_test/<JOB_ID>/` holds the sample CSVs,
    `e2e_validation_metrics.json`, `e2e_gcp_metrics.json`, and the `real/` +
    `oss/` bundles.
-6. Print a one-line summary: report path + the single most important finding.
+6. Crosscheck + stats-diff artifacts present in `integration_test/<JOB_ID>/`
+   (`freetext_crosscheck_metrics.json`/`_report.md`, `stats_diff.json`/`.md`).
+7. Print a one-line summary: report path + the single most important finding.
 
 ---
 
@@ -351,6 +418,8 @@ Hand the OSS team the `oss/` folder + the three scripts; keep `real/` local.
 - Report filename is always `end_to_end_validation_report_YYYY_MM_DD_HH_MM.md`
   under `output/`.
 - **Per-deployment artifacts live under `integration_test/<JOB_ID>/`** —
-  sample CSVs, both metrics JSONs, and the exported `real/` + `oss/` bundles.
+  sample CSVs, the four metrics JSONs (offline, GCP probe, stats diff,
+  freetext crosscheck), the crosscheck + stats-diff markdown reports, and the
+  exported `real/` + `oss/` bundles.
 - **Dataflow job ids and job names are never redacted** — they stay verbatim
   in the `oss/` bundle.

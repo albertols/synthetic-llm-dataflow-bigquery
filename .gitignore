@@ -54,6 +54,7 @@ application_default_credentials.json
 # WIF, ARC runners) out of this personal repo — but the laptop CI gate is
 # infra-free and MUST be tracked, or no PR check ever runs.
 !.github/workflows/ci.yml
+!.github/workflows/release_tag_report.yaml
 docs/superpowers/specs
 public_cloud/deploy/gcp/journal/*.jsonl
 public_cloud/deploy/gcp/journal/image_tag

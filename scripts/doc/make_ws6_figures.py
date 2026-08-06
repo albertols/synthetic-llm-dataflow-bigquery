@@ -1,6 +1,6 @@
 """Regenerate the WS6 pipeline-shape figures.
 
-    uv run --no-sync python3 scripts/make_ws6_figures.py
+    uv run --no-sync python3 scripts/doc/make_ws6_figures.py
 
 Writes PNGs into docs/designs/assets/. Every measured number below is
 derived from integration_tests/2026-07-26_17_10_37-5541097091204532225/
@@ -8,7 +8,7 @@ derived from integration_tests/2026-07-26_17_10_37-5541097091204532225/
 not hand-edit the constants; update them from a superseding run and re-run.
 
 Palette matches the WS5/2026-07-24/2026-07-25 assets (see
-scripts/make_ws5_figures.py) so the design-doc set reads as one system.
+scripts/doc/make_ws5_figures.py) so the design-doc set reads as one system.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-ASSETS = Path(__file__).resolve().parents[1] / "docs" / "designs" / "assets"
+ASSETS = Path(__file__).resolve().parents[2] / "docs" / "designs" / "assets"
 
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 INK, MUTED, GRID, SURFACE = "#1c2530", "#5b6672", "#dfe4ea", "#ffffff"

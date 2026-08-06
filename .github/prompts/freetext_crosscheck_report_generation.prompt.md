@@ -8,7 +8,10 @@ description: >
   free-text / string columns in the LIVE source BigQuery table and measures how
   faithfully the synthetic table reproduced them — surfacing concrete
   synthetic-generation improvements (missing formats, hallucinated formats,
-  null/empty-parity gaps, length drift, memorization). ADC access to the target
+  null/empty-parity gaps, length drift, memorization). Runs standalone or
+  chained from the E2E validation report prompt's Step 3.5, which overrides
+  `--out-json`/`--out-md` into `integration_test/<JOB_ID>/` — the standalone
+  default below is `output/freetext_crosscheck/`. ADC access to the target
   GCP project is a PREREQUISITE and is verified first.
   Inputs: source FQN, synthetic FQN, free-text column list (+ optional sample
   size / top-k). Output:
@@ -114,6 +117,13 @@ python scripts/e2e/freetext_crosscheck.py \
   --out-json "output/freetext_crosscheck/metrics_${TS}.json" \
   --out-md   "output/freetext_crosscheck/report_${TS}.md"
 ```
+
+When this prompt is chained from the E2E validation report (its Step 3.5),
+`--out-json`/`--out-md` are overridden to
+`integration_test/<JOB_ID>/freetext_crosscheck_metrics.json` and
+`_report.md` so the crosscheck artifacts land next to the rest of that
+deployment's evidence; run standalone (as above) and the defaults stay
+`output/freetext_crosscheck/`.
 
 The script computes, per column, on both tables:
 
