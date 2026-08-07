@@ -30,6 +30,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sdfb_core.contracts.relational import parse_llm_prompt_constraint
+from sdfb_core.engines.temporal_parse import parse_temporal_string
 from sdfb_core.engines.text_shapes import (
     RelaxedShapes,
     build_shape_mix,
@@ -351,8 +352,9 @@ def temporal_to_float(v: object) -> float | None:
 
 def temporal_string_to_float(s: str, fmt: str) -> float:
     """Date-shaped STRING value → epoch seconds (naive parses pin to UTC,
-    matching `temporal_to_float`)."""
-    return datetime.strptime(s, fmt).replace(tzinfo=UTC).timestamp()
+    matching `temporal_to_float`). Lock-free parse: the 2026-08-06 10M run
+    stalled generate bundles up to 908 s on `strptime`'s global cache lock."""
+    return parse_temporal_string(s, fmt).replace(tzinfo=UTC).timestamp()
 
 
 def temporal_string_from_float(v: float, fmt: str) -> str:
@@ -407,7 +409,7 @@ def _profile_string(
         if fmt is not None:
             pairs: list[tuple[object, float, int | None]] = []
             for s in strings:
-                parsed = datetime.strptime(s, fmt)
+                parsed = parse_temporal_string(s, fmt)
                 pairs.append(
                     (s, parsed.replace(tzinfo=UTC).timestamp(), parsed.year)
                 )

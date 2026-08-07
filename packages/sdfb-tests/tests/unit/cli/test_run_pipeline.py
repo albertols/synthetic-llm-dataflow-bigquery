@@ -499,3 +499,76 @@ def test_resolve_table_schema_live_extracts_when_uri_empty(monkeypatch):
     # needs one call site), so patch it there rather than in sdfb_beam.ddl.
     monkeypatch.setattr(rp, "extract_table_schema", lambda fqn: sentinel)
     assert rp.resolve_table_schema("", "p.d.t") is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Warm-pool taint preflight (2026-08-07: the 10M warm run replayed the
+# memorized 2026-08-05 pools because exists() was the only guard).
+# ---------------------------------------------------------------------------
+
+
+class _PreflightPoolStore:
+    def __init__(self, pools):
+        self.pools = pools
+        self.deleted: list[tuple[str, str]] = []
+
+    def fetch(self, digest, model_uri):
+        return list(self.pools)
+
+    def delete(self, digest, model_uri):
+        self.deleted.append((digest, model_uri))
+
+
+class _PreflightValueStore:
+    def count_overlap(self, column, values):
+        return sum(1 for v in values if v.startswith("real-"))
+
+
+def _preflight_pool(column, values):
+    from sdfb_core.pools import FreeTextPool
+
+    return FreeTextPool(
+        reference_digest="d", model_uri="m", column=column,
+        target=len(values), values=values, stagnated=False, attempts=1,
+    )
+
+
+def test_warm_pools_trusted_when_clean():
+    from sdfb_beam.cli.run_pipeline import warm_pools_trusted
+
+    store = _PreflightPoolStore([_preflight_pool("c", ("nov-1", "nov-2"))])
+    assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is True
+    assert store.deleted == []
+
+
+def test_warm_pools_tainted_deletes_and_rebuilds():
+    from sdfb_beam.cli.run_pipeline import warm_pools_trusted
+
+    store = _PreflightPoolStore([_preflight_pool("c", ("real-1", "nov-2"))])
+    assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is False
+    assert store.deleted == [("d", "m")]
+
+
+def test_warm_pools_overlap_check_error_keeps_warm_path():
+    from sdfb_beam.cli.run_pipeline import warm_pools_trusted
+
+    class _BoomValueStore:
+        def count_overlap(self, column, values):
+            raise RuntimeError("bq down")
+
+    store = _PreflightPoolStore([_preflight_pool("c", ("real-1",))])
+    assert warm_pools_trusted(store, _BoomValueStore(), "d", "m") is True
+    assert store.deleted == []
+
+
+def test_warm_pools_delete_failure_keeps_warm_path():
+    """Append-rebuild without a clean delete would leave stale rows racing
+    the rebuilt ones in fetch(); better to keep the (flagged) warm pools."""
+    from sdfb_beam.cli.run_pipeline import warm_pools_trusted
+
+    class _NoDeleteStore(_PreflightPoolStore):
+        def delete(self, digest, model_uri):
+            raise RuntimeError("dml denied")
+
+    store = _NoDeleteStore([_preflight_pool("c", ("real-1",))])
+    assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is True

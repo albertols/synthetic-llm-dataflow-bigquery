@@ -53,6 +53,10 @@ from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.io.fk_pools import load_fk_pools
+from sdfb_beam.io.source_values import (
+    BigQuerySourceValueStore,
+    pool_source_overlap,
+)
 from sdfb_beam.io.stats_store import BigQuerySourceStatsStore
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
 from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
@@ -611,6 +615,107 @@ def _emit_source_stats(
     return source_distinct
 
 
+def warm_pools_trusted(
+    pool_store, source_value_store, reference_digest: str, model_uri: str
+) -> bool:
+    """False ⇒ the persisted pools overlap the live source and were
+    deleted for a clean rebuild; True ⇒ keep the warm path.
+
+    2026-08-07 10M warm run: `exists()` was the only guard, so the
+    memorized 2026-08-05 pools (33-99% verbatim source values) were
+    replayed wholesale at 10M-row scale. Both failure paths keep the warm
+    pools — LOUDLY — because a taint check must never kill a launch
+    (pools are an optimisation) and an append-rebuild without a clean
+    delete would leave stale rows racing the rebuilt ones in `fetch`.
+    """
+    try:
+        overlap = pool_source_overlap(
+            pool_store, source_value_store, reference_digest, model_uri
+        )
+    except Exception as exc:
+        log_milestone(
+            "pool_taint_check_error",
+            level=logging.WARNING,
+            error=type(exc).__name__,
+        )
+        return True
+    if not overlap:
+        return True
+    log_milestone(
+        "pool_taint_rebuild",
+        level=logging.WARNING,
+        columns=len(overlap),
+        # Counts only — reference values must never reach logs.
+        overlap_counts={c: n for c, n in sorted(overlap.items())},
+    )
+    try:
+        pool_store.delete(reference_digest, model_uri)
+    except Exception as exc:
+        log_milestone(
+            "pool_taint_delete_error",
+            level=logging.ERROR,
+            error=type(exc).__name__,
+        )
+        return True
+    return False
+
+
+def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
+    """(freetext_pools_store, source_value_store) for `build_pipeline`.
+
+    (None, None) when the pool layer is off; (None, store) when the warm
+    pools were verified clean (branch skipped); (pool_store, value_store)
+    when the branch must build — cold store, or a warm store the taint
+    preflight condemned.
+    """
+    if not (parse_bool_flag(args.build_pool_layer) and args.freetext_pools_table):
+        return None, None
+    digest = compute_reference_digest(reference_rows)
+    pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
+    # Full-domain novelty rejection for the build branch, and the
+    # taint preflight for the warm path (2026-08-05/07 E2E findings).
+    source_value_store = BigQuerySourceValueStore(args.reference_table)
+    # A MISSING pool table must not surface as a cryptic NotFound out of
+    # the driver — that is exactly how TEST_1 (2026-07-25 16:38) died on
+    # a 404. The table is never auto-created (the CREATE_IF_NEEDED
+    # blast-radius rule confines auto-create to the landing sink), so
+    # say what to run. The READ path degrades silently and correctly on
+    # its own; only an explicit --build_pool_layer reaches here.
+    try:
+        already_built = pool_store.exists(digest, args.model_uri)
+    except Exception as exc:
+        proj, ds, tbl = args.freetext_pools_table.split(".", 2)
+        raise SystemExit(
+            f"--build_pool_layer needs {args.freetext_pools_table}, which "
+            f"could not be read ({type(exc).__name__}: {exc}).\n"
+            f"Create it once:\n"
+            f"  bq mk --table {proj}:{ds}.{tbl} "
+            f"config/bq_schema/synthetic_rag/freetext_pools.schema.json\n"
+            f"Or drop --build_pool_layer: pools are an optimisation, and "
+            f"the run works without them (they are rebuilt per worker)."
+        ) from exc
+    if already_built:
+        # exists() alone let the 2026-08-07 10M warm run replay the
+        # memorized 2026-08-05 pools; a warm store must also prove it
+        # holds no live source values before it is trusted.
+        already_built = warm_pools_trusted(
+            pool_store, source_value_store, digest, args.model_uri
+        )
+    if already_built:
+        log_milestone(
+            "pool_build_skipped",
+            reference_digest=digest[:12],
+            model_uri=args.model_uri,
+        )
+        return None, source_value_store
+    # The branch writes the store itself (blocking load job inside
+    # the DoFn) so the pipeline's AwaitFreeTextPools gate releases
+    # Generate only once the rows are readable — a sibling
+    # WriteToBigQuery sink raced Generate on the 2026-07-28/29 cold
+    # runs and every pool was built twice.
+    return pool_store, source_value_store
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -665,42 +770,9 @@ def main(argv: list[str] | None = None) -> int:
                 create_disposition=BigQueryDisposition.CREATE_NEVER,
             )
 
-    freetext_pools_store = None
-    if parse_bool_flag(args.build_pool_layer) and args.freetext_pools_table:
-        digest = compute_reference_digest(reference_rows)
-        pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
-        # A MISSING pool table must not surface as a cryptic NotFound out of
-        # the driver — that is exactly how TEST_1 (2026-07-25 16:38) died on
-        # a 404. The table is never auto-created (the CREATE_IF_NEEDED
-        # blast-radius rule confines auto-create to the landing sink), so
-        # say what to run. The READ path degrades silently and correctly on
-        # its own; only an explicit --build_pool_layer reaches here.
-        try:
-            already_built = pool_store.exists(digest, args.model_uri)
-        except Exception as exc:
-            proj, ds, tbl = args.freetext_pools_table.split(".", 2)
-            raise SystemExit(
-                f"--build_pool_layer needs {args.freetext_pools_table}, which "
-                f"could not be read ({type(exc).__name__}: {exc}).\n"
-                f"Create it once:\n"
-                f"  bq mk --table {proj}:{ds}.{tbl} "
-                f"config/bq_schema/synthetic_rag/freetext_pools.schema.json\n"
-                f"Or drop --build_pool_layer: pools are an optimisation, and "
-                f"the run works without them (they are rebuilt per worker)."
-            ) from exc
-        if already_built:
-            log_milestone(
-                "pool_build_skipped",
-                reference_digest=digest[:12],
-                model_uri=args.model_uri,
-            )
-        else:
-            # The branch writes the store itself (blocking load job inside
-            # the DoFn) so the pipeline's AwaitFreeTextPools gate releases
-            # Generate only once the rows are readable — a sibling
-            # WriteToBigQuery sink raced Generate on the 2026-07-28/29 cold
-            # runs and every pool was built twice.
-            freetext_pools_store = pool_store
+    freetext_pools_store, source_value_store = resolve_pool_layer(
+        args, reference_rows
+    )
 
     config = PipelineConfig(
         table_schema=table_schema,
@@ -788,6 +860,9 @@ def main(argv: list[str] | None = None) -> int:
             validation_runs_sink=validation_runs_sink,
             rag_chunks_sink=rag_chunks_sink,
             freetext_pools_store=freetext_pools_store,
+            source_value_store=(
+                source_value_store if freetext_pools_store is not None else None
+            ),
         )
         logger.info(
             "Pipeline launched: run_id=%s reference_digest=%s",

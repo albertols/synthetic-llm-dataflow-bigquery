@@ -190,6 +190,14 @@ class GenerationContext(BaseModel):
     # chunk_store above.
     freetext_pools_table: str = ""
     pool_store: object | None = None
+    # A `SourceValueStore` (Protocol in sdfb_core.pools.store) holding each
+    # column's FULL distinct source values, attached worker-side by the
+    # pool-build DoFn. When present, the pool ladder and shape fallback
+    # reject candidates against the whole source domain, not just the
+    # profiled sample — the 2026-08-05 B_TABLE R1 run landed 33-99%
+    # verbatim source values exactly because the sample was the only
+    # rejection set. None ⇒ pre-fix behavior, unchanged.
+    source_value_store: object | None = None
     # --- pool seeding experiment (WS5 §3) -------------------------------
     # "centroid" (control, today's behavior) | "kcenter" | "kcenter_rotate".
     # Retrieval runs 3x per setup and only picks 8 prompt seeds, so this is

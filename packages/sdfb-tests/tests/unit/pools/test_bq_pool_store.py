@@ -154,3 +154,16 @@ def test_store_pickles_even_after_the_lazy_client_materialized():
     clone = pickle.loads(pickle.dumps(store))
     assert clone.table_fqn == "p.synthetic_rag.freetext_pools"
     assert clone._client is None, "the client cache must not survive pickling"
+
+
+def test_delete_removes_a_digest_and_binds_parameters():
+    """Taint-triggered rebuilds (2026-08-07 10M warm run replayed the
+    memorized 2026-08-05 pools) must clear the old rows first — `fetch`
+    has no per-column dedup, so appending rebuilt pools would leave the
+    stale values racing the clean ones."""
+    client = _FakeBqClient([])
+    store = BigQueryFreeTextPoolStore("p.synthetic_rag.freetext_pools", client=client)
+    store.delete("d1", "gs://b/m")
+    sql, params = client.queries[0]
+    assert sql.startswith("DELETE FROM `p.synthetic_rag.freetext_pools`")
+    assert params == {"reference_digest": "d1", "model_uri": "gs://b/m"}

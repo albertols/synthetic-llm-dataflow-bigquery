@@ -70,6 +70,7 @@ from sdfb_core.engines.text_shapes import (
     relaxed_shapes_pattern,
     sample_identifier,
     sample_relaxed_identifier,
+    shape_mix_can_template,
     shape_mix_is_identifier_like,
 )
 from sdfb_core.observability import log_milestone
@@ -598,9 +599,10 @@ class B1RagEngine(GenerationEngine):
         exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
         chunks_by_column = self._fetch_free_text_chunks(ctx)
         # Phase 1 — sequential: seed-example retrieval touches the embedder
-        # (HF fast tokenizers are not thread-safe), so it fully completes
+        # (HF fast tokenizers are not thread-safe), and the source-value
+        # fetches share one lazily-built BQ client, so both fully complete
         # before any ladder thread spawns.
-        jobs: list[tuple[ColumnProfile, list[str], int]] = []
+        jobs: list[tuple[ColumnProfile, list[str], int, frozenset[str]]] = []
         for prof in free_text_cols:
             if self._take_stored_pool(prof.name, ctx, stored, pools):
                 continue
@@ -627,7 +629,8 @@ class B1RagEngine(GenerationEngine):
                         pool_size=len(cached),
                     )
                     continue
-            jobs.append((prof, seed_examples, pool_target))
+            source_values = self._fetch_source_values(ctx, prof.name)
+            jobs.append((prof, seed_examples, pool_target, source_values))
 
         # Phase 2 — parallel: one bounded ladder per column. Collect EVERY
         # result before re-raising the first failure, so sibling columns'
@@ -636,9 +639,9 @@ class B1RagEngine(GenerationEngine):
         if not jobs:
             return pools
         if len(jobs) == 1:
-            prof, seed_examples, pool_target = jobs[0]
+            prof, seed_examples, pool_target, source_values = jobs[0]
             pools[prof.name] = self._infer_free_text_pool(
-                prof, seed_examples, pool_target
+                prof, seed_examples, pool_target, source_values
             )
             return pools
         from concurrent.futures import ThreadPoolExecutor
@@ -652,10 +655,10 @@ class B1RagEngine(GenerationEngine):
                 (
                     prof,
                     executor.submit(
-                        self._infer_free_text_pool, prof, seed_examples, tgt
+                        self._infer_free_text_pool, prof, seed_examples, tgt, src
                     ),
                 )
-                for prof, seed_examples, tgt in jobs
+                for prof, seed_examples, tgt, src in jobs
             ]
             for prof, future in futures:
                 try:
@@ -725,6 +728,41 @@ class B1RagEngine(GenerationEngine):
                 self._seed_space[prof.name] = (vectors, values)
                 return select_seed_examples(vectors, values, k, strategy=strategy)
         return []
+
+    def _fetch_source_values(
+        self, ctx: GenerationContext, column: str
+    ) -> frozenset[str]:
+        """The column's FULL distinct source values, or an empty set.
+
+        Empty (= filter inactive) on: no store attached, cardinality above
+        the store's cap, or a store error — the last two LOUDLY, because a
+        pool built without the filter can memorize (2026-08-05 B_TABLE R1:
+        33-99% verbatim source values on 10 columns).
+        """
+        store = getattr(ctx, "source_value_store", None)
+        if store is None:
+            return frozenset()
+        try:
+            values = store.fetch_distinct(column)
+        except Exception as exc:
+            log_milestone(
+                "freetext_pool_source_filter_error",
+                level=logging.WARNING,
+                column=column,
+                error=type(exc).__name__,
+            )
+            return frozenset()
+        if values is None:
+            log_milestone(
+                "freetext_pool_source_filter_absent",
+                level=logging.WARNING,
+                column=column,
+            )
+            return frozenset()
+        log_milestone(
+            "freetext_pool_source_filter", column=column, size=len(values)
+        )
+        return frozenset(values)
 
     def _pool_cache_key(
         self, ctx: GenerationContext, column: str, target: int
@@ -815,7 +853,11 @@ class B1RagEngine(GenerationEngine):
         return _builder
 
     def _infer_free_text_pool(
-        self, prof: ColumnProfile, seed_examples: list[str], target: int
+        self,
+        prof: ColumnProfile,
+        seed_examples: list[str],
+        target: int,
+        source_values: frozenset[str] = frozenset(),
     ) -> list[str]:
         """Fill a bounded unique pool for one free-text column from batched
         LLM calls conditioned on retrieved exemplars."""
@@ -867,6 +909,7 @@ class B1RagEngine(GenerationEngine):
             y = _pool_llm_yield(
                 self._client, prompt, json_schema, prof, seed_examples,
                 target=target, prompt_for_attempt=prompt_for_attempt,
+                source_values=source_values,
             )
         except Exception as e:
             if self._ctx is not None and self._ctx.strict_freetext:
@@ -886,7 +929,9 @@ class B1RagEngine(GenerationEngine):
                 "target": target, "attempts": 0, "stagnated": False,
             }
         else:
-            pool = self._resolve_pool_yield(prof, y, per_call, target)
+            pool = self._resolve_pool_yield(
+                prof, y, per_call, target, source_values
+            )
             format_rejected = y.format_rejected
             self._pool_build_info[prof.name] = {
                 "target": target,
@@ -934,7 +979,12 @@ class B1RagEngine(GenerationEngine):
         return final
 
     def _resolve_pool_yield(
-        self, prof: ColumnProfile, y: _PoolYield, per_call: int, target: int
+        self,
+        prof: ColumnProfile,
+        y: _PoolYield,
+        per_call: int,
+        target: int,
+        source_values: frozenset[str] = frozenset(),
     ) -> list[str]:
         """Turn one column's ladder outcome into its final pool: shape
         fallback for copy-saturated builds, shape top-up for undersized
@@ -947,7 +997,9 @@ class B1RagEngine(GenerationEngine):
             # failing the bundle buys nothing (the 2026-07-24 16:35 E2E
             # burned 2 full setup() retries exactly here). A relaxed
             # template can still generate verified-novel in-format values.
-            shape_pool = self._shape_fallback_pool(prof, target, exclude=set())
+            shape_pool = self._shape_fallback_pool(
+                prof, target, exclude=set(), source_values=source_values
+            )
             if shape_pool:
                 log_milestone(
                     "freetext_pool_shape_fallback",
@@ -1001,7 +1053,10 @@ class B1RagEngine(GenerationEngine):
             # CHANGE_USERID with 31 distinct values over 1000 rows
             # (diversity collapse).
             top_up = self._shape_fallback_pool(
-                prof, target - len(pool), exclude=set(pool)
+                prof,
+                target - len(pool),
+                exclude=set(pool),
+                source_values=source_values,
             )
             if top_up:
                 log_milestone(
@@ -1035,7 +1090,11 @@ class B1RagEngine(GenerationEngine):
         return pool
 
     def _shape_fallback_pool(
-        self, prof: ColumnProfile, count: int, exclude: set[str]
+        self,
+        prof: ColumnProfile,
+        count: int,
+        exclude: set[str],
+        source_values: frozenset[str] = frozenset(),
     ) -> list[str]:
         """Verified-novel values from a relaxed per-position template, or [].
 
@@ -1047,7 +1106,17 @@ class B1RagEngine(GenerationEngine):
         (whitespace) return [] and the caller keeps its existing raise/
         fallback path. Deterministic per (run_id, column).
         """
-        shapes = build_relaxed_shapes([str(v) for v in prof.observed_values])
+        # The exact shape mix preserves literal fixed-position runs (leading
+        # padding, delimiters, constant prefixes) the length-bucket
+        # relaxation collapses — 2026-08-05 B_TABLE R1: 4/13 columns
+        # reproduced 0% of source shapes under the relaxed fallback.
+        shapes = None
+        if shape_mix_can_template(prof.shape_mix):
+            shapes = prof.shape_mix
+        if shapes is None:
+            shapes = build_relaxed_shapes(
+                [str(v) for v in prof.observed_values]
+            )
         if shapes is None or count <= 0:
             return []
         run_id = self._ctx.pipeline_run_id if self._ctx is not None else ""
@@ -1059,7 +1128,7 @@ class B1RagEngine(GenerationEngine):
         # instead of spinning (same 40x budget as B.2).
         for _ in range(count * 40):
             v = sample_relaxed_identifier(shapes, rng.randrange)
-            if v in observed or v in exclude or v in seen:
+            if v in observed or v in exclude or v in seen or v in source_values:
                 continue
             seen.add(v)
             out.append(v)
@@ -1137,6 +1206,7 @@ def _pool_llm_yield(
     target: int = _DEFAULT_FREE_TEXT_POOL,
     n_choices: int = _POOL_PARALLEL_CHOICES,
     prompt_for_attempt=None,
+    source_values: frozenset[str] = frozenset(),
 ) -> _PoolYield:
     """Run the pool call at escalating sampling levels, accumulating novel
     values until the pool reaches ``target``. Breaking on the FIRST
@@ -1156,7 +1226,11 @@ def _pool_llm_yield(
     independently, so one round trip carries n distinct 32-value arrays —
     the call budget scales down by the same factor (`per_round`).
     """
-    observed = set(prof.observed_values)
+    # Rejection set: the profiled sample PLUS (when a SourceValueStore is
+    # attached) the column's full source domain — a candidate equal to ANY
+    # real value is a copy, whether the profiler sampled it or not
+    # (2026-08-05 B_TABLE R1: 33-99% verbatim values from exactly this gap).
+    observed = set(prof.observed_values) | source_values
     shown = set(seed_examples)
     # Format-plausibility gate (2026-07-25 10:52 E2E): novelty alone let
     # hallucinated meta-tokens into the pool — an echo of the COLUMN NAME

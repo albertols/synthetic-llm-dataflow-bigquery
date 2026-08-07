@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, cast
 
+from sdfb_core.engines.temporal_parse import parse_temporal_string
 from sdfb_core.engines.text_shapes import detect_temporal_format
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -88,7 +89,7 @@ def to_epoch(value: object, value_type: str, fmt: str | None) -> float:
             + t.microsecond / 1e6
         )
     return (
-        datetime.strptime(cast("str", value), cast("str", fmt)) - _EPOCH_NAIVE
+        parse_temporal_string(cast("str", value), cast("str", fmt)) - _EPOCH_NAIVE
     ).total_seconds()
 
 
@@ -113,7 +114,7 @@ def value_year(value: object, value_type: str, fmt: str | None) -> int | None:
     if value_type == VT_TIME:
         return None
     if value_type == VT_STR:
-        return datetime.strptime(cast("str", value), cast("str", fmt)).year
+        return parse_temporal_string(cast("str", value), cast("str", fmt)).year
     return cast("date", value).year
 
 

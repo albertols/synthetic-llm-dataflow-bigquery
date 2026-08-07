@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import re
 import string
-from datetime import datetime
 from typing import TYPE_CHECKING
+
+from sdfb_core.engines.temporal_parse import parse_temporal_string
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable, Iterable
@@ -78,12 +79,12 @@ def detect_temporal_format(values: Iterable[str]) -> str | None:
         return None
     for fmt in _TEMPORAL_FORMATS:
         try:
-            datetime.strptime(vals[0], fmt)
+            parse_temporal_string(vals[0], fmt)
         except ValueError:
             continue
         try:
             for v in vals[1:]:
-                datetime.strptime(v, fmt)
+                parse_temporal_string(v, fmt)
         except ValueError:
             return None  # formats are mutually exclusive — no other fits
         return fmt
@@ -297,6 +298,37 @@ def shape_mix_is_identifier_like(shapes: RelaxedShapes | None) -> bool:
     )
 
 
+def shape_mix_can_template(shapes: RelaxedShapes | None) -> bool:
+    """True when the mix can drive the *fallback pool* template.
+
+    Looser than :func:`shape_mix_is_identifier_like` in exactly one way:
+    whitespace is allowed as a LITERAL position (fixed padding is part of a
+    code's format — the 2026-08-05 B_TABLE crosscheck's COL_026 carries 17
+    literal leading spaces and the length-bucket relaxation rejected the
+    whole column, leaving 0% shape recall). A CLASS position containing
+    whitespace still disqualifies — variable padding is prose, not a code —
+    and the mass-weighted two-class-position minimum stays, because an
+    all-literal template can only regenerate its observed values.
+    """
+    if not shapes:
+        return False
+    total_weight = 0.0
+    class_weight = 0.0
+    for weight, shape in shapes:
+        class_count = 0
+        for entry in shape:
+            if len(entry) > 1:
+                if " " in entry or "\t" in entry:
+                    return False
+                class_count += 1
+        total_weight += weight
+        class_weight += weight * class_count
+    return (
+        total_weight > 0
+        and class_weight / total_weight >= _EXPAND_MIN_CLASS_POSITIONS
+    )
+
+
 _DIGIT_RUN = re.compile(r"\d{2,}")
 
 
@@ -365,5 +397,6 @@ __all__ = [
     "relaxed_shapes_pattern",
     "sample_identifier",
     "sample_relaxed_identifier",
+    "shape_mix_can_template",
     "shape_mix_is_identifier_like",
 ]

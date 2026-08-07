@@ -33,7 +33,14 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
     already produced.
     """
 
-    def __init__(self, engine_name: str, model_client, ctx, store=None) -> None:
+    def __init__(
+        self,
+        engine_name: str,
+        model_client,
+        ctx,
+        store=None,
+        source_value_store=None,
+    ) -> None:
         self.engine_name = engine_name
         self.model_client = model_client
         self.ctx = ctx
@@ -42,6 +49,10 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
         # this DoFn's output releases Generate only once a store fetch hits.
         # Distinct from ctx.pool_store, which setup() blanks (self-read guard).
         self.store = store
+        # Full-domain rejection (2026-08-05 B_TABLE R1: pools memorized
+        # 33-99% of 10 columns). Attached worker-side onto the ctx so the
+        # engine's ladder rejects against the whole source, not the sample.
+        self.source_value_store = source_value_store
         self._engine: Any = None
 
     def setup(self) -> None:
@@ -53,7 +64,11 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
         # The build branch must never read its own output — otherwise it
         # would short-circuit itself into writing nothing on a re-run.
         ctx = ctx.model_copy(
-            update={"pool_store": None, "freetext_pools_table": ""}
+            update={
+                "pool_store": None,
+                "freetext_pools_table": "",
+                "source_value_store": self.source_value_store,
+            }
         )
         self.ctx = ctx
         engine_class = get_engine(self.engine_name)

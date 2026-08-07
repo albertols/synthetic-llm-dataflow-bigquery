@@ -53,3 +53,6 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0018 — Batched, parallel, cached free-text pool builds (B.1)](0018-parallel-batched-freetext-pools.md)
 - [0019 — RAG population scoped to consumers; CUDA embed with VRAM demote](0019-rag-population-scoped-to-consumers.md)
 - [0020 — Free-text pools are a persisted artifact, not per-worker work (amends 0018)](0020-freetext-pools-as-persisted-artifact.md)
+- [0021 — Relational contract in BigQuery column descriptions](0021-relational-contract-in-descriptions.md)
+- [0022 — source_table_stats as a bounded generation input](0022-stats-driven-generation.md)
+- [0023 — Free-text pools reject against the full source domain; warm pools prove cleanliness](0023-source-domain-pool-rejection.md)

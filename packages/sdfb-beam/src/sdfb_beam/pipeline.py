@@ -130,6 +130,7 @@ def build_pipeline(
     validation_runs_sink: beam.PTransform | None = None,
     rag_chunks_sink: beam.PTransform | None = None,
     freetext_pools_store: Any = None,
+    source_value_store: Any = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -207,6 +208,7 @@ def build_pipeline(
                     config.model_client,
                     ctx,
                     store=freetext_pools_store,
+                    source_value_store=source_value_store,
                 )
             )
         )

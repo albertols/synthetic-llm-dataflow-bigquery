@@ -126,6 +126,11 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 | `temporal_range_clamped` | a temporal column's floor hit now−10y; its decile vector was clamped too |
 | `freetext_pool_built target=` | compare per-column targets R1 vs R3 — the exact-distinct lift |
 | `generation_plan` (detail) | per-column route + null/empty/shapes/constraint — the first thing to check when a column misbehaves |
+| `freetext_pool_source_filter size=` | ADR 0023: the column's FULL source domain is in the pool rejection set |
+| `freetext_pool_source_filter_absent` / `_error` (WARNING) | domain above cap / store error — pool built with sample-only rejection; check copy_fraction post-run |
+| `pool_taint_rebuild` (WARNING, launcher) | warm pools overlapped the live source → deleted + rebuilt clean (expected ONCE per tainted pre-ADR-0023 digest) |
+| `pool_taint_check_error` / `pool_taint_delete_error` | preflight could not verify/clear — warm pools kept, verify copy_fraction post-run |
+| `vllm_unfittable_wait` (WARNING) | VRAM transiently short — in-process re-measure instead of a bundle retry (2026-08-05 R1 cost ~80 s + a setup cycle) |
 
 ## 4. WS8 pass criteria (on top of the main playbook's §2 list)
 
@@ -174,3 +179,26 @@ After each run, the standard three-command report recipe
 ([`RUN_PLAYBOOK.md` §5](RUN_PLAYBOOK.md)) plus
 `scripts/e2e/freetext_crosscheck.py` for the per-column fidelity readout;
 interpretation is `e2e-interpreter`'s job as usual.
+
+## 5. 2026-08-05/07 four-run findings → shipped remediations
+
+The R1 (A_TABLE + B_TABLE, 1M cold) + R7 (both tables, 10M warm) cycle
+landed four code fixes; what to expect on the next runs:
+
+| Finding (run) | Fix | Next-run readout |
+|---|---|---|
+| B_TABLE pools memorized 33–99% of 10 columns; R7 replayed them at 10M ([ADR 0023](adr/0023-source-domain-pool-rejection.md)) | full-source-domain rejection at build + launcher taint preflight | first B_TABLE launch: `pool_taint_rebuild` then a clean cold build; A_TABLE (clean pools) keeps `pool_build_skipped`; crosscheck `copy_fraction = 0` |
+| A_TABLE 10M: 24 generate batches stalled 120–908 s in `strptime` (global parser lock, 16 threads × 7 temporal formats) | lock-free `temporal_parse.py` on every profiler/sampler parse path | `batch_done seconds=` p99 collapses to the p50 class; no `Operation ongoing … GenerateRecordsDoFn` warnings |
+| 4/13 B_TABLE columns reproduced 0% of source shapes under the relaxed fallback (leading-space padding lost) | `_shape_fallback_pool` templates from `shape_mix` (literal padding preserved) | crosscheck shape recall > 0 on COL_026-class columns |
+| 13 `vllm_max_model_len_unfittable` aborts + ~80 s bundle retry on T4 | in-process wait-and-re-measure (6 × 20 s window) | `vllm_unfittable_wait` instead of a failed-bundle cycle |
+
+Cost note from R7: a fully-warm run (`pool_build_skipped` + every store
+hit) never ignites vLLM — the T4s idle for the whole run. Warm replays of
+an already-built digest can drop the GPU worker pool entirely
+(CPU-only `n1-highmem-8` runs the same DAG; the embedder already demotes).
+
+Deferred, with rationale: B.1 numeric decile-KS drift (14 A_TABLE + 8
+B_TABLE columns) is the designed marginal-blend ceiling — **R5 (B.2
+inverse-CDF) is the acceptance run**, and B.2 needs the ADR 0023 seam
+wired before its memorization numbers are read as engine truth; COL_048
+(binary-garbage source column) stays accepted as-is.
