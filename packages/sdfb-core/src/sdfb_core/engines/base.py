@@ -198,6 +198,10 @@ class GenerationContext(BaseModel):
     # verbatim source values exactly because the sample was the only
     # rejection set. None ⇒ pre-fix behavior, unchanged.
     source_value_store: object | None = None
+    # True only inside BuildFreeTextPoolsDoFn, which blanks pool_store by
+    # design (self-read guard): suppresses the `freetext_pool_store_absent`
+    # WARNING that two E2E reports misread as a store outage.
+    pool_branch: bool = False
     # --- pool seeding experiment (WS5 §3) -------------------------------
     # "centroid" (control, today's behavior) | "kcenter" | "kcenter_rotate".
     # Retrieval runs 3x per setup and only picks 8 prompt seeds, so this is

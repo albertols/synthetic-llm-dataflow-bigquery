@@ -254,6 +254,15 @@ def bq_cross_validation(
             entry["copy_ratio_nonsentinel"] = _ratio(
                 mem["copied_nonsentinel"], n - sentinel_n
             )
+            sub = _row(
+                client,
+                _substantive_copy_sql(
+                    _quote(landing_fqn), _quote(source_fqn), col
+                ),
+            )
+            entry["copy_ratio_substantive"] = _ratio(
+                sub["copied_substantive"], sub["substantive_n"]
+            )
             entry["temporal_day_granularity"] = bool(
                 non_null > 0 and (mem["day_shaped_n"] or 0) >= 0.99 * non_null
             )
@@ -344,7 +353,9 @@ def evaluate_freetext_rules(
                 (e.get("distinct") or 0) >= floor,
             )
         cf = cfg["freetext.copy_fraction"]
-        copy = e.get("copy_ratio_nonsentinel")
+        copy = e.get("copy_ratio_substantive")
+        if copy is None:
+            copy = e.get("copy_ratio_nonsentinel")
         if (
             copy is not None
             and (src_distinct or 0) > cf.get("applies_above_source_distinct", 100)
@@ -363,6 +374,40 @@ def evaluate_freetext_rules(
 # no rule anywhere scored memorization.
 _MEM_MIN_SOURCE_DISTINCT = 100
 _MEM_COPY_RATIO_THRESHOLD = 0.3
+# K-anonymity floor for the SUBSTANTIVE copy ratio: a source value shared by
+# at least this many source rows is enum mass (the engine re-emits dominant
+# literals at observed frequency BY DESIGN — head values, 2026-08-07 A_TABLE
+# R1), not an identifier. Mirrors the k-anonymity principle
+# (Sweeney 2002, https://doi.org/10.1142/S0218488502001648).
+_MEM_KANON_MIN_COUNT = 10
+
+
+def _substantive_copy_sql(landing_q: str, source_q: str, col: str) -> str:
+    """SQL for the substantive copy count: landing values that are non-NULL,
+    non-trimmed-empty, non-date-sentinel AND equal a RARE source value.
+
+    Empty strings are re-emitted at observed frequency by design (empty
+    parity — the 2026-08-07 A_TABLE R1 read 62.8% "copies" on a 62.4%-empty
+    column from exactly this artifact), and frequent source values are
+    k-anonymous enum mass; neither is memorization.
+    """
+    sentinel_re = r"'^(0001|9999)-'"
+    substantive = (
+        f"{col} IS NOT NULL "
+        f"AND TRIM(SAFE_CAST({col} AS STRING)) != '' "
+        f"AND NOT IFNULL(REGEXP_CONTAINS("
+        f"SAFE_CAST({col} AS STRING), {sentinel_re}), FALSE)"
+    )
+    in_rare_src = (
+        f"{col} IN (SELECT {col} FROM {source_q} "
+        f"GROUP BY {col} HAVING COUNT(*) < {_MEM_KANON_MIN_COUNT})"
+    )
+    return f"""
+        SELECT
+          COUNTIF({substantive} AND {in_rare_src}) AS copied_substantive,
+          COUNTIF({substantive}) AS substantive_n
+        FROM {landing_q}
+    """
 
 
 def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
@@ -383,7 +428,12 @@ def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
     flags = []
     for name, entry in columns.items():
         copy_ratio = entry.get("copy_ratio")
-        scored = entry.get("copy_ratio_nonsentinel")
+        # Substantive first (excludes empty-parity + k-anonymous enum mass,
+        # 2026-08-07 A_TABLE R1 false CRITICAL), then sentinel-adjusted,
+        # then raw.
+        scored = entry.get("copy_ratio_substantive")
+        if scored is None:
+            scored = entry.get("copy_ratio_nonsentinel")
         if scored is None:
             scored = copy_ratio
         source_distinct = entry.get("source_distinct")
@@ -406,6 +456,7 @@ def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
                     "type": entry.get("type"),
                     "copy_ratio": copy_ratio,
                     "copy_ratio_nonsentinel": entry.get("copy_ratio_nonsentinel"),
+                    "copy_ratio_substantive": entry.get("copy_ratio_substantive"),
                     "source_distinct": source_distinct,
                     "severity": "INFO" if day_granularity else "CRITICAL",
                     "rule": (

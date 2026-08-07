@@ -59,6 +59,14 @@ _FREE_TEXT_MIN_MEAN_LEN = 20
 # Above this absolute distinct count a string column is high-cardinality and
 # treated as free text even if short (e.g. emails, ids-as-strings).
 _FREE_TEXT_MAX_CATEGORIES = 50
+# Head-value (dominant literal) capture for FREE_TEXT columns: a value must
+# hold at least this share of the substantive (non-null, non-empty) rows AND
+# at least this many observations before it is re-emitted verbatim — the
+# count floor is the k-anonymity guard (a value shared by many rows is an
+# enum member, not an identifier).
+_FREE_TEXT_HEAD_MIN_SHARE = 0.05
+_FREE_TEXT_HEAD_MIN_COUNT = 10
+_FREE_TEXT_HEAD_MAX = 8
 # BQ temporal types: high-cardinality columns get range-sampled novel values
 # (verbatim copies of real event timestamps are linkage quasi-identifiers —
 # 2026-07-15 E2E report: COL_052 landed 935 real microsecond timestamps).
@@ -132,6 +140,13 @@ class ColumnProfile:
     # FREE_TEXT — observed exact-shape mix (weight, template) for the
     # shape-preserving expander + pattern guidance (2026-08-05 spec C2/C3).
     shape_mix: RelaxedShapes | None = None
+    # FREE_TEXT — dominant literal values (value, share-of-substantive-rows).
+    # An enum-like literal hiding in a free-text column (2026-08-07 A_TABLE
+    # R1: `KW3000` at 77% share) can never come out of the pool — ADR 0023
+    # rightly rejects every source value — so the head mass is re-emitted
+    # at its observed frequency, like temporal sentinels. K-anonymous by
+    # construction: only values above the share/count floors qualify.
+    head_values: tuple[tuple[str, float], ...] = ()
     # FREE_TEXT — per-column prompt steering parsed from the column's DDL
     # description JSON (spec C5); attached to pool prompts when
     # ctx.prompt_constraints is on. Empty = no constraint.
@@ -401,6 +416,7 @@ def _profile_string(
         len(distinct) > _FREE_TEXT_MAX_CATEGORIES
         or (unique_ratio >= _FREE_TEXT_UNIQUE_RATIO and mean_len >= _FREE_TEXT_MIN_MEAN_LEN)
     )
+    head_values = _free_text_head_values(strings) if is_free_text else ()
     if is_free_text:
         # Shaped strings leave the LLM route before it can fail on them
         # (2026-07-17 E2E): date-shaped columns range-sample as TEMPORAL,
@@ -441,6 +457,12 @@ def _profile_string(
                 identifier_shape=shape,
                 is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
                 observed_values=tuple(strings),
+                # The mask MIX, not just the collapsed template: variant
+                # masks merge into digit+upper classes and lose fixed
+                # prefixes (2026-08-07 A_TABLE R1: COL_001-class columns
+                # reproduced 0% of source masks).
+                shape_mix=build_shape_mix(distinct),
+                head_values=head_values,
                 llm_prompt_constraint=constraint,
             )
         # Cap the seed pool — exemplars condition the LLM, they aren't the bulk.
@@ -458,6 +480,7 @@ def _profile_string(
             is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
             observed_values=tuple(strings),
             shape_mix=build_shape_mix(distinct),
+            head_values=head_values,
             llm_prompt_constraint=constraint,
         )
     return _profile_categorical(
@@ -466,6 +489,28 @@ def _profile_string(
         nullable,
         null_fraction,
     )
+
+
+def _free_text_head_values(
+    strings: list[str],
+) -> tuple[tuple[str, float], ...]:
+    """Dominant literals of a FREE_TEXT column, with substantive-row shares.
+
+    Share floor keeps this to genuine enum-like heads; the count floor is
+    the k-anonymity guard. Ordered heaviest-first; bounded so a flat
+    distribution can never smuggle the whole sample back in.
+    """
+    n = len(strings)
+    if n == 0:
+        return ()
+    counts = Counter(strings)
+    heads = [
+        (value, count / n)
+        for value, count in counts.most_common(_FREE_TEXT_HEAD_MAX)
+        if count >= _FREE_TEXT_HEAD_MIN_COUNT
+        and count / n >= _FREE_TEXT_HEAD_MIN_SHARE
+    ]
+    return tuple(heads)
 
 
 def _profile_categorical(

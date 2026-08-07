@@ -129,6 +129,11 @@ _POOL_STAGNATION_MIN_NOVEL = max(1, _POOL_VALUES_PER_CALL // 8)
 _POOL_BUILD_MAX_WORKERS = 4
 # Back-compat alias: the historical single-call pool size == one call's batch.
 _DEFAULT_FREE_TEXT_POOL = _POOL_VALUES_PER_CALL
+# Identifier mask-mix gate: the top-8 masks must cover at least this share
+# of the column's DISTINCT values before the mix replaces the collapsed
+# template (rigid-mask columns qualify; 36-hex-style random masks must not
+# collapse to 8 skeletons).
+_MASK_MIX_MIN_COVERAGE = 0.5
 # Setup embeds at most this many reference rows. The index those vectors
 # feed serves ONLY centroid top-k exemplar retrieval in M1 (generation
 # samples marginals — no per-batch retrieval), so embedding the full 10k
@@ -451,9 +456,8 @@ class B1RagEngine(GenerationEngine):
                 # Format-preserving per-row generation — a bounded pool
                 # sampled with replacement collapses an identifier column's
                 # distinctness (2026-07-17 E2E: ID_COL 30 distinct / 1000).
-                draw_one = partial(
-                    sample_identifier, prof.identifier_shape, rng.randrange
-                )
+                draw_one = self._identifier_draw(prof, rng)
+                draw_one = self._with_head_values(rng, prof.head_values, draw_one)
                 out[name] = [
                     self._sparsity_or(rng, null_frac, empty_frac, draw_one)
                     for _ in range(n)
@@ -494,11 +498,71 @@ class B1RagEngine(GenerationEngine):
                     v = mutate_digit_runs(v, rng.randrange)
                 return v
 
+            value = self._with_head_values(rng, prof.head_values, _value)
             out[name] = [
-                self._sparsity_or(rng, null_frac, empty_frac, _value)
+                self._sparsity_or(rng, null_frac, empty_frac, value)
                 for _ in range(n)
             ]
         return out
+
+    @staticmethod
+    def _with_head_values(
+        rng: random.Random,
+        heads: tuple[tuple[str, float], ...],
+        value: Callable[[], object],
+    ) -> Callable[[], object]:
+        """Wrap a substantive-value draw with dominant-literal re-emission.
+
+        Heads carry their observed share of SUBSTANTIVE rows, so emitting
+        them before the tail draw reproduces the source frequency exactly
+        (2026-08-07 A_TABLE R1: `KW3000` at 77% share had recall 0 — the
+        pool can never contain it, ADR 0023 rejects all source values).
+        """
+        if not heads:
+            return value
+
+        def _draw() -> object:
+            r = rng.random()
+            acc = 0.0
+            for head_value, share in heads:
+                acc += share
+                if r < acc:
+                    return head_value
+            return value()
+
+        return _draw
+
+    def _identifier_draw(
+        self, prof: ColumnProfile, rng: random.Random
+    ) -> Callable[[], object]:
+        """Per-row identifier generator: mask mix when the masks are rigid,
+        collapsed template otherwise.
+
+        The collapsed per-position template merges variant masks into
+        digit+upper classes and loses fixed prefixes (2026-08-07 A_TABLE
+        R1: 0% mask recall on COL_001-class columns). Drawing from the
+        exact mask mix fixes that — but ONLY when the top masks cover most
+        of the column's distinct values; on high-entropy columns (36-hex
+        ids) a top-8 mix would collapse diversity to 8 skeletons.
+        """
+        shape = prof.identifier_shape
+        assert shape is not None
+        mix = prof.shape_mix
+        if mix:
+            distinct = len({str(v) for v in prof.observed_values if v})
+            coverage = sum(w for w, _ in mix) / distinct if distinct else 0.0
+            if coverage >= _MASK_MIX_MIN_COVERAGE:
+                observed = {str(v) for v in prof.observed_values}
+
+                def _from_mix() -> str:
+                    for _ in range(3):
+                        v = sample_relaxed_identifier(mix, rng.randrange)
+                        if v not in observed:
+                            return v
+                    return v
+
+                return _from_mix
+        return partial(sample_identifier, shape, rng.randrange)
 
     @staticmethod
     def _sparsity_or(
@@ -547,12 +611,16 @@ class B1RagEngine(GenerationEngine):
         exactly the silence a milestone exists to break.
         """
         if getattr(ctx, "pool_store", None) is None:
-            log_milestone(
-                "freetext_pool_store_absent",
-                level=logging.WARNING,
-                free_text_columns=free_text_columns,
-                num_rows=ctx.num_rows,
-            )
+            # The build branch blanks its own store by design (self-read
+            # guard) — absent-by-configuration is only worth a WARNING when
+            # a generate worker really has nothing to read.
+            if not getattr(ctx, "pool_branch", False):
+                log_milestone(
+                    "freetext_pool_store_absent",
+                    level=logging.WARNING,
+                    free_text_columns=free_text_columns,
+                    num_rows=ctx.num_rows,
+                )
             return {}
         return self._stored_pools(ctx)
 

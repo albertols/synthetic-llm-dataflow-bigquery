@@ -124,3 +124,18 @@ flowchart TB
   sample-only novelty filter (and deliberately blends observed values at
   high `similarity`). Wire the same seam before reading the WS8 **R5**
   memorization numbers as engine truth.
+
+## Erratum (2026-08-08)
+
+The first post-fix run (`2026-08-07_09_44_36-8456…`) showed that part of
+the Context's copy-ratio evidence was a **probe metric artifact**: the
+`copy_ratio` SQL counted trimmed-empty landing values as copies whenever
+the source contains empties, so empty-parity re-emission (by design)
+inflated the 2026-08-05 B_TABLE numbers on its 73–99%-empty columns. The
+probe now scores `copy_ratio_substantive` (NULL/trimmed-empty/sentinel
+excluded, k-anonymity floor for frequent enum values — see
+[Sweeney 2002](https://doi.org/10.1142/S0218488502001648)). The decision
+stands: genuinely substantive collisions were also present (e.g. the
+146k-distinct reference columns), the rejection filter and taint preflight
+remain correct, and dominant enum-like literals are handled by the
+`head_values` route rather than the pool.

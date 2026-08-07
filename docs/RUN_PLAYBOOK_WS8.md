@@ -202,3 +202,40 @@ B_TABLE columns) is the designed marginal-blend ceiling — **R5 (B.2
 inverse-CDF) is the acceptance run**, and B.2 needs the ADR 0023 seam
 wired before its memorization numbers are read as engine truth; COL_048
 (binary-garbage source column) stays accepted as-is.
+
+### §5b Verification + second remediation wave (2026-08-07 A_TABLE R1, job `…09_44_36-8456…`, image `cc8cf7d`)
+
+The first post-fix cold run **verified all four §5 fixes**: batch
+`seconds=` p50 1.2 / p99 7.1 / max 8.4 (the 120–908 s stall class is gone,
+zero stuck-bundle warnings); `freetext_pool_source_filter` fired per LLM
+column (19,815 / 1,298 / 3,030 values, no `_absent`/`_error`); all pools
+hit target via shape top-up (no stagnation, no undersize); one clean vLLM
+spawn. It also exposed the next findings, remediated 2026-08-08:
+
+| Finding (job `…09_44_36`) | Fix | Next-run readout |
+|---|---|---|
+| Probe scored COL_048 62.8% "copies" on a 62.4%-empty column — empty-parity (and, ahead: head-value) re-emission counted as memorization; the same artifact inflated the 2026-08-05 B_TABLE 33–99% numbers | `copy_ratio_substantive` (excludes NULL/trimmed-empty/date-sentinels; k-anonymity floor: source values with freq ≥ 10 are enum mass) — scored by `memorization_flags` + `freetext.copy_fraction` | memorization table lists substantive ratios; empty-heavy columns stop false-flagging CRITICAL |
+| COL_053/COL_054 miss their dominant literal (`KW3000`/`BATCH`, 77%+ share) — ADR 0023 rightly bans it from pools, nothing re-emits it | `head_values` on FREE_TEXT profiles (share ≥ 5%, count ≥ 10, top 8) re-emitted at observed frequency after null/empty | crosscheck shape recall > 0.75 on both; `top1_share` parity |
+| COL_001 reproduces 0% of source masks — collapsed identifier template merges variant masks into digit+upper | identifier route draws from `shape_mix` when top masks cover ≥ 50% of distinct values (random-mask ids keep the collapsed template) | crosscheck: synthetic masks ⊆ source masks on rigid-mask columns; COL_064-class diversity unchanged |
+| Pool branch logs `freetext_pool_store_absent` (its own by-design blank) — misread as store outage in two reports | `ctx.pool_branch` suppresses the WARNING inside the branch | warning appears only when no `--freetext_pools_table` was passed |
+
+### §5c Before FK/PK + stress runs — measured watch-list (not code changes)
+
+- **Pool build is the cold-run bottleneck** (`PoolTrigger` 14.9 min = 43%
+  of stage time here; 22.4 min on B_TABLE): all ladders run on ONE worker
+  while the fleet idles. If cold-run wall time starts to matter, split the
+  branch per column (`Create(columns) → Reshuffle → per-column ladder`) so
+  each GPU ignites once and builds its share — design change, measure first.
+- **Launcher phase is ~8.6 min** (`launcher_start → workers_starting`):
+  dominated by the Flex launcher VM pulling the multi-GB single image
+  (ADR 0009). Accepted cost; revisit only if launch latency matters.
+- **Uniqueness at 10M+ is stress-ready** — `CombinePerKey` first-wins keeps
+  memory flat (WS6 W4); no change needed for PK runs.
+- **FK pools cap** — `io/fk_pools.py` loads ≤ 100k parent keys per edge into
+  the pickled context; fine for R6-scale parents, and composite-FK joint
+  tuples remain the recorded M2 limitation.
+- **Per-row pydantic cost** — the engine validates each record and the DoFn
+  re-dumps it (`model_validate` + `model_dump` × 10M). Candidate CPU win,
+  but it changes DLQ semantics — profile on M4 before touching.
+- **B.2 parity (R5 gate)** — wire the ADR 0023 `SourceValueStore` seam into
+  `b2_library/freetext.py` before reading R5 memorization numbers.

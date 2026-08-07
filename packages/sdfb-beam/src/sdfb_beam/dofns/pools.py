@@ -68,6 +68,7 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
                 "pool_store": None,
                 "freetext_pools_table": "",
                 "source_value_store": self.source_value_store,
+                "pool_branch": True,
             }
         )
         self.ctx = ctx

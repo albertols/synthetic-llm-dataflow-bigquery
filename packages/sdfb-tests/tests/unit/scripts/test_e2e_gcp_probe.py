@@ -436,3 +436,70 @@ def test_job_params_reads_pipeline_description_typed_values(probe_module):
 
 def test_job_params_empty_job_yields_empty_dict(probe_module):
     assert probe_module._job_params({}) == {}
+
+
+# --------------------------------------------------------------------------
+# copy_ratio_substantive (2026-08-07 A_TABLE R1): empty-parity and
+# head-value re-emission are BY-DESIGN fidelity, not memorization.
+# --------------------------------------------------------------------------
+def test_flags_prefer_substantive_ratio_over_raw(probe_module):
+    """COL_048 class: source 62.4% empty, engine re-emits empties at parity,
+    raw copy_ratio reads 0.628 — but among substantive values nothing is
+    copied. Must NOT flag."""
+    columns = {
+        "COL_048": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.628,
+            "copy_ratio_nonsentinel": 0.628,
+            "copy_ratio_substantive": 0.004,
+            "source_distinct": 19_815,
+        },
+    }
+    assert probe_module.memorization_flags(columns) == []
+
+
+def test_flags_fire_on_substantive_copying_and_carry_the_field(probe_module):
+    columns = {
+        "LEAKY": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.20,
+            "copy_ratio_nonsentinel": 0.20,
+            "copy_ratio_substantive": 0.45,
+            "source_distinct": 5_000,
+        },
+    }
+    flags = probe_module.memorization_flags(columns)
+    assert [f["column"] for f in flags] == ["LEAKY"]
+    assert flags[0]["copy_ratio_substantive"] == 0.45
+    assert flags[0]["severity"] == "CRITICAL"
+
+
+def test_copy_fraction_rule_scores_substantive_when_present(probe_module):
+    per_col = {
+        "COL_048": {
+            "in_source_schema": True,
+            "copy_ratio_nonsentinel": 0.628,
+            "copy_ratio_substantive": 0.0,
+            "source_distinct": 19_815,
+            "distinct": 500,
+            "source_distinct_ratio": 0.09,
+        },
+    }
+    results = probe_module.evaluate_freetext_rules(per_col)
+    cf = [r for r in results if r["rule"] == "freetext.copy_fraction"]
+    assert len(cf) == 1
+    assert cf[0]["passed"] is True
+    assert cf[0]["value"] == 0.0
+
+
+def test_substantive_sql_excludes_empty_and_frequent_source_values(probe_module):
+    """The membership subquery must (a) drop trimmed-empty landing values
+    and (b) exempt source values with frequency >= the k-anonymity floor —
+    head-value re-emission (`KW3000` at 77% share) is enum mass, and a
+    value shared by dozens of source rows identifies nobody."""
+    sql = probe_module._substantive_copy_sql("`p.d.landing`", "`p.d.source`", "`c`")
+    flat = " ".join(sql.split())
+    assert "HAVING COUNT(*) <" in flat
+    assert "TRIM(" in flat

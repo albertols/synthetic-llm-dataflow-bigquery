@@ -317,3 +317,17 @@ def test_branch_attaches_source_value_store_and_rejects_domain_values():
     emitted = {v for r in rows for v in r["values"]}
     assert emitted, "pools still build from the novel values"
     assert not emitted & store.domain
+
+
+def test_branch_does_not_cry_store_absent(caplog):
+    """The branch blanks its own store BY DESIGN (self-read guard); the
+    `freetext_pool_store_absent` WARNING is reserved for runs where nobody
+    passed --freetext_pools_table. Two E2E reports (2026-08-05, 2026-08-07)
+    misread the branch's own blank as a store outage / setup retry."""
+    import logging
+
+    dofn = BuildFreeTextPoolsDoFn("b1_rag", _StubClient(), _ctx())
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        dofn.setup()
+    text = "\n".join(r.message for r in caplog.records)
+    assert "freetext_pool_store_absent" not in text
