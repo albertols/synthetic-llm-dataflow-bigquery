@@ -44,3 +44,23 @@ def test_generate_dofn_mirrors_ctx_into_engine_specific():
     assert captured, "stub engine was not called"
     assert captured[0].engine_specific["freetext_expansion"] == "all"
     assert captured[0].engine_specific["prompt_constraints"] is False
+
+
+def test_generate_dofn_attaches_source_value_store():
+    """B.2 builds pools lazily in Generate workers (no pool branch), so the
+    ADR 0023 rejection set must ride the generate path too: a configured
+    `source_values_table` becomes a worker-side BigQuerySourceValueStore,
+    mirroring chunk_store / pool_store attachment."""
+    from sdfb_beam.dofns.generate import GenerateRecordsDoFn
+    from sdfb_beam.io.source_values import BigQuerySourceValueStore
+    from sdfb_tests.fakes import FakeModelClient
+
+    dofn = GenerateRecordsDoFn(
+        engine_name="minimal",
+        model_client=FakeModelClient(reference_pool=[{}]),
+        ctx=_ctx(source_values_table="p.d.src"),
+    )
+    dofn.setup()
+    store = dofn.ctx.source_value_store
+    assert isinstance(store, BigQuerySourceValueStore)
+    assert store.table_fqn == "p.d.src"

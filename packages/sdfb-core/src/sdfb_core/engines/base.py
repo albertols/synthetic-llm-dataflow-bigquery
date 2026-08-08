@@ -202,6 +202,13 @@ class GenerationContext(BaseModel):
     # design (self-read guard): suppresses the `freetext_pool_store_absent`
     # WARNING that two E2E reports misread as a store outage.
     pool_branch: bool = False
+    # Reference-table FQN for the worker-side `BigQuerySourceValueStore`
+    # attach (mirrors rag_chunks_table / freetext_pools_table). B.2 builds
+    # pools LAZILY inside Generate DoFns — no pool branch — so the ADR 0023
+    # rejection set must ride the generate path too; fetches are lazy
+    # (only when a ladder/pool actually builds) and process-cached.
+    # Empty ⇒ no attach.
+    source_values_table: str = ""
     # --- pool seeding experiment (WS5 §3) -------------------------------
     # "centroid" (control, today's behavior) | "kcenter" | "kcenter_rotate".
     # Retrieval runs 3x per setup and only picks 8 prompt seeds, so this is

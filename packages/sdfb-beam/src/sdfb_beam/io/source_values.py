@@ -16,6 +16,7 @@ lazy client, pickle-safe, injectable fake for laptop tests.
 from __future__ import annotations
 
 import re
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -33,6 +34,21 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # n1-highmem-8 — far below worker RAM, far above every observed E2E column
 # (max seen: 146k distinct, B_TABLE COL_038).
 _DEFAULT_CAP = 1_000_000
+
+# Process-level fetch cache, keyed (table_fqn, column, cap). B.2 builds its
+# pools lazily inside Generate DoFns (no pool branch), so up to 16 sibling
+# hook instances per worker process would otherwise each issue the same
+# SELECT DISTINCT. The lock is held ACROSS the fetch (single-flight): a
+# duplicate multi-second column scan costs more than serializing the few
+# cold fetches a process ever makes.
+_FETCH_CACHE: dict[tuple[str, str, int], frozenset[str] | None] = {}
+_FETCH_CACHE_LOCK = threading.Lock()
+
+
+def clear_source_value_cache() -> None:
+    """Drop all cached fetches (tests / maintenance only)."""
+    with _FETCH_CACHE_LOCK:
+        _FETCH_CACHE.clear()
 
 
 class BigQuerySourceValueStore:
@@ -70,19 +86,30 @@ class BigQuerySourceValueStore:
 
     def fetch_distinct(self, column: str) -> frozenset[str] | None:
         """Every distinct non-NULL value of `column` as strings, or None
-        when the column holds more than `cap` distinct values."""
+        when the column holds more than `cap` distinct values.
+
+        Process-cached per (table, column, cap) — see `_FETCH_CACHE`.
+        """
         col = self._checked(column)
-        # LIMIT cap+1: one extra row is the over-cap signal — cheaper than
-        # a COUNT(DISTINCT) pre-query and exact where it matters.
-        sql = (
-            f"SELECT DISTINCT CAST(`{col}` AS STRING) AS v "
-            f"FROM `{self.table_fqn}` WHERE `{col}` IS NOT NULL "
-            f"LIMIT {self.cap + 1}"
-        )
-        rows = list(self._bq().query(sql).result())
-        if len(rows) > self.cap:
-            return None
-        return frozenset(_row_value(r, "v") for r in rows)
+        key = (self.table_fqn, col, self.cap)
+        with _FETCH_CACHE_LOCK:
+            if key in _FETCH_CACHE:
+                return _FETCH_CACHE[key]
+            # LIMIT cap+1: one extra row is the over-cap signal — cheaper
+            # than a COUNT(DISTINCT) pre-query and exact where it matters.
+            sql = (
+                f"SELECT DISTINCT CAST(`{col}` AS STRING) AS v "
+                f"FROM `{self.table_fqn}` WHERE `{col}` IS NOT NULL "
+                f"LIMIT {self.cap + 1}"
+            )
+            rows = list(self._bq().query(sql).result())
+            result = (
+                None
+                if len(rows) > self.cap
+                else frozenset(_row_value(r, "v") for r in rows)
+            )
+            _FETCH_CACHE[key] = result
+            return result
 
     def count_overlap(self, column: str, values: Iterable[str]) -> int:
         """How many of `values` exist in the column's live source domain."""
@@ -128,4 +155,8 @@ def _row_value(row: Mapping | object, key: str):
     return get(key)
 
 
-__all__ = ["BigQuerySourceValueStore", "pool_source_overlap"]
+__all__ = [
+    "BigQuerySourceValueStore",
+    "clear_source_value_cache",
+    "pool_source_overlap",
+]

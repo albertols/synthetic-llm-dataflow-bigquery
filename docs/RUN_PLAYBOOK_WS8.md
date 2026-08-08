@@ -237,5 +237,11 @@ spawn. It also exposed the next findings, remediated 2026-08-08:
 - **Per-row pydantic cost** — the engine validates each record and the DoFn
   re-dumps it (`model_validate` + `model_dump` × 10M). Candidate CPU win,
   but it changes DLQ semantics — profile on M4 before touching.
-- **B.2 parity (R5 gate)** — wire the ADR 0023 `SourceValueStore` seam into
-  `b2_library/freetext.py` before reading R5 memorization numbers.
+- **B.2 parity (R5 gate)** — ✅ done 2026-08-08: `FreeTextHook` consults the
+  ADR 0023 `SourceValueStore` in its pool novelty filter and shape fallback
+  (same `freetext_pool_source_filter*` milestones as B.1). The store rides
+  the generate path (`source_values_table` → worker-side attach, fetches
+  process-cached) because B.2 builds pools lazily in Generate workers — no
+  pool branch. The reference blend stays: it is confined to ≤100-distinct
+  enum columns, the same category-reuse the substantive copy metric exempts.
+  R5 memorization numbers are now engine-comparable.

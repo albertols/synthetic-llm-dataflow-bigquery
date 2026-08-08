@@ -107,7 +107,11 @@ class B2LibraryEngine(GenerationEngine):
             if p.kind is ColumnKind.FREE_TEXT
         ]
         self._freetext_hook = FreeTextHook(
-            model_client, strict=ctx.strict_freetext
+            model_client,
+            strict=ctx.strict_freetext,
+            # ADR 0023 seam: B.2 builds pools lazily (no pool branch), so
+            # the full-domain rejection set rides the generate-path ctx.
+            source_value_store=getattr(ctx, "source_value_store", None),
         )
 
         backend = self._make_backend()

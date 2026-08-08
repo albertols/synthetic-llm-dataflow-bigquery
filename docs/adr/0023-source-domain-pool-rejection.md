@@ -123,7 +123,13 @@ flowchart TB
 - **B.2 parity is open**: `b2_library/freetext.py` carries the same
   sample-only novelty filter (and deliberately blends observed values at
   high `similarity`). Wire the same seam before reading the WS8 **R5**
-  memorization numbers as engine truth.
+  memorization numbers as engine truth. *(Closed 2026-08-08:
+  `FreeTextHook(source_value_store=…)` rejects against the full domain in
+  the pool build and shape fallback; the store rides the generate path via
+  `GenerationContext.source_values_table` with process-cached fetches,
+  because B.2 builds pools lazily in Generate workers. The reference blend
+  stays — it is confined to ≤100-distinct enum columns, the category reuse
+  the substantive copy metric exempts.)*
 
 ## Erratum (2026-08-08)
 

@@ -806,6 +806,8 @@ def main(argv: list[str] | None = None) -> int:
         prompt_constraints=args.prompt_constraints == "on",
         fk_pools=fk_pools,
         source_distinct=source_distinct,
+        # ADR 0023 generate-path seam: B.2 builds pools lazily in workers.
+        source_values_table=args.reference_table,
     )
 
     create_if_not_exists = parse_bool_flag(args.create_if_not_exists)

@@ -43,6 +43,7 @@ from sdfb_core.engines.text_shapes import (
     shape_mix_is_identifier_like,
 )
 from sdfb_core.observability import log_milestone
+from sdfb_core.pools.store import SourceValueStore
 
 # Bounded pool size — the LLM emits at most this many unique candidates per
 # free-text column regardless of N (the O(1) cost cap). Sized small so the
@@ -171,10 +172,16 @@ class FreeTextHook:
         *,
         pool_size: int = _DEFAULT_POOL_SIZE,
         strict: bool = False,
+        source_value_store: SourceValueStore | None = None,
     ) -> None:
         self._client = model_client
         self._pool_size = pool_size
         self._strict = strict
+        # ADR 0023 seam (B.2 parity, R5 prerequisite): the column's FULL
+        # distinct source values, consulted by the pool novelty filter and
+        # the shape fallback. None ⇒ sample-only rejection, unchanged.
+        self._source_value_store = source_value_store
+        self._source_cache: dict[str, frozenset[str]] = {}
         self._cache: dict[tuple[str, float], list[str]] = {}
         # Negative cache: key → the FreeTextEmptyYieldError message of a
         # deterministic strict-mode build failure (see class docstring).
@@ -348,6 +355,44 @@ class FreeTextHook:
                 self._cache[key] = pool
             return pool
 
+    def _source_values(self, column: str) -> frozenset[str]:
+        """The column's FULL distinct source values, or an empty set —
+        LOUDLY on cap-exceeded/store-error, silently when no store is
+        attached (pre-seam behavior). Fetched once per column per hook;
+        milestone names mirror B.1's for one cross-engine readout."""
+        if self._source_value_store is None:
+            return frozenset()
+        cached = self._source_cache.get(column)
+        if cached is not None:
+            return cached
+        values: frozenset[str] | None
+        try:
+            values = self._source_value_store.fetch_distinct(column)
+        except Exception as exc:
+            log_milestone(
+                "freetext_pool_source_filter_error",
+                level=logging.WARNING,
+                column=column,
+                error=type(exc).__name__,
+            )
+            values = None
+        else:
+            if values is None:
+                log_milestone(
+                    "freetext_pool_source_filter_absent",
+                    level=logging.WARNING,
+                    column=column,
+                )
+            else:
+                log_milestone(
+                    "freetext_pool_source_filter",
+                    column=column,
+                    size=len(values),
+                )
+        result = frozenset(values or ())
+        self._source_cache[column] = result
+        return result
+
     def _generate_pool(
         self, profile: ColumnProfile, cfg: GenerationConfig
     ) -> tuple[list[str], bool]:
@@ -377,7 +422,11 @@ class FreeTextHook:
         # (all copies / all parse-drops) is retried at escalating temperature
         # before falling back (2026-07-16 corp run: the model echoed the seed
         # exemplars verbatim at the base temperature).
-        observed = set(profile.text_pool)
+        # ADR 0023: reject against the profiled sample PLUS (when a
+        # SourceValueStore is attached) the column's full source domain —
+        # a candidate equal to ANY real value is a copy, whether the
+        # profiler sampled it or not.
+        observed = set(profile.text_pool) | self._source_values(profile.name)
         shown = set(exemplars)
         pool: list[str] = []
         pool_seen: set[str] = set()
@@ -548,7 +597,7 @@ class FreeTextHook:
         def pick(k: int) -> int:
             return int(rng.integers(0, k))
 
-        observed = set(profile.text_pool)
+        observed = set(profile.text_pool) | self._source_values(profile.name)
         pool: list[str] = []
         seen: set[str] = set()
         # Bounded rejection sampling: dense keyspaces stop at the cap

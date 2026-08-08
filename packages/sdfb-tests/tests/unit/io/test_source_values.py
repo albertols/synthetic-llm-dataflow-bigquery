@@ -127,3 +127,35 @@ def test_pool_source_overlap_empty_store_is_clean() -> None:
         _FakePoolStore([]), _FakeValueStore(), "d1", "gs://b/m"
     )
     assert overlap == {}
+
+
+# --------------------------------------------------------------------------
+# Process-level fetch cache: B.2 builds pools lazily inside Generate DoFns
+# (no pool branch), so 16 sibling hook instances per process must share one
+# SELECT DISTINCT per column, not issue 16.
+# --------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _fresh_fetch_cache():
+    from sdfb_beam.io import source_values as sv
+
+    sv.clear_source_value_cache()
+    yield
+    sv.clear_source_value_cache()
+
+
+def test_fetch_distinct_is_cached_per_process() -> None:
+    client_a = _FakeBqClient([{"v": "alpha"}])
+    client_b = _FakeBqClient([{"v": "SHOULD-NOT-BE-QUERIED"}])
+    store_a = BigQuerySourceValueStore("p.d.cachetest", client=client_a)
+    store_b = BigQuerySourceValueStore("p.d.cachetest", client=client_b)
+    assert store_a.fetch_distinct("notes") == frozenset({"alpha"})
+    assert store_b.fetch_distinct("notes") == frozenset({"alpha"})
+    assert client_b.queries == []
+
+
+def test_over_cap_result_is_cached_too() -> None:
+    client = _FakeBqClient([{"v": str(i)} for i in range(4)])
+    store = BigQuerySourceValueStore("p.d.captest", cap=3, client=client)
+    assert store.fetch_distinct("notes") is None
+    assert store.fetch_distinct("notes") is None
+    assert len(client.queries) == 1

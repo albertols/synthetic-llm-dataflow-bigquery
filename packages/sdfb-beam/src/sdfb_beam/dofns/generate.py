@@ -158,6 +158,27 @@ class GenerateRecordsDoFn(beam.DoFn):
             )
             self.ctx = ctx
 
+        # ADR 0023 — worker-side attach for the full-source-domain
+        # rejection set. B.2 builds pools lazily HERE (no pool branch), and
+        # a pool-layer-less B.1 run ladders here too; the store's fetches
+        # are lazy and process-cached, so store-hit warm paths never pay a
+        # BQ read.
+        if getattr(ctx, "source_values_table", "") and (
+            getattr(ctx, "source_value_store", None) is None
+        ):
+            from sdfb_beam.io import source_values as source_values_mod
+
+            ctx = ctx.model_copy(
+                update={
+                    "source_value_store": (
+                        source_values_mod.BigQuerySourceValueStore(
+                            ctx.source_values_table
+                        )
+                    )
+                }
+            )
+            self.ctx = ctx
+
         # LLM ignition is LAZY (WS1 §3b): VLLMModelClient.generate_json()
         # calls its own idempotent, lock-serialized setup() on first use, so
         # a run whose columns never reach the LLM (b2 with only empirical/

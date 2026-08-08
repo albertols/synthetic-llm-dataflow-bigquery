@@ -111,6 +111,9 @@ class PipelineConfig:
     # Tier-2 exact per-column distinct counts (--source_stats=exact,
     # ADR 0022) — feeds free-text pool sizing. Empty = Tier 1 only.
     source_distinct: dict = field(default_factory=dict)
+    # Reference-table FQN for the worker-side ADR 0023 source-value store
+    # attach (B.2 builds pools lazily in Generate workers). Empty = off.
+    source_values_table: str = ""
     # FK columns → parent synthetic key values (ADR 0021), loaded
     # driver-side by io/fk_pools when the contract declares FKs.
     fk_pools: dict = field(default_factory=dict)
@@ -172,6 +175,7 @@ def build_pipeline(
         prompt_constraints=config.prompt_constraints,
         fk_pools=config.fk_pools,
         source_distinct=config.source_distinct,
+        source_values_table=config.source_values_table,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.
@@ -352,6 +356,7 @@ def build_pipeline(
         "run_id": config.run_id,
         "valid": uniq["unique"],
         "dlq": dlq,
+        "generation_context": ctx,
     }
 
     # §12 — run-level summary row + BLOCKER gate. Only wired when a
