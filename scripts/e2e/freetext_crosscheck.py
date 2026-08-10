@@ -177,13 +177,52 @@ def _aggregate(client, fqn: str, columns: list[str], top_k: int) -> dict[str, An
     return out
 
 
-def _sample(client, fqn: str, columns: list[str], sample_size: int, rows: int) -> list[dict[str, Any]]:
+def _sample_sql(fqn: str, columns: list[str], nonempty_col: str | None = None) -> str:
+    """Sample query; ``nonempty_col`` adds that column's non-empty predicate.
+
+    `RAND() < p LIMIT lim` short-circuits on storage order, so a
+    mostly-empty column can sample ALL-empty and its source shapes vanish
+    from the report (2026-08-09 B_TABLE R1, COL_037: shape recall 0.00
+    with `missing_shapes: []`). The targeted variant samples the column's
+    substantive rows directly.
+    """
+    cols_sql = ",".join(f"CAST(`{c}` AS STRING) AS `{c}`" for c in columns)
+    where = "WHERE RAND() < @p"
+    if nonempty_col is not None:
+        c = f"CAST(`{nonempty_col}` AS STRING)"
+        where = (
+            f"WHERE `{nonempty_col}` IS NOT NULL "
+            f"AND TRIM({c}) != '' AND RAND() < @p"
+        )
+    return f"SELECT {cols_sql} FROM `{fqn}` {where} LIMIT @lim"
+
+
+# Below this many sampled non-empty values the shape histogram is noise —
+# re-sample the column's substantive rows directly (when the aggregates
+# prove any exist).
+_NONEMPTY_SAMPLE_FLOOR = 50
+
+
+def _needs_nonempty_topup(sampled_nonempty: int, agg: dict[str, Any]) -> bool:
+    substantive = (agg.get("n") or 0) - (agg.get("null_n") or 0) - (
+        agg.get("empty_n") or 0
+    )
+    return sampled_nonempty < _NONEMPTY_SAMPLE_FLOOR and substantive > 0
+
+
+def _sample(
+    client,
+    fqn: str,
+    columns: list[str],
+    sample_size: int,
+    rows: int,
+    nonempty_col: str | None = None,
+) -> list[dict[str, Any]]:
     """Random-ish sample of the columns for in-Python shape mining."""
     from google.cloud import bigquery
 
     p = min(1.0, (sample_size * 3.0) / max(rows, 1))
-    cols_sql = ",".join(f"CAST(`{c}` AS STRING) AS `{c}`" for c in columns)
-    sql = f"SELECT {cols_sql} FROM `{fqn}` WHERE RAND() < @p LIMIT @lim"
+    sql = _sample_sql(fqn, columns, nonempty_col=nonempty_col)
     job = client.query(
         sql,
         job_config=bigquery.QueryJobConfig(
@@ -591,6 +630,26 @@ def run(args) -> dict[str, Any]:
     for col in columns:
         src_vals = [r.get(col) for r in src_sample if r.get(col) not in (None, "")]
         syn_vals = [r.get(col) for r in syn_sample if r.get(col) not in (None, "")]
+        # Mostly-empty columns can sample all-empty under the LIMIT
+        # short-circuit — re-sample their substantive rows directly.
+        if _needs_nonempty_topup(len(src_vals), src_agg[col]):
+            a = src_agg[col]
+            substantive = (a["n"] or 0) - (a["null_n"] or 0) - (a["empty_n"] or 0)
+            print(f"[topup] {col}: source sampled {len(src_vals)} non-empty; "
+                  f"re-sampling {substantive} substantive rows…", file=sys.stderr)
+            rows_t = _sample(client, args.source_fqn, [col],
+                             min(args.sample_size, 5000), substantive,
+                             nonempty_col=col)
+            src_vals = [r.get(col) for r in rows_t if r.get(col) not in (None, "")]
+        if _needs_nonempty_topup(len(syn_vals), syn_agg[col]):
+            a = syn_agg[col]
+            substantive = (a["n"] or 0) - (a["null_n"] or 0) - (a["empty_n"] or 0)
+            print(f"[topup] {col}: synthetic sampled {len(syn_vals)} non-empty; "
+                  f"re-sampling {substantive} substantive rows…", file=sys.stderr)
+            rows_t = _sample(client, args.synthetic_fqn, [col],
+                             min(args.sample_size, 5000), substantive,
+                             nonempty_col=col)
+            syn_vals = [r.get(col) for r in rows_t if r.get(col) not in (None, "")]
         src_prof = _profile_sample(src_vals, args.top_k)
         syn_prof = _profile_sample(syn_vals, args.top_k)
         src_prof["_all_values"] = src_vals

@@ -21,6 +21,37 @@ def test_shape_of_masks_charclasses():
     assert _mod.shape_of("AB-12 x") == "AA-99␣a"
 
 
+def test_sample_sql_plain_has_no_column_filter():
+    sql = _mod._sample_sql("p.d.t", ["A", "B"])
+    assert "WHERE RAND() < @p" in sql
+    assert "IS NOT NULL" not in sql
+
+
+def test_sample_sql_nonempty_filter_targets_one_column():
+    # 2026-08-09 B_TABLE R1, COL_037: `RAND() < p LIMIT lim` short-circuits
+    # on storage order, so a 91%-empty column sampled all-empty and the
+    # report showed shape recall 0.00 with NO missing shapes listed. The
+    # top-up query samples that column's non-empty rows directly.
+    sql = _mod._sample_sql("p.d.t", ["A"], nonempty_col="A")
+    assert "`A` IS NOT NULL" in sql
+    assert "!= ''" in sql
+    assert "RAND() < @p" in sql
+
+
+def test_needs_nonempty_topup_decision():
+    # Too few sampled non-empty values + the aggregate proves substance
+    # exists → top-up. A genuinely all-empty column never re-queries.
+    assert _mod._needs_nonempty_topup(
+        sampled_nonempty=3, agg={"n": 1000, "null_n": 100, "empty_n": 800}
+    )
+    assert not _mod._needs_nonempty_topup(
+        sampled_nonempty=500, agg={"n": 1000, "null_n": 100, "empty_n": 300}
+    )
+    assert not _mod._needs_nonempty_topup(
+        sampled_nonempty=0, agg={"n": 1000, "null_n": 200, "empty_n": 800}
+    )
+
+
 def test_collapse_compresses_runs():
     assert _mod.collapse(_mod.shape_of("2026-01-15")) == "9+-9+-9+"
     assert _mod.collapse(_mod.shape_of("AB")) == "A+"

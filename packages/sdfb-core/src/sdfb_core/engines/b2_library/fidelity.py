@@ -25,7 +25,10 @@ from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Any, cast
 
-from sdfb_core.contracts.relational import parse_llm_prompt_constraint
+from sdfb_core.contracts.prompt_constraint import (
+    parse_prompt_constraint,
+    render_prompt_clause,
+)
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
 from sdfb_core.engines.b2_library.temporal import (
     age_floor_epoch,
@@ -161,6 +164,12 @@ class ColumnProfile:
     # FREE_TEXT: per-column prompt steering from the column's DDL
     # description JSON (spec C5). Empty = no constraint.
     llm_prompt_constraint: str = ""
+    # FREE_TEXT: structured-constraint extras (ADR 0024) — user regex for
+    # guided decoding, length-pin flag (suppresses the derived length
+    # hint), fictitious examples (joined to the pool rejection set).
+    constraint_pattern: str = ""
+    constraint_sets_length: bool = False
+    constraint_examples: tuple[str, ...] = ()
     # TEMPORAL: how to render sampled epoch floats back into values.
     # minimum/maximum hold epoch floats (units per temporal.py) for this kind.
     temporal_value_type: str | None = None
@@ -366,6 +375,24 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
 
     kind = _classify(field, substantive if substantive else non_null)
 
+    # `route: "llm"` (ADR 0024): STRING columns override their typed
+    # classification into the LLM free-text route (B.1 parity). Non-STRING
+    # types keep their route — B.2's own inverse-CDF path owns numeric
+    # fidelity (ADR 0022) — with the same WARNING milestone as B.1.
+    pc = parse_prompt_constraint(field.description)
+    force_llm = pc is not None and pc.route == "llm"
+    if force_llm:
+        if field.bq_type in _STRINGY_BQ_TYPES:
+            kind = ColumnKind.FREE_TEXT
+        else:
+            log_milestone(
+                "prompt_constraint_route_unsupported",
+                level=logging.WARNING,
+                column=field.name,
+                bq_type=field.bq_type,
+            )
+            force_llm = False
+
     if kind is ColumnKind.CONSTANT:
         return ColumnProfile(
             name=field.name,
@@ -418,11 +445,17 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             null_fraction=null_fraction,
             empty_fraction=empty_fraction,
             text_pool=tuple(pool),
-            identifier_shape=detect_identifier_shape(pool),
-            shape_mix=build_shape_mix(pool),
-            llm_prompt_constraint=parse_llm_prompt_constraint(
-                field.description
+            # `force_llm` skips the template route by explicit user intent.
+            identifier_shape=(
+                None if force_llm else detect_identifier_shape(pool)
             ),
+            shape_mix=build_shape_mix(pool),
+            llm_prompt_constraint=(
+                render_prompt_clause(pc) if pc is not None else ""
+            ),
+            constraint_pattern=pc.pattern if pc is not None else "",
+            constraint_sets_length=pc is not None and pc.length is not None,
+            constraint_examples=pc.examples if pc is not None else (),
         )
 
     # CATEGORICAL — empirical frequency table, order-stable for determinism.

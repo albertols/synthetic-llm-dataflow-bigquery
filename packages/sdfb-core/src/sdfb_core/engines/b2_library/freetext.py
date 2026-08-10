@@ -36,13 +36,15 @@ from sdfb_core.engines.base import (
 )
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
+    collapsed_mask,
+    identifier_sampler,
     length_hint,
     mutate_digit_runs,
-    sample_identifier,
     sample_relaxed_identifier,
+    shape_mix_can_template,
     shape_mix_is_identifier_like,
 )
-from sdfb_core.observability import log_milestone
+from sdfb_core.observability import log_milestone, log_prompt_debug
 from sdfb_core.pools.store import SourceValueStore
 
 # Bounded pool size — the LLM emits at most this many unique candidates per
@@ -69,6 +71,27 @@ def similarity_to_temperature(similarity: float) -> float:
     """
     s = min(max(similarity, 0.0), 1.0)
     return round(1.3 - 1.2 * s, 4)
+
+
+def _collapsed_gate(profile: ColumnProfile):
+    """Collapsed-mask candidate gate (B.1 parity, wave-2 §4c).
+
+    For shape-rigid whitespace columns the LLM normalizes literal space
+    runs (2026-08-09 B_TABLE R1, COL_038: ␣␣␣ → ␣ on every pool value) —
+    candidates must reproduce an observed run-collapsed mask. Prose (mix
+    cannot template) stays ungated.
+    """
+    gate_masks: set[str] | None = None
+    if (
+        build_relaxed_shapes(list(profile.text_pool)) is None
+        and shape_mix_can_template(profile.shape_mix)
+    ):
+        gate_masks = {collapsed_mask(str(v)) for v in profile.text_pool if v}
+
+    def gate(v: str) -> bool:
+        return gate_masks is None or collapsed_mask(v) in gate_masks
+
+    return gate
 
 
 def _pool_schema(column_name: str) -> dict:
@@ -261,10 +284,16 @@ class FreeTextHook:
         )
 
         if profile.identifier_shape is not None:
-            return [
-                sample_identifier(profile.identifier_shape, pick)
-                for _ in range(fill)
-            ]
+            # Shared wave-2 sampler: mask mix above coverage, full mask
+            # table below it — the collapsed template scrambled long-tail
+            # mask families (2026-08-09 A_TABLE R1, COL_001-class).
+            sampler = identifier_sampler(
+                profile.identifier_shape,
+                profile.shape_mix,
+                profile.text_pool,
+                pick,
+            )
+            return [sampler() for _ in range(fill)]
 
         if (
             profile.shape_mix is not None
@@ -393,28 +422,64 @@ class FreeTextHook:
         self._source_cache[column] = result
         return result
 
-    def _generate_pool(
-        self, profile: ColumnProfile, cfg: GenerationConfig
-    ) -> tuple[list[str], bool]:
-        exemplars = list(profile.text_pool[: self._pool_size])
-        prompt = (
-            f"You generate synthetic tabular data. First identify the exact "
-            f"format of these example values for the column '{profile.name}' "
-            f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
-            f"timestamp, natural-language text), then generate up to "
-            f"{self._pool_size} NEW, distinct, fictitious values in exactly "
-            f"that format. Never copy an example verbatim. Examples: "
-            f"{exemplars}. Return JSON {{\"values\": [...]}}."
-        )
+    def _pool_prompt_and_schema(
+        self, profile: ColumnProfile, cfg: GenerationConfig, exemplars: list[str]
+    ) -> tuple[str, dict]:
+        """Prompt + guided-decoding schema for one column's pool build.
+
+        Per-column constant suffixes (spec C5 + measured length band, ADR
+        0022) append after the shared prefix — prefix-cache-safe. A
+        user-pinned length (ADR 0024) makes the derived band redundant
+        tokens; a user pattern constrains decoding itself. Also emits the
+        `--prompt_debug` milestone (ADR 0024 §3c) with the seed-elided
+        rebuild.
+        """
+
+        def _prompt(examples_repr: str) -> str:
+            return (
+                f"You generate synthetic tabular data. First identify the exact "
+                f"format of these example values for the column '{profile.name}' "
+                f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
+                f"timestamp, natural-language text), then generate up to "
+                f"{self._pool_size} NEW, distinct, fictitious values in exactly "
+                f"that format. Never copy an example verbatim. Examples: "
+                f"{examples_repr}. Return JSON {{\"values\": [...]}}."
+            )
+
+        prompt = _prompt(str(exemplars))
+        pool_schema = _pool_schema(profile.name)
         if cfg.engine_specific.get("prompt_constraints", True):
-            # Per-column constant suffixes (spec C5 + measured length band,
-            # ADR 0022) — appended after the shared prefix, prefix-cache-safe.
-            constraint, hint = profile.llm_prompt_constraint, length_hint(
-                profile.text_pool
+            constraint = profile.llm_prompt_constraint
+            hint = (
+                ""
+                if profile.constraint_sets_length
+                else length_hint(profile.text_pool)
             )
             prompt += (
                 f" Column constraint: {constraint}." if constraint else ""
             ) + (f" {hint}" if hint else "")
+            if profile.constraint_pattern:
+                pool_schema["properties"]["values"]["items"]["pattern"] = (
+                    profile.constraint_pattern
+                )
+        # Everything after the shared base is the constant per-column
+        # suffix — reattach it to the seed-elided rebuild.
+        suffix = prompt[len(_prompt(str(exemplars))):]
+        log_prompt_debug(
+            str(cfg.engine_specific.get("prompt_debug", "off")),
+            profile.name,
+            prompt,
+            _prompt(f"<{len(exemplars)} seeds elided>") + suffix,
+        )
+        return prompt, pool_schema
+
+    def _generate_pool(
+        self, profile: ColumnProfile, cfg: GenerationConfig
+    ) -> tuple[list[str], bool]:
+        exemplars = list(profile.text_pool[: self._pool_size])
+        prompt, pool_schema = self._pool_prompt_and_schema(
+            profile, cfg, exemplars
+        )
         # Novelty filter: LLM values that equal observed reference values are
         # copies, not generations. The LLM pool is the "diverge" side of the
         # similarity blend — observed values reach the output only via the
@@ -426,8 +491,15 @@ class FreeTextHook:
         # SourceValueStore is attached) the column's full source domain —
         # a candidate equal to ANY real value is a copy, whether the
         # profiler sampled it or not.
-        observed = set(profile.text_pool) | self._source_values(profile.name)
+        # Constraint examples are canonical fictitious values from the DDL
+        # description (ADR 0024) — a verbatim echo must never land as data.
+        observed = (
+            set(profile.text_pool)
+            | self._source_values(profile.name)
+            | set(profile.constraint_examples or ())
+        )
         shown = set(exemplars)
+        gate = _collapsed_gate(profile)
         pool: list[str] = []
         pool_seen: set[str] = set()
         seen: set[str] = set()
@@ -443,7 +515,7 @@ class FreeTextHook:
                 attempts += 1
                 responses = self._client.generate_json(
                     prompt=prompt,
-                    json_schema=_pool_schema(profile.name),
+                    json_schema=pool_schema,
                     max_tokens=2048,
                     temperature=level.temperature,
                     n=1,
@@ -457,7 +529,11 @@ class FreeTextHook:
                     top_k=level.top_k,
                 )
                 values = _extract_values(responses)
-                novel = [v for v in values if v not in observed]
+                novel = [
+                    v
+                    for v in values
+                    if v not in observed and gate(v)
+                ]
                 n_parsed += len(values)
                 n_copies += len(values) - len(novel)
                 n_echoes += sum(1 for v in values if v in shown)
@@ -589,7 +665,16 @@ class FreeTextHook:
         raise/exemplar path. Seeded from the batch-independent pool seed —
         deterministic per run (P6), like the LLM build it replaces.
         """
-        shapes = build_relaxed_shapes(list(profile.text_pool))
+        # Prefer the exact shape mix (B.1 parity): it preserves literal
+        # fixed-position runs — leading padding, delimiters, interior space
+        # runs — that the length-bucket relaxation rejects wholesale
+        # (whitespace ⇒ None), which left gate-rejected whitespace columns
+        # with no template rescue at all.
+        shapes = None
+        if shape_mix_can_template(profile.shape_mix):
+            shapes = profile.shape_mix
+        if shapes is None:
+            shapes = build_relaxed_shapes(list(profile.text_pool))
         if shapes is None:
             return None
         rng = np.random.default_rng(seed)

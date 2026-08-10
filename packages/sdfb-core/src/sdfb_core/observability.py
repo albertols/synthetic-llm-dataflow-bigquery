@@ -45,6 +45,36 @@ def format_milestone(name: str, **fields) -> str:
     return " ".join(parts)
 
 
+def log_prompt_debug(
+    mode: str, column: str, prompt: str, redacted_prompt: str
+) -> None:
+    """Log one built pool prompt per the `--prompt_debug` contract
+    (ADR 0024 §3c).
+
+    "off" logs nothing (production default — reference values are banned
+    from logs). "redacted" logs the instruction + rendered constraint with
+    seed exemplars elided, at INFO. "full" logs the verbatim prompt —
+    reference exemplars INCLUDED — at WARNING, so a debug run's leak
+    surface is loud in Dataflow logs. The sha12 of the FULL prompt is
+    logged in both modes, so prompt drift across runs is comparable even
+    when only redacted text was captured.
+    """
+    if mode not in ("redacted", "full"):
+        return
+    import hashlib
+
+    sha12 = hashlib.sha256(prompt.encode()).hexdigest()[:12]
+    log_milestone(
+        "freetext_pool_prompt",
+        level=logging.WARNING if mode == "full" else logging.INFO,
+        column=column,
+        mode=mode,
+        prompt_chars=len(prompt),
+        sha12=sha12,
+        text=prompt if mode == "full" else redacted_prompt,
+    )
+
+
 def log_milestone(name: str, *, level: int = logging.INFO, **fields) -> str:
     line = format_milestone(name, **fields)
     _logger.log(level, line)

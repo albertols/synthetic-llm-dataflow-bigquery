@@ -73,6 +73,42 @@ def test_evaluate_freetext_rules_flags_the_three_defects():
     assert not [r for r in results if r["column"] == "NOT_IN_SRC"]
 
 
+def test_copy_fraction_tolerates_millionth_scale_noise():
+    """2026-08-09 R1 (both tables): a few-in-a-million coincidental
+    source/synthetic collision failed the strict max=0.0 gate and the
+    rounded display value read 0.0 — a 'fails at 0.0' contradiction. The
+    threshold is now a table-size epsilon and the reported value keeps
+    enough precision to show WHY."""
+    cols = {
+        "NOISY": {
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 900000,
+            "source_distinct": 34622,
+            "source_distinct_ratio": 0.9,
+            "copy_ratio_substantive": 2.2e-05,  # COL_009's raw value
+        },
+        "LEAKY": {
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 90000,
+            "source_distinct": 100000,
+            "source_distinct_ratio": 0.9,
+            "copy_ratio_substantive": 0.4,
+        },
+    }
+    by = {
+        (r["rule"], r["column"]): r
+        for r in _probe.evaluate_freetext_rules(cols)
+    }
+    noisy = by[("freetext.copy_fraction", "NOISY")]
+    assert noisy["passed"] is True
+    assert noisy["value"] == 2.2e-05  # unrounded — never displays as 0.0
+    assert by[("freetext.copy_fraction", "LEAKY")]["passed"] is False
+
+
 def test_distinct_floor_skips_low_cardinality_sources():
     cols = {
         "ENUMISH": {

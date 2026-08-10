@@ -229,6 +229,13 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="Attach per-column llm_prompt_constraint (parsed "
                         "from column-description JSON) to pool prompts "
                         "(spec C5). Prefix-cache-safe constant suffix.")
+    p.add_argument("--prompt_debug", default="off",
+                   choices=["off", "redacted", "full"],
+                   help="Log each built pool prompt as a "
+                        "freetext_pool_prompt milestone (ADR 0024). "
+                        "'redacted' elides seed exemplars; 'full' logs "
+                        "verbatim prompts at WARNING — reference values "
+                        "reach Dataflow logs, debug runs only.")
     p.add_argument("--source_stats", default="sample",
                    choices=["off", "sample", "exact"],
                    help="Compute per-column source_table_stats from the "
@@ -804,6 +811,7 @@ def main(argv: list[str] | None = None) -> int:
         uniqueness_mode=args.uniqueness_mode,
         freetext_expansion=args.freetext_expansion,
         prompt_constraints=args.prompt_constraints == "on",
+        prompt_debug=args.prompt_debug,
         fk_pools=fk_pools,
         source_distinct=source_distinct,
         # ADR 0023 generate-path seam: B.2 builds pools lazily in workers.

@@ -213,17 +213,49 @@ class ColumnSampler:
             self._render_temporal(base), rng.random
         )
 
+    @staticmethod
+    def _categorical_masses(
+        categories: dict, similarity: float
+    ) -> tuple[list, list[float]]:
+        """(categories, probabilities) with sparsity pinned empirically.
+
+        Sparsity categories (empty/whitespace strings, None) keep their
+        exact empirical mass: empty parity is a hard fidelity metric
+        (`freetext.empty_parity` MAJOR) and blending it toward uniform
+        failed it on the 2026-08-09 B_TABLE R1 (COL_033-class Δ0.28) —
+        FREE_TEXT columns already pin sparsity via `_sparsity_or`, and the
+        two kinds must not disagree. The similarity blend flattens only
+        the substantive remainder, scaled into its empirical total mass.
+        """
+        cats = list(categories.keys())
+        counts = [float(categories[c]) for c in cats]
+        total = sum(counts)
+        sparse = [
+            c is None or (isinstance(c, str) and not c.strip()) for c in cats
+        ]
+        sub_total = sum(c for c, s in zip(counts, sparse, strict=True) if not s)
+        sub_count = sum(1 for s in sparse if not s)
+        probs: list[float] = []
+        sub_mass = (sub_total / total) if total else 0.0
+        for cnt, is_sparse in zip(counts, sparse, strict=True):
+            if is_sparse or not sub_count or not sub_total:
+                probs.append(cnt / total if total else 0.0)
+                continue
+            empirical = cnt / sub_total
+            uniform = 1.0 / sub_count
+            probs.append(
+                sub_mass
+                * (similarity * empirical + (1.0 - similarity) * uniform)
+            )
+        norm = sum(probs)
+        return cats, [p / norm for p in probs]
+
     def _categorical_numpy(self, np, rng, n: int, similarity: float) -> list:
         p = self.profile
-        cats = list(p.categories.keys())
-        if not cats:
+        if not p.categories:
             return [None] * n
-        counts = np.asarray([p.categories[c] for c in cats], dtype="float64")
-        empirical = counts / counts.sum()
-        uniform = np.full(len(cats), 1.0 / len(cats))
-        probs = similarity * empirical + (1.0 - similarity) * uniform
-        probs = probs / probs.sum()
-        idx = rng.choice(len(cats), size=n, p=probs)
+        cats, probs = self._categorical_masses(p.categories, similarity)
+        idx = rng.choice(len(cats), size=n, p=np.asarray(probs))
         return [cats[int(i)] for i in idx]
 
     def _from_pool_numpy(self, np, rng, pool: Sequence, n: int) -> list:
@@ -303,18 +335,10 @@ class ColumnSampler:
 
     def _categorical_python(self, rng, n: int, similarity: float) -> list:
         p = self.profile
-        cats = list(p.categories.keys())
-        if not cats:
+        if not p.categories:
             return [None] * n
-        counts = [p.categories[c] for c in cats]
-        total = sum(counts)
-        empirical = [c / total for c in counts]
-        uniform = 1.0 / len(cats)
-        weights = [
-            similarity * empirical[i] + (1.0 - similarity) * uniform
-            for i in range(len(cats))
-        ]
-        return cast("list", rng.choices(cats, weights=weights, k=n))
+        cats, probs = self._categorical_masses(p.categories, similarity)
+        return cast("list", rng.choices(cats, weights=probs, k=n))
 
     def _from_pool_python(self, rng, pool: Sequence, n: int) -> list:
         pool = list(pool)

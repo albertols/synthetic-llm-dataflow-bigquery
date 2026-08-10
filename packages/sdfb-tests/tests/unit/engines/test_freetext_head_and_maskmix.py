@@ -144,9 +144,9 @@ class TestIdentifierMaskMix:
         assert sum(1 for v in drawn if v.startswith("XY")) > 0
         assert sum(1 for v in drawn if v[4:8] == "QRST") > 0
 
-    def test_random_mask_column_keeps_the_collapsed_template(self) -> None:
+    def test_random_mask_column_keeps_mask_diversity(self) -> None:
         # High-entropy masks (36-hex-style): top-8 mask mix would collapse
-        # diversity to 8 skeletons; the collapsed template must stay.
+        # diversity to 8 skeletons; the full mask table must not.
         import random as _r
 
         rng = _r.Random(3)
@@ -158,3 +158,28 @@ class TestIdentifierMaskMix:
         prof = self._identifier_profile(values)
         drawn = self._draw(prof, 300)
         assert len({_mask(v) for v in drawn}) > 8
+
+    def test_long_tail_mask_column_reproduces_observed_masks(self) -> None:
+        # COL_001-class (2026-08-09 A_TABLE R1): hex identifiers whose top-8
+        # masks cover ~20% of distinct values. The collapsed template drew
+        # each position independently — 0% of drawn masks were observed
+        # ones. The mask-table draw must emit observed masks only, inside
+        # the observed (hex) alphabet.
+        import random as _r
+
+        rng = _r.Random(9)
+        values = list(
+            dict.fromkeys(
+                "E2F"
+                + "".join(rng.choice("0123456789ABCDEF") for _ in range(21))
+                for _ in range(120)
+            )
+        )
+        prof = self._identifier_profile(values)
+        drawn = self._draw(prof, 300)
+        assert drawn
+        source_masks = {_mask(v) for v in values}
+        assert {_mask(v) for v in drawn} <= source_masks
+        hex_chars = set("0123456789ABCDEF")
+        assert all(set(v) <= hex_chars for v in drawn)
+        assert len(set(drawn) & set(values)) == 0  # novelty holds

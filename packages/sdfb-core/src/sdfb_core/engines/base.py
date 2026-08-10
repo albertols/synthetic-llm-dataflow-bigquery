@@ -230,6 +230,11 @@ class GenerationContext(BaseModel):
     # DDL description JSON) to pool prompts. Per-column CONSTANT suffix —
     # prefix-cache-safe (ADR 0018).
     prompt_constraints: bool = True
+    # Log each built pool prompt as a `freetext_pool_prompt` milestone
+    # (ADR 0024 §3c): "off" (default) logs nothing; "redacted" elides seed
+    # exemplars (reference values never reach logs); "full" logs verbatim
+    # prompts at WARNING — explicit debug-run opt-in only.
+    prompt_debug: str = "off"
     # Full-table distinct counts per column, driver-populated from the
     # Tier-2 exact stats pass (--source_stats=exact, ADR 0022). The 10k
     # reference sample under-estimates cardinality (five-run verdict:

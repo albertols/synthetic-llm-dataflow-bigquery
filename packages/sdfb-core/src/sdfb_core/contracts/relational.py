@@ -94,19 +94,20 @@ def parse_relational_contract(description: str | None) -> RelationalContract | N
 
 
 def parse_llm_prompt_constraint(description: str | None) -> str:
-    """Per-column prompt constraint from a column description, or ``""``.
+    """Rendered per-column prompt clause from a column description, or ``""``.
 
-    Single-line-normalized and capped at ``_MAX_CONSTRAINT_CHARS``. A
-    non-string value is treated as absent (constraints are prose by
-    definition); a malformed marked object still raises via the extractor.
+    Facade over :mod:`sdfb_core.contracts.prompt_constraint` (ADR 0024):
+    the legacy string form renders byte-identically to its own normalized
+    text; the structured object form renders its deterministic clause. A
+    malformed marked object still raises via the extractor/validator.
     """
-    obj = extract_embedded_json(description, _CONSTRAINT_MARKER)
-    if obj is None:
-        return ""
-    value = obj.get(_CONSTRAINT_MARKER)
-    if not isinstance(value, str):
-        return ""
-    return " ".join(value.split())[:_MAX_CONSTRAINT_CHARS]
+    from sdfb_core.contracts.prompt_constraint import (
+        parse_prompt_constraint,
+        render_prompt_clause,
+    )
+
+    pc = parse_prompt_constraint(description)
+    return "" if pc is None else render_prompt_clause(pc)
 
 
 __all__ = [

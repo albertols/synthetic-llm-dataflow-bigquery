@@ -22,6 +22,7 @@ REF: spec §2 fidelity primitives; ADR 0013 distribution-estimator spine.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
@@ -29,7 +30,11 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sdfb_core.contracts.relational import parse_llm_prompt_constraint
+from sdfb_core.contracts.prompt_constraint import (
+    PromptConstraint,
+    parse_prompt_constraint,
+    render_prompt_clause,
+)
 from sdfb_core.engines.temporal_parse import parse_temporal_string
 from sdfb_core.engines.text_shapes import (
     RelaxedShapes,
@@ -151,6 +156,13 @@ class ColumnProfile:
     # description JSON (spec C5); attached to pool prompts when
     # ctx.prompt_constraints is on. Empty = no constraint.
     llm_prompt_constraint: str = ""
+    # FREE_TEXT — structured-constraint extras (ADR 0024): user regex for
+    # guided decoding, whether the constraint pins length (suppresses the
+    # derived length hint), fictitious examples (joined to the pool
+    # rejection set so a verbatim echo never lands as data).
+    constraint_pattern: str = ""
+    constraint_sets_length: bool = False
+    constraint_examples: tuple[str, ...] = ()
     # TEMPORAL — strftime format when the column is a date-shaped STRING;
     # range-sampled floats render back to strings in the observed format.
     temporal_format: str | None = None
@@ -192,8 +204,29 @@ def _profile_one(col: FieldSchema, values: list[object]) -> ColumnProfile:
 
     distinct = _ordered_distinct(non_null)
 
+    # `route: "llm"` (ADR 0024): a STRING column overrides its typed
+    # classification — constant/categorical/temporal/identifier — into the
+    # LLM free-text route, carrying its rendered constraint. Non-STRING
+    # types keep their route: numeric fidelity is owned by the B.2
+    # inverse-CDF acceptance path (ADR 0022), so LLM-generating them would
+    # regress a documented ceiling.
+    pc = parse_prompt_constraint(col.description)
+    force_llm = pc is not None and pc.route == "llm"
+    if force_llm and (
+        col.bq_type not in _STRINGY_BQ_TYPES
+        or col.is_struct
+        or col.is_repeated
+    ):
+        log_milestone(
+            "prompt_constraint_route_unsupported",
+            level=logging.WARNING,
+            column=col.name,
+            bq_type=col.bq_type,
+        )
+        force_llm = False
+
     # CONSTANT: exactly one distinct non-null value and no nulls observed.
-    if len(distinct) == 1 and not (n - len(non_null)):
+    if len(distinct) == 1 and not (n - len(non_null)) and not force_llm:
         return ColumnProfile(
             name=col.name,
             bq_type=col.bq_type,
@@ -220,6 +253,8 @@ def _profile_one(col: FieldSchema, values: list[object]) -> ColumnProfile:
             null_fraction,
             empty_fraction=empty_fraction,
             with_empties=non_null,
+            pc=pc,
+            force_llm=force_llm,
         )
 
     if col.bq_type in _TEMPORAL_BQ_TYPES:
@@ -401,18 +436,28 @@ def _profile_string(
     null_fraction: float,
     empty_fraction: float = 0.0,
     with_empties: list[object] | None = None,
+    pc: PromptConstraint | None = None,
+    force_llm: bool = False,
 ) -> ColumnProfile:
     """`non_null` arrives with trimmed-empty strings already removed;
     `with_empties` keeps them for the CATEGORICAL fallthrough, where the
-    frequency table (not `empty_fraction`) owns the parity."""
-    constraint = parse_llm_prompt_constraint(col.description)
+    frequency table (not `empty_fraction`) owns the parity. ``force_llm``
+    (`route: "llm"`, ADR 0024) skips the typed shape routes and the
+    categorical fallthrough — the column generates via the LLM pool with
+    its rendered constraint."""
+    if pc is None:
+        pc = parse_prompt_constraint(col.description)
+    constraint = render_prompt_clause(pc) if pc is not None else ""
+    c_pattern = pc.pattern if pc is not None else ""
+    c_sets_length = pc is not None and pc.length is not None
+    c_examples = pc.examples if pc is not None else ()
     strings = [str(v) for v in non_null]
     distinct = _ordered_distinct(strings)
     n = len(strings)
     unique_ratio = (len(distinct) / n) if n else 0.0
     mean_len = (sum(len(s) for s in strings) / n) if n else 0.0
 
-    is_free_text = (
+    is_free_text = force_llm or (
         len(distinct) > _FREE_TEXT_MAX_CATEGORIES
         or (unique_ratio >= _FREE_TEXT_UNIQUE_RATIO and mean_len >= _FREE_TEXT_MIN_MEAN_LEN)
     )
@@ -421,7 +466,8 @@ def _profile_string(
         # Shaped strings leave the LLM route before it can fail on them
         # (2026-07-17 E2E): date-shaped columns range-sample as TEMPORAL,
         # fixed-alphabet identifiers generate from a per-position template.
-        fmt = detect_temporal_format(distinct)
+        # `force_llm` skips both shape routes by explicit user intent.
+        fmt = None if force_llm else detect_temporal_format(distinct)
         if fmt is not None:
             pairs: list[tuple[object, float, int | None]] = []
             for s in strings:
@@ -443,7 +489,7 @@ def _profile_string(
                 temporal_sentinels=sentinels,
                 observed_values=tuple(strings),
             )
-        shape = detect_identifier_shape(distinct)
+        shape = None if force_llm else detect_identifier_shape(distinct)
         if shape is not None:
             # text_examples stays empty on purpose: there is no LLM call to
             # seed and no fallback that may ever fold reference identifiers.
@@ -464,6 +510,9 @@ def _profile_string(
                 shape_mix=build_shape_mix(distinct),
                 head_values=head_values,
                 llm_prompt_constraint=constraint,
+                constraint_pattern=c_pattern,
+                constraint_sets_length=c_sets_length,
+                constraint_examples=c_examples,
             )
         # Cap the seed pool — exemplars condition the LLM, they aren't the bulk.
         examples = tuple(distinct[:64])
@@ -482,6 +531,9 @@ def _profile_string(
             shape_mix=build_shape_mix(distinct),
             head_values=head_values,
             llm_prompt_constraint=constraint,
+            constraint_pattern=c_pattern,
+            constraint_sets_length=c_sets_length,
+            constraint_examples=c_examples,
         )
     return _profile_categorical(
         col,

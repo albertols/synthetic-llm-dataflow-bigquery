@@ -214,6 +214,31 @@ def _sample_categorical(
         weights = np.ones(len(cats))
     weights = weights / weights.sum()
 
+    # Sparsity categories (empty/whitespace strings, None) keep their exact
+    # empirical mass — empty parity is a hard fidelity metric and the
+    # similarity blend flattening it failed `freetext.empty_parity` on the
+    # 2026-08-09 B_TABLE R1 (B.1 parity: ColumnSampler._categorical_masses).
+    # Reweighting applies only within the substantive remainder.
+    sparse = np.asarray(
+        [c is None or (isinstance(c, str) and not c.strip()) for c in cats]
+    )
+    sub_mass = float(weights[~sparse].sum())
+    if sparse.any() and sub_mass > 0:
+        sub_w = weights[~sparse] / sub_mass
+        if temperature <= _TEMP_EPSILON:
+            reweighted = np.zeros_like(sub_w)
+            reweighted[int(np.argmax(sub_w))] = 1.0
+        else:
+            logits = np.log(sub_w + _LOG_SMOOTHING) / temperature
+            logits -= logits.max()
+            reweighted = np.exp(logits)
+            reweighted /= reweighted.sum()
+        probs = weights.copy()
+        probs[~sparse] = reweighted * sub_mass
+        probs /= probs.sum()
+        picks = rng.choice(len(cats), size=n, p=probs)
+        return [cats[int(i)] for i in picks]
+
     if temperature <= _TEMP_EPSILON:
         # Collapse to the mode: maximal mimicry.
         idx = int(np.argmax(weights))

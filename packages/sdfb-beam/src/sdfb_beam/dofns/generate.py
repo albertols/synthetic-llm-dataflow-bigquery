@@ -235,6 +235,7 @@ class GenerateRecordsDoFn(beam.DoFn):
                 "prompt_constraints": getattr(
                     self.ctx, "prompt_constraints", True
                 ),
+                "prompt_debug": getattr(self.ctx, "prompt_debug", "off"),
             },
         )
         log_milestone("batch_start", batch_id=batch_id, n=n)

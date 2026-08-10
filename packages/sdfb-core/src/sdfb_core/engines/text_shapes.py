@@ -272,30 +272,18 @@ def build_shape_mix(
 
 
 def shape_mix_is_identifier_like(shapes: RelaxedShapes | None) -> bool:
-    """True when the mix is code-like and expandable: no template position
-    can emit whitespace (prose tell), and the mass-weighted average shape
-    carries at least two class positions (an all-literal template can only
-    regenerate its own observed values — nothing to expand). Literal
-    prefixes do NOT disqualify: real identifiers share long constant heads
-    (COL_08's ``000190…``) with variation concentrated in a few positions.
+    """True when the mix is code-like and expandable: no CLASS position can
+    emit whitespace (variable padding is prose), and the mass-weighted
+    average shape carries at least two class positions (an all-literal
+    template can only regenerate its own observed values — nothing to
+    expand). Literal positions do NOT disqualify — not even literal
+    whitespace: fixed padding is part of a code's format, and refusing it
+    pinned space-padded reference columns at the pool-cap diversity
+    ceiling (2026-08-09 B_TABLE R1: 7 columns at distinct ≈ 513 vs source
+    45k-146k, COL_038-class). Same whitespace rule as
+    :func:`shape_mix_can_template`, to which this now delegates.
     """
-    if not shapes:
-        return False
-    total_weight = 0.0
-    class_weight = 0.0
-    for weight, shape in shapes:
-        class_count = 0
-        for entry in shape:
-            if " " in entry or "\t" in entry:
-                return False
-            if len(entry) > 1:
-                class_count += 1
-        total_weight += weight
-        class_weight += weight * class_count
-    return (
-        total_weight > 0
-        and class_weight / total_weight >= _EXPAND_MIN_CLASS_POSITIONS
-    )
+    return shape_mix_can_template(shapes)
 
 
 def shape_mix_can_template(shapes: RelaxedShapes | None) -> bool:
@@ -327,6 +315,179 @@ def shape_mix_can_template(shapes: RelaxedShapes | None) -> bool:
         total_weight > 0
         and class_weight / total_weight >= _EXPAND_MIN_CLASS_POSITIONS
     )
+
+
+def _mask_char(ch: str) -> str:
+    if ch.isdigit():
+        return "9"
+    if ch.isupper():
+        return "A"
+    if ch.islower():
+        return "a"
+    return ch
+
+
+_CLASS_RUN = re.compile(r"9{2,}|A{2,}|a{2,}")
+
+
+def collapsed_mask(value: str) -> str:
+    """Run-collapsed character-class mask: digit/letter runs of ≥2 collapse
+    to ``9+``/``A+``/``a+``; whitespace and punctuation stay literal, run
+    lengths included.
+
+    The candidate-gate key for shape-rigid whitespace columns (wave-2 §4c):
+    letting digit/letter run LENGTHS vary keeps legitimate LLM diversity
+    (lexical variation, shorter numbers), while a normalized whitespace run
+    (`` ␣␣␣ `` → `` ␣ ``, the 2026-08-09 B_TABLE COL_038 failure) or a
+    dropped delimiter changes the mask and is rejected.
+    """
+    return _CLASS_RUN.sub(
+        lambda m: m.group(0)[0] + "+", "".join(_mask_char(c) for c in value)
+    )
+
+
+# A (weight, exact-mask) table over a column's distinct values.
+MaskTable = tuple[tuple[int, str], ...]
+
+_MASK_TABLE_CAP = 1024
+
+
+def build_mask_table(
+    values: Iterable[str], cap: int = _MASK_TABLE_CAP
+) -> MaskTable | None:
+    """Exact-mask frequency table over distinct values, heaviest first.
+
+    The full mask DISTRIBUTION, not the top-8 templates: high-entropy
+    identifier columns (2026-08-09 A_TABLE R1, COL_001: top-8 masks cover
+    ~20% of 52k distinct) need whole-mask draws to reproduce the source
+    mask marginal — the collapsed per-position template scrambles it (0%
+    recall). ``cap`` bounds memory; ties break lexicographically for
+    determinism.
+    """
+    distinct = list(dict.fromkeys(v for v in values if v))
+    if len(distinct) < _MIN_VALUES:
+        return None
+    counts: dict[str, int] = {}
+    for v in distinct:
+        mask = "".join(_mask_char(c) for c in v)
+        counts[mask] = counts.get(mask, 0) + 1
+    heaviest = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:cap]
+    return tuple((n, mask) for mask, n in heaviest)
+
+
+def mask_alphabets(values: Iterable[str]) -> dict[str, str]:
+    """Observed characters per mask class, column-wide.
+
+    A mask fill must stay inside the column's real alphabet — hex
+    identifiers must not grow ``G-Z`` just because the mask says
+    "uppercase" (COL_001 stays hexadecimal). Keys present only for classes
+    the column actually exhibits.
+    """
+    digits: set[str] = set()
+    uppers: set[str] = set()
+    lowers: set[str] = set()
+    for v in values:
+        for ch in v:
+            if ch.isdigit():
+                digits.add(ch)
+            elif ch.isupper():
+                uppers.add(ch)
+            elif ch.islower():
+                lowers.add(ch)
+    out: dict[str, str] = {}
+    if digits:
+        out["9"] = "".join(sorted(digits))
+    if uppers:
+        out["A"] = "".join(sorted(uppers))
+    if lowers:
+        out["a"] = "".join(sorted(lowers))
+    return out
+
+
+def sample_from_mask(
+    mask: str, alphabets: dict[str, str], pick: Callable[[int], int]
+) -> str:
+    """One value from an exact mask: class symbols draw from the column's
+    observed alphabets (full class sets as last resort), literals pass
+    through."""
+    out: list[str] = []
+    for ch in mask:
+        if ch == "9":
+            alpha = alphabets.get("9", string.digits)
+        elif ch == "A":
+            alpha = alphabets.get("A", string.ascii_uppercase)
+        elif ch == "a":
+            alpha = alphabets.get("a", string.ascii_lowercase)
+        else:
+            out.append(ch)
+            continue
+        out.append(alpha[pick(len(alpha))])
+    return "".join(out)
+
+
+def sample_mask_table(
+    table: MaskTable, alphabets: dict[str, str], pick: Callable[[int], int]
+) -> str:
+    """One value from a mask table: draw a mask proportionally to its
+    distinct-value weight, then fill it via :func:`sample_from_mask`."""
+    total = sum(w for w, _ in table)
+    r = pick(total)
+    for w, mask in table:
+        if r < w:
+            return sample_from_mask(mask, alphabets, pick)
+        r -= w
+    return sample_from_mask(table[-1][1], alphabets, pick)
+
+
+def identifier_sampler(
+    shape: tuple[str, ...],
+    shape_mix: RelaxedShapes | None,
+    observed_values: Iterable[object],
+    pick: Callable[[int], int],
+    coverage_min: float = 0.5,
+) -> Callable[[], str]:
+    """Per-row identifier generator shared by both engines (wave-2 §4a).
+
+    Mask mix when the top masks cover most distinct values (rigid mask
+    families, the 2026-08-07 fix); otherwise a whole-mask draw from the
+    FULL mask table filled from the column's observed alphabets — the
+    collapsed per-position template scrambled long-tail mask families
+    (2026-08-09 A_TABLE R1, COL_001: 0% mask recall). The collapsed
+    template stays as the last resort. Draws retry x3 against the observed
+    set so novelty pressure stays with the sampler.
+    """
+    observed = {str(v) for v in observed_values}
+    non_empty = [v for v in observed if v]
+    if shape_mix:
+        distinct = len(non_empty)
+        coverage = (
+            sum(w for w, _ in shape_mix) / distinct if distinct else 0.0
+        )
+        if coverage >= coverage_min:
+
+            def _from_mix() -> str:
+                v = ""
+                for _ in range(3):
+                    v = sample_relaxed_identifier(shape_mix, pick)
+                    if v not in observed:
+                        break
+                return v
+
+            return _from_mix
+    table = build_mask_table(non_empty)
+    if table is not None:
+        alphabets = mask_alphabets(non_empty)
+
+        def _from_table() -> str:
+            v = ""
+            for _ in range(3):
+                v = sample_mask_table(table, alphabets, pick)
+                if v not in observed:
+                    break
+            return v
+
+        return _from_table
+    return lambda: sample_identifier(shape, pick)
 
 
 _DIGIT_RUN = re.compile(r"\d{2,}")
@@ -386,16 +547,22 @@ def length_hint(values: Iterable[object], *, min_samples: int = 8) -> str:
 
 
 __all__ = [
+    "build_mask_table",
     "build_relaxed_shapes",
     "build_shape_mix",
+    "collapsed_mask",
     "detect_identifier_shape",
     "detect_temporal_format",
+    "identifier_sampler",
     "length_hint",
+    "mask_alphabets",
     "mutate_digit_runs",
     "relaxed_shape_charset",
     "relaxed_shape_lengths",
     "relaxed_shapes_pattern",
+    "sample_from_mask",
     "sample_identifier",
+    "sample_mask_table",
     "sample_relaxed_identifier",
     "shape_mix_can_template",
     "shape_mix_is_identifier_like",

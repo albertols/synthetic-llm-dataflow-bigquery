@@ -41,7 +41,6 @@ import logging
 import random
 import threading
 import time
-from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sdfb_core.codegen import derive_record_model
@@ -63,17 +62,18 @@ from sdfb_core.engines.generation_plan import (
 from sdfb_core.engines.generation_plan import should_log_plan as _should_log_plan
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
+    collapsed_mask,
+    identifier_sampler,
     length_hint,
     mutate_digit_runs,
     relaxed_shape_charset,
     relaxed_shape_lengths,
     relaxed_shapes_pattern,
-    sample_identifier,
     sample_relaxed_identifier,
     shape_mix_can_template,
     shape_mix_is_identifier_like,
 )
-from sdfb_core.observability import log_milestone
+from sdfb_core.observability import log_milestone, log_prompt_debug
 from sdfb_core.rag.chunking import (
     CHUNK_KIND_FREE_TEXT_COL,
     CHUNK_KIND_ROW_DOC,
@@ -547,22 +547,13 @@ class B1RagEngine(GenerationEngine):
         """
         shape = prof.identifier_shape
         assert shape is not None
-        mix = prof.shape_mix
-        if mix:
-            distinct = len({str(v) for v in prof.observed_values if v})
-            coverage = sum(w for w, _ in mix) / distinct if distinct else 0.0
-            if coverage >= _MASK_MIX_MIN_COVERAGE:
-                observed = {str(v) for v in prof.observed_values}
-
-                def _from_mix() -> str:
-                    for _ in range(3):
-                        v = sample_relaxed_identifier(mix, rng.randrange)
-                        if v not in observed:
-                            return v
-                    return v
-
-                return _from_mix
-        return partial(sample_identifier, shape, rng.randrange)
+        return identifier_sampler(
+            shape,
+            prof.shape_mix,
+            prof.observed_values,
+            rng.randrange,
+            coverage_min=_MASK_MIX_MIN_COVERAGE,
+        )
 
     @staticmethod
     def _sparsity_or(
@@ -863,13 +854,14 @@ class B1RagEngine(GenerationEngine):
         shared prefix for vLLM automatic prefix caching (ADR 0018)."""
         if not getattr(self._ctx, "prompt_constraints", True):
             return ""
+        # A user-pinned length makes the derived band redundant tokens.
+        derived = (
+            ""
+            if getattr(prof, "constraint_sets_length", False)
+            else length_hint(prof.observed_values)
+        )
         return " ".join(
-            s
-            for s in (
-                prof.llm_prompt_constraint,
-                length_hint(prof.observed_values),
-            )
-            if s
+            s for s in (prof.llm_prompt_constraint, derived) if s
         )
 
     def _retrieve_exemplars(
@@ -920,6 +912,44 @@ class B1RagEngine(GenerationEngine):
 
         return _builder
 
+    def _pool_json_schema(self, prof: ColumnProfile) -> tuple[dict, bool]:
+        """Guided-decoding schema for one column's pool call.
+
+        A user-supplied pattern (ADR 0024) constrains decoding itself —
+        prompting alone does not guarantee format adherence — and takes
+        precedence over the derived charset/length regex (the Layer-2
+        opt-in, `pool_pattern_guidance`): the derived union pattern is
+        deliberately looser (see relaxed_shapes_pattern), so novelty
+        pressure stays with the sampler, not the grammar.
+        """
+        items_schema: dict = {"type": "string"}
+        pattern_guided = False
+        if (
+            getattr(prof, "constraint_pattern", "")
+            and self._ctx is not None
+            and getattr(self._ctx, "prompt_constraints", True)
+        ):
+            items_schema["pattern"] = prof.constraint_pattern
+            pattern_guided = True
+        elif self._ctx is not None and self._ctx.pool_pattern_guidance:
+            # Prefer the exact shape mix (2026-08-05 spec C2) — its union
+            # pattern is tighter than the length-bucket relaxation; fall
+            # back to the relaxed builder when no mix exists (e.g. prose).
+            pattern_shapes = prof.shape_mix or build_relaxed_shapes(
+                [str(v) for v in prof.observed_values]
+            )
+            if pattern_shapes is not None:
+                items_schema["pattern"] = relaxed_shapes_pattern(pattern_shapes)
+                pattern_guided = True
+        json_schema = {
+            "type": "object",
+            "properties": {
+                "values": {"type": "array", "items": items_schema}
+            },
+            "required": ["values"],
+        }
+        return json_schema, pattern_guided
+
     def _infer_free_text_pool(
         self,
         prof: ColumnProfile,
@@ -937,6 +967,18 @@ class B1RagEngine(GenerationEngine):
         prompt = _build_pool_prompt(
             prof.name, per_call, seed_examples, constraint=constraint
         )
+        log_prompt_debug(
+            getattr(self._ctx, "prompt_debug", "off"),
+            prof.name,
+            prompt,
+            _build_pool_prompt(
+                prof.name,
+                per_call,
+                seed_examples,
+                constraint=constraint,
+                seeds_repr=f"<{len(seed_examples)} seeds elided>",
+            ),
+        )
         # ARRAY completions only — never n single-value choices. A choice is
         # blind to its siblings, so "distinct" is unsatisfiable per
         # single-value completion and vLLM collapsed all 32 into the
@@ -944,30 +986,7 @@ class B1RagEngine(GenerationEngine):
         # prompt_echoes=96). Inside one array completion the model sees what
         # it already wrote; _pool_llm_yield rides n such arrays per round
         # trip and de-dupes across them.
-        items_schema: dict = {"type": "string"}
-        pattern_guided = False
-        if self._ctx is not None and self._ctx.pool_pattern_guidance:
-            # Layer-2 hallucination fix (opt-in): constrain decoding itself
-            # with a charset/length regex derived from the observed values,
-            # so out-of-format junk is unrepresentable. Deliberately looser
-            # than the per-position template (see relaxed_shapes_pattern) —
-            # novelty pressure stays with the sampler, not the grammar.
-            # Prefer the exact shape mix (2026-08-05 spec C2) — its union
-            # pattern is tighter than the length-bucket relaxation; fall
-            # back to the relaxed builder when no mix exists (e.g. prose).
-            pattern_shapes = prof.shape_mix or build_relaxed_shapes(
-                [str(v) for v in prof.observed_values]
-            )
-            if pattern_shapes is not None:
-                items_schema["pattern"] = relaxed_shapes_pattern(pattern_shapes)
-                pattern_guided = True
-        json_schema = {
-            "type": "object",
-            "properties": {
-                "values": {"type": "array", "items": items_schema}
-            },
-            "required": ["values"],
-        }
+        json_schema, pattern_guided = self._pool_json_schema(prof)
         # kcenter_rotate is the only arm that varies the prompt across
         # attempts; centroid/kcenter keep a byte-identical prefix so vLLM
         # prefix caching still applies (ADR 0018).
@@ -1243,6 +1262,7 @@ def _build_pool_prompt(
     per_call: int,
     seed_examples: list[str],
     constraint: str = "",
+    seeds_repr: str | None = None,
 ) -> str:
     """The pool prompt. One definition — the kcenter_rotate arm rebuilds it
     per attempt with a different seed set, and the two must not drift.
@@ -1250,7 +1270,10 @@ def _build_pool_prompt(
     `constraint` is a per-column CONSTANT (parsed from the DDL description,
     spec C5): the prompt stays byte-identical across attempts, preserving
     vLLM prefix caching (ADR 0018). Empty ⇒ byte-identical to the pre-C5
-    prompt (regression-pinned in tests)."""
+    prompt (regression-pinned in tests). ``seeds_repr`` substitutes the
+    seed-example interpolation — the `--prompt_debug=redacted` rebuild
+    (ADR 0024 §3c); None ⇒ unchanged."""
+    examples = str(seed_examples) if seeds_repr is None else seeds_repr
     prompt = (
         f"You generate synthetic tabular data. First identify the exact "
         f"format of these example values for the column '{column}' "
@@ -1258,11 +1281,50 @@ def _build_pool_prompt(
         f"timestamp, natural-language text), then generate "
         f"{per_call} NEW, distinct, fictitious values in "
         f"exactly that format. Never copy an example verbatim. "
-        f'Examples: {seed_examples}. Return JSON {{"values": [...]}}.'
+        f'Examples: {examples}. Return JSON {{"values": [...]}}.'
     )
     if constraint:
         prompt += f" Column constraint: {constraint}."
     return prompt
+
+
+def _format_gate(prof: ColumnProfile):
+    """Format-plausibility gate over pool candidates for one column.
+
+    Identifier-ish columns (relaxed template exists): observed length
+    bucket + observed charset + no column-name echo. Whitespace columns
+    disable that gate entirely — which let the 2026-08-09 B_TABLE R1 pool
+    fill with whitespace-NORMALIZED values (COL_038: source ␣␣␣ →
+    synthetic ␣ on all 512, shape recall 0) — so when the shape mix can
+    template, candidates must instead reproduce an observed run-collapsed
+    mask: digit/letter run lengths stay free (novelty), whitespace runs
+    and punctuation are exact. Prose columns (neither applies) pass all.
+    """
+    shapes = build_relaxed_shapes([str(v) for v in prof.observed_values])
+    gate_lengths = relaxed_shape_lengths(shapes) if shapes else None
+    gate_charset = relaxed_shape_charset(shapes) if shapes else None
+    gate_masks: set[str] | None = None
+    if shapes is None and shape_mix_can_template(prof.shape_mix):
+        gate_masks = {
+            collapsed_mask(str(v)) for v in prof.observed_values if v
+        }
+    name_lower = prof.name.lower()
+
+    def _in_format(v: str) -> bool:
+        if gate_lengths is not None and gate_charset is not None:
+            return (
+                len(v) in gate_lengths
+                and set(v) <= gate_charset
+                and name_lower not in v.lower()
+            )
+        if gate_masks is not None:
+            return (
+                collapsed_mask(v) in gate_masks
+                and name_lower not in v.lower()
+            )
+        return True
+
+    return _in_format
 
 
 def _pool_llm_yield(
@@ -1298,7 +1360,13 @@ def _pool_llm_yield(
     # attached) the column's full source domain — a candidate equal to ANY
     # real value is a copy, whether the profiler sampled it or not
     # (2026-08-05 B_TABLE R1: 33-99% verbatim values from exactly this gap).
-    observed = set(prof.observed_values) | source_values
+    # Constraint examples are canonical fictitious values from the DDL
+    # description (ADR 0024) — a verbatim echo must never land as data.
+    observed = (
+        set(prof.observed_values)
+        | source_values
+        | set(getattr(prof, "constraint_examples", ()) or ())
+    )
     shown = set(seed_examples)
     # Format-plausibility gate (2026-07-25 10:52 E2E): novelty alone let
     # hallucinated meta-tokens into the pool — an echo of the COLUMN NAME
@@ -1307,19 +1375,7 @@ def _pool_llm_yield(
     # relaxed template exists) a candidate must also match an observed
     # length bucket, stay within the observed charset, and never contain
     # the column name. Prose columns (no template) skip the gate.
-    shapes = build_relaxed_shapes([str(v) for v in prof.observed_values])
-    gate_lengths = relaxed_shape_lengths(shapes) if shapes else None
-    gate_charset = relaxed_shape_charset(shapes) if shapes else None
-    name_lower = prof.name.lower()
-
-    def _in_format(v: str) -> bool:
-        if gate_lengths is None or gate_charset is None:
-            return True
-        return (
-            len(v) in gate_lengths
-            and set(v) <= gate_charset
-            and name_lower not in v.lower()
-        )
+    _in_format = _format_gate(prof)
 
     pool: list[str] = []
     pool_seen: set[str] = set()

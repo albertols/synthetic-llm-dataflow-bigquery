@@ -296,7 +296,10 @@ _FREETEXT_RULE_DEFAULTS: dict[str, dict] = {
     },
     "freetext.copy_fraction": {
         "severity": "BLOCKER",
-        "max": 0.0,
+        # Table-size epsilon, not exact zero: coincidental collisions at
+        # 1M rows false-flagged 15 instances across the 2026-08-09 R1 runs
+        # (mirrors config/thresholds.yml).
+        "max": 1.0e-4,
         "applies_above_source_distinct": 100,
     },
 }
@@ -360,8 +363,10 @@ def evaluate_freetext_rules(
             copy is not None
             and (src_distinct or 0) > cf.get("applies_above_source_distinct", 100)
         ):
+            # Unrounded: a few-in-a-million value rounded to 0.0 next to
+            # passed=false read as a contradiction (2026-08-09 R1 reports).
             add(
-                "freetext.copy_fraction", name, round(copy, 4),
+                "freetext.copy_fraction", name, copy,
                 copy <= cf.get("max", 0.0),
             )
     return results
