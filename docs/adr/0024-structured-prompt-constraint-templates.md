@@ -72,7 +72,8 @@ actually used (reference values are banned from logs).
 
 - DDL authors get a documented, versionable template catalog (design doc §3)
   usable directly in `field.description`; malformed marked objects still fail
-  loudly (ADR 0021 parsing rule).
+  loudly (ADR 0021 parsing rule). Copy-paste-ready Terraform + `_ddl.json`
+  worked examples: [`docs/DDL_CONTRACT_GUIDE.md`](../DDL_CONTRACT_GUIDE.md).
 - Both engines consume constraints through one parse site; engine drift is
   structurally impossible.
 - `prompt_debug=full` deliberately leaks reference exemplars into Dataflow

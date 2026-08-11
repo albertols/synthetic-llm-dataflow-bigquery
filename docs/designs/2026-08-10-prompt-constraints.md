@@ -4,7 +4,9 @@
 Companions: extends [ADR 0021](../adr/0021-relational-contract-in-descriptions.md)
 (the `llm_prompt_constraint` description marker) and
 [ADR 0022](../adr/0022-stats-driven-generation.md) (stats-driven targets);
-decision record: [ADR 0024](../adr/0024-structured-prompt-constraint-templates.md).
+decision record: [ADR 0024](../adr/0024-structured-prompt-constraint-templates.md);
+user-facing configuration guide (Terraform ⇄ `_ddl.json` worked examples):
+[`docs/DDL_CONTRACT_GUIDE.md`](../DDL_CONTRACT_GUIDE.md).
 Evidence: the two 2026-08-09 WS8 R1 cold baselines
 (`2026-08-09_00_19_04-7880358512029555343` = A_TABLE,
 `2026-08-09_00_31_21-17185878817912958022` = B_TABLE), reports in

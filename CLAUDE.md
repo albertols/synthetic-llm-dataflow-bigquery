@@ -95,6 +95,7 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 ## When in doubt
 
 - **What infra to provision before a run** (GCS buckets, BQ datasets/tables, IAM) → [`docs/DEPLOYMENT_PREREQUISITES.md`](docs/DEPLOYMENT_PREREQUISITES.md).
+- **How to declare PK/FK/identity + prompt constraints in table/column descriptions** (Terraform ⇄ `_ddl.json` worked examples; BQ/TF cannot enforce keys, hence the embedded-JSON contract) → [`docs/DDL_CONTRACT_GUIDE.md`](docs/DDL_CONTRACT_GUIDE.md).
 - **How to actually run a deployment** (GPU verdict, run matrix, Dataflow options, L4 capacity strategy, report recipe) → [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md).
 - **How to validate a run after it lands** (duplication/memorization/schema defects traced to code + Dataflow observability) → [`.github/prompts/end_to_end_validation_report_generation.prompt.md`](.github/prompts/end_to_end_validation_report_generation.prompt.md).
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
