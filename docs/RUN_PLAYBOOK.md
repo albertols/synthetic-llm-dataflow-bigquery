@@ -335,6 +335,16 @@ Keep the four `--metrics` labels exactly as written — they name the
 release pipeline's artifact discovery expects. When a run skipped the
 crosscheck/stats-diff step, drop the matching `--metrics`/`--doc` pairs.
 
+Then recompile each bundle into its one-file recap (`_full_report.md`: ToC +
+every `.md` verbatim + every metrics `.json` as a ```json annex;
+`mapping.json` excluded; idempotent — rerun after any doc lands later):
+
+```bash
+python scripts/e2e/build_full_report.py \
+  --dir integration_test/<JOB_ID>/real \
+  --dir integration_test/<JOB_ID>/oss
+```
+
 Only the `oss/` folder produced by step 3 is shareable outside the team; keep
 `real/` (and its `mapping.json` decode key) local.
 

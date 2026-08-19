@@ -57,6 +57,10 @@ uv run --no-sync python3 scripts/e2e/e2e_bundle_export.py \
 # copied into real/ or oss/. When the crosscheck/stats-diff ran, add their
 # --metrics stats_diff= / freetext_crosscheck= and --doc pairs
 # (RUN_PLAYBOOK §5 step 3 has the full invocation + label contract).
+
+uv run --no-sync python3 scripts/e2e/build_full_report.py \
+  --dir integration_test/$JOB/real --dir integration_test/$JOB/oss
+# one-file recap per bundle (_full_report.md: ToC + every .md + json annexes)
 ```
 
 (hacker_news: `--pk id`, table `hacker_news_50k`.)

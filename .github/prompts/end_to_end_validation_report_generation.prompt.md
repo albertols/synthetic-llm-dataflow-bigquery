@@ -89,11 +89,12 @@ integration_test/<JOB_ID>/
     stats_diff_metrics.json     freetext_crosscheck_metrics.json
     stats_diff.md               freetext_crosscheck_report.md
     report.md                   mapping.json   # decode key, real/ only
+    _full_report.md             # one-file recap: ToC + every .md + ```json annexes
   oss/                          # same artifacts, de-identified, shareable
     gcp_metrics.json            offline_metrics.json
     stats_diff_metrics.json     freetext_crosscheck_metrics.json
     stats_diff.md               freetext_crosscheck_report.md
-    report.md
+    report.md                   _full_report.md
 ```
 
 No metrics JSON or crosscheck/stats markdown may survive at the parent level
@@ -426,6 +427,21 @@ survived — the export is only shareable when it prints `leak scan: clean ✅`.
 Hand the OSS team the `oss/` folder + the `scripts/e2e/` toolchain; keep
 `real/` local.
 
+Finally, recompile each bundle into its one-file recap (`_full_report.md`:
+ToC at the top, every `.md` verbatim as a section, every metrics `.json`
+embedded as a ```json annex — `mapping.json` excluded by design; the
+individual files stay canonical):
+
+```bash
+python scripts/e2e/build_full_report.py \
+  --dir integration_test/<JOB_ID>/real \
+  --dir integration_test/<JOB_ID>/oss
+```
+
+The recap is discovery-based (future `.md`/`.json` artifacts join
+automatically) and idempotent — Step 8's recommender re-runs it after
+landing its recommendations so they fold in.
+
 ---
 
 ## Step 7 — Verify
@@ -441,7 +457,9 @@ Hand the OSS team the `oss/` folder + the `scripts/e2e/` toolchain; keep
 5. `integration_test/<JOB_ID>/` matches the finished-folder tree exactly:
    the sample CSVs at the parent level, `real/` with the four metrics JSONs +
    `stats_diff.md` + `freetext_crosscheck_report.md` + `report.md` +
-   `mapping.json`, and `oss/` with the same set minus `mapping.json`.
+   `mapping.json` + `_full_report.md`, and `oss/` with the same set minus
+   `mapping.json`. Each `_full_report.md` opens with a ToC that lists every
+   sibling `.md` and `.json` (and never `mapping.json`).
 6. **No parent-level duplicates survive**: `e2e_validation_metrics.json`,
    `e2e_gcp_metrics.json`, `stats_diff.json`/`.md`,
    `freetext_crosscheck_metrics.json`/`_report.md` are gone from the parent
@@ -470,8 +488,10 @@ run's pool prompts + guided decoding close the observed gaps. It lands
 `real/prompt_constraint_recommendations.md` plus a de-identified
 `oss/prompt_constraint_recommendations.md` twin (standard `mapping.json`
 replacements via `scripts/e2e/redact_doc.py`, leak-scanned) — the twin is
-the shareable, agnostic version of the recommendations. Skip the step when
-Step 3.5 shows no free-text finding worth steering.
+the shareable, agnostic version of the recommendations — and then re-runs
+`build_full_report.py` on both bundles so each `_full_report.md` recap folds
+the recommendations in. Skip the step when Step 3.5 shows no free-text
+finding worth steering.
 
 ---
 

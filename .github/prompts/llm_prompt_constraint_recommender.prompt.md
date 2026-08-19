@@ -16,7 +16,8 @@ description: >
   Output: updated schema file(s) +
   integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md +
   its de-identified oss/ twin (standard mapping.json replacements via
-  scripts/e2e/redact_doc.py) for agnostic reporting.
+  scripts/e2e/redact_doc.py) for agnostic reporting, then refreshed
+  _full_report.md recaps in both bundles (build_full_report.py).
 ---
 
 # /llm_prompt_constraint_recommender — Evidence-driven prompt-constraint authoring
@@ -287,6 +288,15 @@ mapping only knows tokens the bundle export registered: keep the report's
 constraint JSON free of real values anyway (Step 3.3 — fictitious
 `examples`, non-sensitive `values`), because a fresh literal invented here
 has no `VAL_NNNN` entry to hide behind.
+
+Close by refreshing each bundle's one-file recap so the recommendations
+fold into `_full_report.md` (ToC + every `.md` + ```json metrics annexes):
+
+```bash
+python scripts/e2e/build_full_report.py \
+  --dir integration_test/<JOB_ID>/real \
+  --dir integration_test/<JOB_ID>/oss
+```
 
 ---
 
