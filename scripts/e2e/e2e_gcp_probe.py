@@ -213,7 +213,7 @@ def bq_cross_validation(
         # probe on invalid UTF-8.
         if name in src_cols:
             sentinel_re = r"'^(0001|9999)-'"
-            day_re = r"'^\d{4}-\d{2}-\d{2}$'"
+            day_re = r"'^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
             in_src = (
                 f"{col} IN (SELECT DISTINCT {col} FROM {_quote(source_fqn)})"
             )
