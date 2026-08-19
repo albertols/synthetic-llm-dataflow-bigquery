@@ -122,3 +122,17 @@ def test_build_mapping_ignores_non_stats_diff_shaped_metrics():
     }
     m = red.build_mapping(metrics)
     assert m.columns == {}
+
+
+def test_mapping_from_dict_reapplies_the_same_replacements():
+    """A persisted mapping.json must redact post-bundle artifacts with the
+    SAME replacements the original export used (oss/ twins of late docs)."""
+    m = red.Mapping()
+    m.add_identifier("real-project-id", "PROJECT_1")
+    m.add_column("customer_name")
+    m.add_value("Alice Smith")
+
+    rebuilt = red.mapping_from_dict(m.to_dict())
+    text = "customer_name in real-project-id was Alice Smith"
+    assert rebuilt.redact_text(text) == m.redact_text(text)
+    assert "Alice Smith" not in rebuilt.redact_text(text)

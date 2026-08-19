@@ -466,7 +466,11 @@ It reads this deployment's `integration_test/<JOB_ID>/real/` evidence
 (crosscheck, stats diff, offline + GCP metrics, reports) and writes
 evidence-backed `{"llm_prompt_constraint": …}` objects into the schema
 file's column descriptions (DDL_CONTRACT_GUIDE §4 / ADR 0024), so the next
-run's pool prompts + guided decoding close the observed gaps. Skip it when
+run's pool prompts + guided decoding close the observed gaps. It lands
+`real/prompt_constraint_recommendations.md` plus a de-identified
+`oss/prompt_constraint_recommendations.md` twin (standard `mapping.json`
+replacements via `scripts/e2e/redact_doc.py`, leak-scanned) — the twin is
+the shareable, agnostic version of the recommendations. Skip the step when
 Step 3.5 shows no free-text finding worth steering.
 
 ---

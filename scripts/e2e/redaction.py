@@ -151,6 +151,19 @@ def redact_text(m: Mapping, text: str) -> str:
     return m.redact_text(text)
 
 
+def mapping_from_dict(d: dict[str, Any]) -> Mapping:
+    """Rebuild a Mapping from a persisted ``mapping.json`` (`Mapping.to_dict`
+    output) so artifacts created AFTER the bundle export can be redacted with
+    the SAME replacements the export used. Redaction-only use: the placeholder
+    counters are not restored, so registering new columns/values on the
+    rebuilt mapping could collide with existing placeholders."""
+    m = Mapping()
+    m.identifiers = dict(d.get("identifiers") or {})
+    m.columns = dict(d.get("columns") or {})
+    m.values = dict(d.get("values") or {})
+    return m
+
+
 def _split_fqn(fqn: str) -> tuple[str, str, str] | None:
     parts = fqn.split(".")
     return (parts[0], parts[1], parts[2]) if len(parts) == _FQN_PARTS else None

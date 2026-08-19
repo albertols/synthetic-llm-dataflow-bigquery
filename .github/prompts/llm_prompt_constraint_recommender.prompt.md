@@ -14,7 +14,9 @@ description: >
   (the Terraform-shared source of truth). Runs standalone or chained from
   end_to_end_validation_report_generation.prompt.md Step 8.
   Output: updated schema file(s) +
-  integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md.
+  integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md +
+  its de-identified oss/ twin (standard mapping.json replacements via
+  scripts/e2e/redact_doc.py) for agnostic reporting.
 ---
 
 # /llm_prompt_constraint_recommender — Evidence-driven prompt-constraint authoring
@@ -246,11 +248,10 @@ the report.
 
 ---
 
-## Step 6 — Write the recommendations report
+## Step 6 — Write the recommendations report (+ its de-identified `oss/` twin)
 
 `integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md`
-(**internal** — it names real columns/values; it joins the bundle after the
-leak scan, so never copy it into `oss/`). Sections:
+(**internal** — it names real columns/values). Sections:
 
 1. **Header** — JOB_ID, schema file(s), evidence files read, contract note
    from Step 1 (with any code-vs-doc drift called out).
@@ -264,6 +265,28 @@ leak scan, so never copy it into `oss/`). Sections:
    (`--prompt_constraints on`, `--prompt_debug redacted` for the first
    debug run; grep worker logs for `freetext_pool_prompt` + `sha12` drift,
    and `prompt_constraints_found` listing the columns).
+
+Then produce the **de-identified twin** with the bundle's standard mapping —
+this is the version to share/report outside the environment (column names →
+`COL_NNN`, values → `VAL_NNNN`, identifiers hidden, so results stay
+agnostic while remaining correlatable with the job's other `oss/` artifacts):
+
+```bash
+python scripts/e2e/redact_doc.py \
+  --mapping integration_test/<JOB_ID>/real/mapping.json \
+  --in  integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md \
+  --out integration_test/<JOB_ID>/oss/prompt_constraint_recommendations.md
+```
+
+It applies exactly the replacements `real/mapping.json` records (the same
+ones every other `oss/` file already carries) and exits non-zero if a known
+identifier/column survives — the twin is only shareable after
+`leak scan: clean ✅`. On a pre-bundle job dir with no `real/mapping.json`,
+skip the twin and say so in the summary (never hand-redact). Note the
+mapping only knows tokens the bundle export registered: keep the report's
+constraint JSON free of real values anyway (Step 3.3 — fictitious
+`examples`, non-sensitive `values`), because a fresh literal invented here
+has no `VAL_NNNN` entry to hide behind.
 
 ---
 
@@ -280,7 +303,10 @@ leak scan, so never copy it into `oss/`). Sections:
 - **Token-economical** — ≤ 2–3 keys per column, budget the 500-ch clause in
   render order, never duplicate what the prompt already carries.
 - **Privacy-first** — no real values in constraints; grep recommendations
-  against source literals before writing.
+  against source literals before writing. Share only the
+  `oss/prompt_constraint_recommendations.md` twin (Step 6, standard
+  `mapping.json` replacements + clean leak scan) outside the environment;
+  `real/` stays local.
 - **Both engines** — one parse site guarantees identical parsing; use
   `route:"llm"` when their default classifications diverge and the evidence
   needs the LLM route in both.
