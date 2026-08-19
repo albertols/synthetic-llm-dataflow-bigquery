@@ -108,6 +108,10 @@ class PipelineConfig:
     # Attach per-column llm_prompt_constraint (from column-description
     # JSON) to pool prompts (spec C5). See GenerationContext.prompt_constraints.
     prompt_constraints: bool = True
+    # off | redacted | full — log each built pool prompt as a
+    # freetext_pool_prompt milestone (ADR 0024 §3c). See
+    # GenerationContext.prompt_debug.
+    prompt_debug: str = "off"
     # Tier-2 exact per-column distinct counts (--source_stats=exact,
     # ADR 0022) — feeds free-text pool sizing. Empty = Tier 1 only.
     source_distinct: dict = field(default_factory=dict)
@@ -173,6 +177,7 @@ def build_pipeline(
         pool_seed_strategy=config.pool_seed_strategy,
         freetext_expansion=config.freetext_expansion,
         prompt_constraints=config.prompt_constraints,
+        prompt_debug=config.prompt_debug,
         fk_pools=config.fk_pools,
         source_distinct=config.source_distinct,
         source_values_table=config.source_values_table,

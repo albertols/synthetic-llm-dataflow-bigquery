@@ -49,8 +49,14 @@ uv run --no-sync python3 scripts/e2e/e2e_validation_analysis.py --csv eng=integr
 uv run --no-sync python3 scripts/e2e/e2e_bundle_export.py \
   --metrics gcp=integration_test/$JOB/e2e_gcp_metrics.json \
   --metrics offline=integration_test/$JOB/e2e_validation_metrics.json \
+  --csv b1_rag=integration_test/$JOB/b1_rag_sample.csv \
   --report output/<end_to_end_validation_report_YYYY_MM_DD_HH_MM>.md \
-  --out-root integration_test --job-id $JOB
+  --out-root integration_test --job-id $JOB --prune-inputs
+# real/ becomes the canonical metrics location (parent-level JSONs are
+# pruned after a clean leak scan); the CSV stays parent-level, never
+# copied into real/ or oss/. When the crosscheck/stats-diff ran, add their
+# --metrics stats_diff= / freetext_crosscheck= and --doc pairs
+# (RUN_PLAYBOOK §5 step 3 has the full invocation + label contract).
 ```
 
 (hacker_news: `--pk id`, table `hacker_news_50k`.)

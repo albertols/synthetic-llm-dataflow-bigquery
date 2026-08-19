@@ -35,17 +35,22 @@ This skill adds judgment. NEVER edit the generated numbers or charts.
    version = "<version>"  # e.g. v0.4.0
 
    job_dir = Path("integration_test") / job_id
+   # Bundle layout first (real/ is canonical); legacy parent-level fallback.
    basenames = {
-       "gcp": "e2e_gcp_metrics.json",
-       "offline": "e2e_validation_metrics.json",
-       "stats_diff": "stats_diff.json",
-       "crosscheck": "freetext_crosscheck_metrics.json",
+       "gcp": ("real/gcp_metrics.json", "e2e_gcp_metrics.json"),
+       "offline": ("real/offline_metrics.json", "e2e_validation_metrics.json"),
+       "stats_diff": ("real/stats_diff_metrics.json", "stats_diff.json"),
+       "crosscheck": (
+           "real/freetext_crosscheck_metrics.json",
+           "freetext_crosscheck_metrics.json",
+       ),
    }
-   metrics = {
-       label: json.loads((job_dir / name).read_text())
-       for label, name in basenames.items()
-       if (job_dir / name).exists()
-   }
+   metrics = {}
+   for label, names in basenames.items():
+       for name in names:
+           if (job_dir / name).exists():
+               metrics[label] = json.loads((job_dir / name).read_text())
+               break
 
    mapping = redaction.build_mapping(metrics)
    hits = redaction.leak_scan(Path("docs/releases") / version, mapping)

@@ -299,6 +299,16 @@ default_dag_params = {
                     "anywhere 'on' is a logged no-op — prompt refinement, "
                     "never a requirement.",
     ),
+    "prompt_debug": Param(
+        default="off",
+        type="string",
+        enum=["off", "redacted", "full"],
+        description="Log each built pool prompt as a freetext_pool_prompt "
+                    "milestone (ADR 0024 §3c). redacted elides seed "
+                    "exemplars and adds a sha12 prompt hash; full logs "
+                    "verbatim prompts at WARNING — reference values reach "
+                    "Dataflow logs, short-lived debug runs only.",
+    ),
     "source_stats": Param(
         default="sample",
         type="string",
@@ -445,6 +455,7 @@ with models.DAG(
                     "source_stats": "{{ params.source_stats }}",
                     "freetext_expansion": "{{ params.freetext_expansion }}",
                     "prompt_constraints": "{{ params.prompt_constraints }}",
+                    "prompt_debug": "{{ params.prompt_debug }}",
                     "fk_parent_landing": "{{ params.fk_parent_landing }}",
                     "uniqueness_mode": "{{ params.uniqueness_mode }}",
                     "pool_seed_strategy": "{{ params.pool_seed_strategy }}",

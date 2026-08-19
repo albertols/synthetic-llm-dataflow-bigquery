@@ -266,6 +266,15 @@
       ]
     },
     {
+      "name": "prompt_debug",
+      "label": "Pool-prompt debug logging",
+      "helpText": "off (default) logs nothing. redacted logs each built pool prompt as a freetext_pool_prompt milestone with seed exemplars elided (<k seeds elided>) plus a sha12 prompt hash. full logs verbatim prompts at WARNING \u2014 reference values reach Dataflow logs, short-lived debug runs only (ADR 0024 \u00a73c).",
+      "isOptional": true,
+      "regexes": [
+        "^(off|redacted|full)?$"
+      ]
+    },
+    {
       "name": "source_stats",
       "label": "Source-table stats computation",
       "helpText": "sample (default) computes per-column source_table_stats from the reference sample driver-side (zero DAG cost); exact adds ONE aggregate scan of the live table (HLL distinct, deciles, top-k) and feeds exact distinct into free-text pool sizing (ADR 0022); off disables entirely (WS8 spec WS-B).",

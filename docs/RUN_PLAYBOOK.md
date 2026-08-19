@@ -266,9 +266,12 @@ copy the values for `<CSVS>`, `<SCHEMA>`, `<PK>`, `<IDENTITY_COLS>`,
 `<JOB_IDS>` from the run you just launched.
 
 All per-deployment artifacts share one folder named after the primary
-Dataflow job id: put the sample CSVs at `integration_test/<JOB_ID>/*.csv`,
-write both metrics JSONs there, and the bundle export adds `real/` + `oss/`
-alongside them.
+Dataflow job id: put the sample CSVs at `integration_test/<JOB_ID>/*.csv` and
+write the metrics JSONs there as **working files** — the bundle export folds
+them (plus any crosscheck/stats-diff markdown) into `real/` + `oss/` and
+prunes the parent-level duplicates, leaving the CSVs as the only
+parent-level artifacts (the finished-folder tree is drawn in the E2E
+prompt's "Per-deployment artifact folder" section).
 
 **1. Offline analysis** (table-agnostic; computes duplicate ratio, repetition,
 singularity, sparsity, identity-column uniqueness, cross-sample Jaccard —
@@ -301,22 +304,36 @@ python scripts/e2e/e2e_gcp_probe.py \
   --out integration_test/<JOB_ID>/e2e_gcp_metrics.json
 ```
 
-**3. Bundle export** (splits the report + metrics + sample CSVs into an
+**3. Bundle export** (folds the report + metrics + markdown docs into an
 internal `real/` folder and a de-identified `oss/` folder safe to hand to the
-OSS team; exits non-zero unless the leak scan is clean. Dataflow job ids and
-job names are kept verbatim in `oss/` — the bundle folder is named after the
-primary job id):
+OSS team; exits non-zero unless the leak scan is clean, then prunes the
+parent-level duplicates it ingested. Sample CSVs are registered in the
+redaction mapping but NOT copied — the parent-level CSV stays the single
+copy. Dataflow job ids and job names are kept verbatim in `oss/` — the
+bundle folder is named after the primary job id):
 
 ```bash
 python scripts/e2e/e2e_bundle_export.py \
   --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
   --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
+  --metrics stats_diff=integration_test/<JOB_ID>/stats_diff.json \
+  --metrics freetext_crosscheck=integration_test/<JOB_ID>/freetext_crosscheck_metrics.json \
+  --doc stats_diff=integration_test/<JOB_ID>/stats_diff.md \
+  --doc freetext_crosscheck_report=integration_test/<JOB_ID>/freetext_crosscheck_report.md \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
   --out-root integration_test \
-  --no-redact-values
-  # writes integration_test/<JOB_ID>/{real,oss}/
+  --no-redact-values \
+  --prune-inputs
+  # writes integration_test/<JOB_ID>/{real,oss}/ and deletes the ingested
+  # parent-level metrics/markdown after a clean leak scan
 ```
+
+Keep the four `--metrics` labels exactly as written — they name the
+`real/`+`oss/` files (`gcp_metrics.json`, `offline_metrics.json`,
+`stats_diff_metrics.json`, `freetext_crosscheck_metrics.json`) that the
+release pipeline's artifact discovery expects. When a run skipped the
+crosscheck/stats-diff step, drop the matching `--metrics`/`--doc` pairs.
 
 Only the `oss/` folder produced by step 3 is shareable outside the team; keep
 `real/` (and its `mapping.json` decode key) local.

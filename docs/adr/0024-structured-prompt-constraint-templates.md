@@ -51,7 +51,10 @@ actually used (reference values are banned from logs).
    seed exemplars (`<k seeds elided>`) so the privacy rule "reference values
    never reach logs" holds; `full` is an explicit opt-in that logs verbatim
    prompts and carries a WARNING banner. A `sha12` hash supports prompt-drift
-   comparison even at `off`.
+   comparison without verbatim text in both logging modes; `off` (the
+   default) logs nothing at all — zero log surface, per the design doc §3c.
+   *(Erratum 2026-08-19: this sentence originally claimed the `sha12` logs
+   even at `off`, which the implementation never did.)*
 
 ## Alternatives rejected
 

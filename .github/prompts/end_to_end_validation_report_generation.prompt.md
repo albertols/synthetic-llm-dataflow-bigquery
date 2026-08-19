@@ -15,7 +15,10 @@ description: >
   BigQuery via ADC when a file is missing), project, source/landing/quality
   FQNs, Dataflow job_ids, region, PK + identity columns. Output:
   output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md +
-  the integration_test/<job_id>/{real,oss}/ bundle.
+  the integration_test/<job_id>/{real,oss}/ bundle (real/ is the canonical,
+  duplicate-free artifact set; the parent folder keeps only the sample CSVs).
+  Optionally chains /llm_prompt_constraint_recommender at the end to turn the
+  free-text evidence into per-column llm_prompt_constraint recommendations.
 ---
 
 # /end_to_end_validation_report_generation — E2E Engine Validation Report
@@ -73,11 +76,33 @@ only one engine was deployed, run the single-engine subset.
 **Per-deployment artifact folder**: every deployment's artifacts share one
 folder named after the primary Dataflow job id (`<JOB_ID>` = first of
 `JOB_IDS`), e.g. `integration_test/2026-07-09_11_32_56-17188177770294375504/`.
-The sample CSVs (`*.csv`), `e2e_validation_metrics.json`,
-`e2e_gcp_metrics.json`, `stats_diff.json`/`.md`,
-`freetext_crosscheck_metrics.json`/`_report.md`, and the exported `real/` +
-`oss/` bundles (Step 6) all live there. Only the report itself stays under
-`output/`.
+Steps 2–3.5 write their outputs there as **transient working files**; Step 6
+folds every one of them into the `real/` + `oss/` bundles and prunes the
+parent-level duplicates, so a **finished** deployment folder is exactly:
+
+```
+integration_test/<JOB_ID>/
+  <engine>_sample.csv           # one per engine — the ONLY copy (never
+                                # duplicated into real/ or oss/)
+  real/                         # canonical, verbatim — internal use
+    gcp_metrics.json            offline_metrics.json
+    stats_diff_metrics.json     freetext_crosscheck_metrics.json
+    stats_diff.md               freetext_crosscheck_report.md
+    report.md                   mapping.json   # decode key, real/ only
+  oss/                          # same artifacts, de-identified, shareable
+    gcp_metrics.json            offline_metrics.json
+    stats_diff_metrics.json     freetext_crosscheck_metrics.json
+    stats_diff.md               freetext_crosscheck_report.md
+    report.md
+```
+
+No metrics JSON or crosscheck/stats markdown may survive at the parent level
+once Step 6 has run — `real/` is the single source of truth (the historic
+parent-level `e2e_validation_metrics.json`, `e2e_gcp_metrics.json`,
+`stats_diff.json` and `freetext_crosscheck_metrics.json` were always
+byte-identical to their `real/` twins; that duplication is retired). Only the
+report itself stays under `output/`. (Some environments land runs under the
+gitignored plural `integration_tests/` — the layout is identical there.)
 
 ---
 
@@ -272,6 +297,9 @@ python scripts/e2e/source_synthetic_stats_diff.py \
 
 `FREETEXT_COLS` defaults to the free-text subset discovered in Steps 2–3.
 
+These parent-level outputs (like the Step 2/3 metrics JSONs) are **working
+files**: Step 6 folds them into `real/` + `oss/` and prunes them.
+
 ---
 
 ## Step 4 — Diagnose defects and trace each to code
@@ -334,13 +362,14 @@ code ref; keep it tight; no dashboards / Vertex / external LLM suggestions
 
 ---
 
-## Step 6 — Export a shareable bundle (internal `real/` + de-identified `oss/`)
+## Step 6 — Export a shareable bundle (internal `real/` + de-identified `oss/`) and prune the duplicates
 
 The report + metrics + sample CSVs contain the real project / dataset / table
-/ column names and sampled data values. Before sharing with the OSS team,
-split them into two sibling folders with `scripts/e2e/e2e_bundle_export.py`
-(generic — the mapping is derived from the artifacts, so it works for any
-table / environment):
+/ column names and sampled data values. Fold **everything** (four metrics
+JSONs, both crosscheck/stats markdown reports, the report) into the two
+sibling folders with `scripts/e2e/e2e_bundle_export.py` (generic — the
+mapping is derived from the artifacts, so it works for any table /
+environment):
 
 ```bash
 python scripts/e2e/e2e_bundle_export.py \
@@ -348,24 +377,37 @@ python scripts/e2e/e2e_bundle_export.py \
   --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
   --metrics stats_diff=integration_test/<JOB_ID>/stats_diff.json \
   --metrics freetext_crosscheck=integration_test/<JOB_ID>/freetext_crosscheck_metrics.json \
+  --doc stats_diff=integration_test/<JOB_ID>/stats_diff.md \
+  --doc freetext_crosscheck_report=integration_test/<JOB_ID>/freetext_crosscheck_report.md \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
   --out-root integration_test \
-  --no-redact-values
-  # writes integration_test/<JOB_ID>/{real,oss}/
+  --no-redact-values \
+  --prune-inputs
+  # writes integration_test/<JOB_ID>/{real,oss}/ and, after a CLEAN leak
+  # scan, deletes the parent-level metrics/markdown duplicates it ingested
 ```
 
-`--metrics` ingests JSON only — `stats_diff.md` and
-`freetext_crosscheck_report.md` are not redacted into `oss/`; they stay as
-markdown artifacts directly under `integration_test/<JOB_ID>/` next to the
-bundle (Step 7 checks for their presence).
+The `--metrics` labels name the `real/`+`oss/` files (`gcp=` →
+`gcp_metrics.json`, `offline=` → `offline_metrics.json`, `stats_diff=` →
+`stats_diff_metrics.json` …) — keep all four labels exactly as above or the
+release pipeline's artifact discovery will not find them. `--doc` moves the
+two markdown reports: verbatim into `real/<label>.md`, redacted into
+`oss/<label>.md` (`stats_diff=` → `stats_diff.md`,
+`freetext_crosscheck_report=` → `freetext_crosscheck_report.md`).
+
+`--csv` **registers** each sample CSV's header + values in the redaction
+mapping (so the report/doc redaction stays complete) but the CSV is **not**
+copied into `real/` or `oss/` — the parent-level CSV is the single copy, and
+`--prune-inputs` never touches it (nor the report under `output/`).
 
 The bundle folder name defaults to the first Dataflow job id in the gcp
 metrics (`--job-id` overrides), so everything for one deployment sits under
-`integration_test/<JOB_ID>/` next to the metrics JSONs and sample CSVs.
+`integration_test/<JOB_ID>/` next to the sample CSVs.
 
-- `real/` — verbatim `*_metrics.json` + `*_sample.csv` + `report.md` **and**
-  `mapping.json` (the decode key) for internal use.
+- `real/` — verbatim `*_metrics.json` + `stats_diff.md` +
+  `freetext_crosscheck_report.md` + `report.md` **and** `mapping.json` (the
+  decode key) for internal use.
 - `oss/` — the same artifacts with IDENTIFIERS (project/dataset/table/bucket/
   caller email/reference digests/file paths), COLUMN NAMES
   (`COL_NNN`; PK→`PK_COL`, identity→`ID_COL`), and DATA VALUES (`VAL_NNNN`)
@@ -389,18 +431,43 @@ Hand the OSS team the `oss/` folder + the `scripts/e2e/` toolchain; keep
 ## Step 7 — Verify
 
 1. Report opens; relative links resolve.
-2. Every headline number matches `e2e_validation_metrics.json` /
-   `e2e_gcp_metrics.json` / `stats_diff.json` / `freetext_crosscheck_metrics.json`.
+2. Every headline number matches `real/offline_metrics.json` /
+   `real/gcp_metrics.json` / `real/stats_diff_metrics.json` /
+   `real/freetext_crosscheck_metrics.json`.
 3. Each defect has a code-level root cause + fix.
 4. The bundle export printed `leak scan: clean ✅` and `oss/` is free of the
    real project / dataset / table / column names (Dataflow job ids and job
    names are the deliberate exception — they stay verbatim).
-5. `integration_test/<JOB_ID>/` holds the sample CSVs,
-   `e2e_validation_metrics.json`, `e2e_gcp_metrics.json`, and the `real/` +
-   `oss/` bundles.
-6. Crosscheck + stats-diff artifacts present in `integration_test/<JOB_ID>/`
-   (`freetext_crosscheck_metrics.json`/`_report.md`, `stats_diff.json`/`.md`).
+5. `integration_test/<JOB_ID>/` matches the finished-folder tree exactly:
+   the sample CSVs at the parent level, `real/` with the four metrics JSONs +
+   `stats_diff.md` + `freetext_crosscheck_report.md` + `report.md` +
+   `mapping.json`, and `oss/` with the same set minus `mapping.json`.
+6. **No parent-level duplicates survive**: `e2e_validation_metrics.json`,
+   `e2e_gcp_metrics.json`, `stats_diff.json`/`.md`,
+   `freetext_crosscheck_metrics.json`/`_report.md` are gone from the parent
+   (pruned by Step 6) and no `*_sample.csv` exists inside `real/` or `oss/`.
 7. Print a one-line summary: report path + the single most important finding.
+
+---
+
+## Step 8 — OPTIONAL: chain the prompt-constraint recommender
+
+When the free-text evidence shows steerable gaps — `shape_recall < 0.9`,
+spurious shapes, prefix/affix loss, vocabulary or locale drift, or a column
+stuck on the wrong route — offer the user to chain
+`llm_prompt_constraint_recommender.prompt.md` (ask; it edits schema files):
+
+```
+/llm_prompt_constraint_recommender JOB_ID=<JOB_ID> \
+  SCHEMA=<SCHEMA> SOURCE_FQN=<SOURCE_FQN>
+```
+
+It reads this deployment's `integration_test/<JOB_ID>/real/` evidence
+(crosscheck, stats diff, offline + GCP metrics, reports) and writes
+evidence-backed `{"llm_prompt_constraint": …}` objects into the schema
+file's column descriptions (DDL_CONTRACT_GUIDE §4 / ADR 0024), so the next
+run's pool prompts + guided decoding close the observed gaps. Skip it when
+Step 3.5 shows no free-text finding worth steering.
 
 ---
 
@@ -417,9 +484,11 @@ Hand the OSS team the `oss/` folder + the `scripts/e2e/` toolchain; keep
 - **Expected-vs-reality** framing throughout.
 - Report filename is always `end_to_end_validation_report_YYYY_MM_DD_HH_MM.md`
   under `output/`.
-- **Per-deployment artifacts live under `integration_test/<JOB_ID>/`** —
-  sample CSVs, the four metrics JSONs (offline, GCP probe, stats diff,
-  freetext crosscheck), the crosscheck + stats-diff markdown reports, and the
-  exported `real/` + `oss/` bundles.
+- **Per-deployment artifacts live under `integration_test/<JOB_ID>/`** — the
+  sample CSVs at the parent level plus the `real/` + `oss/` bundles holding
+  everything else (four metrics JSONs, crosscheck + stats-diff markdown,
+  report, mapping). Parent-level metrics/markdown files are working copies
+  that Step 6 prunes; **never leave a duplicate behind, never copy a CSV into
+  a bundle**.
 - **Dataflow job ids and job names are never redacted** — they stay verbatim
   in the `oss/` bundle.

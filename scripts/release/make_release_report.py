@@ -116,12 +116,23 @@ def next_version(prev: str | None, bump: str) -> str:
 # discoverable artifact file.
 _ARTIFACT_PATH_PARTS = 3
 
-# basename -> key in the per-job artifact-set dict.
+# basename -> key in the per-job artifact-set dict (legacy flat layout:
+# metrics JSONs directly under integration_test/<job_id>/).
 _ARTIFACT_BASENAMES: dict[str, str] = {
     "e2e_gcp_metrics.json": "gcp",
     "e2e_validation_metrics.json": "offline",
     "freetext_crosscheck_metrics.json": "crosscheck",
     "stats_diff.json": "stats_diff",
+}
+
+# basename -> key for the bundle layout (integration_test/<job_id>/real/…,
+# the e2e_bundle_export.py label-derived names). The redacted oss/ twins are
+# deliberately NOT discoverable — only real/ carries verbatim numbers.
+_BUNDLE_ARTIFACT_BASENAMES: dict[str, str] = {
+    "gcp_metrics.json": "gcp",
+    "offline_metrics.json": "offline",
+    "freetext_crosscheck_metrics.json": "crosscheck",
+    "stats_diff_metrics.json": "stats_diff",
 }
 
 
@@ -142,11 +153,13 @@ def _run_git(*args: str) -> str | None:
 
 def discover_artifact_sets(ref: str) -> dict[str, dict]:
     """job_id -> {"gcp": ..., "offline": ..., "crosscheck": ..., "stats_diff":
-    ...} for every `integration_test/<job_id>/<known_basename>.json` present
-    at `ref`. Files that don't exist for a given job are simply absent from
-    that job's dict (never a crash, never a placeholder). A `ref` with no
-    `integration_test` tree at all (e.g. an early tag, or the empty tree)
-    yields `{}`."""
+    ...} for every known artifact JSON present at `ref`, in either layout:
+    legacy flat (`integration_test/<job_id>/<basename>.json`) or bundle
+    (`integration_test/<job_id>/real/<basename>.json`; the redacted `oss/`
+    twins are skipped). Files that don't exist for a given job are simply
+    absent from that job's dict (never a crash, never a placeholder). A
+    `ref` with no `integration_test` tree at all (e.g. an early tag, or the
+    empty tree) yields `{}`."""
     listing = _run_git("ls-tree", "-r", "--name-only", ref, "--", "integration_test")
     if not listing:
         return {}
@@ -160,7 +173,12 @@ def discover_artifact_sets(ref: str) -> dict[str, dict]:
         if len(parts) < _ARTIFACT_PATH_PARTS or parts[0] != "integration_test":
             continue
         job_id, basename = parts[1], parts[-1]
-        key = _ARTIFACT_BASENAMES.get(basename)
+        if len(parts) == _ARTIFACT_PATH_PARTS:
+            key = _ARTIFACT_BASENAMES.get(basename)
+        elif len(parts) == _ARTIFACT_PATH_PARTS + 1 and parts[2] == "real":
+            key = _BUNDLE_ARTIFACT_BASENAMES.get(basename)
+        else:
+            key = None
         if key is None:
             continue
         raw = _run_git("show", f"{ref}:{path}")

@@ -144,3 +144,29 @@ def test_build_pipeline_threads_source_values_table_into_context(
             dlq_sink=WriteToJsonLines(str(tmp_path / "dlq")),
         )
     assert result["generation_context"].source_values_table == "p.d.customers"
+
+
+def test_build_pipeline_threads_prompt_debug_into_context(
+    tmp_path, customers_schema, customers_reference
+):
+    """ADR 0024 §3c wiring: the CLI's --prompt_debug must survive
+    PipelineConfig → GenerationContext, or engines silently fall back to
+    'off' and no freetext_pool_prompt milestone is ever logged. Constructing
+    the config with prompt_debug= is itself part of the regression: the CLI
+    passes exactly this keyword (run_pipeline.py), so an unknown-field
+    TypeError here means every --prompt_debug invocation crashes."""
+    config = _config(
+        customers_schema,
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        prompt_debug="redacted",
+    )
+    options = PipelineOptions(["--runner=DirectRunner"])
+    with beam.Pipeline(options=options) as p:
+        result = build_pipeline(
+            p,
+            reference_rows=customers_reference,
+            config=config,
+            landing_sink=WriteToJsonLines(str(tmp_path / "landing")),
+            dlq_sink=WriteToJsonLines(str(tmp_path / "dlq")),
+        )
+    assert result["generation_context"].prompt_debug == "redacted"

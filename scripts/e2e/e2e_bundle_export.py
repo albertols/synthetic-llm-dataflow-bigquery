@@ -5,9 +5,11 @@ Produces two sibling folders under ``<out-root>/<job_id>/`` (the primary
 Dataflow job id of the deployment; falls back to the report timestamp when no
 job id is available):
 
-  * ``real/`` — verbatim copies of every metrics JSON + sample CSV + the
+  * ``real/`` — verbatim copies of every metrics JSON + markdown doc + the
     report, plus a ``mapping.json`` decode key (so the internal team can read
-    the real names).
+    the real names). Sample CSVs are NOT copied — the parent-level CSV next
+    to the bundle is the single copy; ``--csv`` only feeds the redaction
+    mapping (header columns + cell values).
   * ``oss/``  — the SAME artifacts with every environment-specific and
     data-specific token deterministically replaced by a generic placeholder,
     safe to hand to the open-source team. A run whose ``oss/`` output still
@@ -31,13 +33,20 @@ Usage:
     python scripts/e2e/e2e_bundle_export.py \
         --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
         --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
+        --doc stats_diff=integration_test/<JOB_ID>/stats_diff.md \
+        --doc freetext_crosscheck_report=integration_test/<JOB_ID>/freetext_crosscheck_report.md \
         --csv b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv \
         --report output/end_to_end_validation_report_2026_07_07_16_26.md \
-        --out-root integration_test
+        --out-root integration_test \
+        --prune-inputs
         # --job-id <JOB_ID>             (default: first Dataflow job id in the
         #                                gcp metrics, else the report timestamp)
         # --no-redact-values            (keep real dev data values in oss/;
         #                                metadata is ALWAYS hidden either way)
+        # --prune-inputs                (after a CLEAN leak scan, delete the
+        #                                metrics/doc input files that live
+        #                                directly in the bundle folder — real/
+        #                                keeps the single canonical copy)
 """
 
 from __future__ import annotations
@@ -91,6 +100,27 @@ def _derive_bundle_name(
     return _derive_timestamp(report)
 
 
+def _parse_labeled(items: list[str], flag: str) -> dict[str, Path]:
+    """`label=path` pairs (repeatable CLI flag) → {label: Path}."""
+    paths: dict[str, Path] = {}
+    for item in items:
+        if "=" not in item:
+            raise SystemExit(f"{flag} expects label=path, got {item!r}")
+        label, path = item.split("=", 1)
+        paths[label.strip()] = Path(path.strip())
+    return paths
+
+
+def _prune_inputs(paths: list[Path], base: Path) -> None:
+    """Delete input files living directly in the bundle folder — their
+    ``real/`` copies are the canonical location after a clean leak scan."""
+    base_resolved = base.resolve()
+    for p in paths:
+        if p.resolve().parent == base_resolved:
+            p.unlink()
+            print(f"pruned duplicate input: {p}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -104,8 +134,17 @@ def main(argv: list[str] | None = None) -> int:
         "--csv",
         action="append",
         default=[],
-        help="engine_label=path.csv (repeatable). Sample generated-data CSVs "
-        "copied verbatim into real/ and redacted into oss/.",
+        help="engine_label=path.csv (repeatable). Registers the sample CSV's "
+        "header columns + cell values in the redaction mapping; the CSV "
+        "itself is NOT copied into real/ or oss/ (the parent-level copy is "
+        "the only one).",
+    )
+    ap.add_argument(
+        "--doc",
+        action="append",
+        default=[],
+        help="label=path.md (repeatable). Markdown artifact copied verbatim "
+        "into real/<label>.md and redacted into oss/<label>.md.",
     )
     ap.add_argument("--report", type=Path, required=True)
     ap.add_argument("--out-root", type=Path, default=Path("integration_test"))
@@ -123,26 +162,25 @@ def main(argv: list[str] | None = None) -> int:
         "Metadata (project/dataset/table/columns) is ALWAYS hidden regardless. "
         "Use --no-redact-values to keep real dev data values in oss/.",
     )
+    ap.add_argument(
+        "--prune-inputs",
+        action="store_true",
+        help="after a CLEAN leak scan, delete the --metrics/--doc input files "
+        "that live directly in the bundle folder (their real/ copies become "
+        "the single canonical location). CSVs and the report are never "
+        "pruned.",
+    )
     args = ap.parse_args(argv)
 
-    metrics_paths: dict[str, Path] = {}
-    for item in args.metrics:
-        if "=" not in item:
-            raise SystemExit(f"--metrics expects label=path, got {item!r}")
-        label, path = item.split("=", 1)
-        metrics_paths[label.strip()] = Path(path.strip())
-
-    csv_paths: dict[str, Path] = {}
-    for item in args.csv:
-        if "=" not in item:
-            raise SystemExit(f"--csv expects engine_label=path, got {item!r}")
-        label, path = item.split("=", 1)
-        csv_paths[label.strip()] = Path(path.strip())
+    metrics_paths = _parse_labeled(args.metrics, "--metrics")
+    csv_paths = _parse_labeled(args.csv, "--csv")
+    doc_paths = _parse_labeled(args.doc, "--doc")
 
     metrics = {
         label: json.loads(p.read_text()) for label, p in metrics_paths.items()
     }
     csv_texts = {label: p.read_text() for label, p in csv_paths.items()}
+    doc_texts = {label: p.read_text() for label, p in doc_paths.items()}
     report_text = args.report.read_text()
 
     mapping = build_mapping(metrics, redact_values=args.redact_values)
@@ -154,11 +192,12 @@ def main(argv: list[str] | None = None) -> int:
     real_dir.mkdir(parents=True, exist_ok=True)
     oss_dir.mkdir(parents=True, exist_ok=True)
 
-    # real/ — verbatim + decode key
+    # real/ — verbatim + decode key. Sample CSVs are deliberately NOT copied:
+    # the parent-level CSV next to the bundle stays the single copy.
     for label, p in metrics_paths.items():
         shutil.copyfile(p, real_dir / f"{label}_metrics.json")
-    for label, p in csv_paths.items():
-        shutil.copyfile(p, real_dir / f"{label}_sample.csv")
+    for label, p in doc_paths.items():
+        shutil.copyfile(p, real_dir / f"{label}.md")
     shutil.copyfile(args.report, real_dir / "report.md")
     (real_dir / "mapping.json").write_text(
         json.dumps(mapping.to_dict(), indent=2, ensure_ascii=False)
@@ -169,8 +208,8 @@ def main(argv: list[str] | None = None) -> int:
         (oss_dir / f"{label}_metrics.json").write_text(
             json.dumps(mapping.redact_json(obj), indent=2, ensure_ascii=False)
         )
-    for label, text in csv_texts.items():
-        (oss_dir / f"{label}_sample.csv").write_text(_redact_csv(mapping, text))
+    for label, text in doc_texts.items():
+        (oss_dir / f"{label}.md").write_text(mapping.redact_text(text))
     (oss_dir / "report.md").write_text(mapping.redact_text(report_text))
 
     leaked = _leak_scan(oss_dir, mapping)
@@ -190,6 +229,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {f}: {tok!r}")
         return 1
     print("leak scan: clean ✅")
+
+    if args.prune_inputs:
+        # Sample CSVs (the only copy) and the report (lives under output/)
+        # are never pruned — only ingested metrics JSONs + markdown docs.
+        _prune_inputs([*metrics_paths.values(), *doc_paths.values()], base)
     return 0
 
 

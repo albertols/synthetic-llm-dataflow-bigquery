@@ -122,8 +122,10 @@ When this prompt is chained from the E2E validation report (its Step 3.5),
 `--out-json`/`--out-md` are overridden to
 `integration_test/<JOB_ID>/freetext_crosscheck_metrics.json` and
 `_report.md` so the crosscheck artifacts land next to the rest of that
-deployment's evidence; run standalone (as above) and the defaults stay
-`output/freetext_crosscheck/`.
+deployment's evidence — as **working files**: the E2E prompt's Step 6 then
+folds them into `integration_test/<JOB_ID>/real/` (verbatim) + `oss/`
+(redacted) and prunes the parent-level copies. Run standalone (as above) and
+the defaults stay `output/freetext_crosscheck/`.
 
 The script computes, per column, on both tables:
 

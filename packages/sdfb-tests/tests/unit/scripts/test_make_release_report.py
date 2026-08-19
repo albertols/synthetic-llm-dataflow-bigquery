@@ -176,6 +176,38 @@ def test_discover_artifact_sets_groups_by_job_and_parses_json():
     assert "gcp" not in second
 
 
+def test_discover_artifact_sets_supports_real_bundle_layout():
+    """New layout: metrics live in `integration_test/<job>/real/` under the
+    bundle-export basenames; `oss/` twins (redacted) must be ignored."""
+    job = "2026-08-11_06_04_05-9"
+    tree = _make_tree(
+        {
+            f"integration_test/{job}/real/gcp_metrics.json": json.dumps(
+                {"dataflow": [{"job_id": "abc"}]}
+            ),
+            f"integration_test/{job}/real/offline_metrics.json": json.dumps(
+                {"engines": {}}
+            ),
+            f"integration_test/{job}/real/stats_diff_metrics.json": json.dumps(
+                {"columns": {}}
+            ),
+            f"integration_test/{job}/real/freetext_crosscheck_metrics.json": (
+                json.dumps({"meta": {}})
+            ),
+            # Redacted twin — must never be picked up as an artifact.
+            f"integration_test/{job}/oss/gcp_metrics.json": json.dumps(
+                {"dataflow": [{"job_id": "REDACTED"}]}
+            ),
+        }
+    )
+    sets = rel.discover_artifact_sets(tree)
+    assert set(sets.keys()) == {job}
+    assert sets[job]["gcp"] == {"dataflow": [{"job_id": "abc"}]}
+    assert sets[job]["offline"] == {"engines": {}}
+    assert sets[job]["stats_diff"] == {"columns": {}}
+    assert sets[job]["crosscheck"] == {"meta": {}}
+
+
 def test_latest_job_picks_lexicographically_greatest_id():
     sets = {"2026-01-01_00_00_00-1": {}, "2026-02-02_00_00_00-2": {}}
     assert rel.latest_job(sets) == "2026-02-02_00_00_00-2"
