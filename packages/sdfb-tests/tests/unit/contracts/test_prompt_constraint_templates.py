@@ -114,3 +114,28 @@ class TestRenderClause:
         clause = render_prompt_clause(PromptConstraint(notes="a\nb " + "x" * 600))
         assert "\n" not in clause
         assert len(clause) <= 500
+
+
+class TestParseSiteNamesTheColumn:
+    def test_unknown_keys_milestone_carries_the_column(self, caplog) -> None:
+        # The WARNING existed but never said WHICH column carried the typo'd
+        # key — useless for debugging a 67-column DDL.
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+            parse_prompt_constraint(
+                '{"llm_prompt_constraint": {"format": "x", "hologram": true}}',
+                column="COL_REF",
+            )
+        text = "\n".join(r.message for r in caplog.records)
+        assert "name=prompt_constraint_unknown_keys" in text
+        assert "column=COL_REF" in text
+        assert "hologram" in text
+
+    def test_validation_error_names_the_column(self) -> None:
+        with pytest.raises(DescriptionJsonError) as exc:
+            parse_prompt_constraint(
+                '{"llm_prompt_constraint": {"pattern": "[unclosed"}}',
+                column="COL_REF",
+            )
+        assert "COL_REF" in str(exc.value)

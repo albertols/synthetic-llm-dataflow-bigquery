@@ -61,18 +61,23 @@ def log_prompt_debug(
     """
     if mode not in ("redacted", "full"):
         return
-    import hashlib
-
-    sha12 = hashlib.sha256(prompt.encode()).hexdigest()[:12]
     log_milestone(
         "freetext_pool_prompt",
         level=logging.WARNING if mode == "full" else logging.INFO,
         column=column,
         mode=mode,
         prompt_chars=len(prompt),
-        sha12=sha12,
+        sha12=sha12(prompt),
         text=prompt if mode == "full" else redacted_prompt,
     )
+
+
+def sha12(text: str) -> str:
+    """First 12 hex chars of the text's sha256 — the drift-comparison key
+    used for pool prompts and rendered constraint clauses alike."""
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
 def log_milestone(name: str, *, level: int = logging.INFO, **fields) -> str:

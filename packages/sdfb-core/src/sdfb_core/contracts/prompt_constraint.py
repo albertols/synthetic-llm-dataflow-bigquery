@@ -105,13 +105,17 @@ class PromptConstraint(BaseModel):
         return v
 
 
-def parse_prompt_constraint(description: str | None) -> PromptConstraint | None:
+def parse_prompt_constraint(
+    description: str | None, column: str = ""
+) -> PromptConstraint | None:
     """The column's constraint, or None when the description is unmarked.
 
     String value ⇒ legacy prose (``notes``). Object value ⇒ typed keys;
     unknown keys are skipped with a ``prompt_constraint_unknown_keys``
     WARNING (forward compatibility), invalid known keys raise
-    :class:`DescriptionJsonError` (loud stop).
+    :class:`DescriptionJsonError` (loud stop). ``column`` names the owner
+    in both — a keys warning or a validation error without the column was
+    undebuggable against a 67-column DDL (2026-08-20 follow-up).
     """
     obj = extract_embedded_json(description, _CONSTRAINT_MARKER)
     if obj is None:
@@ -127,6 +131,7 @@ def parse_prompt_constraint(description: str | None) -> PromptConstraint | None:
         log_milestone(
             "prompt_constraint_unknown_keys",
             level=logging.WARNING,
+            column=column,
             keys=",".join(unknown),
         )
     try:
@@ -134,8 +139,9 @@ def parse_prompt_constraint(description: str | None) -> PromptConstraint | None:
             {k: v for k, v in value.items() if k in known}
         )
     except ValidationError as exc:
+        owner = f" on column {column!r}" if column else ""
         raise DescriptionJsonError(
-            f"llm_prompt_constraint object failed validation: {exc}"
+            f"llm_prompt_constraint object{owner} failed validation: {exc}"
         ) from exc
 
 

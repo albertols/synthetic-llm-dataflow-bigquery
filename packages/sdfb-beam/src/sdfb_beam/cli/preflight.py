@@ -17,13 +17,14 @@ contract; the override is logged, never silent.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.relational import parse_llm_prompt_constraint
-from sdfb_core.observability import log_milestone
+from sdfb_core.observability import log_milestone, sha12
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sdfb_core.contracts import TableSchema
@@ -53,23 +54,34 @@ def _report_prompt_constraints(
     milestone answers that. A column whose description carries a MARKED but
     unparseable constraint object stops loudly (the P1 posture, per column).
     """
-    found: list[str] = []
+    found: dict[str, dict] = {}
     for col in table_schema.columns:
         try:
-            if parse_llm_prompt_constraint(col.description):
-                found.append(col.name)
+            clause = parse_llm_prompt_constraint(
+                col.description, column=col.name
+            )
         except DescriptionJsonError as exc:
             raise SystemExit(
                 f"[preflight P1] {table_schema.fqn}.{col.name}: column "
                 f"description carries an 'llm_prompt_constraint'-marked JSON "
                 f"object that does not parse.\n{exc}"
             ) from exc
+        if clause:
+            # The fetched clause travels with the milestone (2026-08-20
+            # follow-up): a Terraform edit is verifiable from logs by
+            # clause text or by diffing clause_sha12 across launches.
+            found[col.name] = {
+                "clause": clause,
+                "clause_sha12": sha12(clause),
+                "chars": len(clause),
+            }
     if found:
         log_milestone(
             "prompt_constraints_found",
             columns=",".join(found),
             count=len(found),
             enabled=enabled,
+            detail=json.dumps(found, separators=(",", ":")),
         )
     elif enabled:
         log_milestone(

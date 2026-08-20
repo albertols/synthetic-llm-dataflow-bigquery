@@ -282,10 +282,13 @@ the report.
    "`spurious_shapes` → empty") → risk notes (coverage %, route change).
 3. **Declined columns** — evidence seen, why no constraint (not steerable /
    typed route sufficient / sampler-owned defect + owning code area).
-4. **Propagation checklist** — terraform/bq update → extract_ddl → run flags
-   (`--prompt_constraints on`, `--prompt_debug redacted` for the first
-   debug run; grep worker logs for `freetext_pool_prompt` + `sha12` drift,
-   and `prompt_constraints_found` listing the columns).
+4. **Propagation checklist** — terraform/bq update → extract_ddl → run with
+   `--prompt_constraints on`; grep logs for `prompt_constraints_found` —
+   BOTH the launcher (preflight) and worker (generation-plan) variants
+   carry the fetched rendered clause + per-column `clause_sha12`, so the
+   edit is verifiable without `--prompt_debug` (diff `clause_sha12` vs the
+   previous launch). Add `--prompt_debug redacted` only when the full pool
+   prompt is also needed (`freetext_pool_prompt` + `sha12` drift).
 
 Then produce the **de-identified twin** with the bundle's standard mapping —
 this is the version to share/report outside the environment (column names →

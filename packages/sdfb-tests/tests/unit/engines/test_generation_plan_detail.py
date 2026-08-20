@@ -77,3 +77,72 @@ def test_detail_reports_expandability():
     detail = build_plan_detail(profile_columns(schema, rows))
     assert detail["CODE"]["expandable"] is True
     assert detail["PROSE"]["expandable"] is False
+
+
+def test_constraints_detail_shows_the_fetched_clause():
+    # Debugging "did my Terraform constraint reach the engine?" needed a
+    # worker-log line carrying WHAT was fetched, not the boolean
+    # `constraint: true` — the clause is config (Terraform/git-owned, never
+    # real data per ADR 0024 §privacy), so it is loggable in full.
+    from sdfb_core.engines.generation_plan import build_constraints_detail
+
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.d.t"},
+            "schema": [
+                {"name": "PLAIN", "type": "STRING", "mode": "REQUIRED"},
+                {
+                    "name": "REF",
+                    "type": "STRING",
+                    "mode": "NULLABLE",
+                    "description": (
+                        '{"llm_prompt_constraint": {"format": "SWIFT-style ref",'
+                        ' "pattern": "^[A-Z]{4}[0-9]{3}$", "length": 7,'
+                        ' "examples": ["ABCD123"]}}'
+                    ),
+                },
+            ],
+        }
+    )
+    rows = [
+        {"PLAIN": f"note {i}", "REF": f"{'ABCD'[i % 4] * 4}{i:03d}"}
+        for i in range(60)
+    ]
+    detail = build_constraints_detail(profile_columns(schema, rows))
+    assert set(detail) == {"REF"}
+    entry = detail["REF"]
+    assert "SWIFT-style ref" in entry["clause"]
+    assert entry["chars"] == len(entry["clause"])
+    assert len(entry["clause_sha12"]) == 12
+    assert entry["pattern"] is True
+    assert entry["sets_length"] is True
+    assert entry["examples"] == 1
+
+
+def test_constraints_detail_empty_without_constraints():
+    from sdfb_core.engines.generation_plan import build_constraints_detail
+
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.d.t"},
+            "schema": [{"name": "NOTES", "type": "STRING", "mode": "NULLABLE"}],
+        }
+    )
+    rows = [{"NOTES": f"free prose num {i}"} for i in range(60)]
+    assert build_constraints_detail(profile_columns(schema, rows)) == {}
+
+
+def test_constraints_detail_from_b2_profiles():
+    from sdfb_core.engines.generation_plan import build_constraints_detail
+
+    field = FieldSchema.model_validate(
+        {
+            "name": "REF",
+            "type": "STRING",
+            "mode": "NULLABLE",
+            "description": '{"llm_prompt_constraint": {"charset": "digits only"}}',
+        }
+    )
+    rows = [{"REF": f"{i:07d}"} for i in range(60)]
+    detail = build_constraints_detail({"REF": profile_column(field, rows)})
+    assert "digits only" in detail["REF"]["clause"]

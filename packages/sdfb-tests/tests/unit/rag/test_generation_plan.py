@@ -153,3 +153,53 @@ def test_pool_sources_distinguish_store_hits_from_fresh_builds(monkeypatch):
     engine = get_engine("b1_rag")()
     engine.setup(_StubClient(), _ctx(pool_store=store))
     assert json.loads(plans[0]["pool_sources"]) == {"notes": "store"}
+
+
+def test_worker_logs_carry_the_fetched_constraint_clause(caplog):
+    # 2026-08-20 follow-up: the launcher preflight named constrained
+    # COLUMNS, the worker plan said `constraint: true` — neither showed
+    # WHAT was fetched from the BigQuery DDL metadata. The engine now
+    # emits `prompt_constraints_found` (same greppable name as preflight)
+    # with the rendered clause + clause_sha12 per column.
+    import logging
+
+    from sdfb_core.contracts import TableSchema
+    from sdfb_core.engines.b1_rag import B1RagEngine, HashingEmbedder
+
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.constrained_t"},
+            "schema": [
+                {
+                    "name": "REF",
+                    "type": "STRING",
+                    "mode": "REQUIRED",
+                    "description": (
+                        'ops ref {"llm_prompt_constraint":'
+                        ' {"format": "4 letters then 3 digits"}}'
+                    ),
+                },
+            ],
+        }
+    )
+    rows = [{"REF": f"{'ABCD'[i % 4] * 4}{i:03d}"} for i in range(60)]
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=rows,
+        reference_digest="constraint-log-digest",
+        pipeline_run_id="constraint-log-run",
+    )
+
+    class _NoLLM:
+        def generate_json(self, *, n=1, **kw):
+            return [{"values": [f"ZZZZ{i:03d}" for i in range(40)]} for _ in range(n)]
+
+    engine = B1RagEngine(embedder=HashingEmbedder())
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(_NoLLM(), ctx)
+    text = "\n".join(r.message for r in caplog.records)
+    assert "name=prompt_constraints_found" in text
+    assert "4 letters then 3 digits" in text
+    assert "clause_sha12" in text
+    assert "engine=b1_rag" in text
+    engine.teardown()

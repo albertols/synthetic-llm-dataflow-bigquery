@@ -46,6 +46,7 @@ from sdfb_core.engines.base import (
     ModelClient,
 )
 from sdfb_core.engines.generation_plan import (
+    build_constraints_detail,
     build_plan,
     build_plan_detail,
     should_log_plan,
@@ -155,6 +156,20 @@ class B2LibraryEngine(GenerationEngine):
                 build_plan_detail(self._profiles), separators=(",", ":")
             ),
         )
+        # Fetched constraint clauses, verbatim — the b1 mirror (2026-08-20
+        # follow-up: a Terraform description edit must be verifiable from
+        # worker logs without a --prompt_debug run).
+        constraints = build_constraints_detail(self._profiles)
+        if constraints:
+            log_milestone(
+                "prompt_constraints_found",
+                engine=self.name,
+                table=ctx.table_schema.fqn,
+                columns=",".join(constraints),
+                count=len(constraints),
+                enabled=bool(getattr(ctx, "prompt_constraints", True)),
+                detail=json.dumps(constraints, separators=(",", ":")),
+            )
 
     # -- pickling across the Beam worker boundary ---------------------------
     #

@@ -214,7 +214,7 @@ def _profile_one(col: FieldSchema, values: list[object]) -> ColumnProfile:
     # types keep their route: numeric fidelity is owned by the B.2
     # inverse-CDF acceptance path (ADR 0022), so LLM-generating them would
     # regress a documented ceiling.
-    pc = parse_prompt_constraint(col.description)
+    pc = parse_prompt_constraint(col.description, column=col.name)
     force_llm = pc is not None and pc.route == "llm"
     if force_llm and (
         col.bq_type not in _STRINGY_BQ_TYPES
@@ -450,7 +450,7 @@ def _profile_string(
     categorical fallthrough — the column generates via the LLM pool with
     its rendered constraint."""
     if pc is None:
-        pc = parse_prompt_constraint(col.description)
+        pc = parse_prompt_constraint(col.description, column=col.name)
     constraint = render_prompt_clause(pc) if pc is not None else ""
     c_pattern = pc.pattern if pc is not None else ""
     c_sets_length = pc is not None and pc.length is not None

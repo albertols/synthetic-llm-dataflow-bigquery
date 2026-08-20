@@ -125,7 +125,10 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 | `source_stats_exact_failed` (WARNING) | exact scan failed; run degraded to sample tier and stays retryable — investigate, not fatal |
 | `temporal_range_clamped` | a temporal column's floor hit now−10y; its decile vector was clamped too |
 | `freetext_pool_built target=` | compare per-column targets R1 vs R3 — the exact-distinct lift |
-| `generation_plan` (detail) | per-column route + null/empty/shapes/constraint — the first thing to check when a column misbehaves |
+| `generation_plan` (detail) | per-column route + null/empty/shapes/constraint/expandable — the first thing to check when a column misbehaves |
+| `prompt_constraints_found` (launcher + worker) | the `llm_prompt_constraint` clauses actually fetched from the DDL: rendered clause + `clause_sha12` per column (launcher = preflight over the schema, worker = per generation plan). Diff `clause_sha12` across launches to verify a Terraform edit landed |
+| `prompt_constraint_unknown_keys` (WARNING) | a description carries a typo'd/newer constraint key — now names the `column=` |
+| `identifier_source_filter size=` (+ `_absent`/`_error`) | ADR 0025: an identifier column's FULL source domain feeds its mask table + novelty rejection |
 | `freetext_pool_source_filter size=` | ADR 0023: the column's FULL source domain is in the pool rejection set |
 | `freetext_pool_source_filter_absent` / `_error` (WARNING) | domain above cap / store error — pool built with sample-only rejection; check copy_fraction post-run |
 | `pool_taint_rebuild` (WARNING, launcher) | warm pools overlapped the live source → deleted + rebuilt clean (expected ONCE per tainted pre-ADR-0023 digest) |

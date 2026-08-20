@@ -117,6 +117,14 @@ def test_constraints_found_are_listed(monkeypatch):
     (_, kw) = next(c for c in calls if c[0] == "prompt_constraints_found")
     assert kw["columns"] == "NOTES"
     assert kw["count"] == 1
+    # The milestone shows WHAT was fetched, not just where: the rendered
+    # clause plus its sha12, so a Terraform edit is verifiable from logs.
+    import json as _json
+
+    detail = _json.loads(kw["detail"])
+    assert detail["NOTES"]["clause"] == "SWIFT refs"
+    assert len(detail["NOTES"]["clause_sha12"]) == 12
+    assert detail["NOTES"]["chars"] == len("SWIFT refs")
 
 
 def test_constraints_disabled_and_none_found_stays_silent(monkeypatch):

@@ -15,6 +15,7 @@ import threading
 from typing import Any
 
 from sdfb_core.engines.text_shapes import shape_mix_is_identifier_like
+from sdfb_core.observability import sha12
 
 # (engine, reference_digest, table_fqn) triples already logged by this
 # worker process. Keyed per engine so a b1 + b2 comparison run on the same
@@ -75,6 +76,37 @@ def build_plan_detail(profiles: dict[str, Any]) -> dict[str, dict]:
     return dict(sorted(detail.items()))
 
 
+def build_constraints_detail(profiles: dict[str, Any]) -> dict[str, dict]:
+    """column → the `llm_prompt_constraint` actually fetched from the DDL.
+
+    The 2026-08-20 follow-up: the launcher preflight named constrained
+    columns and the plan detail said `constraint: true`, but nothing in the
+    worker logs showed WHAT was fetched — a Terraform description edit was
+    unverifiable without a `--prompt_debug` run. The rendered clause is
+    config (Terraform/git-owned; real values are banned from constraints by
+    ADR 0024's privacy rule), so it logs in full; `clause_sha12` is the
+    drift-comparison key shared with `freetext_pool_prompt`. Duck-typed
+    like :func:`build_plan_detail` (b1/b2 parity).
+    """
+    detail: dict[str, dict] = {}
+    for name, prof in profiles.items():
+        clause = getattr(prof, "llm_prompt_constraint", "") or ""
+        pattern = getattr(prof, "constraint_pattern", "") or ""
+        examples = getattr(prof, "constraint_examples", ()) or ()
+        sets_length = bool(getattr(prof, "constraint_sets_length", False))
+        if not clause and not pattern and not examples:
+            continue
+        detail[name] = {
+            "clause": clause,
+            "clause_sha12": sha12(clause),
+            "chars": len(clause),
+            "pattern": bool(pattern),
+            "sets_length": sets_length,
+            "examples": len(examples),
+        }
+    return dict(sorted(detail.items()))
+
+
 def build_plan(profiles: dict[str, Any]) -> dict[str, list[str]]:
     """column-profile map → {generation_type: sorted [columns]}.
 
@@ -98,6 +130,7 @@ def build_plan(profiles: dict[str, Any]) -> dict[str, list[str]]:
 
 
 __all__ = [
+    "build_constraints_detail",
     "build_plan",
     "build_plan_detail",
     "clear_generation_plan_log",

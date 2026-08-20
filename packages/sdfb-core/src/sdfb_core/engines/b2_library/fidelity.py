@@ -379,7 +379,7 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
     # classification into the LLM free-text route (B.1 parity). Non-STRING
     # types keep their route — B.2's own inverse-CDF path owns numeric
     # fidelity (ADR 0022) — with the same WARNING milestone as B.1.
-    pc = parse_prompt_constraint(field.description)
+    pc = parse_prompt_constraint(field.description, column=field.name)
     force_llm = pc is not None and pc.route == "llm"
     if force_llm:
         if field.bq_type in _STRINGY_BQ_TYPES:

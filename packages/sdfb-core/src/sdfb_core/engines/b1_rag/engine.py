@@ -55,6 +55,9 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     escalating_sampling,
 )
+from sdfb_core.engines.generation_plan import (
+    build_constraints_detail as _build_constraints_detail,
+)
 from sdfb_core.engines.generation_plan import build_plan as _build_plan
 from sdfb_core.engines.generation_plan import (
     build_plan_detail as _build_plan_detail,
@@ -356,6 +359,29 @@ class B1RagEngine(GenerationEngine):
             columns_detail=json.dumps(
                 _build_plan_detail(self._profiles), separators=(",", ":")
             ),
+        )
+        self._log_prompt_constraints(ctx, "b1_rag")
+
+    def _log_prompt_constraints(
+        self, ctx: GenerationContext, engine: str
+    ) -> None:
+        """One worker-log line per plan showing the `llm_prompt_constraint`
+        clauses actually fetched from the DDL metadata — the launcher
+        preflight names columns only, and `columns_detail` only says
+        `constraint: true` (2026-08-20 follow-up). Same greppable milestone
+        name as the preflight's."""
+        assert self._profiles is not None
+        detail = _build_constraints_detail(self._profiles)
+        if not detail:
+            return
+        log_milestone(
+            "prompt_constraints_found",
+            engine=engine,
+            table=ctx.table_schema.fqn,
+            columns=",".join(detail),
+            count=len(detail),
+            enabled=bool(getattr(ctx, "prompt_constraints", True)),
+            detail=json.dumps(detail, separators=(",", ":")),
         )
 
     def teardown(self) -> None:

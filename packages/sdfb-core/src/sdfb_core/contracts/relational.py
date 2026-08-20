@@ -93,7 +93,7 @@ def parse_relational_contract(description: str | None) -> RelationalContract | N
         ) from exc
 
 
-def parse_llm_prompt_constraint(description: str | None) -> str:
+def parse_llm_prompt_constraint(description: str | None, column: str = "") -> str:
     """Rendered per-column prompt clause from a column description, or ``""``.
 
     Facade over :mod:`sdfb_core.contracts.prompt_constraint` (ADR 0024):
@@ -106,7 +106,7 @@ def parse_llm_prompt_constraint(description: str | None) -> str:
         render_prompt_clause,
     )
 
-    pc = parse_prompt_constraint(description)
+    pc = parse_prompt_constraint(description, column=column)
     return "" if pc is None else render_prompt_clause(pc)
 
 
