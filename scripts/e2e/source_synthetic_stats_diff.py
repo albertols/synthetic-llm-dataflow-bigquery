@@ -54,6 +54,10 @@ _UNSUPPORTED_BQ_TYPES = frozenset({"RECORD", "STRUCT"})
 # null_delta/empty_delta (the empty-parity seam, ADR 0022 / 2026-08-05
 # fidelity design) via its max absolute magnitude.
 _WARN_ENTROPY_GAP = 0.3
+# Mirrors the `numeric.decile_ks` post-run rule in config/thresholds.yml
+# (warn 0.2 / fail 0.4) — promoted to the catalog after the 2026-08-11 R1
+# pair, where 22 numeric columns failed with no rule anywhere scoring it.
+# Keep the two in sync.
 _WARN_DECILE_KS = 0.2
 _WARN_PARITY_DELTA = 0.1
 _FAIL_MULTIPLIER = 2.0

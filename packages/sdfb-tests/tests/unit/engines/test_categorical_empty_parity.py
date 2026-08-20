@@ -72,9 +72,14 @@ def test_b2_temperature_reweighting_pins_sparsity_mass() -> None:
     assert abs(_empty_share(values) - 0.95) < 0.02
 
 
-def test_substantive_categories_still_flatten_toward_uniform() -> None:
-    # Diversity intent preserved: within the substantive 5%, a skewed pair
-    # flattens at low similarity.
+def test_substantive_categories_follow_empirical_frequencies() -> None:
+    # 2026-08-11 R1 (both tables): the substantive similarity blend
+    # flattened every skewed enum toward uniform at the default 0.5 —
+    # ~25 categorical columns with entropy gaps -0.2..-0.99 (A_TABLE
+    # COL_004-class: source ~all EUR, synthetic near-uniform over 37
+    # currencies). Categorical marginals now follow the empirical
+    # frequency table at ANY similarity — ADR 0013's original contract;
+    # `similarity` stays an LLM/retrieval dial, not a fidelity dial.
     prof = ColumnProfile(
         name="FLAG",
         bq_type="STRING",
@@ -83,9 +88,11 @@ def test_substantive_categories_still_flatten_toward_uniform() -> None:
         null_fraction=0.0,
         categories={" ": 800, "S": 190, "N": 10},
     )
-    sampler = ColumnSampler(prof)
-    values = sampler.sample_numpy(np.random.default_rng(7), 20000, 0.0)
-    s = sum(1 for v in values if v == "S")
-    n = sum(1 for v in values if v == "N")
-    assert abs(_empty_share(values) - 0.8) < 0.02  # sparsity still pinned
-    assert n / max(s, 1) > 0.6  # 19:1 skew flattened to ~1:1 at similarity 0
+    for similarity in (0.0, 0.5, 1.0):
+        sampler = ColumnSampler(prof)
+        values = sampler.sample_numpy(np.random.default_rng(7), 20000, similarity)
+        s = sum(1 for v in values if v == "S")
+        n = sum(1 for v in values if v == "N")
+        assert abs(_empty_share(values) - 0.8) < 0.02  # sparsity pinned
+        assert abs(s / 20000 - 0.19) < 0.02
+        assert n / max(s, 1) < 0.12, "19:1 skew must survive sampling"

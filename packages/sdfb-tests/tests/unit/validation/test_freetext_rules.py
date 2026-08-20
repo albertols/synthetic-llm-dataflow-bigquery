@@ -123,3 +123,44 @@ def test_distinct_floor_skips_low_cardinality_sources():
     }
     rules = [r["rule"] for r in _probe.evaluate_freetext_rules(cols)]
     assert "freetext.distinct_floor" not in rules
+
+
+def test_copy_fraction_exempts_day_granularity_temporal_columns():
+    # 2026-08-11 A_TABLE R1: 5 temporal day-granularity columns failed the
+    # BLOCKER unconditionally while `memorization_flags` had already
+    # demoted the same columns to INFO — a 3650-day domain collides with a
+    # dense source by domain size, never per-row memorization. The rule now
+    # honors the probe's `temporal_day_granularity` flag: the result row
+    # stays visible but passes, tagged with the exemption.
+    cols = {
+        "LOAD_DATE": {
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 2932,
+            "source_distinct": 7574,
+            "source_distinct_ratio": 0.036,
+            "copy_ratio_substantive": 0.3664,
+            "temporal_day_granularity": True,
+        },
+        "FREE_ID": {  # non-temporal control: still a BLOCKER failure
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 61707,
+            "source_distinct": 9053,
+            "source_distinct_ratio": 0.043,
+            "copy_ratio_substantive": 0.1186,
+            "temporal_day_granularity": False,
+        },
+    }
+    results = _probe.evaluate_freetext_rules(cols)
+    by_col = {
+        (r["rule"], r["column"]): r
+        for r in results
+        if r["rule"] == "freetext.copy_fraction"
+    }
+    exempt = by_col[("freetext.copy_fraction", "LOAD_DATE")]
+    assert exempt["passed"] is True
+    assert exempt.get("exempt") == "temporal_day_granularity"
+    assert by_col[("freetext.copy_fraction", "FREE_ID")]["passed"] is False

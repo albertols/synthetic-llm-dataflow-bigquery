@@ -67,6 +67,10 @@ _SHAPE_PRECISION_WARN = 0.90  # below this, the generator invents formats
 _FRACTION_DELTA_WARN = 0.10   # null/empty/charclass delta that matters
 _LEN_RATIO_WARN = 0.20        # relative mean-length divergence
 _COPY_FRACTION_WARN = 0.30    # literal copy fraction that reads as memorization
+# A synthetic value seen >= this many times in the source SAMPLE is enum
+# mass, not a copy (mirrors the engines' _FREE_TEXT_HEAD_MIN_COUNT
+# k-anonymity floor; 2026-08-11 B_TABLE R1 COL_015 sample-vs-probe split).
+_ENUM_REUSE_MIN_COUNT = 10
 # Above this source distinct-ratio a column counts as high-cardinality for
 # the memorization / diversity findings (mirrors thresholds.yml
 # freetext.distinct_floor `applies_above_source_distinct_ratio`).
@@ -322,6 +326,36 @@ def _fraction(num, den):
     return num / den
 
 
+def _copy_fractions(src_prof, syn_prof) -> tuple[float | None, float | None]:
+    """(carved copy_fraction, raw copy_fraction) from the sampled values.
+
+    Enum-reuse carve-out (2026-08-11 B_TABLE R1, COL_015: this sample
+    metric said 0.27 while the full-table probe's `copy_ratio_substantive`
+    said 0.000 for the same column): a synthetic value observed >=
+    `_ENUM_REUSE_MIN_COUNT` times in the source sample is a shared enum
+    member — re-emitting it is categorical fidelity, not memorization (the
+    WS8 §5b k-anonymity floor). Enum values leave numerator AND
+    denominator; the raw number stays visible as `copy_fraction_raw`.
+    """
+    src_all_vals = src_prof.get("_all_values", [])
+    src_sample_set = set(src_all_vals)
+    src_value_counts = Counter(src_all_vals)
+    syn_sample_vals = syn_prof.get("_all_values", [])
+    if not src_sample_set or not syn_sample_vals:
+        return None, None
+    copied = sum(1 for v in syn_sample_vals if v in src_sample_set)
+    raw = copied / len(syn_sample_vals)
+    substantive = [
+        v
+        for v in syn_sample_vals
+        if src_value_counts.get(v, 0) < _ENUM_REUSE_MIN_COUNT
+    ]
+    if not substantive:
+        return 0.0, raw
+    copied_sub = sum(1 for v in substantive if v in src_sample_set)
+    return copied_sub / len(substantive), raw
+
+
 def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, Any]:
     findings: list[dict[str, str]] = []
 
@@ -352,14 +386,7 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
         key=lambda kv: -kv[1],
     )[:10]
 
-    # --- literal copy fraction (memorization signal), from the actual
-    # sample values captured on the profile ---
-    src_sample_set = set(src_prof.get("_all_values", []))
-    syn_sample_vals = syn_prof.get("_all_values", [])
-    copy_fraction = None
-    if src_sample_set and syn_sample_vals:
-        copied = sum(1 for v in syn_sample_vals if v in src_sample_set)
-        copy_fraction = copied / len(syn_sample_vals)
+    copy_fraction, copy_fraction_raw = _copy_fractions(src_prof, syn_prof)
 
     # --- charclass deltas ---
     src_cc = src_prof.get("charclass_fraction", {})
@@ -439,6 +466,7 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
             "null_fraction_delta": round(syn_null - src_null, 4) if (src_null is not None and syn_null is not None) else None,
             "empty_fraction_delta": round(syn_empty - src_empty, 4) if (src_empty is not None and syn_empty is not None) else None,
             "copy_fraction": round(copy_fraction, 4) if copy_fraction is not None else None,
+            "copy_fraction_raw": round(copy_fraction_raw, 4) if copy_fraction_raw is not None else None,
         },
         "findings": findings,
     }

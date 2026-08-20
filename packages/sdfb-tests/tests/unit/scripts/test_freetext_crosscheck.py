@@ -125,3 +125,29 @@ def test_render_markdown_smoke():
     md = _mod.render_markdown(meta, {"COL_A": entry})
     assert "# Free-text pattern crosscheck" in md
     assert "COL_A" in md
+
+
+def test_diff_copy_fraction_carves_out_enum_reuse():
+    # 2026-08-11 B_TABLE R1, COL_015: the full-table probe scored
+    # `copy_ratio_substantive = 0.000` while this sample crosscheck said
+    # 0.27 for the same column — the ~5% substantive mass is a handful of
+    # low-cardinality codes whose reuse IS categorical fidelity (the
+    # k-anonymity floor of WS8 §5b). A synthetic value observed >= 10 times
+    # in the source sample is enum mass: it leaves numerator AND
+    # denominator; the raw number stays visible as copy_fraction_raw.
+    enum_vals = ["1007"] * 60 + ["6009"] * 40
+    tail_src = [f"SRC-{i:04d}" for i in range(40)]
+    tail_syn = [f"NEW-{i:04d}" for i in range(38)] + tail_src[:2]
+    src, syn = _profiles(enum_vals + tail_src, enum_vals + tail_syn)
+    entry = _mod._diff_column("C", _agg(140), _agg(140), src, syn)
+    # 2 verbatim copies over 40 substantive (non-enum) synthetic values.
+    assert entry["diff"]["copy_fraction"] == 0.05
+    assert entry["diff"]["copy_fraction_raw"] > 0.7
+
+
+def test_diff_copy_fraction_unchanged_without_enum_mass():
+    vals = [f"REAL-{i:05d}" for i in range(100)]
+    src, syn = _profiles(vals, vals)
+    entry = _mod._diff_column("C", _agg(100), _agg(100), src, syn)
+    assert entry["diff"]["copy_fraction"] == 1.0
+    assert entry["diff"]["copy_fraction_raw"] == 1.0

@@ -133,3 +133,25 @@ def test_full_report_handles_both_dirs_in_one_call(tmp_path):
     assert rc == 0
     assert (real / "_full_report.md").exists()
     assert (oss / "_full_report.md").exists()
+
+
+def test_annex_list_mode_lists_files_without_inlining(tmp_path):
+    # The 2026-08-11 R1 recaps were shared with the annex bodies trimmed
+    # away to keep the paste small — but the header still promised "4
+    # metrics annexes" and the ToC linked anchors that did not exist.
+    # `--annexes list` makes the small variant a first-class output: the
+    # ToC names each metrics file with its size instead of linking anchors,
+    # and no ```json bodies are embedded.
+    bundle = _make_bundle(tmp_path)
+    out = build_full_report.build_full_report(bundle, annexes="list")
+    text = out.read_text()
+    assert "annexes: listed, not inlined" in text
+    assert "```json" not in text
+    assert "gcp_metrics.json" in text
+    assert "#annex-" not in text
+
+
+def test_annex_default_stays_inline(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    out = build_full_report.build_full_report(bundle)
+    assert "```json" in out.read_text()

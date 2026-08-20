@@ -284,9 +284,11 @@ class FreeTextHook:
         )
 
         if profile.identifier_shape is not None:
-            # Shared wave-2 sampler: mask mix above coverage, full mask
-            # table below it — the collapsed template scrambled long-tail
-            # mask families (2026-08-09 A_TABLE R1, COL_001-class).
+            # Shared wave-2 sampler: mask mix above coverage, full
+            # row-weighted mask table (positional alphabets pin fixed
+            # prefixes/nibbles, 2026-08-11 A_TABLE R1) below it — the
+            # collapsed template scrambled long-tail mask families
+            # (2026-08-09 A_TABLE R1, COL_001-class).
             sampler = identifier_sampler(
                 profile.identifier_shape,
                 profile.shape_mix,

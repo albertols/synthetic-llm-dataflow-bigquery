@@ -86,3 +86,49 @@ def test_gate_stays_off_for_word_diverse_prose():
 
     y = _pool_llm_yield(_ProseClient(), "p", {}, prof, [vals[0]], target=4)
     assert "a fresh synthetic outage note entirely new" in y.pool
+
+
+def test_gate_reactivates_for_digit_columns_with_diverse_distinct_tail():
+    # 2026-08-11 B_TABLE R1, COL_015: 98% of source ROWS are digit codes
+    # (some with a literal leading space), but the DISTINCT set is dominated
+    # by a diverse alpha tail — the distinct-weighted top-8 mix was mostly
+    # all-literal singleton buckets, `shape_mix_can_template` failed its
+    # class-position minimum, and the gate went dark (format_rejected=0
+    # while 'DEVOLUCION T'-class values filled the 94-value pool). With the
+    # row-mass mix the digit buckets carry their true weight and the gate
+    # comes back.
+    from sdfb_core.contracts import TableSchema
+    from sdfb_core.engines.b1_rag.engine import _format_gate
+    from sdfb_core.engines.b1_rag.profile import profile_columns
+
+    words = [
+        "GARANTIA", "TRASPASO", "LIQUIDACION", "COMISION", "REINTEGRO",
+        "PRESTAMO", "AMORTIZA", "RETENCION",
+    ]
+    rows = (
+        # 25 distinct 7-digit codes, 40 rows each — 1000 rows, ONE mask.
+        [{"c": f"{1000000 + i % 25}"} for i in range(1000)]
+        # 20 distinct ␣+10-digit codes, 40 rows each — 800 rows, ONE mask.
+        + [{"c": f" {2000000000 + i % 20}"} for i in range(800)]
+        # 8 alpha mask families x 26 distinct single rows: by DISTINCT
+        # count each family (26) outweighs both digit buckets (25/20), so
+        # the pre-fix top-8 mix was all single-class-position alpha.
+        + [
+            {"c": f"{w} {chr(ord('A') + i)}"}
+            for w in words
+            for i in range(26)
+        ]
+    )
+    prof = profile_columns(
+        TableSchema.model_validate(
+            {
+                "table_info": {"table_id": "p.d.t"},
+                "schema": [{"name": "c", "type": "STRING", "mode": "NULLABLE"}],
+            }
+        ),
+        rows,
+    )["c"]
+    gate = _format_gate(prof)
+    assert gate("1592637")            # novel 7-digit — in-mask
+    assert gate(" 2999999999")        # novel padded 10-digit — in-mask
+    assert not gate("TOTAL DEVOL")    # hallucinated alpha shape — rejected

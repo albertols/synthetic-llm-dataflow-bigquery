@@ -63,7 +63,12 @@ def _ordered(names: list[str], canonical: list[str]) -> list[str]:
     return known + rest
 
 
-def build_full_report(bundle_dir: Path) -> Path:
+def build_full_report(bundle_dir: Path, annexes: str = "inline") -> Path:
+    """``annexes="inline"`` embeds every metrics JSON as a fenced annex;
+    ``"list"`` names the files (with sizes) instead — the shareable small
+    variant. The 2026-08-11 R1 recaps were deliberately shared annex-free
+    for size; with no supported small variant, the hand edit left a ToC
+    promising anchors the file no longer carried."""
     docs = _ordered(
         [p.name for p in bundle_dir.glob("*.md") if p.name not in _EXCLUDED],
         _CANONICAL_DOCS,
@@ -76,11 +81,17 @@ def build_full_report(bundle_dir: Path) -> Path:
     variant = bundle_dir.name if bundle_dir.name in ("real", "oss") else ""
     job_id = bundle_dir.parent.name if variant else bundle_dir.name
 
+    inline = annexes == "inline"
+    annex_note = (
+        f"{len(metrics)} metrics annexes"
+        if inline
+        else f"{len(metrics)} metrics files (annexes: listed, not inlined)"
+    )
     lines = [
         f"# {job_id} — full E2E report" + (f" ({variant})" if variant else ""),
         "",
         f"One-file recap of every report + metrics artifact in this bundle "
-        f"({len(docs)} documents, {len(metrics)} metrics annexes). The "
+        f"({len(docs)} documents, {annex_note}). The "
         f"individual files stay canonical — regenerate this recap with "
         f"`python scripts/e2e/build_full_report.py --dir <this dir>` after "
         f"any of them changes.",
@@ -92,7 +103,11 @@ def build_full_report(bundle_dir: Path) -> Path:
         lines.append(f"{i}. [{name}](#doc-{_slug(name)})")
     lines += ["", "Annexes:", ""]
     for name in metrics:
-        lines.append(f"- [{name}](#annex-{_slug(name)})")
+        if inline:
+            lines.append(f"- [{name}](#annex-{_slug(name)})")
+        else:
+            size = (bundle_dir / name).stat().st_size
+            lines.append(f"- {name} ({size:,} bytes — see bundle dir)")
 
     for name in docs:
         lines += [
@@ -105,19 +120,20 @@ def build_full_report(bundle_dir: Path) -> Path:
             "",
             (bundle_dir / name).read_text().rstrip(),
         ]
-    for name in metrics:
-        lines += [
-            "",
-            "---",
-            "",
-            f'<a id="annex-{_slug(name)}"></a>',
-            "",
-            f"# 📎 Annex — {name}",
-            "",
-            "```json",
-            (bundle_dir / name).read_text().rstrip(),
-            "```",
-        ]
+    if inline:
+        for name in metrics:
+            lines += [
+                "",
+                "---",
+                "",
+                f'<a id="annex-{_slug(name)}"></a>',
+                "",
+                f"# 📎 Annex — {name}",
+                "",
+                "```json",
+                (bundle_dir / name).read_text().rstrip(),
+                "```",
+            ]
 
     out = bundle_dir / _OUT_NAME
     out.write_text("\n".join(lines) + "\n")
@@ -134,9 +150,16 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="bundle dir to recap (repeatable — typically real/ and oss/)",
     )
+    ap.add_argument(
+        "--annexes",
+        choices=("inline", "list"),
+        default="inline",
+        help="inline = embed metrics JSONs as fenced annexes (default); "
+        "list = name them with sizes only (small shareable variant)",
+    )
     args = ap.parse_args(argv)
     for bundle_dir in args.dirs:
-        out = build_full_report(bundle_dir)
+        out = build_full_report(bundle_dir, annexes=args.annexes)
         print(f"full report → {out}")
     return 0
 

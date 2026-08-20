@@ -46,3 +46,34 @@ def test_detail_from_b2_profiles():
     detail = build_plan_detail(profiles)
     assert detail["NOTES"]["empty_fraction"] == 0.4
     assert set(detail) == {"NOTES", "FLAG"}
+
+
+def test_detail_reports_expandability():
+    # 2026-08-11 R1 postmortems reverse-engineered per column whether the
+    # bulk draw came from the shape-mix expansion or the bounded pool —
+    # the plan line now says it (`expandable`, the default-`identifiers`
+    # expansion eligibility).
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.d.t"},
+            "schema": [
+                {"name": "CODE", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "PROSE", "type": "STRING", "mode": "REQUIRED"},
+            ],
+        }
+    )
+    import random
+
+    rng = random.Random(2)
+    words = ["outage", "spike", "crash", "router", "flap", "link", "poll"]
+    rows = [
+        {
+            "CODE": f"U{i:06d}",
+            "PROSE": " ".join(rng.choice(words) for _ in range(rng.randrange(3, 9)))
+            + f" ticket {i}",
+        }
+        for i in range(60)
+    ]
+    detail = build_plan_detail(profile_columns(schema, rows))
+    assert detail["CODE"]["expandable"] is True
+    assert detail["PROSE"]["expandable"] is False

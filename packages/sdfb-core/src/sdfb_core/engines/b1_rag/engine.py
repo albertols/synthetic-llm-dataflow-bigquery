@@ -61,9 +61,11 @@ from sdfb_core.engines.generation_plan import (
 )
 from sdfb_core.engines.generation_plan import should_log_plan as _should_log_plan
 from sdfb_core.engines.text_shapes import (
+    IdentifierArtifacts,
+    build_identifier_artifacts,
     build_relaxed_shapes,
     collapsed_mask,
-    identifier_sampler,
+    identifier_sampler_from,
     length_hint,
     mutate_digit_runs,
     relaxed_shape_charset,
@@ -201,6 +203,13 @@ class B1RagEngine(GenerationEngine):
         # "store" | "process_cache" | "llm_ladder". Feeds the
         # generation_plan milestone's pool_sources field.
         self._pool_sources: dict[str, str] = {}
+        # Identifier-shaped columns: full source domain (ADR 0023 seam,
+        # 2026-08-11 A_TABLE R1 — the sample-only mask table reproduced 38%
+        # of source masks) and the per-column draw artifacts built ONCE per
+        # setup (mask/positional tables over the domain are too heavy to
+        # rebuild per batch).
+        self._identifier_domains: dict[str, frozenset[str]] = {}
+        self._identifier_artifacts: dict[str, IdentifierArtifacts] = {}
         self._column_order: list[str] = []
         self._ready: bool = False
 
@@ -292,9 +301,29 @@ class B1RagEngine(GenerationEngine):
             seconds=round(time.monotonic() - t_pools, 1),
             freetext_cols=len(self._free_text_pools),
         )
+        # 5. identifier-shaped columns: pull the full source domain through
+        # the same store the pool ladder uses (ADR 0023) so mask tables and
+        # novelty rejection see the whole keyspace, not the sample
+        # (2026-08-11 A_TABLE R1: COL_001 mask recall 0.38).
+        self._fetch_identifier_domains(ctx)
         self._log_generation_plan(ctx)
 
         self._ready = True
+
+    def _fetch_identifier_domains(self, ctx: GenerationContext) -> None:
+        """Full source domains for identifier-shaped columns, via the
+        ADR 0023 `source_value_store` seam (empty dict when no store)."""
+        assert self._profiles is not None
+        for name, prof in self._profiles.items():
+            if (
+                prof.kind is ColumnKind.FREE_TEXT
+                and prof.identifier_shape is not None
+            ):
+                domain = self._fetch_source_values(
+                    ctx, name, milestone="identifier_source_filter"
+                )
+                if domain:
+                    self._identifier_domains[name] = domain
 
     def _log_generation_plan(self, ctx: GenerationContext) -> None:
         """ONE milestone mapping every column to its generation strategy.
@@ -536,24 +565,37 @@ class B1RagEngine(GenerationEngine):
         self, prof: ColumnProfile, rng: random.Random
     ) -> Callable[[], object]:
         """Per-row identifier generator: mask mix when the masks are rigid,
-        collapsed template otherwise.
+        row-weighted mask table (positional alphabets pin fixed prefixes)
+        otherwise, collapsed template as last resort.
 
-        The collapsed per-position template merges variant masks into
-        digit+upper classes and loses fixed prefixes (2026-08-07 A_TABLE
-        R1: 0% mask recall on COL_001-class columns). Drawing from the
-        exact mask mix fixes that — but ONLY when the top masks cover most
-        of the column's distinct values; on high-entropy columns (36-hex
-        ids) a top-8 mix would collapse diversity to 8 skeletons.
+        Evidence = observed rows minus head values (heads are re-emitted at
+        their exact share by `_with_head_values` — leaving them in would
+        double-count their mask mass) plus the column's full source domain
+        when a `source_value_store` is attached (2026-08-11 A_TABLE R1:
+        the sample-only table reproduced 38% of source masks, and novelty
+        was only guaranteed against the sample). Artifacts build once per
+        setup; only the per-batch RNG binding is per-call.
         """
-        shape = prof.identifier_shape
-        assert shape is not None
-        return identifier_sampler(
-            shape,
-            prof.shape_mix,
-            prof.observed_values,
-            rng.randrange,
-            coverage_min=_MASK_MIX_MIN_COVERAGE,
-        )
+        artifacts = self._identifier_artifacts.get(prof.name)
+        if artifacts is None:
+            shape = prof.identifier_shape
+            assert shape is not None
+            head_set = {v for v, _ in prof.head_values}
+            evidence = [
+                str(v) for v in prof.observed_values if str(v) not in head_set
+            ]
+            domain = self._identifier_domains.get(prof.name, frozenset())
+            if domain:
+                seen = set(evidence)
+                evidence += [v for v in domain if v not in seen]
+            artifacts = build_identifier_artifacts(
+                shape,
+                prof.shape_mix,
+                evidence,
+                coverage_min=_MASK_MIX_MIN_COVERAGE,
+            )
+            self._identifier_artifacts[prof.name] = artifacts
+        return identifier_sampler_from(artifacts, rng.randrange)
 
     @staticmethod
     def _sparsity_or(
@@ -789,14 +831,19 @@ class B1RagEngine(GenerationEngine):
         return []
 
     def _fetch_source_values(
-        self, ctx: GenerationContext, column: str
+        self,
+        ctx: GenerationContext,
+        column: str,
+        milestone: str = "freetext_pool_source_filter",
     ) -> frozenset[str]:
         """The column's FULL distinct source values, or an empty set.
 
         Empty (= filter inactive) on: no store attached, cardinality above
         the store's cap, or a store error — the last two LOUDLY, because a
         pool built without the filter can memorize (2026-08-05 B_TABLE R1:
-        33-99% verbatim source values on 10 columns).
+        33-99% verbatim source values on 10 columns). ``milestone`` names
+        the consumer: the pool ladder keeps its historical name, the
+        identifier route logs `identifier_source_filter`.
         """
         store = getattr(ctx, "source_value_store", None)
         if store is None:
@@ -805,7 +852,7 @@ class B1RagEngine(GenerationEngine):
             values = store.fetch_distinct(column)
         except Exception as exc:
             log_milestone(
-                "freetext_pool_source_filter_error",
+                f"{milestone}_error",
                 level=logging.WARNING,
                 column=column,
                 error=type(exc).__name__,
@@ -813,14 +860,12 @@ class B1RagEngine(GenerationEngine):
             return frozenset()
         if values is None:
             log_milestone(
-                "freetext_pool_source_filter_absent",
+                f"{milestone}_absent",
                 level=logging.WARNING,
                 column=column,
             )
             return frozenset()
-        log_milestone(
-            "freetext_pool_source_filter", column=column, size=len(values)
-        )
+        log_milestone(milestone, column=column, size=len(values))
         return frozenset(values)
 
     def _pool_cache_key(

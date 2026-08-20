@@ -52,13 +52,21 @@ def numpy_available() -> bool:
 class ColumnSampler:
     """Samples one column's values for a batch, honoring its profile.
 
-    `similarity` (0..1) widens or tightens the draw:
-      - NUMERIC: similarity→1 keeps values near observed exemplars; →0
-        spreads across the full observed range (always clipped to it).
-      - CATEGORICAL: similarity→1 follows empirical frequencies; →0 flattens
-        toward uniform over the observed support (never invents categories).
+    Marginal fidelity is not a dial (2026-08-11 R1 pair — 22 numeric
+    columns at decile-KS 0.40-0.90, ~25 categoricals with entropy gaps up
+    to -0.99, all at the default `similarity=0.5`):
+      - NUMERIC: inverse transform sampling through the full sorted
+        observed sample (Devroye 1986 ch. II; the B.2/ADR 0022 primitive at
+        sample resolution). `similarity` does not shape numeric draws.
+      - CATEGORICAL: empirical frequencies exactly (ADR 0013's original
+        contract); sparsity categories keep their exact mass. `similarity`
+        does not flatten categoricals.
+      - TEMPORAL: anchored/uniform blend within the (clamped) observed
+        range — owned by the interim temporal-age policy, deliberately NOT
+        distribution-following yet.
       - FREE_TEXT: handled by the engine via the LLM pool; this sampler only
         provides the null mask and a fallback draw from observed examples.
+    `similarity` remains the retrieval-tightness / LLM-temperature dial.
     """
 
     def __init__(self, profile: ColumnProfile) -> None:
@@ -69,7 +77,8 @@ class ColumnSampler:
         # values x 62,500 elements ~= 3,900 CPU-seconds. `_temporal_floats`
         # was already memoized, but the np.asarray() around it was not.
         self._temporal_floats: list[float] | None = None
-        self._numeric_array = None  # np.ndarray | None
+        self._numeric_array = None  # np.ndarray | None (SORTED ascending)
+        self._numeric_sorted: list[float] | None = None
         self._temporal_array = None  # np.ndarray | None
 
     def _temporal_obs_floats(self) -> list[float]:
@@ -100,17 +109,32 @@ class ColumnSampler:
         return self._temporal_floats
 
     def _numeric_obs_array(self, np):
-        """Observed NUMERIC values as a float64 array (built once).
+        """Observed NUMERIC values as a SORTED float64 array (built once) —
+        the empirical quantile vector the inverse-CDF draw interpolates.
 
         The per-call rebuild of this list comprehension was the dominant
         cost of the generation stage on the 2026-07-26 1M run.
         """
         if self._numeric_array is None:
-            self._numeric_array = np.asarray(
-                [float(x) for x in self.profile.observed_values if _is_number(x)],
-                dtype="float64",
+            self._numeric_array = np.sort(
+                np.asarray(
+                    [
+                        float(x)
+                        for x in self.profile.observed_values
+                        if _is_number(x)
+                    ],
+                    dtype="float64",
+                )
             )
         return self._numeric_array
+
+    def _numeric_obs_sorted(self) -> list[float]:
+        """Pure-Python mirror of `_numeric_obs_array` (built once)."""
+        if self._numeric_sorted is None:
+            self._numeric_sorted = sorted(
+                float(x) for x in self.profile.observed_values if _is_number(x)
+            )
+        return self._numeric_sorted
 
     def _temporal_obs_array(self, np):
         """Observed TEMPORAL values as a float64 array (built once)."""
@@ -196,11 +220,31 @@ class ColumnSampler:
         return cast("list", blended.tolist())
 
     def _numeric_numpy(self, np, rng, n: int, similarity: float) -> list:
+        """Inverse transform sampling through the sorted observed sample.
+
+        The anchored+uniform VALUE-AVERAGE this replaces was a convolution
+        that reproduced neither shape (2026-08-11 R1: 22 numeric columns at
+        decile-KS 0.40-0.90) and let one in-range outlier hand uniform mass
+        to the whole span (COL_009's 40xx-prefix band broke mid-range).
+        Interpolating between consecutive order statistics keeps every draw
+        in-range and novel-by-interpolation; `similarity` is unused here.
+        """
         p = self.profile
-        lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
-        hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
         obs = self._numeric_obs_array(np)
-        base = self._blend_floats_numpy(np, rng, obs, lo, hi, n, similarity)
+        if not obs.size:
+            lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
+            hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
+            base = (
+                [lo] * n
+                if hi <= lo
+                else rng.uniform(lo, hi, size=n).tolist()
+            )
+            return [self._coerce_numeric(v) for v in base]
+        if obs.size == 1:
+            base = [float(obs[0])] * n
+        else:
+            grid = np.linspace(0.0, 1.0, obs.size)
+            base = np.interp(rng.random(n), grid, obs).tolist()
         return [self._coerce_numeric(v) for v in base]
 
     def _temporal_numpy(self, np, rng, n: int, similarity: float) -> list:
@@ -214,47 +258,30 @@ class ColumnSampler:
         )
 
     @staticmethod
-    def _categorical_masses(
-        categories: dict, similarity: float
-    ) -> tuple[list, list[float]]:
-        """(categories, probabilities) with sparsity pinned empirically.
+    def _categorical_masses(categories: dict) -> tuple[list, list[float]]:
+        """(categories, probabilities) at exact empirical frequencies.
 
-        Sparsity categories (empty/whitespace strings, None) keep their
-        exact empirical mass: empty parity is a hard fidelity metric
-        (`freetext.empty_parity` MAJOR) and blending it toward uniform
-        failed it on the 2026-08-09 B_TABLE R1 (COL_033-class Δ0.28) —
-        FREE_TEXT columns already pin sparsity via `_sparsity_or`, and the
-        two kinds must not disagree. The similarity blend flattens only
-        the substantive remainder, scaled into its empirical total mass.
+        Sparsity categories were already pinned (2026-08-09 B_TABLE R1,
+        COL_033-class empty-parity Δ0.28); the 2026-08-11 R1 pair then
+        measured the *substantive* similarity blend flattening every
+        skewed enum toward uniform at the default 0.5 (~25 categorical
+        columns, entropy gaps -0.2..-0.99 — A_TABLE COL_004-class: source
+        ~all EUR, synthetic near-uniform over 37 currencies). Categorical
+        marginals now follow the frequency table exactly, ADR 0013's
+        original contract; `similarity` stays an LLM/retrieval dial.
         """
         cats = list(categories.keys())
         counts = [float(categories[c]) for c in cats]
         total = sum(counts)
-        sparse = [
-            c is None or (isinstance(c, str) and not c.strip()) for c in cats
-        ]
-        sub_total = sum(c for c, s in zip(counts, sparse, strict=True) if not s)
-        sub_count = sum(1 for s in sparse if not s)
-        probs: list[float] = []
-        sub_mass = (sub_total / total) if total else 0.0
-        for cnt, is_sparse in zip(counts, sparse, strict=True):
-            if is_sparse or not sub_count or not sub_total:
-                probs.append(cnt / total if total else 0.0)
-                continue
-            empirical = cnt / sub_total
-            uniform = 1.0 / sub_count
-            probs.append(
-                sub_mass
-                * (similarity * empirical + (1.0 - similarity) * uniform)
-            )
-        norm = sum(probs)
-        return cats, [p / norm for p in probs]
+        if not total:
+            return cats, [0.0 for _ in cats]
+        return cats, [cnt / total for cnt in counts]
 
     def _categorical_numpy(self, np, rng, n: int, similarity: float) -> list:
         p = self.profile
         if not p.categories:
             return [None] * n
-        cats, probs = self._categorical_masses(p.categories, similarity)
+        cats, probs = self._categorical_masses(p.categories)
         idx = rng.choice(len(cats), size=n, p=np.asarray(probs))
         return [cats[int(i)] for i in idx]
 
@@ -314,11 +341,25 @@ class ColumnSampler:
         return out
 
     def _numeric_python(self, rng, n: int, similarity: float) -> list:
+        """Pure-Python mirror of `_numeric_numpy` (same inverse-CDF
+        semantics; seeded, not bit-identical across backends)."""
         p = self.profile
-        lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
-        hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
-        obs = [float(x) for x in p.observed_values if _is_number(x)]
-        base = self._blend_floats_python(rng, obs, lo, hi, n, similarity)
+        obs = self._numeric_obs_sorted()
+        if not obs:
+            lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
+            hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
+            base = [lo if hi <= lo else rng.uniform(lo, hi) for _ in range(n)]
+            return [self._coerce_numeric(v) for v in base]
+        m = len(obs)
+        base = []
+        for _ in range(n):
+            if m == 1:
+                base.append(obs[0])
+                continue
+            idx = rng.random() * (m - 1)
+            i = int(idx)
+            frac = idx - i
+            base.append(obs[i] + (obs[i + 1] - obs[i]) * frac)
         return [self._coerce_numeric(v) for v in base]
 
     def _temporal_python(self, rng, n: int, similarity: float) -> list:
@@ -337,7 +378,7 @@ class ColumnSampler:
         p = self.profile
         if not p.categories:
             return [None] * n
-        cats, probs = self._categorical_masses(p.categories, similarity)
+        cats, probs = self._categorical_masses(p.categories)
         return cast("list", rng.choices(cats, weights=probs, k=n))
 
     def _from_pool_python(self, rng, pool: Sequence, n: int) -> list:

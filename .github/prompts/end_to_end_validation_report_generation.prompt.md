@@ -438,6 +438,12 @@ python scripts/e2e/build_full_report.py \
   --dir integration_test/<JOB_ID>/oss
 ```
 
+When the recap must travel light (agent context, chat paste), regenerate
+with `--annexes list` instead of hand-trimming: the ToC then names each
+metrics file with its size and no anchors are promised that the file does
+not carry (the 2026-08-11 R1 recaps were trimmed by hand and shipped a ToC
+pointing at four missing annexes).
+
 The recap is discovery-based (future `.md`/`.json` artifacts join
 automatically) and idempotent — Step 8's recommender re-runs it after
 landing its recommendations so they fold in.

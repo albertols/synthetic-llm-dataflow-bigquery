@@ -245,3 +245,26 @@ spawn. It also exposed the next findings, remediated 2026-08-08:
   pool branch. The reference blend stays: it is confined to ≤100-distinct
   enum columns, the same category-reuse the substantive copy metric exempts.
   R5 memorization numbers are now engine-comparable.
+
+### §5d Third remediation wave (2026-08-11 R1 pair → shipped on ws8)
+
+The two R1 cold baselines (`…04_07_50-11228…` A_TABLE, `…06_04_05-9010…`
+B_TABLE, 1M rows each) were read column-by-column across both bundles'
+stats-diff, crosscheck, probe metrics and worker logs. Every failing
+column reduced to five engine defect classes + three tooling gaps —
+design + decisions in [ADR 0025](adr/0025-marginal-fidelity-by-construction.md)
+and `docs/designs/2026-08-20-marginal-fidelity-wave3.md`:
+
+| Finding (both R1s) | Fix | Next-run readout |
+|---|---|---|
+| 22 numeric columns at decile-KS 0.40–0.90 (A: 14+3 warn, B: 8); COL_009-class 40-prefixed band broken mid-range — the anchored+uniform VALUE-AVERAGE is a convolution, one in-range outlier hands uniform mass the whole span | B.1 numeric = inverse transform sampling through the full sorted observed sample (`_fidelity.py`); `similarity` no longer shapes numerics | `stats_diff` decile-KS ≤ 0.2 (new `numeric.decile_ks` rule) on every B.1 numeric column; COL_009 keeps its leading-40 band |
+| ~25 categorical columns with entropy gaps −0.2…−0.99 (COL_004-class: source ~all EUR, synthetic near-uniform) — the substantive similarity blend flattened every skewed enum at the default 0.5 | categorical draws follow the empirical frequency table at ANY similarity | `stats_diff` entropy_gap ≈ 0 / top1_delta ≈ 0 on categorical columns |
+| COL_001/COL_005 lost their literal `E2F3`-class prefix; COL_064 lost the UUID v4 version/variant nibbles (mask fill drew from column-wide alphabets) | `positional_alphabets` narrow every mask-table fill per position; singleton positions pin as literals | crosscheck: synthetic values carry the fixed prefix; COL_064 emits valid v4 |
+| COL_001 mask recall 0.38 — mask table only ever saw the ≤10k reference sample | identifier columns pull their full source domain through the ADR 0023 store (`identifier_source_filter` milestone); rejection set covers the whole keyspace | shape recall on identifier columns rises toward source-mask coverage; novelty vs full domain by construction |
+| Row-mass inversions: COL_054 digit-delta +0.22, B_TABLE COL_024 92% `99`-mask vs source 32%, COL_015 48% hallucinated alpha mass — `shape_mix`/mask weights counted DISTINCT values, not rows, and head values were double-counted | `build_shape_mix` input = rows minus heads (top_k 8→32); `build_mask_table` weights = row occurrences; all-literal buckets no longer count toward the mix-coverage pivot | crosscheck shape-share deltas ≈ 0 on COL_054/COL_024/COL_015-class columns; COL_015 `format_rejected` > 0 (gate re-armed) |
+| Tooling: 5 false `freetext.copy_fraction` BLOCKERs on day-granularity temporal columns; crosscheck 0.27-vs-probe-0.000 split on COL_015; `_full_report.md` had no supported small variant (the R1 recaps were deliberately shared annex-free for size, leaving the ToC over-promising) | day-granularity exemption (tagged, visible, passing); enum-reuse carve-out (`copy_fraction` vs `copy_fraction_raw`); `build_full_report.py --annexes list` | copy_fraction section reads clean on temporal columns; the two copy metrics agree; small recaps regenerate with a consistent ToC |
+
+B.2 keeps its distinct-weighted mix this wave (its coverage pivot divides
+by the deduped pool; row plumbing lands with R5 — ADR 0025 §Consequences).
+`generation_plan.columns_detail` now carries `expandable` per column, so
+the next postmortem reads the draw path instead of re-deriving it.

@@ -355,20 +355,23 @@ _MASK_TABLE_CAP = 1024
 def build_mask_table(
     values: Iterable[str], cap: int = _MASK_TABLE_CAP
 ) -> MaskTable | None:
-    """Exact-mask frequency table over distinct values, heaviest first.
+    """Exact-mask frequency table over observed ROWS, heaviest first.
 
     The full mask DISTRIBUTION, not the top-8 templates: high-entropy
     identifier columns (2026-08-09 A_TABLE R1, COL_001: top-8 masks cover
     ~20% of 52k distinct) need whole-mask draws to reproduce the source
     mask marginal — the collapsed per-position template scrambles it (0%
-    recall). ``cap`` bounds memory; ties break lexicographically for
-    determinism.
+    recall). Weights are ROW occurrences, not distinct-value counts: the
+    2026-08-11 R1 pair measured distinct weighting inverting row-mass
+    marginals wherever a heavy repeated head met a diverse tail
+    (COL_054/COL_024/COL_015-class). ``cap`` bounds memory; ties break
+    lexicographically for determinism.
     """
-    distinct = list(dict.fromkeys(v for v in values if v))
-    if len(distinct) < _MIN_VALUES:
+    vals = [v for v in values if v]
+    if len(set(vals)) < _MIN_VALUES:
         return None
     counts: dict[str, int] = {}
-    for v in distinct:
+    for v in vals:
         mask = "".join(_mask_char(c) for c in v)
         counts[mask] = counts.get(mask, 0) + 1
     heaviest = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:cap]
@@ -404,14 +407,63 @@ def mask_alphabets(values: Iterable[str]) -> dict[str, str]:
     return out
 
 
+# Per-length, per-position observed charsets: length → (charset@0, charset@1, …).
+PositionalAlphabets = dict[int, tuple[str, ...]]
+
+
+def positional_alphabets(values: Iterable[str]) -> PositionalAlphabets:
+    """Observed characters per position, bucketed by value length.
+
+    Column-wide class alphabets scramble fixed positional structure: the
+    2026-08-11 A_TABLE R1 lost COL_001's literal ``E2F3`` prefix (every
+    source value carries it; synthetic opened with any hex character) and
+    COL_064's RFC 4122 v4 version/variant nibbles. A position whose
+    observed charset is a singleton is a literal by the same evidence rule
+    :func:`detect_identifier_shape` uses — no per-kind special cases.
+    Length buckets with fewer than ``_MIN_VALUES`` values are skipped: one
+    value proves nothing, and pinning it would regenerate it verbatim.
+    """
+    buckets: dict[int, list[str]] = {}
+    for v in values:
+        if v:
+            buckets.setdefault(len(v), []).append(v)
+    out: PositionalAlphabets = {}
+    for length, bucket in buckets.items():
+        if len(set(bucket)) < _MIN_VALUES:
+            continue
+        out[length] = tuple(
+            "".join(sorted({v[i] for v in bucket})) for i in range(length)
+        )
+    return out
+
+
+def _positional_fill(
+    positional_chars: str, class_alpha: str, pick: Callable[[int], int]
+) -> str:
+    """One char from the position's observed charset restricted to the mask
+    class; the column-wide class alphabet is the fallback when the
+    intersection is empty (a mask sampled at a length whose positional
+    evidence never showed this class)."""
+    narrowed = [c for c in positional_chars if c in class_alpha]
+    if not narrowed:
+        return class_alpha[pick(len(class_alpha))]
+    return narrowed[pick(len(narrowed))]
+
+
 def sample_from_mask(
-    mask: str, alphabets: dict[str, str], pick: Callable[[int], int]
+    mask: str,
+    alphabets: dict[str, str],
+    pick: Callable[[int], int],
+    positional: PositionalAlphabets | None = None,
 ) -> str:
     """One value from an exact mask: class symbols draw from the column's
-    observed alphabets (full class sets as last resort), literals pass
-    through."""
+    observed alphabets — narrowed to the position's observed charset when
+    ``positional`` evidence exists for the mask's length (fixed prefixes,
+    version nibbles and other positional literals survive by construction);
+    literals pass through."""
+    per_position = positional.get(len(mask)) if positional else None
     out: list[str] = []
-    for ch in mask:
+    for i, ch in enumerate(mask):
         if ch == "9":
             alpha = alphabets.get("9", string.digits)
         elif ch == "A":
@@ -421,22 +473,115 @@ def sample_from_mask(
         else:
             out.append(ch)
             continue
-        out.append(alpha[pick(len(alpha))])
+        if per_position is not None:
+            out.append(_positional_fill(per_position[i], alpha, pick))
+        else:
+            out.append(alpha[pick(len(alpha))])
     return "".join(out)
 
 
 def sample_mask_table(
-    table: MaskTable, alphabets: dict[str, str], pick: Callable[[int], int]
+    table: MaskTable,
+    alphabets: dict[str, str],
+    pick: Callable[[int], int],
+    positional: PositionalAlphabets | None = None,
 ) -> str:
     """One value from a mask table: draw a mask proportionally to its
-    distinct-value weight, then fill it via :func:`sample_from_mask`."""
+    observed row weight, then fill it via :func:`sample_from_mask`."""
     total = sum(w for w, _ in table)
     r = pick(total)
     for w, mask in table:
         if r < w:
-            return sample_from_mask(mask, alphabets, pick)
+            return sample_from_mask(mask, alphabets, pick, positional)
         r -= w
-    return sample_from_mask(table[-1][1], alphabets, pick)
+    return sample_from_mask(table[-1][1], alphabets, pick, positional)
+
+
+# Opaque, cacheable route + tables for one identifier column: everything
+# `identifier_sampler_from` needs except the per-batch RNG. Building it
+# sorts/masks the whole evidence set — with full source domains attached
+# (150k values) that is too heavy to redo per generate_batch call.
+IdentifierArtifacts = tuple
+
+
+def build_identifier_artifacts(
+    shape: tuple[str, ...],
+    shape_mix: RelaxedShapes | None,
+    observed_values: Iterable[object],
+    coverage_min: float = 0.5,
+) -> IdentifierArtifacts:
+    """Resolve the draw route + heavy tables for one identifier column.
+
+    Mask mix when the top masks cover most of the observed mass (rigid
+    mask families, the 2026-08-07 fix); otherwise a whole-mask draw from
+    the FULL row-weighted mask table filled from the column's observed
+    alphabets, narrowed per position (`positional_alphabets`) so fixed
+    prefixes and version nibbles survive (2026-08-11 A_TABLE R1: COL_001
+    lost its literal E2F3 prefix, COL_064 its v4 nibble). The collapsed
+    template stays as the last resort.
+    """
+    rows = [str(v) for v in observed_values]
+    observed = frozenset(rows)
+    non_empty = [v for v in rows if v]
+    if shape_mix:
+        # Coverage counts only GENERATIVE buckets (≥1 class position): an
+        # all-literal singleton bucket can only regenerate its observed
+        # value verbatim, so it is memorization pressure, not coverage —
+        # high-entropy identifiers carry many of them and must pivot to
+        # the mask table. Mass is over the same universe the mix was built
+        # from — rows for B.1 (row-mass mix), distinct for B.2 (deduped
+        # pool) — so both callers stay self-consistent.
+        generative = sum(
+            w
+            for w, shape in shape_mix
+            if any(len(entry) > 1 for entry in shape)
+        )
+        coverage = generative / len(non_empty) if non_empty else 0.0
+        if coverage >= coverage_min:
+            return ("mix", shape_mix, observed)
+    table = build_mask_table(non_empty)
+    if table is not None:
+        return (
+            "table",
+            table,
+            mask_alphabets(non_empty),
+            positional_alphabets(non_empty),
+            observed,
+        )
+    return ("collapsed", shape)
+
+
+def identifier_sampler_from(
+    artifacts: IdentifierArtifacts, pick: Callable[[int], int]
+) -> Callable[[], str]:
+    """Per-row generator over prebuilt artifacts. Draws retry x3 against
+    the observed set so novelty pressure stays with the sampler."""
+    route = artifacts[0]
+    if route == "mix":
+        _, shape_mix, observed = artifacts
+
+        def _from_mix() -> str:
+            v = ""
+            for _ in range(3):
+                v = sample_relaxed_identifier(shape_mix, pick)
+                if v not in observed:
+                    break
+            return v
+
+        return _from_mix
+    if route == "table":
+        _, table, alphabets, positional, observed = artifacts
+
+        def _from_table() -> str:
+            v = ""
+            for _ in range(3):
+                v = sample_mask_table(table, alphabets, pick, positional)
+                if v not in observed:
+                    break
+            return v
+
+        return _from_table
+    return lambda: sample_identifier(artifacts[1], pick)
 
 
 def identifier_sampler(
@@ -446,48 +591,16 @@ def identifier_sampler(
     pick: Callable[[int], int],
     coverage_min: float = 0.5,
 ) -> Callable[[], str]:
-    """Per-row identifier generator shared by both engines (wave-2 §4a).
-
-    Mask mix when the top masks cover most distinct values (rigid mask
-    families, the 2026-08-07 fix); otherwise a whole-mask draw from the
-    FULL mask table filled from the column's observed alphabets — the
-    collapsed per-position template scrambled long-tail mask families
-    (2026-08-09 A_TABLE R1, COL_001: 0% mask recall). The collapsed
-    template stays as the last resort. Draws retry x3 against the observed
-    set so novelty pressure stays with the sampler.
-    """
-    observed = {str(v) for v in observed_values}
-    non_empty = [v for v in observed if v]
-    if shape_mix:
-        distinct = len(non_empty)
-        coverage = (
-            sum(w for w, _ in shape_mix) / distinct if distinct else 0.0
-        )
-        if coverage >= coverage_min:
-
-            def _from_mix() -> str:
-                v = ""
-                for _ in range(3):
-                    v = sample_relaxed_identifier(shape_mix, pick)
-                    if v not in observed:
-                        break
-                return v
-
-            return _from_mix
-    table = build_mask_table(non_empty)
-    if table is not None:
-        alphabets = mask_alphabets(non_empty)
-
-        def _from_table() -> str:
-            v = ""
-            for _ in range(3):
-                v = sample_mask_table(table, alphabets, pick)
-                if v not in observed:
-                    break
-            return v
-
-        return _from_table
-    return lambda: sample_identifier(shape, pick)
+    """Per-row identifier generator shared by both engines (wave-2 §4a) —
+    the one-shot form of `build_identifier_artifacts` +
+    `identifier_sampler_from`; callers on a hot path should build the
+    artifacts once and reuse them."""
+    return identifier_sampler_from(
+        build_identifier_artifacts(
+            shape, shape_mix, observed_values, coverage_min
+        ),
+        pick,
+    )
 
 
 _DIGIT_RUN = re.compile(r"\d{2,}")
@@ -547,6 +660,7 @@ def length_hint(values: Iterable[object], *, min_samples: int = 8) -> str:
 
 
 __all__ = [
+    "build_identifier_artifacts",
     "build_mask_table",
     "build_relaxed_shapes",
     "build_shape_mix",
@@ -554,9 +668,11 @@ __all__ = [
     "detect_identifier_shape",
     "detect_temporal_format",
     "identifier_sampler",
+    "identifier_sampler_from",
     "length_hint",
     "mask_alphabets",
     "mutate_digit_runs",
+    "positional_alphabets",
     "relaxed_shape_charset",
     "relaxed_shape_lengths",
     "relaxed_shapes_pattern",

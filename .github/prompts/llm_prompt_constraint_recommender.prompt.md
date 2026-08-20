@@ -88,6 +88,12 @@ and note anything that changed since this prompt was written:
    suppression), `_build_pool_prompt` (where the clause lands),
    `_pool_json_schema` (`pattern` → guided decoding `items.pattern`), the
    `constraint_examples` rejection set, and the format/collapsed-mask gates.
+   Plus `engines/text_shapes.py` (ADR 0025): identifier-shaped columns
+   draw from a row-weighted mask table with **per-position alphabets**
+   (fixed prefixes / version nibbles pin automatically) over the **full
+   source domain** when a store is attached (`identifier_source_filter`
+   milestone) — a prefix/shape gap on a mask-routed column is code-owned,
+   not constraint material.
 3. `packages/sdfb-core/src/sdfb_core/engines/b2_library/fidelity.py` +
    `freetext.py` — the B.2 twins of the above; note where the two engines'
    default classification thresholds **differ** (a column can be LLM-routed
@@ -140,12 +146,26 @@ the constraint lever is for gaps the *prompt or decoding grammar* can close.
   is inert. From the `generation_plan`/`build_plan_detail` milestones (or,
   absent those, the profilers' thresholds read in Step 1): constant,
   categorical, temporal-shaped and **identifier-shaped** STRING columns skip
-  the LLM. If the typed route already reproduces the marginal — stop, no
-  constraint. Recommend `"route": "llm"` (STRING-typed only) **with** a
+  the LLM — and `columns_detail.expandable` says whether a pool column's
+  bulk draw comes from the shape mix rather than the pool. If the typed
+  route already reproduces the marginal — stop, no constraint. Recommend
+  `"route": "llm"` (STRING-typed only) **with** a
   constraint when the typed route provably loses semantics (e.g. recall gap
   on a shape-detected column whose mask sampler cannot carry meaning, or a
   column the two engines classify differently and the evidence needs it
   LLM-routed in both).
+- **Sampler-owned classes are never constraint material** (ADR 0025):
+  numeric decile-KS / prefix-band gaps (B.1 inverse-CDF + the
+  `numeric.decile_ks` post-run rule own them), categorical entropy/top1
+  gaps (empirical frequencies own them), identifier prefix/nibble/mask
+  gaps (positional alphabets + full-domain mask tables own them), and
+  shape-share drift on expandable columns (row-mass mix weighting owns
+  it). If such a number still fails AFTER a post-ADR-0025 image, that is a
+  regression to file against the owning code area — not a schema edit.
+- When reading `copy_fraction`, prefer the carved value and cite
+  `copy_fraction_raw` only as context (enum-reuse carve-out); a
+  `freetext.copy_fraction` row tagged `exempt: temporal_day_granularity`
+  is a domain collision, not evidence.
 
 ### 3.1 Key ladder — cheapest effective key first, each with its trigger
 

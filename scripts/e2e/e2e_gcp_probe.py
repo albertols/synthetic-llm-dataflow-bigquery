@@ -301,6 +301,12 @@ _FREETEXT_RULE_DEFAULTS: dict[str, dict] = {
         # (mirrors config/thresholds.yml).
         "max": 1.0e-4,
         "applies_above_source_distinct": 100,
+        # Day-granularity temporal columns collide with a dense source by
+        # domain size (~3650 possible days), never per-row memorization —
+        # `memorization_flags` already demotes them to INFO, and the
+        # 2026-08-11 A_TABLE R1 fired 5 false BLOCKERs on exactly this
+        # class. The result row stays visible, tagged and passing.
+        "exempt_day_granularity": True,
     },
 }
 
@@ -363,12 +369,18 @@ def evaluate_freetext_rules(
             copy is not None
             and (src_distinct or 0) > cf.get("applies_above_source_distinct", 100)
         ):
+            day_exempt = bool(
+                cf.get("exempt_day_granularity", True)
+                and e.get("temporal_day_granularity")
+            )
             # Unrounded: a few-in-a-million value rounded to 0.0 next to
             # passed=false read as a contradiction (2026-08-09 R1 reports).
             add(
                 "freetext.copy_fraction", name, copy,
-                copy <= cf.get("max", 0.0),
+                day_exempt or copy <= cf.get("max", 0.0),
             )
+            if day_exempt:
+                results[-1]["exempt"] = "temporal_day_granularity"
     return results
 
 

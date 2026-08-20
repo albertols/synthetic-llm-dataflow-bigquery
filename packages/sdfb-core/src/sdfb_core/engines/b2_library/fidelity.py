@@ -449,6 +449,11 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             identifier_shape=(
                 None if force_llm else detect_identifier_shape(pool)
             ),
+            # Deduped pool on purpose: B.2's identifier coverage pivot
+            # divides mix mass by len(text_pool), so mass and denominator
+            # must share the distinct universe. The row-mass weighting fix
+            # (2026-08-11 R1, COL_054/COL_024/COL_015-class) needs rows
+            # plumbed through this profile — R5/B.2 scope (ADR 0025).
             shape_mix=build_shape_mix(pool),
             llm_prompt_constraint=(
                 render_prompt_clause(pc) if pc is not None else ""

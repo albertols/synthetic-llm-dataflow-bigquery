@@ -72,6 +72,10 @@ _FREE_TEXT_MAX_CATEGORIES = 50
 _FREE_TEXT_HEAD_MIN_SHARE = 0.05
 _FREE_TEXT_HEAD_MIN_COUNT = 10
 _FREE_TEXT_HEAD_MAX = 8
+# Shape-mix cap for the engines (the stats module keeps 8 for display):
+# 2026-08-11 B_TABLE R1, COL_019 — dozens of source shapes, the top-8 mix
+# left ~62% of row mass uncovered (shape recall 0.24).
+_SHAPE_MIX_TOP_K = 32
 # BQ temporal types: high-cardinality columns get range-sampled novel values
 # (verbatim copies of real event timestamps are linkage quasi-identifiers —
 # 2026-07-15 E2E report: COL_052 landed 935 real microsecond timestamps).
@@ -462,6 +466,14 @@ def _profile_string(
         or (unique_ratio >= _FREE_TEXT_UNIQUE_RATIO and mean_len >= _FREE_TEXT_MIN_MEAN_LEN)
     )
     head_values = _free_text_head_values(strings) if is_free_text else ()
+    # Shape-mix input is ROWS minus head values (2026-08-11 R1 pair): the
+    # distinct-set input weighted every mask by its distinct-value count and
+    # inverted row-mass marginals (A_TABLE COL_054: `BATCH` = 81% of rows
+    # but ONE distinct value; B_TABLE COL_024/COL_015 inverted the same
+    # way). Heads leave the input because `_with_head_values` re-emits them
+    # at their exact share — keeping them would double-count their mass.
+    head_set = {v for v, _ in head_values}
+    mix_rows = [s for s in strings if s not in head_set] or strings
     if is_free_text:
         # Shaped strings leave the LLM route before it can fail on them
         # (2026-07-17 E2E): date-shaped columns range-sample as TEMPORAL,
@@ -507,7 +519,7 @@ def _profile_string(
                 # masks merge into digit+upper classes and lose fixed
                 # prefixes (2026-08-07 A_TABLE R1: COL_001-class columns
                 # reproduced 0% of source masks).
-                shape_mix=build_shape_mix(distinct),
+                shape_mix=build_shape_mix(mix_rows, top_k=_SHAPE_MIX_TOP_K),
                 head_values=head_values,
                 llm_prompt_constraint=constraint,
                 constraint_pattern=c_pattern,
@@ -528,7 +540,7 @@ def _profile_string(
             # engine must not fold observed values into the generated pool.
             is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
             observed_values=tuple(strings),
-            shape_mix=build_shape_mix(distinct),
+            shape_mix=build_shape_mix(mix_rows, top_k=_SHAPE_MIX_TOP_K),
             head_values=head_values,
             llm_prompt_constraint=constraint,
             constraint_pattern=c_pattern,

@@ -14,6 +14,8 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from sdfb_core.engines.text_shapes import shape_mix_is_identifier_like
+
 # (engine, reference_digest, table_fqn) triples already logged by this
 # worker process. Keyed per engine so a b1 + b2 comparison run on the same
 # reference sample logs BOTH plans.
@@ -60,6 +62,15 @@ def build_plan_detail(profiles: dict[str, Any]) -> dict[str, dict]:
             ),
             "shapes": len(getattr(prof, "shape_mix", None) or ()),
             "constraint": bool(getattr(prof, "llm_prompt_constraint", "")),
+            # Whether the default (`identifiers`) expansion draws this
+            # column from its shape mix instead of the bounded pool — the
+            # 2026-08-11 R1 postmortems reverse-engineered this per column.
+            "expandable": bool(
+                getattr(prof, "identifier_shape", None) is not None
+                or shape_mix_is_identifier_like(
+                    getattr(prof, "shape_mix", None)
+                )
+            ),
         }
     return dict(sorted(detail.items()))
 
