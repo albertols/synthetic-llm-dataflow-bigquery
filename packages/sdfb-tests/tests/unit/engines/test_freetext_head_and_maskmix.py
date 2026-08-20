@@ -159,12 +159,16 @@ class TestIdentifierMaskMix:
         drawn = self._draw(prof, 300)
         assert len({_mask(v) for v in drawn}) > 8
 
-    def test_long_tail_mask_column_reproduces_observed_masks(self) -> None:
-        # COL_001-class (2026-08-09 A_TABLE R1): hex identifiers whose top-8
-        # masks cover ~20% of distinct values. The collapsed template drew
-        # each position independently — 0% of drawn masks were observed
-        # ones. The mask-table draw must emit observed masks only, inside
-        # the observed (hex) alphabet.
+    def test_long_tail_mask_column_keeps_alphabet_prefix_and_entropy(self) -> None:
+        # COL_001-class. 2026-08-09: the collapsed template scrambled every
+        # position from MERGED digit+upper alphabets (0% observed masks).
+        # 2026-08-20 (wave 4): the opposite failure — confining draws to
+        # the capped mask table collapsed mask ENTROPY (52k source masks →
+        # 1024, each inflated 1/recall; COL_064 plateaued at ~0.2% per
+        # shape). Near-unique-mask columns now synthesize tail masks per
+        # position from observed char frequencies: novel masks are correct
+        # here (each real mask is itself ~unique) — what must hold is the
+        # alphabet, the literal prefix, novelty, and mask diversity.
         import random as _r
 
         rng = _r.Random(9)
@@ -178,8 +182,9 @@ class TestIdentifierMaskMix:
         prof = self._identifier_profile(values)
         drawn = self._draw(prof, 300)
         assert drawn
-        source_masks = {_mask(v) for v in values}
-        assert {_mask(v) for v in drawn} <= source_masks
         hex_chars = set("0123456789ABCDEF")
         assert all(set(v) <= hex_chars for v in drawn)
+        assert all(v.startswith("E2F") for v in drawn)
         assert len(set(drawn) & set(values)) == 0  # novelty holds
+        # Entropy preserved: far more distinct masks than a top-8 collapse.
+        assert len({_mask(v) for v in drawn}) > 8

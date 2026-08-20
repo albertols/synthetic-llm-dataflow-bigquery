@@ -108,6 +108,9 @@ def test_format_rejected_surfaces_in_undersized_milestone(caplog):
         reference_rows=[{"CHG_MESS_CARR_ID": v} for v in _ID_VALUES],
         pipeline_run_id="run-gate-1",
         num_rows=500,
+        # Ladder-mechanics test: expansion off forces the pool path
+        # (wave 4 skips ladders for expandable columns).
+        freetext_expansion="off",
     )
     engine = B1RagEngine()
     with caplog.at_level("WARNING"):
@@ -169,6 +172,7 @@ def _gate_ctx(**overrides) -> GenerationContext:
         reference_rows=[{"CHG_MESS_CARR_ID": v} for v in _ID_VALUES],
         pipeline_run_id="run-pattern-1",
         num_rows=8,
+        freetext_expansion="off",
     )
     defaults.update(overrides)
     return GenerationContext(**defaults)

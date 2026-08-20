@@ -128,7 +128,10 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 | `generation_plan` (detail) | per-column route + null/empty/shapes/constraint/expandable — the first thing to check when a column misbehaves |
 | `prompt_constraints_found` (launcher + worker) | the `llm_prompt_constraint` clauses actually fetched from the DDL: rendered clause + `clause_sha12` per column (launcher = preflight over the schema, worker = per generation plan). Diff `clause_sha12` across launches to verify a Terraform edit landed |
 | `prompt_constraint_unknown_keys` (WARNING) | a description carries a typo'd/newer constraint key — now names the `column=` |
-| `identifier_source_filter size=` (+ `_absent`/`_error`) | ADR 0025: an identifier column's FULL source domain feeds its mask table + novelty rejection |
+| `identifier_source_filter size=` (+ `_absent`/`_error`) | ADR 0025: an identifier column's FULL source domain feeds its mask table + novelty rejection (wave 4: support-only — weights stay row-mass) |
+| `numeric_source_filter size=` (+ `_absent`/`_error`) | ADR 0026: an identity-like INT64 column's full domain feeds the draw-time collision scrub |
+| `numeric_source_rejected collisions= nudged= unresolved=` | ADR 0026: per-column scrub outcome (first batch); `unresolved > 0` = fully dense neighborhood, read with the k-anon exemption in mind |
+| `freetext_pool_skipped_expandable` | ADR 0026: the column draws from its shape mix — no pool built, by design (not a store outage) |
 | `freetext_pool_source_filter size=` | ADR 0023: the column's FULL source domain is in the pool rejection set |
 | `freetext_pool_source_filter_absent` / `_error` (WARNING) | domain above cap / store error — pool built with sample-only rejection; check copy_fraction post-run |
 | `pool_taint_rebuild` (WARNING, launcher) | warm pools overlapped the live source → deleted + rebuilt clean (expected ONCE per tainted pre-ADR-0023 digest) |
@@ -271,3 +274,165 @@ B.2 keeps its distinct-weighted mix this wave (its coverage pivot divides
 by the deduped pool; row plumbing lands with R5 — ADR 0025 §Consequences).
 `generation_plan.columns_detail` now carries `expandable` per column, so
 the next postmortem reads the draw path instead of re-deriving it.
+
+### §5e Fourth wave (2026-08-20 R1 pair → shipped on ws8)
+
+The 2026-08-20 R1 cold pair (`…05_49_25-7855…` A_TABLE, `…06_28_11-7047…`
+B_TABLE) VERIFIED ADR 0025's numeric+categorical fixes (112/112 columns
+`decile_ks` ok; B_TABLE zero `memorization_flags`). The residual findings
+split into measurement artifacts and four real defects — design +
+decisions in [ADR 0026](adr/0026-measurement-first-mask-integrity.md) and
+`docs/designs/2026-08-20-measurement-and-mask-integrity-wave4.md`:
+
+| Finding (both R1s) | Fix | Next-run readout |
+|---|---|---|
+| Most "shape-mass" findings (COL_054 75→54, COL_024 68.6→7.7 "inversion", COL_015 "49% spurious alpha") were the crosscheck's `RAND()<p LIMIT` storage-front sample — exact full-table shares matched synthetic within 2 pp; COL_015 "contamination" retracted (`DEVOLUCION T` is a genuine dominant source value, heads re-emit it by design) | crosscheck samples hash-ordered (deterministic); new `shape_mass_tv` + `missing_shapes_below_floor` diff keys | crosscheck `shape_mass_tv` ≈ 0 on COL_024/COL_054-class; `missing_shapes` never empty at recall < 0.9 |
+| CRITICAL: COL_009 (INT64, 34.6k source-distinct) `copy_ratio_substantive` 0.52 — dense-band inverse-CDF interpolation rounds onto rare real account numbers | identity-like integral columns (>100 sample-distinct) fetch the full domain (ADR 0023 seam) + draw-time scrub (redraw + ±8 nudge; multi-knots kept as enum mass) | `numeric_source_filter` fires; COL_009 substantive ≪ 0.3; `memorization_flags` empty |
+| COL_064 recall 0.005 / COL_001 recall 0.46 — 1024-mask cap collapse + lexicographic digit-skewed tie-break + 1/recall renormalization | Good–Turing tail bucket (per-position char frequencies) + crc32 tie-break; domain now support-only (fixes the ADR 0025 E5 distinct-weighting regression) | COL_064 shape plateau gone; COL_001 top-mask share ≈ source; novelty vs full domain holds |
+| COL_038 invents `'6C'`/`'F4'` codes — hex class bound to letter-only positions (digit leak 10/16); retry mass migration (COL_026 0.890→0.838) | `_class_for` kind preservation; mask-stable fill retries (bucket never re-picked) | COL_038 family split ≈ source; COL_026 dominant mask share restored |
+| Pool build = 41% (A) / 53% (B) of cold wall time, partly for pools never read (expandable columns draw from shape mix) | expandable columns skip the ladder (`freetext_pool_skipped_expandable`); constraint columns never expand (clause + `pattern` reach the tail again) | PoolTrigger share drops on B_TABLE-class; skipped columns keep `distinct ≫ 512` |
+| 15 false `freetext.copy_fraction` BLOCKERs on INT64 small/medium domains; stall ladder unattributable to a column | `exempt_numeric_domains` (tagged, visible; CRITICAL stays `memorization_flags`); probe keeps per-column `pool_ladder` timestamps | copy_fraction section reads clean on numerics; topup/stagnation attributable per column |
+
+## 6. Next-cycle recipes — R1-c (constraints), R6 (table B + FK), R7 (10M)
+
+Written from the 2026-08-20 R1 cold pair (jobs `…05_49_25-7855…` A_TABLE,
+`…06_28_11-7047…` B_TABLE — bundles under `integration_tests/`). Both runs
+verified ADR 0025's numeric/categorical fixes end-to-end (A: 67/67, B:
+45/45 columns `decile_ks` ok; B additionally raised **zero**
+`memorization_flags`). Both also ran with **no PK declared** — every next
+run below closes that gap via the description contract.
+
+### 6a. R1-c — constraint acceptance rerun (both tables)
+
+Verifies the four `llm_prompt_constraint` edits recommended by the
+2026-08-20 bundles (`prompt_constraint_recommendations.md` in each):
+A_TABLE `COL_064` (route:llm + RFC 4122 v4 `pattern`); B_TABLE `COL_042`
+(same), `COL_015` (corrected `format`, `pattern` declined at 52% live
+coverage), `COL_019` (skeleton-anchored `format` + 2 fictitious
+`examples`).
+
+```
+1. terraform apply           # column description edits go live
+2. python scripts/extract_ddl.py … per table   # re-pin _ddl.json (if the DAG passes ddl_uri)
+3. DELETE FROM `${PROJECT}.synthetic_rag.freetext_pools` WHERE reference_digest IN (
+     SELECT DISTINCT reference_digest
+     FROM `${PROJECT}.synthetic_rag.source_table_stats`
+     WHERE table_fqn IN ('<A_FQN>','<B_FQN>'))
+   -- REQUIRED: the pool skip-key is the REFERENCE digest (row content),
+   -- which a description-only edit does NOT change — a warm store hit
+   -- would replay pools built with the OLD prompts and mask the edit
+   -- (§1 do-not-confound rule). rag_chunks/source_table_stats can stay.
+4. Trigger R1 config per table: {"num_rows":"1000000","batch_size":"1000"}
+```
+
+Readout ladder (in order, before any crosscheck):
+
+| Check | Expect |
+|---|---|
+| launcher `prompt_constraints_found` | `clause_sha12` **changed** for `COL_015`/`COL_019`; **newly present** for `COL_064`/`COL_042` |
+| worker `generation_plan.columns_detail` | `COL_064`/`COL_042` on `route=llm` (previously identifier route) |
+| crosscheck A `COL_064` | `shape_recall` 0.0053 → ≥ 0.9 (guided decoding) |
+| crosscheck B `COL_019` | `shape_recall` 0.33 → ≥ 0.7; the two named templates appear in synthetic top shapes |
+| crosscheck B `COL_015` | with the wave-4 crosscheck (hash-ordered sampling), the alpha shapes REAPPEAR in the source panel — they are genuine head values (`DEVOLUCION T` 31.9% of source non-empty; ADR 0026 §Context). Expect `shape_precision` ≈ 1 and head shares within ~2 pp; the constraint now steers only the digit-code TAIL (constraint columns no longer expand) |
+
+### 6b. R6 — table B + FK child (full config recipe)
+
+**Contract (Terraform).** Declare relationships on BOTH tables — the
+parent needs its `pk` so `--uniqueness_mode=exact` gives the child a
+duplicate-free key pool, and both R1 baselines flagged the undeclared-PK
+gate blind spot:
+
+```hcl
+locals {
+  a_table_contract = jsonencode({
+    sdfb = 1
+    pk   = ["ACCOUNT_ID"]              # activates pk.duplicate gate + clean parent keys
+  })
+  b_table_contract = jsonencode({
+    sdfb = 1
+    pk   = ["MOVEMENT_ID"]
+    fk = [{
+      cols     = ["ACCOUNT_ID"]
+      ref      = "core_banking.a_table"   # dataset-qualified, ALWAYS (P1 stops otherwise)
+      ref_cols = ["ACCOUNT_ID"]
+    }]
+  })
+}
+```
+
+`ref` names the SOURCE-world `dataset.table`; at run time only the table
+name is reused — the read targets `{fk_parent_landing}.{a_table}`
+(`io/fk_pools.py::parent_landing_fqn`). Full worked examples + sequence
+diagram: [`DDL_CONTRACT_GUIDE.md`](DDL_CONTRACT_GUIDE.md) §6–§8 (not
+redrawn here).
+
+**Trigger config (child run — overrides only):**
+
+```json
+{"table_fqn": "<TABLE_B>", "num_rows": "1000000", "batch_size": "1000",
+ "fk_parent_landing": "${PROJECT}.synthetic_data"}
+```
+
+`fk_parent_landing` is `project.dataset` (no table) — the landing dataset
+holding the parent's already-landed synthetic rows. It is the activation
+switch: contract `fk` **and** this flag must both be present
+(`run_pipeline.py::_load_reference_and_preflight`), otherwise the FK
+column silently keeps its profiled marginal.
+
+**Preconditions checklist (in order):**
+
+1. Terraform applied; contracts visible:
+   `bq show --format=prettyjson ${PROJECT}:<SRC_DATASET>.<TABLE_B>` —
+   description carries the `{"sdfb":1,…}` JSON (P1 parses it, P2 checks
+   the columns; a marked-but-broken contract is a loud `SystemExit`).
+2. `extract_ddl.py` re-run per table if the DAG pins `ddl_uri` (skip when
+   the launcher live-fetches from `INFORMATION_SCHEMA`).
+3. **Parent landed and non-empty**: `SELECT COUNT(*), COUNT(DISTINCT
+   ACCOUNT_ID) FROM ${PROJECT}.synthetic_data.a_table` — run A first in
+   this campaign and do NOT truncate `synthetic_data.<LANDING_A>` between
+   the parent run and R6. An empty parent = empty `fk_pools` = the FK
+   override silently NOT applied (engine skips empty pools) → orphans.
+4. Parent-key cap awareness: `io/fk_pools.py` loads ≤ 100k DISTINCT
+   parent keys per edge. A 1M-row parent with > 100k distinct keys is
+   fine — the child samples a 100k subset, referential integrity holds,
+   the orphan query stays 0.
+5. Keep DAG defaults: `uniqueness_mode=exact`, `prompt_constraints=on`.
+
+**Milestones to grep (on top of §3):** `relational_contract_loaded
+pk=MOVEMENT_ID fk_count=1`, `fk_pool_loaded
+parent=${PROJECT}.synthetic_data.a_table values=N` (N ≤ 100k),
+`preflight_pk_not_unique_in_sample` (WARNING-only — real sources may
+violate an undeclared PK).
+
+**Pass criteria:** §4.4 orphan query = 0 rows, plus `validation_runs`
+gate with `pk.duplicate` now ACTIVE. **Expected v1 side-effect, not a
+defect:** the FK column's profile is overridden to a uniform categorical
+over the parent pool (ADR 0021: integrity beats the child marginal), so
+`stats_diff` on `ACCOUNT_ID` may show entropy/top1 drift — read it as the
+documented v1 trade-off, not a regression. Composite-FK joint tuples stay
+the recorded M2 limitation.
+
+Multi-table alternative: `scripts/run_tableset.py` (parent-first
+ordering, dry-run first).
+
+### 6c. R7 — 10M scale (warm everything)
+
+**Trigger config:** `{"num_rows":"10000000","batch_size":"1000"}` — same
+table(s), same digest.
+
+**Preconditions:** all stores populated and NOT truncated since the last
+cold run (`freetext_pools`, `rag_chunks`, `source_table_stats`); no
+source-table content change (a content change moves the reference digest
+and silently makes R7 a cold 10M run — the 2026-08-20 cold pair measured
+pool build at 41–53% of wall time, which at 10M cold would dominate the
+run). Verify warmth first: the §2 R2 readouts (`pool_build_skipped`,
+`freetext_pool_store_hit`, `b1_chunks_reused`, `source_stats_skipped`)
+must all fire.
+
+**Expect:** ≥ 6k rows/s class (July 10M: 26.4 min at ~6.3k rows/s);
+diversity ceiling gone (`freetext_expansion` default); `batch_done
+seconds=` p99 in the p50 class (lock-free strptime, §5); a fully-warm run
+may never ignite vLLM (§5 cost note — the GPU pool can be dropped for
+warm replays). Re-score memorization at 10M: collision metrics scale with
+row count, so `copy_ratio_substantive` on COL_009-class columns is THE
+number to re-read at scale.

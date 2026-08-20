@@ -125,6 +125,79 @@ def test_distinct_floor_skips_low_cardinality_sources():
     assert "freetext.distinct_floor" not in rules
 
 
+def test_copy_fraction_exempts_dense_numeric_domains():
+    # 2026-08-20 R1 pair: 15 of the 16 copy_fraction BLOCKER rows were
+    # numeric columns whose substantive collision (0.02%-11%) is dense
+    # integer-domain mass — an interpolated in-range integer lands on a
+    # real value by domain density, the same "collision by domain size"
+    # argument as the day-granularity exemption. Numeric privacy stays
+    # owned by memorization_flags (0.3 substantive threshold, k-anon
+    # floor); the freetext rule now exempts numeric-typed columns, visibly.
+    cols = {
+        "SETTLE_AMT": {  # INT64, COL_047-class: exempt but visible
+            "in_source_schema": True,
+            "type": "INT64",
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 12481,
+            "source_distinct": 9053,
+            "source_distinct_ratio": 0.043,
+            "copy_ratio_substantive": 0.109,
+        },
+        "REF_TEXT": {  # STRING control at the same magnitude: still fails
+            "in_source_schema": True,
+            "type": "STRING",
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 12481,
+            "source_distinct": 9053,
+            "source_distinct_ratio": 0.043,
+            "copy_ratio_substantive": 0.109,
+        },
+    }
+    by = {
+        (r["rule"], r["column"]): r
+        for r in _probe.evaluate_freetext_rules(cols)
+        if r["rule"] == "freetext.copy_fraction"
+    }
+    amt = by[("freetext.copy_fraction", "SETTLE_AMT")]
+    assert amt["passed"] is True
+    assert amt.get("exempt") == "numeric_domain"
+    assert by[("freetext.copy_fraction", "REF_TEXT")]["passed"] is False
+
+
+def test_numeric_exempt_column_still_flags_critical_memorization():
+    # COL_009 (2026-08-20 A_TABLE R1): INT64, 52% substantive collision.
+    # The copy_fraction row is numeric-exempt (dense-domain class), but the
+    # CRITICAL channel — memorization_flags — must still fire: the two
+    # rules are tiers, not duplicates.
+    entry = {
+        "ACCOUNT_NO": {
+            "in_source_schema": True,
+            "type": "INT64",
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 134297,
+            "source_distinct": 34622,
+            "source_distinct_ratio": 0.164,
+            "copy_ratio": 0.831829,
+            "copy_ratio_nonsentinel": 0.831829,
+            "copy_ratio_substantive": 0.52175,
+        },
+    }
+    rows = {
+        (r["rule"], r["column"]): r
+        for r in _probe.evaluate_freetext_rules(entry)
+        if r["rule"] == "freetext.copy_fraction"
+    }
+    assert rows[("freetext.copy_fraction", "ACCOUNT_NO")]["passed"] is True
+    assert rows[("freetext.copy_fraction", "ACCOUNT_NO")].get("exempt") == "numeric_domain"
+    flags = _probe.memorization_flags(entry)
+    assert len(flags) == 1
+    assert flags[0]["column"] == "ACCOUNT_NO"
+    assert flags[0]["severity"] == "CRITICAL"
+
+
 def test_copy_fraction_exempts_day_granularity_temporal_columns():
     # 2026-08-11 A_TABLE R1: 5 temporal day-granularity columns failed the
     # BLOCKER unconditionally while `memorization_flags` had already

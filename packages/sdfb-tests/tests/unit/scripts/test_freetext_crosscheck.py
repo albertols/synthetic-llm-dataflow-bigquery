@@ -21,21 +21,30 @@ def test_shape_of_masks_charclasses():
     assert _mod.shape_of("AB-12 x") == "AA-99␣a"
 
 
-def test_sample_sql_plain_has_no_column_filter():
+def test_sample_sql_is_deterministic_hash_ordered():
+    # 2026-08-20 R1 pair: `RAND() < @p LIMIT @lim` with p oversampled 3x
+    # short-circuits on storage order, so the sample covered only the
+    # storage-front slice of the table. Every "shape mass" finding on a
+    # skewed column was distorted by it (COL_015 "49% spurious alpha mass",
+    # COL_024 68.6%->7.7% "inversion" — both contradicted by the same
+    # bundle's full-table top_values). Hash-ordered sampling is unbiased
+    # w.r.t. storage order AND deterministic (same table -> same sample),
+    # mirroring e2e_fetch_samples.py / source_synthetic_stats_diff.py.
     sql = _mod._sample_sql("p.d.t", ["A", "B"])
-    assert "WHERE RAND() < @p" in sql
+    assert "FARM_FINGERPRINT(TO_JSON_STRING(t))" in sql
+    assert "RAND()" not in sql
     assert "IS NOT NULL" not in sql
 
 
 def test_sample_sql_nonempty_filter_targets_one_column():
-    # 2026-08-09 B_TABLE R1, COL_037: `RAND() < p LIMIT lim` short-circuits
-    # on storage order, so a 91%-empty column sampled all-empty and the
-    # report showed shape recall 0.00 with NO missing shapes listed. The
-    # top-up query samples that column's non-empty rows directly.
+    # The top-up variant samples the column's substantive rows directly
+    # (2026-08-09 B_TABLE R1, COL_037: a 91%-empty column sampled all-empty
+    # and the report showed shape recall 0.00 with NO missing shapes).
     sql = _mod._sample_sql("p.d.t", ["A"], nonempty_col="A")
     assert "`A` IS NOT NULL" in sql
     assert "!= ''" in sql
-    assert "RAND() < @p" in sql
+    assert "FARM_FINGERPRINT(TO_JSON_STRING(t))" in sql
+    assert "RAND()" not in sql
 
 
 def test_needs_nonempty_topup_decision():
@@ -151,3 +160,45 @@ def test_diff_copy_fraction_unchanged_without_enum_mass():
     entry = _mod._diff_column("C", _agg(100), _agg(100), src, syn)
     assert entry["diff"]["copy_fraction"] == 1.0
     assert entry["diff"]["copy_fraction_raw"] == 1.0
+
+
+def test_diff_surfaces_long_tail_missing_shapes():
+    # 2026-08-20 B_TABLE R1, COL_037: shape recall 0.68 with
+    # `missing_shapes: []` — every unreproduced shape sat under the 2% mass
+    # floor, so the report said "top missing: n/a" while a third of the
+    # source mass was missing. The floored list now falls back to the top
+    # missing shapes and the tail is counted explicitly.
+    head = ["OK1"] * 150
+    tail = [f"{'X' * (i + 1)}-7" for i in range(25)] * 4  # 25 shapes, 1.6% each
+    syn = ["OK9"] * 100  # reproduces only the head shape 'AA9'
+    src_prof, syn_prof = _profiles(head + tail, syn)
+    entry = _mod._diff_column("C", _agg(250), _agg(100), src_prof, syn_prof)
+    d = entry["diff"]
+    assert d["shape_recall"] < 0.9
+    assert d["missing_shapes"], "long-tail miss must still name examples"
+    assert d["missing_shapes_below_floor"] == 25
+    assert not any(
+        "top missing: n/a" in f["message"] for f in entry["findings"]
+    )
+
+
+def test_diff_scores_shape_mass_inversion():
+    # 2026-08-20 B_TABLE R1, COL_024: source shape mass 68.6%/30.9% vs
+    # synthetic 7.7%/92.2% over the SAME two masks scored 0.033 ("no
+    # material divergence") because recall/precision are presence-only.
+    # The total-variation term sees the inversion.
+    src_vals = ["1" * 16] * 69 + ["35"] * 31
+    inverted = ["2" * 16] * 8 + ["46"] * 92
+    faithful = ["3" * 16] * 69 + ["57"] * 31
+    src, bad = _profiles(src_vals, inverted)
+    _, good = _profiles(src_vals, faithful)
+    bad_entry = _mod._diff_column("C", _agg(100), _agg(100), src, bad)
+    good_entry = _mod._diff_column("C", _agg(100), _agg(100), src, good)
+    assert bad_entry["diff"]["shape_recall"] == 1.0
+    assert bad_entry["diff"]["shape_precision"] == 1.0
+    assert bad_entry["diff"]["shape_mass_tv"] > 0.5
+    assert good_entry["diff"]["shape_mass_tv"] < 0.05
+    assert any("shape mass" in f["message"] for f in bad_entry["findings"])
+    assert (
+        _mod._column_score(bad_entry) > _mod._column_score(good_entry)
+    )

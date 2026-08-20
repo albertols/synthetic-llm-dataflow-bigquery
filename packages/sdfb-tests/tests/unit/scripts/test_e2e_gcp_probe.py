@@ -105,6 +105,50 @@ def test_worker_log_milestones_captures_sdfb_generic_and_legacy(probe_module):
     assert "embedder_pulled" not in result["timestamps"]
 
 
+def test_worker_log_milestones_attributes_pool_ladder_per_column(probe_module):
+    """2026-08-20 B_TABLE R1: the report's topup → stagnated → fallback
+    sequence could not be attributed to a column because the probe kept
+    only the FIRST occurrence of each milestone name and dropped its
+    `column=` field. Pool-ladder milestones are now also collected per
+    column (first timestamp per (column, milestone))."""
+    from sdfb_core.observability import format_milestone
+
+    entries = [
+        {
+            "textPayload": format_milestone(
+                "freetext_pool_shape_topup", column="CONCEPT", added=40
+            ),
+            "timestamp": "2026-07-06T00:01:00Z",
+        },
+        {
+            "textPayload": format_milestone(
+                "freetext_pool_stagnated", column="CONCEPT", novel=1
+            ),
+            "timestamp": "2026-07-06T00:05:00Z",
+        },
+        {
+            "textPayload": format_milestone(
+                "freetext_pool_built", column="REF_CODE", size=512
+            ),
+            "timestamp": "2026-07-06T00:02:00Z",
+        },
+        {  # duplicate for the same (column, milestone): first wins
+            "textPayload": format_milestone(
+                "freetext_pool_built", column="REF_CODE", size=512
+            ),
+            "timestamp": "2026-07-06T00:09:00Z",
+        },
+    ]
+    session = _FakeLogSession(entries)
+    result = probe_module._worker_log_milestones(
+        session, "proj", "job-1", probe_module._DEFAULT_MILESTONES, {}
+    )
+    ladder = result["pool_ladder"]
+    assert ladder["CONCEPT"]["freetext_pool_shape_topup"] == "2026-07-06T00:01:00Z"
+    assert ladder["CONCEPT"]["freetext_pool_stagnated"] == "2026-07-06T00:05:00Z"
+    assert ladder["REF_CODE"]["freetext_pool_built"] == "2026-07-06T00:02:00Z"
+
+
 class _FakeResp:
     def __init__(self, data: dict):
         self._data = data

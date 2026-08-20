@@ -117,6 +117,32 @@ def test_mask_table_learns_source_only_masks(ident_ctx) -> None:
     engine.teardown()
 
 
+def test_domain_supplements_support_without_swamping_row_mass() -> None:
+    # 2026-08-20 wave-4 (D1): the full distinct domain was CONCATENATED
+    # onto the row-weighted evidence, so a 146k-value domain out-voted a
+    # 10k-row sample — the dominant mask fell 89.8% → 8.2% of draws and
+    # the coverage pivot always fired. Weights must come from rows;
+    # the domain feeds only novelty rejection, alphabets and (when the
+    # rows' own singleton masks say unseen masks exist) tail support.
+    from sdfb_core.engines.text_shapes import (
+        build_identifier_artifacts,
+        identifier_sampler_from,
+    )
+
+    rows = ["QX" + f"{i % 40:08d}" for i in range(360)] + [
+        f"{i:04d}QRSTUV" for i in range(40)
+    ]
+    domain = frozenset(f"J{i:07d}ZZ" for i in range(5000))  # a third mask family
+    artifacts = build_identifier_artifacts(
+        tuple("x" * 10), None, rows, domain=domain
+    )
+    rng = random.Random(13)
+    draw = identifier_sampler_from(artifacts, rng.randrange)
+    drawn = [draw() for _ in range(600)]
+    dominant = sum(1 for v in drawn if _mask(v) == "AA99999999") / len(drawn)
+    assert dominant > 0.75  # source row mass is 90%; domain must not dilute it
+
+
 def test_without_store_identifier_behavior_is_sample_bound(ident_ctx) -> None:
     engine = B1RagEngine(embedder=HashingEmbedder())
     engine.setup(_NoLLMClient(), ident_ctx)

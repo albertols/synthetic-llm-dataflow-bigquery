@@ -89,7 +89,10 @@ def test_identifier_branch_reproduces_observed_masks():
     out = hook.sample(prof, 300, GenerationConfig(seed=11), np.random.default_rng(11))
     drawn = [v for v in out if v]
     assert drawn
-    source_masks = {_mask(v) for v in values}
-    assert {_mask(v) for v in drawn} <= source_masks
+    # Wave 4: near-unique-mask columns synthesize tail masks per position
+    # (the capped table alone collapsed mask entropy — COL_064/COL_001).
+    # Novel masks are correct here; alphabet, prefix and diversity must hold.
     hex_chars = set("0123456789ABCDEF")
     assert all(set(v) <= hex_chars for v in drawn)
+    assert all(v.startswith("E2F") for v in drawn)
+    assert len({_mask(v) for v in drawn}) > 8

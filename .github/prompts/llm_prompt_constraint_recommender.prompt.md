@@ -165,7 +165,19 @@ the constraint lever is for gaps the *prompt or decoding grammar* can close.
 - When reading `copy_fraction`, prefer the carved value and cite
   `copy_fraction_raw` only as context (enum-reuse carve-out); a
   `freetext.copy_fraction` row tagged `exempt: temporal_day_granularity`
-  is a domain collision, not evidence.
+  or `exempt: numeric_domain` is a domain collision, not evidence.
+- **Post-ADR-0026 addenda**: (a) UUID/near-unique-mask identifier columns
+  no longer need the `route:"llm"` + `pattern` stop-gap — the Good–Turing
+  mask tail serves them for free; judge them by `shape_mass_tv` and
+  novelty, never exact-mask recall (novel masks are correct there). (b)
+  A constraint now REACHES its column's tail draws: constraint-carrying
+  columns never route to shape-mix expansion, so `format`/`pattern`
+  clauses are no longer decorative on expandable columns — but weigh the
+  cost: adding a constraint to a previously expandable column moves it
+  onto the LLM pool ladder (cold-run wall time). (c) Trust shape-mass
+  numbers only from wave-4 bundles (hash-ordered sampling); pre-wave-4
+  `top_shapes` panels on skewed columns are storage-front artifacts —
+  cross-check against the bundle's exact `top_values` before steering.
 
 ### 3.1 Key ladder — cheapest effective key first, each with its trigger
 

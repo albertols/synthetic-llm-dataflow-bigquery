@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import re
 import string
+import zlib
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from sdfb_core.engines.temporal_parse import parse_temporal_string
@@ -45,6 +47,10 @@ _TEMPORAL_FORMATS: tuple[str, ...] = (
 
 # One value proves nothing about a shared shape.
 _MIN_VALUES = 2
+# Mask-stable novelty retries (wave 4, D2): the fill redraws, the mask
+# never re-picks. 8 attempts push slip-through on sparse keyspaces below
+# ~1e-6 while saturated keyspaces still accept (k-anonymous by pigeonhole).
+_FILL_RETRIES = 8
 # A shape must carry at least this many varying (class) positions,
 # mass-weighted, before expansion can diversify it — an all-literal
 # template can only regenerate its own observed values.
@@ -65,6 +71,43 @@ _CHAR_CLASSES: tuple[str, ...] = (
     string.digits + string.ascii_uppercase,
     string.digits + string.ascii_letters,
 )
+
+# (class, has-digit, has-upper, has-lower) — precomputed kind flags for the
+# kind-preservation rule in `_class_for`.
+_CHAR_CLASS_KINDS: tuple[tuple[str, bool, bool, bool], ...] = tuple(
+    (
+        cls,
+        any(c.isdigit() for c in cls),
+        any(c.isupper() for c in cls),
+        any(c.islower() for c in cls),
+    )
+    for cls in _CHAR_CLASSES
+)
+
+
+def _class_for(chars: set[str]) -> str | None:
+    """Narrowest class covering ``chars`` WITHOUT introducing a character
+    KIND (digit / upper / lower) the evidence never showed.
+
+    The hex classes sit before the plain letter classes (narrower), so a
+    letter-only position whose observed chars happened to fall inside A-F
+    bound to ``digits+ABCDEF`` and started emitting digits 62.5% of the
+    time (2026-08-20 B_TABLE R1, COL_038-class: 'EXSPF1   DN…' →
+    'EXSPF1   6C…' — measured family split 0.611/0.389, exactly 10/16 vs
+    6/16). A class may generalize WITHIN a kind (D,N → any uppercase)
+    but never add a kind."""
+    has_digit = any(c.isdigit() for c in chars)
+    has_upper = any(c.isupper() for c in chars)
+    has_lower = any(c.islower() for c in chars)
+    for cls, k_digit, k_upper, k_lower in _CHAR_CLASS_KINDS:
+        if (
+            chars <= set(cls)
+            and (has_digit or not k_digit)
+            and (has_upper or not k_upper)
+            and (has_lower or not k_lower)
+        ):
+            return cls
+    return None
 
 
 def detect_temporal_format(values: Iterable[str]) -> str | None:
@@ -117,12 +160,10 @@ def detect_identifier_shape(values: Iterable[str]) -> tuple[str, ...] | None:
         if len(chars) == 1:
             shape.append(next(iter(chars)))
             continue
-        for cls in _CHAR_CLASSES:
-            if chars <= set(cls):
-                shape.append(cls)
-                break
-        else:
+        cls = _class_for(chars)
+        if cls is None:
             return None
+        shape.append(cls)
     return tuple(shape)
 
 
@@ -175,12 +216,8 @@ def build_relaxed_shapes(values: Iterable[str]) -> RelaxedShapes | None:
             if len(chars) == 1:
                 shape.append(next(iter(chars)))
                 continue
-            for cls in _CHAR_CLASSES:
-                if chars <= set(cls):
-                    shape.append(cls)
-                    break
-            else:
-                shape.append("".join(sorted(chars)))
+            cls = _class_for(chars)
+            shape.append(cls if cls is not None else "".join(sorted(chars)))
         shapes.append((len(bucket), tuple(shape)))
     return tuple(shapes) or None
 
@@ -261,12 +298,8 @@ def build_shape_mix(
             if len(chars) == 1:
                 shape.append(next(iter(chars)))
                 continue
-            for cls in _CHAR_CLASSES:
-                if chars <= set(cls):
-                    shape.append(cls)
-                    break
-            else:
-                shape.append("".join(sorted(chars)))
+            cls = _class_for(chars)
+            shape.append(cls if cls is not None else "".join(sorted(chars)))
         shapes.append((len(bucket), tuple(shape)))
     return tuple(shapes) or None
 
@@ -370,12 +403,26 @@ def build_mask_table(
     vals = [v for v in values if v]
     if len(set(vals)) < _MIN_VALUES:
         return None
+    counts = _mask_counts(vals)
+    # Count ties break on a stable hash, NOT the mask string: lexicographic
+    # ordering ('-' < '9' < 'a'/'A') kept the most digit-front-loaded masks
+    # whenever counts tied — on an all-singleton column (COL_064, UUID v4)
+    # the survivors' digit share measured 0.74 vs population 0.63
+    # (2026-08-20 A_TABLE R1). crc32 is deterministic across processes.
+    heaviest = sorted(
+        counts.items(),
+        key=lambda kv: (-kv[1], zlib.crc32(kv[0].encode("utf-8")), kv[0]),
+    )[:cap]
+    return tuple((n, mask) for mask, n in heaviest)
+
+
+def _mask_counts(vals: list[str]) -> dict[str, int]:
+    """Exact-mask row counts over non-empty values."""
     counts: dict[str, int] = {}
     for v in vals:
         mask = "".join(_mask_char(c) for c in v)
         counts[mask] = counts.get(mask, 0) + 1
-    heaviest = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:cap]
-    return tuple((n, mask) for mask, n in heaviest)
+    return counts
 
 
 def mask_alphabets(values: Iterable[str]) -> dict[str, str]:
@@ -405,6 +452,68 @@ def mask_alphabets(values: Iterable[str]) -> dict[str, str]:
     if lowers:
         out["a"] = "".join(sorted(lowers))
     return out
+
+
+# Residual tail beyond the kept mask table (wave 4): the cap silently
+# dropped every mask outside the top 1024 and renormalized the survivors —
+# COL_001 (52k distinct 24-hex ids) landed each kept mask at 1/recall =
+# 2.2-2.4x its source mass (shape recall 0.46), and COL_064 (UUID v4,
+# every mask ~unique) collapsed 210k masks onto 1024 drawn uniformly.
+# Tail draws synthesize a value per position from observed character
+# FREQUENCIES, so near-unique-mask columns keep their mask entropy by
+# construction. The tail's row weight follows Good & Turing's estimator:
+# dropped rows plus one per kept singleton mask (a mask seen once is the
+# evidence that unseen masks exist).
+# (weight, per-length buckets: (bucket_weight, ((char, count), ...) per position))
+MaskTail = tuple[int, tuple[tuple[int, tuple[tuple[tuple[str, int], ...], ...]], ...]]
+
+
+def _build_mask_tail(
+    weight_rows: list[str], extra_evidence: list[str]
+) -> MaskTail | None:
+    """Tail bucket from the rows that carry its weight plus support-only
+    evidence (e.g. the ADR 0023 source domain, which informs WHAT tail
+    values look like but not HOW MUCH mass they hold)."""
+    if not weight_rows:
+        return None
+    evidence = [v for v in weight_rows if v] + [v for v in extra_evidence if v]
+    buckets: dict[int, list[str]] = {}
+    for v in evidence:
+        buckets.setdefault(len(v), []).append(v)
+    per_length: list[tuple[int, tuple[tuple[tuple[str, int], ...], ...]]] = []
+    for length, bucket in sorted(buckets.items()):
+        cols = tuple(
+            tuple(sorted(Counter(v[i] for v in bucket).items()))
+            for i in range(length)
+        )
+        per_length.append((len(bucket), cols))
+    return (len(weight_rows), tuple(per_length))
+
+
+def _sample_mask_tail(tail: MaskTail, pick: Callable[[int], int]) -> str:
+    """One tail value: draw a length bucket by evidence weight, then each
+    position's character by its observed frequency."""
+    _, buckets = tail
+    total = sum(w for w, _ in buckets)
+    r = pick(total)
+    cols = buckets[-1][1]
+    for w, cand in buckets:
+        if r < w:
+            cols = cand
+            break
+        r -= w
+    out: list[str] = []
+    for col in cols:
+        t = sum(c for _, c in col)
+        k = pick(t)
+        ch = col[-1][0]
+        for cand_ch, c in col:
+            if k < c:
+                ch = cand_ch
+                break
+            k -= c
+        out.append(ch)
+    return "".join(out)
 
 
 # Per-length, per-position observed charsets: length → (charset@0, charset@1, …).
@@ -509,19 +618,32 @@ def build_identifier_artifacts(
     shape_mix: RelaxedShapes | None,
     observed_values: Iterable[object],
     coverage_min: float = 0.5,
+    domain: Iterable[str] = (),
 ) -> IdentifierArtifacts:
     """Resolve the draw route + heavy tables for one identifier column.
 
     Mask mix when the top masks cover most of the observed mass (rigid
     mask families, the 2026-08-07 fix); otherwise a whole-mask draw from
-    the FULL row-weighted mask table filled from the column's observed
+    the row-weighted mask table filled from the column's observed
     alphabets, narrowed per position (`positional_alphabets`) so fixed
     prefixes and version nibbles survive (2026-08-11 A_TABLE R1: COL_001
-    lost its literal E2F3 prefix, COL_064 its v4 nibble). The collapsed
-    template stays as the last resort.
+    lost its literal E2F3 prefix, COL_064 its v4 nibble), plus a residual
+    TAIL bucket for the mass the cap would otherwise renormalize away
+    (wave 4 — see `MaskTail`). The collapsed template stays as the last
+    resort.
+
+    ``domain`` is the ADR 0023 full source domain, kept SEPARATE from the
+    weight-carrying rows (wave 4, D1): concatenating its distinct values
+    onto the row multiset let a 146k-value domain out-vote a 10k-row
+    sample — the dominant mask fell from 89.8% to 8.2% of draws and the
+    coverage pivot always fired. The domain feeds novelty rejection, the
+    alphabets/positional evidence and the tail's support; mask WEIGHTS
+    and the coverage denominator stay row-mass.
     """
     rows = [str(v) for v in observed_values]
-    observed = frozenset(rows)
+    row_set = frozenset(rows)
+    domain_only = [str(v) for v in domain if str(v) and str(v) not in row_set]
+    observed = row_set | frozenset(domain_only)
     non_empty = [v for v in rows if v]
     if shape_mix:
         # Coverage counts only GENERATIVE buckets (≥1 class position): an
@@ -541,12 +663,22 @@ def build_identifier_artifacts(
             return ("mix", shape_mix, observed)
     table = build_mask_table(non_empty)
     if table is not None:
+        counts = _mask_counts(non_empty)
+        kept = {mask for _, mask in table}
+        tail_rows = [
+            v
+            for v in non_empty
+            if (m := "".join(_mask_char(c) for c in v)) not in kept
+            or counts[m] == 1
+        ]
+        alpha_evidence = non_empty + domain_only
         return (
             "table",
             table,
-            mask_alphabets(non_empty),
-            positional_alphabets(non_empty),
+            mask_alphabets(alpha_evidence),
+            positional_alphabets(alpha_evidence),
             observed,
+            _build_mask_tail(tail_rows, domain_only),
         )
     return ("collapsed", shape)
 
@@ -554,28 +686,55 @@ def build_identifier_artifacts(
 def identifier_sampler_from(
     artifacts: IdentifierArtifacts, pick: Callable[[int], int]
 ) -> Callable[[], str]:
-    """Per-row generator over prebuilt artifacts. Draws retry x3 against
-    the observed set so novelty pressure stays with the sampler."""
+    """Per-row generator over prebuilt artifacts.
+
+    Novelty retries are MASK-STABLE (wave 4, D2): the bucket/mask is drawn
+    once and only the FILL redraws on a collision. Redrawing the whole
+    draw made rejection shape-dependent — mass migrated from saturated
+    low-cardinality mask families to high-cardinality ones (2026-08-20
+    B_TABLE R1, COL_026: dominant mask 0.890 → 0.838 while a rare variant
+    inflated 42x). A keyspace so saturated that three fills all collide
+    accepts the collision: its values are k-anonymous by pigeonhole, and
+    mask mass beats forced novelty there."""
     route = artifacts[0]
     if route == "mix":
         _, shape_mix, observed = artifacts
 
         def _from_mix() -> str:
+            shape = pick_relaxed_shape(shape_mix, pick)
             v = ""
-            for _ in range(3):
-                v = sample_relaxed_identifier(shape_mix, pick)
+            for _ in range(_FILL_RETRIES):
+                v = sample_identifier(shape, pick)
                 if v not in observed:
                     break
             return v
 
         return _from_mix
     if route == "table":
-        _, table, alphabets, positional, observed = artifacts
+        _, table, alphabets, positional, observed, tail = artifacts
+        kept_weight = sum(w for w, _ in table)
+        tail_weight = tail[0] if tail is not None else 0
 
         def _from_table() -> str:
+            r = pick(kept_weight + tail_weight)
+            if r < kept_weight or tail is None:
+                mask = table[-1][1]
+                for w, cand in table:
+                    if r < w:
+                        mask = cand
+                        break
+                    r -= w
+
+                def _fill() -> str:
+                    return sample_from_mask(mask, alphabets, pick, positional)
+            else:
+
+                def _fill() -> str:
+                    return _sample_mask_tail(tail, pick)
+
             v = ""
-            for _ in range(3):
-                v = sample_mask_table(table, alphabets, pick, positional)
+            for _ in range(_FILL_RETRIES):
+                v = _fill()
                 if v not in observed:
                     break
             return v
@@ -590,6 +749,7 @@ def identifier_sampler(
     observed_values: Iterable[object],
     pick: Callable[[int], int],
     coverage_min: float = 0.5,
+    domain: Iterable[str] = (),
 ) -> Callable[[], str]:
     """Per-row identifier generator shared by both engines (wave-2 §4a) —
     the one-shot form of `build_identifier_artifacts` +
@@ -597,7 +757,7 @@ def identifier_sampler(
     artifacts once and reuse them."""
     return identifier_sampler_from(
         build_identifier_artifacts(
-            shape, shape_mix, observed_values, coverage_min
+            shape, shape_mix, observed_values, coverage_min, domain=domain
         ),
         pick,
     )
@@ -622,18 +782,28 @@ def mutate_digit_runs(value: str, pick: Callable[[int], int]) -> str:
     return _DIGIT_RUN.sub(_fresh, value)
 
 
+def pick_relaxed_shape(
+    shapes: RelaxedShapes, pick: Callable[[int], int]
+) -> tuple[str, ...]:
+    """Draw ONE bucket proportionally to its observed weight. Callers doing
+    novelty retries must keep the bucket and redraw only the fill (wave 4,
+    D2): re-picking the bucket per retry makes rejection shape-dependent
+    and migrates mass out of saturated mask families."""
+    total = sum(w for w, _ in shapes)
+    r = pick(total)
+    for w, shape in shapes:
+        if r < w:
+            return shape
+        r -= w
+    return shapes[-1][1]
+
+
 def sample_relaxed_identifier(
     shapes: RelaxedShapes, pick: Callable[[int], int]
 ) -> str:
     """One value from a relaxed template: draw a length bucket proportionally
     to its observed weight, then fill it position-by-position."""
-    total = sum(w for w, _ in shapes)
-    r = pick(total)
-    for w, shape in shapes:
-        if r < w:
-            return sample_identifier(shape, pick)
-        r -= w
-    return sample_identifier(shapes[-1][1], pick)
+    return sample_identifier(pick_relaxed_shape(shapes, pick), pick)
 
 
 def length_hint(values: Iterable[object], *, min_samples: int = 8) -> str:
@@ -672,6 +842,7 @@ __all__ = [
     "length_hint",
     "mask_alphabets",
     "mutate_digit_runs",
+    "pick_relaxed_shape",
     "positional_alphabets",
     "relaxed_shape_charset",
     "relaxed_shape_lengths",

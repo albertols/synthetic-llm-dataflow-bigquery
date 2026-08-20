@@ -121,6 +121,13 @@ rules:
     # the same columns to INFO. Exempted rows stay visible, tagged
     # `exempt: temporal_day_granularity`, and pass.
     exempt_day_granularity: true
+    # Numeric columns collide the same way: an in-range integer draw lands
+    # on a real value by DOMAIN DENSITY, not by copying a row (ADR 0025
+    # pre-authorized the carve-out; the 2026-08-20 R1 pair fired 15 false
+    # BLOCKERs at 0.02%-11% substantive on INT64 columns). Numeric privacy
+    # stays owned by memorization_flags (substantive >= 0.3, k-anonymity
+    # floor) — exempted rows stay visible, tagged `exempt: numeric_domain`.
+    exempt_numeric_domains: true
 
   numeric.decile_ks:
     dimension: fidelity

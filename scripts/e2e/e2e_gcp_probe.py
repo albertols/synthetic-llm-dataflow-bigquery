@@ -307,8 +307,23 @@ _FREETEXT_RULE_DEFAULTS: dict[str, dict] = {
         # 2026-08-11 A_TABLE R1 fired 5 false BLOCKERs on exactly this
         # class. The result row stays visible, tagged and passing.
         "exempt_day_granularity": True,
+        # Numeric columns collide the same way a day-domain does: an
+        # in-range integer draw lands on a real value by DOMAIN DENSITY,
+        # not by copying a row (ADR 0025 pre-authorized this carve-out;
+        # the 2026-08-20 R1 pair fired 15 false BLOCKERs at 0.02%-11% on
+        # INT64 columns). Numeric privacy stays owned by
+        # `memorization_flags` (substantive >= 0.3, k-anon floor) — the
+        # exempt row stays visible and tagged so the two tiers read
+        # together.
+        "exempt_numeric_domains": True,
     },
 }
+
+# BQ types on the numeric-domain exemption (matches the engine's
+# _NUMERIC_BQ_TYPES; the probe stores the landing schema type per column).
+_NUMERIC_BQ_TYPES = frozenset(
+    {"INTEGER", "INT64", "FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"}
+)
 
 
 def evaluate_freetext_rules(
@@ -373,14 +388,20 @@ def evaluate_freetext_rules(
                 cf.get("exempt_day_granularity", True)
                 and e.get("temporal_day_granularity")
             )
+            numeric_exempt = bool(
+                cf.get("exempt_numeric_domains", True)
+                and e.get("type") in _NUMERIC_BQ_TYPES
+            )
             # Unrounded: a few-in-a-million value rounded to 0.0 next to
             # passed=false read as a contradiction (2026-08-09 R1 reports).
             add(
                 "freetext.copy_fraction", name, copy,
-                day_exempt or copy <= cf.get("max", 0.0),
+                day_exempt or numeric_exempt or copy <= cf.get("max", 0.0),
             )
             if day_exempt:
                 results[-1]["exempt"] = "temporal_day_granularity"
+            elif numeric_exempt:
+                results[-1]["exempt"] = "numeric_domain"
     return results
 
 
@@ -800,6 +821,15 @@ def _worker_log_milestones(
         "pageSize": 1000,
     }
     found: dict[str, str] = {}
+    # Pool-ladder milestones per column (2026-08-20 B_TABLE R1: the
+    # first-occurrence-only map made a topup → stagnated → fallback
+    # sequence unattributable — the three lines belonged to different
+    # columns). First timestamp per (column, milestone).
+    pool_ladder: dict[str, dict[str, str]] = {}
+    pool_col_rx = re.compile(
+        r"SDFB_MILESTONE name=(?P<name>freetext_pool_[a-z0-9_]+)"
+        r".*?\bcolumn=(?P<column>\S+)"
+    )
     compiled = [(label, re.compile(pat)) for label, pat in milestones]
     stall_rx = re.compile(r"creating for at least ([\d.]+) seconds")
     pkg_rx = re.compile(r"^(vllm|sdgx|torch|faiss[-\w]*|transformers)==([\w.]+)")
@@ -820,6 +850,7 @@ def _worker_log_milestones(
             sm2 = _SDFB_MILESTONE_RE.search(text)
             if sm2:
                 found.setdefault(f"sdfb.{sm2.group('name')}", ts)
+            _note_pool_ladder(pool_ladder, pool_col_rx, text, ts)
             for label, rx in compiled:
                 if label not in found and rx.search(text):
                     found[label] = ts
@@ -836,10 +867,22 @@ def _worker_log_milestones(
     return {
         "scanned_entries": scanned,
         "timestamps": found,
+        "pool_ladder": pool_ladder,
         "durations_seconds": _milestone_durations(found, [m[0] for m in milestones]),
         "generation_stall_max_seconds": round(stall_max, 1) if stall_max else None,
         "worker_packages": packages,
     }
+
+
+def _note_pool_ladder(
+    pool_ladder: dict, rx: re.Pattern[str], text: str, ts
+) -> None:
+    """First timestamp per (column, freetext_pool_* milestone)."""
+    pc = rx.search(text)
+    if pc:
+        pool_ladder.setdefault(pc.group("column"), {}).setdefault(
+            pc.group("name"), ts
+        )
 
 
 def _post_with_retry(session, url: str, body: dict, *, attempts: int = 5) -> dict:

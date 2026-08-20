@@ -64,6 +64,7 @@ _FQN_PARTS = 3
 _SHAPE_MASS_MIN = 0.02        # a shape must hold >=2% of source mass to be "missing"
 _SHAPE_RECALL_WARN = 0.90     # below this, the generator is missing real formats
 _SHAPE_PRECISION_WARN = 0.90  # below this, the generator invents formats
+_SHAPE_MASS_TV_WARN = 0.25    # total-variation shape-mass distance that matters
 _FRACTION_DELTA_WARN = 0.10   # null/empty/charclass delta that matters
 _LEN_RATIO_WARN = 0.20        # relative mean-length divergence
 _COPY_FRACTION_WARN = 0.30    # literal copy fraction that reads as memorization
@@ -182,23 +183,33 @@ def _aggregate(client, fqn: str, columns: list[str], top_k: int) -> dict[str, An
 
 
 def _sample_sql(fqn: str, columns: list[str], nonempty_col: str | None = None) -> str:
-    """Sample query; ``nonempty_col`` adds that column's non-empty predicate.
+    """Deterministic hash-ordered sample; ``nonempty_col`` adds that
+    column's non-empty predicate.
 
-    `RAND() < p LIMIT lim` short-circuits on storage order, so a
-    mostly-empty column can sample ALL-empty and its source shapes vanish
-    from the report (2026-08-09 B_TABLE R1, COL_037: shape recall 0.00
-    with `missing_shapes: []`). The targeted variant samples the column's
-    substantive rows directly.
+    The previous ``RAND() < @p LIMIT @lim`` (p oversampled 3x) form
+    short-circuited on STORAGE ORDER: LIMIT was reached about a third of
+    the way through the scan, so the sample only ever saw the
+    storage-front slice. Every shape-mass number on a skewed column was
+    distorted by it — the 2026-08-20 R1 pair reported COL_015 "49%
+    spurious alpha mass" and a COL_024 68.6%→7.7% "inversion" that the
+    same bundle's full-table ``top_values`` contradicted, and 2026-08-09
+    COL_037 sampled all-empty on a 91%-empty column. Hash-ordering spreads
+    the sample across the table AND makes it deterministic (same table →
+    same sample → reproducible reports), mirroring
+    ``e2e_fetch_samples.py`` / ``source_synthetic_stats_diff.py``. The
+    targeted variant samples the column's substantive rows directly.
     """
     cols_sql = ",".join(f"CAST(`{c}` AS STRING) AS `{c}`" for c in columns)
-    where = "WHERE RAND() < @p"
+    where = ""
     if nonempty_col is not None:
         c = f"CAST(`{nonempty_col}` AS STRING)"
         where = (
-            f"WHERE `{nonempty_col}` IS NOT NULL "
-            f"AND TRIM({c}) != '' AND RAND() < @p"
+            f"WHERE `{nonempty_col}` IS NOT NULL AND TRIM({c}) != '' "
         )
-    return f"SELECT {cols_sql} FROM `{fqn}` {where} LIMIT @lim"
+    return (
+        f"SELECT {cols_sql} FROM `{fqn}` AS t {where}"
+        f"ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(t)) LIMIT @lim"
+    )
 
 
 # Below this many sampled non-empty values the shape histogram is noise —
@@ -222,16 +233,15 @@ def _sample(
     rows: int,
     nonempty_col: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Random-ish sample of the columns for in-Python shape mining."""
+    """Deterministic hash-ordered sample of the columns for shape mining."""
     from google.cloud import bigquery
 
-    p = min(1.0, (sample_size * 3.0) / max(rows, 1))
+    del rows  # was only used to tune the RAND() oversampling constant
     sql = _sample_sql(fqn, columns, nonempty_col=nonempty_col)
     job = client.query(
         sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("p", "FLOAT64", p),
                 bigquery.ScalarQueryParameter("lim", "INT64", sample_size),
             ]
         ),
@@ -356,6 +366,33 @@ def _copy_fractions(src_prof, syn_prof) -> tuple[float | None, float | None]:
     return copied_sub / len(substantive), raw
 
 
+def _missing_shape_lists(
+    src_mass: dict, syn_counts: dict, shape_recall: float
+) -> tuple[list, int]:
+    """(top missing shapes, count of sub-floor missing shapes).
+
+    Long-tail miss (2026-08-20 B_TABLE COL_037: recall 0.68 with an empty
+    missing list — every unreproduced shape sat under the mass floor and
+    the finding read "top missing: n/a"): count the sub-floor tail, and
+    when the floored list is empty but recall says mass is missing, fall
+    back to the top missing shapes regardless of floor."""
+    missing = sorted(
+        ((s, m) for s, m in src_mass.items() if m >= _SHAPE_MASS_MIN and s not in syn_counts),
+        key=lambda kv: -kv[1],
+    )[:10]
+    below_floor = sum(
+        1
+        for s, m in src_mass.items()
+        if m < _SHAPE_MASS_MIN and s not in syn_counts
+    )
+    if not missing and shape_recall < _SHAPE_RECALL_WARN:
+        missing = sorted(
+            ((s, m) for s, m in src_mass.items() if s not in syn_counts),
+            key=lambda kv: -kv[1],
+        )[:5]
+    return missing, below_floor
+
+
 def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, Any]:
     findings: list[dict[str, str]] = []
 
@@ -376,11 +413,19 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
 
     shape_recall = sum(m for s, m in src_mass.items() if s in syn_counts)
     shape_precision = sum(m for s, m in syn_mass.items() if s in src_counts)
+    # Total-variation distance over the union of shapes: presence-only
+    # recall/precision are blind to MASS shifts (a 68.6%/30.9% source split
+    # rendered 7.7%/92.2% scores recall = precision = 1.0 — the 2026-08-20
+    # B_TABLE COL_024 report read "no material divergence" on an inverted
+    # marginal). TV ∈ [0, 1]; 0 = identical shape marginals.
+    shape_mass_tv = 0.5 * sum(
+        abs(src_mass.get(s, 0.0) - syn_mass.get(s, 0.0))
+        for s in set(src_mass) | set(syn_mass)
+    )
 
-    missing = sorted(
-        ((s, m) for s, m in src_mass.items() if m >= _SHAPE_MASS_MIN and s not in syn_counts),
-        key=lambda kv: -kv[1],
-    )[:10]
+    missing, missing_below_floor = _missing_shape_lists(
+        src_mass, syn_counts, shape_recall
+    )
     spurious = sorted(
         ((s, m) for s, m in syn_mass.items() if m >= _SHAPE_MASS_MIN and s not in src_counts),
         key=lambda kv: -kv[1],
@@ -408,6 +453,15 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
     if shape_precision < _SHAPE_PRECISION_WARN:
         add("HIGH", f"shape precision {shape_precision:.2f}: synthetic invents formats "
                     f"absent from source (top spurious: {', '.join(s for s, _ in spurious[:3]) or 'n/a'})")
+    if shape_mass_tv > _SHAPE_MASS_TV_WARN:
+        worst = max(
+            set(src_mass) | set(syn_mass),
+            key=lambda s: abs(src_mass.get(s, 0.0) - syn_mass.get(s, 0.0)),
+        )
+        add("MEDIUM",
+            f"shape mass divergence {shape_mass_tv:.2f} (total variation): "
+            f"'{worst}' holds {src_mass.get(worst, 0.0):.2f} of source mass "
+            f"vs {syn_mass.get(worst, 0.0):.2f} synthetic")
     if src_null is not None and syn_null is not None and abs(syn_null - src_null) > _FRACTION_DELTA_WARN:
         add("MEDIUM", f"null fraction {syn_null:.2f} vs source {src_null:.2f} "
                       f"(delta {syn_null - src_null:+.2f})")
@@ -459,6 +513,8 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
         "diff": {
             "shape_recall": round(shape_recall, 4),
             "shape_precision": round(shape_precision, 4),
+            "shape_mass_tv": round(shape_mass_tv, 4),
+            "missing_shapes_below_floor": missing_below_floor,
             "missing_shapes": [{"shape": s, "source_mass": round(m, 4)} for s, m in missing],
             "spurious_shapes": [{"shape": s, "synthetic_mass": round(m, 4)} for s, m in spurious],
             "charclass_delta": {k: round(v, 4) for k, v in cc_delta.items()},
@@ -485,6 +541,9 @@ def _column_score(entry: dict[str, Any]) -> float:
     score = 0.0
     score += (1 - d["shape_recall"]) * 2
     score += (1 - d["shape_precision"]) * 2
+    # Mass shifts recall/precision cannot see (the COL_024 inversion class);
+    # TV is already in [0, 1], no capping needed.
+    score += d.get("shape_mass_tv", 0.0) * 2
     score += sum(abs(v) for v in d["charclass_delta"].values())
     score += min(d["mean_length_rel_delta"] or 0, 1.0)
     score += abs(d["empty_fraction_delta"] or 0) * 2
@@ -587,8 +646,14 @@ def render_markdown(meta: dict[str, Any], columns: dict[str, Any]) -> str:  # no
         a(f"| Top shapes (exact) | {_shape_table(s['top_shapes'])} | {_shape_table(y['top_shapes'])} |")
         a("")
         if d["missing_shapes"]:
+            tail = d.get("missing_shapes_below_floor") or 0
+            tail_note = (
+                f" — plus {tail} rarer source shapes below the "
+                f"{_SHAPE_MASS_MIN * 100:.0f}% mass floor" if tail else ""
+            )
             a("**Missing shapes** (in source, absent from synthetic): "
-              + ", ".join(f"`{m['shape']}` ({m['source_mass'] * 100:.1f}%)" for m in d["missing_shapes"]))
+              + ", ".join(f"`{m['shape']}` ({m['source_mass'] * 100:.1f}%)" for m in d["missing_shapes"])
+              + tail_note)
             a("")
         if d["spurious_shapes"]:
             a("**Spurious shapes** (invented by synthetic, absent from source): "

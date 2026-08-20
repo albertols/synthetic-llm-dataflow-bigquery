@@ -183,6 +183,145 @@ class TestPositionalAlphabets:
             ), v
 
 
+class TestMaskTableBeyondCap:
+    """2026-08-20 R1 pair (wave 4): high-entropy identifier columns collapse
+    through the 1024-mask cap.
+
+    COL_064 (UUID v4, every mask ~unique): the kept 1024 all-count-1 masks
+    were selected by the LEXICOGRAPHIC tie-break ('-' < '9' < 'a'), i.e. the
+    most digit-front-loaded masks in the column (measured avg digit share
+    0.74 vs population 0.63), then drawn uniformly — synthetic shapes
+    plateaued at ~0.2% each while real v4 masks are ~unique. COL_001
+    (24-hex): the cap dropped a long tail of real mass and renormalized the
+    survivors (source top mask 0.5% → synthetic 1.2% = 0.5/recall 0.46).
+    The fix: count ties break on a stable hash (no digit skew), and the
+    dropped/singleton mass moves to a TAIL bucket synthesized per position
+    from observed character frequencies (Good-Turing style: the singleton
+    count estimates unseen-mask mass)."""
+
+    def test_cap_tie_break_is_not_digit_skewed(self) -> None:
+        rng = random.Random(17)
+        values = list(
+            dict.fromkeys(
+                "".join(rng.choice("0123456789abcdef") for _ in range(16))
+                for _ in range(2000)
+            )
+        )
+        table = build_mask_table(values, cap=200)
+        assert table is not None
+        masks = [m for _, m in table]
+
+        def digit_share(ms: list[str]) -> float:
+            joined = "".join(ms)
+            return sum(1 for c in joined if c == "9") / len(joined)
+
+        population = [_mask(v) for v in values]
+        # Lexicographic tie-break kept ~0.95 digit share in this fixture;
+        # a stable-hash tie-break tracks the population (~0.62).
+        assert abs(digit_share(masks) - digit_share(population)) < 0.05
+
+    def test_tail_draws_survive_the_cap_with_literals_intact(self) -> None:
+        # > cap distinct masks, all singletons: draws must not be confined
+        # to the kept table — and every draw keeps the literal 'ID-' prefix
+        # and the column alphabet.
+        rng = random.Random(23)
+        values = list(
+            dict.fromkeys(
+                "ID-" + "".join(rng.choice("0123456789ABCDEF") for _ in range(12))
+                for _ in range(1600)
+            )
+        )
+        table = build_mask_table(values)
+        assert table is not None
+        kept_masks = {m for _, m in table}
+        draw = identifier_sampler(tuple("x" * 15), None, values, rng.randrange)
+        drawn = [draw() for _ in range(400)]
+        assert all(v.startswith("ID-") and len(v) == 15 for v in drawn)
+        assert all(set(v[3:]) <= set("0123456789ABCDEF") for v in drawn)
+        assert not set(drawn) & set(values)  # novelty holds
+        drawn_masks = {_mask(v) for v in drawn}
+        # The tail bucket reaches masks the capped table cannot express.
+        assert drawn_masks - kept_masks
+
+    def test_uuid_v4_discipline_survives_beyond_cap(self) -> None:
+        import uuid
+
+        rng = random.Random(29)
+        values = [
+            str(uuid.UUID(int=rng.getrandbits(128), version=4))
+            for _ in range(1600)
+        ]
+        draw = identifier_sampler(tuple("x" * 36), None, values, rng.randrange)
+        for _ in range(200):
+            v = draw()
+            assert re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                v,
+            ), v
+
+    def test_rigid_mask_columns_have_no_tail(self) -> None:
+        # Repeated-mask columns (no singletons, nothing dropped): the tail
+        # bucket must stay empty — masks remain exactly the observed set.
+        values = [f"XY{i:06d}" for i in range(200)] + [
+            f"{i:04d}QRST" for i in range(100)
+        ]
+        draw = identifier_sampler(tuple("x" * 8), None, values, random.Random(7).randrange)
+        drawn = [draw() for _ in range(300)]
+        assert {_mask(v) for v in drawn} <= {_mask(v) for v in values}
+
+
+class TestMaskStableNoveltyRetry:
+    def test_novelty_retry_does_not_migrate_mask_mass(self) -> None:
+        # 2026-08-20 wave-4 (D2): on a collision the retry redrew the WHOLE
+        # draw (new mask included), so mass migrated from saturated
+        # low-cardinality mask families to high-cardinality ones (COL_026:
+        # dominant 0.890 → 0.838, a rare variant inflated 42x). The retry
+        # now redraws only the FILL within the chosen mask; a saturated
+        # keyspace accepts the collision (its values are k-anonymous by
+        # pigeonhole) instead of abandoning the mask.
+        values = ["QRST" + f"{i % 10:04d}" for i in range(900)] + [
+            f"{i:08d}" for i in range(3000, 3100)
+        ]
+        rng = random.Random(19)
+        draw = identifier_sampler(tuple("x" * 8), None, values, rng.randrange)
+        drawn = [draw() for _ in range(1000)]
+        dominant = sum(1 for v in drawn if _mask(v) == "AAAA9999") / len(drawn)
+        assert dominant > 0.85  # source row mass is 90%
+
+
+class TestClassKindPreservation:
+    """2026-08-20 B_TABLE R1, COL_038: `_CHAR_CLASSES` is ordered
+    narrowest-first and `digits+ABCDEF` (16 chars) precedes uppercase (26),
+    so a letter-only position whose chars happen to fall in A-F bound to
+    the HEX class and started emitting digits 62.5% of the time ('EXSPF1
+    DN…' → 'EXSPF1   6C…', 'TN  F4'). A class must never introduce a
+    character KIND (digit/upper/lower) the position never showed."""
+
+    def test_shape_mix_letter_positions_never_gain_digits(self) -> None:
+        # Positions 0-1 are letters ⊆ A-F; position 2+ carries G-Z letters
+        # so the column-wide alphabet is not hex-bound.
+        values = [
+            f"{p}{q}Z{i:05d}" for i, (p, q) in enumerate(
+                (a, b) for a in "CDEF" for b in "ABCD"
+            )
+        ] * 3
+        shapes = build_shape_mix(values)
+        assert shapes is not None
+        for _, shape in shapes:
+            assert not any(c.isdigit() for c in shape[0]), shape[0]
+            assert not any(c.isdigit() for c in shape[1]), shape[1]
+
+    def test_detect_identifier_shape_keeps_hex_for_mixed_positions(self) -> None:
+        # A genuinely mixed digit+A-F position must still bind to the hex
+        # class — kind preservation only blocks classes that ADD a kind.
+        from sdfb_core.engines.text_shapes import detect_identifier_shape
+
+        values = ["A1B2C3D4", "3C4D5E6F", "B2C3D4E5", "9F8E7D6C"]
+        shape = detect_identifier_shape(values)
+        assert shape is not None
+        assert all(set(entry) <= set("0123456789ABCDEF") for entry in shape)
+
+
 class TestIdentifierLikeLiteralSpaces:
     def test_literal_space_padding_is_identifier_like(self) -> None:
         # COL_038-class: rigid space-padded codes must expand per-row

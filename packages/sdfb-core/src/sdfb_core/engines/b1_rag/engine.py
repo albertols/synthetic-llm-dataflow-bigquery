@@ -41,6 +41,7 @@ import logging
 import random
 import threading
 import time
+from collections import Counter
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sdfb_core.codegen import derive_record_model
@@ -71,9 +72,11 @@ from sdfb_core.engines.text_shapes import (
     identifier_sampler_from,
     length_hint,
     mutate_digit_runs,
+    pick_relaxed_shape,
     relaxed_shape_charset,
     relaxed_shape_lengths,
     relaxed_shapes_pattern,
+    sample_identifier,
     sample_relaxed_identifier,
     shape_mix_can_template,
     shape_mix_is_identifier_like,
@@ -139,6 +142,16 @@ _DEFAULT_FREE_TEXT_POOL = _POOL_VALUES_PER_CALL
 # template (rigid-mask columns qualify; 36-hex-style random masks must not
 # collapse to 8 skeletons).
 _MASK_MIX_MIN_COVERAGE = 0.5
+# Identity-like NUMERIC gate (wave 4): only integral columns whose sample
+# distinct count clears the memorization rule's floor fetch a source domain
+# — mirrors `_MEM_MIN_SOURCE_DISTINCT` in the E2E probe.
+_NUMERIC_DOMAIN_MIN_DISTINCT = 100
+# Collision scrub: redraw rounds through the inverse-CDF, then nudge to the
+# nearest non-source integer (bounded walk). A value the SAMPLE saw at
+# least twice is a multi-knot: k-anonymous enum mass that stays exact.
+_NUMERIC_REDRAW_ROUNDS = 2
+_NUMERIC_NUDGE_MAX = 8
+_NUMERIC_MULTI_KNOT_MIN = 2
 # Setup embeds at most this many reference rows. The index those vectors
 # feed serves ONLY centroid top-k exemplar retrieval in M1 (generation
 # samples marginals — no per-batch retrieval), so embedding the full 10k
@@ -213,6 +226,14 @@ class B1RagEngine(GenerationEngine):
         # rebuild per batch).
         self._identifier_domains: dict[str, frozenset[str]] = {}
         self._identifier_artifacts: dict[str, IdentifierArtifacts] = {}
+        # Identity-like integral NUMERIC columns (wave 4): full source
+        # domain for collision scrubbing (2026-08-20 A_TABLE R1, COL_009:
+        # inverse-CDF interpolation in a dense integer band landed 52%
+        # substantive copies), plus the multi-knot values (sample freq >= 2)
+        # that stay exact as k-anonymous enum mass.
+        self._numeric_domains: dict[str, frozenset[str]] = {}
+        self._numeric_multi_knots: dict[str, frozenset[str]] = {}
+        self._numeric_scrub_logged: set[str] = set()
         self._column_order: list[str] = []
         self._ready: bool = False
 
@@ -307,8 +328,11 @@ class B1RagEngine(GenerationEngine):
         # 5. identifier-shaped columns: pull the full source domain through
         # the same store the pool ladder uses (ADR 0023) so mask tables and
         # novelty rejection see the whole keyspace, not the sample
-        # (2026-08-11 A_TABLE R1: COL_001 mask recall 0.38).
+        # (2026-08-11 A_TABLE R1: COL_001 mask recall 0.38). Wave 4 extends
+        # the seam to identity-like integral NUMERIC columns (COL_009:
+        # 52% substantive copies from dense-band interpolation).
         self._fetch_identifier_domains(ctx)
+        self._fetch_numeric_domains(ctx)
         self._log_generation_plan(ctx)
 
         self._ready = True
@@ -327,6 +351,36 @@ class B1RagEngine(GenerationEngine):
                 )
                 if domain:
                     self._identifier_domains[name] = domain
+
+    def _fetch_numeric_domains(self, ctx: GenerationContext) -> None:
+        """Full source domains for identity-like integral NUMERIC columns.
+
+        Gated to columns whose SAMPLE distinct count clears the
+        memorization rule's cardinality floor (source_distinct > 100):
+        below it, collisions are enum reuse the probe's k-anonymity floor
+        already exempts, and the domain query would be spent for nothing.
+        Multi-knot values (sample frequency >= 2) are recorded so the
+        scrubber keeps them exact — under the ~20x sample-to-source scale
+        they are the frequent codes the engine must re-emit (the same
+        argument as FREE_TEXT head values)."""
+        assert self._profiles is not None
+        for name, prof in self._profiles.items():
+            if prof.kind is not ColumnKind.NUMERIC or not prof.is_integral:
+                continue
+            values = [str(v) for v in prof.observed_values if v is not None]
+            if len(set(values)) <= _NUMERIC_DOMAIN_MIN_DISTINCT:
+                continue
+            domain = self._fetch_source_values(
+                ctx, name, milestone="numeric_source_filter"
+            )
+            if domain:
+                self._numeric_domains[name] = domain
+                counts = Counter(values)
+                self._numeric_multi_knots[name] = frozenset(
+                    v
+                    for v, c in counts.items()
+                    if c >= _NUMERIC_MULTI_KNOT_MIN
+                )
 
     def _log_generation_plan(self, ctx: GenerationContext) -> None:
         """ONE milestone mapping every column to its generation strategy.
@@ -396,6 +450,11 @@ class B1RagEngine(GenerationEngine):
         self._embedder = None
         self._ref_vectors = []
         self._free_text_pools = {}
+        self._identifier_domains = {}
+        self._identifier_artifacts = {}
+        self._numeric_domains = {}
+        self._numeric_multi_knots = {}
+        self._numeric_scrub_logged = set()
         self._column_order = []
         self._ready = False
 
@@ -482,10 +541,78 @@ class B1RagEngine(GenerationEngine):
             if sampler.profile.kind is ColumnKind.FREE_TEXT:
                 continue  # patched separately from the LLM pool
             if use_numpy:
-                out[name] = sampler.sample_numpy(rng, n, similarity)
+                values = sampler.sample_numpy(rng, n, similarity)
             else:
-                out[name] = sampler.sample_python(rng, n, similarity)
+                values = sampler.sample_python(rng, n, similarity)
+            if name in self._numeric_domains:
+                values = self._scrub_numeric_collisions(
+                    name, sampler, rng, values, similarity, use_numpy
+                )
+            out[name] = values
         return out
+
+    def _scrub_numeric_collisions(
+        self, name, sampler, rng, values: list, similarity: float,
+        use_numpy: bool,
+    ) -> list:
+        """Reject rare-source-value collisions on identity-like INT64 draws.
+
+        The inverse-CDF interpolant rounds onto real values wherever the
+        integer band is dense (2026-08-20 A_TABLE R1: COL_009 landed 52%
+        substantive copies of rare account numbers). Colliding draws
+        redraw through the same inverse-CDF, then nudge to the nearest
+        non-source integer — the marginal moves by at most a few units.
+        Multi-knot values (sample frequency >= 2) stay exact: under the
+        sample-to-source scale they are k-anonymous enum mass, the numeric
+        twin of FREE_TEXT head values. A value still colliding after the
+        nudge walk (fully dense neighborhood) is kept — by pigeonhole its
+        neighbors are all real values too, and the residual is logged.
+        """
+        domain = self._numeric_domains[name]
+        keep = self._numeric_multi_knots.get(name, frozenset())
+
+        def _collides(v) -> bool:
+            return v is not None and str(v) in domain and str(v) not in keep
+
+        idx = [i for i, v in enumerate(values) if _collides(v)]
+        collisions = len(idx)
+        if not collisions:
+            return values
+        for _ in range(_NUMERIC_REDRAW_ROUNDS):
+            if not idx:
+                break
+            fresh = (
+                sampler.sample_numpy(rng, len(idx), similarity)
+                if use_numpy
+                else sampler.sample_python(rng, len(idx), similarity)
+            )
+            for i, v in zip(idx, fresh, strict=True):
+                if v is not None:  # keep null parity: a None redraw is a miss
+                    values[i] = v
+            idx = [i for i in idx if _collides(values[i])]
+        nudged = 0
+        for i in list(idx):
+            v = int(values[i])
+            for step in range(1, _NUMERIC_NUDGE_MAX + 1):
+                lo, hi = v - step, v + step
+                if str(lo) not in domain:
+                    values[i], nudged = lo, nudged + 1
+                    idx.remove(i)
+                    break
+                if str(hi) not in domain:
+                    values[i], nudged = hi, nudged + 1
+                    idx.remove(i)
+                    break
+        if name not in self._numeric_scrub_logged:
+            self._numeric_scrub_logged.add(name)
+            log_milestone(
+                "numeric_source_rejected",
+                column=name,
+                collisions=collisions,
+                nudged=nudged,
+                unresolved=len(idx),
+            )
+        return values
 
     def _sample_free_text(
         self, n: int, cfg: GenerationConfig, similarity: float
@@ -519,14 +646,7 @@ class B1RagEngine(GenerationEngine):
                 ]
                 continue
             pool = self._free_text_pools.get(name) or list(prof.text_examples)
-            expand = (
-                prof.shape_mix is not None
-                and expansion != "off"
-                and (
-                    expansion == "all"
-                    or shape_mix_is_identifier_like(prof.shape_mix)
-                )
-            )
+            expand = self._draws_from_expansion(prof)
             if not pool and not expand:
                 out[name] = [None] * n
                 continue
@@ -541,10 +661,12 @@ class B1RagEngine(GenerationEngine):
                     # Draw from the observed shape mix: distinct scales with
                     # rows, not with the LLM pool cap (2026-08-03 10M run:
                     # synthetic distinct == pool size on all 13 columns).
-                    for _ in range(3):
-                        v = sample_relaxed_identifier(
-                            prof.shape_mix, rng.randrange
-                        )
+                    # Bucket-stable novelty retry (wave 4, D2): keep the
+                    # drawn bucket, redraw only the fill — re-picking the
+                    # bucket migrates mass out of saturated mask families.
+                    shape = pick_relaxed_shape(prof.shape_mix, rng.randrange)
+                    for _ in range(8):
+                        v = sample_identifier(shape, rng.randrange)
                         if v not in observed:
                             return v
                     return v
@@ -559,6 +681,29 @@ class B1RagEngine(GenerationEngine):
                 for _ in range(n)
             ]
         return out
+
+    def _draws_from_expansion(self, prof: ColumnProfile) -> bool:
+        """One truth for "this column's tail draws come from shape-mix
+        expansion" — shared by the draw path AND the pool-build skip so
+        they can never diverge (a skipped pool without expansion would
+        fall back to observed `text_examples`, i.e. memorization).
+
+        Columns carrying an `llm_prompt_constraint` never expand (wave 4):
+        the constraint's enforcement vehicle is the pool prompt and its
+        guided `pattern` — expansion was silently bypassing both, which
+        made a `format`/`charset` clause on an expandable column
+        decorative (2026-08-20 B_TABLE R1, COL_015-class)."""
+        if prof.llm_prompt_constraint:
+            return False
+        expansion = getattr(self._ctx, "freetext_expansion", "identifiers")
+        return (
+            prof.shape_mix is not None
+            and expansion != "off"
+            and (
+                expansion == "all"
+                or shape_mix_is_identifier_like(prof.shape_mix)
+            )
+        )
 
     @staticmethod
     def _with_head_values(
@@ -591,16 +736,19 @@ class B1RagEngine(GenerationEngine):
         self, prof: ColumnProfile, rng: random.Random
     ) -> Callable[[], object]:
         """Per-row identifier generator: mask mix when the masks are rigid,
-        row-weighted mask table (positional alphabets pin fixed prefixes)
-        otherwise, collapsed template as last resort.
+        row-weighted mask table (positional alphabets pin fixed prefixes,
+        residual tail bucket carries the beyond-cap mass) otherwise,
+        collapsed template as last resort.
 
         Evidence = observed rows minus head values (heads are re-emitted at
         their exact share by `_with_head_values` — leaving them in would
-        double-count their mask mass) plus the column's full source domain
-        when a `source_value_store` is attached (2026-08-11 A_TABLE R1:
-        the sample-only table reproduced 38% of source masks, and novelty
-        was only guaranteed against the sample). Artifacts build once per
-        setup; only the per-batch RNG binding is per-call.
+        double-count their mask mass). The full source domain (ADR 0023
+        store) travels SEPARATELY (wave 4, D1): concatenated onto the row
+        multiset it out-voted the sample — distinct-weighted masks again,
+        dominant mask 89.8% → 8.2% of draws — so it now feeds only novelty
+        rejection, alphabets/positional evidence and the tail's support.
+        Artifacts build once per setup; only the per-batch RNG binding is
+        per-call.
         """
         artifacts = self._identifier_artifacts.get(prof.name)
         if artifacts is None:
@@ -610,15 +758,12 @@ class B1RagEngine(GenerationEngine):
             evidence = [
                 str(v) for v in prof.observed_values if str(v) not in head_set
             ]
-            domain = self._identifier_domains.get(prof.name, frozenset())
-            if domain:
-                seen = set(evidence)
-                evidence += [v for v in domain if v not in seen]
             artifacts = build_identifier_artifacts(
                 shape,
                 prof.shape_mix,
                 evidence,
                 coverage_min=_MASK_MIX_MIN_COVERAGE,
+                domain=self._identifier_domains.get(prof.name, frozenset()),
             )
             self._identifier_artifacts[prof.name] = artifacts
         return identifier_sampler_from(artifacts, rng.randrange)
@@ -714,6 +859,7 @@ class B1RagEngine(GenerationEngine):
             for p in self._profiles.values()
             if p.kind is ColumnKind.FREE_TEXT and p.identifier_shape is None
         ]
+        free_text_cols = self._skip_expandable_pools(free_text_cols)
         if not free_text_cols:
             return pools
 
@@ -796,6 +942,26 @@ class B1RagEngine(GenerationEngine):
         if first_error is not None:
             raise first_error
         return pools
+
+    def _skip_expandable_pools(
+        self, free_text_cols: list[ColumnProfile]
+    ) -> list[ColumnProfile]:
+        """Drop columns whose draw path never reads a pool (wave 4).
+
+        Shape-mix-expandable columns draw from their observed shape mix —
+        the ladder work (LLM calls, stagnation waits, store writes) was
+        dead cost: the 2026-08-20 B_TABLE R1 spent 28.7 min (53% of wall
+        time) in PoolTrigger with several such columns.
+        `_draws_from_expansion` is the same predicate the draw path uses,
+        so a skipped column is GUARANTEED to expand instead."""
+        kept: list[ColumnProfile] = []
+        for p in free_text_cols:
+            if self._draws_from_expansion(p):
+                self._pool_sources[p.name] = "expansion_no_pool"
+                log_milestone("freetext_pool_skipped_expandable", column=p.name)
+            else:
+                kept.append(p)
+        return kept
 
     def _fetch_free_text_chunks(self, ctx: GenerationContext) -> dict[str, list]:
         """Fetch persisted `free_text_col` chunks ONCE for all columns and

@@ -69,6 +69,9 @@ def test_pool_scales_past_32_with_batched_calls():
         reference_digest="d",
         pipeline_run_id="pool-scale",
         num_rows=200,
+        # Ladder-mechanics test: expansion off forces the pool path
+        # (wave 4 skips ladders for expandable columns).
+        freetext_expansion="off",
     )
     engine.setup(client, ctx)
     pool = engine._free_text_pools["notes"]

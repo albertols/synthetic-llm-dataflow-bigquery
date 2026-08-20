@@ -328,6 +328,19 @@ For every anomaly: **evidence → root cause (file:symbol) → fix**. Check for:
   so `pk.duplicate` never fires; runs `PASSED` despite the above.
 - **Perf**: unnecessary embedder warm-pull for the library engine; long
   generation stall; startup-bound wall time.
+- **Wave-4 metric keys (ADR 0026)** — read them before calling a shape
+  defect: crosscheck `diff.shape_mass_tv` (total-variation shape-mass
+  distance; the mass metric — recall/precision are presence-only and score
+  1.0 on an inverted marginal) and `missing_shapes_below_floor`;
+  `freetext.copy_fraction` rows tagged `exempt: numeric_domain` PASS by
+  design (numeric privacy is `memorization_flags`' job); the probe's
+  `pool_ladder` maps `freetext_pool_*` milestones per column — attribute
+  stalls to a column from it, never from first-occurrence timestamps.
+  `freetext_pool_skipped_expandable` is by-design (expandable columns draw
+  from their shape mix), not a store outage. On near-unique-mask
+  identifier columns (UUID-class), NOVEL masks are correct post-ADR-0026
+  (tail bucket); judge them by `shape_mass_tv`, alphabet, literal
+  prefixes and novelty — not by exact-mask recall.
 
 > **Forward-looking**: this step hand-computes fidelity from the offline CSV
 > (Step 2) and live BQ (Step 3). Once `--enable-evaluation` lands (see
