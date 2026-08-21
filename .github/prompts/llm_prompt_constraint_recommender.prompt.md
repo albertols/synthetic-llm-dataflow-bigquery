@@ -242,10 +242,14 @@ For each targeted column in `SCHEMA`, set/replace the embedded object in the
 - Keep the file valid JSON (mind the double-escaping rule for `pattern`).
 
 Remind the user of the propagation chain (guide §7–§8): this file doubles as
-the Terraform `google_bigquery_table.schema` payload, and the pipeline reads
-descriptions back from `INFORMATION_SCHEMA` via the DDL extractor — the new
-constraints only reach the engines after `terraform apply` (or `bq update`)
-**and** a fresh `scripts/extract_ddl.py` run, with `--prompt_constraints on`.
+the Terraform `google_bigquery_table.schema` payload **of the LANDING
+(synthetic/target) table** — ADR 0027 D2: the pipeline overlays description
+surfaces from `--landing_table`'s `INFORMATION_SCHEMA` live at EVERY launch
+and STRIPS the source table's descriptions, so constraints written anywhere
+else reach nothing. `terraform apply` (or `bq update`) on the landing table
+alone propagates the new constraints, with `--prompt_constraints on` (the
+default). A fresh `scripts/extract_ddl.py` run against the LANDING table
+only refreshes the optional `--ddl_uri` offline-fallback pin.
 
 ---
 
@@ -294,13 +298,24 @@ the report.
    "`spurious_shapes` → empty") → risk notes (coverage %, route change).
 3. **Declined columns** — evidence seen, why no constraint (not steerable /
    typed route sufficient / sampler-owned defect + owning code area).
-4. **Propagation checklist** — terraform/bq update → extract_ddl → run with
-   `--prompt_constraints on`; grep logs for `prompt_constraints_found` —
-   BOTH the launcher (preflight) and worker (generation-plan) variants
-   carry the fetched rendered clause + per-column `clause_sha12`, so the
-   edit is verifiable without `--prompt_debug` (diff `clause_sha12` vs the
-   previous launch). Add `--prompt_debug redacted` only when the full pool
-   prompt is also needed (`freetext_pool_prompt` + `sha12` drift).
+4. **Propagation checklist** — terraform/bq update is ENOUGH: DDL
+   resolution is live-first (ADR 0027 D2 — the 2026-08-21 four-run cycle,
+   which consumed a stale pin and fired zero `prompt_constraints_found`,
+   is the decision record), so the next launch extracts the edited
+   descriptions from `INFORMATION_SCHEMA` directly. Verify in order:
+   `ddl_live_extracted` + `target_metadata_overlaid` (the LANDING
+   table's descriptions are what generation consumes;
+   `target_metadata_unavailable` means the edits are on the wrong table
+   or the landing table is missing; an `ddl_live_extract_failed`
+   fallback launch runs on the pin and will NOT carry fresh edits), then
+   `prompt_constraints_found` — BOTH the launcher (preflight) and worker
+   (generation-plan) variants carry the fetched rendered clause +
+   per-column `clause_sha12`, so the edit is verifiable without
+   `--prompt_debug` (diff `clause_sha12` vs the previous launch).
+   Housekeeping: re-run `scripts/extract_ddl.py` when `ddl_pin_drift`
+   fires, so the OFFLINE fallback stays usable. Add `--prompt_debug
+   redacted` only when the full pool prompt is also needed
+   (`freetext_pool_prompt` + `sha12` drift).
 
 Then produce the **de-identified twin** with the bundle's standard mapping —
 this is the version to share/report outside the environment (column names →

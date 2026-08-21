@@ -674,9 +674,44 @@ def _job_params(j: dict) -> dict[str, Any]:
             "shortStrValue",
         ):
             if e.get(field) is not None:
-                params[str(key)] = e[field]
+                params[str(key)] = _sanitize_param(str(key), e[field])
                 break
     return params
+
+
+# Params whose whole value is an infra identifier with zero analytical value
+# (the oss redaction mapping only knows tables/columns/callers, so these
+# leaked verbatim into every bundle until the 2026-08-21 four-run cycle).
+_PARAM_DROP_KEYS = frozenset(
+    {
+        "dataflow_kms_key",
+        "subnetwork",
+        "network",
+        "use_network_tags",
+        "use_network_tags_for_flex_templates",
+        "service_account_email",
+        "impersonate_service_account",
+    }
+)
+
+
+def _sanitize_param(key: str, value: Any) -> Any:
+    """Mask infra identifiers in a pipeline-option value at collection time.
+
+    Buckets keep their object path (`gs://REDACTED_BUCKET/…`), registry
+    paths keep the image basename (the tag carries the build id), and the
+    keys in `_PARAM_DROP_KEYS` are replaced wholesale. Everything else
+    passes through untouched."""
+    if not isinstance(value, str):
+        return value
+    if key in _PARAM_DROP_KEYS:
+        return "REDACTED"
+    out = re.sub(r"gs://[^/\s]+", "gs://REDACTED_BUCKET", value)
+    out = re.sub(r"[\w.-]+\.pkg\.dev(?:/[\w.-]+)*/([\w.-]+:[\w.-]+)",
+                 r"ARTIFACT_REGISTRY/\1", out)
+    out = re.sub(r"[\w.+-]+@[\w.-]+\.iam\.gserviceaccount\.com",
+                 "REDACTED_SERVICE_ACCOUNT", out)
+    return out
 
 
 # Job-message text markers → milestone label. Applied to JOB_MESSAGE_BASIC text

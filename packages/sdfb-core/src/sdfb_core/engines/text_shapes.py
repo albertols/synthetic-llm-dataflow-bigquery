@@ -806,6 +806,33 @@ def sample_relaxed_identifier(
     return sample_identifier(pick_relaxed_shape(shapes, pick), pick)
 
 
+# C0 controls minus common text whitespace, plus DEL/C1 — the marker set of
+# binary payloads mis-stored as STRING. Accented/Unicode TEXT never trips
+# this (ord >= 160), so Spanish prose columns stay on their normal routes.
+_CONTROL_CHARS = frozenset(
+    chr(c) for c in range(32) if chr(c) not in "\t\n\r"
+) | frozenset(chr(c) for c in range(127, 160))
+_BINARY_MIN_SHARE = 0.5
+
+
+def is_binary_class(
+    values: Iterable[object], min_share: float = _BINARY_MIN_SHARE
+) -> bool:
+    """True when most substantive values carry control characters.
+
+    COL_048-class (2026-08-21 four-run cycle): a binary/control-char
+    column spent the ENTIRE cold pool phase (8.6 min, 41% of wall time)
+    in an LLM ladder whose candidates were format-rejected en masse — an
+    LLM cannot usefully emit control bytes. Such columns route straight
+    to the shape-fallback template pool.
+    """
+    vals = [str(v) for v in values if v]
+    if len(vals) < _MIN_VALUES:
+        return False
+    hits = sum(1 for v in vals if any(ch in _CONTROL_CHARS for ch in v))
+    return hits / len(vals) >= min_share
+
+
 def length_hint(values: Iterable[object], *, min_samples: int = 8) -> str:
     """Measured length band for free-text pool prompts.
 
@@ -839,6 +866,7 @@ __all__ = [
     "detect_temporal_format",
     "identifier_sampler",
     "identifier_sampler_from",
+    "is_binary_class",
     "length_hint",
     "mask_alphabets",
     "mutate_digit_runs",

@@ -42,7 +42,8 @@ from apache_beam.options.pipeline_options import (
 )
 from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
-from sdfb_core.observability import log_milestone
+from sdfb_core.contracts.relational import parse_llm_prompt_constraint
+from sdfb_core.observability import log_build_info, log_milestone
 from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.stats import PROFILER_VERSION, profile_source_table, stats_rows
 from sdfb_core.validation import Thresholds
@@ -111,11 +112,17 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p = argparse.ArgumentParser(description="Synthetic Dataflow BigQuery — pipeline launcher")
     p.add_argument("--ddl_uri", default="",
-                   help="gs:// or local path to _ddl.json. OPTIONAL "
-                        "(WS4 §6b): empty = live INFORMATION_SCHEMA "
-                        "extraction from --reference_table at "
-                        "graph-construction time. An explicit URI is the "
-                        "pin/air-gap escape hatch and always wins.")
+                   help="gs:// or local path to _ddl.json — the OFFLINE "
+                        "FALLBACK only (ADR 0027 D2). Live extraction is "
+                        "authoritative at every launch: structure from "
+                        "--reference_table, description surfaces "
+                        "(llm_prompt_constraint + relational contract) "
+                        "overlaid from --landing_table — the SOURCE "
+                        "table's descriptions are stripped, never used. "
+                        "The pin (extract it from the LANDING table) is "
+                        "consumed only when live extraction fails "
+                        "(air-gap, BQ outage); staleness is reported "
+                        "(ddl_pin_drift/ddl_pin_fresh).")
     p.add_argument("--reference_table", required=True,
                    help="FQN of source table for live SELECT reference rows")
     p.add_argument("--reference_rows_limit", type=int, default=10_000)
@@ -342,71 +349,210 @@ def load_ddl(ddl_uri: str) -> TableSchema:
         return TableSchema.model_validate(json.loads(f.read()))
 
 
-# A pinned --ddl_uri that does not EXIST is an operational miss (new source
-# table whose DDL was never exported) and must degrade to live extraction:
-# TEST_1 (2026-07-25 16:38) died at template launch on a 404 with a perfectly
-# good source table available. A pin that exists but is CORRUPT is a different
-# failure — the operator asked for that exact schema — and still raises.
-_MISSING_DDL_MARKERS = ("notfound", "no such object", "404", "filenotfound")
+def resolve_table_schema(
+    ddl_uri: str, reference_table: str, landing_table: str = ""
+) -> TableSchema:
+    """Live INFORMATION_SCHEMA extraction is AUTHORITATIVE at every launch,
+    and generation-steering metadata comes from the TARGET table only
+    (ADR 0027 D2, 2026-08-21).
 
+    Two rules from the 2026-08-21 four-run cycle:
 
-def _is_missing_ddl(exc: BaseException) -> bool:
-    """True when `exc` means "the object isn't there", not "it's malformed"."""
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if isinstance(cur, FileNotFoundError):
-            return True
-        if isinstance(cur, json.JSONDecodeError):
-            return False  # parsed-but-broken: never silently swap the schema
-        blob = f"{type(cur).__name__} {cur}".lower()
-        if any(m in blob for m in _MISSING_DDL_MARKERS):
-            return True
-        cur = cur.__cause__ or cur.__context__
-    return False
-
-
-def resolve_table_schema(ddl_uri: str, reference_table: str) -> TableSchema:
-    """WS4 §6b precedence: explicit ``--ddl_uri`` (pin/air-gap) > live
-    INFORMATION_SCHEMA extraction from the source table.
-
-    A MISSING pin falls through to live extraction (WS5 T1); a corrupt or
-    schema-invalid pin still raises.
+    1. **Live-first.** The schema is fetched from the bqClient every
+       launch — the cycle consumed a stale ``--ddl_uri`` pin and silently
+       dropped every constraint edit (zero `prompt_constraints_found`
+       across four jobs). ``--ddl_uri`` demotes to the OFFLINE FALLBACK
+       (air-gapped launcher, BQ outage); a corrupt pin in offline mode
+       still raises — the operator's declared fallback is broken.
+    2. **Target-only steering metadata.** Structure (columns/types/modes)
+       mirrors the SOURCE table, but the description surfaces — the
+       `llm_prompt_constraint` clauses and the `{"sdfb":1,…}` contract —
+       are overlaid from the LANDING (synthetic/target) table, which the
+       synthetic-data team owns and Terraforms. The source (lake) table's
+       descriptions are another team's prose and must NEVER steer
+       generation: with the target unreachable they are STRIPPED, not
+       inherited. The offline pin is the one exception — it is the
+       operator's declared fallback, extracted from the landing table per
+       the propagation runbook, so its descriptions stand when the target
+       is also unreachable.
     """
-    if ddl_uri:
-        logger.info("Loading DDL from %s", ddl_uri)
+    live_error: Exception | None = None
+    if reference_table:
         try:
-            schema = load_ddl(ddl_uri)
-        except Exception as exc:
-            if not _is_missing_ddl(exc):
-                raise
+            schema = extract_table_schema(reference_table)
+        except Exception as exc:  # any live failure → offline fallback
+            live_error = exc
+        else:
+            log_milestone(
+                "ddl_live_extracted",
+                table=reference_table,
+                columns=len(schema.columns),
+            )
+            schema = _overlay_target_metadata(
+                schema, landing_table, strip_on_missing=True
+            )
+            if ddl_uri:
+                _check_ddl_pin_staleness(schema, ddl_uri)
+            return schema
+
+    if ddl_uri:
+        if live_error is not None:
             logger.warning(
-                "DDL pin %s not found; live-extracting from %s",
-                ddl_uri,
+                "Live DDL extraction from %s failed (%s); using --ddl_uri "
+                "offline fallback %s",
                 reference_table,
+                type(live_error).__name__,
+                ddl_uri,
             )
             log_milestone(
-                "ddl_uri_miss_fallback",
-                uri=ddl_uri,
+                "ddl_live_extract_failed",
+                level=logging.WARNING,
                 table=reference_table,
-                error=type(exc).__name__,
+                error=type(live_error).__name__,
+                note="using --ddl_uri offline fallback — constraints/contract "
+                "are as-of the pin's extraction, not the live deployment",
             )
-        else:
-            log_milestone("ddl_loaded_from_uri", uri=ddl_uri)
-            return schema
-    else:
-        logger.info(
-            "No --ddl_uri; live-extracting schema from %s", reference_table
+        schema = load_ddl(ddl_uri)
+        log_milestone(
+            "ddl_loaded_from_uri",
+            uri=ddl_uri,
+            fallback=live_error is not None,
+        )
+        return _overlay_target_metadata(
+            schema, landing_table, strip_on_missing=False
         )
 
-    schema = extract_table_schema(reference_table)
+    if live_error is not None:
+        raise live_error
+    raise ValueError(
+        "resolve_table_schema needs --reference_table (live extraction) "
+        "or --ddl_uri (offline fallback)"
+    )
+
+
+def _overlay_target_metadata(
+    base: TableSchema, landing_table: str, *, strip_on_missing: bool
+) -> TableSchema:
+    """Replace `base`'s description surfaces with the TARGET table's.
+
+    `strip_on_missing=True` (live-source base): the source's descriptions
+    must never survive, so an unreachable target strips them to empty.
+    `strip_on_missing=False` (offline pin base): the pin is the
+    operator's declared fallback and its descriptions stand.
+    """
+    target: TableSchema | None = None
+    if landing_table:
+        try:
+            target = extract_table_schema(landing_table)
+        except Exception as exc:
+            log_milestone(
+                "target_metadata_unavailable",
+                level=logging.WARNING,
+                table=landing_table,
+                error=type(exc).__name__,
+                note="no constraints/contract from the target this run; "
+                "source descriptions are never used as a substitute",
+            )
+    if target is None:
+        if not strip_on_missing:
+            return base
+        return _with_descriptions(base, "", {})
+    col_desc = {c.name: (c.description or "") for c in target.columns}
+    schema = _with_descriptions(
+        base, target.table_info.description or "", col_desc
+    )
     log_milestone(
-        "ddl_live_extracted",
-        table=reference_table,
-        columns=len(schema.columns),
+        "target_metadata_overlaid",
+        table=landing_table,
+        constraint_columns=len(_constraint_clauses(schema)),
     )
     return schema
+
+
+def _with_descriptions(
+    schema: TableSchema, table_description: str, col_desc: dict[str, str]
+) -> TableSchema:
+    """A copy of `schema` whose description surfaces are exactly the given
+    ones — absent columns get empty, never the base's leftovers."""
+    return schema.model_copy(
+        update={
+            "table_info": schema.table_info.model_copy(
+                update={"description": table_description}
+            ),
+            "columns": [
+                c.model_copy(
+                    update={"description": col_desc.get(c.name, "")}
+                )
+                for c in schema.columns
+            ],
+        }
+    )
+
+
+def _check_ddl_pin_staleness(live: TableSchema, ddl_uri: str) -> None:
+    """Say aloud when the ``--ddl_uri`` pin disagrees with the LIVE schema
+    on generation-steering metadata.
+
+    Live already won this launch — the check protects the NEXT offline
+    day: a stale pin would silently drop the constraint edits again the
+    moment INFORMATION_SCHEMA becomes unreachable (exactly the
+    2026-08-21 four-run failure class, then with the pin authoritative).
+    Best-effort: an unloadable pin is a WARNING here, never fatal.
+    """
+    try:
+        pinned = load_ddl(ddl_uri)
+    except Exception as exc:
+        log_milestone(
+            "ddl_pin_check_error",
+            level=logging.WARNING,
+            uri=ddl_uri,
+            error=type(exc).__name__,
+            note="pin unusable as an offline fallback",
+        )
+        return
+    pinned_clauses = _constraint_clauses(pinned)
+    live_clauses = _constraint_clauses(live)
+    drifted = sorted(
+        col
+        for col in set(pinned_clauses) | set(live_clauses)
+        if pinned_clauses.get(col, "") != live_clauses.get(col, "")
+    )
+    table_drift = (
+        (pinned.table_info.description or "")
+        != (live.table_info.description or "")
+    )
+    if drifted or table_drift:
+        log_milestone(
+            "ddl_pin_drift",
+            level=logging.WARNING,
+            uri=ddl_uri,
+            columns=",".join(drifted) or "-",
+            table_description_drift=table_drift,
+            fix="re-run scripts/extract_ddl.py so the offline fallback "
+            "matches the live deployment",
+        )
+    else:
+        log_milestone(
+            "ddl_pin_fresh",
+            uri=ddl_uri,
+            constraint_columns=len(live_clauses),
+        )
+
+
+def _constraint_clauses(schema: TableSchema) -> dict[str, str]:
+    """column → parsed `llm_prompt_constraint` clause (unparseable → the
+    raw description, so a broken edit still reads as drift)."""
+    out: dict[str, str] = {}
+    for col in schema.columns:
+        try:
+            clause = parse_llm_prompt_constraint(
+                col.description, column=col.name
+            )
+        except Exception:
+            clause = col.description or ""
+        if clause:
+            out[col.name] = clause
+    return out
 
 
 def resolve_engine_strictness(client_type: str) -> bool:
@@ -729,13 +875,18 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
         force=True,
     )
+    # First line of every launch: which build is this? (2026-08-21 cycle —
+    # two same-day runs were indistinguishable by build from the logs.)
+    log_build_info("launcher")
     args, beam_argv = parse_args(argv or sys.argv[1:])
     options = PipelineOptions(beam_argv)
     runner = options.view_as(StandardOptions).runner or "DataflowRunner"
 
     configure_pipeline_options(options, runner, args.run_id)
 
-    table_schema = resolve_table_schema(args.ddl_uri, args.reference_table)
+    table_schema = resolve_table_schema(
+        args.ddl_uri, args.reference_table, args.landing_table
+    )
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 

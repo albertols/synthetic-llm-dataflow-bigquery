@@ -86,6 +86,29 @@ def log_milestone(name: str, *, level: int = logging.INFO, **fields) -> str:
     return line
 
 
+# Baked into the image at build time (docker/Dockerfile GIT_COMMIT_ARG →
+# this env var); "unknown" means a build whose invocation never passed it.
+BUILD_COMMIT_ENV = "SDFB_BUILD_COMMIT"
+
+
+def log_build_info(component: str) -> str:
+    """One `build_info` milestone naming the image's git commit.
+
+    The 2026-08-21 four-run cycle could not tell which build each job ran
+    (two same-day runs on the "same" label differed only by image content,
+    and the interpreter mis-filed a deterministic behavior change as
+    run-to-run non-determinism). Stamped from the launcher AND each worker
+    so every mined log surface carries it.
+    """
+    import os
+
+    return log_milestone(
+        "build_info",
+        commit=os.environ.get(BUILD_COMMIT_ENV, "unknown"),
+        component=component,
+    )
+
+
 def parse_milestone(line: str) -> dict | None:
     m = _MILESTONE_RE.search(line)
     if not m:

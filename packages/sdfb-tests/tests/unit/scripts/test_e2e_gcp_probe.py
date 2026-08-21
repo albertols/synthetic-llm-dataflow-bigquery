@@ -149,6 +149,48 @@ def test_worker_log_milestones_attributes_pool_ladder_per_column(probe_module):
     assert ladder["REF_CODE"]["freetext_pool_built"] == "2026-07-06T00:02:00Z"
 
 
+def test_job_params_sanitizes_infra_identifiers(probe_module):
+    """2026-08-21 four-run cycle: the Dataflow environment dump leaked
+    staging-bucket names, the KMS key ring, subnetwork projects, network
+    tags and the registry path into every bundle — none of it is covered
+    by the oss redaction mapping (it only knows tables/columns/callers),
+    and none of it has analytical value. The probe now masks these at
+    collection time; the image TAG survives (it carries the build id)."""
+    job = {
+        "environment": {
+            "sdkPipelineOptions": {
+                "display_data": [
+                    {"key": "staging_location",
+                     "value": "gs://corp-secret-staging-bucket/staging/x.123"},
+                    {"key": "model_uri",
+                     "value": "gs://corp-model-bucket/synthetic/models/m/v1"},
+                    {"key": "dataflow_kms_key",
+                     "value": "projects/kms-proj/locations/r/keyRings/kr/cryptoKeys/ck"},
+                    {"key": "subnetwork",
+                     "value": "https://www.googleapis.com/compute/v1/projects/net-proj/regions/r/subnetworks/sn-1"},
+                    {"key": "use_network_tags",
+                     "value": "tag-a;tag-b;tag-c"},
+                    {"key": "service_account_email",
+                     "value": "runner@corp-proj.iam.gserviceaccount.com"},
+                    {"key": "worker_harness_container_image",
+                     "value": "europe-docker.pkg.dev/corp-proj/repo/sdfb-python:oss-abc1234"},
+                    {"key": "num_rows", "value": "1000000"},
+                ]
+            }
+        }
+    }
+    params = probe_module._job_params(job)
+    joined = " ".join(str(v) for v in params.values())
+    for secret in ("corp-secret-staging-bucket", "corp-model-bucket", "kms-proj",
+                   "net-proj", "tag-a", "corp-proj", "runner@"):
+        assert secret not in joined, (secret, params)
+    assert params["num_rows"] == "1000000"
+    # The build id must survive masking — it is the only way to tie a run
+    # to a commit before the build_info milestone existed.
+    assert "sdfb-python:oss-abc1234" in params["worker_harness_container_image"]
+    assert params["staging_location"].startswith("gs://REDACTED_BUCKET/")
+
+
 class _FakeResp:
     def __init__(self, data: dict):
         self._data = data

@@ -113,3 +113,70 @@ def test_expansion_off_builds_the_pool_again() -> None:
     engine.setup(client, _ctx(freetext_expansion="off"))
     assert "code_plain" in engine._free_text_pools
     engine.teardown()
+
+
+def test_zero_llm_columns_warns_gpu_idle(caplog) -> None:
+    # 2026-08-21 four-run cycle: a run where EVERY free-text column
+    # resolved expandable never ignited vLLM, yet billed ~28 GPU-minutes
+    # on an idle T4. The engine now says so the moment the plan is known.
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.codes"},
+            "schema": [
+                {"name": "code_plain", "type": "STRING", "mode": "REQUIRED"},
+            ],
+        }
+    )
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=[{"code_plain": f"{i:04d}A{i % 10}"} for i in range(100)],
+        reference_digest="codes-digest-idle",
+        pipeline_run_id="codes-run-idle",
+    )
+    engine = B1RagEngine(embedder=HashingEmbedder())
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(_CountingClient(), ctx)
+    text = "\n".join(r.message for r in caplog.records)
+    assert "name=llm_route_unused" in text
+    engine.teardown()
+
+
+def test_llm_run_does_not_warn_gpu_idle(caplog) -> None:
+    engine = B1RagEngine(embedder=HashingEmbedder())
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(_CountingClient(), _ctx())  # code_hint runs the ladder
+    text = "\n".join(r.message for r in caplog.records)
+    assert "name=llm_route_unused" not in text
+    engine.teardown()
+
+
+def test_binary_class_column_skips_the_llm_ladder(caplog) -> None:
+    # COL_048-class (2026-08-21 cycle): a binary/control-char column spent
+    # 8.6 min (the ENTIRE cold pool phase, 41% of wall time) in an LLM
+    # ladder whose candidates were format-rejected en masse — an LLM
+    # cannot usefully emit control bytes. Such columns now go straight to
+    # the shape-fallback template pool.
+    values = [
+        f"{'X' * (i % 5)}\x03{i:03x}\x0b{'Q' * (i % 3)}" for i in range(80)
+    ]
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.bin"},
+            "schema": [{"name": "bin_col", "type": "STRING", "mode": "REQUIRED"}],
+        }
+    )
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=[{"bin_col": v} for v in values],
+        reference_digest="bin-digest",
+        pipeline_run_id="bin-run",
+    )
+    client = _CountingClient()
+    engine = B1RagEngine(embedder=HashingEmbedder())
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(client, ctx)
+    text = "\n".join(r.message for r in caplog.records)
+    assert "name=freetext_pool_binary_fallback" in text
+    assert client.prompts == []  # the LLM was never consulted
+    assert engine._pool_sources.get("bin_col") == "binary_fallback"
+    engine.teardown()

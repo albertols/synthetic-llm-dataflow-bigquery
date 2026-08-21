@@ -56,8 +56,13 @@ ARG ENV_NAME_ARG="unset"
 ARG ARTIFACTORY_HOSTNAME_ARG="unset"
 ARG ARTIFACTORY_RELEASER_USERNAME_ARG="unset"
 ARG ARTIFACTORY_RELEASER_PWD_ARG="unset"
+# Git commit this image was built from — stamped into every launcher and
+# worker log as the `build_info` milestone (2026-08-21 four-run cycle:
+# same-day runs were indistinguishable by build from the logs alone).
+ARG GIT_COMMIT_ARG="unknown"
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    SDFB_BUILD_COMMIT=$GIT_COMMIT_ARG \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     UV_NO_CACHE=1 \

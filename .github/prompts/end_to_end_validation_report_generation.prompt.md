@@ -328,19 +328,41 @@ For every anomaly: **evidence → root cause (file:symbol) → fix**. Check for:
   so `pk.duplicate` never fires; runs `PASSED` despite the above.
 - **Perf**: unnecessary embedder warm-pull for the library engine; long
   generation stall; startup-bound wall time.
-- **Wave-4 metric keys (ADR 0026)** — read them before calling a shape
-  defect: crosscheck `diff.shape_mass_tv` (total-variation shape-mass
-  distance; the mass metric — recall/precision are presence-only and score
-  1.0 on an inverted marginal) and `missing_shapes_below_floor`;
-  `freetext.copy_fraction` rows tagged `exempt: numeric_domain` PASS by
-  design (numeric privacy is `memorization_flags`' job); the probe's
-  `pool_ladder` maps `freetext_pool_*` milestones per column — attribute
-  stalls to a column from it, never from first-occurrence timestamps.
-  `freetext_pool_skipped_expandable` is by-design (expandable columns draw
-  from their shape mix), not a store outage. On near-unique-mask
+- **Wave-4 metric keys (ADR 0026/0027)** — read them before calling a
+  shape defect: crosscheck `diff.shape_head_tv` (total variation over the
+  NAMED head shapes, long tail grouped — THE mass metric;
+  recall/precision are presence-only and score 1.0 on an inverted
+  marginal, and the raw `shape_mass_tv` saturates at ~1.0 on
+  near-unique-mask columns even for a perfect generator) and
+  `missing_shapes_below_floor`; `freetext.copy_fraction` rows tagged
+  `exempt: numeric_domain` PASS by design (numeric privacy is
+  `memorization_flags`' job); the probe's `pool_ladder` maps
+  `freetext_pool_*` milestones per column — attribute stalls to a column
+  from it, never from first-occurrence timestamps. On near-unique-mask
   identifier columns (UUID-class), NOVEL masks are correct post-ADR-0026
-  (tail bucket); judge them by `shape_mass_tv`, alphabet, literal
-  prefixes and novelty — not by exact-mask recall.
+  (tail bucket); judge them by `shape_head_tv`, alphabet, literal
+  prefixes and novelty — never by exact-mask recall.
+- **Build + propagation forensics (ADR 0027)** — BEFORE attributing any
+  cross-run delta: compare the two runs' `build_info commit=` milestones
+  (a behavior change between builds is deterministic, not
+  "non-determinism" or "sampling variance" — the 2026-08-21 cycle
+  mis-filed both). DDL is LIVE-FIRST and steering metadata is
+  TARGET-ONLY (ADR 0027 D2): `ddl_live_extracted` +
+  `target_metadata_overlaid constraint_columns=N` means the LANDING
+  table's constraint/contract edits reached this launch;
+  `target_metadata_unavailable` means the run generated with NO
+  constraints (check the landing table exists and carries the
+  descriptions — the source table's descriptions are stripped by design
+  and are never the explanation for anything). An
+  `ddl_live_extract_failed` → `ddl_loaded_from_uri fallback=True` launch
+  ran OFFLINE on the (possibly stale) pin — zero
+  `prompt_constraints_found` on such a run is the pin's staleness, not a
+  code defect. `ddl_pin_drift` alone is housekeeping (the offline
+  fallback is stale), not a defect in THIS run.
+  `llm_route_unused` + `freetext_pool_skipped_expandable` on every
+  column means vLLM was never needed — by design, with the GPU idle: a
+  cost note (recommend a CPU-only rerun), never a lifecycle failure.
+  `freetext_pool_binary_fallback` is the by-design COL_048-class route.
 
 > **Forward-looking**: this step hand-computes fidelity from the offline CSV
 > (Step 2) and live BQ (Step 3). Once `--enable-evaluation` lands (see

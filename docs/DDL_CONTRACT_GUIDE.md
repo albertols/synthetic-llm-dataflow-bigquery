@@ -57,6 +57,20 @@ contract *defaults* `pk`/`identity`; explicit `--pk_cols` / `--identity_cols`
 CLI flags **win** when passed. FK pools load only when the contract declares
 `fk` **and** `--fk_parent_landing` names the landing dataset.
 
+> **WHERE the contract lives (ADR 0027 D2, 2026-08-21): on the LANDING
+> (synthetic/target) table — never the source.** The pipeline reads the
+> description surfaces live from `--landing_table`'s `INFORMATION_SCHEMA`
+> at every launch and overlays them onto the source table's structure;
+> the source (lake) table's descriptions are another team's prose and are
+> deliberately stripped, never used to steer generation. Declare the
+> `{"sdfb":1,…}` contract and every `llm_prompt_constraint` in the
+> Terraform that provisions your `synthetic_data.*` tables (worked
+> examples below apply unchanged — put them on the landing twin). A
+> `terraform apply` there reaches the very next trigger
+> (`target_metadata_overlaid` in the launcher log); no DDL re-extraction
+> step. `--ddl_uri` pins are only the offline fallback and should be
+> extracted from the LANDING table.
+
 ## 2. The two surfaces at a glance
 
 | Surface | Marker key | Owns | Parser |

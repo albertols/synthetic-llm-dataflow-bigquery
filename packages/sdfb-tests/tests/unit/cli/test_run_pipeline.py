@@ -490,15 +490,29 @@ def test_resolve_table_schema_prefers_explicit_uri(monkeypatch):
 
 
 def test_resolve_table_schema_live_extracts_when_uri_empty(monkeypatch):
-    from types import SimpleNamespace
-
     from sdfb_beam.cli import run_pipeline as rp
+    from sdfb_core.contracts import FieldSchema, TableInfo, TableSchema
 
-    sentinel = SimpleNamespace(columns=[1, 2], fqn="p.d.t")
-    # Bound at module scope in run_pipeline since WS5 T1 (the 404 fallback
-    # needs one call site), so patch it there rather than in sdfb_beam.ddl.
-    monkeypatch.setattr(rp, "extract_table_schema", lambda fqn: sentinel)
-    assert rp.resolve_table_schema("", "p.d.t") is sentinel
+    live = TableSchema(
+        table_info=TableInfo(table_id="p.d.t", description="lake prose"),
+        columns=[
+            FieldSchema(
+                name="COL_001",
+                bq_type="STRING",
+                mode="NULLABLE",
+                description="lake-side hint",
+            )
+        ],
+    )
+    # Bound at module scope in run_pipeline since WS5 T1, so patch it
+    # there rather than in sdfb_beam.ddl.
+    monkeypatch.setattr(rp, "extract_table_schema", lambda fqn: live)
+    got = rp.resolve_table_schema("", "p.d.t")
+    assert [c.name for c in got.columns] == ["COL_001"]
+    # ADR 0027 D2: with no landing_table given, SOURCE descriptions are
+    # stripped — they must never steer generation.
+    assert got.columns[0].description == ""
+    assert got.table_info.description == ""
 
 
 # ---------------------------------------------------------------------------

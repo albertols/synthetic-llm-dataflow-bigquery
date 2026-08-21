@@ -59,3 +59,4 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0024 — Structured prompt-constraint templates in column descriptions](0024-structured-prompt-constraint-templates.md)
 - [0025 — Marginal fidelity by construction (B.1 inverse-CDF, positional alphabets, row-mass shapes)](0025-marginal-fidelity-by-construction.md)
 - [0026 — Measurement first, then mask integrity (crosscheck sampling, mask tail bucket, numeric source scrub; amends 0025)](0026-measurement-first-mask-integrity.md)
+- [0027 — Wave 4 verified; operational integrity (build stamp, DDL-pin drift guard, source-side k-anonymity, nudge-first scrub, head TV, binary fast-path; amends 0026)](0027-verified-wave4-operational-integrity.md)

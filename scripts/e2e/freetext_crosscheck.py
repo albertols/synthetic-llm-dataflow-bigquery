@@ -393,6 +393,40 @@ def _missing_shape_lists(
     return missing, below_floor
 
 
+def _shape_tv(src_mass: dict, syn_mass: dict) -> tuple[float, float, set]:
+    """(raw TV, head TV, head shapes) over the two shape marginals.
+
+    Raw: total variation over the union of shapes — presence-only
+    recall/precision are blind to MASS shifts (a 68.6%/30.9% source split
+    rendered 7.7%/92.2% scores recall = precision = 1.0 — the 2026-08-20
+    B_TABLE COL_024 report read "no material divergence" on an inverted
+    marginal). TV ∈ [0, 1]; 0 = identical shape marginals.
+
+    Head (2026-08-21 cycle): the raw metric saturates at ~1.0 on
+    near-unique-mask columns (UUID-class measured 0.956) — two ~unique
+    mask sets are disjoint even for a PERFECT generator, the same artifact
+    that invalidates recall there (ADR 0026). Grouping the distribution as
+    {each NAMED shape (source mass >= the floor)} + {everything else}
+    keeps mass inversions on named shapes visible while the long tail
+    compares as one bucket. Findings and the score key on the HEAD
+    number; the raw TV stays reported for dense-shape columns."""
+    raw = 0.5 * sum(
+        abs(src_mass.get(s, 0.0) - syn_mass.get(s, 0.0))
+        for s in set(src_mass) | set(syn_mass)
+    )
+    head_shapes = {s for s, m in src_mass.items() if m >= _SHAPE_MASS_MIN}
+    src_other = sum(m for s, m in src_mass.items() if s not in head_shapes)
+    syn_other = sum(m for s, m in syn_mass.items() if s not in head_shapes)
+    head = 0.5 * (
+        sum(
+            abs(src_mass.get(s, 0.0) - syn_mass.get(s, 0.0))
+            for s in head_shapes
+        )
+        + abs(src_other - syn_other)
+    )
+    return raw, head, head_shapes
+
+
 def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, Any]:
     findings: list[dict[str, str]] = []
 
@@ -413,15 +447,7 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
 
     shape_recall = sum(m for s, m in src_mass.items() if s in syn_counts)
     shape_precision = sum(m for s, m in syn_mass.items() if s in src_counts)
-    # Total-variation distance over the union of shapes: presence-only
-    # recall/precision are blind to MASS shifts (a 68.6%/30.9% source split
-    # rendered 7.7%/92.2% scores recall = precision = 1.0 — the 2026-08-20
-    # B_TABLE COL_024 report read "no material divergence" on an inverted
-    # marginal). TV ∈ [0, 1]; 0 = identical shape marginals.
-    shape_mass_tv = 0.5 * sum(
-        abs(src_mass.get(s, 0.0) - syn_mass.get(s, 0.0))
-        for s in set(src_mass) | set(syn_mass)
-    )
+    shape_mass_tv, shape_head_tv, head_shapes = _shape_tv(src_mass, syn_mass)
 
     missing, missing_below_floor = _missing_shape_lists(
         src_mass, syn_counts, shape_recall
@@ -453,15 +479,15 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
     if shape_precision < _SHAPE_PRECISION_WARN:
         add("HIGH", f"shape precision {shape_precision:.2f}: synthetic invents formats "
                     f"absent from source (top spurious: {', '.join(s for s, _ in spurious[:3]) or 'n/a'})")
-    if shape_mass_tv > _SHAPE_MASS_TV_WARN:
+    if shape_head_tv > _SHAPE_MASS_TV_WARN and head_shapes:
         worst = max(
-            set(src_mass) | set(syn_mass),
+            head_shapes,
             key=lambda s: abs(src_mass.get(s, 0.0) - syn_mass.get(s, 0.0)),
         )
         add("MEDIUM",
-            f"shape mass divergence {shape_mass_tv:.2f} (total variation): "
-            f"'{worst}' holds {src_mass.get(worst, 0.0):.2f} of source mass "
-            f"vs {syn_mass.get(worst, 0.0):.2f} synthetic")
+            f"shape mass divergence {shape_head_tv:.2f} (head total "
+            f"variation): '{worst}' holds {src_mass.get(worst, 0.0):.2f} of "
+            f"source mass vs {syn_mass.get(worst, 0.0):.2f} synthetic")
     if src_null is not None and syn_null is not None and abs(syn_null - src_null) > _FRACTION_DELTA_WARN:
         add("MEDIUM", f"null fraction {syn_null:.2f} vs source {src_null:.2f} "
                       f"(delta {syn_null - src_null:+.2f})")
@@ -514,6 +540,7 @@ def _diff_column(col: str, src_agg, syn_agg, src_prof, syn_prof) -> dict[str, An
             "shape_recall": round(shape_recall, 4),
             "shape_precision": round(shape_precision, 4),
             "shape_mass_tv": round(shape_mass_tv, 4),
+            "shape_head_tv": round(shape_head_tv, 4),
             "missing_shapes_below_floor": missing_below_floor,
             "missing_shapes": [{"shape": s, "source_mass": round(m, 4)} for s, m in missing],
             "spurious_shapes": [{"shape": s, "synthetic_mass": round(m, 4)} for s, m in spurious],
@@ -541,9 +568,10 @@ def _column_score(entry: dict[str, Any]) -> float:
     score = 0.0
     score += (1 - d["shape_recall"]) * 2
     score += (1 - d["shape_precision"]) * 2
-    # Mass shifts recall/precision cannot see (the COL_024 inversion class);
-    # TV is already in [0, 1], no capping needed.
-    score += d.get("shape_mass_tv", 0.0) * 2
+    # Mass shifts recall/precision cannot see (the COL_024 inversion class).
+    # HEAD TV, not raw: exact-mask TV saturates on near-unique-mask columns
+    # (2026-08-21 cycle) and would rank healthy UUID-class columns worst.
+    score += d.get("shape_head_tv", 0.0) * 2
     score += sum(abs(v) for v in d["charclass_delta"].values())
     score += min(d["mean_length_rel_delta"] or 0, 1.0)
     score += abs(d["empty_fraction_delta"] or 0) * 2
@@ -610,16 +638,20 @@ def render_markdown(meta: dict[str, Any], columns: dict[str, Any]) -> str:  # no
     # ---- executive summary ----
     a("## Executive summary — improvement backlog (worst first)")
     a("")
-    a("| Rank | Column | Score | Shape recall | Shape precision | Copy frac | Top issue |")
-    a("|---|---|---|---|---|---|---|")
+    a("| Rank | Column | Score | Shape recall | Shape precision | Head TV | Copy frac | Top issue |")
+    a("|---|---|---|---|---|---|---|---|")
     for i, (col, e) in enumerate(ranked, 1):
         d = e["diff"]
         top = e["findings"][0]["message"] if e["findings"] else "—"
         a(f"| {i} | `{col}` | {e['score']} | {d['shape_recall']:.2f} | "
-          f"{d['shape_precision']:.2f} | {_fmt_num(d['copy_fraction'])} | {top} |")
+          f"{d['shape_precision']:.2f} | {d.get('shape_head_tv', 0.0):.2f} | "
+          f"{_fmt_num(d['copy_fraction'])} | {top} |")
     a("")
     a("**Legend** — *shape recall*: source formats reproduced by synthetic (1.0 = all). "
       "*shape precision*: synthetic formats that exist in source (1.0 = no hallucinated formats). "
+      "*head TV*: total-variation distance over the NAMED head shapes (source mass ≥ 2%), long "
+      "tail grouped — the mass metric to judge identifier/near-unique-mask columns by (ADR 0026: "
+      "recall/precision and raw TV saturate there). "
       "*copy frac*: sampled synthetic values found verbatim in the source sample.")
     a("")
 

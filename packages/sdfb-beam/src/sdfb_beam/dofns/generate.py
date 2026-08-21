@@ -32,7 +32,7 @@ from sdfb_core.engines import (
     get_engine,
 )
 from sdfb_core.engines.identity import apply_identity_columns
-from sdfb_core.observability import log_milestone
+from sdfb_core.observability import log_build_info, log_milestone
 from sdfb_core.seeding import derive_batch_seed
 
 # Where B.1's embedder weights land after the GCS warm-pull. Offline loaders
@@ -86,6 +86,7 @@ class GenerateRecordsDoFn(beam.DoFn):
 
     def setup(self):
         t0 = time.monotonic()
+        log_build_info("worker")
         log_milestone("dofn_setup_start", engine=self.engine_name)
         failure_key = f"{self.engine_name}:{self.ctx.pipeline_run_id}"
         with _SETUP_FAILURES_LOCK:

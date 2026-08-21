@@ -111,6 +111,34 @@ class BigQuerySourceValueStore:
             _FETCH_CACHE[key] = result
             return result
 
+    def fetch_frequent(
+        self, column: str, min_count: int
+    ) -> frozenset[str] | None:
+        """Values shared by at least `min_count` source rows, as strings —
+        the k-anonymous enum mass the numeric scrub keeps exact (wave-4
+        v2). Same cap/None semantics and process cache as
+        `fetch_distinct`; the frequent set is a subset of the distinct set
+        so the cap is far harder to hit here."""
+        col = self._checked(column)
+        key = (self.table_fqn, f"{col}#freq>={int(min_count)}", self.cap)
+        with _FETCH_CACHE_LOCK:
+            if key in _FETCH_CACHE:
+                return _FETCH_CACHE[key]
+            sql = (
+                f"SELECT CAST(`{col}` AS STRING) AS v "
+                f"FROM `{self.table_fqn}` WHERE `{col}` IS NOT NULL "
+                f"GROUP BY v HAVING COUNT(*) >= {int(min_count)} "
+                f"LIMIT {self.cap + 1}"
+            )
+            rows = list(self._bq().query(sql).result())
+            result = (
+                None
+                if len(rows) > self.cap
+                else frozenset(_row_value(r, "v") for r in rows)
+            )
+            _FETCH_CACHE[key] = result
+            return result
+
     def count_overlap(self, column: str, values: Iterable[str]) -> int:
         """How many of `values` exist in the column's live source domain."""
         col = self._checked(column)

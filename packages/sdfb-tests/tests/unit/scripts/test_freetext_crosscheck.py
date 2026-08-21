@@ -197,8 +197,28 @@ def test_diff_scores_shape_mass_inversion():
     assert bad_entry["diff"]["shape_recall"] == 1.0
     assert bad_entry["diff"]["shape_precision"] == 1.0
     assert bad_entry["diff"]["shape_mass_tv"] > 0.5
+    assert bad_entry["diff"]["shape_head_tv"] > 0.5  # both shapes are head
     assert good_entry["diff"]["shape_mass_tv"] < 0.05
     assert any("shape mass" in f["message"] for f in bad_entry["findings"])
     assert (
         _mod._column_score(bad_entry) > _mod._column_score(good_entry)
     )
+
+
+def test_head_tv_is_quiet_on_near_unique_mask_columns():
+    # 2026-08-21 four-run cycle: raw exact-mask TV saturates at ~1.0 on
+    # near-unique-mask columns (UUID measured TV 0.956) — two ~unique-mask
+    # sets are disjoint even for a PERFECT generator, the same artifact
+    # that already invalidated recall there (ADR 0026). The actionable
+    # metric is TV over the NAMED head shapes (source mass >= the 2%
+    # floor) with the long tail grouped as one bucket: near-unique columns
+    # have no head, so they stay quiet; mass inversions on named shapes
+    # still trip it.
+    src_vals = ["A" * (10 + i) for i in range(100)]  # 100 unique masks, 1% each
+    syn_vals = ["B" * (111 + i) for i in range(100)]  # disjoint unique masks
+    src, syn = _profiles(src_vals, syn_vals)
+    entry = _mod._diff_column("C", _agg(100), _agg(100), src, syn)
+    d = entry["diff"]
+    assert d["shape_mass_tv"] > 0.9  # the raw metric saturates by design
+    assert d["shape_head_tv"] < 0.05
+    assert not any("shape mass" in f["message"] for f in entry["findings"])

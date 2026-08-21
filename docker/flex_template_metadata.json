@@ -5,7 +5,7 @@
     {
       "name": "ddl_uri",
       "label": "DDL JSON URI",
-      "helpText": "gs:// path to the _ddl.json produced by scripts/extract_ddl.py. Optional; empty/omitted = live INFORMATION_SCHEMA extraction from reference_table.",
+      "helpText": "gs:// path to a _ddl.json \u2014 the OFFLINE FALLBACK only (ADR 0027 D2). Live extraction is authoritative at every launch: structure from reference_table, description surfaces (llm_prompt_constraint + relational contract) overlaid from landing_table \u2014 the SOURCE table's descriptions are stripped, never used to steer generation. Extract the pin from the LANDING table; it is consumed only when live extraction fails (air-gap, BQ outage), with staleness reported via ddl_pin_drift / ddl_pin_fresh.",
       "isOptional": true,
       "regexes": [
         "^gs://[^/]+/.+\\.json$"

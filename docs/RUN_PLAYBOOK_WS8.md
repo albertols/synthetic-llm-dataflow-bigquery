@@ -132,6 +132,14 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 | `numeric_source_filter size=` (+ `_absent`/`_error`) | ADR 0026: an identity-like INT64 column's full domain feeds the draw-time collision scrub |
 | `numeric_source_rejected collisions= nudged= unresolved=` | ADR 0026: per-column scrub outcome (first batch); `unresolved > 0` = fully dense neighborhood, read with the k-anon exemption in mind |
 | `freetext_pool_skipped_expandable` | ADR 0026: the column draws from its shape mix — no pool built, by design (not a store outage) |
+| `build_info commit=` (launcher + workers) | ADR 0027: the image's git commit — compare builds BEFORE comparing runs |
+| `ddl_live_extracted` | ADR 0027: the LIVE `INFORMATION_SCHEMA` schema (bqClient) is what this launch generates from — BigQuery metadata edits always take effect |
+| `target_metadata_overlaid constraint_columns=` / `target_metadata_unavailable` (WARNING) | ADR 0027 D2: constraints + contract come from the LANDING table's descriptions; unavailable = NO constraints this run (source descriptions are never a substitute) |
+| `ddl_live_extract_failed` (WARNING) → `ddl_loaded_from_uri fallback=True` | ADR 0027: live extraction unreachable — OFFLINE mode, the pin's (possibly stale) constraints/contract apply |
+| `ddl_pin_drift` (WARNING) / `ddl_pin_fresh` / `ddl_pin_check_error` | ADR 0027: the `--ddl_uri` pin vs live, checked while live is authoritative — drift means the OFFLINE FALLBACK is stale; re-extract before the next air-gapped day |
+| `llm_route_unused` (WARNING) | ADR 0027: this setup ran zero LLM ladders — GPU workers idle; plan a CPU-only rerun |
+| `freetext_pool_binary_fallback` | ADR 0027: control-char column skipped the LLM ladder for the template fallback (COL_048-class) |
+| `numeric_kanon_filter size=` (+ `_absent`/`_error`) | ADR 0027: the scrub's keep-set from SOURCE frequencies (HAVING COUNT ≥ 10); absent = sample-heuristic fallback |
 | `freetext_pool_source_filter size=` | ADR 0023: the column's FULL source domain is in the pool rejection set |
 | `freetext_pool_source_filter_absent` / `_error` (WARNING) | domain above cap / store error — pool built with sample-only rejection; check copy_fraction post-run |
 | `pool_taint_rebuild` (WARNING, launcher) | warm pools overlapped the live source → deleted + rebuilt clean (expected ONCE per tainted pre-ADR-0023 digest) |
@@ -293,6 +301,25 @@ decisions in [ADR 0026](adr/0026-measurement-first-mask-integrity.md) and
 | Pool build = 41% (A) / 53% (B) of cold wall time, partly for pools never read (expandable columns draw from shape mix) | expandable columns skip the ladder (`freetext_pool_skipped_expandable`); constraint columns never expand (clause + `pattern` reach the tail again) | PoolTrigger share drops on B_TABLE-class; skipped columns keep `distinct ≫ 512` |
 | 15 false `freetext.copy_fraction` BLOCKERs on INT64 small/medium domains; stall ladder unattributable to a column | `exempt_numeric_domains` (tagged, visible; CRITICAL stays `memorization_flags`); probe keeps per-column `pool_ladder` timestamps | copy_fraction section reads clean on numerics; topup/stagnation attributable per column |
 
+### §5f Wave-4 verification cycle (2026-08-20/21 four-run pair → shipped on ws8)
+
+Two wave-4 cold pairs (A_TABLE `…14_13_44-17334…` / `…07_58_08-12248…`,
+B_TABLE `…14_39_00-1599…` / `…07_23_07-4791…`) VERIFIED every ADR 0026
+acceptance criterion (figures: `make_wave4_verification_figures.py`;
+decisions: [ADR 0027](adr/0027-verified-wave4-operational-integrity.md)):
+COL_009 substantive 0.522 → 0.253 identically on both cold runs; COL_064
+plateau 0.25% → 0.045%; COL_001 top-mask at source parity; false
+BLOCKERs 16 → 2. The cycle's own findings → fixes:
+
+| Finding (four-run cycle) | Fix | Next-run readout |
+|---|---|---|
+| Constraint edits live in BigQuery metadata never reached ANY launch — the pinned `--ddl_uri` predates them; zero `prompt_constraints_found`, silently | **live-first DDL resolution** (ADR 0027 D2): every launch extracts schema + descriptions from live `INFORMATION_SCHEMA`; the pin demotes to the offline fallback, its staleness reported (`ddl_pin_drift`/`ddl_pin_fresh`) | `ddl_live_extracted` + `prompt_constraints_found` with the expected `clause_sha12` on the FIRST launch after a metadata edit — no re-extraction step needed |
+| No way to tell which BUILD a job ran (interpreter mis-filed the deterministic scrub as "sampling variance" and the E5 route change as "non-determinism") | `build_info commit=` milestone from launcher + every worker (`SDFB_BUILD_COMMIT` baked at image build) | first log lines carry the commit; reports compare builds before runs |
+| Scrub v1: redraw-first redistributed rejected mass (COL_047 decile-KS 0.038 → 0.166) and the sample multi-knot exemption kept pseudo-enum values (COL_009 0.25 vs ~0.14 telemetry residual) | nudge-first (±24, in-quantile) + keep-set from SOURCE frequencies (`fetch_frequent`, HAVING COUNT ≥ 10) | COL_047-class decile-KS back to ≤0.1; COL_009 substantive → ~0.14 floor; `numeric_source_rejected` gains `redrawn=`; `numeric_kanon_filter size=` fires |
+| B_TABLE cold run never ignited vLLM (all 13 columns expandable — by design) yet billed ~28 idle GPU-min; COL_048's binary ladder burned 8.6 min of format-rejected LLM calls | `llm_route_unused` WARNING when a setup runs zero ladders; `is_binary_class` columns go straight to the template fallback (`freetext_pool_binary_fallback`) | plan for CPU-only reruns on `llm_route_unused`; A_TABLE cold pool phase drops by the COL_048 ladder time |
+| `shape_mass_tv` saturates at ~1.0 on near-unique-mask columns (COL_064 0.956) — would rank the healthiest identifier columns worst | `shape_head_tv` (named head shapes + grouped tail) carries findings/score/summary; raw TV stays in the diff | crosscheck exec summary shows Head TV; COL_064/COL_001 read ≈ 0 there |
+| oss redaction never covered the Dataflow environment dump (staging buckets, KMS, subnets, network tags in every bundle; one bundle skipped column redaction entirely) | probe masks infra params at collection (`_job_params` sanitizer); existing bundles scrubbed + re-mapped | new bundles carry `gs://REDACTED_BUCKET/…`-style params only |
+
 ## 6. Next-cycle recipes — R1-c (constraints), R6 (table B + FK), R7 (10M)
 
 Written from the 2026-08-20 R1 cold pair (jobs `…05_49_25-7855…` A_TABLE,
@@ -312,8 +339,17 @@ coverage), `COL_019` (skeleton-anchored `format` + 2 fictitious
 `examples`).
 
 ```
-1. terraform apply           # column description edits go live
-2. python scripts/extract_ddl.py … per table   # re-pin _ddl.json (if the DAG passes ddl_uri)
+1. terraform apply           # description edits on the LANDING tables
+   -- (synthetic_data.*, the tables YOU own — never the source/lake
+   -- tables, whose descriptions are stripped by design) — and that is
+   -- ENOUGH to reach the next launch: live-first DDL resolution
+   -- (ADR 0027 D2) overlays the target table's descriptions from
+   -- INFORMATION_SCHEMA every time. (The 2026-08-21 cycle predated
+   -- this: four runs consumed a stale pin and fired zero
+   -- prompt_constraints_found.)
+2. OPTIONAL housekeeping: python scripts/extract_ddl.py … + re-upload the
+   ddl_uri pin — only to keep the OFFLINE fallback fresh for air-gapped
+   days; `ddl_pin_drift` reminds you when it drifts.
 3. DELETE FROM `${PROJECT}.synthetic_rag.freetext_pools` WHERE reference_digest IN (
      SELECT DISTINCT reference_digest
      FROM `${PROJECT}.synthetic_rag.source_table_stats`
@@ -323,6 +359,13 @@ coverage), `COL_019` (skeleton-anchored `format` + 2 fictitious
    -- would replay pools built with the OLD prompts and mask the edit
    -- (§1 do-not-confound rule). rag_chunks/source_table_stats can stay.
 4. Trigger R1 config per table: {"num_rows":"1000000","batch_size":"1000"}
+5. Verify BEFORE reading any metric: `build_info commit=` matches the
+   image you built; `ddl_live_extracted` + `target_metadata_overlaid
+   constraint_columns=N` (a `target_metadata_unavailable` launch ran with
+   NO constraints — check the landing table exists and carries the
+   descriptions; an `ddl_live_extract_failed` → pin-fallback launch does
+   NOT carry fresh edits); then `prompt_constraints_found` with the
+   expected clause_sha12 per column.
 ```
 
 Readout ladder (in order, before any crosscheck):
@@ -331,16 +374,18 @@ Readout ladder (in order, before any crosscheck):
 |---|---|
 | launcher `prompt_constraints_found` | `clause_sha12` **changed** for `COL_015`/`COL_019`; **newly present** for `COL_064`/`COL_042` |
 | worker `generation_plan.columns_detail` | `COL_064`/`COL_042` on `route=llm` (previously identifier route) |
-| crosscheck A `COL_064` | `shape_recall` 0.0053 → ≥ 0.9 (guided decoding) |
+| crosscheck A `COL_064` | post-ADR-0027: the engine's mask tail already serves valid v4 for free (plateau 0.25%→0.045% verified) — judge by `shape_head_tv` ≈ 0, NOT recall. The `route:"llm"`+`pattern` constraint remains optional (guided decoding buys exactness at one LLM call per pool value); consider REMOVING it to keep the cheaper mask route |
 | crosscheck B `COL_019` | `shape_recall` 0.33 → ≥ 0.7; the two named templates appear in synthetic top shapes |
 | crosscheck B `COL_015` | with the wave-4 crosscheck (hash-ordered sampling), the alpha shapes REAPPEAR in the source panel — they are genuine head values (`DEVOLUCION T` 31.9% of source non-empty; ADR 0026 §Context). Expect `shape_precision` ≈ 1 and head shares within ~2 pp; the constraint now steers only the digit-code TAIL (constraint columns no longer expand) |
 
 ### 6b. R6 — table B + FK child (full config recipe)
 
-**Contract (Terraform).** Declare relationships on BOTH tables — the
-parent needs its `pk` so `--uniqueness_mode=exact` gives the child a
-duplicate-free key pool, and both R1 baselines flagged the undeclared-PK
-gate blind spot:
+**Contract (Terraform).** Declare relationships on BOTH tables' **LANDING
+twins** (`synthetic_data.a_table` / `synthetic_data.b_table` — ADR 0027
+D2: the pipeline reads description surfaces from `--landing_table`, never
+the source) — the parent needs its `pk` so `--uniqueness_mode=exact`
+gives the child a duplicate-free key pool, and both R1 baselines flagged
+the undeclared-PK gate blind spot:
 
 ```hcl
 locals {
@@ -381,12 +426,13 @@ column silently keeps its profiled marginal.
 
 **Preconditions checklist (in order):**
 
-1. Terraform applied; contracts visible:
-   `bq show --format=prettyjson ${PROJECT}:<SRC_DATASET>.<TABLE_B>` —
+1. Terraform applied; contracts visible on the LANDING table:
+   `bq show --format=prettyjson ${PROJECT}:synthetic_data.<TABLE_B>` —
    description carries the `{"sdfb":1,…}` JSON (P1 parses it, P2 checks
    the columns; a marked-but-broken contract is a loud `SystemExit`).
-2. `extract_ddl.py` re-run per table if the DAG pins `ddl_uri` (skip when
-   the launcher live-fetches from `INFORMATION_SCHEMA`).
+   Expect `target_metadata_overlaid` in the launcher log.
+2. OPTIONAL: `extract_ddl.py` re-run against the LANDING table to refresh
+   the `ddl_uri` offline-fallback pin (live overlay is authoritative).
 3. **Parent landed and non-empty**: `SELECT COUNT(*), COUNT(DISTINCT
    ACCOUNT_ID) FROM ${PROJECT}.synthetic_data.a_table` — run A first in
    this campaign and do NOT truncate `synthetic_data.<LANDING_A>` between

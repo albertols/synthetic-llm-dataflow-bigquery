@@ -22,6 +22,7 @@ steps:
       - --build-arg=ENV_NAME_ARG=dev
       - --build-arg=BEAM_SDK_IMAGE=docker.io/apache/beam_python3.11_sdk:2.74.0
       - --build-arg=SDFB_SDK_CONTAINER_IMAGE_ARG=${_IMAGE_URI}
+      - --build-arg=GIT_COMMIT_ARG=${_GIT_COMMIT}
       - .
 
 images: ["${_IMAGE_URI}"]
@@ -31,3 +32,4 @@ options:
 timeout: 7200s
 substitutions:
   _IMAGE_URI: unset
+  _GIT_COMMIT: unknown

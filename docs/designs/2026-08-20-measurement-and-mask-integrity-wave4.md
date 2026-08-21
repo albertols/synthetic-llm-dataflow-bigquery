@@ -1,6 +1,6 @@
 # Wave 4 — trust the measurement first, then fix the sampler
 
-**Status:** ACCEPTED (2026-08-20) · **ADR:** [0026](../adr/0026-measurement-first-mask-integrity.md)
+**Status:** ACCEPTED (2026-08-20) · **VERIFIED (2026-08-21, §6)** · **ADR:** [0026](../adr/0026-measurement-first-mask-integrity.md) · [0027](../adr/0027-verified-wave4-operational-integrity.md)
 · **Depends on:** [ADR 0023](../adr/0023-source-domain-pool-rejection.md) (source-domain seam),
 [ADR 0025](../adr/0025-marginal-fidelity-by-construction.md) (wave-3 samplers — partially re-read here)
 · **Figures:** `scripts/doc/make_wave4_figures.py` (2 evidence + 2 concept)
@@ -202,7 +202,50 @@ Two routing changes ride the same wave:
 5. `freetext.copy_fraction` rows on INT64 columns read
    `exempt: numeric_domain` and pass; STRING rows keep the old behavior.
 
-## 6. Figure provenance
+## 6. R-cycle verification (2026-08-21 four-run cycle)
+
+The next cold pair (`2026-08-20_14_13_44-17334…` A_TABLE,
+`2026-08-20_14_39_00-1599…` B_TABLE, wave-4 build) measured every §5
+acceptance criterion; a second same-build cold pair on 2026-08-21
+reproduced the numbers. Decision record for the follow-ups: [ADR
+0027](../adr/0027-verified-wave4-operational-integrity.md).
+
+![wave-4 verified](assets/wave4-verified.png)
+
+*Claim: every acceptance criterion moved as designed — COL_009
+substantive copy 0.522 → 0.253 (identical on both cold runs:
+deterministic, not variance, despite the run report's first read),
+COL_064's shape plateau collapsed 0.25% → 0.045% per shape, COL_001's
+top-mask share landed at source parity (0.485 vs 0.475; was 1.2%), and
+the false `copy_fraction` BLOCKERs fell 16 → 2.*
+
+![scrub anatomy](assets/wave4-scrub-anatomy.png)
+
+*Claim: the v1 scrub resolved collisions mostly by REDRAW — which
+redistributes rejected mass across the whole marginal — and a
+sparse-neighborhood column paid decile-KS 0.038 → 0.166 for a privacy
+gain its k-anonymity floor mostly didn't need; the v2 scrub nudges first
+(±24, in-quantile) and takes its keep-set from SOURCE frequencies
+(`fetch_frequent`, HAVING COUNT ≥ 10), closing the pseudo-multi-knot gap
+that held COL_009 at 0.25 instead of its ~0.14 telemetry residual.*
+
+Two more verification facts the cycle surfaced:
+
+- **The B_TABLE cold run never ignited vLLM**: all 13 tracked free-text
+  columns resolved `expandable` (`freetext_pool_skipped_expandable` ×13)
+  — by design (E5), but ~28 GPU-minutes billed idle; the engine now says
+  so (`llm_route_unused` WARNING) and COL_048-class binary columns skip
+  their dead 8.6-min ladder too (`freetext_pool_binary_fallback`).
+- **`shape_mass_tv` saturates on near-unique-mask columns** (COL_064
+  measured 0.956 — two ~unique-mask sets are disjoint even for a perfect
+  generator). The metric that carries the claim is now `shape_head_tv`
+  (TV over named head shapes, long tail grouped), reported in the
+  crosscheck's executive summary.
+
+Regenerate: `uv run --no-sync python3
+scripts/doc/make_wave4_verification_figures.py`.
+
+## 7. Figure provenance
 
 ```bash
 uv run --no-sync python3 scripts/doc/make_wave4_figures.py

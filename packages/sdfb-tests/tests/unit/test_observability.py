@@ -66,3 +66,19 @@ def test_warning_level_supported(caplog):
     with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
         log_milestone("freetext_llm_fallback", level=logging.WARNING, column="c1")
     assert caplog.records[0].levelno == logging.WARNING
+
+
+def test_build_info_stamps_the_baked_commit(caplog, monkeypatch):
+    # 2026-08-21 four-run cycle: two same-day runs could not be told apart
+    # by build — the commit is baked into the image env and stamped from
+    # launcher + workers so the probe mines it from any log surface.
+    from sdfb_core.observability import BUILD_COMMIT_ENV, log_build_info
+
+    monkeypatch.setenv(BUILD_COMMIT_ENV, "abc1234")
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        line = log_build_info("launcher")
+    assert "name=build_info" in line
+    assert "commit=abc1234" in line
+    assert "component=launcher" in line
+    monkeypatch.delenv(BUILD_COMMIT_ENV)
+    assert "commit=unknown" in log_build_info("worker")

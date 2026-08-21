@@ -56,6 +56,13 @@ class SourceValueStore(Protocol):
         must then behave as if no store were attached, loudly)."""
         ...
 
+    # OPTIONAL extension (wave-4 v2, duck-typed via getattr so existing
+    # implementations stay valid): `fetch_frequent(column, min_count)
+    # -> frozenset[str] | None` returns the values shared by at least
+    # `min_count` SOURCE rows — the k-anonymous enum mass the numeric
+    # collision scrub must keep exact. Implementations without it fall
+    # back to the caller's sample-side heuristic.
+
 
 class InMemoryFreeTextPoolStore:
     """List-backed `FreeTextPoolStore` for tests and laptop runs."""

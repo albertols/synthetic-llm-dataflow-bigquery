@@ -70,6 +70,7 @@ from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
     collapsed_mask,
     identifier_sampler_from,
+    is_binary_class,
     length_hint,
     mutate_digit_runs,
     pick_relaxed_shape,
@@ -146,12 +147,22 @@ _MASK_MIX_MIN_COVERAGE = 0.5
 # distinct count clears the memorization rule's floor fetch a source domain
 # — mirrors `_MEM_MIN_SOURCE_DISTINCT` in the E2E probe.
 _NUMERIC_DOMAIN_MIN_DISTINCT = 100
-# Collision scrub: redraw rounds through the inverse-CDF, then nudge to the
-# nearest non-source integer (bounded walk). A value the SAMPLE saw at
-# least twice is a multi-knot: k-anonymous enum mass that stays exact.
+# Collision scrub (wave-4 v2, 2026-08-21 four-run cycle): NUDGE-FIRST,
+# then inverse-CDF redraw rounds for saturated neighborhoods, then a final
+# nudge. Redraw-first redistributed the rejected mass across the whole
+# marginal — a version-number column's decile-KS rose 0.04 → 0.17 while a
+# nudge would have kept every scrubbed value inside its quantile
+# neighborhood.
 _NUMERIC_REDRAW_ROUNDS = 2
-_NUMERIC_NUDGE_MAX = 8
+_NUMERIC_NUDGE_MAX = 24
 _NUMERIC_MULTI_KNOT_MIN = 2
+# Keep-set floor: a source value shared by at least this many SOURCE rows
+# is k-anonymous enum mass (mirrors the probe's _MEM_KANON_MIN_COUNT). The
+# set comes from the store's `fetch_frequent` when available; the sample
+# multi-knot heuristic is only the no-store fallback — at ~21x subsampling
+# a sample frequency of 2 does not imply source frequency >= 10 (the
+# 2026-08-21 cycle measured that gap as COL_009's 0.25-vs-0.14 residual).
+_NUMERIC_KANON_MIN_COUNT = 10
 # Setup embeds at most this many reference rows. The index those vectors
 # feed serves ONLY centroid top-k exemplar retrieval in M1 (generation
 # samples marginals — no per-batch retrieval), so embedding the full 10k
@@ -325,6 +336,18 @@ class B1RagEngine(GenerationEngine):
             seconds=round(time.monotonic() - t_pools, 1),
             freetext_cols=len(self._free_text_pools),
         )
+        if not any(s == "llm_ladder" for s in self._pool_sources.values()):
+            # No column drew a single LLM token this setup (all expandable
+            # / store-warm / binary-fallback / typed routes). 2026-08-21
+            # four-run cycle: such a run billed ~28 GPU-minutes on an idle
+            # T4 — say so, so the operator can rerun CPU-only.
+            log_milestone(
+                "llm_route_unused",
+                level=logging.WARNING,
+                note="no LLM-routed free-text work this run — GPU workers "
+                "stay idle; a CPU-only worker pool serves it at lower cost "
+                "(RUN_PLAYBOOK_WS8 cost note)",
+            )
         # 5. identifier-shaped columns: pull the full source domain through
         # the same store the pool ladder uses (ADR 0023) so mask tables and
         # novelty rejection see the whole keyspace, not the sample
@@ -375,12 +398,50 @@ class B1RagEngine(GenerationEngine):
             )
             if domain:
                 self._numeric_domains[name] = domain
-                counts = Counter(values)
-                self._numeric_multi_knots[name] = frozenset(
-                    v
-                    for v, c in counts.items()
-                    if c >= _NUMERIC_MULTI_KNOT_MIN
+                self._numeric_multi_knots[name] = self._numeric_keep_set(
+                    ctx, name, values
                 )
+
+    def _numeric_keep_set(
+        self, ctx: GenerationContext, name: str, values: list[str]
+    ) -> frozenset[str]:
+        """K-anonymous values the scrub must keep exact.
+
+        Preferred: the SOURCE's own frequent values (`fetch_frequent`,
+        HAVING COUNT(*) >= 10 — the same floor the probe's substantive
+        metric applies), so the scrub and the measurement agree on what
+        counts as enum mass. Fallback (store absent / method absent /
+        error / over-cap): sample multi-knots, the wave-4 v1 heuristic."""
+        store = getattr(ctx, "source_value_store", None)
+        fetch_frequent = getattr(store, "fetch_frequent", None)
+        if fetch_frequent is not None:
+            try:
+                frequent = fetch_frequent(name, _NUMERIC_KANON_MIN_COUNT)
+            except Exception as exc:
+                log_milestone(
+                    "numeric_kanon_filter_error",
+                    level=logging.WARNING,
+                    column=name,
+                    error=type(exc).__name__,
+                )
+            else:
+                if frequent is not None:
+                    log_milestone(
+                        "numeric_kanon_filter",
+                        column=name,
+                        size=len(frequent),
+                        min_count=_NUMERIC_KANON_MIN_COUNT,
+                    )
+                    return frozenset(frequent)
+                log_milestone(
+                    "numeric_kanon_filter_absent",
+                    level=logging.WARNING,
+                    column=name,
+                )
+        counts = Counter(values)
+        return frozenset(
+            v for v, c in counts.items() if c >= _NUMERIC_MULTI_KNOT_MIN
+        )
 
     def _log_generation_plan(self, ctx: GenerationContext) -> None:
         """ONE milestone mapping every column to its generation strategy.
@@ -559,14 +620,16 @@ class B1RagEngine(GenerationEngine):
 
         The inverse-CDF interpolant rounds onto real values wherever the
         integer band is dense (2026-08-20 A_TABLE R1: COL_009 landed 52%
-        substantive copies of rare account numbers). Colliding draws
-        redraw through the same inverse-CDF, then nudge to the nearest
-        non-source integer — the marginal moves by at most a few units.
-        Multi-knot values (sample frequency >= 2) stay exact: under the
-        sample-to-source scale they are k-anonymous enum mass, the numeric
-        twin of FREE_TEXT head values. A value still colliding after the
-        nudge walk (fully dense neighborhood) is kept — by pigeonhole its
-        neighbors are all real values too, and the residual is logged.
+        substantive copies of rare account numbers). NUDGE-FIRST (wave-4
+        v2): a colliding draw walks to the nearest non-source integer, so
+        the scrubbed value stays inside its quantile neighborhood and the
+        marginal barely moves (redraw-first redistributed the rejected
+        mass — a version-number column's decile-KS rose 0.04 → 0.17).
+        Saturated neighborhoods fall back to inverse-CDF redraws, then one
+        final nudge. Keep-set values (source-frequent, k-anonymous) stay
+        exact — the numeric twin of FREE_TEXT head values. A value still
+        colliding after all of it is kept: by pigeonhole its whole
+        neighborhood is real values, and the residual is logged.
         """
         domain = self._numeric_domains[name]
         keep = self._numeric_multi_knots.get(name, frozenset())
@@ -574,10 +637,28 @@ class B1RagEngine(GenerationEngine):
         def _collides(v) -> bool:
             return v is not None and str(v) in domain and str(v) not in keep
 
+        def _nudge(idx: list[int]) -> int:
+            resolved = 0
+            for i in list(idx):
+                v = int(values[i])
+                for step in range(1, _NUMERIC_NUDGE_MAX + 1):
+                    lo, hi = v - step, v + step
+                    if str(lo) not in domain:
+                        values[i], resolved = lo, resolved + 1
+                        idx.remove(i)
+                        break
+                    if str(hi) not in domain:
+                        values[i], resolved = hi, resolved + 1
+                        idx.remove(i)
+                        break
+            return resolved
+
         idx = [i for i, v in enumerate(values) if _collides(v)]
         collisions = len(idx)
         if not collisions:
             return values
+        nudged = _nudge(idx)
+        redrawn = 0
         for _ in range(_NUMERIC_REDRAW_ROUNDS):
             if not idx:
                 break
@@ -586,23 +667,13 @@ class B1RagEngine(GenerationEngine):
                 if use_numpy
                 else sampler.sample_python(rng, len(idx), similarity)
             )
+            before = len(idx)
             for i, v in zip(idx, fresh, strict=True):
                 if v is not None:  # keep null parity: a None redraw is a miss
                     values[i] = v
             idx = [i for i in idx if _collides(values[i])]
-        nudged = 0
-        for i in list(idx):
-            v = int(values[i])
-            for step in range(1, _NUMERIC_NUDGE_MAX + 1):
-                lo, hi = v - step, v + step
-                if str(lo) not in domain:
-                    values[i], nudged = lo, nudged + 1
-                    idx.remove(i)
-                    break
-                if str(hi) not in domain:
-                    values[i], nudged = hi, nudged + 1
-                    idx.remove(i)
-                    break
+            redrawn += before - len(idx)
+        nudged += _nudge(idx)
         if name not in self._numeric_scrub_logged:
             self._numeric_scrub_logged.add(name)
             log_milestone(
@@ -610,6 +681,7 @@ class B1RagEngine(GenerationEngine):
                 column=name,
                 collisions=collisions,
                 nudged=nudged,
+                redrawn=redrawn,
                 unresolved=len(idx),
             )
         return values
@@ -877,33 +949,11 @@ class B1RagEngine(GenerationEngine):
         # before any ladder thread spawns.
         jobs: list[tuple[ColumnProfile, list[str], int, frozenset[str]]] = []
         for prof in free_text_cols:
-            if self._take_stored_pool(prof.name, ctx, stored, pools):
-                continue
-            seed_examples = self._column_seed_examples(
-                prof, ctx, _DEFAULT_TOP_K, chunks_by_column.get(prof.name)
+            job = self._collect_pool_job(
+                prof, ctx, stored, pools, exemplars, chunks_by_column
             )
-            if not seed_examples:
-                seed_examples = [
-                    e[prof.name]
-                    for e in exemplars
-                    if e.get(prof.name) not in (None, "")
-                ][:_DEFAULT_TOP_K] or list(prof.text_examples[:_DEFAULT_TOP_K])
-            pool_target = self._pool_target(prof, ctx)
-            key = self._pool_cache_key(ctx, prof.name, pool_target)
-            if key is not None:
-                with _POOL_CACHE_LOCK:
-                    cached = _POOL_CACHE.get(key)
-                if cached is not None:
-                    pools[prof.name] = list(cached)
-                    self._pool_sources[prof.name] = "process_cache"
-                    log_milestone(
-                        "freetext_pool_cache_hit",
-                        column=prof.name,
-                        pool_size=len(cached),
-                    )
-                    continue
-            source_values = self._fetch_source_values(ctx, prof.name)
-            jobs.append((prof, seed_examples, pool_target, source_values))
+            if job is not None:
+                jobs.append(job)
 
         # Phase 2 — parallel: one bounded ladder per column. Collect EVERY
         # result before re-raising the first failure, so sibling columns'
@@ -942,6 +992,72 @@ class B1RagEngine(GenerationEngine):
         if first_error is not None:
             raise first_error
         return pools
+
+    def _collect_pool_job(
+        self,
+        prof: ColumnProfile,
+        ctx: GenerationContext,
+        stored: dict[str, list[str]],
+        pools: dict[str, list[str]],
+        exemplars: list[dict],
+        chunks_by_column: dict[str, list],
+    ) -> tuple[ColumnProfile, list[str], int, frozenset[str]] | None:
+        """Phase-1 resolution for one column: serve it from the store /
+        binary fallback / process cache (returns None), or assemble its
+        LLM-ladder job."""
+        if self._take_stored_pool(prof.name, ctx, stored, pools):
+            return None
+        if self._take_binary_fallback(prof, ctx, pools):
+            return None
+        seed_examples = self._column_seed_examples(
+            prof, ctx, _DEFAULT_TOP_K, chunks_by_column.get(prof.name)
+        )
+        if not seed_examples:
+            seed_examples = [
+                e[prof.name]
+                for e in exemplars
+                if e.get(prof.name) not in (None, "")
+            ][:_DEFAULT_TOP_K] or list(prof.text_examples[:_DEFAULT_TOP_K])
+        pool_target = self._pool_target(prof, ctx)
+        key = self._pool_cache_key(ctx, prof.name, pool_target)
+        if key is not None:
+            with _POOL_CACHE_LOCK:
+                cached = _POOL_CACHE.get(key)
+            if cached is not None:
+                pools[prof.name] = list(cached)
+                self._pool_sources[prof.name] = "process_cache"
+                log_milestone(
+                    "freetext_pool_cache_hit",
+                    column=prof.name,
+                    pool_size=len(cached),
+                )
+                return None
+        source_values = self._fetch_source_values(ctx, prof.name)
+        return (prof, seed_examples, pool_target, source_values)
+
+    def _take_binary_fallback(
+        self, prof: ColumnProfile, ctx: GenerationContext, pools: dict
+    ) -> bool:
+        """Binary payloads mis-stored as STRING (wave-4 v2): the LLM
+        ladder cannot emit control bytes — its candidates were
+        format-rejected en masse while the column burned the whole cold
+        pool phase (COL_048-class: 8.6 min, 41% of wall time). Straight
+        to the template fallback; the pool persists like any other."""
+        if not is_binary_class(prof.observed_values):
+            return False
+        target = self._pool_target(prof, ctx)
+        fallback = self._shape_fallback_pool(
+            prof, target, set(), self._fetch_source_values(ctx, prof.name)
+        )
+        pools[prof.name] = fallback
+        self._pool_sources[prof.name] = "binary_fallback"
+        log_milestone(
+            "freetext_pool_binary_fallback",
+            column=prof.name,
+            pool_size=len(fallback),
+            target=target,
+        )
+        return True
 
     def _skip_expandable_pools(
         self, free_text_cols: list[ColumnProfile]

@@ -62,6 +62,21 @@ def test_fetch_distinct_rejects_non_identifier_column() -> None:
         store.fetch_distinct("notes`; DROP TABLE x")
 
 
+def test_fetch_frequent_groups_by_kanon_floor() -> None:
+    # Wave-4 v2: the numeric scrub's keep-set comes from SOURCE
+    # frequencies (HAVING COUNT(*) >= k), not the sample's multi-knots.
+    client = _FakeBqClient([{"v": "2000"}, {"v": "35"}])
+    store = BigQuerySourceValueStore("p.d.source", client=client)
+    assert store.fetch_frequent("acct", 10) == frozenset({"2000", "35"})
+    sql, _cfg = client.queries[0]
+    assert "GROUP BY v HAVING COUNT(*) >= 10" in sql
+    assert "`acct`" in sql
+    # Cached under a distinct key — a fetch_distinct for the same column
+    # must not collide with the frequent set.
+    client.rows = [{"v": "other"}]
+    assert store.fetch_frequent("acct", 10) == frozenset({"2000", "35"})
+
+
 def test_count_overlap_binds_values_as_array_parameter() -> None:
     client = _FakeBqClient([{"n": 7}])
     store = BigQuerySourceValueStore("p.d.source", client=client)
