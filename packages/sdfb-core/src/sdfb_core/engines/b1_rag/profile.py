@@ -167,6 +167,12 @@ class ColumnProfile:
     constraint_pattern: str = ""
     constraint_sets_length: bool = False
     constraint_examples: tuple[str, ...] = ()
+    # FREE_TEXT — Tier-P/B routing inputs (ADR 0028): the clause's literal
+    # prefix, its pinned fixed width (None when unpinned or a band), and
+    # the structured prefix-family shares for weighted pattern sampling.
+    constraint_prefix: str = ""
+    constraint_length: int | None = None
+    constraint_families: tuple[tuple[str, float], ...] = ()
     # TEMPORAL — strftime format when the column is a date-shaped STRING;
     # range-sampled floats render back to strings in the observed format.
     temporal_format: str | None = None
@@ -455,6 +461,13 @@ def _profile_string(
     c_pattern = pc.pattern if pc is not None else ""
     c_sets_length = pc is not None and pc.length is not None
     c_examples = pc.examples if pc is not None else ()
+    c_prefix = pc.prefix if pc is not None else ""
+    c_length = (
+        pc.length[0]
+        if pc is not None and pc.length is not None and pc.length[0] == pc.length[1]
+        else None
+    )
+    c_families = pc.families if pc is not None else ()
     strings = [str(v) for v in non_null]
     distinct = _ordered_distinct(strings)
     n = len(strings)
@@ -525,6 +538,9 @@ def _profile_string(
                 constraint_pattern=c_pattern,
                 constraint_sets_length=c_sets_length,
                 constraint_examples=c_examples,
+                constraint_prefix=c_prefix,
+                constraint_length=c_length,
+                constraint_families=c_families,
             )
         # Cap the seed pool — exemplars condition the LLM, they aren't the bulk.
         examples = tuple(distinct[:64])
@@ -546,6 +562,9 @@ def _profile_string(
             constraint_pattern=c_pattern,
             constraint_sets_length=c_sets_length,
             constraint_examples=c_examples,
+            constraint_prefix=c_prefix,
+            constraint_length=c_length,
+            constraint_families=c_families,
         )
     return _profile_categorical(
         col,

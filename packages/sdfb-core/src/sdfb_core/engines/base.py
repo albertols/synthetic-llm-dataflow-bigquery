@@ -166,6 +166,12 @@ class GenerationContext(BaseModel):
     # Columns that must be per-row-unique and NEVER sampled from reference
     # data (PK / UUID / account-number style). See engines/identity.py.
     identity_columns: list[str] = Field(default_factory=list)
+    # Declared primary-key columns (relational contract / --pk_cols). The
+    # 2026-08-21 run proved generation must know the PK, not just the
+    # gate: the declared PK drew from a 512-cap pool and 999 488 rows
+    # were pk.duplicate by construction (ADR 0028). Routed constraint
+    # samplers keep a per-process emitted set for these columns.
+    pk_columns: list[str] = Field(default_factory=list)
     # When True (real-LLM runs), a failed free-text LLM call re-raises
     # instead of silently falling back to reference exemplars. The 2026-07-10
     # E2E runs shipped 100% memorized identifiers because the fallback was
@@ -226,6 +232,13 @@ class GenerationContext(BaseModel):
     # uniformly from EXACTLY these values, whatever its profiled kind —
     # referential integrity beats the child's marginal in v1.
     fk_pools: dict[str, tuple] = Field(default_factory=dict)
+    # Relational E2E metadata for the once-per-plan `relational_e2e`
+    # worker log entry (ADR 0028 follow-up): where this run lands, and
+    # each declared FK edge as {"cols": [...], "ref": "ds.parent",
+    # "parent_landing": "project.landing.parent"}. Display-only — the
+    # sampling truth stays in fk_pools.
+    landing_table: str = ""
+    fk_edges: list[dict] = Field(default_factory=list)
     # Attach the per-column llm_prompt_constraint (parsed from the column's
     # DDL description JSON) to pool prompts. Per-column CONSTANT suffix —
     # prefix-cache-safe (ADR 0018).

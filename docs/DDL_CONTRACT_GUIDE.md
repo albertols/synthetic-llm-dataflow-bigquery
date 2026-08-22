@@ -151,7 +151,29 @@ prefix-cache-safe. All keys optional; combine freely.
 | `units` | str | semantic scale ("EUR cents") | prompt clause |
 | `locale` | str | language of prose ("es-ES") | prompt clause |
 | `route` | `"auto"` \| `"llm"` | **force a typed column onto the LLM route** (constant/categorical/temporal/identifier STRING columns) | profiler override; non-STRING types warn `prompt_constraint_route_unsupported` and keep their typed route |
+| `families` | `{prefix: share}` (or pair list) | prefix-family mass targets (`{"E2F3": 0.57, "E2F1": 0.42, "2301": 0.007}`) — replaces prose percentages, which no sampler can parse | ADR 0028 Tier-P weighted sampling; shares normalized; **not** rendered into the prompt |
 | `notes` | str ≤ 500 | anything else, free prose | appended last (the legacy string form lands here) |
+
+**Routing (ADR 0028).** A constrained column no longer always means an
+LLM pool. Launcher-visible in the `generation_plan` milestone's
+`pool_sources` and the `constraint_sampler_active` /
+`freetext_pool_byte_template` milestones:
+
+- **`pattern` present and samplable** (anchored; literals, classes,
+  `\d`, bounded repeats, groups, alternation — no `+`/`*`, negated
+  classes, backrefs, lookarounds) → a seeded CPU **pattern sampler**
+  generates format-exact, unlimited unique values; `families` weights
+  apply. No LLM call, no pool cap. **Author `pattern` first, always** —
+  it is the difference between a guaranteed format and a request.
+- **Binary payloads** (control-byte values mis-stored as STRING) →
+  a **byte template** (`prefix` + random tail at pinned `length`) —
+  never source copies, per the privacy note such clauses carry.
+- **Anything else** → the LLM pool ladder, as before.
+
+**PK columns** (declared in the table contract): preflight P4 refuses a
+launch whose PK generator cannot cover `num_rows` unique values — give
+PK columns a samplable `pattern`. Declared FKs require
+`--fk_parent_landing` at launch (P6; `skip` is the loud opt-out).
 
 Debugging the result: run with `--prompt_debug=redacted` and grep Dataflow
 worker logs for `freetext_pool_prompt` — you see exactly the instruction +

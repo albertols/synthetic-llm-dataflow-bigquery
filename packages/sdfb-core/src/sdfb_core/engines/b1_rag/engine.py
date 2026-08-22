@@ -56,12 +56,20 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     escalating_sampling,
 )
+from sdfb_core.engines.constraint_sampler import (
+    ByteTemplateSampler,
+    compile_pattern_sampler,
+)
+from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.generation_plan import (
     build_constraints_detail as _build_constraints_detail,
 )
 from sdfb_core.engines.generation_plan import build_plan as _build_plan
 from sdfb_core.engines.generation_plan import (
     build_plan_detail as _build_plan_detail,
+)
+from sdfb_core.engines.generation_plan import (
+    log_plan_pretty as _log_plan_pretty,
 )
 from sdfb_core.engines.generation_plan import should_log_plan as _should_log_plan
 from sdfb_core.engines.text_shapes import (
@@ -113,8 +121,12 @@ _DEFAULT_TOP_K = 8
 # of the 2026-07-19 run oversampled 3 columns 28-619x. Each LLM call stays
 # bounded at _POOL_VALUES_PER_CALL values — multiple bounded calls, never
 # per-row work (ADR 0013's FASTGEN spine).
-_FREE_TEXT_POOL_MAX = 512
+_FREE_TEXT_POOL_MAX = FREE_TEXT_POOL_MAX
 _POOL_VALUES_PER_CALL = 32
+# Routed-draw rejection bound (ADR 0028): with clause value spaces at
+# 1e19+ and forbidden sets at 1e5, a miss is ~1e-14 per try — the bound
+# exists to make pathological saturation a loud error, not a hang.
+_ROUTED_DRAW_TRIES = 16
 # Server-side parallel sampling (2026-07-25 perf fix): each pool HTTP round
 # trip requests this many INDEPENDENT array-completions (`n=`) and de-dupes
 # across them, multiplying per-call novel yield ~4x. Safe because pool
@@ -215,6 +227,14 @@ class B1RagEngine(GenerationEngine):
         # without touching the (thread-unsafe) embedder from a worker
         # thread. Written before any ladder thread spawns; read-only after.
         self._seed_space: dict[str, tuple[list, list]] = {}
+        # ADR 0028 — column -> ("pattern" | "byte_template", sampler) for
+        # constrained columns whose clause routes to a programmatic
+        # sampler; plus per-column source-rejection sets and, for PK
+        # columns, the per-process emitted set that guarantees
+        # uniqueness across batches.
+        self._routed: dict[str, tuple[str, Any]] = {}
+        self._routed_forbidden: dict[str, frozenset[str]] = {}
+        self._routed_emitted: dict[str, set[str]] = {}
         self._index: ExactIPIndex | None = None
         self._embedder: Embedder | None = None
         self._ref_vectors: list[list[float]] = []
@@ -279,6 +299,10 @@ class B1RagEngine(GenerationEngine):
         self._samplers = {
             name: ColumnSampler(prof) for name, prof in self._profiles.items()
         }
+        # ADR 0028 — route constrained columns to programmatic samplers
+        # BEFORE any pool work: Tier P/B columns never enter the ladder
+        # and draw straight from their clause's value space.
+        self._route_constraint_samplers(ctx)
 
         # 1+2. embed + index (only meaningful with reference rows present).
         # Embedder precedence: injected (tests) > real BgeEmbedder if the
@@ -476,6 +500,10 @@ class B1RagEngine(GenerationEngine):
             ),
         )
         self._log_prompt_constraints(ctx, "b1_rag")
+        _log_plan_pretty(
+            "b1_rag", ctx, self._profiles,
+            pool_sources=dict(self._pool_sources),
+        )
 
     def _log_prompt_constraints(
         self, ctx: GenerationContext, engine: str
@@ -516,6 +544,9 @@ class B1RagEngine(GenerationEngine):
         self._numeric_domains = {}
         self._numeric_multi_knots = {}
         self._numeric_scrub_logged = set()
+        self._routed = {}
+        self._routed_forbidden = {}
+        self._routed_emitted = {}
         self._column_order = []
         self._ready = False
 
@@ -706,6 +737,16 @@ class B1RagEngine(GenerationEngine):
             # cause): one uniform draw decides null → empty → value, so the
             # two sparsity modes never double-count.
             empty_frac = prof.empty_fraction
+            if name in self._routed:
+                # ADR 0028 Tier P/B: sample the clause's value space
+                # directly — format-exact, unbounded (the pool cap can
+                # never truncate a PK again), source-rejecting.
+                draw_routed = self._routed_draw(name, rng)
+                out[name] = [
+                    self._sparsity_or(rng, null_frac, empty_frac, draw_routed)
+                    for _ in range(n)
+                ]
+                continue
             if prof.identifier_shape is not None:
                 # Format-preserving per-row generation — a bounded pool
                 # sampled with replacement collapses an identifier column's
@@ -932,6 +973,7 @@ class B1RagEngine(GenerationEngine):
             if p.kind is ColumnKind.FREE_TEXT and p.identifier_shape is None
         ]
         free_text_cols = self._skip_expandable_pools(free_text_cols)
+        free_text_cols = self._skip_routed_pools(free_text_cols)
         if not free_text_cols:
             return pools
 
@@ -1078,6 +1120,114 @@ class B1RagEngine(GenerationEngine):
             else:
                 kept.append(p)
         return kept
+
+    def _route_constraint_samplers(self, ctx: GenerationContext) -> None:
+        """Attach a programmatic sampler to every constrained column whose
+        clause defines its value space (ADR 0028).
+
+        Tier B (binary payloads, pinned length) wins over Tier P: an LLM
+        or grammar cannot emit control bytes, and the replaced source-copy
+        fallback landed `copy_ratio_substantive=1.0` against the clause's
+        own privacy note (2026-08-21 run). Tier P compiles the clause
+        ``pattern`` — draws are format-exact, unbounded, and family-
+        weighted. Anything else keeps its existing route untouched.
+        """
+        assert self._profiles is not None
+        if not getattr(ctx, "prompt_constraints", True):
+            return
+        pk_cols = set(getattr(ctx, "pk_columns", []) or [])
+        for name, prof in self._profiles.items():
+            if (
+                prof.kind is not ColumnKind.FREE_TEXT
+                or not prof.llm_prompt_constraint
+            ):
+                continue
+            routed = self._route_one(prof)
+            if routed is None:
+                continue
+            route, sampler = routed
+            self._routed[name] = (route, sampler)
+            self._routed_forbidden[name] = frozenset(
+                str(v) for v in prof.observed_values
+            ) | self._fetch_source_values(ctx, name) | frozenset(
+                prof.constraint_examples
+            )
+            if name in pk_cols:
+                self._routed_emitted[name] = set()
+            log_milestone(
+                "freetext_pool_byte_template"
+                if route == "byte_template"
+                else "constraint_sampler_active",
+                column=name,
+                route=route,
+                capacity=f"{float(sampler.capacity):.2e}",
+                pk=name in pk_cols,
+            )
+
+    def _route_one(
+        self, prof: ColumnProfile
+    ) -> tuple[str, Any] | None:
+        """One column's route decision, from clause fields alone."""
+        if is_binary_class(prof.observed_values):
+            length = prof.constraint_length or _mode_length(
+                prof.observed_values
+            )
+            prefix = prof.constraint_prefix
+            if length and length >= len(prefix):
+                return (
+                    "byte_template",
+                    ByteTemplateSampler(prefix=prefix, length=length),
+                )
+            return None  # underivable template: keep the legacy fallback
+        if prof.constraint_pattern:
+            sampler = compile_pattern_sampler(
+                prof.constraint_pattern, families=prof.constraint_families
+            )
+            if sampler is not None:
+                return ("pattern", sampler)
+        return None
+
+    def _skip_routed_pools(
+        self, free_text_cols: list[ColumnProfile]
+    ) -> list[ColumnProfile]:
+        """Drop Tier-P/B columns from the pool build (ADR 0028): their
+        draw path samples the clause's value space directly, so ladder
+        work (LLM calls, store writes, binary fallback) is dead cost —
+        and for binary columns, a privacy violation."""
+        kept: list[ColumnProfile] = []
+        for p in free_text_cols:
+            routed = self._routed.get(p.name)
+            if routed is not None:
+                self._pool_sources[p.name] = routed[0]
+            else:
+                kept.append(p)
+        return kept
+
+    def _routed_draw(self, name: str, rng: random.Random):
+        """Per-row draw closure for a routed column: bounded rejection
+        against the source domain (and the emitted set on PK columns).
+        Saturation raises loudly — never silently emits a source value."""
+        route, sampler = self._routed[name]
+        forbidden = self._routed_forbidden.get(name, frozenset())
+        emitted = self._routed_emitted.get(name)
+
+        def _draw() -> str:
+            for _ in range(_ROUTED_DRAW_TRIES):
+                v = cast(str, sampler.sample(rng))
+                if v in forbidden:
+                    continue
+                if emitted is not None:
+                    if v in emitted:
+                        continue
+                    emitted.add(v)
+                return v
+            raise RuntimeError(
+                f"routed draw stalled for column {name} (route={route}, "
+                f"forbidden={len(forbidden)}, "
+                f"emitted={len(emitted) if emitted is not None else 0})"
+            )
+
+        return _draw
 
     def _fetch_free_text_chunks(self, ctx: GenerationContext) -> dict[str, list]:
         """Fetch persisted `free_text_col` chunks ONCE for all columns and
@@ -1608,6 +1758,17 @@ class _PoolYield(NamedTuple):
     # per column into `freetext_pools.stagnated` (2026-07-29: rows stored
     # hardcoded false because nothing recorded this).
     stagnated: bool = False
+
+
+def _mode_length(values: tuple[object, ...]) -> int:
+    """Most common substantive value length, 0 when nothing substantive —
+    the Tier-B length stand-in when the clause does not pin one."""
+    lengths = Counter(
+        len(str(v)) for v in values if v is not None and str(v).strip()
+    )
+    if not lengths:
+        return 0
+    return lengths.most_common(1)[0][0]
 
 
 def _build_pool_prompt(

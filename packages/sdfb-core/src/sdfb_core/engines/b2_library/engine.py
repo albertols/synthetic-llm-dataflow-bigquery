@@ -49,6 +49,7 @@ from sdfb_core.engines.generation_plan import (
     build_constraints_detail,
     build_plan,
     build_plan_detail,
+    log_plan_pretty,
     should_log_plan,
 )
 from sdfb_core.observability import log_milestone
@@ -170,6 +171,7 @@ class B2LibraryEngine(GenerationEngine):
                 enabled=bool(getattr(ctx, "prompt_constraints", True)),
                 detail=json.dumps(constraints, separators=(",", ":")),
             )
+        log_plan_pretty(self.name, ctx, self._profiles)
 
     # -- pickling across the Beam worker boundary ---------------------------
     #

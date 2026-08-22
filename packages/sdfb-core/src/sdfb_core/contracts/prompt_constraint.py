@@ -66,6 +66,13 @@ class PromptConstraint(BaseModel):
     locale: str = ""
     route: Literal["auto", "llm"] = "auto"
     notes: str = ""
+    # Prefix-family shares for Tier-P pattern sampling (ADR 0028 D5):
+    # the structured replacement for prose percentages. Accepts
+    # {"E2F3": 0.57, ...} or [["E2F3", 0.57], ...]; shares are
+    # normalized by the sampler. Not rendered into the prompt clause —
+    # its consumer is the sampler, the prose `format` keeps steering
+    # the LLM when one is involved.
+    families: tuple[tuple[str, float], ...] = ()
 
     @field_validator(
         "format", "prefix", "suffix", "charset", "units", "locale", "notes"
@@ -102,6 +109,13 @@ class PromptConstraint(BaseModel):
     def _band(cls, v: object) -> object:
         if isinstance(v, int) and not isinstance(v, bool):
             return (v, v)
+        return v
+
+    @field_validator("families", mode="before")
+    @classmethod
+    def _family_pairs(cls, v: object) -> object:
+        if isinstance(v, dict):
+            return tuple(v.items())
         return v
 
 

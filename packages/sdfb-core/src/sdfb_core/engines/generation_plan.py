@@ -15,7 +15,14 @@ import threading
 from typing import Any
 
 from sdfb_core.engines.text_shapes import shape_mix_is_identifier_like
-from sdfb_core.observability import sha12
+from sdfb_core.observability import log_milestone_pretty, sha12
+
+# The bounded-pool ceiling shared by the engines' free-text ladders and
+# the launcher's PK-capacity preflight (ADR 0028 P4): a constrained
+# column with no samplable pattern can never exceed this many distinct
+# values, so a PK routed there caps at it — the 2026-08-21 run DLQ'd
+# 999 488 of 1M rows exactly this way.
+FREE_TEXT_POOL_MAX = 512
 
 # (engine, reference_digest, table_fqn) triples already logged by this
 # worker process. Keyed per engine so a b1 + b2 comparison run on the same
@@ -129,10 +136,65 @@ def build_plan(profiles: dict[str, Any]) -> dict[str, list[str]]:
     return {k: sorted(v) for k, v in sorted(plan.items())}
 
 
+def log_plan_pretty(
+    engine: str,
+    ctx: Any,
+    profiles: dict[str, Any],
+    pool_sources: dict[str, str] | None = None,
+) -> None:
+    """The two once-per-plan pretty entries (ADR 0028 follow-up).
+
+    Emitted by both engines right after their compact ``generation_plan``
+    milestone, under the same once-guard: an indent-2
+    ``generation_plan_pretty`` for quick per-column inspection, and a
+    ``relational_e2e`` block naming every relational table the run
+    touches — landing table, PK, each FK edge with its parent landing
+    table and loaded pool size — plus the fetched constraint clauses.
+    One glance answers "did the whole relational contract reach this
+    run", which the 2026-08-21 job could not (its FK was silently
+    inactive)."""
+    table = ctx.table_schema.fqn
+    plan_payload: dict[str, Any] = {
+        "engine": engine,
+        "table": table,
+        "plan": build_plan(profiles),
+        "columns": build_plan_detail(profiles),
+    }
+    if pool_sources:
+        plan_payload["pool_sources"] = dict(sorted(pool_sources.items()))
+    log_milestone_pretty(
+        "generation_plan_pretty", plan_payload, engine=engine, table=table
+    )
+
+    fk_pools: dict[str, tuple] = getattr(ctx, "fk_pools", {}) or {}
+    edges: list[dict] = list(getattr(ctx, "fk_edges", []) or [])
+    if not edges and fk_pools:
+        edges = [{"cols": [c]} for c in sorted(fk_pools)]
+    fk_view = []
+    for edge in edges:
+        first_col = (edge.get("cols") or [""])[0]
+        pool_size = len(fk_pools.get(first_col, ()))
+        fk_view.append(
+            {**edge, "pool_size": pool_size, "active": pool_size > 0}
+        )
+    relational_payload = {
+        "source_table": table,
+        "landing_table": getattr(ctx, "landing_table", "") or None,
+        "pk": list(getattr(ctx, "pk_columns", []) or []),
+        "identity": list(getattr(ctx, "identity_columns", []) or []),
+        "fk": fk_view,
+        "llm_prompt_constraints": build_constraints_detail(profiles),
+    }
+    log_milestone_pretty(
+        "relational_e2e", relational_payload, engine=engine, table=table
+    )
+
+
 __all__ = [
     "build_constraints_detail",
     "build_plan",
     "build_plan_detail",
     "clear_generation_plan_log",
+    "log_plan_pretty",
     "should_log_plan",
 ]

@@ -53,7 +53,7 @@ from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
-from sdfb_beam.io.fk_pools import load_fk_pools
+from sdfb_beam.io.fk_pools import load_fk_pools, parent_landing_fqn
 from sdfb_beam.io.source_values import (
     BigQuerySourceValueStore,
     pool_source_overlap,
@@ -262,7 +262,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="project.dataset holding already-landed synthetic "
                         "parent tables (ADR 0021). With a contract that "
                         "declares FKs, child FK columns sample from the "
-                        "parents' landed keys. Empty = FK pools off.")
+                        "parents' landed keys. When the contract declares "
+                        "FKs this flag is REQUIRED (ADR 0028 P6): empty "
+                        "fails preflight; pass 'skip' to loudly generate "
+                        "from marginals with integrity unverified.")
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
@@ -675,11 +678,21 @@ def _load_reference_and_preflight(args, table_schema):
         tuple(c.strip() for c in args.identity_cols.split(",") if c.strip()),
         reference_rows,
         prompt_constraints_enabled=args.prompt_constraints == "on",
+        # ADR 0028: P4 refuses a PK whose routed generator cannot cover
+        # num_rows; P6 refuses a declared-but-unactivated FK ("skip" is
+        # the loud escape hatch) — both before any graph exists.
+        num_rows=args.num_rows,
+        fk_parent_landing=args.fk_parent_landing,
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
     fk_pools: dict = {}
-    if pf.contract and pf.contract.fk and args.fk_parent_landing:
+    if (
+        pf.contract
+        and pf.contract.fk
+        and args.fk_parent_landing
+        and args.fk_parent_landing != "skip"
+    ):
         fk_pools = load_fk_pools(pf.contract.fk, args.fk_parent_landing)
     source_distinct = _emit_source_stats(args, table_schema, reference_rows, pf)
     return reference_rows, pf, fk_pools, source_distinct
@@ -964,6 +977,19 @@ def main(argv: list[str] | None = None) -> int:
         prompt_constraints=args.prompt_constraints == "on",
         prompt_debug=args.prompt_debug,
         fk_pools=fk_pools,
+        fk_edges=tuple(
+            {
+                "cols": list(fk.cols),
+                "ref": fk.ref,
+                "parent_landing": (
+                    parent_landing_fqn(fk.ref, args.fk_parent_landing)
+                    if args.fk_parent_landing
+                    and args.fk_parent_landing != "skip"
+                    else ""
+                ),
+            }
+            for fk in (pf.contract.fk if pf.contract else ())
+        ),
         source_distinct=source_distinct,
         # ADR 0023 generate-path seam: B.2 builds pools lazily in workers.
         source_values_table=args.reference_table,

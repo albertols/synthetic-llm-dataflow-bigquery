@@ -16,6 +16,7 @@ stay Beam-free. Beam metric counterparts live in ``sdfb_beam``.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shlex
@@ -83,6 +84,25 @@ def sha12(text: str) -> str:
 def log_milestone(name: str, *, level: int = logging.INFO, **fields) -> str:
     line = format_milestone(name, **fields)
     _logger.log(level, line)
+    return line
+
+
+def log_milestone_pretty(
+    name: str, payload: dict, *, level: int = logging.INFO, **fields
+) -> str:
+    """A milestone whose body is human-readable indent-2 JSON.
+
+    The header line keeps the single-line ``SDFB_MILESTONE name=…``
+    grep contract; the payload follows as one multi-line JSON block in
+    the SAME log record, so Cloud Logging shows it as a single expandable
+    entry (operator ask, 2026-08-22: the plan blob was an 8k-char single
+    line). Machine consumers keep parsing the compact sibling milestone —
+    pretty entries are for eyes, never for tooling."""
+    line = format_milestone(name, **fields)
+    body = json.dumps(
+        payload, indent=2, ensure_ascii=False, sort_keys=True, default=str
+    )
+    _logger.log(level, line + "\n" + body)
     return line
 
 

@@ -121,6 +121,10 @@ class PipelineConfig:
     # FK columns → parent synthetic key values (ADR 0021), loaded
     # driver-side by io/fk_pools when the contract declares FKs.
     fk_pools: dict = field(default_factory=dict)
+    # Declared FK edges as display metadata for the worker's
+    # `relational_e2e` pretty log (ADR 0028 follow-up): each
+    # {"cols": [...], "ref": "ds.parent", "parent_landing": fqn}.
+    fk_edges: tuple = ()
     # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
     # behind up to three shuffle barriers; "streaming" lands rows as they
     # are generated and measures the duplicate rate instead.
@@ -167,6 +171,7 @@ def build_pipeline(
         model_uri=config.model_uri,
         embedder_uri=config.embedder_uri,
         identity_columns=list(config.identity_columns),
+        pk_columns=list(config.pk_columns),
         strict_freetext=config.strict_freetext,
         num_rows=config.num_rows,
         embedder_id=config.embedder_id,
@@ -179,6 +184,8 @@ def build_pipeline(
         prompt_constraints=config.prompt_constraints,
         prompt_debug=config.prompt_debug,
         fk_pools=config.fk_pools,
+        fk_edges=[dict(e) for e in config.fk_edges],
+        landing_table=config.landing_table,
         source_distinct=config.source_distinct,
         source_values_table=config.source_values_table,
     )

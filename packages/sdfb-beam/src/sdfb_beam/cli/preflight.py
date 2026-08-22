@@ -23,7 +23,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sdfb_core.contracts.description_json import DescriptionJsonError
+from sdfb_core.contracts.prompt_constraint import parse_prompt_constraint
 from sdfb_core.contracts.relational import parse_llm_prompt_constraint
+from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
+from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.observability import log_milestone, sha12
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -91,6 +94,84 @@ def _report_prompt_constraints(
         )
 
 
+def _check_pk_capacity(
+    table_schema: TableSchema, effective_pk: tuple[str, ...], num_rows: int
+) -> None:
+    """P4 (ADR 0028) — every constrained PK column's routed generator
+    must cover ``num_rows`` unique values.
+
+    A constrained column with no samplable ``pattern`` draws from a pool
+    capped at ``FREE_TEXT_POOL_MAX``; the 2026-08-21 run declared such a
+    column as PK at 1M rows and DLQ'd 999 488 of them — 37 minutes and
+    1 586 GPU-s after a check that costs microseconds here.
+    Unconstrained PK columns keep their existing (unbounded) routes and
+    are not judged.
+    """
+    by_name = {c.name: c for c in table_schema.columns}
+    for col in effective_pk:
+        field = by_name.get(col)
+        if field is None:
+            continue
+        pc = parse_prompt_constraint(field.description, column=col)
+        if pc is None:
+            continue
+        sampler = (
+            compile_pattern_sampler(pc.pattern, families=pc.families)
+            if pc.pattern
+            else None
+        )
+        capacity = sampler.capacity if sampler is not None else FREE_TEXT_POOL_MAX
+        if capacity < num_rows:
+            vehicle = (
+                f"pattern {pc.pattern!r} (capacity {capacity:.2e})"
+                if sampler is not None
+                else f"a bounded LLM pool (cap {FREE_TEXT_POOL_MAX})"
+            )
+            raise SystemExit(
+                f"[preflight P4] {table_schema.fqn}.{col}: declared PK "
+                f"carries an llm_prompt_constraint whose generator is "
+                f"{vehicle} — it cannot produce {num_rows} unique values "
+                f"and every excess row would be a pk.duplicate BLOCKER. "
+                f"Add a samplable 'pattern' with capacity >= num_rows, or "
+                f"remove the constraint from the PK column."
+            )
+
+
+def _check_fk_activation(
+    table_schema: TableSchema,
+    contract: RelationalContract,
+    fk_parent_landing: str,
+) -> None:
+    """P6 (ADR 0028) — a declared FK is resolved or loudly refused.
+
+    The 2026-08-21 run declared an FK and launched without
+    ``--fk_parent_landing``: pools silently never loaded, zero
+    ``fk.orphan`` evaluations, and '0 orphans' read as a pass."""
+    if not contract.fk:
+        return
+    if fk_parent_landing == "skip":
+        log_milestone(
+            "fk_declared_skipped",
+            level=logging.WARNING,
+            table=table_schema.fqn,
+            fk_refs=",".join(fk.ref for fk in contract.fk),
+            note="contract declares FK edges but --fk_parent_landing=skip "
+            "was passed — FK columns generate from marginals, referential "
+            "integrity UNVERIFIED this run",
+        )
+        return
+    if not fk_parent_landing:
+        refs = sorted(fk.ref for fk in contract.fk)
+        raise SystemExit(
+            f"[preflight P6] {table_schema.fqn}: the contract declares FK "
+            f"edges to {refs} but --fk_parent_landing was not passed — the "
+            f"run would silently generate FK columns from marginals with "
+            f"no fk.orphan check. Pass "
+            f"--fk_parent_landing=<project.landing_dataset> (parents must "
+            f"be landed first) or explicitly --fk_parent_landing=skip."
+        )
+
+
 def preflight(
     table_schema: TableSchema,
     pk_cols: tuple[str, ...],
@@ -98,8 +179,14 @@ def preflight(
     reference_rows: list[dict],
     fk_parents_resolved: dict[str, bool] | None = None,
     prompt_constraints_enabled: bool = True,
+    num_rows: int = 0,
+    fk_parent_landing: str | None = None,
 ) -> PreflightResult:
-    """Run P1-P5; returns the effective pk/identity columns."""
+    """Run P1-P6; returns the effective pk/identity columns.
+
+    ``num_rows`` > 0 arms the P4 PK-capacity check; ``fk_parent_landing``
+    not-None arms the P6 FK-activation check (pass the CLI value
+    verbatim, "" included)."""
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
@@ -117,6 +204,8 @@ def preflight(
 
     if contract is None:
         log_milestone("relational_contract_absent", table=fqn)
+        if num_rows > 0 and pk_cols:
+            _check_pk_capacity(table_schema, pk_cols, num_rows)
         return PreflightResult(pk_cols, identity_cols, None, warnings)
 
     # P2 — every contract column must exist in the schema.
@@ -180,6 +269,12 @@ def preflight(
                 duplicates=dupes,
                 sample_rows=len(reference_rows),
             )
+
+    # P4 — PK generation capacity; P6 — FK activation (ADR 0028).
+    if num_rows > 0 and effective_pk:
+        _check_pk_capacity(table_schema, tuple(effective_pk), num_rows)
+    if fk_parent_landing is not None:
+        _check_fk_activation(table_schema, contract, fk_parent_landing)
 
     log_milestone(
         "relational_contract_loaded",
