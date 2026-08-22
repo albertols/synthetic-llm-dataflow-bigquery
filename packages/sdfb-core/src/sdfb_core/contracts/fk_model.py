@@ -174,6 +174,67 @@ def model_sha12(model: FkModel) -> str:
     return sha12(canon)
 
 
+def fk_model_ascii(
+    model: FkModel, aliases: dict[str, str] | None = None
+) -> str:
+    """Glanceable plain-text rendering for Cloud Logging (2026-08-22
+    operator ask): no renderer needed — waves state the generation
+    order, ``-->`` marks enforced edges, ``..>`` informational ones,
+    and the joined field lists sit on BOTH ends of every arrow.
+
+    Example::
+
+        relational model | 6 tables | 4 enforced + 1 informational edges
+        wave 0 | A_TABLE
+        wave 0 | C_TABLE
+        wave 1 | B_TABLE (B_COL_006,B_COL_007) --> A_TABLE (A_COL_001,A_COL_002)
+        ...
+          info | C_TABLE (JOIN_KEY) ..> A_TABLE (JOIN_KEY)   [informational — display-only]
+    """
+    aliases = aliases or {}
+
+    def _name(fqn: str) -> str:
+        return aliases.get(fqn, fqn)
+
+    def _edge_line(child: str, fk: ForeignKey) -> str:
+        parent = _resolve_ref(fk.ref, model.tables)
+        parent_txt = (
+            _name(parent) if parent is not None else f"{fk.ref} [external]"
+        )
+        arrow = "..>" if fk.informational else "-->"
+        return (
+            f"{_name(child)} ({','.join(fk.cols)}) {arrow} "
+            f"{parent_txt} ({','.join(fk.ref_cols)})"
+        )
+
+    enforced = [(c, fk) for c, fk in model.edges if not fk.informational]
+    informational = [(c, fk) for c, fk in model.edges if fk.informational]
+    lines = [
+        f"relational model | {len(model.tables)} tables | "
+        f"{len(enforced)} enforced + {len(informational)} informational "
+        f"edges"
+    ]
+    by_child: dict[str, list] = {}
+    for c, fk in enforced:
+        by_child.setdefault(c, []).append(fk)
+    for i, level in enumerate(model.levels):
+        for t in level:
+            fks = by_child.get(t, [])
+            if not fks:
+                lines.append(f"wave {i} | {_name(t)}")
+            else:
+                lines.append(f"wave {i} | {_edge_line(t, fks[0])}")
+                lines.extend(
+                    f"       | {_edge_line(t, fk)}" for fk in fks[1:]
+                )
+    for c, fk in informational:
+        lines.append(
+            f"  info | {_edge_line(c, fk)}   "
+            f"[informational — display-only, never enforced]"
+        )
+    return "\n".join(lines)
+
+
 def fk_model_mermaid(
     model: FkModel, aliases: dict[str, str] | None = None
 ) -> str:
@@ -223,11 +284,29 @@ def fk_model_mermaid(
     return "\n".join(lines)
 
 
+def fk_model_log_body(
+    model: FkModel, aliases: dict[str, str] | None = None
+) -> str:
+    """The `fk_model_pretty` log body: the glanceable ASCII rendering
+    first (for humans reading Cloud Logging), the fenced mermaid source
+    below (for the report-recycling flow — prompt §5.5 lifts it into
+    `integration_tests/fk_models/<sha>.mmd`). One log entry, both
+    audiences."""
+    return (
+        fk_model_ascii(model, aliases)
+        + "\n\n```mermaid\n"
+        + fk_model_mermaid(model, aliases)
+        + "\n```"
+    )
+
+
 __all__ = [
     "FkModel",
     "FkModelError",
     "build_fk_model",
     "connected_component",
+    "fk_model_ascii",
+    "fk_model_log_body",
     "fk_model_mermaid",
     "model_sha12",
 ]

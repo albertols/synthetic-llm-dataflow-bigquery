@@ -115,6 +115,9 @@ class TestWorkerFkModelPretty:
     def test_fk_model_pretty_renders_worker_side(self, caplog) -> None:
         _b1_setup(caplog)
         assert "name=fk_model_pretty" in caplog.text
+        assert "relational model |" in caplog.text  # glanceable ASCII
+        assert "-->" in caplog.text
+        assert "```mermaid" in caplog.text
         assert "flowchart" in caplog.text
         assert "parent_t" in caplog.text
 

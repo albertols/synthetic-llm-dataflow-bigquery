@@ -386,7 +386,7 @@ def build_pipeline(
             env="dev", blocker_failure_ratio=1.0
         )
         valid_count, dlq_by_rule = _gate_inputs(
-            uniq, dlq_raw, config.uniqueness_mode
+            uniq, dlq_raw, config.uniqueness_mode, label_prefix
         )
         summary_rows = (
             p
@@ -578,7 +578,9 @@ def _rag_free_text_columns(
     ]
 
 
-def _gate_inputs(uniq: dict, dlq_raw, uniqueness_mode: str):
+def _gate_inputs(
+    uniq: dict, dlq_raw, uniqueness_mode: str, label_prefix: str = ""
+):
     """`(valid_count, dlq_by_rule)` singletons for the BLOCKER gate.
 
     `build_run_summary` computes ``total = valid_count + dlq_count``. In
@@ -592,17 +594,21 @@ def _gate_inputs(uniq: dict, dlq_raw, uniqueness_mode: str):
     if uniqueness_mode == "streaming":
         valid_count = uniq["distinct_count"]
     else:
-        valid_count = uniq["unique"] | "CountValid" >> beam.combiners.Count.Globally()
+        valid_count = (
+            uniq["unique"]
+            | f"{label_prefix}CountValid" >> beam.combiners.Count.Globally()
+        )
     dlq_by_rule = (
         (
-            dlq_raw | "DlqRulePairs" >> beam.Map(_dlq_rule_weight),
+            dlq_raw
+            | f"{label_prefix}DlqRulePairs" >> beam.Map(_dlq_rule_weight),
             # Streaming reports duplicates as measured counts rather than
             # diverted envelopes; the gate folds them identically.
             uniq["rule_counts"],
         )
-        | "AllRulePairs" >> beam.Flatten()
-        | "DlqRuleCounts" >> beam.CombinePerKey(sum)
-        | "DlqRuleDict" >> beam.combiners.ToDict()
+        | f"{label_prefix}AllRulePairs" >> beam.Flatten()
+        | f"{label_prefix}DlqRuleCounts" >> beam.CombinePerKey(sum)
+        | f"{label_prefix}DlqRuleDict" >> beam.combiners.ToDict()
     )
     return valid_count, dlq_by_rule
 

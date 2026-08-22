@@ -400,9 +400,11 @@ code ref; keep it tight; no dashboards / Vertex / external LLM suggestions
 
 ## Step 5.5 — FK-model diagram (recycled, never redrawn)
 
-Every launcher/worker log now carries the run's relationship model as
-pasteable mermaid (`SDFB_MILESTONE name=fk_model_pretty … model_sha12=<sha>`
-followed by a `flowchart` block) plus the `relational_e2e` JSON entry
+Every launcher/worker log now carries the run's relationship model in
+ONE `SDFB_MILESTONE name=fk_model_pretty … model_sha12=<sha>` entry:
+a glanceable ASCII rendering first (waves + `child (cols) --> parent
+(ref_cols)` arrows; `..>` = informational) and a fenced ```mermaid
+block below it (the pasteable source), plus the `relational_e2e` JSON entry
 (landing table, FK edges with parent-landing FQNs + pool sizes, PK,
 clauses). The report MUST show the model visually, and MUST NOT spend
 tokens re-deriving it:
@@ -412,7 +414,8 @@ tokens re-deriving it:
 2. If `integration_tests/fk_models/<sha>.mmd` exists → embed that file's
    content VERBATIM as a ```mermaid block in report.md §0 (run under
    test). Do not redraw, restyle, or re-label it.
-3. If it does not exist → copy the mermaid block from the log into
+3. If it does not exist → copy the fenced mermaid block (between the
+   ```mermaid fences inside fk_model_pretty) into
    `integration_tests/fk_models/<sha>.mmd` (create the dir if needed),
    then embed it. The next report with the same model reuses it for free.
 4. Aliases: the diagram in `oss/` must use the registry aliases

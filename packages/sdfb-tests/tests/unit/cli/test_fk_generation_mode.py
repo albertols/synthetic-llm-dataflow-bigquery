@@ -58,6 +58,11 @@ class TestLauncherFkModel:
             log_launcher_fk_model("p.src.orders", self._contract(),
                                   mode="relational")
         assert "name=fk_model_pretty" in caplog.text
+        # glanceable ASCII first (2026-08-22 operator ask)...
+        assert "relational model |" in caplog.text
+        assert "-->" in caplog.text and "..>" in caplog.text
+        # ...then the fenced mermaid for report recycling.
+        assert "```mermaid" in caplog.text
         assert "flowchart" in caplog.text
         assert "customers" in caplog.text
         assert "-.->" in caplog.text  # informational edge stays visible

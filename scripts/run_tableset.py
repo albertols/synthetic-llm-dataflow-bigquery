@@ -38,6 +38,7 @@ from pathlib import Path
 from sdfb_core.contracts.fk_model import (
     FkModel,
     build_fk_model,
+    fk_model_ascii,
     fk_model_mermaid,
     model_sha12,
 )
@@ -321,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     model = build_fk_model(tables, contracts)
     artifact = write_model_artifact(model, Path(args.fk_models_dir))
     print(f"FK model {model_sha12(model)} → {artifact}")
-    print(fk_model_mermaid(model))
+    print(fk_model_ascii(model))
     print()
 
     if args.emit_trigger_configs:

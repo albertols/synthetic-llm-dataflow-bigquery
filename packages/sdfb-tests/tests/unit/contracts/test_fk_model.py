@@ -173,3 +173,54 @@ class TestConnectedComponent:
         from sdfb_core.contracts.fk_model import connected_component
         got = connected_component(f"{_P}.LONER", tables, contracts)
         assert got == (f"{_P}.LONER",)
+
+
+class TestAsciiRendering:
+    """Human-glanceable log rendering (2026-08-22 operator ask): waves,
+    `-->` enforced edges, `..>` informational, field lists on both ends
+    — readable straight in Cloud Logging, no renderer needed."""
+
+    def test_waves_and_enforced_arrows(self):
+        tables, contracts = _six_tables()
+        from sdfb_core.contracts.fk_model import fk_model_ascii
+        text = fk_model_ascii(build_fk_model(tables, contracts))
+        assert "wave 0" in text and "wave 1" in text and "wave 2" in text
+        # child(cols) --> parent(ref_cols), fields visible on both ends
+        assert (
+            "B_TABLE (B_COL_006,B_COL_007,B_COL_009) "
+            "--> A_TABLE (A_COL_001,A_COL_002,A_COL_003)"
+        ) in text.replace(f"{_P}.", "")
+        assert "D_TABLE (D_COL_001) --> C_TABLE (C_COL_001)" in (
+            text.replace(f"{_P}.", "")
+        )
+
+    def test_informational_edges_are_dotted_and_tagged(self):
+        tables, contracts = _six_tables()
+        from sdfb_core.contracts.fk_model import fk_model_ascii
+        text = fk_model_ascii(build_fk_model(tables, contracts))
+        assert "..>" in text
+        assert "[informational" in text
+        assert "-->" not in text.split("[informational")[0].rsplit(
+            "JOIN_KEY_UNMAPPED", 1
+        )[-1]
+
+    def test_header_counts_and_aliases(self):
+        tables, contracts = _six_tables()
+        from sdfb_core.contracts.fk_model import fk_model_ascii
+        aliases = {t: t.rsplit(".", 1)[-1] for t in tables}
+        text = fk_model_ascii(build_fk_model(tables, contracts), aliases)
+        assert "6 tables" in text
+        assert "4 enforced" in text and "1 informational" in text
+        assert f"{_P}." not in text  # aliases applied
+
+    def test_external_parent_is_labelled(self):
+        tables = [f"{_P}.orders"]
+        contracts = {
+            f"{_P}.orders": _c(fk=[ForeignKey(
+                cols=("CUST",), ref="src.customers", ref_cols=("ID",)
+            )]),
+        }
+        from sdfb_core.contracts.fk_model import fk_model_ascii
+        text = fk_model_ascii(build_fk_model(tables, contracts))
+        assert "src.customers" in text
+        assert "[external]" in text

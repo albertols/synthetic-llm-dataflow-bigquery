@@ -46,7 +46,7 @@ from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.fk_model import (
     build_fk_model,
     connected_component,
-    fk_model_mermaid,
+    fk_model_log_body,
     model_sha12,
 )
 from sdfb_core.contracts.relational import parse_llm_prompt_constraint
@@ -796,7 +796,7 @@ def log_launcher_fk_model(
     model = build_fk_model([table_fqn], {table_fqn: contract})
     log_milestone_text(
         "fk_model_pretty",
-        fk_model_mermaid(model),
+        fk_model_log_body(model),
         table=table_fqn,
         model_sha12=model_sha12(model),
         edges=len(model.edges),
@@ -1561,14 +1561,32 @@ def _run_relational_job(plan, args, beam_argv: list[str]) -> int:
         )
         for s in specs
     ]
+    total_edges = sum(len(s.parent_edges) for s in specs)
     log_milestone(
         "relational_single_job",
         tables=len(specs),
         order=",".join(
             s.config.landing_table.rsplit(".", 1)[-1] for s in specs
         ),
-        edges=sum(len(s.parent_edges) for s in specs),
+        edges=total_edges,
+        edges_detail=",".join(
+            f"{s.config.landing_table.rsplit('.', 1)[-1]}:"
+            f"{len(s.parent_edges)}"
+            for s in specs
+        ),
     )
+    if len(specs) > 1 and total_edges == 0:
+        log_milestone(
+            "relational_closure_no_enforced_edges",
+            level=logging.WARNING,
+            tables=len(specs),
+            note="the closure grouped these tables but ZERO enforced "
+            "in-set FK edges resolved — every FK column generates from "
+            "marginals this run. If edges were declared, check "
+            "fk_model_pretty: dashed arrows are informational "
+            "(excluded from enforcement by design); solid edges that "
+            "are missing here indicate a contract/overlay problem.",
+        )
     with beam.Pipeline(options=options) as p:
         results = build_relational_pipeline(p, specs)
         logger.info(

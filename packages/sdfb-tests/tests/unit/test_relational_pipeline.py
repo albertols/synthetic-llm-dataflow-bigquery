@@ -145,12 +145,17 @@ def test_independent_tables_share_one_pipeline(
             reference_rows=customers_reference,
             landing_sink=WriteToJsonLines(str(tmp_path / "a")),
             dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_a")),
+            # 2026-08-22 second launch: corp always sets
+            # validation_runs_table — the §12 gate subgraph must be
+            # label-namespaced too (CountValid collided).
+            validation_runs_sink=WriteToJsonLines(str(tmp_path / "vr_a")),
         ),
         TableSpec(
             config=_cfg("multi-b", "p.land.t_b"),
             reference_rows=customers_reference,
             landing_sink=WriteToJsonLines(str(tmp_path / "b")),
             dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_b")),
+            validation_runs_sink=WriteToJsonLines(str(tmp_path / "vr_b")),
         ),
     ]
     options = PipelineOptions(["--runner=DirectRunner"])

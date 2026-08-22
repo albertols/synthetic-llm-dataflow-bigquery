@@ -16,7 +16,7 @@ from typing import Any
 
 from sdfb_core.contracts.fk_model import (
     build_fk_model,
-    fk_model_mermaid,
+    fk_model_log_body,
     model_sha12,
 )
 from sdfb_core.contracts.relational import ForeignKey, RelationalContract
@@ -237,7 +237,7 @@ def _log_fk_model_pretty(
     model = build_fk_model([table], {table: contract})
     log_milestone_text(
         "fk_model_pretty",
-        fk_model_mermaid(model),
+        fk_model_log_body(model),
         engine=engine,
         table=table,
         model_sha12=model_sha12(model),
