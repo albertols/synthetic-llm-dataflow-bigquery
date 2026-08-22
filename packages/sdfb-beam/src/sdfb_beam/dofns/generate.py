@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from contextlib import nullcontext
 
 import apache_beam as beam
 from apache_beam.metrics import Metrics
@@ -32,7 +33,11 @@ from sdfb_core.engines import (
     get_engine,
 )
 from sdfb_core.engines.identity import apply_identity_columns
-from sdfb_core.observability import log_build_info, log_milestone
+from sdfb_core.observability import (
+    log_build_info,
+    log_milestone,
+    milestone_scope,
+)
 from sdfb_core.seeding import derive_batch_seed
 
 # Where B.1's embedder weights land after the GCS warm-pull. Offline loaders
@@ -71,6 +76,7 @@ class GenerateRecordsDoFn(beam.DoFn):
         ctx: GenerationContext,
         similarity: float = 0.5,
         seed: int | None = None,
+        expect_fk_side: bool = False,
     ) -> None:
         super().__init__()
         self.engine_name = engine_name
@@ -78,13 +84,31 @@ class GenerateRecordsDoFn(beam.DoFn):
         self.ctx = ctx
         self.similarity = similarity
         self.base_seed = seed
-        self._engine = None  # built in setup()
+        # ADR 0030 single-job relational mode: a child table's FK pools
+        # arrive as a Beam SIDE INPUT (the parent's landed keys, sampled
+        # in-DAG) — side inputs are visible only in process(), so the
+        # heavy engine build defers to the FIRST bundle (once, guarded).
+        # The setup()-builds-engines rule (CLAUDE.md) is deliberately
+        # relaxed here: the build still happens exactly once per DoFn
+        # instance, just one hop later.
+        self.expect_fk_side = expect_fk_side
+        self._engine = None  # built in setup() (or first process())
 
         self._yielded = Metrics.counter("generation", "yielded")
         self._failed = Metrics.counter("generation", "failed")
         self._batch_seconds = Metrics.distribution("generation", "batch_msec")
 
+    def _scope(self):
+        """Tag every milestone of this DoFn's engine with its landing
+        table (ADR 0030): N tables interleave in one worker log."""
+        prefix = getattr(self.ctx, "log_table_prefix", "")
+        return milestone_scope(prefix) if prefix else nullcontext()
+
     def setup(self):
+        with self._scope():
+            self._setup_with_scope()
+
+    def _setup_with_scope(self):
         t0 = time.monotonic()
         log_build_info("worker")
         log_milestone("dofn_setup_start", engine=self.engine_name)
@@ -188,9 +212,8 @@ class GenerateRecordsDoFn(beam.DoFn):
         # nothing. Failure stays loud: under strict_freetext a boot error
         # raises out of the first pool call. teardown() remains unconditional.
 
-        engine_class = get_engine(self.engine_name)
-        self._engine = engine_class()
-        self._engine.setup(self.model_client, ctx)
+        if not self.expect_fk_side:
+            self._ensure_engine(ctx)
         # Column name → BQ type, used to shape synthesized identity values
         # (STRING → UUIDv4, INTEGER/INT64 → non-negative int). Built once per
         # worker rather than per row.
@@ -205,7 +228,33 @@ class GenerateRecordsDoFn(beam.DoFn):
             column.name: column.max_length for column in self.ctx.table_schema.columns
         }
 
-    def process(self, request):
+    def _ensure_engine(self, ctx, fk_side: dict | None = None):
+        if self._engine is not None:
+            return
+        if fk_side:
+            empty = sorted(c for c, vals in fk_side.items() if not vals)
+            if empty:
+                raise RuntimeError(
+                    f"in-job FK side input delivered EMPTY parent key "
+                    f"pools for columns {empty} — the parent stage landed "
+                    f"no rows; refusing to generate the child from "
+                    f"marginals (ADR 0030)."
+                )
+            ctx = ctx.model_copy(
+                update={"fk_pools": {**ctx.fk_pools, **fk_side}}
+            )
+            self.ctx = ctx
+        engine_class = get_engine(self.engine_name)
+        self._engine = engine_class()
+        self._engine.setup(self.model_client, ctx)
+
+    def process(self, request, fk_side: dict | None = None):
+        with self._scope():
+            yield from self._process_with_scope(request, fk_side)
+
+    def _process_with_scope(self, request, fk_side: dict | None = None):
+        if self._engine is None:
+            self._ensure_engine(self.ctx, fk_side)
         n = int(request["n"])
         batch_id = int(request["batch_id"])
         if self.base_seed is None:

@@ -16,10 +16,12 @@ stay Beam-free. Beam metric counterparts live in ``sdfb_beam``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
 import shlex
+from contextvars import ContextVar
 
 MILESTONE_PREFIX = "SDFB_MILESTONE"
 
@@ -81,7 +83,42 @@ def sha12(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
+# Multi-table runs interleave N engines' milestones in one worker log
+# (ADR 0030): the active table rides a ContextVar so EVERY milestone in
+# scope carries `table=<LANDING_NAME>` without touching call sites.
+# Thread-correct: set per DoFn bundle / engine entry; pool worker threads
+# inherit via the executor initializer (engine-side).
+_MILESTONE_TABLE: ContextVar[str] = ContextVar("sdfb_milestone_table",
+                                               default="")
+
+
+@contextlib.contextmanager
+def milestone_scope(table: str):
+    """Tag every milestone logged inside with ``table=`` (explicit
+    ``table=`` kwargs win)."""
+    token = _MILESTONE_TABLE.set(table)
+    try:
+        yield
+    finally:
+        _MILESTONE_TABLE.reset(token)
+
+
+def milestone_scope_value() -> str:
+    """The active scope (for propagating into worker threads)."""
+    return _MILESTONE_TABLE.get()
+
+
+def set_milestone_scope_for_thread(table: str) -> None:
+    """Executor-initializer helper: contextvars do NOT propagate into
+    ThreadPoolExecutor workers, so pool ladders set the scope per thread
+    (ADR 0030)."""
+    _MILESTONE_TABLE.set(table)
+
+
 def log_milestone(name: str, *, level: int = logging.INFO, **fields) -> str:
+    scope = _MILESTONE_TABLE.get()
+    if scope and "table" not in fields:
+        fields["table"] = scope
     line = format_milestone(name, **fields)
     _logger.log(level, line)
     return line

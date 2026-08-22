@@ -1,6 +1,6 @@
 # FK-model generation scenarios — flag semantics, visual relational logging, history mappings
 
-**Status:** ACCEPTED (2026-08-22) — Stage 1 implemented (TDD, laptop); Stage 2 (single-job multi-table DAG) design-only · decision record: [ADR 0029](../adr/0029-fk-model-scenarios-and-history-mappings.md)
+**Status:** ACCEPTED (2026-08-22, rev B: minimal-input scenarios, derived FK activation; **Stage 2 implemented same day** — single-job multi-table pipeline, [ADR 0030](../adr/0030-single-job-relational-generation.md)) · decision record: [ADR 0029](../adr/0029-fk-model-scenarios-and-history-mappings.md)
 **Depends on:** [ADR 0021](../adr/0021-relational-contract-in-descriptions.md) (parent-first FK) · [ADR 0028](../adr/0028-constraint-router-relational-plan.md) (P6, relational logs)
 **Reference model:** `docs/assets/fk_relationship_example.{png,tf}` — the 6-table corp model (A→F, composite PK/FK, one out-of-DDL `PARTY_KEY`). **Local-only** (gitignored via `docs/assets/fk*`): kept off the public repo by choice; the §2 mermaid below carries the same shape for readers without the files.
 
@@ -10,19 +10,32 @@ ADR 0021 parent-first mechanism for Stage 1.
 
 ---
 
-## 1. The scenarios — `generate_fk_relationships` (default `true`)
+## 1. The scenarios — two inputs, everything else derived (rev B)
 
-One flag on `run_pipeline.py` and as a Composer `Param`; one greppable
-state milestone (`fk_generation_mode mode=relational|isolated`) on every
-launch.
+Users give `--landing_table` (one FQN or a comma-separated list) +
+`--generate_fk_relationships` (default `true`). `fk_parent_landing` is
+NOT an input — parents land in the landing table's own dataset, so it
+derives; the flag stays only as an expert override for cross-dataset
+parents. Every launch logs one `launch_scenario` milestone stating the
+resolved plan (scenario, table order, mode).
 
-| Input | Flag | Behavior |
+| # | Input | Behavior |
 |---|---|---|
-| 1 table, no FK declared | `true` | today's run; `fk_model_absent` |
-| 1 table, FK declared | `true` | P6 enforced (`fk_parent_landing` required), FK pools load, model logged |
-| 1 table, FK declared | `false` | **loud** isolated run: `fk_generation_disabled` WARNING + `fk_declared_skipped`; marginals; the flag maps onto the tested P6 `skip` path |
-| N tables (`run_tableset`) | `true` | contracts → topological **waves**; children auto-receive `fk_parent_landing`; parallel within a wave (`--max-parallel`) |
-| N tables | `false` | one wave, all tables independent in parallel; every ignored enforced edge named in a WARNING |
+| 1 | one table, `false` | that table only; declared enforced edges ignored **loudly** |
+| 2 | one table, `true` (default) | no relationships ⇒ identical to 1, zero friction; relationships ⇒ the launcher expands to the table's whole connected component (informational edges count for grouping) and generates ALL of it, parents-first, sequentially, run_ids suffixed |
+| 3 | many tables, `false` | each independently, given order — the dozens-of-unrelated-tables path |
+| 3b | many tables, `true` | union of components, deduped, parents-first |
+
+Activation is verified where it matters: an enforced edge whose parent
+is unlanded/empty stops **at pool-load time** with the missing refs
+named (`assert_fk_pools_nonempty`) — preflight no longer refuses
+anything FK-related, and the `skip` sentinel is gone. Component
+membership comes from a landing-dataset contract scan
+(`--fk_contracts_json` injects it offline); scan failure degrades
+loudly (`fk_discovery_unavailable`) to single-target planning.
+`run_tableset.py` remains the POWER path: same planner semantics plus
+within-wave parallelism (`--max-parallel`) and Airflow trigger-conf
+emission.
 
 ## 2. The FK model is one definition — `sdfb_core/contracts/fk_model.py`
 
@@ -104,7 +117,7 @@ Composer DAG (`composer/synthetic_beam_bigquery.py`) stays single-table
 and simply gained the two params. The set's model lands as
 `integration_tests/fk_models/<model_sha12>.mmd` for report recycling.
 
-## 5. Stage 2 (design-only) — one Dataflow job for the whole model
+## 5. Stage 2 (IMPLEMENTED — ADR 0030) — one Dataflow job for the whole model
 
 The measured argument (evidence:
 [`constraint-router-pk-blocker.png`](assets/constraint-router-pk-blocker.png)
@@ -114,7 +127,9 @@ rows. Sequential per-table jobs for the 6-table model pay that boot ~6×
 (~91 min of overhead); wave-parallelism helps wall-clock but still boots
 one fleet per table.
 
-The Stage-2 shape — after Stage 1 run evidence, as its own ADR:
+The shape, now implemented (`build_relational_pipeline` + `TableSpec` /
+`FkEdgeSpec`, `--multi_table_mode=single_job` default; DirectRunner-
+proven, Dataflow run evidence = the acceptance gate):
 
 - One job, per-table stages; a child's FK columns take the parent's
   **generated key PCollection as a side input** — no landing round-trip,

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
 from sdfb_beam.cli.preflight import preflight
 from sdfb_beam.io.fk_pools import load_fk_pools
 from sdfb_core.contracts import TableSchema
@@ -49,15 +48,12 @@ class TestPreflight:
         preflight(_schema(_INFO_ONLY), (), (), _rows())
 
     def test_informational_only_fk_needs_no_parent_landing(self):
-        preflight(
-            _schema(_INFO_ONLY), (), (), _rows(), fk_parent_landing=""
-        )
+        preflight(_schema(_INFO_ONLY), (), (), _rows())
 
-    def test_enforced_edge_still_requires_parent_landing(self):
-        with pytest.raises(SystemExit, match="preflight P6"):
-            preflight(
-                _schema(_MIXED), (), (), _rows(), fk_parent_landing=""
-            )
+    def test_enforced_edge_also_passes_preflight(self):
+        # ADR 0029 rev B: activation is derived + verified at pool-load
+        # time, not refused at preflight.
+        preflight(_schema(_MIXED), (), (), _rows())
 
 
 class TestFkPoolLoader:

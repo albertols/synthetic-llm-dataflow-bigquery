@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import apache_beam as beam
 from sdfb_core.engines import get_engine
-from sdfb_core.observability import log_milestone
+from sdfb_core.observability import log_milestone, milestone_scope
 from sdfb_core.pools import FreeTextPool
 
 from sdfb_beam.dofns.localize import localize_embedder
@@ -75,14 +76,27 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
         t0 = time.monotonic()
-        self._engine.setup(self.model_client, ctx)
-        log_milestone(
-            "pool_branch_setup_done",
-            seconds=round(time.monotonic() - t0, 1),
-            engine=self.engine_name,
-        )
+        with self._scope():
+            self._engine.setup(self.model_client, ctx)
+            log_milestone(
+                "pool_branch_setup_done",
+                seconds=round(time.monotonic() - t0, 1),
+                engine=self.engine_name,
+            )
+
+    def _scope(self):
+        prefix = getattr(self.ctx, "log_table_prefix", "")
+        return milestone_scope(prefix) if prefix else nullcontext()
 
     def process(self, _element) -> Iterator[dict]:
+        scope = self._scope()
+        scope.__enter__()
+        try:
+            yield from self._process_scoped()
+        finally:
+            scope.__exit__(None, None, None)
+
+    def _process_scoped(self) -> Iterator[dict]:
         pools = getattr(self._engine, "_free_text_pools", None) or {}
         build_info = getattr(self._engine, "_pool_build_info", None) or {}
         rows = []

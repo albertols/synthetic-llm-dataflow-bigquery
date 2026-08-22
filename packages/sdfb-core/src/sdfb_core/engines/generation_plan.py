@@ -164,11 +164,21 @@ def log_plan_pretty(
     run", which the 2026-08-21 job could not (its FK was silently
     inactive)."""
     table = ctx.table_schema.fqn
+    prefix = getattr(ctx, "log_table_prefix", "") or ""
+
+    def _q(cols: dict) -> dict:
+        # Multi-table runs (ADR 0030): LANDING_NAME.COL keys, so a pasted
+        # worker log or _full_report names every column unambiguously and
+        # oss/ replacements stay mechanical.
+        if not prefix:
+            return cols
+        return {f"{prefix}.{k}": v for k, v in cols.items()}
+
     plan_payload: dict[str, Any] = {
         "engine": engine,
         "table": table,
         "plan": build_plan(profiles),
-        "columns": build_plan_detail(profiles),
+        "columns": _q(build_plan_detail(profiles)),
     }
     if pool_sources:
         plan_payload["pool_sources"] = dict(sorted(pool_sources.items()))
@@ -193,7 +203,7 @@ def log_plan_pretty(
         "pk": list(getattr(ctx, "pk_columns", []) or []),
         "identity": list(getattr(ctx, "identity_columns", []) or []),
         "fk": fk_view,
-        "llm_prompt_constraints": build_constraints_detail(profiles),
+        "llm_prompt_constraints": _q(build_constraints_detail(profiles)),
     }
     log_milestone_pretty(
         "relational_e2e", relational_payload, engine=engine, table=table

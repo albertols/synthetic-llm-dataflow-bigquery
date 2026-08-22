@@ -239,6 +239,11 @@ class GenerationContext(BaseModel):
     # sampling truth stays in fk_pools.
     landing_table: str = ""
     fk_edges: list[dict] = Field(default_factory=list)
+    # Multi-table launches (ADR 0030): the landing table NAME used to
+    # qualify column references in pretty log payloads
+    # (`<LANDING>.<col>`) so oss/ replacements stay unambiguous when N
+    # tables share one worker log. Empty = single-table, bare names.
+    log_table_prefix: str = ""
     # Attach the per-column llm_prompt_constraint (parsed from the column's
     # DDL description JSON) to pool prompts. Per-column CONSTANT suffix —
     # prefix-cache-safe (ADR 0018).

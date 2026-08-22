@@ -147,3 +147,29 @@ class TestModelSha:
         contracts2 = dict(contracts)
         contracts2[f"{_P}.F_TABLE"] = _c(pk=("F_COL_001",))  # drop F→E
         assert model_sha12(build_fk_model(tables, contracts2)) != a
+
+
+class TestConnectedComponent:
+    """Scenario-2 grouping (ADR 0029 rev B): 'related' includes
+    informational edges — the 6-table model connects C to A only via
+    PARTY_KEY — while ORDERING still ignores them."""
+
+    def test_component_spans_informational_edges(self):
+        tables, contracts = _six_tables()
+        from sdfb_core.contracts.fk_model import connected_component
+        got = connected_component(f"{_P}.A_TABLE", tables, contracts)
+        assert got == tuple(tables)  # all six, via C's dashed edge
+
+    def test_component_from_a_leaf(self):
+        tables, contracts = _six_tables()
+        from sdfb_core.contracts.fk_model import connected_component
+        got = connected_component(f"{_P}.F_TABLE", tables, contracts)
+        assert got == tuple(tables)
+
+    def test_unrelated_table_is_its_own_component(self):
+        tables, contracts = _six_tables()
+        tables = [*tables, f"{_P}.LONER"]
+        contracts[f"{_P}.LONER"] = None
+        from sdfb_core.contracts.fk_model import connected_component
+        got = connected_component(f"{_P}.LONER", tables, contracts)
+        assert got == (f"{_P}.LONER",)

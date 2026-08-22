@@ -120,6 +120,43 @@ def build_fk_model(
     )
 
 
+def connected_component(
+    target: str,
+    tables: list[str] | tuple[str, ...],
+    contracts: dict[str, RelationalContract | None],
+) -> tuple[str, ...]:
+    """The tables related to ``target`` — its undirected FK component.
+
+    Scenario-2 grouping (ADR 0029): "related" spans ALL edges,
+    informational included — the 6-table model connects C to the rest
+    only via the dashed PARTY_KEY edge, and a user launching any member
+    means the whole model. ORDERING still ignores informational edges
+    (`build_fk_model`); this function only decides membership. Returned
+    in ``tables`` order.
+    """
+    adjacent: dict[str, set[str]] = {t: set() for t in tables}
+    for table in tables:
+        contract = contracts.get(table)
+        if contract is None:
+            continue
+        for fk in contract.fk:
+            parent = _resolve_ref(fk.ref, tables)
+            if parent is not None and parent != table:
+                adjacent[table].add(parent)
+                adjacent[parent].add(table)
+    seen = {target}
+    frontier = [target]
+    while frontier:
+        nxt = []
+        for t in frontier:
+            for n in adjacent.get(t, ()):
+                if n not in seen:
+                    seen.add(n)
+                    nxt.append(n)
+        frontier = nxt
+    return tuple(t for t in tables if t in seen)
+
+
 def model_sha12(model: FkModel) -> str:
     """Content hash for diagram recycling: same tables + edges ⇒ same
     sha ⇒ the report reuses ``integration_tests/fk_models/<sha>.mmd``
@@ -190,6 +227,7 @@ __all__ = [
     "FkModel",
     "FkModelError",
     "build_fk_model",
+    "connected_component",
     "fk_model_mermaid",
     "model_sha12",
 ]

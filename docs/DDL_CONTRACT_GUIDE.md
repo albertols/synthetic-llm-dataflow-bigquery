@@ -54,8 +54,10 @@ flowchart LR
 
 **Precedence rule** (`run_pipeline.py::_load_reference_and_preflight`): the
 contract *defaults* `pk`/`identity`; explicit `--pk_cols` / `--identity_cols`
-CLI flags **win** when passed. FK pools load only when the contract declares
-`fk` **and** `--fk_parent_landing` names the landing dataset.
+CLI flags **win** when passed. FK pools load whenever the contract declares
+enforced `fk` edges and `--generate_fk_relationships` is true (default) —
+the parent landing dataset derives from `--landing_table` (ADR 0029 rev B);
+an unlanded/empty parent stops the launch loudly.
 
 > **WHERE the contract lives (ADR 0027 D2, 2026-08-21): on the LANDING
 > (synthetic/target) table — never the source.** The pipeline reads the
@@ -127,19 +129,27 @@ Two hard rules, both loud by design:
 | `pk` | list of column names | uniqueness enforcement (`--uniqueness_mode=exact`), duplicate gate in validation, `pk_analysis` in the E2E probe |
 | `identity` | list of column names | per-row unique identifier generation (never pool-drawn, never folded) |
 | `fk[].cols` / `ref_cols` | non-empty, equal arity | child columns sample from the parent's **landed synthetic** keys (`io/fk_pools.py`) — referential integrity beats the child's marginal (v1) |
-| `fk[].ref` | must be `dataset.table` | resolved to `{landing_dataset}.{table}` at run time via `--fk_parent_landing` |
+| `fk[].ref` | must be `dataset.table` | resolved to `{landing_dataset}.{table}` at run time — the landing dataset derives from `--landing_table` (ADR 0029 rev B; `--fk_parent_landing` is an expert override for cross-dataset parents) |
 | `fk[].informational` | bool, default `false` | **documentation-only edge (ADR 0029)**: drawn dashed in FK-model diagrams (`fk_model_pretty` logs, reports), excluded from ALL enforcement — no column-existence check, no `fk_parent_landing` requirement, no FK pool, no orphan rule, no generation-order constraint. For relationships whose join key is absent from the DDL (the 6-table example's `PARTY_KEY`) |
 
 > **v1 scope, on record:** single-column FKs are exact. Composite FKs load
 > aligned per-column pools but draw columns independently — joint tuple
 > draws are the M2 follow-up (`io/fk_pools.py` docstring, ROADMAP).
 
-**Relational scenarios (ADR 0029).** `--generate_fk_relationships`
-(default `true`, also a Composer param) is the switch between relational
-and isolated generation; every launch logs `fk_generation_mode` and its
-resolved model as pasteable mermaid (`fk_model_pretty`). Multi-table
-sets run parents-first in waves via `scripts/run_tableset.py`
-(`--max-parallel`, `--emit-trigger-configs` for Airflow). Worked 6-table
+**Relational scenarios (ADR 0029 rev B).** Two inputs describe every
+launch: `--landing_table` (one FQN or a CSV list) +
+`--generate_fk_relationships` (default `true`). With relationships
+declared, a single-table launch expands to the whole connected
+component and generates it parents-first **in ONE Dataflow job**
+(ADR 0030: one worker fleet, one vLLM ignition, parent keys handed to
+children as in-DAG side inputs; `--multi_table_mode=sequential_jobs` is
+the fallback) — `fk_parent_landing` derives from the landing dataset
+and is no longer a user concern. `false` =
+isolated generation, declared edges ignored loudly. Every launch logs
+`launch_scenario`, `fk_generation_mode` and the resolved model as
+pasteable mermaid (`fk_model_pretty`). `scripts/run_tableset.py` is the
+power path (within-wave parallelism, `--emit-trigger-configs` for
+Airflow). Worked 6-table
 example — composite FKs, an informational `PARTY_KEY` edge, letter-
 prefixed anonymization: `docs/assets/fk_relationship_example.{tf,png}`
 (**local-only**, gitignored via `docs/assets/fk*`; the equivalent shape

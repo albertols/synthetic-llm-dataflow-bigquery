@@ -1,6 +1,6 @@
 # ADR 0029 — FK-model generation scenarios, visual relational logging, history mappings
 
-**Status:** ACCEPTED (2026-08-22) — Stage 1 implemented (TDD); Stage 2 (single-job multi-table DAG) deferred to its own ADR after run evidence
+**Status:** ACCEPTED (2026-08-22, rev B same day) — Stage 1 implemented (TDD); rev B simplifies the launch UX after owner feedback (minimal inputs, derived activation); Stage 2 (single-job multi-table DAG) deferred to its own ADR after run evidence
 **Design:** [`docs/designs/2026-08-22-fk-model-generation-scenarios.md`](../designs/2026-08-22-fk-model-generation-scenarios.md)
 **Depends on:** [ADR 0021](0021-relational-contract-in-descriptions.md) · [ADR 0028](0028-constraint-router-relational-plan.md)
 **Scope note:** opens M2 multi-table territory on the owner's direction (CLAUDE.md constraint 5); Stage 1 stays on ADR 0021's parent-first mechanism.
@@ -23,11 +23,33 @@ drawing from scratch.
 
 ## Decision
 
-**D1 — `generate_fk_relationships` (default `true`) is the scenario
-switch**, on `run_pipeline` and as a Composer `Param`. `false` maps onto
-the tested P6 `skip` path and is always loud (`fk_generation_disabled`
-WARNING + `fk_generation_mode mode=isolated`); `true` keeps P6
-enforcement. Every launch logs its mode.
+**D1 (rev B) — two inputs describe every scenario**: `landing_table`
+(one FQN or a comma-separated list) + `generate_fk_relationships`
+(default `true`); everything else derives. The scenarios:
+
+1. *one table + `false`* — that table only; declared enforced edges
+   ignored LOUDLY (`fk_generation_disabled` + plan warning).
+2. *one table + `true`* — no declared relationships in its component ⇒
+   behaves exactly like 1, zero friction; relationships ⇒ the launcher
+   expands the launch to the table's whole connected component
+   (informational edges count for GROUPING, never for ORDER) and runs
+   it parents-first, per-table run_ids suffixed, one
+   `launch_scenario` milestone stating the plan.
+3. *many tables + `false`* — each independently, given order (the
+   dozens-of-unrelated-tables path). With `true`: union of components,
+   deduped, ordered.
+
+**`fk_parent_landing` is no longer a user input**: parents land in the
+`landing_table`'s own dataset, so it derives
+(`derive_fk_parent_landing`); the CLI/Param stays as an EXPERT override
+for cross-dataset parents only. The P6 preflight refusal and the
+`skip` sentinel are REMOVED — activation is verified where pools load
+(`assert_fk_pools_nonempty`: an unlanded/empty parent is a loud,
+actionable stop naming the missing refs). Component membership comes
+from a landing-dataset contract scan (offline injectable via
+`--fk_contracts_json`); a scan failure degrades loudly
+(`fk_discovery_unavailable`) to single-target planning, never blocking
+a run that used to work.
 
 **D2 — one FK-model definition.** `sdfb_core/contracts/fk_model.py`
 owns the graph (nodes, edges, external parents, parents-first levels,

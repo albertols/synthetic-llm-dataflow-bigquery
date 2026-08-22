@@ -321,23 +321,31 @@ default_dag_params = {
     "fk_parent_landing": Param(
         default="",
         type="string",
-        description="project.dataset of already-landed synthetic parent "
-                    "tables (ADR 0021). Set by run_tableset.py-style "
-                    "multi-table triggers so child FK columns sample the "
-                    "parents' landed keys. With a contract that declares "
-                    "enforced FKs this is REQUIRED (ADR 0028 P6): empty "
-                    "fails preflight; 'skip' loudly generates from "
-                    "marginals.",
+        description="EXPERT OVERRIDE only (ADR 0029): parents are assumed "
+                    "landed in the landing dataset and this derives "
+                    "automatically. Set only when parents land in a "
+                    "DIFFERENT project.dataset.",
+    ),
+    "multi_table_mode": Param(
+        default="single_job",
+        type="string",
+        enum=["single_job", "sequential_jobs"],
+        description="How a multi-table plan executes (ADR 0030). "
+                    "single_job (default): every planned table in ONE "
+                    "Dataflow job — one worker fleet, one vLLM ignition, "
+                    "in-DAG FK key handoff. sequential_jobs: one job per "
+                    "table, parents first (fallback/debugging).",
     ),
     "generate_fk_relationships": Param(
         default="true",
         type="string",
         enum=["true", "false"],
-        description="true (default): declared FK edges are honored — "
-                    "children sample landed parent keys, P6 enforced. "
-                    "false: isolated single-table generation; FK columns "
-                    "use marginals, logged loudly (fk_generation_disabled "
-                    "WARNING + fk_generation_mode=isolated). ADR 0029.",
+        description="true (default): declared relationships are honored — "
+                    "the launch expands to the table's whole FK component "
+                    "(parents first, derived automatically); tables with "
+                    "no relationships behave exactly as false. false: "
+                    "isolated generation — declared edges ignored LOUDLY, "
+                    "FK columns use marginals. ADR 0029.",
     ),
     "pool_seed_strategy": Param(
         default="centroid",
@@ -472,6 +480,7 @@ with models.DAG(
                     "fk_parent_landing": "{{ params.fk_parent_landing }}",
                     "generate_fk_relationships":
                         "{{ params.generate_fk_relationships }}",
+                    "multi_table_mode": "{{ params.multi_table_mode }}",
                     "uniqueness_mode": "{{ params.uniqueness_mode }}",
                     "pool_seed_strategy": "{{ params.pool_seed_strategy }}",
                     "reference_table": "{{ params.table_fqn }}",

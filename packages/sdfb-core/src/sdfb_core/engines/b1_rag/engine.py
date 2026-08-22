@@ -36,6 +36,7 @@ imports at module scope. Heavy deps are deferred into the seams.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import random
@@ -90,7 +91,12 @@ from sdfb_core.engines.text_shapes import (
     shape_mix_can_template,
     shape_mix_is_identifier_like,
 )
-from sdfb_core.observability import log_milestone, log_prompt_debug
+from sdfb_core.observability import (
+    log_milestone,
+    log_prompt_debug,
+    milestone_scope_value,
+    set_milestone_scope_for_thread,
+)
 from sdfb_core.rag.chunking import (
     CHUNK_KIND_FREE_TEXT_COL,
     CHUNK_KIND_ROW_DOC,
@@ -1012,9 +1018,20 @@ class B1RagEngine(GenerationEngine):
         from concurrent.futures import ThreadPoolExecutor
 
         first_error: Exception | None = None
+        # Ladder threads inherit the milestone table scope (ADR 0030):
+        # without this, a multi-table worker's pool milestones lose their
+        # table tag the moment they hop threads.
+        scope_table = milestone_scope_value()
         with ThreadPoolExecutor(
             max_workers=min(_POOL_BUILD_MAX_WORKERS, len(jobs)),
             thread_name_prefix="sdfb-pool",
+            initializer=(
+                functools.partial(
+                    set_milestone_scope_for_thread, scope_table
+                )
+                if scope_table
+                else None
+            ),
         ) as executor:
             futures = [
                 (

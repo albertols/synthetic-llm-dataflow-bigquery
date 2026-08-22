@@ -7,8 +7,6 @@ silently inactive. Both become launcher-side stops.
 
 from __future__ import annotations
 
-import logging
-
 import pytest
 from sdfb_beam.cli.preflight import preflight
 from sdfb_core.contracts import TableSchema
@@ -79,28 +77,25 @@ class TestP4PkCapacity:
         preflight(_schema(_PK_CONTRACT, _PROSE), (), (), _rows())
 
 
-class TestP6FkActivation:
-    def test_declared_fk_without_parent_landing_stops(self):
-        with pytest.raises(SystemExit, match="preflight P6"):
-            preflight(
-                _schema(_FK_CONTRACT), (), (), _rows(), fk_parent_landing=""
-            )
+class TestFkActivationIsDerived:
+    """ADR 0029 rev B: fk_parent_landing derives from --landing_table,
+    so preflight no longer refuses a declared FK — activation is checked
+    where pools LOAD (loud empty-parent stop in run_pipeline)."""
 
-    def test_declared_fk_with_skip_warns_and_passes(self, caplog):
-        with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
-            preflight(
-                _schema(_FK_CONTRACT), (), (), _rows(),
-                fk_parent_landing="skip",
-            )
-        assert "name=fk_declared_skipped" in caplog.text
+    def test_declared_fk_passes_preflight_without_any_flag(self):
+        preflight(_schema(_FK_CONTRACT), (), (), _rows())
 
-    def test_declared_fk_with_landing_dataset_passes(self):
-        preflight(
-            _schema(_FK_CONTRACT), (), (), _rows(),
-            fk_parent_landing="p.landing",
-        )
+    def test_empty_parent_pool_stops_loudly(self):
+        from sdfb_beam.cli.run_pipeline import assert_fk_pools_nonempty
+        from sdfb_core.contracts.relational import parse_relational_contract
+        contract = parse_relational_contract(_FK_CONTRACT)
+        with pytest.raises(SystemExit, match=r"not landed"):
+            assert_fk_pools_nonempty(contract.fk, {}, "p.landing")
 
-    def test_no_fk_declared_needs_no_flag(self):
-        preflight(
-            _schema(_PK_CONTRACT), (), (), _rows(), fk_parent_landing=""
+    def test_populated_parent_pool_passes(self):
+        from sdfb_beam.cli.run_pipeline import assert_fk_pools_nonempty
+        from sdfb_core.contracts.relational import parse_relational_contract
+        contract = parse_relational_contract(_FK_CONTRACT)
+        assert_fk_pools_nonempty(
+            contract.fk, {"CUST_ID": ("K1", "K2")}, "p.landing"
         )

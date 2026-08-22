@@ -137,42 +137,6 @@ def _check_pk_capacity(
             )
 
 
-def _check_fk_activation(
-    table_schema: TableSchema,
-    contract: RelationalContract,
-    fk_parent_landing: str,
-) -> None:
-    """P6 (ADR 0028) — a declared FK is resolved or loudly refused.
-
-    The 2026-08-21 run declared an FK and launched without
-    ``--fk_parent_landing``: pools silently never loaded, zero
-    ``fk.orphan`` evaluations, and '0 orphans' read as a pass."""
-    enforced = tuple(fk for fk in contract.fk if not fk.informational)
-    if not enforced:
-        return
-    if fk_parent_landing == "skip":
-        log_milestone(
-            "fk_declared_skipped",
-            level=logging.WARNING,
-            table=table_schema.fqn,
-            fk_refs=",".join(fk.ref for fk in enforced),
-            note="contract declares FK edges but --fk_parent_landing=skip "
-            "was passed — FK columns generate from marginals, referential "
-            "integrity UNVERIFIED this run",
-        )
-        return
-    if not fk_parent_landing:
-        refs = sorted(fk.ref for fk in enforced)
-        raise SystemExit(
-            f"[preflight P6] {table_schema.fqn}: the contract declares FK "
-            f"edges to {refs} but --fk_parent_landing was not passed — the "
-            f"run would silently generate FK columns from marginals with "
-            f"no fk.orphan check. Pass "
-            f"--fk_parent_landing=<project.landing_dataset> (parents must "
-            f"be landed first) or explicitly --fk_parent_landing=skip."
-        )
-
-
 def preflight(
     table_schema: TableSchema,
     pk_cols: tuple[str, ...],
@@ -181,13 +145,13 @@ def preflight(
     fk_parents_resolved: dict[str, bool] | None = None,
     prompt_constraints_enabled: bool = True,
     num_rows: int = 0,
-    fk_parent_landing: str | None = None,
 ) -> PreflightResult:
-    """Run P1-P6; returns the effective pk/identity columns.
+    """Run P1-P5 + P4; returns the effective pk/identity columns.
 
-    ``num_rows`` > 0 arms the P4 PK-capacity check; ``fk_parent_landing``
-    not-None arms the P6 FK-activation check (pass the CLI value
-    verbatim, "" included)."""
+    ``num_rows`` > 0 arms the P4 PK-capacity check. FK activation is no
+    longer a preflight concern (ADR 0029 rev B): fk_parent_landing
+    derives from the landing table, and an unlanded/empty parent stops
+    loudly at pool-load time instead."""
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
@@ -274,11 +238,9 @@ def preflight(
                 sample_rows=len(reference_rows),
             )
 
-    # P4 — PK generation capacity; P6 — FK activation (ADR 0028).
+    # P4 — PK generation capacity (ADR 0028).
     if num_rows > 0 and effective_pk:
         _check_pk_capacity(table_schema, tuple(effective_pk), num_rows)
-    if fk_parent_landing is not None:
-        _check_fk_activation(table_schema, contract, fk_parent_landing)
 
     log_milestone(
         "relational_contract_loaded",

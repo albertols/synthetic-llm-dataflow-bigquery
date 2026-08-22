@@ -22,13 +22,13 @@ class TestResolveFkMode:
         landing, mode = resolve_fk_mode(True, "p.landing")
         assert (landing, mode) == ("p.landing", "relational")
 
-    def test_disabled_maps_to_skip_and_isolated(self):
+    def test_disabled_clears_landing_and_is_isolated(self):
         landing, mode = resolve_fk_mode(False, "p.landing")
-        assert (landing, mode) == ("skip", "isolated")
+        assert (landing, mode) == ("", "isolated")
 
     def test_disabled_with_empty_flag_still_isolated(self):
         landing, mode = resolve_fk_mode(False, "")
-        assert (landing, mode) == ("skip", "isolated")
+        assert (landing, mode) == ("", "isolated")
 
 
 class TestLogMilestoneText:

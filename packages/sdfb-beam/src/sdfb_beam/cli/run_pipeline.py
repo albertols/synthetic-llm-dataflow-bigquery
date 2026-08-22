@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import apache_beam as beam
@@ -44,6 +45,7 @@ from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.fk_model import (
     build_fk_model,
+    connected_component,
     fk_model_mermaid,
     model_sha12,
 )
@@ -51,6 +53,7 @@ from sdfb_core.contracts.relational import parse_llm_prompt_constraint
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
+    log_milestone_pretty,
     log_milestone_text,
 )
 from sdfb_core.rag.embedding import embedder_identity
@@ -68,7 +71,13 @@ from sdfb_beam.io.source_values import (
     pool_source_overlap,
 )
 from sdfb_beam.io.stats_store import BigQuerySourceStatsStore
-from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+from sdfb_beam.pipeline import (
+    FkEdgeSpec,
+    PipelineConfig,
+    TableSpec,
+    build_pipeline,
+    build_relational_pipeline,
+)
 from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
 
@@ -137,7 +146,10 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="FQN of source table for live SELECT reference rows")
     p.add_argument("--reference_rows_limit", type=int, default=10_000)
     p.add_argument("--landing_table", required=True,
-                   help="BQ table for synthetic rows (project.dataset.table)")
+                   help="BQ table for synthetic rows (project.dataset.table). "
+                        "Accepts a comma-separated list for multi-table "
+                        "launches (ADR 0029 scenarios): each table runs "
+                        "sequentially with a suffixed run_id.")
     p.add_argument("--dlq_table", required=True,
                    help="BQ DLQ table (project.dataset.table)")
     p.add_argument("--write_disposition", default="append",
@@ -269,20 +281,32 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="gs:// or local path for the stats JSON artifact; "
                         "empty skips it.")
     p.add_argument("--generate_fk_relationships", default="true",
-                   help="true (default): declared FK edges are honored — "
-                        "children sample landed parent keys and P6 "
-                        "requires --fk_parent_landing. false: isolated "
-                        "generation — FK columns use marginals, logged "
-                        "loudly (fk_generation_disabled WARNING + "
-                        "fk_generation_mode=isolated). ADR 0029.")
+                   help="true (default): declared relationships are "
+                        "honored — a launch expands to the table's whole "
+                        "FK component (parents first) and children sample "
+                        "landed parent keys; tables with no declared "
+                        "relationships behave exactly as false (zero "
+                        "friction). false: isolated generation — declared "
+                        "edges ignored LOUDLY, FK columns use marginals. "
+                        "ADR 0029.")
     p.add_argument("--fk_parent_landing", default="",
-                   help="project.dataset holding already-landed synthetic "
-                        "parent tables (ADR 0021). With a contract that "
-                        "declares FKs, child FK columns sample from the "
-                        "parents' landed keys. When the contract declares "
-                        "FKs this flag is REQUIRED (ADR 0028 P6): empty "
-                        "fails preflight; pass 'skip' to loudly generate "
-                        "from marginals with integrity unverified.")
+                   help="EXPERT OVERRIDE only (ADR 0029): parents are "
+                        "assumed landed in the --landing_table dataset and "
+                        "this derives automatically. Set it only when "
+                        "parents land in a DIFFERENT project.dataset.")
+    p.add_argument("--multi_table_mode", default="single_job",
+                   choices=["single_job", "sequential_jobs"],
+                   help="How a multi-table plan executes (ADR 0030). "
+                        "single_job (default): every planned table in ONE "
+                        "Dataflow job — one worker fleet, one vLLM "
+                        "ignition, in-DAG FK key handoff. sequential_jobs: "
+                        "one job per table, parents first (fallback / "
+                        "debugging).")
+    p.add_argument("--fk_contracts_json", default="",
+                   help="offline map {landing_fqn: relational contract} "
+                        "for scenario planning (tests / air-gapped dry "
+                        "runs). Default: discovered live from the landing "
+                        "dataset's table descriptions.")
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
@@ -597,15 +621,160 @@ def parse_bool_flag(value: str) -> bool:
 def resolve_fk_mode(
     generate_fk_relationships: bool, fk_parent_landing: str
 ) -> tuple[str, str]:
-    """``(effective fk_parent_landing, mode)`` for the run (ADR 0029).
+    """``(effective fk_parent_landing, mode)`` for one table's run
+    (ADR 0029 rev B — minimal-input scenarios).
 
-    ``--generate_fk_relationships=false`` is the user-facing isolated
-    switch: it maps onto the P6 ``skip`` semantics (marginals, loud
-    ``fk_declared_skipped`` when edges exist) so one tested enforcement
-    path serves both spellings."""
+    Isolated (`--generate_fk_relationships=false`): FK pools are simply
+    off — no sentinel value, no preflight refusal; the launcher already
+    warned loudly. Relational: the value is whatever the plan derived
+    (the landing table's own dataset unless overridden)."""
     if not generate_fk_relationships:
-        return "skip", "isolated"
+        return "", "isolated"
     return fk_parent_landing, "relational"
+
+
+def derive_fk_parent_landing(landing_table: str) -> str:
+    """``project.dataset`` of the landing table — parents land in the
+    SAME dataset, so the old --fk_parent_landing input is derivable and
+    no longer a user concern (ADR 0029 rev B)."""
+    return landing_table.rsplit(".", 1)[0]
+
+
+def derive_source_fqn(landing_table: str, reference_table: str) -> str:
+    """A sibling's source FQN: the reference table's dataset + the
+    sibling's table name (the repo's same-name convention)."""
+    src_dataset = reference_table.rsplit(".", 1)[0]
+    return f"{src_dataset}.{landing_table.rsplit('.', 1)[-1]}"
+
+
+def assert_fk_pools_nonempty(
+    fks, fk_pools: dict, parent_landing: str
+) -> None:
+    """Loud stop when an enforced FK edge loaded an EMPTY parent pool
+    (ADR 0029 rev B): an empty parent means "not landed yet", and
+    generating the child anyway would silently repeat the 2026-08-21
+    false '0 orphans'. Scenario 2 orders parents first automatically;
+    a direct child launch must land parents first."""
+    missing = sorted(
+        fk.ref
+        for fk in fks
+        if not fk.informational and not fk_pools.get(fk.cols[0])
+    )
+    if missing:
+        raise SystemExit(
+            f"FK parents not landed (or empty) in {parent_landing}: "
+            f"{missing}. Scenario 2 (--generate_fk_relationships=true on "
+            f"the launch) generates parents first automatically; for a "
+            f"manual child-only run, land the parents first."
+        )
+
+
+def parse_landing_tables(value: str) -> list[str]:
+    """``--landing_table`` accepts one FQN or a comma-separated list."""
+    return [t.strip() for t in value.split(",") if t.strip()]
+
+
+@dataclass(frozen=True)
+class TableRun:
+    """One planned per-table generation inside a launch."""
+
+    landing_table: str
+    source_table: str
+    run_id: str
+    fk_parent_landing: str
+
+
+@dataclass(frozen=True)
+class LaunchPlan:
+    scenario: str
+    runs: tuple[TableRun, ...]
+    warnings: tuple[str, ...] = field(default=())
+
+
+def _has_enforced_fk(contract) -> bool:
+    return contract is not None and any(
+        not fk.informational for fk in contract.fk
+    )
+
+
+def plan_launch(
+    landing_tables: list[str],
+    reference_table: str,
+    generate_fk_relationships: bool,
+    contracts: dict,
+    run_id: str,
+) -> LaunchPlan:
+    """The launch scenarios, resolved to an ordered per-table plan
+    (ADR 0029 rev B). ``contracts`` maps every candidate LANDING-table
+    FQN in the dataset to its parsed contract (or None).
+
+    1. one table + false  → itself only; ignored enforced edges warned.
+    2. one table + true   → no relations: identical to 1 (seamless);
+       relations: the whole connected component (informational edges
+       count for GROUPING), parents-first — nothing else to configure.
+    3. many tables + false → each independently, given order.
+       many tables + true  → union of components, deduped, ordered.
+    """
+    warnings: list[str] = []
+    if generate_fk_relationships:
+        member_set: list[str] = []
+        for target in landing_tables:
+            for t in connected_component(
+                target, list(contracts) or landing_tables, contracts
+            ):
+                if t not in member_set:
+                    member_set.append(t)
+            if target not in member_set:
+                member_set.append(target)
+        model = build_fk_model(member_set, contracts)
+        ordered = [t for level in model.levels for t in level]
+        expanded = len(ordered) > len(landing_tables)
+        relational = expanded or any(
+            _has_enforced_fk(contracts.get(t)) for t in ordered
+        )
+        if expanded:
+            extra = [t for t in ordered if t not in landing_tables]
+            warnings.append(
+                f"relational closure expanded the launch to {extra} "
+                f"(declared relationships; parents generate first)"
+            )
+        scenario = (
+            "relational_closure"
+            if relational
+            else ("isolated" if len(ordered) == 1 else "multi_independent")
+        )
+    else:
+        ordered = list(landing_tables)
+        ignored = [
+            t for t in ordered if _has_enforced_fk(contracts.get(t))
+        ]
+        if ignored:
+            warnings.append(
+                f"generate_fk_relationships=false ignores declared FK "
+                f"edges on {ignored} — referential integrity UNVERIFIED"
+            )
+        scenario = "isolated" if len(ordered) == 1 else "multi_isolated"
+
+    multi = len(ordered) > 1
+    runs = tuple(
+        TableRun(
+            landing_table=t,
+            source_table=derive_source_fqn(t, reference_table),
+            run_id=(
+                f"{run_id}-{i:02d}-{t.rsplit('.', 1)[-1]}" if multi else run_id
+            ),
+            fk_parent_landing=(
+                derive_fk_parent_landing(t)
+                if generate_fk_relationships
+                and _has_enforced_fk(contracts.get(t))
+                else ""
+            ),
+        )
+        for i, t in enumerate(ordered)
+    )
+    return LaunchPlan(
+        scenario=scenario, runs=runs, warnings=tuple(warnings)
+    )
 
 
 def log_launcher_fk_model(
@@ -719,7 +888,9 @@ def configure_pipeline_options(
             )
 
 
-def _load_reference_and_preflight(args, table_schema):
+def _load_reference_and_preflight(
+    args, table_schema, in_set_landing: frozenset[str] = frozenset()
+):
     """Eager reference read + relational preflight (ADR 0021): parse and
     validate the description contract, default pk/identity from it
     (explicit CLI wins), fail fast on unknown columns — all driver-side,
@@ -736,22 +907,39 @@ def _load_reference_and_preflight(args, table_schema):
         tuple(c.strip() for c in args.identity_cols.split(",") if c.strip()),
         reference_rows,
         prompt_constraints_enabled=args.prompt_constraints == "on",
-        # ADR 0028: P4 refuses a PK whose routed generator cannot cover
-        # num_rows; P6 refuses a declared-but-unactivated FK ("skip" is
-        # the loud escape hatch) — both before any graph exists.
+        # ADR 0028 P4: refuse a PK whose routed generator cannot cover
+        # num_rows — before any graph exists.
         num_rows=args.num_rows,
-        fk_parent_landing=args.fk_parent_landing,
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
+    # ADR 0029 rev B — FK activation derives, never asks: with the flag
+    # on and enforced edges declared, parents live in the SAME landing
+    # dataset (--fk_parent_landing stays as an expert override only).
+    # An empty parent pool is a loud, actionable stop.
     fk_pools: dict = {}
-    if (
-        pf.contract
-        and pf.contract.fk
-        and args.fk_parent_landing
-        and args.fk_parent_landing != "skip"
+    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
+    external_fk = tuple(
+        fk
+        for fk in (pf.contract.fk if pf.contract else ())
+        if not fk.informational
+        and fk.ref.rsplit(".", 1)[-1] not in in_set_names
+    )
+    if parse_bool_flag(args.generate_fk_relationships) and external_fk:
+        parent_landing = args.fk_parent_landing or derive_fk_parent_landing(
+            args.landing_table
+        )
+        fk_pools = load_fk_pools(external_fk, parent_landing)
+        assert_fk_pools_nonempty(external_fk, fk_pools, parent_landing)
+        args.fk_parent_landing = parent_landing  # ctx fk_edges read it
+    elif parse_bool_flag(args.generate_fk_relationships) and any(
+        not fk.informational for fk in (pf.contract.fk if pf.contract else ())
     ):
-        fk_pools = load_fk_pools(pf.contract.fk, args.fk_parent_landing)
+        # All enforced edges resolve in-set (ADR 0030 single job): keys
+        # arrive as side inputs; still derive for the fk_edges metadata.
+        args.fk_parent_landing = args.fk_parent_landing or (
+            derive_fk_parent_landing(args.landing_table)
+        )
     source_distinct = _emit_source_stats(args, table_schema, reference_rows, pf)
     return reference_rows, pf, fk_pools, source_distinct
 
@@ -940,6 +1128,52 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
     return pool_store, source_value_store
 
 
+def _discover_landing_contracts(args, targets: list[str]) -> dict:
+    """Landing-dataset contracts for scenario planning (ADR 0029 rev B).
+
+    Offline map via --fk_contracts_json (tests / air-gap); else a live
+    scan of the landing dataset's table descriptions. A scan failure
+    NEVER blocks the launch — it degrades loudly to single-target
+    planning (`fk_discovery_unavailable`), and the per-table run still
+    honors the target's own contract from its resolved schema."""
+    from sdfb_core.contracts.relational import parse_relational_contract
+
+    if args.fk_contracts_json:
+        with FileSystems.open(args.fk_contracts_json) as fh:
+            raw = json.loads(fh.read().decode("utf-8"))
+        from sdfb_core.contracts.relational import RelationalContract
+
+        return {
+            fqn: (
+                RelationalContract.model_validate(obj) if obj else None
+            )
+            for fqn, obj in raw.items()
+        }
+    if not parse_bool_flag(args.generate_fk_relationships):
+        return {}
+    try:  # pragma: no cover - live-GCP path (M4/Dataflow)
+        from google.cloud import bigquery
+
+        dataset = derive_fk_parent_landing(targets[0])
+        client = bigquery.Client()
+        out: dict = {}
+        for item in client.list_tables(dataset):
+            fqn = f"{dataset}.{item.table_id}"
+            desc = client.get_table(item.reference).description or ""
+            out[fqn] = parse_relational_contract(desc)
+        return out
+    except Exception as exc:
+        log_milestone(
+            "fk_discovery_unavailable",
+            level=logging.WARNING,
+            error=type(exc).__name__,
+            note="could not scan the landing dataset for relational "
+            "contracts — planning the given table(s) only; the target's "
+            "own contract still applies per table",
+        )
+        return {}
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -950,30 +1184,97 @@ def main(argv: list[str] | None = None) -> int:
     # two same-day runs were indistinguishable by build from the logs.)
     log_build_info("launcher")
     args, beam_argv = parse_args(argv or sys.argv[1:])
-    options = PipelineOptions(beam_argv)
-    runner = options.view_as(StandardOptions).runner or "DataflowRunner"
 
-    configure_pipeline_options(options, runner, args.run_id)
+    # ADR 0029 rev B — resolve the launch scenario BEFORE any per-table
+    # work: minimal inputs (landing table(s) + one flag), everything
+    # else derived. One milestone states the whole plan.
+    targets = parse_landing_tables(args.landing_table)
+    generate_fk = parse_bool_flag(args.generate_fk_relationships)
+    contracts = _discover_landing_contracts(args, targets)
+    plan = plan_launch(
+        targets,
+        args.reference_table,
+        generate_fk,
+        contracts or {t: None for t in targets},
+        args.run_id,
+    )
+    for warning in plan.warnings:
+        logger.warning("launch plan: %s", warning)
+    log_milestone(
+        "launch_scenario",
+        scenario=plan.scenario,
+        tables=len(plan.runs),
+        order=",".join(r.landing_table.rsplit(".", 1)[-1] for r in plan.runs),
+        generate_fk_relationships=generate_fk,
+    )
+    # ONE human-readable block stating every enabled/disabled config of
+    # this execution (ADR 0030): pasted _full_report.md +
+    # worker_logs.jsonl answer "what was on?" without arg archaeology.
+    log_milestone_pretty(
+        "launch_config",
+        {
+            **{
+                k: v
+                for k, v in sorted(vars(args).items())
+                if not k.startswith("_") and k != "model_client"
+            },
+            "resolved": {
+                "scenario": plan.scenario,
+                "generate_fk_relationships": generate_fk,
+                "multi_table_mode": args.multi_table_mode,
+                "tables_in_order": [
+                    r.landing_table for r in plan.runs
+                ],
+                "run_ids": [r.run_id for r in plan.runs],
+                "fk_parent_landing_derived": [
+                    r.fk_parent_landing or "(none)" for r in plan.runs
+                ],
+                "warnings": list(plan.warnings),
+            },
+        },
+        scenario=plan.scenario,
+    )
+    if len(plan.runs) > 1 and args.multi_table_mode == "single_job":
+        return _run_relational_job(plan, args, beam_argv)
+    for i, run in enumerate(plan.runs):
+        table_args = argparse.Namespace(**vars(args))
+        table_args._multi_table_plan = len(plan.runs) > 1
+        table_args.landing_table = run.landing_table
+        table_args.reference_table = run.source_table
+        table_args.run_id = run.run_id
+        table_args.fk_parent_landing = (
+            args.fk_parent_landing or run.fk_parent_landing
+        )
+        # The --ddl_uri pin describes the FIRST target only; siblings
+        # extract live (authoritative per ADR 0027 D2).
+        if run.landing_table != targets[0]:
+            table_args.ddl_uri = ""
+        rc = _run_one_table(table_args, beam_argv)
+        if rc != 0:
+            logger.error(
+                "table %s failed (rc=%d) — aborting the remaining %d "
+                "planned tables (children never run without parents)",
+                run.landing_table, rc, len(plan.runs) - i - 1,
+            )
+            return rc
+    return 0
 
+
+def _prepare_table_spec(
+    args, model_client, in_set_landing: frozenset[str] = frozenset()
+) -> TableSpec:
+    """Everything one table needs, driver-side: schema, preflight, FK
+    pools (EXTERNAL parents only — in-set parents arrive as in-DAG side
+    inputs, ADR 0030), stores, sinks, config. Shared by the
+    single-table runner and the single-job relational runner."""
     table_schema = resolve_table_schema(
         args.ddl_uri, args.reference_table, args.landing_table
     )
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 
-    logger.info("Building model client (client_type=%s, vllm_dtype=%s, "
-                "vllm_max_model_len=%s)",
-                args.client_type, args.vllm_dtype, args.vllm_max_model_len)
-    model_client = build_model_client(
-        args.client_type,
-        args.model_uri,
-        vllm_dtype=args.vllm_dtype,
-        vllm_max_model_len=args.vllm_max_model_len,
-    )
-
-    # ADR 0029: the flag is the single isolated/relational switch —
-    # resolve it BEFORE preflight so P6 and the FK-pool load see one
-    # authoritative fk_parent_landing value.
+    # ADR 0029 rev B: mode is informational here — activation derives
+    # inside _load_reference_and_preflight from the table's own contract.
     args.fk_parent_landing, fk_mode = resolve_fk_mode(
         parse_bool_flag(args.generate_fk_relationships),
         args.fk_parent_landing,
@@ -988,7 +1289,7 @@ def main(argv: list[str] | None = None) -> int:
             "UNVERIFIED this run",
         )
     reference_rows, pf, fk_pools, source_distinct = _load_reference_and_preflight(
-        args, table_schema
+        args, table_schema, in_set_landing=in_set_landing
     )
     log_launcher_fk_model(table_schema.fqn, pf.contract, mode=fk_mode)
 
@@ -1052,6 +1353,11 @@ def main(argv: list[str] | None = None) -> int:
         prompt_constraints=args.prompt_constraints == "on",
         prompt_debug=args.prompt_debug,
         fk_pools=fk_pools,
+        log_table_prefix=(
+            args.landing_table.rsplit(".", 1)[-1]
+            if getattr(args, "_multi_table_plan", False) or in_set_landing
+            else ""
+        ),
         fk_edges=tuple(
             {
                 "cols": list(fk.cols),
@@ -1060,9 +1366,7 @@ def main(argv: list[str] | None = None) -> int:
                 "informational": fk.informational,
                 "parent_landing": (
                     parent_landing_fqn(fk.ref, args.fk_parent_landing)
-                    if args.fk_parent_landing
-                    and args.fk_parent_landing != "skip"
-                    and not fk.informational
+                    if args.fk_parent_landing and not fk.informational
                     else ""
                 ),
             }
@@ -1115,24 +1419,140 @@ def main(argv: list[str] | None = None) -> int:
             create_disposition=BigQueryDisposition.CREATE_NEVER,
         )
 
+    # In-set enforced edges: parents live in THIS job's spec list — no BQ
+    # pool load; the composer wires the parent's landed keys as a side
+    # input (ADR 0030). parent_pk is patched in by the relational runner.
+    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
+    parent_edges = tuple(
+        FkEdgeSpec(
+            child_cols=tuple(fk.cols),
+            ref_cols=tuple(fk.ref_cols),
+            parent_landing=parent_landing_fqn(
+                fk.ref, derive_fk_parent_landing(args.landing_table)
+            ),
+        )
+        for fk in (pf.contract.fk if pf.contract else ())
+        if not fk.informational
+        and fk.ref.rsplit(".", 1)[-1] in in_set_names
+    )
+
+    return TableSpec(
+        config=config,
+        reference_rows=reference_rows,
+        landing_sink=landing_sink,
+        dlq_sink=dlq_sink,
+        validation_runs_sink=validation_runs_sink,
+        rag_chunks_sink=rag_chunks_sink,
+        freetext_pools_store=freetext_pools_store,
+        source_value_store=(
+            source_value_store if freetext_pools_store is not None else None
+        ),
+        parent_edges=parent_edges,
+    )
+
+
+def _run_one_table(args, beam_argv: list[str]) -> int:
+    options = PipelineOptions(beam_argv)
+    runner = options.view_as(StandardOptions).runner or "DataflowRunner"
+    configure_pipeline_options(options, runner, args.run_id)
+
+    logger.info("Building model client (client_type=%s, vllm_dtype=%s, "
+                "vllm_max_model_len=%s)",
+                args.client_type, args.vllm_dtype, args.vllm_max_model_len)
+    model_client = build_model_client(
+        args.client_type,
+        args.model_uri,
+        vllm_dtype=args.vllm_dtype,
+        vllm_max_model_len=args.vllm_max_model_len,
+    )
+    spec = _prepare_table_spec(args, model_client)
+
     with beam.Pipeline(options=options) as p:
         result = build_pipeline(
             p,
-            reference_rows=reference_rows,
-            config=config,
-            landing_sink=landing_sink,
-            dlq_sink=dlq_sink,
-            validation_runs_sink=validation_runs_sink,
-            rag_chunks_sink=rag_chunks_sink,
-            freetext_pools_store=freetext_pools_store,
-            source_value_store=(
-                source_value_store if freetext_pools_store is not None else None
-            ),
+            reference_rows=spec.reference_rows,
+            config=spec.config,
+            landing_sink=spec.landing_sink,
+            dlq_sink=spec.dlq_sink,
+            validation_runs_sink=spec.validation_runs_sink,
+            rag_chunks_sink=spec.rag_chunks_sink,
+            freetext_pools_store=spec.freetext_pools_store,
+            source_value_store=spec.source_value_store,
         )
         logger.info(
             "Pipeline launched: run_id=%s reference_digest=%s",
             result["run_id"],
             result["reference_digest"],
+        )
+    return 0
+
+
+def _run_relational_job(plan, args, beam_argv: list[str]) -> int:
+    """ADR 0030 — scenario 2/3 in ONE Dataflow job: every planned table's
+    subgraph in one pipeline, parents-first, children fed by in-DAG
+    parent-key side inputs. One worker fleet and one vLLM ignition serve
+    all tables; the 911 s launch+boot (measured, ADR 0028 figures) is
+    paid once instead of per table."""
+    from dataclasses import replace as _dc_replace
+
+    options = PipelineOptions(beam_argv)
+    runner = options.view_as(StandardOptions).runner or "DataflowRunner"
+    configure_pipeline_options(options, runner, args.run_id)
+
+    model_client = build_model_client(
+        args.client_type,
+        args.model_uri,
+        vllm_dtype=args.vllm_dtype,
+        vllm_max_model_len=args.vllm_max_model_len,
+    )
+    in_set = frozenset(r.landing_table for r in plan.runs)
+    first_landing = plan.runs[0].landing_table
+    specs = []
+    for run in plan.runs:
+        table_args = argparse.Namespace(**vars(args))
+        table_args.landing_table = run.landing_table
+        table_args.reference_table = run.source_table
+        table_args.run_id = run.run_id
+        table_args.fk_parent_landing = (
+            args.fk_parent_landing or run.fk_parent_landing
+        )
+        if run.landing_table != first_landing:
+            table_args.ddl_uri = ""  # pin describes the target only
+        specs.append(
+            _prepare_table_spec(
+                table_args, model_client, in_set_landing=in_set
+            )
+        )
+    # Patch each edge's parent_pk from the sibling spec so the composer
+    # can skip the Distinct shuffle when ref tuple == parent PK.
+    pk_by_landing = {
+        s.config.landing_table: tuple(s.config.pk_columns) for s in specs
+    }
+    specs = [
+        _dc_replace(
+            s,
+            parent_edges=tuple(
+                _dc_replace(
+                    e, parent_pk=pk_by_landing.get(e.parent_landing, ())
+                )
+                for e in s.parent_edges
+            ),
+        )
+        for s in specs
+    ]
+    log_milestone(
+        "relational_single_job",
+        tables=len(specs),
+        order=",".join(
+            s.config.landing_table.rsplit(".", 1)[-1] for s in specs
+        ),
+        edges=sum(len(s.parent_edges) for s in specs),
+    )
+    with beam.Pipeline(options=options) as p:
+        results = build_relational_pipeline(p, specs)
+        logger.info(
+            "Relational pipeline launched: %d tables, run_id=%s",
+            len(results), args.run_id,
         )
     return 0
 
