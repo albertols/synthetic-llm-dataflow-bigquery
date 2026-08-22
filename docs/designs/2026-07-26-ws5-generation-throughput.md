@@ -49,7 +49,7 @@ is**, by a factor of more than 20 over every other phase.
 Note the last row. The FAISS index — the nominal centrepiece of the RAG layer
 — costs 2 seconds across the entire job. §3 follows that thread.
 
-> **`ACCU_LIMIT_KEY` / `COL_048` is excluded from every target in §6.** It
+> **`COL_047` / `COL_048` is excluded from every target in §6.** It
 > carries binary characters and is a known special case (user instruction,
 > 2026-07-26). It accounts for 26 107 s of the pool total; **excluding it, the
 > remaining two columns still cost 42 698 s over 72 rebuilds ≈ 11.9
@@ -254,7 +254,7 @@ if ddl_uri:
 TEST_1 died at *template launch*, before any worker started:
 
 ```
-NotFound: 404 GET .../ddl_metadata_CDH_dataset_KW111T_RR.json: No such object
+NotFound: 404 GET .../ddl_metadata_CDH_dataset_A_TABLE.json: No such object
 Error: Template launch failed: exit status 1
 ```
 
@@ -281,7 +281,7 @@ on every run.
 ## 6. Acceptance criteria
 
 Falsifiable against the existing milestones, measured per phase.
-**`ACCU_LIMIT_KEY` excluded throughout** (see §1).
+**`COL_047` excluded throughout** (see §1).
 
 | Phase | 1M baseline | WS5 target |
 |---|---:|---:|

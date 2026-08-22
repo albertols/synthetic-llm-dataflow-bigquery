@@ -48,8 +48,8 @@ class TestLauncherFkModel:
             fk=(
                 ForeignKey(cols=("CUST_ID",), ref="ds.customers",
                            ref_cols=("ID",)),
-                ForeignKey(cols=("PARTY_KEY",), ref="ds.parties",
-                           ref_cols=("PARTY_KEY",), informational=True),
+                ForeignKey(cols=("JOIN_KEY",), ref="ds.parties",
+                           ref_cols=("JOIN_KEY",), informational=True),
             ),
         )
 

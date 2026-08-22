@@ -25,7 +25,7 @@ _PK_DESC = (
 )
 _BIN_DESC = (
     '{"llm_prompt_constraint": {"route": "llm", "length": 12, '
-    '"prefix": "S1®±", "format": "opaque internal system key"}}'
+    '"prefix": "A1®±", "format": "opaque internal system key"}}'
 )
 _PROSE_DESC = (
     '{"llm_prompt_constraint": {"route": "llm", '
@@ -58,7 +58,7 @@ def _e2f_value(i: int) -> str:
 
 def _bin_value(i: int) -> str:
     # chr(0x8D) is C1 — trips is_binary_class on every value.
-    return f"S1®±{i:03d}xyz."
+    return f"A1®±{i:03d}xyz."
 
 
 def _schema(cols: list[tuple[str, str]]) -> TableSchema:
@@ -148,7 +148,7 @@ class TestTierByteTemplate:
         engine, _ = _setup([("BLOB", _BIN_DESC)], rows, caplog)
         out = list(engine.generate_batch(400, GenerationConfig(seed=5)))
         values = [r.model_dump()["BLOB"] for r in out]
-        assert all(v.startswith("S1®±") for v in values)
+        assert all(v.startswith("A1®±") for v in values)
         assert all(len(v) == 12 for v in values)
         assert not {r["BLOB"] for r in rows} & set(values)
 

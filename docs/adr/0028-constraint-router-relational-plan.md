@@ -10,7 +10,7 @@
 ## Context
 
 The first PK+FK run (`2026-08-21_14_54_30-1966084111444777604`,
-KW860T_RR, 1M rows) went FAILED_BLOCKER by construction, and its
+B_TABLE, 1M rows) went FAILED_BLOCKER by construction, and its
 telemetry generalizes to the fleet-scale question (thousands of tables,
 thousands of constrained columns):
 

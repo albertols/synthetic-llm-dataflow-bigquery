@@ -1,6 +1,6 @@
 """Informational FK edges are display-only (ADR 0029).
 
-The 6-table example's PARTY_KEY edge names a column absent from every
+The 6-table example's JOIN_KEY edge names a column absent from every
 DDL — declared with ``informational: true`` it must draw in diagrams
 without tripping P2 (unknown column), P6 (activation), or FK pool loads.
 """
@@ -16,13 +16,13 @@ from sdfb_core.contracts.relational import ForeignKey
 
 _INFO_ONLY = (
     '{"sdfb": 1, "pk": ["ID"], '
-    '"fk": [{"cols": ["PARTY_KEY_UNMAPPED"], "ref": "ds.a_table", '
-    '"ref_cols": ["PARTY_KEY_UNMAPPED"], "informational": true}]}'
+    '"fk": [{"cols": ["JOIN_KEY_UNMAPPED"], "ref": "ds.a_table", '
+    '"ref_cols": ["JOIN_KEY_UNMAPPED"], "informational": true}]}'
 )
 _MIXED = (
     '{"sdfb": 1, "pk": ["ID"], "fk": ['
-    '{"cols": ["PARTY_KEY_UNMAPPED"], "ref": "ds.a_table", '
-    '"ref_cols": ["PARTY_KEY_UNMAPPED"], "informational": true}, '
+    '{"cols": ["JOIN_KEY_UNMAPPED"], "ref": "ds.a_table", '
+    '"ref_cols": ["JOIN_KEY_UNMAPPED"], "informational": true}, '
     '{"cols": ["CUST_ID"], "ref": "ds.customers", "ref_cols": ["ID"]}]}'
 )
 
@@ -61,8 +61,8 @@ class TestFkPoolLoader:
         client = MagicMock()
         fks = (
             ForeignKey(
-                cols=("PARTY_KEY_UNMAPPED",), ref="ds.a_table",
-                ref_cols=("PARTY_KEY_UNMAPPED",), informational=True,
+                cols=("JOIN_KEY_UNMAPPED",), ref="ds.a_table",
+                ref_cols=("JOIN_KEY_UNMAPPED",), informational=True,
             ),
         )
         pools = load_fk_pools(fks, "p.landing", client=client)

@@ -53,7 +53,7 @@ class TestQualifiedPrettyColumns:
         clear_generation_plan_log()
         schema = TableSchema.model_validate(
             {
-                "table_info": {"table_id": "p.src.kw860t"},
+                "table_info": {"table_id": "p.src.b_table"},
                 "schema": [
                     {"name": "KEY", "type": "STRING", "mode": "REQUIRED",
                      "description": _E2F},
@@ -66,7 +66,7 @@ class TestQualifiedPrettyColumns:
             reference_rows=rows,
             reference_digest=f"qual-{prefix or 'off'}",
             pipeline_run_id="qual-run",
-            landing_table="p.land.KW860T",
+            landing_table="p.land.B_TABLE",
             log_table_prefix=prefix,
         )
         engine = B1RagEngine(embedder=HashingEmbedder())
@@ -80,10 +80,10 @@ class TestQualifiedPrettyColumns:
         clear_generation_plan_log()
 
     def test_multi_table_prefix_qualifies_columns(self, caplog):
-        self._setup(caplog, prefix="KW860T")
-        assert '"KW860T.KEY"' in caplog.text  # plan + constraints keys
+        self._setup(caplog, prefix="B_TABLE")
+        assert '"B_TABLE.KEY"' in caplog.text  # plan + constraints keys
 
     def test_single_table_keys_stay_bare(self, caplog):
         self._setup(caplog, prefix="")
-        assert '"KW860T.KEY"' not in caplog.text
+        assert '"B_TABLE.KEY"' not in caplog.text
         assert '"KEY"' in caplog.text

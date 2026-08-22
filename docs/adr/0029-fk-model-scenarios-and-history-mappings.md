@@ -60,7 +60,7 @@ SOURCE FQNs — the prior suffix-only match silently dropped such edges).
 
 **D3 — informational FK edges.** `ForeignKey.informational: true`
 declares a relationship whose join key is absent from the DDL
-(PARTY_KEY-class): drawn dashed in every diagram, excluded from P2/P3/P6,
+(JOIN_KEY-class): drawn dashed in every diagram, excluded from P2/P3/P6,
 FK pools, orphan rules, and wave ordering. Visibility without
 unenforceable promises.
 
@@ -95,7 +95,7 @@ redrawn.
   change with zero run evidence; ADR 0021 chose per-table jobs for
   failure isolation. Staged: design sketch in the doc (§5), own ADR
   after Stage-1 evidence.
-- **Enforcing PARTY_KEY-style edges via synthesized join columns**: the
+- **Enforcing JOIN_KEY-style edges via synthesized join columns**: the
   column does not exist in the schema; inventing it would change the
   landing contract. Documentation-only edges cover the need.
 - **Per-model mapping files (one registry per FK model)**: unrelated

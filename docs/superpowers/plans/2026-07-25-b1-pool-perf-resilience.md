@@ -4,7 +4,7 @@
 
 **Goal:** Cut the B.1 free-text pool build from ~26 min back to single-digit minutes and make one stubborn column unable to triple `DoFn.setup()` — the two root causes of the 2026-07-24 E2E slowdowns (3187 s and 4045 s vs the 1481–1679 s master/ws1 baseline).
 
-**Architecture:** Five surgical changes, no new abstractions: (1) each pool HTTP round trip requests `n=4` array-completions server-side (vLLM parallel sampling) so per-call novel yield ×4 and the attempt budget scales down accordingly; (2) B.1 gains B.2's relaxed-shape fallback + a shape top-up for undersized pools, so echo-saturated identifier-ish columns (CHG_MESS_CARR_ID, CHANGE_USERID) stop raising `FreeTextEmptyYieldError` out of `setup()`; (3) per-column ladders run concurrently in a bounded thread pool (embedder work stays sequential — HF tokenizers are not thread-safe); (4) a process-level pool cache keyed on `(reference_digest, model_uri, column, target)` survives Dataflow bundle retries, so a retried `setup()` never rebuilds a sibling column's pool; (5) `DoFn.setup()` re-entry after a failure emits a `dofn_setup_retry` milestone + Beam counter so retries are visible in worker logs and job metrics.
+**Architecture:** Five surgical changes, no new abstractions: (1) each pool HTTP round trip requests `n=4` array-completions server-side (vLLM parallel sampling) so per-call novel yield ×4 and the attempt budget scales down accordingly; (2) B.1 gains B.2's relaxed-shape fallback + a shape top-up for undersized pools, so echo-saturated identifier-ish columns (COL_053, COL_052) stop raising `FreeTextEmptyYieldError` out of `setup()`; (3) per-column ladders run concurrently in a bounded thread pool (embedder work stays sequential — HF tokenizers are not thread-safe); (4) a process-level pool cache keyed on `(reference_digest, model_uri, column, target)` survives Dataflow bundle retries, so a retried `setup()` never rebuilds a sibling column's pool; (5) `DoFn.setup()` re-entry after a failure emits a `dofn_setup_retry` milestone + Beam counter so retries are visible in worker logs and job metrics.
 
 **Tech Stack:** pure-Python stdlib (`threading`, `concurrent.futures`) in `sdfb-core`; Apache Beam metrics in `sdfb-beam`; pytest in `sdfb-tests`. No new dependencies.
 
@@ -29,7 +29,7 @@
 | Pool build | 122 s | 1552 s | ~2645 s over 3 `setup()` attempts |
 | Wall clock | 24.7 min | 53.1 min | 67.4 min |
 
-Cause 1: WS2 §4b.2 raised pool target 32 → `min(num_rows, distinct, 512)` ⇒ up to 32 sequential vLLM calls/column at 20–48 s/call. Cause 2 (16:35 run only): `FreeTextEmptyYieldError` on `CHG_MESS_CARR_ID` (parroting: `distinct=1, novel=0`) crashed `setup()` twice; Dataflow silently retried; `_build_free_text_pools` is all-or-nothing, so every retry rebuilt every pool; the run PASSED with zero trace and collapsed diversity (`CHANGE_USERID` 229→31 distinct).
+Cause 1: WS2 §4b.2 raised pool target 32 → `min(num_rows, distinct, 512)` ⇒ up to 32 sequential vLLM calls/column at 20–48 s/call. Cause 2 (16:35 run only): `FreeTextEmptyYieldError` on `COL_053` (parroting: `distinct=1, novel=0`) crashed `setup()` twice; Dataflow silently retried; `_build_free_text_pools` is all-or-nothing, so every retry rebuilt every pool; the run PASSED with zero trace and collapsed diversity (`COL_052` 229→31 distinct).
 
 ---
 
@@ -208,7 +208,7 @@ Create `packages/sdfb-tests/tests/unit/rag/test_b1_shape_fallback.py`:
 ```python
 """B.1 parity with B.2's relaxed-shape fallback (2026-07-24 16:35 E2E).
 
-That run: CHG_MESS_CARR_ID parroted one exemplar on every escalation level
+That run: COL_053 parroted one exemplar on every escalation level
 (distinct=1, novel=0) -> FreeTextEmptyYieldError out of DoFn.setup() ->
 Dataflow silently retried the whole setup twice (~17 min of rework).
 A relaxed per-position template generates verified-novel in-format values
@@ -235,7 +235,7 @@ def _schema(col: str) -> TableSchema:
 
 # Mixed lengths defeat detect_identifier_shape (strict), no whitespace so
 # build_relaxed_shapes CAN template them -> FREE_TEXT with
-# identifier_shape=None, exactly the CHG_MESS_CARR_ID class.
+# identifier_shape=None, exactly the COL_053 class.
 _ID_VALUES = [f"USR{i:04d}X" for i in range(30)] + [f"USR{i:05d}XX" for i in range(30)]
 # Whitespace -> build_relaxed_shapes returns None (prose stays prose).
 _PROSE_VALUES = [f"support ticket about outage number {i}" for i in range(60)]
@@ -418,7 +418,7 @@ else:
         )
     elif len(pool) < target:
         # Top up an undersized pool from the template before accepting
-        # the shortfall — the 2026-07-24 16:35 run landed CHANGE_USERID
+        # the shortfall — the 2026-07-24 16:35 run landed COL_052
         # with 31 distinct values over 1000 rows (diversity collapse).
         top_up = self._shape_fallback_pool(
             prof, target - len(pool), exclude=set(pool)
@@ -465,7 +465,7 @@ git add packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py packages/sdfb-
 git commit -m "fix(b1): relaxed-shape fallback + top-up instead of setup()-fatal empty yield
 
 Ports B.2's copy-saturated shape fallback to B.1 and adds a shape top-up
-for undersized pools. CHG_MESS_CARR_ID-class columns (mixed-length IDs the
+for undersized pools. COL_053-class columns (mixed-length IDs the
 strict detector rejects, LLM parrots exemplars) no longer raise
 FreeTextEmptyYieldError out of DoFn.setup() — the 2026-07-24 16:35 E2E
 paid 2 silent full-setup retries (+17 min) and landed 31-distinct pools.
@@ -1192,7 +1192,7 @@ WS2 §4b.2 scaled B.1's free-text pool target from 32 to
 `min(num_rows, distinct, 512)`, which multiplied sequential vLLM calls per
 column by up to 32x (20-48 s/call on T4/float16). The 2026-07-24 12:46 E2E
 spent 1552 s (49% of wall clock) building 3 pools; the 16:35 run tripled
-its setup because one echo-saturated column (`CHG_MESS_CARR_ID`) raised
+its setup because one echo-saturated column (`COL_053`) raised
 `FreeTextEmptyYieldError` out of `DoFn.setup()` twice, and Dataflow's
 silent bundle retries rebuilt every sibling pool from scratch — invisible
 in `validation_runs`.

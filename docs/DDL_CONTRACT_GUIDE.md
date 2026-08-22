@@ -130,7 +130,7 @@ Two hard rules, both loud by design:
 | `identity` | list of column names | per-row unique identifier generation (never pool-drawn, never folded) |
 | `fk[].cols` / `ref_cols` | non-empty, equal arity | child columns sample from the parent's **landed synthetic** keys (`io/fk_pools.py`) — referential integrity beats the child's marginal (v1) |
 | `fk[].ref` | must be `dataset.table` | resolved to `{landing_dataset}.{table}` at run time — the landing dataset derives from `--landing_table` (ADR 0029 rev B; `--fk_parent_landing` is an expert override for cross-dataset parents) |
-| `fk[].informational` | bool, default `false` | **documentation-only edge (ADR 0029)**: drawn dashed in FK-model diagrams (`fk_model_pretty` logs, reports), excluded from ALL enforcement — no column-existence check, no `fk_parent_landing` requirement, no FK pool, no orphan rule, no generation-order constraint. For relationships whose join key is absent from the DDL (the 6-table example's `PARTY_KEY`) |
+| `fk[].informational` | bool, default `false` | **documentation-only edge (ADR 0029)**: drawn dashed in FK-model diagrams (`fk_model_pretty` logs, reports), excluded from ALL enforcement — no column-existence check, no `fk_parent_landing` requirement, no FK pool, no orphan rule, no generation-order constraint. For relationships whose join key is absent from the DDL (the 6-table example's `JOIN_KEY`) |
 
 > **v1 scope, on record:** single-column FKs are exact. Composite FKs load
 > aligned per-column pools but draw columns independently — joint tuple
@@ -150,7 +150,7 @@ isolated generation, declared edges ignored loudly. Every launch logs
 pasteable mermaid (`fk_model_pretty`). `scripts/run_tableset.py` is the
 power path (within-wave parallelism, `--emit-trigger-configs` for
 Airflow). Worked 6-table
-example — composite FKs, an informational `PARTY_KEY` edge, letter-
+example — composite FKs, an informational `JOIN_KEY` edge, letter-
 prefixed anonymization: `docs/assets/fk_relationship_example.{tf,png}`
 (**local-only**, gitignored via `docs/assets/fk*`; the equivalent shape
 is drawn in the ADR 0029 design doc §2).

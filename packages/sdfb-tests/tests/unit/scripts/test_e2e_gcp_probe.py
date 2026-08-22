@@ -583,7 +583,7 @@ def test_copy_fraction_rule_scores_substantive_when_present(probe_module):
 def test_substantive_sql_excludes_empty_and_frequent_source_values(probe_module):
     """The membership subquery must (a) drop trimmed-empty landing values
     and (b) exempt source values with frequency >= the k-anonymity floor —
-    head-value re-emission (`KW3000` at 77% share) is enum mass, and a
+    head-value re-emission (`ZZ3000` at 77% share) is enum mass, and a
     value shared by dozens of source rows identifies nobody."""
     sql = probe_module._substantive_copy_sql("`p.d.landing`", "`p.d.source`", "`c`")
     flat = " ".join(sql.split())

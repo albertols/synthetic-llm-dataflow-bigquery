@@ -188,7 +188,7 @@ def build_relaxed_shapes(values: Iterable[str]) -> RelaxedShapes | None:
     strict detector rejects, or None.
 
     Last-resort route for LLM-echo-saturated free-text pools (2026-07-22 b2
-    E2E: CHANGE_USERID — the model returned the shown exemplars verbatim on
+    E2E: COL_052 — the model returned the shown exemplars verbatim on
     every escalation attempt, killing the whole run). Relaxations vs
     :func:`detect_identifier_shape`: mixed lengths become weighted buckets,
     there is no minimum length, and a position whose characters fit no

@@ -11,8 +11,8 @@ mkdir -p models/gemma4/e4b-it/v1             # see MODEL_LAYOUT.md for the Kaggl
 
 # smoke test — uses your real _ddl.json
 uv run python scripts/hello_synthetic_mlx.py \
-    --ddl_path output/CDH_dataset/ddl_metadata_CDH_dataset_KW860T_RR.json \
-    --reference_table CDH_dataset.KW860T_RR \
+    --ddl_path output/CDH_dataset/ddl_metadata_CDH_dataset_B_TABLE.json \
+    --reference_table CDH_dataset.B_TABLE \
     --reference_limit 5 \
     --num_rows 10 \
     --model_path ./models/gemma4/e4b-it/v1/
@@ -54,8 +54,8 @@ Cost: ~30s model load + ~1–2s per row (on M4 24GB w/ Gemma 4 E4B).
 uv run python -m sdfb_beam.cli.run_pipeline \
     --runner DirectRunner \
     --client_type mlx \
-    --ddl_uri output/CDH_dataset/ddl_metadata_CDH_dataset_KW860T_RR.json \
-    --reference_table CDH_dataset.KW860T_RR \
+    --ddl_uri output/CDH_dataset/ddl_metadata_CDH_dataset_B_TABLE.json \
+    --reference_table CDH_dataset.B_TABLE \
     --landing_table <project>.<dataset>.sdfb_landing \
     --dlq_table <project>.<dataset>.sdfb_dlq \
     --num_rows 20 \
@@ -66,7 +66,7 @@ uv run python -m sdfb_beam.cli.run_pipeline \
 ```
 
 Three things the doc's old command got wrong (now fixed above), worth understanding:
-- `--reference_table` must be the **same table the DDL describes** (`CDH_dataset.KW860T_RR`), or the reference rows won't match the schema.
+- `--reference_table` must be the **same table the DDL describes** (`CDH_dataset.B_TABLE`), or the reference rows won't match the schema.
 - `--landing_table` / `--dlq_table` are **real BigQuery tables** (`project.dataset.table`), not local paths — `run_pipeline.py` wires them into `WriteToBigQuery(create_disposition=CREATE_NEVER)`, so they must pre-exist. There is no local-file sink; even DirectRunner writes to BQ (needs creds).
 - `--model_uri` is the **`-it`** variant (the base has no chat template).
 

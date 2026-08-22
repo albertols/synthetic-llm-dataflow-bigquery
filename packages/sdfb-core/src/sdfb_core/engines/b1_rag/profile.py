@@ -151,7 +151,7 @@ class ColumnProfile:
     shape_mix: RelaxedShapes | None = None
     # FREE_TEXT — dominant literal values (value, share-of-substantive-rows).
     # An enum-like literal hiding in a free-text column (2026-08-07 A_TABLE
-    # R1: `KW3000` at 77% share) can never come out of the pool — ADR 0023
+    # R1: `ZZ3000` at 77% share) can never come out of the pool — ADR 0023
     # rightly rejects every source value — so the head mass is re-emitted
     # at its observed frequency, like temporal sentinels. K-anonymous by
     # construction: only values above the share/count floors qualify.

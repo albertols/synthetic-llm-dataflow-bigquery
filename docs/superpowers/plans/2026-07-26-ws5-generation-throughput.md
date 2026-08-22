@@ -20,7 +20,7 @@
 - `WriteToBigQuery` uses `FILE_LOADS`, never `STREAMING_INSERTS`.
 - Validation failures route to a tagged DLQ output with full error context — never silently dropped.
 - Laptop test command: `uv run --no-sync python3 -m pytest -m "not gpu and not gcp" -q` (currently **619 passed**). Lint: `uv run --no-sync ruff check .`
-- `ACCU_LIMIT_KEY` / `COL_048` is a known special case (binary characters) and is **excluded from all acceptance measurements** — per user instruction 2026-07-26.
+- `COL_047` / `COL_048` is a known special case (binary characters) and is **excluded from all acceptance measurements** — per user instruction 2026-07-26.
 
 ## Sequencing note (read before starting)
 
@@ -1597,7 +1597,7 @@ git commit -m "docs(adr): 0020 — free-text pools as a persisted artifact (WS5)
 
 ---
 
-## Acceptance (measured, ACCU_LIMIT_KEY excluded)
+## Acceptance (measured, COL_047 excluded)
 
 | Phase | 1M baseline (2026-07-26) | Target |
 |---|---:|---:|

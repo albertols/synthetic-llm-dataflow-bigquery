@@ -28,7 +28,7 @@ _NUMERIC_CLAUSE = '{"llm_prompt_constraint": {"examples": ["20"]}}'
 def _schema() -> TableSchema:
     return TableSchema.model_validate(
         {
-            "table_info": {"table_id": "p.src.KW111T_RR"},
+            "table_info": {"table_id": "p.src.A_TABLE"},
             "schema": [
                 {"name": "HEX_KEY", "type": "STRING", "mode": "REQUIRED",
                  "description": _PATTERN},
@@ -63,10 +63,10 @@ def test_vehicles_logged_per_table_and_column(caplog):
     text = caplog.text
     assert "name=prompt_constraints_pretty" in text
     # TABLE.COL-qualified keys, one entry per constrained column.
-    assert '"KW111T_RR.HEX_KEY"' in text
-    assert '"KW111T_RR.DIRECTION"' in text
-    assert '"KW111T_RR.BRANCH"' in text
-    assert '"KW111T_RR.PLAIN"' not in text  # unconstrained: absent
+    assert '"A_TABLE.HEX_KEY"' in text
+    assert '"A_TABLE.DIRECTION"' in text
+    assert '"A_TABLE.BRANCH"' in text
+    assert '"A_TABLE.PLAIN"' not in text  # unconstrained: absent
     # The route field is finally visible.
     assert '"route": "llm"' in text
     assert '"route": "auto"' in text

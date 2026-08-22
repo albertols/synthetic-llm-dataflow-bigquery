@@ -162,7 +162,7 @@ class FreeTextHook:
     A *copy-saturated* one (``parsed > 0``, every value an observed copy)
     first tries a relaxed per-position character template
     (``build_relaxed_shapes``) to generate verified-novel in-format values
-    without the LLM — the CHANGE_USERID failure mode of the 2026-07-22 b2
+    without the LLM — the COL_052 failure mode of the 2026-07-22 b2
     E2E runs, where qwen echoed the 32 shown exemplars on all 3 attempts.
     A successful shape pool is a genuine novel pool and is cached normally.
     Only when no template applies (prose) or the template keyspace is
@@ -523,7 +523,7 @@ class FreeTextHook:
                     n=1,
                     # Walk the seed per attempt: a pinned seed repeated the
                     # exact same echo on every escalation level (2026-07-22
-                    # b2 E2E, CHANGE_USERID: 3 identical 32-echo responses),
+                    # b2 E2E, COL_052: 3 identical 32-echo responses),
                     # making the ladder's diversity partly illusory. Still
                     # P6-reproducible — derived from the same base.
                     seed=None if base_seed is None else base_seed + attempts - 1,
@@ -586,7 +586,7 @@ class FreeTextHook:
                 # deterministic on rebuild, so retrying or failing the batch
                 # buys nothing. A relaxed per-position template can still
                 # generate verified-novel in-format values without the LLM
-                # (2026-07-22 b2 E2E: CHANGE_USERID, 96/96 echoes, run
+                # (2026-07-22 b2 E2E: COL_052, 96/96 echoes, run
                 # FAILED). Parse failures (parsed=0) skip this — they are
                 # config/transport-shaped, not a property of the column.
                 shape_pool = self._shape_fallback_pool(profile, base_seed)

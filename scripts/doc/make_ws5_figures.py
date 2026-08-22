@@ -44,9 +44,9 @@ JOB_WALL = 4_050.0  # 14:04:52 -> 15:12:22
 
 POOLS_REBUILT, POOLS_CACHED = 108, 21
 PER_COLUMN = {  # freetext_pool_built totals
-    "ACCU_LIMIT_KEY": 26_107.0,
-    "CHANGE_USERID": 24_478.0,
-    "CHG_MESS_CARR_ID": 18_220.0,
+    "COL_047": 26_107.0,
+    "COL_052": 24_478.0,
+    "COL_053": 18_220.0,
 }
 WAVES = [(3.2, 1), (10.5, 8), (17.0, 24), (37.0, 8), (55.1, 3)]
 LAST_POOL_MIN = 64.2

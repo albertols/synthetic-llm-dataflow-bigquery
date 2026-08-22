@@ -2,7 +2,7 @@
 
 **Status:** ACCEPTED (2026-08-22, rev B: minimal-input scenarios, derived FK activation; **Stage 2 implemented same day** — single-job multi-table pipeline, [ADR 0030](../adr/0030-single-job-relational-generation.md)) · decision record: [ADR 0029](../adr/0029-fk-model-scenarios-and-history-mappings.md)
 **Depends on:** [ADR 0021](../adr/0021-relational-contract-in-descriptions.md) (parent-first FK) · [ADR 0028](../adr/0028-constraint-router-relational-plan.md) (P6, relational logs)
-**Reference model:** `docs/assets/fk_relationship_example.{png,tf}` — the 6-table corp model (A→F, composite PK/FK, one out-of-DDL `PARTY_KEY`). **Local-only** (gitignored via `docs/assets/fk*`): kept off the public repo by choice; the §2 mermaid below carries the same shape for readers without the files.
+**Reference model:** `docs/assets/fk_relationship_example.{png,tf}` — the 6-table corp model (A→F, composite PK/FK, one out-of-DDL `JOIN_KEY`). **Local-only** (gitignored via `docs/assets/fk*`): kept off the public repo by choice; the §2 mermaid below carries the same shape for readers without the files.
 
 Scope note: multi-table generation is M2 territory (CLAUDE.md constraint 5);
 this design opens it deliberately, on the owner's direction, staying on the
@@ -49,7 +49,7 @@ because contracts name refs by the **landing** dataset while sets list
 table name).
 
 **Informational edges** (`"informational": true` on an FK entry): the
-6-table model's A↔C relationship rides `PARTY_KEY` — a column absent
+6-table model's A↔C relationship rides `JOIN_KEY` — a column absent
 from every DDL. Declaring it as a normal FK would fail preflight P2
 (unknown column). Informational edges are drawn dashed in every diagram
 and **excluded from all enforcement**: no P2 check, no P6 requirement,
@@ -60,7 +60,7 @@ generations).
 ```mermaid
 flowchart BT
   B["🗄️ B_TABLE"] -->|"B_COL_006,007,009 → A_COL_001,002,003"| A["🗄️ A_TABLE"]
-  C["🗄️ C_TABLE"] -.->|"PARTY_KEY (informational)"| A
+  C["🗄️ C_TABLE"] -.->|"JOIN_KEY (informational)"| A
   D["🗄️ D_TABLE"] -->|"D_COL_001 → C_COL_001"| C
   E["🗄️ E_TABLE"] -->|"E_COL_001 → C_COL_001"| C
   F["🗄️ F_TABLE"] -->|"F_COL_001 → E_COL_001"| E
@@ -152,7 +152,7 @@ proven, Dataflow run evidence = the acceptance gate):
 decode key** (the whole `integration_tests/` tree is gitignored; treat
 it exactly like `real/`): first-arrival letter prefixes `A…Z, AA, AB, …`
 (dozens of unrelated future tables), columns `<PREFIX>_COL_NNN` in DDL
-order, aliases immutable once assigned, out-of-DDL fields (PARTY_KEY)
+order, aliases immutable once assigned, out-of-DDL fields (JOIN_KEY)
 listed under `retained`. `scripts/e2e/history_mappings.py` owns
 assignment (`seed-example` → A..F skeleton matching the reference model;
 `adopt` binds an alias to its real FQN; `assign` maps a DDL). The bundle

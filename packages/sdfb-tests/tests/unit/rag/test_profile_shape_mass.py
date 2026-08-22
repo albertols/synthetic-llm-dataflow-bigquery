@@ -49,9 +49,9 @@ def test_shape_mix_weights_are_row_mass_not_distinct_counts() -> None:
 def test_head_values_are_excluded_from_the_mix_input() -> None:
     # A dominant literal plus a diverse same-mask family: the family's
     # weight must not include the head's rows.
-    values = ["KW3000"] * 500 + [f"U{i:05d}" for i in range(100)]
+    values = ["ZZ3000"] * 500 + [f"U{i:05d}" for i in range(100)]
     prof = _profiles(values)
-    assert prof.head_values and prof.head_values[0][0] == "KW3000"
+    assert prof.head_values and prof.head_values[0][0] == "ZZ3000"
     assert prof.shape_mix is not None
     weights = {mask_of(shape): w for w, shape in prof.shape_mix}
     assert weights.get("A99999", 0) == 600 - 500

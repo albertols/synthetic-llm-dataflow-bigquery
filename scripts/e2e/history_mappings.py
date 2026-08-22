@@ -13,7 +13,7 @@ Naming: prefixes in first-arrival order A..Z, AA, AB, … (dozens of
 unrelated tables are expected); columns numbered in DDL order at first
 sight (``A_COL_001``), new columns appended after the existing block —
 an alias, once assigned, never changes. Non-DDL fields (the 6-table
-example's PARTY_KEY) are recorded in ``retained`` and pass through
+example's JOIN_KEY) are recorded in ``retained`` and pass through
 redaction as-is.
 
 CLI:

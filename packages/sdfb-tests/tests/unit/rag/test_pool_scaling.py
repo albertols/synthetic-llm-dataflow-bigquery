@@ -165,7 +165,7 @@ def test_pool_llm_yield_empty_yield_stops_after_full_ladder():
 
 
 def test_pool_llm_yield_stops_when_novel_yield_stagnates():
-    """2026-07-23 E2E CHANGE_USERID: 32 attempts parsed 1035 values for a
+    """2026-07-23 E2E COL_052: 32 attempts parsed 1035 values for a
     257-value pool — after the early attempts the model only re-emitted
     duplicates/echoes. Consecutive low-novelty attempts (after the ladder is
     exhausted) must end the loop, keeping whatever the early attempts won."""

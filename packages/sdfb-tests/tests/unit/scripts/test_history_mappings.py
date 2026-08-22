@@ -68,10 +68,10 @@ class TestAssign:
     def test_retained_fields_recorded_not_aliased(self):
         h = _mod.HistoryMappings()
         h.assign_table("p.d.limits", ["K"])
-        h.retain_field("p.d.limits", "PARTY_KEY")
+        h.retain_field("p.d.limits", "JOIN_KEY")
         entry = h.assign_table("p.d.limits", ["K"])
-        assert entry["retained"] == ["PARTY_KEY"]
-        assert "PARTY_KEY" not in entry["columns"]
+        assert entry["retained"] == ["JOIN_KEY"]
+        assert "JOIN_KEY" not in entry["columns"]
 
 
 class TestPersistence:

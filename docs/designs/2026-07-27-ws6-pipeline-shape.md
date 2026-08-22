@@ -259,7 +259,7 @@ re-probes on subprocess death and adopts the winner, emitting
 
 ## 6. Acceptance
 
-Measured per phase from existing milestones. `ACCU_LIMIT_KEY` excluded (known
+Measured per phase from existing milestones. `COL_047` excluded (known
 binary-char special case).
 
 | Phase | This run | WS6 target |
@@ -387,7 +387,7 @@ pre-gate behaviour becomes the fallback.
 
 **(b) Stored rows lied about the build.** `freetext_pools` rows carried
 `attempts=0`, `stagnated=false`, and `target` set to the *achieved* size
-(ACCU_LIMIT_KEY: stored "target 386" for a 512-target build that ran 8
+(COL_047: stored "target 386" for a 512-target build that ran 8
 attempts and ended undersized) — the engine never recorded any of it. The
 engine now keeps `_pool_build_info[column] = {target, attempts, stagnated}`
 (stagnated = the yield-decay break fired, a new `_PoolYield` field) and the
@@ -438,7 +438,7 @@ SDFB_MILESTONE name=generation_plan engine=b1_rag table=p.d.t columns=64
   seed_strategy=centroid top_k=8
   plan={"categorical":[...],"constant":[...],"freetext_llm_pool":[...],
         "numeric":[...],"shaped_identifier":[...],"temporal":[...]}
-  pool_sources={"NOTES":"store","CHANGE_USERID":"llm_ladder"}
+  pool_sources={"NOTES":"store","COL_052":"llm_ladder"}
 ```
 
 Labels map 1:1 onto the engine's dispatch: `constant` (literal copy),

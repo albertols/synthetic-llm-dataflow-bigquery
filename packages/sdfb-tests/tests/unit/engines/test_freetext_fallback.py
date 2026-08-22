@@ -323,7 +323,7 @@ def test_b2_low_cardinality_free_text_keeps_reference_blend(wide_ctx):
 
 # ---------------------------------------------------------------------------
 # Shape-template fallback — copy-saturated pools (2026-07-22 b2 E2E:
-# CHANGE_USERID, 96/96 prompt echoes on every escalation attempt, run FAILED
+# COL_052, 96/96 prompt echoes on every escalation attempt, run FAILED
 # with blocker_ratio=1.0). When the LLM parses values but every one is an
 # observed copy, a relaxed per-position template generates novel in-format
 # values instead of killing the batch. Parse failures (parsed=0) still raise.
@@ -331,7 +331,7 @@ def test_b2_low_cardinality_free_text_keeps_reference_blend(wide_ctx):
 
 
 class _EchoShownClient:
-    """Echoes exactly the exemplars it was built with — the CHANGE_USERID
+    """Echoes exactly the exemplars it was built with — the COL_052
     signature (prompt_echoes == parsed, novel = 0, identically every call)."""
 
     def __init__(self, shown):
@@ -348,20 +348,20 @@ def _userid_profiles():
         {
             "table_info": {"table_id": "demo.audit"},
             "schema": [
-                {"name": "change_userid", "type": "STRING", "mode": "REQUIRED"}
+                {"name": "col_052", "type": "STRING", "mode": "REQUIRED"}
             ],
             "primary_keys": None,
         }
     )
     # 60 distinct 7-char ids: unique-ratio 1.0 → FREE_TEXT, but below the
     # strict identifier-shape minimum length → the LLM pool route.
-    rows = [{"change_userid": f"USR_{i}"} for i in range(100, 160)]
+    rows = [{"col_052": f"USR_{i}"} for i in range(100, 160)]
     return profile_table(schema, rows)
 
 
 def test_b2_echo_saturated_pool_falls_back_to_shape_template(caplog):
     profiles = _userid_profiles()
-    p = profiles["change_userid"]
+    p = profiles["col_052"]
     assert p.identifier_shape is None  # would never reach the LLM otherwise
     client = _EchoShownClient(p.text_pool[:8])
     hook = FreeTextHook(client, pool_size=8, strict=True)
@@ -374,7 +374,7 @@ def test_b2_echo_saturated_pool_falls_back_to_shape_template(caplog):
     assert all(re.fullmatch(r"USR_\d{3}", v) for v in pool)  # format-preserving
     text = "\n".join(r.message for r in caplog.records)
     assert "SDFB_MILESTONE name=freetext_pool_shape_fallback" in text
-    assert "column=change_userid" in text
+    assert "column=col_052" in text
     # A genuine novel pool → cached: the next batch pays no LLM calls.
     n_calls = len(client.calls)
     assert hook._pool_for(p, cfg) == pool
@@ -385,7 +385,7 @@ def test_b2_shape_fallback_applies_in_lax_mode_over_exemplars(caplog):
     # Non-strict used to degrade to exemplar memorization; novel-by-template
     # is strictly better and must win when a template exists.
     profiles = _userid_profiles()
-    p = profiles["change_userid"]
+    p = profiles["col_052"]
     hook = FreeTextHook(_EchoShownClient(p.text_pool[:8]), pool_size=8)
     with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
         pool = hook._pool_for(p, GenerationConfig(seed=3))
@@ -472,7 +472,7 @@ def test_b1_all_copy_yield_counts_as_empty(caplog, free_text_ctx):
 # Escalating-temperature retries — an empty NOVEL yield (all verbatim copies
 # or all parse-drops) retries the pool call at higher temperatures before
 # giving up. 2026-07-16 corp run: Qwen3-4B echoed the seed exemplars verbatim
-# for BUSI_CONTR_KEY on every choice → strict kill after a 90-min setup.
+# for PK_COL on every choice → strict kill after a 90-min setup.
 # ---------------------------------------------------------------------------
 
 

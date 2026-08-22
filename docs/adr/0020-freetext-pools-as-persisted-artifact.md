@@ -16,7 +16,7 @@ Measured on the 1M-row run:
 |---|---|
 | `freetext_pool_built` | 108 (36 rebuilds × 3 columns) |
 | Total LLM service time | 68 805 s ≈ 19.1 GPU-hours |
-| Excluding `ACCU_LIMIT_KEY` (known binary-char special case) | 42 698 s over 72 rebuilds ≈ 11.9 GPU-hours |
+| Excluding `COL_047` (known binary-char special case) | 42 698 s over 72 rebuilds ≈ 11.9 GPU-hours |
 | `freetext_pool_cache_hit` | 21 of 129 attempts — **all inside one process**, t+11.8→13.8 min |
 | `dofn_setup_done` | 43 entries, 28 982 s total, max 965 s |
 | Last pool completed | **t+64 min of a 68-minute job** |

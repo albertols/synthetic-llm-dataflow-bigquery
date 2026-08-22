@@ -435,7 +435,7 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 Per arm, report novel-yield per LLM call, final pool size per column, and
 ladder attempts to target — `freetext_pool_built` carries all three.
 
-**Exclude `ACCU_LIMIT_KEY` / `COL_048` from every comparison.** It carries
+**Exclude `COL_047` / `COL_048` from every comparison.** It carries
 binary characters and is a known special case.
 
 ---

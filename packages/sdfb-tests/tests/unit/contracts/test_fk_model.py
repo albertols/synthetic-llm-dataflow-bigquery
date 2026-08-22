@@ -1,7 +1,7 @@
 """FK model graph + mermaid renderer (ADR 0029).
 
 Fixture is the 6-table example (`docs/assets/fk_relationship_example.tf`):
-B→A (composite), C→A (informational PARTY_KEY, absent from any DDL),
+B→A (composite), C→A (informational JOIN_KEY, absent from any DDL),
 D→C, E→C, F→E.
 """
 
@@ -38,9 +38,9 @@ def _six_tables():
         f"{_P}.C_TABLE": _c(
             pk=("C_COL_001",),
             fk=[ForeignKey(
-                cols=("PARTY_KEY_UNMAPPED",),
+                cols=("JOIN_KEY_UNMAPPED",),
                 ref="synthetic_data.A_TABLE",
-                ref_cols=("PARTY_KEY_UNMAPPED",),
+                ref_cols=("JOIN_KEY_UNMAPPED",),
                 informational=True,
             )],
         ),
@@ -152,7 +152,7 @@ class TestModelSha:
 class TestConnectedComponent:
     """Scenario-2 grouping (ADR 0029 rev B): 'related' includes
     informational edges — the 6-table model connects C to A only via
-    PARTY_KEY — while ORDERING still ignores them."""
+    JOIN_KEY — while ORDERING still ignores them."""
 
     def test_component_spans_informational_edges(self):
         tables, contracts = _six_tables()

@@ -68,12 +68,12 @@ RUN_B = "2026-08-20_06_28_11-7047…"  # B_TABLE R1 cold, 1M rows
 # Dominant-value share of SUBSTANTIVE (non-empty) rows:
 # (label, exact source, exact synthetic, storage-front panel estimate).
 #   COL_054 BATCH   : 112,659/208,815  vs 528,806/988,800  vs shape AAAAA 0.751
-#   COL_053 KW3000  : 112,658/210,882  vs 530,025/1,000,000 vs shape AA9999 0.746
+#   COL_053 ZZ3000  : 112,658/210,882  vs 530,025/1,000,000 vs shape AA9999 0.746
 #   COL_024 '35'    : 1,186,421/1,291,853 vs 614,777/668,140 vs shape 99 0.309
 #   COL_015 DEVOL.T : 30,936/96,815    vs 15,499/45,903     vs alpha ~0.003
 PANEL_VS_TRUTH = (
     ("COL_054 (A)\n'BATCH'", 0.5395, 0.5348, 0.7508),
-    ("COL_053 (A)\n'KW3000'", 0.5342, 0.5300, 0.7460),
+    ("COL_053 (A)\n'ZZ3000'", 0.5342, 0.5300, 0.7460),
     ("COL_024 (B)\n'35'", 0.9184, 0.9201, 0.3092),
     ("COL_015 (B)\n'DEVOLUCION T'", 0.3196, 0.3376, 0.0030),
 )

@@ -105,7 +105,7 @@ existing once-guard.
 - **Amends ADR 0028 P4** (2026-08-22 first single-job launch evidence):
   the PK capacity check is now TUPLE-product-aware and route-aware — a
   composite PK passes when any member's generator is unbounded, and a
-  non-STRING member with a cosmetic clause (KW111T_RR's numeric
-  `BRANCH_NO_MAIN`, `examples=['20']`) no longer reads as a 512-value
+  non-STRING member with a cosmetic clause (A_TABLE's numeric
+  `A_COL_002`, `examples=['20']`) no longer reads as a 512-value
   pool; enum `values` clauses contribute their domain size. The
   2026-08-21 single-capped-PK failure mode still stops identically.

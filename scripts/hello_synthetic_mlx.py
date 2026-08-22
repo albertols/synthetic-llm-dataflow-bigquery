@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="M4 MLX smoke test for synthetic-dataflow-bigquery")
     p.add_argument("--ddl_path", required=True,
-                   help="Local path to _ddl.json (e.g. output/CDH_dataset/ddl_metadata_CDH_dataset_KW860T_RR.json)")
+                   help="Local path to _ddl.json (e.g. output/CDH_dataset/ddl_metadata_CDH_dataset_B_TABLE.json)")
     p.add_argument("--reference_table", required=True,
                    help="BQ table FQN for reference SELECT, e.g. cdh_dataset.synthetic_data")
     p.add_argument("--reference_limit", type=int, default=5)

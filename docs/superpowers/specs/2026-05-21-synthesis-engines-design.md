@@ -80,7 +80,7 @@ Distribution model = **fitted statistical library = `sdgx`** (hitsz-ids, Apache-
 
 | Resource | Detail | Action |
 |---|---|---|
-| Reference table | source `SELECT` (e.g. `CDH_dataset.KW860T_RR`) | exists |
+| Reference table | source `SELECT` (e.g. `CDH_dataset.B_TABLE`) | exists |
 | Landing table | `<proj>.<ds>.sdfb_landing`, schema = source DDL, `CREATE_NEVER` | **create before run** |
 | DLQ table | `<proj>.<ds>.sdfb_dlq`, partitioned, `CREATE_NEVER` | **create before run** |
 | `synthetic_data_quality.validation_runs` | run metadata + `reference_digest` provenance (§12) | **create + wire** |

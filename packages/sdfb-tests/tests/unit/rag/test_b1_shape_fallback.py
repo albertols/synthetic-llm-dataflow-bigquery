@@ -1,6 +1,6 @@
 """B.1 parity with B.2's relaxed-shape fallback (2026-07-24 16:35 E2E).
 
-That run: CHG_MESS_CARR_ID parroted one exemplar on every escalation level
+That run: COL_053 parroted one exemplar on every escalation level
 (distinct=1, novel=0) -> FreeTextEmptyYieldError out of DoFn.setup() ->
 Dataflow silently retried the whole setup twice (~17 min of rework).
 A relaxed per-position template generates verified-novel in-format values
@@ -27,7 +27,7 @@ def _schema(col: str) -> TableSchema:
 
 # Mixed lengths defeat detect_identifier_shape (strict), no whitespace so
 # build_relaxed_shapes CAN template them -> FREE_TEXT with
-# identifier_shape=None, exactly the CHG_MESS_CARR_ID class.
+# identifier_shape=None, exactly the COL_053 class.
 _ID_VALUES = [f"USR{i:04d}X" for i in range(30)] + [f"USR{i:05d}XX" for i in range(30)]
 # Whitespace -> build_relaxed_shapes returns None (prose stays prose).
 _PROSE_VALUES = [f"support ticket about outage number {i}" for i in range(60)]

@@ -102,8 +102,8 @@ class TestFkActivationIsDerived:
 
 
 class TestP4CompositePk:
-    """The 2026-08-22 first single-job launch: KW111T_RR's 5-column
-    composite PK failed P4 because one member (BRANCH_NO_MAIN, a NUMERIC
+    """The 2026-08-22 first single-job launch: A_TABLE's 5-column
+    composite PK failed P4 because one member (A_COL_002, a NUMERIC
     branch code with a cosmetic examples-only clause) was judged ALONE
     against 1M rows. P4 must bound the TUPLE (product of factors), and a
     column whose type never routes through the capped pool contributes
@@ -128,18 +128,18 @@ class TestP4CompositePk:
             }
         )
 
-    def test_kw111t_shape_passes(self):
+    def test_a_table_shape_passes(self):
         # numeric member w/ examples-only clause + unconstrained members:
         # tuple capacity is unbounded — must NOT stop the launch.
         examples_only = (
             '{"llm_prompt_constraint": {"examples": ["20"]}}'
         )
         schema = self._schema([
-            ("BANK_ID", "INT64", ""),
-            ("BRANCH_NO_MAIN", "INT64", examples_only),
-            ("ACCOUNT_NO_1", "INT64", ""),
+            ("A_COL_001", "INT64", ""),
+            ("A_COL_002", "INT64", examples_only),
+            ("A_COL_003", "INT64", ""),
         ])
-        rows = [{"BANK_ID": i, "BRANCH_NO_MAIN": 20, "ACCOUNT_NO_1": i}
+        rows = [{"A_COL_001": i, "A_COL_002": 20, "A_COL_003": i}
                 for i in range(10)]
         preflight(schema, (), (), rows, num_rows=1_000_000)
 

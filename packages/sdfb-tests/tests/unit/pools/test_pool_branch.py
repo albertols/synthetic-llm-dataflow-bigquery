@@ -265,7 +265,7 @@ def test_a_store_write_failure_is_loud_but_never_fatal():
 def test_rows_record_the_real_build_info_not_defaults():
     """2026-07-29 postmortem, freetext_pools screenshots: every stored row
     had attempts=0 / stagnated=false, and `target` was silently set to the
-    ACHIEVED size (ACCU_LIMIT_KEY: stored target=386 for a 512-target build
+    ACHIEVED size (COL_047: stored target=386 for a 512-target build
     that ran 8 attempts and ended undersized). The engine must record per-
     column build info and the branch must persist it."""
 

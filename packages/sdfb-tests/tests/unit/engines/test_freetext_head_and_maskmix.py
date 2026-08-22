@@ -2,7 +2,7 @@
 
 Two crosscheck findings from the post-ADR-0023 cold baseline:
 
-  - COL_053/COL_054 miss their DOMINANT value entirely (`KW3000` /
+  - COL_053/COL_054 miss their DOMINANT value entirely (`ZZ3000` /
     `BATCH` at 77%+ share): an enum-like literal hiding in a free-text
     column can never come out of the pool (ADR 0023 rightly rejects all
     source values), so the head mass must be re-emitted at its observed
@@ -49,19 +49,19 @@ def _schema(name: str) -> TableSchema:
 
 class TestHeadValueProfiling:
     def test_dominant_literal_is_captured_with_its_share(self) -> None:
-        values = ["KW3000"] * 770 + [f"KW1{i:03d}" for i in range(230)]
+        values = ["ZZ3000"] * 770 + [f"KW1{i:03d}" for i in range(230)]
         rows = [{"code": v} for v in values]
         profiles = profile_columns(_schema("code"), rows)
         prof = profiles["code"]
         assert prof.kind is ColumnKind.FREE_TEXT
         assert len(prof.head_values) == 1
         value, share = prof.head_values[0]
-        assert value == "KW3000"
+        assert value == "ZZ3000"
         assert abs(share - 0.77) < 0.01
 
     def test_low_share_and_low_count_values_are_not_heads(self) -> None:
         # 3% share (30/1000) is below the 5% floor; nothing qualifies.
-        values = ["KW3000"] * 30 + [f"KW1{i:03d}" for i in range(970)]
+        values = ["ZZ3000"] * 30 + [f"KW1{i:03d}" for i in range(970)]
         rows = [{"code": v} for v in values]
         prof = profile_columns(_schema("code"), rows)["code"]
         assert prof.kind is ColumnKind.FREE_TEXT
@@ -84,8 +84,8 @@ class TestHeadValueSampling:
             nullable=True,
             null_fraction=0.2,
             empty_fraction=0.3,
-            head_values=(("KW3000", 0.5),),
-            observed_values=("KW3000", "KW1001", "KW1002"),
+            head_values=(("ZZ3000", 0.5),),
+            observed_values=("ZZ3000", "ZZ1001", "ZZ1002"),
             is_unique_valued=False,
         )
         engine = self._engine_with(prof, ["tail-1", "tail-2"])
@@ -95,8 +95,8 @@ class TestHeadValueSampling:
         assert abs(counts[None] / n - 0.2) < 0.03
         assert abs(counts[""] / n - 0.3) < 0.03
         # P(head) = (1 - null - empty) * share = 0.5 * 0.5 = 0.25
-        assert abs(counts["KW3000"] / n - 0.25) < 0.03
-        tail = n - counts[None] - counts[""] - counts["KW3000"]
+        assert abs(counts["ZZ3000"] / n - 0.25) < 0.03
+        tail = n - counts[None] - counts[""] - counts["ZZ3000"]
         assert abs(tail / n - 0.25) < 0.03
 
     def test_no_heads_means_behavior_unchanged(self) -> None:

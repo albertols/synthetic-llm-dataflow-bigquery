@@ -8,7 +8,7 @@ draw-path routing follow-up) · decision record: [ADR 0028](../adr/0028-constrai
 **Figures:** `scripts/doc/make_constraint_router_figures.py` (2 evidence)
 
 The first PK+FK run (`2026-08-21_14_54_30-1966084111444777604`, 1M rows,
-KW860T_RR) failed by construction: the declared PK is a constrained
+B_TABLE) failed by construction: the declared PK is a constrained
 free-text column, constrained columns never expand (ADR 0026), and pools
 cap at 512 — so 999 488 rows were `pk.duplicate` before a single quality
 rule ran. The same run shows the deeper pattern this design fixes:
@@ -52,7 +52,7 @@ Two findings that are *not* defects, for the record:
   as designed — not LLM example-anchoring.
 - **"COL_048" naming**: the binary column is COL_047 in this bundle's
   DDL ordering; the wave-4 bundle indexed the same physical column
-  (ACCU_LIMIT_KEY) as COL_048 — the engine comment at `engine.py:1044`
+  (COL_047) as COL_048 — the engine comment at `engine.py:1044`
   still calls it "COL_048-class". Clause↔column identity at fleet scale
   must key on `clause_sha12` (already logged by
   `prompt_constraints_found`), never on positional column ids.

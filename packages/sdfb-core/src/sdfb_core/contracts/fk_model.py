@@ -9,7 +9,7 @@ R1 lesson applies: inline copies of graph logic drift.
 
 Informational edges (``ForeignKey.informational``) shape the DIAGRAM
 but never the ORDER: they carry no enforcement, so they must not force
-a parent to generate first (the 6-table example's PARTY_KEY edge would
+a parent to generate first (the 6-table example's JOIN_KEY edge would
 otherwise serialize two independent roots).
 """
 
@@ -129,7 +129,7 @@ def connected_component(
 
     Scenario-2 grouping (ADR 0029): "related" spans ALL edges,
     informational included — the 6-table model connects C to the rest
-    only via the dashed PARTY_KEY edge, and a user launching any member
+    only via the dashed JOIN_KEY edge, and a user launching any member
     means the whole model. ORDERING still ignores informational edges
     (`build_fk_model`); this function only decides membership. Returned
     in ``tables`` order.

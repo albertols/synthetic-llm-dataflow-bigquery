@@ -104,15 +104,15 @@ class TestPatternSampler:
 
 class TestByteTemplateSampler:
     def test_prefix_and_exact_length(self):
-        s = ByteTemplateSampler(prefix="S1®±", length=12)
+        s = ByteTemplateSampler(prefix="A1®±", length=12)
         rng = random.Random(5)
         for _ in range(100):
             v = s.sample(rng)
-            assert v.startswith("S1®±")
+            assert v.startswith("A1®±")
             assert len(v) == 12
 
     def test_never_emits_forbidden_values(self):
-        s = ByteTemplateSampler(prefix="S1®±", length=12)
+        s = ByteTemplateSampler(prefix="A1®±", length=12)
         forbidden = frozenset(
             s.sample(random.Random(5)) for _ in range(10)
         )
@@ -124,7 +124,7 @@ class TestByteTemplateSampler:
     def test_tails_are_not_printable_ascii_only(self):
         # The clause: "never fall back to printable-ASCII-only". Across a
         # batch, tails must mix in bytes outside 0x20-0x7E.
-        s = ByteTemplateSampler(prefix="S1®±", length=12)
+        s = ByteTemplateSampler(prefix="A1®±", length=12)
         rng = random.Random(5)
         tails = [s.sample(rng)[4:] for _ in range(200)]
         assert any(
@@ -132,7 +132,7 @@ class TestByteTemplateSampler:
         )
 
     def test_capacity_covers_millions(self):
-        s = ByteTemplateSampler(prefix="S1®±", length=12)
+        s = ByteTemplateSampler(prefix="A1®±", length=12)
         # 8 free tail positions over a >=255-codepoint alphabet.
         assert s.capacity >= 255**8
 

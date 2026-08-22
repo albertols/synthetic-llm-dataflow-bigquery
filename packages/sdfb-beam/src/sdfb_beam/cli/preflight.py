@@ -115,7 +115,7 @@ def _pk_capacity_factor(field, pc) -> int | None:
     Unbounded: no constraint, or a non-STRING type (numeric / temporal /
     etc. keep their typed generators — a cosmetic ``examples`` clause on
     a NUMERIC branch code must not read as a 512-value pool, the
-    2026-08-22 KW111T false stop). Bounded: an enum ``values`` clause
+    2026-08-22 A_TABLE false stop). Bounded: an enum ``values`` clause
     (its domain), a samplable ``pattern`` (its language), else the
     ``FREE_TEXT_POOL_MAX`` pool cap."""
     if pc is None:

@@ -834,7 +834,7 @@ class B1RagEngine(GenerationEngine):
 
         Heads carry their observed share of SUBSTANTIVE rows, so emitting
         them before the tail draw reproduces the source frequency exactly
-        (2026-08-07 A_TABLE R1: `KW3000` at 77% share had recall 0 — the
+        (2026-08-07 A_TABLE R1: `ZZ3000` at 77% share had recall 0 — the
         pool can never contain it, ADR 0023 rejects all source values).
         """
         if not heads:
@@ -1657,7 +1657,7 @@ class B1RagEngine(GenerationEngine):
         elif len(pool) < target:
             # Top up an undersized pool from the template before
             # accepting the shortfall — the 2026-07-24 16:35 run landed
-            # CHANGE_USERID with 31 distinct values over 1000 rows
+            # COL_052 with 31 distinct values over 1000 rows
             # (diversity collapse).
             top_up = self._shape_fallback_pool(
                 prof,
