@@ -147,21 +147,22 @@ def _check_fk_activation(
     The 2026-08-21 run declared an FK and launched without
     ``--fk_parent_landing``: pools silently never loaded, zero
     ``fk.orphan`` evaluations, and '0 orphans' read as a pass."""
-    if not contract.fk:
+    enforced = tuple(fk for fk in contract.fk if not fk.informational)
+    if not enforced:
         return
     if fk_parent_landing == "skip":
         log_milestone(
             "fk_declared_skipped",
             level=logging.WARNING,
             table=table_schema.fqn,
-            fk_refs=",".join(fk.ref for fk in contract.fk),
+            fk_refs=",".join(fk.ref for fk in enforced),
             note="contract declares FK edges but --fk_parent_landing=skip "
             "was passed — FK columns generate from marginals, referential "
             "integrity UNVERIFIED this run",
         )
         return
     if not fk_parent_landing:
-        refs = sorted(fk.ref for fk in contract.fk)
+        refs = sorted(fk.ref for fk in enforced)
         raise SystemExit(
             f"[preflight P6] {table_schema.fqn}: the contract declares FK "
             f"edges to {refs} but --fk_parent_landing was not passed — the "
@@ -210,7 +211,10 @@ def preflight(
 
     # P2 — every contract column must exist in the schema.
     valid = {c.name for c in table_schema.columns}
-    fk_cols = tuple(c for fk in contract.fk for c in fk.cols)
+    # Informational edges are display-only (ADR 0029): their cols may be
+    # absent from the DDL by definition, and they never require pools.
+    enforced_fk = tuple(fk for fk in contract.fk if not fk.informational)
+    fk_cols = tuple(c for fk in enforced_fk for c in fk.cols)
     for label, cols in (
         ("pk", contract.pk),
         ("identity", contract.identity),
@@ -224,9 +228,9 @@ def preflight(
             )
 
     # P3 — FK closure, when the caller resolved parents (multi-table runs).
-    if fk_parents_resolved is not None and contract.fk:
+    if fk_parents_resolved is not None and enforced_fk:
         unresolved = sorted(
-            {fk.ref for fk in contract.fk if not fk_parents_resolved.get(fk.ref)}
+            {fk.ref for fk in enforced_fk if not fk_parents_resolved.get(fk.ref)}
         )
         if unresolved:
             raise SystemExit(

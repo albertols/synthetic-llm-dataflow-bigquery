@@ -42,8 +42,17 @@ from apache_beam.options.pipeline_options import (
 )
 from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
+from sdfb_core.contracts.fk_model import (
+    build_fk_model,
+    fk_model_mermaid,
+    model_sha12,
+)
 from sdfb_core.contracts.relational import parse_llm_prompt_constraint
-from sdfb_core.observability import log_build_info, log_milestone
+from sdfb_core.observability import (
+    log_build_info,
+    log_milestone,
+    log_milestone_text,
+)
 from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.stats import PROFILER_VERSION, profile_source_table, stats_rows
 from sdfb_core.validation import Thresholds
@@ -64,6 +73,7 @@ from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
 
 if TYPE_CHECKING:
+    from sdfb_core.contracts.relational import RelationalContract
     from sdfb_core.engines import ModelClient
 
 logger = logging.getLogger(__name__)
@@ -258,6 +268,13 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--source_stats_json", default="",
                    help="gs:// or local path for the stats JSON artifact; "
                         "empty skips it.")
+    p.add_argument("--generate_fk_relationships", default="true",
+                   help="true (default): declared FK edges are honored — "
+                        "children sample landed parent keys and P6 "
+                        "requires --fk_parent_landing. false: isolated "
+                        "generation — FK columns use marginals, logged "
+                        "loudly (fk_generation_disabled WARNING + "
+                        "fk_generation_mode=isolated). ADR 0029.")
     p.add_argument("--fk_parent_landing", default="",
                    help="project.dataset holding already-landed synthetic "
                         "parent tables (ADR 0021). With a contract that "
@@ -575,6 +592,47 @@ _TRUTHY_FLAG_VALUES = frozenset({"true", "1", "yes"})
 def parse_bool_flag(value: str) -> bool:
     """Normalize a string-valued boolean Flex-Template parameter."""
     return str(value).strip().lower() in _TRUTHY_FLAG_VALUES
+
+
+def resolve_fk_mode(
+    generate_fk_relationships: bool, fk_parent_landing: str
+) -> tuple[str, str]:
+    """``(effective fk_parent_landing, mode)`` for the run (ADR 0029).
+
+    ``--generate_fk_relationships=false`` is the user-facing isolated
+    switch: it maps onto the P6 ``skip`` semantics (marginals, loud
+    ``fk_declared_skipped`` when edges exist) so one tested enforcement
+    path serves both spellings."""
+    if not generate_fk_relationships:
+        return "skip", "isolated"
+    return fk_parent_landing, "relational"
+
+
+def log_launcher_fk_model(
+    table_fqn: str,
+    contract: RelationalContract | None,
+    mode: str,
+) -> None:
+    """One `fk_generation_mode` milestone + the resolved FK model as
+    pasteable mermaid (`fk_model_pretty`), launcher-side (ADR 0029).
+
+    A single-table launch models this table plus its declared parents
+    (external nodes); informational edges stay visible, dashed. The
+    2026-08-21 run had a declared-but-inactive FK and nothing in any log
+    said so — the mode line and the diagram close that gap."""
+    log_milestone("fk_generation_mode", table=table_fqn, mode=mode)
+    if contract is None or not contract.fk:
+        log_milestone("fk_model_absent", table=table_fqn)
+        return
+    model = build_fk_model([table_fqn], {table_fqn: contract})
+    log_milestone_text(
+        "fk_model_pretty",
+        fk_model_mermaid(model),
+        table=table_fqn,
+        model_sha12=model_sha12(model),
+        edges=len(model.edges),
+        mode=mode,
+    )
 
 
 def resolve_landing_dispositions(
@@ -913,9 +971,26 @@ def main(argv: list[str] | None = None) -> int:
         vllm_max_model_len=args.vllm_max_model_len,
     )
 
+    # ADR 0029: the flag is the single isolated/relational switch —
+    # resolve it BEFORE preflight so P6 and the FK-pool load see one
+    # authoritative fk_parent_landing value.
+    args.fk_parent_landing, fk_mode = resolve_fk_mode(
+        parse_bool_flag(args.generate_fk_relationships),
+        args.fk_parent_landing,
+    )
+    if fk_mode == "isolated":
+        log_milestone(
+            "fk_generation_disabled",
+            level=logging.WARNING,
+            table=args.reference_table,
+            note="--generate_fk_relationships=false — any declared FK "
+            "edges generate from marginals; referential integrity "
+            "UNVERIFIED this run",
+        )
     reference_rows, pf, fk_pools, source_distinct = _load_reference_and_preflight(
         args, table_schema
     )
+    log_launcher_fk_model(table_schema.fqn, pf.contract, mode=fk_mode)
 
     thresholds = resolve_thresholds(args.thresholds_uri, args.env)
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
@@ -981,10 +1056,13 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "cols": list(fk.cols),
                 "ref": fk.ref,
+                "ref_cols": list(fk.ref_cols),
+                "informational": fk.informational,
                 "parent_landing": (
                     parent_landing_fqn(fk.ref, args.fk_parent_landing)
                     if args.fk_parent_landing
                     and args.fk_parent_landing != "skip"
+                    and not fk.informational
                     else ""
                 ),
             }

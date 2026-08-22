@@ -128,10 +128,21 @@ Two hard rules, both loud by design:
 | `identity` | list of column names | per-row unique identifier generation (never pool-drawn, never folded) |
 | `fk[].cols` / `ref_cols` | non-empty, equal arity | child columns sample from the parent's **landed synthetic** keys (`io/fk_pools.py`) — referential integrity beats the child's marginal (v1) |
 | `fk[].ref` | must be `dataset.table` | resolved to `{landing_dataset}.{table}` at run time via `--fk_parent_landing` |
+| `fk[].informational` | bool, default `false` | **documentation-only edge (ADR 0029)**: drawn dashed in FK-model diagrams (`fk_model_pretty` logs, reports), excluded from ALL enforcement — no column-existence check, no `fk_parent_landing` requirement, no FK pool, no orphan rule, no generation-order constraint. For relationships whose join key is absent from the DDL (the 6-table example's `PARTY_KEY`) |
 
 > **v1 scope, on record:** single-column FKs are exact. Composite FKs load
 > aligned per-column pools but draw columns independently — joint tuple
 > draws are the M2 follow-up (`io/fk_pools.py` docstring, ROADMAP).
+
+**Relational scenarios (ADR 0029).** `--generate_fk_relationships`
+(default `true`, also a Composer param) is the switch between relational
+and isolated generation; every launch logs `fk_generation_mode` and its
+resolved model as pasteable mermaid (`fk_model_pretty`). Multi-table
+sets run parents-first in waves via `scripts/run_tableset.py`
+(`--max-parallel`, `--emit-trigger-configs` for Airflow). Worked 6-table
+example — composite FKs, an informational `PARTY_KEY` edge, letter-
+prefixed anonymization: [`docs/assets/fk_relationship_example.tf`](assets/fk_relationship_example.tf)
+(diagram: [`fk_relationship_example.png`](assets/fk_relationship_example.png)).
 
 ## 4. Column-level constraint — every settable field
 

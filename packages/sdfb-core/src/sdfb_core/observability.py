@@ -106,6 +106,20 @@ def log_milestone_pretty(
     return line
 
 
+def log_milestone_text(
+    name: str, body: str, *, level: int = logging.INFO, **fields
+) -> str:
+    """A milestone whose body is raw multi-line text (e.g. mermaid).
+
+    Same contract as :func:`log_milestone_pretty` — greppable header,
+    one Cloud Logging entry — for bodies that are not JSON: the
+    `fk_model_pretty` diagram source is pasted straight into a mermaid
+    renderer, so it must not be JSON-escaped."""
+    line = format_milestone(name, **fields)
+    _logger.log(level, line + "\n" + body)
+    return line
+
+
 # Baked into the image at build time (docker/Dockerfile GIT_COMMIT_ARG →
 # this env var); "unknown" means a build whose invocation never passed it.
 BUILD_COMMIT_ENV = "SDFB_BUILD_COMMIT"

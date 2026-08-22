@@ -324,7 +324,20 @@ default_dag_params = {
         description="project.dataset of already-landed synthetic parent "
                     "tables (ADR 0021). Set by run_tableset.py-style "
                     "multi-table triggers so child FK columns sample the "
-                    "parents' landed keys; empty = FK pools off.",
+                    "parents' landed keys. With a contract that declares "
+                    "enforced FKs this is REQUIRED (ADR 0028 P6): empty "
+                    "fails preflight; 'skip' loudly generates from "
+                    "marginals.",
+    ),
+    "generate_fk_relationships": Param(
+        default="true",
+        type="string",
+        enum=["true", "false"],
+        description="true (default): declared FK edges are honored — "
+                    "children sample landed parent keys, P6 enforced. "
+                    "false: isolated single-table generation; FK columns "
+                    "use marginals, logged loudly (fk_generation_disabled "
+                    "WARNING + fk_generation_mode=isolated). ADR 0029.",
     ),
     "pool_seed_strategy": Param(
         default="centroid",
@@ -457,6 +470,8 @@ with models.DAG(
                     "prompt_constraints": "{{ params.prompt_constraints }}",
                     "prompt_debug": "{{ params.prompt_debug }}",
                     "fk_parent_landing": "{{ params.fk_parent_landing }}",
+                    "generate_fk_relationships":
+                        "{{ params.generate_fk_relationships }}",
                     "uniqueness_mode": "{{ params.uniqueness_mode }}",
                     "pool_seed_strategy": "{{ params.pool_seed_strategy }}",
                     "reference_table": "{{ params.table_fqn }}",

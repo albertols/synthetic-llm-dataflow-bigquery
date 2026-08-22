@@ -38,6 +38,12 @@ class ForeignKey(BaseModel):
     cols: tuple[str, ...]
     ref: str
     ref_cols: tuple[str, ...]
+    # Documentation-only edge (ADR 0029): drawn dashed in FK-model
+    # diagrams but excluded from enforcement — no P2 column-existence
+    # check, no P6 activation requirement, no FK pool, no orphan rule.
+    # For relationships that exist logically but whose join key is
+    # absent from the DDL (the 6-table example's PARTY_KEY).
+    informational: bool = False
 
     @field_validator("cols", "ref_cols")
     @classmethod

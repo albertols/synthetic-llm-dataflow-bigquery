@@ -52,6 +52,8 @@ def load_fk_pools(
 
     pools: dict[str, tuple] = {}
     for fk in fks:
+        if fk.informational:  # display-only edge (ADR 0029): no pool
+            continue
         parent = parent_landing_fqn(fk.ref, landing_dataset)
         cols_sql = ", ".join(f"`{c}`" for c in fk.ref_cols)
         sql = (

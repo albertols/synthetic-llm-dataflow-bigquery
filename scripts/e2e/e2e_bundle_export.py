@@ -121,6 +121,26 @@ def _prune_inputs(paths: list[Path], base: Path) -> None:
             print(f"pruned duplicate input: {p}")
 
 
+def _resolve_history_entry(ap, args, metrics):
+    """Registry entry for this run (ADR 0029), or None (legacy naming).
+
+    Assigns/extends the table's aliases in the persistent registry and
+    saves it — the registry, not a per-job mapping.json, is the decode
+    key when this path is active."""
+    if not args.history_mappings:
+        return None
+    if not args.history_table_fqn:
+        ap.error("--history-mappings requires --history-table-fqn")
+    import history_mappings as _hm  # sibling import (path set above)
+
+    registry = _hm.HistoryMappings.load(args.history_mappings)
+    entry = registry.assign_table(
+        args.history_table_fqn, redaction.ordered_columns(metrics)
+    )
+    registry.save(args.history_mappings)
+    return entry
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -163,6 +183,23 @@ def main(argv: list[str] | None = None) -> int:
         "Use --no-redact-values to keep real dev data values in oss/.",
     )
     ap.add_argument(
+        "--history-mappings",
+        type=Path,
+        default=None,
+        help="path to the persistent alias registry (ADR 0029, "
+        "integration_tests/history_mappings_replacement.json). When given, "
+        "table/column aliases come from (and append to) the registry — one "
+        "stable name per real column across every bundle — and the per-job "
+        "mapping.json is NOT written (the registry IS the decode key). "
+        "Requires --history-table-fqn.",
+    )
+    ap.add_argument(
+        "--history-table-fqn",
+        default="",
+        help="the run's real source table FQN — the registry key used with "
+        "--history-mappings.",
+    )
+    ap.add_argument(
         "--prune-inputs",
         action="store_true",
         help="after a CLEAN leak scan, delete the --metrics/--doc input files "
@@ -183,7 +220,14 @@ def main(argv: list[str] | None = None) -> int:
     doc_texts = {label: p.read_text() for label, p in doc_paths.items()}
     report_text = args.report.read_text()
 
-    mapping = build_mapping(metrics, redact_values=args.redact_values)
+    history_entry = _resolve_history_entry(ap, args, metrics)
+
+    mapping = build_mapping(
+        metrics,
+        redact_values=args.redact_values,
+        preset_columns=history_entry["columns"] if history_entry else None,
+        preset_table_alias=history_entry["alias"] if history_entry else None,
+    )
     for text in csv_texts.values():
         _register_csv(mapping, text, redact_values=args.redact_values)
 
@@ -199,9 +243,12 @@ def main(argv: list[str] | None = None) -> int:
     for label, p in doc_paths.items():
         shutil.copyfile(p, real_dir / f"{label}.md")
     shutil.copyfile(args.report, real_dir / "report.md")
-    (real_dir / "mapping.json").write_text(
-        json.dumps(mapping.to_dict(), indent=2, ensure_ascii=False)
-    )
+    if history_entry is None:
+        # Legacy per-job decode key; with a history registry the registry
+        # itself is the (single, cross-run) decode key — ADR 0029.
+        (real_dir / "mapping.json").write_text(
+            json.dumps(mapping.to_dict(), indent=2, ensure_ascii=False)
+        )
 
     # oss/ — redacted
     for label, obj in metrics.items():

@@ -398,6 +398,33 @@ code ref; keep it tight; no dashboards / Vertex / external LLM suggestions
 
 ---
 
+## Step 5.5 — FK-model diagram (recycled, never redrawn)
+
+Every launcher/worker log now carries the run's relationship model as
+pasteable mermaid (`SDFB_MILESTONE name=fk_model_pretty … model_sha12=<sha>`
+followed by a `flowchart` block) plus the `relational_e2e` JSON entry
+(landing table, FK edges with parent-landing FQNs + pool sizes, PK,
+clauses). The report MUST show the model visually, and MUST NOT spend
+tokens re-deriving it:
+
+1. Grep the worker/launcher log for `fk_model_pretty` and note its
+   `model_sha12=<sha>`.
+2. If `integration_tests/fk_models/<sha>.mmd` exists → embed that file's
+   content VERBATIM as a ```mermaid block in report.md §0 (run under
+   test). Do not redraw, restyle, or re-label it.
+3. If it does not exist → copy the mermaid block from the log into
+   `integration_tests/fk_models/<sha>.mmd` (create the dir if needed),
+   then embed it. The next report with the same model reuses it for free.
+4. Aliases: the diagram in `oss/` must use the registry aliases
+   (`A_TABLE`…), never real table names — the worker-logged mermaid uses
+   real FQNs, so run it through the same redaction as every other doc
+   (the exporter does this for `--doc`-registered files automatically;
+   an fk_model block inside report.md is redacted with the report).
+5. `fk_generation_mode` states whether the run was `relational` or
+   `isolated` — say which in §0, and if `isolated` with declared edges,
+   flag referential integrity as UNVERIFIED (the 2026-08-21 lesson: "0
+   orphans" from an inactive FK is not a pass).
+
 ## Step 6 — Export a shareable bundle (internal `real/` + de-identified `oss/`) and prune the duplicates
 
 The report + metrics + sample CSVs contain the real project / dataset / table
@@ -418,6 +445,8 @@ python scripts/e2e/e2e_bundle_export.py \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
   --out-root integration_test \
+  --history-mappings integration_tests/history_mappings_replacement.json \
+  --history-table-fqn <REAL_SOURCE_FQN> \
   --no-redact-values \
   --prune-inputs
   # writes integration_test/<JOB_ID>/{real,oss}/ and, after a CLEAN leak
@@ -442,11 +471,20 @@ metrics (`--job-id` overrides), so everything for one deployment sits under
 `integration_test/<JOB_ID>/` next to the sample CSVs.
 
 - `real/` — verbatim `*_metrics.json` + `stats_diff.md` +
-  `freetext_crosscheck_report.md` + `report.md` **and** `mapping.json` (the
-  decode key) for internal use.
+  `freetext_crosscheck_report.md` + `report.md` for internal use. With
+  `--history-mappings` (the default workflow, ADR 0029) NO per-job
+  `mapping.json` is written: the persistent
+  `integration_tests/history_mappings_replacement.json` registry is the
+  single decode key — a real table keeps its letter prefix (`A_TABLE`,
+  `B_TABLE`, … `AA_TABLE` past Z, first-arrival order) and every column
+  its `<PREFIX>_COL_NNN` alias (DDL order) across ALL runs. The registry
+  is LOCAL-ONLY (never committed, never bundled), exactly like `real/`.
+  Legacy bundles that predate the registry keep their `mapping.json`.
 - `oss/` — the same artifacts with IDENTIFIERS (project/dataset/table/bucket/
   caller email/reference digests/file paths), COLUMN NAMES
-  (`COL_NNN`; PK→`PK_COL`, identity→`ID_COL`), and DATA VALUES (`VAL_NNNN`)
+  (registry aliases `<PREFIX>_COL_NNN` when `--history-mappings` is used —
+  stable across runs; legacy `COL_NNN`/`PK_COL`/`ID_COL` otherwise), and
+  DATA VALUES (`VAL_NNNN`)
   deterministically redacted. A generic email regex catches any caller PII even
   when the metrics captured it as `unknown`. **Dataflow job ids and job names
   are kept as-is** (never redacted) — they name the bundle folder and keep the

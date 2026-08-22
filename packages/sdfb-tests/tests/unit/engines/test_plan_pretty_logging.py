@@ -111,6 +111,19 @@ class TestPrettyEntries:
         assert caplog.text.count("name=relational_e2e") == 1
 
 
+class TestWorkerFkModelPretty:
+    def test_fk_model_pretty_renders_worker_side(self, caplog) -> None:
+        _b1_setup(caplog)
+        assert "name=fk_model_pretty" in caplog.text
+        assert "flowchart" in caplog.text
+        assert "parent_t" in caplog.text
+
+    def test_fk_model_pretty_logs_once_per_plan(self, caplog) -> None:
+        _b1_setup(caplog)
+        _b1_setup(caplog)
+        assert caplog.text.count("name=fk_model_pretty") == 1
+
+
 def test_b2_engine_emits_the_same_pretty_entries(caplog) -> None:
     engine = get_engine("b2_library")(use_sdgx=False)
     with caplog.at_level(logging.INFO, logger="sdfb.milestone"):

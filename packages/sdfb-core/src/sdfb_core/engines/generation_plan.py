@@ -14,8 +14,18 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from sdfb_core.contracts.fk_model import (
+    build_fk_model,
+    fk_model_mermaid,
+    model_sha12,
+)
+from sdfb_core.contracts.relational import ForeignKey, RelationalContract
 from sdfb_core.engines.text_shapes import shape_mix_is_identifier_like
-from sdfb_core.observability import log_milestone_pretty, sha12
+from sdfb_core.observability import (
+    log_milestone_pretty,
+    log_milestone_text,
+    sha12,
+)
 
 # The bounded-pool ceiling shared by the engines' free-text ladders and
 # the launcher's PK-capacity preflight (ADR 0028 P4): a constrained
@@ -187,6 +197,41 @@ def log_plan_pretty(
     }
     log_milestone_pretty(
         "relational_e2e", relational_payload, engine=engine, table=table
+    )
+    _log_fk_model_pretty(engine, table, edges)
+
+
+def _log_fk_model_pretty(
+    engine: str, table: str, edges: list[dict]
+) -> None:
+    """The table-local FK model as pasteable mermaid, worker-side
+    (ADR 0029): this table plus its declared parents, informational
+    edges dashed. Skipped when the run declares no edges."""
+    fks = []
+    for e in edges:
+        ref = e.get("ref", "")
+        cols = tuple(e.get("cols") or ())
+        if not ref or not cols:
+            continue
+        fks.append(
+            ForeignKey(
+                cols=cols,
+                ref=ref,
+                ref_cols=tuple(e.get("ref_cols") or cols),
+                informational=bool(e.get("informational", False)),
+            )
+        )
+    if not fks:
+        return
+    contract = RelationalContract(sdfb=1, fk=tuple(fks))
+    model = build_fk_model([table], {table: contract})
+    log_milestone_text(
+        "fk_model_pretty",
+        fk_model_mermaid(model),
+        engine=engine,
+        table=table,
+        model_sha12=model_sha12(model),
+        edges=len(model.edges),
     )
 
 

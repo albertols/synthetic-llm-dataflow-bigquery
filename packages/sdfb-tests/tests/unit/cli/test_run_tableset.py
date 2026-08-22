@@ -70,3 +70,106 @@ def test_plan_argv_fk_flag_only_for_children():
     assert "--fk_parent_landing=p.synthetic_data" in child_cmd
     assert "--landing_table=p.synthetic_data.orders" in child_cmd
     assert "--num_rows=1000" in child_cmd
+
+
+# --- ADR 0029: waves, flag semantics, trigger configs, model artifact ---
+
+_SIX = {
+    "p.ds.a_t": None,
+    "p.ds.b_t": _contract(["ds.a_t"]),
+    "p.ds.c_t": None,
+    "p.ds.d_t": _contract(["ds.c_t"]),
+}
+_SIX_TABLES = list(_SIX)
+
+
+def _config(tables=None):
+    return {
+        "tables": tables or _SIX_TABLES,
+        "landing_dataset": "p.synthetic_data",
+        "run_id": "set2",
+        "common_args": {"num_rows": "10"},
+    }
+
+
+def test_plan_waves_groups_independent_tables():
+    waves = _mod.plan_tableset_waves(_config(), _SIX)
+    level_tables = [
+        [a for cmd in level for a in cmd if a.startswith("--reference_table=")]
+        for level in waves
+    ]
+    assert level_tables[0] == [
+        "--reference_table=p.ds.a_t", "--reference_table=p.ds.c_t"
+    ]
+    assert level_tables[1] == [
+        "--reference_table=p.ds.b_t", "--reference_table=p.ds.d_t"
+    ]
+
+
+def test_plan_waves_disabled_fk_is_one_level_with_flag():
+    waves = _mod.plan_tableset_waves(
+        _config(), _SIX, generate_fk_relationships=False
+    )
+    assert len(waves) == 1 and len(waves[0]) == 4
+    for cmd in waves[0]:
+        assert "--generate_fk_relationships=false" in cmd
+        assert not any(a.startswith("--fk_parent_landing") for a in cmd)
+
+
+def test_argv_carries_fk_flag_enabled():
+    waves = _mod.plan_tableset_waves(_config(), _SIX)
+    for level in waves:
+        for cmd in level:
+            assert "--generate_fk_relationships=true" in cmd
+
+
+def test_informational_only_child_gets_no_parent_landing():
+    contracts = {
+        "p.ds.solo": parse_relational_contract(
+            '{"sdfb": 1, "fk": [{"cols": ["PK_X"], "ref": "ds.a_t", '
+            '"ref_cols": ["PK_X"], "informational": true}]}'
+        ),
+    }
+    waves = _mod.plan_tableset_waves(_config(["p.ds.solo"]), contracts)
+    (cmd,) = waves[0]
+    assert not any(a.startswith("--fk_parent_landing") for a in cmd)
+
+
+def test_emit_trigger_configs_ordered_files(tmp_path):
+    paths = _mod.emit_trigger_configs(_config(), _SIX, tmp_path)
+    names = [p.name for p in paths]
+    assert names == [
+        "00_a_t.json", "01_c_t.json", "02_b_t.json", "03_d_t.json"
+    ]
+    import json as _json
+    child = _json.loads((tmp_path / "02_b_t.json").read_text())
+    assert child["table_fqn"] == "p.ds.b_t"
+    assert child["fk_parent_landing"] == "p.synthetic_data"
+    assert child["generate_fk_relationships"] == "true"
+    assert child["num_rows"] == "10"
+    parent = _json.loads((tmp_path / "00_a_t.json").read_text())
+    assert "fk_parent_landing" not in parent
+
+
+def test_run_waves_parallel_and_abort(tmp_path):
+    import sys as _sys
+    ok = [_sys.executable, "-c",
+          f"open(r'{tmp_path}/ok', 'a').write('x')"]
+    fail = [_sys.executable, "-c", "raise SystemExit(3)"]
+    never = [_sys.executable, "-c",
+             f"open(r'{tmp_path}/never', 'w').write('x')"]
+    rc = _mod.run_waves([[ok, fail], [never]], max_parallel=2)
+    assert rc == 3
+    assert (tmp_path / "ok").exists()
+    assert not (tmp_path / "never").exists()
+
+
+def test_write_model_artifact(tmp_path):
+    from sdfb_core.contracts.fk_model import build_fk_model
+    model = build_fk_model(_SIX_TABLES, _SIX)
+    path = _mod.write_model_artifact(model, tmp_path)
+    assert path.parent == tmp_path
+    assert path.suffix == ".mmd"
+    assert path.read_text().startswith("flowchart")
+    # idempotent: same model, same file
+    assert _mod.write_model_artifact(model, tmp_path) == path

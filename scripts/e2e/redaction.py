@@ -66,6 +66,14 @@ class Mapping:
         if real and real not in self.identifiers:
             self.identifiers[real] = placeholder
 
+    def preload_columns(self, preset: dict[str, str]) -> None:
+        """Pre-register real→alias pairs from the history registry
+        (ADR 0029): a preset alias always wins over role/generic naming,
+        so a table's columns keep one name across every run."""
+        for real, alias in preset.items():
+            if real and real not in self.columns:
+                self.columns[real] = alias
+
     def add_column(self, real: str, *, role: str | None = None) -> None:
         if not real or real in self.columns:
             return
@@ -169,21 +177,44 @@ def _split_fqn(fqn: str) -> tuple[str, str, str] | None:
     return (parts[0], parts[1], parts[2]) if len(parts) == _FQN_PARTS else None
 
 
+def ordered_columns(metrics: dict[str, Any]) -> list[str]:
+    """Column names in redaction order (schema first, then offline
+    engines) — the SAME order `_collect_columns` walks, published so the
+    history registry (ADR 0029) numbers columns identically."""
+    gcp = metrics.get("gcp") or {}
+    offline = metrics.get("offline") or {}
+    bq_cols = (gcp.get("bigquery") or {}).get("columns") or {}
+    out: list[str] = list(bq_cols)
+    for eng in (offline.get("engines") or {}).values():
+        for c in eng.get("columns") or {}:
+            if c not in out:
+                out.append(c)
+    return out
+
+
 def build_mapping(
     metrics: dict[str, Any],
     *,
     redact_values: bool = True,
+    preset_columns: dict[str, str] | None = None,
+    preset_table_alias: str | None = None,
 ) -> Mapping:
-    """Derive a full redaction mapping from the collected metrics artifacts."""
+    """Derive a full redaction mapping from the collected metrics artifacts.
+
+    ``preset_columns`` / ``preset_table_alias`` come from the history
+    registry (ADR 0029): preset names win over role/generic naming so
+    the same real column redacts to the same alias in every bundle."""
     m = Mapping()
     gcp = metrics.get("gcp") or {}
     offline = metrics.get("offline") or {}
     bq = gcp.get("bigquery") or {}
 
+    if preset_columns:
+        m.preload_columns(preset_columns)
     pk_cols = set(offline.get("primary_key") or []) | set(bq.get("pk_columns") or [])
     id_cols = set(offline.get("identity_columns") or [])
 
-    _collect_identifiers(gcp, bq, m)
+    _collect_identifiers(gcp, bq, m, table_alias=preset_table_alias)
     _collect_columns(gcp, offline, pk_cols, id_cols, m)
     _collect_stats_diff_columns(metrics, m)
     if redact_values:
@@ -229,7 +260,12 @@ def _collect_stats_diff_columns(metrics: dict[str, Any], m: Mapping) -> None:
             m.add_column(col)
 
 
-def _collect_identifiers(gcp: dict[str, Any], bq: dict[str, Any], m: Mapping) -> None:
+def _collect_identifiers(
+    gcp: dict[str, Any],
+    bq: dict[str, Any],
+    m: Mapping,
+    table_alias: str | None = None,
+) -> None:
     """Project / dataset / table / bucket / caller / job / digest tokens."""
     m.add_identifier(gcp.get("project"), "PROJECT_ID")
     caller = gcp.get("caller_identity")
@@ -266,7 +302,7 @@ def _collect_identifiers(gcp: dict[str, Any], bq: dict[str, Any], m: Mapping) ->
 
     for ds, role in dataset_roles.items():
         m.add_identifier(ds, role)
-    m.add_identifier(table_name, "TARGET_TABLE")
+    m.add_identifier(table_name, table_alias or "TARGET_TABLE")
 
     # Dataflow job ids / job names are intentionally NOT redacted: they name
     # the bundle folder and must stay correlatable in the oss/ artifacts.
