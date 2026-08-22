@@ -141,8 +141,9 @@ resolved model as pasteable mermaid (`fk_model_pretty`). Multi-table
 sets run parents-first in waves via `scripts/run_tableset.py`
 (`--max-parallel`, `--emit-trigger-configs` for Airflow). Worked 6-table
 example — composite FKs, an informational `PARTY_KEY` edge, letter-
-prefixed anonymization: [`docs/assets/fk_relationship_example.tf`](assets/fk_relationship_example.tf)
-(diagram: [`fk_relationship_example.png`](assets/fk_relationship_example.png)).
+prefixed anonymization: `docs/assets/fk_relationship_example.{tf,png}`
+(**local-only**, gitignored via `docs/assets/fk*`; the equivalent shape
+is drawn in the ADR 0029 design doc §2).
 
 ## 4. Column-level constraint — every settable field
 

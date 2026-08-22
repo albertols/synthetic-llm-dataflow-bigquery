@@ -2,7 +2,7 @@
 
 **Status:** ACCEPTED (2026-08-22) — Stage 1 implemented (TDD, laptop); Stage 2 (single-job multi-table DAG) design-only · decision record: [ADR 0029](../adr/0029-fk-model-scenarios-and-history-mappings.md)
 **Depends on:** [ADR 0021](../adr/0021-relational-contract-in-descriptions.md) (parent-first FK) · [ADR 0028](../adr/0028-constraint-router-relational-plan.md) (P6, relational logs)
-**Reference model:** [`docs/assets/fk_relationship_example.png`](../assets/fk_relationship_example.png) / [`.tf`](../assets/fk_relationship_example.tf) — the 6-table corp model (A→F, composite PK/FK, one out-of-DDL `PARTY_KEY`)
+**Reference model:** `docs/assets/fk_relationship_example.{png,tf}` — the 6-table corp model (A→F, composite PK/FK, one out-of-DDL `PARTY_KEY`). **Local-only** (gitignored via `docs/assets/fk*`): kept off the public repo by choice; the §2 mermaid below carries the same shape for readers without the files.
 
 Scope note: multi-table generation is M2 territory (CLAUDE.md constraint 5);
 this design opens it deliberately, on the owner's direction, staying on the

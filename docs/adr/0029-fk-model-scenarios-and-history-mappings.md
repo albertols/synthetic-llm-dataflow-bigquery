@@ -9,7 +9,8 @@
 
 The first PK+FK run (ADR 0028 context) showed a declared FK silently
 inactive; the corp target is a 6-table relational model
-(`docs/assets/fk_relationship_example.{png,tf}`: composite PK/FKs, one
+(`docs/assets/fk_relationship_example.{png,tf}`, local-only /
+gitignored: composite PK/FKs, one
 join key absent from every DDL) plus dozens of unrelated tables to
 follow. Three gaps: (1) no user-facing switch between relational and
 isolated generation, and no log surface showing the relationship model a
