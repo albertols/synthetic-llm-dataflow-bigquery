@@ -298,7 +298,13 @@
     {
       "name": "fk_parent_landing",
       "label": "FK parent landing dataset",
-      "helpText": "project.dataset holding already-landed synthetic parent tables (ADR 0021). With a relational contract that declares FKs, child FK columns sample from the parents' landed keys. Empty/omitted = FK pools off.",
+      "helpText": "project.dataset holding already-landed synthetic parent tables (ADR 0021). With a contract that declares enforced FKs this is REQUIRED (ADR 0028 P6): empty fails preflight; 'skip' loudly generates from marginals.",
+      "isOptional": true
+    },
+    {
+      "name": "generate_fk_relationships",
+      "label": "Generate FK relationships",
+      "helpText": "true (default): declared FK edges are honored — children sample landed parent keys, P6 enforced. false: isolated generation; FK columns use marginals, logged loudly (fk_generation_disabled WARNING + fk_generation_mode=isolated). ADR 0029.",
       "isOptional": true
     }
   ]
