@@ -23,11 +23,20 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sdfb_core.contracts.description_json import DescriptionJsonError
-from sdfb_core.contracts.prompt_constraint import parse_prompt_constraint
+from sdfb_core.contracts.prompt_constraint import (
+    parse_prompt_constraint,
+    render_prompt_clause,
+)
 from sdfb_core.contracts.relational import parse_llm_prompt_constraint
+from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
 from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
-from sdfb_core.observability import log_milestone, sha12
+from sdfb_core.engines.text_shapes import is_binary_class
+from sdfb_core.observability import (
+    log_milestone,
+    log_milestone_pretty,
+    sha12,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sdfb_core.contracts import TableSchema
@@ -94,47 +103,159 @@ def _report_prompt_constraints(
         )
 
 
+# Column types that route through the (capped) free-text machinery —
+# everything else keeps its typed route and never touches a pool
+# (ADR 0024; mirrors b1_rag/profile._STRINGY_BQ_TYPES).
+_POOL_ROUTED_BQ_TYPES = frozenset({"STRING", "JSON", "GEOGRAPHY", "BYTES"})
+
+
+def _pk_capacity_factor(field, pc) -> int | None:
+    """One PK member's unique-value capacity; None = unbounded.
+
+    Unbounded: no constraint, or a non-STRING type (numeric / temporal /
+    etc. keep their typed generators — a cosmetic ``examples`` clause on
+    a NUMERIC branch code must not read as a 512-value pool, the
+    2026-08-22 KW111T false stop). Bounded: an enum ``values`` clause
+    (its domain), a samplable ``pattern`` (its language), else the
+    ``FREE_TEXT_POOL_MAX`` pool cap."""
+    if pc is None:
+        return None
+    if pc.values:
+        return len(pc.values)
+    if (
+        field.bq_type not in _POOL_ROUTED_BQ_TYPES
+        or field.is_struct
+        or field.is_repeated
+    ):
+        return None
+    if pc.pattern:
+        sampler = compile_pattern_sampler(pc.pattern, families=pc.families)
+        if sampler is not None:
+            return sampler.capacity
+    return FREE_TEXT_POOL_MAX
+
+
 def _check_pk_capacity(
     table_schema: TableSchema, effective_pk: tuple[str, ...], num_rows: int
 ) -> None:
-    """P4 (ADR 0028) — every constrained PK column's routed generator
-    must cover ``num_rows`` unique values.
+    """P4 (ADR 0028, product-aware since ADR 0030 follow-up) — the PK
+    TUPLE's generator capacity must cover ``num_rows`` unique values.
 
-    A constrained column with no samplable ``pattern`` draws from a pool
-    capped at ``FREE_TEXT_POOL_MAX``; the 2026-08-21 run declared such a
-    column as PK at 1M rows and DLQ'd 999 488 of them — 37 minutes and
-    1 586 GPU-s after a check that costs microseconds here.
-    Unconstrained PK columns keep their existing (unbounded) routes and
-    are not judged.
-    """
+    Tuple capacity is the PRODUCT of per-member factors
+    (`_pk_capacity_factor`); any unbounded member passes the whole
+    tuple. The original per-member rule falsely stopped the 2026-08-22
+    single-job launch on a 5-column composite PK whose only constrained
+    member was a numeric code — while the 2026-08-21 disaster this
+    check exists for (a single capped-pool PK at 1M rows) still stops
+    exactly as before."""
     by_name = {c.name: c for c in table_schema.columns}
+    factors: dict[str, int] = {}
+    product = 1
     for col in effective_pk:
         field = by_name.get(col)
         if field is None:
             continue
         pc = parse_prompt_constraint(field.description, column=col)
+        factor = _pk_capacity_factor(field, pc)
+        if factor is None:
+            return  # one unbounded member covers the tuple
+        factors[col] = factor
+        product *= factor
+    if factors and product < num_rows:
+        detail = ", ".join(f"{c}={f}" for c, f in factors.items())
+        raise SystemExit(
+            f"[preflight P4] {table_schema.fqn}: the declared PK tuple "
+            f"{list(effective_pk)} has a bounded generator capacity of "
+            f"{product} ({detail}) < num_rows={num_rows} — every excess "
+            f"row would be a pk.duplicate BLOCKER. Give a PK member a "
+            f"samplable 'pattern' with enough capacity, or remove the "
+            f"constraint from one member so its typed route stays "
+            f"unbounded."
+        )
+
+
+def _constraint_vehicle(prof, field) -> str:
+    """What this clause ACTUALLY drives (2026-08-22 operator ask): a
+    clause is a generation vehicle only on the free-text path — forced
+    by route:'llm' or reached by natural free-text classification.
+    Everywhere else it is prompt steering at most, and the log says so
+    instead of leaving the operator to infer it."""
+    stringy = (
+        field.bq_type in _POOL_ROUTED_BQ_TYPES
+        and not field.is_struct
+        and not field.is_repeated
+    )
+    if not stringy:
+        return (
+            f"{prof.kind.value} typed route — a clause on a non-STRING "
+            f"column is NEVER a generation vehicle "
+            f"(prompt_constraint_route_unsupported); it will not build a "
+            f"freetext pool, RAG chunks or retrieval"
+        )
+    if prof.kind.value == "free_text":
+        if prof.identifier_shape is not None:
+            return "shaped_identifier template (no LLM)"
+        if is_binary_class(prof.observed_values):
+            return (
+                "byte_template (Tier B, ADR 0028 — no LLM, never "
+                "source values)"
+            )
+        if prof.constraint_pattern and compile_pattern_sampler(
+            prof.constraint_pattern,
+            families=getattr(prof, "constraint_families", ()),
+        ):
+            return (
+                "pattern_sampler (Tier P, ADR 0028 — no LLM, "
+                "unlimited uniques)"
+            )
+        return (
+            "freetext_llm_pool (LLM pool + RAG retrieval; the clause "
+            "pins the pool prompt, ADR 0024/0026)"
+        )
+    return (
+        f"{prof.kind.value} typed route — the clause steers prompts "
+        f"ONLY on the free-text path; add route:'llm' to force this "
+        f"STRING column onto freetext_llm_pool/RAG"
+    )
+
+
+def _report_constraint_vehicles(
+    table_schema: TableSchema, reference_rows: list[dict]
+) -> None:
+    """One pretty block per table: every constrained column, keyed
+    TABLE.COL, with its clause, its declared ``route`` and the RESOLVED
+    generation vehicle (from the real profiler over the reference
+    sample) — visible at preflight, before any worker exists."""
+    if not reference_rows:
+        return
+    profiles = profile_columns(table_schema, reference_rows)
+    name = table_schema.fqn.rsplit(".", 1)[-1]
+    payload: dict[str, dict] = {}
+    for col in table_schema.columns:
+        pc = parse_prompt_constraint(col.description, column=col.name)
         if pc is None:
             continue
-        sampler = (
-            compile_pattern_sampler(pc.pattern, families=pc.families)
-            if pc.pattern
-            else None
+        prof = profiles.get(col.name)
+        if prof is None:
+            continue
+        clause = render_prompt_clause(pc)
+        payload[f"{name}.{col.name}"] = {
+            "route": pc.route,
+            "vehicle": _constraint_vehicle(prof, col),
+            "clause": clause,
+            "clause_sha12": sha12(clause),
+            "pattern": bool(pc.pattern),
+            "values": len(pc.values),
+            "examples": len(pc.examples),
+            "length": list(pc.length) if pc.length else None,
+        }
+    if payload:
+        log_milestone_pretty(
+            "prompt_constraints_pretty",
+            payload,
+            table=name,
+            count=len(payload),
         )
-        capacity = sampler.capacity if sampler is not None else FREE_TEXT_POOL_MAX
-        if capacity < num_rows:
-            vehicle = (
-                f"pattern {pc.pattern!r} (capacity {capacity:.2e})"
-                if sampler is not None
-                else f"a bounded LLM pool (cap {FREE_TEXT_POOL_MAX})"
-            )
-            raise SystemExit(
-                f"[preflight P4] {table_schema.fqn}.{col}: declared PK "
-                f"carries an llm_prompt_constraint whose generator is "
-                f"{vehicle} — it cannot produce {num_rows} unique values "
-                f"and every excess row would be a pk.duplicate BLOCKER. "
-                f"Add a samplable 'pattern' with capacity >= num_rows, or "
-                f"remove the constraint from the PK column."
-            )
 
 
 def preflight(
@@ -155,6 +276,7 @@ def preflight(
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
+    _report_constraint_vehicles(table_schema, reference_rows)
 
     # P1 — parse. A marked-but-invalid contract is a stop, not a warning.
     try:

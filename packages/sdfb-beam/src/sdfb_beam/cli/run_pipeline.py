@@ -1506,8 +1506,13 @@ def _run_relational_job(plan, args, beam_argv: list[str]) -> int:
         vllm_max_model_len=args.vllm_max_model_len,
     )
     in_set = frozenset(r.landing_table for r in plan.runs)
-    first_landing = plan.runs[0].landing_table
+    # The --ddl_uri pin describes the USER'S target table(s) — closure
+    # siblings extract live only (2026-08-22 launch: the first PLANNED
+    # table, a parent, wrongly inherited the target's pin and logged
+    # spurious ddl_pin_drift).
+    pin_owners = set(parse_landing_tables(args.landing_table))
     specs = []
+    prep_failures: list[tuple[str, str]] = []
     for run in plan.runs:
         table_args = argparse.Namespace(**vars(args))
         table_args.landing_table = run.landing_table
@@ -1516,12 +1521,28 @@ def _run_relational_job(plan, args, beam_argv: list[str]) -> int:
         table_args.fk_parent_landing = (
             args.fk_parent_landing or run.fk_parent_landing
         )
-        if run.landing_table != first_landing:
+        if run.landing_table not in pin_owners:
             table_args.ddl_uri = ""  # pin describes the target only
-        specs.append(
-            _prepare_table_spec(
-                table_args, model_client, in_set_landing=in_set
+        # Collect-then-fail (2026-08-22 launch lesson): one table's
+        # preflight stop must not HIDE the remaining tables' constraint
+        # reports and blockers — prep everything, abort once with all.
+        try:
+            specs.append(
+                _prepare_table_spec(
+                    table_args, model_client, in_set_landing=in_set
+                )
             )
+        except SystemExit as exc:
+            logger.error(
+                "prep failed for %s: %s", run.landing_table, exc
+            )
+            prep_failures.append((run.landing_table, str(exc)))
+    if prep_failures:
+        summary = "\n".join(f"- {t}: {e}" for t, e in prep_failures)
+        raise SystemExit(
+            f"{len(prep_failures)} of {len(plan.runs)} planned tables "
+            f"failed driver-side preflight — nothing was launched:\n"
+            f"{summary}"
         )
     # Patch each edge's parent_pk from the sibling spec so the composer
     # can skip the Distinct shuffle when ref tuple == parent PK.

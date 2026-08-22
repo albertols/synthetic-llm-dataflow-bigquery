@@ -99,3 +99,78 @@ class TestFkActivationIsDerived:
         assert_fk_pools_nonempty(
             contract.fk, {"CUST_ID": ("K1", "K2")}, "p.landing"
         )
+
+
+class TestP4CompositePk:
+    """The 2026-08-22 first single-job launch: KW111T_RR's 5-column
+    composite PK failed P4 because one member (BRANCH_NO_MAIN, a NUMERIC
+    branch code with a cosmetic examples-only clause) was judged ALONE
+    against 1M rows. P4 must bound the TUPLE (product of factors), and a
+    column whose type never routes through the capped pool contributes
+    unbounded capacity (ADR 0024: non-STRING keeps its typed route)."""
+
+    def _schema(self, cols):
+        return TableSchema.model_validate(
+            {
+                "table_info": {
+                    "table_id": "p.d.t",
+                    "description": (
+                        '{"sdfb": 1, "pk": '
+                        + str([c[0] for c in cols]).replace("'", '"')
+                        + "}"
+                    ),
+                },
+                "schema": [
+                    {"name": n, "type": t, "mode": "REQUIRED",
+                     "description": d}
+                    for n, t, d in cols
+                ],
+            }
+        )
+
+    def test_kw111t_shape_passes(self):
+        # numeric member w/ examples-only clause + unconstrained members:
+        # tuple capacity is unbounded — must NOT stop the launch.
+        examples_only = (
+            '{"llm_prompt_constraint": {"examples": ["20"]}}'
+        )
+        schema = self._schema([
+            ("BANK_ID", "INT64", ""),
+            ("BRANCH_NO_MAIN", "INT64", examples_only),
+            ("ACCOUNT_NO_1", "INT64", ""),
+        ])
+        rows = [{"BANK_ID": i, "BRANCH_NO_MAIN": 20, "ACCOUNT_NO_1": i}
+                for i in range(10)]
+        preflight(schema, (), (), rows, num_rows=1_000_000)
+
+    def test_all_members_capped_below_num_rows_stops(self):
+        schema = self._schema([
+            ("A", "STRING", _PROSE),
+            ("B", "STRING", _PROSE),
+        ])
+        rows = [{"A": f"a{i}", "B": f"b{i}"} for i in range(10)]
+        # 512 * 512 = 262 144 < 1M -> tuple genuinely cannot be unique.
+        with pytest.raises(SystemExit, match="preflight P4"):
+            preflight(schema, (), (), rows, num_rows=1_000_000)
+        # ...but covers 200k rows fine.
+        preflight(schema, (), (), rows, num_rows=200_000)
+
+    def test_enum_values_clause_counts_its_domain(self):
+        enum = '{"llm_prompt_constraint": {"values": ["I", "O"]}}'
+        schema = self._schema([
+            ("DIRECTION", "STRING", enum),
+            ("KEY", "STRING", _PROSE),
+        ])
+        rows = [{"DIRECTION": "I", "KEY": f"k{i}"} for i in range(10)]
+        # 2 * 512 = 1024 -> stops at 1M, passes at 1000.
+        with pytest.raises(SystemExit, match="preflight P4"):
+            preflight(schema, (), (), rows, num_rows=1_000_000)
+        preflight(schema, (), (), rows, num_rows=1_000)
+
+    def test_single_numeric_pk_with_clause_is_untouched(self):
+        examples_only = (
+            '{"llm_prompt_constraint": {"examples": ["7"]}}'
+        )
+        schema = self._schema([("ACCT", "INT64", examples_only)])
+        rows = [{"ACCT": i} for i in range(10)]
+        preflight(schema, (), (), rows, num_rows=1_000_000)

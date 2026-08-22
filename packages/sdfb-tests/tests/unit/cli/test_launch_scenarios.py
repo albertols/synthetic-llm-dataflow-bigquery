@@ -258,3 +258,56 @@ class TestMainPlansAndLoops:
         assert [r.landing_table for r in captured["plan"].runs] == [
             f"{_LAND}.A_TABLE", f"{_LAND}.B_TABLE"
         ]
+
+
+    def test_single_job_prep_collects_all_failures(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """2026-08-22 launch: table 1's P4 stop hid tables 2-4 entirely.
+        Driver-side prep must keep going, surface EVERY table's report,
+        then abort once with all blockers named."""
+        import json as _json
+        import logging as _logging
+
+        from sdfb_beam.cli import run_pipeline as rp
+
+        contracts = {
+            f"{_LAND}.A_TABLE": {"sdfb": 1, "pk": ["A_COL_001"]},
+            f"{_LAND}.B_TABLE": {
+                "sdfb": 1,
+                "fk": [{"cols": ["B_COL_006"],
+                        "ref": "synthetic_data.A_TABLE",
+                        "ref_cols": ["A_COL_001"]}],
+            },
+        }
+        cj = tmp_path / "contracts.json"
+        cj.write_text(_json.dumps(contracts))
+        prepped = []
+
+        def _fake_prep(a, client, in_set_landing=frozenset()):
+            prepped.append(a.landing_table)
+            if a.landing_table.endswith("A_TABLE"):
+                raise SystemExit("[preflight P4] boom on A")
+            raise SystemExit("[preflight P4] boom on B")
+
+        monkeypatch.setattr(rp, "_prepare_table_spec", _fake_prep)
+        monkeypatch.setattr(rp, "build_model_client", lambda *a, **k: object())
+        import pytest as _pytest
+
+        with (
+            caplog.at_level(_logging.ERROR),
+            _pytest.raises(SystemExit) as exc,
+        ):
+            rp.main([
+                "--reference_table=proj.src_ds.B_TABLE",
+                f"--landing_table={_LAND}.B_TABLE",
+                "--dlq_table=proj.q.dlq",
+                "--num_rows=10",
+                "--model_uri=gs://m/x",
+                "--run_id=r9",
+                f"--fk_contracts_json={cj}",
+            ])
+        # BOTH tables were prepped despite the first failure...
+        assert prepped == [f"{_LAND}.A_TABLE", f"{_LAND}.B_TABLE"]
+        # ...and the single abort names both blockers.
+        assert "A_TABLE" in str(exc.value) and "B_TABLE" in str(exc.value)
