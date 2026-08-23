@@ -10,7 +10,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from sdfb_beam.cli.preflight import preflight
-from sdfb_beam.io.fk_pools import load_fk_pools
+from sdfb_beam.io.fk_pools import load_fk_key_pools
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.relational import ForeignKey
 
@@ -65,6 +65,5 @@ class TestFkPoolLoader:
                 ref_cols=("JOIN_KEY_UNMAPPED",), informational=True,
             ),
         )
-        pools = load_fk_pools(fks, "p.landing", client=client)
-        assert pools == {}
+        assert load_fk_key_pools(fks, "p.landing", client=client) == []
         client.query.assert_not_called()

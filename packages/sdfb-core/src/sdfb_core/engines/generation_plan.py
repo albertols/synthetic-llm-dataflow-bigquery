@@ -190,12 +190,32 @@ def log_plan_pretty(
     edges: list[dict] = list(getattr(ctx, "fk_edges", []) or [])
     if not edges and fk_pools:
         edges = [{"cols": [c]} for c in sorted(fk_pools)]
+    # Joint key pools (ADR 0031) are the sampling truth; the per-column
+    # projection is only a fallback for a legacy single-column pool. A
+    # composite edge MUST report its key-tuple count — the first
+    # column's distinct count can be 1 for a pool of a million tuples.
+    key_pools: list[dict] = list(getattr(ctx, "fk_key_pools", []) or [])
+    tuples_by_cols = {
+        tuple(p.get("cols") or ()): len(p.get("keys") or ())
+        for p in key_pools
+    }
     fk_view = []
     for edge in edges:
-        first_col = (edge.get("cols") or [""])[0]
-        pool_size = len(fk_pools.get(first_col, ()))
+        cols = tuple(edge.get("cols") or ())
+        key_tuples = tuples_by_cols.get(cols)
+        if key_tuples is None:
+            pool_size = len(fk_pools.get(cols[0] if cols else "", ()))
+            fk_view.append(
+                {**edge, "pool_size": pool_size, "active": pool_size > 0}
+            )
+            continue
         fk_view.append(
-            {**edge, "pool_size": pool_size, "active": pool_size > 0}
+            {
+                **edge,
+                "key_tuples": key_tuples,
+                "joint": True,
+                "active": key_tuples > 0,
+            }
         )
     relational_payload = {
         "source_table": table,

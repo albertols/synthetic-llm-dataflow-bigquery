@@ -49,6 +49,7 @@ from sdfb_core.seeding import derive_batch_seed
 from sdfb_beam.dofns.localize import (
     localize_embedder,
 )
+from sdfb_beam.io.fk_pools import per_column_view
 
 # Per-process ledger of failed setup() attempts, keyed "engine:run_id".
 # Dataflow retries a failed bundle with a FRESH DoFn in the SAME process;
@@ -228,11 +229,15 @@ class GenerateRecordsDoFn(beam.DoFn):
             column.name: column.max_length for column in self.ctx.table_schema.columns
         }
 
-    def _ensure_engine(self, ctx, fk_side: dict | None = None):
+    def _ensure_engine(self, ctx, fk_side: list | None = None):
         if self._engine is not None:
             return
         if fk_side:
-            empty = sorted(c for c, vals in fk_side.items() if not vals)
+            empty = sorted(
+                ",".join(edge.get("cols") or ())
+                for edge in fk_side
+                if not edge.get("keys")
+            )
             if empty:
                 raise RuntimeError(
                     f"in-job FK side input delivered EMPTY parent key "
@@ -241,18 +246,24 @@ class GenerateRecordsDoFn(beam.DoFn):
                     f"marginals (ADR 0030)."
                 )
             ctx = ctx.model_copy(
-                update={"fk_pools": {**ctx.fk_pools, **fk_side}}
+                update={
+                    "fk_key_pools": [*ctx.fk_key_pools, *fk_side],
+                    "fk_pools": {
+                        **ctx.fk_pools,
+                        **per_column_view(list(fk_side)),
+                    },
+                }
             )
             self.ctx = ctx
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
         self._engine.setup(self.model_client, ctx)
 
-    def process(self, request, fk_side: dict | None = None):
+    def process(self, request, fk_side: list | None = None):
         with self._scope():
             yield from self._process_with_scope(request, fk_side)
 
-    def _process_with_scope(self, request, fk_side: dict | None = None):
+    def _process_with_scope(self, request, fk_side: list | None = None):
         if self._engine is None:
             self._ensure_engine(self.ctx, fk_side)
         n = int(request["n"])

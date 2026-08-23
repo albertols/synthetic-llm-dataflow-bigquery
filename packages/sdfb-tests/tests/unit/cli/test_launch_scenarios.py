@@ -241,7 +241,7 @@ class TestMainPlansAndLoops:
         captured = {}
         monkeypatch.setattr(
             rp, "_run_relational_job",
-            lambda plan, a, beam_argv: (
+            lambda plan, a, beam_argv, known_columns=None: (
                 captured.update(plan=plan) or 0
             ),
         )
@@ -284,7 +284,7 @@ class TestMainPlansAndLoops:
         cj.write_text(_json.dumps(contracts))
         prepped = []
 
-        def _fake_prep(a, client, in_set_landing=frozenset()):
+        def _fake_prep(a, client, in_set_landing=frozenset(), known_columns=None):
             prepped.append(a.landing_table)
             if a.landing_table.endswith("A_TABLE"):
                 raise SystemExit("[preflight P4] boom on A")

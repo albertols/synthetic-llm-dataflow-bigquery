@@ -133,3 +133,59 @@ def test_b2_engine_emits_the_same_pretty_entries(caplog) -> None:
         engine.setup(_StubClient(), _ctx())
     assert "name=generation_plan_pretty" in caplog.text
     assert "name=relational_e2e" in caplog.text
+
+
+class TestJointKeyPoolsInThePlan:
+    """ADR 0031 — `relational_e2e` is the point of truth for what an
+    edge is drawing from. A per-column `pool_size` misreports a
+    composite edge badly: the 2026-08-23 edge's first column is
+    CONSTANT, so it would have read `pool_size: 1` for a pool of a
+    million key tuples."""
+
+    @staticmethod
+    def _ctx_with_joint_edge():
+        schema = TableSchema.model_validate(
+            {
+                "table_info": {"table_id": "p.src.child_t"},
+                "schema": [
+                    {"name": "KEY", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "CC", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "BR", "type": "INT64", "mode": "REQUIRED"},
+                ],
+            }
+        )
+        rows = [
+            {"KEY": f"K{i:04d}", "CC": "ES", "BR": 10 + (i % 2)}
+            for i in range(40)
+        ]
+        return GenerationContext(
+            table_schema=schema,
+            reference_rows=rows,
+            reference_digest="joint-digest",
+            pipeline_run_id="joint-run",
+            pk_columns=["KEY"],
+            landing_table="p.landing.child_t",
+            fk_edges=[
+                {
+                    "cols": ["CC", "BR"],
+                    "ref": "landing.parent_t",
+                    "ref_cols": ["CC", "BR"],
+                    "parent_landing": "p.landing.parent_t",
+                }
+            ],
+            fk_key_pools=[
+                {
+                    "cols": ["CC", "BR"],
+                    # CC is constant — a per-column view reads "1".
+                    "keys": [("ES", 10), ("ES", 11), ("ES", 12)],
+                }
+            ],
+        )
+
+    def test_edge_reports_key_tuples_not_first_column_distinct(self, caplog):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(_StubClient(), self._ctx_with_joint_edge())
+        assert '"key_tuples": 3' in caplog.text
+        assert '"joint": true' in caplog.text
+        assert '"active": true' in caplog.text

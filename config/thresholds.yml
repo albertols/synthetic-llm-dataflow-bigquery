@@ -36,6 +36,16 @@ rules:
     severity: BLOCKER
     threshold: 0     # 0 duplicates on declared primary keys
 
+  fk.orphan:
+    dimension: consistency
+    severity: BLOCKER
+    threshold: 0     # 0 rows referencing a parent key that was not landed
+    # ADR 0031. The engine draws whole parent key TUPLES, so an orphan
+    # means a generator regression, not a tolerance to tune. Rows divert
+    # to the DLQ; NULL FK tuples ("no parent", SQL MATCH SIMPLE) pass.
+    # Added after the 2026-08-23 run reported PASSED with 81.8% orphans —
+    # no rule scored referential integrity at all.
+
   row.duplicate:
     dimension: uniqueness
     severity: BLOCKER

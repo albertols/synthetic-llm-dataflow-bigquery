@@ -124,6 +124,155 @@ def test_child_fk_values_come_from_parent_landed_keys(
     assert not any(900000 <= v < 900100 for v in child_fks)
 
 
+_COMPOSITE_CHILD_SCHEMA = TableSchema.model_validate(
+    {
+        "table_info": {"table_id": "p.src.orders_composite"},
+        "schema": [
+            {"name": "ORDER_ID", "type": "STRING", "mode": "REQUIRED"},
+            {"name": "CUST_ID", "type": "INT64", "mode": "REQUIRED"},
+            {"name": "CC", "type": "STRING", "mode": "REQUIRED"},
+            {"name": "AMOUNT", "type": "INT64", "mode": "REQUIRED"},
+        ],
+    }
+)
+
+
+def test_composite_fk_lands_only_key_tuples_the_parent_holds(
+    tmp_path, customers_schema, customers_reference
+):
+    """The 2026-08-23 defect, in one DirectRunner run.
+
+    `(customer_id, country)` is sparse: each landed customer_id pairs
+    with exactly ONE country, so a child drawing the two columns from
+    independent pools lands a combination the parent never held roughly
+    (1 - 1/|countries|) of the time — the shape that measured 81.8%
+    orphans in production. Joint tuple draws make it structurally
+    impossible.
+    """
+    parent_cfg = PipelineConfig(
+        table_schema=customers_schema,
+        engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        num_rows=60,
+        batch_size=30,
+        run_id="rel-parent-composite",
+        landing_table="p.land.customers",
+        log_table_prefix="customers",
+        identity_columns=("customer_id",),
+    )
+    child_reference = [
+        # Same country VALUES the parent knows, deliberately paired with
+        # customer ids it will never land: only the joint draw can fix
+        # both columns at once.
+        {
+            "ORDER_ID": f"ORD{i:05d}",
+            "CUST_ID": 900000 + i,
+            "CC": ("DE", "FR", "ES")[i % 3],
+            "AMOUNT": i * 7,
+        }
+        for i in range(40)
+    ]
+    child_cfg = PipelineConfig(
+        table_schema=_COMPOSITE_CHILD_SCHEMA,
+        engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=child_reference),
+        num_rows=120,
+        batch_size=60,
+        run_id="rel-child-composite",
+        landing_table="p.land.orders_composite",
+        log_table_prefix="orders_composite",
+    )
+    specs = [
+        TableSpec(
+            config=parent_cfg,
+            reference_rows=customers_reference,
+            landing_sink=WriteToJsonLines(str(tmp_path / "cparent")),
+            dlq_sink=WriteToJsonLines(str(tmp_path / "cdlq_parent")),
+        ),
+        TableSpec(
+            config=child_cfg,
+            reference_rows=child_reference,
+            landing_sink=WriteToJsonLines(str(tmp_path / "cchild")),
+            dlq_sink=WriteToJsonLines(str(tmp_path / "cdlq_child")),
+            parent_edges=(
+                FkEdgeSpec(
+                    child_cols=("CUST_ID", "CC"),
+                    ref_cols=("customer_id", "country"),
+                    parent_landing="p.land.customers",
+                    parent_pk=("customer_id",),
+                ),
+            ),
+        ),
+    ]
+    options = PipelineOptions(["--runner=DirectRunner"])
+    with beam.Pipeline(options=options) as p:
+        build_relational_pipeline(p, specs)
+
+    parent_rows = _read_jsonl(tmp_path / "cparent")
+    child_rows = _read_jsonl(tmp_path / "cchild")
+    assert parent_rows and child_rows
+    parent_keys = {
+        (r["customer_id"], r["country"])
+        for r in parent_rows
+        if r["country"] is not None
+    }
+    child_keys = {(r["CUST_ID"], r["CC"]) for r in child_rows}
+    orphans = child_keys - parent_keys
+    assert not orphans, f"{len(orphans)} orphan key tuples generated"
+    # …and the independent gate ran: no row was diverted, because none
+    # could be. A clean DLQ here is a MEASURED 0 orphans, not a claim.
+    assert not [
+        r
+        for r in _read_jsonl(tmp_path / "cdlq_child")
+        if r.get("rule_id") == "fk.orphan"
+    ]
+    # A NULL parent key is not referenceable (SQL never matches it), so
+    # it must never reach the child as a drawable key.
+    assert None not in {r["CC"] for r in child_rows}
+
+
+def test_fk_integrity_gate_is_wired_only_for_tables_with_edges(
+    tmp_path, customers_schema, customers_reference
+):
+    """A table with no FK edges keeps its DAG shape unchanged; a child
+    with edges gets the `fk.orphan` check between Generate and
+    ValidateRecord."""
+    from sdfb_beam.pipeline import build_pipeline
+
+    cfg = PipelineConfig(
+        table_schema=customers_schema,
+        engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        num_rows=10,
+        batch_size=10,
+        run_id="gate-shape",
+        landing_table="p.land.customers",
+        identity_columns=("customer_id",),
+    )
+    options = PipelineOptions(["--runner=DirectRunner"])
+    p = beam.Pipeline(options=options)
+    build_pipeline(
+        p,
+        reference_rows=customers_reference,
+        config=cfg,
+        landing_sink=WriteToJsonLines(str(tmp_path / "plain")),
+        dlq_sink=WriteToJsonLines(str(tmp_path / "plain_dlq")),
+        label_prefix="plain/",
+    )
+    assert not any("EnforceFkIntegrity" in lbl for lbl in p.applied_labels)
+
+    cfg.fk_key_pools = [{"cols": ["country"], "keys": [("DE",), ("FR",)]}]
+    build_pipeline(
+        p,
+        reference_rows=customers_reference,
+        config=cfg,
+        landing_sink=WriteToJsonLines(str(tmp_path / "fk")),
+        dlq_sink=WriteToJsonLines(str(tmp_path / "fk_dlq")),
+        label_prefix="fk/",
+    )
+    assert any("EnforceFkIntegrity" in lbl for lbl in p.applied_labels)
+
+
 def test_independent_tables_share_one_pipeline(
     tmp_path, customers_schema, customers_reference
 ):

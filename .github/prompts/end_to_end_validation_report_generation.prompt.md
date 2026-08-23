@@ -427,6 +427,22 @@ tokens re-deriving it:
    `isolated` — say which in §0, and if `isolated` with declared edges,
    flag referential integrity as UNVERIFIED (the 2026-08-21 lesson: "0
    orphans" from an inactive FK is not a pass).
+6. **Enforcement is a CONTRACT fact, never an inference** (ADR 0031).
+   Read `fk_enforcement_summary` (launcher) for `enforced=` /
+   `informational=` / `enforceable_but_informational=`, and
+   `fk_key_pool_bound` (worker) for the per-edge `key_tuples` +
+   `weighting`. Report exactly what those say. Do NOT explain an
+   `informational: true` edge as the engine "refusing" or "deciding"
+   anything — the flag is written by whoever authored the table
+   description, and an edge whose columns exist on both sides is
+   enforceable as declared (composite `ref_cols` need NOT be the
+   parent's full PK: the pool is `DISTINCT` over exactly those
+   columns). The 2026-08-23 report got this backwards; the fix is the
+   one-line contract edit the summary prints.
+7. Referential integrity has a rule now: `fk.orphan` (BLOCKER,
+   threshold 0). Quote its `validation_runs.dlq_by_rule` count. A run
+   with 0 enforced edges has NO orphan measurement — say "not
+   verified", never "passed".
 
 ## Step 6 — Export a shareable bundle (internal `real/` + de-identified `oss/`) and prune the duplicates
 

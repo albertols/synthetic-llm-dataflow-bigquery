@@ -61,6 +61,7 @@ from sdfb_core.engines.constraint_sampler import (
     ByteTemplateSampler,
     compile_pattern_sampler,
 )
+from sdfb_core.engines.fk_keys import bind_fk_key_pools
 from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.generation_plan import (
     build_constraints_detail as _build_constraints_detail,
@@ -241,6 +242,10 @@ class B1RagEngine(GenerationEngine):
         self._routed: dict[str, tuple[str, Any]] = {}
         self._routed_forbidden: dict[str, frozenset[str]] = {}
         self._routed_emitted: dict[str, set[str]] = {}
+        # Enforced FK edges (ADR 0031) — joint parent-key tuple pools,
+        # bound in setup(); their columns bypass the per-column samplers.
+        self._fk_key_pools: list = []
+        self._fk_columns: set[str] = set()
         self._index: ExactIPIndex | None = None
         self._embedder: Embedder | None = None
         self._ref_vectors: list[list[float]] = []
@@ -287,21 +292,11 @@ class B1RagEngine(GenerationEngine):
 
         # 3. profile columns (cheap O(N_ref) pass).
         self._profiles = profile_columns(ctx.table_schema, ctx.reference_rows)
-        # FK columns sample from the parent's landed keys (ADR 0021):
-        # override the profiled kind with a uniform categorical over
-        # exactly the parent pool — integrity beats the child marginal.
-        for fk_name, fk_values in getattr(ctx, "fk_pools", {}).items():
-            if fk_name in self._profiles and fk_values:
-                base = self._profiles[fk_name]
-                self._profiles[fk_name] = ColumnProfile(
-                    name=base.name,
-                    bq_type=base.bq_type,
-                    kind=ColumnKind.CATEGORICAL,
-                    nullable=base.nullable,
-                    null_fraction=0.0,
-                    categories={v: 1 for v in fk_values},
-                    observed_values=tuple(fk_values),
-                )
+        # FK columns take the parent's landed key TUPLES (ADR 0031) —
+        # drawn jointly at batch time, so the profile override here only
+        # keeps them OFF the free-text/LLM path and out of the per-column
+        # samplers; `_draw_fk_columns` owns their values.
+        self._bind_fk_key_pools(ctx)
         self._samplers = {
             name: ColumnSampler(prof) for name, prof in self._profiles.items()
         }
@@ -389,6 +384,32 @@ class B1RagEngine(GenerationEngine):
         self._log_generation_plan(ctx)
 
         self._ready = True
+
+    def _bind_fk_key_pools(self, ctx: GenerationContext) -> None:
+        """Enforced FK edges → joint key pools, and their columns marked.
+
+        The profile override keeps FK columns OFF the free-text/LLM path
+        and out of the per-column samplers; `_draw_fk_columns` owns their
+        values (ADR 0031).
+        """
+        self._fk_key_pools = bind_fk_key_pools(ctx)
+        self._fk_columns = {c for p in self._fk_key_pools for c in p.cols}
+        profiles = self._profiles or {}
+        for pool in self._fk_key_pools:
+            for i, name in enumerate(pool.cols):
+                base = profiles.get(name)
+                if base is None:
+                    continue
+                values = tuple(dict.fromkeys(k[i] for k in pool.keys))
+                profiles[name] = ColumnProfile(
+                    name=base.name,
+                    bq_type=base.bq_type,
+                    kind=ColumnKind.CATEGORICAL,
+                    nullable=base.nullable,
+                    null_fraction=pool.null_fraction,
+                    categories={v: 1 for v in values},
+                    observed_values=values,
+                )
 
     def _fetch_identifier_domains(self, ctx: GenerationContext) -> None:
         """Full source domains for identifier-shaped columns, via the
@@ -638,6 +659,8 @@ class B1RagEngine(GenerationEngine):
             sampler = self._samplers[name]
             if sampler.profile.kind is ColumnKind.FREE_TEXT:
                 continue  # patched separately from the LLM pool
+            if name in self._fk_columns:
+                continue  # drawn as whole parent key tuples below
             if use_numpy:
                 values = sampler.sample_numpy(rng, n, similarity)
             else:
@@ -647,6 +670,24 @@ class B1RagEngine(GenerationEngine):
                     name, sampler, rng, values, similarity, use_numpy
                 )
             out[name] = values
+        out.update(self._draw_fk_columns(n, rng, use_numpy))
+        return out
+
+    def _draw_fk_columns(
+        self, n: int, rng, use_numpy: bool
+    ) -> dict[str, list]:
+        """Enforced FK columns, drawn as whole parent key tuples.
+
+        One draw per EDGE, then transposed onto its columns — the
+        combination is what the parent holds, so the combination is what
+        the row gets (ADR 0031). A per-column draw here is exactly the
+        2026-08-23 orphan defect.
+        """
+        out: dict[str, list] = {}
+        for pool in self._fk_key_pools:
+            drawn = pool.draw(n, rng, use_numpy=use_numpy)
+            for i, col in enumerate(pool.cols):
+                out[col] = [t[i] for t in drawn]
         return out
 
     def _scrub_numeric_collisions(

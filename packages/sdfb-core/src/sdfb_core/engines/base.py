@@ -227,10 +227,14 @@ class GenerationContext(BaseModel):
     # from their observed shape mix, "all" also mutates digit runs inside
     # texty pool draws. Never adds an LLM call on any setting.
     freetext_expansion: str = "identifiers"
-    # FK columns → the parent's landed synthetic key values (ADR 0021,
-    # loaded driver-side by io/fk_pools). A column present here samples
-    # uniformly from EXACTLY these values, whatever its profiled kind —
-    # referential integrity beats the child's marginal in v1.
+    # Enforced FK edges → the parent's landed key TUPLES (ADR 0031):
+    # ``[{"cols": [...], "keys": [[v, …], …]}, …]``. The tuple is the
+    # unit of referential integrity, so it is the unit of the draw —
+    # per-column pools cannot express "this combination exists".
+    fk_key_pools: list[dict] = Field(default_factory=list)
+    # Per-column projection of the same keys (ADR 0021 shape). Kept for
+    # profiling/plan metadata and for single-column edges arriving from
+    # the legacy driver-side loader; sampling truth is fk_key_pools.
     fk_pools: dict[str, tuple] = Field(default_factory=dict)
     # Relational E2E metadata for the once-per-plan `relational_e2e`
     # worker log entry (ADR 0028 follow-up): where this run lands, and

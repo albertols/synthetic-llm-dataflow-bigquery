@@ -3,7 +3,11 @@
 from unittest.mock import MagicMock
 
 from sdfb_beam.handlers.fake_client import FakeModelClient
-from sdfb_beam.io.fk_pools import load_fk_pools, parent_landing_fqn
+from sdfb_beam.io.fk_pools import (
+    load_fk_key_pools,
+    parent_landing_fqn,
+    per_column_view,
+)
 from sdfb_core.contracts.relational import parse_relational_contract
 from sdfb_core.contracts.schema import TableSchema
 from sdfb_core.engines import GenerationConfig, GenerationContext
@@ -61,7 +65,9 @@ def test_parent_landing_fqn():
     )
 
 
-def test_load_fk_pools_composite_alignment():
+def test_load_fk_key_pools_keeps_composite_keys_joint():
+    """An already-landed parent is read as whole key TUPLES (ADR 0031) —
+    the per-column view is a derived convenience, never the draw."""
     contract = parse_relational_contract(
         '{"sdfb": 1, "fk": [{"cols": ["A", "B"], "ref": "ds.parent", '
         '"ref_cols": ["X", "Y"]}]}'
@@ -70,9 +76,11 @@ def test_load_fk_pools_composite_alignment():
     row2 = {"X": 2, "Y": "b"}
     client = MagicMock()
     client.query.return_value.result.return_value = [row1, row2]
-    pools = load_fk_pools(contract.fk, "p.synthetic_data", client=client)
-    assert pools["A"] == (1, 2)
-    assert pools["B"] == ("a", "b")
+    payloads = load_fk_key_pools(
+        contract.fk, "p.synthetic_data", client=client
+    )
+    assert payloads == [{"cols": ["A", "B"], "keys": [(1, "a"), (2, "b")]}]
+    assert per_column_view(payloads) == {"A": (1, 2), "B": ("a", "b")}
     sql = client.query.call_args[0][0]
     assert "`p.synthetic_data.parent`" in sql
     assert "SELECT DISTINCT `X`, `Y`" in sql

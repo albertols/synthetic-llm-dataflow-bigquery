@@ -128,13 +128,22 @@ Two hard rules, both loud by design:
 | `sdfb` | required int (version) | contract versioning; `1` today |
 | `pk` | list of column names | uniqueness enforcement (`--uniqueness_mode=exact`), duplicate gate in validation, `pk_analysis` in the E2E probe |
 | `identity` | list of column names | per-row unique identifier generation (never pool-drawn, never folded) |
-| `fk[].cols` / `ref_cols` | non-empty, equal arity | child columns sample from the parent's **landed synthetic** keys (`io/fk_pools.py`) — referential integrity beats the child's marginal (v1) |
+| `fk[].cols` / `ref_cols` | non-empty, equal arity | child columns take whole KEY TUPLES from the parent's **landed synthetic** rows (ADR 0031): the combination is drawn as one unit, weighted to the child's own marginals, so orphans are structurally impossible at any edge width. `ref_cols` need NOT be the parent's full PK — any projection works (the pool is `DISTINCT` over exactly those columns) |
 | `fk[].ref` | must be `dataset.table` | resolved to `{landing_dataset}.{table}` at run time — the landing dataset derives from `--landing_table` (ADR 0029 rev B; `--fk_parent_landing` is an expert override for cross-dataset parents) |
-| `fk[].informational` | bool, default `false` | **documentation-only edge (ADR 0029)**: drawn dashed in FK-model diagrams (`fk_model_pretty` logs, reports), excluded from ALL enforcement — no column-existence check, no `fk_parent_landing` requirement, no FK pool, no orphan rule, no generation-order constraint. For relationships whose join key is absent from the DDL (the 6-table example's `JOIN_KEY`) |
+| `fk[].informational` | bool, default `false` | **documentation-only edge (ADR 0029)**: drawn dashed in FK-model diagrams (`fk_model_pretty` logs, reports), excluded from ALL enforcement — no column-existence check, no `fk_parent_landing` requirement, no FK pool, no orphan rule, no generation-order constraint. Use it ONLY when the join key is absent from the DDL (the 6-table example's `JOIN_KEY`). If the columns exist on both sides, the launcher now says so: `fk_enforcement_summary` prints `ENFORCEABLE` at WARNING level and names this exact edit (ADR 0031) |
 
-> **v1 scope, on record:** single-column FKs are exact. Composite FKs load
-> aligned per-column pools but draw columns independently — joint tuple
-> draws are the M2 follow-up (`io/fk_pools.py` docstring, ROADMAP).
+> **Enforced FK edges, what you get (ADR 0031).** Every child row takes a
+> whole parent key tuple, weighted so the child's own column
+> distributions survive the restriction (IPF fit), with unseen parent
+> values kept reachable (Good–Turing floor) and NULL FK tuples preserved
+> at the child's observed rate (SQL MATCH SIMPLE: NULL = "no parent",
+> never an orphan). The `fk.orphan` BLOCKER rule then MEASURES it per
+> run. Before ADR 0031 a composite edge drew each column independently:
+> the 2026-08-23 run's 3-column edge would have orphaned ≥97% of rows.
+>
+> **One cap, announced:** a child samples at most 100,000 distinct parent
+> key tuples per edge (`fk_key_pool_capped` WARNING when a parent holds
+> more), so its FK distinct count cannot exceed that.
 
 **Relational scenarios (ADR 0029 rev B).** Two inputs describe every
 launch: `--landing_table` (one FQN or a CSV list) +

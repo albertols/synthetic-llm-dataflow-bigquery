@@ -60,3 +60,7 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0025 — Marginal fidelity by construction (B.1 inverse-CDF, positional alphabets, row-mass shapes)](0025-marginal-fidelity-by-construction.md)
 - [0026 — Measurement first, then mask integrity (crosscheck sampling, mask tail bucket, numeric source scrub; amends 0025)](0026-measurement-first-mask-integrity.md)
 - [0027 — Wave 4 verified; operational integrity (build stamp, DDL-pin drift guard, source-side k-anonymity, nudge-first scrub, head TV, binary fast-path; amends 0026)](0027-verified-wave4-operational-integrity.md)
+- [0028 — Constraint router + relational plan (Tier P/B samplers, PK capacity preflight)](0028-constraint-router-relational-plan.md)
+- [0029 — FK-model scenarios + history mappings (minimal-input launches, informational edges, alias registry)](0029-fk-model-scenarios-and-history-mappings.md)
+- [0030 — Single-job relational generation (one Dataflow job, in-DAG FK key handoff)](0030-single-job-relational-generation.md)
+- [0031 — Referential integrity by construction: joint FK key draws (IPF-fitted weights, fk.orphan gate; supersedes per-column pools)](0031-joint-fk-key-draws.md)

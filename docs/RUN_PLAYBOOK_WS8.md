@@ -145,6 +145,10 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 | `pool_taint_rebuild` (WARNING, launcher) | warm pools overlapped the live source → deleted + rebuilt clean (expected ONCE per tainted pre-ADR-0023 digest) |
 | `pool_taint_check_error` / `pool_taint_delete_error` | preflight could not verify/clear — warm pools kept, verify copy_fraction post-run |
 | `vllm_unfittable_wait` (WARNING) | VRAM transiently short — in-process re-measure instead of a bundle retry (2026-08-05 R1 cost ~80 s + a setup cycle) |
+| `fk_enforcement_summary` (launcher; **WARNING** when 0 enforced) | ADR 0031 D5: what this launch will actually enforce, per table, BEFORE the GPU spends. An `ENFORCEABLE` line = an informational edge whose columns exist on both sides; the block prints the exact contract edit |
+| `fk_key_pool_bound columns= key_tuples= weighting= null_fraction=` | ADR 0031: one per enforced edge, worker-side. `weighting=child_marginal` = the IPF fit ran (the child's marginals survive the restriction); `uniform` = no overlap between the child's sample and the parent's keys — check the edge is the one you meant |
+| `fk_key_pool_capped` (WARNING) | ADR 0031 D6: the parent holds at least the 100k side-input cap of distinct keys — the child references a uniform sample of them, so its FK distinct count cannot exceed the cap |
+| `fk.orphan` in `validation_runs.dlq_by_rule` | ADR 0031 D4: rows that referenced a non-existent parent. Non-zero = a generator regression (the draw is joint by construction) — read it as a BLOCKER, not a tolerance |
 
 ## 4. WS8 pass criteria (on top of the main playbook's §2 list)
 
@@ -172,14 +176,37 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 3. **Skip-key tiers** — after R3, the same `(table_fqn, reference_digest)`
    must hold BOTH tiers (sample from R1, exact from R3): the tier-aware
    `exists()` worked; a single-tier result means the R1 rows blocked R3.
-4. **FK integrity** (R6 child) — orphan target is zero:
+4. **FK integrity** (R6 child) — orphan target is zero. Composite edges
+   join on the WHOLE tuple (ADR 0031); NULL FK tuples are legitimately
+   parentless and excluded:
 
    ```sql
+   -- single-column edge
    SELECT COUNT(*) FROM `${PROJECT}.synthetic_data.<LANDING_B>` c
    LEFT JOIN `${PROJECT}.synthetic_data.<LANDING_A>` p
      ON c.<FK_COL> = p.<PK_COL>
    WHERE p.<PK_COL> IS NULL AND c.<FK_COL> IS NOT NULL;
+
+   -- composite edge: DISTINCT projection of the parent's ref columns
+   SELECT COUNT(*) AS orphans
+   FROM `${PROJECT}.synthetic_data.<LANDING_B>` c
+   LEFT JOIN (SELECT DISTINCT <REF_COLS>
+              FROM `${PROJECT}.synthetic_data.<LANDING_A>`) p
+     USING (<REF_COLS>)
+   WHERE p.<FIRST_REF_COL> IS NULL
+     AND c.<FIRST_FK_COL> IS NOT NULL;
    ```
+
+   **Read the launcher first, before the money is spent** (ADR 0031 D5):
+   `fk_enforcement_summary` states `N enforced · M informational` for
+   every table. `0 enforced` with an `ENFORCEABLE` line means the
+   contract still carries `"informational": true` on an edge whose
+   columns exist on both sides — fix the description and relaunch;
+   nothing downstream can produce integrity from a display-only edge.
+   Cross-check on the worker side: `fk_key_pool_bound` (one per enforced
+   edge, `weighting=child_marginal`, `key_tuples=N`) and the absence of
+   `fk.orphan` in `validation_runs.dlq_by_rule` — the in-DAG BLOCKER now
+   measures what the SQL above verifies independently.
 
 5. **B.2 marginals** (R5) — in the crosscheck/report, numeric and temporal
    columns' decile overlap vs source improves on the July uniform baseline;

@@ -43,6 +43,7 @@ from apache_beam.options.pipeline_options import (
 )
 from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
+from sdfb_core.contracts.fk_enforcement import enforcement_summary
 from sdfb_core.contracts.fk_model import (
     build_fk_model,
     connected_component,
@@ -65,7 +66,11 @@ from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
-from sdfb_beam.io.fk_pools import load_fk_pools, parent_landing_fqn
+from sdfb_beam.io.fk_pools import (
+    load_fk_key_pools,
+    parent_landing_fqn,
+    per_column_view,
+)
 from sdfb_beam.io.source_values import (
     BigQuerySourceValueStore,
     pool_source_overlap,
@@ -804,6 +809,37 @@ def log_launcher_fk_model(
     )
 
 
+def log_fk_enforcement(
+    table_fqn: str,
+    contract: RelationalContract | None,
+    known_columns: dict | None,
+    table_schema,
+) -> None:
+    """State what this launch will ENFORCE, before the GPU spends an
+    hour on it (ADR 0031).
+
+    A closure that groups tables on an informational edge costs a full
+    parent generation and buys no integrity — the 2026-08-23 run paid
+    49 minutes for exactly that, and the only trace was a WARNING about
+    zero edges after the graph was already built."""
+    columns = dict(known_columns or {})
+    columns.setdefault(
+        table_fqn, frozenset(c.name for c in table_schema.columns)
+    )
+    summary = enforcement_summary(table_fqn, contract, columns)
+    if summary is None:
+        return
+    log_milestone_text(
+        "fk_enforcement_summary",
+        summary.text,
+        level=logging.WARNING if summary.warn else logging.INFO,
+        table=table_fqn,
+        enforced=summary.enforced,
+        informational=summary.informational,
+        enforceable_but_informational=len(summary.enforceable),
+    )
+
+
 def resolve_landing_dispositions(
     write_disposition: str, create_if_not_exists: bool
 ) -> tuple[str, str]:
@@ -918,6 +954,7 @@ def _load_reference_and_preflight(
     # dataset (--fk_parent_landing stays as an expert override only).
     # An empty parent pool is a loud, actionable stop.
     fk_pools: dict = {}
+    fk_key_pools: list[dict] = []
     in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
     external_fk = tuple(
         fk
@@ -929,7 +966,8 @@ def _load_reference_and_preflight(
         parent_landing = args.fk_parent_landing or derive_fk_parent_landing(
             args.landing_table
         )
-        fk_pools = load_fk_pools(external_fk, parent_landing)
+        fk_key_pools = load_fk_key_pools(external_fk, parent_landing)
+        fk_pools = per_column_view(fk_key_pools)
         assert_fk_pools_nonempty(external_fk, fk_pools, parent_landing)
         args.fk_parent_landing = parent_landing  # ctx fk_edges read it
     elif parse_bool_flag(args.generate_fk_relationships) and any(
@@ -941,7 +979,7 @@ def _load_reference_and_preflight(
             derive_fk_parent_landing(args.landing_table)
         )
     source_distinct = _emit_source_stats(args, table_schema, reference_rows, pf)
-    return reference_rows, pf, fk_pools, source_distinct
+    return reference_rows, pf, fk_pools, fk_key_pools, source_distinct
 
 
 def _emit_source_stats(
@@ -1128,8 +1166,15 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
     return pool_store, source_value_store
 
 
-def _discover_landing_contracts(args, targets: list[str]) -> dict:
-    """Landing-dataset contracts for scenario planning (ADR 0029 rev B).
+def _discover_landing_contracts(
+    args, targets: list[str]
+) -> tuple[dict, dict[str, frozenset[str]]]:
+    """Landing-dataset contracts (+ column sets) for scenario planning.
+
+    ADR 0029 rev B for the contracts; ADR 0031 adds the column sets,
+    read from the SAME `get_table` call the description comes from, so
+    the launcher can tell an informational edge that could be enforced
+    from one whose join key is genuinely not in the DDL.
 
     Offline map via --fk_contracts_json (tests / air-gap); else a live
     scan of the landing dataset's table descriptions. A scan failure
@@ -1148,20 +1193,22 @@ def _discover_landing_contracts(args, targets: list[str]) -> dict:
                 RelationalContract.model_validate(obj) if obj else None
             )
             for fqn, obj in raw.items()
-        }
+        }, {}
     if not parse_bool_flag(args.generate_fk_relationships):
-        return {}
+        return {}, {}
     try:  # pragma: no cover - live-GCP path (M4/Dataflow)
         from google.cloud import bigquery
 
         dataset = derive_fk_parent_landing(targets[0])
         client = bigquery.Client()
         out: dict = {}
+        columns: dict[str, frozenset[str]] = {}
         for item in client.list_tables(dataset):
             fqn = f"{dataset}.{item.table_id}"
-            desc = client.get_table(item.reference).description or ""
-            out[fqn] = parse_relational_contract(desc)
-        return out
+            table = client.get_table(item.reference)
+            out[fqn] = parse_relational_contract(table.description or "")
+            columns[fqn] = frozenset(f.name for f in table.schema)
+        return out, columns
     except Exception as exc:
         log_milestone(
             "fk_discovery_unavailable",
@@ -1171,7 +1218,7 @@ def _discover_landing_contracts(args, targets: list[str]) -> dict:
             "contracts — planning the given table(s) only; the target's "
             "own contract still applies per table",
         )
-        return {}
+        return {}, {}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1190,7 +1237,7 @@ def main(argv: list[str] | None = None) -> int:
     # else derived. One milestone states the whole plan.
     targets = parse_landing_tables(args.landing_table)
     generate_fk = parse_bool_flag(args.generate_fk_relationships)
-    contracts = _discover_landing_contracts(args, targets)
+    contracts, landing_columns = _discover_landing_contracts(args, targets)
     plan = plan_launch(
         targets,
         args.reference_table,
@@ -1235,7 +1282,9 @@ def main(argv: list[str] | None = None) -> int:
         scenario=plan.scenario,
     )
     if len(plan.runs) > 1 and args.multi_table_mode == "single_job":
-        return _run_relational_job(plan, args, beam_argv)
+        return _run_relational_job(
+            plan, args, beam_argv, known_columns=dict(landing_columns)
+        )
     for i, run in enumerate(plan.runs):
         table_args = argparse.Namespace(**vars(args))
         table_args._multi_table_plan = len(plan.runs) > 1
@@ -1261,7 +1310,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _prepare_table_spec(
-    args, model_client, in_set_landing: frozenset[str] = frozenset()
+    args,
+    model_client,
+    in_set_landing: frozenset[str] = frozenset(),
+    known_columns: dict | None = None,
 ) -> TableSpec:
     """Everything one table needs, driver-side: schema, preflight, FK
     pools (EXTERNAL parents only — in-set parents arrive as in-DAG side
@@ -1288,10 +1340,19 @@ def _prepare_table_spec(
             "edges generate from marginals; referential integrity "
             "UNVERIFIED this run",
         )
-    reference_rows, pf, fk_pools, source_distinct = _load_reference_and_preflight(
+    (
+        reference_rows,
+        pf,
+        fk_pools,
+        fk_key_pools,
+        source_distinct,
+    ) = _load_reference_and_preflight(
         args, table_schema, in_set_landing=in_set_landing
     )
     log_launcher_fk_model(table_schema.fqn, pf.contract, mode=fk_mode)
+    log_fk_enforcement(
+        table_schema.fqn, pf.contract, known_columns, table_schema
+    )
 
     thresholds = resolve_thresholds(args.thresholds_uri, args.env)
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
@@ -1353,6 +1414,7 @@ def _prepare_table_spec(
         prompt_constraints=args.prompt_constraints == "on",
         prompt_debug=args.prompt_debug,
         fk_pools=fk_pools,
+        fk_key_pools=fk_key_pools,
         log_table_prefix=(
             args.landing_table.rsplit(".", 1)[-1]
             if getattr(args, "_multi_table_plan", False) or in_set_landing
@@ -1487,7 +1549,9 @@ def _run_one_table(args, beam_argv: list[str]) -> int:
     return 0
 
 
-def _run_relational_job(plan, args, beam_argv: list[str]) -> int:
+def _run_relational_job(
+    plan, args, beam_argv: list[str], known_columns: dict | None = None
+) -> int:
     """ADR 0030 — scenario 2/3 in ONE Dataflow job: every planned table's
     subgraph in one pipeline, parents-first, children fed by in-DAG
     parent-key side inputs. One worker fleet and one vLLM ignition serve
@@ -1512,6 +1576,7 @@ def _run_relational_job(plan, args, beam_argv: list[str]) -> int:
     # spurious ddl_pin_drift).
     pin_owners = set(parse_landing_tables(args.landing_table))
     specs = []
+    columns_seen: dict = dict(known_columns or {})
     prep_failures: list[tuple[str, str]] = []
     for run in plan.runs:
         table_args = argparse.Namespace(**vars(args))
@@ -1527,11 +1592,18 @@ def _run_relational_job(plan, args, beam_argv: list[str]) -> int:
         # preflight stop must not HIDE the remaining tables' constraint
         # reports and blockers — prep everything, abort once with all.
         try:
-            specs.append(
-                _prepare_table_spec(
-                    table_args, model_client, in_set_landing=in_set
-                )
+            spec = _prepare_table_spec(
+                table_args,
+                model_client,
+                in_set_landing=in_set,
+                known_columns=columns_seen,
             )
+            # Parents are prepped first, so a child's summary can see
+            # its parent's columns and judge enforceability.
+            columns_seen[spec.config.landing_table] = frozenset(
+                c.name for c in spec.config.table_schema.columns
+            )
+            specs.append(spec)
         except SystemExit as exc:
             logger.error(
                 "prep failed for %s: %s", run.landing_table, exc
