@@ -201,6 +201,14 @@ Debugging the result: run with `--prompt_debug=redacted` and grep Dataflow
 worker logs for `freetext_pool_prompt` — you see exactly the instruction +
 rendered clause the model received, seeds elided (design doc §3c).
 
+**Dataset-wide visual snapshot**: the
+[`/visual_fk_pk_ddl_contract_guide`](../.github/prompts/visual_fk_pk_ddl_contract_guide.prompt.md)
+Copilot prompt scans every table description in a landing dataset,
+resolves the full FK/PK model with the repo's own parsers, and writes a
+timestamped `integration_tests/ddl_contract_guides/<stamp>/{real,oss}/`
+guide — ASCII + mermaid diagrams, per-table contract facts, and a
+closing table of every field's description + constraint clause.
+
 ## 5. Worked example — `a_table_ddl.json` (parent)
 
 Fictitious core-banking accounts table. Every constraint style appears at
