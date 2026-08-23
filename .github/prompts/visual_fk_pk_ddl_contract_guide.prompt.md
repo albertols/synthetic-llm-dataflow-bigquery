@@ -116,10 +116,13 @@ mermaid = fk_model_mermaid(model, aliases_short)
 ```
 
 Per column, collect `route`, the rendered clause
-(`parse_llm_prompt_constraint(description, column=name)`), and the
-structured flags (`parse_prompt_constraint(...)`: `pattern`, `values`,
-`length`, `examples`) — a marked-but-unparseable JSON is a LOUD finding
-(quote the `DescriptionJsonError`), never a silent skip.
+(`parse_llm_prompt_constraint(description, column=name)`), and EVERY
+structured field of `parse_prompt_constraint(...)` — `pattern`,
+`values`, `length`, `families` (ADR 0028 Tier-P shares), `prefix`,
+`suffix`, `charset`, `units`, `locale`, `examples`, `notes` — they feed
+the closing table's `route` + `clause fields` columns. A
+marked-but-unparseable JSON is a LOUD finding (quote the
+`DescriptionJsonError`), never a silent skip.
 
 ## Step 3 — Write `real/ddl_contract_guide.md`
 
@@ -134,10 +137,11 @@ Document contract, in this order:
    - the `fk_model_mermaid` source inside a ```mermaid fence — the
      rendered picture. Do NOT redraw or restyle either.
 3. **Per-table contract facts** — one subsection per table:
-   `pk` (composite order preserved), `identity`, each FK edge as
-   `(cols) --> ref (ref_cols)` with `[informational]` where declared,
-   count of constrained columns, and a `⚠ no contract` marker for
-   tables whose description carries no `{"sdfb":1,…}` object.
+   `sdfb` contract version, `pk` (composite order preserved),
+   `identity`, each FK edge as `(cols) --> ref (ref_cols)` with
+   `[informational]` where declared, constrained-column counts split by
+   route (`N forced route=llm / M auto`), and a `⚠ no contract` marker
+   for tables whose description carries no `{"sdfb":1,…}` object.
 4. **Connected components** — list each component's tables
    (`connected_component`; informational edges count for grouping):
    this is exactly what a scenario-2 launch of any member would
@@ -145,21 +149,42 @@ Document contract, in this order:
    (e.g. legacy twins of renamed tables) — the 2026-08-22 run
    double-generated because stale contract-bearing twins stayed in the
    dataset.
-5. **Closing field table** (MANDATORY, every table, every field):
+5. **Closing field table** (MANDATORY, every table, every field —
+   identical column set in `real/` and `oss/`):
 
-   | table.field | type | description (prose) | llm_prompt_constraint |
-   |---|---|---|---|
+   | table.field | type | route | clause fields | description (prose) | llm_prompt_constraint (rendered) |
+   |---|---|---|---|---|---|
 
+   - `route` = the DECLARED routing: `llm` (forced onto the free-text
+     path) or `auto` (typed classification decides); empty when the
+     field carries no constraint. This column is mandatory — it is the
+     difference between a clause that DRIVES generation and one that
+     only steers (DDL_CONTRACT_GUIDE §4 routing).
+   - `clause fields` = the structured keys actually set, compact, in
+     this order (omit unset ones):
+     `pattern ✓ · values=N · length=X[-Y] · families=N · prefix=… ·
+     suffix=… · charset=… · units=… · locale=… · examples=N`.
+     These are the §4 metadata fields — `pattern` and `families` decide
+     Tier-P sampling (ADR 0028), `values` the enum domain, `length`
+     the pin that suppresses the derived hint.
    - `description (prose)` = the column description with the embedded
      `{"llm_prompt_constraint": …}` JSON removed (prose before/after
      the brace-balanced object, per DDL_CONTRACT_GUIDE §2).
-   - `llm_prompt_constraint` = the RENDERED clause (repo renderer) plus
-     `route=llm` when declared; empty cell when unconstrained. Escape
-     `|` inside clauses as `\|`.
+   - `llm_prompt_constraint (rendered)` = the repo-rendered clause
+     (`parse_llm_prompt_constraint`) verbatim; empty cell when
+     unconstrained. Escape `|` inside clauses as `\|`.
 
 ## Step 4 — Write `oss/ddl_contract_guide.md` via the alias registry
 
-Same document, aliased. Use the registry helper — never invent aliases:
+Same document (IDENTICAL structure and column set), aliased. The
+replacements MUST come from the persistent registry —
+`integration_tests/history_mappings_replacement.json` — and from
+nowhere else: the same real table/column maps to the SAME alias here,
+in every `e2e_bundle_export` oss/ bundle and in every validation
+report (ADR 0029 D6 — the registry is the single cross-artifact decode
+key). Reuse existing entries; `assign_table` is idempotent and only
+APPENDS unseen tables/columns (new tables continue G_TABLE, H_TABLE, …
+past the seeded block). Never invent an alias, never renumber:
 
 ```bash
 # once per real table (idempotent; appends new tables as G_TABLE, H_…):
@@ -171,8 +196,11 @@ uv run --no-sync python3 scripts/e2e/history_mappings.py assign \
 (Or load `HistoryMappings` in the same python session and call
 `assign_table(fqn, [column names in DDL order])` per table — simpler.)
 Replace every table name and every column name in the document —
-diagrams, per-table sections, and the closing field table — with the
-registry aliases. Fields recorded under `retained` pass through as-is.
+diagrams, per-table sections, the closing field table, AND inside
+rendered clause text / prose descriptions (a `notes` clause may name a
+sibling column) — with the registry aliases. Fields recorded under
+`retained` pass through as-is. `route` and the structured clause
+fields are metadata, not identifiers: they appear UNCHANGED in oss/.
 Then **leak-scan**: grep the oss/ file for every `real_fqn` and every
 real column name present in the registry; any hit = fix before
 delivering. Never write real names into `oss/`.
