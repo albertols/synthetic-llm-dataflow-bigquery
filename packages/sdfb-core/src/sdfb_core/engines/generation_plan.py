@@ -14,12 +14,6 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from sdfb_core.contracts.fk_model import (
-    build_fk_model,
-    fk_model_log_body,
-    model_sha12,
-)
-from sdfb_core.contracts.relational import ForeignKey, RelationalContract
 from sdfb_core.engines.text_shapes import shape_mix_is_identifier_like
 from sdfb_core.observability import (
     log_milestone_pretty,
@@ -228,40 +222,22 @@ def log_plan_pretty(
     log_milestone_pretty(
         "relational_e2e", relational_payload, engine=engine, table=table
     )
-    _log_fk_model_pretty(engine, table, edges)
+    _log_relationship_card(engine, table, ctx)
 
 
-def _log_fk_model_pretty(
-    engine: str, table: str, edges: list[dict]
-) -> None:
-    """The table-local FK model as pasteable mermaid, worker-side
-    (ADR 0029): this table plus its declared parents, informational
-    edges dashed. Skipped when the run declares no edges."""
-    fks = []
-    for e in edges:
-        ref = e.get("ref", "")
-        cols = tuple(e.get("cols") or ())
-        if not ref or not cols:
-            continue
-        fks.append(
-            ForeignKey(
-                cols=cols,
-                ref=ref,
-                ref_cols=tuple(e.get("ref_cols") or cols),
-                informational=bool(e.get("informational", False)),
-            )
-        )
-    if not fks:
+def _log_relationship_card(engine: str, table: str, ctx) -> None:
+    """The launcher's relationship card, echoed once per plan in the
+    WORKER log (ADR 0032).
+
+    Workers are where a run is debugged, and a card the driver rendered
+    is the same card — the model was resolved once, from
+    `config/relationships/`, and travels as text.
+    """
+    card = getattr(ctx, "relationship_card", "") or ""
+    if not card.strip():
         return
-    contract = RelationalContract(sdfb=1, fk=tuple(fks))
-    model = build_fk_model([table], {table: contract})
     log_milestone_text(
-        "fk_model_pretty",
-        fk_model_log_body(model),
-        engine=engine,
-        table=table,
-        model_sha12=model_sha12(model),
-        edges=len(model.edges),
+        "relationship_model", card, engine=engine, table=table
     )
 
 

@@ -1,6 +1,7 @@
 # ADR 0021 — Relational metadata as description-embedded JSON; parent-first multi-table
 
-**Status:** ACCEPTED (2026-08-05)
+**Status:** SUPERSEDED (2026-08-24) by [ADR 0032](0032-relationships-as-config.md) — relationships moved to `config/relationships/*.yaml`; the `{"sdfb": 1, …}` table-description contract is no longer read by anything. Kept for the rationale: why the contract ever lived in descriptions (BQ constraints are unenforced, the Terraform module exposes no PK block).
+**Was:** ACCEPTED (2026-08-05)
 **Design:** `docs/superpowers/specs/2026-08-05-relational-metadata-stats-freetext-fidelity-design.md` (local) · plan `docs/superpowers/plans/2026-08-05-relational-stats-freetext-fidelity.md`
 
 ## Context

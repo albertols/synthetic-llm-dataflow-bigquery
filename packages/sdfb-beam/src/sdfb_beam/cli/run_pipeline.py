@@ -43,14 +43,10 @@ from apache_beam.options.pipeline_options import (
 )
 from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
-from sdfb_core.contracts.fk_enforcement import enforcement_summary
-from sdfb_core.contracts.fk_model import (
-    build_fk_model,
-    connected_component,
-    fk_model_log_body,
-    model_sha12,
+from sdfb_core.contracts.prompt_constraint import parse_llm_prompt_constraint
+from sdfb_core.contracts.relationships import (
+    RelationshipRegistry,
 )
-from sdfb_core.contracts.relational import parse_llm_prompt_constraint
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
@@ -71,6 +67,7 @@ from sdfb_beam.io.fk_pools import (
     parent_landing_fqn,
     per_column_view,
 )
+from sdfb_beam.io.relationships import load_relationship_registry
 from sdfb_beam.io.source_values import (
     BigQuerySourceValueStore,
     pool_source_overlap,
@@ -87,7 +84,6 @@ from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
 
 if TYPE_CHECKING:
-    from sdfb_core.contracts.relational import RelationalContract
     from sdfb_core.engines import ModelClient
 
 logger = logging.getLogger(__name__)
@@ -307,11 +303,14 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "ignition, in-DAG FK key handoff. sequential_jobs: "
                         "one job per table, parents first (fallback / "
                         "debugging).")
-    p.add_argument("--fk_contracts_json", default="",
-                   help="offline map {landing_fqn: relational contract} "
-                        "for scenario planning (tests / air-gapped dry "
-                        "runs). Default: discovered live from the landing "
-                        "dataset's table descriptions.")
+    p.add_argument("--relationships_uri", default="config/relationships",
+                   help="Where the relational models live (ADR 0032): a "
+                        "folder or a single YAML file, local or gs://. "
+                        "Default: the config/relationships folder packaged "
+                        "in the image. Point it at gs://... to change PK/FK "
+                        "without rebuilding — this is the ONLY source of "
+                        "relational truth; table descriptions are never "
+                        "read for it.")
     p.add_argument("--validation_runs_table", default="",
                    help="BQ table for the run-level summary row "
                         "(project.dataset.table); empty skips the write")
@@ -661,9 +660,7 @@ def assert_fk_pools_nonempty(
     false '0 orphans'. Scenario 2 orders parents first automatically;
     a direct child launch must land parents first."""
     missing = sorted(
-        fk.ref
-        for fk in fks
-        if not fk.informational and not fk_pools.get(fk.cols[0])
+        fk.ref for fk in fks if not fk_pools.get(fk.cols[0])
     )
     if missing:
         raise SystemExit(
@@ -696,53 +693,57 @@ class LaunchPlan:
     warnings: tuple[str, ...] = field(default=())
 
 
-def _has_enforced_fk(contract) -> bool:
-    return contract is not None and any(
-        not fk.informational for fk in contract.fk
-    )
-
-
 def plan_launch(
     landing_tables: list[str],
     reference_table: str,
     generate_fk_relationships: bool,
-    contracts: dict,
+    registry: RelationshipRegistry,
     run_id: str,
 ) -> LaunchPlan:
-    """The launch scenarios, resolved to an ordered per-table plan
-    (ADR 0029 rev B). ``contracts`` maps every candidate LANDING-table
-    FQN in the dataset to its parsed contract (or None).
+    """The launch scenarios, resolved to an ordered per-table plan.
 
-    1. one table + false  → itself only; ignored enforced edges warned.
-    2. one table + true   → no relations: identical to 1 (seamless);
-       relations: the whole connected component (informational edges
-       count for GROUPING), parents-first — nothing else to configure.
-    3. many tables + false → each independently, given order.
-       many tables + true  → union of components, deduped, ordered.
+    Two inputs decide everything (ADR 0029 rev B, now sourced from
+    `config/relationships/` — ADR 0032): the landing table(s) and the
+    flag. The registry answers the rest.
+
+    1. one table + false  → itself only; any enforced edge is loudly
+       ignored (referential integrity UNVERIFIED for that run).
+    2. one table + true   → not in a model, or detached: identical to 1,
+       zero friction. In a model: its whole ENABLED component, ordered
+       parents-first. Disabling one table in the model file detaches it
+       and everything that reached the rest only through it.
+    3. many tables + false → each independently, in the given order —
+       concurrent isolated generation, no relationships anywhere.
+       many tables + true  → the union of their components. Rare and
+       expensive, so it says so.
     """
     warnings: list[str] = []
     if generate_fk_relationships:
-        member_set: list[str] = []
+        by_name: dict[str, str] = {}
         for target in landing_tables:
-            for t in connected_component(
-                target, list(contracts) or landing_tables, contracts
-            ):
-                if t not in member_set:
-                    member_set.append(t)
-            if target not in member_set:
-                member_set.append(target)
-        model = build_fk_model(member_set, contracts)
-        ordered = [t for level in model.levels for t in level]
-        expanded = len(ordered) > len(landing_tables)
-        relational = expanded or any(
-            _has_enforced_fk(contracts.get(t)) for t in ordered
-        )
+            dataset = derive_fk_parent_landing(target)
+            for name in registry.component(target):
+                by_name.setdefault(name, f"{dataset}.{name}")
+        ordered = [
+            by_name[name]
+            for name in registry.generation_order(tuple(by_name))
+        ]
+        expanded = [t for t in ordered if t not in landing_tables]
         if expanded:
-            extra = [t for t in ordered if t not in landing_tables]
             warnings.append(
-                f"relational closure expanded the launch to {extra} "
-                f"(declared relationships; parents generate first)"
+                f"the relational model expanded this launch to {expanded} "
+                f"(declared in config/relationships; parents generate first)"
             )
+        if len(landing_tables) > 1:
+            warnings.append(
+                f"{len(landing_tables)} targets WITH relationships: the "
+                f"launch covers {len(ordered)} tables in one job. Pass "
+                f"--generate_fk_relationships=false for independent "
+                f"concurrent generation instead."
+            )
+        relational = bool(expanded) or any(
+            registry.enforced_edges(t) for t in ordered
+        )
         scenario = (
             "relational_closure"
             if relational
@@ -750,13 +751,12 @@ def plan_launch(
         )
     else:
         ordered = list(landing_tables)
-        ignored = [
-            t for t in ordered if _has_enforced_fk(contracts.get(t))
-        ]
+        ignored = [t for t in ordered if registry.enforced_edges(t)]
         if ignored:
             warnings.append(
-                f"generate_fk_relationships=false ignores declared FK "
-                f"edges on {ignored} — referential integrity UNVERIFIED"
+                f"generate_fk_relationships=false ignores the enforced FK "
+                f"edges declared on {ignored} — referential integrity "
+                f"UNVERIFIED for this run"
             )
         scenario = "isolated" if len(ordered) == 1 else "multi_isolated"
 
@@ -770,8 +770,7 @@ def plan_launch(
             ),
             fk_parent_landing=(
                 derive_fk_parent_landing(t)
-                if generate_fk_relationships
-                and _has_enforced_fk(contracts.get(t))
+                if generate_fk_relationships and registry.enforced_edges(t)
                 else ""
             ),
         )
@@ -782,61 +781,41 @@ def plan_launch(
     )
 
 
-def log_launcher_fk_model(
+def log_relationship_model(
     table_fqn: str,
-    contract: RelationalContract | None,
+    registry: RelationshipRegistry,
     mode: str,
 ) -> None:
-    """One `fk_generation_mode` milestone + the resolved FK model as
-    pasteable mermaid (`fk_model_pretty`), launcher-side (ADR 0029).
+    """The run's relational truth, in one glanceable log entry.
 
-    A single-table launch models this table plus its declared parents
-    (external nodes); informational edges stay visible, dashed. The
-    2026-08-21 run had a declared-but-inactive FK and nothing in any log
-    said so — the mode line and the diagram close that gap."""
+    `relationship_model` carries the card (tables, PK, identity, every
+    edge with enforced/documented/disabled state, generation waves, and
+    the file it came from) plus the fenced mermaid source below it for
+    report tooling. `fk_generation_mode` stays as the one-line greppable
+    state. Nothing here is inferred: it is the model file, rendered.
+    """
     log_milestone("fk_generation_mode", table=table_fqn, mode=mode)
-    if contract is None or not contract.fk:
-        log_milestone("fk_model_absent", table=table_fqn)
-        return
-    model = build_fk_model([table_fqn], {table_fqn: contract})
+    relations = registry.relations(table_fqn)
+    enforced = len(registry.enforced_edges(table_fqn))
+    documented = sum(
+        1 for e in (relations.fk if relations else ()) if not e.enforced
+    )
     log_milestone_text(
-        "fk_model_pretty",
-        fk_model_log_body(model),
+        "relationship_model",
+        registry.log_body(table_fqn),
+        level=(
+            logging.WARNING
+            if mode == "relational" and relations is not None and not enforced
+            and documented
+            else logging.INFO
+        ),
         table=table_fqn,
-        model_sha12=model_sha12(model),
-        edges=len(model.edges),
+        model=getattr(registry.model_for(table_fqn), "model", "none"),
+        enforced=enforced,
+        documented=documented,
+        enabled=registry.enabled(table_fqn),
+        sha=registry.sha12(),
         mode=mode,
-    )
-
-
-def log_fk_enforcement(
-    table_fqn: str,
-    contract: RelationalContract | None,
-    known_columns: dict | None,
-    table_schema,
-) -> None:
-    """State what this launch will ENFORCE, before the GPU spends an
-    hour on it (ADR 0031).
-
-    A closure that groups tables on an informational edge costs a full
-    parent generation and buys no integrity — the 2026-08-23 run paid
-    49 minutes for exactly that, and the only trace was a WARNING about
-    zero edges after the graph was already built."""
-    columns = dict(known_columns or {})
-    columns.setdefault(
-        table_fqn, frozenset(c.name for c in table_schema.columns)
-    )
-    summary = enforcement_summary(table_fqn, contract, columns)
-    if summary is None:
-        return
-    log_milestone_text(
-        "fk_enforcement_summary",
-        summary.text,
-        level=logging.WARNING if summary.warn else logging.INFO,
-        table=table_fqn,
-        enforced=summary.enforced,
-        informational=summary.informational,
-        enforceable_but_informational=len(summary.enforceable),
     )
 
 
@@ -925,12 +904,16 @@ def configure_pipeline_options(
 
 
 def _load_reference_and_preflight(
-    args, table_schema, in_set_landing: frozenset[str] = frozenset()
+    args,
+    table_schema,
+    registry: RelationshipRegistry,
+    in_set_landing: frozenset[str] = frozenset(),
 ):
-    """Eager reference read + relational preflight (ADR 0021): parse and
-    validate the description contract, default pk/identity from it
-    (explicit CLI wins), fail fast on unknown columns — all driver-side,
-    before any graph exists."""
+    """Eager reference read + relational preflight (ADR 0032): the
+    table's relations come from `config/relationships/`, pk/identity
+    default from them (CLI fills the gaps for tables no model declares),
+    and unknown columns fail fast — all driver-side, before any graph
+    exists."""
     logger.info("Loading reference rows from %s (limit=%d)",
                 args.reference_table, args.reference_rows_limit)
     reference_rows = load_reference_rows(
@@ -942,6 +925,7 @@ def _load_reference_and_preflight(
         tuple(c.strip() for c in args.pk_cols.split(",") if c.strip()),
         tuple(c.strip() for c in args.identity_cols.split(",") if c.strip()),
         reference_rows,
+        relations=registry.relations(args.landing_table),
         prompt_constraints_enabled=args.prompt_constraints == "on",
         # ADR 0028 P4: refuse a PK whose routed generator cannot cover
         # num_rows — before any graph exists.
@@ -956,11 +940,11 @@ def _load_reference_and_preflight(
     fk_pools: dict = {}
     fk_key_pools: list[dict] = []
     in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
+    enforced_fk = registry.enforced_edges(args.landing_table)
     external_fk = tuple(
         fk
-        for fk in (pf.contract.fk if pf.contract else ())
-        if not fk.informational
-        and fk.ref.rsplit(".", 1)[-1] not in in_set_names
+        for fk in enforced_fk
+        if fk.ref.rsplit(".", 1)[-1] not in in_set_names
     )
     if parse_bool_flag(args.generate_fk_relationships) and external_fk:
         parent_landing = args.fk_parent_landing or derive_fk_parent_landing(
@@ -970,9 +954,7 @@ def _load_reference_and_preflight(
         fk_pools = per_column_view(fk_key_pools)
         assert_fk_pools_nonempty(external_fk, fk_pools, parent_landing)
         args.fk_parent_landing = parent_landing  # ctx fk_edges read it
-    elif parse_bool_flag(args.generate_fk_relationships) and any(
-        not fk.informational for fk in (pf.contract.fk if pf.contract else ())
-    ):
+    elif parse_bool_flag(args.generate_fk_relationships) and enforced_fk:
         # All enforced edges resolve in-set (ADR 0030 single job): keys
         # arrive as side inputs; still derive for the fk_edges metadata.
         args.fk_parent_landing = args.fk_parent_landing or (
@@ -996,7 +978,7 @@ def _emit_source_stats(
     if args.source_stats == "off" or not reference_rows:
         return {}
     stats = profile_source_table(
-        table_schema, reference_rows, contract=pf.contract
+        table_schema, reference_rows, relations=pf.relations
     )
     source_distinct: dict[str, int] = {}
     if args.source_stats == "exact":
@@ -1166,61 +1148,6 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
     return pool_store, source_value_store
 
 
-def _discover_landing_contracts(
-    args, targets: list[str]
-) -> tuple[dict, dict[str, frozenset[str]]]:
-    """Landing-dataset contracts (+ column sets) for scenario planning.
-
-    ADR 0029 rev B for the contracts; ADR 0031 adds the column sets,
-    read from the SAME `get_table` call the description comes from, so
-    the launcher can tell an informational edge that could be enforced
-    from one whose join key is genuinely not in the DDL.
-
-    Offline map via --fk_contracts_json (tests / air-gap); else a live
-    scan of the landing dataset's table descriptions. A scan failure
-    NEVER blocks the launch — it degrades loudly to single-target
-    planning (`fk_discovery_unavailable`), and the per-table run still
-    honors the target's own contract from its resolved schema."""
-    from sdfb_core.contracts.relational import parse_relational_contract
-
-    if args.fk_contracts_json:
-        with FileSystems.open(args.fk_contracts_json) as fh:
-            raw = json.loads(fh.read().decode("utf-8"))
-        from sdfb_core.contracts.relational import RelationalContract
-
-        return {
-            fqn: (
-                RelationalContract.model_validate(obj) if obj else None
-            )
-            for fqn, obj in raw.items()
-        }, {}
-    if not parse_bool_flag(args.generate_fk_relationships):
-        return {}, {}
-    try:  # pragma: no cover - live-GCP path (M4/Dataflow)
-        from google.cloud import bigquery
-
-        dataset = derive_fk_parent_landing(targets[0])
-        client = bigquery.Client()
-        out: dict = {}
-        columns: dict[str, frozenset[str]] = {}
-        for item in client.list_tables(dataset):
-            fqn = f"{dataset}.{item.table_id}"
-            table = client.get_table(item.reference)
-            out[fqn] = parse_relational_contract(table.description or "")
-            columns[fqn] = frozenset(f.name for f in table.schema)
-        return out, columns
-    except Exception as exc:
-        log_milestone(
-            "fk_discovery_unavailable",
-            level=logging.WARNING,
-            error=type(exc).__name__,
-            note="could not scan the landing dataset for relational "
-            "contracts — planning the given table(s) only; the target's "
-            "own contract still applies per table",
-        )
-        return {}, {}
-
-
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -1237,13 +1164,12 @@ def main(argv: list[str] | None = None) -> int:
     # else derived. One milestone states the whole plan.
     targets = parse_landing_tables(args.landing_table)
     generate_fk = parse_bool_flag(args.generate_fk_relationships)
-    contracts, landing_columns = _discover_landing_contracts(args, targets)
+    # ADR 0032 — the relational model comes from config, not from
+    # production metadata: no dataset scan, no table-description parse,
+    # one file the operator can read and version.
+    registry = load_relationship_registry(args.relationships_uri)
     plan = plan_launch(
-        targets,
-        args.reference_table,
-        generate_fk,
-        contracts or {t: None for t in targets},
-        args.run_id,
+        targets, args.reference_table, generate_fk, registry, args.run_id
     )
     for warning in plan.warnings:
         logger.warning("launch plan: %s", warning)
@@ -1281,10 +1207,14 @@ def main(argv: list[str] | None = None) -> int:
         },
         scenario=plan.scenario,
     )
-    if len(plan.runs) > 1 and args.multi_table_mode == "single_job":
-        return _run_relational_job(
-            plan, args, beam_argv, known_columns=dict(landing_columns)
+    for target in targets:
+        log_relationship_model(
+            target,
+            registry,
+            mode="relational" if generate_fk else "isolated",
         )
+    if len(plan.runs) > 1 and args.multi_table_mode == "single_job":
+        return _run_relational_job(plan, args, beam_argv, registry=registry)
     for i, run in enumerate(plan.runs):
         table_args = argparse.Namespace(**vars(args))
         table_args._multi_table_plan = len(plan.runs) > 1
@@ -1298,7 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
         # extract live (authoritative per ADR 0027 D2).
         if run.landing_table != targets[0]:
             table_args.ddl_uri = ""
-        rc = _run_one_table(table_args, beam_argv)
+        rc = _run_one_table(table_args, beam_argv, registry=registry)
         if rc != 0:
             logger.error(
                 "table %s failed (rc=%d) — aborting the remaining %d "
@@ -1313,7 +1243,7 @@ def _prepare_table_spec(
     args,
     model_client,
     in_set_landing: frozenset[str] = frozenset(),
-    known_columns: dict | None = None,
+    registry: RelationshipRegistry | None = None,
 ) -> TableSpec:
     """Everything one table needs, driver-side: schema, preflight, FK
     pools (EXTERNAL parents only — in-set parents arrive as in-DAG side
@@ -1325,8 +1255,8 @@ def _prepare_table_spec(
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 
-    # ADR 0029 rev B: mode is informational here — activation derives
-    # inside _load_reference_and_preflight from the table's own contract.
+    # ADR 0029 rev B: mode is descriptive here — activation derives
+    # inside _load_reference_and_preflight from the table's relations.
     args.fk_parent_landing, fk_mode = resolve_fk_mode(
         parse_bool_flag(args.generate_fk_relationships),
         args.fk_parent_landing,
@@ -1340,6 +1270,7 @@ def _prepare_table_spec(
             "edges generate from marginals; referential integrity "
             "UNVERIFIED this run",
         )
+    registry = registry or RelationshipRegistry()
     (
         reference_rows,
         pf,
@@ -1347,12 +1278,9 @@ def _prepare_table_spec(
         fk_key_pools,
         source_distinct,
     ) = _load_reference_and_preflight(
-        args, table_schema, in_set_landing=in_set_landing
+        args, table_schema, registry, in_set_landing=in_set_landing
     )
-    log_launcher_fk_model(table_schema.fqn, pf.contract, mode=fk_mode)
-    log_fk_enforcement(
-        table_schema.fqn, pf.contract, known_columns, table_schema
-    )
+    log_relationship_model(args.landing_table, registry, mode=fk_mode)
 
     thresholds = resolve_thresholds(args.thresholds_uri, args.env)
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
@@ -1425,15 +1353,19 @@ def _prepare_table_spec(
                 "cols": list(fk.cols),
                 "ref": fk.ref,
                 "ref_cols": list(fk.ref_cols),
-                "informational": fk.informational,
+                "enforced": fk.enforced,
                 "parent_landing": (
                     parent_landing_fqn(fk.ref, args.fk_parent_landing)
-                    if args.fk_parent_landing and not fk.informational
+                    if args.fk_parent_landing and fk.enforced
                     else ""
                 ),
             }
-            for fk in (pf.contract.fk if pf.contract else ())
+            for fk in (pf.relations.fk if pf.relations else ())
         ),
+        # The card the launcher printed, carried verbatim to the workers
+        # (ADR 0032): the model is resolved ONCE, driver-side, and both
+        # logs show the same thing.
+        relationship_card=registry.log_body(args.landing_table),
         source_distinct=source_distinct,
         # ADR 0023 generate-path seam: B.2 builds pools lazily in workers.
         source_values_table=args.reference_table,
@@ -1493,9 +1425,8 @@ def _prepare_table_spec(
                 fk.ref, derive_fk_parent_landing(args.landing_table)
             ),
         )
-        for fk in (pf.contract.fk if pf.contract else ())
-        if not fk.informational
-        and fk.ref.rsplit(".", 1)[-1] in in_set_names
+        for fk in registry.enforced_edges(args.landing_table)
+        if fk.ref.rsplit(".", 1)[-1] in in_set_names
     )
 
     return TableSpec(
@@ -1513,7 +1444,10 @@ def _prepare_table_spec(
     )
 
 
-def _run_one_table(args, beam_argv: list[str]) -> int:
+def _run_one_table(
+    args, beam_argv: list[str],
+    registry: RelationshipRegistry | None = None,
+) -> int:
     options = PipelineOptions(beam_argv)
     runner = options.view_as(StandardOptions).runner or "DataflowRunner"
     configure_pipeline_options(options, runner, args.run_id)
@@ -1527,7 +1461,7 @@ def _run_one_table(args, beam_argv: list[str]) -> int:
         vllm_dtype=args.vllm_dtype,
         vllm_max_model_len=args.vllm_max_model_len,
     )
-    spec = _prepare_table_spec(args, model_client)
+    spec = _prepare_table_spec(args, model_client, registry=registry)
 
     with beam.Pipeline(options=options) as p:
         result = build_pipeline(
@@ -1550,7 +1484,8 @@ def _run_one_table(args, beam_argv: list[str]) -> int:
 
 
 def _run_relational_job(
-    plan, args, beam_argv: list[str], known_columns: dict | None = None
+    plan, args, beam_argv: list[str],
+    registry: RelationshipRegistry | None = None,
 ) -> int:
     """ADR 0030 — scenario 2/3 in ONE Dataflow job: every planned table's
     subgraph in one pipeline, parents-first, children fed by in-DAG
@@ -1576,7 +1511,6 @@ def _run_relational_job(
     # spurious ddl_pin_drift).
     pin_owners = set(parse_landing_tables(args.landing_table))
     specs = []
-    columns_seen: dict = dict(known_columns or {})
     prep_failures: list[tuple[str, str]] = []
     for run in plan.runs:
         table_args = argparse.Namespace(**vars(args))
@@ -1592,18 +1526,14 @@ def _run_relational_job(
         # preflight stop must not HIDE the remaining tables' constraint
         # reports and blockers — prep everything, abort once with all.
         try:
-            spec = _prepare_table_spec(
-                table_args,
-                model_client,
-                in_set_landing=in_set,
-                known_columns=columns_seen,
+            specs.append(
+                _prepare_table_spec(
+                    table_args,
+                    model_client,
+                    in_set_landing=in_set,
+                    registry=registry,
+                )
             )
-            # Parents are prepped first, so a child's summary can see
-            # its parent's columns and judge enforceability.
-            columns_seen[spec.config.landing_table] = frozenset(
-                c.name for c in spec.config.table_schema.columns
-            )
-            specs.append(spec)
         except SystemExit as exc:
             logger.error(
                 "prep failed for %s: %s", run.landing_table, exc
@@ -1652,12 +1582,12 @@ def _run_relational_job(
             "relational_closure_no_enforced_edges",
             level=logging.WARNING,
             tables=len(specs),
-            note="the closure grouped these tables but ZERO enforced "
+            note="the model grouped these tables but ZERO enforced "
             "in-set FK edges resolved — every FK column generates from "
-            "marginals this run. If edges were declared, check "
-            "fk_model_pretty: dashed arrows are informational "
-            "(excluded from enforcement by design); solid edges that "
-            "are missing here indicate a contract/overlay problem.",
+            "marginals this run. Read the relationship_model card: `..>` "
+            "edges are documented-only (`enforced: false`) and a table "
+            "marked [DISABLED] hands out no keys. Flip the flag in "
+            "config/relationships to change it.",
         )
     with beam.Pipeline(options=options) as p:
         results = build_relational_pipeline(p, specs)

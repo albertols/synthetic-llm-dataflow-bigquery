@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from sdfb_core.contracts.relational import ForeignKey
+    from sdfb_core.contracts.relationships import FkEdge
 
 _DEFAULT_LIMIT = 100_000
 
@@ -36,7 +36,7 @@ def parent_landing_fqn(ref: str, landing_dataset: str) -> str:
 
 
 def load_fk_key_pools(
-    fks: tuple[ForeignKey, ...],
+    fks: tuple[FkEdge, ...],
     landing_dataset: str,
     client=None,
     limit: int = _DEFAULT_LIMIT,
@@ -56,7 +56,7 @@ def load_fk_key_pools(
 
     payloads: list[dict] = []
     for fk in fks:
-        if fk.informational:  # display-only edge (ADR 0029): no pool
+        if not fk.enforced:  # documented-only edge (ADR 0032): no pool
             continue
         parent = parent_landing_fqn(fk.ref, landing_dataset)
         cols_sql = ", ".join(f"`{c}`" for c in fk.ref_cols)

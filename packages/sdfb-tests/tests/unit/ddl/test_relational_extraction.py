@@ -1,11 +1,17 @@
-"""Relational contract flows extractor → _ddl.json → TableSchema (Task 12)."""
+"""The extractor reads BigQuery's own metadata — never a relational
+contract from the table description (ADR 0032).
+
+PK/FK/identity of RECORD live in `config/relationships/`. A description
+that still carries a legacy `{"sdfb": 1, …}` object is inert: it must not
+be parsed, mirrored into `_ddl.json`, or silently applied to a run.
+"""
 
 from unittest.mock import MagicMock
 
 from sdfb_beam.ddl.extractor import extract_ddl_metadata
 from sdfb_core.contracts import TableSchema
 
-_CONTRACT_DESC = (
+_LEGACY_DESC = (
     "Ops table. "
     '{"sdfb": 1, "pk": ["ID", "SEQ"], '
     '"fk": [{"cols": ["CUST_ID"], "ref": "ds.customers", "ref_cols": ["ID"]}], '
@@ -26,7 +32,7 @@ def _make_field(name: str, ftype: str) -> MagicMock:
     return f
 
 
-def _make_table(description: str) -> MagicMock:
+def _make_table(description: str, constraints=None) -> MagicMock:
     t = MagicMock()
     t.schema = [_make_field(n, "STRING") for n in ("ID", "SEQ", "CUST_ID")]
     t.created = None
@@ -43,53 +49,41 @@ def _make_table(description: str) -> MagicMock:
     t.num_rows = 100
     t.require_partition_filter = False
     t._properties = {}
-    t.table_constraints = None
+    t.table_constraints = constraints
     return t
 
 
-def _extract(description: str) -> dict:
+def _extract(description: str, constraints=None) -> dict:
     client = MagicMock()
-    client.get_table.return_value = _make_table(description)
+    client.get_table.return_value = _make_table(description, constraints)
     client.query.return_value.result.return_value = iter([])
     return extract_ddl_metadata(project="p", dataset="d", table="t", client=client)
 
 
-def test_contract_pk_wins_over_absent_constraints():
-    result = _extract(_CONTRACT_DESC)
-    assert result["primary_keys"] == ["ID", "SEQ"]
+def test_a_legacy_description_contract_is_inert():
+    """The old marker must not come back through the side door."""
+    result = _extract(_LEGACY_DESC)
+    assert "relational" not in result["table_info"]
+    assert result["primary_keys"] is None
 
 
-def test_table_info_carries_relational_mirror():
-    result = _extract(_CONTRACT_DESC)
-    rel = result["table_info"]["relational"]
-    assert rel["pk"] == ["ID", "SEQ"]
-    assert rel["fk"][0]["ref"] == "ds.customers"
+def test_bigquery_declared_primary_key_is_still_read():
+    constraints = MagicMock()
+    constraints.primary_key.columns = ["ID", "SEQ"]
+    assert _extract("Ops table.", constraints)["primary_keys"] == ["ID", "SEQ"]
 
 
-def test_no_contract_keeps_legacy_paths():
+def test_legacy_description_line_stays_the_last_fallback():
     result = _extract("Test table.\nPRIMARY KEY: ID\nOther notes.")
     assert result["primary_keys"] == ["ID"]
-    assert result["table_info"]["relational"] is None
 
 
-def test_table_schema_parses_contract_from_description():
+def test_table_schema_has_no_relational_accessor():
+    """TableSchema describes COLUMNS; relations are not its business."""
     schema = TableSchema.model_validate(
         {
-            "table_info": {"table_id": "p.d.t", "description": _CONTRACT_DESC},
+            "table_info": {"table_id": "p.d.t", "description": _LEGACY_DESC},
             "schema": [{"name": "ID", "type": "STRING", "mode": "REQUIRED"}],
         }
     )
-    contract = schema.relational_contract()
-    assert contract is not None
-    assert contract.identity == ("ID",)
-    assert contract.fk[0].cols == ("CUST_ID",)
-
-
-def test_table_schema_without_contract_is_none():
-    schema = TableSchema.model_validate(
-        {
-            "table_info": {"table_id": "p.d.t", "description": "prose"},
-            "schema": [{"name": "ID", "type": "STRING", "mode": "REQUIRED"}],
-        }
-    )
-    assert schema.relational_contract() is None
+    assert not hasattr(schema, "relational_contract")

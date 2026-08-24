@@ -9,10 +9,10 @@ import pytest
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.prompt_constraint import (
     PromptConstraint,
+    parse_llm_prompt_constraint,
     parse_prompt_constraint,
     render_prompt_clause,
 )
-from sdfb_core.contracts.relational import parse_llm_prompt_constraint
 
 
 class TestParseLegacyString:

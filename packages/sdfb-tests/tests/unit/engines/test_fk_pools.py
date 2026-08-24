@@ -8,7 +8,7 @@ from sdfb_beam.io.fk_pools import (
     parent_landing_fqn,
     per_column_view,
 )
-from sdfb_core.contracts.relational import parse_relational_contract
+from sdfb_core.contracts.relationships import parse_relationship_model
 from sdfb_core.contracts.schema import TableSchema
 from sdfb_core.engines import GenerationConfig, GenerationContext
 from sdfb_core.engines.b1_rag import B1RagEngine, HashingEmbedder
@@ -68,16 +68,24 @@ def test_parent_landing_fqn():
 def test_load_fk_key_pools_keeps_composite_keys_joint():
     """An already-landed parent is read as whole key TUPLES (ADR 0031) —
     the per-column view is a derived convenience, never the draw."""
-    contract = parse_relational_contract(
-        '{"sdfb": 1, "fk": [{"cols": ["A", "B"], "ref": "ds.parent", '
-        '"ref_cols": ["X", "Y"]}]}'
-    )
+    relations = parse_relationship_model(
+        """
+model: m
+tables:
+  CHILD:
+    fk:
+      - cols: [A, B]
+        ref: ds.parent
+        ref_cols: [X, Y]
+""",
+        source="test.yaml",
+    ).tables["CHILD"]
     row1 = {"X": 1, "Y": "a"}
     row2 = {"X": 2, "Y": "b"}
     client = MagicMock()
     client.query.return_value.result.return_value = [row1, row2]
     payloads = load_fk_key_pools(
-        contract.fk, "p.synthetic_data", client=client
+        relations.fk, "p.synthetic_data", client=client
     )
     assert payloads == [{"cols": ["A", "B"], "keys": [(1, "a"), (2, "b")]}]
     assert per_column_view(payloads) == {"A": (1, 2), "B": ("a", "b")}

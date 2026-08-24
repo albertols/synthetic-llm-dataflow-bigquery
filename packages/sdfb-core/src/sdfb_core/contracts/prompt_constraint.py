@@ -196,6 +196,21 @@ def render_prompt_clause(pc: PromptConstraint) -> str:
 
 __all__ = [
     "PromptConstraint",
+    "parse_llm_prompt_constraint",
     "parse_prompt_constraint",
     "render_prompt_clause",
 ]
+
+
+def parse_llm_prompt_constraint(description: str | None, column: str = "") -> str:
+    """Rendered per-column prompt clause from a COLUMN description, or "".
+
+    Column-level steering stays in the column description (ADR 0024): it
+    describes how to generate one field's values, so it belongs next to
+    that field. Only the RELATIONAL contract moved out to
+    `config/relationships/` (ADR 0032). The legacy string form renders
+    byte-identically to its own normalized text; a malformed marked
+    object still raises via the extractor/validator.
+    """
+    pc = parse_prompt_constraint(description, column=column)
+    return "" if pc is None else render_prompt_clause(pc)

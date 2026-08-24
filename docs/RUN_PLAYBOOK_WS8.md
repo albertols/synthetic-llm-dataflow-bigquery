@@ -3,7 +3,7 @@
 The campaign companion to [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) (GPU verdict,
 Dataflow options, L4 capacity ladder, report recipe — all still apply and are
 not repeated here). This doc is the **run matrix for the WS8 features**:
-relational contract + FK pools (ADR 0021), tiered `source_table_stats`,
+relationship models + FK key pools (ADR 0032/0031), tiered `source_table_stats`,
 exact-distinct pool sizing, B.2 inverse-CDF sampling, measured length hints,
 shape-preserving expansion (ADR 0022 / [design](designs/2026-08-05-source-table-stats.md)
 — each `--source_stats` / `--freetext_expansion` mode has its own diagram
@@ -100,7 +100,7 @@ the WS8 posture: `source_stats=sample`, `freetext_expansion=identifiers`,
 | **R4a** expansion off | `{"num_rows":"1000000","batch_size":"1000","freetext_expansion":"off"}` (pools warm — expansion is post-pool CPU) | the July diversity ceiling, reproduced on purpose (control arm) | crosscheck: freetext `distinct == pool size` again |
 | **R4b** expansion all | same with `"freetext_expansion":"all"` | maximum diversity: shape expander + digit-run mutation on texty draws | crosscheck: distinct ≫ pool size, shapes still match `shape_mix`; zero extra LLM calls vs R4a |
 | **R5** B.2 engine | `{"engine":"b2_library","num_rows":"1000000","batch_size":"1000"}` | inverse-CDF numeric+temporal live (ADR 0022 acceptance 5); B.2 empty-parity + length hints | numeric/temporal decile overlap vs source beats the July uniform baseline (KS drop in crosscheck); `temporal_range_clamped` where applicable |
-| **R6** table B + FK | table B cold: `{"table_fqn":"<TABLE_B>", "num_rows":"1000000","batch_size":"1000"}` then, if B declares FKs to A in its `{"sdfb":1,...}` description contract: add `"fk_parent_landing":"${PROJECT}.synthetic_data"` | second-table generality of R1 + ADR 0021 referential integrity (child FK columns sample A's landed keys) | preflight P1–P5 pass on the contract; constraint-discovery lines in driver log; post-run orphan query (§4) = **0 rows** |
+| **R6** table B + FK | table B cold: `{"table_fqn":"<TABLE_B>", "num_rows":"1000000","batch_size":"1000"}` then, if `config/relationships/` declares an enforced edge B→A, nothing else is needed (the launch expands to the component and orders it) | second-table generality of R1 + referential integrity by construction (the child draws WHOLE parent key tuples, ADR 0031) | preflight P2–P5 pass on the model; constraint-discovery lines in driver log; post-run orphan query (§4) = **0 rows** |
 | **R7** 10M scale | `{"num_rows":"10000000","batch_size":"1000"}` — warm digest, all stores populated | throughput at scale with the full WS8 posture (July 10M: 26.4 min / ~6.3k rows/s, but `distinct==pool size`) | ≥ 6k rows/s class; the diversity ceiling GONE (expansion default on); stats skipped (warm digest) |
 
 Optional control if length-hint attribution is ever questioned:
@@ -145,7 +145,8 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 | `pool_taint_rebuild` (WARNING, launcher) | warm pools overlapped the live source → deleted + rebuilt clean (expected ONCE per tainted pre-ADR-0023 digest) |
 | `pool_taint_check_error` / `pool_taint_delete_error` | preflight could not verify/clear — warm pools kept, verify copy_fraction post-run |
 | `vllm_unfittable_wait` (WARNING) | VRAM transiently short — in-process re-measure instead of a bundle retry (2026-08-05 R1 cost ~80 s + a setup cycle) |
-| `fk_enforcement_summary` (launcher; **WARNING** when 0 enforced) | ADR 0031 D5: what this launch will actually enforce, per table, BEFORE the GPU spends. An `ENFORCEABLE` line = an informational edge whose columns exist on both sides; the block prints the exact contract edit |
+| `relationships_loaded` / `relationships_absent` (launcher) | ADR 0032: which model FILES this launch read, their models, table count and sha. Absent = no relationships declared anywhere; every table generates alone |
+| `relationship_model` (launcher AND every worker; **WARNING** when a relational launch enforces 0 edges) | ADR 0032 D6: the whole model at a glance — tables with PK/identity, every edge as `-->` enforced / `..>` documented, `[DISABLED — detached]` tables, the generation waves, and the FILE it came from. Driver and worker print the identical card |
 | `fk_key_pool_bound columns= key_tuples= weighting= null_fraction=` | ADR 0031: one per enforced edge, worker-side. `weighting=child_marginal` = the IPF fit ran (the child's marginals survive the restriction); `uniform` = no overlap between the child's sample and the parent's keys — check the edge is the one you meant |
 | `fk_key_pool_capped` (WARNING) | ADR 0031 D6: the parent holds at least the 100k side-input cap of distinct keys — the child references a uniform sample of them, so its FK distinct count cannot exceed the cap |
 | `fk.orphan` in `validation_runs.dlq_by_rule` | ADR 0031 D4: rows that referenced a non-existent parent. Non-zero = a generator regression (the draw is joint by construction) — read it as a BLOCKER, not a tolerance |
@@ -197,12 +198,12 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
      AND c.<FIRST_FK_COL> IS NOT NULL;
    ```
 
-   **Read the launcher first, before the money is spent** (ADR 0031 D5):
-   `fk_enforcement_summary` states `N enforced · M informational` for
-   every table. `0 enforced` with an `ENFORCEABLE` line means the
-   contract still carries `"informational": true` on an edge whose
-   columns exist on both sides — fix the description and relaunch;
-   nothing downstream can produce integrity from a display-only edge.
+   **Read the launcher first, before the money is spent** (ADR 0032 D6):
+   the `relationship_model` card states `N enforced + M documented edges`
+   for the whole model. `0 enforced` on a relational launch means every
+   edge is `enforced: false` or a parent is `[DISABLED]` — fix
+   `config/relationships/<model>.yaml` and relaunch; nothing downstream
+   can produce integrity from an edge that draws no keys.
    Cross-check on the worker side: `fk_key_pool_bound` (one per enforced
    edge, `weighting=child_marginal`, `key_tuples=N`) and the absence of
    `fk.orphan` in `validation_runs.dlq_by_rule` — the in-DAG BLOCKER now
@@ -354,7 +355,7 @@ Written from the 2026-08-20 R1 cold pair (jobs `…05_49_25-7855…` A_TABLE,
 verified ADR 0025's numeric/categorical fixes end-to-end (A: 67/67, B:
 45/45 columns `decile_ks` ok; B additionally raised **zero**
 `memorization_flags`). Both also ran with **no PK declared** — every next
-run below closes that gap via the description contract.
+run below closes that gap via `config/relationships/`.
 
 ### 6a. R1-c — constraint acceptance rerun (both tables)
 
@@ -453,11 +454,12 @@ column silently keeps its profiled marginal.
 
 **Preconditions checklist (in order):**
 
-1. Terraform applied; contracts visible on the LANDING table:
-   `bq show --format=prettyjson ${PROJECT}:synthetic_data.<TABLE_B>` —
-   description carries the `{"sdfb":1,…}` JSON (P1 parses it, P2 checks
-   the columns; a marked-but-broken contract is a loud `SystemExit`).
-   Expect `target_metadata_overlaid` in the launcher log.
+1. The model declares the edge — check it WITHOUT launching:
+   `uv run --no-sync python3 scripts/relationships/card.py --table <TABLE_B>`
+   prints exactly what the launch will plan (ADR 0032). A broken model
+   file is a loud stop; P2 then checks the columns against the real
+   schema. Column CONSTRAINTS still come from the landing table's column
+   descriptions — expect `target_metadata_overlaid` in the launcher log.
 2. OPTIONAL: `extract_ddl.py` re-run against the LANDING table to refresh
    the `ddl_uri` offline-fallback pin (live overlay is authoritative).
 3. **Parent landed and non-empty**: `SELECT COUNT(*), COUNT(DISTINCT

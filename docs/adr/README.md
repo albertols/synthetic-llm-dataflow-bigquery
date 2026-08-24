@@ -64,3 +64,4 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0029 — FK-model scenarios + history mappings (minimal-input launches, informational edges, alias registry)](0029-fk-model-scenarios-and-history-mappings.md)
 - [0030 — Single-job relational generation (one Dataflow job, in-DAG FK key handoff)](0030-single-job-relational-generation.md)
 - [0031 — Referential integrity by construction: joint FK key draws (IPF-fitted weights, fk.orphan gate; supersedes per-column pools)](0031-joint-fk-key-draws.md)
+- [0032 — Relationships are config, not table descriptions (config/relationships/*.yaml; supersedes 0021)](0032-relationships-as-config.md)

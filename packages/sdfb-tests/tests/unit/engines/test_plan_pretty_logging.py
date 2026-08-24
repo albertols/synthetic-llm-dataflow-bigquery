@@ -14,6 +14,7 @@ import logging
 
 import pytest
 from sdfb_core.contracts import TableSchema
+from sdfb_core.contracts.relationships import RelationshipRegistry
 from sdfb_core.engines import GenerationContext, get_engine
 from sdfb_core.engines.b1_rag import B1RagEngine, HashingEmbedder
 from sdfb_core.engines.generation_plan import clear_generation_plan_log
@@ -53,6 +54,25 @@ def _rows(n: int = 60) -> list[dict]:
     ]
 
 
+_CARD = RelationshipRegistry.from_sources(
+    [(
+        "config/relationships/retail.yaml",
+        """
+model: retail
+tables:
+  parent_t:
+    pk: [PARENT_ID]
+  child_t:
+    pk: [KEY]
+    fk:
+      - cols: [PARENT_ID]
+        ref: parent_t
+        ref_cols: [PARENT_ID]
+""",
+    )]
+).log_body("child_t")
+
+
 class _StubClient:
     def generate_json(self, *, prompt: str, n: int = 1, **kwargs):
         return [{"values": [f"gen-{i}" for i in range(32)]}]
@@ -74,6 +94,7 @@ def _ctx() -> GenerationContext:
             }
         ],
         fk_pools={"PARENT_ID": tuple(f"P{i}" for i in range(7))},
+        relationship_card=_CARD,
     )
 
 
@@ -111,20 +132,32 @@ class TestPrettyEntries:
         assert caplog.text.count("name=relational_e2e") == 1
 
 
-class TestWorkerFkModelPretty:
-    def test_fk_model_pretty_renders_worker_side(self, caplog) -> None:
+class TestWorkerRelationshipCard:
+    """ADR 0032 — the worker echoes the card the LAUNCHER rendered from
+    `config/relationships/`. One model resolution, one rendering, so the
+    driver and worker logs cannot disagree about what is related."""
+
+    def test_card_is_echoed_verbatim_worker_side(self, caplog) -> None:
         _b1_setup(caplog)
-        assert "name=fk_model_pretty" in caplog.text
-        assert "relational model |" in caplog.text  # glanceable ASCII
+        assert "name=relationship_model" in caplog.text
+        assert "RELATIONSHIP MODEL retail" in caplog.text
+        assert "wave 0 | parent_t" in caplog.text
         assert "-->" in caplog.text
         assert "```mermaid" in caplog.text
-        assert "flowchart" in caplog.text
-        assert "parent_t" in caplog.text
 
-    def test_fk_model_pretty_logs_once_per_plan(self, caplog) -> None:
+    def test_card_logs_once_per_plan(self, caplog) -> None:
         _b1_setup(caplog)
         _b1_setup(caplog)
-        assert caplog.text.count("name=fk_model_pretty") == 1
+        assert caplog.text.count("name=relationship_model") == 1
+
+    def test_no_card_means_no_entry(self, caplog) -> None:
+        """A table outside every model carries no card — the worker log
+        stays quiet instead of printing an empty block."""
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        ctx = _ctx().model_copy(update={"relationship_card": ""})
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(_StubClient(), ctx)
+        assert "name=relationship_model" not in caplog.text
 
 
 def test_b2_engine_emits_the_same_pretty_entries(caplog) -> None:

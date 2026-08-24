@@ -347,6 +347,16 @@ default_dag_params = {
                     "isolated generation — declared edges ignored LOUDLY, "
                     "FK columns use marginals. ADR 0029.",
     ),
+    "relationships_uri": Param(
+        default="config/relationships",
+        type="string",
+        description="Where the relational models live (ADR 0032): a folder "
+                    "or a single YAML file, local or gs://. Default: the "
+                    "config/relationships folder packaged in the image. "
+                    "Point it at gs://... to change PK/FK/identity with no "
+                    "rebuild and no BigQuery metadata edit — it is the ONLY "
+                    "source of relational truth.",
+    ),
     "pool_seed_strategy": Param(
         default="centroid",
         type="string",
@@ -480,6 +490,8 @@ with models.DAG(
                     "fk_parent_landing": "{{ params.fk_parent_landing }}",
                     "generate_fk_relationships":
                         "{{ params.generate_fk_relationships }}",
+                    "relationships_uri":
+                        "{{ params.relationships_uri }}",
                     "multi_table_mode": "{{ params.multi_table_mode }}",
                     "uniqueness_mode": "{{ params.uniqueness_mode }}",
                     "pool_seed_strategy": "{{ params.pool_seed_strategy }}",

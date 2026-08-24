@@ -61,3 +61,11 @@ public_cloud/deploy/gcp/journal/image_tag
 integration_tests/
 .claude/worktrees/
 docs/assets/fk*
+
+# Relationship models (ADR 0032): the committed ones are alias-only
+# examples; a real corp model dropped here ships in the image build and
+# must never reach git.
+config/relationships/*
+!config/relationships/README.md
+!config/relationships/*.example.yaml
+!config/relationships/example_*.yaml

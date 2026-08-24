@@ -30,6 +30,8 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
                        created_at; vector-index state reported (created after
                        first population — BQ needs ≥5k rows). Pass
                        --rag-chunks-table "" to skip for RAG-less deployments.
+ 12. Relationships   — config/relationships/*.yaml load, and every table they
+                       reference exists in the landing dataset (ADR 0032)
  10. Free-text pools — {project}.synthetic_rag.freetext_pools (WS5, ADR 0020).
                        OPTIONAL BY DESIGN: it is a memo pad, not a data store —
                        one row per (reference_digest, model_uri, column). Absent,
@@ -759,6 +761,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="gs:// path where the _ddl.json is staged. OPTIONAL (WS4 §6b): "
                         "empty = the launcher live-extracts from INFORMATION_SCHEMA; "
                         "an explicit URI pins the schema (air-gap escape hatch).")
+    p.add_argument("--relationships-uri", default="config/relationships",
+                   help="where the relational models live (ADR 0032): a "
+                        "folder or file, local or gs://. Pass '' to skip "
+                        "the relational checks.")
     p.add_argument("--rag-chunks-table", default=None,
                    help="FQN of the shared RAG chunk store (WS2). Default "
                         "{project}.synthetic_rag.rag_chunks; pass '' to skip the "
@@ -800,13 +806,103 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return args
 
 
+def step12_relationships(ctx: Ctx) -> None:
+    """ADR 0032 — every table the relational models reference must exist.
+
+    `config/relationships/` is the single source of truth for PK/FK, and
+    a scenario-2 launch on ANY member generates the whole enabled
+    component. A model that names a table nobody created yet turns into
+    a mid-launch stop, so it is worth one metadata read here.
+
+    A DISABLED table is reported but never an ACTION: it is detached on
+    purpose, and its absence cannot break a launch.
+    """
+    a = ctx.args
+    uri = a.relationships_uri
+    if not uri:
+        ctx.add("12", "Relationship models", SKIP,
+                "--relationships-uri '' — check omitted")
+        return
+    try:
+        registry = _load_registry(uri)
+    except Exception as e:
+        ctx.add("12", "Relationship models", ACTION,
+                f"`{uri}` — {short(f'{type(e).__name__}: {e}')}",
+                "fix the model file: a launch reads the same loader and "
+                "will stop on it")
+        return
+    if not registry.models:
+        ctx.add("12", "Relationship models", SKIP,
+                f"`{uri}` — no model files (every table generates alone)")
+        return
+    summary = " · ".join(
+        f"{m.model}: {len(m.tables)} tables" for m in registry.models
+    )
+    ctx.add("12", "Relationship models", OK, f"`{uri}` — {summary}")
+
+    client, reason = bq_client(a.project)
+    dataset = a.landing_table.rsplit(".", 1)[0] if a.landing_table else ""
+    if client is None or not dataset:
+        ctx.add("12a", "Model tables exist", SKIP,
+                reason or "no --landing-table to derive the dataset from")
+        return
+    from google.api_core.exceptions import NotFound
+
+    missing: list[str] = []
+    disabled_missing: list[str] = []
+    checked = 0
+    for model in registry.models:
+        for name, relations in model.tables.items():
+            fqn = f"{dataset}.{name}"
+            try:
+                client.get_table(fqn)
+                checked += 1
+            except NotFound:
+                (missing if relations.enabled else disabled_missing).append(
+                    fqn
+                )
+            except Exception:
+                continue
+    detail = f"{checked} of {checked + len(missing) + len(disabled_missing)} present"
+    if disabled_missing:
+        detail += f" · {len(disabled_missing)} absent but DISABLED (fine)"
+    if missing:
+        ctx.add("12a", "Model tables exist", ACTION,
+                f"{detail} — missing {', '.join(bq_table_link(f) for f in missing)}",
+                "create the landing tables (scripts/derive_landing_schema.py "
+                "+ bq mk), or set `enabled: false` on them in the model file "
+                "to detach them from the launch")
+        return
+    ctx.add("12a", "Model tables exist", OK, detail)
+
+
+def _load_registry(uri: str):
+    """Local dir/file through the pure loader; gs:// through Beam's."""
+    from sdfb_core.contracts.relationships import RelationshipRegistry
+
+    if "://" not in uri:
+        base = Path(uri)
+        paths = (
+            sorted(p for p in base.glob("*.y*ml"))
+            if base.is_dir()
+            else ([base] if base.exists() else [])
+        )
+        return RelationshipRegistry.from_sources(
+            [(str(p), p.read_text(encoding="utf-8")) for p in paths]
+        )
+    from sdfb_beam.io.relationships import load_relationship_registry
+
+    return load_relationship_registry(uri)
+
+
 def main(argv: list[str] | None = None) -> int:
     warnings.filterwarnings("ignore", message=".*quota project.*")
     args = parse_args(argv)
     ctx = Ctx(args=args)
     for step in (step1_source_ddl, step2_landing_schema, step3_local_weights, step4_bq_tables,
                  step5_staging_bucket, step6_templates_bucket, step7_bq_datasets, step8_others,
-                 step9_rag_layer, step10_freetext_pools, step11_source_stats):
+                 step9_rag_layer, step10_freetext_pools, step11_source_stats,
+                 step12_relationships):
         step(ctx)
 
     stamp = datetime.now(UTC)

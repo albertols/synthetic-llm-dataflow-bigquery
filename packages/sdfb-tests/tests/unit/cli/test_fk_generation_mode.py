@@ -1,8 +1,9 @@
-"""--generate_fk_relationships flag + FK-model launcher logging (ADR 0029).
+"""--generate_fk_relationships + the launcher's relationship card.
 
 The flag is the user-facing switch between relational and isolated
-generation; its state must be one greppable milestone, and the resolved
-FK model must be pasteable mermaid in the launcher log.
+generation; its state must be one greppable milestone, and the model the
+run resolved must be readable at a glance in Cloud Logging — tables,
+PK, identity, every edge with its state (ADR 0029 flag, ADR 0032 card).
 """
 
 from __future__ import annotations
@@ -10,11 +11,38 @@ from __future__ import annotations
 import logging
 
 from sdfb_beam.cli.run_pipeline import (
-    log_launcher_fk_model,
+    log_relationship_model,
     resolve_fk_mode,
 )
-from sdfb_core.contracts.relational import ForeignKey, RelationalContract
+from sdfb_core.contracts.relationships import RelationshipRegistry
 from sdfb_core.observability import log_milestone_text
+
+_MODEL = """
+model: sales
+description: orders and their parties
+tables:
+  orders:
+    pk: [ID]
+    identity: [ORDER_UUID]
+    fk:
+      - cols: [CUST_ID]
+        ref: customers
+        ref_cols: [ID]
+      - cols: [JOIN_KEY]
+        ref: parties
+        ref_cols: [JOIN_KEY]
+        enforced: false
+  customers:
+    pk: [ID]
+  parties:
+    pk: [JOIN_KEY]
+"""
+
+
+def _registry(text: str = _MODEL) -> RelationshipRegistry:
+    return RelationshipRegistry.from_sources(
+        [("config/relationships/sales.yaml", text)]
+    )
 
 
 class TestResolveFkMode:
@@ -34,121 +62,71 @@ class TestResolveFkMode:
 class TestLogMilestoneText:
     def test_header_line_plus_raw_body(self, caplog):
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
-            log_milestone_text("fk_model_pretty", "flowchart BT\n  a --> b",
+            log_milestone_text("relationship_model", "flowchart BT\n  a --> b",
                                table="p.d.t")
-        assert "name=fk_model_pretty" in caplog.text
+        assert "name=relationship_model" in caplog.text
         assert "flowchart BT\n  a --> b" in caplog.text
 
 
-class TestLauncherFkModel:
-    def _contract(self) -> RelationalContract:
-        return RelationalContract(
-            sdfb=1,
-            pk=("ID",),
-            fk=(
-                ForeignKey(cols=("CUST_ID",), ref="ds.customers",
-                           ref_cols=("ID",)),
-                ForeignKey(cols=("JOIN_KEY",), ref="ds.parties",
-                           ref_cols=("JOIN_KEY",), informational=True),
-            ),
-        )
-
-    def test_logs_mermaid_with_parents_and_dashed_edge(self, caplog):
+class TestRelationshipCard:
+    def test_card_carries_keys_edges_and_diagram(self, caplog):
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
-            log_launcher_fk_model("p.src.orders", self._contract(),
-                                  mode="relational")
-        assert "name=fk_model_pretty" in caplog.text
-        # glanceable ASCII first (2026-08-22 operator ask)...
-        assert "relational model |" in caplog.text
-        assert "-->" in caplog.text and "..>" in caplog.text
-        # ...then the fenced mermaid for report recycling.
-        assert "```mermaid" in caplog.text
-        assert "flowchart" in caplog.text
-        assert "customers" in caplog.text
-        assert "-.->" in caplog.text  # informational edge stays visible
+            log_relationship_model(
+                "p.landing.orders", _registry(), mode="relational"
+            )
+        text = caplog.text
+        assert "name=relationship_model" in text
+        assert "RELATIONSHIP MODEL sales" in text
+        assert "config/relationships/sales.yaml" in text  # provenance
+        assert "pk(ID)" in text and "identity(ORDER_UUID)" in text
+        assert "-->" in text and "..>" in text  # enforced + documented
+        # …then the fenced mermaid for report recycling.
+        assert "```mermaid" in text and "flowchart" in text
+        assert "-.->" in text  # documented edge stays visible in the diagram
+        assert "enforced=1" in text and "documented=1" in text
 
-    def test_no_contract_logs_absent(self, caplog):
+    def test_a_table_no_model_declares_says_so(self, caplog):
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
-            log_launcher_fk_model("p.src.orders", None, mode="relational")
-        assert "name=fk_model_absent" in caplog.text
+            log_relationship_model(
+                "p.src.unknown", _registry(), mode="relational"
+            )
+        assert "not in any model" in caplog.text
+        assert "model=none" in caplog.text
 
     def test_mode_milestone_always_present(self, caplog):
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
-            log_launcher_fk_model("p.src.orders", self._contract(),
-                                  mode="isolated")
+            log_relationship_model(
+                "p.landing.orders", _registry(), mode="isolated"
+            )
         assert "name=fk_generation_mode" in caplog.text
         assert "mode=isolated" in caplog.text
 
-
-class TestLauncherEnforcementSummary:
-    """ADR 0031 — the launcher states what it will ENFORCE, at WARNING
-    level when the answer is "nothing it could have enforced"."""
-
-    @staticmethod
-    def _schema():
-        from sdfb_core.contracts import TableSchema
-
-        return TableSchema.model_validate(
-            {
-                "table_info": {"table_id": "p.src.B_TABLE"},
-                "schema": [
-                    {"name": "COL_005", "type": "INT64", "mode": "REQUIRED"},
-                    {"name": "PK_COL", "type": "STRING", "mode": "REQUIRED"},
-                ],
-            }
+    def test_documented_only_relational_launch_warns(self, caplog):
+        """A relational launch that can enforce NOTHING is the 2026-08-23
+        failure mode: it costs a full parent generation and delivers no
+        integrity. It must be impossible to miss."""
+        only_documented = _MODEL.replace(
+            "      - cols: [CUST_ID]\n        ref: customers\n"
+            "        ref_cols: [ID]\n",
+            "      - cols: [CUST_ID]\n        ref: customers\n"
+            "        ref_cols: [ID]\n        enforced: false\n",
         )
-
-    @staticmethod
-    def _contract(informational: bool):
-        return RelationalContract(
-            sdfb=1,
-            pk=("PK_COL",),
-            fk=(
-                ForeignKey(
-                    cols=("COL_005",),
-                    ref="landing.A_TABLE",
-                    ref_cols=("COL_005",),
-                    informational=informational,
-                ),
-            ),
-        )
-
-    def test_informational_but_enforceable_warns_with_the_fix(self, caplog):
-        from sdfb_beam.cli.run_pipeline import log_fk_enforcement
-
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
-            log_fk_enforcement(
-                "p.src.B_TABLE",
-                self._contract(True),
-                {"p.landing.A_TABLE": frozenset({"COL_005"})},
-                self._schema(),
+            log_relationship_model(
+                "p.landing.orders", _registry(only_documented),
+                mode="relational",
             )
-        assert "name=fk_enforcement_summary" in caplog.text
-        assert "enforceable_but_informational=1" in caplog.text
-        assert "ENFORCEABLE" in caplog.text
         assert "WARNING" in caplog.text
+        assert "enforced=0" in caplog.text
 
-    def test_enforced_edge_reports_without_warning(self, caplog):
-        from sdfb_beam.cli.run_pipeline import log_fk_enforcement
-
+    def test_disabled_table_is_marked_in_the_card(self, caplog):
+        disabled = _MODEL.replace(
+            "  customers:\n    pk: [ID]",
+            "  customers:\n    enabled: false\n    pk: [ID]",
+        )
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
-            log_fk_enforcement(
-                "p.src.B_TABLE",
-                self._contract(False),
-                {"p.landing.A_TABLE": frozenset({"COL_005"})},
-                self._schema(),
+            log_relationship_model(
+                "p.landing.orders", _registry(disabled), mode="relational"
             )
-        assert "enforced=1" in caplog.text
-        assert "WARNING" not in caplog.text
-
-    def test_no_edges_logs_nothing(self, caplog):
-        from sdfb_beam.cli.run_pipeline import log_fk_enforcement
-
-        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
-            log_fk_enforcement(
-                "p.src.B_TABLE",
-                RelationalContract(sdfb=1, pk=("PK_COL",)),
-                {},
-                self._schema(),
-            )
-        assert "fk_enforcement_summary" not in caplog.text
+        assert "DISABLED" in caplog.text
+        assert "parent DISABLED — not drawn" in caplog.text

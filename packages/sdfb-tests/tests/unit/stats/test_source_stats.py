@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from sdfb_core.contracts.relational import parse_relational_contract
+from sdfb_core.contracts.relationships import parse_relationship_model
 from sdfb_core.contracts.schema import TableSchema
 from sdfb_core.stats.source_stats import (
     PROFILER_VERSION,
@@ -23,11 +23,20 @@ _SCHEMA = {
     ],
 }
 
-_CONTRACT = parse_relational_contract(
-    '{"sdfb": 1, "pk": ["PK_COL"], '
-    '"fk": [{"cols": ["STATUS"], "ref": "d.parent", "ref_cols": ["S"]}], '
-    '"identity": ["PK_COL"]}'
-)
+_RELATIONS = parse_relationship_model(
+    """
+model: stats
+tables:
+  T:
+    pk: [PK_COL]
+    identity: [PK_COL]
+    fk:
+      - cols: [STATUS]
+        ref: d.parent
+        ref_cols: [S]
+""",
+    source="test.yaml",
+).tables["T"]
 
 
 def _rows(n: int = 100) -> list[dict]:
@@ -51,7 +60,7 @@ def _table_schema() -> TableSchema:
 
 
 def test_per_column_stats_shape():
-    stats = profile_source_table(_table_schema(), _rows(), contract=_CONTRACT)
+    stats = profile_source_table(_table_schema(), _rows(), relations=_RELATIONS)
     assert set(stats) == {
         "ZEROS", "NOTES", "STATUS", "LOADED", "PK_COL", "AMOUNT", "__table__",
     }
@@ -141,7 +150,7 @@ def test_generation_plan_labels_merged():
 
 
 def test_stats_rows_flatten():
-    stats = profile_source_table(_table_schema(), _rows(), contract=_CONTRACT)
+    stats = profile_source_table(_table_schema(), _rows(), relations=_RELATIONS)
     rows = stats_rows("p.d.t", "digest123", "run-1", stats)
     assert len(rows) == len(stats)
     by_col = {r["column"]: r for r in rows}

@@ -161,16 +161,6 @@ class TableSchema(BaseModel):
             raise ValueError(f"primary_keys reference unknown columns: {unknown}")
         return self
 
-    def relational_contract(self):
-        """The `{"sdfb": 1, ...}` contract from the table description, or
-        None (ADR 0021). Parsed on demand from `table_info.description` —
-        the `_ddl.json` `relational` key is a human-readable mirror only.
-        Raises `DescriptionJsonError` for a marked-but-invalid contract.
-        """
-        from sdfb_core.contracts.relational import parse_relational_contract
-
-        return parse_relational_contract(self.table_info.description)
-
     @property
     def fqn(self) -> str:
         """Fully-qualified table name (`project.dataset.table`)."""

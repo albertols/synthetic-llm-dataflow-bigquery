@@ -2,6 +2,7 @@
 
 **Status:** ACCEPTED (2026-08-22, rev B: minimal-input scenarios, derived FK activation; **Stage 2 implemented same day** — single-job multi-table pipeline, [ADR 0030](../adr/0030-single-job-relational-generation.md)) · decision record: [ADR 0029](../adr/0029-fk-model-scenarios-and-history-mappings.md)
 **Superseded in part by:** [`2026-08-23-referential-integrity-joint-fk-draws.md`](2026-08-23-referential-integrity-joint-fk-draws.md) / [ADR 0031](../adr/0031-joint-fk-key-draws.md) — FK columns now draw whole parent key TUPLES (composite edges were per-column here), and `fk_enforcement_summary` reports at launch what an informational edge costs.
+**Superseded in part by:** [`2026-08-24-relationships-as-config.md`](2026-08-24-relationships-as-config.md) / [ADR 0032](../adr/0032-relationships-as-config.md) — the scenarios are unchanged, but the model comes from `config/relationships/*.yaml` (not table descriptions), `--fk_contracts_json` is gone, and `informational: true` is now `enforced: false`.
 **Depends on:** [ADR 0021](../adr/0021-relational-contract-in-descriptions.md) (parent-first FK) · [ADR 0028](../adr/0028-constraint-router-relational-plan.md) (P6, relational logs)
 **Reference model:** `docs/assets/fk_relationship_example.{png,tf}` — the 6-table corp model (A→F, composite PK/FK, one out-of-DDL `JOIN_KEY`). **Local-only** (gitignored via `docs/assets/fk*`): kept off the public repo by choice; the §2 mermaid below carries the same shape for readers without the files.
 

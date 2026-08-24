@@ -103,8 +103,11 @@ RUN uv sync --frozen --no-dev --all-packages \
 COPY packages/sdfb-core/src packages/sdfb-core/src
 COPY packages/sdfb-beam/src packages/sdfb-beam/src
 
-# Runtime config read at launch from WORKDIR /workspace (run_pipeline defaults
-# --thresholds_uri to config/thresholds.yml). Also ships the bq_schemas.
+# Runtime config read at launch from WORKDIR /workspace: thresholds
+# (--thresholds_uri) and the relational models (--relationships_uri
+# defaults to config/relationships, ADR 0032 — a real model file dropped
+# in that folder is gitignored but DOES ship in the image; a gs:// URI
+# overrides it per launch). Also ships the bq_schemas.
 COPY config config
 
 # Two execution contexts import sdfb-core/sdfb-beam, both from /workspace/.venv:

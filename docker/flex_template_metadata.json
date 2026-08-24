@@ -5,7 +5,7 @@
     {
       "name": "ddl_uri",
       "label": "DDL JSON URI",
-      "helpText": "gs:// path to a _ddl.json — the OFFLINE FALLBACK only (ADR 0027 D2). Live extraction is authoritative at every launch: structure from reference_table, description surfaces (llm_prompt_constraint + relational contract) overlaid from landing_table — the SOURCE table's descriptions are stripped, never used to steer generation. Extract the pin from the LANDING table; it is consumed only when live extraction fails (air-gap, BQ outage), with staleness reported via ddl_pin_drift / ddl_pin_fresh.",
+      "helpText": "gs:// path to a _ddl.json \u2014 the OFFLINE FALLBACK only (ADR 0027 D2). Live extraction is authoritative at every launch: structure from reference_table, description surfaces (llm_prompt_constraint + relational contract) overlaid from landing_table \u2014 the SOURCE table's descriptions are stripped, never used to steer generation. Extract the pin from the LANDING table; it is consumed only when live extraction fails (air-gap, BQ outage), with staleness reported via ddl_pin_drift / ddl_pin_fresh.",
       "isOptional": true,
       "regexes": [
         "^gs://[^/]+/.+\\.json$"
@@ -63,7 +63,7 @@
     },
     {
       "name": "similarity",
-      "label": "Similarity to reference (0.0–1.0)",
+      "label": "Similarity to reference (0.0\u20131.0)",
       "helpText": "0=pure random within schema, 1=mimic reference closely. Default 0.5.",
       "isOptional": true,
       "regexes": [
@@ -115,7 +115,7 @@
     {
       "name": "embedder_uri",
       "label": "Embedder URI (B.1 RAG)",
-      "helpText": "gs://<bucket>/synthetic/models/embedders/<model>/<version>/ — optional; empty uses the dependency-free HashingEmbedder.",
+      "helpText": "gs://<bucket>/synthetic/models/embedders/<model>/<version>/ \u2014 optional; empty uses the dependency-free HashingEmbedder.",
       "isOptional": true,
       "regexes": [
         "^(gs://[^/]+/.+/|)$"
@@ -151,7 +151,7 @@
     {
       "name": "env",
       "label": "Environment tier",
-      "helpText": "dev | uat | prd — selects the threshold tier from config/thresholds.yml.",
+      "helpText": "dev | uat | prd \u2014 selects the threshold tier from config/thresholds.yml.",
       "isOptional": true,
       "regexes": [
         "^(dev|uat|prd)$"
@@ -187,7 +187,7 @@
     {
       "name": "seed",
       "label": "Explicit base RNG seed",
-      "helpText": "Explicit base RNG seed (integer) for deliberate reproduction of a run. Empty (default) derives a fresh seed per (run_id, batch) — recommended.",
+      "helpText": "Explicit base RNG seed (integer) for deliberate reproduction of a run. Empty (default) derives a fresh seed per (run_id, batch) \u2014 recommended.",
       "isOptional": true,
       "regexes": [
         "^([0-9]+)?$"
@@ -259,7 +259,7 @@
     {
       "name": "prompt_constraints",
       "label": "Per-column LLM prompt constraints",
-      "helpText": "on (default) attaches each column's llm_prompt_constraint (parsed from its DDL description JSON) to the pool prompt as a constant, prefix-cache-safe suffix. Columns without a constraint are untouched — with none anywhere, 'on' is a no-op (spec C5).",
+      "helpText": "on (default) attaches each column's llm_prompt_constraint (parsed from its DDL description JSON) to the pool prompt as a constant, prefix-cache-safe suffix. Columns without a constraint are untouched \u2014 with none anywhere, 'on' is a no-op (spec C5).",
       "isOptional": true,
       "regexes": [
         "^(on|off)?$"
@@ -268,7 +268,7 @@
     {
       "name": "prompt_debug",
       "label": "Pool-prompt debug logging",
-      "helpText": "off (default) logs nothing. redacted logs each built pool prompt as a freetext_pool_prompt milestone with seed exemplars elided (<k seeds elided>) plus a sha12 prompt hash. full logs verbatim prompts at WARNING — reference values reach Dataflow logs, short-lived debug runs only (ADR 0024 §3c).",
+      "helpText": "off (default) logs nothing. redacted logs each built pool prompt as a freetext_pool_prompt milestone with seed exemplars elided (<k seeds elided>) plus a sha12 prompt hash. full logs verbatim prompts at WARNING \u2014 reference values reach Dataflow logs, short-lived debug runs only (ADR 0024 \u00a73c).",
       "isOptional": true,
       "regexes": [
         "^(off|redacted|full)?$"
@@ -304,13 +304,19 @@
     {
       "name": "generate_fk_relationships",
       "label": "Generate FK relationships",
-      "helpText": "true (default): declared relationships are honored — the launch expands to the whole FK component, parents first, everything derived. Tables with no relationships behave exactly as false. false: isolated generation; declared edges ignored LOUDLY. ADR 0029.",
+      "helpText": "true (default): declared relationships are honored \u2014 the launch expands to the whole FK component, parents first, everything derived. Tables with no relationships behave exactly as false. false: isolated generation; declared edges ignored LOUDLY. ADR 0029.",
+      "isOptional": true
+    },
+    {
+      "name": "relationships_uri",
+      "label": "Relationship models URI",
+      "helpText": "Where the relational models live (ADR 0032): a folder or a single YAML file, local or gs://. Default: the config/relationships folder packaged in the image. Point it at gs://... to change PK/FK/identity without rebuilding \u2014 this is the ONLY source of relational truth; table descriptions are never read for it.",
       "isOptional": true
     },
     {
       "name": "multi_table_mode",
       "label": "Multi-table execution mode",
-      "helpText": "single_job (default): every planned table in ONE Dataflow job — one worker fleet, one vLLM ignition, in-DAG FK key handoff (ADR 0030). sequential_jobs: one job per table, parents first (fallback/debugging).",
+      "helpText": "single_job (default): every planned table in ONE Dataflow job \u2014 one worker fleet, one vLLM ignition, in-DAG FK key handoff (ADR 0030). sequential_jobs: one job per table, parents first (fallback/debugging).",
       "isOptional": true,
       "regexes": [
         "^(single_job|sequential_jobs)$"

@@ -1,11 +1,16 @@
 #!/usr/bin/env python
 """Parent-first multi-table orchestrator (ADR 0021, Option 1).
 
-Runs today's proven single-table pipeline once per table, ordered by the FK
-edges declared in each table's relational contract. A child run receives
-``--fk_parent_landing`` so its FK columns sample from the parents' landed
-synthetic keys. Zero DAG-shape change; per-table failure isolation; a
-mid-set failure stops the set (children must never run without parents).
+Runs today's proven single-table pipeline once per table, ordered by the
+FK edges declared in `config/relationships/` (ADR 0032). A child run
+receives ``--fk_parent_landing`` so its FK columns sample from the
+parents' landed synthetic keys. Zero DAG-shape change; per-table failure
+isolation; a mid-set failure stops the set (children must never run
+without parents).
+
+`run_pipeline.py --multi_table_mode=single_job` (the default) already
+puts a whole model in ONE Dataflow job (ADR 0030); this script stays for
+the cases that want job-per-table isolation or Airflow trigger configs.
 
 Set config (JSON):
 
@@ -17,11 +22,9 @@ Set config (JSON):
                        "dlq_table": "proj.synthetic_data_quality.dlq"}
     }
 
-Contracts are fetched live via the DDL extractor; ``--contracts-json``
-injects them offline (tests / air-gapped dry runs):
-
-    {"proj.src_ds.orders": {"sdfb": 1, "fk": [{"cols": ["CUST_ID"],
-      "ref": "src_ds.customers", "ref_cols": ["ID"]}]}}
+Relationships come from ``--relationships-uri`` (default
+`config/relationships`, a folder or file, local or gs://) — the same
+single source of truth the pipeline reads.
 
 Usage:
     python scripts/run_tableset.py --config tableset.json --dry-run
@@ -35,85 +38,26 @@ import subprocess
 import sys
 from pathlib import Path
 
-from sdfb_core.contracts.fk_model import (
-    FkModel,
-    build_fk_model,
-    fk_model_ascii,
-    fk_model_mermaid,
-    model_sha12,
-)
-from sdfb_core.contracts.relational import RelationalContract
+from sdfb_beam.io.relationships import load_relationship_registry
+from sdfb_core.contracts.relationships import RelationshipRegistry
 
 _RUN_PIPELINE = "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py"
 _FK_MODELS_DIR = "integration_tests/fk_models"
+_REL_DIR = "config/relationships"
 
 
 class TableSetError(ValueError):
     """Bad set config: unknown parent, FK cycle, duplicate table."""
 
 
-def _suffix(fqn: str, parts: int) -> str:
-    return ".".join(fqn.split(".")[-parts:])
-
-
-def resolve_edges(
-    tables: list[str], contracts: dict[str, RelationalContract | None]
-) -> dict[str, set[str]]:
-    """table → set of parent tables (only parents inside the set count).
-
-    A contract's ``fk.ref`` is ``dataset.table``; it matches a set member
-    whose FQN ends with it. An FK to a table OUTSIDE the set is allowed —
-    the parent must already be landed (run_pipeline's preflight P3 and the
-    FK-pool read enforce that at run time).
-    """
-    by_suffix = {_suffix(t, 2): t for t in tables}
-    edges: dict[str, set[str]] = {t: set() for t in tables}
-    for table in tables:
-        contract = contracts.get(table)
-        if contract is None:
-            continue
-        for fk in contract.fk:
-            parent = by_suffix.get(_suffix(fk.ref, 2))
-            if parent is not None and parent != table:
-                edges[table].add(parent)
-    return edges
-
-
-def topo_sort(tables: list[str], edges: dict[str, set[str]]) -> list[str]:
-    """Parents-first order, stable for independent tables; cycles raise."""
-    if len(set(tables)) != len(tables):
-        raise TableSetError(f"duplicate tables in set: {tables}")
-    ordered: list[str] = []
-    done: set[str] = set()
-    visiting: set[str] = set()
-
-    def visit(t: str) -> None:
-        if t in done:
-            return
-        if t in visiting:
-            raise TableSetError(f"FK cycle involving {t}")
-        visiting.add(t)
-        for parent in sorted(edges.get(t, ())):
-            visit(parent)
-        visiting.discard(t)
-        done.add(t)
-        ordered.append(t)
-
-    for t in tables:
-        visit(t)
-    return ordered
-
-
-def _enforced_fk(contract: RelationalContract | None) -> bool:
-    return contract is not None and any(
-        not fk.informational for fk in contract.fk
-    )
+def _names(tables: list[str]) -> tuple[str, ...]:
+    return tuple(t.rsplit(".", 1)[-1] for t in tables)
 
 
 def build_argv(
     table: str,
     config: dict,
-    contract: RelationalContract | None,
+    registry: RelationshipRegistry,
     index: int,
     generate_fk_relationships: bool = True,
 ) -> list[str]:
@@ -128,8 +72,9 @@ def build_argv(
         f"--run_id={run_id}-{index:02d}-{table.rsplit('.', 1)[-1]}",
         "--generate_fk_relationships="
         + ("true" if generate_fk_relationships else "false"),
+        f"--relationships_uri={config.get('relationships_uri', _REL_DIR)}",
     ]
-    if generate_fk_relationships and _enforced_fk(contract):
+    if generate_fk_relationships and registry.enforced_edges(table):
         argv.append(f"--fk_parent_landing={landing_dataset}")
     for key, value in sorted(config.get("common_args", {}).items()):
         argv.append(f"--{key}={value}")
@@ -138,42 +83,44 @@ def build_argv(
 
 def plan_tableset_waves(
     config: dict,
-    contracts: dict[str, RelationalContract | None],
+    registry: RelationshipRegistry,
     generate_fk_relationships: bool = True,
 ) -> list[list[list[str]]]:
-    """Parents-first WAVES of run_pipeline argvs (ADR 0029).
+    """Parents-first WAVES of run_pipeline argvs (ADR 0029/0032).
 
     Each wave's tables are FK-independent of one another, so a wave may
     run in parallel (`run_waves`); waves themselves stay sequential —
     children never launch before their parents landed. With the flag off
-    every table is one wave (isolated generation) and any declared
-    enforced edge is reported ignored."""
+    every table is one wave (isolated generation) and any enforced edge
+    the model declares is reported ignored."""
     tables = list(config["tables"])
-    model = build_fk_model(tables, contracts)
     if not generate_fk_relationships:
         ignored = [
-            f"{child}->{fk.ref}"
-            for child, fk in model.edges
-            if not fk.informational
+            f"{t}->{edge.ref}"
+            for t in tables
+            for edge in registry.enforced_edges(t)
         ]
         if ignored:
             print(
-                "WARNING: --generate-fk-relationships=false ignores "
-                f"declared FK edges: {ignored} — referential integrity "
-                "UNVERIFIED for this set.",
+                "WARNING: --generate-fk-relationships=false ignores the "
+                f"enforced FK edges {ignored} declared in "
+                "config/relationships — referential integrity UNVERIFIED "
+                "for this set.",
                 file=sys.stderr,
             )
-        levels: tuple[tuple[str, ...], ...] = (tuple(tables),)
+        waves_of_names: tuple[tuple[str, ...], ...] = (_names(tables),)
     else:
-        levels = model.levels
+        waves_of_names = registry.generation_waves(_names(tables))
+    by_name = {t.rsplit(".", 1)[-1]: t for t in tables}
     waves: list[list[list[str]]] = []
     index = 0
-    for level in levels:
+    for wave_names in waves_of_names:
         wave = []
-        for t in level:
+        for name in wave_names:
+            table = by_name.get(name, name)
             wave.append(
                 build_argv(
-                    t, config, contracts.get(t), index,
+                    table, config, registry, index,
                     generate_fk_relationships=generate_fk_relationships,
                 )
             )
@@ -184,7 +131,7 @@ def plan_tableset_waves(
 
 def emit_trigger_configs(
     config: dict,
-    contracts: dict[str, RelationalContract | None],
+    registry: RelationshipRegistry,
     out_dir: Path,
     generate_fk_relationships: bool = True,
 ) -> list[Path]:
@@ -194,25 +141,27 @@ def emit_trigger_configs(
     single-table; multi-table on corp = triggering it once per file, in
     filename order (waves flattened — the NN_ prefix IS the order)."""
     tables = list(config["tables"])
-    model = build_fk_model(tables, contracts)
-    levels = (
-        model.levels if generate_fk_relationships else (tuple(tables),)
+    waves_of_names = (
+        registry.generation_waves(_names(tables))
+        if generate_fk_relationships
+        else (_names(tables),)
     )
+    by_name = {t.rsplit(".", 1)[-1]: t for t in tables}
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     index = 0
-    for level in levels:
-        for t in level:
+    for wave_names in waves_of_names:
+        for name in wave_names:
+            table = by_name.get(name, name)
             conf: dict = {
-                "table_fqn": t,
+                "table_fqn": table,
                 "generate_fk_relationships":
                     "true" if generate_fk_relationships else "false",
                 **config.get("common_args", {}),
             }
-            if generate_fk_relationships and _enforced_fk(contracts.get(t)):
+            if generate_fk_relationships and registry.enforced_edges(table):
                 conf["fk_parent_landing"] = config["landing_dataset"]
-            name = f"{index:02d}_{t.rsplit('.', 1)[-1]}.json"
-            path = out_dir / name
+            path = out_dir / f"{index:02d}_{name}.json"
             path.write_text(json.dumps(conf, indent=2, sort_keys=True))
             paths.append(path)
             index += 1
@@ -243,65 +192,46 @@ def run_waves(
     return 0
 
 
-def write_model_artifact(model: FkModel, out_dir: Path) -> Path:
-    """Persist the set's FK model as `<sha12>.mmd` for diagram recycling
+def write_model_artifact(
+    registry: RelationshipRegistry, table: str, out_dir: Path
+) -> Path:
+    """Persist the set's model diagram as `<sha12>.mmd` for recycling
     (ADR 0029): the E2E report embeds this file instead of re-deriving
     the drawing when the model is unchanged."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{model_sha12(model)}.mmd"
-    path.write_text(fk_model_mermaid(model))
+    path = out_dir / f"{registry.sha12()}.mmd"
+    path.write_text(registry.mermaid(table))
     return path
 
 
-def _load_contracts(
-    tables: list[str], contracts_json: str | None
-) -> dict[str, RelationalContract | None]:
-    if contracts_json:
-        raw = json.loads(Path(contracts_json).read_text())
-        return {
-            t: (
-                RelationalContract.model_validate(raw[t])
-                if t in raw
-                else None
-            )
-            for t in tables
-        }
-    # Live mode: the extractor already knows how to parse the contract.
-    from sdfb_beam.ddl.extractor import extract_ddl_metadata
-
-    out: dict[str, RelationalContract | None] = {}
-    for t in tables:
-        project, dataset, name = t.split(".")
-        meta = extract_ddl_metadata(project=project, dataset=dataset, table=name)
-        rel = meta["table_info"].get("relational")
-        out[t] = RelationalContract.model_validate(rel) if rel else None
-    return out
-
-
 def plan_tableset(
-    config: dict, contracts: dict[str, RelationalContract | None]
+    config: dict, registry: RelationshipRegistry
 ) -> list[list[str]]:
     """The ordered list of run_pipeline argvs for the whole set."""
     tables = list(config["tables"])
-    order = topo_sort(tables, resolve_edges(tables, contracts))
+    by_name = {t.rsplit(".", 1)[-1]: t for t in tables}
+    order = registry.generation_order(_names(tables))
     return [
-        build_argv(t, config, contracts.get(t), i)
-        for i, t in enumerate(order)
+        build_argv(by_name.get(name, name), config, registry, i)
+        for i, name in enumerate(order)
     ]
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, help="set config JSON path")
-    p.add_argument("--contracts-json", default=None,
-                   help="offline contracts map (tests / dry runs)")
+    p.add_argument("--relationships-uri", default=_REL_DIR,
+                   help="where the relational models live (ADR 0032): a "
+                        "folder or a single YAML file, local or gs://. "
+                        "The same single source of truth run_pipeline "
+                        "reads.")
     p.add_argument("--dry-run", action="store_true",
                    help="print the ordered commands, run nothing")
     p.add_argument("--generate-fk-relationships", default="true",
                    choices=["true", "false"],
                    help="false = isolated generation for every table (one "
-                        "parallel wave, declared FK edges loudly ignored). "
-                        "ADR 0029.")
+                        "parallel wave, the model's enforced FK edges "
+                        "loudly ignored). ADR 0029/0032.")
     p.add_argument("--max-parallel", type=int, default=1,
                    help="jobs launched concurrently WITHIN a wave — bound "
                         "it to your Dataflow/GPU quota, waves stay "
@@ -310,31 +240,33 @@ def main(argv: list[str] | None = None) -> int:
                    help="write ordered Airflow trigger conf JSONs for the "
                         "Composer DAG instead of launching locally")
     p.add_argument("--fk-models-dir", default=_FK_MODELS_DIR,
-                   help="where the set's FK-model .mmd artifact lands "
+                   help="where the set's model .mmd artifact lands "
                         "(diagram recycling for E2E reports)")
     args = p.parse_args(argv)
     generate_fk = args.generate_fk_relationships == "true"
 
     config = json.loads(Path(args.config).read_text())
+    config.setdefault("relationships_uri", args.relationships_uri)
     tables = list(config["tables"])
-    contracts = _load_contracts(tables, args.contracts_json)
+    registry = load_relationship_registry(args.relationships_uri)
 
-    model = build_fk_model(tables, contracts)
-    artifact = write_model_artifact(model, Path(args.fk_models_dir))
-    print(f"FK model {model_sha12(model)} → {artifact}")
-    print(fk_model_ascii(model))
+    artifact = write_model_artifact(
+        registry, tables[0], Path(args.fk_models_dir)
+    )
+    print(f"relationship model {registry.sha12()} → {artifact}")
+    print(registry.card(tables[0]))
     print()
 
     if args.emit_trigger_configs:
         for path in emit_trigger_configs(
-            config, contracts, Path(args.emit_trigger_configs),
+            config, registry, Path(args.emit_trigger_configs),
             generate_fk_relationships=generate_fk,
         ):
             print(f"wrote {path}")
         return 0
 
     waves = plan_tableset_waves(
-        config, contracts, generate_fk_relationships=generate_fk
+        config, registry, generate_fk_relationships=generate_fk
     )
     for level, wave in enumerate(waves):
         print(f"— wave {level} ({len(wave)} tables) —")

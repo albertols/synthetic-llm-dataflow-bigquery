@@ -4,15 +4,18 @@ The checks are metadata-only (milliseconds, zero DAG cost) and fail with
 the exact fix, following the pool-table precedent in ``run_pipeline.py``
 (the 2026-07-25 TEST_1 lesson: a cryptic driver NotFound costs a run).
 
-Check ladder (2026-08-05 spec, WS-A A3):
-  P1  contract parses + validates          → SystemExit (loud, with snippet)
-  P2  contract columns exist in the schema → SystemExit naming them
+Check ladder (2026-08-05 spec, WS-A A3; relational input per ADR 0032):
+  P2  model columns exist in the schema    → SystemExit naming them
   P3  FK parents resolved (when a resolver is provided) → SystemExit
+  P4  the PK's generator can cover num_rows → SystemExit (ADR 0028)
   P5  PK tuple unique in the reference sample → WARNING milestone only
       (source data may legitimately violate an undeclared PK)
 
-CLI-provided ``--pk_cols`` / ``--identity_cols`` always win over the
-contract; the override is logged, never silent.
+The relational input is this table's entry in `config/relationships/`
+(ADR 0032) — the model file is the source of truth, so its PK/identity
+win and a conflicting ``--pk_cols`` is loudly IGNORED. Tables no model
+declares fall back to the CLI flags, which is how a one-off table with
+no relationships generates with zero config.
 """
 
 from __future__ import annotations
@@ -24,10 +27,10 @@ from typing import TYPE_CHECKING
 
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.prompt_constraint import (
+    parse_llm_prompt_constraint,
     parse_prompt_constraint,
     render_prompt_clause,
 )
-from sdfb_core.contracts.relational import parse_llm_prompt_constraint
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
 from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
@@ -40,14 +43,16 @@ from sdfb_core.observability import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sdfb_core.contracts import TableSchema
-    from sdfb_core.contracts.relational import RelationalContract
+    from sdfb_core.contracts.relationships import TableRelations
 
 
 @dataclass(frozen=True)
 class PreflightResult:
     pk_cols: tuple[str, ...]
     identity_cols: tuple[str, ...]
-    contract: RelationalContract | None
+    # This table's entry in `config/relationships/` (ADR 0032), or None
+    # when no model declares it — then PK/identity come from the CLI.
+    relations: TableRelations | None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -263,6 +268,7 @@ def preflight(
     pk_cols: tuple[str, ...],
     identity_cols: tuple[str, ...],
     reference_rows: list[dict],
+    relations: TableRelations | None = None,
     fk_parents_resolved: dict[str, bool] | None = None,
     prompt_constraints_enabled: bool = True,
     num_rows: int = 0,
@@ -278,39 +284,32 @@ def preflight(
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
     _report_constraint_vehicles(table_schema, reference_rows)
 
-    # P1 — parse. A marked-but-invalid contract is a stop, not a warning.
-    try:
-        contract = table_schema.relational_contract()
-    except DescriptionJsonError as exc:
-        raise SystemExit(
-            f"[preflight P1] {fqn}: the table description carries an "
-            f"'sdfb'-marked JSON object that does not validate.\n{exc}\n"
-            f"Fix the Terraform description (use jsonencode) or remove the "
-            f"marker."
-        ) from exc
-
-    if contract is None:
-        log_milestone("relational_contract_absent", table=fqn)
+    if relations is None:
+        log_milestone("relationships_absent_for_table", table=fqn)
         if num_rows > 0 and pk_cols:
             _check_pk_capacity(table_schema, pk_cols, num_rows)
         return PreflightResult(pk_cols, identity_cols, None, warnings)
 
-    # P2 — every contract column must exist in the schema.
+    # P2 — every column the model names must exist in the schema. This is
+    # where a typo in `config/relationships/*.yaml` stops the launch, at
+    # the cost of one comparison, instead of generating the wrong shape.
     valid = {c.name for c in table_schema.columns}
-    # Informational edges are display-only (ADR 0029): their cols may be
-    # absent from the DDL by definition, and they never require pools.
-    enforced_fk = tuple(fk for fk in contract.fk if not fk.informational)
+    # Documented edges (`enforced: false`) describe a relationship whose
+    # join key need not be in the DDL — they never draw keys, so their
+    # columns are exempt by definition.
+    enforced_fk = tuple(fk for fk in relations.fk if fk.enforced)
     fk_cols = tuple(c for fk in enforced_fk for c in fk.cols)
     for label, cols in (
-        ("pk", contract.pk),
-        ("identity", contract.identity),
+        ("pk", relations.pk),
+        ("identity", relations.identity),
         ("fk.cols", fk_cols),
     ):
         missing = _missing(cols, valid)
         if missing:
             raise SystemExit(
-                f"[preflight P2] {fqn}: contract {label} references unknown "
-                f"columns {missing}. Schema columns: {sorted(valid)}"
+                f"[preflight P2] {fqn}: the relationship model's {label} "
+                f"names unknown columns {missing}. Fix the model file (or "
+                f"the table). Schema columns: {sorted(valid)}"
             )
 
     # P3 — FK closure, when the caller resolved parents (multi-table runs).
@@ -325,19 +324,20 @@ def preflight(
                 f"their synthetic tables before this run."
             )
 
-    # CLI wins; the contract fills the gaps.
-    effective_pk = pk_cols or contract.pk
-    effective_identity = identity_cols or contract.identity
-    if pk_cols and contract.pk and tuple(pk_cols) != contract.pk:
+    # The model is the source of truth; CLI flags fill the gaps it leaves.
+    effective_pk = relations.pk or pk_cols
+    effective_identity = relations.identity or identity_cols
+    if pk_cols and relations.pk and tuple(pk_cols) != relations.pk:
         warnings.append(
-            f"--pk_cols {list(pk_cols)} overrides contract pk {list(contract.pk)}"
+            f"--pk_cols {list(pk_cols)} IGNORED — the relationship model "
+            f"declares pk {list(relations.pk)} and is the source of truth"
         )
         log_milestone(
-            "relational_contract_overridden",
+            "relationships_pk_override_ignored",
             level=logging.WARNING,
             table=fqn,
             cli_pk=",".join(pk_cols),
-            contract_pk=",".join(contract.pk),
+            model_pk=",".join(relations.pk),
         )
 
     # P5 — PK sanity against the reference sample (warning only).
@@ -365,14 +365,16 @@ def preflight(
         _check_pk_capacity(table_schema, tuple(effective_pk), num_rows)
 
     log_milestone(
-        "relational_contract_loaded",
+        "relations_loaded",
         table=fqn,
-        pk=",".join(contract.pk),
-        fk_count=len(contract.fk),
-        identity=",".join(contract.identity),
+        pk=",".join(relations.pk),
+        fk_count=len(relations.fk),
+        enforced_fk=len(enforced_fk),
+        identity=",".join(relations.identity),
+        enabled=relations.enabled,
     )
     return PreflightResult(
-        tuple(effective_pk), tuple(effective_identity), contract, warnings
+        tuple(effective_pk), tuple(effective_identity), relations, warnings
     )
 
 

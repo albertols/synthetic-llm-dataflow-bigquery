@@ -243,6 +243,11 @@ class GenerationContext(BaseModel):
     # sampling truth stays in fk_pools.
     landing_table: str = ""
     fk_edges: list[dict] = Field(default_factory=list)
+    # The relationship card the LAUNCHER rendered from
+    # `config/relationships/` (ADR 0032), carried verbatim so the worker
+    # log shows the same model the driver planned from — no second graph
+    # implementation, nothing to drift.
+    relationship_card: str = ""
     # Multi-table launches (ADR 0030): the landing table NAME used to
     # qualify column references in pretty log payloads
     # (`<LANDING>.<col>`) so oss/ replacements stay unambiguous when N

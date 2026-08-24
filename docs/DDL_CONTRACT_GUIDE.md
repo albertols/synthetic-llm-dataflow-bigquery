@@ -1,34 +1,46 @@
-# DDL description contract — user guide (Terraform ⇄ `_ddl.json` ⇄ engines)
+# Column-constraint guide (Terraform ⇄ `_ddl.json` ⇄ engines)
 
 **Audience:** the person provisioning target tables (Terraform) and wiring
 synthetic runs. This is the *configuration* companion to
-[ADR 0021](adr/0021-relational-contract-in-descriptions.md) (table-level
-relational contract) and [ADR 0024](adr/0024-structured-prompt-constraint-templates.md)
-(column-level prompt constraints); design rationale and evidence live in
+[ADR 0024](adr/0024-structured-prompt-constraint-templates.md) (column-level
+prompt constraints); design rationale and evidence live in
 [the wave-2 design doc](designs/2026-08-10-prompt-constraints.md). Everything
 below is copy-paste-ready and matches the parsers in
 `packages/sdfb-core/src/sdfb_core/contracts/`.
 
+> **Relationships are NOT here.** PK, FK and identity live in
+> [`config/relationships/`](../config/relationships/README.md) — versioned
+> YAML the repo owns, read at launch, changed without touching BigQuery
+> ([ADR 0032](adr/0032-relationships-as-config.md)). Table descriptions are
+> never parsed for relational structure. This guide owns the OTHER surface:
+> per-column generation steering, which stays next to the column it steers.
+
 ---
 
-## 1. Why the contract lives in *descriptions* (the Terraform reminder)
+## 1. Two surfaces, two owners
 
 BigQuery's PK/FK "constraints" are **metadata only — never enforced**
 ([BigQuery table constraints](https://cloud.google.com/bigquery/docs/primary-foreign-keys)),
 and the enterprise Terraform module for `google_bigquery_table` does **not
 expose** a primary-key block at all
 ([registry: `google_bigquery_table`](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/bigquery_table)).
-So there is no Terraform-native way to declare the relationships the
-generator must honor.
+So BigQuery cannot hold the relationships the generator must honor.
 
-ADR 0021's answer: a **versioned JSON contract embedded in the table
-description**, plus per-column generation hints embedded in **column
-descriptions**. Descriptions are plain strings — Terraform can set them, the
-DDL extractor reads them back from `INFORMATION_SCHEMA`, and the pipeline
-*actually enforces* what they declare (PK uniqueness via
-`--uniqueness_mode=exact`, FK referential integrity via parent-landed key
-pools). The description is the single source of truth; nothing else carries
-relationships.
+The answer used to be a JSON contract embedded in the table description.
+[ADR 0032](adr/0032-relationships-as-config.md) moved it out: relationships
+are **repo config** now (`config/relationships/*.yaml`), because they
+describe a MODEL spanning many tables, and scattering that across N table
+descriptions made every change a `bq update` / `terraform apply` against
+production metadata.
+
+Per-column steering did not move. A `llm_prompt_constraint` describes how to
+generate ONE field's values, so it belongs next to that field, where whoever
+owns the column can read it — and Terraform sets it as a plain string.
+
+| Surface | Lives in | Owns | Changed by |
+|---|---|---|---|
+| **Relationships** | `config/relationships/<model>.yaml` | `pk`, `identity`, `fk`, `enabled` | editing a file (or `--relationships_uri=gs://…`) |
+| **Column constraints** | the COLUMN description | `format`, `pattern`, `values`, `route`, … | `terraform apply` on the landing table |
 
 ```mermaid
 flowchart LR
@@ -38,47 +50,44 @@ flowchart LR
     classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
     classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
-    TF["📄 Terraform module<br/>descriptions carry JSON"]:::data
+    REL["📄 config/relationships<br/>pk · fk · identity · enabled"]:::data
+    TF["📄 Terraform module<br/>COLUMN descriptions"]:::data
     BQ[("🗄️ BigQuery table<br/>+ INFORMATION_SCHEMA")]:::store
-    EX["🔀 DDL extractor<br/>scripts/extract_ddl.py"]:::beam
-    DDL[("📄 a_table_ddl.json")]:::store
-    PF["🛡️ preflight (driver)<br/>parse + validate contract"]:::cpu
-    FK[("🗄️ parent landing table<br/>fk_pools read")]:::store
+    PF["🛡️ preflight (driver)<br/>model + constraints"]:::cpu
+    FK[("🗄️ parent landing table<br/>key tuples")]:::store
     ENG["⚙️ engines B.1 / B.2<br/>pk · fk · constraints"]:::cpu
     LLM["🧠 vLLM pool prompts<br/>+ guided decoding"]:::gpu
 
-    TF --> BQ --> EX --> DDL --> PF --> ENG --> LLM
+    TF --> BQ --> PF --> ENG --> LLM
+    REL --> PF
     BQ -. reference sample .-> PF
     FK --> PF
 ```
 
 **Precedence rule** (`run_pipeline.py::_load_reference_and_preflight`): the
-contract *defaults* `pk`/`identity`; explicit `--pk_cols` / `--identity_cols`
-CLI flags **win** when passed. FK pools load whenever the contract declares
-enforced `fk` edges and `--generate_fk_relationships` is true (default) —
-the parent landing dataset derives from `--landing_table` (ADR 0029 rev B);
-an unlanded/empty parent stops the launch loudly.
+relationship model is the source of truth for `pk`/`identity`; a conflicting
+`--pk_cols` / `--identity_cols` is **ignored with a WARNING**. Tables no model
+declares fall back to those flags, so a one-off table needs no config at all.
+FK key pools load whenever the model declares enforced `fk` edges and
+`--generate_fk_relationships` is true (default) — the parent landing dataset
+derives from `--landing_table`; an unlanded/empty parent stops the launch
+loudly.
 
-> **WHERE the contract lives (ADR 0027 D2, 2026-08-21): on the LANDING
-> (synthetic/target) table — never the source.** The pipeline reads the
-> description surfaces live from `--landing_table`'s `INFORMATION_SCHEMA`
-> at every launch and overlays them onto the source table's structure;
-> the source (lake) table's descriptions are another team's prose and are
-> deliberately stripped, never used to steer generation. Declare the
-> `{"sdfb":1,…}` contract and every `llm_prompt_constraint` in the
-> Terraform that provisions your `synthetic_data.*` tables (worked
-> examples below apply unchanged — put them on the landing twin). A
-> `terraform apply` there reaches the very next trigger
+> **WHERE column constraints live (ADR 0027 D2): on the LANDING
+> (synthetic/target) table — never the source.** The pipeline reads column
+> descriptions live from `--landing_table`'s `INFORMATION_SCHEMA` at every
+> launch and overlays them onto the source table's structure; the source
+> (lake) table's descriptions are another team's prose and are deliberately
+> stripped. A `terraform apply` there reaches the very next trigger
 > (`target_metadata_overlaid` in the launcher log); no DDL re-extraction
-> step. `--ddl_uri` pins are only the offline fallback and should be
-> extracted from the LANDING table.
+> step. `--ddl_uri` pins are only the offline fallback.
 
 ## 2. The two surfaces at a glance
 
 | Surface | Marker key | Owns | Parser |
 |---|---|---|---|
-| **Table** description | `"sdfb"` | relationships: `pk`, `fk`, `identity` | `contracts/relational.py::parse_relational_contract` |
 | **Column** description | `"llm_prompt_constraint"` | per-column generation hints (string or object) | `contracts/prompt_constraint.py::parse_prompt_constraint` |
+| `config/relationships/*.yaml` | — (whole file) | relationships: `pk`, `fk`, `identity`, `enabled` | `contracts/relationships.py::parse_relationship_model` |
 
 ### Placement is free — prose around the JSON is expected
 
@@ -96,8 +105,8 @@ identically:
 3) Prose after:
    {"llm_prompt_constraint": {"format": "24-char uppercase hex"}} Populated by the auth service.
 
-4) Prose both sides (table-level looks the same):
-   Ledger accounts. {"sdfb": 1, "pk": ["ACCOUNT_ID"]} Owned by team-core-banking.
+4) Prose both sides:
+   Card token, PAN-derived. {"llm_prompt_constraint": {"prefix": "E2F"}} Owned by team-core-banking.
 ```
 
 Two hard rules, both loud by design:
@@ -110,59 +119,38 @@ Two hard rules, both loud by design:
   break older engines, and vice versa (ADR 0024 forward/backward
   compatibility).
 
-## 3. Table-level contract — every settable field
+## 3. Relationships — one file, not N descriptions
 
-```jsonc
-{"sdfb": 1,                                  // REQUIRED version tag
- "pk": ["ACCOUNT_ID"],                       // 0..n columns; composite OK
- "identity": ["IBAN"],                       // unique-but-not-key columns
- "fk": [                                     // 0..n edges
-   {"cols": ["ACCOUNT_ID"],                  // this table's columns
-    "ref": "core_banking.a_table",           // parent as dataset.table (MUST be qualified)
-    "ref_cols": ["ACCOUNT_ID"]}              // parent columns, same arity
- ]}
+PK / identity / FK are declared in `config/relationships/<model>.yaml` and
+nowhere else ([ADR 0032](adr/0032-relationships-as-config.md); full schema
+and rules in [`config/relationships/README.md`](../config/relationships/README.md)):
+
+```yaml
+model: core_banking
+tables:
+  a_table:
+    pk: [ACCOUNT_ID]
+    identity: [CARD_TOKEN]
+  b_table:
+    pk: [MOVEMENT_ID]
+    fk:
+      - cols:     [ACCOUNT_ID]
+        ref:      a_table           # bare name = same model
+        ref_cols: [ACCOUNT_ID]      # need NOT be the parent's full PK
 ```
 
-| Field | Validation | What the pipeline does with it |
-|---|---|---|
-| `sdfb` | required int (version) | contract versioning; `1` today |
-| `pk` | list of column names | uniqueness enforcement (`--uniqueness_mode=exact`), duplicate gate in validation, `pk_analysis` in the E2E probe |
-| `identity` | list of column names | per-row unique identifier generation (never pool-drawn, never folded) |
-| `fk[].cols` / `ref_cols` | non-empty, equal arity | child columns take whole KEY TUPLES from the parent's **landed synthetic** rows (ADR 0031): the combination is drawn as one unit, weighted to the child's own marginals, so orphans are structurally impossible at any edge width. `ref_cols` need NOT be the parent's full PK — any projection works (the pool is `DISTINCT` over exactly those columns) |
-| `fk[].ref` | must be `dataset.table` | resolved to `{landing_dataset}.{table}` at run time — the landing dataset derives from `--landing_table` (ADR 0029 rev B; `--fk_parent_landing` is an expert override for cross-dataset parents) |
-| `fk[].informational` | bool, default `false` | **documentation-only edge (ADR 0029)**: drawn dashed in FK-model diagrams (`fk_model_pretty` logs, reports), excluded from ALL enforcement — no column-existence check, no `fk_parent_landing` requirement, no FK pool, no orphan rule, no generation-order constraint. Use it ONLY when the join key is absent from the DDL (the 6-table example's `JOIN_KEY`). If the columns exist on both sides, the launcher now says so: `fk_enforcement_summary` prints `ENFORCEABLE` at WARNING level and names this exact edit (ADR 0031) |
+Two flags govern what a launch does with it — `enabled: false` on a table
+DETACHES it (and anything that reached the model only through it),
+`enforced: false` on an edge documents the relationship without generating
+from it. Check any edit without launching:
 
-> **Enforced FK edges, what you get (ADR 0031).** Every child row takes a
-> whole parent key tuple, weighted so the child's own column
-> distributions survive the restriction (IPF fit), with unseen parent
-> values kept reachable (Good–Turing floor) and NULL FK tuples preserved
-> at the child's observed rate (SQL MATCH SIMPLE: NULL = "no parent",
-> never an orphan). The `fk.orphan` BLOCKER rule then MEASURES it per
-> run. Before ADR 0031 a composite edge drew each column independently:
-> the 2026-08-23 run's 3-column edge would have orphaned ≥97% of rows.
->
-> **One cap, announced:** a child samples at most 100,000 distinct parent
-> key tuples per edge (`fk_key_pool_capped` WARNING when a parent holds
-> more), so its FK distinct count cannot exceed that.
+```bash
+uv run --no-sync python3 scripts/relationships/card.py --table b_table
+```
 
-**Relational scenarios (ADR 0029 rev B).** Two inputs describe every
-launch: `--landing_table` (one FQN or a CSV list) +
-`--generate_fk_relationships` (default `true`). With relationships
-declared, a single-table launch expands to the whole connected
-component and generates it parents-first **in ONE Dataflow job**
-(ADR 0030: one worker fleet, one vLLM ignition, parent keys handed to
-children as in-DAG side inputs; `--multi_table_mode=sequential_jobs` is
-the fallback) — `fk_parent_landing` derives from the landing dataset
-and is no longer a user concern. `false` =
-isolated generation, declared edges ignored loudly. Every launch logs
-`launch_scenario`, `fk_generation_mode` and the resolved model as
-pasteable mermaid (`fk_model_pretty`). `scripts/run_tableset.py` is the
-power path (within-wave parallelism, `--emit-trigger-configs` for
-Airflow). Worked 6-table
-example — composite FKs, an informational `JOIN_KEY` edge, letter-
-prefixed anonymization: `docs/assets/fk_relationship_example.{tf,png}`
-(**local-only**, gitignored via `docs/assets/fk*`; the equivalent shape
-is drawn in the ADR 0029 design doc §2).
+Every child row then takes a WHOLE parent key tuple
+([ADR 0031](adr/0031-joint-fk-key-draws.md)), so orphans are impossible by
+construction and the `fk.orphan` BLOCKER rule measures it per run.
 
 ## 4. Column-level constraint — every settable field
 
@@ -227,8 +215,9 @@ least once; comments call out which §4 row each column exercises.
 {
   "table_info": {
     "table_id": "demo_project.core_banking.a_table",
-    // Table-level contract: PK + identity, prose around the JSON is fine.
-    "description": "Customer accounts, one row per account. {\"sdfb\": 1, \"pk\": [\"ACCOUNT_ID\"], \"identity\": [\"CARD_TOKEN\"]} Owned by team-core-banking.",
+    // Table description = prose only. PK/identity live in
+    // config/relationships/core_banking.yaml (§3).
+    "description": "Customer accounts, one row per account. Owned by team-core-banking.",
     "data_location": "EU",
     "table_type": "TABLE"
   },
@@ -288,13 +277,16 @@ least once; comments call out which §4 row each column exercises.
 
 ## 6. Worked example — `b_table_ddl.json` (child, FK → a_table)
 
+Its companion model file is §3's `core_banking.yaml`; the DDL below carries
+column constraints only.
+
 ```jsonc
 {
   "table_info": {
     "table_id": "demo_project.core_banking.b_table",
-    // FK edge: this table's ACCOUNT_ID samples from a_table's LANDED keys.
-    // ref MUST be dataset-qualified; composite edges allowed (v1 caveat §3).
-    "description": "Account movements. {\"sdfb\": 1, \"pk\": [\"MOVEMENT_ID\"], \"fk\": [{\"cols\": [\"ACCOUNT_ID\"], \"ref\": \"core_banking.a_table\", \"ref_cols\": [\"ACCOUNT_ID\"]}]}",
+    // Prose only. The FK edge (this table's ACCOUNT_ID samples a_table's
+    // LANDED keys) is declared in config/relationships/core_banking.yaml.
+    "description": "Account movements.",
     "data_location": "EU",
     "table_type": "TABLE"
   },
@@ -303,9 +295,9 @@ least once; comments call out which §4 row each column exercises.
      "description": "{\"llm_prompt_constraint\": {\"format\": \"12-char uppercase hexadecimal movement id\", \"pattern\": \"^[0-9A-F]{12}$\"}}"},
 
     {"name": "ACCOUNT_ID", "type": "STRING", "mode": "REQUIRED", "max_length": 10,
-     // FK column: NO constraint needed — fk_pools overrides whatever the
-     // profiler would do; referential integrity beats the marginal (v1)
-     "description": "FK to a_table.ACCOUNT_ID (see table description contract)."},
+     // FK column: NO constraint needed — the joint key draw overrides
+     // whatever the profiler would do (ADR 0031)
+     "description": "FK to a_table.ACCOUNT_ID (see config/relationships)."},
 
     {"name": "OPERATION_CODE", "type": "STRING", "mode": "REQUIRED", "max_length": 4,
      "description": "{\"llm_prompt_constraint\": {\"values\": [\"ADTW\", \"DEPO\", \"XFER\", \"CHRG\"]}}"},
@@ -325,34 +317,16 @@ least once; comments call out which §4 row each column exercises.
 ## 7. Terraform wiring
 
 The schema JSON files above double as the `schema` payload of
-`google_bigquery_table` — descriptions travel inside them. The table-level
-contract goes in the resource's `description`. Two equivalent styles:
+`google_bigquery_table` — column descriptions travel inside them, and that
+is the ONLY thing Terraform now carries for the generator. Relationships are
+a repo file (§3); a `terraform apply` never touches them.
 
 ```hcl
-locals {
-  # Style A — jsonencode() builds the contract; HCL-native, no escaping.
-  a_table_contract = jsonencode({
-    sdfb     = 1
-    pk       = ["ACCOUNT_ID"]
-    identity = ["CARD_TOKEN"]
-  })
-
-  b_table_contract = jsonencode({
-    sdfb = 1
-    pk   = ["MOVEMENT_ID"]
-    fk = [{
-      cols     = ["ACCOUNT_ID"]
-      ref      = "core_banking.a_table"   # dataset-qualified, ALWAYS
-      ref_cols = ["ACCOUNT_ID"]
-    }]
-  })
-}
-
 resource "google_bigquery_table" "a_table" {
   dataset_id  = google_bigquery_dataset.core_banking.dataset_id
   table_id    = "a_table"
-  # Prose + contract in one description — the parser finds the JSON anywhere.
-  description = "Customer accounts, one row per account. ${local.a_table_contract} Owned by team-core-banking."
+  # Prose only — no relational JSON. PK/identity: config/relationships/.
+  description = "Customer accounts, one row per account. Owned by team-core-banking."
 
   # Column array identical to the "schema" list of a_table_ddl.json §5 —
   # keep it in a versioned file so Terraform and the pipeline share one truth.
@@ -360,29 +334,14 @@ resource "google_bigquery_table" "a_table" {
 
   # ⚠️ DO NOT reach for primary-key / table_constraints blocks here:
   # BigQuery constraints are unenforced metadata and the enterprise module
-  # does not expose them — the sdfb JSON above is what the pipeline
-  # actually enforces (ADR 0021).
+  # does not expose them. Declare keys in config/relationships (ADR 0032).
 }
 
 resource "google_bigquery_table" "b_table" {
   dataset_id  = google_bigquery_dataset.core_banking.dataset_id
   table_id    = "b_table"
-  description = "Account movements. ${local.b_table_contract}"
+  description = "Account movements."
   schema      = file("${path.module}/schemas/b_table.schema.json")
-}
-```
-
-```hcl
-# Style B — heredoc with literal JSON (handy when copying from a _ddl.json).
-# Plain JSON contains no ${…}, so no escaping is needed inside the heredoc.
-resource "google_bigquery_table" "a_table_literal" {
-  dataset_id  = google_bigquery_dataset.core_banking.dataset_id
-  table_id    = "a_table"
-  description = <<-EOT
-    Customer accounts, one row per account.
-    {"sdfb": 1, "pk": ["ACCOUNT_ID"], "identity": ["CARD_TOKEN"]}
-  EOT
-  schema      = file("${path.module}/schemas/a_table.schema.json")
 }
 ```
 
@@ -399,55 +358,53 @@ whole `_ddl.json`):
 ]
 ```
 
-## 8. Running the pair — parent first, always
+## 8. Running the pair — one launch, parents first
 
 ```mermaid
 sequenceDiagram
+    participant REL as 📄 config/relationships
     participant TF as 📄 Terraform apply
     participant BQ as 🗄️ BigQuery
-    participant P1 as 🔀 run_pipeline (a_table)
-    participant P2 as 🔀 run_pipeline (b_table)
+    participant P as 🔀 run_pipeline (one job)
 
-    TF->>BQ: tables + descriptions (contracts embedded)
-    P1->>BQ: extract DDL / read descriptions
-    P1->>BQ: land 1M synthetic a_table rows
-    P2->>BQ: preflight parses fk edge (sdfb contract)
-    P2->>BQ: fk_pools ← DISTINCT ACCOUNT_ID<br/>from LANDED a_table (--fk_parent_landing)
-    P2->>BQ: land b_table rows — every ACCOUNT_ID exists in parent
+    TF->>BQ: tables + COLUMN descriptions
+    REL->>P: model: a_table <- b_table, pk, identity
+    P->>BQ: read schema + column constraints (live)
+    P->>BQ: land a_table (parent, wave 0)
+    P->>BQ: b_table draws WHOLE key tuples from landed a_table
+    P->>BQ: land b_table — every ACCOUNT_ID exists in the parent
 ```
 
 ```bash
-# 0. Extract the DDL JSONs from the live (Terraform-created) tables
+# 0. (optional) refresh the offline DDL pin from the LANDING tables
 python scripts/extract_ddl.py --project demo_project \
-  --dataset core_banking --table a_table --output_base ./output
-python scripts/extract_ddl.py --project demo_project \
-  --dataset core_banking --table b_table --output_base ./output
+  --dataset synthetic_data --table a_table --output_base ./output
 
-# 1. Parent run — pk/identity come from the description contract
-#    (pass --pk_cols/--identity_cols only to OVERRIDE the contract)
+# 1. ONE launch generates the whole model, parents first: the target's
+#    component comes from config/relationships, pk/identity with it.
 python -m sdfb_beam.cli.run_pipeline \
-  --ddl_uri output/a_table_ddl.json \
-  --reference_table demo_project.core_banking.a_table \
-  --landing_table demo_project.synthetic_data.a_table \
-  --uniqueness_mode exact --prompt_constraints on \
-  --prompt_debug redacted ... # debug-run only; drop for production
-
-# 2. Child run — the fk edge activates via --fk_parent_landing
-python -m sdfb_beam.cli.run_pipeline \
-  --ddl_uri output/b_table_ddl.json \
   --reference_table demo_project.core_banking.b_table \
   --landing_table demo_project.synthetic_data.b_table \
-  --fk_parent_landing demo_project.synthetic_data \
-  --uniqueness_mode exact --prompt_constraints on ...
+  --uniqueness_mode exact --prompt_constraints on
+  # --generate_fk_relationships=true is the default
+  # --relationships_uri=config/relationships is the default
+
+# 2. Just this table, no relationships:
+python -m sdfb_beam.cli.run_pipeline ... --generate_fk_relationships=false
+
+# 3. A different model for one launch, no rebuild, no metadata edit:
+python -m sdfb_beam.cli.run_pipeline ... \
+  --relationships_uri=gs://my-bucket/relationships/core_banking.yaml
 ```
 
 ## 9. Functional ⇄ technical capability map
 
 | You want… | You write… | The pipeline does… | Proof it worked |
 |---|---|---|---|
-| unique keys | `"pk"` in the table contract | exact per-run dedup + validation gate | `pk_analysis` clean, `validation_runs` PASSED |
-| rows that join to the parent | `"fk"` edge + `--fk_parent_landing` | child samples parent's landed keys | join query returns 0 orphans |
-| unique non-key identifiers | `"identity"` | per-row unique generation, never pooled | duplicate probe on the column = 0 |
+| unique keys | `pk:` in the model file | exact per-run dedup + validation gate | `pk_analysis` clean, `validation_runs` PASSED |
+| rows that join to the parent | an `fk:` edge in the model file | child draws WHOLE parent key tuples (ADR 0031) | `fk.orphan` count 0; join query returns 0 orphans |
+| unique non-key identifiers | `identity:` in the model file | per-row unique generation, never pooled | duplicate probe on the column = 0 |
+| to take one table out of a model | `enabled: false` | it and anything behind it detach; it still generates alone | the card marks it `[DISABLED — detached]` |
 | exact string shapes | `pattern` (+ `format`) | guided decoding — the model *cannot* emit off-pattern | crosscheck `shape_recall` → 1.0 |
 | preserved literal padding | `pattern` with explicit ` {3}` runs | decoding + collapsed-mask pool gate | `spurious_shapes` empty |
 | closed vocabularies | `values` | prompt vocabulary clause | `top_values` ⊆ declared set |
@@ -459,12 +416,14 @@ python -m sdfb_beam.cli.run_pipeline \
 
 | Pitfall | Symptom | Fix |
 |---|---|---|
-| `"ref": "a_table"` (unqualified) | loud preflight failure | always `dataset.table` |
+| `ref:` naming a table not in the model | loud load failure | use the bare name of a table in the same model, or `dataset.table` for an already-landed external parent |
 | real values pasted into `examples` | privacy leak into prompts/logs | examples must be **fictitious**; pools reject echoes, but don't tempt it |
 | `route: "llm"` on INT64 | WARNING, route unchanged | only STRING-typed columns re-route |
 | unescaped regex in JSON | `DescriptionJsonError` at preflight | JSON-escape backslashes: `\\\\.` for a literal dot |
 | constraint typo in a *marked* object | loud stop (by design) | fix the JSON; prose outside the braces is always safe |
-| Terraform `table_constraints` block | silently unenforced metadata | declare relationships in the `sdfb` contract instead |
+| Terraform `table_constraints` block | silently unenforced metadata | declare relationships in `config/relationships/` instead |
+| a legacy `{"sdfb": 1, …}` object still in a table description | silently INERT — nothing reads it | move it to a model file (§3) and delete it from the description |
+| `--pk_cols` on a table the model declares | WARNING, flag ignored | edit the model file; it is the source of truth |
 
 ---
 

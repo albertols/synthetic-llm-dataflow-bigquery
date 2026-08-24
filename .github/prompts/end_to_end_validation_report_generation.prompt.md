@@ -400,22 +400,23 @@ code ref; keep it tight; no dashboards / Vertex / external LLM suggestions
 
 ## Step 5.5 — FK-model diagram (recycled, never redrawn)
 
-Every launcher/worker log now carries the run's relationship model in
-ONE `SDFB_MILESTONE name=fk_model_pretty … model_sha12=<sha>` entry:
-a glanceable ASCII rendering first (waves + `child (cols) --> parent
-(ref_cols)` arrows; `..>` = informational) and a fenced ```mermaid
-block below it (the pasteable source), plus the `relational_e2e` JSON entry
-(landing table, FK edges with parent-landing FQNs + pool sizes, PK,
-clauses). The report MUST show the model visually, and MUST NOT spend
-tokens re-deriving it:
+Every launcher/worker log carries the run's relationship model in ONE
+`SDFB_MILESTONE name=relationship_model … sha=<sha>` entry (ADR 0032):
+a glanceable card first (model name, the `config/relationships/` FILE it
+came from, tables with `pk(...)`/`identity(...)`, generation waves, and
+every edge as `-->` enforced / `..>` documented / `[DISABLED — detached]`)
+and a fenced ```mermaid block below it (the pasteable source), plus the
+`relational_e2e` JSON entry (landing table, FK edges with parent-landing
+FQNs + key-tuple counts, PK, clauses). The report MUST show the model
+visually, and MUST NOT spend tokens re-deriving it:
 
-1. Grep the worker/launcher log for `fk_model_pretty` and note its
-   `model_sha12=<sha>`.
+1. Grep the worker/launcher log for `relationship_model` and note its
+   `sha=<sha>`.
 2. If `integration_tests/fk_models/<sha>.mmd` exists → embed that file's
    content VERBATIM as a ```mermaid block in report.md §0 (run under
    test). Do not redraw, restyle, or re-label it.
 3. If it does not exist → copy the fenced mermaid block (between the
-   ```mermaid fences inside fk_model_pretty) into
+   ```mermaid fences inside relationship_model) into
    `integration_tests/fk_models/<sha>.mmd` (create the dir if needed),
    then embed it. The next report with the same model reuses it for free.
 4. Aliases: the diagram in `oss/` must use the registry aliases
@@ -427,18 +428,17 @@ tokens re-deriving it:
    `isolated` — say which in §0, and if `isolated` with declared edges,
    flag referential integrity as UNVERIFIED (the 2026-08-21 lesson: "0
    orphans" from an inactive FK is not a pass).
-6. **Enforcement is a CONTRACT fact, never an inference** (ADR 0031).
-   Read `fk_enforcement_summary` (launcher) for `enforced=` /
-   `informational=` / `enforceable_but_informational=`, and
-   `fk_key_pool_bound` (worker) for the per-edge `key_tuples` +
-   `weighting`. Report exactly what those say. Do NOT explain an
-   `informational: true` edge as the engine "refusing" or "deciding"
-   anything — the flag is written by whoever authored the table
-   description, and an edge whose columns exist on both sides is
-   enforceable as declared (composite `ref_cols` need NOT be the
-   parent's full PK: the pool is `DISTINCT` over exactly those
-   columns). The 2026-08-23 report got this backwards; the fix is the
-   one-line contract edit the summary prints.
+6. **Enforcement is a CONFIG fact, never an inference** (ADR 0032).
+   The `relationship_model` card carries `enforced=` / `documented=` /
+   `enabled=` and the model FILE; `fk_key_pool_bound` (worker) carries
+   the per-edge `key_tuples` + `weighting`. Report exactly what those
+   say. Do NOT explain an unenforced edge as the engine "refusing" or
+   "deciding" anything — `enforced: false` and `enabled: false` are
+   written by whoever edited `config/relationships/<model>.yaml`, and
+   composite `ref_cols` need NOT be the parent's full PK (the pool is
+   `DISTINCT` over exactly those columns). The 2026-08-23 report got
+   this backwards; the fix is a one-line edit in the model file, which
+   the card names.
 7. Referential integrity has a rule now: `fk.orphan` (BLOCKER,
    threshold 0). Quote its `validation_runs.dlq_by_rule` count. A run
    with 0 enforced edges has NO orphan measurement — say "not

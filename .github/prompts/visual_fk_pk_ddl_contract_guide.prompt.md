@@ -1,29 +1,30 @@
 ---
 mode: agent
 description: >
-  Scan EVERY table description in a landing dataset (default:
-  synthetic_data), resolve the DDL description contract across tables
-  per docs/DDL_CONTRACT_GUIDE.md — PK, FK edges (enforced vs
-  informational), identity columns, per-column llm_prompt_constraint
-  clauses — and produce a timestamped VISUAL contract-guide snapshot:
-  ASCII + mermaid relationship diagrams, per-table contract facts, and a
+  Resolve the relational model from config/relationships/ (ADR 0032 —
+  PK, FK edges enforced vs documented, identity, enabled/disabled) and
+  the per-column llm_prompt_constraint clauses from the landing
+  dataset's COLUMN descriptions (default: synthetic_data), then produce
+  a timestamped VISUAL contract-guide snapshot:
+  the relationship card + mermaid diagram, per-table facts, and a
   closing table of every table.field's description + constraint clause.
   Written twice: integration_tests/ddl_contract_guides/<STAMP>/real/
   (verbatim names, local-only) and .../oss/ (aliases from the history
   mappings registry, shareable, leak-scanned). ADC access to the target
   GCP project is a PREREQUISITE and is verified first. Parsing and graph
   resolution ALWAYS go through the repo's own tooling
-  (sdfb_core.contracts.*) — never hand-parse a contract.
+  (sdfb_core.contracts.*) — never hand-parse a model or a clause.
 ---
 
 # /visual_fk_pk_ddl_contract_guide — Visual FK/PK DDL-contract snapshot
 
 ## Goal
 
-Produce a **visual, self-contained snapshot of the relational contract
-layer** as deployed in a landing dataset, so anyone can answer at a
-glance: which tables exist, which declare PK / identity / FK edges
-(enforced solid, informational dashed), what every
+Produce a **visual, self-contained snapshot of the contract layer** — the
+relational model as declared in `config/relationships/`, and the column
+steering as deployed on the landing tables — so anyone can answer at a
+glance: which tables the model covers, their PK / identity / FK edges
+(enforced solid, documented dashed, disabled marked), what every
 `llm_prompt_constraint` says, and what every field's description is.
 
 Output folder (timestamp = generation time, `date +%Y_%m_%d_%H_%M`):
@@ -49,7 +50,8 @@ dataset, table, or column name is hard-coded.
 | Param | Example | Notes |
 |---|---|---|
 | `PROJECT` | `<project-id>` | GCP project id |
-| `LANDING_DATASET` | `synthetic_data` | dataset whose table descriptions carry the contracts (ADR 0027 D2: contracts live on the LANDING tables) |
+| `LANDING_DATASET` | `synthetic_data` | dataset whose COLUMN descriptions carry the constraints (ADR 0027 D2: they live on the LANDING tables) |
+| `RELATIONSHIPS` | `config/relationships` | the relational models (ADR 0032) — folder, file, or `gs://`. The ONLY source of PK/FK/identity |
 | `OUT_ROOT` | `integration_tests/ddl_contract_guides` | snapshot parent dir |
 | `REGISTRY` | `integration_tests/history_mappings_replacement.json` | history-mappings alias registry (ADR 0029 D6) — created/extended if absent |
 
@@ -69,6 +71,8 @@ against BigQuery metadata (INFORMATION_SCHEMA) — no table data is read.
 ## Step 1 — Scan ALL descriptions in the dataset (two queries, no loops)
 
 ```bash
+# Table descriptions are PROSE only now (ADR 0032) — collected for the
+# per-table sections, never parsed for relational structure.
 bq query --project_id="$PROJECT" --use_legacy_sql=false --format=json "
   SELECT table_name, option_value AS description
   FROM \`$PROJECT.$LANDING_DATASET\`.INFORMATION_SCHEMA.TABLE_OPTIONS
@@ -80,40 +84,44 @@ bq query --project_id="$PROJECT" --use_legacy_sql=false --format=json "
   ORDER BY table_name, column_name" > /tmp/column_descriptions.json
 ```
 
-Tables without a marked description are still listed in the snapshot
-(as contract-less nodes) — absence is a finding, not an omission.
+A table the models do not declare is still listed (as a model-less node)
+— absence is a finding, not an omission. So is the reverse: a table the
+MODEL declares that does not exist in the dataset.
 
-## Step 2 — Resolve contracts + the FK model with REPO TOOLING ONLY
+## Step 2 — Resolve the model + clauses with REPO TOOLING ONLY
 
-Never hand-parse. The repo owns one parser and one graph definition —
-use them so this snapshot can never disagree with what the pipeline
-does (`uv run --no-sync python3` from the repo root):
+Never hand-parse. The repo owns one model loader and one clause parser —
+use them so this snapshot can never disagree with what the pipeline does
+(`uv run --no-sync python3` from the repo root):
 
 ```python
 import json
-from sdfb_core.contracts.relational import (
-    parse_relational_contract, parse_llm_prompt_constraint,
+from pathlib import Path
+
+from sdfb_core.contracts.prompt_constraint import (
+    parse_llm_prompt_constraint, parse_prompt_constraint,
 )
-from sdfb_core.contracts.prompt_constraint import parse_prompt_constraint
-from sdfb_core.contracts.fk_model import (
-    build_fk_model, connected_component,
-    fk_model_ascii, fk_model_mermaid, model_sha12,
+from sdfb_core.contracts.relationships import RelationshipRegistry
+
+# The relational model — the single source of truth (ADR 0032).
+base = Path(RELATIONSHIPS)
+paths = sorted(base.glob("*.y*ml")) if base.is_dir() else [base]
+registry = RelationshipRegistry.from_sources(
+    [(str(p), p.read_text(encoding="utf-8")) for p in paths]
 )
+sha = registry.sha12()
+for model in registry.models:
+    first = next(iter(model.tables))
+    card = registry.card(first)          # the launcher's own rendering
+    mermaid = registry.mermaid(first)    # the house-style diagram
 
 tables_desc = {r["table_name"]: (r.get("description") or "").strip("\"' ")
                for r in json.load(open("/tmp/table_descriptions.json"))}
-tables = sorted(tables_desc)
-fqns = [f"{PROJECT}.{LANDING_DATASET}.{t}" for t in tables]
-contracts = {
-    f"{PROJECT}.{LANDING_DATASET}.{t}": parse_relational_contract(d)
-    for t, d in tables_desc.items()
-}
-model = build_fk_model(fqns, contracts)
-sha = model_sha12(model)
-aliases_short = {f: f.rsplit(".", 1)[-1] for f in fqns}
-ascii_art = fk_model_ascii(model, aliases_short)
-mermaid = fk_model_mermaid(model, aliases_short)
 ```
+
+`registry.card(table)` is EXACTLY what a launch logs — reuse it, never
+re-render it. `registry.component(table)` is what a scenario-2 launch on
+that table would generate; `registry.generation_waves(...)` is the order.
 
 Per column, collect `route`, the rendered clause
 (`parse_llm_prompt_constraint(description, column=name)`), and EVERY
@@ -128,27 +136,27 @@ marked-but-unparseable JSON is a LOUD finding (quote the
 
 Document contract, in this order:
 
-1. **Header** — dataset FQN, snapshot timestamp, `model_sha12=<sha>`,
-   table/edge counts (`N tables | E enforced + I informational edges`).
-2. **Relationship diagram, twice** (both are MANDATORY):
-   - the `fk_model_ascii` block verbatim inside a ```text fence — the
-     glanceable rendering (`wave N | child (cols) --> parent
-     (ref_cols)`; `..>` = informational; `[external]` parents);
-   - the `fk_model_mermaid` source inside a ```mermaid fence — the
-     rendered picture. Do NOT redraw or restyle either.
-3. **Per-table contract facts** — one subsection per table:
-   `sdfb` contract version, `pk` (composite order preserved),
-   `identity`, each FK edge as `(cols) --> ref (ref_cols)` with
-   `[informational]` where declared, constrained-column counts split by
-   route (`N forced route=llm / M auto`), and a `⚠ no contract` marker
-   for tables whose description carries no `{"sdfb":1,…}` object.
-4. **Connected components** — list each component's tables
-   (`connected_component`; informational edges count for grouping):
+1. **Header** — dataset FQN, the model FILE(s) read, snapshot timestamp,
+   `sha=<registry.sha12()>`, table/edge counts.
+2. **The model, twice** (both are MANDATORY):
+   - `registry.card(table)` verbatim inside a ```text fence — the same
+     card the launcher logs (waves, `pk(...)`, `identity(...)`,
+     `-->` enforced / `..>` documented, `[DISABLED — detached]`);
+   - `registry.mermaid(table)` inside a ```mermaid fence — the rendered
+     picture. Do NOT redraw or restyle either.
+3. **Per-table facts** — one subsection per table: `pk` (composite order
+   preserved), `identity`, each FK edge as `(cols) --> ref (ref_cols)`
+   with `[documented]` where `enforced: false`, `[DISABLED]` where the
+   table is detached, constrained-column counts split by route
+   (`N forced route=llm / M auto`), and a `⚠ not in any model` marker
+   for dataset tables no model declares (they generate alone, with
+   PK/identity from CLI flags).
+4. **Components** — list each component's tables (`registry.component`):
    this is exactly what a scenario-2 launch of any member would
    generate. Flag any component containing near-duplicate table names
    (e.g. legacy twins of renamed tables) — the 2026-08-22 run
-   double-generated because stale contract-bearing twins stayed in the
-   dataset.
+   double-generated because stale twins stayed in the dataset. Also flag
+   any table the MODEL declares that is missing from the dataset.
 5. **Closing field table** (MANDATORY, every table, every field —
    identical column set in `real/` and `oss/`):
 
@@ -219,9 +227,10 @@ validation report (prompt §5.5) embeds it by sha instead of redrawing.
 
 - Repo tooling only for parsing/graphing — a snapshot that disagrees
   with `sdfb_core.contracts` is worse than none.
-- Enforced vs informational is a CONTRACT fact (`informational: true`),
-  never a judgment call; dashed/`..>` everywhere for informational.
-- Both diagrams (ASCII + mermaid) in both files; the closing field
+- Enforced vs documented is a CONFIG fact (`enforced: false`), and
+  detached is another (`enabled: false`) — never a judgment call;
+  dashed/`..>` everywhere for documented, `[DISABLED]` for detached.
+- Both renderings (card + mermaid) in both files; the closing field
   table is never truncated — every field of every table appears.
 - `real/` stays local (gitignored); only `oss/` may leave the machine,
   and only after a clean leak scan.

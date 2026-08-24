@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from sdfb_core.engines.text_shapes import build_shape_mix
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from sdfb_core.contracts.relational import RelationalContract
+    from sdfb_core.contracts.relationships import TableRelations
     from sdfb_core.contracts.schema import TableSchema
 
 _NUMERIC_BQ_TYPES = frozenset(
@@ -106,16 +106,16 @@ def _parse_temporals(strings: list[str], *, sniff: bool) -> list[datetime]:
 def profile_source_table(
     table_schema: TableSchema,
     reference_rows: list[dict],
-    contract: RelationalContract | None = None,
+    relations: TableRelations | None = None,
     generation_plan: dict[str, str] | None = None,
 ) -> dict[str, dict]:
     """name → stats dict for every top-level column of the schema, plus a
     ``__table__`` pseudo-column with table-level stats (null-pattern mix)."""
-    pk = set(contract.pk) if contract else set()
-    identity = set(contract.identity) if contract else set()
+    pk = set(relations.pk) if relations else set()
+    identity = set(relations.identity) if relations else set()
     fk_cols: set[str] = set()
-    if contract:
-        for fk in contract.fk:
+    if relations:
+        for fk in relations.fk:
             fk_cols.update(fk.cols)
     plan = generation_plan or {}
     n = len(reference_rows)
