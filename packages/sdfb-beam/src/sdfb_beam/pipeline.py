@@ -135,6 +135,10 @@ class PipelineConfig:
     # Multi-table launches (ADR 0030): landing table NAME qualifying
     # column references in logs; empty = single-table bare names.
     log_table_prefix: str = ""
+    # The relationship card the LAUNCHER rendered from
+    # `config/relationships/` (ADR 0032), carried to the workers so both
+    # logs show the same model. Empty = this table is in no model.
+    relationship_card: str = ""
     # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
     # behind up to three shuffle barriers; "streaming" lands rows as they
     # are generated and measures the duplicate rate instead.
@@ -206,6 +210,7 @@ def build_pipeline(
         fk_edges=[dict(e) for e in config.fk_edges],
         landing_table=config.landing_table,
         log_table_prefix=config.log_table_prefix,
+        relationship_card=config.relationship_card,
         source_distinct=config.source_distinct,
         source_values_table=config.source_values_table,
     )
