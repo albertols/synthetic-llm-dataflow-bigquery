@@ -279,6 +279,11 @@ class B1RagEngine(GenerationEngine):
         self._column_order: list[str] = []
         self._ready: bool = False
 
+    @property
+    def constrained_columns(self) -> frozenset[str]:
+        """Columns a declared clause owns end to end (Tier P/B)."""
+        return frozenset(self._routed)
+
     # -- lifecycle ----------------------------------------------------------
 
     def setup(self, model_client: ModelClient, ctx: GenerationContext) -> None:
@@ -1193,7 +1198,13 @@ class B1RagEngine(GenerationEngine):
         assert self._profiles is not None
         if not getattr(ctx, "prompt_constraints", True):
             return
-        pk_cols = set(getattr(ctx, "pk_columns", []) or [])
+        # PK and identity both mean "unique per run", so both get the
+        # emitted-set rejection on routed draws (ADR 0028; identity added
+        # 2026-08-25 when a routed identity column had to stop being
+        # overwritten by UUID synthesis).
+        unique_cols = set(getattr(ctx, "pk_columns", []) or []) | set(
+            getattr(ctx, "identity_columns", []) or []
+        )
         for name, prof in self._profiles.items():
             if (
                 prof.kind is not ColumnKind.FREE_TEXT
@@ -1210,7 +1221,7 @@ class B1RagEngine(GenerationEngine):
             ) | self._fetch_source_values(ctx, name) | frozenset(
                 prof.constraint_examples
             )
-            if name in pk_cols:
+            if name in unique_cols:
                 self._routed_emitted[name] = set()
             log_milestone(
                 "freetext_pool_byte_template"
@@ -1219,7 +1230,7 @@ class B1RagEngine(GenerationEngine):
                 column=name,
                 route=route,
                 capacity=f"{float(sampler.capacity):.2e}",
-                pk=name in pk_cols,
+                unique=name in unique_cols,
             )
 
     def _route_one(

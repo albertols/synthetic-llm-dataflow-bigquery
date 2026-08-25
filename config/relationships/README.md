@@ -83,6 +83,21 @@ A table that appears in no model file generates alone, with `--pk_cols` /
 that IS in a model takes its keys from the model, and a conflicting
 `--pk_cols` is ignored with a WARNING.
 
+## `pk:` must actually BE a key
+
+Preflight measures the declared PK against the reference sample and
+**stops the launch** when it repeats on more than half the rows: the run
+would land about as many rows as the tuple has distinct values and divert
+the rest as `pk.duplicate` (2026-08-25: 99.4% duplicates in the sample →
+74 rows landed of 1,000,000, BLOCKER gate tripped 11 minutes and one GPU
+later). Fix the `pk:` (usually a missing discriminating column), lower
+`--num_rows`, or move the column to `identity:` if it was never a key.
+
+A column listed under `identity:` that ALSO carries a `pattern` (or any
+clause the router can sample) is generated from that clause — unique per
+run, never a source value — instead of a UUID. The launcher logs
+`identity_constraint_owned` when that happens.
+
 ## Rules the loader enforces at launch
 
 - every `fk.ref` names a table in the model, or is `dataset.table`

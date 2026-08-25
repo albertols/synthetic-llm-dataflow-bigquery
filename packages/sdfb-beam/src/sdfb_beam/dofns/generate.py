@@ -94,6 +94,9 @@ class GenerateRecordsDoFn(beam.DoFn):
         # instance, just one hop later.
         self.expect_fk_side = expect_fk_side
         self._engine = None  # built in setup() (or first process())
+        # Identity columns this DoFn synthesizes — resolved once the
+        # engine exists, since a constraint-routed column owns itself.
+        self._identity_columns: list[str] = list(ctx.identity_columns or ())
 
         self._yielded = Metrics.counter("generation", "yielded")
         self._failed = Metrics.counter("generation", "failed")
@@ -258,6 +261,31 @@ class GenerateRecordsDoFn(beam.DoFn):
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
         self._engine.setup(self.model_client, ctx)
+        self._resolve_identity_columns()
+
+    def _resolve_identity_columns(self) -> None:
+        """Identity columns this DoFn still synthesizes.
+
+        A column whose declared clause routes to a programmatic sampler
+        is generated from that clause's value space and already rejects
+        every source value — overwriting it with a UUID destroys the
+        declared shape for no privacy gain (2026-08-25: a `pattern`
+        identity column landed UUIDv4s). The engine keeps it unique; the
+        handover is logged so it is never a silent behaviour change.
+        """
+        declared = list(self.ctx.identity_columns or ())
+        # Duck-typed: an engine without a router (B.2 today, any stub)
+        # simply owns nothing and the previous behaviour holds.
+        owned = getattr(self._engine, "constrained_columns", frozenset())
+        self._identity_columns = [c for c in declared if c not in owned]
+        handed_over = [c for c in declared if c in owned]
+        if handed_over:
+            log_milestone(
+                "identity_constraint_owned",
+                columns=",".join(handed_over),
+                note="generated from the declared clause (unique per run, "
+                "source values rejected) instead of UUID synthesis",
+            )
 
     def process(self, request, fk_side: list | None = None):
         with self._scope():
@@ -312,10 +340,10 @@ class GenerateRecordsDoFn(beam.DoFn):
                 # objects; downstream stages convert to DataFrame and
                 # back as needed.
                 row = record.model_dump(mode="python")
-                if self.ctx.identity_columns:
+                if self._identity_columns:
                     row = apply_identity_columns(
                         row,
-                        identity_columns=self.ctx.identity_columns,
+                        identity_columns=self._identity_columns,
                         column_types=self._column_types,
                         column_max_lengths=self._column_max_lengths,
                         run_id=self.ctx.pipeline_run_id,

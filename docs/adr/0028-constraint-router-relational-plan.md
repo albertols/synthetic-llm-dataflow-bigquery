@@ -131,3 +131,24 @@ route table: a job with no Tier-S/L work submits CPU-only
   draw-path routing is a follow-up** (its free-text pools build lazily
   per batch — same seam story as ADR 0023's R5 note); B.2 constrained
   columns keep pool behavior until then.
+
+## Amendment (2026-08-25) — a routed column owns itself, including identity
+
+Run `…-11759075672032343276` routed `B_COL_008` to the Tier-P sampler
+(`constraint_sampler_active route=pattern capacity=3.63e+24`) and landed
+UUIDv4s in every row: the column is also the table's `identity`, and
+`apply_identity_columns` overwrote the router's output after generation.
+The declared `pattern` was computed, then discarded.
+
+- **A constraint-driven generator owns its column.** Engines expose
+  `constrained_columns` (Tier P/B); the DoFn removes those from identity
+  synthesis and logs `identity_constraint_owned`. Engines without a
+  router (B.2, any stub) return the empty set and behave exactly as
+  before.
+- **Identity still means unique.** `_routed_emitted` now tracks identity
+  columns as well as PK columns, so a routed identity column is unique
+  per run — and the routed path already rejects the source domain
+  (`_routed_forbidden`), which is the privacy property identity
+  synthesis was introduced for in the first place. The milestone field
+  `pk=` is now `unique=`, covering both.
+

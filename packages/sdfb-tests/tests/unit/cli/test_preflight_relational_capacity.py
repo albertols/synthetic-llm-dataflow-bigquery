@@ -176,3 +176,54 @@ class TestP4CompositePk:
         schema = self._schema(cols)
         rows = [{"ACCT": i} for i in range(10)]
         preflight(schema, (), (), rows, relations=self._relations(cols), num_rows=1_000_000)
+
+
+class TestP5PkIsActuallyAKey:
+    """2026-08-25 run …-11759075672032343276: the model declared a
+    3-column PK whose tuple repeats on 99.4% of the source sample. The
+    launch ran anyway and landed **74 rows of 1,000,000** — every other
+    row was `pk.duplicate` — then tripped the BLOCKER gate 11 minutes
+    and one GPU later. The sample already knew; preflight must say so.
+    """
+
+    @staticmethod
+    def _rows(distinct: int, total: int = 10_000) -> list[dict]:
+        return [
+            {"ID": f"k{i % distinct}", "CUST_ID": "c", "NOTES": "x"}
+            for i in range(total)
+        ]
+
+    def test_a_pk_that_is_not_a_key_stops_before_the_gpu(self):
+        with pytest.raises(SystemExit, match=r"preflight P5") as exc:
+            preflight(
+                _schema(), (), (), self._rows(60), relations=_PK_RELATIONS,
+                num_rows=1_000_000,
+            )
+        message = str(exc.value)
+        assert "ID" in message              # names the columns
+        assert "60" in message              # the distinct tuples measured
+        assert "1,000,000" in message or "1000000" in message
+
+    def test_a_real_key_passes(self):
+        preflight(
+            _schema(), (), (), self._rows(10_000), relations=_PK_RELATIONS,
+            num_rows=1_000_000,
+        )
+
+    def test_mild_source_duplication_still_only_warns(self):
+        """Source data may legitimately dent an undeclared PK; the
+        generator recombines values, so this is not a launch stop."""
+        result = preflight(
+            _schema(), (), (), self._rows(9_000), relations=_PK_RELATIONS,
+            num_rows=1_000_000,
+        )
+        assert any("not unique" in w for w in result.warnings)
+
+    def test_a_small_run_within_the_key_space_is_fine(self):
+        preflight(
+            _schema(), (), (), self._rows(60), relations=_PK_RELATIONS,
+            num_rows=50,
+        )
+
+    def test_num_rows_zero_never_stops(self):
+        preflight(_schema(), (), (), self._rows(60), relations=_PK_RELATIONS)

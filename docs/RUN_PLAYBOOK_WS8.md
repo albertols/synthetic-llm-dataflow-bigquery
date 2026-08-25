@@ -149,6 +149,7 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 | `relationship_model` (launcher AND every worker; **WARNING** when a relational launch enforces 0 edges) | ADR 0032 D6: the whole model at a glance — tables with PK/identity, every edge as `-->` enforced / `..>` documented, `[DISABLED — detached]` tables, the generation waves, and the FILE it came from. Driver and worker print the identical card |
 | `fk_key_pool_bound columns= key_tuples= weighting= null_fraction=` | ADR 0031: one per enforced edge, worker-side. `weighting=child_marginal` = the IPF fit ran (the child's marginals survive the restriction); `uniform` = no overlap between the child's sample and the parent's keys — check the edge is the one you meant |
 | `fk_key_pool_capped` (WARNING) | ADR 0031 D6: the parent holds at least the 100k side-input cap of distinct keys — the child references a uniform sample of them, so its FK distinct count cannot exceed the cap |
+| `identity_constraint_owned` | ADR 0028 amendment (2026-08-25): the named identity columns are generated from their DECLARED CLAUSE (Tier P/B), not UUID synthesis — unique per run and source-rejecting. Absent = every identity column is a UUID, the pre-2026-08-25 behaviour |
 | `fk.orphan` in `validation_runs.dlq_by_rule` | ADR 0031 D4: rows that referenced a non-existent parent. Non-zero = a generator regression (the draw is joint by construction) — read it as a BLOCKER, not a tolerance |
 
 ## 4. WS8 pass criteria (on top of the main playbook's §2 list)

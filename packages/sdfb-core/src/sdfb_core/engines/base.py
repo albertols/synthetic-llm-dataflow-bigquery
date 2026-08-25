@@ -300,6 +300,20 @@ class GenerationEngine(ABC):
 
     name: str = ""
 
+    @property
+    def constrained_columns(self) -> frozenset[str]:
+        """Columns this engine generates from a declared clause's own
+        value space (ADR 0028 Tier P/B).
+
+        The DoFn asks so that identity synthesis does not overwrite them
+        (2026-08-25: a `pattern`-routed identity column landed UUIDs).
+        Such a generator already satisfies what identity synthesis is
+        for — it draws from the clause, never from the source domain —
+        and the engine gives it per-run uniqueness in exchange.
+        Engines with no router return the empty set and behave as before.
+        """
+        return frozenset()
+
     @abstractmethod
     def setup(self, model_client: ModelClient, ctx: GenerationContext) -> None:
         """Called once per worker before any `generate_batch`.

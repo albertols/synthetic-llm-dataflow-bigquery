@@ -263,6 +263,49 @@ def _report_constraint_vehicles(
         )
 
 
+# Above this share of duplicate PK tuples in the reference sample, the
+# declared PK is not a key of the data at all — it is a typo or a missing
+# column, not a data-quality dent. Generation samples those same
+# marginals, so almost every row will collide and divert as
+# `pk.duplicate` (2026-08-25: 99.4% duplicates in the sample ->
+# 999 926 of 1 000 000 rows DLQ'd, BLOCKER gate tripped).
+_PK_NOT_A_KEY_RATIO = 0.5
+
+
+def _check_pk_is_a_key(
+    fqn: str,
+    pk: tuple[str, ...],
+    distinct: int,
+    sample_rows: int,
+    num_rows: int,
+) -> None:
+    """Stop when the sample proves the run cannot fill ``num_rows``.
+
+    A key that repeats on most of its own source rows cannot key a
+    larger synthetic table: the run lands about as many rows as the
+    tuple has distinct values and diverts the rest. Cheap to see here,
+    expensive to discover at the gate.
+    """
+    duplicate_ratio = 1 - distinct / sample_rows
+    if (
+        num_rows <= 0
+        or duplicate_ratio < _PK_NOT_A_KEY_RATIO
+        or num_rows <= distinct
+    ):
+        return
+    raise SystemExit(
+        f"[preflight P5] {fqn}: the declared PK {list(pk)} is not a key of "
+        f"this data — only {distinct:,} distinct tuples in {sample_rows:,} "
+        f"sample rows ({duplicate_ratio:.1%} duplicates). Generation draws "
+        f"the same marginals, so a {num_rows:,}-row run would land on the "
+        f"order of {distinct:,} rows and divert the rest as pk.duplicate, "
+        f"tripping the BLOCKER gate. Fix one of: the `pk:` in the "
+        f"relationship model (add the column that discriminates rows), the "
+        f"row count (--num_rows <= the real key space), or move the column "
+        f"to `identity:` if it was never meant to be a key."
+    )
+
+
 def preflight(
     table_schema: TableSchema,
     pk_cols: tuple[str, ...],
@@ -340,13 +383,16 @@ def preflight(
             model_pk=",".join(relations.pk),
         )
 
-    # P5 — PK sanity against the reference sample (warning only).
+    # P5 — is the declared PK actually a key of this data?
     if effective_pk and reference_rows:
         tuples = {
             tuple(r.get(c) for c in effective_pk) for r in reference_rows
         }
         if len(tuples) < len(reference_rows):
             dupes = len(reference_rows) - len(tuples)
+            _check_pk_is_a_key(
+                fqn, effective_pk, len(tuples), len(reference_rows), num_rows
+            )
             warnings.append(
                 f"PK {list(effective_pk)} not unique in the reference sample "
                 f"({dupes} duplicate tuples of {len(reference_rows)} rows)"
