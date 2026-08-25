@@ -61,6 +61,11 @@ image (already `COPY`d, like `config/thresholds.yml`). Pointing it at a
 change becomes a file upload, with no image rebuild and no production
 metadata edit. Declared in the flex-template metadata and the Composer DAG,
 because an undeclared param is rejected at launch (the 1ea4516 lesson).
+The match is one level deep (`<uri>/*.yaml`; Beam's `*` does not cross
+`/`). Absence is legitimate ONLY at the packaged default: an explicit URI
+that cannot be listed, or that holds no models, is a loud stop — a typo'd
+bucket must never read as "no relationships declared", which would
+generate every table alone and still report PASSED.
 
 **D5 — the model is the source of truth for keys; the CLI fills gaps.**
 A table the model declares takes its `pk`/`identity` from it, and a

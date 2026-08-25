@@ -67,7 +67,10 @@ from sdfb_beam.io.fk_pools import (
     parent_landing_fqn,
     per_column_view,
 )
-from sdfb_beam.io.relationships import load_relationship_registry
+from sdfb_beam.io.relationships import (
+    DEFAULT_RELATIONSHIPS_URI,
+    load_relationship_registry,
+)
 from sdfb_beam.io.source_values import (
     BigQuerySourceValueStore,
     pool_source_overlap,
@@ -303,7 +306,8 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "ignition, in-DAG FK key handoff. sequential_jobs: "
                         "one job per table, parents first (fallback / "
                         "debugging).")
-    p.add_argument("--relationships_uri", default="config/relationships",
+    p.add_argument("--relationships_uri",
+                   default=DEFAULT_RELATIONSHIPS_URI,
                    help="Where the relational models live (ADR 0032): a "
                         "folder or a single YAML file, local or gs://. "
                         "Default: the config/relationships folder packaged "

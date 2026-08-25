@@ -67,13 +67,42 @@ class TestDirectoryLoading:
 
 
 class TestAbsenceAndFailure:
-    def test_no_files_is_a_legitimate_empty_registry(self, tmp_path, caplog):
+    """Absence is legitimate ONLY where nobody pointed: the packaged
+    default. A URI someone typed and got wrong must never degrade into
+    "this run has no relationships" — that silently generates every
+    table alone and loses the whole model."""
+
+    def test_the_default_location_may_hold_no_models(self, tmp_path, caplog, monkeypatch):
+        monkeypatch.setattr(
+            "sdfb_beam.io.relationships.DEFAULT_RELATIONSHIPS_URI",
+            str(tmp_path),
+        )
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
             registry = load_relationship_registry(str(tmp_path))
         assert registry.models == ()
         assert "name=relationships_absent" in caplog.text
 
-    def test_an_empty_uri_loads_nothing(self):
+    def test_an_explicit_location_with_no_models_stops_the_launch(self, tmp_path):
+        with pytest.raises(RelationshipError, match="no model files"):
+            load_relationship_registry(str(tmp_path))
+
+    def test_an_unreachable_bucket_stops_the_launch(self, monkeypatch):
+        """A typo'd or unauthorized gs:// path is the likeliest first
+        mistake; it must read as a stop, not as "no relationships"."""
+        from apache_beam.io.filesystem import BeamIOError
+
+        def _boom(_patterns):
+            raise BeamIOError("bucket does not exist")
+
+        monkeypatch.setattr(
+            "sdfb_beam.io.relationships.FileSystems.match", _boom
+        )
+        with pytest.raises(RelationshipError) as exc:
+            load_relationship_registry("gs://bucket/typo_level")
+        assert "gs://bucket/typo_level" in str(exc.value)
+        assert "BeamIOError" in str(exc.value)
+
+    def test_an_empty_uri_disables_relationships_on_purpose(self):
         assert load_relationship_registry("").models == ()
 
     def test_a_broken_model_stops_the_launch(self, tmp_path):

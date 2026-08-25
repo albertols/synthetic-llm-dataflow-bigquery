@@ -24,9 +24,18 @@ from sdfb_core.observability import log_milestone
 
 _SUFFIXES = (".yaml", ".yml")
 
+# The packaged location, shipped inside the flex-template image. Absence
+# is only legitimate HERE: anywhere else, somebody pointed on purpose.
+DEFAULT_RELATIONSHIPS_URI = "config/relationships"
+
 
 def _patterns(uri: str) -> list[str]:
-    """A file URI matches itself; anything else is treated as a folder."""
+    """A file URI matches itself; anything else is treated as a folder.
+
+    One level, no recursion: Beam's ``*`` does not cross ``/``, so
+    ``gs://bucket/models`` finds ``gs://bucket/models/retail.yaml`` and
+    NOT ``gs://bucket/models/legacy/retail.yaml``.
+    """
     if uri.endswith(_SUFFIXES):
         return [uri]
     base = uri.rstrip("/")
@@ -36,23 +45,36 @@ def _patterns(uri: str) -> list[str]:
 def load_relationship_registry(uri: str) -> RelationshipRegistry:
     """Every model file under ``uri``, validated into one registry.
 
-    An empty or missing location is a legitimate state — "no
-    relationships declared anywhere" — and yields an empty registry, so
-    single-table generation needs no config at all. A file that EXISTS
-    but does not parse is a loud stop: a half-read model would silently
-    generate the wrong relational shape.
+    Three outcomes, and the difference matters more than the code:
+
+    * ``uri=""`` — relationships deliberately off; empty registry.
+    * the PACKAGED default holds no models — legitimate ("nothing
+      declared anywhere"); every table generates alone.
+    * anything else empty, unreadable or unparseable — a LOUD stop.
+      Someone typed that path; silently degrading to "no relationships"
+      would generate every table alone and lose the whole model, which
+      looks like a successful run.
     """
     if not uri:
         return RelationshipRegistry()
+    patterns = _patterns(uri)
     paths: list[str] = []
-    for pattern in _patterns(uri):
+    for pattern in patterns:
         try:
             for match in FileSystems.match([pattern]):
                 paths.extend(
                     metadata.path for metadata in match.metadata_list
                 )
-        except Exception:  # pragma: no cover - filesystem-dependent
-            continue
+        except Exception as exc:
+            # A missing bucket, a denied read, a bad scheme. Never
+            # swallowed: this is the first thing a gs:// override gets
+            # wrong, and it must not read as "no relationships".
+            raise RelationshipError(
+                f"{uri}: could not be listed ({type(exc).__name__}: "
+                f"{exc}). Checked {patterns}. Fix the URI, or grant the "
+                f"launcher's service account storage.objects.list/get on "
+                f"the bucket."
+            ) from exc
     sources: list[tuple[str, str]] = []
     for path in sorted(set(paths)):
         try:
@@ -65,11 +87,22 @@ def load_relationship_registry(uri: str) -> RelationshipRegistry:
                 f"model"
             ) from exc
     if not sources:
+        if uri.rstrip("/") != DEFAULT_RELATIONSHIPS_URI.rstrip("/"):
+            raise RelationshipError(
+                f"{uri}: no model files there. Checked {patterns}. A "
+                f"relationships URI you pass explicitly must hold at "
+                f"least one .yaml/.yml model — refusing to generate every "
+                f"table in isolation as if none were declared. (Pass "
+                f"--relationships_uri='' to turn relationships off on "
+                f"purpose; note that the match is ONE level deep and the "
+                f"files must end in .yaml or .yml.)"
+            )
         log_milestone(
             "relationships_absent",
             uri=uri,
-            note="no model files found — every table generates in "
-            "isolation with PK/identity from the CLI flags",
+            note="no model files in the packaged default location — "
+            "every table generates in isolation with PK/identity from "
+            "the CLI flags",
         )
         return RelationshipRegistry()
     registry = RelationshipRegistry.from_sources(sources)
@@ -85,4 +118,4 @@ def load_relationship_registry(uri: str) -> RelationshipRegistry:
     return registry
 
 
-__all__ = ["load_relationship_registry"]
+__all__ = ["DEFAULT_RELATIONSHIPS_URI", "load_relationship_registry"]

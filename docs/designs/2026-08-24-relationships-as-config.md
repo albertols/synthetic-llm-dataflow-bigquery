@@ -67,6 +67,17 @@ edge draws parent key tuples (ADR 0031); a dotted orange edge is present in
 the model but not drawn this run. Scenario 3b is the expensive one, so the
 launcher warns rather than silently expanding.*
 
+`--relationships_uri` takes a folder or a single file, local or `gs://`
+(the same `FileSystems` seam `--thresholds_uri` uses, so a `gs://`
+override needs no new machinery — only `storage.objects.list`/`get` for
+the launcher's service account, and only on the LAUNCHER: the model is
+resolved driver-side and travels to workers as text). The match is one
+level deep (`<uri>/*.yaml`, `*` does not cross `/`). A URI that cannot be
+listed, or an explicitly-passed URI holding no models, is a LOUD stop —
+silently degrading to "no relationships" would generate every table alone
+and still report success, which is the failure mode this whole change
+exists to prevent.
+
 The registry answers four questions and nothing else asks them:
 `component(table)` (who travels with it), `generation_waves(tables)`
 (what may run in parallel, parents first), `enforced_edges(table)` (what

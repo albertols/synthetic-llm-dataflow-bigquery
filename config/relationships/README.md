@@ -9,9 +9,29 @@ BigQuery are **not** read for relational structure (ADR 0032).
 # it is already the default — this is what a launch does implicitly
 --relationships_uri=config/relationships
 
-# override for one launch, no image rebuild, no metadata edit
+# a GCS FOLDER: every *.yaml / *.yml directly under that prefix
+--relationships_uri=gs://my-bucket/relationships
+
+# or one specific file
 --relationships_uri=gs://my-bucket/relationships/corp_model.yaml
+
+# relationships off on purpose (every table generates alone)
+--relationships_uri=""
 ```
+
+Three things to know about a `gs://` override:
+
+- **One level, no recursion.** The match is `<uri>/*.yaml` and
+  `<uri>/*.yml`; Beam's `*` does not cross `/`, so
+  `gs://bucket/models/legacy/x.yaml` is NOT picked up by
+  `gs://bucket/models`. Trailing slash optional.
+- **The extension matters.** A file without `.yaml`/`.yml` is invisible.
+- **A wrong URI stops the launch.** An unlistable path, or a path you
+  passed explicitly that holds no models, raises — it never degrades into
+  "no relationships declared", which would generate every table alone and
+  still look like a successful run. Only the packaged default may be
+  empty. The launcher's service account needs
+  `storage.objects.list` + `get` on the bucket.
 
 ## The whole schema
 
