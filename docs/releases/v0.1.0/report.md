@@ -145,3 +145,53 @@ _Evolution chart spans 0 prior tagged release(s) plus this one (execution_second
 
 ---
 _Generated deterministically by `scripts/release/make_release_report.py` — insights layer: `.claude/skills/release-report/SKILL.md`._
+\n
+## Insights
+
+_Interpretation layer (`.claude/skills/release-report`), written 2026-08-29 on top of the generated tables above — none of the numbers or charts were edited. No ADC on the authoring machine: every statement below comes from the committed bundle and the run's worker logs; nothing was re-queried live. Parent columns are named by the generator's tokens; child columns are described, not named (their aliases share the token namespace)._
+
+**Scope.** First tagged release, so there is no base side and every delta reads "not measured". The head job is the 2026-08-26 R6 run: the parent table and its FK child generated at **10,000,000 rows each in one Dataflow job** (wave 0 → wave 1, ADR 0030), `n1-highmem-8` × 2→4 workers with one T4 each, image `oss-pk-ready-6ed7b93`, `qwen3/4b-instruct-2507`. The deterministic tables read the **parent** bundle (`real/*_metrics.json`); the child's twins (`real/*_metrics_a_table.json`) are cited by hand here — the generator discovers one artifact set per job (backlog item below).
+
+### Regression calls
+
+No regression is callable against a base. Severity of the head-side readings, worst first:
+
+| Reading | Call | Why |
+|---|---|---|
+| child stats-diff `decile_ks` **0.209 WARN** on one enforced-FK column (child bundle; not in the parent table above) | **INFO — documented v1 trade-off** | ADR 0031: the child draws whole parent key tuples from a 100k-key pool (`fk_key_pool_capped`; the parent holds 2.49M distinct keys), so the FK column's marginal is the pool's, not the source's. Referential integrity is what it buys: **0 orphans / 10,000,000 child rows** by an independent full join, `fk.orphan` BLOCKER fired 0 times |
+| `decile_ks_max` 0.1436 (parent, `COL_006`) | INFO | within threshold (`ok`); the same column read 0.159 at 1M — sample-level noise on a heavy-tailed numeric |
+| `shape_recall_min` 0 / `shape_precision_min` 0 | INFO — measurement artifact | the three parent identifier columns (`COL_045` opaque byte key, `ID_COL` UUID, `PK_COL` 24-hex PK) are near-unique-mask: exact-mask recall saturates at 0 for any faithful generator; the mass metric ADR 0026 designates for them, `shape_head_tv`, is **0.00 on all three**. The worst genuine shape gaps are on the child — a 12-char reference column at `shape_head_tv` 0.48 (a 29 % all-digit source shape reproduced at 0 %), a 31-char fixed-width code column at 0.24, a 12-char sparse reference column at 0.20 — all `copy_fraction` 0, all steerable, all already carrying `llm_prompt_constraint` |
+| `copy_fraction_max` 0.0022 (`COL_050`) | INFO | after the identifier/domain exemption; `copy_fraction_raw` reaches 0.75 on a 5-char code column with 3,030 source distinct (`COL_051`) — in-domain collisions on a closed code set, not memorization. Live memorization probe: one INFO flag (`COL_041`, a day-granularity date domain), zero on the child |
+| `top_value_share_max` 1 | INFO | 12 parent / 6 child columns are constants in source too (stats-diff `top1_delta` 0.000) — fidelity, not collapse |
+| `dup_ratio_max` 0 · PK `uniqueness_ratio` 1.0 (10M/10M distinct, `max_repeat` 1) on both tables · `validation.pydantic_valid` = `generation.yielded` = 10,000,000 | PASS | |
+
+### Bottleneck attribution (5,574 s wall)
+
+| Phase | Minutes | Attribution |
+|---|---|---|
+| worker startup (image pull) | 15.4 | `workers_ready` at +15:22 — the GPU image; 8:03 on the 1M run the day before |
+| pool branches (parent 7.0 · child 16.9, concurrent) | 16.9 | vLLM ignition 200 s operator-visible (65 s weight pull + fit + 43.7 s engine init + the 25.8 s `vllm_ignition_seconds` above + 65 s readiness handshake); ladders 304–537 s each; the child branch then spent ~6 min after its last pool on identifier/numeric domain fetches (a 944k-value identifier domain, ADR 0025/0027) |
+| parent generate | 23.4 | `dominant_stage_seconds` 1,442 = `CreateRequests/…/Reshuffle` fused with GenerateRecords: 1,000 batches × 10k rows, `batch_done` p50 25.3 s → **7.1k rows/s** on 32 CPU threads; store-warm (`freetext_pool_store_hit`), no LLM call |
+| parent PK enforce (`EnforceUniqueness/CombineByPk`) | 8.0 | a global combine over 10M keys — the ADR 0030 wave barrier: the child cannot start until this lands |
+| child generate setup + generate | 3.2 + 16.5 | `fk_key_pool_bound key_tuples=100000 weighting=child_marginal` on every instance (side input), then 1,000 batches at p50 25.4 s → **10.2k rows/s** (45 columns vs the parent's 67) |
+| BQ `FILE_LOADS` + cleanup | 13.2 | two 10M-row loads |
+
+GPU: vLLM served pool builds for ~9 of the 93 minutes; `TotalGpuTime` 16,345 GPU-s = **272 GPU-minutes billed on four T4s**. `tokens_per_s` reads "not measured" because the probe has no vLLM throughput counter — not because vLLM was idle during the ladders.
+
+Which commits plausibly shaped this profile: ADR 0030 (one job) put the parent's PK enforce + key side-input on the child's critical path (~12 min between the parent's last batch and the child's first); ADR 0031 is the 3.2-min child setup; ADR 0020/0023 (persisted, source-rejected pools) are why the generate stage never touches the GPU; ADR 0033 (this release, laptop-verified only — the head run predates it) removes the 1M run's failed pool-branch bundle (+8 min retry), one ~150 s ladder round per off-format-example column, and the sample-sized pool target on sparse columns.
+
+### Optimization candidates
+
+1. **CPU/GPU worker split** — pool branch on GPU workers, generate + PK enforce + loads on CPU-only workers (two jobs, or a store-warm replay that never requests a GPU): up to ~260 idle GPU-minutes per 10M relational job. Largest lever, no fidelity risk.
+2. **Overlap the child with the parent's tail** — start the child's generate on the parent's PK-enforced keys as soon as the combine lands instead of after the side-input materialization; level-parallel scheduling for wider models (ROADMAP).
+3. **PK enforce at 10M** — combiner lifting or skip-when-unique-by-construction for identifier-synthesized keys (8 min today, grows with rows).
+4. **Image pull** — 8–15 min per launch; slimmer GPU image or a pre-pulled node image.
+5. **Ladder cost** — ADR 0033's collapse exit + example preflight (measure on the next cold launch); raising `FREE_TEXT_POOL_MAX` past 512 for 45k–144k-distinct columns is a separate GPU-time decision.
+
+### Follow-up backlog
+
+- Next cold relational launch on an ADR 0033 image: the design doc's §8 milestone checks (`freetext_pool_ladder_retried` absent-or-recovered, sparse-column `target=512`, `format_collapse` at `attempts=2`, `length_clamped` on the 35-char narrative column, `freetext_pools_warm` on every generate setup).
+- Probe: a vLLM tokens/s counter (`tokens_per_s`), and an FK-orphan check as a script (today an ad-hoc SQL in the E2E report).
+- Release generator: discover multi-table bundles (`*_<table>.json` twins) and report per table — the child's 0-orphan result is this release's headline and is invisible to the deterministic tables.
+- Fix the 28-char clause example on the child's 31-char fixed-width code column in the landing-table description; the engine now warns (`prompt_constraint_example_off_format`) but still spends one round on it.
+- The FK-column marginal: co-partitioned join beyond the 100k key cap (ROADMAP).
