@@ -18,6 +18,7 @@ Substitution markers (workflow 3 seds these at import time):
   {{SDFB_DDL_URI}}            gs://…/ddl.json (empty ⇒ operator omits ddl_uri; live INFORMATION_SCHEMA extraction)
   {{SDFB_RAG_CHUNKS_TABLE}}   project.synthetic_rag.rag_chunks (B.1 chunk store; empty ⇒ params omitted, no reuse/population)
   {{SDFB_FREETEXT_POOLS_TABLE}} project.synthetic_rag.freetext_pools (WS5 pool store; empty ⇒ params omitted, pools rebuild per worker)
+  {{SDFB_SOURCE_STATS_TABLE}}  project.synthetic_rag.source_table_stats (WS8 stats store; empty ⇒ param omitted, stats land as milestone + JSON artifact only)
   {{WRITE_DISPOSITION}}       default of the `write_disposition` DAG param (append | overwrite)
   {{SDFB_LANDING_TABLE}}      project.synthetic_data.<table> (defaults to the source table name)
   {{SDFB_DLQ_TABLE}}          project.synthetic_data_quality.dlq
@@ -67,6 +68,12 @@ _RAG_CHUNKS_TABLE = "{{SDFB_RAG_CHUNKS_TABLE}}"
 # paid 45 rebuilds (~26 of 53 min) exactly this way, warning
 # freetext_pool_store_absent 25 times.
 _FREETEXT_POOLS_TABLE = "{{SDFB_FREETEXT_POOLS_TABLE}}"
+# WS8 source_table_stats store (2026-08-05 spec WS-B). Empty ⇒ the DAG omits
+# source_stats_table entirely: stats still compute driver-side and land as
+# the source_table_stats milestone + optional JSON artifact — only the BQ
+# persistence is skipped. The table is NEVER auto-created (bq mk from
+# config/bq_schema/synthetic_rag/source_table_stats.schema.json).
+_SOURCE_STATS_TABLE = "{{SDFB_SOURCE_STATS_TABLE}}"
 
 # -----------------------------------------------------------------------------
 # Runtime infra — Composer Variables, set once per env (not build-time-baked).
@@ -169,7 +176,7 @@ default_dag_params = {
                     "BLOCKER). Empty = PK undeclared, rule idle.",
     ),
     "vllm_dtype": Param(
-        default="auto",
+        default="float16",
         type="string",
         enum=["auto", "float16", "bfloat16"],
         description="vLLM --dtype override. auto = checkpoint dtype (bf16 for "
@@ -266,6 +273,89 @@ default_dag_params = {
                     "In streaming mode duplicate rows LAND — a failing gate "
                     "still marks the run FAILED_BLOCKER; recover by "
                     "re-triggering with write_disposition=overwrite.",
+    ),
+    "freetext_expansion": Param(
+        default="identifiers",
+        type="string",
+        enum=["off", "identifiers", "all"],
+        description="Shape-preserving expander (WS8 spec C3). off = pool "
+                    "draws only, synthetic distinct is capped at the pool "
+                    "size (the 2026-08-03 10M-run ceiling). identifiers "
+                    "(default) = code-like columns (no whitespace, >=2 "
+                    "varying positions) draw fresh values from their "
+                    "observed shape mix — distinct scales with rows, shape "
+                    "precision stays 1.0 by construction. all = additionally "
+                    "mutates digit runs inside texty pool draws. Zero LLM "
+                    "calls added on every setting.",
+    ),
+    "prompt_constraints": Param(
+        default="on",
+        type="string",
+        enum=["on", "off"],
+        description="Attach each column's llm_prompt_constraint (parsed "
+                    "from its DDL description JSON) to the pool prompt as a "
+                    "constant suffix (WS8 spec C5, prefix-cache-safe). "
+                    "Columns without a constraint are untouched; with none "
+                    "anywhere 'on' is a logged no-op — prompt refinement, "
+                    "never a requirement.",
+    ),
+    "prompt_debug": Param(
+        default="off",
+        type="string",
+        enum=["off", "redacted", "full"],
+        description="Log each built pool prompt as a freetext_pool_prompt "
+                    "milestone (ADR 0024 §3c). redacted elides seed "
+                    "exemplars and adds a sha12 prompt hash; full logs "
+                    "verbatim prompts at WARNING — reference values reach "
+                    "Dataflow logs, short-lived debug runs only.",
+    ),
+    "source_stats": Param(
+        default="sample",
+        type="string",
+        enum=["sample", "off"],
+        description="Per-column source_table_stats from the reference "
+                    "sample, computed driver-side before the graph (WS8 "
+                    "spec WS-B; zero DAG cost). Ignored table-write-wise "
+                    "when the build left SDFB_SOURCE_STATS_TABLE empty.",
+    ),
+    "fk_parent_landing": Param(
+        default="",
+        type="string",
+        description="EXPERT OVERRIDE only (ADR 0029): parents are assumed "
+                    "landed in the landing dataset and this derives "
+                    "automatically. Set only when parents land in a "
+                    "DIFFERENT project.dataset.",
+    ),
+    "multi_table_mode": Param(
+        default="single_job",
+        type="string",
+        enum=["single_job", "sequential_jobs"],
+        description="How a multi-table plan executes (ADR 0030). "
+                    "single_job (default): every planned table in ONE "
+                    "Dataflow job — one worker fleet, one vLLM ignition, "
+                    "in-DAG FK key handoff. sequential_jobs: one job per "
+                    "table, parents first (fallback/debugging).",
+    ),
+    "generate_fk_relationships": Param(
+        default="true",
+        type="string",
+        enum=["true", "false"],
+        description="true (default): declared relationships are honored — "
+                    "the launch expands to the table's whole FK component "
+                    "(parents first, derived automatically); tables with "
+                    "no relationships behave exactly as false. false: "
+                    "isolated generation — declared edges ignored LOUDLY, "
+                    "FK columns use marginals. ADR 0029.",
+    ),
+    "relationships_uri": Param(
+        default="config/relationships",
+        type="string",
+        description="Where the relational models live (ADR 0032): a folder "
+                    "or a single YAML file, local or gs://. Default: the "
+                    "config/relationships folder packaged in the image. "
+                    "Point it at gs://... to change PK/FK/identity with no "
+                    "rebuild and no BigQuery metadata edit — it is the ONLY "
+                    "source of relational truth.",
     ),
     "pool_seed_strategy": Param(
         default="centroid",
@@ -385,6 +475,24 @@ with models.DAG(
                         if _FREETEXT_POOLS_TABLE
                         else {}
                     ),
+                    # WS8 stats store — same off-state convention: the
+                    # param is omitted when the build left the marker empty
+                    # (stats still land as milestone + JSON artifact).
+                    **(
+                        {"source_stats_table": _SOURCE_STATS_TABLE}
+                        if _SOURCE_STATS_TABLE
+                        else {}
+                    ),
+                    "source_stats": "{{ params.source_stats }}",
+                    "freetext_expansion": "{{ params.freetext_expansion }}",
+                    "prompt_constraints": "{{ params.prompt_constraints }}",
+                    "prompt_debug": "{{ params.prompt_debug }}",
+                    "fk_parent_landing": "{{ params.fk_parent_landing }}",
+                    "generate_fk_relationships":
+                        "{{ params.generate_fk_relationships }}",
+                    "relationships_uri":
+                        "{{ params.relationships_uri }}",
+                    "multi_table_mode": "{{ params.multi_table_mode }}",
                     "uniqueness_mode": "{{ params.uniqueness_mode }}",
                     "pool_seed_strategy": "{{ params.pool_seed_strategy }}",
                     "reference_table": "{{ params.table_fqn }}",

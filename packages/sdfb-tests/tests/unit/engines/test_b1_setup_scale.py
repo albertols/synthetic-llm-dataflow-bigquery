@@ -62,6 +62,10 @@ def big_ctx() -> GenerationContext:
         reference_rows=rows,
         reference_digest="big-digest",
         pipeline_run_id="b1-big",
+        # Embed-cap test guards the pool build's seed-example embed;
+        # expansion off keeps that path live (wave 4 skips ladders for
+        # expandable columns).
+        freetext_expansion="off",
     )
 
 

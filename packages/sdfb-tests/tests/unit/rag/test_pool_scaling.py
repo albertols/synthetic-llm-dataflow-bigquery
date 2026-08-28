@@ -12,6 +12,7 @@ from sdfb_core.engines.b1_rag.engine import (
     _POOL_VALUES_PER_CALL,
     _pool_llm_yield,
 )
+from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.rag.embedding import HashingEmbedder
 
 
@@ -68,6 +69,9 @@ def test_pool_scales_past_32_with_batched_calls():
         reference_digest="d",
         pipeline_run_id="pool-scale",
         num_rows=200,
+        # Ladder-mechanics test: expansion off forces the pool path
+        # (wave 4 skips ladders for expandable columns).
+        freetext_expansion="off",
     )
     engine.setup(client, ctx)
     pool = engine._free_text_pools["notes"]
@@ -76,6 +80,30 @@ def test_pool_scales_past_32_with_batched_calls():
     # n=4 choices/call -> per-round yield 128: 2 calls cover target=200.
     assert client.calls >= -(-200 // (_POOL_VALUES_PER_CALL * 4))
     engine.teardown()
+
+
+def test_pool_target_prefers_exact_source_distinct():
+    """Tier-2 exact distinct lifts a sample-starved target (ADR 0022):
+    60 sample-distinct notes + source_distinct 4000 → num_rows bound (500),
+    not the sample's 60. Missing/zero hints keep sample behavior."""
+    schema, rows = _schema_and_rows(300)
+    for i, r in enumerate(rows):
+        r["notes"] = f"repeating customer note body number {i % 60} with extended details"
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=32))
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=rows,
+        reference_digest="d",
+        pipeline_run_id="pool-exact",
+        num_rows=500,
+        source_distinct={"notes": 4000},
+    )
+    prof = profile_columns(schema, rows)["notes"]
+    assert engine._pool_target(prof, ctx) == 500
+    ctx_no_hint = ctx.model_copy(update={"source_distinct": {}})
+    assert engine._pool_target(prof, ctx_no_hint) == 60
+    ctx_zero = ctx.model_copy(update={"source_distinct": {"notes": 0}})
+    assert engine._pool_target(prof, ctx_zero) == 60
 
 
 def test_pool_target_respects_column_distinct():
@@ -137,7 +165,7 @@ def test_pool_llm_yield_empty_yield_stops_after_full_ladder():
 
 
 def test_pool_llm_yield_stops_when_novel_yield_stagnates():
-    """2026-07-23 E2E CHANGE_USERID: 32 attempts parsed 1035 values for a
+    """2026-07-23 E2E COL_052: 32 attempts parsed 1035 values for a
     257-value pool — after the early attempts the model only re-emitted
     duplicates/echoes. Consecutive low-novelty attempts (after the ladder is
     exhausted) must end the loop, keeping whatever the early attempts won."""
@@ -237,3 +265,73 @@ def test_pool_call_budget_scales_with_choices():
         client, "p", {}, _free_text_profile_with_observed(), ["seed"], target=512
     )
     assert y.attempts == 8
+
+
+class _FakeSourceValueStore:
+    """`fetch_distinct(column)` → the column's FULL source domain."""
+
+    def __init__(self, values: dict[str, frozenset[str]]) -> None:
+        self._values = values
+
+    def fetch_distinct(self, column: str) -> frozenset[str] | None:
+        return self._values.get(column)
+
+
+def test_pool_target_takes_the_source_filter_cardinality_when_exact_stats_are_absent(
+    caplog,
+):
+    # 2026-08-25/26 R6 runs: A_COL_015 (95% empty) showed 94 distinct in
+    # the 10k reference sample while the source filter the SAME setup
+    # fetched a moment later held 4,022 — and the target stayed 94 because
+    # the Tier-2 exact count (ADR 0022, --source_stats=exact) was absent.
+    # The filter's size IS the exact cardinality, already paid for.
+    import logging
+
+    schema, _ = _schema_and_rows(1)
+    # 94 distinct substantive values over 300 rows (a sparse column).
+    rows = [{"id": i, "notes": f"sparse ref {i % 94:04d}"} for i in range(300)]
+    client = _BatchClient()
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=32))
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=rows,
+        reference_digest="d-source-filter-card",
+        pipeline_run_id="pool-target-filter",
+        num_rows=1_000_000,
+        freetext_expansion="off",
+        source_value_store=_FakeSourceValueStore(
+            {"notes": frozenset(f"src ref {i:05d}" for i in range(4022))}
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(client, ctx)
+    # target = min(num_rows=1M, source distinct=4022, cap=512) = 512, not 94.
+    assert len(engine._free_text_pools["notes"]) == _FREE_TEXT_POOL_MAX
+    text = "\n".join(r.message for r in caplog.records)
+    assert "name=freetext_pool_built" in text
+    assert f"target={_FREE_TEXT_POOL_MAX}" in text
+    engine.teardown()
+
+
+def test_pool_target_prefers_the_exact_stats_count_over_the_filter():
+    # Tier-2 exact stats stay authoritative when present (ADR 0022).
+    schema, rows = _schema_and_rows(300)
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=32))
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=rows,
+        reference_digest="d-exact-wins",
+        pipeline_run_id="pool-target-exact",
+        num_rows=1_000_000,
+        source_distinct={"notes": 40},
+        freetext_expansion="off",
+    )
+    engine._ctx = ctx
+    prof = profile_columns(schema, rows)["notes"]
+    # exact stats (40) beat the filter (4022)
+    assert engine._pool_target(prof, ctx, source_cardinality=4022) == 40
+    no_exact = ctx.model_copy(update={"source_distinct": {}})
+    # the filter (4022 → cap 512) beats the sample distinct (300)
+    assert engine._pool_target(prof, no_exact, source_cardinality=4022) == 512
+    # neither: the sample distinct remains the stand-in
+    assert engine._pool_target(prof, no_exact, source_cardinality=0) == 300

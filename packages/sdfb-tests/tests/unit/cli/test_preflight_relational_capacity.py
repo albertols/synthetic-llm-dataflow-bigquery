@@ -1,0 +1,229 @@
+"""Preflight P4 (PK generation capacity) + FK activation — ADR 0028.
+
+The 2026-08-21 run discovered its PK/pool conflict 37 minutes and 1 586
+GPU-s after launch (999 488 pk.duplicate), and its declared FK was
+silently inactive. Both become launcher-side stops. The PK itself now
+comes from `config/relationships/` (ADR 0032).
+"""
+
+from __future__ import annotations
+
+import pytest
+from sdfb_beam.cli.preflight import preflight
+from sdfb_core.contracts import TableSchema
+
+
+def _relations(text: str, table: str = "t"):
+    from sdfb_core.contracts.relationships import parse_relationship_model
+
+    return parse_relationship_model(text, source="test.yaml").tables[table]
+
+
+_PK_RELATIONS = _relations("model: m\ntables:\n  t:\n    pk: [ID]\n")
+_FK_RELATIONS = _relations(
+    "model: m\ntables:\n  t:\n    pk: [ID]\n    fk:\n"
+    "      - cols: [CUST_ID]\n        ref: ds.customers\n"
+    "        ref_cols: [ID]\n"
+)
+_E2F = (
+    '{"llm_prompt_constraint": {"route": "llm", '
+    '"pattern": "^(E2F[13][0-9A-F]{20}|2301[0-9A-F]{20})$"}}'
+)
+_TINY = '{"llm_prompt_constraint": {"route": "llm", "pattern": "^[0-9]{3}$"}}'
+_PROSE = '{"llm_prompt_constraint": {"route": "llm", "format": "opaque key"}}'
+
+
+def _schema(table_desc: str = "", id_desc: str = "") -> TableSchema:
+    return TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.d.t", "description": ""},
+            "schema": [
+                {
+                    "name": "ID",
+                    "type": "STRING",
+                    "mode": "REQUIRED",
+                    "description": id_desc,
+                },
+                {"name": "CUST_ID", "type": "STRING", "mode": "REQUIRED"},
+            ],
+        }
+    )
+
+
+def _rows(n: int = 10) -> list[dict]:
+    return [{"ID": f"E2F3{i:020X}", "CUST_ID": "c1"} for i in range(n)]
+
+
+class TestP4PkCapacity:
+    def test_constrained_pk_without_pattern_stops_at_scale(self):
+        with pytest.raises(SystemExit, match="preflight P4"):
+            preflight(_schema("", _PROSE), (), (), _rows(), relations=_PK_RELATIONS,
+                num_rows=1_000_000,
+            )
+
+    def test_constrained_pk_without_pattern_ok_below_pool_cap(self):
+        preflight(_schema("", _PROSE), (), (), _rows(), relations=_PK_RELATIONS, num_rows=500
+        )
+
+    def test_pattern_pk_with_ample_capacity_passes(self):
+        preflight(_schema("", _E2F), (), (), _rows(), relations=_PK_RELATIONS, num_rows=1_000_000
+        )
+
+    def test_pattern_pk_with_small_capacity_stops(self):
+        with pytest.raises(SystemExit, match="preflight P4"):
+            preflight(_schema("", _TINY), (), (), _rows(), relations=_PK_RELATIONS,
+                num_rows=1_000_000,
+            )
+
+    def test_unconstrained_pk_is_untouched(self):
+        preflight(_schema(), (), (), _rows(), relations=_PK_RELATIONS, num_rows=1_000_000)
+
+    def test_num_rows_zero_disables_the_check(self):
+        preflight(_schema("", _PROSE), (), (), _rows(), relations=_PK_RELATIONS)
+
+
+class TestFkActivationIsDerived:
+    """ADR 0029 rev B: fk_parent_landing derives from --landing_table,
+    so preflight no longer refuses a declared FK — activation is checked
+    where pools LOAD (loud empty-parent stop in run_pipeline)."""
+
+    def test_declared_fk_passes_preflight_without_any_flag(self):
+        preflight(_schema(), (), (), _rows(), relations=_FK_RELATIONS)
+
+    def test_empty_parent_pool_stops_loudly(self):
+        from sdfb_beam.cli.run_pipeline import assert_fk_pools_nonempty
+        with pytest.raises(SystemExit, match=r"not landed"):
+            assert_fk_pools_nonempty(_FK_RELATIONS.fk, {}, "p.landing")
+
+    def test_populated_parent_pool_passes(self):
+        from sdfb_beam.cli.run_pipeline import assert_fk_pools_nonempty
+        assert_fk_pools_nonempty(
+            _FK_RELATIONS.fk, {"CUST_ID": ("K1", "K2")}, "p.landing"
+        )
+
+
+class TestP4CompositePk:
+    """The 2026-08-22 first single-job launch: A_TABLE's 5-column
+    composite PK failed P4 because one member (A_COL_002, a NUMERIC
+    branch code with a cosmetic examples-only clause) was judged ALONE
+    against 1M rows. P4 must bound the TUPLE (product of factors), and a
+    column whose type never routes through the capped pool contributes
+    unbounded capacity (ADR 0024: non-STRING keeps its typed route)."""
+
+    def _relations(self, cols):
+        names = ", ".join(c[0] for c in cols)
+        return _relations(f"model: m\ntables:\n  t:\n    pk: [{names}]\n")
+
+    def _schema(self, cols):
+        return TableSchema.model_validate(
+            {
+                "table_info": {"table_id": "p.d.t", "description": ""},
+                "schema": [
+                    {"name": n, "type": t, "mode": "REQUIRED",
+                     "description": d}
+                    for n, t, d in cols
+                ],
+            }
+        )
+
+    def test_a_table_shape_passes(self):
+        # numeric member w/ examples-only clause + unconstrained members:
+        # tuple capacity is unbounded — must NOT stop the launch.
+        examples_only = (
+            '{"llm_prompt_constraint": {"examples": ["20"]}}'
+        )
+        cols = [
+            ("A_COL_001", "INT64", ""),
+            ("A_COL_002", "INT64", examples_only),
+            ("A_COL_003", "INT64", ""),
+        ]
+        schema = self._schema(cols)
+        rows = [{"A_COL_001": i, "A_COL_002": 20, "A_COL_003": i}
+                for i in range(10)]
+        preflight(schema, (), (), rows, relations=self._relations(cols), num_rows=1_000_000)
+
+    def test_all_members_capped_below_num_rows_stops(self):
+        cols = [
+            ("A", "STRING", _PROSE),
+            ("B", "STRING", _PROSE),
+        ]
+        schema = self._schema(cols)
+        rows = [{"A": f"a{i}", "B": f"b{i}"} for i in range(10)]
+        # 512 * 512 = 262 144 < 1M -> tuple genuinely cannot be unique.
+        with pytest.raises(SystemExit, match="preflight P4"):
+            preflight(schema, (), (), rows, relations=self._relations(cols), num_rows=1_000_000)
+        # ...but covers 200k rows fine.
+        preflight(schema, (), (), rows, relations=self._relations(cols), num_rows=200_000)
+
+    def test_enum_values_clause_counts_its_domain(self):
+        enum = '{"llm_prompt_constraint": {"values": ["I", "O"]}}'
+        cols = [
+            ("DIRECTION", "STRING", enum),
+            ("KEY", "STRING", _PROSE),
+        ]
+        schema = self._schema(cols)
+        rows = [{"DIRECTION": "I", "KEY": f"k{i}"} for i in range(10)]
+        # 2 * 512 = 1024 -> stops at 1M, passes at 1000.
+        with pytest.raises(SystemExit, match="preflight P4"):
+            preflight(schema, (), (), rows, relations=self._relations(cols), num_rows=1_000_000)
+        preflight(schema, (), (), rows, relations=self._relations(cols), num_rows=1_000)
+
+    def test_single_numeric_pk_with_clause_is_untouched(self):
+        examples_only = (
+            '{"llm_prompt_constraint": {"examples": ["7"]}}'
+        )
+        cols = [("ACCT", "INT64", examples_only)]
+        schema = self._schema(cols)
+        rows = [{"ACCT": i} for i in range(10)]
+        preflight(schema, (), (), rows, relations=self._relations(cols), num_rows=1_000_000)
+
+
+class TestP5PkIsActuallyAKey:
+    """2026-08-25 run …-11759075672032343276: the model declared a
+    3-column PK whose tuple repeats on 99.4% of the source sample. The
+    launch ran anyway and landed **74 rows of 1,000,000** — every other
+    row was `pk.duplicate` — then tripped the BLOCKER gate 11 minutes
+    and one GPU later. The sample already knew; preflight must say so.
+    """
+
+    @staticmethod
+    def _rows(distinct: int, total: int = 10_000) -> list[dict]:
+        return [
+            {"ID": f"k{i % distinct}", "CUST_ID": "c", "NOTES": "x"}
+            for i in range(total)
+        ]
+
+    def test_a_pk_that_is_not_a_key_stops_before_the_gpu(self):
+        with pytest.raises(SystemExit, match=r"preflight P5") as exc:
+            preflight(
+                _schema(), (), (), self._rows(60), relations=_PK_RELATIONS,
+                num_rows=1_000_000,
+            )
+        message = str(exc.value)
+        assert "ID" in message              # names the columns
+        assert "60" in message              # the distinct tuples measured
+        assert "1,000,000" in message or "1000000" in message
+
+    def test_a_real_key_passes(self):
+        preflight(
+            _schema(), (), (), self._rows(10_000), relations=_PK_RELATIONS,
+            num_rows=1_000_000,
+        )
+
+    def test_mild_source_duplication_still_only_warns(self):
+        """Source data may legitimately dent an undeclared PK; the
+        generator recombines values, so this is not a launch stop."""
+        result = preflight(
+            _schema(), (), (), self._rows(9_000), relations=_PK_RELATIONS,
+            num_rows=1_000_000,
+        )
+        assert any("not unique" in w for w in result.warnings)
+
+    def test_a_small_run_within_the_key_space_is_fine(self):
+        preflight(
+            _schema(), (), (), self._rows(60), relations=_PK_RELATIONS,
+            num_rows=50,
+        )
+
+    def test_num_rows_zero_never_stops(self):
+        preflight(_schema(), (), (), self._rows(60), relations=_PK_RELATIONS)

@@ -34,6 +34,7 @@ from sdfb_core.contracts import GeneratedRecord
 from sdfb_core.engines.b2_library.backends import EmpiricalBackend, SdgxBackend
 from sdfb_core.engines.b2_library.fidelity import (
     ColumnKind,
+    ColumnProfile,
     enforce_value,
     profile_table,
 )
@@ -44,7 +45,14 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     ModelClient,
 )
-from sdfb_core.engines.generation_plan import build_plan, should_log_plan
+from sdfb_core.engines.fk_keys import bind_fk_key_pools
+from sdfb_core.engines.generation_plan import (
+    build_constraints_detail,
+    build_plan,
+    build_plan_detail,
+    log_plan_pretty,
+    should_log_plan,
+)
 from sdfb_core.observability import log_milestone
 
 
@@ -70,6 +78,8 @@ class B2LibraryEngine(GenerationEngine):
         self._backend = None  # SamplingBackend | None
         self._freetext_hook: FreeTextHook | None = None
         self._fitted: bool = False
+        # Enforced FK edges (ADR 0031) — joint parent-key tuple pools.
+        self._fk_key_pools: list = []
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -80,13 +90,37 @@ class B2LibraryEngine(GenerationEngine):
         self._ctx = ctx
         self._record_model = derive_record_model(ctx.table_schema)
         self._profiles = profile_table(ctx.table_schema, ctx.reference_rows)
+        # FK columns take the parent's landed key TUPLES (ADR 0031),
+        # drawn jointly per batch — mirroring B.1. The profile override
+        # keeps them off the free-text path; the joint draw below owns
+        # the values, overwriting whatever the backend sampled.
+        self._fk_key_pools = bind_fk_key_pools(ctx)
+        for pool in self._fk_key_pools:
+            for i, fk_name in enumerate(pool.cols):
+                base = self._profiles.get(fk_name)
+                if base is None:
+                    continue
+                values = tuple(dict.fromkeys(k[i] for k in pool.keys))
+                self._profiles[fk_name] = ColumnProfile(
+                    name=base.name,
+                    bq_type=base.bq_type,
+                    kind=ColumnKind.CATEGORICAL,
+                    nullable=base.nullable,
+                    null_fraction=pool.null_fraction,
+                    categories=values,
+                    weights=tuple(1.0 / len(values) for _ in values),
+                )
         self._free_text_cols = [
             name
             for name, p in self._profiles.items()
             if p.kind is ColumnKind.FREE_TEXT
         ]
         self._freetext_hook = FreeTextHook(
-            model_client, strict=ctx.strict_freetext
+            model_client,
+            strict=ctx.strict_freetext,
+            # ADR 0023 seam: B.2 builds pools lazily (no pool branch), so
+            # the full-domain rejection set rides the generate-path ctx.
+            source_value_store=getattr(ctx, "source_value_store", None),
         )
 
         backend = self._make_backend()
@@ -126,7 +160,25 @@ class B2LibraryEngine(GenerationEngine):
             columns=len(self._profiles),
             backend=self._backend_descriptor(),
             plan=json.dumps(build_plan(self._profiles), separators=(",", ":")),
+            columns_detail=json.dumps(
+                build_plan_detail(self._profiles), separators=(",", ":")
+            ),
         )
+        # Fetched constraint clauses, verbatim — the b1 mirror (2026-08-20
+        # follow-up: a Terraform description edit must be verifiable from
+        # worker logs without a --prompt_debug run).
+        constraints = build_constraints_detail(self._profiles)
+        if constraints:
+            log_milestone(
+                "prompt_constraints_found",
+                engine=self.name,
+                table=ctx.table_schema.fqn,
+                columns=",".join(constraints),
+                count=len(constraints),
+                enabled=bool(getattr(ctx, "prompt_constraints", True)),
+                detail=json.dumps(constraints, separators=(",", ":")),
+            )
+        log_plan_pretty(self.name, ctx, self._profiles)
 
     # -- pickling across the Beam worker boundary ---------------------------
     #
@@ -181,6 +233,13 @@ class B2LibraryEngine(GenerationEngine):
             columns[name] = self._freetext_hook.sample(
                 self._profiles[name], n, cfg, rng
             )
+
+        # 2b. Enforced FK columns: whole parent key tuples, overwriting
+        # whatever the backend drew per column (ADR 0031).
+        for pool in self._fk_key_pools:
+            drawn = pool.draw(n, rng, use_numpy=True)
+            for i, name in enumerate(pool.cols):
+                columns[name] = [t[i] for t in drawn]
 
         # 3. Assemble rows, enforce fidelity, validate, yield.
         col_order = [c.name for c in self._ctx.table_schema.columns]

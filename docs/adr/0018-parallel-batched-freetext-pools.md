@@ -2,6 +2,11 @@
 
 Date: 2026-07-25
 Status: accepted
+Figures: pool-build cost anatomy and seed strategies in
+[`2026-07-26-ws5-generation-throughput.md`](../designs/2026-07-26-ws5-generation-throughput.md);
+the prefix-cache prompt anatomy this ADR's byte-identical-prefix rule
+protects is drawn in
+[`2026-08-05-source-table-stats.md`](../designs/2026-08-05-source-table-stats.md).
 
 ## Context
 
@@ -9,7 +14,7 @@ WS2 §4b.2 scaled B.1's free-text pool target from 32 to
 `min(num_rows, distinct, 512)`, which multiplied sequential vLLM calls per
 column by up to 32x (20-48 s/call on T4/float16). The 2026-07-24 12:46 E2E
 spent 1552 s (49% of wall clock) building 3 pools; the 16:35 run tripled
-its setup because one echo-saturated column (`CHG_MESS_CARR_ID`) raised
+its setup because one echo-saturated column (`COL_053`) raised
 `FreeTextEmptyYieldError` out of `DoFn.setup()` twice, and Dataflow's
 silent bundle retries rebuilt every sibling pool from scratch — invisible
 in `validation_runs`.

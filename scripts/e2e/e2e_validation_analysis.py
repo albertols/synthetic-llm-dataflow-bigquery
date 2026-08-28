@@ -22,7 +22,7 @@ shared memorization when the live source table is not queried here (the live
 copy-ratio lives in ``e2e_gcp_probe.py``).
 
 Usage:
-    python scripts/e2e_validation_analysis.py \
+    python scripts/e2e/e2e_validation_analysis.py \
         --csv b1_rag=integration_tests/b1_rag/<sample>.csv \
         --csv b2_library=integration_tests/b2_library/<sample>.csv \
         --schema config/bq_schema/<dataset>/<TABLE>.schema.json \

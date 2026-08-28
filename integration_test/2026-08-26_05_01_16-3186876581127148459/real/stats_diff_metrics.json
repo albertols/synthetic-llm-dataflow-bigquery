@@ -1,0 +1,932 @@
+{
+ "columns": {
+  "C_COL_009": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0261,
+   "top1_delta": 0.0039,
+   "decile_ks": 0.14357615894039732,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_010": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_011": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_012": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_048": {
+   "type": "STRING",
+   "entropy_gap": -0.0035,
+   "top1_delta": -0.000805,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": -0.0009,
+   "length_band": {
+    "src": {
+     "p05": 12,
+     "p50": 12,
+     "p95": 12
+    },
+    "syn": {
+     "p05": 12,
+     "p50": 12,
+     "p95": 12
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_006": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_008": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0007,
+   "top1_delta": -0.0007,
+   "decile_ks": 0.06666666666666665,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_007": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0008,
+   "top1_delta": -0.0032,
+   "decile_ks": 0.026666666666666672,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_001": {
+   "type": "STRING",
+   "entropy_gap": -0.0028,
+   "top1_delta": -0.0003,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 24,
+     "p50": 24,
+     "p95": 24
+    },
+    "syn": {
+     "p05": 24,
+     "p50": 24,
+     "p95": 24
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_057": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0113,
+   "top1_delta": 0.0093,
+   "decile_ks": 0.05632530120481927,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_055": {
+   "type": "STRING",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 2,
+     "p50": 2,
+     "p95": 2
+    },
+    "syn": {
+     "p05": 2,
+     "p50": 2,
+     "p95": 2
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_056": {
+   "type": "INTEGER",
+   "entropy_gap": -0.001,
+   "top1_delta": -0.0001,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_052": {
+   "type": "TIMESTAMP",
+   "entropy_gap": -0.0303,
+   "top1_delta": -0.035,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_053": {
+   "type": "STRING",
+   "entropy_gap": -0.0197,
+   "top1_delta": 0.002,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 6,
+     "p50": 6,
+     "p95": 7
+    },
+    "syn": {
+     "p05": 6,
+     "p50": 6,
+     "p95": 7
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_054": {
+   "type": "STRING",
+   "entropy_gap": -0.0361,
+   "top1_delta": -0.001146,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": -0.0005,
+   "length_band": {
+    "src": {
+     "p05": 4,
+     "p50": 5,
+     "p95": 5
+    },
+    "syn": {
+     "p05": 4,
+     "p50": 5,
+     "p95": 5
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_037": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_038": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_005": {
+   "type": "STRING",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 2,
+     "p50": 2,
+     "p95": 2
+    },
+    "syn": {
+     "p05": 2,
+     "p50": 2,
+     "p95": 2
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_003": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_004": {
+   "type": "STRING",
+   "entropy_gap": -0.0169,
+   "top1_delta": 0.004,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 3,
+     "p50": 3,
+     "p95": 3
+    },
+    "syn": {
+     "p05": 3,
+     "p50": 3,
+     "p95": 3
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_047": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0391,
+   "top1_delta": 0.0367,
+   "decile_ks": 0.0969512195121951,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_045": {
+   "type": "STRING",
+   "entropy_gap": 0.0035,
+   "top1_delta": 0.0039,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "syn": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_066": {
+   "type": "STRING",
+   "entropy_gap": -0.0086,
+   "top1_delta": 0.0008,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 8,
+     "p50": 8,
+     "p95": 8
+    },
+    "syn": {
+     "p05": 8,
+     "p50": 8,
+     "p95": 8
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_044": {
+   "type": "STRING",
+   "entropy_gap": -0.0695,
+   "top1_delta": 0.0065,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "syn": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_042": {
+   "type": "STRING",
+   "entropy_gap": 0.005,
+   "top1_delta": 0.0037,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "syn": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_043": {
+   "type": "STRING",
+   "entropy_gap": -0.0025,
+   "top1_delta": -0.0003,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "syn": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_034": {
+   "type": "STRING",
+   "entropy_gap": -0.0831,
+   "top1_delta": -0.0017,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "syn": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_014": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0098,
+   "top1_delta": -0.0046,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_013": {
+   "type": "STRING",
+   "entropy_gap": 0.0051,
+   "top1_delta": 0.0005,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0001,
+   "length_band": {
+    "src": {
+     "p05": 1,
+     "p50": 1,
+     "p95": 1
+    },
+    "syn": {
+     "p05": 1,
+     "p50": 1,
+     "p95": 1
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_016": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0029,
+   "top1_delta": -0.0021,
+   "decile_ks": 0.09396923157939685,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_017": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0018,
+   "top1_delta": 0.0008,
+   "decile_ks": 0.08980949369448088,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_015": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0005,
+   "top1_delta": 0.0005,
+   "decile_ks": 0.09445379995954595,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_039": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0001,
+   "top1_delta": -0.0001,
+   "decile_ks": 0.01756279525000004,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_002": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0001,
+   "top1_delta": -0.0041,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_049": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0012,
+   "top1_delta": -0.0008,
+   "decile_ks": 0.099625468164794,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_063": {
+   "type": "STRING",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 2,
+     "p50": 2,
+     "p95": 2
+    },
+    "syn": {
+     "p05": 2,
+     "p50": 2,
+     "p95": 2
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_050": {
+   "type": "STRING",
+   "entropy_gap": -0.018,
+   "top1_delta": -0.002,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "syn": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_051": {
+   "type": "STRING",
+   "entropy_gap": -0.0009,
+   "top1_delta": -0.0018,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "syn": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_067": {
+   "type": "DATE",
+   "entropy_gap": 0.0004,
+   "top1_delta": 0.0045,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_040": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_041": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0023,
+   "top1_delta": -0.0003,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_058": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_032": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_033": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_020": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0003,
+   "top1_delta": 0.0,
+   "decile_ks": 0.03144197510936919,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_018": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_019": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_023": {
+   "type": "INTEGER",
+   "entropy_gap": -0.007,
+   "top1_delta": -0.0094,
+   "decile_ks": 0.08486707596562978,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_021": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_022": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_030": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_031": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_024": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_025": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_026": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_027": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_028": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_029": {
+   "type": "INTEGER",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": 0.0,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_062": {
+   "type": "TIMESTAMP",
+   "entropy_gap": -0.0161,
+   "top1_delta": -0.0009,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_065": {
+   "type": "TIMESTAMP",
+   "entropy_gap": 0.002,
+   "top1_delta": -0.003,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_046": {
+   "type": "STRING",
+   "entropy_gap": -0.0088,
+   "top1_delta": 0.0037,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 8,
+     "p50": 8,
+     "p95": 8
+    },
+    "syn": {
+     "p05": 8,
+     "p50": 8,
+     "p95": 8
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_035": {
+   "type": "STRING",
+   "entropy_gap": -0.014,
+   "top1_delta": -0.0057,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 8,
+     "p50": 8,
+     "p95": 8
+    },
+    "syn": {
+     "p05": 8,
+     "p50": 8,
+     "p95": 8
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_064": {
+   "type": "STRING",
+   "entropy_gap": 0.0,
+   "top1_delta": 0.0,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 36,
+     "p50": 36,
+     "p95": 36
+    },
+    "syn": {
+     "p05": 36,
+     "p50": 36,
+     "p95": 36
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_061": {
+   "type": "STRING",
+   "entropy_gap": -0.2653,
+   "top1_delta": -0.005,
+   "decile_ks": null,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": {
+    "src": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "syn": {
+     "p05": 10,
+     "p50": 10,
+     "p95": 10
+    },
+    "drift": 0
+   },
+   "verdict": "ok"
+  },
+  "C_COL_059": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0017,
+   "top1_delta": -0.001,
+   "decile_ks": 0.06631284193428713,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_060": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0007,
+   "top1_delta": -0.0004,
+   "decile_ks": 0.02602846136285141,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  },
+  "C_COL_036": {
+   "type": "INTEGER",
+   "entropy_gap": -0.0008,
+   "top1_delta": -0.0006,
+   "decile_ks": 0.01717249604178228,
+   "null_delta": 0.0,
+   "empty_delta": 0.0,
+   "length_band": null,
+   "verdict": "ok"
+  }
+ },
+ "table": {
+  "skipped": [],
+  "source_rows": null,
+  "synthetic_rows": null
+ },
+ "evaluation": null
+}

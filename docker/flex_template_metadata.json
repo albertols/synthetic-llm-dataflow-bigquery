@@ -5,7 +5,7 @@
     {
       "name": "ddl_uri",
       "label": "DDL JSON URI",
-      "helpText": "gs:// path to the _ddl.json produced by scripts/extract_ddl.py. Optional; empty/omitted = live INFORMATION_SCHEMA extraction from reference_table.",
+      "helpText": "gs:// path to a _ddl.json \u2014 the OFFLINE FALLBACK only (ADR 0027 D2). Live extraction is authoritative at every launch: structure from reference_table, description surfaces (llm_prompt_constraint + relational contract) overlaid from landing_table \u2014 the SOURCE table's descriptions are stripped, never used to steer generation. Extract the pin from the LANDING table; it is consumed only when live extraction fails (air-gap, BQ outage), with staleness reported via ddl_pin_drift / ddl_pin_fresh.",
       "isOptional": true,
       "regexes": [
         "^gs://[^/]+/.+\\.json$"
@@ -245,6 +245,81 @@
       "isOptional": true,
       "regexes": [
         "^(exact|streaming)?$"
+      ]
+    },
+    {
+      "name": "freetext_expansion",
+      "label": "Free-text shape expander",
+      "helpText": "off = pool draws only (distinct capped at pool size). identifiers (default) = code-like columns expand from their observed shape mix, breaking the pool-size distinct ceiling. all = also mutate digit runs inside texty pool draws. Never adds an LLM call (2026-08-05 spec C3).",
+      "isOptional": true,
+      "regexes": [
+        "^(off|identifiers|all)?$"
+      ]
+    },
+    {
+      "name": "prompt_constraints",
+      "label": "Per-column LLM prompt constraints",
+      "helpText": "on (default) attaches each column's llm_prompt_constraint (parsed from its DDL description JSON) to the pool prompt as a constant, prefix-cache-safe suffix. Columns without a constraint are untouched \u2014 with none anywhere, 'on' is a no-op (spec C5).",
+      "isOptional": true,
+      "regexes": [
+        "^(on|off)?$"
+      ]
+    },
+    {
+      "name": "prompt_debug",
+      "label": "Pool-prompt debug logging",
+      "helpText": "off (default) logs nothing. redacted logs each built pool prompt as a freetext_pool_prompt milestone with seed exemplars elided (<k seeds elided>) plus a sha12 prompt hash. full logs verbatim prompts at WARNING \u2014 reference values reach Dataflow logs, short-lived debug runs only (ADR 0024 \u00a73c).",
+      "isOptional": true,
+      "regexes": [
+        "^(off|redacted|full)?$"
+      ]
+    },
+    {
+      "name": "source_stats",
+      "label": "Source-table stats computation",
+      "helpText": "sample (default) computes per-column source_table_stats from the reference sample driver-side (zero DAG cost); exact adds ONE aggregate scan of the live table (HLL distinct, deciles, top-k) and feeds exact distinct into free-text pool sizing (ADR 0022); off disables entirely (WS8 spec WS-B).",
+      "isOptional": true,
+      "regexes": [
+        "^(off|sample|exact)?$"
+      ]
+    },
+    {
+      "name": "source_stats_table",
+      "label": "Source stats BQ table",
+      "helpText": "project.dataset.table for source_table_stats rows; empty/omitted skips the BQ write (stats still land as milestone + JSON artifact). Existing (table, digest) rows are never rewritten. Never auto-created: bq mk from config/bq_schema/synthetic_rag/source_table_stats.schema.json.",
+      "isOptional": true
+    },
+    {
+      "name": "source_stats_json",
+      "label": "Source stats JSON artifact path",
+      "helpText": "gs:// or local path for the per-run stats JSON artifact; empty/omitted skips it.",
+      "isOptional": true
+    },
+    {
+      "name": "fk_parent_landing",
+      "label": "FK parent landing dataset",
+      "helpText": "EXPERT OVERRIDE only (ADR 0029): parents are assumed landed in the landing dataset and this derives automatically. Set only when parents land in a DIFFERENT project.dataset.",
+      "isOptional": true
+    },
+    {
+      "name": "generate_fk_relationships",
+      "label": "Generate FK relationships",
+      "helpText": "true (default): declared relationships are honored \u2014 the launch expands to the whole FK component, parents first, everything derived. Tables with no relationships behave exactly as false. false: isolated generation; declared edges ignored LOUDLY. ADR 0029.",
+      "isOptional": true
+    },
+    {
+      "name": "relationships_uri",
+      "label": "Relationship models URI",
+      "helpText": "Where the relational models live (ADR 0032): a folder or a single YAML file, local or gs://. Default: the config/relationships folder packaged in the image. Point it at gs://... to change PK/FK/identity without rebuilding \u2014 this is the ONLY source of relational truth; table descriptions are never read for it.",
+      "isOptional": true
+    },
+    {
+      "name": "multi_table_mode",
+      "label": "Multi-table execution mode",
+      "helpText": "single_job (default): every planned table in ONE Dataflow job \u2014 one worker fleet, one vLLM ignition, in-DAG FK key handoff (ADR 0030). sequential_jobs: one job per table, parents first (fallback/debugging).",
+      "isOptional": true,
+      "regexes": [
+        "^(single_job|sequential_jobs)$"
       ]
     }
   ]

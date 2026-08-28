@@ -1,6 +1,6 @@
 """Regenerate the WS5 generation-throughput figures.
 
-    uv run --no-sync python3 scripts/make_ws5_figures.py
+    uv run --no-sync python3 scripts/doc/make_ws5_figures.py
 
 Writes PNGs into docs/designs/assets/. Every measured number below is
 derived from integration_tests/2026-07-26_06_54_25-14348390798392809440/
@@ -23,7 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-ASSETS = Path(__file__).resolve().parents[1] / "docs" / "designs" / "assets"
+ASSETS = Path(__file__).resolve().parents[2] / "docs" / "designs" / "assets"
 
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 # OKLab dE x100 floor for normal-vision separation (dataviz check 4).
@@ -44,9 +44,9 @@ JOB_WALL = 4_050.0  # 14:04:52 -> 15:12:22
 
 POOLS_REBUILT, POOLS_CACHED = 108, 21
 PER_COLUMN = {  # freetext_pool_built totals
-    "ACCU_LIMIT_KEY": 26_107.0,
-    "CHANGE_USERID": 24_478.0,
-    "CHG_MESS_CARR_ID": 18_220.0,
+    "COL_047": 26_107.0,
+    "COL_052": 24_478.0,
+    "COL_053": 18_220.0,
 }
 WAVES = [(3.2, 1), (10.5, 8), (17.0, 24), (37.0, 8), (55.1, 3)]
 LAST_POOL_MIN = 64.2

@@ -2530,7 +2530,7 @@ git commit -m "feat(eval): validation_data_history schema file + row drift guard
 ### Task 13: probe + report-prompt integration (§5d)
 
 **Files:**
-- Modify: `scripts/e2e_gcp_probe.py` (extend `bq_quality` table tuple at ~line 315; new `derive_run_ids` helper before `main`; auto-derive call in `main` at ~line 760; ensure `import re` present)
+- Modify: `scripts/e2e/e2e_gcp_probe.py` (extend `bq_quality` table tuple at ~line 315; new `derive_run_ids` helper before `main`; auto-derive call in `main` at ~line 760; ensure `import re` present)
 - Modify: `.github/prompts/end_to_end_validation_report_generation.prompt.md` (Inputs table ~L41; Step 3 ~L151; Step 4 note ~L250; Step 5 scorecard ~L257; consistency rules ~L340)
 - Test: append to `packages/sdfb-tests/tests/unit/scripts/test_e2e_gcp_probe.py`
 
@@ -2647,7 +2647,7 @@ Expected: all passed
 
 ```bash
 uv run --no-sync ruff check .
-git add scripts/e2e_gcp_probe.py .github/prompts/end_to_end_validation_report_generation.prompt.md \
+git add scripts/e2e/e2e_gcp_probe.py .github/prompts/end_to_end_validation_report_generation.prompt.md \
         packages/sdfb-tests/tests/unit/scripts/test_e2e_gcp_probe.py
 git commit -m "feat(eval): probe run_id auto-derive + history fetch + report-prompt integration (WS3 §5d)"
 ```

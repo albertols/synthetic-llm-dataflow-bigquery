@@ -36,10 +36,16 @@ from sdfb_core.engines.base import (
 )
 from sdfb_core.engines.text_shapes import (
     build_relaxed_shapes,
-    sample_identifier,
+    collapsed_mask,
+    identifier_sampler,
+    length_hint,
+    mutate_digit_runs,
     sample_relaxed_identifier,
+    shape_mix_can_template,
+    shape_mix_is_identifier_like,
 )
-from sdfb_core.observability import log_milestone
+from sdfb_core.observability import log_milestone, log_prompt_debug
+from sdfb_core.pools.store import SourceValueStore
 
 # Bounded pool size — the LLM emits at most this many unique candidates per
 # free-text column regardless of N (the O(1) cost cap). Sized small so the
@@ -65,6 +71,27 @@ def similarity_to_temperature(similarity: float) -> float:
     """
     s = min(max(similarity, 0.0), 1.0)
     return round(1.3 - 1.2 * s, 4)
+
+
+def _collapsed_gate(profile: ColumnProfile):
+    """Collapsed-mask candidate gate (B.1 parity, wave-2 §4c).
+
+    For shape-rigid whitespace columns the LLM normalizes literal space
+    runs (2026-08-09 B_TABLE R1, COL_038: ␣␣␣ → ␣ on every pool value) —
+    candidates must reproduce an observed run-collapsed mask. Prose (mix
+    cannot template) stays ungated.
+    """
+    gate_masks: set[str] | None = None
+    if (
+        build_relaxed_shapes(list(profile.text_pool)) is None
+        and shape_mix_can_template(profile.shape_mix)
+    ):
+        gate_masks = {collapsed_mask(str(v)) for v in profile.text_pool if v}
+
+    def gate(v: str) -> bool:
+        return gate_masks is None or collapsed_mask(v) in gate_masks
+
+    return gate
 
 
 def _pool_schema(column_name: str) -> dict:
@@ -135,7 +162,7 @@ class FreeTextHook:
     A *copy-saturated* one (``parsed > 0``, every value an observed copy)
     first tries a relaxed per-position character template
     (``build_relaxed_shapes``) to generate verified-novel in-format values
-    without the LLM — the CHANGE_USERID failure mode of the 2026-07-22 b2
+    without the LLM — the COL_052 failure mode of the 2026-07-22 b2
     E2E runs, where qwen echoed the 32 shown exemplars on all 3 attempts.
     A successful shape pool is a genuine novel pool and is cached normally.
     Only when no template applies (prose) or the template keyspace is
@@ -168,10 +195,16 @@ class FreeTextHook:
         *,
         pool_size: int = _DEFAULT_POOL_SIZE,
         strict: bool = False,
+        source_value_store: SourceValueStore | None = None,
     ) -> None:
         self._client = model_client
         self._pool_size = pool_size
         self._strict = strict
+        # ADR 0023 seam (B.2 parity, R5 prerequisite): the column's FULL
+        # distinct source values, consulted by the pool novelty filter and
+        # the shape fallback. None ⇒ sample-only rejection, unchanged.
+        self._source_value_store = source_value_store
+        self._source_cache: dict[str, frozenset[str]] = {}
         self._cache: dict[tuple[str, float], list[str]] = {}
         # Negative cache: key → the FreeTextEmptyYieldError message of a
         # deterministic strict-mode build failure (see class docstring).
@@ -209,40 +242,100 @@ class FreeTextHook:
         generate format-preserving values per row from the profile's
         per-position template.
         """
+        # One uniform draw decides null → empty → value, so the two sparsity
+        # modes never double-count (2026-08-05 spec C1; mirrors B.1).
+        null_frac = profile.null_fraction if profile.nullable else 0.0
+        empty_frac = profile.empty_fraction
+        u = rng.random(n)
+        null_mask = u < null_frac
+        empty_mask = ~null_mask & (u < null_frac + empty_frac)
+        fill = int(n - int(null_mask.sum()) - int(empty_mask.sum()))
+
+        def pick(k: int) -> int:
+            return int(rng.integers(0, k))
+
+        generated = self._generate_fill(profile, cfg, fill, pick, rng)
+        if generated is None:
+            return [None] * n
+
+        out: list[str | None] = []
+        gen_iter = iter(generated)
+        for i in range(n):
+            if null_mask[i]:
+                out.append(None)
+            elif empty_mask[i]:
+                out.append("")
+            else:
+                out.append(next(gen_iter))
+        return out
+
+    def _generate_fill(
+        self,
+        profile: ColumnProfile,
+        cfg: GenerationConfig,
+        fill: int,
+        pick,
+        rng: np.random.Generator,
+    ) -> list[str | None] | None:
+        """The `fill` substantive values of one batch, or None when no
+        source of values exists (caller emits all-None)."""
+        expansion = str(
+            cfg.engine_specific.get("freetext_expansion", "identifiers")
+        )
+
         if profile.identifier_shape is not None:
-            values = [
-                sample_identifier(
-                    profile.identifier_shape, lambda k: int(rng.integers(0, k))
-                )
-                for _ in range(n)
-            ]
-            if profile.nullable and profile.null_fraction > 0.0:
-                null_mask = rng.random(n) < profile.null_fraction
-                return [None if null_mask[i] else values[i] for i in range(n)]
-            return values
+            # Shared wave-2 sampler: mask mix above coverage, full
+            # row-weighted mask table (positional alphabets pin fixed
+            # prefixes/nibbles, 2026-08-11 A_TABLE R1) below it — the
+            # collapsed template scrambled long-tail mask families
+            # (2026-08-09 A_TABLE R1, COL_001-class).
+            sampler = identifier_sampler(
+                profile.identifier_shape,
+                profile.shape_mix,
+                profile.text_pool,
+                pick,
+            )
+            return [sampler() for _ in range(fill)]
+
+        if (
+            profile.shape_mix is not None
+            and expansion != "off"
+            and (
+                expansion == "all"
+                or shape_mix_is_identifier_like(profile.shape_mix)
+            )
+        ):
+            # Shape-preserving expansion: distinct scales with rows, not
+            # with the pool cap, and the LLM is never called (spec C3).
+            observed = set(profile.text_pool)
+            generated: list[str | None] = []
+            for _ in range(fill):
+                v = ""
+                for _ in range(3):
+                    v = sample_relaxed_identifier(profile.shape_mix, pick)
+                    if v not in observed:
+                        break
+                generated.append(v)
+            return generated
 
         pool = self._pool_for(profile, cfg)
         ref_pool = list(profile.text_pool)
         if len(ref_pool) > _REFERENCE_BLEND_MAX_DISTINCT:
             # Identity-like cardinality: the reference blend is the leak
-            # (see _REFERENCE_BLEND_MAX_DISTINCT). `_blend_pools` shifts all
-            # mass to the novel pool when the reference side is empty.
+            # (see _REFERENCE_BLEND_MAX_DISTINCT). `_blend_pools` shifts
+            # all mass to the novel pool when the reference is empty.
             ref_pool = []
 
         # similarity high ⇒ favor the observed reference pool (mimic);
         # similarity low ⇒ favor the freshly-generated LLM pool (diverge).
         combined, probs = _blend_pools(pool, ref_pool, cfg.similarity)
         if not combined:
-            return [None] * n
-
-        picks = rng.choice(len(combined), size=n, p=probs)
-        values: list[str | None] = [combined[int(i)] for i in picks]
-
-        # Honor the marginal null-rate where the schema allows it.
-        if profile.nullable and profile.null_fraction > 0.0:
-            null_mask = rng.random(n) < profile.null_fraction
-            values = [None if null_mask[i] else values[i] for i in range(n)]
-        return values
+            return None
+        picks = rng.choice(len(combined), size=fill, p=probs)
+        drawn: list[str | None] = [combined[int(i)] for i in picks]
+        if expansion == "all":
+            drawn = [mutate_digit_runs(v, pick) if v else v for v in drawn]
+        return drawn
 
     def _pool_for(self, profile: ColumnProfile, cfg: GenerationConfig) -> list[str]:
         key = (profile.name, round(cfg.similarity, 4))
@@ -293,18 +386,101 @@ class FreeTextHook:
                 self._cache[key] = pool
             return pool
 
+    def _source_values(self, column: str) -> frozenset[str]:
+        """The column's FULL distinct source values, or an empty set —
+        LOUDLY on cap-exceeded/store-error, silently when no store is
+        attached (pre-seam behavior). Fetched once per column per hook;
+        milestone names mirror B.1's for one cross-engine readout."""
+        if self._source_value_store is None:
+            return frozenset()
+        cached = self._source_cache.get(column)
+        if cached is not None:
+            return cached
+        values: frozenset[str] | None
+        try:
+            values = self._source_value_store.fetch_distinct(column)
+        except Exception as exc:
+            log_milestone(
+                "freetext_pool_source_filter_error",
+                level=logging.WARNING,
+                column=column,
+                error=type(exc).__name__,
+            )
+            values = None
+        else:
+            if values is None:
+                log_milestone(
+                    "freetext_pool_source_filter_absent",
+                    level=logging.WARNING,
+                    column=column,
+                )
+            else:
+                log_milestone(
+                    "freetext_pool_source_filter",
+                    column=column,
+                    size=len(values),
+                )
+        result = frozenset(values or ())
+        self._source_cache[column] = result
+        return result
+
+    def _pool_prompt_and_schema(
+        self, profile: ColumnProfile, cfg: GenerationConfig, exemplars: list[str]
+    ) -> tuple[str, dict]:
+        """Prompt + guided-decoding schema for one column's pool build.
+
+        Per-column constant suffixes (spec C5 + measured length band, ADR
+        0022) append after the shared prefix — prefix-cache-safe. A
+        user-pinned length (ADR 0024) makes the derived band redundant
+        tokens; a user pattern constrains decoding itself. Also emits the
+        `--prompt_debug` milestone (ADR 0024 §3c) with the seed-elided
+        rebuild.
+        """
+
+        def _prompt(examples_repr: str) -> str:
+            return (
+                f"You generate synthetic tabular data. First identify the exact "
+                f"format of these example values for the column '{profile.name}' "
+                f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
+                f"timestamp, natural-language text), then generate up to "
+                f"{self._pool_size} NEW, distinct, fictitious values in exactly "
+                f"that format. Never copy an example verbatim. Examples: "
+                f"{examples_repr}. Return JSON {{\"values\": [...]}}."
+            )
+
+        prompt = _prompt(str(exemplars))
+        pool_schema = _pool_schema(profile.name)
+        if cfg.engine_specific.get("prompt_constraints", True):
+            constraint = profile.llm_prompt_constraint
+            hint = (
+                ""
+                if profile.constraint_sets_length
+                else length_hint(profile.text_pool)
+            )
+            prompt += (
+                f" Column constraint: {constraint}." if constraint else ""
+            ) + (f" {hint}" if hint else "")
+            if profile.constraint_pattern:
+                pool_schema["properties"]["values"]["items"]["pattern"] = (
+                    profile.constraint_pattern
+                )
+        # Everything after the shared base is the constant per-column
+        # suffix — reattach it to the seed-elided rebuild.
+        suffix = prompt[len(_prompt(str(exemplars))):]
+        log_prompt_debug(
+            str(cfg.engine_specific.get("prompt_debug", "off")),
+            profile.name,
+            prompt,
+            _prompt(f"<{len(exemplars)} seeds elided>") + suffix,
+        )
+        return prompt, pool_schema
+
     def _generate_pool(
         self, profile: ColumnProfile, cfg: GenerationConfig
     ) -> tuple[list[str], bool]:
         exemplars = list(profile.text_pool[: self._pool_size])
-        prompt = (
-            f"You generate synthetic tabular data. First identify the exact "
-            f"format of these example values for the column '{profile.name}' "
-            f"(e.g. UUID, hexadecimal identifier, numeric code, date, "
-            f"timestamp, natural-language text), then generate up to "
-            f"{self._pool_size} NEW, distinct, fictitious values in exactly "
-            f"that format. Never copy an example verbatim. Examples: "
-            f"{exemplars}. Return JSON {{\"values\": [...]}}."
+        prompt, pool_schema = self._pool_prompt_and_schema(
+            profile, cfg, exemplars
         )
         # Novelty filter: LLM values that equal observed reference values are
         # copies, not generations. The LLM pool is the "diverge" side of the
@@ -313,8 +489,19 @@ class FreeTextHook:
         # (all copies / all parse-drops) is retried at escalating temperature
         # before falling back (2026-07-16 corp run: the model echoed the seed
         # exemplars verbatim at the base temperature).
-        observed = set(profile.text_pool)
+        # ADR 0023: reject against the profiled sample PLUS (when a
+        # SourceValueStore is attached) the column's full source domain —
+        # a candidate equal to ANY real value is a copy, whether the
+        # profiler sampled it or not.
+        # Constraint examples are canonical fictitious values from the DDL
+        # description (ADR 0024) — a verbatim echo must never land as data.
+        observed = (
+            set(profile.text_pool)
+            | self._source_values(profile.name)
+            | set(profile.constraint_examples or ())
+        )
         shown = set(exemplars)
+        gate = _collapsed_gate(profile)
         pool: list[str] = []
         pool_seen: set[str] = set()
         seen: set[str] = set()
@@ -330,13 +517,13 @@ class FreeTextHook:
                 attempts += 1
                 responses = self._client.generate_json(
                     prompt=prompt,
-                    json_schema=_pool_schema(profile.name),
+                    json_schema=pool_schema,
                     max_tokens=2048,
                     temperature=level.temperature,
                     n=1,
                     # Walk the seed per attempt: a pinned seed repeated the
                     # exact same echo on every escalation level (2026-07-22
-                    # b2 E2E, CHANGE_USERID: 3 identical 32-echo responses),
+                    # b2 E2E, COL_052: 3 identical 32-echo responses),
                     # making the ladder's diversity partly illusory. Still
                     # P6-reproducible — derived from the same base.
                     seed=None if base_seed is None else base_seed + attempts - 1,
@@ -344,7 +531,11 @@ class FreeTextHook:
                     top_k=level.top_k,
                 )
                 values = _extract_values(responses)
-                novel = [v for v in values if v not in observed]
+                novel = [
+                    v
+                    for v in values
+                    if v not in observed and gate(v)
+                ]
                 n_parsed += len(values)
                 n_copies += len(values) - len(novel)
                 n_echoes += sum(1 for v in values if v in shown)
@@ -395,7 +586,7 @@ class FreeTextHook:
                 # deterministic on rebuild, so retrying or failing the batch
                 # buys nothing. A relaxed per-position template can still
                 # generate verified-novel in-format values without the LLM
-                # (2026-07-22 b2 E2E: CHANGE_USERID, 96/96 echoes, run
+                # (2026-07-22 b2 E2E: COL_052, 96/96 echoes, run
                 # FAILED). Parse failures (parsed=0) skip this — they are
                 # config/transport-shaped, not a property of the column.
                 shape_pool = self._shape_fallback_pool(profile, base_seed)
@@ -476,7 +667,16 @@ class FreeTextHook:
         raise/exemplar path. Seeded from the batch-independent pool seed —
         deterministic per run (P6), like the LLM build it replaces.
         """
-        shapes = build_relaxed_shapes(list(profile.text_pool))
+        # Prefer the exact shape mix (B.1 parity): it preserves literal
+        # fixed-position runs — leading padding, delimiters, interior space
+        # runs — that the length-bucket relaxation rejects wholesale
+        # (whitespace ⇒ None), which left gate-rejected whitespace columns
+        # with no template rescue at all.
+        shapes = None
+        if shape_mix_can_template(profile.shape_mix):
+            shapes = profile.shape_mix
+        if shapes is None:
+            shapes = build_relaxed_shapes(list(profile.text_pool))
         if shapes is None:
             return None
         rng = np.random.default_rng(seed)
@@ -484,7 +684,7 @@ class FreeTextHook:
         def pick(k: int) -> int:
             return int(rng.integers(0, k))
 
-        observed = set(profile.text_pool)
+        observed = set(profile.text_pool) | self._source_values(profile.name)
         pool: list[str] = []
         seen: set[str] = set()
         # Bounded rejection sampling: dense keyspaces stop at the cap

@@ -41,4 +41,4 @@
 - [ ] Merge `ws2-rag-phase-a` → `ws3-eval-framework`; apply the Task-2 pattern to the eval branch: `write_history = eval_rows | "WriteValidationDataHistory" >> validation_data_history_sink` + `_MemorizationGateDoFn.process(self, row, wait_on_write=None)` with the same `AsIter` guard; update its docstring (removes the WS3 final-review caveat — now field-motivated by the b2 run); test mirroring Task 2's; full suite green on ws3.
 - [ ] Push all three branches (PRs #3/#4/#6 update in place).
 
-**Out of scope:** b1 embed-phase regression (image bisect, M4/CI); `ACCU_LIMIT_KEY` BYTES-as-STRING (source-owner escalation, report #5); probe `LIMIT 50` (report #6 — minor tooling, fold into WS5); GPU-image Beam bump verification beyond pin edits (CI build + M4 run).
+**Out of scope:** b1 embed-phase regression (image bisect, M4/CI); `COL_047` BYTES-as-STRING (source-owner escalation, report #5); probe `LIMIT 50` (report #6 — minor tooling, fold into WS5); GPU-image Beam bump verification beyond pin edits (CI build + M4 run).

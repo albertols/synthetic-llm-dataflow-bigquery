@@ -28,7 +28,7 @@ by the ``ModelClient`` free-text hook (``freetext.py``), not sampled here.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
 
@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 # Below this temperature, categorical sampling collapses to the modal value
 # (maximal mimicry) instead of softmax-reweighting — avoids divide-by-tiny.
 _TEMP_EPSILON = 1e-9
+# An inverse-CDF needs at least two quantile points to interpolate between.
+_MIN_QUANTILE_POINTS = 2
 # Smoothing added to weights before the log in temperature reweighting.
 _LOG_SMOOTHING = 1e-12
 
@@ -132,17 +134,35 @@ class EmpiricalBackend:
         elif p.kind is ColumnKind.NUMERIC:
             lo = p.minimum if p.minimum is not None else 0.0
             hi = p.maximum if p.maximum is not None else lo
-            draws = rng.uniform(lo, hi, size=n) if hi > lo else np.full(n, lo)
+            if len(p.quantiles) >= _MIN_QUANTILE_POINTS:
+                # Inverse transform sampling over the empirical CDF: uniform
+                # draws map through the observed decile vector, so a skewed
+                # source marginal lands skewed. Plain uniform-in-range put
+                # ~99% of a 90/10 heavy-tailed column above its true p90
+                # (ADR 0022).
+                grid = np.linspace(0.0, 1.0, len(p.quantiles))
+                draws = np.interp(rng.random(n), grid, np.asarray(p.quantiles))
+            elif hi > lo:
+                draws = rng.uniform(lo, hi, size=n)
+            else:
+                draws = np.full(n, lo)
             values = [round(x) for x in draws] if p.is_integer else [float(x) for x in draws]
 
         elif p.kind is ColumnKind.CATEGORICAL:
             values = _sample_categorical(p, n, rng, temperature)
 
         elif p.kind is ColumnKind.TEMPORAL:
+            # TEMPORAL profiles always carry a value type (set beside kind).
             values = _inject_temporal_sentinels(
                 p,
                 sample_temporal(
-                    p.minimum, p.maximum, p.temporal_value_type, p.temporal_format, n, rng
+                    p.minimum,
+                    p.maximum,
+                    cast("str", p.temporal_value_type),
+                    p.temporal_format,
+                    n,
+                    rng,
+                    quantiles=p.quantiles,
                 ),
                 rng,
             )
@@ -193,6 +213,31 @@ def _sample_categorical(
     if weights.sum() <= 0:
         weights = np.ones(len(cats))
     weights = weights / weights.sum()
+
+    # Sparsity categories (empty/whitespace strings, None) keep their exact
+    # empirical mass — empty parity is a hard fidelity metric and the
+    # similarity blend flattening it failed `freetext.empty_parity` on the
+    # 2026-08-09 B_TABLE R1 (B.1 parity: ColumnSampler._categorical_masses).
+    # Reweighting applies only within the substantive remainder.
+    sparse = np.asarray(
+        [c is None or (isinstance(c, str) and not c.strip()) for c in cats]
+    )
+    sub_mass = float(weights[~sparse].sum())
+    if sparse.any() and sub_mass > 0:
+        sub_w = weights[~sparse] / sub_mass
+        if temperature <= _TEMP_EPSILON:
+            reweighted = np.zeros_like(sub_w)
+            reweighted[int(np.argmax(sub_w))] = 1.0
+        else:
+            logits = np.log(sub_w + _LOG_SMOOTHING) / temperature
+            logits -= logits.max()
+            reweighted = np.exp(logits)
+            reweighted /= reweighted.sum()
+        probs = weights.copy()
+        probs[~sparse] = reweighted * sub_mass
+        probs /= probs.sum()
+        picks = rng.choice(len(cats), size=n, p=probs)
+        return [cats[int(i)] for i in picks]
 
     if temperature <= _TEMP_EPSILON:
         # Collapse to the mode: maximal mimicry.

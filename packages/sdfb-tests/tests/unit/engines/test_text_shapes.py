@@ -144,7 +144,7 @@ def test_sample_identifier_is_deterministic_for_a_seeded_pick():
 
 # ---------------------------------------------------------------------------
 # build_relaxed_shapes / sample_relaxed_identifier — the last-resort template
-# for LLM-echo-saturated free-text columns (2026-07-22 b2 E2E: CHANGE_USERID,
+# for LLM-echo-saturated free-text columns (2026-07-22 b2 E2E: COL_052,
 # 96/96 prompt echoes over all escalation attempts → whole run FAILED).
 # The strict detector rejects mixed lengths / short codes / punctuation
 # variation; the relaxed builder buckets by length and keeps per-position

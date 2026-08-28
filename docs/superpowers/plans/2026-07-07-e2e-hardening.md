@@ -19,7 +19,7 @@
 - Verify after every task: `uv run pytest -m "not gpu and not gcp" -q` and `uv run ruff check .` both green.
 - Commit after every task (small commits, message prefix `feat:`/`fix:`/`docs:`/`test:`).
 - No Vertex AI / Dataplex / Looker / external LLM APIs anywhere.
-- The milestone line format is an API: `SDFB_MILESTONE name=<name> key=value …` — never change wording without updating `scripts/e2e_gcp_probe.py` and the contract test together.
+- The milestone line format is an API: `SDFB_MILESTONE name=<name> key=value …` — never change wording without updating `scripts/e2e/e2e_gcp_probe.py` and the contract test together.
 
 ---
 
@@ -100,7 +100,7 @@ One stable, greppable line per milestone:
 
     SDFB_MILESTONE name=<milestone> key=value key='quoted value' ...
 
-``scripts/e2e_gcp_probe.py`` mines Dataflow worker logs for this prefix to
+``scripts/e2e/e2e_gcp_probe.py`` mines Dataflow worker logs for this prefix to
 derive engine execution timings. The format is therefore an API: fields are
 emitted in sorted order, values containing whitespace are single-quoted via
 ``shlex.quote``, and the line never contains a newline. Change nothing here
@@ -799,16 +799,16 @@ In `summary.py`, find `BLOCKER_RULE_IDS` (imported constant — locate its defin
 ### Task 7: Vendor the e2e scripts + prompt into the repo
 
 **Files:**
-- Create: `scripts/e2e_validation_analysis.py`, `scripts/e2e_gcp_probe.py`, `scripts/e2e_bundle_export.py` (copied from `docs/superpowers/plans/assets/e2e/`)
+- Create: `scripts/e2e/e2e_validation_analysis.py`, `scripts/e2e/e2e_gcp_probe.py`, `scripts/e2e/e2e_bundle_export.py` (copied from `docs/superpowers/plans/assets/e2e/`)
 - Create: `.github/prompts/end_to_end_validation_report_generation.prompt.md` (copied from assets)
 - Test: `packages/sdfb-tests/tests/unit/scripts/test_e2e_validation_analysis.py`
 
 - [ ] **Step 1: Copy the assets verbatim**
 
 ```bash
-cp docs/superpowers/plans/assets/e2e/e2e_validation_analysis.py scripts/e2e_validation_analysis.py
-cp docs/superpowers/plans/assets/e2e/e2e_gcp_probe.py scripts/e2e_gcp_probe.py
-cp docs/superpowers/plans/assets/e2e/e2e_bundle_export.py scripts/e2e_bundle_export.py
+cp docs/superpowers/plans/assets/e2e/e2e_validation_analysis.py scripts/e2e/e2e_validation_analysis.py
+cp docs/superpowers/plans/assets/e2e/e2e_gcp_probe.py scripts/e2e/e2e_gcp_probe.py
+cp docs/superpowers/plans/assets/e2e/e2e_bundle_export.py scripts/e2e/e2e_bundle_export.py
 mkdir -p .github/prompts
 cp docs/superpowers/plans/assets/e2e/end_to_end_validation_report_generation.prompt.md .github/prompts/
 ```
@@ -845,7 +845,7 @@ def test_analysis_end_to_end(tmp_path, analysis_module):
 ### Task 8: Probe improvements — milestone contract, failure regexes, run-id filter, engine labels
 
 **Files:**
-- Modify: `scripts/e2e_gcp_probe.py`
+- Modify: `scripts/e2e/e2e_gcp_probe.py`
 - Test: `packages/sdfb-tests/tests/unit/scripts/test_e2e_gcp_probe.py`
 
 **Interfaces:**
@@ -908,7 +908,7 @@ In `_worker_log_milestones`, inside the entry loop before the legacy regex pass:
 ### Task 9: Analysis improvements — batch-size annotation, entropy, sequential identity check
 
 **Files:**
-- Modify: `scripts/e2e_validation_analysis.py`
+- Modify: `scripts/e2e/e2e_validation_analysis.py`
 - Test: extend `packages/sdfb-tests/tests/unit/scripts/test_e2e_validation_analysis.py`
 
 - [ ] **Step 1: Failing tests**
@@ -950,7 +950,7 @@ def test_entropy_reported(analysis_module, tmp_path):
 ### Task 10: Bundle-export improvements — recursive leak scan, more identifiers
 
 **Files:**
-- Modify: `scripts/e2e_bundle_export.py`
+- Modify: `scripts/e2e/e2e_bundle_export.py`
 - Test: `packages/sdfb-tests/tests/unit/scripts/test_e2e_bundle_export.py`
 
 - [ ] **Step 1: Failing tests** — build minimal `gcp`/`offline` metric dicts in-test (project, source/landing FQNs, one dataflow job with `job_id`, `name`, and `environment.worker_image = "europe-docker.pkg.dev/proj/repo/img:tag"`), plus a tiny report md mentioning the project id; run `main()` against tmp_path; assert: exit code 0, `oss/report.md` contains no real project id, `mapping.json` maps the worker image, and a leak planted in a SUBDIRECTORY of `oss/` is caught (call `_leak_scan` directly for that case).

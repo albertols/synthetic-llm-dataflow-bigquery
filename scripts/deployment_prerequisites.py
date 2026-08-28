@@ -30,6 +30,8 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
                        created_at; vector-index state reported (created after
                        first population — BQ needs ≥5k rows). Pass
                        --rag-chunks-table "" to skip for RAG-less deployments.
+ 12. Relationships   — config/relationships/*.yaml load, and every table they
+                       reference exists in the landing dataset (ADR 0032)
  10. Free-text pools — {project}.synthetic_rag.freetext_pools (WS5, ADR 0020).
                        OPTIONAL BY DESIGN: it is a memo pad, not a data store —
                        one row per (reference_digest, model_uri, column). Absent,
@@ -39,6 +41,13 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
                        ACTION, when the table is missing — it is a performance
                        opt-in, not a prerequisite. Pass --freetext-pools-table
                        "" to omit the check entirely.
+ 11. Source stats     — {project}.synthetic_rag.source_table_stats (WS8,
+                       2026-08-05 spec WS-B). OPTIONAL BY DESIGN like step 10:
+                       absent, per-column stats still land as a milestone +
+                       JSON artifact, only the BQ persistence is skipped
+                       (SKIP, never ACTION). A PRESENT-but-drifted table IS
+                       an ACTION — the driver's write_rows load job would
+                       fail mid-launch. Pass --source-stats-table "" to omit.
 
 Exit code: 0 when no ACTION items (KO=0), 1 when any ACTION (KO). SKIP (could not
 verify — offline / no creds / missing lib) never fails the run but is surfaced.
@@ -112,6 +121,17 @@ _RAG_PARTITION_FIELD = "created_at"
 FREETEXT_POOLS_MIN_COLUMNS = [
     "reference_digest", "model_uri", "column", "target",
     "values", "stagnated", "attempts",
+]
+
+# source_table_stats contract (WS8 / ADR 0021 sibling, 2026-08-05 spec WS-B).
+# One row per (table_fqn, reference_digest, column); headline numerics are
+# real columns, the full entry rides in `stats` as JSON. Fallback when the
+# committed schema file is missing; the committed file wins when present.
+SOURCE_STATS_MIN_COLUMNS = [
+    "table_fqn", "reference_digest", "run_id", "column", "generation_plan",
+    "null_fraction", "empty_fraction", "distinct", "distinct_ratio",
+    "is_pk", "is_fk", "stats", "sample_rows", "stats_tier",
+    "profiler_version", "computed_at",
 ]
 
 
@@ -536,6 +556,60 @@ def step10_freetext_pools(ctx: Ctx) -> None:
                 f"{t_link} — {len(required)} cols · pools read instead of rebuilt")
 
 
+def step11_source_stats(ctx: Ctx) -> None:
+    """WS8 / 2026-08-05 spec WS-B — the persisted source_table_stats store.
+
+    Same posture as step 10: a missing table is **SKIP, not ACTION** —
+    stats persistence is optional (`--source_stats_table ''` at launch
+    skips the write; the milestone + JSON artifact still fire). A table
+    that EXISTS but drifted is an ACTION: `write_rows` load jobs would
+    start failing mid-run, which is the launcher's worst failure shape.
+    """
+    a = ctx.args
+    fqn = a.source_stats_table
+    if not fqn:
+        ctx.add("11", "Source stats store", SKIP,
+                "--source-stats-table '' — check omitted")
+        return
+    proj, ds, table = fqn.split(".", 2)
+    t_link = bq_table_link(fqn)
+    schema_file = Path(a.schemas_dir) / ds / f"{table}.schema.json"
+    client, reason = bq_client(a.project)
+    if client is None:
+        ctx.add("11", "Source stats store", SKIP, f"{t_link} — {reason}")
+        return
+    from google.api_core.exceptions import NotFound
+
+    try:
+        live = client.get_table(fqn)
+    except NotFound:
+        ctx.add("11", "Source stats store", SKIP,
+                f"{t_link} — not found; stats land as milestone + JSON "
+                f"artifact only. To persist: "
+                f"`bq mk --table {proj}:{ds}.{table} "
+                f"config/bq_schema/synthetic_rag/{table}.schema.json`")
+        return
+    except Exception as e:
+        ctx.add("11", "Source stats store", SKIP,
+                f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
+        return
+
+    if schema_file.exists():
+        required = [f["name"] for f in json.loads(schema_file.read_text())]
+    else:
+        required = list(SOURCE_STATS_MIN_COLUMNS)
+    missing_cols = [c for c in required if c not in {f.name for f in live.schema}]
+    if missing_cols:
+        ctx.add("11", "Source stats store", ACTION,
+                f"{t_link} — missing columns: {', '.join(missing_cols)}",
+                f"align the table with {schema_file if schema_file.exists() else 'config/bq_schema/synthetic_rag/source_table_stats.schema.json'} "
+                "— a drifted stats table fails the driver's write_rows load "
+                "job mid-launch")
+    else:
+        ctx.add("11", "Source stats store", OK,
+                f"{t_link} — {len(required)} cols · stats rows will persist")
+
+
 # --------------------------------------------------------------------------- #
 # shared check primitives
 # --------------------------------------------------------------------------- #
@@ -687,6 +761,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="gs:// path where the _ddl.json is staged. OPTIONAL (WS4 §6b): "
                         "empty = the launcher live-extracts from INFORMATION_SCHEMA; "
                         "an explicit URI pins the schema (air-gap escape hatch).")
+    p.add_argument("--relationships-uri", default="config/relationships",
+                   help="where the relational models live (ADR 0032): a "
+                        "folder or file, local or gs://. Pass '' to skip "
+                        "the relational checks.")
     p.add_argument("--rag-chunks-table", default=None,
                    help="FQN of the shared RAG chunk store (WS2). Default "
                         "{project}.synthetic_rag.rag_chunks; pass '' to skip the "
@@ -696,6 +774,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                         "{project}.synthetic_rag.freetext_pools; pass '' to omit "
                         "the check. Optional by design — absent, pools are "
                         "rebuilt per worker process (pre-WS5 behaviour).")
+    p.add_argument("--source-stats-table", default=None,
+                   help="FQN of the source_table_stats store (WS8, 2026-08-05 "
+                        "spec WS-B). Default {project}.synthetic_rag."
+                        "source_table_stats; pass '' to omit the check. "
+                        "Optional by design — absent, stats land as milestone "
+                        "+ JSON artifact only.")
     p.add_argument("--models-dir", default=str(REPO_ROOT / "models"), help="Local weights root (default ./models).")
     p.add_argument("--schemas-dir", default=str(REPO_ROOT / "config" / "bq_schema"),
                    help="Root under which step 1/2 drop {dataset}/{table}.schema.json "
@@ -717,7 +801,98 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         args.rag_chunks_table = f"{args.project}.synthetic_rag.rag_chunks"
     if args.freetext_pools_table is None:
         args.freetext_pools_table = f"{args.project}.synthetic_rag.freetext_pools"
+    if args.source_stats_table is None:
+        args.source_stats_table = f"{args.project}.synthetic_rag.source_table_stats"
     return args
+
+
+def step12_relationships(ctx: Ctx) -> None:
+    """ADR 0032 — every table the relational models reference must exist.
+
+    `config/relationships/` is the single source of truth for PK/FK, and
+    a scenario-2 launch on ANY member generates the whole enabled
+    component. A model that names a table nobody created yet turns into
+    a mid-launch stop, so it is worth one metadata read here.
+
+    A DISABLED table is reported but never an ACTION: it is detached on
+    purpose, and its absence cannot break a launch.
+    """
+    a = ctx.args
+    uri = a.relationships_uri
+    if not uri:
+        ctx.add("12", "Relationship models", SKIP,
+                "--relationships-uri '' — check omitted")
+        return
+    try:
+        registry = _load_registry(uri)
+    except Exception as e:
+        ctx.add("12", "Relationship models", ACTION,
+                f"`{uri}` — {short(f'{type(e).__name__}: {e}')}",
+                "fix the model file: a launch reads the same loader and "
+                "will stop on it")
+        return
+    if not registry.models:
+        ctx.add("12", "Relationship models", SKIP,
+                f"`{uri}` — no model files (every table generates alone)")
+        return
+    summary = " · ".join(
+        f"{m.model}: {len(m.tables)} tables" for m in registry.models
+    )
+    ctx.add("12", "Relationship models", OK, f"`{uri}` — {summary}")
+
+    client, reason = bq_client(a.project)
+    dataset = a.landing_table.rsplit(".", 1)[0] if a.landing_table else ""
+    if client is None or not dataset:
+        ctx.add("12a", "Model tables exist", SKIP,
+                reason or "no --landing-table to derive the dataset from")
+        return
+    from google.api_core.exceptions import NotFound
+
+    missing: list[str] = []
+    disabled_missing: list[str] = []
+    checked = 0
+    for model in registry.models:
+        for name, relations in model.tables.items():
+            fqn = f"{dataset}.{name}"
+            try:
+                client.get_table(fqn)
+                checked += 1
+            except NotFound:
+                (missing if relations.enabled else disabled_missing).append(
+                    fqn
+                )
+            except Exception:
+                continue
+    detail = f"{checked} of {checked + len(missing) + len(disabled_missing)} present"
+    if disabled_missing:
+        detail += f" · {len(disabled_missing)} absent but DISABLED (fine)"
+    if missing:
+        ctx.add("12a", "Model tables exist", ACTION,
+                f"{detail} — missing {', '.join(bq_table_link(f) for f in missing)}",
+                "create the landing tables (scripts/derive_landing_schema.py "
+                "+ bq mk), or set `enabled: false` on them in the model file "
+                "to detach them from the launch")
+        return
+    ctx.add("12a", "Model tables exist", OK, detail)
+
+
+def _load_registry(uri: str):
+    """Local dir/file through the pure loader; gs:// through Beam's."""
+    from sdfb_core.contracts.relationships import RelationshipRegistry
+
+    if "://" not in uri:
+        base = Path(uri)
+        paths = (
+            sorted(p for p in base.glob("*.y*ml"))
+            if base.is_dir()
+            else ([base] if base.exists() else [])
+        )
+        return RelationshipRegistry.from_sources(
+            [(str(p), p.read_text(encoding="utf-8")) for p in paths]
+        )
+    from sdfb_beam.io.relationships import load_relationship_registry
+
+    return load_relationship_registry(uri)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -726,7 +901,8 @@ def main(argv: list[str] | None = None) -> int:
     ctx = Ctx(args=args)
     for step in (step1_source_ddl, step2_landing_schema, step3_local_weights, step4_bq_tables,
                  step5_staging_bucket, step6_templates_bucket, step7_bq_datasets, step8_others,
-                 step9_rag_layer, step10_freetext_pools):
+                 step9_rag_layer, step10_freetext_pools, step11_source_stats,
+                 step12_relationships):
         step(ctx)
 
     stamp = datetime.now(UTC)

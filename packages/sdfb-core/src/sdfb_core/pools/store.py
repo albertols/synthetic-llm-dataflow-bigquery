@@ -39,6 +39,31 @@ class FreeTextPoolStore(Protocol):
         ...
 
 
+@runtime_checkable
+class SourceValueStore(Protocol):
+    """A column's FULL distinct source values, for pool novelty rejection.
+
+    The 2026-08-05 B_TABLE R1 run landed 33-99% verbatim source values on
+    10 free-text columns because the pool ladder rejects only against the
+    profiled sample; this seam lets the ladder reject against the whole
+    source domain. The BigQuery implementation lives in
+    `sdfb_beam.io.source_values` — `sdfb-core` stays GCP-free.
+    """
+
+    def fetch_distinct(self, column: str) -> frozenset[str] | None:
+        """Every distinct non-NULL value of `column`, as strings — or None
+        when the column's cardinality exceeds the store's cap (the caller
+        must then behave as if no store were attached, loudly)."""
+        ...
+
+    # OPTIONAL extension (wave-4 v2, duck-typed via getattr so existing
+    # implementations stay valid): `fetch_frequent(column, min_count)
+    # -> frozenset[str] | None` returns the values shared by at least
+    # `min_count` SOURCE rows — the k-anonymous enum mass the numeric
+    # collision scrub must keep exact. Implementations without it fall
+    # back to the caller's sample-side heuristic.
+
+
 class InMemoryFreeTextPoolStore:
     """List-backed `FreeTextPoolStore` for tests and laptop runs."""
 
@@ -78,4 +103,4 @@ class InMemoryFreeTextPoolStore:
         )
 
 
-__all__ = ["FreeTextPoolStore", "InMemoryFreeTextPoolStore"]
+__all__ = ["FreeTextPoolStore", "InMemoryFreeTextPoolStore", "SourceValueStore"]

@@ -265,7 +265,7 @@ def test_a_store_write_failure_is_loud_but_never_fatal():
 def test_rows_record_the_real_build_info_not_defaults():
     """2026-07-29 postmortem, freetext_pools screenshots: every stored row
     had attempts=0 / stagnated=false, and `target` was silently set to the
-    ACHIEVED size (ACCU_LIMIT_KEY: stored target=386 for a 512-target build
+    ACHIEVED size (COL_047: stored target=386 for a 512-target build
     that ran 8 attempts and ended undersized). The engine must record per-
     column build info and the branch must persist it."""
 
@@ -288,3 +288,46 @@ def test_rows_record_the_real_build_info_not_defaults():
         assert row["attempts"] == col_info["attempts"] >= 1
         assert row["target"] == col_info["target"] >= 1
         assert row["stagnated"] == col_info["stagnated"]
+
+
+class _DomainStore:
+    """Fake `SourceValueStore`: the LLM's first few generations for col_a
+    "already exist" in the full source domain."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.domain = frozenset(f"col_a-gen-{c}-{i}" for c in range(4) for i in range(8))
+
+    def fetch_distinct(self, column: str) -> frozenset[str] | None:
+        self.calls.append(column)
+        return self.domain
+
+
+def test_branch_attaches_source_value_store_and_rejects_domain_values():
+    """The build branch is where the full-domain rejection must engage
+    (2026-08-05 B_TABLE R1: pools memorized 33-99% of 10 columns because
+    only the profiled sample was rejected against)."""
+    store = _DomainStore()
+    dofn = BuildFreeTextPoolsDoFn(
+        "b1_rag", _StubClient(), _ctx(), source_value_store=store
+    )
+    dofn.setup()
+    rows = list(dofn.process(None))
+    assert "col_a" in store.calls
+    emitted = {v for r in rows for v in r["values"]}
+    assert emitted, "pools still build from the novel values"
+    assert not emitted & store.domain
+
+
+def test_branch_does_not_cry_store_absent(caplog):
+    """The branch blanks its own store BY DESIGN (self-read guard); the
+    `freetext_pool_store_absent` WARNING is reserved for runs where nobody
+    passed --freetext_pools_table. Two E2E reports (2026-08-05, 2026-08-07)
+    misread the branch's own blank as a store outage / setup retry."""
+    import logging
+
+    dofn = BuildFreeTextPoolsDoFn("b1_rag", _StubClient(), _ctx())
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        dofn.setup()
+    text = "\n".join(r.message for r in caplog.records)
+    assert "freetext_pool_store_absent" not in text

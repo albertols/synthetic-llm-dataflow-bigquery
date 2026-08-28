@@ -92,7 +92,7 @@ fi
 
 log "verdict: ${TIER}/${TABLE} matched EXPECT=${EXPECT}"
 log "next — report recipe (RUN_PLAYBOOK §5):"
-log "  uv run --no-sync python3 scripts/e2e_gcp_probe.py --project ${PROJECT_ID} \\"
+log "  uv run --no-sync python3 scripts/e2e/e2e_gcp_probe.py --project ${PROJECT_ID} \\"
 log "    --source-fqn <SOURCE_FQN> --landing-fqn <LANDING_FQN> --quality-dataset ${PROJECT_ID}.${QUALITY_DATASET} \\"
 log "    --region ${REGION} --pk <pk_cols> --job-id ${JOB_ID} --run-id ${RUN_ID} --out integration_test/${JOB_ID}/e2e_gcp_metrics.json"
 log "  then e2e_validation_analysis.py + e2e_bundle_export.py -> integration_test/${JOB_ID}/"

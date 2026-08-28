@@ -37,7 +37,12 @@ def derive_record_model(
         for col in table_schema.columns
     }
 
-    model = create_model(model_name, __base__=base, **field_defs)
+    # mypy checks the **field_defs unpack against every keyword parameter
+    # of create_model (__config__, __doc__, ...), so a dynamic-fields call
+    # can never typecheck — pydantic's documented dynamic-model pattern.
+    model: type[GeneratedRecord] = create_model(  # type: ignore[call-overload]
+        model_name, __base__=base, **field_defs
+    )
     model.__doc__ = (
         f"Dynamically-derived record model for `{table_schema.fqn}` — "
         f"{len(table_schema.columns)} columns, "
@@ -53,7 +58,7 @@ def _field_definition(field: FieldSchema, parent_name: str) -> tuple[Any, Any]:
 
     if field.is_repeated:
         return (
-            list[base_type],
+            list[base_type],  # type: ignore[valid-type]
             Field(default_factory=list, description=description),
         )
 
@@ -72,7 +77,9 @@ def _python_type(field: FieldSchema, parent_name: str) -> Any:
             sub.name: _field_definition(sub, parent_name=nested_name)
             for sub in (field.fields or [])
         }
-        return create_model(nested_name, __base__=GeneratedRecord, **nested_defs)
+        return create_model(  # type: ignore[call-overload]
+            nested_name, __base__=GeneratedRecord, **nested_defs
+        )
 
     py_type = BQ_TO_PYTHON.get(field.bq_type)
     if py_type is None:
@@ -84,15 +91,15 @@ def _python_type(field: FieldSchema, parent_name: str) -> Any:
     if field.bq_type == "STRING" and field.max_length is not None:
         return Annotated[str, Field(max_length=field.max_length)]
 
-    # NUMERIC / BIGNUMERIC precision + scale.
-    if field.bq_type in {"NUMERIC", "BIGNUMERIC"}:
-        kwargs: dict[str, int] = {}
-        if field.precision is not None:
-            kwargs["max_digits"] = field.precision
-        if field.scale is not None:
-            kwargs["decimal_places"] = field.scale
-        if kwargs:
-            return Annotated[Decimal, Field(**kwargs)]
+    # NUMERIC / BIGNUMERIC precision + scale (None = constraint unset,
+    # same as omitting the keyword).
+    if field.bq_type in {"NUMERIC", "BIGNUMERIC"} and (
+        field.precision is not None or field.scale is not None
+    ):
+        return Annotated[
+            Decimal,
+            Field(max_digits=field.precision, decimal_places=field.scale),
+        ]
 
     return py_type
 
