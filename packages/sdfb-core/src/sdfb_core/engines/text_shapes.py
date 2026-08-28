@@ -856,6 +856,34 @@ def length_hint(values: Iterable[object], *, min_samples: int = 8) -> str:
     return f"Most values are {p05}-{p95} characters long (median {p50})."
 
 
+def length_ceiling(
+    values: Iterable[object], *, min_samples: int = 8
+) -> int | None:
+    """The hard length ceiling of a fixed-width prose field, or None.
+
+    A source column stored in a fixed-width field truncates at its width,
+    so its length marginal is a free distribution whose upper tail is
+    folded onto the maximum: p95 == max over the substantive values, with
+    a real spread below it (2026-08-26 R6 A_COL_019: p05 18, p50 34,
+    p95 35, max 35 — and the pool's LLM values ran to 62). Free-length
+    prose has a lone maximum well above p95; a narrow band (p05 within
+    max(4, max/4) of the maximum) is not a wall the distribution runs
+    into but a width the shape template already carries. ADR 0033.
+    """
+    lengths = sorted(
+        len(str(v)) for v in values if v is not None and str(v).strip()
+    )
+    if len(lengths) < min_samples:
+        return None
+    last = len(lengths) - 1
+    p05 = lengths[int(0.05 * last)]
+    p95 = lengths[int(0.95 * last)]
+    top = lengths[-1]
+    if p95 != top or top - p05 < max(4, top // 4):
+        return None
+    return top
+
+
 __all__ = [
     "build_identifier_artifacts",
     "build_mask_table",
@@ -867,6 +895,7 @@ __all__ = [
     "identifier_sampler",
     "identifier_sampler_from",
     "is_binary_class",
+    "length_ceiling",
     "length_hint",
     "mask_alphabets",
     "mutate_digit_runs",

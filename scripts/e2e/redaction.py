@@ -42,6 +42,7 @@ _NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
 # "unknown"). The OSS repo handle "org/repo" is not an email and is preserved.
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _EMAIL_PLACEHOLDER = "analyst@example.org"
+_NETWORK_TAGS_RE = re.compile(r"use_network_tags(?:_for_flex_templates)?=([^'\"\]\s,]+)")
 _FQN_PARTS = 3
 # Minimum length for a data value to be replaced in prose (shorter tokens are
 # only replaced when they are all-uppercase alpha, e.g. currency/country codes).
@@ -310,6 +311,24 @@ def _collect_identifiers(
         img = (job.get("environment") or {}).get("worker_image")
         if img:
             m.add_identifier(img, "WORKER_IMAGE")
+    _collect_network_tags(gcp, m)
+
+
+def _collect_network_tags(gcp: dict[str, Any], m: Mapping) -> None:
+    """Network-tag names ride inside each Dataflow job's `experiments`
+    list (`use_network_tags=a;b`, `use_network_tags_for_flex_templates=a;b`)
+    — infrastructure identifiers no other rule touched (2026-08-26 R6 10M
+    bundle, ADR 0033 D7). Aliased in first-seen order: NETWORK_TAG_n."""
+    tags: list[str] = []
+    for job in gcp.get("dataflow") or []:
+        experiments = str((job.get("parameters") or {}).get("experiments") or "")
+        for mobj in _NETWORK_TAGS_RE.finditer(experiments):
+            for raw in mobj.group(1).split(";"):
+                tag = raw.strip()
+                if tag and tag not in tags:
+                    tags.append(tag)
+    for i, tag in enumerate(tags, 1):
+        m.add_identifier(tag, f"NETWORK_TAG_{i}")
 
 
 def _collect_columns(

@@ -136,3 +136,49 @@ def test_mapping_from_dict_reapplies_the_same_replacements():
     text = "customer_name in real-project-id was Alice Smith"
     assert rebuilt.redact_text(text) == m.redact_text(text)
     assert "Alice Smith" not in rebuilt.redact_text(text)
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-26 R6 10M bundle (ADR 0033): the redacted gcp metrics still carried
+# the Dataflow job's network-tag names inside `parameters.experiments`
+# (`use_network_tags=<tag>;<tag>…`, `use_network_tags_for_flex_templates=…`)
+# — infrastructure identifiers no other rule touched. They must map like
+# any identifier so the bundle, the release report and its leak scan all
+# see NETWORK_TAG_n instead.
+# ---------------------------------------------------------------------------
+
+
+def _gcp_with_network_tags():
+    return {
+        "project": "real-project",
+        "bigquery": {"source_fqn": "real-project.src_ds.tbl", "landing_fqn": "real-project.land_ds.tbl"},
+        "dataflow": [
+            {
+                "job_id": "2026-08-26_05_01_16-1",
+                "parameters": {
+                    "subnetwork": "REDACTED",
+                    "experiments": (
+                        "['use_runner_v2', "
+                        "'use_network_tags=corp-net-a;corp-egress-b', "
+                        "'use_network_tags_for_flex_templates=corp-net-a;corp-egress-b', "
+                        "'beam_fn_api']"
+                    ),
+                },
+            }
+        ],
+    }
+
+
+def test_build_mapping_registers_dataflow_network_tags():
+    m = red.build_mapping({"gcp": _gcp_with_network_tags(), "offline": {}})
+    assert m.identifiers.get("corp-net-a") == "NETWORK_TAG_1"
+    assert m.identifiers.get("corp-egress-b") == "NETWORK_TAG_2"
+
+
+def test_redact_text_scrubs_network_tags_from_experiments():
+    m = red.build_mapping({"gcp": _gcp_with_network_tags(), "offline": {}})
+    out = red.redact_text(
+        m, "use_network_tags=corp-net-a;corp-egress-b use_network_tags_for_flex_templates=corp-net-a"
+    )
+    assert "corp-net-a" not in out and "corp-egress-b" not in out
+    assert "NETWORK_TAG_1" in out and "NETWORK_TAG_2" in out

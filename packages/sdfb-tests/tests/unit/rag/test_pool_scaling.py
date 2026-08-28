@@ -265,3 +265,73 @@ def test_pool_call_budget_scales_with_choices():
         client, "p", {}, _free_text_profile_with_observed(), ["seed"], target=512
     )
     assert y.attempts == 8
+
+
+class _FakeSourceValueStore:
+    """`fetch_distinct(column)` → the column's FULL source domain."""
+
+    def __init__(self, values: dict[str, frozenset[str]]) -> None:
+        self._values = values
+
+    def fetch_distinct(self, column: str) -> frozenset[str] | None:
+        return self._values.get(column)
+
+
+def test_pool_target_takes_the_source_filter_cardinality_when_exact_stats_are_absent(
+    caplog,
+):
+    # 2026-08-25/26 R6 runs: A_COL_015 (95% empty) showed 94 distinct in
+    # the 10k reference sample while the source filter the SAME setup
+    # fetched a moment later held 4,022 — and the target stayed 94 because
+    # the Tier-2 exact count (ADR 0022, --source_stats=exact) was absent.
+    # The filter's size IS the exact cardinality, already paid for.
+    import logging
+
+    schema, _ = _schema_and_rows(1)
+    # 94 distinct substantive values over 300 rows (a sparse column).
+    rows = [{"id": i, "notes": f"sparse ref {i % 94:04d}"} for i in range(300)]
+    client = _BatchClient()
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=32))
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=rows,
+        reference_digest="d-source-filter-card",
+        pipeline_run_id="pool-target-filter",
+        num_rows=1_000_000,
+        freetext_expansion="off",
+        source_value_store=_FakeSourceValueStore(
+            {"notes": frozenset(f"src ref {i:05d}" for i in range(4022))}
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(client, ctx)
+    # target = min(num_rows=1M, source distinct=4022, cap=512) = 512, not 94.
+    assert len(engine._free_text_pools["notes"]) == _FREE_TEXT_POOL_MAX
+    text = "\n".join(r.message for r in caplog.records)
+    assert "name=freetext_pool_built" in text
+    assert f"target={_FREE_TEXT_POOL_MAX}" in text
+    engine.teardown()
+
+
+def test_pool_target_prefers_the_exact_stats_count_over_the_filter():
+    # Tier-2 exact stats stay authoritative when present (ADR 0022).
+    schema, rows = _schema_and_rows(300)
+    engine = B1RagEngine(embedder=HashingEmbedder(dim=32))
+    ctx = GenerationContext(
+        table_schema=schema,
+        reference_rows=rows,
+        reference_digest="d-exact-wins",
+        pipeline_run_id="pool-target-exact",
+        num_rows=1_000_000,
+        source_distinct={"notes": 40},
+        freetext_expansion="off",
+    )
+    engine._ctx = ctx
+    prof = profile_columns(schema, rows)["notes"]
+    # exact stats (40) beat the filter (4022)
+    assert engine._pool_target(prof, ctx, source_cardinality=4022) == 40
+    no_exact = ctx.model_copy(update={"source_distinct": {}})
+    # the filter (4022 → cap 512) beats the sample distinct (300)
+    assert engine._pool_target(prof, no_exact, source_cardinality=4022) == 512
+    # neither: the sample distinct remains the stand-in
+    assert engine._pool_target(prof, no_exact, source_cardinality=0) == 300

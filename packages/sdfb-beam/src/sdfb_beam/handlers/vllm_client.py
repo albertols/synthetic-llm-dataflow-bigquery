@@ -54,6 +54,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from sdfb_core.engines.base import ModelClientTransientError
 from sdfb_core.observability import log_milestone
 
 from sdfb_beam.gcs import localize_gcs_prefix, split_gs_uri
@@ -118,25 +119,33 @@ _VLLM_NON_KV_OVERHEAD_BYTES = int(1.25 * 1024**3)
 # Floor for a clamped --max-model-len: pool builds complete with
 # max_tokens=2048, so anything shorter leaves no room for the prompt.
 _VLLM_MIN_MODEL_LEN = 4096
-# In-process wait-and-re-measure window for a transiently unfittable card
-# (sibling embedders demote within ~80 s of setup — 2026-08-05 B_TABLE R1
-# timeline): 6 attempts x 20 s covers that with margin, at a fraction of a
-# bundle-retry's cost (fresh DoFn.setup() + store fetches).
-_UNFITTABLE_RETRY_ATTEMPTS = 6
+# In-process wait-and-re-measure window for a transiently unfittable card.
+# Sibling embedders demote within ~80 s of setup on a single-table run
+# (2026-08-05 B_TABLE R1); a two-table relational job (ADR 0030) doubles
+# the DoFn instances churning the card during setup and the 2026-08-25 R6
+# run needed 161 s from the first unfittable measure to a fittable card —
+# the old window (6 attempts = 5 x 20 s between first and last measure)
+# expired 60 s short and failed the bundle after its sibling ladders had
+# finished (ADR 0033). 12 attempts (11 x 20 s = 220 s) cover that with
+# margin for a third table's churn, still at a fraction of a bundle
+# retry's cost (fresh DoFn.setup() + re-embed + store fetches).
+_UNFITTABLE_RETRY_ATTEMPTS = 12
 _UNFITTABLE_RETRY_WAIT_S = 20.0
 # vLLM rounds KV capacity to 16-token blocks; keep the clamp aligned.
 _VLLM_LEN_ALIGN = 16
 _PARKED_SERVERS: dict[str, Any] = {}
 
 
-class ModelLenUnfittableError(RuntimeError):
+class ModelLenUnfittableError(ModelClientTransientError):
     """The measured VRAM budget cannot host even `_VLLM_MIN_MODEL_LEN`.
 
     Raised BEFORE the server spawn (2026-07-29_09_30_47: three doomed spawns
     burned the whole `_MAX_CONSECUTIVE_SPAWN_FAILURES` budget on a card that
     was only transiently contended). Deliberately NOT counted as a spawn
     failure — each bundle retry re-measures the card, and an embedder that
-    has since demoted frees the budget the next attempt needs."""
+    has since demoted frees the budget the next attempt needs. A
+    `ModelClientTransientError` (ADR 0033): the engine's ladder retries the
+    losing thread in-process instead of failing the bundle."""
 
 
 def _kv_bytes_per_token(cfg: dict, dtype_bytes: int = 2) -> int | None:

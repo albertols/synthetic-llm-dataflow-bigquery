@@ -17,6 +17,7 @@ from sdfb_core.engines.base import (
     GenerationContext,
     GenerationEngine,
     ModelClient,
+    ModelClientTransientError,
 )
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,7 @@ __all__ = [
     "GenerationContext",
     "GenerationEngine",
     "ModelClient",
+    "ModelClientTransientError",
     "get_engine",
     "register_engine",
 ]

@@ -189,7 +189,7 @@ the constraint lever is for gaps the *prompt or decoding grammar* can close.
 | 4 | `values` | closed vocabulary drifting (synthetic emits out-of-set codes) | source `distinct` small (aim ≤ 20; hard cap 64); values render as a Python-list repr inside the clause — a fat list blows the 500-ch clause cap and is truncated mid-list |
 | 5 | `format` | shape gap where `pattern` fails its coverage gate, or semantics the mask cannot express | ≤ ~90 ch of business prose naming the format; the workhorse fallback |
 | 6 | `charset` / `units` / `locale` | `charclass_delta` on one class / unit drift / wrong-language prose | one short clause each |
-| 7 | `examples` | shape alone under-specifies content (semantic prose, composite codes) | **last resort**; 1–2 (cap 8 × 64 ch); MUST be fictitious — they join the pool rejection set, so a real value is a privacy leak AND permanently unusable |
+| 7 | `examples` | shape alone under-specifies content (semantic prose, composite codes) | **last resort**; 1–2 (cap 8 × 64 ch); MUST be fictitious — they join the pool rejection set, so a real value is a privacy leak AND permanently unusable. **MUST match the source length bucket exactly** (`len_p05`/`len_p95`, count padding spaces): the engine preflights every example through the column's format gate (`prompt_constraint_example_off_format`, ADR 0033) and the model echoes an off-format example's length — the 2026-08-25/26 runs rejected 385/393 candidates of a 31-ch column whose example was 28 ch |
 | 8 | `notes` | value legends / business decode worth carrying | renders **last** → first casualty of the 500-ch truncation; keep tiny |
 
 **The `pattern` coverage gate is non-negotiable.** Compute coverage from the

@@ -32,6 +32,22 @@ class FreeTextEmptyYieldError(RuntimeError):
     """
 
 
+class ModelClientTransientError(RuntimeError):
+    """The model client could not serve THIS call, but the condition is
+    expected to clear without operator action (ADR 0033).
+
+    Raised by a `ModelClient` when the server is not (yet) usable for a
+    reason that resolves on its own — a GPU transiently too full to host
+    the model while sibling embedders demote. The engine treats it as
+    "not ready", never as "the LLM yielded nothing": a ladder thread that
+    hits it is retried in-process once its siblings have landed, and it is
+    NEVER swallowed into the lax exemplar fallback (the 2026-07-10 root
+    cause — setup() never ran — was universal memorization). 2026-08-25
+    R6: one thread's fit-wait expired 60 s before a sibling's spawn
+    succeeded; the bundle failed after 10 min of finished sibling work.
+    """
+
+
 def escalating_temperatures(start: float = 0.7) -> tuple[float, ...]:
     """Sampling temperatures for free-text pool retries, ascending from
     ``start`` up to 1.3.

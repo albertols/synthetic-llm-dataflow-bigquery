@@ -162,7 +162,7 @@ prefix-cache-safe. All keys optional; combine freely.
 |---|---|---|---|
 | `format` | str ≤ 500 | tell the LLM the business format in words | prompt clause `format=…` |
 | `pattern` | anchored regex ≤ 200, must compile | **guarantee** the shape, not just request it | prompt clause **and** vLLM guided decoding (`items.pattern`) — overrides the derived regex |
-| `examples` | ≤ 8 strings, ≤ 64 ch each | show fictitious canonical values | prompt clause; echoes are rejected from pools (never land as data) |
+| `examples` | ≤ 8 strings, ≤ 64 ch each; **must sit in the column's observed length bucket / charset** | show fictitious canonical values | prompt clause; echoes are rejected from pools (never land as data); an off-format example logs `prompt_constraint_example_off_format` at plan time — the model echoes its length (ADR 0033: a 28-ch example on a 31-ch column rejected 98 % of a run's candidates) |
 | `values` | ≤ 64 strings | closed vocabulary | prompt clause `allowed values=[…]` |
 | `prefix` / `suffix` | str | literal affixes (`E2F…`) | prompt clauses |
 | `charset` | str | restrict the alphabet | prompt clause |
@@ -418,6 +418,7 @@ python -m sdfb_beam.cli.run_pipeline ... \
 |---|---|---|
 | `ref:` naming a table not in the model | loud load failure | use the bare name of a table in the same model, or `dataset.table` for an already-landed external parent |
 | real values pasted into `examples` | privacy leak into prompts/logs | examples must be **fictitious**; pools reject echoes, but don't tempt it |
+| `examples` entry of the wrong length (a fixed-width column) | `prompt_constraint_example_off_format` WARNING, then `freetext_pool_format_collapse` — the LLM echoes the example's length and the pool comes from the shape fallback | make the example exactly the source width (count the padding spaces); `gate_lengths=` in the WARNING lists the accepted lengths |
 | `route: "llm"` on INT64 | WARNING, route unchanged | only STRING-typed columns re-route |
 | unescaped regex in JSON | `DescriptionJsonError` at preflight | JSON-escape backslashes: `\\\\.` for a literal dot |
 | constraint typo in a *marked* object | loud stop (by design) | fix the JSON; prose outside the braces is always safe |

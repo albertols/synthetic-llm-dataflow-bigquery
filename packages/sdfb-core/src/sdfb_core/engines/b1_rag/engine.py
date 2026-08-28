@@ -55,6 +55,7 @@ from sdfb_core.engines.b1_rag.profile import (
 from sdfb_core.engines.base import (
     FreeTextEmptyYieldError,
     GenerationEngine,
+    ModelClientTransientError,
     escalating_sampling,
 )
 from sdfb_core.engines.constraint_sampler import (
@@ -81,6 +82,7 @@ from sdfb_core.engines.text_shapes import (
     collapsed_mask,
     identifier_sampler_from,
     is_binary_class,
+    length_ceiling,
     length_hint,
     mutate_digit_runs,
     pick_relaxed_shape,
@@ -150,6 +152,13 @@ _POOL_PARALLEL_CHOICES = 4
 # yield decay.
 _POOL_STAGNATION_WINDOW = 3
 _POOL_STAGNATION_MIN_NOVEL = max(1, _POOL_VALUES_PER_CALL // 8)
+# Format-collapse exit (ADR 0033, 2026-08-25/26 R6 A_COL_037): 385/393
+# and 386/393 parsed values were format-rejected — 28-char values into a
+# fixed 31-char bucket, the model echoing its clause's own off-format
+# example — over three ~150 s T4 rounds before the stagnation window
+# closed. A full-yield round with ZERO in-format values is a structural
+# mismatch temperature cannot fix; two in a row end the ladder.
+_POOL_FORMAT_COLLAPSE_ROUNDS = 2
 # Ladders for different columns are independent — run them on a bounded
 # thread pool. vLLM continuous-batches concurrent requests on the server
 # side; the client (openai/httpx) is thread-safe; embedder work is NOT
@@ -366,11 +375,21 @@ class B1RagEngine(GenerationEngine):
             seconds=round(time.monotonic() - t_pools, 1),
             freetext_cols=len(self._free_text_pools),
         )
-        if not any(s == "llm_ladder" for s in self._pool_sources.values()):
+        sources = list(self._pool_sources.values())
+        warm = sum(1 for s in sources if s in ("store", "process_cache"))
+        if "llm_ladder" not in sources and warm:
+            # Pools served from the persisted store / process cache: the
+            # LLM work was done ONCE by the pool branch (ADR 0020) and this
+            # generate setup reads it — the designed steady state, not idle
+            # hardware. 2026-08-26 R6 10M: 64 `llm_route_unused` WARNINGs,
+            # one per generate DoFn instance, inside a job whose pool
+            # branch had just spent 17 GPU-minutes building those pools.
+            log_milestone("freetext_pools_warm", columns=warm)
+        elif "llm_ladder" not in sources:
             # No column drew a single LLM token this setup (all expandable
-            # / store-warm / binary-fallback / typed routes). 2026-08-21
-            # four-run cycle: such a run billed ~28 GPU-minutes on an idle
-            # T4 — say so, so the operator can rerun CPU-only.
+            # / binary-fallback / typed routes). 2026-08-21 four-run cycle:
+            # such a run billed ~28 GPU-minutes on an idle T4 — say so, so
+            # the operator can rerun CPU-only.
             log_milestone(
                 "llm_route_unused",
                 level=logging.WARNING,
@@ -1081,22 +1100,53 @@ class B1RagEngine(GenerationEngine):
         ) as executor:
             futures = [
                 (
-                    prof,
-                    executor.submit(
-                        self._infer_free_text_pool, prof, seed_examples, tgt, src
-                    ),
+                    job,
+                    executor.submit(self._infer_free_text_pool, *job),
                 )
-                for prof, seed_examples, tgt, src in jobs
+                for job in jobs
             ]
-            for prof, future in futures:
+            not_ready: list[tuple[tuple, Exception]] = []
+            for job, future in futures:
                 try:
-                    pools[prof.name] = future.result()
+                    pools[job[0].name] = future.result()
+                except ModelClientTransientError as e:
+                    not_ready.append((job, e))
                 except Exception as e:  # re-raised below, after all columns land
                     if first_error is None:
                         first_error = e
+        first_error = self._retry_not_ready_ladders(not_ready, pools, first_error)
         if first_error is not None:
             raise first_error
         return pools
+
+    def _retry_not_ready_ladders(
+        self,
+        not_ready: list[tuple[tuple, Exception]],
+        pools: dict[str, list[str]],
+        first_error: Exception | None,
+    ) -> Exception | None:
+        """Rebuild, once and sequentially, every ladder whose thread hit a
+        transient client condition — the vLLM fit-wait window expiring
+        while a sibling's spawn was about to succeed (2026-08-25 R6, ADR
+        0033) — against the client its siblings just used. Before this,
+        one lost race re-raised after every sibling ladder had finished
+        and failed the bundle: Dataflow then re-embedded, re-fetched and
+        re-ran the 70 s ladder eight minutes later. A second failure is a
+        real outage: it becomes the error the caller raises."""
+        for job, err in not_ready:
+            prof = job[0]
+            log_milestone(
+                "freetext_pool_ladder_retried",
+                level=logging.WARNING,
+                column=prof.name,
+                error=type(err).__name__,
+            )
+            try:
+                pools[prof.name] = self._infer_free_text_pool(*job)
+            except Exception as e:
+                if first_error is None:
+                    first_error = e
+        return first_error
 
     def _collect_pool_job(
         self,
@@ -1123,7 +1173,14 @@ class B1RagEngine(GenerationEngine):
                 for e in exemplars
                 if e.get(prof.name) not in (None, "")
             ][:_DEFAULT_TOP_K] or list(prof.text_examples[:_DEFAULT_TOP_K])
-        pool_target = self._pool_target(prof, ctx)
+        # The source filter is fetched BEFORE the target is sized: its
+        # size is the column's exact cardinality, already paid for (ADR
+        # 0033 — 2026-08-25/26 R6 A_COL_015: sample distinct 94, filter
+        # 4,022, target stayed 94 with Tier-2 stats absent).
+        source_values = self._fetch_source_values(ctx, prof.name)
+        pool_target = self._pool_target(
+            prof, ctx, source_cardinality=len(source_values)
+        )
         key = self._pool_cache_key(ctx, prof.name, pool_target)
         if key is not None:
             with _POOL_CACHE_LOCK:
@@ -1137,8 +1194,40 @@ class B1RagEngine(GenerationEngine):
                     pool_size=len(cached),
                 )
                 return None
-        source_values = self._fetch_source_values(ctx, prof.name)
+        self._preflight_constraint_examples(prof)
         return (prof, seed_examples, pool_target, source_values)
+
+    @staticmethod
+    def _preflight_constraint_examples(prof: ColumnProfile) -> None:
+        """Flag a clause example the column's own format gate would reject.
+
+        ADR 0033 (2026-08-25/26 R6 A_COL_037): a fixed 31-char column
+        shipped a 28-char fictitious example; the model echoed the
+        example's length and 385/393 candidates were format-rejected. The
+        gate that rejects them can judge the example BEFORE a round is
+        spent — the operator sees `example_len` vs `gate_lengths` in the
+        worker log next to `prompt_constraints_found`.
+        """
+        examples = getattr(prof, "constraint_examples", ()) or ()
+        if not examples:
+            return
+        gate = _format_gate(prof)
+        if gate.prose:
+            return
+        for ex in examples:
+            if gate(ex):
+                continue
+            log_milestone(
+                "prompt_constraint_example_off_format",
+                level=logging.WARNING,
+                column=prof.name,
+                example_len=len(ex),
+                gate_lengths=(
+                    ",".join(str(n) for n in sorted(gate.lengths))
+                    if gate.lengths is not None
+                    else "mask"
+                ),
+            )
 
     def _take_binary_fallback(
         self, prof: ColumnProfile, ctx: GenerationContext, pools: dict
@@ -1150,10 +1239,11 @@ class B1RagEngine(GenerationEngine):
         to the template fallback; the pool persists like any other."""
         if not is_binary_class(prof.observed_values):
             return False
-        target = self._pool_target(prof, ctx)
-        fallback = self._shape_fallback_pool(
-            prof, target, set(), self._fetch_source_values(ctx, prof.name)
+        source_values = self._fetch_source_values(ctx, prof.name)
+        target = self._pool_target(
+            prof, ctx, source_cardinality=len(source_values)
         )
+        fallback = self._shape_fallback_pool(prof, target, set(), source_values)
         pools[prof.name] = fallback
         self._pool_sources[prof.name] = "binary_fallback"
         log_milestone(
@@ -1402,18 +1492,27 @@ class B1RagEngine(GenerationEngine):
             return None
         return (ctx.reference_digest, ctx.model_uri, column, target)
 
-    def _pool_target(self, prof: ColumnProfile, ctx: GenerationContext) -> int:
+    def _pool_target(
+        self,
+        prof: ColumnProfile,
+        ctx: GenerationContext,
+        source_cardinality: int = 0,
+    ) -> int:
         """min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX), skipping
         unknown (zero/empty) bounds. `column_distinct` prefers the Tier-2
-        exact count (`ctx.source_distinct`, ADR 0022) — the sample distinct
-        under-estimates true cardinality and starved pools (five-run
-        verdict: sample 95 vs source 4k). Without exact stats the sample
-        distinct remains the stand-in."""
+        exact count (`ctx.source_distinct`, ADR 0022), then the source
+        filter's cardinality (`source_cardinality`, ADR 0033 — the filter
+        IS the exact distinct set when it is under the store's cap), and
+        only then the sample distinct, which under-estimates true
+        cardinality and starved pools (five-run verdict: sample 95 vs
+        source 4k; 2026-08-25/26 R6: 94 vs 4,022 with Tier-2 absent)."""
         bounds = [_FREE_TEXT_POOL_MAX]
         if ctx.num_rows > 0:
             bounds.append(ctx.num_rows)
-        distinct = ctx.source_distinct.get(prof.name, 0) or len(
-            set(prof.observed_values)
+        distinct = (
+            ctx.source_distinct.get(prof.name, 0)
+            or source_cardinality
+            or len(set(prof.observed_values))
         )
         if distinct > 0:
             bounds.append(distinct)
@@ -1570,6 +1669,11 @@ class B1RagEngine(GenerationEngine):
                 target=target, prompt_for_attempt=prompt_for_attempt,
                 source_values=source_values,
             )
+        except ModelClientTransientError:
+            # The client was not usable — not "the LLM yielded nothing".
+            # Never the exemplar fallback (lax mode included): the caller
+            # retries this column once its siblings land (ADR 0033).
+            raise
         except Exception as e:
             if self._ctx is not None and self._ctx.strict_freetext:
                 raise
@@ -1871,7 +1975,7 @@ def _build_pool_prompt(
     return prompt
 
 
-def _format_gate(prof: ColumnProfile):
+class _FormatGate:
     """Format-plausibility gate over pool candidates for one column.
 
     Identifier-ish columns (relaxed template exists): observed length
@@ -1881,33 +1985,40 @@ def _format_gate(prof: ColumnProfile):
     synthetic ␣ on all 512, shape recall 0) — so when the shape mix can
     template, candidates must instead reproduce an observed run-collapsed
     mask: digit/letter run lengths stay free (novelty), whitespace runs
-    and punctuation are exact. Prose columns (neither applies) pass all.
+    and punctuation are exact. Prose columns (neither applies) pass all
+    — `prose` is True there, so callers can apply the prose-only length
+    ceiling (ADR 0033) and skip the example preflight.
     """
-    shapes = build_relaxed_shapes([str(v) for v in prof.observed_values])
-    gate_lengths = relaxed_shape_lengths(shapes) if shapes else None
-    gate_charset = relaxed_shape_charset(shapes) if shapes else None
-    gate_masks: set[str] | None = None
-    if shapes is None and shape_mix_can_template(prof.shape_mix):
-        gate_masks = {
-            collapsed_mask(str(v)) for v in prof.observed_values if v
-        }
-    name_lower = prof.name.lower()
 
-    def _in_format(v: str) -> bool:
-        if gate_lengths is not None and gate_charset is not None:
+    def __init__(self, prof: ColumnProfile) -> None:
+        shapes = build_relaxed_shapes([str(v) for v in prof.observed_values])
+        self.lengths = relaxed_shape_lengths(shapes) if shapes else None
+        self._charset = relaxed_shape_charset(shapes) if shapes else None
+        self._masks: set[str] | None = None
+        if shapes is None and shape_mix_can_template(prof.shape_mix):
+            self._masks = {
+                collapsed_mask(str(v)) for v in prof.observed_values if v
+            }
+        self._name_lower = prof.name.lower()
+        self.prose = self.lengths is None and self._masks is None
+
+    def __call__(self, v: str) -> bool:
+        if self.lengths is not None and self._charset is not None:
             return (
-                len(v) in gate_lengths
-                and set(v) <= gate_charset
-                and name_lower not in v.lower()
+                len(v) in self.lengths
+                and set(v) <= self._charset
+                and self._name_lower not in v.lower()
             )
-        if gate_masks is not None:
+        if self._masks is not None:
             return (
-                collapsed_mask(v) in gate_masks
-                and name_lower not in v.lower()
+                collapsed_mask(v) in self._masks
+                and self._name_lower not in v.lower()
             )
         return True
 
-    return _in_format
+
+def _format_gate(prof: ColumnProfile) -> _FormatGate:
+    return _FormatGate(prof)
 
 
 def _pool_llm_yield(
@@ -1959,6 +2070,15 @@ def _pool_llm_yield(
     # length bucket, stay within the observed charset, and never contain
     # the column name. Prose columns (no template) skip the gate.
     _in_format = _format_gate(prof)
+    # Prose-only length ceiling (ADR 0033): a fixed-width source field
+    # truncates at its width; the prose gate passes everything, so the
+    # prompt's length band was advisory (2026-08-26 R6 A_COL_019: source
+    # max 35, pool values to 62). Enforce it the way the source does —
+    # by truncation — BEFORE the novelty check, so a clamped value is
+    # still rejected if it collides with a real one.
+    ceiling = length_ceiling(prof.observed_values) if _in_format.prose else None
+    n_clamped = 0
+    collapse_rounds = 0
 
     pool: list[str] = []
     pool_seen: set[str] = set()
@@ -1993,20 +2113,35 @@ def _pool_llm_yield(
             top_p=level.top_p,
             top_k=level.top_k,
         )
-        parsed_values = _string_values(results, prof.name)
+        parsed_values, clamped = _clamp_to_ceiling(
+            _string_values(results, prof.name), ceiling
+        )
+        n_clamped += clamped
         values = [v for v in parsed_values if _in_format(v)]
         n_format_rejected += len(parsed_values) - len(values)
-        novel = [v for v in values if v not in observed]
+        # Format collapse: a full-yield round with zero in-format values.
+        collapse_rounds = _collapse_rounds(collapse_rounds, parsed_values, values)
+        if collapse_rounds >= _POOL_FORMAT_COLLAPSE_ROUNDS:
+            n_parsed += len(parsed_values)
+            log_milestone(
+                "freetext_pool_format_collapse",
+                level=logging.WARNING,
+                column=prof.name,
+                attempts=attempts,
+                parsed=n_parsed,
+                format_rejected=n_format_rejected,
+                pool_size=len(pool),
+                target=target,
+            )
+            hit_stagnation = True
+            break
         n_parsed += len(parsed_values)
-        n_copies += len(values) - len(novel)
-        n_echoes += sum(1 for v in values if v in shown)
+        added, copies, echoes = _absorb_round(
+            values, observed, shown, pool, pool_seen
+        )
+        n_copies += copies
+        n_echoes += echoes
         seen.update(values)
-        added = 0
-        for v in novel:
-            if v not in pool_seen:
-                pool_seen.add(v)
-                pool.append(v)
-                added += 1
         stagnant = stagnant + 1 if added < _POOL_STAGNATION_MIN_NOVEL else 0
         if stagnant >= _POOL_STAGNATION_WINDOW and attempts >= len(levels):
             log_milestone(
@@ -2020,10 +2155,58 @@ def _pool_llm_yield(
             )
             hit_stagnation = True
             break
+    if n_clamped:
+        log_milestone(
+            "freetext_pool_length_clamped",
+            column=prof.name,
+            clamped=n_clamped,
+            max_len=ceiling,
+        )
     return _PoolYield(
         pool, n_parsed, len(seen), n_copies, n_echoes, attempts,
         n_format_rejected, hit_stagnation,
     )
+
+
+def _absorb_round(
+    values: list[str],
+    observed: set[object],
+    shown: set[str],
+    pool: list[str],
+    pool_seen: set[str],
+) -> tuple[int, int, int]:
+    """Fold one round's in-format values into the pool; returns (novel
+    values added, copies of observed/source values, prompt-seed echoes)."""
+    novel = [v for v in values if v not in observed]
+    added = 0
+    for v in novel:
+        if v not in pool_seen:
+            pool_seen.add(v)
+            pool.append(v)
+            added += 1
+    echoes = sum(1 for v in values if v in shown)
+    return added, len(values) - len(novel), echoes
+
+
+def _clamp_to_ceiling(
+    values: list[str], ceiling: int | None
+) -> tuple[list[str], int]:
+    """Truncate candidates past a fixed-width ceiling (ADR 0033); returns
+    the values and how many were clamped. None ceiling ⇒ untouched."""
+    if ceiling is None:
+        return values, 0
+    n_long = sum(1 for v in values if len(v) > ceiling)
+    if not n_long:
+        return values, 0
+    return [v[:ceiling] for v in values], n_long
+
+
+def _collapse_rounds(streak: int, parsed: list[str], in_format: list[str]) -> int:
+    """Consecutive full-yield rounds (≥ one array's worth parsed) with zero
+    in-format values — the format-collapse signature (ADR 0033)."""
+    if len(parsed) >= _POOL_VALUES_PER_CALL and not in_format:
+        return streak + 1
+    return 0
 
 
 def _string_values(results: list, name: str) -> list[str]:

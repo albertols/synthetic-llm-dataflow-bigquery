@@ -180,3 +180,31 @@ def test_binary_class_column_skips_the_llm_ladder(caplog) -> None:
     assert client.prompts == []  # the LLM was never consulted
     assert engine._pool_sources.get("bin_col") == "binary_fallback"
     engine.teardown()
+
+
+def test_store_warm_setup_reports_pools_warm_not_gpu_idle(caplog) -> None:
+    # 2026-08-26 R6 10M run: 64 `llm_route_unused` WARNINGs — one per
+    # generate-DoFn instance — inside a job whose pool branch had just
+    # spent 17 GPU-minutes building those very pools. Store-warm is the
+    # designed steady state (ADR 0020), not idle hardware: say THAT.
+    from types import SimpleNamespace
+
+    class _WarmStore:
+        def fetch(self, digest, model_uri):
+            return [
+                SimpleNamespace(
+                    column="code_hint",
+                    values=[f"{i:04d}W{i % 10}" for i in range(64)],
+                )
+            ]
+
+    client = _CountingClient()
+    engine = B1RagEngine(embedder=HashingEmbedder())
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(client, _ctx(pool_store=_WarmStore()))
+    text = "\n".join(r.message for r in caplog.records)
+    assert "name=freetext_pool_store_hit" in text
+    assert "name=llm_route_unused" not in text
+    assert "name=freetext_pools_warm" in text
+    assert client.prompts == []  # no LLM call in a store-warm setup
+    engine.teardown()

@@ -1452,3 +1452,27 @@ def test_setup_reraises_when_unfittable_persists(monkeypatch):
     assert len(spawn_attempts) == mod._UNFITTABLE_RETRY_ATTEMPTS
     # Still not a spawn-failure strike: the next bundle may re-measure.
     assert mod._SPAWN_FAILURES.get(c.base_url, 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-25 R6 1M run: a ladder thread's fit-wait window (6 x 20 s)
+# expired at 19:27:27; a sibling embedder released the card and the next
+# thread's spawn succeeded at 19:28:27 — 161 s after the FIRST unfittable
+# measure. A two-table relational job doubles the DoFn instances demoting
+# embedders during setup, so the window must cover that churn, and the
+# error must be recognisable as transient by the engine's ladder retry.
+# ---------------------------------------------------------------------------
+
+
+def test_unfittable_error_is_a_transient_client_error():
+    from sdfb_beam.handlers import vllm_client as mod
+    from sdfb_core.engines.base import ModelClientTransientError
+
+    assert issubclass(mod.ModelLenUnfittableError, ModelClientTransientError)
+
+
+def test_unfittable_window_covers_relational_setup_churn():
+    from sdfb_beam.handlers import vllm_client as mod
+
+    window = mod._UNFITTABLE_RETRY_ATTEMPTS * mod._UNFITTABLE_RETRY_WAIT_S
+    assert window >= 180.0, "2026-08-25: 161 s until the card was fittable"

@@ -137,14 +137,19 @@ grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
 | `target_metadata_overlaid constraint_columns=` / `target_metadata_unavailable` (WARNING) | ADR 0027 D2: constraints + contract come from the LANDING table's descriptions; unavailable = NO constraints this run (source descriptions are never a substitute) |
 | `ddl_live_extract_failed` (WARNING) → `ddl_loaded_from_uri fallback=True` | ADR 0027: live extraction unreachable — OFFLINE mode, the pin's (possibly stale) constraints/contract apply |
 | `ddl_pin_drift` (WARNING) / `ddl_pin_fresh` / `ddl_pin_check_error` | ADR 0027: the `--ddl_uri` pin vs live, checked while live is authoritative — drift means the OFFLINE FALLBACK is stale; re-extract before the next air-gapped day |
-| `llm_route_unused` (WARNING) | ADR 0027: this setup ran zero LLM ladders — GPU workers idle; plan a CPU-only rerun |
+| `llm_route_unused` (WARNING) | ADR 0027 / 0033: this setup has NO LLM-derived pool at all (every column expandable / typed / binary) — GPU workers idle; plan a CPU-only rerun. A store-warm setup logs `freetext_pools_warm` instead |
+| `freetext_pools_warm columns=` | ADR 0033: every pool came from the persisted store / process cache — the designed warm path (ADR 0020), not idle hardware (the 2026-08-26 10M run logged 64 spurious `llm_route_unused`) |
+| `freetext_pool_ladder_retried column= error=` (WARNING) | ADR 0033: a ladder thread hit a transient client condition (vLLM fit-wait expired while a sibling's spawn succeeded) and was rebuilt in-process after the siblings landed. Expect `freetext_pool_built` for the same column right after; a second failure raises (bundle retry) |
+| `freetext_pool_format_collapse column= attempts= parsed= format_rejected=` (WARNING) | ADR 0033: two consecutive full-yield rounds with zero in-format values — structural mismatch (2026-08-25/26 A_COL_037: 385/393 rejected, a 28-char clause example on a 31-char column); the shape fallback follows. Check `prompt_constraint_example_off_format` for the cause |
+| `prompt_constraint_example_off_format column= example_len= gate_lengths=` (WARNING) | ADR 0033: a clause `examples` entry fails the column's own format gate (wrong length bucket / charset) — the model WILL echo it; fix the example in the DDL description |
+| `freetext_pool_length_clamped column= clamped= max_len=` | ADR 0033: prose candidates past a fixed-width source ceiling (p95 == max, wide spread below) were truncated to it before novelty rejection (A_COL_019-class: source max 35, pool values ran to 62) |
 | `freetext_pool_binary_fallback` | ADR 0027: control-char column skipped the LLM ladder for the template fallback (COL_048-class) |
 | `numeric_kanon_filter size=` (+ `_absent`/`_error`) | ADR 0027: the scrub's keep-set from SOURCE frequencies (HAVING COUNT ≥ 10); absent = sample-heuristic fallback |
 | `freetext_pool_source_filter size=` | ADR 0023: the column's FULL source domain is in the pool rejection set |
 | `freetext_pool_source_filter_absent` / `_error` (WARNING) | domain above cap / store error — pool built with sample-only rejection; check copy_fraction post-run |
 | `pool_taint_rebuild` (WARNING, launcher) | warm pools overlapped the live source → deleted + rebuilt clean (expected ONCE per tainted pre-ADR-0023 digest) |
 | `pool_taint_check_error` / `pool_taint_delete_error` | preflight could not verify/clear — warm pools kept, verify copy_fraction post-run |
-| `vllm_unfittable_wait` (WARNING) | VRAM transiently short — in-process re-measure instead of a bundle retry (2026-08-05 R1 cost ~80 s + a setup cycle) |
+| `vllm_unfittable_wait` (WARNING) | VRAM transiently short — in-process re-measure instead of a bundle retry (2026-08-05 R1 cost ~80 s + a setup cycle). Window 12 × 20 s since ADR 0033 (the 2026-08-25 two-table run needed 161 s; the old 6-attempt window failed the bundle) |
 | `relationships_loaded` / `relationships_absent` (launcher) | ADR 0032: which model FILES this launch read, their models, table count and sha. Absent = no relationships declared anywhere; every table generates alone |
 | `relationship_model` (launcher AND every worker; **WARNING** when a relational launch enforces 0 edges) | ADR 0032 D6: the whole model at a glance — tables with PK/identity, every edge as `-->` enforced / `..>` documented, `[DISABLED — detached]` tables, the generation waves, and the FILE it came from. Driver and worker print the identical card |
 | `fk_key_pool_bound columns= key_tuples= weighting= null_fraction=` | ADR 0031: one per enforced edge, worker-side. `weighting=child_marginal` = the IPF fit ran (the child's marginals survive the restriction); `uniform` = no overlap between the child's sample and the parent's keys — check the edge is the one you meant |
@@ -490,6 +495,28 @@ the recorded M2 limitation.
 
 Multi-table alternative: `scripts/run_tableset.py` (parent-first
 ordering, dry-run first).
+
+### 6b′. R6 pair landed (2026-08-25 1M · 2026-08-26 10M) → ADR 0033
+
+Both R6 launches (`C_TABLE` parent + `A_TABLE` child, one job, FK enforced)
+met the §4 criteria: PK 1.0, **0 orphans on 10M child rows** by an
+independent full join, 0 row dupes, stats `ok` except the documented
+FK-column marginal, `copy_fraction = 0`, gates PASSED. The worker logs
+carried five defects the reports did not
+([design doc](designs/2026-08-29-r6-scale-pool-ladder-integrity.md)):
+
+| Evidence (worker log) | Shipped (ADR 0033) | Verify next cold launch |
+|---|---|---|
+| 1M: `A_TABLE/BuildFreeTextPools` work item FAILED at 19:36:02 on a ladder thread's `ModelLenUnfittableError` raised 60 s before a sibling's spawn succeeded; 3 finished ladders re-raised; retry +8 min | transient errors retried in-process once siblings land (`freetext_pool_ladder_retried`); fit-wait window 6 → 12 attempts | no failed work item on the pool branch; `ladder_retried` (if any) followed by `freetext_pool_built` |
+| both: `A_COL_015` `target=94` (sample distinct) with `freetext_pool_source_filter size=4022` a moment later | target = exact stats → **source-filter size** → sample | `A_COL_015 target=512` |
+| both: `A_COL_037` `format_rejected=385/386` of 393 parsed, `attempts=3`, then `shape_fallback` (clause example 28 ch on a 31-ch column) | `freetext_pool_format_collapse` after 2 rounds; `prompt_constraint_example_off_format` at plan time | `attempts=2`; the preflight WARNING names `example_len=28 gate_lengths=31` |
+| 10M crosscheck: `A_COL_019` synthetic `len_max=62` vs source 35 (p95 == max) | prose candidates clamped to `length_ceiling` (`freetext_pool_length_clamped`) | crosscheck `len_max` == 35 |
+| 10M: 64 × `llm_route_unused` WARNING from store-warm generate DoFns | `freetext_pools_warm` INFO for warm setups | 0 `llm_route_unused`; one `freetext_pools_warm` per generate setup |
+| oss bundle `gcp_metrics.parameters.experiments` carried network-tag names | `NETWORK_TAG_n` redaction | `leak_scan` clean on the next export |
+
+Cost note at 10M: vLLM served pool builds for ~9 of 93 minutes while
+4 × T4 billed 272 GPU-minutes — the CPU/GPU split (§5 cost note) is the
+next architecture step, not a defect of this pair.
 
 ### 6c. R7 — 10M scale (warm everything)
 
