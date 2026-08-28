@@ -66,4 +66,9 @@ This skill adds judgment. NEVER edit the generated numbers or charts.
    Run from the repo root (matches every other `scripts/e2e/` invocation).
    A nonzero exit means a real identifier/column survived into
    `docs/releases/<version>/` — fix the `## Insights` prose before committing.
-5. Commit as `docs(releases): <version> insights`.
+5. Commit as `docs(releases): <version> insights [release-report]` — the
+   `[release-report]` marker is the ONLY self-trigger guard in
+   `release_tag_report.yaml` (`if: !contains(head_commit.message, '[release-report]')`);
+   without it the push to master tags a spurious next version (v0.1.0's
+   insights would have minted v0.1.1). Push to master directly (the report
+   commit itself is pushed by the Action the same way).
