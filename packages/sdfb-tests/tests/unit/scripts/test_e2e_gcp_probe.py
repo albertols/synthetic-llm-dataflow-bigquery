@@ -1,4 +1,4 @@
-"""Unit tests for `scripts/e2e_gcp_probe.py` (the vendored Dataflow/BQ probe).
+"""Unit tests for `scripts/e2e/e2e_gcp_probe.py` (the vendored Dataflow/BQ probe).
 
 Loaded via importlib the same way `test_deployment_prerequisites.py` loads
 `scripts/deployment_prerequisites.py` (see that file's docstring/idiom). The
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e_gcp_probe.py"
+_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e" / "e2e_gcp_probe.py"
 _spec = importlib.util.spec_from_file_location("e2e_gcp_probe", _SCRIPT)
 _probe_module = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _probe_module
@@ -103,6 +103,92 @@ def test_worker_log_milestones_captures_sdfb_generic_and_legacy(probe_module):
     # Legacy "embedder_pulled" wording regex must not have fired on the
     # structured line — the two capture paths stay independent.
     assert "embedder_pulled" not in result["timestamps"]
+
+
+def test_worker_log_milestones_attributes_pool_ladder_per_column(probe_module):
+    """2026-08-20 B_TABLE R1: the report's topup → stagnated → fallback
+    sequence could not be attributed to a column because the probe kept
+    only the FIRST occurrence of each milestone name and dropped its
+    `column=` field. Pool-ladder milestones are now also collected per
+    column (first timestamp per (column, milestone))."""
+    from sdfb_core.observability import format_milestone
+
+    entries = [
+        {
+            "textPayload": format_milestone(
+                "freetext_pool_shape_topup", column="CONCEPT", added=40
+            ),
+            "timestamp": "2026-07-06T00:01:00Z",
+        },
+        {
+            "textPayload": format_milestone(
+                "freetext_pool_stagnated", column="CONCEPT", novel=1
+            ),
+            "timestamp": "2026-07-06T00:05:00Z",
+        },
+        {
+            "textPayload": format_milestone(
+                "freetext_pool_built", column="REF_CODE", size=512
+            ),
+            "timestamp": "2026-07-06T00:02:00Z",
+        },
+        {  # duplicate for the same (column, milestone): first wins
+            "textPayload": format_milestone(
+                "freetext_pool_built", column="REF_CODE", size=512
+            ),
+            "timestamp": "2026-07-06T00:09:00Z",
+        },
+    ]
+    session = _FakeLogSession(entries)
+    result = probe_module._worker_log_milestones(
+        session, "proj", "job-1", probe_module._DEFAULT_MILESTONES, {}
+    )
+    ladder = result["pool_ladder"]
+    assert ladder["CONCEPT"]["freetext_pool_shape_topup"] == "2026-07-06T00:01:00Z"
+    assert ladder["CONCEPT"]["freetext_pool_stagnated"] == "2026-07-06T00:05:00Z"
+    assert ladder["REF_CODE"]["freetext_pool_built"] == "2026-07-06T00:02:00Z"
+
+
+def test_job_params_sanitizes_infra_identifiers(probe_module):
+    """2026-08-21 four-run cycle: the Dataflow environment dump leaked
+    staging-bucket names, the KMS key ring, subnetwork projects, network
+    tags and the registry path into every bundle — none of it is covered
+    by the oss redaction mapping (it only knows tables/columns/callers),
+    and none of it has analytical value. The probe now masks these at
+    collection time; the image TAG survives (it carries the build id)."""
+    job = {
+        "environment": {
+            "sdkPipelineOptions": {
+                "display_data": [
+                    {"key": "staging_location",
+                     "value": "gs://corp-secret-staging-bucket/staging/x.123"},
+                    {"key": "model_uri",
+                     "value": "gs://corp-model-bucket/synthetic/models/m/v1"},
+                    {"key": "dataflow_kms_key",
+                     "value": "projects/kms-proj/locations/r/keyRings/kr/cryptoKeys/ck"},
+                    {"key": "subnetwork",
+                     "value": "https://www.googleapis.com/compute/v1/projects/net-proj/regions/r/subnetworks/sn-1"},
+                    {"key": "use_network_tags",
+                     "value": "tag-a;tag-b;tag-c"},
+                    {"key": "service_account_email",
+                     "value": "runner@corp-proj.iam.gserviceaccount.com"},
+                    {"key": "worker_harness_container_image",
+                     "value": "europe-docker.pkg.dev/corp-proj/repo/sdfb-python:oss-abc1234"},
+                    {"key": "num_rows", "value": "1000000"},
+                ]
+            }
+        }
+    }
+    params = probe_module._job_params(job)
+    joined = " ".join(str(v) for v in params.values())
+    for secret in ("corp-secret-staging-bucket", "corp-model-bucket", "kms-proj",
+                   "net-proj", "tag-a", "corp-proj", "runner@"):
+        assert secret not in joined, (secret, params)
+    assert params["num_rows"] == "1000000"
+    # The build id must survive masking — it is the only way to tie a run
+    # to a commit before the build_info milestone existed.
+    assert "sdfb-python:oss-abc1234" in params["worker_harness_container_image"]
+    assert params["staging_location"].startswith("gs://REDACTED_BUCKET/")
 
 
 class _FakeResp:
@@ -436,3 +522,70 @@ def test_job_params_reads_pipeline_description_typed_values(probe_module):
 
 def test_job_params_empty_job_yields_empty_dict(probe_module):
     assert probe_module._job_params({}) == {}
+
+
+# --------------------------------------------------------------------------
+# copy_ratio_substantive (2026-08-07 A_TABLE R1): empty-parity and
+# head-value re-emission are BY-DESIGN fidelity, not memorization.
+# --------------------------------------------------------------------------
+def test_flags_prefer_substantive_ratio_over_raw(probe_module):
+    """COL_048 class: source 62.4% empty, engine re-emits empties at parity,
+    raw copy_ratio reads 0.628 — but among substantive values nothing is
+    copied. Must NOT flag."""
+    columns = {
+        "COL_048": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.628,
+            "copy_ratio_nonsentinel": 0.628,
+            "copy_ratio_substantive": 0.004,
+            "source_distinct": 19_815,
+        },
+    }
+    assert probe_module.memorization_flags(columns) == []
+
+
+def test_flags_fire_on_substantive_copying_and_carry_the_field(probe_module):
+    columns = {
+        "LEAKY": {
+            "type": "STRING",
+            "is_constant": False,
+            "copy_ratio": 0.20,
+            "copy_ratio_nonsentinel": 0.20,
+            "copy_ratio_substantive": 0.45,
+            "source_distinct": 5_000,
+        },
+    }
+    flags = probe_module.memorization_flags(columns)
+    assert [f["column"] for f in flags] == ["LEAKY"]
+    assert flags[0]["copy_ratio_substantive"] == 0.45
+    assert flags[0]["severity"] == "CRITICAL"
+
+
+def test_copy_fraction_rule_scores_substantive_when_present(probe_module):
+    per_col = {
+        "COL_048": {
+            "in_source_schema": True,
+            "copy_ratio_nonsentinel": 0.628,
+            "copy_ratio_substantive": 0.0,
+            "source_distinct": 19_815,
+            "distinct": 500,
+            "source_distinct_ratio": 0.09,
+        },
+    }
+    results = probe_module.evaluate_freetext_rules(per_col)
+    cf = [r for r in results if r["rule"] == "freetext.copy_fraction"]
+    assert len(cf) == 1
+    assert cf[0]["passed"] is True
+    assert cf[0]["value"] == 0.0
+
+
+def test_substantive_sql_excludes_empty_and_frequent_source_values(probe_module):
+    """The membership subquery must (a) drop trimmed-empty landing values
+    and (b) exempt source values with frequency >= the k-anonymity floor —
+    head-value re-emission (`ZZ3000` at 77% share) is enum mass, and a
+    value shared by dozens of source rows identifies nobody."""
+    sql = probe_module._substantive_copy_sql("`p.d.landing`", "`p.d.source`", "`c`")
+    flat = " ".join(sql.split())
+    assert "HAVING COUNT(*) <" in flat
+    assert "TRIM(" in flat

@@ -32,6 +32,22 @@ class FreeTextEmptyYieldError(RuntimeError):
     """
 
 
+class ModelClientTransientError(RuntimeError):
+    """The model client could not serve THIS call, but the condition is
+    expected to clear without operator action (ADR 0033).
+
+    Raised by a `ModelClient` when the server is not (yet) usable for a
+    reason that resolves on its own — a GPU transiently too full to host
+    the model while sibling embedders demote. The engine treats it as
+    "not ready", never as "the LLM yielded nothing": a ladder thread that
+    hits it is retried in-process once its siblings have landed, and it is
+    NEVER swallowed into the lax exemplar fallback (the 2026-07-10 root
+    cause — setup() never ran — was universal memorization). 2026-08-25
+    R6: one thread's fit-wait expired 60 s before a sibling's spawn
+    succeeded; the bundle failed after 10 min of finished sibling work.
+    """
+
+
 def escalating_temperatures(start: float = 0.7) -> tuple[float, ...]:
     """Sampling temperatures for free-text pool retries, ascending from
     ``start`` up to 1.3.
@@ -166,6 +182,12 @@ class GenerationContext(BaseModel):
     # Columns that must be per-row-unique and NEVER sampled from reference
     # data (PK / UUID / account-number style). See engines/identity.py.
     identity_columns: list[str] = Field(default_factory=list)
+    # Declared primary-key columns (relational contract / --pk_cols). The
+    # 2026-08-21 run proved generation must know the PK, not just the
+    # gate: the declared PK drew from a 512-cap pool and 999 488 rows
+    # were pk.duplicate by construction (ADR 0028). Routed constraint
+    # samplers keep a per-process emitted set for these columns.
+    pk_columns: list[str] = Field(default_factory=list)
     # When True (real-LLM runs), a failed free-text LLM call re-raises
     # instead of silently falling back to reference exemplars. The 2026-07-10
     # E2E runs shipped 100% memorized identifiers because the fallback was
@@ -190,12 +212,80 @@ class GenerationContext(BaseModel):
     # chunk_store above.
     freetext_pools_table: str = ""
     pool_store: object | None = None
+    # A `SourceValueStore` (Protocol in sdfb_core.pools.store) holding each
+    # column's FULL distinct source values, attached worker-side by the
+    # pool-build DoFn. When present, the pool ladder and shape fallback
+    # reject candidates against the whole source domain, not just the
+    # profiled sample — the 2026-08-05 B_TABLE R1 run landed 33-99%
+    # verbatim source values exactly because the sample was the only
+    # rejection set. None ⇒ pre-fix behavior, unchanged.
+    source_value_store: object | None = None
+    # True only inside BuildFreeTextPoolsDoFn, which blanks pool_store by
+    # design (self-read guard): suppresses the `freetext_pool_store_absent`
+    # WARNING that two E2E reports misread as a store outage.
+    pool_branch: bool = False
+    # Reference-table FQN for the worker-side `BigQuerySourceValueStore`
+    # attach (mirrors rag_chunks_table / freetext_pools_table). B.2 builds
+    # pools LAZILY inside Generate DoFns — no pool branch — so the ADR 0023
+    # rejection set must ride the generate path too; fetches are lazy
+    # (only when a ladder/pool actually builds) and process-cached.
+    # Empty ⇒ no attach.
+    source_values_table: str = ""
     # --- pool seeding experiment (WS5 §3) -------------------------------
     # "centroid" (control, today's behavior) | "kcenter" | "kcenter_rotate".
     # Retrieval runs 3x per setup and only picks 8 prompt seeds, so this is
     # the cheapest lever on novel-yield-per-call there is. One build, three
     # arms — the runs differ in exactly one variable.
     pool_seed_strategy: str = "centroid"
+    # Shape-preserving expander (2026-08-05 spec C3): "off" draws from the
+    # bounded pool only (distinct capped at pool size — the 10M-run
+    # diversity ceiling), "identifiers" (default) expands code-like columns
+    # from their observed shape mix, "all" also mutates digit runs inside
+    # texty pool draws. Never adds an LLM call on any setting.
+    freetext_expansion: str = "identifiers"
+    # Enforced FK edges → the parent's landed key TUPLES (ADR 0031):
+    # ``[{"cols": [...], "keys": [[v, …], …]}, …]``. The tuple is the
+    # unit of referential integrity, so it is the unit of the draw —
+    # per-column pools cannot express "this combination exists".
+    fk_key_pools: list[dict] = Field(default_factory=list)
+    # Per-column projection of the same keys (ADR 0021 shape). Kept for
+    # profiling/plan metadata and for single-column edges arriving from
+    # the legacy driver-side loader; sampling truth is fk_key_pools.
+    fk_pools: dict[str, tuple] = Field(default_factory=dict)
+    # Relational E2E metadata for the once-per-plan `relational_e2e`
+    # worker log entry (ADR 0028 follow-up): where this run lands, and
+    # each declared FK edge as {"cols": [...], "ref": "ds.parent",
+    # "parent_landing": "project.landing.parent"}. Display-only — the
+    # sampling truth stays in fk_pools.
+    landing_table: str = ""
+    fk_edges: list[dict] = Field(default_factory=list)
+    # The relationship card the LAUNCHER rendered from
+    # `config/relationships/` (ADR 0032), carried verbatim so the worker
+    # log shows the same model the driver planned from — no second graph
+    # implementation, nothing to drift.
+    relationship_card: str = ""
+    # Multi-table launches (ADR 0030): the landing table NAME used to
+    # qualify column references in pretty log payloads
+    # (`<LANDING>.<col>`) so oss/ replacements stay unambiguous when N
+    # tables share one worker log. Empty = single-table, bare names.
+    log_table_prefix: str = ""
+    # Attach the per-column llm_prompt_constraint (parsed from the column's
+    # DDL description JSON) to pool prompts. Per-column CONSTANT suffix —
+    # prefix-cache-safe (ADR 0018).
+    prompt_constraints: bool = True
+    # Log each built pool prompt as a `freetext_pool_prompt` milestone
+    # (ADR 0024 §3c): "off" (default) logs nothing; "redacted" elides seed
+    # exemplars (reference values never reach logs); "full" logs verbatim
+    # prompts at WARNING — explicit debug-run opt-in only.
+    prompt_debug: str = "off"
+    # Full-table distinct counts per column, driver-populated from the
+    # Tier-2 exact stats pass (--source_stats=exact, ADR 0022). The 10k
+    # reference sample under-estimates cardinality (five-run verdict:
+    # sample distinct 95 vs source 4k starved the pool at 95); these lift
+    # the pool target back toward _FREE_TEXT_POOL_MAX. Empty = Tier 1 only,
+    # sample-distinct behavior unchanged. Workers stay stats-TABLE-agnostic:
+    # the value arrives through this context, never a BQ read.
+    source_distinct: dict[str, int] = Field(default_factory=dict)
     # --- RAG layer (WS2 §4b) -------------------------------------------
     # Requested synthetic row count — bounds the free-text pool target
     # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.
@@ -225,6 +315,20 @@ class GenerationEngine(ABC):
     """
 
     name: str = ""
+
+    @property
+    def constrained_columns(self) -> frozenset[str]:
+        """Columns this engine generates from a declared clause's own
+        value space (ADR 0028 Tier P/B).
+
+        The DoFn asks so that identity synthesis does not overwrite them
+        (2026-08-25: a `pattern`-routed identity column landed UUIDs).
+        Such a generator already satisfies what identity synthesis is
+        for — it draws from the clause, never from the source domain —
+        and the engine gives it per-run uniqueness in exchange.
+        Engines with no router return the empty set and behave as before.
+        """
+        return frozenset()
 
     @abstractmethod
     def setup(self, model_client: ModelClient, ctx: GenerationContext) -> None:

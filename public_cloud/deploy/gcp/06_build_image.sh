@@ -12,7 +12,7 @@ require_env PROJECT_SUFFIX
 cd "${REPO_ROOT}"
 run gcloud builds submit . \
   --config "${SCRIPT_DIR}/cloudbuild/build_image.yaml" \
-  --substitutions "_IMAGE_URI=${IMAGE_URI}" \
+  --substitutions "_IMAGE_URI=${IMAGE_URI},_GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
   --service-account "projects/${PROJECT_ID}/serviceAccounts/${BUILD_SA}" \
   --project "${PROJECT_ID}" --region "${REGION}"
 

@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import apache_beam as beam
 from sdfb_core.engines import get_engine
-from sdfb_core.observability import log_milestone
+from sdfb_core.observability import log_milestone, milestone_scope
 from sdfb_core.pools import FreeTextPool
 
 from sdfb_beam.dofns.localize import localize_embedder
@@ -33,7 +34,14 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
     already produced.
     """
 
-    def __init__(self, engine_name: str, model_client, ctx, store=None) -> None:
+    def __init__(
+        self,
+        engine_name: str,
+        model_client,
+        ctx,
+        store=None,
+        source_value_store=None,
+    ) -> None:
         self.engine_name = engine_name
         self.model_client = model_client
         self.ctx = ctx
@@ -42,6 +50,10 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
         # this DoFn's output releases Generate only once a store fetch hits.
         # Distinct from ctx.pool_store, which setup() blanks (self-read guard).
         self.store = store
+        # Full-domain rejection (2026-08-05 B_TABLE R1: pools memorized
+        # 33-99% of 10 columns). Attached worker-side onto the ctx so the
+        # engine's ladder rejects against the whole source, not the sample.
+        self.source_value_store = source_value_store
         self._engine: Any = None
 
     def setup(self) -> None:
@@ -53,20 +65,38 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
         # The build branch must never read its own output — otherwise it
         # would short-circuit itself into writing nothing on a re-run.
         ctx = ctx.model_copy(
-            update={"pool_store": None, "freetext_pools_table": ""}
+            update={
+                "pool_store": None,
+                "freetext_pools_table": "",
+                "source_value_store": self.source_value_store,
+                "pool_branch": True,
+            }
         )
         self.ctx = ctx
         engine_class = get_engine(self.engine_name)
         self._engine = engine_class()
         t0 = time.monotonic()
-        self._engine.setup(self.model_client, ctx)
-        log_milestone(
-            "pool_branch_setup_done",
-            seconds=round(time.monotonic() - t0, 1),
-            engine=self.engine_name,
-        )
+        with self._scope():
+            self._engine.setup(self.model_client, ctx)
+            log_milestone(
+                "pool_branch_setup_done",
+                seconds=round(time.monotonic() - t0, 1),
+                engine=self.engine_name,
+            )
+
+    def _scope(self):
+        prefix = getattr(self.ctx, "log_table_prefix", "")
+        return milestone_scope(prefix) if prefix else nullcontext()
 
     def process(self, _element) -> Iterator[dict]:
+        scope = self._scope()
+        scope.__enter__()
+        try:
+            yield from self._process_scoped()
+        finally:
+            scope.__exit__(None, None, None)
+
+    def _process_scoped(self) -> Iterator[dict]:
         pools = getattr(self._engine, "_free_text_pools", None) or {}
         build_info = getattr(self._engine, "_pool_build_info", None) or {}
         rows = []

@@ -1,8 +1,14 @@
 # Design — Persistent RAG layer (`synthetic_rag.rag_chunks`)
 
-- **Status**: adopted — Phase A implemented (WS2, 2026-07-20)
-- **Date**: 2026-07-07
-- **Updated**: 2026-07-20
+> **Status: ACCEPTED — Phase A implemented** (WS2, 2026-07-20; proposed
+> 2026-07-07) · visuals retrofitted 2026-08-05 per the
+> `visual-first-documentation` skill
+> · decision record: [ADR 0017](../adr/0017-custom-rag-layer-over-beam-ml-rag.md)
+> · retrieval *geometry* (unit-sphere trigonometry, centroid cones, k-center
+> coverage) is owned by
+> [`2026-07-25-rag-retrieval-geometry-roadmap.md`](2026-07-25-rag-retrieval-geometry-roadmap.md)
+> and reused here, never redrawn.
+
 - **Scope**: Phase A (this doc) is implemented. Phase B/C are deferred — see
   §6 and `docs/superpowers/specs/2026-07-20-e2e-remediation-rag-eval-evolution-design.md` §4.
 - **Author context**: ACTION_4 from the M1→M2 planning pass (see project memory).
@@ -250,36 +256,28 @@ When both are set, this adds one branch to the DAG built by `build_pipeline()`
 (`packages/sdfb-beam/src/sdfb_beam/pipeline.py`), fed from the same
 `reference_rows` PCollection the engine already consumes — no second BQ read.
 
+Claim: *population is one opt-in DAG branch off the reference rows the run
+already holds, skipped entirely at DAG-construction time when the digest is
+already embedded.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  REF["⚪ reference_rows<br/>existing PCollection"]:::data --> EX{"🛡️ driver exists()?<br/>digest + embedder id/ver"}
+  EX -- "already populated" --> SKIP["⚪ branch never added<br/>rag_population_skipped"]:::data
+  EX -- "not yet" --> CHUNK["🔀 ChunkReferenceRowsDoFn<br/>row_doc + free_text_col<br/>chunk_id · row_digest"]:::beam
+  CHUNK --> EMB["🔀 EmbedChunksDoFn<br/>setup()-built BgeEmbedder<br/>GCS warm-pull, local-only"]:::beam
+  EMB --> W["🔀 WriteToBigQuery<br/>FILE_LOADS · WRITE_APPEND<br/>CREATE_NEVER"]:::beam
+  W --> BQT[("🗄️ synthetic_rag.<br/>rag_chunks")]:::store
 ```
-                         ┌─────────────────────────┐
- reference_rows ────────▶│ ReferenceDigestKnown?    │  (driver-side store.exists()
- (existing PCollection,  │  skip if rows already    │   check for this reference_digest
-  side input today)      │  exist for this digest   │   + embedder id/version, before
-                         └───────────┬─────────────┘   the DAG is constructed)
-                                     │ (only when NOT already populated)
-                                     ▼
-                         ┌─────────────────────────┐
-                         │ ChunkReferenceRowsDoFn   │  row-as-doc (chunk_index=0,
-                         │  (sdfb-core, pure-Python)│  chunk_kind='row_doc') +
-                         │                          │  one chunk per free-text column
-                         └───────────┬─────────────┘  (chunk_kind='free_text_col');
-                                     │                 chunk_id/source_pk/row_digest
-                                     │                 attached here via chunk_row()
-                                     ▼
-                         ┌─────────────────────────┐
-                         │ EmbedChunksDoFn          │  setup()-built embedder (same
-                         │ (setup-built embedder)   │  GCS warm-pull + local-only
-                         │                          │  loading as GenerateRecordsDoFn);
-                         └───────────┬─────────────┘  embeds + assembles the final
-                                     │                 rag_chunks row dict (metadata,
-                                     │                 created_at) via chunk_to_bq_row()
-                                     ▼
-                         ┌─────────────────────────┐
-                         │ WriteToBigQuery          │  FILE_LOADS, WRITE_APPEND,
-                         │ (rag_chunks)             │  CREATE_NEVER (matches landing/
-                         │                          │  dlq/validation_runs convention)
-                         └─────────────────────────┘
-```
+
+The `exists()` check runs once on the driver before the graph is built —
+one BQ query, never N per-worker checks; a hit means the branch is not in
+the DAG at all.
 
 Design notes:
 
@@ -340,9 +338,9 @@ Design notes:
   is implemented — not part of this document's scope to edit, since M1
   contents are frozen; noted here as the follow-on doc change.
 
-**Delta from the original design.** The 2026-07-07 diagram above put the
-embed step behind `RunInference` (`EmbedderModelHandler` wrapping
-`BgeEmbedder`). Phase A implemented it as `EmbedChunksDoFn`, a plain DoFn
+**Delta from the original design.** The original 2026-07-07 version of the
+population diagram put the embed step behind `RunInference`
+(`EmbedderModelHandler` wrapping `BgeEmbedder`). Phase A implemented it as `EmbedChunksDoFn`, a plain DoFn
 with a `setup()`-built embedder instead — matching the lifecycle convention
 `GenerateRecordsDoFn` already uses for the *generation-time* embedder
 (build-heavy-object-once-in-setup, per `.claude/skills/beam-dofn.md`), so the
@@ -376,7 +374,31 @@ class ChunkStore(Protocol):
 implementation; `InMemoryChunkStore` (`sdfb_core/rag/store.py`) is the
 test/laptop double.
 
+Claim: *the read path is all-or-nothing — one missing or wrong-dim row
+discards the whole fetch and falls back to today's embed path, so the two
+branches always converge on identical `_ref_vectors`/`_index` state.*
+
+```mermaid
+flowchart TD
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  S["⚙️ B1RagEngine.setup()<br/>profile columns (unchanged)"]:::cpu --> Q{"⚙️ chunk_store attached<br/>AND digest known?"}
+  Q -- no --> EMB["⚙️ embed on worker<br/>serialize → BgeEmbedder"]:::cpu
+  Q -- yes --> F["⚙️ fetch(digest, row_doc,<br/>embedder id, version)"]:::cpu
+  F --> COV{"🛡️ all-or-nothing coverage:<br/>every row present,<br/>every dim correct?"}
+  COV -- "any failure" --> EMB
+  COV -- pass --> REUSE["⚙️ vectors from BQ<br/>b1_chunks_reused milestone"]:::cpu
+  REUSE --> IDX["⚙️ build_index — same FAISS<br/>IndexFlatIP either way"]:::cpu
+  EMB --> IDX
+  IDX --> POOLS["⚙️ free-text pools (§5a)<br/>unchanged downstream"]:::cpu
+  BQT[("🗄️ rag_chunks")]:::store --> F
 ```
+
+In prose, the same contract:
+
+```text
 setup(model_client, ctx):
   1. profile columns (unchanged)
   2. IF ctx.chunk_store is not None AND ctx.reference_digest:
@@ -449,6 +471,45 @@ Key properties:
   bypassing the DoFn entirely.
 
 ## 5. Chunking & retrieval standards
+
+Claim: *one vector table, two deliberately different retrieval surfaces —
+exact-local for the pipeline's own generation (deterministic, no RPCs in
+the hot path), approximate-BQ for every external consumer.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  BQT[("🗄️ synthetic_rag.rag_chunks<br/>L2-normalized vectors")]:::store
+  subgraph gen ["generation (this pipeline)"]
+    SETUP["🔀 DoFn setup()<br/>fetch once per worker"]:::beam
+    FAISS["⚙️ local FAISS IndexFlatIP<br/>exact cosine, deterministic"]:::cpu
+    EX["🧠 exemplars → LLM<br/>free-text pools"]:::gpu
+    SETUP --> FAISS --> EX
+  end
+  subgraph ext ["downstream consumers (chatbot, KG, any GenAI app)"]
+    VS["⚙️ BQ VECTOR_SEARCH<br/>IVF, approximate, COSINE"]:::cpu
+    APP["⚪ top-k chunks +<br/>source_pk / row_digest linkage"]:::data
+    VS --> APP
+  end
+  BQT --> SETUP
+  BQT --> VS
+```
+
+The split is load-bearing, not incidental: exact `IndexFlatIP` keeps
+generation deterministic and RPC-free per the "deterministic top-k" comment
+in `sdfb_core/rag/index.py`; IVF `VECTOR_SEARCH` trades exactness for
+scale-free external querying. The *geometry* of the exact side — why
+centroid top-k, what the retrieval cone looks like on the unit sphere, when
+k-center beats it — is drawn in
+[`2026-07-25-rag-retrieval-geometry-roadmap.md`](2026-07-25-rag-retrieval-geometry-roadmap.md)
+([retrieval geometry](assets/embedding-geometry-topk.png),
+[centroid vs per-query](assets/centroid-vs-perquery.png)) and reused, not
+redrawn.
 
 - **Row-as-document serialization** (`chunk_kind='row_doc'`): identical to
   today's GReaT-style sentence — `"col is value, col is value, ..."` in
@@ -641,3 +702,23 @@ unchanged** until an operator opts in:
    running it, leaves the system in today's state — the read branch's
    fallback makes `rag_chunks` purely additive infrastructure that can be
    ignored, emptied, or dropped without touching engine code.
+
+## Figure provenance
+
+All figures in this doc are inline mermaid (house classDef vocabulary —
+🟠 Beam, 🟢 CPU/pure-Python, 🟣 GPU/vLLM, 🔵 stores, ⚪ values); this doc
+plots no measured magnitudes of its own. The pool-reuse *evidence* (cold
+vs warm pool timings) lives with the WS5/WS6 run docs
+([`2026-07-26-ws5-generation-throughput.md`](2026-07-26-ws5-generation-throughput.md),
+[`2026-07-27-ws6-pipeline-shape.md`](2026-07-27-ws6-pipeline-shape.md));
+retrieval-geometry concept figures are owned by
+[`2026-07-25-rag-retrieval-geometry-roadmap.md`](2026-07-25-rag-retrieval-geometry-roadmap.md)
+and linked above (concept figures are shared repo assets — reuse before
+redraw, per the `visual-first-documentation` skill).
+
+External references:
+[GReaT serialization (Borisov et al., ICLR 2023)](https://arxiv.org/abs/2210.06280)
+(the row-as-document convention `serialize_row()` follows) ·
+[BigQuery vector search](https://cloud.google.com/bigquery/docs/vector-search) ·
+[FAISS](https://github.com/facebookresearch/faiss) —
+retrieval date for all URLs: 2026-08-05.

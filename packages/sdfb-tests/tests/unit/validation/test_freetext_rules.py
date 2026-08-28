@@ -1,0 +1,239 @@
+"""Post-run freetext parity/diversity/copy rules (Task 11)."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+from sdfb_core.validation.thresholds import load_thresholds
+
+_SCRIPT = Path(__file__).parents[5] / "scripts" / "e2e" / "e2e_gcp_probe.py"
+_spec = importlib.util.spec_from_file_location("e2e_gcp_probe_ft", _SCRIPT)
+_probe = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _probe
+_spec.loader.exec_module(_probe)
+
+_THRESHOLDS = Path(__file__).parents[5] / "config" / "thresholds.yml"
+
+
+def test_catalog_carries_freetext_rules():
+    t = load_thresholds(_THRESHOLDS, env="prd")
+    for rule_id in (
+        "freetext.empty_parity",
+        "freetext.distinct_floor",
+        "freetext.copy_fraction",
+    ):
+        assert rule_id in t.rules, rule_id
+        assert t.rules[rule_id].get("scope") == "post_run"
+
+
+def _columns() -> dict:
+    return {
+        "SPARSE": {  # source 91% empty, synthetic 0% — the crosscheck gap
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.914,
+            "distinct": 512,
+            "source_distinct": 73231,
+            "source_distinct_ratio": 0.038,
+            "copy_ratio_nonsentinel": 0.0,
+        },
+        "IDS": {  # high-cardinality: distinct collapsed to pool size
+            "in_source_schema": True,
+            "empty_fraction": 0.05,
+            "source_empty_fraction": 0.05,
+            "distinct": 512,
+            "source_distinct": 146046,
+            "source_distinct_ratio": 0.76,
+            "copy_ratio_nonsentinel": 0.0,
+        },
+        "LEAKY": {  # verbatim copies on a high-cardinality column
+            "in_source_schema": True,
+            "empty_fraction": 0.1,
+            "source_empty_fraction": 0.1,
+            "distinct": 90000,
+            "source_distinct": 100000,
+            "source_distinct_ratio": 0.9,
+            "copy_ratio_nonsentinel": 0.4,
+        },
+        "NOT_IN_SRC": {"in_source_schema": False},
+    }
+
+
+def test_evaluate_freetext_rules_flags_the_three_defects():
+    results = _probe.evaluate_freetext_rules(_columns())
+    by = {(r["rule"], r["column"]): r for r in results}
+
+    assert by[("freetext.empty_parity", "SPARSE")]["passed"] is False
+    assert by[("freetext.empty_parity", "IDS")]["passed"] is True
+    assert by[("freetext.distinct_floor", "IDS")]["passed"] is False
+    assert by[("freetext.copy_fraction", "LEAKY")]["passed"] is False
+    assert by[("freetext.copy_fraction", "IDS")]["passed"] is True
+    assert not [r for r in results if r["column"] == "NOT_IN_SRC"]
+
+
+def test_copy_fraction_tolerates_millionth_scale_noise():
+    """2026-08-09 R1 (both tables): a few-in-a-million coincidental
+    source/synthetic collision failed the strict max=0.0 gate and the
+    rounded display value read 0.0 — a 'fails at 0.0' contradiction. The
+    threshold is now a table-size epsilon and the reported value keeps
+    enough precision to show WHY."""
+    cols = {
+        "NOISY": {
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 900000,
+            "source_distinct": 34622,
+            "source_distinct_ratio": 0.9,
+            "copy_ratio_substantive": 2.2e-05,  # COL_009's raw value
+        },
+        "LEAKY": {
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 90000,
+            "source_distinct": 100000,
+            "source_distinct_ratio": 0.9,
+            "copy_ratio_substantive": 0.4,
+        },
+    }
+    by = {
+        (r["rule"], r["column"]): r
+        for r in _probe.evaluate_freetext_rules(cols)
+    }
+    noisy = by[("freetext.copy_fraction", "NOISY")]
+    assert noisy["passed"] is True
+    assert noisy["value"] == 2.2e-05  # unrounded — never displays as 0.0
+    assert by[("freetext.copy_fraction", "LEAKY")]["passed"] is False
+
+
+def test_distinct_floor_skips_low_cardinality_sources():
+    cols = {
+        "ENUMISH": {
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 5,
+            "source_distinct": 40,
+            "source_distinct_ratio": 0.02,
+            "copy_ratio_nonsentinel": 0.0,
+        }
+    }
+    rules = [r["rule"] for r in _probe.evaluate_freetext_rules(cols)]
+    assert "freetext.distinct_floor" not in rules
+
+
+def test_copy_fraction_exempts_dense_numeric_domains():
+    # 2026-08-20 R1 pair: 15 of the 16 copy_fraction BLOCKER rows were
+    # numeric columns whose substantive collision (0.02%-11%) is dense
+    # integer-domain mass — an interpolated in-range integer lands on a
+    # real value by domain density, the same "collision by domain size"
+    # argument as the day-granularity exemption. Numeric privacy stays
+    # owned by memorization_flags (0.3 substantive threshold, k-anon
+    # floor); the freetext rule now exempts numeric-typed columns, visibly.
+    cols = {
+        "SETTLE_AMT": {  # INT64, COL_047-class: exempt but visible
+            "in_source_schema": True,
+            "type": "INT64",
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 12481,
+            "source_distinct": 9053,
+            "source_distinct_ratio": 0.043,
+            "copy_ratio_substantive": 0.109,
+        },
+        "REF_TEXT": {  # STRING control at the same magnitude: still fails
+            "in_source_schema": True,
+            "type": "STRING",
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 12481,
+            "source_distinct": 9053,
+            "source_distinct_ratio": 0.043,
+            "copy_ratio_substantive": 0.109,
+        },
+    }
+    by = {
+        (r["rule"], r["column"]): r
+        for r in _probe.evaluate_freetext_rules(cols)
+        if r["rule"] == "freetext.copy_fraction"
+    }
+    amt = by[("freetext.copy_fraction", "SETTLE_AMT")]
+    assert amt["passed"] is True
+    assert amt.get("exempt") == "numeric_domain"
+    assert by[("freetext.copy_fraction", "REF_TEXT")]["passed"] is False
+
+
+def test_numeric_exempt_column_still_flags_critical_memorization():
+    # COL_009 (2026-08-20 A_TABLE R1): INT64, 52% substantive collision.
+    # The copy_fraction row is numeric-exempt (dense-domain class), but the
+    # CRITICAL channel — memorization_flags — must still fire: the two
+    # rules are tiers, not duplicates.
+    entry = {
+        "ACCOUNT_NO": {
+            "in_source_schema": True,
+            "type": "INT64",
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 134297,
+            "source_distinct": 34622,
+            "source_distinct_ratio": 0.164,
+            "copy_ratio": 0.831829,
+            "copy_ratio_nonsentinel": 0.831829,
+            "copy_ratio_substantive": 0.52175,
+        },
+    }
+    rows = {
+        (r["rule"], r["column"]): r
+        for r in _probe.evaluate_freetext_rules(entry)
+        if r["rule"] == "freetext.copy_fraction"
+    }
+    assert rows[("freetext.copy_fraction", "ACCOUNT_NO")]["passed"] is True
+    assert rows[("freetext.copy_fraction", "ACCOUNT_NO")].get("exempt") == "numeric_domain"
+    flags = _probe.memorization_flags(entry)
+    assert len(flags) == 1
+    assert flags[0]["column"] == "ACCOUNT_NO"
+    assert flags[0]["severity"] == "CRITICAL"
+
+
+def test_copy_fraction_exempts_day_granularity_temporal_columns():
+    # 2026-08-11 A_TABLE R1: 5 temporal day-granularity columns failed the
+    # BLOCKER unconditionally while `memorization_flags` had already
+    # demoted the same columns to INFO — a 3650-day domain collides with a
+    # dense source by domain size, never per-row memorization. The rule now
+    # honors the probe's `temporal_day_granularity` flag: the result row
+    # stays visible but passes, tagged with the exemption.
+    cols = {
+        "LOAD_DATE": {
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 2932,
+            "source_distinct": 7574,
+            "source_distinct_ratio": 0.036,
+            "copy_ratio_substantive": 0.3664,
+            "temporal_day_granularity": True,
+        },
+        "FREE_ID": {  # non-temporal control: still a BLOCKER failure
+            "in_source_schema": True,
+            "empty_fraction": 0.0,
+            "source_empty_fraction": 0.0,
+            "distinct": 61707,
+            "source_distinct": 9053,
+            "source_distinct_ratio": 0.043,
+            "copy_ratio_substantive": 0.1186,
+            "temporal_day_granularity": False,
+        },
+    }
+    results = _probe.evaluate_freetext_rules(cols)
+    by_col = {
+        (r["rule"], r["column"]): r
+        for r in results
+        if r["rule"] == "freetext.copy_fraction"
+    }
+    exempt = by_col[("freetext.copy_fraction", "LOAD_DATE")]
+    assert exempt["passed"] is True
+    assert exempt.get("exempt") == "temporal_day_granularity"
+    assert by_col[("freetext.copy_fraction", "FREE_ID")]["passed"] is False

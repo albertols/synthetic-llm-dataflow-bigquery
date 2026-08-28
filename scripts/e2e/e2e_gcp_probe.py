@@ -24,7 +24,7 @@ Nothing here is specific to any one table or environment: pass ``--project``,
 ``--source-fqn``, ``--landing-fqn`` and ``--job-id`` and it works anywhere.
 
 Usage:
-    python scripts/e2e_gcp_probe.py \
+    python scripts/e2e/e2e_gcp_probe.py \
         --project project \
         --source-fqn project.dataset.table \
         --landing-fqn project.synthetic_data.table \
@@ -180,6 +180,7 @@ def bq_cross_validation(
               COUNT(*) AS n,
               COUNT(DISTINCT {col}) AS distinct_n,
               COUNTIF({col} IS NULL) AS null_n,
+              COUNTIF(TRIM(SAFE_CAST({col} AS STRING)) = '') AS empty_n,
               {zero_expr} AS zero_n,
               APPROX_TOP_COUNT({col}, 1)[SAFE_OFFSET(0)].count AS top_count
             FROM {_quote(landing_fqn)}
@@ -193,6 +194,8 @@ def bq_cross_validation(
             "distinct": agg["distinct_n"],
             "distinct_ratio": _ratio(agg["distinct_n"], n),
             "null_fraction": _ratio(agg["null_n"], n),
+            # Trimmed-empty parity signal (2026-08-05 spec C4).
+            "empty_fraction": _ratio(agg["empty_n"], n),
             "zero_fraction": _ratio(agg["zero_n"], n) if is_numeric else None,
             "top_value_share": _ratio(agg["top_count"], n),  # repetition
             "is_constant": (agg["distinct_n"] or 0) <= 1,     # singularity
@@ -210,7 +213,7 @@ def bq_cross_validation(
         # probe on invalid UTF-8.
         if name in src_cols:
             sentinel_re = r"'^(0001|9999)-'"
-            day_re = r"'^\d{4}-\d{2}-\d{2}$'"
+            day_re = r"'^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
             in_src = (
                 f"{col} IN (SELECT DISTINCT {col} FROM {_quote(source_fqn)})"
             )
@@ -229,9 +232,18 @@ def bq_cross_validation(
                 FROM {_quote(landing_fqn)}
                 """,
             )
-            src_distinct = _scalar(
-                client, f"SELECT COUNT(DISTINCT {col}) FROM {_quote(source_fqn)}"
+            src_agg = _row(
+                client,
+                f"""
+                SELECT
+                  COUNT(DISTINCT {col}) AS distinct_n,
+                  COUNTIF(TRIM(SAFE_CAST({col} AS STRING)) = '') AS empty_n
+                FROM {_quote(source_fqn)}
+                """,
             )
+            src_distinct = src_agg["distinct_n"]
+            entry["source_empty_fraction"] = _ratio(src_agg["empty_n"], src_n)
+            entry["source_distinct_ratio"] = _ratio(src_distinct, src_n)
             copied = mem["copied"]
             sentinel_n = mem["sentinel_n"] or 0
             non_null = n - (agg["null_n"] or 0)
@@ -241,6 +253,15 @@ def bq_cross_validation(
             entry["sentinel_fraction"] = _ratio(sentinel_n, n)
             entry["copy_ratio_nonsentinel"] = _ratio(
                 mem["copied_nonsentinel"], n - sentinel_n
+            )
+            sub = _row(
+                client,
+                _substantive_copy_sql(
+                    _quote(landing_fqn), _quote(source_fqn), col
+                ),
+            )
+            entry["copy_ratio_substantive"] = _ratio(
+                sub["copied_substantive"], sub["substantive_n"]
             )
             entry["temporal_day_granularity"] = bool(
                 non_null > 0 and (mem["day_shaped_n"] or 0) >= 0.99 * non_null
@@ -256,7 +277,132 @@ def bq_cross_validation(
         "pk_analysis": _pk_analysis(client, landing_fqn, pk_columns),
         "columns": per_col,
         "memorization_flags": memorization_flags(per_col),
+        "freetext_rules": evaluate_freetext_rules(per_col),
     }
+
+
+# --- post-run free-text fidelity rules (2026-08-05 spec C4) ---------------
+# Mirrors config/thresholds.yml `scope: post_run` entries. Defaults are
+# duplicated here because the probe is a standalone script (no project
+# imports at runtime); pass a `rules` dict parsed from thresholds.yml to
+# override.
+_FREETEXT_RULE_DEFAULTS: dict[str, dict] = {
+    "freetext.empty_parity": {"severity": "MAJOR", "max_abs_delta": 0.10},
+    "freetext.distinct_floor": {
+        "severity": "MAJOR",
+        "applies_above_source_distinct_ratio": 0.5,
+        "min_ratio_of_source": 0.5,
+        "floor_distinct": 5120,
+    },
+    "freetext.copy_fraction": {
+        "severity": "BLOCKER",
+        # Table-size epsilon, not exact zero: coincidental collisions at
+        # 1M rows false-flagged 15 instances across the 2026-08-09 R1 runs
+        # (mirrors config/thresholds.yml).
+        "max": 1.0e-4,
+        "applies_above_source_distinct": 100,
+        # Day-granularity temporal columns collide with a dense source by
+        # domain size (~3650 possible days), never per-row memorization —
+        # `memorization_flags` already demotes them to INFO, and the
+        # 2026-08-11 A_TABLE R1 fired 5 false BLOCKERs on exactly this
+        # class. The result row stays visible, tagged and passing.
+        "exempt_day_granularity": True,
+        # Numeric columns collide the same way a day-domain does: an
+        # in-range integer draw lands on a real value by DOMAIN DENSITY,
+        # not by copying a row (ADR 0025 pre-authorized this carve-out;
+        # the 2026-08-20 R1 pair fired 15 false BLOCKERs at 0.02%-11% on
+        # INT64 columns). Numeric privacy stays owned by
+        # `memorization_flags` (substantive >= 0.3, k-anon floor) — the
+        # exempt row stays visible and tagged so the two tiers read
+        # together.
+        "exempt_numeric_domains": True,
+    },
+}
+
+# BQ types on the numeric-domain exemption (matches the engine's
+# _NUMERIC_BQ_TYPES; the probe stores the landing schema type per column).
+_NUMERIC_BQ_TYPES = frozenset(
+    {"INTEGER", "INT64", "FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"}
+)
+
+
+def evaluate_freetext_rules(
+    per_col: dict[str, dict], rules: dict[str, dict] | None = None
+) -> list[dict]:
+    """Evaluate the post_run freetext rules over per-column cross-validation
+    entries. Pure + offline: returns one result dict per (rule, column)
+    where the rule applies; a column absent from the source is skipped."""
+    cfg = {**_FREETEXT_RULE_DEFAULTS, **(rules or {})}
+    results: list[dict] = []
+
+    def add(rule: str, column: str, value, passed: bool) -> None:
+        results.append(
+            {
+                "rule": rule,
+                "column": column,
+                "value": value,
+                "passed": passed,
+                "severity": cfg[rule].get(
+                    "severity", _FREETEXT_RULE_DEFAULTS[rule]["severity"]
+                ),
+            }
+        )
+
+    for name, e in per_col.items():
+        if not e.get("in_source_schema"):
+            continue
+        ep = cfg["freetext.empty_parity"]
+        src_empty = e.get("source_empty_fraction")
+        lnd_empty = e.get("empty_fraction")
+        if src_empty is not None and lnd_empty is not None:
+            delta = round(abs(lnd_empty - src_empty), 4)
+            add(
+                "freetext.empty_parity", name, delta,
+                delta <= ep.get("max_abs_delta", 0.10),
+            )
+        df = cfg["freetext.distinct_floor"]
+        sdr = e.get("source_distinct_ratio")
+        src_distinct = e.get("source_distinct")
+        if (
+            sdr is not None
+            and src_distinct
+            and sdr > df.get("applies_above_source_distinct_ratio", 0.5)
+        ):
+            floor = min(
+                df.get("min_ratio_of_source", 0.5) * src_distinct,
+                df.get("floor_distinct", 5120),
+            )
+            add(
+                "freetext.distinct_floor", name, e.get("distinct"),
+                (e.get("distinct") or 0) >= floor,
+            )
+        cf = cfg["freetext.copy_fraction"]
+        copy = e.get("copy_ratio_substantive")
+        if copy is None:
+            copy = e.get("copy_ratio_nonsentinel")
+        if (
+            copy is not None
+            and (src_distinct or 0) > cf.get("applies_above_source_distinct", 100)
+        ):
+            day_exempt = bool(
+                cf.get("exempt_day_granularity", True)
+                and e.get("temporal_day_granularity")
+            )
+            numeric_exempt = bool(
+                cf.get("exempt_numeric_domains", True)
+                and e.get("type") in _NUMERIC_BQ_TYPES
+            )
+            # Unrounded: a few-in-a-million value rounded to 0.0 next to
+            # passed=false read as a contradiction (2026-08-09 R1 reports).
+            add(
+                "freetext.copy_fraction", name, copy,
+                day_exempt or numeric_exempt or copy <= cf.get("max", 0.0),
+            )
+            if day_exempt:
+                results[-1]["exempt"] = "temporal_day_granularity"
+            elif numeric_exempt:
+                results[-1]["exempt"] = "numeric_domain"
+    return results
 
 
 # A non-constant column whose source support is genuinely large (> 100
@@ -266,6 +412,40 @@ def bq_cross_validation(
 # no rule anywhere scored memorization.
 _MEM_MIN_SOURCE_DISTINCT = 100
 _MEM_COPY_RATIO_THRESHOLD = 0.3
+# K-anonymity floor for the SUBSTANTIVE copy ratio: a source value shared by
+# at least this many source rows is enum mass (the engine re-emits dominant
+# literals at observed frequency BY DESIGN — head values, 2026-08-07 A_TABLE
+# R1), not an identifier. Mirrors the k-anonymity principle
+# (Sweeney 2002, https://doi.org/10.1142/S0218488502001648).
+_MEM_KANON_MIN_COUNT = 10
+
+
+def _substantive_copy_sql(landing_q: str, source_q: str, col: str) -> str:
+    """SQL for the substantive copy count: landing values that are non-NULL,
+    non-trimmed-empty, non-date-sentinel AND equal a RARE source value.
+
+    Empty strings are re-emitted at observed frequency by design (empty
+    parity — the 2026-08-07 A_TABLE R1 read 62.8% "copies" on a 62.4%-empty
+    column from exactly this artifact), and frequent source values are
+    k-anonymous enum mass; neither is memorization.
+    """
+    sentinel_re = r"'^(0001|9999)-'"
+    substantive = (
+        f"{col} IS NOT NULL "
+        f"AND TRIM(SAFE_CAST({col} AS STRING)) != '' "
+        f"AND NOT IFNULL(REGEXP_CONTAINS("
+        f"SAFE_CAST({col} AS STRING), {sentinel_re}), FALSE)"
+    )
+    in_rare_src = (
+        f"{col} IN (SELECT {col} FROM {source_q} "
+        f"GROUP BY {col} HAVING COUNT(*) < {_MEM_KANON_MIN_COUNT})"
+    )
+    return f"""
+        SELECT
+          COUNTIF({substantive} AND {in_rare_src}) AS copied_substantive,
+          COUNTIF({substantive}) AS substantive_n
+        FROM {landing_q}
+    """
 
 
 def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
@@ -286,7 +466,12 @@ def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
     flags = []
     for name, entry in columns.items():
         copy_ratio = entry.get("copy_ratio")
-        scored = entry.get("copy_ratio_nonsentinel")
+        # Substantive first (excludes empty-parity + k-anonymous enum mass,
+        # 2026-08-07 A_TABLE R1 false CRITICAL), then sentinel-adjusted,
+        # then raw.
+        scored = entry.get("copy_ratio_substantive")
+        if scored is None:
+            scored = entry.get("copy_ratio_nonsentinel")
         if scored is None:
             scored = copy_ratio
         source_distinct = entry.get("source_distinct")
@@ -309,6 +494,7 @@ def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
                     "type": entry.get("type"),
                     "copy_ratio": copy_ratio,
                     "copy_ratio_nonsentinel": entry.get("copy_ratio_nonsentinel"),
+                    "copy_ratio_substantive": entry.get("copy_ratio_substantive"),
                     "source_distinct": source_distinct,
                     "severity": "INFO" if day_granularity else "CRITICAL",
                     "rule": (
@@ -488,9 +674,44 @@ def _job_params(j: dict) -> dict[str, Any]:
             "shortStrValue",
         ):
             if e.get(field) is not None:
-                params[str(key)] = e[field]
+                params[str(key)] = _sanitize_param(str(key), e[field])
                 break
     return params
+
+
+# Params whose whole value is an infra identifier with zero analytical value
+# (the oss redaction mapping only knows tables/columns/callers, so these
+# leaked verbatim into every bundle until the 2026-08-21 four-run cycle).
+_PARAM_DROP_KEYS = frozenset(
+    {
+        "dataflow_kms_key",
+        "subnetwork",
+        "network",
+        "use_network_tags",
+        "use_network_tags_for_flex_templates",
+        "service_account_email",
+        "impersonate_service_account",
+    }
+)
+
+
+def _sanitize_param(key: str, value: Any) -> Any:
+    """Mask infra identifiers in a pipeline-option value at collection time.
+
+    Buckets keep their object path (`gs://REDACTED_BUCKET/…`), registry
+    paths keep the image basename (the tag carries the build id), and the
+    keys in `_PARAM_DROP_KEYS` are replaced wholesale. Everything else
+    passes through untouched."""
+    if not isinstance(value, str):
+        return value
+    if key in _PARAM_DROP_KEYS:
+        return "REDACTED"
+    out = re.sub(r"gs://[^/\s]+", "gs://REDACTED_BUCKET", value)
+    out = re.sub(r"[\w.-]+\.pkg\.dev(?:/[\w.-]+)*/([\w.-]+:[\w.-]+)",
+                 r"ARTIFACT_REGISTRY/\1", out)
+    out = re.sub(r"[\w.+-]+@[\w.-]+\.iam\.gserviceaccount\.com",
+                 "REDACTED_SERVICE_ACCOUNT", out)
+    return out
 
 
 # Job-message text markers → milestone label. Applied to JOB_MESSAGE_BASIC text
@@ -635,6 +856,15 @@ def _worker_log_milestones(
         "pageSize": 1000,
     }
     found: dict[str, str] = {}
+    # Pool-ladder milestones per column (2026-08-20 B_TABLE R1: the
+    # first-occurrence-only map made a topup → stagnated → fallback
+    # sequence unattributable — the three lines belonged to different
+    # columns). First timestamp per (column, milestone).
+    pool_ladder: dict[str, dict[str, str]] = {}
+    pool_col_rx = re.compile(
+        r"SDFB_MILESTONE name=(?P<name>freetext_pool_[a-z0-9_]+)"
+        r".*?\bcolumn=(?P<column>\S+)"
+    )
     compiled = [(label, re.compile(pat)) for label, pat in milestones]
     stall_rx = re.compile(r"creating for at least ([\d.]+) seconds")
     pkg_rx = re.compile(r"^(vllm|sdgx|torch|faiss[-\w]*|transformers)==([\w.]+)")
@@ -655,6 +885,7 @@ def _worker_log_milestones(
             sm2 = _SDFB_MILESTONE_RE.search(text)
             if sm2:
                 found.setdefault(f"sdfb.{sm2.group('name')}", ts)
+            _note_pool_ladder(pool_ladder, pool_col_rx, text, ts)
             for label, rx in compiled:
                 if label not in found and rx.search(text):
                     found[label] = ts
@@ -671,10 +902,22 @@ def _worker_log_milestones(
     return {
         "scanned_entries": scanned,
         "timestamps": found,
+        "pool_ladder": pool_ladder,
         "durations_seconds": _milestone_durations(found, [m[0] for m in milestones]),
         "generation_stall_max_seconds": round(stall_max, 1) if stall_max else None,
         "worker_packages": packages,
     }
+
+
+def _note_pool_ladder(
+    pool_ladder: dict, rx: re.Pattern[str], text: str, ts
+) -> None:
+    """First timestamp per (column, freetext_pool_* milestone)."""
+    pc = rx.search(text)
+    if pc:
+        pool_ladder.setdefault(pc.group("column"), {}).setdefault(
+            pc.group("name"), ts
+        )
 
 
 def _post_with_retry(session, url: str, body: dict, *, attempts: int = 5) -> dict:

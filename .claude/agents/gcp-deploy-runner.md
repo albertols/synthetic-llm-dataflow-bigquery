@@ -16,7 +16,7 @@ model: sonnet
 ## Token-efficiency rules (hard)
 
 - Poll ONLY with `--format 'value(currentState)'`; never `describe` without a format.
-- NEVER dump raw worker logs into context. `scripts/e2e_gcp_probe.py` owns log mining; run_e2e.sh already caps failure output at 50 error lines.
+- NEVER dump raw worker logs into context. `scripts/e2e/e2e_gcp_probe.py` owns log mining; run_e2e.sh already caps failure output at 50 error lines.
 - Read `journal/runs.jsonl` with `tail`, not whole-file.
 
 ## NOT in scope

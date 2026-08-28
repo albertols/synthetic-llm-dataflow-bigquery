@@ -174,11 +174,14 @@ def _build_table_info(bq_table: bigquery.Table, full_table_id: str) -> dict[str,
 
 
 def _get_primary_keys(bq_table: bigquery.Table) -> list[str] | None:
-    """Extract primary keys from BQ table constraints, with description fallback.
+    """Extract primary keys declared in BigQuery itself.
 
-    BQ stores PKs in `table.table_constraints.primary_key.columns` when set
-    via `ALTER TABLE … ADD PRIMARY KEY`. As a fallback, parse
-    `PRIMARY KEY: col1, col2` from the table description.
+    The PK of RECORD (the relational model) lives in
+    `config/relationships/` since ADR 0032 and is applied by the
+    launcher; what this reads is whatever BigQuery itself knows —
+    `table.table_constraints` (set via `ALTER TABLE … ADD PRIMARY KEY`),
+    then the legacy `PRIMARY KEY: col1, col2` description line. Useful
+    context in `_ddl.json`, never the source of truth.
 
     REF: https://docs.cloud.google.com/bigquery/docs/primary-foreign-keys
     """

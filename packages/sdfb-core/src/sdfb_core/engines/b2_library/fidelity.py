@@ -23,7 +23,12 @@ from collections import Counter
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
+from typing import Any, cast
 
+from sdfb_core.contracts.prompt_constraint import (
+    parse_prompt_constraint,
+    render_prompt_clause,
+)
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
 from sdfb_core.engines.b2_library.temporal import (
     age_floor_epoch,
@@ -32,7 +37,11 @@ from sdfb_core.engines.b2_library.temporal import (
     to_epoch,
     value_year,
 )
-from sdfb_core.engines.text_shapes import detect_identifier_shape
+from sdfb_core.engines.text_shapes import (
+    RelaxedShapes,
+    build_shape_mix,
+    detect_identifier_shape,
+)
 from sdfb_core.observability import log_milestone
 
 # Free-text heuristics. A STRING column is routed to the LLM free-text hook
@@ -123,6 +132,11 @@ class ColumnProfile:
     kind: ColumnKind
     nullable: bool
     null_fraction: float = 0.0
+    # Fraction of ALL sampled rows whose value is a trimmed-empty string.
+    # Empties leave `text_pool` and re-emit at this rate on the FREE_TEXT
+    # route; CATEGORICAL keeps them as categories and leaves this 0.0
+    # (2026-08-05 spec C1 — never double-count the parity).
+    empty_fraction: float = 0.0
     # CONSTANT
     constant_value: object | None = None
     # NUMERIC observed bounds (inclusive); None when no non-null samples.
@@ -144,6 +158,18 @@ class ColumnProfile:
     # calling the LLM — qwen3-4b echoed COL_001's exemplars verbatim on every
     # escalation attempt in the 2026-07-17 E2E run (novel=0, 872 rows dead).
     identifier_shape: tuple[str, ...] | None = None
+    # FREE_TEXT: observed exact-shape mix for the shape-preserving expander
+    # (2026-08-05 spec C2/C3).
+    shape_mix: RelaxedShapes | None = None
+    # FREE_TEXT: per-column prompt steering from the column's DDL
+    # description JSON (spec C5). Empty = no constraint.
+    llm_prompt_constraint: str = ""
+    # FREE_TEXT: structured-constraint extras (ADR 0024) — user regex for
+    # guided decoding, length-pin flag (suppresses the derived length
+    # hint), fictitious examples (joined to the pool rejection set).
+    constraint_pattern: str = ""
+    constraint_sets_length: bool = False
+    constraint_examples: tuple[str, ...] = ()
     # TEMPORAL: how to render sampled epoch floats back into values.
     # minimum/maximum hold epoch floats (units per temporal.py) for this kind.
     temporal_value_type: str | None = None
@@ -151,6 +177,21 @@ class ColumnProfile:
     # TEMPORAL: sentinel values (year 1 / 9999) excluded from [min, max] and
     # re-injected at their observed fraction: ((value, fraction), ...).
     temporal_sentinels: tuple[tuple[object, float], ...] = ()
+    # NUMERIC/TEMPORAL: 11-point empirical quantile vector (p0..p100; epoch
+    # floats for TEMPORAL, clamped like [minimum, maximum]). Samplers
+    # inverse-transform uniform draws through it so skewed source marginals
+    # land skewed (uniform-in-range flattened them — ADR 0022); () falls
+    # back to uniform.
+    quantiles: tuple[float, ...] = ()
+
+
+def _decile_points(ordered: list[float]) -> tuple[float, ...]:
+    """11 evenly-spaced empirical quantiles (p0..p100) from an ALREADY
+    sorted list — one sort serves min/max and the inverse-CDF vector."""
+    if not ordered:
+        return ()
+    last = len(ordered) - 1
+    return tuple(ordered[round(i * last / 10)] for i in range(11))
 
 
 def _non_null(values: list[object]) -> list[object]:
@@ -276,7 +317,8 @@ def _temporal_profile(
     temporal_sentinels = tuple(
         (v, count / total_non_null) for v, count in sentinel_counts.items()
     )
-    lo, hi = min(epochs), max(epochs)
+    ordered = sorted(epochs)
+    lo, hi = ordered[0], ordered[-1]
     floor = age_floor_epoch(value_type, fmt, _MAX_TEMPORAL_AGE_YEARS)
     if floor is not None and lo < floor <= hi:
         lo = floor
@@ -285,6 +327,9 @@ def _temporal_profile(
             column=field.name,
             max_age_years=_MAX_TEMPORAL_AGE_YEARS,
         )
+    # Quantile points below the clamp floor collapse onto it — same
+    # semantics as the [minimum, maximum] clamp, applied to the CDF vector.
+    quantiles = tuple(max(q, lo) for q in _decile_points(ordered))
     return ColumnProfile(
         name=field.name,
         bq_type=field.bq_type,
@@ -296,6 +341,7 @@ def _temporal_profile(
         temporal_value_type=value_type,
         temporal_format=fmt,
         temporal_sentinels=temporal_sentinels,
+        quantiles=quantiles,
     )
 
 
@@ -307,6 +353,13 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
     total = len(raw)
     null_fraction = (total - len(non_null)) / total if total else 0.0
     nullable = field.is_nullable
+    # Trimmed-empty strings are sparsity, not content: classification and
+    # pools see `substantive`; the CATEGORICAL route keeps the original
+    # stream so its frequency table carries the empties itself.
+    substantive = [
+        v for v in non_null if not (isinstance(v, str) and not v.strip())
+    ]
+    empty_fraction = (len(non_null) - len(substantive)) / total if total else 0.0
 
     # No non-null observations: emit a CONSTANT-None / empty profile. The
     # record model supplies the schema default (None for NULLABLE).
@@ -320,7 +373,25 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             constant_value=None,
         )
 
-    kind = _classify(field, non_null)
+    kind = _classify(field, substantive if substantive else non_null)
+
+    # `route: "llm"` (ADR 0024): STRING columns override their typed
+    # classification into the LLM free-text route (B.1 parity). Non-STRING
+    # types keep their route — B.2's own inverse-CDF path owns numeric
+    # fidelity (ADR 0022) — with the same WARNING milestone as B.1.
+    pc = parse_prompt_constraint(field.description, column=field.name)
+    force_llm = pc is not None and pc.route == "llm"
+    if force_llm:
+        if field.bq_type in _STRINGY_BQ_TYPES:
+            kind = ColumnKind.FREE_TEXT
+        else:
+            log_milestone(
+                "prompt_constraint_route_unsupported",
+                level=logging.WARNING,
+                column=field.name,
+                bq_type=field.bq_type,
+            )
+            force_llm = False
 
     if kind is ColumnKind.CONSTANT:
         return ColumnProfile(
@@ -329,11 +400,13 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             kind=kind,
             nullable=nullable,
             null_fraction=null_fraction,
-            constant_value=non_null[0],
+            constant_value=(substantive[0] if substantive else non_null[0]),
         )
 
     if kind is ColumnKind.NUMERIC:
-        nums = [float(v) for v in non_null]
+        # NUMERIC verdicts come from _classify, which already proved every
+        # value parses; float() re-raising here would be a classifier bug.
+        nums = sorted(float(cast("Any", v)) for v in non_null)
         is_int = field.bq_type in {"INTEGER", "INT64"}
         # NUMERIC/BIGNUMERIC: respect the declared scale (default 2 places
         # for fixed-point money-like columns) so sampled values pass the
@@ -347,14 +420,15 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
             kind=kind,
             nullable=nullable,
             null_fraction=null_fraction,
-            minimum=min(nums),
-            maximum=max(nums),
+            minimum=nums[0],
+            maximum=nums[-1],
             is_integer=is_int,
             decimal_scale=decimal_scale,
+            quantiles=_decile_points(nums),
         )
 
     if kind is ColumnKind.TEMPORAL:
-        profile = _temporal_profile(field, non_null, nullable, null_fraction)
+        profile = _temporal_profile(field, substantive, nullable, null_fraction)
         if profile is not None:
             return profile
         # BQ-typed temporal whose observed values are mixed/unparseable:
@@ -362,15 +436,31 @@ def profile_column(field: FieldSchema, reference_rows: list[dict]) -> ColumnProf
         kind = ColumnKind.CATEGORICAL
 
     if kind is ColumnKind.FREE_TEXT:
-        pool = _dedupe_stable([str(v) for v in non_null])
+        pool = _dedupe_stable([str(v) for v in substantive])
         return ColumnProfile(
             name=field.name,
             bq_type=field.bq_type,
             kind=kind,
             nullable=nullable,
             null_fraction=null_fraction,
+            empty_fraction=empty_fraction,
             text_pool=tuple(pool),
-            identifier_shape=detect_identifier_shape(pool),
+            # `force_llm` skips the template route by explicit user intent.
+            identifier_shape=(
+                None if force_llm else detect_identifier_shape(pool)
+            ),
+            # Deduped pool on purpose: B.2's identifier coverage pivot
+            # divides mix mass by len(text_pool), so mass and denominator
+            # must share the distinct universe. The row-mass weighting fix
+            # (2026-08-11 R1, COL_054/COL_024/COL_015-class) needs rows
+            # plumbed through this profile — R5/B.2 scope (ADR 0025).
+            shape_mix=build_shape_mix(pool),
+            llm_prompt_constraint=(
+                render_prompt_clause(pc) if pc is not None else ""
+            ),
+            constraint_pattern=pc.pattern if pc is not None else "",
+            constraint_sets_length=pc is not None and pc.length is not None,
+            constraint_examples=pc.examples if pc is not None else (),
         )
 
     # CATEGORICAL — empirical frequency table, order-stable for determinism.
@@ -452,7 +542,7 @@ def enforce_value(profile: ColumnProfile, value: object) -> object:
 def _enforce_numeric(profile: ColumnProfile, value: object) -> object:
     """Clip a sampled numeric to ``[min, max]`` and pin its type/scale."""
     try:
-        num = float(value)
+        num = float(cast("Any", value))
     except (TypeError, ValueError):
         return _representative(profile)
     if profile.minimum is not None:
@@ -506,8 +596,11 @@ def _representative(profile: ColumnProfile) -> object:
         lo = profile.minimum if profile.minimum is not None else 0.0
         return round(lo) if profile.is_integer else lo
     if profile.kind is ColumnKind.TEMPORAL and profile.minimum is not None:
+        # TEMPORAL profiles always carry a value type (set beside kind).
         return from_epoch(
-            profile.minimum, profile.temporal_value_type, profile.temporal_format
+            profile.minimum,
+            cast("str", profile.temporal_value_type),
+            profile.temporal_format,
         )
     if profile.kind is ColumnKind.CATEGORICAL and profile.categories:
         return profile.categories[0]

@@ -121,3 +121,52 @@ class TestDlqRuleWeight:
 
     def test_unknown_rule_id_defaults(self):
         assert _dlq_rule_weight({}) == ("unknown", 1)
+
+
+def test_build_pipeline_threads_source_values_table_into_context(
+    tmp_path, customers_schema, customers_reference
+):
+    """ADR 0023 generate-path wiring: the launcher's reference-table FQN
+    must reach GenerationContext so workers can attach the source-value
+    store (B.2 builds pools lazily there — no pool branch)."""
+    config = _config(
+        customers_schema,
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        source_values_table="p.d.customers",
+    )
+    options = PipelineOptions(["--runner=DirectRunner"])
+    with beam.Pipeline(options=options) as p:
+        result = build_pipeline(
+            p,
+            reference_rows=customers_reference,
+            config=config,
+            landing_sink=WriteToJsonLines(str(tmp_path / "landing")),
+            dlq_sink=WriteToJsonLines(str(tmp_path / "dlq")),
+        )
+    assert result["generation_context"].source_values_table == "p.d.customers"
+
+
+def test_build_pipeline_threads_prompt_debug_into_context(
+    tmp_path, customers_schema, customers_reference
+):
+    """ADR 0024 §3c wiring: the CLI's --prompt_debug must survive
+    PipelineConfig → GenerationContext, or engines silently fall back to
+    'off' and no freetext_pool_prompt milestone is ever logged. Constructing
+    the config with prompt_debug= is itself part of the regression: the CLI
+    passes exactly this keyword (run_pipeline.py), so an unknown-field
+    TypeError here means every --prompt_debug invocation crashes."""
+    config = _config(
+        customers_schema,
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        prompt_debug="redacted",
+    )
+    options = PipelineOptions(["--runner=DirectRunner"])
+    with beam.Pipeline(options=options) as p:
+        result = build_pipeline(
+            p,
+            reference_rows=customers_reference,
+            config=config,
+            landing_sink=WriteToJsonLines(str(tmp_path / "landing")),
+            dlq_sink=WriteToJsonLines(str(tmp_path / "dlq")),
+        )
+    assert result["generation_context"].prompt_debug == "redacted"

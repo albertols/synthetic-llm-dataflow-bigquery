@@ -10,6 +10,8 @@ REFs:
 
 from __future__ import annotations
 
+import math
+
 import apache_beam as beam
 from apache_beam.metrics import Metrics
 from pydantic import ValidationError
@@ -31,9 +33,40 @@ class ValidateRecordDoFn(beam.DoFn):
     def setup(self):
         self._record_model = derive_record_model(self.table_schema)
 
+    def _load_safety_error(self, record) -> dict | None:
+        # Load-safety bound (2026-08-22 single-job run): FILE_LOADS
+        # aborts the WHOLE landing load on one BQ-invalid row. Over-long
+        # strings are already caught by the derived Pydantic model
+        # (max_length -> schema.types); non-finite floats are NOT — and
+        # json.dumps writes bare NaN/Infinity, which is invalid JSON, so
+        # one such value kills the table's landing job.
+        for col, v in record.items():
+            if isinstance(v, float) and not math.isfinite(v):
+                return {
+                    "rule_id": "schema.non_finite",
+                    "error_detail": (
+                        f"{col}: non-finite float {v!r} — json.dumps "
+                        f"emits invalid JSON and BQ load aborts"
+                    ),
+                }
+        return None
+
     def process(self, record):
         try:
             self._record_model.model_validate(record)  # type: ignore[union-attr]
+            safety = self._load_safety_error(record)
+            if safety is not None:
+                self._invalid.inc()
+                yield beam.pvalue.TaggedOutput(
+                    "invalid",
+                    {
+                        "raw_record": record,
+                        "error_type": "load_safety",
+                        "stage": "pre_write",
+                        **safety,
+                    },
+                )
+                return
             self._valid.inc()
             yield record
         except ValidationError as e:

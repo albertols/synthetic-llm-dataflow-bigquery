@@ -10,7 +10,7 @@
 > Every number is re-derived from
 > `integration_tests/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
 > (first GPU/CPU-separated 1M-row run on the GCP LZ) via
-> [`scripts/make_ws6_figures.py`](../../scripts/make_ws6_figures.py), which also
+> [`scripts/doc/make_ws6_figures.py`](../../scripts/doc/make_ws6_figures.py), which also
 > regenerates every figure (provenance in §7).
 >
 > Written to the `visual-first-documentation` skill.
@@ -281,7 +281,7 @@ the pool ladder alone is 26 minutes of it.
 ## 7. Figure provenance
 
 ```bash
-uv run --no-sync python3 scripts/make_ws6_figures.py
+uv run --no-sync python3 scripts/doc/make_ws6_figures.py
 ```
 
 Palette matches the WS5 / 2026-07-24 / 2026-07-25 assets (blue `#2a78d6`,

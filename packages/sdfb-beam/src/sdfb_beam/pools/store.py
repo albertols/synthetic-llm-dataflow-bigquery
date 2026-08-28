@@ -131,5 +131,21 @@ class BigQueryFreeTextPoolStore:
             rows, self.table_fqn, job_config=job_config
         ).result()
 
+    def delete(self, reference_digest: str, model_uri: str) -> None:
+        """Drop every pool row for this digest + LLM (blocking DML).
+
+        The taint-preflight path (2026-08-07: the 10M warm run replayed
+        memorized 2026-08-05 pools): `fetch` has no per-column dedup, so a
+        rebuild must clear the stale rows before the branch re-appends.
+        """
+        sql = (
+            f"DELETE FROM `{self.table_fqn}` "
+            "WHERE `reference_digest` = @reference_digest "
+            "AND `model_uri` = @model_uri"
+        )
+        self._query(
+            sql, {"reference_digest": reference_digest, "model_uri": model_uri}
+        )
+
 
 __all__ = ["BigQueryFreeTextPoolStore", "pool_to_row", "row_to_pool"]

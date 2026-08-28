@@ -27,8 +27,9 @@ Mark M4-only tests with `@pytest.mark.gpu` or `@pytest.mark.gcp`. The default `p
 
 ```bash
 uv sync --group dev
-uv run pytest -m "not gpu and not gcp" -q   # expect all green (285+ tests)
+uv run pytest -m "not gpu and not gcp" -q   # expect all green (845+ tests)
 uv run ruff check .
+uv run mypy packages/sdfb-core/src          # hard CI gate — expect 0 errors
 ```
 
 Full machine setup: [`docs/M4_SETUP.md`](docs/M4_SETUP.md).
@@ -51,6 +52,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `packages/sdfb-beam/src/sdfb_beam/pipeline.py` — `build_pipeline()` composer.
 - `packages/sdfb-beam/src/sdfb_beam/ddl/cli.py` — DDL extractor CLI.
 - `scripts/extract_ddl.py`, `scripts/probe_gpu_dataflow.sh`, `scripts/hello_synthetic_mlx.py` — runnable entry shims (image build/push live in CI, see [ADR 0008](docs/adr/0008-ci-driven-builds.md)).
+- Scripts follow a `scripts/<scope>/` layout (`doc/`, `e2e/`, `release/`) — convention in [`scripts/README.md`](scripts/README.md); new scripts never land at the root.
 
 ## What lives where in `.claude/`
 
@@ -93,6 +95,8 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 ## When in doubt
 
 - **What infra to provision before a run** (GCS buckets, BQ datasets/tables, IAM) → [`docs/DEPLOYMENT_PREREQUISITES.md`](docs/DEPLOYMENT_PREREQUISITES.md).
+- **How to declare PK/FK/identity** (versioned YAML models, the `enabled`/`enforced` flags, the three launch scenarios) → [`config/relationships/README.md`](config/relationships/README.md) + [ADR 0032](docs/adr/0032-relationships-as-config.md). Table descriptions are NEVER read for relational structure.
+- **How to declare per-column prompt constraints** (Terraform ⇄ `_ddl.json` worked examples) → [`docs/DDL_CONTRACT_GUIDE.md`](docs/DDL_CONTRACT_GUIDE.md).
 - **How to actually run a deployment** (GPU verdict, run matrix, Dataflow options, L4 capacity strategy, report recipe) → [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md).
 - **How to validate a run after it lands** (duplication/memorization/schema defects traced to code + Dataflow observability) → [`.github/prompts/end_to_end_validation_report_generation.prompt.md`](.github/prompts/end_to_end_validation_report_generation.prompt.md).
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
@@ -117,3 +121,10 @@ same assets instead of redrawn. Load it before writing or updating such a doc.
 
 Apply the same rule when *explaining* this work in conversation: lead with the
 diagram or worked geometry, then the prose.
+
+**Cite primary sources.** A design decision that leans on an external method
+(a paper, an algorithm, a vendor mechanism like vLLM prefix caching or BQ
+HLL++) links the primary source at the decision site — ADRs and design docs
+carry the links; code comments name the ADR, not the URL. First applied
+repo-wide in [ADR 0022](docs/adr/0022-stats-driven-generation.md). The rule
+lives in the `visual-first-documentation` skill (§ Citations).

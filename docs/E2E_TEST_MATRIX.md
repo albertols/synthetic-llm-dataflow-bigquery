@@ -4,7 +4,7 @@ Companion to [`docs/RUN_PLAYBOOK.md`](https://github.com/albertols/synthetic-llm
 
 **Defaults (only overrides are listed per run):** `num_rows=1000`, `batch_size=16`, `similarity=0.5`, `seed=""` (derived per run_id/batch), `vllm_dtype=auto`, `client_type=vllm`, `identity_cols=<ID_COL>`, `pk_cols=<PK_COL>,<PK_COL_2>` (real columns of the target table), landing table truncated between runs (or fresh `run_id` verified in `validation_runs`).
 
-**After every run:** `scripts/e2e_gcp_probe.py` → `scripts/e2e_validation_analysis.py` → `scripts/e2e_bundle_export.py`, then the report prompt. Check the **Dataflow job state** (`gcloud dataflow jobs describe <job_id>`), not Airflow green (DAG launches with `wait_until_finished=False`).
+**After every run:** `scripts/e2e/e2e_gcp_probe.py` → `scripts/e2e/e2e_validation_analysis.py` → `scripts/e2e/e2e_bundle_export.py`, then the report prompt. Check the **Dataflow job state** (`gcloud dataflow jobs describe <job_id>`), not Airflow green (DAG launches with `wait_until_finished=False`).
 
 ---
 

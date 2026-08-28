@@ -1,6 +1,6 @@
 """Regenerate the WS5 generation-throughput figures.
 
-    uv run --no-sync python3 scripts/make_ws5_figures.py
+    uv run --no-sync python3 scripts/doc/make_ws5_figures.py
 
 Writes PNGs into docs/designs/assets/. Every measured number below is
 derived from integration_tests/2026-07-26_06_54_25-14348390798392809440/
@@ -23,7 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-ASSETS = Path(__file__).resolve().parents[1] / "docs" / "designs" / "assets"
+ASSETS = Path(__file__).resolve().parents[2] / "docs" / "designs" / "assets"
 
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 # OKLab dE x100 floor for normal-vision separation (dataviz check 4).

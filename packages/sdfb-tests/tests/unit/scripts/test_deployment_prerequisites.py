@@ -238,3 +238,68 @@ def test_committed_pool_schema_matches_the_contract():
     )
     assert [f["name"] for f in schema] == _mod.FREETEXT_POOLS_MIN_COLUMNS
     assert all(f.get("description") for f in schema), "every column documented"
+
+
+# --------------------------------------------------------------------------- #
+# step 11 — source stats store (WS8, 2026-08-05 spec WS-B)
+# --------------------------------------------------------------------------- #
+def _stats_ctx(fqn):
+    args = argparse.Namespace(
+        project="p",
+        source_stats_table=fqn,
+        schemas_dir=str(_REPO_ROOT / "config" / "bq_schema"),
+    )
+    return _mod.Ctx(args=args)
+
+
+def test_parse_args_source_stats_default_and_opt_out():
+    base = ["--project", "p", "--source-table", "p.raw.t"]
+    args = _mod.parse_args(base)
+    assert args.source_stats_table == "p.synthetic_rag.source_table_stats"
+    args = _mod.parse_args([*base, "--source-stats-table", ""])
+    assert args.source_stats_table == ""
+
+
+def test_step11_missing_table_is_skip_not_action(monkeypatch):
+    """Stats persistence is optional: absent, the milestone + JSON artifact
+    still fire — only the BQ write is skipped."""
+    fqn = "p.synthetic_rag.source_table_stats"
+    _patch_bq(monkeypatch, _FakeBQ(tables={}))
+    ctx = _stats_ctx(fqn)
+    _mod.step11_source_stats(ctx)
+    (result,) = ctx.results
+    assert result.status == _mod.SKIP
+    assert "bq mk" in result.resource
+
+
+def test_step11_present_and_correct_is_ok(monkeypatch):
+    fqn = "p.synthetic_rag.source_table_stats"
+    _patch_bq(
+        monkeypatch,
+        _FakeBQ(tables={fqn: _pool_table(_mod.SOURCE_STATS_MIN_COLUMNS)}),
+    )
+    ctx = _stats_ctx(fqn)
+    _mod.step11_source_stats(ctx)
+    (result,) = ctx.results
+    assert result.status == _mod.OK
+
+
+def test_step11_drifted_table_is_an_action(monkeypatch):
+    """A present-but-drifted stats table fails the driver's write_rows load
+    job mid-launch — the one case that must block."""
+    fqn = "p.synthetic_rag.source_table_stats"
+    columns = [c for c in _mod.SOURCE_STATS_MIN_COLUMNS if c != "empty_fraction"]
+    _patch_bq(monkeypatch, _FakeBQ(tables={fqn: _pool_table(columns)}))
+    ctx = _stats_ctx(fqn)
+    _mod.step11_source_stats(ctx)
+    (result,) = ctx.results
+    assert result.status == _mod.ACTION
+    assert "empty_fraction" in result.resource
+
+
+def test_step11_opt_out_is_skip():
+    ctx = _stats_ctx("")
+    _mod.step11_source_stats(ctx)
+    (result,) = ctx.results
+    assert result.status == _mod.SKIP
+    assert "omitted" in result.resource

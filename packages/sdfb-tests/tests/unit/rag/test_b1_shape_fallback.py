@@ -53,6 +53,8 @@ def _ctx(col: str, values: list[str], **overrides) -> GenerationContext:
         pipeline_run_id="run-shape-1",
         strict_freetext=True,
         num_rows=40,
+        # Ladder-mechanics tests: expansion off forces the pool path.
+        freetext_expansion="off",
     )
     defaults.update(overrides)
     return GenerationContext(**defaults)

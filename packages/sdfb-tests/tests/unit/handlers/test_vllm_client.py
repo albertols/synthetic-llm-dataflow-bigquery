@@ -1376,6 +1376,10 @@ def test_unfittable_len_raises_before_spawn_without_a_strike(
     _patch_torch_mem(monkeypatch, free_gib=10.0)
     popen = mock.Mock()
     monkeypatch.setattr("subprocess.Popen", popen)
+    # The wait-and-re-measure window (2026-08-05 R1 fix) retries the
+    # measurement in-process; stub the waits so the exhaustion path is
+    # instant — the contract under test is raise-without-strike.
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
     model_dir = _qwen3_model_dir(tmp_path, weights_gib=7.5)
     c = VLLMModelClient(
         model_uri="gs://bucket/synthetic/models/m/v1/",
@@ -1391,3 +1395,84 @@ def test_unfittable_len_raises_before_spawn_without_a_strike(
         c.setup()
     popen.assert_not_called()
     assert not any(mod._SPAWN_FAILURES.values())
+
+
+# ---------------------------------------------------------------------------
+# Transiently-unfittable VRAM: wait and re-measure in-process
+# (2026-08-05 B_TABLE R1: 13 unfittable aborts + an ~80 s bundle-retry
+# cycle, while sibling embedders released the card 79 s later).
+# ---------------------------------------------------------------------------
+
+
+def test_setup_waits_out_a_transiently_unfittable_card(monkeypatch, caplog):
+    import logging
+
+    from sdfb_beam.handlers import vllm_client as mod
+
+    c = VLLMModelClient(model_uri="/already/local/model")
+    spawn_attempts = []
+
+    def _spawn():
+        spawn_attempts.append(1)
+        if len(spawn_attempts) < 3:
+            raise mod.ModelLenUnfittableError("no room yet")
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+    with (
+        mock.patch.object(c, "_spawn_server", side_effect=_spawn),
+        mock.patch.object(c, "_wait_until_ready"),
+        mock.patch.object(c, "_build_openai_client", return_value=object()),
+        caplog.at_level(logging.WARNING, logger="sdfb.milestone"),
+    ):
+        c.setup()
+    assert len(spawn_attempts) == 3
+    assert len(sleeps) == 2, "one wait per failed measure"
+    text = "\n".join(r.message for r in caplog.records)
+    assert "SDFB_MILESTONE name=vllm_unfittable_wait" in text
+
+
+def test_setup_reraises_when_unfittable_persists(monkeypatch):
+    from sdfb_beam.handlers import vllm_client as mod
+
+    c = VLLMModelClient(model_uri="/already/local/model")
+    spawn_attempts = []
+
+    def _spawn():
+        spawn_attempts.append(1)
+        raise mod.ModelLenUnfittableError("still no room")
+
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    with (
+        mock.patch.object(c, "_spawn_server", side_effect=_spawn),
+        mock.patch.object(c, "_wait_until_ready"),
+        pytest.raises(mod.ModelLenUnfittableError),
+    ):
+        c.setup()
+    assert len(spawn_attempts) == mod._UNFITTABLE_RETRY_ATTEMPTS
+    # Still not a spawn-failure strike: the next bundle may re-measure.
+    assert mod._SPAWN_FAILURES.get(c.base_url, 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-25 R6 1M run: a ladder thread's fit-wait window (6 x 20 s)
+# expired at 19:27:27; a sibling embedder released the card and the next
+# thread's spawn succeeded at 19:28:27 — 161 s after the FIRST unfittable
+# measure. A two-table relational job doubles the DoFn instances demoting
+# embedders during setup, so the window must cover that churn, and the
+# error must be recognisable as transient by the engine's ladder retry.
+# ---------------------------------------------------------------------------
+
+
+def test_unfittable_error_is_a_transient_client_error():
+    from sdfb_beam.handlers import vllm_client as mod
+    from sdfb_core.engines.base import ModelClientTransientError
+
+    assert issubclass(mod.ModelLenUnfittableError, ModelClientTransientError)
+
+
+def test_unfittable_window_covers_relational_setup_churn():
+    from sdfb_beam.handlers import vllm_client as mod
+
+    window = mod._UNFITTABLE_RETRY_ATTEMPTS * mod._UNFITTABLE_RETRY_WAIT_S
+    assert window >= 180.0, "2026-08-25: 161 s until the card was fittable"

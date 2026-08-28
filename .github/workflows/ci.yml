@@ -52,8 +52,9 @@ jobs:
         run: uv run ruff check .
 
       - name: Mypy (sdfb-core only — strict surface)
+        # Hard gate since 2026-08-05 — the type debt was paid down to zero.
+        # A red mypy here is a regression, not legacy noise.
         run: uv run mypy packages/sdfb-core/src
-        continue-on-error: true   # promote to hard-fail once type debt is paid
 
       - name: Pytest (laptop-side suite)
         run: uv run pytest -m "not gpu and not gcp" -q

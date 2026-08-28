@@ -20,12 +20,15 @@ REFs:
 from __future__ import annotations
 
 import functools
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 import apache_beam as beam
+from apache_beam.transforms import combiners
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext, ModelClient
+from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
     MAX_ROW_DOC_ROWS,
     chunk_free_text_value,
@@ -45,6 +48,7 @@ from sdfb_beam.dofns import (
     PanderaValidateBatchDoFn,
     ValidateRecordDoFn,
 )
+from sdfb_beam.dofns.fk_integrity import EnforceFkIntegrityDoFn
 from sdfb_beam.dofns.pools import BuildFreeTextPoolsDoFn
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.rag.population import ChunkReferenceRowsDoFn, EmbedChunksDoFn
@@ -102,6 +106,39 @@ class PipelineConfig:
     freetext_pools_table: str = ""
     # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
     pool_seed_strategy: str = "centroid"
+    # Shape-preserving expander (2026-08-05 spec C3): off | identifiers
+    # (default) | all. See GenerationContext.freetext_expansion.
+    freetext_expansion: str = "identifiers"
+    # Attach per-column llm_prompt_constraint (from column-description
+    # JSON) to pool prompts (spec C5). See GenerationContext.prompt_constraints.
+    prompt_constraints: bool = True
+    # off | redacted | full — log each built pool prompt as a
+    # freetext_pool_prompt milestone (ADR 0024 §3c). See
+    # GenerationContext.prompt_debug.
+    prompt_debug: str = "off"
+    # Tier-2 exact per-column distinct counts (--source_stats=exact,
+    # ADR 0022) — feeds free-text pool sizing. Empty = Tier 1 only.
+    source_distinct: dict = field(default_factory=dict)
+    # Reference-table FQN for the worker-side ADR 0023 source-value store
+    # attach (B.2 builds pools lazily in Generate workers). Empty = off.
+    source_values_table: str = ""
+    # Enforced FK edges → the parent's landed key TUPLES (ADR 0031),
+    # loaded driver-side by io/fk_pools for a parent that landed in an
+    # earlier job. Same-job parents deliver theirs as a side input.
+    fk_key_pools: list = field(default_factory=list)
+    # Per-column projection of the same keys — plan/metadata only.
+    fk_pools: dict = field(default_factory=dict)
+    # Declared FK edges as display metadata for the worker's
+    # `relational_e2e` pretty log (ADR 0028 follow-up): each
+    # {"cols": [...], "ref": "ds.parent", "parent_landing": fqn}.
+    fk_edges: tuple = ()
+    # Multi-table launches (ADR 0030): landing table NAME qualifying
+    # column references in logs; empty = single-table bare names.
+    log_table_prefix: str = ""
+    # The relationship card the LAUNCHER rendered from
+    # `config/relationships/` (ADR 0032), carried to the workers so both
+    # logs show the same model. Empty = this table is in no model.
+    relationship_card: str = ""
     # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
     # behind up to three shuffle barriers; "streaming" lands rows as they
     # are generated and measures the duplicate rate instead.
@@ -118,12 +155,21 @@ def build_pipeline(
     validation_runs_sink: beam.PTransform | None = None,
     rag_chunks_sink: beam.PTransform | None = None,
     freetext_pools_store: Any = None,
+    source_value_store: Any = None,
+    label_prefix: str = "",
+    fk_side: Any = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
     Returns a metadata dict with the reference digest, run id, and
     handles to the resulting PCollections (`valid`, `dlq`) for callers
     that want to attach further transforms (metrics, additional sinks).
+
+    ``label_prefix`` namespaces every transform label so N tables can
+    share ONE pipeline (ADR 0030 single-job relational mode); ``fk_side``
+    is that mode's parent-keys side input (`AsSingleton` of a list of
+    ``{"cols", "keys"}`` edge payloads, ADR 0031) — it defers the child's
+    engine build to the first bundle (`GenerateRecordsDoFn.expect_fk_side`).
     """
     for label, cols in (
         ("identity_columns", config.identity_columns),
@@ -147,6 +193,7 @@ def build_pipeline(
         model_uri=config.model_uri,
         embedder_uri=config.embedder_uri,
         identity_columns=list(config.identity_columns),
+        pk_columns=list(config.pk_columns),
         strict_freetext=config.strict_freetext,
         num_rows=config.num_rows,
         embedder_id=config.embedder_id,
@@ -155,6 +202,17 @@ def build_pipeline(
         pool_pattern_guidance=config.pool_pattern_guidance,
         freetext_pools_table=config.freetext_pools_table,
         pool_seed_strategy=config.pool_seed_strategy,
+        freetext_expansion=config.freetext_expansion,
+        prompt_constraints=config.prompt_constraints,
+        prompt_debug=config.prompt_debug,
+        fk_pools=config.fk_pools,
+        fk_key_pools=[dict(e) for e in config.fk_key_pools],
+        fk_edges=[dict(e) for e in config.fk_edges],
+        landing_table=config.landing_table,
+        log_table_prefix=config.log_table_prefix,
+        relationship_card=config.relationship_card,
+        source_distinct=config.source_distinct,
+        source_values_table=config.source_values_table,
     )
 
     # Build batch request specs eagerly — driver-side, before the graph.
@@ -167,7 +225,7 @@ def build_pipeline(
         remaining -= n
         batch_id += 1
 
-    requests = p | "CreateRequests" >> beam.Create(request_specs)
+    requests = p | f"{label_prefix}CreateRequests" >> beam.Create(request_specs)
 
     # WS5 §2 / 2026-07-29 four-run postmortem — optional free-text pool
     # build branch. The driver decides (digest existence check) whether to
@@ -183,37 +241,39 @@ def build_pipeline(
     if freetext_pools_store is not None:
         pool_rows = (
             p
-            | "PoolTrigger" >> beam.Create([None])
-            | "BuildFreeTextPools"
+            | f"{label_prefix}PoolTrigger" >> beam.Create([None])
+            | f"{label_prefix}BuildFreeTextPools"
             >> beam.ParDo(
                 BuildFreeTextPoolsDoFn(
                     config.engine_name,
                     config.model_client,
                     ctx,
                     store=freetext_pools_store,
+                    source_value_store=source_value_store,
                 )
             )
         )
-        requests = requests | "AwaitFreeTextPools" >> beam.Map(
+        requests = requests | f"{label_prefix}AwaitFreeTextPools" >> beam.Map(
             lambda spec, _pools: spec, _pools=beam.pvalue.AsList(pool_rows)
         )
 
     generated = (
         requests
-        | "Generate" >> beam.ParDo(
-            GenerateRecordsDoFn(
-                engine_name=config.engine_name,
-                model_client=config.model_client,
-                ctx=ctx,
-                similarity=config.similarity,
-                seed=config.seed,
-            )
+        | f"{label_prefix}Generate" >> _generate_pardo(
+            config, ctx, fk_side
         ).with_outputs("failed", main="main")
     )
 
+    # Line 4 of defense (ADR 0031) — referential integrity, measured per
+    # run instead of assumed. Present only when this table declares
+    # enforced FK edges; absent ⇒ DAG unchanged.
+    generated_main, fk_invalid = _fk_integrity_stage(
+        generated.main, config, fk_side, label_prefix
+    )
+
     record_validated = (
-        generated.main
-        | "ValidateRecord" >> beam.ParDo(
+        generated_main
+        | f"{label_prefix}ValidateRecord" >> beam.ParDo(
             ValidateRecordDoFn(table_schema=config.table_schema)
         ).with_outputs("invalid", main="main")
     )
@@ -226,41 +286,36 @@ def build_pipeline(
         # funnel inside the fused Generate->KeyByRowDigest stage (~0.88k
         # rows/s). Pandera's cost is amortized over rows in the frame, so
         # validate thousands at a time, not tens.
-        | "Batch" >> beam.BatchElements(min_batch_size=1_000, max_batch_size=10_000)
+        | f"{label_prefix}Batch" >> beam.BatchElements(min_batch_size=1_000, max_batch_size=10_000)
     )
     batch_validated = (
         batched
-        | "PanderaValidate" >> beam.ParDo(
+        | f"{label_prefix}PanderaValidate" >> beam.ParDo(
             PanderaValidateBatchDoFn(table_schema=config.table_schema)
         ).with_outputs("invalid", main="main")
     )
 
     # Line 3 of defense — full-row and identity-column duplicates divert to
     # the DLQ instead of landing (first occurrence per key wins).
-    uniq = batch_validated.main | "EnforceUniqueness" >> EnforceUniqueness(
+    uniq = batch_validated.main | f"{label_prefix}EnforceUniqueness" >> EnforceUniqueness(
         identity_columns=list(config.identity_columns),
         pk_columns=list(config.pk_columns),
         mode=config.uniqueness_mode,
     )
 
     # Landing sink — valid, unique records only.
-    _ = uniq["unique"] | "WriteLanding" >> landing_sink
+    _ = uniq["unique"] | f"{label_prefix}WriteLanding" >> landing_sink
 
-    # DLQ — flatten the four failure tags, then normalize the heterogeneous
-    # envelopes into the uniform dead_letter schema before writing.
-    dlq_raw = (
-        (
-            generated.failed,
-            record_validated.invalid,
-            batch_validated.invalid,
-            uniq["duplicates"],
-        )
-        | "FlattenDLQ" >> beam.Flatten()
-    )
-    dlq = dlq_raw | "NormalizeDLQ" >> beam.Map(
+    # DLQ — flatten every failure tag (five with the FK gate wired),
+    # then normalize the heterogeneous envelopes into the uniform
+    # dead_letter schema before writing.
+    dlq_raw = _dlq_inputs(
+        generated, fk_invalid, record_validated, batch_validated, uniq
+    ) | f"{label_prefix}FlattenDLQ" >> beam.Flatten()
+    dlq = dlq_raw | f"{label_prefix}NormalizeDLQ" >> beam.Map(
         normalize_dlq_record, run_id=config.run_id
     )
-    _ = dlq | "WriteDLQ" >> dlq_sink
+    _ = dlq | f"{label_prefix}WriteDLQ" >> dlq_sink
 
     # WS2 §4b.1 — optional rag_chunks population branch. The driver decides
     # (existence check) whether to pass a sink; None ⇒ branch absent, DAG
@@ -285,9 +340,9 @@ def build_pipeline(
         )
         row_doc_chunks = (
             p
-            | "RagReferenceRows"
+            | f"{label_prefix}RagReferenceRows"
             >> beam.Create(reference_rows[:MAX_ROW_DOC_ROWS])
-            | "RagChunkRows"
+            | f"{label_prefix}RagChunkRows"
             >> beam.ParDo(
                 ChunkReferenceRowsDoFn(
                     source_fqn=config.table_schema.fqn,
@@ -302,11 +357,11 @@ def build_pipeline(
         )
         value_chunks = (
             p
-            | "RagDistinctValues"
+            | f"{label_prefix}RagDistinctValues"
             >> beam.Create(
                 [(c, v) for c, vals in distinct_values.items() for v in vals]
             )
-            | "RagValueChunks"
+            | f"{label_prefix}RagValueChunks"
             >> beam.MapTuple(
                 functools.partial(
                     chunk_free_text_value,
@@ -319,21 +374,22 @@ def build_pipeline(
         )
         chunks = (
             (row_doc_chunks, value_chunks)
-            | "RagAllChunks" >> beam.Flatten()
+            | f"{label_prefix}RagAllChunks" >> beam.Flatten()
             # Spread the (now small) chunk set across workers so the embed
             # stage keeps Beam's embarrassing parallelism.
-            | "RagFanout" >> beam.Reshuffle()
-            | "RagBatchChunks"
+            | f"{label_prefix}RagFanout" >> beam.Reshuffle()
+            | f"{label_prefix}RagBatchChunks"
             >> beam.BatchElements(min_batch_size=32, max_batch_size=256)
-            | "RagEmbedChunks" >> beam.ParDo(EmbedChunksDoFn(config.embedder_uri))
+            | f"{label_prefix}RagEmbedChunks" >> beam.ParDo(EmbedChunksDoFn(config.embedder_uri))
         )
-        _ = chunks | "WriteRagChunks" >> rag_chunks_sink
+        _ = chunks | f"{label_prefix}WriteRagChunks" >> rag_chunks_sink
 
     result: dict[str, Any] = {
         "reference_digest": digest,
         "run_id": config.run_id,
         "valid": uniq["unique"],
         "dlq": dlq,
+        "generation_context": ctx,
     }
 
     # §12 — run-level summary row + BLOCKER gate. Only wired when a
@@ -344,12 +400,12 @@ def build_pipeline(
             env="dev", blocker_failure_ratio=1.0
         )
         valid_count, dlq_by_rule = _gate_inputs(
-            uniq, dlq_raw, config.uniqueness_mode
+            uniq, dlq_raw, config.uniqueness_mode, label_prefix
         )
         summary_rows = (
             p
-            | "SummarySeed" >> beam.Create([None])
-            | "BuildValidationRun" >> beam.Map(
+            | f"{label_prefix}SummarySeed" >> beam.Create([None])
+            | f"{label_prefix}BuildValidationRun" >> beam.Map(
                 _build_validation_run_row,
                 valid_count=beam.pvalue.AsSingleton(valid_count),
                 dlq_by_rule=beam.pvalue.AsSingleton(dlq_by_rule),
@@ -363,7 +419,7 @@ def build_pipeline(
                 model_uri=config.model_uri,
             )
         )
-        write_result = summary_rows | "WriteValidationRun" >> validation_runs_sink
+        write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
         if config.fail_on_blocker:
             gate_kwargs = {}
             load_jobs = getattr(write_result, "destination_load_jobid_pairs", None)
@@ -374,12 +430,213 @@ def build_pipeline(
                 # validation_runs trace). Non-BQ sinks (DirectRunner tests)
                 # expose no WriteResult and keep the sibling wiring.
                 gate_kwargs["wait_on_write"] = beam.pvalue.AsIter(load_jobs)
-            _ = summary_rows | "BlockerGate" >> beam.ParDo(
+            _ = summary_rows | f"{label_prefix}BlockerGate" >> beam.ParDo(
                 _BlockerGateDoFn(), **gate_kwargs
             )
         result["validation_run"] = summary_rows
 
     return result
+
+
+def _dlq_inputs(generated, fk_invalid, record_validated, batch_validated, uniq):
+    """Every failure tag that feeds the DLQ, in stage order. `fk.orphan`
+    rides between generation and per-record validation — a row that
+    references a parent that does not exist is a failure of the run, not
+    of the record's shape."""
+    tags = [
+        generated.failed,
+        record_validated.invalid,
+        batch_validated.invalid,
+        uniq["duplicates"],
+    ]
+    if fk_invalid is not None:
+        tags.insert(1, fk_invalid)
+    return tuple(tags)
+
+
+def _fk_integrity_stage(generated_main, config, fk_side, label_prefix: str):
+    """``(rows to validate, orphan rows or None)``.
+
+    A table with no enforced FK edge keeps its DAG shape unchanged — the
+    optional-branch idiom used by the pool/RAG branches."""
+    if fk_side is None and not config.fk_key_pools:
+        return generated_main, None
+    dofn = EnforceFkIntegrityDoFn(
+        fk_key_pools=[dict(e) for e in config.fk_key_pools]
+    )
+    pardo = (
+        beam.ParDo(dofn, fk_side=fk_side)
+        if fk_side is not None
+        else beam.ParDo(dofn)
+    )
+    checked = generated_main | f"{label_prefix}EnforceFkIntegrity" >> (
+        pardo.with_outputs("invalid", main="main")
+    )
+    return checked.main, checked.invalid
+
+
+def _generate_pardo(config: PipelineConfig, ctx, fk_side):
+    """The Generate ParDo; a child table's parent-key side input rides
+    as a process() kwarg and defers the engine build (ADR 0030)."""
+    dofn = GenerateRecordsDoFn(
+        engine_name=config.engine_name,
+        model_client=config.model_client,
+        ctx=ctx,
+        similarity=config.similarity,
+        seed=config.seed,
+        expect_fk_side=fk_side is not None,
+    )
+    if fk_side is not None:
+        return beam.ParDo(dofn, fk_side=fk_side)
+    return beam.ParDo(dofn)
+
+
+# In-DAG FK key-pool cap (ADR 0030) — mirrors io/fk_pools._DEFAULT_LIMIT:
+# a child samples from at most this many parent key tuples; the side input
+# stays a few MB even under 100M-row parents.
+_FK_SIDE_SAMPLE_CAP = 100_000
+
+
+@dataclass(frozen=True)
+class FkEdgeSpec:
+    """One enforced FK edge resolved INSIDE the job (ADR 0030): the
+    child's ``child_cols`` sample from the parent's landed ``ref_cols``,
+    delivered as a side input — no BQ round-trip, integrity by
+    construction. ``parent_pk`` lets the composer skip the Distinct
+    shuffle when the ref tuple IS the parent PK (already unique after
+    EnforceUniqueness)."""
+
+    child_cols: tuple[str, ...]
+    ref_cols: tuple[str, ...]
+    parent_landing: str
+    parent_pk: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TableSpec:
+    """One table of a single-job relational launch (ADR 0030)."""
+
+    config: PipelineConfig
+    reference_rows: list[dict]
+    landing_sink: beam.PTransform
+    dlq_sink: beam.PTransform
+    validation_runs_sink: beam.PTransform | None = None
+    rag_chunks_sink: beam.PTransform | None = None
+    freetext_pools_store: Any = None
+    source_value_store: Any = None
+    parent_edges: tuple[FkEdgeSpec, ...] = ()
+
+
+def _edge_key_pools(parent_valid, edge: FkEdgeSpec, prefix: str):
+    """The parent's landed key TUPLES for one edge → a one-element
+    PCollection holding ``[{"cols": [...], "keys": [(v, …), …]}]``.
+
+    The tuple survives end to end (ADR 0031): splitting it into
+    per-column pools here is exactly what let a child assemble a
+    combination its parent never held. A key containing NULL is dropped —
+    SQL equality never matches NULL, so it is not referenceable.
+    """
+    tuples = (
+        parent_valid
+        | f"{prefix}FkTuples" >> beam.Map(
+            lambda r, rc=edge.ref_cols: tuple(r[c] for c in rc)
+        )
+        | f"{prefix}FkDropNullKeys"
+        >> beam.Filter(lambda t: all(v is not None for v in t))
+    )
+    if tuple(sorted(edge.ref_cols)) != tuple(sorted(edge.parent_pk)):
+        tuples = tuples | f"{prefix}FkDistinct" >> beam.Distinct()
+    sampled = (
+        tuples
+        | f"{prefix}FkSample"
+        >> combiners.Sample.FixedSizeGlobally(_FK_SIDE_SAMPLE_CAP)
+    )
+    return sampled | f"{prefix}FkPools" >> beam.Map(
+        _key_pool_payload, cols=list(edge.child_cols)
+    )
+
+
+def _key_pool_payload(keys, cols: list[str]) -> list[dict]:
+    """One edge's side-input payload. The cap is announced, never
+    silent: a child sampling 100k of a larger parent's keys references
+    only those, which caps its own FK distinct count."""
+    if len(keys) >= _FK_SIDE_SAMPLE_CAP:
+        log_milestone(
+            "fk_key_pool_capped",
+            level=logging.WARNING,
+            columns=",".join(cols),
+            cap=_FK_SIDE_SAMPLE_CAP,
+            detail=(
+                "the parent holds at least as many distinct keys as the "
+                "cap; the child references a uniform sample of them, so "
+                "its FK distinct count cannot exceed the cap"
+            ),
+        )
+    return [{"cols": cols, "keys": list(keys)}]
+
+
+def build_relational_pipeline(
+    p: beam.Pipeline, specs: list[TableSpec]
+) -> dict[str, dict[str, Any]]:
+    """N tables, ONE pipeline (ADR 0030): each table's full subgraph
+    (pools, RAG, generation, validation, DLQ, gate) label-namespaced by
+    its landing table name; a child's FK columns take the parent's
+    landed keys as an in-DAG side input, which is also the runner-level
+    ordering barrier — children never generate before parents. One
+    worker fleet, one vLLM ignition, serves every table.
+
+    ``specs`` must arrive parents-first (`plan_launch` order). Returns
+    {landing_table: build_pipeline result}."""
+    valid_by_landing: dict[str, Any] = {}
+    results: dict[str, dict[str, Any]] = {}
+    for spec in specs:
+        name = spec.config.landing_table.rsplit(".", 1)[-1]
+        prefix = f"{name}/"
+        side = None
+        if spec.parent_edges:
+            edge_pools = []
+            for j, edge in enumerate(spec.parent_edges):
+                parent = valid_by_landing.get(edge.parent_landing)
+                if parent is None:
+                    raise ValueError(
+                        f"{spec.config.landing_table}: parent "
+                        f"{edge.parent_landing!r} not built earlier in the "
+                        f"spec list — specs must be parents-first"
+                    )
+                edge_pools.append(
+                    _edge_key_pools(parent, edge, f"{prefix}edge{j}/")
+                )
+            if len(edge_pools) == 1:
+                merged = edge_pools[0]
+            else:
+                merged = (
+                    tuple(edge_pools)
+                    | f"{prefix}FkEdgeFlatten" >> beam.Flatten()
+                    | f"{prefix}FkMerge"
+                    >> beam.CombineGlobally(
+                        lambda payloads: [
+                            edge for p in payloads for edge in p
+                        ]
+                    )
+                )
+            side = beam.pvalue.AsSingleton(merged)
+        results[spec.config.landing_table] = build_pipeline(
+            p,
+            reference_rows=spec.reference_rows,
+            config=spec.config,
+            landing_sink=spec.landing_sink,
+            dlq_sink=spec.dlq_sink,
+            validation_runs_sink=spec.validation_runs_sink,
+            rag_chunks_sink=spec.rag_chunks_sink,
+            freetext_pools_store=spec.freetext_pools_store,
+            source_value_store=spec.source_value_store,
+            label_prefix=prefix,
+            fk_side=side,
+        )
+        valid_by_landing[spec.config.landing_table] = results[
+            spec.config.landing_table
+        ]["valid"]
+    return results
 
 
 def _rag_free_text_columns(
@@ -398,7 +655,9 @@ def _rag_free_text_columns(
     ]
 
 
-def _gate_inputs(uniq: dict, dlq_raw, uniqueness_mode: str):
+def _gate_inputs(
+    uniq: dict, dlq_raw, uniqueness_mode: str, label_prefix: str = ""
+):
     """`(valid_count, dlq_by_rule)` singletons for the BLOCKER gate.
 
     `build_run_summary` computes ``total = valid_count + dlq_count``. In
@@ -412,17 +671,21 @@ def _gate_inputs(uniq: dict, dlq_raw, uniqueness_mode: str):
     if uniqueness_mode == "streaming":
         valid_count = uniq["distinct_count"]
     else:
-        valid_count = uniq["unique"] | "CountValid" >> beam.combiners.Count.Globally()
+        valid_count = (
+            uniq["unique"]
+            | f"{label_prefix}CountValid" >> beam.combiners.Count.Globally()
+        )
     dlq_by_rule = (
         (
-            dlq_raw | "DlqRulePairs" >> beam.Map(_dlq_rule_weight),
+            dlq_raw
+            | f"{label_prefix}DlqRulePairs" >> beam.Map(_dlq_rule_weight),
             # Streaming reports duplicates as measured counts rather than
             # diverted envelopes; the gate folds them identically.
             uniq["rule_counts"],
         )
-        | "AllRulePairs" >> beam.Flatten()
-        | "DlqRuleCounts" >> beam.CombinePerKey(sum)
-        | "DlqRuleDict" >> beam.combiners.ToDict()
+        | f"{label_prefix}AllRulePairs" >> beam.Flatten()
+        | f"{label_prefix}DlqRuleCounts" >> beam.CombinePerKey(sum)
+        | f"{label_prefix}DlqRuleDict" >> beam.combiners.ToDict()
     )
     return valid_count, dlq_by_rule
 

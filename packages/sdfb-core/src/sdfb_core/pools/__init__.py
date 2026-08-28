@@ -7,6 +7,15 @@ Protocol and record live here; the BigQuery implementation is in
 """
 
 from sdfb_core.pools.record import FreeTextPool
-from sdfb_core.pools.store import FreeTextPoolStore, InMemoryFreeTextPoolStore
+from sdfb_core.pools.store import (
+    FreeTextPoolStore,
+    InMemoryFreeTextPoolStore,
+    SourceValueStore,
+)
 
-__all__ = ["FreeTextPool", "FreeTextPoolStore", "InMemoryFreeTextPoolStore"]
+__all__ = [
+    "FreeTextPool",
+    "FreeTextPoolStore",
+    "InMemoryFreeTextPoolStore",
+    "SourceValueStore",
+]

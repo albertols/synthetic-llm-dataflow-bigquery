@@ -7,7 +7,7 @@
 > Every number in §1 is re-derived from
 > `integration_tests/2026-07-26_06_54_25-14348390798392809440/worker_logs.jsonl`
 > (the 1M-row stress run); the extraction is reproducible via
-> [`scripts/make_ws5_figures.py`](../../scripts/make_ws5_figures.py), which also
+> [`scripts/doc/make_ws5_figures.py`](../../scripts/doc/make_ws5_figures.py), which also
 > regenerates every figure (provenance in §7).
 >
 > **Implementation plan:** [`docs/superpowers/plans/2026-07-26-ws5-generation-throughput.md`](../superpowers/plans/2026-07-26-ws5-generation-throughput.md)
@@ -312,7 +312,7 @@ GPU-hours are not at risk either way.
 All four PNGs regenerate with:
 
 ```bash
-uv run --no-sync python3 scripts/make_ws5_figures.py
+uv run --no-sync python3 scripts/doc/make_ws5_figures.py
 ```
 
 Palette is the project's established design-doc palette (blue `#2a78d6`,

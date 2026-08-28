@@ -1,54 +1,33 @@
-#!/usr/bin/env python
-"""Bundle the E2E validation artifacts into a shareable, de-identified export.
+"""Shared redaction + leak-scan machinery for the `scripts/e2e/` toolchain.
 
-Produces two sibling folders under ``<out-root>/<job_id>/`` (the primary
-Dataflow job id of the deployment; falls back to the report timestamp when no
-job id is available):
+Extracted from `e2e_bundle_export.py` so other scripts (e.g. the release
+report generator) can build a redaction `Mapping` from collected metrics,
+apply it to text/CSV/JSON artifacts, and leak-scan a directory tree without
+importing the bundle exporter's argparse/IO orchestration.
 
-  * ``real/`` — verbatim copies of every metrics JSON + sample CSV + the
-    report, plus a ``mapping.json`` decode key (so the internal team can read
-    the real names).
-  * ``oss/``  — the SAME artifacts with every environment-specific and
-    data-specific token deterministically replaced by a generic placeholder,
-    safe to hand to the open-source team. A run whose ``oss/`` output still
-    contained a real identifier would be a leak, so redaction covers three
-    token classes:
+Token classes redacted (see `e2e_bundle_export.py`'s module docstring for the
+full rationale):
 
-      1. IDENTIFIERS — project / dataset / table / bucket / caller email /
-         reference digests / file paths. Dataflow job ids and job names are
-         deliberately KEPT verbatim (they name the bundle folder and carry no
-         environment secrets).
-      2. COLUMN NAMES — every field name becomes ``COL_NNN`` (primary-key and
-         identity columns keep a role prefix: ``PK_COL`` / ``ID_COL``).
-      3. DATA VALUES — concrete sampled values (top-value / run-length
-         exemplars + every non-numeric CSV cell) become ``VAL_NNNN``.
+  1. IDENTIFIERS — project / dataset / table / bucket / caller email /
+     reference digests / file paths.
+  2. COLUMN NAMES — every field name becomes ``COL_NNN`` (primary-key and
+     identity columns keep a role prefix: ``PK_COL`` / ``ID_COL``).
+  3. DATA VALUES — concrete sampled values become ``VAL_NNNN``.
 
-Nothing is hard-coded to a table or environment: the mapping is derived
-entirely from the input artifacts, so this works for any table and any future
-integration test.
+Sibling import idiom for scripts under `scripts/e2e/`::
 
-Usage:
-    python scripts/e2e_bundle_export.py \
-        --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
-        --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
-        --csv b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv \
-        --report output/end_to_end_validation_report_2026_07_07_16_26.md \
-        --out-root integration_test
-        # --job-id <JOB_ID>             (default: first Dataflow job id in the
-        #                                gcp metrics, else the report timestamp)
-        # --no-redact-values            (keep real dev data values in oss/;
-        #                                metadata is ALWAYS hidden either way)
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import redaction
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
 import io
-import json
 import re
-import shutil
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +42,10 @@ _NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
 # "unknown"). The OSS repo handle "org/repo" is not an email and is preserved.
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _EMAIL_PLACEHOLDER = "analyst@example.org"
+_NETWORK_TAGS_RE = re.compile(r"use_network_tags(?:_for_flex_templates)?=([^'\"\]\s,]+)")
 _FQN_PARTS = 3
 # Minimum length for a data value to be replaced in prose (shorter tokens are
-# only redacted when they are all-uppercase alpha, e.g. currency/country codes).
+# only replaced when they are all-uppercase alpha, e.g. currency/country codes).
 _MIN_TEXT_VALUE_LEN = 4
 
 
@@ -86,6 +66,14 @@ class Mapping:
     def add_identifier(self, real: str | None, placeholder: str) -> None:
         if real and real not in self.identifiers:
             self.identifiers[real] = placeholder
+
+    def preload_columns(self, preset: dict[str, str]) -> None:
+        """Pre-register real→alias pairs from the history registry
+        (ADR 0029): a preset alias always wins over role/generic naming,
+        so a table's columns keep one name across every run."""
+        for real, alias in preset.items():
+            if real and real not in self.columns:
+                self.columns[real] = alias
 
     def add_column(self, real: str, *, role: str | None = None) -> None:
         if not real or real in self.columns:
@@ -167,33 +155,118 @@ class Mapping:
         }
 
 
+def redact_text(m: Mapping, text: str) -> str:
+    """Free-function form of `Mapping.redact_text` for sibling-script callers."""
+    return m.redact_text(text)
+
+
+def mapping_from_dict(d: dict[str, Any]) -> Mapping:
+    """Rebuild a Mapping from a persisted ``mapping.json`` (`Mapping.to_dict`
+    output) so artifacts created AFTER the bundle export can be redacted with
+    the SAME replacements the export used. Redaction-only use: the placeholder
+    counters are not restored, so registering new columns/values on the
+    rebuilt mapping could collide with existing placeholders."""
+    m = Mapping()
+    m.identifiers = dict(d.get("identifiers") or {})
+    m.columns = dict(d.get("columns") or {})
+    m.values = dict(d.get("values") or {})
+    return m
+
+
 def _split_fqn(fqn: str) -> tuple[str, str, str] | None:
     parts = fqn.split(".")
     return (parts[0], parts[1], parts[2]) if len(parts) == _FQN_PARTS else None
+
+
+def ordered_columns(metrics: dict[str, Any]) -> list[str]:
+    """Column names in redaction order (schema first, then offline
+    engines) — the SAME order `_collect_columns` walks, published so the
+    history registry (ADR 0029) numbers columns identically."""
+    gcp = metrics.get("gcp") or {}
+    offline = metrics.get("offline") or {}
+    bq_cols = (gcp.get("bigquery") or {}).get("columns") or {}
+    out: list[str] = list(bq_cols)
+    for eng in (offline.get("engines") or {}).values():
+        for c in eng.get("columns") or {}:
+            if c not in out:
+                out.append(c)
+    return out
 
 
 def build_mapping(
     metrics: dict[str, Any],
     *,
     redact_values: bool = True,
+    preset_columns: dict[str, str] | None = None,
+    preset_table_alias: str | None = None,
 ) -> Mapping:
-    """Derive a full redaction mapping from the collected metrics artifacts."""
+    """Derive a full redaction mapping from the collected metrics artifacts.
+
+    ``preset_columns`` / ``preset_table_alias`` come from the history
+    registry (ADR 0029): preset names win over role/generic naming so
+    the same real column redacts to the same alias in every bundle."""
     m = Mapping()
     gcp = metrics.get("gcp") or {}
     offline = metrics.get("offline") or {}
     bq = gcp.get("bigquery") or {}
 
+    if preset_columns:
+        m.preload_columns(preset_columns)
     pk_cols = set(offline.get("primary_key") or []) | set(bq.get("pk_columns") or [])
     id_cols = set(offline.get("identity_columns") or [])
 
-    _collect_identifiers(gcp, bq, m)
+    _collect_identifiers(gcp, bq, m, table_alias=preset_table_alias)
     _collect_columns(gcp, offline, pk_cols, id_cols, m)
+    _collect_stats_diff_columns(metrics, m)
     if redact_values:
         _collect_values(offline, m)
     return m
 
 
-def _collect_identifiers(gcp: dict[str, Any], bq: dict[str, Any], m: Mapping) -> None:
+def _is_stats_diff_shaped(obj: Any) -> bool:
+    """Structural check for a `stats_diff.json`-shaped dict
+    (`source_synthetic_stats_diff.py::diff_profiles`'s output: a top-level
+    ``columns`` dict + a ``table`` key). Checked by shape, not by requiring
+    the caller to have used the label ``"stats_diff"`` — any metrics dict
+    that flows through `build_mapping` this-shaped gets its column names
+    registered."""
+    return (
+        isinstance(obj, dict)
+        and isinstance(obj.get("columns"), dict)
+        and "table" in obj
+    )
+
+
+def _collect_stats_diff_columns(metrics: dict[str, Any], m: Mapping) -> None:
+    """Register source-only column names carried by a stats-diff artifact.
+
+    `_collect_columns` only walks landing-side schema (`gcp.bigquery.columns`)
+    and offline per-engine columns, so a column present ONLY on the source
+    side — one BigQuery never wrote to the landing table — is invisible to
+    it. `source_synthetic_stats_diff.py::diff_profiles` still names every
+    such column: every profiled name is a key of `stats_diff["columns"]`,
+    and source-only-or-unsupported-type names land in
+    `stats_diff["table"]["skipped"]`. Without this, both sets pass through
+    the `oss/` bundle export unredacted (real column names leak via
+    `table.skipped` and the `columns` dict keys of a copied
+    `stats_diff_metrics.json`).
+    """
+    for obj in metrics.values():
+        if not _is_stats_diff_shaped(obj):
+            continue
+        for col in obj.get("columns") or {}:
+            m.add_column(col)
+        table = obj.get("table") or {}
+        for col in table.get("skipped") or []:
+            m.add_column(col)
+
+
+def _collect_identifiers(
+    gcp: dict[str, Any],
+    bq: dict[str, Any],
+    m: Mapping,
+    table_alias: str | None = None,
+) -> None:
     """Project / dataset / table / bucket / caller / job / digest tokens."""
     m.add_identifier(gcp.get("project"), "PROJECT_ID")
     caller = gcp.get("caller_identity")
@@ -230,7 +303,7 @@ def _collect_identifiers(gcp: dict[str, Any], bq: dict[str, Any], m: Mapping) ->
 
     for ds, role in dataset_roles.items():
         m.add_identifier(ds, role)
-    m.add_identifier(table_name, "TARGET_TABLE")
+    m.add_identifier(table_name, table_alias or "TARGET_TABLE")
 
     # Dataflow job ids / job names are intentionally NOT redacted: they name
     # the bundle folder and must stay correlatable in the oss/ artifacts.
@@ -238,6 +311,24 @@ def _collect_identifiers(gcp: dict[str, Any], bq: dict[str, Any], m: Mapping) ->
         img = (job.get("environment") or {}).get("worker_image")
         if img:
             m.add_identifier(img, "WORKER_IMAGE")
+    _collect_network_tags(gcp, m)
+
+
+def _collect_network_tags(gcp: dict[str, Any], m: Mapping) -> None:
+    """Network-tag names ride inside each Dataflow job's `experiments`
+    list (`use_network_tags=a;b`, `use_network_tags_for_flex_templates=a;b`)
+    — infrastructure identifiers no other rule touched (2026-08-26 R6 10M
+    bundle, ADR 0033 D7). Aliased in first-seen order: NETWORK_TAG_n."""
+    tags: list[str] = []
+    for job in gcp.get("dataflow") or []:
+        experiments = str((job.get("parameters") or {}).get("experiments") or "")
+        for mobj in _NETWORK_TAGS_RE.finditer(experiments):
+            for raw in mobj.group(1).split(";"):
+                tag = raw.strip()
+                if tag and tag not in tags:
+                    tags.append(tag)
+    for i, tag in enumerate(tags, 1):
+        m.add_identifier(tag, f"NETWORK_TAG_{i}")
 
 
 def _collect_columns(
@@ -264,7 +355,6 @@ def _collect_columns(
         m.add_column(c)
 
 
-
 def _collect_values(offline: dict[str, Any], m: Mapping) -> None:
     """Walk the offline metrics for concrete ``value`` leaves to redact."""
 
@@ -282,7 +372,7 @@ def _collect_values(offline: dict[str, Any], m: Mapping) -> None:
     walk(offline)
 
 
-def _register_csv(m: Mapping, text: str, *, redact_values: bool) -> None:
+def register_csv(m: Mapping, text: str, *, redact_values: bool) -> None:
     """Register a sample CSV's header columns (+ cell values) in the mapping."""
     rows = list(csv.reader(io.StringIO(text)))
     if not rows:
@@ -297,7 +387,7 @@ def _register_csv(m: Mapping, text: str, *, redact_values: bool) -> None:
                 m.add_value(cell)
 
 
-def _redact_csv(m: Mapping, text: str) -> str:
+def redact_csv(m: Mapping, text: str) -> str:
     """Structurally redact a sample CSV (header via columns, cells via values)."""
     rows = list(csv.reader(io.StringIO(text)))
     out = io.StringIO()
@@ -314,145 +404,22 @@ def _redact_csv(m: Mapping, text: str) -> str:
     return out.getvalue()
 
 
-# --------------------------------------------------------------------------
-# bundle writer
-# --------------------------------------------------------------------------
-def _derive_timestamp(report: Path | None) -> str:
-    if report:
-        mobj = re.search(r"(\d{4}_\d{2}_\d{2}_\d{2}_\d{2})", report.name)
-        if mobj:
-            return mobj.group(1)
-    return datetime.now(UTC).strftime("%Y_%m_%d_%H_%M")
+def leak_scan(oss_dir: Path, mapping: Mapping) -> list[tuple[str, str]]:
+    """Fail-safe: confirm no real identifier/column survived into oss_dir.
 
-
-def _derive_bundle_name(
-    job_id: str, metrics: dict[str, Any], report: Path | None
-) -> str:
-    """Bundle folder = the deployment's primary Dataflow job id."""
-    if job_id:
-        return job_id
-    for job in (metrics.get("gcp") or {}).get("dataflow") or []:
-        if job.get("job_id"):
-            return str(job["job_id"])
-    return _derive_timestamp(report)
-
-
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "--metrics",
-        action="append",
-        required=True,
-        help="label=path.json (repeatable). Use labels 'gcp' and 'offline' so "
-        "the mapping can find FQNs/columns; extra labels are copied + redacted.",
-    )
-    ap.add_argument(
-        "--csv",
-        action="append",
-        default=[],
-        help="engine_label=path.csv (repeatable). Sample generated-data CSVs "
-        "copied verbatim into real/ and redacted into oss/.",
-    )
-    ap.add_argument("--report", type=Path, required=True)
-    ap.add_argument("--out-root", type=Path, default=Path("integration_test"))
-    ap.add_argument(
-        "--job-id",
-        default="",
-        help="bundle folder name; default: first Dataflow job id found in the "
-        "gcp metrics, else the report timestamp.",
-    )
-    ap.add_argument(
-        "--redact-values",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="redact concrete data-sample values (VAL_NNNN) in the oss/ export. "
-        "Metadata (project/dataset/table/columns) is ALWAYS hidden regardless. "
-        "Use --no-redact-values to keep real dev data values in oss/.",
-    )
-    args = ap.parse_args(argv)
-
-    metrics_paths: dict[str, Path] = {}
-    for item in args.metrics:
-        if "=" not in item:
-            raise SystemExit(f"--metrics expects label=path, got {item!r}")
-        label, path = item.split("=", 1)
-        metrics_paths[label.strip()] = Path(path.strip())
-
-    csv_paths: dict[str, Path] = {}
-    for item in args.csv:
-        if "=" not in item:
-            raise SystemExit(f"--csv expects engine_label=path, got {item!r}")
-        label, path = item.split("=", 1)
-        csv_paths[label.strip()] = Path(path.strip())
-
-    metrics = {
-        label: json.loads(p.read_text()) for label, p in metrics_paths.items()
-    }
-    csv_texts = {label: p.read_text() for label, p in csv_paths.items()}
-    report_text = args.report.read_text()
-
-    mapping = build_mapping(metrics, redact_values=args.redact_values)
-    for text in csv_texts.values():
-        _register_csv(mapping, text, redact_values=args.redact_values)
-
-    base = args.out_root / _derive_bundle_name(args.job_id, metrics, args.report)
-    real_dir, oss_dir = base / "real", base / "oss"
-    real_dir.mkdir(parents=True, exist_ok=True)
-    oss_dir.mkdir(parents=True, exist_ok=True)
-
-    # real/ — verbatim + decode key
-    for label, p in metrics_paths.items():
-        shutil.copyfile(p, real_dir / f"{label}_metrics.json")
-    for label, p in csv_paths.items():
-        shutil.copyfile(p, real_dir / f"{label}_sample.csv")
-    shutil.copyfile(args.report, real_dir / "report.md")
-    (real_dir / "mapping.json").write_text(
-        json.dumps(mapping.to_dict(), indent=2, ensure_ascii=False)
-    )
-
-    # oss/ — redacted
-    for label, obj in metrics.items():
-        (oss_dir / f"{label}_metrics.json").write_text(
-            json.dumps(mapping.redact_json(obj), indent=2, ensure_ascii=False)
-        )
-    for label, text in csv_texts.items():
-        (oss_dir / f"{label}_sample.csv").write_text(_redact_csv(mapping, text))
-    (oss_dir / "report.md").write_text(mapping.redact_text(report_text))
-
-    leaked = _leak_scan(oss_dir, mapping)
-    print(f"real bundle → {real_dir}")
-    print(f"oss  bundle → {oss_dir}")
-    print(
-        f"values redacted: {args.redact_values} "
-        "(metadata is always hidden)"
-    )
-    print(
-        f"mapping: {len(mapping.columns)} columns, "
-        f"{len(mapping.identifiers)} identifiers, {len(mapping.values)} values"
-    )
-    if leaked:
-        print("WARNING: possible residual tokens in oss/:")
-        for f, tok in leaked:
-            print(f"  {f}: {tok!r}")
-        return 1
-    print("leak scan: clean ✅")
-    return 0
-
-
-main_with_args = main
-
-
-def _leak_scan(oss_dir: Path, mapping: Mapping) -> list[tuple[str, str]]:
-    """Fail-safe: confirm no real identifier/column survived into oss/."""
+    Binary-tolerant: reads every file as bytes and decodes with
+    ``errors="ignore"`` rather than `Path.read_text()`'s strict UTF-8. Text
+    files (the common case — JSON/CSV/md) decode identically either way, so
+    behavior there is unchanged; a binary file (e.g. a chart PNG sitting
+    alongside the report) no longer crashes the scan with
+    `UnicodeDecodeError` and is instead scanned for any decodable token
+    remnant, same as a text file.
+    """
     reals = list(mapping.identifiers) + list(mapping.columns)
     hits: list[tuple[str, str]] = []
     for f in (f for f in oss_dir.rglob("*") if f.is_file()):
-        text = f.read_text()
+        text = f.read_bytes().decode("utf-8", errors="ignore")
         for real in reals:
             if real and real in text:
                 hits.append((f.name, real))
     return hits
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
