@@ -1,0 +1,1732 @@
+{
+ "schema": "config/bq_schema/LANDING_DATASET/C_TABLE.schema.json",
+ "schema_columns": 67,
+ "primary_key": [
+  "C_COL_001",
+  "C_COL_002",
+  "C_COL_004"
+ ],
+ "identity_columns": [
+  "C_COL_064"
+ ],
+ "engines": {
+  "b1_rag_c_table": {
+   "file": "integration_tests/2026-08-26_05_01_16-3186876581127148459/b1_rag_c_table_sample.csv",
+   "row_count": 10000,
+   "full_row_duplicates": 0,
+   "full_row_duplicate_ratio": 0.0,
+   "distinct_full_rows": 10000,
+   "primary_key": {
+    "declared": true,
+    "columns": [
+     "C_COL_001",
+     "C_COL_002",
+     "C_COL_004"
+    ],
+    "distinct": 10000,
+    "distinct_ratio": 1.0,
+    "duplicates": 0,
+    "run_lengths": {
+     "max_run": 1,
+     "top_runs": [
+      {
+       "value": "E2F1FED914025BA52A6679CB\u001f5\u001fEUR",
+       "run_length": 1
+      },
+      {
+       "value": "E2F1058F0B8829E86EBAE356\u001f1\u001fESP",
+       "run_length": 1
+      },
+      {
+       "value": "E2F1F84B862F75AD2C9D5658\u001f1\u001fUSD",
+       "run_length": 1
+      },
+      {
+       "value": "23010761C29E4771CBB37C1E\u001f5\u001fESP",
+       "run_length": 1
+      },
+      {
+       "value": "E2F3E65B1B40A1687D311A80\u001f1\u001fESP",
+       "run_length": 1
+      }
+     ],
+     "run_length_histogram": {
+      "1": 10000
+     },
+     "equals_batch_size": false
+    }
+   },
+   "identity_columns": {
+    "C_COL_064": {
+     "distinct": 10000,
+     "distinct_ratio": 1.0,
+     "duplicates": 0,
+     "run_lengths": {
+      "max_run": 1,
+      "top_runs": [
+       {
+        "value": "a757db62-f27f-41e1-8fb1-6e782cf3",
+        "run_length": 1
+       },
+       {
+        "value": "b89c33b7-4ffd-474e-a6a1-38bc0526",
+        "run_length": 1
+       },
+       {
+        "value": "8e61a710-a9a5-45ff-bf4b-c3750d37",
+        "run_length": 1
+       },
+       {
+        "value": "75ebdd98-a3e4-41b8-90b7-f6b957d8",
+        "run_length": 1
+       },
+       {
+        "value": "4335e0ea-393d-41e5-ab05-3efe1b64",
+        "run_length": 1
+       }
+      ],
+      "run_length_histogram": {
+       "1": 10000
+      },
+      "equals_batch_size": false
+     },
+     "sequential": false
+    }
+   },
+   "columns": {
+    "C_COL_001": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 10000,
+     "distinct_ratio": 1.0,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.0001,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "E2F1FED914025BA52A6679CB",
+       "count": 1
+      },
+      {
+       "value": "E2F1058F0B8829E86EBAE356",
+       "count": 1
+      },
+      {
+       "value": "E2F1F84B862F75AD2C9D5658",
+       "count": 1
+      }
+     ],
+     "normalized_entropy": 1.0
+    },
+    "C_COL_002": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 2,
+     "distinct_ratio": 0.0002,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": 0.0,
+     "top_value_share": 0.5027,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "5",
+       "count": 5027
+      },
+      {
+       "value": "1",
+       "count": 4973
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.999979
+    },
+    "C_COL_003": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_004": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 29,
+     "distinct_ratio": 0.0029,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.6966,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "EUR",
+       "count": 6966
+      },
+      {
+       "value": "ESP",
+       "count": 1713
+      },
+      {
+       "value": "USD",
+       "count": 500
+      }
+     ],
+     "normalized_entropy": 0.326218
+    },
+    "C_COL_005": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "ES",
+       "count": 10000
+      }
+     ],
+     "normalized_entropy": 0.0
+    },
+    "C_COL_006": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": 0.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "19",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_007": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 365,
+     "distinct_ratio": 0.0365,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": 0.0,
+     "top_value_share": 0.2556,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "3333",
+       "count": 2556
+      },
+      {
+       "value": "42",
+       "count": 1221
+      },
+      {
+       "value": "20",
+       "count": 1179
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.54548
+    },
+    "C_COL_008": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 342,
+     "distinct_ratio": 0.0342,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": 0.0,
+     "top_value_share": 0.2581,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "3333",
+       "count": 2581
+      },
+      {
+       "value": "42",
+       "count": 1292
+      },
+      {
+       "value": "20",
+       "count": 1195
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.544013
+    },
+    "C_COL_009": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 5755,
+     "distinct_ratio": 0.5755,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": 0.0,
+     "top_value_share": 0.0121,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "4001000000",
+       "count": 121
+      },
+      {
+       "value": "4001000001",
+       "count": 54
+      },
+      {
+       "value": "4001000002",
+       "count": 34
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.959197
+    },
+    "C_COL_010": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_011": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_012": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_013": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 2,
+     "distinct_ratio": 0.0002,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.9994,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "N",
+       "count": 9994
+      },
+      {
+       "value": "Y",
+       "count": 6
+      }
+     ],
+     "normalized_entropy": 0.007287
+    },
+    "C_COL_014": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 2,
+     "distinct_ratio": 0.0002,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.189,
+     "zero_fraction": 0.189,
+     "top_value_share": 0.811,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "2",
+       "count": 8110
+      },
+      {
+       "value": "0",
+       "count": 1890
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.699375
+    },
+    "C_COL_015": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 4,
+     "distinct_ratio": 0.0004,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9994,
+     "zero_fraction": 0.9994,
+     "top_value_share": 0.9994,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9994
+      },
+      {
+       "value": "1",
+       "count": 3
+      },
+      {
+       "value": "1000000",
+       "count": 2
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.004081
+    },
+    "C_COL_016": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 92,
+     "distinct_ratio": 0.0092,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9837,
+     "zero_fraction": 0.9837,
+     "top_value_share": 0.9837,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9837
+      },
+      {
+       "value": "60101",
+       "count": 22
+      },
+      {
+       "value": "601",
+       "count": 20
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.032396
+    },
+    "C_COL_017": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 146,
+     "distinct_ratio": 0.0146,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9763,
+     "zero_fraction": 0.9763,
+     "top_value_share": 0.9763,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9763
+      },
+      {
+       "value": "60101",
+       "count": 25
+      },
+      {
+       "value": "601",
+       "count": 20
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.043425
+    },
+    "C_COL_018": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_019": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_020": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1776,
+     "distinct_ratio": 0.1776,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.8096,
+     "zero_fraction": 0.8096,
+     "top_value_share": 0.8096,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 8096
+      },
+      {
+       "value": "100000",
+       "count": 17
+      },
+      {
+       "value": "200000",
+       "count": 13
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.253658
+    },
+    "C_COL_021": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_022": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_023": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1862,
+     "distinct_ratio": 0.1862,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.7313,
+     "zero_fraction": 0.7313,
+     "top_value_share": 0.7313,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 7313
+      },
+      {
+       "value": "1",
+       "count": 213
+      },
+      {
+       "value": "2",
+       "count": 96
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.320032
+    },
+    "C_COL_024": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_025": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_026": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_027": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_028": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_029": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_030": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_031": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_032": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_033": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_034": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 2383,
+     "distinct_ratio": 0.2383,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.1937,
+     "zero_fraction": null,
+     "top_value_share": 0.1937,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0001-01-01",
+       "count": 1937
+      },
+      {
+       "value": "2020-05-20",
+       "count": 13
+      },
+      {
+       "value": "2020-08-17",
+       "count": 12
+      }
+     ],
+     "normalized_entropy": 0.850057
+    },
+    "C_COL_035": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 30,
+     "distinct_ratio": 0.003,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.6218,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "00:00:00",
+       "count": 6218
+      },
+      {
+       "value": "01:01:01",
+       "count": 1945
+      },
+      {
+       "value": "12:44:26",
+       "count": 514
+      }
+     ],
+     "normalized_entropy": 0.397964
+    },
+    "C_COL_036": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1711,
+     "distinct_ratio": 0.1711,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.8182,
+     "zero_fraction": 0.8182,
+     "top_value_share": 0.8182,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 8182
+      },
+      {
+       "value": "601",
+       "count": 18
+      },
+      {
+       "value": "100",
+       "count": 11
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.24378
+    },
+    "C_COL_037": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_038": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_039": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 38,
+     "distinct_ratio": 0.0038,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.996,
+     "zero_fraction": 0.996,
+     "top_value_share": 0.996,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9960
+      },
+      {
+       "value": "652204",
+       "count": 4
+      },
+      {
+       "value": "303959",
+       "count": 1
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.011073
+    },
+    "C_COL_040": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 2,
+     "distinct_ratio": 0.0002,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9999,
+     "zero_fraction": 0.9999,
+     "top_value_share": 0.9999,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9999
+      },
+      {
+       "value": "120000",
+       "count": 1
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.001473
+    },
+    "C_COL_041": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 4,
+     "distinct_ratio": 0.0004,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9988,
+     "zero_fraction": 0.9988,
+     "top_value_share": 0.9988,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9988
+      },
+      {
+       "value": "300",
+       "count": 7
+      },
+      {
+       "value": "600",
+       "count": 4
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.007455
+    },
+    "C_COL_042": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 337,
+     "distinct_ratio": 0.0337,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9656,
+     "zero_fraction": null,
+     "top_value_share": 0.9656,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0001-01-01",
+       "count": 9656
+      },
+      {
+       "value": "2058-04-15",
+       "count": 2
+      },
+      {
+       "value": "2046-03-01",
+       "count": 2
+      }
+     ],
+     "normalized_entropy": 0.060056
+    },
+    "C_COL_043": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 4,
+     "distinct_ratio": 0.0004,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9992,
+     "zero_fraction": null,
+     "top_value_share": 0.9992,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0001-01-01",
+       "count": 9992
+      },
+      {
+       "value": "1998-03-23",
+       "count": 4
+      },
+      {
+       "value": "1998-08-03",
+       "count": 3
+      }
+     ],
+     "normalized_entropy": 0.005254
+    },
+    "C_COL_044": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 2289,
+     "distinct_ratio": 0.2289,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.3592,
+     "zero_fraction": null,
+     "top_value_share": 0.3592,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0001-01-01",
+       "count": 3592
+      },
+      {
+       "value": "2019-12-27",
+       "count": 13
+      },
+      {
+       "value": "2019-09-11",
+       "count": 13
+      }
+     ],
+     "normalized_entropy": 0.710781
+    },
+    "C_COL_045": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 6,
+     "distinct_ratio": 0.0006,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.468,
+     "zero_fraction": null,
+     "top_value_share": 0.468,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0001-01-01",
+       "count": 4680
+      },
+      {
+       "value": "2024-08-21",
+       "count": 2470
+      },
+      {
+       "value": "2024-06-28",
+       "count": 2388
+      }
+     ],
+     "normalized_entropy": 0.679749
+    },
+    "C_COL_046": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 30,
+     "distinct_ratio": 0.003,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.6312,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "00:00:00",
+       "count": 6312
+      },
+      {
+       "value": "12:44:26",
+       "count": 1119
+      },
+      {
+       "value": "11:28:17",
+       "count": 692
+      }
+     ],
+     "normalized_entropy": 0.444061
+    },
+    "C_COL_047": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1717,
+     "distinct_ratio": 0.1717,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": 0.0,
+     "top_value_share": 0.3782,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "1",
+       "count": 3782
+      },
+      {
+       "value": "4",
+       "count": 745
+      },
+      {
+       "value": "3353",
+       "count": 373
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.57813
+    },
+    "C_COL_048": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 3714,
+     "distinct_ratio": 0.3714,
+     "null_fraction": 0.6286,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.0001,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "S1\u00ae\u00b1\u00d8\u0013C\u00ed\u00ad\u001dT\u00bf",
+       "count": 1
+      },
+      {
+       "value": "S1\u00ae\u00b1}\u0019\u0081\u001bMy\u007f\u0006",
+       "count": 1
+      },
+      {
+       "value": "S1\u00ae\u00b1\u00f6\u00e8+X\u00f9\u0017\u0006\u00a1",
+       "count": 1
+      }
+     ],
+     "normalized_entropy": 1.0
+    },
+    "C_COL_049": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 848,
+     "distinct_ratio": 0.0848,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9101,
+     "zero_fraction": 0.9101,
+     "top_value_share": 0.9101,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9101
+      },
+      {
+       "value": "-200",
+       "count": 10
+      },
+      {
+       "value": "-100",
+       "count": 8
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.134063
+    },
+    "C_COL_050": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 481,
+     "distinct_ratio": 0.0481,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9452,
+     "zero_fraction": null,
+     "top_value_share": 0.9452,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0001-01-01",
+       "count": 9452
+      },
+      {
+       "value": "2019-12-10",
+       "count": 3
+      },
+      {
+       "value": "2021-04-20",
+       "count": 3
+      }
+     ],
+     "normalized_entropy": 0.088774
+    },
+    "C_COL_051": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 533,
+     "distinct_ratio": 0.0533,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9017,
+     "zero_fraction": null,
+     "top_value_share": 0.9017,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0001-01-01",
+       "count": 9017
+      },
+      {
+       "value": "9999-12-31",
+       "count": 431
+      },
+      {
+       "value": "2027-02-01",
+       "count": 3
+      }
+     ],
+     "normalized_entropy": 0.116949
+    },
+    "C_COL_052": {
+     "present": true,
+     "bq_type": "TIMESTAMP",
+     "distinct": 10000,
+     "distinct_ratio": 1.0,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.0001,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "2023-12-08 00:20:36.962185+00:00",
+       "count": 1
+      },
+      {
+       "value": "2019-02-04 01:53:02.321256+00:00",
+       "count": 1
+      },
+      {
+       "value": "2021-03-12 20:04:47.945903+00:00",
+       "count": 1
+      }
+     ],
+     "normalized_entropy": 1.0
+    },
+    "C_COL_053": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 3147,
+     "distinct_ratio": 0.3147,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.5315,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "KW3000",
+       "count": 5315
+      },
+      {
+       "value": "PPAE922",
+       "count": 817
+      },
+      {
+       "value": "PNOE954",
+       "count": 717
+      }
+     ],
+     "normalized_entropy": 0.450755
+    },
+    "C_COL_054": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 506,
+     "distinct_ratio": 0.0506,
+     "null_fraction": 0.0118,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.5281,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "BATCH",
+       "count": 5281
+      },
+      {
+       "value": "747M",
+       "count": 1160
+      },
+      {
+       "value": "6009",
+       "count": 951
+      }
+     ],
+     "normalized_entropy": 0.434034
+    },
+    "C_COL_055": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "ES",
+       "count": 10000
+      }
+     ],
+     "normalized_entropy": 0.0
+    },
+    "C_COL_056": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 2,
+     "distinct_ratio": 0.0002,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0009,
+     "zero_fraction": 0.0009,
+     "top_value_share": 0.9991,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "19",
+       "count": 9991
+      },
+      {
+       "value": "0",
+       "count": 9
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.010404
+    },
+    "C_COL_057": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 107,
+     "distinct_ratio": 0.0107,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.6396,
+     "zero_fraction": 0.6396,
+     "top_value_share": 0.6396,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 6396
+      },
+      {
+       "value": "3333",
+       "count": 1213
+      },
+      {
+       "value": "747",
+       "count": 1139
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.306335
+    },
+    "C_COL_058": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 1.0,
+     "zero_fraction": 1.0,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 10000
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.0
+    },
+    "C_COL_059": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 107,
+     "distinct_ratio": 0.0107,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9893,
+     "zero_fraction": 0.9893,
+     "top_value_share": 0.9893,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9893
+      },
+      {
+       "value": "2",
+       "count": 2
+      },
+      {
+       "value": "-9500717",
+       "count": 1
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.023338
+    },
+    "C_COL_060": {
+     "present": true,
+     "bq_type": "INTEGER",
+     "distinct": 115,
+     "distinct_ratio": 0.0115,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.9884,
+     "zero_fraction": 0.9884,
+     "top_value_share": 0.9884,
+     "is_constant": false,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "0",
+       "count": 9884
+      },
+      {
+       "value": "-201141",
+       "count": 3
+      },
+      {
+       "value": "195950",
+       "count": 1
+      }
+     ],
+     "int_type_conformance": 1.0,
+     "normalized_entropy": 0.024878
+    },
+    "C_COL_061": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 2272,
+     "distinct_ratio": 0.2272,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.3497,
+     "zero_fraction": null,
+     "top_value_share": 0.3497,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "0001-01-01",
+       "count": 3497
+      },
+      {
+       "value": "2021-04-21",
+       "count": 10
+      },
+      {
+       "value": "2020-05-11",
+       "count": 10
+      }
+     ],
+     "normalized_entropy": 0.718519
+    },
+    "C_COL_062": {
+     "present": true,
+     "bq_type": "TIMESTAMP",
+     "distinct": 10000,
+     "distinct_ratio": 1.0,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.0001,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "2025-05-28 16:17:39.138564+00:00",
+       "count": 1
+      },
+      {
+       "value": "2024-09-04 19:07:08.472208+00:00",
+       "count": 1
+      },
+      {
+       "value": "2025-09-15 12:52:59.526699+00:00",
+       "count": 1
+      }
+     ],
+     "normalized_entropy": 1.0
+    },
+    "C_COL_063": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 1,
+     "distinct_ratio": 0.0001,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 1.0,
+     "is_constant": true,
+     "is_near_constant": true,
+     "top_values": [
+      {
+       "value": "RR",
+       "count": 10000
+      }
+     ],
+     "normalized_entropy": 0.0
+    },
+    "C_COL_064": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 10000,
+     "distinct_ratio": 1.0,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.0001,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "a757db62-f27f-41e1-8fb1-6e782cf32e96",
+       "count": 1
+      },
+      {
+       "value": "b89c33b7-4ffd-474e-a6a1-38bc05261860",
+       "count": 1
+      },
+      {
+       "value": "8e61a710-a9a5-45ff-bf4b-c3750d374cb1",
+       "count": 1
+      }
+     ],
+     "normalized_entropy": 1.0
+    },
+    "C_COL_065": {
+     "present": true,
+     "bq_type": "TIMESTAMP",
+     "distinct": 13,
+     "distinct_ratio": 0.0013,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.4953,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "2024-08-21 15:20:57.296323+00:00",
+       "count": 4953
+      },
+      {
+       "value": "2024-06-28 11:02:47.325036+00:00",
+       "count": 2815
+      },
+      {
+       "value": "2024-06-28 11:02:10.551295+00:00",
+       "count": 2200
+      }
+     ],
+     "normalized_entropy": 0.414584
+    },
+    "C_COL_066": {
+     "present": true,
+     "bq_type": "STRING",
+     "distinct": 11,
+     "distinct_ratio": 0.0011,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.4991,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "20240628",
+       "count": 4991
+      },
+      {
+       "value": "20240821",
+       "count": 4973
+      },
+      {
+       "value": "20241111",
+       "count": 9
+      }
+     ],
+     "normalized_entropy": 0.300955
+    },
+    "C_COL_067": {
+     "present": true,
+     "bq_type": "DATE",
+     "distinct": 12,
+     "distinct_ratio": 0.0012,
+     "null_fraction": 0.0,
+     "sentinel_fraction": 0.0,
+     "zero_fraction": null,
+     "top_value_share": 0.5028,
+     "is_constant": false,
+     "is_near_constant": false,
+     "top_values": [
+      {
+       "value": "2024-06-28",
+       "count": 5028
+      },
+      {
+       "value": "2024-08-21",
+       "count": 4931
+      },
+      {
+       "value": "2024-11-11",
+       "count": 7
+      }
+     ],
+     "normalized_entropy": 0.291978
+    }
+   }
+  }
+ },
+ "cross_sample_overlap": {}
+}
