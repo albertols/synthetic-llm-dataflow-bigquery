@@ -117,7 +117,7 @@ chunk), and `--emit-trigger-configs DIR` which writes the **ordered
 Airflow trigger confs** instead of launching — the corp path: the
 Composer DAG (`composer/synthetic_beam_bigquery.py`) stays single-table
 and simply gained the two params. The set's model lands as
-`integration_tests/fk_models/<model_sha12>.mmd` for report recycling.
+`runs/fk_models/<model_sha12>.mmd` for report recycling.
 
 ## 5. Stage 2 (IMPLEMENTED — ADR 0030) — one Dataflow job for the whole model
 
@@ -150,8 +150,8 @@ proven, Dataflow run evidence = the acceptance gate):
 
 ## 6. History mappings + diagram recycling (report layer)
 
-`integration_tests/history_mappings_replacement.json` — **local-only
-decode key** (the whole `integration_tests/` tree is gitignored; treat
+`runs/history_mappings_replacement.json` — **local-only
+decode key** (the whole `runs/` tree is gitignored; treat
 it exactly like `real/`): first-arrival letter prefixes `A…Z, AA, AB, …`
 (dozens of unrelated future tables), columns `<PREFIX>_COL_NNN` in DDL
 order, aliases immutable once assigned, out-of-DDL fields (JOIN_KEY)
@@ -162,7 +162,7 @@ exporter consumes it via `--history-mappings/--history-table-fqn`:
 preset aliases win over the legacy `COL_NNN`/`PK_COL` role naming and
 the per-job `mapping.json` is no longer written.
 
-Diagram recycling: reports embed `integration_tests/fk_models/<sha>.mmd`
+Diagram recycling: reports embed `runs/fk_models/<sha>.mmd`
 verbatim when the logged `model_sha12` matches — zero tokens spent
 redrawing an unchanged model (prompt §5.5).
 

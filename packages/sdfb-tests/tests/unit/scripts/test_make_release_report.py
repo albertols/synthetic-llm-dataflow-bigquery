@@ -20,10 +20,10 @@ Artifact-shape grounding for `compute_deltas` (real key names, not guesses):
 
 `discover_artifact_sets` git-plumbing tests build a throwaway tree object
 (`git hash-object -w --stdin` + `git mktree`) instead of relying on
-pre-existing committed `integration_test/<job_id>/` folders — none are
-actually committed to this repo (verified via `git log --all --diff-filter=A
---name-only` across all branches/history), only the real-run artifacts under
-the gitignored `integration_tests/` (plural). Building a synthetic tree is
+pre-existing committed evidence folders (canonical
+`docs/releases/<version>/evidence/<job_id>/`, legacy
+`integration_test/<job_id>/`); day-to-day run artifacts live only under
+the gitignored local `runs/`. Building a synthetic tree is
 still a read-only operation from the branch's point of view: it writes loose
 objects but touches no ref, branch, or working tree, exactly like the
 suggested `git hash-object -t tree /dev/null` empty-tree trick.

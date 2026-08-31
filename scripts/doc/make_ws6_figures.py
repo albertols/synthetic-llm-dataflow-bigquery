@@ -3,7 +3,7 @@
     uv run --no-sync python3 scripts/doc/make_ws6_figures.py
 
 Writes PNGs into docs/designs/assets/. Every measured number below is
-derived from integration_tests/2026-07-26_17_10_37-5541097091204532225/
+derived from runs/2026-07-26_17_10_37-5541097091204532225/
 (the first GPU/CPU-separated 1M-row run on the GCP LZ) — see MEASURED. Do
 not hand-edit the constants; update them from a superseding run and re-run.
 

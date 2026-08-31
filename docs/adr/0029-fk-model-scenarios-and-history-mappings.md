@@ -75,10 +75,10 @@ tables concurrently (bounded by quota), waves stay sequential, first
 failure aborts the remainder. `--emit-trigger-configs` writes the
 ordered Airflow confs for the corp Composer path (the DAG itself stays
 single-table). The set's model lands as
-`integration_tests/fk_models/<sha12>.mmd`.
+`runs/fk_models/<sha12>.mmd`.
 
 **D6 — one persistent alias registry replaces per-job `mapping.json`.**
-`integration_tests/history_mappings_replacement.json` (LOCAL-ONLY decode
+`runs/history_mappings_replacement.json` (LOCAL-ONLY decode
 key; the tree is gitignored): prefixes `A…Z, AA, …` in first-arrival
 order, columns `<PREFIX>_COL_NNN` in DDL order, aliases immutable,
 out-of-DDL fields `retained`. `scripts/e2e/history_mappings.py` owns

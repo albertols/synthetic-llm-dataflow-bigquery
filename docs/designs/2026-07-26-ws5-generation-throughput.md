@@ -5,7 +5,7 @@
 > the §6 targets are *predictions* until an M4 run measures them. Decisions
 > are recorded in [ADR 0020](../adr/0020-freetext-pools-as-persisted-artifact.md).
 > Every number in §1 is re-derived from
-> `integration_tests/2026-07-26_06_54_25-14348390798392809440/worker_logs.jsonl`
+> `runs/2026-07-26_06_54_25-14348390798392809440/worker_logs.jsonl`
 > (the 1M-row stress run); the extraction is reproducible via
 > [`scripts/doc/make_ws5_figures.py`](../../scripts/doc/make_ws5_figures.py), which also
 > regenerates every figure (provenance in §7).

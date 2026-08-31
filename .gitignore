@@ -58,7 +58,7 @@ application_default_credentials.json
 docs/superpowers/specs
 public_cloud/deploy/gcp/journal/*.jsonl
 public_cloud/deploy/gcp/journal/image_tag
-integration_tests/
+runs/
 .claude/worktrees/
 docs/assets/fk*
 

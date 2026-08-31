@@ -3,7 +3,7 @@
 
 Companion to ``e2e_gcp_probe.py`` / ``e2e_validation_analysis.py``: the E2E
 validation prompt needs a handful of representative rows per engine run
-(``integration_test/<JOB_ID>/<engine>_sample.csv``) for spot-checking and
+(``runs/<JOB_ID>/<engine>_sample.csv``) for spot-checking and
 free-text crosschecks. Historically these were exported by hand from the BQ
 console; this script fetches them directly via a deterministic,
 warehouse-side sample so the CSV is reproducible without a manual export
@@ -23,7 +23,7 @@ Usage:
         --engine-label b2_library=r-b2 \
         --rows 200 \
         --run-id-col run_id \
-        --out-dir integration_test
+        --out-dir runs
 """
 
 from __future__ import annotations
@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--rows", type=int, default=200)
     ap.add_argument("--run-id-col", default=None)
-    ap.add_argument("--out-dir", default="integration_test")
+    ap.add_argument("--out-dir", default="runs")
     args = ap.parse_args(argv)
 
     engine_labels = _parse_engine_labels(args.engine_labels) or {"sample": None}

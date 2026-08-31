@@ -4,7 +4,7 @@
 
 Writes PNGs into docs/designs/assets/. Both figures are EVIDENCE: the
 2026-08-20/21 four-run cycle measurements (the only place those numbers
-are typed), read from the bundles under `integration_tests/` and their
+are typed), read from the bundles under `runs/` and their
 `worker_logs.jsonl` scrub telemetry. Claims:
 
   1. wave4-verified.png    — every ADR 0026 acceptance criterion moved as
@@ -44,9 +44,9 @@ SRGB_CUTOFF = 0.04045
 
 # --- MEASURED (2026-08-20/21 four-run cycle; the only place these numbers
 # are typed). Sources:
-#   pre-fix   integration_tests/2026-08-20_05_49_25-7855…  (A_TABLE, pre-wave-4)
-#   run 1     integration_tests/2026-08-20_14_13_44-17334… (A_TABLE, wave-4 cold)
-#   run 4     integration_tests/2026-08-21_07_58_08-12248… (A_TABLE, wave-4 cold)
+#   pre-fix   runs/2026-08-20_05_49_25-7855…  (A_TABLE, pre-wave-4)
+#   run 1     runs/2026-08-20_14_13_44-17334… (A_TABLE, wave-4 cold)
+#   run 4     runs/2026-08-21_07_58_08-12248… (A_TABLE, wave-4 cold)
 # gcp_metrics annexes (copy ratios), freetext_crosscheck annexes (top-shape
 # shares), and worker_logs.jsonl `numeric_source_rejected` lines (scrub
 # telemetry; first-batch means over 8 workers, run 4).

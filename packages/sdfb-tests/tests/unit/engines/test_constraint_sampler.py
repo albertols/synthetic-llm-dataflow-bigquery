@@ -1,7 +1,7 @@
 """Constraint samplers (ADR 0028 Tier P / Tier B).
 
 Fixtures are the four clauses of the 2026-08-21 first PK+FK run
-(`integration_tests/2026-08-21_14_54_30-1966084111444777604`): the E2F
+(`runs/2026-08-21_14_54_30-1966084111444777604`): the E2F
 24-hex PK pattern, the UUIDv4 pattern, and the S1-prefixed 12-byte
 opaque key whose binary fallback memorized 58 source values.
 """

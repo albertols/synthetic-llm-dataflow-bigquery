@@ -10,7 +10,7 @@ description: >
   synthetic-generation improvements (missing formats, hallucinated formats,
   null/empty-parity gaps, length drift, memorization). Runs standalone or
   chained from the E2E validation report prompt's Step 3.5, which overrides
-  `--out-json`/`--out-md` into `integration_test/<JOB_ID>/` — the standalone
+  `--out-json`/`--out-md` into `runs/<JOB_ID>/` — the standalone
   default below is `output/freetext_crosscheck/`. ADC access to the target
   GCP project is a PREREQUISITE and is verified first.
   Inputs: source FQN, synthetic FQN, free-text column list (+ optional sample
@@ -120,10 +120,10 @@ python scripts/e2e/freetext_crosscheck.py \
 
 When this prompt is chained from the E2E validation report (its Step 3.5),
 `--out-json`/`--out-md` are overridden to
-`integration_test/<JOB_ID>/freetext_crosscheck_metrics.json` and
+`runs/<JOB_ID>/freetext_crosscheck_metrics.json` and
 `_report.md` so the crosscheck artifacts land next to the rest of that
 deployment's evidence — as **working files**: the E2E prompt's Step 6 then
-folds them into `integration_test/<JOB_ID>/real/` (verbatim) + `oss/`
+folds them into `runs/<JOB_ID>/real/` (verbatim) + `oss/`
 (redacted) and prunes the parent-level copies. Run standalone (as above) and
 the defaults stay `output/freetext_crosscheck/`.
 

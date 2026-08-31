@@ -3,8 +3,8 @@
 **Status:** ACCEPTED (2026-08-29) — laptop-proven (TDD, 1,332 tests,
 DirectRunner); the next cold relational launch is the acceptance gate
 **Decision:** [ADR 0033](../adr/0033-pool-ladder-integrity-at-scale.md)
-**Evidence:** `integration_tests/2026-08-25_12_05_08-14035293654817605690`
-(R6, 1M rows/table) · `integration_tests/2026-08-26_05_01_16-3186876581127148459`
+**Evidence:** `runs/2026-08-25_12_05_08-14035293654817605690`
+(R6, 1M rows/table) · `runs/2026-08-26_05_01_16-3186876581127148459`
 (R6, 10M rows/table) — `_full_report.md` + `worker_logs.jsonl` in each
 **Depends on:** [ADR 0018](../adr/0018-parallel-batched-freetext-pools.md)
 (parallel ladders) · [ADR 0020](../adr/0020-freetext-pools-as-persisted-artifact.md)

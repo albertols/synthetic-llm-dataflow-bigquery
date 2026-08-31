@@ -77,7 +77,7 @@ def _write_metrics(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 def test_main_redacts_project_and_maps_worker_image(tmp_path):
     gcp_path, offline_path, report_path = _write_metrics(tmp_path)
-    out_root = tmp_path / "integration_tests"
+    out_root = tmp_path / "runs"
 
     rc = bundle_module.main(
         [
@@ -104,7 +104,7 @@ def test_main_redacts_project_and_maps_worker_image(tmp_path):
 
 def test_job_id_and_name_kept_verbatim_in_oss(tmp_path):
     gcp_path, offline_path, report_path = _write_metrics(tmp_path)
-    out_root = tmp_path / "integration_test"
+    out_root = tmp_path / "runs"
 
     rc = bundle_module.main(
         [
@@ -138,7 +138,7 @@ def test_csv_not_bundled_but_still_feeds_the_mapping(tmp_path):
         f"# E2E Validation Report\n\nProject: {_PROJECT_ID}\n"
         "Top customer_name literal was Alice Smith.\n"
     )
-    out_root = tmp_path / "integration_test"
+    out_root = tmp_path / "runs"
     csv_path = tmp_path / "b1_rag_sample.csv"
     csv_path.write_text("customer_name,amount\nAlice Smith,42\n")
 
@@ -180,7 +180,7 @@ def test_csv_values_kept_in_report_with_no_redact_values(tmp_path):
         f"# E2E Validation Report\n\nProject: {_PROJECT_ID}\n"
         "Top customer_name literal was Alice Smith.\n"
     )
-    out_root = tmp_path / "integration_test"
+    out_root = tmp_path / "runs"
     csv_path = tmp_path / "b2_library_sample.csv"
     csv_path.write_text("customer_name,amount\nAlice Smith,42\n")
 
@@ -210,7 +210,7 @@ def test_csv_values_kept_in_report_with_no_redact_values(tmp_path):
 
 def test_doc_verbatim_in_real_and_redacted_in_oss(tmp_path):
     gcp_path, offline_path, report_path = _write_metrics(tmp_path)
-    out_root = tmp_path / "integration_test"
+    out_root = tmp_path / "runs"
     doc_path = tmp_path / "stats_diff.md"
     doc_text = (
         f"# Stats diff\n\nSource: {_PROJECT_ID}.raw_data.source_table\n"
@@ -242,7 +242,7 @@ def test_doc_verbatim_in_real_and_redacted_in_oss(tmp_path):
 
 
 def test_prune_inputs_removes_bundle_local_duplicates_after_clean_scan(tmp_path):
-    out_root = tmp_path / "integration_test"
+    out_root = tmp_path / "runs"
     job_dir = out_root / _JOB_ID
     job_dir.mkdir(parents=True)
 

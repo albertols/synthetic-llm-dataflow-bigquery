@@ -10,7 +10,7 @@ user-facing configuration guide (Terraform ⇄ `_ddl.json` worked examples):
 Evidence: the two 2026-08-09 WS8 R1 cold baselines
 (`2026-08-09_00_19_04-7880358512029555343` = A_TABLE,
 `2026-08-09_00_31_21-17185878817912958022` = B_TABLE), reports in
-[`integration_tests/`](../../integration_tests/).
+`runs/` (local, gitignored).
 
 ---
 

@@ -8,7 +8,7 @@
 > **W5 changed from investigation to fix during implementation** — see §5.
 >
 > Every number is re-derived from
-> `integration_tests/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
+> `runs/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
 > (first GPU/CPU-separated 1M-row run on the GCP LZ) via
 > [`scripts/doc/make_ws6_figures.py`](../../scripts/doc/make_ws6_figures.py), which also
 > regenerates every figure (provenance in §7).
@@ -459,7 +459,7 @@ no `pool_sources` field because B.2 free-text pools build lazily per batch.
 ## 11. 2026-07-31 → 08-03 five-run postmortem — the funnel closes, and 10M rows lands
 
 Five runs on the `9b441e6`+ build (`d08040e` head). Every number below is
-re-derived from `integration_tests/<JOB_ID>/worker_logs.jsonl` by the same
+re-derived from `runs/<JOB_ID>/worker_logs.jsonl` by the same
 sweep used for §9 (severity histogram, milestone inventory, batch timeline).
 
 | Signal | R1′ `07-31_05_20` cold A | R2′ `07-31_05_33` cold B | R3′ `07-31_09_11` | R4′ `08-03_09_03` warm B | R5′ `08-03_11_27` warm B **10M** |
