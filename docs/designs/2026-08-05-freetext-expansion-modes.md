@@ -1,7 +1,7 @@
 # `--freetext_expansion` — the shape-preserving expander, mode by mode
 
-> **Status: ACCEPTED / SHIPPED** (WS8, 2026-08-05 spec C3; branch
-> `ws8-fidelity-relational`, PR #13). Flag surface: `run_pipeline.py
+> **Status: ACCEPTED / SHIPPED** (WS8, 2026-08-05 spec C3; merged to
+> `master` via PR #13, released in v0.1.0). Flag surface: `run_pipeline.py
 > --freetext_expansion`, Composer DAG param `freetext_expansion`, Flex
 > metadata entry of the same name. Default: `identifiers`.
 > Companions: [ADR 0021](../adr/0021-relational-contract-in-descriptions.md) ·

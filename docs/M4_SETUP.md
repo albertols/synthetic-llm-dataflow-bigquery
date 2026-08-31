@@ -86,13 +86,14 @@ uv sync --package sdfb-beam --extra mlx                  # real-LLM smoke (see M
 
 **Do NOT install `--extra gpu` on the M4.** vLLM is CUDA-only and the `[gpu]` extra is marked `sys_platform == 'linux'`, so it's a no-op here by design — vLLM only ever runs inside the Dataflow container ([ADR 0010](adr/0010-m4-local-smoke-mlx.md)). On the M4 you exercise the LLM path through MLX, never vLLM. The `[gpu]` extra is resolved only when the linux GPU image is built ([ADR 0012](adr/0012-enterprise-image-build.md)).
 
-### 4. Sanity check — the 68 laptop tests must pass on the M4
+### 4. Sanity check — the laptop test suite must pass on the M4
 
 ```bash
 uv run pytest -m "not gpu and not gcp" -q
 ```
 
-Expected last line: `68 passed in ~25s`.
+Expected: all green (~1,330 tests as of 2026-08-31; the exact count grows —
+any failure is a setup problem, not a flaky suite).
 
 If any test fails: paste the last ~30 lines back — that's the fastest signal something diverges between the laptop and M4 environments.
 
@@ -151,43 +152,22 @@ After each step, paste these into chat (terse is fine):
 
 Once those four come back green, we pick the next task.
 
-## Recommended task order from here
+## What to run from the M4
 
-Three M4-doable tasks are unblocked. Suggested order with rationale:
+The M1 build-out this section used to sequence (DDL extraction → CI image →
+vLLM handler → first E2E) shipped in v0.1.0 — current scope lives in
+[`ROADMAP.md`](ROADMAP.md), and launching/validating runs is
+[`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md)'s job. From the M4 you typically:
+trigger CI workflows (`gh workflow run …`, see [`CICD.md`](CICD.md)), stage
+model weights ([`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)), iterate on real-LLM
+behaviour without Dataflow via the MLX loop
+([`M4_LOCAL_SMOKE.md`](M4_LOCAL_SMOKE.md)), and launch/interpret Dataflow
+runs.
 
-### Step A — Extract a real `_ddl.json` (~10 min)
-
-Sanity-checks the laptop → M4 transfer and confirms the canonical schema shape against a real table, not just our fixture mocks.
-
-```bash
-uv run python scripts/extract_ddl.py \
-    --project "$(gcloud config get-value project)" \
-    --dataset <some_small_dev_dataset> \
-    --table <some_small_table> \
-    --runner DirectRunner
-```
-
-Output lands in `./output/<dataset>/ddl_metadata_<dataset>_<table>.json`.
-
-Paste back the `head -50` of the file (or the full JSON if small). If `TableSchema.model_validate()` accepts it cleanly on the M4, the whole DDL extractor chain is verified against real BigQuery — not just mocked clients.
-
-### Step B — #10 (image) + #14 (CI workflows)
-
-Per [ADR 0008](adr/0008-ci-driven-builds.md), image build/push/deploy happen in GitHub Actions, not on the M4. Full runbook: **[`CICD.md`](CICD.md)**. Covers the 3 workflows + DAG + secrets + Flex Template metadata. The M4's role here is `gh workflow run …` and observing the resulting Dataflow runs.
-
-For real-LLM iteration on the M4 without burning Dataflow time, see **[`M4_LOCAL_SMOKE.md`](M4_LOCAL_SMOKE.md)** — the MLX-based smoke loop (#15).
-
-**#6 (sdgx vs DataDreamer bake-off)** can use the MLX loop for fast fidelity-check iteration before any Dataflow run.
-
-### Step C — #9 (vLLM `ModelHandler`)
-
-Depends on having weights in GCS. Layout, download procedure, and runtime-load snippets: **[`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)**. Stage Gemma 4 E4B-**it** weights to `gs://{bucket}/synthetic/models/gemma4/e4b-it/v1/` (use the `-it` variant — the base has no chat template) → then implement #9.
-
-### Step D — #11 (end-to-end on Dataflow) + #12 (thresholds + `validation_runs` table)
-
-After #9 + #10 are stable. This is the M1 finish line.
-
-**Gate it first with the predeployment preflight** — one read-only command that generates the schema files and verifies every GCS/BigQuery/weights prerequisite exists, printing an OK/KO report with clickable paths (no DataflowRunner, no `bq mk`):
+**Gate every run campaign with the predeployment preflight** — one read-only
+command that generates the schema files and verifies every
+GCS/BigQuery/weights prerequisite exists, printing an OK/KO report with
+clickable paths (no DataflowRunner, no `bq mk`):
 
 ```bash
 uv run python scripts/deployment_prerequisites.py \

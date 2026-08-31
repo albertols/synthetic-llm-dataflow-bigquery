@@ -1,7 +1,7 @@
 # WS6 — Pipeline shape: the setup gap, the retry cascade, and the GroupByKey barrier
 
-> **Status: IMPLEMENTED + E2E MEASURED.** All five items are landed on
-> `ws6-pipeline-shape` (748 tests green as of 2026-08-05); the §6 targets are
+> **Status: IMPLEMENTED + E2E MEASURED.** All five items merged to `master`
+> (branch retired); the §6 targets are
 > measured by the 2026-07-31 → 2026-08-03 five-run matrix in **§11** — warm
 > 1M in 12.6 min (target < 15) and the first 10M-row run at 26.4 min.
 >

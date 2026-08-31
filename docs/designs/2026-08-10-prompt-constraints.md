@@ -1,6 +1,6 @@
 # Wave-2 prompt constraints — structured templates, prompt debug, route override
 
-**Status: DESIGN → IMPLEMENTED (laptop side) — awaiting R-series acceptance re-run on M4**
+**Status: IMPLEMENTED + ACCEPTED — R-series acceptance measured (2026-08-20 R1 pair; constraint plumbing verified live-first per ADR 0027)**
 Companions: extends [ADR 0021](../adr/0021-relational-contract-in-descriptions.md)
 (the `llm_prompt_constraint` description marker) and
 [ADR 0022](../adr/0022-stats-driven-generation.md) (stats-driven targets);
