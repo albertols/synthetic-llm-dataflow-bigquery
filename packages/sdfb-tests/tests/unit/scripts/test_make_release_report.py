@@ -208,6 +208,36 @@ def test_discover_artifact_sets_supports_real_bundle_layout():
     assert sets[job]["crosscheck"] == {"meta": {}}
 
 
+def test_discover_artifact_sets_supports_release_evidence_layout():
+    """Canonical layout from doc-revisit on: bundles live under
+    `docs/releases/<version>/evidence/<job>/real/`; `oss/` twins and
+    non-evidence release files (report.md, summary.json) are skipped."""
+    job = "2026-08-26_05_01_16-3186876581127148459"
+    tree = _make_tree(
+        {
+            f"docs/releases/v0.1.0/evidence/{job}/real/gcp_metrics.json": json.dumps(
+                {"dataflow": [{"job_id": "abc", "timing": {"execution_seconds": 60.0}}]}
+            ),
+            f"docs/releases/v0.1.0/evidence/{job}/real/offline_metrics.json": (
+                json.dumps({"engines": {}})
+            ),
+            # Redacted twin — must never be picked up as an artifact.
+            f"docs/releases/v0.1.0/evidence/{job}/oss/gcp_metrics.json": json.dumps(
+                {"dataflow": [{"job_id": "REDACTED"}]}
+            ),
+            "docs/releases/v0.1.0/report.md": "# not an artifact",
+            "docs/releases/v0.1.0/summary.json": json.dumps({"version": "v0.1.0"}),
+        }
+    )
+    sets = rel.discover_artifact_sets(tree)
+    assert set(sets.keys()) == {job}
+    assert sets[job]["gcp"] == {
+        "dataflow": [{"job_id": "abc", "timing": {"execution_seconds": 60.0}}]
+    }
+    assert sets[job]["offline"] == {"engines": {}}
+    assert "crosscheck" not in sets[job]
+
+
 def test_latest_job_picks_lexicographically_greatest_id():
     sets = {"2026-01-01_00_00_00-1": {}, "2026-02-02_00_00_00-2": {}}
     assert rel.latest_job(sets) == "2026-02-02_00_00_00-2"

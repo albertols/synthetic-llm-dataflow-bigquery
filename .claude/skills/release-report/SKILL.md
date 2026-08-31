@@ -9,8 +9,10 @@ The GH Action (`.github/workflows/release_tag_report.yaml`) already produced
 the deterministic numbers via `scripts/release/make_release_report.py`.
 This skill adds judgment. NEVER edit the generated numbers or charts.
 
-1. Read `docs/releases/<version>/report.md` + the underlying
-   `integration_test/<JOB_ID>/*.json` for both sides of the diff.
+1. Read `docs/releases/<version>/report.md` + the underlying evidence
+   bundles (`docs/releases/<version>/evidence/<JOB_ID>/real/*.json`;
+   legacy tags: `integration_test/<JOB_ID>/*.json`) for both sides of the
+   diff.
 2. Append an `## Insights` section: regressions (call severity), bottleneck
    attribution (which Dataflow step/phase moved and which commit plausibly
    moved it), optimization candidates, follow-up backlog items.
@@ -31,10 +33,12 @@ This skill adds judgment. NEVER edit the generated numbers or charts.
    sys.path.insert(0, "scripts/e2e")
    import redaction
 
-   job_id = "<JOB_ID>"    # the integration_test/<JOB_ID>/ this release's head side used
+   job_id = "<JOB_ID>"    # the evidence bundle this release's head side used
    version = "<version>"  # e.g. v0.4.0
 
-   job_dir = Path("integration_test") / job_id
+   job_dir = Path("docs/releases") / version / "evidence" / job_id
+   if not job_dir.exists():  # pre-relocation tags kept bundles here
+       job_dir = Path("integration_test") / job_id
    # Bundle layout first (real/ is canonical); legacy parent-level fallback.
    basenames = {
        "gcp": ("real/gcp_metrics.json", "e2e_gcp_metrics.json"),
