@@ -395,7 +395,7 @@ class B1RagEngine(GenerationEngine):
                 level=logging.WARNING,
                 note="no LLM-routed free-text work this run — GPU workers "
                 "stay idle; a CPU-only worker pool serves it at lower cost "
-                "(RUN_PLAYBOOK_WS8 cost note)",
+                "(RUN_PLAYBOOK §9c cost note)",
             )
         # 5. identifier-shaped columns: pull the full source domain through
         # the same store the pool ladder uses (ADR 0023) so mask tables and

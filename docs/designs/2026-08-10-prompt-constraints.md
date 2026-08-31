@@ -331,8 +331,9 @@ in Dataflow worker logs like every other `sdfb.*` milestone.
 | (f) Categorical empty-parity | **Root cause of the COL_033 Δ0.28 / COL_035 Δ0.24 empty-parity failures, found during this wave**: the categorical similarity blend flattened the empty/whitespace category toward uniform along with everything else (at similarity 0.5, a 95 %-empty category emits at ~72 %). Sparsity categories now keep their exact empirical mass in both engines; the blend applies only within the substantive remainder — matching how FREE_TEXT columns already pin sparsity (`_sparsity_or`). | `b1_rag/_fidelity.py::_categorical_masses`, `b2_library/backends.py::_sample_categorical` |
 
 Deliberately *not* actioned: B.1 numeric decile-KS drift (R5/B.2 owns it, ADR
-0022) and `PoolTrigger` 44.5 %/61.6 % stage dominance (measured watch-list,
-[RUN_PLAYBOOK_WS8 §5c](../RUN_PLAYBOOK_WS8.md)).
+0022) and `PoolTrigger` 44.5 %/61.6 % stage dominance (measured watch-list;
+recorded in the retired `RUN_PLAYBOOK_WS8.md` §5c — git history — and
+partially addressed by ADR 0026's expandable-column ladder skip).
 
 ## 5. Acceptance criteria (falsifiable, next R1-class runs)
 
