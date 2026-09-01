@@ -116,7 +116,7 @@ bytes.
 buckets (`gs://REDACTED_BUCKET/…`), registry paths (image basename
 kept — it carries the build id), service accounts, and drops
 KMS/subnetwork/network-tag values wholesale at collection time; the
-bundles in `integration_tests/` were scrubbed retroactively and the
+bundles in `runs/` were scrubbed retroactively and the
 mis-redacted bundle re-mapped to COL_XXX names (mapping derived from the
 schema-ordered gcp annexes, 67/67 invariant match).
 

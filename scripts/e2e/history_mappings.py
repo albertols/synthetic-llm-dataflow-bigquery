@@ -2,11 +2,11 @@
 """Persistent table/column alias registry for E2E report redaction
 (ADR 0029).
 
-One LOCAL-ONLY file — ``integration_tests/history_mappings_replacement
+One LOCAL-ONLY file — ``runs/history_mappings_replacement
 .json`` — replaces the per-job ``mapping.json``: a real table keeps the
 same letter prefix and column aliases across every future run, so
 reports, diagrams and cross-run comparisons stay consistent. It is the
-DECODE KEY (real names inside): ``integration_tests/`` is gitignored and
+DECODE KEY (real names inside): ``runs/`` is gitignored and
 this file must never be committed or bundled, exactly like ``real/``.
 
 Naming: prefixes in first-arrival order A..Z, AA, AB, … (dozens of
@@ -31,7 +31,7 @@ import datetime as _dt
 import json
 from pathlib import Path
 
-DEFAULT_PATH = Path("integration_tests/history_mappings_replacement.json")
+DEFAULT_PATH = Path("runs/history_mappings_replacement.json")
 _EXAMPLE_ALIASES = 6  # A..F, docs/assets/fk_relationship_example.tf
 
 

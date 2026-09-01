@@ -11,11 +11,11 @@ description: >
   Dataflow job metrics + worker logs for execution milestones (startup,
   model / vLLM ignition, embedder load, generation stall, BigQuery load). ADC
   access to the target GCP project is a PREREQUISITE and is verified first.
-  Inputs: engine CSVs (under integration_test/<job_id>/, auto-fetched from
+  Inputs: engine CSVs (under runs/<job_id>/, auto-fetched from
   BigQuery via ADC when a file is missing), project, source/landing/quality
   FQNs, Dataflow job_ids, region, PK + identity columns. Output:
   output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md +
-  the integration_test/<job_id>/{real,oss}/ bundle (real/ is the canonical,
+  the runs/<job_id>/{real,oss}/ bundle (real/ is the canonical,
   duplicate-free artifact set; the parent folder keeps only the sample CSVs).
   Optionally chains /llm_prompt_constraint_recommender at the end to turn the
   free-text evidence into per-column llm_prompt_constraint recommendations.
@@ -47,7 +47,7 @@ inputs.
 
 | Param | Example | Notes |
 |---|---|---|
-| `CSVS` | `b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv …` | `engine_label=path`, repeatable; sample CSVs live under `integration_test/<JOB_ID>/`; optional: when omitted (or a file is missing), Step 1.5 fetches the samples from `LANDING_FQN` via ADC |
+| `CSVS` | `b1_rag=runs/<JOB_ID>/b1_rag_sample.csv …` | `engine_label=path`, repeatable; sample CSVs live under `runs/<JOB_ID>/`; optional: when omitted (or a file is missing), Step 1.5 fetches the samples from `LANDING_FQN` via ADC |
 | `PROJECT` | `db-<env>-…-pwcclake-es` | GCP project id |
 | `SOURCE_FQN` | `<project>.<dataset>.<TABLE>` | live source table |
 | `LANDING_FQN` | `<project>.synthetic_data.<TABLE>` | synthetic landing table |
@@ -75,13 +75,13 @@ only one engine was deployed, run the single-engine subset.
 
 **Per-deployment artifact folder**: every deployment's artifacts share one
 folder named after the primary Dataflow job id (`<JOB_ID>` = first of
-`JOB_IDS`), e.g. `integration_test/2026-07-09_11_32_56-17188177770294375504/`.
+`JOB_IDS`), e.g. `runs/2026-07-09_11_32_56-17188177770294375504/`.
 Steps 2–3.5 write their outputs there as **transient working files**; Step 6
 folds every one of them into the `real/` + `oss/` bundles and prunes the
 parent-level duplicates, so a **finished** deployment folder is exactly:
 
 ```
-integration_test/<JOB_ID>/
+runs/<JOB_ID>/
   <engine>_sample.csv           # one per engine — the ONLY copy (never
                                 # duplicated into real/ or oss/)
   real/                         # canonical, verbatim — internal use
@@ -102,8 +102,9 @@ once Step 6 has run — `real/` is the single source of truth (the historic
 parent-level `e2e_validation_metrics.json`, `e2e_gcp_metrics.json`,
 `stats_diff.json` and `freetext_crosscheck_metrics.json` were always
 byte-identical to their `real/` twins; that duplication is retired). Only the
-report itself stays under `output/`. (Some environments land runs under the
-gitignored plural `integration_tests/` — the layout is identical there.)
+report itself stays under `output/`. (Bundles land in the gitignored local
+`runs/` dir; a release-cited bundle is promoted to
+`docs/releases/<version>/evidence/<JOB_ID>/` — the layout is identical.)
 
 ---
 
@@ -167,7 +168,7 @@ Write a short "Expected behaviour" note per engine.
 
 ## Step 1.5 — Materialize missing sample CSVs from BigQuery (no manual export)
 
-For every engine whose CSV under `integration_test/<JOB_ID>/` is missing:
+For every engine whose CSV under `runs/<JOB_ID>/` is missing:
 
 ```bash
 python scripts/e2e/e2e_fetch_samples.py \
@@ -193,7 +194,7 @@ python scripts/e2e/e2e_validation_analysis.py \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --schema <SCHEMA> --pk <PK> --identity-cols <IDENTITY_COLS> \
   --batch-size <BATCH_SIZE> \
-  --out integration_test/<JOB_ID>/e2e_validation_metrics.json
+  --out runs/<JOB_ID>/e2e_validation_metrics.json
 ```
 
 Per engine it computes: full-row duplicate ratio + distinct rows; **REPETITION**
@@ -216,7 +217,7 @@ python scripts/e2e/e2e_gcp_probe.py \
   $(for j in <JOB_IDS>; do echo --job-id $j; done) \
   $(for r in <RUN_IDS>; do echo --run-id $r; done) \
   $(for e in <ENGINE_LABEL=JOB_ID>; do echo --engine-label $e; done) \
-  --out integration_test/<JOB_ID>/e2e_gcp_metrics.json
+  --out runs/<JOB_ID>/e2e_gcp_metrics.json
 ```
 
 `--run-id` (repeatable) scopes the `validation_runs`/`dlq` query to this
@@ -287,13 +288,13 @@ write into the per-deployment folder when run from E2E:
 python scripts/e2e/freetext_crosscheck.py \
   --source-fqn <SOURCE_FQN> --synthetic-fqn <LANDING_FQN> \
   --columns "<FREETEXT_COLS>" \
-  --out-json integration_test/<JOB_ID>/freetext_crosscheck_metrics.json \
-  --out-md   integration_test/<JOB_ID>/freetext_crosscheck_report.md
+  --out-json runs/<JOB_ID>/freetext_crosscheck_metrics.json \
+  --out-md   runs/<JOB_ID>/freetext_crosscheck_report.md
 
 python scripts/e2e/source_synthetic_stats_diff.py \
   --source-fqn <SOURCE_FQN> --synthetic-fqn <LANDING_FQN> --project <PROJECT> \
-  --out-json integration_test/<JOB_ID>/stats_diff.json \
-  --out-md   integration_test/<JOB_ID>/stats_diff.md
+  --out-json runs/<JOB_ID>/stats_diff.json \
+  --out-md   runs/<JOB_ID>/stats_diff.md
 ```
 
 `FREETEXT_COLS` defaults to the free-text subset discovered in Steps 2–3.
@@ -412,12 +413,12 @@ visually, and MUST NOT spend tokens re-deriving it:
 
 1. Grep the worker/launcher log for `relationship_model` and note its
    `sha=<sha>`.
-2. If `integration_tests/fk_models/<sha>.mmd` exists → embed that file's
+2. If `runs/fk_models/<sha>.mmd` exists → embed that file's
    content VERBATIM as a ```mermaid block in report.md §0 (run under
    test). Do not redraw, restyle, or re-label it.
 3. If it does not exist → copy the fenced mermaid block (between the
    ```mermaid fences inside relationship_model) into
-   `integration_tests/fk_models/<sha>.mmd` (create the dir if needed),
+   `runs/fk_models/<sha>.mmd` (create the dir if needed),
    then embed it. The next report with the same model reuses it for free.
 4. Aliases: the diagram in `oss/` must use the registry aliases
    (`A_TABLE`…), never real table names — the worker-logged mermaid uses
@@ -455,20 +456,20 @@ environment):
 
 ```bash
 python scripts/e2e/e2e_bundle_export.py \
-  --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
-  --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
-  --metrics stats_diff=integration_test/<JOB_ID>/stats_diff.json \
-  --metrics freetext_crosscheck=integration_test/<JOB_ID>/freetext_crosscheck_metrics.json \
-  --doc stats_diff=integration_test/<JOB_ID>/stats_diff.md \
-  --doc freetext_crosscheck_report=integration_test/<JOB_ID>/freetext_crosscheck_report.md \
+  --metrics gcp=runs/<JOB_ID>/e2e_gcp_metrics.json \
+  --metrics offline=runs/<JOB_ID>/e2e_validation_metrics.json \
+  --metrics stats_diff=runs/<JOB_ID>/stats_diff.json \
+  --metrics freetext_crosscheck=runs/<JOB_ID>/freetext_crosscheck_metrics.json \
+  --doc stats_diff=runs/<JOB_ID>/stats_diff.md \
+  --doc freetext_crosscheck_report=runs/<JOB_ID>/freetext_crosscheck_report.md \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
-  --out-root integration_test \
-  --history-mappings integration_tests/history_mappings_replacement.json \
+  --out-root runs \
+  --history-mappings runs/history_mappings_replacement.json \
   --history-table-fqn <REAL_SOURCE_FQN> \
   --no-redact-values \
   --prune-inputs
-  # writes integration_test/<JOB_ID>/{real,oss}/ and, after a CLEAN leak
+  # writes runs/<JOB_ID>/{real,oss}/ and, after a CLEAN leak
   # scan, deletes the parent-level metrics/markdown duplicates it ingested
 ```
 
@@ -487,13 +488,13 @@ copied into `real/` or `oss/` — the parent-level CSV is the single copy, and
 
 The bundle folder name defaults to the first Dataflow job id in the gcp
 metrics (`--job-id` overrides), so everything for one deployment sits under
-`integration_test/<JOB_ID>/` next to the sample CSVs.
+`runs/<JOB_ID>/` next to the sample CSVs.
 
 - `real/` — verbatim `*_metrics.json` + `stats_diff.md` +
   `freetext_crosscheck_report.md` + `report.md` for internal use. With
   `--history-mappings` (the default workflow, ADR 0029) NO per-job
   `mapping.json` is written: the persistent
-  `integration_tests/history_mappings_replacement.json` registry is the
+  `runs/history_mappings_replacement.json` registry is the
   single decode key — a real table keeps its letter prefix (`A_TABLE`,
   `B_TABLE`, … `AA_TABLE` past Z, first-arrival order) and every column
   its `<PREFIX>_COL_NNN` alias (DDL order) across ALL runs. The registry
@@ -526,8 +527,8 @@ individual files stay canonical):
 
 ```bash
 python scripts/e2e/build_full_report.py \
-  --dir integration_test/<JOB_ID>/real \
-  --dir integration_test/<JOB_ID>/oss
+  --dir runs/<JOB_ID>/real \
+  --dir runs/<JOB_ID>/oss
 ```
 
 When the recap must travel light (agent context, chat paste), regenerate
@@ -552,7 +553,7 @@ landing its recommendations so they fold in.
 4. The bundle export printed `leak scan: clean ✅` and `oss/` is free of the
    real project / dataset / table / column names (Dataflow job ids and job
    names are the deliberate exception — they stay verbatim).
-5. `integration_test/<JOB_ID>/` matches the finished-folder tree exactly:
+5. `runs/<JOB_ID>/` matches the finished-folder tree exactly:
    the sample CSVs at the parent level, `real/` with the four metrics JSONs +
    `stats_diff.md` + `freetext_crosscheck_report.md` + `report.md` +
    `mapping.json` + `_full_report.md`, and `oss/` with the same set minus
@@ -578,7 +579,7 @@ stuck on the wrong route — offer the user to chain
   SCHEMA=<SCHEMA> SOURCE_FQN=<SOURCE_FQN>
 ```
 
-It reads this deployment's `integration_test/<JOB_ID>/real/` evidence
+It reads this deployment's `runs/<JOB_ID>/real/` evidence
 (crosscheck, stats diff, offline + GCP metrics, reports) and writes
 evidence-backed `{"llm_prompt_constraint": …}` objects into the schema
 file's column descriptions (DDL_CONTRACT_GUIDE §4 / ADR 0024), so the next
@@ -606,7 +607,7 @@ finding worth steering.
 - **Expected-vs-reality** framing throughout.
 - Report filename is always `end_to_end_validation_report_YYYY_MM_DD_HH_MM.md`
   under `output/`.
-- **Per-deployment artifacts live under `integration_test/<JOB_ID>/`** — the
+- **Per-deployment artifacts live under `runs/<JOB_ID>/`** — the
   sample CSVs at the parent level plus the `real/` + `oss/` bundles holding
   everything else (four metrics JSONs, crosscheck + stats-diff markdown,
   report, mapping). Parent-level metrics/markdown files are working copies

@@ -20,10 +20,10 @@ Artifact-shape grounding for `compute_deltas` (real key names, not guesses):
 
 `discover_artifact_sets` git-plumbing tests build a throwaway tree object
 (`git hash-object -w --stdin` + `git mktree`) instead of relying on
-pre-existing committed `integration_test/<job_id>/` folders — none are
-actually committed to this repo (verified via `git log --all --diff-filter=A
---name-only` across all branches/history), only the real-run artifacts under
-the gitignored `integration_tests/` (plural). Building a synthetic tree is
+pre-existing committed evidence folders (canonical
+`docs/releases/<version>/evidence/<job_id>/`, legacy
+`integration_test/<job_id>/`); day-to-day run artifacts live only under
+the gitignored local `runs/`. Building a synthetic tree is
 still a read-only operation from the branch's point of view: it writes loose
 objects but touches no ref, branch, or working tree, exactly like the
 suggested `git hash-object -t tree /dev/null` empty-tree trick.
@@ -206,6 +206,36 @@ def test_discover_artifact_sets_supports_real_bundle_layout():
     assert sets[job]["offline"] == {"engines": {}}
     assert sets[job]["stats_diff"] == {"columns": {}}
     assert sets[job]["crosscheck"] == {"meta": {}}
+
+
+def test_discover_artifact_sets_supports_release_evidence_layout():
+    """Canonical layout from doc-revisit on: bundles live under
+    `docs/releases/<version>/evidence/<job>/real/`; `oss/` twins and
+    non-evidence release files (report.md, summary.json) are skipped."""
+    job = "2026-08-26_05_01_16-3186876581127148459"
+    tree = _make_tree(
+        {
+            f"docs/releases/v0.1.0/evidence/{job}/real/gcp_metrics.json": json.dumps(
+                {"dataflow": [{"job_id": "abc", "timing": {"execution_seconds": 60.0}}]}
+            ),
+            f"docs/releases/v0.1.0/evidence/{job}/real/offline_metrics.json": (
+                json.dumps({"engines": {}})
+            ),
+            # Redacted twin — must never be picked up as an artifact.
+            f"docs/releases/v0.1.0/evidence/{job}/oss/gcp_metrics.json": json.dumps(
+                {"dataflow": [{"job_id": "REDACTED"}]}
+            ),
+            "docs/releases/v0.1.0/report.md": "# not an artifact",
+            "docs/releases/v0.1.0/summary.json": json.dumps({"version": "v0.1.0"}),
+        }
+    )
+    sets = rel.discover_artifact_sets(tree)
+    assert set(sets.keys()) == {job}
+    assert sets[job]["gcp"] == {
+        "dataflow": [{"job_id": "abc", "timing": {"execution_seconds": 60.0}}]
+    }
+    assert sets[job]["offline"] == {"engines": {}}
+    assert "crosscheck" not in sets[job]
 
 
 def test_latest_job_picks_lexicographically_greatest_id():

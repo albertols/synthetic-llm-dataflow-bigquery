@@ -1,7 +1,8 @@
 # 2026-08-26_05_01_16-3186876581127148459 — R6 10M/table relational run (C_TABLE parent + A_TABLE child)
 
 Committed metrics bundle for the release report (`scripts/release/make_release_report.py`
-discovers `integration_test/<JOB_ID>/real/*.json` at a git ref — nothing else is read).
+discovers `docs/releases/<version>/evidence/<JOB_ID>/real/*.json` at a git ref —
+legacy `integration_test/<JOB_ID>/` for pre-relocation tags; nothing else is read).
 
 - Reconstructed from the run's `_full_report.md` inlined JSON annexes (the oss
   export: table/column/value identifiers are already aliases — `PROJECT_ID`,

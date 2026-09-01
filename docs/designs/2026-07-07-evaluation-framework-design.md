@@ -1,6 +1,6 @@
 # Design — Evaluation framework (`synthetic_data_quality.validation_data_history`)
 
-> **Status: DESIGN** (proposed 2026-07-07, M2 candidate — no implementation yet)
+> **Status: PARTIALLY IMPLEMENTED** (proposed 2026-07-07; Tier-1/2/3 code lives on branch `ws3-eval-framework` — `sdfb_core/evaluation/` — merge pending)
 > · visuals retrofitted 2026-08-05 per the `visual-first-documentation` skill
 > · related: [ADR 0022](../adr/0022-stats-driven-generation.md) (the
 > source-side stats this framework's landing-side metrics mirror),

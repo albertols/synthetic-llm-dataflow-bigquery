@@ -134,6 +134,7 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 
 - `config/thresholds.yml` — `--thresholds_uri` (gs:// or local); missing → permissive gate.
 - `config/models.yml` — registry/reference only; the run takes a full `--model_uri`, not a key.
+- `config/relationships/*.yaml` — the versioned PK/FK/identity model ([ADR 0032](adr/0032-relationships-as-config.md), [`config/relationships/README.md`](../config/relationships/README.md)); required for any relational run (`--relationships-uri` gs:// override supported); absent → every table generates alone. Preflight step 12 validates it.
 
 ### IAM — Dataflow worker SA
 
@@ -146,7 +147,7 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 
 db.com-specific; the bulk of what an OSS adaptation removes or genericizes:
 
-- **JFrog** base images + pip mirror (ADR 0003, `pyproject.toml [tool.uv.index]`) → Docker Hub / gcr.io + pypi.org.
+- **JFrog** base images + pip mirror (ADR 0003, `pyproject.toml [tool.uv.index]`) → Docker Hub / gcr.io + pypi.org. Runtime image pulls come from Artifact Registry regardless ([ADR 0015](adr/0015-worker-image-via-artifact-registry.md)).
 - **WIF + GSM secrets** for CI auth and worker image pulls (`CICD.md` §6) → SA key or ADC. Add `secretmanager.secretAccessor` to the worker SA only here.
 - **Composer Variables** `PROJECT_ID`, `REGION`, `DATAFLOW_SUBNET`, `SA_DATAFLOW`, `SDFB_MODEL_URI` (`composer/synthetic_beam_bigquery.py`) → pass as DAG params / env.
 - **Network tags, `WORKER_IP_PRIVATE` + Private Google Access, KMS keys, secure-boot** → removable for a public-IP OSS default.

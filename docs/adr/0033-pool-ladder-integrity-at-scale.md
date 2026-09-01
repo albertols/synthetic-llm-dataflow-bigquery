@@ -12,7 +12,7 @@ The R6 pair is the first relational evidence at scale, and its headline
 is clean: PK uniqueness 1.0 on 10M rows per table, referential integrity
 verified by an independent full-table join (0 / 10,000,000 orphans),
 0 row duplicates, 67/67 + 44/45 stats columns `ok`, no memorization flag.
-Both E2E reports (`integration_tests/<job>/_full_report.md`) say "no
+Both E2E reports (`runs/<job>/_full_report.md`) say "no
 BLOCKER/CRITICAL". The worker logs say five things the reports did not:
 
 1. **A bundle failed and was retried in the 1M run.** Four pool ladders

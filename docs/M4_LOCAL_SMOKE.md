@@ -125,4 +125,4 @@ If this errors with `safetensors index missing`, the download didn't include `mo
 | Prompt engineering changes | L2 |
 | End-to-end engine + validation chain | L3 |
 | GPU image / Dataflow / vLLM / L4 | CI workflow 1 + probe |
-| Production fidelity / throughput / cost | Dataflow probe with real model (M1 §11) |
+| Production fidelity / throughput / cost | real Dataflow runs ([`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md)) |
