@@ -14,6 +14,7 @@ sources:
   - docs/adr/0032-relationships-as-config.md
   - docs/adr/0033-pool-ladder-integrity-at-scale.md
 figures:
+  - docs/assets/beam-summit-2025-acceptance.png
   - docs/assets/architecture-overview.png
   - docs/articles/assets/validation-guardrails.png
   - docs/articles/assets/generation-plan-routing.png
@@ -29,13 +30,24 @@ synced_at_commit: 3512a33
 *Self-hosted LLM generation on Apache Beam / Dataflow / BigQuery — the series
 behind the Apache Beam Summit 2025 session "Building Banking Synthetic Data
 for a Lakehouse with Gemma".*
+![beam-summit-2025-acceptance.png](../assets/beam-summit-2025-acceptance.png)
+A year of prototypes and experimentation later, the results were good
+enough to integrate into a corporate environment and open-source the repo —
+exciting times!
 
 ## The problem nobody is allowed to solve the easy way
 
-Every data team I've worked with has the same recurring conversation. Someone
-needs realistic rows outside production — an integration test, a demo
-environment, an ML prototype, a partner enablement — and the table they need
-is exactly the one they cannot copy: accounts, movements, customer records.
+For the last 15 years, every data team I've worked with has had the same
+recurring conversation. Someone needs realistic rows outside production — an
+integration test, a demo environment, an ML prototype, a partner enablement
+— and the table they need is exactly the one they cannot copy: accounts,
+movements, customer records.
+
+These days the conversation ends faster: someone types "give me the data"
+into GitHub Copilot and runs with whatever comes back — millions of
+frontier-model tokens burned a day, hundreds of GenAI seats flushed with
+them, thousands of rows with no framework behind them, no data product, no
+mathematical rigor.
 
 The easy exits are all blocked in a regulated (banking) environment:
 
