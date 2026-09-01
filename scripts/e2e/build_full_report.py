@@ -24,8 +24,8 @@ from scratch.
 
 Usage:
     python scripts/e2e/build_full_report.py \
-        --dir integration_test/<JOB_ID>/real \
-        --dir integration_test/<JOB_ID>/oss
+        --dir runs/<JOB_ID>/real \
+        --dir runs/<JOB_ID>/oss
 """
 
 from __future__ import annotations

@@ -99,7 +99,7 @@ existing once-guard.
 - DirectRunner-proven end to end (child FK containment asserted against
   disjoint reference values); T4/L4 Dataflow evidence is the acceptance
   gate before this becomes the recommended corp path.
-- `integration_tests` interpreters gain three new anchors:
+- `runs` interpreters gain three new anchors:
   `launch_config`, `relational_single_job`, and `table=`-tagged
   milestones.
 - **Amends ADR 0028 P4** (2026-08-22 first single-job launch evidence):

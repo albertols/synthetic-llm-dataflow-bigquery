@@ -1,6 +1,6 @@
 """Persistent table/column alias registry (ADR 0029, report consistency).
 
-One `integration_tests/history_mappings_replacement.json` (LOCAL-ONLY —
+One `runs/history_mappings_replacement.json` (LOCAL-ONLY —
 it is the decode key) replaces per-job `mapping.json`: a table keeps its
 letter prefix and column aliases across every future run, and prefixes
 scale past Z (A..Z, AA, AB, …) for the dozens of unrelated tables to

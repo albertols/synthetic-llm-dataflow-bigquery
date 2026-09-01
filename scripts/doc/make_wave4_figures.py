@@ -57,8 +57,8 @@ CVD_FLOOR = 15.0
 SRGB_CUTOFF = 0.04045
 
 # --- MEASURED (2026-08-20 R1 pair; the only place these numbers are typed).
-# Source: integration_tests/2026-08-20_05_49_25-7855058315673855031 (A_TABLE)
-#     and integration_tests/2026-08-20_06_28_11-7047697540022640037 (B_TABLE),
+# Source: runs/2026-08-20_05_49_25-7855058315673855031 (A_TABLE)
+#     and runs/2026-08-20_06_28_11-7047697540022640037 (B_TABLE),
 # oss-redacted bundle annexes: freetext_crosscheck_metrics.json `top_values`
 # (exact APPROX_TOP_COUNT over the FULL tables) vs the same annex's sampled
 # `top_shapes` panel, and e2e_gcp_metrics.json copy ratios.

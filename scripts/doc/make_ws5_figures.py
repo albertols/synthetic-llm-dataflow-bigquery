@@ -3,7 +3,7 @@
     uv run --no-sync python3 scripts/doc/make_ws5_figures.py
 
 Writes PNGs into docs/designs/assets/. Every measured number below is
-derived from integration_tests/2026-07-26_06_54_25-14348390798392809440/
+derived from runs/2026-07-26_06_54_25-14348390798392809440/
 (the 1M-row stress run) — see MEASURED below for the extraction. Re-run the
 extraction if that run is superseded; do not hand-edit the constants.
 

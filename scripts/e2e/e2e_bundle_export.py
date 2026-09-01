@@ -31,13 +31,13 @@ integration test.
 
 Usage:
     python scripts/e2e/e2e_bundle_export.py \
-        --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
-        --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
-        --doc stats_diff=integration_test/<JOB_ID>/stats_diff.md \
-        --doc freetext_crosscheck_report=integration_test/<JOB_ID>/freetext_crosscheck_report.md \
-        --csv b1_rag=integration_test/<JOB_ID>/b1_rag_sample.csv \
+        --metrics gcp=runs/<JOB_ID>/e2e_gcp_metrics.json \
+        --metrics offline=runs/<JOB_ID>/e2e_validation_metrics.json \
+        --doc stats_diff=runs/<JOB_ID>/stats_diff.md \
+        --doc freetext_crosscheck_report=runs/<JOB_ID>/freetext_crosscheck_report.md \
+        --csv b1_rag=runs/<JOB_ID>/b1_rag_sample.csv \
         --report output/end_to_end_validation_report_2026_07_07_16_26.md \
-        --out-root integration_test \
+        --out-root runs \
         --prune-inputs
         # --job-id <JOB_ID>             (default: first Dataflow job id in the
         #                                gcp metrics, else the report timestamp)
@@ -167,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         "into real/<label>.md and redacted into oss/<label>.md.",
     )
     ap.add_argument("--report", type=Path, required=True)
-    ap.add_argument("--out-root", type=Path, default=Path("integration_test"))
+    ap.add_argument("--out-root", type=Path, default=Path("runs"))
     ap.add_argument(
         "--job-id",
         default="",
@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="path to the persistent alias registry (ADR 0029, "
-        "integration_tests/history_mappings_replacement.json). When given, "
+        "runs/history_mappings_replacement.json). When given, "
         "table/column aliases come from (and append to) the registry — one "
         "stable name per real column across every bundle — and the per-job "
         "mapping.json is NOT written (the registry IS the decode key). "

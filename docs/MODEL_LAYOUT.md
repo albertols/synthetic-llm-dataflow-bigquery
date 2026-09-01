@@ -10,7 +10,7 @@ Where model weights live, in what format, for which runner.
 | **DirectRunner (M4 — stretch / optional)** | `./models/{family}/{model}/{version}/` | MLX, llama.cpp, or vLLM-CPU | safetensors (or GGUF) |
 | **Dataflow (L4 GPU workers)** | `gs://{bucket}/synthetic/models/{family}/{model}/{version}/` | vLLM with CUDA | safetensors + AWQ Q4 |
 
-**For M1 §8 specifically** (the DAG end-to-end on DirectRunner), no real model is needed — `FakeModelClient` substitutes. Everything below is for §9–§11 when real LLMs come online.
+For DirectRunner work no real model is needed — `FakeModelClient` substitutes. Everything below is for the real-LLM paths (shipped; kept as the staging reference).
 
 ---
 
@@ -39,7 +39,7 @@ gs://{bucket}/synthetic/models/
 ├── qwen2.5/7b-it/v1/            # Optional cross-family check (Apache-2.0)
 │   └── … (same layout)
 └── embedders/
-    └── bge-small-en-v1.5/v1/    # For B.1 RAG (M1 §7)
+    └── bge-small-en-v1.5/v1/    # For B.1 RAG
         ├── config.json
         ├── model.safetensors
         ├── tokenizer.json
@@ -78,7 +78,7 @@ A future `MLXModelClient` (out of M1 scope) would slot into the `ModelClient` Pr
 
 For M1 specifically, **on M4 you have two practical paths**:
 1. `FakeModelClient` + DirectRunner — exercise the pipeline locally with no GPU.
-2. `VLLMModelClient` on Dataflow with L4 workers — the production path (M1 §11).
+2. `VLLMModelClient` on Dataflow with L4 workers — the production path.
 
 A real-model DirectRunner run on M4 with MLX is a nice-to-have for §6 (B.2 spike) and §7 (B.1 spike), not a blocker.
 
@@ -170,7 +170,7 @@ loader. `vocab.txt` is optional (the fast tokenizer already embeds it).
 
 Per [ADR 0011](adr/0011-adopt-beam-vllm-model-handler.md), the serving path uses Beam's
 `apache_beam.ml.inference.vllm_inference.VLLMCompletionsModelHandler`. Inside
-`sdfb_beam/handlers/vllm_client.py` (M1 §9):
+`sdfb_beam/handlers/vllm_client.py`:
 
 ```python
 def setup(self):
@@ -199,11 +199,11 @@ def setup(self):
     )
 ```
 
-`HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are set in `docker/Dockerfile` (M1 §10) so any accidental Hub call fails loudly. The model directory must be self-contained.
+`HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are set in `docker/Dockerfile` so any accidental Hub call fails loudly. The model directory must be self-contained.
 
-### §11 vLLM acceptance — what the Dataflow probe must confirm
+### vLLM acceptance — what the Dataflow probe must confirm
 
-GPU validation happens via the §11 Dataflow probe (`scripts/probe_gpu_dataflow.sh`) once the image is built — there's no separate laptop test (vLLM is CUDA-only). The probe (1-row job) must confirm the vLLM serving path:
+GPU validation happens via the Dataflow probe (`scripts/probe_gpu_dataflow.sh`) once the image is built — there's no separate laptop test (vLLM is CUDA-only). The probe (1-row job) must confirm the vLLM serving path:
 
 - **Server loads the model** — `Gemma4ForConditionalGeneration` accepted (needs vLLM ≥ 0.21; see version note below).
 - **Thinking channel suppressed** — pass `chat_template_kwargs={"enable_thinking": False}` via the **chat** endpoint (not raw completions); otherwise the model spends the token budget on chain-of-thought and truncates the JSON (see the Gemma 4 project memory).

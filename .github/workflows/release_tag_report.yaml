@@ -3,8 +3,9 @@ name: Release tag + report
 # Post-merge release layer (spec: docs/superpowers/specs/
 # 2026-08-06-e2e-reporting-scripts-release-design.md). Tags every merge to
 # master with SemVer derived from the squash-merge title, generates the
-# redacted before/after release report from committed integration_test/
-# artifacts (NO GCP access), and commits docs/releases/<version>/.
+# redacted before/after release report from committed evidence bundles in
+# docs/releases/<version>/evidence/ (legacy integration_test/ for old tags;
+# NO GCP access), and commits docs/releases/<version>/.
 
 on:
   push:

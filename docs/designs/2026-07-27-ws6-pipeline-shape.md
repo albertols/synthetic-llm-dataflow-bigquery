@@ -1,14 +1,14 @@
 # WS6 — Pipeline shape: the setup gap, the retry cascade, and the GroupByKey barrier
 
-> **Status: IMPLEMENTED + E2E MEASURED.** All five items are landed on
-> `ws6-pipeline-shape` (748 tests green as of 2026-08-05); the §6 targets are
+> **Status: IMPLEMENTED + E2E MEASURED.** All five items merged to `master`
+> (branch retired); the §6 targets are
 > measured by the 2026-07-31 → 2026-08-03 five-run matrix in **§11** — warm
 > 1M in 12.6 min (target < 15) and the first 10M-row run at 26.4 min.
 >
 > **W5 changed from investigation to fix during implementation** — see §5.
 >
 > Every number is re-derived from
-> `integration_tests/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
+> `runs/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
 > (first GPU/CPU-separated 1M-row run on the GCP LZ) via
 > [`scripts/doc/make_ws6_figures.py`](../../scripts/doc/make_ws6_figures.py), which also
 > regenerates every figure (provenance in §7).
@@ -459,7 +459,7 @@ no `pool_sources` field because B.2 free-text pools build lazily per batch.
 ## 11. 2026-07-31 → 08-03 five-run postmortem — the funnel closes, and 10M rows lands
 
 Five runs on the `9b441e6`+ build (`d08040e` head). Every number below is
-re-derived from `integration_tests/<JOB_ID>/worker_logs.jsonl` by the same
+re-derived from `runs/<JOB_ID>/worker_logs.jsonl` by the same
 sweep used for §9 (severity histogram, milestone inventory, batch timeline).
 
 | Signal | R1′ `07-31_05_20` cold A | R2′ `07-31_05_33` cold B | R3′ `07-31_09_11` | R4′ `08-03_09_03` warm B | R5′ `08-03_11_27` warm B **10M** |

@@ -306,7 +306,7 @@ uv run --no-sync python3 scripts/doc/make_constraint_router_figures.py
 | fig 2 | `assets/constraint-router-outcomes.png` | per-clause build seconds & rejects + landed distincts |
 
 All numbers live in the script's `MEASURED` block, sourced from
-`integration_tests/2026-08-21_14_54_30-1966084111444777604/`
+`runs/2026-08-21_14_54_30-1966084111444777604/`
 (`_full_report.md` annexes + `worker_logs.jsonl`). Palette
 BLUE/ORANGE/AQUA per the asset set; OKLab separation printed on every
 regeneration. External links retrieved 2026-08-22.

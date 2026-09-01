@@ -45,8 +45,8 @@ CVD_FLOOR = 15.0
 SRGB_CUTOFF = 0.04045
 
 # --- MEASURED (2026-08-11 R1 pair; the only place these numbers are typed).
-# Source: integration_tests/2026-08-11_04_07_50-11228952274629556592 (A_TABLE)
-#     and integration_tests/2026-08-11_06_04_05-9010984585999295806 (B_TABLE),
+# Source: runs/2026-08-11_04_07_50-11228952274629556592 (A_TABLE)
+#     and runs/2026-08-11_06_04_05-9010984585999295806 (B_TABLE),
 # oss-redacted stats_diff.md / freetext_crosscheck_report.md tables.
 RUN_A = "2026-08-11_04_07_50-11228…"  # A_TABLE R1 cold, 1M rows
 RUN_B = "2026-08-11_06_04_05-9010…"  # B_TABLE R1 cold, 1M rows

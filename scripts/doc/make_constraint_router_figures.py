@@ -4,7 +4,7 @@
 
 Writes PNGs into docs/designs/assets/. Both figures are EVIDENCE: the
 2026-08-21 first PK+FK run (the only place those numbers are typed),
-read from `integration_tests/2026-08-21_14_54_30-1966084111444777604/`
+read from `runs/2026-08-21_14_54_30-1966084111444777604/`
 (_full_report.md annexes + worker_logs.jsonl milestones). Claims:
 
   1. constraint-router-pk-blocker.png — a 512-cap constrained pool

@@ -1,16 +1,16 @@
 # WS5 — Generation throughput & RAG seeding campaign (visual design)
 
-> **Status: IMPLEMENTED (laptop side), AWAITING E2E MEASUREMENT.** All ten
-> plan tasks are landed on `ws5-generation-throughput` with 683 tests green;
+> **Status: IMPLEMENTED + E2E MEASURED.** All ten plan tasks merged to
+> `master` (branch retired); measured on the WS6 five-run matrix and later campaigns;
 > the §6 targets are *predictions* until an M4 run measures them. Decisions
 > are recorded in [ADR 0020](../adr/0020-freetext-pools-as-persisted-artifact.md).
 > Every number in §1 is re-derived from
-> `integration_tests/2026-07-26_06_54_25-14348390798392809440/worker_logs.jsonl`
+> `runs/2026-07-26_06_54_25-14348390798392809440/worker_logs.jsonl`
 > (the 1M-row stress run); the extraction is reproducible via
 > [`scripts/doc/make_ws5_figures.py`](../../scripts/doc/make_ws5_figures.py), which also
 > regenerates every figure (provenance in §7).
 >
-> **Implementation plan:** [`docs/superpowers/plans/2026-07-26-ws5-generation-throughput.md`](../superpowers/plans/2026-07-26-ws5-generation-throughput.md)
+> **Implementation plan:** `docs/superpowers/plans/2026-07-26-ws5-generation-throughput.md` (retired 2026-08-31 with the plans/ layer; recoverable from git history)
 > — 10 tasks in 4 phases, TDD, one commit per task.
 > This document is written to the `visual-first-documentation` skill
 > (`.claude/skills/visual-first-documentation/SKILL.md`), which owns the

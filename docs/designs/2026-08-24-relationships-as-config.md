@@ -1,7 +1,7 @@
 # Relationships as config — one file, not N table descriptions
 
-**Status:** ACCEPTED (2026-08-24) — DirectRunner-proven; the first Dataflow
-launch reading `config/relationships/` is the acceptance gate
+**Status:** ACCEPTED (2026-08-24) — gate MET: the R6 pair (2026-08-25/26)
+launched from `config/relationships/` with the relationship card in driver + worker logs
 **Decision:** [ADR 0032](../adr/0032-relationships-as-config.md)
 **User guide:** [`config/relationships/README.md`](../../config/relationships/README.md)
 **Supersedes:** [ADR 0021](../adr/0021-relational-contract-in-descriptions.md)

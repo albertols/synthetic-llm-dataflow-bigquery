@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-07-26) · **Amends:** [0018](0018-parallel-batched-freetext-pools.md)
 **Design:** [WS5 — generation throughput & RAG seeding](../designs/2026-07-26-ws5-generation-throughput.md)
-**Evidence:** `integration_tests/2026-07-26_06_54_25-14348390798392809440/` (1M rows, 68 min, 4 L4 workers)
+**Evidence:** `runs/2026-07-26_06_54_25-14348390798392809440/` (1M rows, 68 min, 4 L4 workers)
 
 ## Context
 

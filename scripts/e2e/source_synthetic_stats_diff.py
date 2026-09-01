@@ -24,8 +24,8 @@ Usage:
         --synthetic-fqn project.synthetic_data.landing_table \
         --project project \
         --rows 10000 \
-        --out-json integration_test/<JOB_ID>/stats_diff.json \
-        --out-md integration_test/<JOB_ID>/stats_diff.md
+        --out-json runs/<JOB_ID>/stats_diff.json \
+        --out-md runs/<JOB_ID>/stats_diff.md
 """
 
 from __future__ import annotations

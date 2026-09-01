@@ -8,7 +8,7 @@ description: >
   a timestamped VISUAL contract-guide snapshot:
   the relationship card + mermaid diagram, per-table facts, and a
   closing table of every table.field's description + constraint clause.
-  Written twice: integration_tests/ddl_contract_guides/<STAMP>/real/
+  Written twice: runs/ddl_contract_guides/<STAMP>/real/
   (verbatim names, local-only) and .../oss/ (aliases from the history
   mappings registry, shareable, leak-scanned). ADC access to the target
   GCP project is a PREREQUISITE and is verified first. Parsing and graph
@@ -30,12 +30,12 @@ glance: which tables the model covers, their PK / identity / FK edges
 Output folder (timestamp = generation time, `date +%Y_%m_%d_%H_%M`):
 
 ```
-integration_tests/ddl_contract_guides/<YYYY_MM_DD_HH_MM>/
+runs/ddl_contract_guides/<YYYY_MM_DD_HH_MM>/
   real/ddl_contract_guide.md     # verbatim names — INTERNAL, local-only
   oss/ddl_contract_guide.md      # registry aliases — shareable
 ```
 
-`integration_tests/` is gitignored: `real/` is safe by construction and
+`runs/` is gitignored: `real/` is safe by construction and
 must NEVER be committed or shared; `oss/` is the hand-off artifact.
 
 This is a **repeated action** (re-run after every Terraform contract
@@ -52,8 +52,8 @@ dataset, table, or column name is hard-coded.
 | `PROJECT` | `<project-id>` | GCP project id |
 | `LANDING_DATASET` | `synthetic_data` | dataset whose COLUMN descriptions carry the constraints (ADR 0027 D2: they live on the LANDING tables) |
 | `RELATIONSHIPS` | `config/relationships` | the relational models (ADR 0032) — folder, file, or `gs://`. The ONLY source of PK/FK/identity |
-| `OUT_ROOT` | `integration_tests/ddl_contract_guides` | snapshot parent dir |
-| `REGISTRY` | `integration_tests/history_mappings_replacement.json` | history-mappings alias registry (ADR 0029 D6) — created/extended if absent |
+| `OUT_ROOT` | `runs/ddl_contract_guides` | snapshot parent dir |
+| `REGISTRY` | `runs/history_mappings_replacement.json` | history-mappings alias registry (ADR 0029 D6) — created/extended if absent |
 
 ---
 
@@ -186,7 +186,7 @@ Document contract, in this order:
 
 Same document (IDENTICAL structure and column set), aliased. The
 replacements MUST come from the persistent registry —
-`integration_tests/history_mappings_replacement.json` — and from
+`runs/history_mappings_replacement.json` — and from
 nowhere else: the same real table/column maps to the SAME alias here,
 in every `e2e_bundle_export` oss/ bundle and in every validation
 report (ADR 0029 D6 — the registry is the single cross-artifact decode
@@ -219,7 +219,7 @@ both; the leak scan is the proof, not the assumption.
 
 ## Step 5 — Recycle the diagram
 
-Write the mermaid source to `integration_tests/fk_models/<sha>.mmd`
+Write the mermaid source to `runs/fk_models/<sha>.mmd`
 (create the dir if needed) unless that file already exists — the E2E
 validation report (prompt §5.5) embeds it by sha instead of redrawing.
 

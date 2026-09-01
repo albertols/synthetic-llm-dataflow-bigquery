@@ -35,23 +35,23 @@ JOB=<job_id>; RUN=<run_id>; T=citibike_trips_50k
 # convention), into the per-job folder:
 bq query --use_legacy_sql=false --format=csv --max_rows=500 --project_id=$PROJECT_ID \
   "SELECT * FROM \`${PROJECT_ID}.synthetic_data.${T}\` LIMIT 500" \
-  > integration_test/$JOB/b1_rag_sample.csv
+  > runs/$JOB/b1_rag_sample.csv
 
 uv run --no-sync python3 scripts/e2e/e2e_gcp_probe.py --project $PROJECT_ID \
   --source-fqn $PROJECT_ID.synthetic_source.$T --landing-fqn $PROJECT_ID.synthetic_data.$T \
   --quality-dataset $PROJECT_ID.synthetic_data_quality --region us-central1 \
-  --job-id $JOB --run-id $RUN --pk trip_id --out integration_test/$JOB/e2e_gcp_metrics.json
+  --job-id $JOB --run-id $RUN --pk trip_id --out runs/$JOB/e2e_gcp_metrics.json
 
-uv run --no-sync python3 scripts/e2e/e2e_validation_analysis.py --csv eng=integration_test/$JOB/b1_rag_sample.csv \
+uv run --no-sync python3 scripts/e2e/e2e_validation_analysis.py --csv eng=runs/$JOB/b1_rag_sample.csv \
   --schema output/${T}_landing_schema.json --pk trip_id --batch-size 16 \
-  --out integration_test/$JOB/e2e_validation_metrics.json
+  --out runs/$JOB/e2e_validation_metrics.json
 
 uv run --no-sync python3 scripts/e2e/e2e_bundle_export.py \
-  --metrics gcp=integration_test/$JOB/e2e_gcp_metrics.json \
-  --metrics offline=integration_test/$JOB/e2e_validation_metrics.json \
-  --csv b1_rag=integration_test/$JOB/b1_rag_sample.csv \
+  --metrics gcp=runs/$JOB/e2e_gcp_metrics.json \
+  --metrics offline=runs/$JOB/e2e_validation_metrics.json \
+  --csv b1_rag=runs/$JOB/b1_rag_sample.csv \
   --report output/<end_to_end_validation_report_YYYY_MM_DD_HH_MM>.md \
-  --out-root integration_test --job-id $JOB --prune-inputs
+  --out-root runs --job-id $JOB --prune-inputs
 # real/ becomes the canonical metrics location (parent-level JSONs are
 # pruned after a clean leak scan); the CSV stays parent-level, never
 # copied into real/ or oss/. When the crosscheck/stats-diff ran, add their
@@ -59,8 +59,12 @@ uv run --no-sync python3 scripts/e2e/e2e_bundle_export.py \
 # (RUN_PLAYBOOK §5 step 3 has the full invocation + label contract).
 
 uv run --no-sync python3 scripts/e2e/build_full_report.py \
-  --dir integration_test/$JOB/real --dir integration_test/$JOB/oss
+  --dir runs/$JOB/real --dir runs/$JOB/oss
 # one-file recap per bundle (_full_report.md: ToC + every .md + json annexes)
+
+# promote the bundle into release evidence (committed) when a release will
+# cite this run:
+cp -R runs/$JOB docs/releases/<version>/evidence/$JOB
 ```
 
 (hacker_news: `--pk id`, table `hacker_news_50k`.)

@@ -1,7 +1,7 @@
 # Referential integrity by construction — joint FK key draws
 
-**Status:** ACCEPTED (2026-08-23) — DirectRunner-proven; the R7-FK
-Dataflow pair is the acceptance gate
+**Status:** ACCEPTED (2026-08-23) — gate MET: the R6 FK-enforced Dataflow
+pair landed (2026-08-25 1M · 2026-08-26 10M, 0 orphans on 10M child rows; ADR 0033)
 **Decision:** [ADR 0031](../adr/0031-joint-fk-key-draws.md)
 **Depends on:** [ADR 0030](../adr/0030-single-job-relational-generation.md)
 (in-DAG parent-key handoff) · [ADR 0029](../adr/0029-fk-model-scenarios-and-history-mappings.md)

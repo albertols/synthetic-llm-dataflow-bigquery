@@ -1,10 +1,10 @@
-# synthetic-dataflow-bigquery — roadmap
+# synthetic-llm-dataflow-bigquery — roadmap
 
-Single source of truth for milestone scope. Locked decisions per milestone live as ADRs in [`adr/`](adr/); operational runbooks live in this directory's other docs.
+Single source of truth for milestone scope. Locked decisions per milestone live as ADRs in [`adr/`](adr/); operational runbooks live in this directory's other docs; shipped-version history lives in [`releases/`](releases/README.md).
 
-## M1 — laptop-spine + L4 GPU + first Dataflow E2E
+## M1 — laptop-spine + GPU + first Dataflow E2E ✅ shipped
 
-**Goal**: produce schema-conformant synthetic rows for one BigQuery table on real Dataflow with L4 GPU workers, validated in-pipeline (Mode A).
+**Goal**: produce schema-conformant synthetic rows for one BigQuery table on real Dataflow with GPU workers, validated in-pipeline (Mode A).
 
 | # | Task | Status | Where |
 |---|---|---|---|
@@ -16,57 +16,41 @@ Single source of truth for milestone scope. Locked decisions per milestone live 
 | 6 | B.2 library-wrapper engine (sdgx; bake-off deferred, ADR 0013) | ✅ done | laptop |
 | 7 | B.1 RAG engine (FAISS retrieval + distribution inference) | ✅ done | laptop |
 | 8 | Beam DAG end-to-end on DirectRunner + `FakeModelClient` | ✅ done | laptop |
-| 9 | vLLM `ModelHandler` + `ModelClient` | ✅ done | laptop (mock-tested; real run in §11) |
+| 9 | vLLM `ModelHandler` + `ModelClient` | ✅ done | laptop + Dataflow |
 | 10 | `docker/Dockerfile` + CI workflows | ✅ done | CI |
-| 11 | E2E Dataflow run: Gemma 4 E4B → 26B-A4B MoE | 🔒 pending | M4 |
-| 12 | `thresholds.yml` wiring + `validation_runs` BQ table | ✅ done | laptop (DirectRunner; BQ write verified in §11) |
+| 11 | E2E Dataflow runs on GPU workers | ✅ done | R-series campaigns on T4 (Qwen; Gemma needs L4 — see `RUN_PLAYBOOK.md` §1), 1M and 10M rows/table measured; evidence in [`releases/`](releases/README.md) |
+| 12 | `thresholds.yml` wiring + `validation_runs` BQ table | ✅ done | verified on real runs |
 
-Personal-GCP T4 E2E layer (public_cloud/deploy/gcp) — spec 2026-07-14, ADR 0016; unblocks the matrix without corporate LZ/M4.
+The personal-GCP T4 E2E layer (`public_cloud/deploy/gcp`, ADR 0016) is what executed the run matrix without a corporate landing zone.
 
-**Hard constraints (immutable for M1)** — see [`adr/0001-no-managed-gcp-services.md`](adr/0001-no-managed-gcp-services.md):
+**Hard constraints (immutable)** — see [`adr/0001-no-managed-gcp-services.md`](adr/0001-no-managed-gcp-services.md):
 - No Vertex AI, Dataplex, Looker.
 - No HuggingFace Hub at runtime.
 - No external LLM APIs (GPT / Claude / Grok / Deepseek).
-- Single-table only; FK / multi-table is M2.
 
-**M1 deliverables**:
-- Working DAG that ingests a `_ddl.json`, pulls a live BQ reference sample, generates N rows via Gemma 4 on L4 workers, validates with Pydantic + Pandera + (optional) whylogs profile merge, writes valid rows to BigQuery via `FILE_LOADS` and invalid rows to a partitioned DLQ table.
-- All laptop tests passing in CI on every push.
-- Reference digest and run metadata in `synthetic_data_quality.validation_runs`.
+(The original "single-table only" M1 constraint was retired when relational generation shipped in v0.1.0.)
 
-**2026-07 cycle — engine fixes + E2E tooling + observability**: fixed the
-seed-replay defect (`derive_batch_seed(run_id, batch_id)` in
-`sdfb_core/seeding.py` — no-`--seed` runs no longer replay an identical draw
-per batch) and the silent-LLM-fallback defect (`freetext_llm_fallback`
-milestone + fatal `ModelGpuIncompatibleError` on a bf16-vs-Turing mismatch at
-vLLM init, instead of silently copying reference exemplars); added a
-`SDFB_MILESTONE` structured-logging contract (`sdfb_core/observability.py`)
-so worker-log mining no longer depends on wording regexes; added per-row
-identity-column synthesis (`--identity_cols`) and `row.duplicate` /
-`identity.unique` BLOCKER gate rules; landed the `scripts/e2e/e2e_gcp_probe.py` +
-`scripts/e2e/e2e_validation_analysis.py` + `scripts/e2e/e2e_bundle_export.py` E2E
-validation toolchain and `docs/RUN_PLAYBOOK.md`. Two design specs came out of
-this cycle for M2 scoping:
-[`docs/designs/2026-07-07-rag-layer-design.md`](designs/2026-07-07-rag-layer-design.md)
-and
-[`docs/designs/2026-07-07-evaluation-framework-design.md`](designs/2026-07-07-evaluation-framework-design.md).
+History note: the 2026-07 engine-fix/E2E-tooling cycle and the 2026-08 fidelity/relational waves are recorded where they belong — ADRs 0017–0033, the design docs under [`designs/`](designs/), and the release reports under [`releases/`](releases/README.md); this file no longer narrates them.
 
-## M2 — Mode B validation + scale + breadth
+## M2 — validation breadth + scale
 
 **Goal**: production-grade validation, broader use cases, foundations for managed adoption.
 
-Themes (order TBD; targets are 4–6 weeks after M1 ships):
-- **Mode B validation pipeline** — GX 1.x Checkpoint + Soda Core scan + SDMetrics fidelity (`QualityReport` + `DiagnosticReport`) + Evidently drift report. Results to `synthetic_data_quality.*` tables; HTML / JSON artifacts to GCS.
-- **Multi-table mode** — IN PROGRESS (`ws8-fidelity-relational`): relationships as versioned config + preflight + FK key pools + parent-first orchestrator ([ADR 0032](adr/0032-relationships-as-config.md), superseding the description contract of [ADR 0021](adr/0021-relational-contract-in-descriptions.md)), minimal-input scenarios ([ADR 0029](adr/0029-fk-model-scenarios-and-history-mappings.md)), one Dataflow job for the whole model ([ADR 0030](adr/0030-single-job-relational-generation.md)), and referential integrity by construction — joint key tuples, IPF-fitted weights, `fk.orphan` BLOCKER gate ([ADR 0031](adr/0031-joint-fk-key-draws.md), closes composite-FK joint draws and the `fk.exists` check). **R6 acceptance pair landed** (2026-08-25 1M + 2026-08-26 10M rows/table, one job, FK enforced): PK 1.0, 0 orphans on 10M child rows, `copy_fraction` 0 — and the worker logs' five defects shipped as [ADR 0033](adr/0033-pool-ladder-integrity-at-scale.md) (transient-retry ladders, filter-sized pool targets, format-collapse exit + example preflight, prose length ceiling, warm-pool semantics; laptop-verified, next cold launch is the gate). Remaining: transcribe the corp model into `config/relationships/`, level-parallel scheduling, co-partitioned join for parents beyond the 100k key cap, `--source_stats=exact` warehouse tier, CPU/GPU worker split for the generate stage (10M: ~9 busy GPU-minutes of 272 billed).
-- **Constrained-decoding fallback chain** — `outlines` and `lm-format-enforcer` for schema edge cases that beat vLLM's guided JSON.
+**Shipped early (v0.1.0, 2026-08)** — most of the original multi-table theme landed ahead of schedule: relationships as versioned config ([ADR 0032](adr/0032-relationships-as-config.md), superseding the description contract of [ADR 0021](adr/0021-relational-contract-in-descriptions.md)), minimal-input launch scenarios ([ADR 0029](adr/0029-fk-model-scenarios-and-history-mappings.md)), one Dataflow job for the whole model ([ADR 0030](adr/0030-single-job-relational-generation.md)), referential integrity by construction — joint key tuples, IPF-fitted weights, `fk.orphan` BLOCKER gate ([ADR 0031](adr/0031-joint-fk-key-draws.md)) — plus pool-ladder integrity at 10M scale ([ADR 0033](adr/0033-pool-ladder-integrity-at-scale.md)). R6 acceptance pair: PK 1.0, **0 orphans on 10M child rows**, `copy_fraction` 0.
+
+**Remaining themes**:
+- **Relational follow-through** — transcribe the corp model into `config/relationships/`; level-parallel scheduling; co-partitioned join for parents beyond the 100k key cap; ADR 0033's next cold-launch gate; CPU/GPU worker split for the generate stage (10M: ~9 busy GPU-minutes of 272 billed).
+- **Evaluation framework merge** — Tier 1/2/3 metrics (`ws3-eval-framework` branch): KS/Wasserstein, TV, PSI/JSD, DCR/NNDR, SDMetrics reports, memorization identifiers — into the run contract.
+- **Mode B validation pipeline** — GX 1.x Checkpoint + Soda Core scan + SDMetrics fidelity + Evidently drift report; results to `synthetic_data_quality.*`, artifacts to GCS.
+- **Constrained-decoding fallback chain** — `outlines` / `lm-format-enforcer` for schema edge cases that beat vLLM's guided JSON.
 - **Reference snapshot pattern** — cached parquet under `gs://{project}-dataflow/reference/{table}/sample.parquet` as a deterministic alternative to live SELECT.
 - **PII allow-list** — mask / format-template sensitive columns before they touch embeddings or validation reports.
-- **B.2 spike formalization** — lock the library choice (`sdgx` vs `DataDreamer`) in `config/models.yml` after head-to-head fidelity numbers.
+- **B.2 routing parity** — B.2 through the relational/constraint seams B.1 already has; head-to-head fidelity numbers to finalize the library lock.
 - **Apple Silicon MLX `ModelClient`** — drop-in for `VLLMModelClient` so M4-local runs become a full alternative to the FakeClient.
-- **CI gating** — Mode B checkpoint blocks PR merges to main; thresholds.yml is the source of truth.
+- **CI gating** — Mode B checkpoint blocks PR merges; thresholds.yml is the source of truth.
 
 **Explicit non-goals for M2**:
-- Dataplex / Looker dashboards (the no-managed-services rule from ADR-0001 still applies).
+- Dataplex / Looker dashboards (ADR-0001 still applies).
 - OpenLineage / Marquez / Dagster.
 - External LLM APIs.
 
@@ -74,7 +58,7 @@ Themes (order TBD; targets are 4–6 weeks after M1 ships):
 
 **Goal**: operations team can adopt without us.
 
-- **IaC / Terraform** — buckets, datasets, secrets, IAM, AR repos (if we migrate from JFrog).
+- **IaC / Terraform** — buckets, datasets, secrets, IAM, AR repos.
 - **Run metadata schema v2** — full audit trail, signed-URL report links, OpenLineage-compatible structure (without taking the OpenLineage dependency).
 - **Multi-region** — at least `us-central1` parity with `europe-west3`.
 - **Quota-aware autoscaling** — pipeline reads quota before requesting workers, fails gracefully.

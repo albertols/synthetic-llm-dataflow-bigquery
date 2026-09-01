@@ -1,17 +1,54 @@
-# Run playbook — GPU verdict, run matrix, Dataflow options, report recipe
-
-> **Running the WS8 validation campaign** (relationship models, tiered
-> source stats, inverse-CDF, expansion arms, 10M)? The run matrix lives in
-> [`RUN_PLAYBOOK_WS8.md`](RUN_PLAYBOOK_WS8.md); this doc keeps the GPU
-> verdict, Dataflow options, capacity ladder, and report recipe it builds on.
+# Run playbook — GPU verdict, defaults, Dataflow options, recipes, pass criteria
 
 The operational companion to [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md)
 (what must exist before a run) — this doc is about the run itself: which GPU to
-pick, what the four M1 §11 validation runs are, which Dataflow launch knobs
-matter, how to hold L4 capacity when `europe-west3` is stocked out, and how to
-turn a finished job into a report. Everything here reflects the
-`composer/synthetic_beam_bigquery.py` DAG and the `packages/sdfb-beam` CLI as
-they exist on this branch — read those files if a flag looks stale.
+pick, the current flag posture, which Dataflow launch knobs matter, how to hold
+L4 capacity when `europe-west3` is stocked out, how to read worker logs, what
+passing looks like, and how to turn a finished job into a report. Everything
+here reflects the `composer/synthetic_beam_bigquery.py` DAG and the
+`packages/sdfb-beam` CLI on `master` — read those files if a flag looks stale.
+Campaign history (the WS8 R-series verdicts and remediation waves) lives in
+ADRs 0023–0033 and the design docs they cite, not here.
+
+---
+
+## 0. From-scratch reset (before a cold campaign)
+
+Deploy/align the stats table first (the schema carries
+`sample_rows`/`stats_tier`/`profiler_version`):
+
+```bash
+# new table:
+bq mk --table "${PROJECT}:synthetic_rag.source_table_stats" \
+  config/bq_schema/synthetic_rag/source_table_stats.schema.json
+# pre-existing table (additive, no data rewrite):
+bq update "${PROJECT}:synthetic_rag.source_table_stats" \
+  config/bq_schema/synthetic_rag/source_table_stats.schema.json
+```
+
+Then wipe state so every store path is exercised cold:
+
+```bash
+for t in \
+  "synthetic_data.<LANDING_A>" "synthetic_data.<LANDING_B>" \
+  "synthetic_data_quality.dlq" "synthetic_data_quality.validation_runs" \
+  "synthetic_rag.freetext_pools" "synthetic_rag.rag_chunks" \
+  "synthetic_rag.source_table_stats"; do
+  bq query --use_legacy_sql=false "TRUNCATE TABLE \`${PROJECT}.${t}\`"
+done
+```
+
+Truncating `freetext_pools`/`rag_chunks`/`source_table_stats` resets every
+digest — **all first runs are cold** (full pool ladder + embed + stats
+write). That is the expensive part: sequence warm runs immediately after
+their cold twin.
+
+Preflight (the stats-table step must report OK, not ACTION):
+
+```bash
+python scripts/deployment_prerequisites.py --project ${PROJECT} \
+  --source-stats-table ${PROJECT}.synthetic_rag.source_table_stats
+```
 
 ---
 
@@ -53,9 +90,8 @@ Three blockers stack, and quantization does not rescue any of them:
    **already AWQ 4-bit quantized** — quantization shrinks the weights, not the
    attention working set, so it does not move this number.
 
-**Conclusion: there is no Gemma-on-T4 configuration.** T4 is a plumbing-only
-profile in this pipeline (real vLLM server, real BigQuery write, no Gemma).
-Fidelity runs require an L4.
+**Conclusion: there is no Gemma-on-T4 configuration.** T4 runs pair with an
+fp16-safe model; Gemma fidelity runs require an L4.
 
 **L4 availability.** `europe-west3-a` and `europe-west3-b` both carry L4
 (`g2-standard-*`) capacity; `g2-standard-4`, `-8`, `-12`, and `-16` all ship
@@ -66,35 +102,32 @@ capacity fallback region when both `europe-west3` zones are stocked out (see
 away the EU-residency alignment in
 [ADR 0004](adr/0004-europe-west3-region.md)).
 
-**T4-safe registry model.** For plumbing runs, `gpu=t4` must be paired with a
-model that is fp16-safe on Turing, not a Gemma checkpoint. The registry entry
-is `qwen3_4b_instruct_2507` in
-[`config/models.yml`](../config/models.yml) — Apache-2.0, `min_compute_capability:
-"7.5"`, FP16, guided-JSON clean. Point the `SDFB_MODEL_URI` Composer Variable
-at its `gcs_uri` before a `gpu=t4` run; the DAG's `gpu` param docstring
-(`composer/synthetic_beam_bigquery.py`) says this explicitly.
+**T4-safe registry model.** For T4 runs, pair `gpu=t4` with a model that is
+fp16-safe on Turing, not a Gemma checkpoint. The registry entry is
+`qwen3_4b_instruct_2507` in [`config/models.yml`](../config/models.yml) —
+Apache-2.0, `min_compute_capability: "7.5"`, FP16, guided-JSON clean. Point
+the `SDFB_MODEL_URI` Composer Variable at its `gcs_uri` before a `gpu=t4`
+run. If staging a qwen2.5 build: remember the local-dir rename before GCS
+staging, and a missing `special_tokens_map.json` is expected and handled.
 
 ---
 
-## 2. Post-remediation run matrix (branch e2e-hardening, after Tasks 1-5)
+## 2. Run defaults + universal pass criteria
 
-Common params: `num_rows=1000`, `identity_cols=<ID_COL>`,
-`pk_cols=<PK_COL>,<PK_COL_2>` (substitute the target table's real
-identity/PK columns), `seed=""` (derived), landing table truncated
-between runs (or fresh run_id verified in validation_runs).
-Leave `vllm_max_model_len` at its `8192` default for every vLLM run: it caps
-the KV-cache allocation, and uncapped Qwen3-2507 (native 262K context) needs
-a 36GiB KV cache — the T4 EngineCore exits 1 at startup (observed 2026-07-14,
-4 bundle retries then job failure, each retry re-pulling ~7.5GB of weights).
+Common to every vLLM run: `client_type=vllm`, qwen + `vllm_dtype=float16`
+(the DAG default — qwen ships bf16, T4 is CC 7.5), `vllm_max_model_len=8192`
+(it caps the KV-cache allocation; uncapped Qwen3-2507 at native 262K context
+needs a 36GiB KV cache and the T4 EngineCore exits 1 at startup),
+`identity_cols`/`pk_cols` set to the table's real columns via
+`config/relationships/`, fresh Airflow trigger per run (salted `run_id` is
+derived). `batch_size=1000` for 1M/10M rows; the DAG's `16` default is sized
+for smokes. Params not listed = DAG defaults, which already carry the current
+posture: `source_stats=sample`, `freetext_expansion=identifiers`,
+`prompt_constraints=on`, `build_pool_layer=true`, `build_rag_layer=true`,
+`uniqueness_mode=exact`, `pool_seed_strategy=centroid`.
 
-| Run | Engine | Model | GPU | Expect |
-|---|---|---|---|---|
-| R1' | b1_rag | qwen3-4b (`vllm_dtype=float16`) | t4 | `vllm_ready` present; NO `freetext_llm_fallback`; job FAILS if vLLM can't start (strict) |
-| R2' | b1_rag | qwen3-4b | t4 (repeat of R1') | output DIFFERS from R1' (salted run_id → new seeds) |
-| R3' | b2_library | qwen3-4b (`vllm_dtype=float16`) | t4 | same as R1' plus pk.duplicate rule live |
-| R4' | b1_rag | gemma4-e4b-it | l4 | bf16 path; guard must NOT fire on L4 |
+**Universal pass criteria — every vLLM run:**
 
-Pass criteria per run:
 1. `model_client_setup_start/done`, `model_pull_*`, `vllm_spawn`, `vllm_ready` all present in worker logs.
 2. Zero `freetext_llm_fallback` milestones (a vLLM run that falls back now crashes instead).
 3. `copy_ratio < 0.3` on every non-constant STRING column with `source_distinct > 100` (probe step 3).
@@ -103,6 +136,8 @@ Pass criteria per run:
 6. `b1_embed_done rows=` equals `reference_rows_limit` (10000), not the full source count.
 7. Check the Dataflow job state directly (`gcloud dataflow jobs describe <job_id>` or the Dataflow console) — the Composer DAG launches the job with `wait_until_finished=False`, so a strict-mode worker crash fails the Dataflow job itself while the Airflow task still shows success. Airflow green is not proof of a healthy run.
 8. `validation_runs.valid_count` must equal `num_rows` requested. A shortfall — even on a `PASSED` row, since the BLOCKER gate only checks a *ratio* — means whole batches were lost to `engine_failure` and never replaced; PASSED is not proof the run actually produced the row count it was asked for.
+
+The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
 
 ---
 
@@ -118,15 +153,14 @@ Pass criteria per run:
   it if you ever touch that experiment string.
 - **Machine type / `g2-standard-4` vs `-8`.** Today the DAG offers no
   `g2-standard-4` toggle at all: `gpu=l4` hardcodes `g2-standard-8` in the
-  DAG's `machineType` ternary, and `gpu=t4` maps to `n1-standard-8` — the T4
-  plumbing runs (R1'–R3') never touch the `g2-standard` family. The `-4` vs `-8`
-  trade-off is therefore informational, relevant only if someone edits that
-  ternary: both sizes carry exactly one L4, so the choice is pure headroom,
-  not GPU count — `-8` gives the CPU-side steps (BQ read, Pandera validation,
-  `sdgx` fit for B.2, the Beam harness alongside vLLM) more vCPU/RAM to avoid
-  becoming the bottleneck next to the GPU, at roughly double the non-GPU
-  cost. The hardcoded `-8` is the right default for the fidelity run
-  (R4'); don't downgrade it without a measured reason.
+  DAG's `machineType` ternary, and `gpu=t4` maps to `n1-standard-8`. The `-4`
+  vs `-8` trade-off is therefore informational, relevant only if someone
+  edits that ternary: both sizes carry exactly one L4, so the choice is pure
+  headroom, not GPU count — `-8` gives the CPU-side steps (BQ read, Pandera
+  validation, `sdgx` fit for B.2, the Beam harness alongside vLLM) more
+  vCPU/RAM to avoid becoming the bottleneck next to the GPU, at roughly
+  double the non-GPU cost. The hardcoded `-8` is the right default for
+  fidelity runs; don't downgrade it without a measured reason.
 - **Worker disk.** The Flex Template's `environment.diskSizeGb` field does
   **not** propagate to the worker harness — it's set on the launch request
   but ignored (confirmed at `packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:57`,
@@ -164,17 +198,14 @@ Pass criteria per run:
   carry L4 capacity, §1) via a `workerZone` override or by relying on the
   reservation-affinity ladder in §4, rather than letting Dataflow's own
   zone-spread retry logic hunt across all of `europe-west3`.
-- **`maxWorkers` for 1000-row runs.** The DAG currently hardcodes
-  `maxWorkers: 4`. For the R1'/R2' replay-check runs at `num_rows=1000` with
-  `batch_size=16` (~63 batches), **1–2 workers is the right target** — the
-  per-batch LLM call dominates wall time and more GPU workers just means
-  more idle vLLM cold-starts and more GPU spend for no throughput gain;
-  `num_rows` at this scale doesn't need horizontal scale-out. Treat the
-  hardcoded `4` as a ceiling, not a target — Dataflow won't launch more
-  workers than the graph can use. For the T4 runs (R1'–R3') the cap is
-  purely a cold-start/cost matter; for the L4 run (R4') requesting fewer
-  workers up front additionally reduces contention against the L4 stockout
-  (§4).
+- **`maxWorkers` for smoke-scale runs.** The DAG currently hardcodes
+  `maxWorkers: 4`. For 1000-row replay checks with `batch_size=16`
+  (~63 batches), **1–2 workers is the right target** — the per-batch LLM call
+  dominates wall time and more GPU workers just means more idle vLLM
+  cold-starts and more GPU spend for no throughput gain. Treat the hardcoded
+  `4` as a ceiling, not a target — Dataflow won't launch more workers than
+  the graph can use; requesting fewer workers up front additionally reduces
+  contention under an L4 stockout (§4).
 
 ---
 
@@ -266,12 +297,12 @@ copy the values for `<CSVS>`, `<SCHEMA>`, `<PK>`, `<IDENTITY_COLS>`,
 `<JOB_IDS>` from the run you just launched.
 
 All per-deployment artifacts share one folder named after the primary
-Dataflow job id: put the sample CSVs at `integration_test/<JOB_ID>/*.csv` and
-write the metrics JSONs there as **working files** — the bundle export folds
-them (plus any crosscheck/stats-diff markdown) into `real/` + `oss/` and
-prunes the parent-level duplicates, leaving the CSVs as the only
-parent-level artifacts (the finished-folder tree is drawn in the E2E
-prompt's "Per-deployment artifact folder" section).
+Dataflow job id, under the **local, gitignored `runs/` dir**: put the sample
+CSVs at `runs/<JOB_ID>/*.csv` and write the metrics JSONs there as **working
+files** — the bundle export folds them (plus any crosscheck/stats-diff
+markdown) into `real/` + `oss/` and prunes the parent-level duplicates,
+leaving the CSVs as the only parent-level artifacts (the finished-folder tree
+is drawn in the E2E prompt's "Per-deployment artifact folder" section).
 
 **1. Offline analysis** (table-agnostic; computes duplicate ratio, repetition,
 singularity, sparsity, identity-column uniqueness, cross-sample Jaccard —
@@ -283,12 +314,12 @@ python scripts/e2e/e2e_validation_analysis.py \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --schema <SCHEMA> --pk <PK> --identity-cols <IDENTITY_COLS> \
   --batch-size <BATCH_SIZE> \
-  --out integration_test/<JOB_ID>/e2e_validation_metrics.json
+  --out runs/<JOB_ID>/e2e_validation_metrics.json
 ```
 
 **2. Live GCP cross-validation + Dataflow observability** (ADC-authenticated;
-`--run-id` lets the probe correlate a job against the R1'/R2' salted-run-id
-replay-difference check in §2, `--engine-label` stamps a human-readable
+`--run-id` lets the probe correlate a job against the salted-run-id
+replay-difference check, `--engine-label` stamps a human-readable
 label onto each job_id so the report can say "b1_rag" instead of a raw
 Dataflow job id):
 
@@ -301,7 +332,7 @@ python scripts/e2e/e2e_gcp_probe.py \
   $(for j in <JOB_IDS>; do echo --job-id $j; done) \
   --run-id <RUN_ID> \
   --engine-label b1_rag=<JOB_ID_1> --engine-label b2_library=<JOB_ID_2> \
-  --out integration_test/<JOB_ID>/e2e_gcp_metrics.json
+  --out runs/<JOB_ID>/e2e_gcp_metrics.json
 ```
 
 **3. Bundle export** (folds the report + metrics + markdown docs into an
@@ -314,18 +345,18 @@ bundle folder is named after the primary job id):
 
 ```bash
 python scripts/e2e/e2e_bundle_export.py \
-  --metrics gcp=integration_test/<JOB_ID>/e2e_gcp_metrics.json \
-  --metrics offline=integration_test/<JOB_ID>/e2e_validation_metrics.json \
-  --metrics stats_diff=integration_test/<JOB_ID>/stats_diff.json \
-  --metrics freetext_crosscheck=integration_test/<JOB_ID>/freetext_crosscheck_metrics.json \
-  --doc stats_diff=integration_test/<JOB_ID>/stats_diff.md \
-  --doc freetext_crosscheck_report=integration_test/<JOB_ID>/freetext_crosscheck_report.md \
+  --metrics gcp=runs/<JOB_ID>/e2e_gcp_metrics.json \
+  --metrics offline=runs/<JOB_ID>/e2e_validation_metrics.json \
+  --metrics stats_diff=runs/<JOB_ID>/stats_diff.json \
+  --metrics freetext_crosscheck=runs/<JOB_ID>/freetext_crosscheck_metrics.json \
+  --doc stats_diff=runs/<JOB_ID>/stats_diff.md \
+  --doc freetext_crosscheck_report=runs/<JOB_ID>/freetext_crosscheck_report.md \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
-  --out-root integration_test \
+  --out-root runs \
   --no-redact-values \
   --prune-inputs
-  # writes integration_test/<JOB_ID>/{real,oss}/ and deletes the ingested
+  # writes runs/<JOB_ID>/{real,oss}/ and deletes the ingested
   # parent-level metrics/markdown after a clean leak scan
 ```
 
@@ -341,31 +372,31 @@ every `.md` verbatim + every metrics `.json` as a ```json annex;
 
 ```bash
 python scripts/e2e/build_full_report.py \
-  --dir integration_test/<JOB_ID>/real \
-  --dir integration_test/<JOB_ID>/oss
+  --dir runs/<JOB_ID>/real \
+  --dir runs/<JOB_ID>/oss
 ```
 
 Only the `oss/` folder produced by step 3 is shareable outside the team; keep
 `real/` (and its `mapping.json` decode key) local.
 
+**Promotion.** When a release will cite the run, copy the finished bundle
+into the committed evidence layer the release Action discovers:
+
+```bash
+cp -R runs/<JOB_ID> docs/releases/<version>/evidence/<JOB_ID>
+```
+
 ---
 
-## 6. WS5 — free-text pool store and the seeding experiment
+## 6. Stores, flags, and experiment hygiene
 
-Landed 2026-07-26 (ADR 0020, [design](designs/2026-07-26-ws5-generation-throughput.md)).
-Not yet measured on real hardware — these are the runs that measure it.
+### 6a. Free-text pool store (optional, provision once)
 
-### 6a. Provision the pool table (once)
-
-**The pool store is OPTIONAL.** Without it the pipeline behaves exactly as it
-did before WS5 — every worker process rebuilds its pools in `setup()`, which is
-the 19.1 GPU-hour / 68-minute behaviour WS5 exists to remove. It is a
-performance opt-in, not a prerequisite: `deployment_prerequisites.py` step 10
-reports a missing table as **SKIP, never ACTION**.
-
-To enable it, create the table once from the committed schema (never
-auto-created — the `CREATE_IF_NEEDED` blast-radius rule confines auto-create to
-the landing sink):
+**The pool store is OPTIONAL.** Without it the pipeline rebuilds pools in
+every worker process's `setup()` — the 19.1 GPU-hour / 68-minute behaviour
+the store exists to remove ([ADR 0020](adr/0020-freetext-pools-as-persisted-artifact.md)).
+It is a performance opt-in, not a prerequisite: `deployment_prerequisites.py`
+step 10 reports a missing table as **SKIP, never ACTION**.
 
 ```bash
 bq mk --table \
@@ -374,86 +405,28 @@ bq mk --table \
 ```
 
 No partitioning: the table holds one row per
-`(reference_digest, model_uri, column)` — a handful per run — so a partition
-would add a required column and buy nothing.
-
+`(reference_digest, model_uri, column)` — a handful per run.
 `--build_pool_layer=true` against a missing table fails at launch with the
-`bq mk` line above rather than a cryptic `NotFound`. The read path degrades
+`bq mk` line above rather than a cryptic `NotFound`; the read path degrades
 silently and correctly on its own.
 
-### 6b. Target-table bootstrap (TEST_1 follow-up)
+A run that rebuilds pools because `--freetext_pools_table` was never passed
+announces itself: grep for `freetext_pool_store_absent` (WARNING) before
+blaming anything else — a 2026-07-26 run spent 26 of its 53 minutes on
+exactly this.
 
-Two independent things bit the 2026-07-25 16:38 run:
+### 6b. Target-table bootstrap flags
 
-- **A missing `--ddl_uri` is no longer fatal** (WS5 T1) — it falls through to
-  live `INFORMATION_SCHEMA` extraction and logs `ddl_uri_miss_fallback`. A
-  *corrupt* pin still fails loudly, by design.
-- **The landing table is still not created unless you ask.** Pass
-  `--create_if_not_exists=true`; the machinery (`derive_bq_load_schema` +
-  `CREATE_IF_NEEDED`) has been complete since WS4. TEST_1 passed `false`, so
-  it would have hit `CREATE_NEVER` even past the DDL step. The default stays
-  `false` deliberately: flipping it widens blast radius on every run.
+- **A missing `--ddl_uri` is not fatal** — the launch falls through to live
+  `INFORMATION_SCHEMA` extraction (live-first resolution, ADR 0027 D2) and
+  logs `ddl_uri_miss_fallback`. A *corrupt* pin still fails loudly, by
+  design.
+- **The landing table is not created unless you ask.** Pass
+  `--create_if_not_exists=true` (`derive_bq_load_schema` + `CREATE_IF_NEEDED`).
+  The default stays `false` deliberately: flipping it widens blast radius on
+  every run.
 
-### 6c. Sequencing — do not confound the experiment
-
-Run these **in order**. Phase 1 changes throughput; the seeding arms change
-pool composition. Measuring them together tells you nothing about either.
-
-| # | Flags | What it measures |
-|---|---|---|
-| 1 | (Phase 1 only, no pool store) | sampler hoisting + batch sizing vs the 68-min baseline |
-| 2 | `--build_pool_layer=true --freetext_pools_table=…` | cold run that *populates* the store |
-| 3 | `--freetext_pools_table=…` (no build flag) | **warm** run — the ≤5 min target |
-| 4 | run 2 with `--pool_seed_strategy=kcenter` | arm B |
-| 5 | run 2 with `--pool_seed_strategy=kcenter_rotate` | arm A |
-
-Runs 2, 4 and 5 must each start from an **empty** `freetext_pools` for their
-digest, or the ladder is skipped and the arm measures nothing. Clear with:
-
-```bash
-bq query --use_legacy_sql=false \
-  "DELETE FROM \`${PROJECT}.synthetic_rag.freetext_pools\`
-   WHERE reference_digest = '<digest>'"
-```
-
-### 6d. What to read out of the logs
-
-```bash
-grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
-```
-
-| Milestone | Reads as |
-|---|---|
-| `freetext_pool_store_hit` | pool read, ladder skipped — the point of WS5 |
-| `freetext_pool_store_miss` | store attached but empty for that column |
-| `freetext_pool_store_error` | store unreachable; run degraded to building (not fatal) |
-| `pool_build_skipped` | driver found this digest+model already populated |
-| `pool_branch_setup_done` / `pool_branch_emitted` | the build branch ran |
-| `ddl_uri_miss_fallback` | the DDL pin 404'd and live extraction took over |
-| `vllm_ready` | should appear **once** on a cold run, **never** on a warm one |
-
-Per arm, report novel-yield per LLM call, final pool size per column, and
-ladder attempts to target — `freetext_pool_built` carries all three.
-
-**Exclude `COL_047` / `COL_048` from every comparison.** It carries
-binary characters and is a known special case.
-
----
-
-## 7. WS6 — pipeline shape (landed 2026-07-27, not yet measured)
-
-### 7a. The flag that matters most is still WS5's
-
-The 2026-07-26_17_10_37 run spent **26 of its 53 minutes** rebuilding
-free-text pools because `--freetext_pools_table` was never passed. b1_rag now
-emits `freetext_pool_store_absent` (WARNING) when that happens — grep for it
-before blaming anything else:
-
-```bash
-grep -c 'name=freetext_pool_store_absent' worker_logs.jsonl   # expect 0
-```
-
-### 7b. `--uniqueness_mode`
+### 6c. `--uniqueness_mode`
 
 | Value | Landing | Duplicates | Use when |
 |---|---|---|---|
@@ -466,14 +439,312 @@ In `streaming`, duplicate rows land. The run is still marked
 both modes (the transform publishes `distinct_count` so
 `total = valid + dlq` stays equal to the rows generated).
 
-### 7c. New milestones to read out
+### 6d. Do not confound experiments
+
+When measuring any pool/seeding/stats arm: arms that *build* pools must each
+start from an **empty** `freetext_pools` for their digest, or the persisted
+pool masks the effect being measured. Clear with:
+
+```bash
+bq query --use_legacy_sql=false \
+  "DELETE FROM \`${PROJECT}.synthetic_rag.freetext_pools\`
+   WHERE reference_digest = '<digest>'"
+```
+
+The same rule applies to prompt/constraint edits: the pool skip-key is the
+**reference digest** (row content), which a description-only edit does NOT
+change — a warm store hit would replay pools built with the OLD prompts and
+mask the edit. Exclude `COL_047`/`COL_048` (binary-character columns, known
+special case) from every comparison.
+
+---
+
+## 7. Milestone log dictionary — reading worker logs
+
+```bash
+grep -o 'name=[a-z_]*' worker_logs.jsonl | sort | uniq -c | sort -rn
+```
+
+Store / pool lifecycle:
 
 | Milestone | Reads as |
 |---|---|
-| `freetext_pool_store_absent` | this run will rebuild pools per worker process |
-| `vllm_spawn_lost_race` | a duplicate spawn adopted the healthy server — **benign**, and previously fatal |
+| `freetext_pool_store_hit` | pool read, ladder skipped — the point of the store |
+| `freetext_pool_store_miss` | store attached but empty for that column |
+| `freetext_pool_store_error` | store unreachable; run degraded to building (not fatal) |
+| `freetext_pool_store_absent` (WARNING) | no `--freetext_pools_table` passed — this run rebuilds pools per worker process |
+| `pool_build_skipped` | driver found this digest+model already populated |
+| `pool_branch_setup_done` / `pool_branch_emitted` | the build branch ran |
+| `freetext_pool_built target=` | per-column pool landed; compare targets across stats tiers for the exact-distinct lift |
+| `freetext_pools_warm columns=` | every pool came from the persisted store / process cache — the designed warm path (ADR 0020/0033), not idle hardware |
+| `llm_route_unused` (WARNING) | this setup has NO LLM-derived pool at all (every column expandable / typed / binary) — GPU workers idle; plan a CPU-only rerun (ADR 0027/0033) |
+| `freetext_pool_skipped_expandable` | the column draws from its shape mix — no pool built, by design (ADR 0026) |
+| `freetext_pool_ladder_retried column= error=` (WARNING) | a ladder thread hit a transient client condition and was rebuilt in-process; expect `freetext_pool_built` right after — a second failure raises (ADR 0033) |
+| `freetext_pool_format_collapse column= attempts= parsed= format_rejected=` (WARNING) | two consecutive full-yield rounds with zero in-format values — structural mismatch; the shape fallback follows; check `prompt_constraint_example_off_format` for the cause (ADR 0033) |
+| `prompt_constraint_example_off_format column= example_len= gate_lengths=` (WARNING) | a clause `examples` entry fails the column's own format gate — the model WILL echo it; fix the example in the DDL description (ADR 0033) |
+| `freetext_pool_length_clamped column= clamped= max_len=` | prose candidates past a fixed-width source ceiling were truncated before novelty rejection (ADR 0033) |
+| `freetext_pool_binary_fallback` | control-char column skipped the LLM ladder for the template fallback (ADR 0027) |
+| `freetext_pool_source_filter size=` (+ `_absent`/`_error`) | the column's FULL source domain is in the pool rejection set (ADR 0023); absent/error = sample-only rejection — check copy_fraction post-run |
+| `pool_taint_rebuild` (WARNING, launcher) | warm pools overlapped the live source → deleted + rebuilt clean (expected ONCE per tainted pre-ADR-0023 digest) |
+| `pool_taint_check_error` / `pool_taint_delete_error` | preflight could not verify/clear — warm pools kept, verify copy_fraction post-run |
+
+Stats / DDL / build provenance:
+
+| Milestone | Reads as |
+|---|---|
+| `source_stats_written` / `source_stats_skipped` | stats landed / versioned skip key hit (digest + `profiler_version` + achieved tier) |
+| `source_stats_exact` | Tier-2 aggregate scan merged; `source_distinct` threaded to pool sizing |
+| `source_stats_exact_failed` (WARNING) | exact scan failed; run degraded to sample tier and stays retryable — investigate, not fatal |
+| `temporal_range_clamped` | a temporal column's floor hit now−10y; its decile vector was clamped too |
+| `generation_plan` (detail) | per-column route + null/empty/shapes/constraint/expandable — the first thing to check when a column misbehaves |
+| `prompt_constraints_found` (launcher + worker) | the `llm_prompt_constraint` clauses actually fetched from the DDL: rendered clause + `clause_sha12` per column; diff `clause_sha12` across launches to verify a Terraform edit landed |
+| `prompt_constraint_unknown_keys` (WARNING) | a description carries a typo'd/newer constraint key — names the `column=` |
+| `build_info commit=` (launcher + workers) | the image's git commit — compare builds BEFORE comparing runs (ADR 0027) |
+| `ddl_live_extracted` | the LIVE `INFORMATION_SCHEMA` schema is what this launch generates from — BigQuery metadata edits always take effect |
+| `target_metadata_overlaid constraint_columns=` / `target_metadata_unavailable` (WARNING) | constraints + contract come from the LANDING table's descriptions; unavailable = NO constraints this run |
+| `ddl_live_extract_failed` (WARNING) → `ddl_loaded_from_uri fallback=True` | live extraction unreachable — OFFLINE mode, the pin's (possibly stale) constraints/contract apply |
+| `ddl_pin_drift` (WARNING) / `ddl_pin_fresh` / `ddl_pin_check_error` | the `--ddl_uri` pin vs live — drift means the OFFLINE FALLBACK is stale; re-extract before the next air-gapped day |
+
+Engine / GPU lifecycle:
+
+| Milestone | Reads as |
+|---|---|
+| `vllm_ready` | should appear **once** on a cold run, **never** on a warm one |
+| `vllm_spawn_lost_race` | a duplicate spawn adopted the healthy server — **benign** |
+| `vllm_unfittable_wait` (WARNING) | VRAM transiently short — in-process re-measure instead of a bundle retry (window 12 × 20 s since ADR 0033) |
 | `embedder_cuda_no_room` | the GPU was too full for the embedder; it used CPU instead of OOMing |
 | `embedder_cuda_oom_fallback` | the move to CUDA OOMed and degraded to CPU rather than failing the bundle |
+| `identifier_source_filter size=` (+ `_absent`/`_error`) | an identifier column's FULL source domain feeds its mask table + novelty rejection (ADR 0025/0026) |
+| `numeric_source_filter size=` (+ `_absent`/`_error`) | an identity-like INT64 column's full domain feeds the draw-time collision scrub (ADR 0026) |
+| `numeric_source_rejected collisions= nudged= redrawn= unresolved=` | per-column scrub outcome (first batch); `unresolved > 0` = fully dense neighborhood, read with the k-anon exemption in mind |
+| `numeric_kanon_filter size=` (+ `_absent`/`_error`) | the scrub's keep-set from SOURCE frequencies (HAVING COUNT ≥ 10); absent = sample-heuristic fallback (ADR 0027) |
+| `dofn_setup_retry` | expect **0**; non-zero means the setup cascade is back and worth a postmortem |
 
-Expect `dofn_setup_retry` and CUDA OOM occurrences to be **0** now. If either
-is non-zero, the cascade is back and the run is worth a postmortem.
+Relational:
+
+| Milestone | Reads as |
+|---|---|
+| `relationships_loaded` / `relationships_absent` (launcher) | which model FILES this launch read, their models, table count and sha (ADR 0032); absent = every table generates alone |
+| `relationship_model` (launcher AND every worker; **WARNING** when a relational launch enforces 0 edges) | the whole model at a glance — tables with PK/identity, every edge as `-->` enforced / `..>` documented, `[DISABLED — detached]` tables, the generation waves, and the FILE it came from |
+| `fk_key_pool_bound columns= key_tuples= weighting= null_fraction=` | one per enforced edge (ADR 0031). `weighting=child_marginal` = the IPF fit ran; `uniform` = no overlap between the child's sample and the parent's keys — check the edge is the one you meant |
+| `fk_key_pool_capped` (WARNING) | the parent holds ≥ the 100k side-input cap of distinct keys — the child references a uniform sample of them |
+| `identity_constraint_owned` | the named identity columns are generated from their DECLARED CLAUSE (Tier P/B), not UUID synthesis (ADR 0028 amendment) |
+| `fk.orphan` in `validation_runs.dlq_by_rule` | rows that referenced a non-existent parent. Non-zero = a generator regression (the draw is joint by construction) — a BLOCKER, not a tolerance |
+
+---
+
+## 8. Extended pass criteria (stats, privacy, FK, marginals)
+
+On top of the §2 universal list:
+
+1. **Stats contract** — every row a campaign wrote:
+
+   ```sql
+   SELECT stats_tier, profiler_version, COUNT(*) n,
+          COUNTIF(sample_rows IS NULL) missing_sample_rows
+   FROM `${PROJECT}.synthetic_rag.source_table_stats`
+   GROUP BY 1, 2;
+   -- expect the tiers you ran; missing_sample_rows = 0 everywhere
+   ```
+
+2. **Privacy gate** — no literal values persisted for high-cardinality
+   columns:
+
+   ```sql
+   SELECT `column` FROM `${PROJECT}.synthetic_rag.source_table_stats`
+   WHERE `distinct` > 50
+     AND JSON_VALUE(stats, '$.top_values[0][0]') IS NOT NULL;
+   -- expect: zero rows
+   ```
+
+3. **Skip-key tiers** — after an exact-tier run over a digest that already
+   holds sample-tier rows, the same `(table_fqn, reference_digest)` must
+   hold BOTH tiers: the tier-aware `exists()` worked; a single-tier result
+   means the earlier rows blocked the exact write.
+4. **FK integrity** (enforced-edge runs) — orphan target is zero. Composite
+   edges join on the WHOLE tuple (ADR 0031); NULL FK tuples are legitimately
+   parentless and excluded:
+
+   ```sql
+   -- single-column edge
+   SELECT COUNT(*) FROM `${PROJECT}.synthetic_data.<LANDING_B>` c
+   LEFT JOIN `${PROJECT}.synthetic_data.<LANDING_A>` p
+     ON c.<FK_COL> = p.<PK_COL>
+   WHERE p.<PK_COL> IS NULL AND c.<FK_COL> IS NOT NULL;
+
+   -- composite edge: DISTINCT projection of the parent's ref columns
+   SELECT COUNT(*) AS orphans
+   FROM `${PROJECT}.synthetic_data.<LANDING_B>` c
+   LEFT JOIN (SELECT DISTINCT <REF_COLS>
+              FROM `${PROJECT}.synthetic_data.<LANDING_A>`) p
+     USING (<REF_COLS>)
+   WHERE p.<FIRST_REF_COL> IS NULL
+     AND c.<FIRST_FK_COL> IS NOT NULL;
+   ```
+
+   **Read the launcher first, before the money is spent** (ADR 0032 D6):
+   the `relationship_model` card states `N enforced + M documented edges`
+   for the whole model. `0 enforced` on a relational launch means every
+   edge is `enforced: false` or a parent is `[DISABLED]` — fix
+   `config/relationships/<model>.yaml` and relaunch; nothing downstream
+   can produce integrity from an edge that draws no keys.
+   Cross-check on the worker side: `fk_key_pool_bound` (one per enforced
+   edge, `weighting=child_marginal`, `key_tuples=N`) and the absence of
+   `fk.orphan` in `validation_runs.dlq_by_rule` — the in-DAG BLOCKER
+   measures what the SQL above verifies independently.
+
+5. **Marginals** — numeric and temporal columns' decile overlap vs source
+   holds (`stats_diff` `numeric.decile_ks` ≤ 0.2 class); categorical
+   entropy_gap ≈ 0 / top1_delta ≈ 0.
+6. **Diversity** — freetext `distinct` is not pinned at pool size; shapes
+   still conform to the observed `shape_mix`.
+7. **thresholds.yml freetext rules** — `freetext.empty_parity`,
+   `freetext.distinct_floor` pass; `freetext.copy_fraction` (BLOCKER) at 0.
+
+After each run, the §5 report recipe plus
+`scripts/e2e/freetext_crosscheck.py` for the per-column fidelity readout;
+interpretation is `e2e-interpreter`'s job as usual.
+
+---
+
+## 9. Launch recipes
+
+### 9a. Constraint acceptance rerun (after `llm_prompt_constraint` edits)
+
+Verifies operator edits to per-column constraint clauses:
+
+```
+1. terraform apply           # description edits on the LANDING tables
+   -- (synthetic_data.*, the tables YOU own — never the source/lake
+   -- tables, whose descriptions are stripped by design) — and that is
+   -- ENOUGH to reach the next launch: live-first DDL resolution
+   -- (ADR 0027 D2) overlays the target table's descriptions from
+   -- INFORMATION_SCHEMA every time.
+2. OPTIONAL housekeeping: python scripts/extract_ddl.py … + re-upload the
+   ddl_uri pin — only to keep the OFFLINE fallback fresh for air-gapped
+   days; `ddl_pin_drift` reminds you when it drifts.
+3. DELETE FROM `${PROJECT}.synthetic_rag.freetext_pools` WHERE reference_digest IN (
+     SELECT DISTINCT reference_digest
+     FROM `${PROJECT}.synthetic_rag.source_table_stats`
+     WHERE table_fqn IN ('<A_FQN>','<B_FQN>'))
+   -- REQUIRED: the pool skip-key is the REFERENCE digest (row content),
+   -- which a description-only edit does NOT change — a warm store hit
+   -- would replay pools built with the OLD prompts and mask the edit
+   -- (§6d do-not-confound rule). rag_chunks/source_table_stats can stay.
+4. Trigger per table: {"num_rows":"1000000","batch_size":"1000"}
+5. Verify BEFORE reading any metric: `build_info commit=` matches the
+   image you built; `ddl_live_extracted` + `target_metadata_overlaid
+   constraint_columns=N` (a `target_metadata_unavailable` launch ran with
+   NO constraints; an `ddl_live_extract_failed` → pin-fallback launch does
+   NOT carry fresh edits); then `prompt_constraints_found` with the
+   expected clause_sha12 per column.
+```
+
+Readout ladder (in order, before any crosscheck): launcher
+`prompt_constraints_found` (`clause_sha12` changed/newly present per edited
+column) → worker `generation_plan.columns_detail` (edited columns on the
+expected route) → crosscheck per column (`shape_head_tv` ≈ 0 on
+identifier-mask columns — judge mask columns by head TV, not recall;
+`shape_recall` lift where a `format`/`examples` edit targeted named
+templates).
+
+### 9b. Relational run — parent + FK child (full config recipe)
+
+**Contract (Terraform).** Declare relationships on BOTH tables' **LANDING
+twins** (`synthetic_data.a_table` / `synthetic_data.b_table` — ADR 0027
+D2: the pipeline reads description surfaces from `--landing_table`, never
+the source) — the parent needs its `pk` so `--uniqueness_mode=exact`
+gives the child a duplicate-free key pool:
+
+```hcl
+locals {
+  a_table_contract = jsonencode({
+    sdfb = 1
+    pk   = ["ACCOUNT_ID"]              # activates pk.duplicate gate + clean parent keys
+  })
+  b_table_contract = jsonencode({
+    sdfb = 1
+    pk   = ["MOVEMENT_ID"]
+    fk = [{
+      cols     = ["ACCOUNT_ID"]
+      ref      = "core_banking.a_table"   # dataset-qualified, ALWAYS (P1 stops otherwise)
+      ref_cols = ["ACCOUNT_ID"]
+    }]
+  })
+}
+```
+
+`ref` names the SOURCE-world `dataset.table`; at run time only the table
+name is reused — the read targets `{fk_parent_landing}.{a_table}`
+(`io/fk_pools.py::parent_landing_fqn`). Full worked examples + sequence
+diagram: [`DDL_CONTRACT_GUIDE.md`](DDL_CONTRACT_GUIDE.md) §6–§8.
+
+**Trigger config (child run — overrides only):**
+
+```json
+{"table_fqn": "<TABLE_B>", "num_rows": "1000000", "batch_size": "1000",
+ "fk_parent_landing": "${PROJECT}.synthetic_data"}
+```
+
+`fk_parent_landing` is `project.dataset` (no table) — the landing dataset
+holding the parent's already-landed synthetic rows. It is the activation
+switch: contract `fk` **and** this flag must both be present
+(`run_pipeline.py::_load_reference_and_preflight`), otherwise the FK
+column silently keeps its profiled marginal.
+
+**Preconditions checklist (in order):**
+
+1. The model declares the edge — check it WITHOUT launching:
+   `uv run --no-sync python3 scripts/relationships/card.py --table <TABLE_B>`
+   prints exactly what the launch will plan (ADR 0032). A broken model
+   file is a loud stop; P2 then checks the columns against the real
+   schema. Column CONSTRAINTS still come from the landing table's column
+   descriptions — expect `target_metadata_overlaid` in the launcher log.
+2. OPTIONAL: `extract_ddl.py` re-run against the LANDING table to refresh
+   the `ddl_uri` offline-fallback pin (live overlay is authoritative).
+3. **Parent landed and non-empty**: `SELECT COUNT(*), COUNT(DISTINCT
+   ACCOUNT_ID) FROM ${PROJECT}.synthetic_data.a_table` — run the parent
+   first and do NOT truncate its landing table between the parent run and
+   the child run. An empty parent = empty `fk_pools` = the FK override
+   silently NOT applied (engine skips empty pools) → orphans.
+4. Parent-key cap awareness: `io/fk_pools.py` loads ≤ 100k DISTINCT
+   parent keys per edge. A 1M-row parent with > 100k distinct keys is
+   fine — the child samples a 100k subset, referential integrity holds,
+   the orphan query stays 0.
+5. Keep DAG defaults: `uniqueness_mode=exact`, `prompt_constraints=on`.
+
+**Milestones to grep (on top of §7):** `relational_contract_loaded
+pk=MOVEMENT_ID fk_count=1`, `fk_pool_loaded
+parent=${PROJECT}.synthetic_data.a_table values=N` (N ≤ 100k),
+`preflight_pk_not_unique_in_sample` (WARNING-only — real sources may
+violate an undeclared PK).
+
+**Pass criteria:** §8.4 orphan query = 0 rows, plus `validation_runs`
+gate with `pk.duplicate` ACTIVE. **Expected side-effect, not a defect:**
+the FK column's marginal is restricted to the parent pool (integrity
+beats the child marginal), so `stats_diff` on the FK column may show
+entropy/top1 drift — the documented trade-off.
+
+Multi-table alternative: `scripts/run_tableset.py` (parent-first
+ordering, dry-run first).
+
+### 9c. 10M scale (warm everything)
+
+**Trigger config:** `{"num_rows":"10000000","batch_size":"1000"}` — same
+table(s), same digest.
+
+**Preconditions:** all stores populated and NOT truncated since the last
+cold run (`freetext_pools`, `rag_chunks`, `source_table_stats`); no
+source-table content change (a content change moves the reference digest
+and silently makes this a cold 10M run — cold pool build measured at
+41–53% of wall time would dominate). Verify warmth first: `pool_build_skipped`,
+`freetext_pool_store_hit`, `b1_chunks_reused`, `source_stats_skipped`
+must all fire.
+
+**Expect:** ≥ 6k rows/s class; diversity ceiling gone (`freetext_expansion`
+default); `batch_done seconds=` p99 in the p50 class; a fully-warm run may
+never ignite vLLM (the GPU pool can be dropped for warm replays — CPU-only
+`n1-highmem-8` runs the same DAG; the embedder already demotes). Re-score
+memorization at 10M: collision metrics scale with row count, so
+`copy_ratio_substantive` on identity-like numeric columns is THE number to
+re-read at scale.

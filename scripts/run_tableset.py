@@ -42,7 +42,7 @@ from sdfb_beam.io.relationships import load_relationship_registry
 from sdfb_core.contracts.relationships import RelationshipRegistry
 
 _RUN_PIPELINE = "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py"
-_FK_MODELS_DIR = "integration_tests/fk_models"
+_FK_MODELS_DIR = "runs/fk_models"
 _REL_DIR = "config/relationships"
 
 

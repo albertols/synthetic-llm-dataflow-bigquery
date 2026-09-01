@@ -26,7 +26,7 @@ above it; a measured number appears in exactly one place.
 
 | Layer | Lives in | Rule |
 |---|---|---|
-| Raw evidence | `integration_tests/<JOB_ID>/` | immutable; never edited |
+| Raw evidence | `runs/<JOB_ID>/` (local, gitignored); release-promoted copies in `docs/releases/<version>/evidence/<JOB_ID>/` | immutable; never edited |
 | Derived constants | `scripts/doc/make_<topic>_figures.py` → `MEASURED` block | **the only place a measured number is typed** |
 | Figures | `docs/designs/assets/<topic>-*.png` | generated only; never hand-edited |
 | Narrative | `docs/designs/<date>-<topic>.md` | cites figures; no orphan numbers |
@@ -85,6 +85,7 @@ regeneration discipline:
 |---|---|---|
 | Pipeline/DAG shape, control flow, decision tree | **inline mermaid** | diffable in git, no binary asset, renders everywhere |
 | Math, geometry, distributions, measured magnitudes | **generated PNG** | needs real axes and real numbers |
+| Cloud architecture with GCP services, audience-facing/Medium figures, any diagram mermaid renders cramped | **drawio → exported PNG** | official GCP icons, full layout control; Medium cannot render mermaid |
 | Enumerable facts with no magnitude relation | **table** | a chart would add nothing |
 | A single number that *is* the point | **one sentence** | resist charting one value |
 
@@ -129,6 +130,39 @@ Rules:
 - One icon per node, leading the label; don't decorate every word.
 - Subgraphs mark lifecycle phases (e.g. `❄️ cold run` vs `🔥 every batch`),
   not ownership — ownership is the node class.
+
+## Draw.io diagrams — when mermaid is not enough
+
+Mermaid stays the default for anything a reader diffs on GitHub. Reach for
+drawio when the figure is one of these:
+
+- **GCP architecture** — the diagram shows cloud services (GCS, Dataflow,
+  BigQuery, Composer, Artifact Registry) and benefits from the official GCP
+  icon set; a box labeled "BigQuery" is not a BigQuery icon.
+- **Audience-facing** — Medium articles (which cannot render mermaid), decks,
+  or the README's flagship architecture figure.
+- **Mermaid renders it cramped** — more than ~12 nodes, crossing edges, or
+  labels that need a fourth line. If you are fighting mermaid's layouter,
+  stop fighting and switch.
+
+Convention:
+
+- The `.drawio` source and its exported `.png` are committed **side-by-side
+  in the same `assets/` dir with the same basename**
+  (`assets/<topic>-architecture.drawio` + `.png`). The PNG is what docs
+  embed; the `.drawio` is the regenerable source — a PNG with no committed
+  `.drawio` is a hand-made figure, same defect as an uncommitted script.
+- The figure-provenance row names the `.drawio` file as source and records
+  the export path (next-ai-drawio MCP plugin, or the drawio desktop app).
+- **The boundary is the destination, not taste**: GitHub-facing flow/DAG
+  diagrams stay inline mermaid (diffable); article-bound and architecture
+  diagrams are drawio+PNG. Never maintain the same diagram in both forms.
+- The color vocabulary carries over from the mermaid house style (Beam
+  orange `#eb6834`, stores blue `#2a78d6`, GPU purple `#7a3fd1`, CPU green
+  `#1baf7a`, plain data gray `#6b7280`) so drawio and mermaid figures read
+  as one system; GCP product icons keep their official colors.
+- The claim-per-figure rule applies unchanged — a drawio diagram with no
+  one-sentence claim is decoration.
 
 ## Every figure carries a claim
 

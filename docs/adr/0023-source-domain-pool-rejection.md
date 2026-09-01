@@ -1,8 +1,8 @@
 # ADR 0023 — free-text pools reject against the full source domain, and warm pools must prove they are clean
 
 **Status:** ACCEPTED (2026-08-07)
-**Evidence:** `integration_tests/2026-08-05_13_45_47-1427089893336350116/report.md`
-(B_TABLE R1 cold, 1M) · `integration_tests/2026-08-07_03_23_43-2668234728217694289/`
+**Evidence:** `runs/2026-08-05_13_45_47-1427089893336350116/report.md`
+(B_TABLE R1 cold, 1M) · `runs/2026-08-07_03_23_43-2668234728217694289/`
 (B_TABLE R7 warm, 10M) — the WS8 four-run cycle.
 **Related:** ADR 0020 (pools as persisted artifact) · ADR 0022 (`source_distinct`
 threading) · `thresholds.yml` `freetext.copy_fraction` (BLOCKER, `scope: post_run`).

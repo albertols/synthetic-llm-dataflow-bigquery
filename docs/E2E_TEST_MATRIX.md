@@ -1,6 +1,6 @@
 # E2E integration test matrix — M4 / Dataflow runs
 
-Companion to [`docs/RUN_PLAYBOOK.md`](https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/vllm-setup-worker/docs/RUN_PLAYBOOK.md) §2. All runs are triggered via the Composer DAG (`composer/synthetic_beam_bigquery.py`); model selection is the `SDFB_MODEL_URI` Composer Variable pointed at the matching `gcs_uri` in [`config/models.yml`](https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/vllm-setup-worker/config/models.yml).
+Companion to [`docs/RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) §2. All runs are triggered via the Composer DAG (`composer/synthetic_beam_bigquery.py`); model selection is the `SDFB_MODEL_URI` Composer Variable pointed at the matching `gcs_uri` in [`config/models.yml`](../config/models.yml).
 
 **Defaults (only overrides are listed per run):** `num_rows=1000`, `batch_size=16`, `similarity=0.5`, `seed=""` (derived per run_id/batch), `vllm_dtype=auto`, `client_type=vllm`, `identity_cols=<ID_COL>`, `pk_cols=<PK_COL>,<PK_COL_2>` (real columns of the target table), landing table truncated between runs (or fresh `run_id` verified in `validation_runs`).
 
@@ -18,7 +18,7 @@ Companion to [`docs/RUN_PLAYBOOK.md`](https://github.com/albertols/synthetic-llm
 
 ---
 
-## Tier 1 — Core playbook matrix (mandatory, RUN_PLAYBOOK §2)
+## Tier 1 — Core playbook matrix (mandatory)
 
 | ID | Engine | Model (registry key) | GPU | Overrides | Purpose |
 |----|--------|----------------------|-----|-----------|---------|
@@ -68,6 +68,20 @@ Companion to [`docs/RUN_PLAYBOOK.md`](https://github.com/albertols/synthetic-llm
 
 ---
 
+## Tier 5 — Relational / FK integrity (ADR 0029–0033)
+
+Requires a relationship model in `config/relationships/` declaring the
+enforced edge, and the parent's landing table populated (never truncate it
+between the parent run and the child run). Full config recipe:
+[`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) §9b.
+
+| ID | Config | Purpose / what to assert |
+|----|--------|--------------------------|
+| F1 | parent + child, enforced edge, `fk_parent_landing` set | Referential integrity by construction: launcher `relationship_model` card shows ≥1 enforced edge; worker `fk_key_pool_bound` per edge; RUN_PLAYBOOK §8.4 orphan query = **0 rows**; `pk.duplicate` gate ACTIVE via the model's `pk`. |
+| F2 | F1 at `num_rows=10000000` (warm digest) | FK integrity + pool-ladder integrity at scale (ADR 0033 gate): 0 orphans at 10M, no failed pool-branch work item, `freetext_pools_warm` on warm setups. |
+
+---
+
 ## Suggested execution order
 
 1. **S0** (free, validates plumbing + new Flex Template params).
@@ -76,7 +90,8 @@ Companion to [`docs/RUN_PLAYBOOK.md`](https://github.com/albertols/synthetic-llm
 4. **R4' → R5' → R6' → R7'** on L4 (per the L4 stockout strategy in RUN_PLAYBOOK §4 — batch them into one capacity window).
 5. **P1–P8** on the T4 config once Tier 1 is green (P4/P5 last — they're the slow ones).
 6. **N2, N3** opportunistically alongside the L4/T4 windows.
-7. Report per run via the [report prompt](https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/vllm-setup-worker/.github/prompts/end_to_end_validation_report_generation.prompt.md); attach bundles from `e2e_bundle_export.py`.
+7. **F1–F2** once a parent table's baseline is green (they hold the parent's landing table between runs).
+8. Report per run via the [report prompt](../.github/prompts/end_to_end_validation_report_generation.prompt.md); attach bundles from `e2e_bundle_export.py`.
 
 ## Minimal must-do set (if capacity is tight)
 

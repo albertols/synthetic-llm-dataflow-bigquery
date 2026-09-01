@@ -4,7 +4,7 @@ description: >
   Recommend and apply per-column {"llm_prompt_constraint": …} objects
   (DDL_CONTRACT_GUIDE §4 / ADR 0024) for a synthetic-dataflow-bigquery table,
   driven by a landed E2E run's evidence bundle
-  (integration_test/<JOB_ID>/real/ — crosscheck, stats diff, offline + GCP
+  (runs/<JOB_ID>/real/ — crosscheck, stats diff, offline + GCP
   metrics, reports). Pure prompt engineering with teeth: every recommendation
   is evidence-gated, token-economical, validated through the engines' OWN
   parser/renderer, and compatible with both B.1 (RAG) and B.2
@@ -14,7 +14,7 @@ description: >
   (the Terraform-shared source of truth). Runs standalone or chained from
   end_to_end_validation_report_generation.prompt.md Step 8.
   Output: updated schema file(s) +
-  integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md +
+  runs/<JOB_ID>/real/prompt_constraint_recommendations.md +
   its de-identified oss/ twin (standard mapping.json replacements via
   scripts/e2e/redact_doc.py) for agnostic reporting, then refreshed
   _full_report.md recaps in both bundles (build_full_report.py).
@@ -45,7 +45,7 @@ did not ask for.
 
 | Param | Example | Notes |
 |---|---|---|
-| `JOB_ID` | `2026-08-11_06_04_05-9010…` | locates `integration_test/<JOB_ID>/real/` (falls back to the legacy parent-level filenames for pre-bundle job dirs) |
+| `JOB_ID` | `2026-08-11_06_04_05-9010…` | locates `runs/<JOB_ID>/real/` (falls back to the legacy parent-level filenames for pre-bundle job dirs) |
 | `SCHEMA` | `config/bq_schema/<dataset>/<TABLE>.schema.json` | the file to edit (repeatable — one per table when the deployment generated several). Also accepts a `*_ddl.json` (edit the `schema[].description` entries) |
 | `SOURCE_FQN` | `<project>.<dataset>.<TABLE>` | optional; enables live pattern-coverage verification via ADC when the offline evidence is borderline |
 | `TARGET_COLS` | `COL_A,COL_B` | optional; default = every column with a steerable finding in the evidence |
@@ -117,7 +117,7 @@ routing gates, guided-decoding path. Every later decision cites it.
 
 ## Step 2 — Load the evidence (all numbers come from these files)
 
-From `integration_test/<JOB_ID>/real/` (legacy fallback names in brackets):
+From `runs/<JOB_ID>/real/` (legacy fallback names in brackets):
 
 | File | What to extract per column |
 |---|---|
@@ -287,7 +287,7 @@ the report.
 
 ## Step 6 — Write the recommendations report (+ its de-identified `oss/` twin)
 
-`integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md`
+`runs/<JOB_ID>/real/prompt_constraint_recommendations.md`
 (**internal** — it names real columns/values). Sections:
 
 1. **Header** — JOB_ID, schema file(s), evidence files read, contract note
@@ -324,9 +324,9 @@ agnostic while remaining correlatable with the job's other `oss/` artifacts):
 
 ```bash
 python scripts/e2e/redact_doc.py \
-  --mapping integration_test/<JOB_ID>/real/mapping.json \
-  --in  integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md \
-  --out integration_test/<JOB_ID>/oss/prompt_constraint_recommendations.md
+  --mapping runs/<JOB_ID>/real/mapping.json \
+  --in  runs/<JOB_ID>/real/prompt_constraint_recommendations.md \
+  --out runs/<JOB_ID>/oss/prompt_constraint_recommendations.md
 ```
 
 It applies exactly the replacements `real/mapping.json` records (the same
@@ -344,8 +344,8 @@ fold into `_full_report.md` (ToC + every `.md` + ```json metrics annexes):
 
 ```bash
 python scripts/e2e/build_full_report.py \
-  --dir integration_test/<JOB_ID>/real \
-  --dir integration_test/<JOB_ID>/oss
+  --dir runs/<JOB_ID>/real \
+  --dir runs/<JOB_ID>/oss
 ```
 
 ---

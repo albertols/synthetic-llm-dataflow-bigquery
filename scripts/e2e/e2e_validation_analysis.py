@@ -23,8 +23,8 @@ copy-ratio lives in ``e2e_gcp_probe.py``).
 
 Usage:
     python scripts/e2e/e2e_validation_analysis.py \
-        --csv b1_rag=integration_tests/b1_rag/<sample>.csv \
-        --csv b2_library=integration_tests/b2_library/<sample>.csv \
+        --csv b1_rag=runs/b1_rag/<sample>.csv \
+        --csv b2_library=runs/b2_library/<sample>.csv \
         --schema config/bq_schema/<dataset>/<TABLE>.schema.json \
         --pk <PK_COL[,PK_COL2]> \
         --identity-cols <ID_COL[,ID_COL2]> \

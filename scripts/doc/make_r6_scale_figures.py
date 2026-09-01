@@ -4,8 +4,8 @@
 
 Writes PNGs into docs/designs/assets/. Every measured number below is
 derived from the two R6 relational runs' worker logs + reports
-(integration_tests/2026-08-25_12_05_08-14035293654817605690, 1M rows/table;
-integration_tests/2026-08-26_05_01_16-3186876581127148459, 10M rows/table)
+(runs/2026-08-25_12_05_08-14035293654817605690, 1M rows/table;
+runs/2026-08-26_05_01_16-3186876581127148459, 10M rows/table)
 — see MEASURED. Do not hand-edit the constants; update them from a
 superseding run and re-run. The CONCEPT block is seeded and deterministic.
 

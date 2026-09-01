@@ -16,9 +16,9 @@ twin is only shareable when the run prints ``leak scan: clean ✅``.
 
 Usage:
     python scripts/e2e/redact_doc.py \
-        --mapping integration_test/<JOB_ID>/real/mapping.json \
-        --in  integration_test/<JOB_ID>/real/prompt_constraint_recommendations.md \
-        --out integration_test/<JOB_ID>/oss/prompt_constraint_recommendations.md
+        --mapping runs/<JOB_ID>/real/mapping.json \
+        --in  runs/<JOB_ID>/real/prompt_constraint_recommendations.md \
+        --out runs/<JOB_ID>/oss/prompt_constraint_recommendations.md
 """
 
 from __future__ import annotations

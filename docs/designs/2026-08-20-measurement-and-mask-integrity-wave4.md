@@ -259,7 +259,7 @@ uv run --no-sync python3 scripts/doc/make_wave4_figures.py
 | numeric scrub | `assets/wave4-numeric-scrub.png` | EVIDENCE + CONCEPT — INT64 substantive copy; dense-band scrub |
 
 Measured numbers are typed once, in the script's `MEASURED` block, sourced
-from the two immutable bundles under `integration_tests/`. Concept panels
+from the two immutable bundles under `runs/`. Concept panels
 are seeded and run through the live repo code (`build_identifier_artifacts`,
 `identifier_sampler_from`, `np.interp` — the same inverse transform
 `_fidelity.py` uses); re-running reproduces them pixel-identically.

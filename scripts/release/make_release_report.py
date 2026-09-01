@@ -18,10 +18,12 @@ Usage (see `main()` / `--help` for the full flag set):
     # local dry run — prints the plan, writes nothing
     python scripts/release/make_release_report.py --dry-run
 
-Artifact discovery reads committed `integration_test/<JOB_ID>/*.json` files
-straight out of git (via `git ls-tree` + `git show` against an arbitrary
-ref/tag/tree), so the release Action needs no GCP credentials and no working
-copy of the artifacts — only the git history.
+Artifact discovery reads committed evidence bundles —
+`docs/releases/<version>/evidence/<JOB_ID>/real/*.json` (canonical), with
+legacy `integration_test/<JOB_ID>/` layouts kept discoverable for
+pre-relocation tags — straight out of git (via `git ls-tree` + `git show`
+against an arbitrary ref/tag/tree), so the release Action needs no GCP
+credentials and no working copy of the artifacts — only the git history.
 
 `compute_deltas` walks a fixed metric map grounded in the real producer
 scripts (not guessed key names):
@@ -113,10 +115,15 @@ def next_version(prev: str | None, bump: str) -> str:
 # Artifact discovery at a git ref (tag, branch, commit, or bare tree sha)
 # --------------------------------------------------------------------------
 # "integration_test/<job_id>/<basename>" — minimum path-segment count for a
-# discoverable artifact file.
+# discoverable artifact file (legacy layouts; pre-relocation tags).
 _ARTIFACT_PATH_PARTS = 3
 
-# basename -> key in the per-job artifact-set dict (legacy flat layout:
+# "docs/releases/<version>/evidence/<job_id>/real/<basename>" — the canonical
+# evidence layout from 2026-08-31 (doc-revisit) on; integration_test/ stays
+# discoverable so pre-relocation tags remain regenerable.
+_EVIDENCE_PATH_PARTS = 7
+
+# basename -> key in the per-job artifact-set dict (legacy flat layout only:
 # metrics JSONs directly under integration_test/<job_id>/).
 _ARTIFACT_BASENAMES: dict[str, str] = {
     "e2e_gcp_metrics.json": "gcp",
@@ -125,9 +132,11 @@ _ARTIFACT_BASENAMES: dict[str, str] = {
     "stats_diff.json": "stats_diff",
 }
 
-# basename -> key for the bundle layout (integration_test/<job_id>/real/…,
-# the e2e_bundle_export.py label-derived names). The redacted oss/ twins are
-# deliberately NOT discoverable — only real/ carries verbatim numbers.
+# basename -> key for the bundle layout (…/<job_id>/real/…, the
+# e2e_bundle_export.py label-derived names) — shared by the canonical
+# evidence location and the legacy integration_test/ one. The redacted oss/
+# twins are deliberately NOT discoverable — only real/ carries verbatim
+# numbers.
 _BUNDLE_ARTIFACT_BASENAMES: dict[str, str] = {
     "gcp_metrics.json": "gcp",
     "offline_metrics.json": "offline",
@@ -138,8 +147,8 @@ _BUNDLE_ARTIFACT_BASENAMES: dict[str, str] = {
 
 def _run_git(*args: str) -> str | None:
     """`check=True` subprocess wrapper; returns None (not a crash) on any
-    git failure — a ref with no `integration_test` tree, an unreadable
-    object, or a bad ref must degrade gracefully, never raise."""
+    git failure — a ref with no artifact tree, an unreadable object, or a
+    bad ref must degrade gracefully, never raise."""
     try:
         return subprocess.run(
             ["git", *args],
@@ -153,14 +162,17 @@ def _run_git(*args: str) -> str | None:
 
 def discover_artifact_sets(ref: str) -> dict[str, dict]:
     """job_id -> {"gcp": ..., "offline": ..., "crosscheck": ..., "stats_diff":
-    ...} for every known artifact JSON present at `ref`, in either layout:
-    legacy flat (`integration_test/<job_id>/<basename>.json`) or bundle
-    (`integration_test/<job_id>/real/<basename>.json`; the redacted `oss/`
-    twins are skipped). Files that don't exist for a given job are simply
-    absent from that job's dict (never a crash, never a placeholder). A
-    `ref` with no `integration_test` tree at all (e.g. an early tag, or the
-    empty tree) yields `{}`."""
-    listing = _run_git("ls-tree", "-r", "--name-only", ref, "--", "integration_test")
+    ...} for every known artifact JSON present at `ref`, in any layout:
+    canonical evidence (`docs/releases/<version>/evidence/<job_id>/real/
+    <basename>.json`), legacy flat (`integration_test/<job_id>/
+    <basename>.json`), or legacy bundle (`integration_test/<job_id>/real/
+    <basename>.json`); the redacted `oss/` twins are skipped everywhere.
+    Files that don't exist for a given job are simply absent from that job's
+    dict (never a crash, never a placeholder). A `ref` with no artifact tree
+    at all (e.g. an early tag, or the empty tree) yields `{}`."""
+    listing = _run_git(
+        "ls-tree", "-r", "--name-only", ref, "--", "docs/releases", "integration_test"
+    )
     if not listing:
         return {}
 
@@ -170,16 +182,23 @@ def discover_artifact_sets(ref: str) -> dict[str, dict]:
         if not path:
             continue
         parts = path.split("/")
-        if len(parts) < _ARTIFACT_PATH_PARTS or parts[0] != "integration_test":
-            continue
-        job_id, basename = parts[1], parts[-1]
-        if len(parts) == _ARTIFACT_PATH_PARTS:
-            key = _ARTIFACT_BASENAMES.get(basename)
-        elif len(parts) == _ARTIFACT_PATH_PARTS + 1 and parts[2] == "real":
-            key = _BUNDLE_ARTIFACT_BASENAMES.get(basename)
-        else:
-            key = None
-        if key is None:
+        job_id: str | None = None
+        key: str | None = None
+        if parts[0] == "integration_test" and len(parts) >= _ARTIFACT_PATH_PARTS:
+            job_id, basename = parts[1], parts[-1]
+            if len(parts) == _ARTIFACT_PATH_PARTS:
+                key = _ARTIFACT_BASENAMES.get(basename)
+            elif len(parts) == _ARTIFACT_PATH_PARTS + 1 and parts[2] == "real":
+                key = _BUNDLE_ARTIFACT_BASENAMES.get(basename)
+        elif (
+            len(parts) == _EVIDENCE_PATH_PARTS
+            and parts[:2] == ["docs", "releases"]
+            and parts[3] == "evidence"
+            and parts[5] == "real"
+        ):
+            job_id = parts[4]
+            key = _BUNDLE_ARTIFACT_BASENAMES.get(parts[-1])
+        if job_id is None or key is None:
             continue
         raw = _run_git("show", f"{ref}:{path}")
         if raw is None:
