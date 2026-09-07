@@ -12,6 +12,7 @@ from apache_beam.options.pipeline_options import (
     WorkerOptions,
 )
 from sdfb_beam.cli.run_pipeline import (
+    _DEFAULT_STATE_CACHE_MB,
     _DEFAULT_WORKER_DISK_GB,
     build_model_client,
     configure_pipeline_options,
@@ -631,3 +632,20 @@ def test_parse_args_accepts_initial_workers_as_an_optional_string():
     assert resolve_num_workers(args.initial_workers) is None
     with pytest.raises(ValueError, match="initial_workers"):
         resolve_num_workers("four")
+
+
+# --- state cache for the ResolveUniqueness side inputs (ADR 0034) ----------
+# 2026-09-07 R7: `Retrieving state 62 times costed 60 seconds ... consider
+# adding '--max_cache_memory_usage_mb'` on the single-barrier read stage —
+# Beam's default cache (100 MB in the harness; the option reads 0 = unset)
+# re-fetched the PK/identity group dicts per bundle.
+def test_configure_options_dataflow_pins_the_state_cache_size():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1")
+    assert opts.view_as(WorkerOptions).max_cache_memory_usage_mb == _DEFAULT_STATE_CACHE_MB
+
+
+def test_configure_options_explicit_state_cache_wins():
+    opts = PipelineOptions(["--runner=DataflowRunner", "--max_cache_memory_usage_mb=64"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1")
+    assert opts.view_as(WorkerOptions).max_cache_memory_usage_mb == 64

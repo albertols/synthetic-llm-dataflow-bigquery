@@ -47,11 +47,20 @@ _DEFAULT_CAP = 1_000_000
 _FETCH_CACHE: dict[tuple[str, str, int], frozenset[str] | None] = {}
 _FETCH_CACHE_LOCK = threading.Lock()
 
+# ADR 0034 D4 (amended 2026-09-07): the Storage Read API attempt is a
+# per-PROCESS decision. The R7 pair's worker SA had no
+# `bigquery.readsessions.create` permission and every one of 107 + 459
+# fetches paid a doomed `to_arrow()` before the REST path; once a
+# PermissionDenied / Forbidden is seen, the process goes straight to REST.
+_STORAGE_API_STATE = {"disabled": False}
+_STORAGE_DENIED_ERRORS = frozenset({"PermissionDenied", "Forbidden", "Unauthorized"})
+
 
 def clear_source_value_cache() -> None:
-    """Drop all cached fetches (tests / maintenance only)."""
+    """Drop all cached fetches and re-arm the Storage API (tests only)."""
     with _FETCH_CACHE_LOCK:
         _FETCH_CACHE.clear()
+        _STORAGE_API_STATE["disabled"] = False
 
 
 class BigQuerySourceValueStore:
@@ -105,7 +114,7 @@ class BigQuerySourceValueStore:
                 f"FROM `{self.table_fqn}` WHERE `{col}` IS NOT NULL "
                 f"LIMIT {self.cap + 1}"
             )
-            values = _column_values(self._bq().query(sql).result(), "v")
+            values = _column_values(self._bq().query(sql), "v")
             result = None if len(values) > self.cap else frozenset(values)
             _FETCH_CACHE[key] = result
             return result
@@ -129,7 +138,7 @@ class BigQuerySourceValueStore:
                 f"GROUP BY v HAVING COUNT(*) >= {int(min_count)} "
                 f"LIMIT {self.cap + 1}"
             )
-            values = _column_values(self._bq().query(sql).result(), "v")
+            values = _column_values(self._bq().query(sql), "v")
             result = None if len(values) > self.cap else frozenset(values)
             _FETCH_CACHE[key] = result
             return result
@@ -178,8 +187,8 @@ def _row_value(row: Mapping | object, key: str):
     return get(key)
 
 
-def _column_values(result, column: str) -> list[str]:
-    """One query result's ``column`` as a list of non-NULL strings.
+def _column_values(query_job, column: str) -> list[str]:
+    """One query's ``column`` as a list of non-NULL strings.
 
     Prefers ``RowIterator.to_arrow()`` (ADR 0034): the BigQuery client
     downloads large results through the Storage Read API when the
@@ -187,25 +196,46 @@ def _column_values(result, column: str) -> list[str]:
     worker image) and serves small ones from the cached first page. The
     plain ``RowIterator.__iter__`` path is tabledata.list — the 2026-08-29
     R6 cold run paged a 944,582-value identifier domain through it at
-    ~2.9k rows/s (1,078 s inside DoFn.setup()). Any Arrow-path failure
-    falls back to row iteration, loudly, so a worker without the Storage
-    client is slower, never wrong.
+    ~2.9k rows/s (1,078 s inside DoFn.setup()).
+
+    Two rules from the 2026-09-07 R7 pair, where every fetch failed:
+
+    * the REST fallback takes a FRESH ``query_job.result()`` — a
+      ``RowIterator`` is one-shot ("Iterator has already started"), and
+      the failed Storage attempt had already consumed the first one;
+    * a permission failure (the worker SA lacks
+      ``bigquery.readsessions.create``) disables the Storage attempt for
+      the rest of the process — loudly, once — instead of costing a
+      doomed round trip on every column.
     """
-    to_arrow = getattr(result, "to_arrow", None)
-    if to_arrow is not None:
-        try:
-            table = to_arrow()
-            return [
-                v for v in table.column(column).to_pylist() if v is not None
-            ]
-        except Exception as exc:
-            log_milestone(
-                "source_values_arrow_fallback",
-                level=logging.WARNING,
-                error=type(exc).__name__,
-            )
+    if not _STORAGE_API_STATE["disabled"]:
+        result = query_job.result()
+        to_arrow = getattr(result, "to_arrow", None)
+        if to_arrow is not None:
+            try:
+                table = to_arrow()
+                return [
+                    v for v in table.column(column).to_pylist() if v is not None
+                ]
+            except Exception as exc:
+                log_milestone(
+                    "source_values_arrow_fallback",
+                    level=logging.WARNING,
+                    error=type(exc).__name__,
+                )
+                if type(exc).__name__ in _STORAGE_DENIED_ERRORS:
+                    _STORAGE_API_STATE["disabled"] = True
+                    log_milestone(
+                        "source_values_storage_api_disabled",
+                        level=logging.WARNING,
+                        error=type(exc).__name__,
+                        note="grant roles/bigquery.readSessionUser to the "
+                        "worker SA for Storage Read API domain fetches; "
+                        "REST paging serves this process",
+                    )
+    rows = query_job.result()
     return [
-        v for v in (_row_value(r, column) for r in result) if v is not None
+        v for v in (_row_value(r, column) for r in rows) if v is not None
     ]
 
 

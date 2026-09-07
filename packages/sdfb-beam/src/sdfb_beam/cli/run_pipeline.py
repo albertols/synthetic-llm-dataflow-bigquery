@@ -98,6 +98,11 @@ logger = logging.getLogger(__name__)
 # ``environment.diskSizeGb`` does NOT propagate to the worker harness (observed:
 # workers booted at the 25GB default despite the DAG requesting 200).
 _DEFAULT_WORKER_DISK_GB = 200
+# ADR 0034: the single-barrier uniqueness stage reads its PK/identity
+# collision groups as side inputs; Beam's default state cache re-fetched
+# them per bundle ("Retrieving state 62 times costed 60 seconds",
+# 2026-09-07 R7). 512 MB on an n1-highmem-8 is a rounding error.
+_DEFAULT_STATE_CACHE_MB = 512
 
 # batch_size is rows-per-element. At the historic fixed default of 16, a 1M-row
 # run produced 62,500 elements and paid per-element Python overhead 62,500
@@ -385,6 +390,14 @@ def resolve_num_workers(value: str | int | None) -> int | None:
             f"empty, got {value!r}"
         )
     return int(text)
+
+
+def resolve_rag_embed_device(model_client) -> str:
+    """Where the RAG population embeds run: the GPU ("auto") under one
+    SDK process per worker; CPU under the multi-process topology, where
+    every sibling process would otherwise open a CUDA context beside the
+    vLLM spawn (ADR 0034 D6 follow-up, 2026-09-07 R7m)."""
+    return "cpu" if getattr(model_client, "cross_process", False) else "auto"
 
 
 def resolve_cross_process(runner: str, experiments: list[str] | None) -> bool:
@@ -938,6 +951,10 @@ def configure_pipeline_options(
         if not gco.job_name:
             gco.job_name = sanitize_job_name("sdfb", run_id)
         worker_options = options.view_as(WorkerOptions)
+        if not worker_options.max_cache_memory_usage_mb:
+            worker_options.max_cache_memory_usage_mb = _DEFAULT_STATE_CACHE_MB
+            logger.info("Pinned worker max_cache_memory_usage_mb to %d MB (ADR 0034).",
+                        _DEFAULT_STATE_CACHE_MB)
         if num_workers is not None:
             if worker_options.num_workers:
                 logger.info(
@@ -1409,6 +1426,7 @@ def _prepare_table_spec(
         freetext_pools_table=args.freetext_pools_table,
         pool_seed_strategy=validate_seed_strategy(args.pool_seed_strategy),
         uniqueness_mode=args.uniqueness_mode,
+        rag_embed_device=resolve_rag_embed_device(model_client),
         freetext_expansion=args.freetext_expansion,
         prompt_constraints=args.prompt_constraints == "on",
         prompt_debug=args.prompt_debug,

@@ -234,3 +234,16 @@ def test_launcher_resolves_cross_process_from_the_sdk_container_topology():
     c = build_model_client("vllm", "gs://b/m/v1/", cross_process=True)
     assert c.cross_process is True
     assert build_model_client("vllm", "gs://b/m/v1/").cross_process is False
+
+
+def test_cross_process_teardown_of_a_client_that_never_bound_is_silent(caplog):
+    """2026-09-07 R7m: 40 `vllm_server_kept_alive` lines — one per DoFn
+    teardown, including the 38 clients that never ignited. The milestone
+    is evidence that a server was left running; it must fire only from a
+    client that was bound to (or spawned) one."""
+    import logging
+
+    c = VLLMModelClient(model_uri="gs://b/m/v1/", cross_process=True)
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        c.teardown()
+    assert "vllm_server_kept_alive" not in caplog.text

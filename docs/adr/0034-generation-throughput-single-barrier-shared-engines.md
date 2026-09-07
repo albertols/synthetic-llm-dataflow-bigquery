@@ -1,6 +1,6 @@
 # ADR 0034 — Generation throughput: one dedup barrier, one engine per process, a fleet that starts full (and the multi-process experiment)
 
-**Status:** ACCEPTED (2026-09-07) — laptop-proven (TDD, 1,379 tests, DirectRunner); the next R6/R7 launch pair is the acceptance gate
+**Status:** ACCEPTED (2026-09-07) — D1–D3, D5–D7 verified on the 2026-09-07 R7 pair (single + multi SDK topology, 10M rows/table); D4 amended the same day after the pair exposed its fallback defect (see *Acceptance evidence*)
 **Design:** [`docs/designs/2026-09-07-generation-throughput-where-time-goes.md`](../designs/2026-09-07-generation-throughput-where-time-goes.md)
 **Evidence:** the 2026-08-29 R6 pair — cold `2026-08-29_07_33_36-13355700596190055276` (93.8 min) and its immediate warm re-trigger `2026-08-29_09_49_17-12681434869969021419` (86.1 min), both `C_TABLE ◄═ A_TABLE`, 10M rows/table, PK 1.0, 0/10M orphans, `worker_logs.jsonl` + `_full_report.md` in each
 **Amends:** [ADR 0019](0019-rag-population-scoped-to-consumers.md) (embedder lifecycle) · [ADR 0030](0030-single-job-relational-generation.md) (launch topology) · [ADR 0033](0033-pool-ladder-integrity-at-scale.md) (prose ceiling) · the WS6 uniqueness modes ([design](../designs/2026-07-27-ws6-pipeline-shape.md))
@@ -99,7 +99,14 @@ CUDA → demote) is byte-identical.
 (the `google-cloud-bigquery-storage` client is on the worker image),
 small ones come from the cached first page, and any Arrow-path failure
 falls back to row iteration with `source_values_arrow_fallback`. Same
-SQL, same cap semantics, same process cache.
+SQL, same cap semantics, same process cache. *Amended 2026-09-07:* the
+fallback takes a **fresh** `QueryJob.result()` — a `RowIterator` is
+one-shot and the failed Storage attempt has already started it — and a
+`PermissionDenied` / `Forbidden` disables the Storage attempt for the
+rest of the process (`source_values_storage_api_disabled`, once). The
+worker SA needs `roles/bigquery.readSessionUser`
+(`bigquery.readsessions.create`); `02_iam.sh` and
+`DEPLOYMENT_PREREQUISITES.md` grant and document it.
 
 **D5 — A scale run starts at its worker ceiling.** `initial_workers` is
 a Flex Template parameter and Composer `Param`, pinned by the launcher
@@ -126,6 +133,64 @@ acceptance run reads clean.
 `_FormatGate.length_blind` (prose OR collapsed-mask gate) is where
 `length_ceiling` clamps candidates before the format and novelty checks
 (ADR 0033 D5 covered prose only).
+
+**D8 — Two follow-ups from the acceptance pair.** (a) Under
+`sdk_containers=multi` the cold RAG population embeds run on CPU
+(`PipelineConfig.rag_embed_device`, resolved by the launcher from the
+client's `cross_process`): eight sibling embedders held the T4 while
+vLLM tried to spawn — 8 × 20 s `vllm_unfittable_wait`, 344 s ignition
+against 190 s single. The pool branch's own embedder (one process) keeps
+`auto`. (b) The launcher pins `max_cache_memory_usage_mb` to 512 when
+unset: the single-barrier read stage fetched its PK/identity group side
+inputs per bundle ("Retrieving state 62 times costed 60 seconds").
+`vllm_server_kept_alive` now fires only from a client that was bound to
+or spawned a server (40 lines from 38 idle clients on R7m).
+
+**Evaluated, not adopted — NVIDIA MPS.** Dataflow's
+[NVIDIA Multi-Process Service](https://docs.cloud.google.com/dataflow/docs/gpu/use-nvidia-mps)
+(`worker_accelerator=…;use_nvidia_mps`, retrieved 2026-09-07) lets
+several SDK processes share one GPU's CUDA context and scheduler; Google
+recommends it for `RunInference` with `model_copies > 1`, it forbids
+`no_use_multiple_sdk_containers`, and it warns against exceeding GPU
+memory with large models. Our GPU work is one vLLM **server** per
+worker reached over HTTP by every process (ADR 0014) — the only
+multi-process CUDA use was the cold population embed, which D8(a)
+moves to CPU. MPS would not change the KV budget that bounds the pool
+ladders, adds a control daemon between vLLM and the driver, and the
+[driver guidance](https://docs.cloud.google.com/dataflow/docs/gpu/use-gpus#drivers)
+keeps `install-nvidia-driver:5xx` unchanged either way. Revisit only if
+the design ever runs more than one model process per GPU (e.g. two vLLM
+replicas on an L4 for parallel pool ladders).
+
+## Acceptance evidence — the 2026-09-07 R7 pair
+
+Two 10M-row launches of the same pair on image `oss-pk-ready-00fc613`,
+`initial_workers` left empty (both started on **1** worker), read from
+`worker_logs.jsonl` and the console autoscaling chart (no report
+annexes yet); figure `assets/throughput-evolution.png`:
+
+| | R6 cold (08-29) | R7 `single` | R7 `multi` |
+|---|---|---|---|
+| wall time | 93.8 min | ≈ 76.5 min | ≈ 50.5 min |
+| C_TABLE / A_TABLE generation | 23.5 / 19.2 min | 21.5 / 14.9 | **10.4 / 6.7** |
+| 10k-row batch at steady state | 26–29 s | 26–29 s | **5.6–6.7 s** |
+| dedup + load, C / A | 14.0 / 12.2 min | **7.8 / 6.5** | **3.4 / 3.0** |
+| engine builds per table | 32 | **4** (`engine_shared holders=2..8`) | one per process |
+| `dofn_setup_done` p50 (C_TABLE) | 75 s | **26 s** | 27 s |
+| vLLM ignition | 226 s | 190 s | 344 s (8 unfittable waits → D8a) |
+| cross-process spawn lock | n/a | n/a | 1 acquired + 1 wait + reuse, no OOM, no lost race |
+| `freetext_pool_length_clamped` A_COL_019 | absent | `max_len=35` | `max_len=35` |
+| workers | 2 → 4 at +27 min | 1 → 4 at +26 min | 1 → 2 at +29, 4 at +37 min |
+| source-domain fetches | OK (REST, 5.5 min) | **107/107 failed** | **459/459 failed** |
+
+The last row is the defect D4's amendment fixes: `PermissionDenied` on
+the Storage attempt, then `ValueError` ("Iterator has already started")
+on the fallback. For those two runs the ADR 0023 rejection sets, the
+identifier and numeric source domains, and the ADR 0033 filter-sized
+pool target (`A_COL_015` back to 94) were all inactive; the pools they
+persisted are candidates for the launcher's taint preflight
+(`pool_source_overlap` → delete + rebuild) and their landed rows need the
+E2E probe's `copy_ratio` before they count as clean.
 
 ## Consequences
 
@@ -159,7 +224,13 @@ acceptance run reads clean.
   alter the FK-column marginal trade-off (`C_COL_007` warn, ADR 0031);
   it leaves the A_COL_037 clause example (28 chars on a 31-char column,
   `prompt_constraint_example_off_format` fired again) to the operator.
-- Laptop-verified only. Acceptance on the next cold + warm R6/R7 pair:
+- The multi topology is validated (3× the fleet rate at four workers,
+  5× per worker at two), but stays opt-in (`sdk_containers=multi`) for
+  one more launch: the D4 amendment and D8(a) are the only untested
+  changes and the next run must show `identifier_source_filter size=`
+  (not `_error`), zero `vllm_unfittable_wait` on a multi cold start, and
+  `initial_workers=4` from the first second.
+- Original acceptance list (kept for the record; status in the table above):
   `CombineByPk` absent from `dominant_stages`; `engine_shared` present
   and `dofn_setup_done` ≤ 4 per table; `initial_workers=4` → no harness
   boots after `workers_ready`; `identifier_source_filter` for

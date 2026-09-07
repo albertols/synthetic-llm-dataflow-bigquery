@@ -173,3 +173,66 @@ def test_embed_dofn_localizes_a_gcs_embedder_before_building_it(monkeypatch):
     assert pulled["built_from"] == localize_mod.EMBEDDER_LOCAL_DIR, (
         "the embedder must be built from the local pull, never the gs:// URI"
     )
+
+
+# ---------------------------------------------------------------------------
+# ADR 0034 D6 follow-up (2026-09-07 R7m): under sdk_containers=multi the
+# cold RAG population ran its embedder in 8 SDK processes at once, each
+# holding a CUDA context + weights while vLLM tried to spawn — 8 x 20 s of
+# `vllm_unfittable_wait` and a 344 s ignition (190 s single). The
+# population embed runs on CPU under the multi topology; the pool branch's
+# own embedder (one process) keeps "auto".
+# ---------------------------------------------------------------------------
+def test_pipeline_config_threads_the_rag_embed_device_to_the_population_dofn():
+    import apache_beam as beam
+    from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+    from sdfb_beam.rag.population import EmbedChunksDoFn
+    from sdfb_core.contracts import TableSchema
+
+    schema = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "demo.t"},
+            "schema": [{"name": "v", "type": "STRING", "mode": "REQUIRED"}],
+        }
+    )
+
+    def _embed_dofns(node):
+        found = []
+        for part in getattr(node, "parts", []):
+            fn = getattr(part.transform, "fn", None)
+            if isinstance(fn, EmbedChunksDoFn):
+                found.append(fn)
+            found.extend(_embed_dofns(part))
+        return found
+
+    def _build(device):
+        cfg = PipelineConfig(
+            table_schema=schema, engine_name="fake", model_client=None,
+            num_rows=4, batch_size=4, run_id="r1", rag_embed_device=device,
+        )
+        p = beam.Pipeline()
+        build_pipeline(
+            p, reference_rows=[{"v": "a"}], config=cfg,
+            landing_sink=beam.Map(lambda x: x), dlq_sink=beam.Map(lambda x: x),
+            rag_chunks_sink=beam.Map(lambda x: x),
+        )
+        return _embed_dofns(p.transforms_stack[0])
+
+    (default,) = _build("auto")
+    assert default.device == "auto"
+    (cpu,) = _build("cpu")
+    assert cpu.device == "cpu"
+
+
+def test_launcher_puts_population_embeds_on_cpu_under_the_multi_topology():
+    from sdfb_beam.cli.run_pipeline import resolve_rag_embed_device
+
+    class _Multi:
+        cross_process = True
+
+    class _Single:
+        cross_process = False
+
+    assert resolve_rag_embed_device(_Multi()) == "cpu"
+    assert resolve_rag_embed_device(_Single()) == "auto"
+    assert resolve_rag_embed_device(object()) == "auto"  # fake / mlx clients

@@ -103,6 +103,35 @@ POOLS_A_WARM = (37.6, 38.4, 39.4, 40.7, 40.9, 41.4, 42.2, 42.7, 43.4, 44.2, 44.6
                 45.1, 45.5, 47.4, 47.6, 47.6, 48.2, 48.3, 48.9, 49.2, 49.6, 50.0,
                 50.5, 52.2, 52.6, 53.2, 53.3, 53.7, 57.4, 58.2, 59.0, 60.2)
 
+# --- MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613) -------
+# Worker logs only (no report annexes): phase edges from milestones, wall
+# time from job create (job-id timestamp, PDT → UTC) to the console
+# autoscaling chart's "worker pool stopped" (±0.5 min). initial_workers was
+# left EMPTY on both — the fleet started on 1 worker.
+# single: 2026-09-07_05_04_25-2281175974286848139 (sdk_containers=single)
+# multi:  2026-09-07_07_33_01-10181729754686044047 (sdk_containers=multi)
+ACCEPT_RUNS = ("R6 cold\n2026-08-29", "R7 single\n2026-09-07", "R7 multi\n2026-09-07")
+ACCEPT_WALL_MIN = (93.8, 76.5, 50.5)
+ACCEPT_PHASES_MIN = {  # per run: startup, cold pool branch (critical path), generation (both tables), dedup + load (both tables)
+    "startup (launcher + boot)": (15.9, 13.0, 12.4),
+    "cold pool branch": (7.9, 10.1, 12.9),
+    "generation C + A": (42.7, 36.4, 17.1),
+    "dedup + load C + A": (26.2, 14.3, 6.4),
+}
+ACCEPT_GEN_ROWS_PER_S = {  # C_TABLE / A_TABLE stage averages
+    "C_TABLE": (7_241, 7_758, 16_026),
+    "A_TABLE": (10_163, 11_173, 25_063),
+}
+ACCEPT_BATCH_SECONDS = (27.5, 27.5, 6.1)  # 10k-row batch_done at steady state
+ACCEPT_WORKERS_AT_4_MIN = (
+    "2 → 4 @ +27 min", "1 → 4 @ +26 min", "1 → 2 @ +29, 4 @ +37 min"
+)
+MULTI_PEAK_ROWS_PER_S = 31_417  # C_TABLE bucket 8-10 min, 4 workers up
+MULTI_VLLM_READY_S, SINGLE_VLLM_READY_S = 344.0, 190.4  # 8 vs 1 unfittable waits
+FETCH_FAILURES = (107, 459)  # source_values_arrow_fallback (PermissionDenied) → all fetches inactive
+ENGINE_BUILDS_PER_TABLE_SINGLE = 4  # engine_shared holders=2..8 on each worker (32 → 4)
+SETUP_P50_SINGLE_S = 25.9  # dofn_setup_done C_TABLE (was 74.9)
+
 # --- MEASURED (shuffle) ------------------------------------------------------
 SHUFFLE_GB_COLD = 123.26  # TotalShuffleDataProcessed, both tables, all barriers
 ROWS_PER_TABLE, TABLES = 10_000_000, 2
@@ -338,38 +367,88 @@ def fig_shuffle_barriers():
 
 # --------------------------------------------------------------------------
 def fig_gil_ceiling():
-    """Claim: one Python interpreter per worker caps the fleet's
-    generation near 10.5k rows/s; every other lever in this ADR trims
-    minutes around that stage, only more interpreters move it."""
+    """Claim: one interpreter per worker capped the fleet near 10.5k
+    rows/s; eight interpreters per worker measured 3x that at four
+    workers (R7 multi) against an 8x linear projection — the next
+    binding stage is the shuffle write and the autoscaler's ramp."""
     fig, ax = plt.subplots(figsize=(11.5, 5.0), facecolor=SURFACE)
-    interpreters = np.array([1, 2, 4, 8])
-    fleet = FLEET_ROWS_PER_S_MEASURED * interpreters / INTERPRETERS_MEASURED
-    ax.bar(0, fleet[0], width=0.55, color=AQUA, zorder=3)
-    for i in range(1, len(interpreters)):
-        ax.bar(i, fleet[i], width=0.55, color=AQUA, alpha=0.55, hatch="//",
-               edgecolor=SURFACE, zorder=3)
-    for i, f in enumerate(fleet):
+    bars = (
+        ("1 interpreter / worker\nmeasured, R6 pair", FLEET_ROWS_PER_S_MEASURED, False),
+        ("8 interpreters / worker\nmeasured, R7 multi (4 workers)", MULTI_PEAK_ROWS_PER_S, False),
+        ("8 interpreters / worker\nlinear projection", FLEET_ROWS_PER_S_MEASURED * 8, True),
+    )
+    for i, (_label, f, projected) in enumerate(bars):
+        ax.bar(i, f, width=0.55, color=AQUA, alpha=0.55 if projected else 1.0,
+               hatch="//" if projected else None, edgecolor=SURFACE if projected else "none",
+               zorder=3)
         ax.text(i, f + 1_500, f"{f / 1e3:.1f}k rows/s", ha="center", color=INK, fontsize=9.5,
                 fontweight="600")
-    ax.text(0, fleet[0] + 9_500, "measured — R6 pair\n(1 SDK process / worker)", ha="center",
-            va="bottom", color=INK, fontsize=8.8, linespacing=1.3)
-    ax.text(0.55, fleet[-1] * 0.70,
-            "projected (hatched): linear in interpreters\n"
-            "until the shuffle write / BigQuery load bind —\n"
-            "the R7m experiment reads the real number.\n"
-            f"{WORKERS} workers x {VCPUS_PER_WORKER} vCPUs billed; "
-            f"{WORKERS * INTERPRETERS_MEASURED} interpreters busy today.",
+    gain = MULTI_PEAK_ROWS_PER_S / FLEET_ROWS_PER_S_MEASURED
+    ax.annotate(f"x{gain:.1f} measured", xy=(1, MULTI_PEAK_ROWS_PER_S), xytext=(0.45, 52_000),
+                color=INK, fontsize=9.5, fontweight="600",
+                arrowprops={"arrowstyle": "-|>", "color": INK, "linewidth": 1.1})
+    ax.text(0.45, 62_000,
+            "10k-row batches: 26-29 s on one GIL → 5.6-6.7 s with eight;\n"
+            "the fleet ran on 1-2 workers for most of the multi job\n"
+            "(initial_workers empty) — the 4-worker bucket is the honest peak.\n"
+            "Hatched = the linear projection; the gap is the next lever.",
             ha="left", va="center", color=MUTED, fontsize=8.6, linespacing=1.4)
-    ax.set_xticks(range(len(interpreters)))
-    ax.set_xticklabels([f"{n} interpreter{'s' if n > 1 else ''}\nper worker" for n in interpreters],
-                       fontsize=9.5)
+    ax.set_xticks(range(len(bars)))
+    ax.set_xticklabels([b[0] for b in bars], fontsize=9.2)
     ax.set_ylabel("fleet generation rate (rows / s)", color=MUTED, fontsize=9)
-    ax.set_ylim(0, fleet[-1] * 1.15)
+    ax.set_ylim(0, FLEET_ROWS_PER_S_MEASURED * 8 * 1.15)
     _style(ax)
-    _title(ax, "Generation is bound by one interpreter per worker, not by the GPU",
-           "10k-row batches take 26-29 s at 8 threads on one GIL (4 s alone); sdk_containers=multi is the lever, gated on the R7m acceptance run")
+    _title(ax, "Generation was bound by one interpreter per worker: eight measured 3x at four workers",
+           "C_TABLE steady-state buckets — R6 pair (single) vs 2026-09-07 R7 multi; sdk_containers=multi is validated, the 8x projection is not")
     fig.tight_layout()
     fig.savefig(ASSETS / "throughput-gil-ceiling.png", dpi=160, facecolor=SURFACE)
+    plt.close(fig)
+
+
+# --------------------------------------------------------------------------
+_MIN_LABELLED_PHASE_MIN = 6  # narrower phases get no in-bar label
+
+
+def fig_evolution():
+    """Claim: the three runs' wall time fell 93.8 → 76.5 → 50.5 minutes;
+    the single-barrier dedup halved the dedup phase and the multi-process
+    topology halved generation, while startup and the cold pool branch
+    stayed put."""
+    fig, ax = plt.subplots(figsize=(12.5, 5.2), facecolor=SURFACE)
+    colours = {
+        "startup (launcher + boot)": BLUE,
+        "cold pool branch": ORANGE,
+        "generation C + A": AQUA,
+        "dedup + load C + A": BLUE,
+    }
+    hatches = {"dedup + load C + A": "//"}
+    n = len(ACCEPT_RUNS)
+    left = np.zeros(n)
+    for label, mins in ACCEPT_PHASES_MIN.items():
+        vals = np.asarray(mins)
+        ax.barh(range(n), vals, left=left, height=0.55, color=colours[label],
+                hatch=hatches.get(label), edgecolor=SURFACE if label in hatches else "none",
+                zorder=3, label=label)
+        for i, (lo, v) in enumerate(zip(left, vals, strict=True)):
+            if v >= _MIN_LABELLED_PHASE_MIN:
+                ax.text(lo + v / 2, i, f"{v:.0f}", ha="center", va="center",
+                        color=SURFACE if colours[label] != AQUA else INK, fontsize=8.6)
+        left = left + vals
+    for i, (wall, note) in enumerate(zip(ACCEPT_WALL_MIN, ACCEPT_WORKERS_AT_4_MIN, strict=True)):
+        ax.text(wall + 1.0, i, f"{wall:.1f} min · {note}", va="center", color=INK,
+                fontsize=8.8, fontweight="600")
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(ACCEPT_RUNS, fontsize=9.5)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 135)
+    ax.set_xlabel("minutes (phases on the critical path; cleanup omitted)", color=MUTED,
+                  fontsize=9)
+    ax.legend(frameon=False, fontsize=8.8, labelcolor=INK, loc="lower right", ncol=2)
+    _style(ax, grid_axis="x")
+    _title(ax, "Three runs, one job shape: 93.8 → 76.5 → 50.5 minutes",
+           "10M rows/table, C_TABLE ◄═ A_TABLE, T4 workers; R7 pair on image oss-pk-ready-00fc613, initial_workers empty on both")
+    fig.tight_layout()
+    fig.savefig(ASSETS / "throughput-evolution.png", dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
 
@@ -411,7 +490,8 @@ if __name__ == "__main__":
     fig_setup_cost()
     fig_shuffle_barriers()
     fig_gil_ceiling()
+    fig_evolution()
     for name in ("throughput-where-time-went", "throughput-generation-ramp",
                  "throughput-setup-cost", "throughput-shuffle-barriers",
-                 "throughput-gil-ceiling"):
+                 "throughput-gil-ceiling", "throughput-evolution"):
         print("wrote", ASSETS / f"{name}.png")

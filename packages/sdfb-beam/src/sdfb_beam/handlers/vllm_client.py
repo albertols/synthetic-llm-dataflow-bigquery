@@ -604,12 +604,17 @@ class VLLMModelClient:
     def _teardown_cross_process(self) -> None:
         with _SETUP_LOCK:
             self._client = None
+            was_bound = self._bound
             if self._bound:
                 self._bound = False
                 _SERVER_REFS[self.base_url] = _SERVER_REFS.get(self.base_url, 1) - 1
             server, self._server = self._server, None
             if server is not None:
                 _PARKED_SERVERS[self.base_url] = server
+        if not was_bound and server is None:
+            # A client that never ignited left nothing running (2026-09-07
+            # R7m: 40 kept-alive lines, 38 of them from such clients).
+            return
         fields: dict[str, Any] = {"url": self.base_url}
         if server is not None:
             fields["pid"] = getattr(server, "pid", None)

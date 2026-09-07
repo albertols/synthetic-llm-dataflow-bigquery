@@ -143,6 +143,11 @@ class PipelineConfig:
     # behind up to three shuffle barriers; "streaming" lands rows as they
     # are generated and measures the duplicate rate instead.
     uniqueness_mode: str = "exact"
+    # Device for the RAG population embed (ADR 0034 D6 follow-up): "auto"
+    # = the worker GPU; "cpu" under the multi-process SDK topology, where
+    # eight sibling embedders held the card while vLLM tried to spawn
+    # (2026-09-07 R7m: 8 x 20 s unfittable waits, 344 s ignition).
+    rag_embed_device: str = "auto"
 
 
 def build_pipeline(
@@ -383,7 +388,10 @@ def build_pipeline(
             | f"{label_prefix}RagFanout" >> beam.Reshuffle()
             | f"{label_prefix}RagBatchChunks"
             >> beam.BatchElements(min_batch_size=32, max_batch_size=256)
-            | f"{label_prefix}RagEmbedChunks" >> beam.ParDo(EmbedChunksDoFn(config.embedder_uri))
+            | f"{label_prefix}RagEmbedChunks"
+            >> beam.ParDo(
+                EmbedChunksDoFn(config.embedder_uri, device=config.rag_embed_device)
+            )
         )
         _ = chunks | f"{label_prefix}WriteRagChunks" >> rag_chunks_sink
 

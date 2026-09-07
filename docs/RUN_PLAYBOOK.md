@@ -202,7 +202,23 @@ The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
   the DAG with `sdk_containers=multi`) and read `sdk_container_topology`,
   `vllm_spawn_lock_acquired` / `vllm_spawn_lock_wait` (exactly one
   acquired per worker), `engine_shared holders=`, and the generate
-  stage's `batch_done` rate before promoting it.
+  stage's `batch_done` rate before promoting it. **Measured 2026-09-07
+  (R7 pair, 10M rows/table):** `single` ≈ 76.5 min, `multi` ≈ 50.5 min
+  — 10k-row batches in 5.6–6.7 s instead of 26–29 s, one spawn lock per
+  worker, no CUDA OOM, the fleet on 1–2 workers for most of the job
+  because `initial_workers` was left empty. Pass `sdk_containers=multi`
+  **and** `initial_workers=4` together for a 10M run. Under `multi` the
+  cold RAG population embeds run on CPU (ADR 0034 D8a) so the eight
+  sibling processes never hold the card while vLLM spawns.
+- **NVIDIA MPS — evaluated, not enabled (ADR 0034).** Dataflow's
+  `worker_accelerator=…;use_nvidia_mps` shares one CUDA context across
+  SDK processes and is meant for `RunInference` with `model_copies > 1`
+  on one GPU. This pipeline runs ONE vLLM server per worker reached over
+  HTTP from every process; nothing else touches the GPU concurrently
+  once the population embed is on CPU under `multi`, so MPS has no work
+  to schedule and would only add a daemon in front of the driver. Do not
+  add it without a design change that puts a second model process on the
+  card.
 - **ONE SDK process per GPU worker — add `no_use_multiple_sdk_containers`.**
   Runner v2's default spawns one sibling SDK process per vCPU (8 on
   `n1-standard-8` / `g2-standard-8`), and **every sibling runs the full DoFn
@@ -511,6 +527,10 @@ Store / pool lifecycle:
 | `pool_branch_setup_done` / `pool_branch_emitted` | the build branch ran |
 | `freetext_pool_built target=` | per-column pool landed; compare targets across stats tiers for the exact-distinct lift |
 | `freetext_pools_warm columns=` | every pool came from the persisted store / process cache — the designed warm path (ADR 0020/0033), not idle hardware |
+| `engine_shared holders=N` | this generate DoFn reused the process's engine (ADR 0034 D2): N holders share one build — 4 builds per table on the R7 single run instead of 32 |
+| `source_values_arrow_fallback error=` / `source_values_storage_api_disabled` | the Storage Read API attempt failed (`PermissionDenied` = grant `roles/bigquery.readSessionUser`); REST paging serves the process. A following `*_source_filter_error` means the fetch itself failed — the ADR 0023 filters are INACTIVE, treat the run's pools as tainted |
+| `vllm_spawn_lock_acquired` / `vllm_spawn_lock_wait` / `vllm_server_kept_alive` | `sdk_containers=multi` (ADR 0034 D6): exactly one process per worker acquires the spawn window; waiters bind to its server via the reuse probe; the server outlives the client that spawned it |
+| `sdk_container_topology topology=` | launcher: `single` (one SDK process per worker) or `multi` (one per vCPU) — decides the cross-process vLLM mode and the CPU population embed |
 | `llm_route_unused` (WARNING) | this setup has NO LLM-derived pool at all (every column expandable / typed / binary) — GPU workers idle; plan a CPU-only rerun (ADR 0027/0033) |
 | `freetext_pool_skipped_expandable` | the column draws from its shape mix — no pool built, by design (ADR 0026) |
 | `freetext_pool_ladder_retried column= error=` (WARNING) | a ladder thread hit a transient client condition and was rebuilt in-process; expect `freetext_pool_built` right after — a second failure raises (ADR 0033) |

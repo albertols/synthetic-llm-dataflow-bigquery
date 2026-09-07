@@ -1,7 +1,9 @@
 # Generation throughput — where a 10M-row relational job spends 94 minutes
 
-**Status:** ACCEPTED (2026-09-07) — laptop-proven (TDD, 1,379 tests,
-DirectRunner); the next cold + warm R6/R7 pair on the M4 is the acceptance gate
+**Status:** ACCEPTED (2026-09-07) — verified on the same-day R7 pair
+(`single` ≈ 76.5 min, `multi` ≈ 50.5 min, §1b); one defect found and
+fixed (D4 fallback); `sdk_containers=multi` validated, opt-in for one
+more launch
 **Decision:** [ADR 0034](../adr/0034-generation-throughput-single-barrier-shared-engines.md)
 **Evidence:** `runs/2026-08-29_07_33_36-13355700596190055276` (R6, cold,
 10M rows/table, 93.8 min) · `runs/2026-08-29_09_49_17-12681434869969021419`
@@ -67,6 +69,47 @@ frame: `engine.py::_fetch_identifier_domains → source_values.py::fetch_distinc
 minutes inside `DoFn.setup()` (the orange arrow in the cold panel). The
 [E2E prompt](../../.github/prompts/end_to_end_validation_report_generation.prompt.md)
 now says so.
+
+### 1b. Acceptance — the 2026-09-07 R7 pair
+
+![evolution](assets/throughput-evolution.png)
+
+*Three runs of one job shape: 93.8 → 76.5 → 50.5 minutes. The
+single-barrier dedup halved the dedup phase on the `single` run; the
+multi-process topology then halved generation; startup and the cold pool
+branch stayed put — and both R7 runs started on one worker because
+`initial_workers` was left empty.* Runs
+`2026-09-07_05_04_25-2281175974286848139` (`sdk_containers=single`) and
+`2026-09-07_07_33_01-10181729754686044047` (`multi`), image
+`oss-pk-ready-00fc613`, worker logs only (the per-run table is in
+[ADR 0034 § Acceptance evidence](../adr/0034-generation-throughput-single-barrier-shared-engines.md)).
+
+What the multi log proves: exactly one `vllm_spawn_lock_acquired` per
+worker, the sibling pool branch `vllm_spawn_lock_wait` → `vllm_reuse`, no
+CUDA OOM, no lost race, 10k-row batches in 5.6–6.7 s, C_TABLE at 16k
+rows/s on 1–2 workers and 31k rows/s in the one bucket where four were
+up. The single log proves D2: `engine_shared holders=2..8` on every
+worker, four builds per table instead of 32, `dofn_setup_done` p50 26 s
+instead of 75 s.
+
+What it exposed: **every source-domain fetch failed in both runs** —
+`source_values_arrow_fallback error=PermissionDenied` (the worker SA has
+no `bigquery.readsessions.create`) followed by `*_source_filter_error
+error=ValueError`, because the REST fallback re-iterated the
+`RowIterator` the Storage attempt had already started. For those two
+runs the ADR 0023 rejection sets, the identifier/numeric domains and the
+ADR 0033 filter-sized pool target (`A_COL_015` back to 94) were
+inactive. Fixed the same day (fresh `QueryJob.result()` for the fallback;
+`PermissionDenied` disables the Storage attempt per process, loudly
+once; `roles/bigquery.readSessionUser` granted and documented). The
+pools those runs persisted go through the launcher's taint preflight
+(`pool_source_overlap` → delete + rebuild) on the next launch; their
+landed rows need the E2E probe's `copy_ratio` before they count as
+clean. Two smaller follow-ups from the same logs: the multi cold start
+paid eight `vllm_unfittable_wait`s (344 s ignition) while eight
+population embedders held the card — they now run on CPU under `multi`
+— and the single-barrier read stage's side inputs were re-fetched per
+bundle (`max_cache_memory_usage_mb` pinned to 512).
 
 ## §2 Generation: one interpreter per worker
 
@@ -318,6 +361,18 @@ flowchart LR
   S1 -. "reuse probe /v1/models" .-> V
 ```
 
+**NVIDIA MPS — evaluated, not adopted.** Dataflow's
+[Multi-Process Service](https://docs.cloud.google.com/dataflow/docs/gpu/use-nvidia-mps)
+(`worker_accelerator=…;use_nvidia_mps`; forbids
+`no_use_multiple_sdk_containers`; meant for `RunInference` with
+`model_copies > 1`) shares one CUDA context across SDK processes. Here the
+GPU has one tenant per worker — the vLLM server every process reaches
+over HTTP — and the only concurrent multi-process CUDA use, the cold
+population embed, now runs on CPU under `multi`. MPS would not touch the
+T4 KV budget that bounds the pool ladders; it would add a daemon between
+vLLM and the driver. It becomes relevant only with a second model
+process per card (two vLLM replicas on an L4), which is not this design.
+
 The spawn window (pull → dtype guard → spawn → ready) is exclusive across
 processes because a loopback port can be bound by one process only —
 the same shared host network that makes the reuse probe on `:8000` work
@@ -398,4 +453,5 @@ BLUE / ORANGE / AQUA with the OKLab separation check on every run.
 | generation ramp | `assets/throughput-generation-ramp.png` | rows/s per 2-min bucket per table and run; SDK-harness registrations of the autoscaled workers |
 | setup cost | `assets/throughput-setup-cost.png` | per-instance `dofn_setup_done` / `b1_pools_built` seconds, 32 per table, cold and warm |
 | shuffle barriers | `assets/throughput-shuffle-barriers.png` | `TotalShuffleDataProcessed` measured for the chain vs the single-barrier projection (hatched) |
-| GIL ceiling | `assets/throughput-gil-ceiling.png` | measured fleet rate at one interpreter per worker; projected (hatched) for 2/4/8 |
+| GIL ceiling | `assets/throughput-gil-ceiling.png` | measured fleet rate at one interpreter per worker vs. eight (R7 multi, four workers); the 8× linear projection hatched |
+| evolution | `assets/throughput-evolution.png` | critical-path phases of the three runs (R6 cold, R7 single, R7 multi) with wall time and worker ramp |
