@@ -48,3 +48,42 @@ def test_composer_dag_declares_and_forwards_prompt_debug():
     dag_text = _COMPOSER_DAG.read_text()
     assert '"prompt_debug": Param(' in dag_text
     assert '"prompt_debug": "{{ params.prompt_debug }}"' in dag_text
+
+
+def test_uniqueness_mode_surfaces_accept_every_cli_mode():
+    """ADR 0034 added `exact_chained`; the template regex, the Composer
+    enum and argparse choices must agree or the mode is unreachable."""
+    import re
+
+    from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
+
+    (regex,) = _metadata_param("uniqueness_mode")["regexes"]
+    for mode in (*UNIQUENESS_MODES, ""):
+        assert re.fullmatch(regex, mode), mode
+    dag_text = _COMPOSER_DAG.read_text()
+    for mode in UNIQUENESS_MODES:
+        assert f'"{mode}"' in dag_text, mode
+
+
+def test_flex_template_and_composer_expose_initial_workers():
+    """ADR 0034: the initial worker count is a per-trigger knob."""
+    import re
+
+    param = _metadata_param("initial_workers")
+    assert param["isOptional"] is True
+    (regex,) = param["regexes"]
+    for ok in ("", "4", "16"):
+        assert re.fullmatch(regex, ok), ok
+    assert not re.fullmatch(regex, "four")
+    dag_text = _COMPOSER_DAG.read_text()
+    assert '"initial_workers": Param(' in dag_text
+    assert '"initial_workers": "{{ params.initial_workers }}"' in dag_text
+
+
+def test_composer_dag_exposes_sdk_containers_topology():
+    """ADR 0034: `sdk_containers=multi` lifts `no_use_multiple_sdk_containers`
+    for a vLLM launch; `single` (default) keeps the RUN_PLAYBOOK §3 pin."""
+    dag_text = _COMPOSER_DAG.read_text()
+    assert '"sdk_containers": Param(' in dag_text
+    assert "enum=[\"single\", \"multi\"]" in dag_text
+    assert "params.sdk_containers == 'single'" in dag_text

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Submit one E2E tier, poll to terminal state, journal the run.
 # Usage: ./run_e2e.sh <tier> <table> [--dry-run]
-#   tiers:  S0 R1p R2p R3p N4 P6 P7   (R1p == R1' — shell-safe names)
+#   tiers:  S0 R1p R2p R3p N4 P6 P7 R7 R7m   (R1p == R1' — shell-safe names)
 #   tables: citibike hacker_news
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
@@ -32,11 +32,21 @@ CMD=(gcloud dataflow flex-template run "${JOB_NAME}"
   --additional-user-labels "tier=${TIER_LC},table=${TABLE}"
   --parameters "${PARAMS},run_id=${RUN_ID}"
   --format 'value(job.id)')
+# ADR 0034: a scale tier starts at its worker ceiling instead of waiting
+# ~4 min for the autoscaler (the R6 pair ran its first stage on half the
+# fleet). Empty NUM_WORKERS keeps Dataflow's default.
+[[ -n "${NUM_WORKERS:-}" ]] && CMD+=(--num-workers "${NUM_WORKERS}")
 # GPU tiers: exactly ONE SDK process per worker. Runner v2's default sibling
 # SDK processes each re-run DoFn setup (weight pull, vLLM spawn into the
 # occupied GPU → CUDA OOM, CPU-thrashed embedding) — the 2026-07-16 corp run
 # burned 5.4h across 4 bundle retries on that topology (RUN_PLAYBOOK §3).
-[[ -n "${ACCELERATOR}" ]] && CMD+=(--additional-experiments "worker_accelerator=${ACCELERATOR},no_use_multiple_sdk_containers")
+# ADR 0034: SDK_CONTAINERS=multi lifts the pin (one SDK process per vCPU) —
+# the vLLM client's cross-process spawn mutex keeps one server per worker.
+if [[ -n "${ACCELERATOR}" ]]; then
+  EXPERIMENTS="worker_accelerator=${ACCELERATOR}"
+  [[ "${SDK_CONTAINERS:-single}" != "multi" ]] && EXPERIMENTS+=",no_use_multiple_sdk_containers"
+  CMD+=(--additional-experiments "${EXPERIMENTS}")
+fi
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   echo "+ ${CMD[*]}"

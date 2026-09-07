@@ -586,3 +586,48 @@ def test_warm_pools_delete_failure_keeps_warm_path():
 
     store = _NoDeleteStore([_preflight_pool("c", ("real-1",))])
     assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is True
+
+
+# --- num_workers: start a scale run at its worker ceiling (ADR 0034) --------
+# The 2026-08-29 R6 pair launched on 2 workers and autoscaled to 4 only ~4
+# min into the first generate stage — C_TABLE ran 8 minutes at a quarter
+# of its steady-state rate. Like disk_size_gb, the initial count is pinned
+# from the launcher (the Flex Template environment field is not the
+# channel the DAG controls per trigger).
+def test_configure_options_dataflow_sets_num_workers_when_given():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+    assert opts.view_as(WorkerOptions).num_workers == 4
+
+
+def test_configure_options_dataflow_leaves_num_workers_unset_by_default():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1")
+    assert opts.view_as(WorkerOptions).num_workers is None
+
+
+def test_configure_options_explicit_beam_flag_wins_over_num_workers():
+    opts = PipelineOptions(["--runner=DataflowRunner", "--num_workers=2"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+    assert opts.view_as(WorkerOptions).num_workers == 2
+
+
+_MIN_ARGS = [
+    "--reference_table", "p.src.t",
+    "--landing_table", "p.land.t",
+    "--dlq_table", "p.q.dlq",
+    "--num_rows", "10",
+    "--run_id", "r1",
+    "--model_uri", "gs://b/synthetic/models/m/v1/",
+]
+
+
+def test_parse_args_accepts_initial_workers_as_an_optional_string():
+    from sdfb_beam.cli.run_pipeline import parse_args, resolve_num_workers
+
+    args, _beam = parse_args([*_MIN_ARGS, "--initial_workers", "4"])
+    assert resolve_num_workers(args.initial_workers) == 4
+    args, _beam = parse_args(_MIN_ARGS)
+    assert resolve_num_workers(args.initial_workers) is None
+    with pytest.raises(ValueError, match="initial_workers"):
+        resolve_num_workers("four")

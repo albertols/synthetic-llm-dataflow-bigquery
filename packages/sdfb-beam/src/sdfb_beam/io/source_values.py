@@ -15,9 +15,12 @@ lazy client, pickle-safe, injectable fake for laptop tests.
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from typing import TYPE_CHECKING
+
+from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Iterable, Mapping
@@ -102,12 +105,8 @@ class BigQuerySourceValueStore:
                 f"FROM `{self.table_fqn}` WHERE `{col}` IS NOT NULL "
                 f"LIMIT {self.cap + 1}"
             )
-            rows = list(self._bq().query(sql).result())
-            result = (
-                None
-                if len(rows) > self.cap
-                else frozenset(_row_value(r, "v") for r in rows)
-            )
+            values = _column_values(self._bq().query(sql).result(), "v")
+            result = None if len(values) > self.cap else frozenset(values)
             _FETCH_CACHE[key] = result
             return result
 
@@ -130,12 +129,8 @@ class BigQuerySourceValueStore:
                 f"GROUP BY v HAVING COUNT(*) >= {int(min_count)} "
                 f"LIMIT {self.cap + 1}"
             )
-            rows = list(self._bq().query(sql).result())
-            result = (
-                None
-                if len(rows) > self.cap
-                else frozenset(_row_value(r, "v") for r in rows)
-            )
+            values = _column_values(self._bq().query(sql).result(), "v")
+            result = None if len(values) > self.cap else frozenset(values)
             _FETCH_CACHE[key] = result
             return result
 
@@ -181,6 +176,37 @@ def pool_source_overlap(
 def _row_value(row: Mapping | object, key: str):
     get = row.get if hasattr(row, "get") else row.__getitem__  # type: ignore[union-attr]
     return get(key)
+
+
+def _column_values(result, column: str) -> list[str]:
+    """One query result's ``column`` as a list of non-NULL strings.
+
+    Prefers ``RowIterator.to_arrow()`` (ADR 0034): the BigQuery client
+    downloads large results through the Storage Read API when the
+    ``google-cloud-bigquery-storage`` client is installed (it is, on the
+    worker image) and serves small ones from the cached first page. The
+    plain ``RowIterator.__iter__`` path is tabledata.list — the 2026-08-29
+    R6 cold run paged a 944,582-value identifier domain through it at
+    ~2.9k rows/s (1,078 s inside DoFn.setup()). Any Arrow-path failure
+    falls back to row iteration, loudly, so a worker without the Storage
+    client is slower, never wrong.
+    """
+    to_arrow = getattr(result, "to_arrow", None)
+    if to_arrow is not None:
+        try:
+            table = to_arrow()
+            return [
+                v for v in table.column(column).to_pylist() if v is not None
+            ]
+        except Exception as exc:
+            log_milestone(
+                "source_values_arrow_fallback",
+                level=logging.WARNING,
+                error=type(exc).__name__,
+            )
+    return [
+        v for v in (_row_value(r, column) for r in result) if v is not None
+    ]
 
 
 __all__ = [

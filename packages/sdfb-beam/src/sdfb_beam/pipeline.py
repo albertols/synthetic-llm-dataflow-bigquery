@@ -301,6 +301,9 @@ def build_pipeline(
         identity_columns=list(config.identity_columns),
         pk_columns=list(config.pk_columns),
         mode=config.uniqueness_mode,
+        # ADR 0034: the exact barrier shuffles rows as value tuples in
+        # schema order — half the bytes of a keyed dict per row.
+        columns=[c.name for c in config.table_schema.columns],
     )
 
     # Landing sink — valid, unique records only.

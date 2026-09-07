@@ -35,6 +35,7 @@ import yaml
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.io.gcp.bigquery import BigQueryDisposition, WriteToBigQuery
 from apache_beam.options.pipeline_options import (
+    DebugOptions,
     GoogleCloudOptions,
     PipelineOptions,
     SetupOptions,
@@ -176,6 +177,15 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "at runtime. Pre-provision the table out-of-band "
                         "(e.g. `bq mk`/DDL) if those constraints matter.")
     p.add_argument("--num_rows", type=int, required=True)
+    p.add_argument("--initial_workers", default="",
+                   help="Initial Dataflow worker count (ADR 0034). Empty = "
+                        "Dataflow's own default: the 2026-08-29 R6 pair "
+                        "started on 2 workers and autoscaled to 4 only ~4 min "
+                        "into the first generate stage, so C_TABLE ran 8 min "
+                        "at a quarter of its steady-state rate. A scale run "
+                        "starts at its max_num_workers. Pinned from the "
+                        "launcher like disk_size_gb; an explicit Beam "
+                        "--num_workers on the launch wins.")
     p.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE,
                    help="Rows per element. Left at the default, this scales "
                         "with --num_rows toward ~1,000 elements (never below "
@@ -225,8 +235,12 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "--build_pool_layer also enables the build branch.")
     p.add_argument("--uniqueness_mode", default="exact",
                    choices=list(UNIQUENESS_MODES),
-                   help="exact = divert every duplicate to the DLQ "
-                        "(default, today). streaming = land rows as they "
+                   help="exact = divert every duplicate to the DLQ behind "
+                        "ONE full-row shuffle barrier (default; PK/identity "
+                        "resolved from key-only groups, ADR 0034). "
+                        "exact_chained = the pre-ADR-0034 three-barrier "
+                        "chain (row digest -> PK -> identity), kept for "
+                        "A/B runs. streaming = land rows as they "
                         "are generated and MEASURE the duplicate rate "
                         "instead of removing it, so no GroupByKey barrier "
                         "sits between generation and BigQuery. In streaming mode duplicate rows LAND — the run is still marked "
@@ -359,13 +373,45 @@ def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
         return Thresholds(env=env, blocker_failure_ratio=1.0)
 
 
+def resolve_num_workers(value: str | int | None) -> int | None:
+    """``--initial_workers`` → an int, or None for "leave Dataflow's default".
+    Anything that is not a positive integer is a launch error, loudly."""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    if not text.isdigit() or int(text) <= 0:
+        raise ValueError(
+            f"initial_workers / num_workers must be a positive integer or "
+            f"empty, got {value!r}"
+        )
+    return int(text)
+
+
+def resolve_cross_process(runner: str, experiments: list[str] | None) -> bool:
+    """True when this Dataflow launch runs the SDK harness as MULTIPLE
+    processes per worker (Runner v2's default) — i.e. the vLLM spawn
+    window must be exclusive across processes, not just threads
+    (ADR 0034). `no_use_multiple_sdk_containers` (RUN_PLAYBOOK §3) pins
+    one process per worker; DirectRunner is always one process."""
+    if runner != "DataflowRunner":
+        return False
+    return "no_use_multiple_sdk_containers" not in {
+        str(e).strip() for e in (experiments or [])
+    }
+
+
 def build_model_client(
     client_type: str,
     model_uri: str,
     vllm_dtype: str = "auto",
     vllm_max_model_len: str = "8192",
+    cross_process: bool = False,
 ) -> ModelClient:
-    """Lazy factory — avoids importing vLLM / MLX on machines that don't have them."""
+    """Lazy factory — avoids importing vLLM / MLX on machines that don't have them.
+
+    ``cross_process`` (ADR 0034) tells the vLLM client that sibling SDK
+    PROCESSES on the worker will race it for the one GPU — see
+    `resolve_cross_process`."""
     if client_type == "fake":
         from sdfb_beam.handlers.fake_client import FakeModelClient
         # Empty pool — caller is expected to override for any real smoke test.
@@ -388,7 +434,11 @@ def build_model_client(
                     f"empty, got {vllm_max_model_len!r}"
                 )
             kwargs["max-model-len"] = max_len
-        return VLLMModelClient(model_uri=model_uri, vllm_server_kwargs=kwargs)
+        return VLLMModelClient(
+            model_uri=model_uri,
+            vllm_server_kwargs=kwargs,
+            cross_process=cross_process,
+        )
     if client_type == "mlx":
         from sdfb_beam.handlers.mlx_client import MLXModelClient
         return MLXModelClient(model_uri=model_uri)
@@ -853,7 +903,10 @@ def sanitize_job_name(prefix: str, run_id: str) -> str:
 
 
 def configure_pipeline_options(
-    options: PipelineOptions, runner: str, run_id: str
+    options: PipelineOptions,
+    runner: str,
+    run_id: str,
+    num_workers: int | None = None,
 ) -> None:
     """Set runner-dependent options.
 
@@ -874,6 +927,10 @@ def configure_pipeline_options(
     Beam SDK container (no ``sdfb_core``/``sdfb_beam``) and DoFn unpickling dies
     with ``ModuleNotFoundError: No module named 'sdfb_core'``. An explicit
     ``--sdk_container_image`` (e.g. ``scripts/probe_gpu_dataflow.sh``) wins.
+
+    ``num_workers`` (ADR 0034) pins the INITIAL worker count the same way:
+    a scale run starts at its ceiling instead of waiting on the
+    autoscaler; an explicit Beam ``--num_workers`` on the launch wins.
     """
     options.view_as(SetupOptions).save_main_session = runner == "DirectRunner"
     if runner == "DataflowRunner":
@@ -881,6 +938,16 @@ def configure_pipeline_options(
         if not gco.job_name:
             gco.job_name = sanitize_job_name("sdfb", run_id)
         worker_options = options.view_as(WorkerOptions)
+        if num_workers is not None:
+            if worker_options.num_workers:
+                logger.info(
+                    "Worker num_workers already set explicitly (%d); leaving "
+                    "as-is (initial_workers=%d ignored).",
+                    worker_options.num_workers, num_workers,
+                )
+            else:
+                worker_options.num_workers = num_workers
+                logger.info("Pinned initial num_workers to %d (ADR 0034).", num_workers)
         if worker_options.disk_size_gb:
             logger.info("Worker disk_size_gb already set explicitly (%d GB); leaving as-is.",
                         worker_options.disk_size_gb)
@@ -1454,7 +1521,18 @@ def _run_one_table(
 ) -> int:
     options = PipelineOptions(beam_argv)
     runner = options.view_as(StandardOptions).runner or "DataflowRunner"
-    configure_pipeline_options(options, runner, args.run_id)
+    configure_pipeline_options(
+        options, runner, args.run_id,
+        num_workers=resolve_num_workers(getattr(args, "initial_workers", "")),
+    )
+    cross_process = resolve_cross_process(
+        runner, options.view_as(DebugOptions).experiments
+    )
+    log_milestone(
+        "sdk_container_topology",
+        topology="multi" if cross_process else "single",
+        runner=runner,
+    )
 
     logger.info("Building model client (client_type=%s, vllm_dtype=%s, "
                 "vllm_max_model_len=%s)",
@@ -1464,6 +1542,7 @@ def _run_one_table(
         args.model_uri,
         vllm_dtype=args.vllm_dtype,
         vllm_max_model_len=args.vllm_max_model_len,
+        cross_process=cross_process,
     )
     spec = _prepare_table_spec(args, model_client, registry=registry)
 
@@ -1500,13 +1579,25 @@ def _run_relational_job(
 
     options = PipelineOptions(beam_argv)
     runner = options.view_as(StandardOptions).runner or "DataflowRunner"
-    configure_pipeline_options(options, runner, args.run_id)
+    configure_pipeline_options(
+        options, runner, args.run_id,
+        num_workers=resolve_num_workers(getattr(args, "initial_workers", "")),
+    )
+    cross_process = resolve_cross_process(
+        runner, options.view_as(DebugOptions).experiments
+    )
+    log_milestone(
+        "sdk_container_topology",
+        topology="multi" if cross_process else "single",
+        runner=runner,
+    )
 
     model_client = build_model_client(
         args.client_type,
         args.model_uri,
         vllm_dtype=args.vllm_dtype,
         vllm_max_model_len=args.vllm_max_model_len,
+        cross_process=cross_process,
     )
     in_set = frozenset(r.landing_table for r in plan.runs)
     # The --ddl_uri pin describes the USER'S target table(s) — closure

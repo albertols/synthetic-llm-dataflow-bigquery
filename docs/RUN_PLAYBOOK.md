@@ -176,6 +176,33 @@ The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
   unconditionally — required for the custom `ModelHandler`/DoFn `setup()`
   lifecycle this pipeline relies on to build the vLLM client once per worker
   rather than per bundle. Don't remove it.
+- **Initial worker count — `initial_workers` (ADR 0034).** Dataflow
+  starts a batch job below `maxWorkers` and scales up on backlog: the
+  2026-08-29 R6 pair launched on 2 workers and reached 4 only ~4 min into
+  the first generate stage (3 harness boots at 15:01 / 17:08), so
+  C_TABLE ran its first 8 minutes at ~2.5k rows/s against a 10.5k rows/s
+  steady state. Pass `initial_workers=4` (= `maxWorkers`) on every
+  10M-row trigger; leave it empty for smoke runs. The launcher pins it
+  through `WorkerOptions.num_workers` (`run_pipeline.configure_pipeline_options`),
+  the same channel as `disk_size_gb`; `run_e2e.sh` tiers carry it as
+  `job.num_workers` (`R7`).
+- **SDK-container topology — `sdk_containers=single|multi` (ADR 0034).**
+  `single` (default) is the pin described in the next bullet. `multi`
+  lifts it: Runner v2 starts one SDK process per vCPU, so the generate
+  stages — pure-Python DoFns that shared ONE interpreter per worker on
+  the R6 pair (8 harness threads, ~1 of 8 vCPUs busy, ~10.5k rows/s
+  fleet-wide) — get eight interpreters per worker. The vLLM client makes
+  that safe: a cross-process spawn mutex (a bound loopback port,
+  `spawn_lock_port` = 8001) serializes the pull → spawn → ready window
+  across processes, every other process binds to the one server through
+  the existing reuse probe, and teardown keeps the server alive
+  (`vllm_server_kept_alive`). The embedder loads lazily, so the seven
+  non-spawning processes hold no CUDA context. `multi` is an
+  **acceptance experiment**, not yet the default: run `R7m` (or trigger
+  the DAG with `sdk_containers=multi`) and read `sdk_container_topology`,
+  `vllm_spawn_lock_acquired` / `vllm_spawn_lock_wait` (exactly one
+  acquired per worker), `engine_shared holders=`, and the generate
+  stage's `batch_done` rate before promoting it.
 - **ONE SDK process per GPU worker — add `no_use_multiple_sdk_containers`.**
   Runner v2's default spawns one sibling SDK process per vCPU (8 on
   `n1-standard-8` / `g2-standard-8`), and **every sibling runs the full DoFn
@@ -430,8 +457,15 @@ exactly this.
 
 | Value | Landing | Duplicates | Use when |
 |---|---|---|---|
-| `exact` (default) | after up to 3 shuffle barriers | diverted to the DLQ | you need duplicates removed |
+| `exact` (default) | after ONE full-row shuffle barrier (PK/identity resolved from key-only groups, [ADR 0034](adr/0034-generation-throughput-single-barrier-shared-engines.md)) | diverted to the DLQ | you need duplicates removed |
+| `exact_chained` | after 3 chained full-row barriers (row digest → PK → identity, the pre-ADR-0034 path) | diverted to the DLQ | A/B against `exact` only — same envelopes and counts, ~3x the shuffle bytes |
 | `streaming` | **incremental, as generated** | **land**, rate measured and gated | you want rows visible early and will re-run on a gate failure |
+
+`exact` and `exact_chained` divert the same rows with the same `rule_id`s
+and exact counts; `exact` keeps the row with the smallest digest per
+collision (deterministic) where the chain kept an arbitrary one. The
+2026-08-29 R6 pair measured the chain at ~26 of 94 minutes per job
+(123 GB through Dataflow Shuffle, `resource exhausted` retry storms).
 
 In `streaming`, duplicate rows land. The run is still marked
 `FAILED_BLOCKER` in `validation_runs`, so recover with
