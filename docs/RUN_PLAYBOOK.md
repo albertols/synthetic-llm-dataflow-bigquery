@@ -185,7 +185,17 @@ The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
   10M-row trigger; leave it empty for smoke runs. The launcher pins it
   through `WorkerOptions.num_workers` (`run_pipeline.configure_pipeline_options`),
   the same channel as `disk_size_gb`; `run_e2e.sh` tiers carry it as
-  `job.num_workers` (`R7`).
+  `job.num_workers` (`R7`) and as the template param `initial_workers`.
+- **Autoscaling mode — `autoscaling=auto|throughput|fixed` (ADR 0034
+  D9).** A fleet you sized by hand should stay that size: `auto`
+  (default) pins Dataflow's `autoscaling_algorithm=NONE` exactly when
+  `initial_workers` is given, `fixed` pins it and refuses to launch
+  without `initial_workers`, `throughput` keeps THROUGHPUT_BASED. The
+  2026-09-07 15:53 and 09-08 multi runs scaled 1 → 4 for the parent, fell
+  to 1–2 workers through the parent's load and the child's pool phase,
+  and re-provisioned VMs for the child — ≈ 4 min per job. `R7`/`R7m`
+  now carry `initial_workers=4` + `autoscaling=fixed`; an explicit Beam
+  `--autoscaling_algorithm` always wins.
 - **SDK-container topology — `sdk_containers=single|multi` (ADR 0034).**
   `single` (default) is the pin described in the next bullet. `multi`
   lifts it: Runner v2 starts one SDK process per vCPU, so the generate
@@ -207,16 +217,20 @@ The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
   — 10k-row batches in 5.6–6.7 s instead of 26–29 s, one spawn lock per
   worker, no CUDA OOM, the fleet on 1–2 workers for most of the job
   because `initial_workers` was left empty. Pass `sdk_containers=multi`
-  **and** `initial_workers=4` together for a 10M run. Under `multi` the
-  cold RAG population embeds run on CPU (ADR 0034 D8a) so the eight
-  sibling processes never hold the card while vLLM spawns.
+  **and** `initial_workers=4` (+ `autoscaling=fixed`) together for a
+  10M run. Under `multi` the cold RAG population embed stays on the GPU
+  but is bounded to `rag_embed_shards` (2) processes, and the pool
+  branch waits for it before its first LLM call spawns vLLM (ADR 0034
+  D8 rev. 2 — rev. 1's CPU embeds starved the model pull and the vLLM
+  init on 2026-09-08: 598 s ignition, a 15-min population stage).
 - **NVIDIA MPS — evaluated, not enabled (ADR 0034).** Dataflow's
   `worker_accelerator=…;use_nvidia_mps` shares one CUDA context across
   SDK processes and is meant for `RunInference` with `model_copies > 1`
   on one GPU. This pipeline runs ONE vLLM server per worker reached over
-  HTTP from every process; nothing else touches the GPU concurrently
-  once the population embed is on CPU under `multi`, so MPS has no work
-  to schedule and would only add a daemon in front of the driver. Do not
+  HTTP from every process; the only other GPU tenant is the cold
+  population embed, bounded to two processes that finish before vLLM
+  spawns, so MPS has no work to schedule and would only add a daemon in
+  front of the driver. Do not
   add it without a design change that puts a second model process on the
   card.
 - **ONE SDK process per GPU worker — add `no_use_multiple_sdk_containers`.**
@@ -786,6 +800,10 @@ ordering, dry-run first).
 
 **Trigger config:** `{"num_rows":"10000000","batch_size":"1000"}` — same
 table(s), same digest.
+
+**Fleet:** `initial_workers=4`, `autoscaling=fixed`, `sdk_containers=multi`
+(tier `R7m`, ADR 0034 D5/D6/D9) — the 09-07/09-08 multi runs lost ≈ 4 min
+per job to autoscaler dips between the parent and child stages.
 
 **Preconditions:** all stores populated and NOT truncated since the last
 cold run (`freetext_pools`, `rag_chunks`, `source_table_stats`); no

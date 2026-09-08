@@ -87,3 +87,18 @@ def test_composer_dag_exposes_sdk_containers_topology():
     assert '"sdk_containers": Param(' in dag_text
     assert "enum=[\"single\", \"multi\"]" in dag_text
     assert "params.sdk_containers == 'single'" in dag_text
+
+
+def test_flex_template_and_composer_expose_autoscaling():
+    """ADR 0034 D9: auto (fixed when initial_workers is set) | throughput | fixed."""
+    import re
+
+    param = _metadata_param("autoscaling")
+    assert param["isOptional"] is True
+    (regex,) = param["regexes"]
+    for ok in ("", "auto", "throughput", "fixed"):
+        assert re.fullmatch(regex, ok), ok
+    assert not re.fullmatch(regex, "none")
+    dag_text = _COMPOSER_DAG.read_text()
+    assert '"autoscaling": Param(' in dag_text
+    assert '"autoscaling": "{{ params.autoscaling }}"' in dag_text

@@ -110,22 +110,35 @@ POOLS_A_WARM = (37.6, 38.4, 39.4, 40.7, 40.9, 41.4, 42.2, 42.7, 43.4, 44.2, 44.6
 # left EMPTY on both — the fleet started on 1 worker.
 # single: 2026-09-07_05_04_25-2281175974286848139 (sdk_containers=single)
 # multi:  2026-09-07_07_33_01-10181729754686044047 (sdk_containers=multi)
-ACCEPT_RUNS = ("R6 cold\n2026-08-29", "R7 single\n2026-09-07", "R7 multi\n2026-09-07")
-ACCEPT_WALL_MIN = (93.8, 76.5, 50.5)
+# 2026-09-07_15_53_03-5022269583842232852: "warm" multi re-trigger whose pools
+# the taint preflight rebuilt (the 09-07 pair had built them without source
+# filters) — RAG warm, vLLM spawned once, 183 s ignition, no unfittable wait.
+# 2026-09-08_01_28_40-16766915117990408687: cold multi, population embeds on
+# CPU (D8 rev. 1) — 15-min stage, 177 s model pull, 598 s ignition; the
+# autoscaler dipped to 1 worker between the parent and child stages.
+# Both: `initial_workers` empty; both images carry the D4 fix
+# (`identifier_source_filter size=944582`, no `_error`).
+ACCEPT_RUNS = ("R6 cold\n08-29", "R7 single\n09-07", "R7 multi\n09-07",
+               "R7 multi warm\n09-07 (pools rebuilt)", "R7 multi cold\n09-08 (CPU embeds)")
+ACCEPT_WALL_MIN = (93.8, 76.5, 50.5, 52.5, 56.9)
 ACCEPT_PHASES_MIN = {  # per run: startup, cold pool branch (critical path), generation (both tables), dedup + load (both tables)
-    "startup (launcher + boot)": (15.9, 13.0, 12.4),
-    "cold pool branch": (7.9, 10.1, 12.9),
-    "generation C + A": (42.7, 36.4, 17.1),
-    "dedup + load C + A": (26.2, 14.3, 6.4),
+    "startup (launcher + boot)": (15.9, 13.0, 12.4, 11.6, 15.5),
+    "cold pool branch": (7.9, 10.1, 12.9, 9.7, 14.2),
+    "generation C + A": (42.7, 36.4, 17.1, 21.1, 17.0),
+    "dedup + load C + A": (26.2, 14.3, 6.4, 7.5, 8.2),
 }
 ACCEPT_GEN_ROWS_PER_S = {  # C_TABLE / A_TABLE stage averages
-    "C_TABLE": (7_241, 7_758, 16_026),
-    "A_TABLE": (10_163, 11_173, 25_063),
+    "C_TABLE": (7_241, 7_758, 16_026, 13_680, None),
+    "A_TABLE": (10_163, 11_173, 25_063, 18_727, None),
 }
-ACCEPT_BATCH_SECONDS = (27.5, 27.5, 6.1)  # 10k-row batch_done at steady state
+ACCEPT_BATCH_SECONDS = (27.5, 27.5, 6.1, 6.6, None)  # 10k-row batch_done at steady state
 ACCEPT_WORKERS_AT_4_MIN = (
-    "2 → 4 @ +27 min", "1 → 4 @ +26 min", "1 → 2 @ +29, 4 @ +37 min"
+    "2 → 4 @ +27 min", "1 → 4 @ +26 min", "1 → 2 @ +29, 4 @ +37 min",
+    "1 → 4 @ +32, dip to 2 @ +37", "1 → 4 @ +20, dip to 1 @ +40",
 )
+VLLM_READY_S = {"single": 190.4, "multi": 344.0, "multi warm": 183.0, "multi cold cpu": 598.7}
+MODEL_PULL_S = {"multi warm": 52.5, "multi cold cpu": 177.6}
+POPULATION_STAGE_MIN = {"multi": 2.9, "multi cold cpu": 15.4}  # RagEmbedChunks span (GPU x8 vs CPU x56)
 MULTI_PEAK_ROWS_PER_S = 31_417  # C_TABLE bucket 8-10 min, 4 workers up
 MULTI_VLLM_READY_S, SINGLE_VLLM_READY_S = 344.0, 190.4  # 8 vs 1 unfittable waits
 FETCH_FAILURES = (107, 459)  # source_values_arrow_fallback (PermissionDenied) → all fetches inactive
@@ -414,7 +427,7 @@ def fig_evolution():
     the single-barrier dedup halved the dedup phase and the multi-process
     topology halved generation, while startup and the cold pool branch
     stayed put."""
-    fig, ax = plt.subplots(figsize=(12.5, 5.2), facecolor=SURFACE)
+    fig, ax = plt.subplots(figsize=(13.0, 6.6), facecolor=SURFACE)
     colours = {
         "startup (launcher + boot)": BLUE,
         "cold pool branch": ORANGE,
@@ -440,13 +453,13 @@ def fig_evolution():
     ax.set_yticks(range(n))
     ax.set_yticklabels(ACCEPT_RUNS, fontsize=9.5)
     ax.invert_yaxis()
-    ax.set_xlim(0, 135)
+    ax.set_xlim(0, 140)
     ax.set_xlabel("minutes (phases on the critical path; cleanup omitted)", color=MUTED,
                   fontsize=9)
     ax.legend(frameon=False, fontsize=8.8, labelcolor=INK, loc="lower right", ncol=2)
     _style(ax, grid_axis="x")
-    _title(ax, "Three runs, one job shape: 93.8 → 76.5 → 50.5 minutes",
-           "10M rows/table, C_TABLE ◄═ A_TABLE, T4 workers; R7 pair on image oss-pk-ready-00fc613, initial_workers empty on both")
+    _title(ax, "Five runs, one job shape: 93.8 → 76.5 → 50.5 → 52.5 → 56.9 minutes",
+           "10M rows/table, C_TABLE ◄═ A_TABLE, T4 workers; initial_workers empty on every run — the last two lost their minutes to the autoscaler's dips and to CPU population embeds")
     fig.tight_layout()
     fig.savefig(ASSETS / "throughput-evolution.png", dpi=160, facecolor=SURFACE)
     plt.close(fig)

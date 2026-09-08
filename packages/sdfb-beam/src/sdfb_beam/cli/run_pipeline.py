@@ -182,6 +182,16 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "at runtime. Pre-provision the table out-of-band "
                         "(e.g. `bq mk`/DDL) if those constraints matter.")
     p.add_argument("--num_rows", type=int, required=True)
+    p.add_argument("--autoscaling", default="auto",
+                   choices=list(_AUTOSCALING_MODES),
+                   help="auto (default) = a fleet sized by --initial_workers "
+                        "stays that size (autoscaling_algorithm=NONE), "
+                        "otherwise Dataflow's THROUGHPUT_BASED. fixed = "
+                        "same pin, and --initial_workers is required. "
+                        "throughput = always let Dataflow scale (the "
+                        "2026-09-07/08 multi runs lost ~4 min per job to "
+                        "mid-job scale-downs between the parent and child "
+                        "stages, ADR 0034 D9).")
     p.add_argument("--initial_workers", default="",
                    help="Initial Dataflow worker count (ADR 0034). Empty = "
                         "Dataflow's own default: the 2026-08-29 R6 pair "
@@ -393,11 +403,41 @@ def resolve_num_workers(value: str | int | None) -> int | None:
 
 
 def resolve_rag_embed_device(model_client) -> str:
-    """Where the RAG population embeds run: the GPU ("auto") under one
-    SDK process per worker; CPU under the multi-process topology, where
-    every sibling process would otherwise open a CUDA context beside the
-    vLLM spawn (ADR 0034 D6 follow-up, 2026-09-07 R7m)."""
-    return "cpu" if getattr(model_client, "cross_process", False) else "auto"
+    """Where the RAG population embeds run: the worker GPU, on every
+    topology. The 2026-09-08 cold run moved them to CPU under `multi` and
+    starved the model pull (177 s) and the vLLM engine init (598 s)
+    instead; the contention is bounded by `rag_embed_shards` and by the
+    pool branch waiting for the population (ADR 0034 D8)."""
+    return "auto"
+
+
+_AUTOSCALING_MODES = ("auto", "throughput", "fixed")
+
+
+def resolve_autoscaling(mode: str, num_workers: int | None) -> str | None:
+    """``--autoscaling`` → the Beam ``autoscaling_algorithm`` to pin, or
+    None to leave Dataflow's default (THROUGHPUT_BASED).
+
+    ``auto`` (default) pins ``NONE`` exactly when ``initial_workers`` is
+    given: a fleet you sized by hand should stay that size. The 2026-09-07
+    and 09-08 multi runs dropped to 1-2 workers during the parent's
+    load / FK-pool phase and re-provisioned VMs for the child stage —
+    A_TABLE ran its first 3-8 minutes short-handed (ADR 0034 D9).
+    ``fixed`` requires ``initial_workers``; ``throughput`` keeps scaling.
+    """
+    text = str(mode or "auto").strip().lower()
+    if text not in _AUTOSCALING_MODES:
+        raise ValueError(
+            f"autoscaling must be one of {_AUTOSCALING_MODES}, got {mode!r}"
+        )
+    if text == "throughput":
+        return None
+    if text == "fixed" and num_workers is None:
+        raise ValueError(
+            "autoscaling=fixed needs initial_workers (the size of the "
+            "fixed fleet)"
+        )
+    return "NONE" if num_workers is not None else None
 
 
 def resolve_cross_process(runner: str, experiments: list[str] | None) -> bool:
@@ -915,11 +955,29 @@ def sanitize_job_name(prefix: str, run_id: str) -> str:
     return name[:63].rstrip("-")
 
 
+def _pin_autoscaling(worker_options, autoscaling: str, num_workers: int | None) -> None:
+    """ADR 0034 D9: pin ``autoscaling_algorithm`` per ``--autoscaling``; an
+    explicit Beam flag always wins."""
+    algorithm = resolve_autoscaling(autoscaling, num_workers)
+    if algorithm is None:
+        return
+    if worker_options.autoscaling_algorithm:
+        logger.info(
+            "Worker autoscaling_algorithm already set explicitly (%s); "
+            "leaving as-is (autoscaling=%s ignored).",
+            worker_options.autoscaling_algorithm, autoscaling,
+        )
+        return
+    worker_options.autoscaling_algorithm = algorithm
+    logger.info("Pinned autoscaling_algorithm to %s (ADR 0034 D9).", algorithm)
+
+
 def configure_pipeline_options(
     options: PipelineOptions,
     runner: str,
     run_id: str,
     num_workers: int | None = None,
+    autoscaling: str = "auto",
 ) -> None:
     """Set runner-dependent options.
 
@@ -955,6 +1013,7 @@ def configure_pipeline_options(
             worker_options.max_cache_memory_usage_mb = _DEFAULT_STATE_CACHE_MB
             logger.info("Pinned worker max_cache_memory_usage_mb to %d MB (ADR 0034).",
                         _DEFAULT_STATE_CACHE_MB)
+        _pin_autoscaling(worker_options, autoscaling, num_workers)
         if num_workers is not None:
             if worker_options.num_workers:
                 logger.info(
@@ -1542,6 +1601,7 @@ def _run_one_table(
     configure_pipeline_options(
         options, runner, args.run_id,
         num_workers=resolve_num_workers(getattr(args, "initial_workers", "")),
+        autoscaling=getattr(args, "autoscaling", "auto"),
     )
     cross_process = resolve_cross_process(
         runner, options.view_as(DebugOptions).experiments
@@ -1600,6 +1660,7 @@ def _run_relational_job(
     configure_pipeline_options(
         options, runner, args.run_id,
         num_workers=resolve_num_workers(getattr(args, "initial_workers", "")),
+        autoscaling=getattr(args, "autoscaling", "auto"),
     )
     cross_process = resolve_cross_process(
         runner, options.view_as(DebugOptions).experiments

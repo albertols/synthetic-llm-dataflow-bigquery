@@ -143,11 +143,16 @@ class PipelineConfig:
     # behind up to three shuffle barriers; "streaming" lands rows as they
     # are generated and measures the duplicate rate instead.
     uniqueness_mode: str = "exact"
-    # Device for the RAG population embed (ADR 0034 D6 follow-up): "auto"
-    # = the worker GPU; "cpu" under the multi-process SDK topology, where
-    # eight sibling embedders held the card while vLLM tried to spawn
-    # (2026-09-07 R7m: 8 x 20 s unfittable waits, 344 s ignition).
+    # RAG population embed (ADR 0034 D8, rev. 2026-09-08). The device is
+    # the worker GPU on every topology ("auto"); moving it to CPU under
+    # multi starved the model pull and the vLLM engine init instead
+    # (09-08 cold: 177 s pull, 598 s ignition, 15-min stage). What bounds
+    # the contention is the FAN-OUT: at most `rag_embed_shards` embedders
+    # run at once (each a CUDA context + 130 MB of weights) instead of
+    # one per SDK process, and the pool branch waits for them to finish
+    # before its first LLM call spawns vLLM.
     rag_embed_device: str = "auto"
+    rag_embed_shards: int = 2
 
 
 def build_pipeline(
@@ -232,6 +237,20 @@ def build_pipeline(
 
     requests = p | f"{label_prefix}CreateRequests" >> beam.Create(request_specs)
 
+    # WS2 §4b.1 — optional rag_chunks population branch. The driver decides
+    # (existence check) whether to pass a sink; None ⇒ branch absent, DAG
+    # unchanged (the validation_runs_sink precedent). Feeds on
+    # `reference_rows` — the driver-loaded ≤10k sample whose digest is this
+    # run's provenance key — NOT a full-table read; scope rationale in
+    # sdfb_beam/rag/population.py. Built BEFORE the pool branch so the
+    # pool trigger can wait on the embedded chunks (ADR 0034 D8).
+    chunks = None
+    if rag_chunks_sink is not None:
+        chunks = _population_branch(
+            p, config, reference_rows, digest, label_prefix=label_prefix
+        )
+        _ = chunks | f"{label_prefix}WriteRagChunks" >> rag_chunks_sink
+
     # WS5 §2 / 2026-07-29 four-run postmortem — optional free-text pool
     # build branch. The driver decides (digest existence check) whether to
     # pass a store; None ⇒ branch absent, DAG unchanged. The branch builds
@@ -244,9 +263,18 @@ def build_pipeline(
     # branch (build + store write) completes, so every Generate setup's
     # store fetch hits.
     if freetext_pools_store is not None:
+        trigger = p | f"{label_prefix}PoolTrigger" >> beam.Create([None])
+        if chunks is not None:
+            # ADR 0034 D8: the branch's first LLM call spawns vLLM; wait
+            # for the population embedders to finish (and demote) so the
+            # spawn meets a free card and idle cores (09-07 R7m: 8 x 20 s
+            # unfittable waits; 09-08 cold: a 598 s ignition beside 56
+            # CPU embedders).
+            trigger = trigger | f"{label_prefix}AwaitRagPopulation" >> beam.Map(
+                lambda x, _chunks: x, _chunks=beam.pvalue.AsList(chunks)
+            )
         pool_rows = (
-            p
-            | f"{label_prefix}PoolTrigger" >> beam.Create([None])
+            trigger
             | f"{label_prefix}BuildFreeTextPools"
             >> beam.ParDo(
                 BuildFreeTextPoolsDoFn(
@@ -324,76 +352,6 @@ def build_pipeline(
         normalize_dlq_record, run_id=config.run_id
     )
     _ = dlq | f"{label_prefix}WriteDLQ" >> dlq_sink
-
-    # WS2 §4b.1 — optional rag_chunks population branch. The driver decides
-    # (existence check) whether to pass a sink; None ⇒ branch absent, DAG
-    # unchanged (the validation_runs_sink precedent). Feeds on
-    # `reference_rows` — the driver-loaded ≤10k sample whose digest is this
-    # run's provenance key — NOT a full-table read; scope rationale in
-    # sdfb_beam/rag/population.py.
-    if rag_chunks_sink is not None:
-        free_text_columns = _rag_free_text_columns(
-            config.table_schema, reference_rows
-        )
-        # Population is scoped to what its consumers can read (ADR 0019):
-        # row_doc chunks cover EXACTLY the engine's read prefix
-        # (`_vectors_from_store` is all-or-nothing over rows[:1024]) — the
-        # 2026-07-25 06:18 run embedded all 10k rows and 90 % could never
-        # be read back. free_text_col chunks dedupe to distinct
-        # (column, value), computed driver-side (reference_rows is already
-        # in memory here); Beam still fans the embed itself out across
-        # workers via the Reshuffle below.
-        distinct_values = distinct_free_text_values(
-            reference_rows, free_text_columns
-        )
-        row_doc_chunks = (
-            p
-            | f"{label_prefix}RagReferenceRows"
-            >> beam.Create(reference_rows[:MAX_ROW_DOC_ROWS])
-            | f"{label_prefix}RagChunkRows"
-            >> beam.ParDo(
-                ChunkReferenceRowsDoFn(
-                    source_fqn=config.table_schema.fqn,
-                    reference_digest=digest,
-                    column_order=[c.name for c in config.table_schema.columns],
-                    free_text_columns=[],  # value chunks come deduped below
-                    pk_columns=list(config.pk_columns),
-                    embedder_id=config.embedder_id,
-                    embedder_version=config.embedder_version,
-                )
-            )
-        )
-        value_chunks = (
-            p
-            | f"{label_prefix}RagDistinctValues"
-            >> beam.Create(
-                [(c, v) for c, vals in distinct_values.items() for v in vals]
-            )
-            | f"{label_prefix}RagValueChunks"
-            >> beam.MapTuple(
-                functools.partial(
-                    chunk_free_text_value,
-                    source_fqn=config.table_schema.fqn,
-                    reference_digest=digest,
-                    embedder_id=config.embedder_id,
-                    embedder_version=config.embedder_version,
-                )
-            )
-        )
-        chunks = (
-            (row_doc_chunks, value_chunks)
-            | f"{label_prefix}RagAllChunks" >> beam.Flatten()
-            # Spread the (now small) chunk set across workers so the embed
-            # stage keeps Beam's embarrassing parallelism.
-            | f"{label_prefix}RagFanout" >> beam.Reshuffle()
-            | f"{label_prefix}RagBatchChunks"
-            >> beam.BatchElements(min_batch_size=32, max_batch_size=256)
-            | f"{label_prefix}RagEmbedChunks"
-            >> beam.ParDo(
-                EmbedChunksDoFn(config.embedder_uri, device=config.rag_embed_device)
-            )
-        )
-        _ = chunks | f"{label_prefix}WriteRagChunks" >> rag_chunks_sink
 
     result: dict[str, Any] = {
         "reference_digest": digest,
@@ -648,6 +606,99 @@ def build_relational_pipeline(
             spec.config.landing_table
         ]["valid"]
     return results
+
+
+def _population_branch(
+    p: beam.Pipeline,
+    config: PipelineConfig,
+    reference_rows: list[dict],
+    digest: str,
+    *,
+    label_prefix: str,
+):
+    """The rag_chunks population branch (WS2 §4b.1): reference rows and
+    distinct free-text values → chunks → a BOUNDED embed fan-out
+    (ADR 0034 D8). Returns the embedded-chunks PCollection; the caller
+    writes it and lets the pool trigger wait on it."""
+    free_text_columns = _rag_free_text_columns(
+        config.table_schema, reference_rows
+    )
+    # Population is scoped to what its consumers can read (ADR 0019):
+    # row_doc chunks cover EXACTLY the engine's read prefix
+    # (`_vectors_from_store` is all-or-nothing over rows[:1024]) — the
+    # 2026-07-25 06:18 run embedded all 10k rows and 90 % could never
+    # be read back. free_text_col chunks dedupe to distinct
+    # (column, value), computed driver-side (reference_rows is already
+    # in memory here); Beam still fans the embed itself out below.
+    distinct_values = distinct_free_text_values(
+        reference_rows, free_text_columns
+    )
+    row_doc_chunks = (
+        p
+        | f"{label_prefix}RagReferenceRows"
+        >> beam.Create(reference_rows[:MAX_ROW_DOC_ROWS])
+        | f"{label_prefix}RagChunkRows"
+        >> beam.ParDo(
+            ChunkReferenceRowsDoFn(
+                source_fqn=config.table_schema.fqn,
+                reference_digest=digest,
+                column_order=[c.name for c in config.table_schema.columns],
+                free_text_columns=[],  # value chunks come deduped below
+                pk_columns=list(config.pk_columns),
+                embedder_id=config.embedder_id,
+                embedder_version=config.embedder_version,
+            )
+        )
+    )
+    value_chunks = (
+        p
+        | f"{label_prefix}RagDistinctValues"
+        >> beam.Create(
+            [(c, v) for c, vals in distinct_values.items() for v in vals]
+        )
+        | f"{label_prefix}RagValueChunks"
+        >> beam.MapTuple(
+            functools.partial(
+                chunk_free_text_value,
+                source_fqn=config.table_schema.fqn,
+                reference_digest=digest,
+                embedder_id=config.embedder_id,
+                embedder_version=config.embedder_version,
+            )
+        )
+    )
+    shards = max(1, int(config.rag_embed_shards))
+    chunks = (
+        (row_doc_chunks, value_chunks)
+        | f"{label_prefix}RagAllChunks" >> beam.Flatten()
+        # BOUNDED fan-out (ADR 0034 D8): `rag_embed_shards` keyed
+        # groups ⇒ at most that many concurrent embedders, whatever
+        # the SDK topology. The unbounded Reshuffle put one embedder
+        # in every SDK process — eight CUDA contexts per worker under
+        # `multi` — beside the vLLM spawn.
+        | f"{label_prefix}RagShard"
+        >> beam.Map(lambda c, k=shards: (_rag_shard_key(c, k), c))
+        | f"{label_prefix}RagShardGroup" >> beam.GroupByKey()
+        | f"{label_prefix}RagShardValues" >> beam.FlatMap(lambda kv: kv[1])
+        | f"{label_prefix}RagBatchChunks"
+        >> beam.BatchElements(min_batch_size=32, max_batch_size=256)
+        | f"{label_prefix}RagEmbedChunks"
+        >> beam.ParDo(
+            EmbedChunksDoFn(config.embedder_uri, device=config.rag_embed_device)
+        )
+    )
+    return chunks
+
+
+def _rag_shard_key(chunk, shards: int) -> int:
+    """Deterministic shard for one chunk — ``shards`` keyed groups bound
+    the population's embedder concurrency (ADR 0034 D8)."""
+    import hashlib
+
+    digest = hashlib.blake2b(
+        str(chunk.chunk_id).encode("utf-8"), digest_size=4
+    ).digest()
+    return int.from_bytes(digest, "big") % max(1, int(shards))
 
 
 def _rag_free_text_columns(

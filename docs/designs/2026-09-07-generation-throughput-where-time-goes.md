@@ -70,15 +70,18 @@ minutes inside `DoFn.setup()` (the orange arrow in the cold panel). The
 [E2E prompt](../../.github/prompts/end_to_end_validation_report_generation.prompt.md)
 now says so.
 
-### 1b. Acceptance — the 2026-09-07 R7 pair
+### 1b. Acceptance — the 2026-09-07 R7 pair, then the 09-07/09-08 multi pair
 
 ![evolution](assets/throughput-evolution.png)
 
-*Three runs of one job shape: 93.8 → 76.5 → 50.5 minutes. The
-single-barrier dedup halved the dedup phase on the `single` run; the
+*Five runs of one job shape: 93.8 → 76.5 → 50.5 → 52.5 → 56.9 minutes.
+The single-barrier dedup halved the dedup phase on the `single` run; the
 multi-process topology then halved generation; startup and the cold pool
-branch stayed put — and both R7 runs started on one worker because
-`initial_workers` was left empty.* Runs
+branch stayed put. The last two runs gave minutes back: the autoscaler
+dipped to 1–2 workers between the parent and child stages on both
+(`initial_workers` was empty on every run), and the 09-08 cold run paid
+a 15-minute population stage for the CPU embeds of ADR 0034 D8 rev. 1.*
+Runs
 `2026-09-07_05_04_25-2281175974286848139` (`sdk_containers=single`) and
 `2026-09-07_07_33_01-10181729754686044047` (`multi`), image
 `oss-pk-ready-00fc613`, worker logs only (the per-run table is in
@@ -107,9 +110,27 @@ pools those runs persisted go through the launcher's taint preflight
 landed rows need the E2E probe's `copy_ratio` before they count as
 clean. Two smaller follow-ups from the same logs: the multi cold start
 paid eight `vllm_unfittable_wait`s (344 s ignition) while eight
-population embedders held the card — they now run on CPU under `multi`
-— and the single-barrier read stage's side inputs were re-fetched per
-bundle (`max_cache_memory_usage_mb` pinned to 512).
+population embedders held the card — rev. 1 moved them to CPU under
+`multi` — and the single-barrier read stage's side inputs were
+re-fetched per bundle (`max_cache_memory_usage_mb` pinned to 512).
+
+What the second multi pair proved and falsified (09-07 15:53 "warm",
+whose pools the taint preflight rebuilt as designed, ≈ 52.5 min; 09-08
+01:28 cold, 56.9 min; the per-run table is in the ADR): the D4
+amendment holds (`identifier_source_filter size=944582` on every
+fetch; the Storage attempt is denied and disabled once per process
+until `roles/bigquery.readSessionUser` is granted). The warm run's vLLM
+ignition, 183 s with no population contention, is the target number.
+The cold run's CPU embeds were a regression: 56 CPU embedders across
+the fleet turned a 2.9-min population stage into 15.4 min and starved
+the model pull (177.6 s vs 52.5 s) and the engine init (598.7 s) on the
+same VMs. Rev. 2 keeps the embed on the GPU and bounds the fan-out to
+`rag_embed_shards` (2) keyed groups, and the pool branch's trigger waits
+on the embedded chunks (`AwaitRagPopulation`), so the spawn meets a free
+card. The autoscaler chart of both runs shows the same shape — up for
+the parent, down to 1–2 workers through the parent's load and the
+child's pool phase, up again for the child — which costs the child's
+first minutes and is what `autoscaling=fixed` (ADR 0034 D9) removes.
 
 ## §2 Generation: one interpreter per worker
 
@@ -420,9 +441,10 @@ Falsifiable, keyed to milestones that exist in the code:
 2. `engine_shared holders=8` on every worker and ≤ 4 `dofn_setup_done`
    per table; no `Bundle processor … creating for at least` WARNING above
    60 s.
-3. `initial_workers=4`: no `Starting Unified Worker` after
-   `workers_ready`; C_TABLE's first 2-min bucket within 2× of its steady
-   rate.
+3. `initial_workers=4` + `autoscaling=fixed`: no `Starting Unified
+   Worker` after `workers_ready`; C_TABLE's first 2-min bucket within 2×
+   of its steady rate; the worker count never drops between the parent
+   and child stages (the 09-07/09-08 multi pair dipped to 1–2).
 4. `identifier_source_filter column=A_COL_005 size=944582` lands within
    30 s of the previous milestone; no `source_values_arrow_fallback`.
 5. No `embedder_device` milestone from a store-warm generate setup;
@@ -435,6 +457,10 @@ Falsifiable, keyed to milestones that exist in the code:
    `vllm_spawn_lost_race`, and the generate stage's aggregate
    `batch_done` rate above the pair's 10.5k rows/s. Until then `single`
    stays the default.
+8. Population (ADR 0034 D8 rev. 2, multi cold start): at most two
+   `embedder_device` from `RagEmbedChunks` per job, the stage under
+   3 min, model pull under 60 s, vLLM ignition ≈ 180–200 s with zero
+   `vllm_unfittable_wait`.
 
 ## §8 Figure provenance
 

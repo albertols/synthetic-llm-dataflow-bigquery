@@ -649,3 +649,58 @@ def test_configure_options_explicit_state_cache_wins():
     opts = PipelineOptions(["--runner=DataflowRunner", "--max_cache_memory_usage_mb=64"])
     configure_pipeline_options(opts, "DataflowRunner", "r1")
     assert opts.view_as(WorkerOptions).max_cache_memory_usage_mb == 64
+
+
+# --- autoscaling: a pinned fleet stays pinned (ADR 0034 D9) -----------------
+# 2026-09-07 warm-rebuild + 2026-09-08 cold (both multi): the autoscaler
+# dropped to 1-2 workers during the parent's load / FK-pool phase and
+# re-provisioned VMs for the child stage — A_TABLE ran its first 3-8 min on
+# 1-2 workers (10.3 / ~11 min vs 6.7 on the run that kept 4).
+def test_autoscaling_auto_pins_none_when_initial_workers_is_given():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+    w = opts.view_as(WorkerOptions)
+    assert w.num_workers == 4
+    assert w.autoscaling_algorithm == "NONE"
+
+
+def test_autoscaling_auto_without_initial_workers_leaves_dataflow_default():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1")
+    assert opts.view_as(WorkerOptions).autoscaling_algorithm is None
+
+
+def test_autoscaling_throughput_keeps_scaling_even_with_initial_workers():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(
+        opts, "DataflowRunner", "r1", num_workers=4, autoscaling="throughput"
+    )
+    assert opts.view_as(WorkerOptions).autoscaling_algorithm is None
+
+
+def test_autoscaling_fixed_without_initial_workers_is_a_launch_error():
+    from sdfb_beam.cli.run_pipeline import resolve_autoscaling
+
+    assert resolve_autoscaling("fixed", 4) == "NONE"
+    assert resolve_autoscaling("auto", 4) == "NONE"
+    assert resolve_autoscaling("auto", None) is None
+    assert resolve_autoscaling("throughput", 4) is None
+    with pytest.raises(ValueError, match="autoscaling"):
+        resolve_autoscaling("fixed", None)
+    with pytest.raises(ValueError, match="autoscaling"):
+        resolve_autoscaling("bogus", 4)
+
+
+def test_explicit_beam_autoscaling_flag_wins():
+    opts = PipelineOptions(["--runner=DataflowRunner", "--autoscaling_algorithm=THROUGHPUT_BASED"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+    assert opts.view_as(WorkerOptions).autoscaling_algorithm == "THROUGHPUT_BASED"
+
+
+def test_parse_args_accepts_autoscaling():
+    from sdfb_beam.cli.run_pipeline import parse_args
+
+    args, _beam = parse_args([*_MIN_ARGS, "--autoscaling", "fixed"])
+    assert args.autoscaling == "fixed"
+    args, _beam = parse_args(_MIN_ARGS)
+    assert args.autoscaling == "auto"

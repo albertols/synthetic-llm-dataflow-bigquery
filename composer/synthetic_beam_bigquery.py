@@ -285,6 +285,18 @@ default_dag_params = {
                     "first stage starts on the whole fleet. Never above "
                     "maxWorkers.",
     ),
+    "autoscaling": Param(
+        default="auto",
+        type="string",
+        enum=["auto", "throughput", "fixed"],
+        description="auto = a fleet sized by initial_workers stays that "
+                    "size (Dataflow autoscaling NONE), otherwise "
+                    "THROUGHPUT_BASED. fixed = same pin, initial_workers "
+                    "required. throughput = always scale (ADR 0034 D9: the "
+                    "2026-09-07/08 multi runs lost ~4 min per job to "
+                    "mid-job scale-downs between the parent and child "
+                    "stages).",
+    ),
     "uniqueness_mode": Param(
         default="exact",
         type="string",
@@ -531,6 +543,7 @@ with models.DAG(
                     "dlq_table": "{{SDFB_DLQ_TABLE}}",
                     "num_rows": "{{ params.num_rows }}",
                     "initial_workers": "{{ params.initial_workers }}",
+                    "autoscaling": "{{ params.autoscaling }}",
                     "batch_size": "{{ params.batch_size }}",
                     "similarity": "{{ params.similarity }}",
                     # Salted per trigger: retriggering the same logical date

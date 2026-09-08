@@ -1,6 +1,6 @@
 # ADR 0034 — Generation throughput: one dedup barrier, one engine per process, a fleet that starts full (and the multi-process experiment)
 
-**Status:** ACCEPTED (2026-09-07) — D1–D3, D5–D7 verified on the 2026-09-07 R7 pair (single + multi SDK topology, 10M rows/table); D4 amended the same day after the pair exposed its fallback defect (see *Acceptance evidence*)
+**Status:** ACCEPTED (2026-09-07) — D1–D3, D5–D7 verified on the 2026-09-07 R7 pair (single + multi SDK topology, 10M rows/table); D4 amended the same day after the pair exposed its fallback defect and verified on the 09-07/09-08 multi pair; D8 revised (rev. 2) and D9 added 2026-09-08 after that pair (see *Acceptance evidence*)
 **Design:** [`docs/designs/2026-09-07-generation-throughput-where-time-goes.md`](../designs/2026-09-07-generation-throughput-where-time-goes.md)
 **Evidence:** the 2026-08-29 R6 pair — cold `2026-08-29_07_33_36-13355700596190055276` (93.8 min) and its immediate warm re-trigger `2026-08-29_09_49_17-12681434869969021419` (86.1 min), both `C_TABLE ◄═ A_TABLE`, 10M rows/table, PK 1.0, 0/10M orphans, `worker_logs.jsonl` + `_full_report.md` in each
 **Amends:** [ADR 0019](0019-rag-population-scoped-to-consumers.md) (embedder lifecycle) · [ADR 0030](0030-single-job-relational-generation.md) (launch topology) · [ADR 0033](0033-pool-ladder-integrity-at-scale.md) (prose ceiling) · the WS6 uniqueness modes ([design](../designs/2026-07-27-ws6-pipeline-shape.md))
@@ -134,17 +134,47 @@ acceptance run reads clean.
 `length_ceiling` clamps candidates before the format and novelty checks
 (ADR 0033 D5 covered prose only).
 
-**D8 — Two follow-ups from the acceptance pair.** (a) Under
-`sdk_containers=multi` the cold RAG population embeds run on CPU
-(`PipelineConfig.rag_embed_device`, resolved by the launcher from the
-client's `cross_process`): eight sibling embedders held the T4 while
-vLLM tried to spawn — 8 × 20 s `vllm_unfittable_wait`, 344 s ignition
-against 190 s single. The pool branch's own embedder (one process) keeps
-`auto`. (b) The launcher pins `max_cache_memory_usage_mb` to 512 when
-unset: the single-barrier read stage fetched its PK/identity group side
-inputs per bundle ("Retrieving state 62 times costed 60 seconds").
-`vllm_server_kept_alive` now fires only from a client that was bound to
-or spawned a server (40 lines from 38 idle clients on R7m).
+**D8 — Bound the cold population embed and let the pool branch wait
+for it (rev. 2, 2026-09-08).** The rag_chunks population branch embeds
+the ≤10k reference rows and the distinct free-text values with
+`BgeEmbedder`. Under `sdk_containers=multi` the acceptance pair fanned
+it out (`Reshuffle`) to every SDK process — eight CUDA contexts and
+eight weight loads per worker beside the vLLM spawn: 8 × 20 s
+`vllm_unfittable_wait`, 344 s ignition against 190 s on `single`.
+Rev. 1 (2026-09-07) moved those embeds to CPU; the 2026-09-08 cold run
+showed that 56 CPU embedders starve the rest of the VM instead: the
+model pull took 177.6 s (52.5 s the day before), the vLLM engine init
+598.7 s, and the population stage itself 15.4 min instead of 2.9. Rev. 2
+keeps the GPU (`PipelineConfig.rag_embed_device="auto"` on every
+topology) and bounds the *fan-out*: `PipelineConfig.rag_embed_shards`
+(default 2) keys the chunks into that many groups (`RagShard` →
+`RagShardGroup`) so at most two embedders exist per job whatever the
+topology, and the pool branch's trigger takes the embedded chunks as a
+side input (`AwaitRagPopulation`, only when a rag sink is configured) so
+the branch's first LLM call — the one that spawns vLLM — meets a free
+card and idle cores. The pool branch's own embedder (one process) is
+unchanged. Also from the acceptance pair: the launcher pins
+`max_cache_memory_usage_mb` to 512 when unset (the single-barrier read
+stage fetched its PK/identity group side inputs per bundle — "Retrieving
+state 62 times costed 60 seconds"), and `vllm_server_kept_alive` fires
+only from a client that was bound to or spawned a server (40 lines from
+38 idle clients on R7m).
+
+**D9 — A fleet you size by hand stays that size.** `autoscaling` =
+`auto` | `throughput` | `fixed` (template + DAG param,
+`run_pipeline --autoscaling`). `auto` (default) pins Dataflow's
+`autoscaling_algorithm=NONE` exactly when `initial_workers` is given;
+`fixed` pins it and refuses to launch without `initial_workers`;
+`throughput` keeps THROUGHPUT_BASED. An explicit Beam
+`--autoscaling_algorithm` always wins over the mode. Evidence: on both
+09-07 15:53 and 09-08 01:28 the autoscaler went 1 → 4 for the parent's
+generate stage, dropped to 1–2 workers during the parent's load and the
+child's pool phase, then re-provisioned VMs for the child's generate
+stage — A_TABLE ran its first minutes short-handed and each job paid
+≈ 4 min against the 09-07 07:33 run, whose fleet happened to stay up.
+The cost is a fixed 4-worker bill through load and cleanup, minutes on
+a 10M run; the `R7`/`R7m` tiers now pass `initial_workers=4` +
+`autoscaling=fixed`.
 
 **Evaluated, not adopted — NVIDIA MPS.** Dataflow's
 [NVIDIA Multi-Process Service](https://docs.cloud.google.com/dataflow/docs/gpu/use-nvidia-mps)
@@ -154,34 +184,41 @@ recommends it for `RunInference` with `model_copies > 1`, it forbids
 `no_use_multiple_sdk_containers`, and it warns against exceeding GPU
 memory with large models. Our GPU work is one vLLM **server** per
 worker reached over HTTP by every process (ADR 0014) — the only
-multi-process CUDA use was the cold population embed, which D8(a)
-moves to CPU. MPS would not change the KV budget that bounds the pool
+multi-process CUDA use is the cold population embed, which D8 bounds to
+`rag_embed_shards` processes that finish before vLLM spawns. MPS would
+not change the KV budget that bounds the pool
 ladders, adds a control daemon between vLLM and the driver, and the
 [driver guidance](https://docs.cloud.google.com/dataflow/docs/gpu/use-gpus#drivers)
 keeps `install-nvidia-driver:5xx` unchanged either way. Revisit only if
 the design ever runs more than one model process per GPU (e.g. two vLLM
 replicas on an L4 for parallel pool ladders).
 
-## Acceptance evidence — the 2026-09-07 R7 pair
+## Acceptance evidence — the 2026-09-07 R7 pair and the 09-07/09-08 multi pair
 
-Two 10M-row launches of the same pair on image `oss-pk-ready-00fc613`,
-`initial_workers` left empty (both started on **1** worker), read from
-`worker_logs.jsonl` and the console autoscaling chart (no report
-annexes yet); figure `assets/throughput-evolution.png`:
+Four 10M-row launches of the same pair, `initial_workers` left empty on
+every one (all started on **1** worker), read from `worker_logs.jsonl`
+and the console autoscaling chart; figure `assets/throughput-evolution.png`.
+The first two are on image `oss-pk-ready-00fc613`; the last two carry
+the D4 amendment and D8 rev. 1 (CPU population embeds). The 09-07 15:53
+launch was meant as a warm replay, but the taint preflight found the
+pools the R7 pair had persisted without source filters and rebuilt them
+(`pool_source_overlap` → delete + rebuild, as designed); its RAG store
+was warm. The 09-08 logs were exported with an exclusion filter (no
+`batch_start`/`batch_done`), so its per-table rates are stage spans:
 
-| | R6 cold (08-29) | R7 `single` | R7 `multi` |
-|---|---|---|---|
-| wall time | 93.8 min | ≈ 76.5 min | ≈ 50.5 min |
-| C_TABLE / A_TABLE generation | 23.5 / 19.2 min | 21.5 / 14.9 | **10.4 / 6.7** |
-| 10k-row batch at steady state | 26–29 s | 26–29 s | **5.6–6.7 s** |
-| dedup + load, C / A | 14.0 / 12.2 min | **7.8 / 6.5** | **3.4 / 3.0** |
-| engine builds per table | 32 | **4** (`engine_shared holders=2..8`) | one per process |
-| `dofn_setup_done` p50 (C_TABLE) | 75 s | **26 s** | 27 s |
-| vLLM ignition | 226 s | 190 s | 344 s (8 unfittable waits → D8a) |
-| cross-process spawn lock | n/a | n/a | 1 acquired + 1 wait + reuse, no OOM, no lost race |
-| `freetext_pool_length_clamped` A_COL_019 | absent | `max_len=35` | `max_len=35` |
-| workers | 2 → 4 at +27 min | 1 → 4 at +26 min | 1 → 2 at +29, 4 at +37 min |
-| source-domain fetches | OK (REST, 5.5 min) | **107/107 failed** | **459/459 failed** |
+| | R6 cold (08-29) | R7 `single` | R7 `multi` | multi, pools rebuilt (09-07 15:53) | multi cold, CPU embeds (09-08) |
+|---|---|---|---|---|---|
+| wall time | 93.8 min | ≈ 76.5 min | ≈ 50.5 min | ≈ 52.5 min | 56.9 min |
+| C_TABLE / A_TABLE generation | 23.5 / 19.2 min | 21.5 / 14.9 | **10.4 / 6.7** | 12.2 / 8.9 | ≈ 6 / ≈ 11 (A short-handed, D9) |
+| 10k-row batch at steady state | 26–29 s | 26–29 s | **5.6–6.7 s** | 6.6 s | (filtered out of the export) |
+| dedup + load, C / A | 14.0 / 12.2 min | **7.8 / 6.5** | **3.4 / 3.0** | 7.5 (both) | 8.2 (both) |
+| cold pool branch (critical path) | 7.9 min | 10.1 | 12.9 | 9.7 | 14.2 |
+| population embed stage | — | — | 2.9 min (GPU × 8 processes) | warm (`b1_chunks_reused`) | **15.4 min** (CPU × 56 processes) |
+| model pull / vLLM ignition | — / 226 s | — / 190 s | — / 344 s (8 unfittable waits) | 52.5 s / **183 s**, no wait | **177.6 s / 598.7 s** (CPU-starved) |
+| engine builds per table | 32 | **4** (`engine_shared holders=2..8`) | one per process | one per process | one per process |
+| cross-process spawn lock | n/a | n/a | 1 acquired + 1 wait + reuse, no OOM | 1 per worker, no OOM | 1 per worker, no OOM |
+| workers | 2 → 4 at +27 min | 1 → 4 at +26 min | 1 → 2 at +29, 4 at +37 min | 1 → 4 at +32, **dip to 2 at +37** | 1 → 4 at +20, **dip to 1 at +40** |
+| source-domain fetches | OK (REST, 5.5 min) | **107/107 failed** | **459/459 failed** | OK — `identifier_source_filter size=944582` | OK — same; Storage denied once per process (IAM role still ungranted), REST 22 s |
 
 The last row is the defect D4's amendment fixes: `PermissionDenied` on
 the Storage attempt, then `ValueError` ("Iterator has already started")
@@ -191,6 +228,17 @@ pool target (`A_COL_015` back to 94) were all inactive; the pools they
 persisted are candidates for the launcher's taint preflight
 (`pool_source_overlap` → delete + rebuild) and their landed rows need the
 E2E probe's `copy_ratio` before they count as clean.
+
+The 09-07/09-08 multi pair then verified that amendment (every fetch
+`size=944582`, the Storage attempt denied and disabled once per process
+because `roles/bigquery.readSessionUser` is still to be granted on the
+worker SA) and falsified D8 rev. 1: the CPU population embed is the
+whole difference between the 09-08 cold run's 56.9 min and a ≈ 45-min
+cold run — a 15.4-min population stage that also starved the model pull
+and the vLLM init on the same VM. Both runs show the same autoscaler
+shape (up for the parent, down between stages, up again for the child),
+which is D9's evidence. Launcher/boot variance accounts for the rest
+(11.6 vs 15.5 min).
 
 ## Consequences
 
@@ -224,12 +272,19 @@ E2E probe's `copy_ratio` before they count as clean.
   alter the FK-column marginal trade-off (`C_COL_007` warn, ADR 0031);
   it leaves the A_COL_037 clause example (28 chars on a 31-char column,
   `prompt_constraint_example_off_format` fired again) to the operator.
-- The multi topology is validated (3× the fleet rate at four workers,
-  5× per worker at two), but stays opt-in (`sdk_containers=multi`) for
-  one more launch: the D4 amendment and D8(a) are the only untested
-  changes and the next run must show `identifier_source_filter size=`
-  (not `_error`), zero `vllm_unfittable_wait` on a multi cold start, and
-  `initial_workers=4` from the first second.
+- The multi topology is validated on three launches (3× the fleet rate
+  at four workers, 5× per worker at two) and the D4 amendment on two,
+  but `multi` stays opt-in (`sdk_containers=multi`) for one more
+  launch: D8 rev. 2 and D9 are the untested changes. The next multi cold
+  start must show at most two population embedders per job
+  (`embedder_device` from `RagEmbedChunks`), a population stage back
+  under 3 min, a model pull under 60 s and vLLM ignition ≈ 180–200 s
+  with zero `vllm_unfittable_wait`, and — with `initial_workers=4` +
+  `autoscaling=fixed` — no `Starting Unified Worker` after
+  `workers_ready` and a worker count that never drops between the
+  parent and child stages. Expected wall time for that cold run:
+  ≈ 44–46 min (56.9 − 12.5 population/ignition − ≈ 4 autoscaler dip,
+  ± launcher variance).
 - Original acceptance list (kept for the record; status in the table above):
   `CombineByPk` absent from `dominant_stages`; `engine_shared` present
   and `dofn_setup_done` ≤ 4 per table; `initial_workers=4` → no harness

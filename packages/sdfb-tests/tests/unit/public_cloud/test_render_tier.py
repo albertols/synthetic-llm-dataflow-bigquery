@@ -113,3 +113,16 @@ def test_multi_process_scale_tier_lifts_the_pin():
 def test_shell_output_carries_sdk_containers():
     assert "SDK_CONTAINERS='single'" in rt.to_shell(*render("R1p", "citibike"))
     assert "SDK_CONTAINERS='multi'" in rt.to_shell(*render("R7m", "citibike"))
+
+
+def test_scale_tiers_pin_the_fleet_through_template_params():
+    """ADR 0034 D9: R7/R7m start at 4 workers AND keep them — the
+    autoscaler's mid-job dips cost the child stage 4 min on both 09-07/08
+    multi runs."""
+    for tier in ("R7", "R7m"):
+        params, job = render(tier, "citibike")
+        assert params["initial_workers"] == "4"
+        assert params["autoscaling"] == "fixed"
+        assert job["num_workers"] == "4"
+    smoke, _job = render("R1p", "citibike")
+    assert "autoscaling" not in smoke and "initial_workers" not in smoke
