@@ -12,6 +12,7 @@ from apache_beam.options.pipeline_options import (
     WorkerOptions,
 )
 from sdfb_beam.cli.run_pipeline import (
+    _DEFAULT_STATE_CACHE_MB,
     _DEFAULT_WORKER_DISK_GB,
     build_model_client,
     configure_pipeline_options,
@@ -586,3 +587,120 @@ def test_warm_pools_delete_failure_keeps_warm_path():
 
     store = _NoDeleteStore([_preflight_pool("c", ("real-1",))])
     assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is True
+
+
+# --- num_workers: start a scale run at its worker ceiling (ADR 0034) --------
+# The 2026-08-29 R6 pair launched on 2 workers and autoscaled to 4 only ~4
+# min into the first generate stage — C_TABLE ran 8 minutes at a quarter
+# of its steady-state rate. Like disk_size_gb, the initial count is pinned
+# from the launcher (the Flex Template environment field is not the
+# channel the DAG controls per trigger).
+def test_configure_options_dataflow_sets_num_workers_when_given():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+    assert opts.view_as(WorkerOptions).num_workers == 4
+
+
+def test_configure_options_dataflow_leaves_num_workers_unset_by_default():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1")
+    assert opts.view_as(WorkerOptions).num_workers is None
+
+
+def test_configure_options_explicit_beam_flag_wins_over_num_workers():
+    opts = PipelineOptions(["--runner=DataflowRunner", "--num_workers=2"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+    assert opts.view_as(WorkerOptions).num_workers == 2
+
+
+_MIN_ARGS = [
+    "--reference_table", "p.src.t",
+    "--landing_table", "p.land.t",
+    "--dlq_table", "p.q.dlq",
+    "--num_rows", "10",
+    "--run_id", "r1",
+    "--model_uri", "gs://b/synthetic/models/m/v1/",
+]
+
+
+def test_parse_args_accepts_initial_workers_as_an_optional_string():
+    from sdfb_beam.cli.run_pipeline import parse_args, resolve_num_workers
+
+    args, _beam = parse_args([*_MIN_ARGS, "--initial_workers", "4"])
+    assert resolve_num_workers(args.initial_workers) == 4
+    args, _beam = parse_args(_MIN_ARGS)
+    assert resolve_num_workers(args.initial_workers) is None
+    with pytest.raises(ValueError, match="initial_workers"):
+        resolve_num_workers("four")
+
+
+# --- state cache for the ResolveUniqueness side inputs (ADR 0034) ----------
+# 2026-09-07 R7: `Retrieving state 62 times costed 60 seconds ... consider
+# adding '--max_cache_memory_usage_mb'` on the single-barrier read stage —
+# Beam's default cache (100 MB in the harness; the option reads 0 = unset)
+# re-fetched the PK/identity group dicts per bundle.
+def test_configure_options_dataflow_pins_the_state_cache_size():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1")
+    assert opts.view_as(WorkerOptions).max_cache_memory_usage_mb == _DEFAULT_STATE_CACHE_MB
+
+
+def test_configure_options_explicit_state_cache_wins():
+    opts = PipelineOptions(["--runner=DataflowRunner", "--max_cache_memory_usage_mb=64"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1")
+    assert opts.view_as(WorkerOptions).max_cache_memory_usage_mb == 64
+
+
+# --- autoscaling: a pinned fleet stays pinned (ADR 0034 D9) -----------------
+# 2026-09-07 warm-rebuild + 2026-09-08 cold (both multi): the autoscaler
+# dropped to 1-2 workers during the parent's load / FK-pool phase and
+# re-provisioned VMs for the child stage — A_TABLE ran its first 3-8 min on
+# 1-2 workers (10.3 / ~11 min vs 6.7 on the run that kept 4).
+def test_autoscaling_auto_pins_none_when_initial_workers_is_given():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+    w = opts.view_as(WorkerOptions)
+    assert w.num_workers == 4
+    assert w.autoscaling_algorithm == "NONE"
+
+
+def test_autoscaling_auto_without_initial_workers_leaves_dataflow_default():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1")
+    assert opts.view_as(WorkerOptions).autoscaling_algorithm is None
+
+
+def test_autoscaling_throughput_keeps_scaling_even_with_initial_workers():
+    opts = PipelineOptions(["--runner=DataflowRunner"])
+    configure_pipeline_options(
+        opts, "DataflowRunner", "r1", num_workers=4, autoscaling="throughput"
+    )
+    assert opts.view_as(WorkerOptions).autoscaling_algorithm is None
+
+
+def test_autoscaling_fixed_without_initial_workers_is_a_launch_error():
+    from sdfb_beam.cli.run_pipeline import resolve_autoscaling
+
+    assert resolve_autoscaling("fixed", 4) == "NONE"
+    assert resolve_autoscaling("auto", 4) == "NONE"
+    assert resolve_autoscaling("auto", None) is None
+    assert resolve_autoscaling("throughput", 4) is None
+    with pytest.raises(ValueError, match="autoscaling"):
+        resolve_autoscaling("fixed", None)
+    with pytest.raises(ValueError, match="autoscaling"):
+        resolve_autoscaling("bogus", 4)
+
+
+def test_explicit_beam_autoscaling_flag_wins():
+    opts = PipelineOptions(["--runner=DataflowRunner", "--autoscaling_algorithm=THROUGHPUT_BASED"])
+    configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+    assert opts.view_as(WorkerOptions).autoscaling_algorithm == "THROUGHPUT_BASED"
+
+
+def test_parse_args_accepts_autoscaling():
+    from sdfb_beam.cli.run_pipeline import parse_args
+
+    args, _beam = parse_args([*_MIN_ARGS, "--autoscaling", "fixed"])
+    assert args.autoscaling == "fixed"
+    args, _beam = parse_args(_MIN_ARGS)
+    assert args.autoscaling == "auto"

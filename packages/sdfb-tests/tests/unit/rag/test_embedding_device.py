@@ -45,6 +45,7 @@ def test_auto_resolves_to_cuda_when_available(monkeypatch, tmp_path):
     log: dict = {}
     _fake_stack(monkeypatch, cuda_available=True, log=log)
     emb = BgeEmbedder(str(tmp_path), device="auto")
+    emb.ensure_loaded()
     assert emb.device == "cuda"
     assert log["moves"] == ["cuda"]
 
@@ -55,6 +56,7 @@ def test_auto_falls_back_to_cpu(monkeypatch, tmp_path):
     log: dict = {}
     _fake_stack(monkeypatch, cuda_available=False, log=log)
     emb = BgeEmbedder(str(tmp_path), device="auto")
+    emb.ensure_loaded()
     assert emb.device == "cpu"
 
 
@@ -64,6 +66,7 @@ def test_demote_to_cpu_moves_and_frees(monkeypatch, tmp_path):
     log: dict = {}
     _fake_stack(monkeypatch, cuda_available=True, log=log)
     emb = BgeEmbedder(str(tmp_path), device="auto")
+    emb.ensure_loaded()
     emb.demote_to_cpu()
     assert emb.device == "cpu"
     assert log["moves"] == ["cuda", "cpu"]
@@ -79,7 +82,9 @@ def test_explicit_cpu_never_touches_cuda(monkeypatch, tmp_path):
     log: dict = {}
     _fake_stack(monkeypatch, cuda_available=True, log=log)
     emb = BgeEmbedder(str(tmp_path))
+    emb.ensure_loaded()
     assert emb.device == "cpu"
+    assert log["moves"] == ["cpu"]
     emb.demote_to_cpu()
     assert log.get("emptied") is None
 
@@ -92,13 +97,13 @@ def _milestones(caplog) -> list[dict]:
     ]
 
 
-def test_construction_logs_embedder_device_milestone(monkeypatch, tmp_path, caplog):
+def test_load_logs_embedder_device_milestone(monkeypatch, tmp_path, caplog):
     from sdfb_core.rag.embedding import BgeEmbedder
 
     log: dict = {}
     _fake_stack(monkeypatch, cuda_available=True, log=log)
     with caplog.at_level("INFO"):
-        BgeEmbedder(str(tmp_path), device="auto")
+        BgeEmbedder(str(tmp_path), device="auto").ensure_loaded()
     devs = [m for m in _milestones(caplog) if m["name"] == "embedder_device"]
     assert devs and devs[0]["device"] == "cuda" and devs[0]["requested"] == "auto"
 
@@ -111,6 +116,7 @@ def test_demote_logs_embedder_demoted_only_when_leaving_cuda(
     log: dict = {}
     _fake_stack(monkeypatch, cuda_available=True, log=log)
     emb = BgeEmbedder(str(tmp_path), device="auto")
+    emb.ensure_loaded()
     with caplog.at_level("INFO"):
         emb.demote_to_cpu()
         emb.demote_to_cpu()  # idempotent second call must not log again
@@ -119,6 +125,7 @@ def test_demote_logs_embedder_demoted_only_when_leaving_cuda(
 
     caplog.clear()
     cpu_emb = BgeEmbedder(str(tmp_path))  # explicit cpu
+    cpu_emb.ensure_loaded()
     with caplog.at_level("INFO"):
         cpu_emb.demote_to_cpu()
     assert not [
@@ -150,6 +157,7 @@ def test_auto_stays_on_cpu_when_the_gpu_is_full(monkeypatch, tmp_path):
     log: dict = {}
     _with_mem(monkeypatch, free_bytes=2 * 1024**2, cuda_available=True, log=log)
     emb = BgeEmbedder(str(tmp_path), device="auto")
+    emb.ensure_loaded()
     assert emb.device == "cpu"
     assert log.get("moves") == ["cpu"], "must never attempt the .to(cuda)"
 
@@ -160,6 +168,7 @@ def test_auto_uses_cuda_when_there_is_ample_room(monkeypatch, tmp_path):
     log: dict = {}
     _with_mem(monkeypatch, free_bytes=8 * 1024**3, cuda_available=True, log=log)
     emb = BgeEmbedder(str(tmp_path), device="auto")
+    emb.ensure_loaded()
     assert emb.device == "cuda"
 
 
@@ -171,6 +180,7 @@ def test_auto_still_works_when_mem_get_info_is_unavailable(monkeypatch, tmp_path
     log: dict = {}
     _fake_stack(monkeypatch, cuda_available=True, log=log)
     emb = BgeEmbedder(str(tmp_path), device="auto")
+    emb.ensure_loaded()
     assert emb.device == "cuda"
 
 
@@ -208,6 +218,7 @@ def test_an_oom_on_move_degrades_to_cpu_instead_of_failing_the_bundle(
     del real_to
     with caplog.at_level("WARNING"):
         emb = BgeEmbedder(str(tmp_path), device="auto")
+        emb.ensure_loaded()
     assert emb.device == "cpu"
     assert log["moves"] == ["cuda", "cpu"]
     assert "embedder_cuda_oom_fallback" in caplog.text

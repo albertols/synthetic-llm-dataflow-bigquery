@@ -427,3 +427,65 @@ def test_narrow_length_band_is_not_a_ceiling():
 
     assert length_ceiling(_prose_profile().observed_values) is None
     assert length_ceiling(_fixed_width_prose_profile(35).observed_values) == 35
+
+
+# ---------------------------------------------------------------------------
+# ADR 0034 — the fixed-width ceiling also applies to MASK-gated columns.
+#
+# 2026-08-29 R6 (cold): A_COL_019 was gated by collapsed masks
+# (`prompt_constraint_example_off_format ... gate_lengths=mask`), so the
+# ADR 0033 prose ceiling never engaged and pool values ran to 48 chars
+# against a 35-char source (p95 42 vs 35). Masks collapse letter runs, so
+# they cannot see length — the ceiling must clamp BEFORE the mask check,
+# exactly as it does for prose.
+# ---------------------------------------------------------------------------
+def _mask_gated_fixed_width_profile(width: int = 35) -> ColumnProfile:
+    from sdfb_core.engines.text_shapes import build_shape_mix
+
+    names = [
+        "MARGARITA", "VALENTINO", "SEBASTIAN", "ALEJANDRA", "FRANCISCO",
+        "GUADALUPE", "ESPERANZA", "CRISTOBAL", "MAXIMILIA", "ANASTASIA",
+    ]
+    long_vals = [
+        f"TRANSFERENCIA A FAVOR DE {names[i % len(names)]} LOPEZ GARCIA"[:width]
+        for i in range(30)
+    ]
+    short_vals = [f"NOMINA {i}" for i in range(30)]
+    vals = tuple(long_vals + short_vals)
+    return ColumnProfile(
+        name="concept",
+        bq_type="STRING",
+        kind=ColumnKind.FREE_TEXT,
+        nullable=False,
+        null_fraction=0.0,
+        observed_values=vals,
+        text_examples=vals[:2],
+        shape_mix=build_shape_mix(vals),
+    )
+
+
+def test_mask_gated_candidates_are_clamped_to_the_fixed_width_ceiling(caplog):
+    import logging
+
+    from sdfb_core.engines.b1_rag.engine import _format_gate
+
+    prof = _mask_gated_fixed_width_profile(35)
+    gate = _format_gate(prof)
+    assert not gate.prose, "fixture must be mask-gated, not prose"
+
+    long_value = "TRANSFERENCIA A FAVOR DE CATALINAS RUIZ MORALES"  # 47
+    short_value = "NOMINA 77"
+
+    class _Client:
+        def generate_json(self, prompt, json_schema, **kw):
+            return [{"values": [long_value, short_value]}]
+
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        y = _pool_llm_yield(_Client(), "p", {}, prof, [], target=8)
+    assert long_value[:35] in y.pool
+    assert long_value not in y.pool
+    assert short_value in y.pool
+    assert y.format_rejected == 0
+    text = "\n".join(r.message for r in caplog.records)
+    assert "name=freetext_pool_length_clamped" in text
+    assert "max_len=35" in text

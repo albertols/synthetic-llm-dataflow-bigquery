@@ -15,11 +15,16 @@ def _fresh_b1_pool_cache():
     """B.1's free-text pool cache is deliberately process-lived (it must
     survive Dataflow bundle retries), so tests sharing a reference_digest
     would cross-pollute without this reset."""
+    from sdfb_beam.dofns.generate import _reset_engine_registry
     from sdfb_core.engines.b1_rag.engine import clear_free_text_pool_cache
 
+    # The shared-engine registry (ADR 0034) is process-lived for the same
+    # reason; tests that build DoFns with equal keys would share engines.
+    _reset_engine_registry()
     clear_free_text_pool_cache()
     yield
     clear_free_text_pool_cache()
+    _reset_engine_registry()
 
 
 # ---------------------------------------------------------------------------

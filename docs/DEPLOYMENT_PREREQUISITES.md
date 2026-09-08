@@ -139,6 +139,7 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 ### IAM — Dataflow worker SA
 
 - `bigquery.dataEditor` + `bigquery.jobUser` — landing/dlq/validation writes + reference `SELECT`.
+- `bigquery.readSessionUser` — the Storage Read API (`bigquery.readsessions.create`) for the per-column source-domain fetches ([ADR 0034](adr/0034-generation-throughput-single-barrier-shared-engines.md) D4). Without it the worker logs `source_values_arrow_fallback error=PermissionDenied` + `source_values_storage_api_disabled` once and pages the domain via REST (the 2026-08-29 run: 944k values in 5.5 min inside `DoFn.setup()`).
 - `storage.objectViewer` on the models bucket; `storage.objectAdmin` on staging/temp.
 
 ---

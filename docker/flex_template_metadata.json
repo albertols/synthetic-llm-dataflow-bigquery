@@ -53,6 +53,24 @@
       ]
     },
     {
+      "name": "initial_workers",
+      "label": "Initial worker count",
+      "helpText": "Initial Dataflow worker count (ADR 0034). Empty = Dataflow's default; the 2026-08-29 R6 pair started on 2 workers and autoscaled to 4 only ~4 min into the first generate stage. A 10M-row run should start at its maxWorkers. Must not exceed maxWorkers.",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "autoscaling",
+      "label": "Worker autoscaling mode",
+      "helpText": "auto (default): a fleet sized by initial_workers stays that size (autoscaling NONE), otherwise Dataflow's THROUGHPUT_BASED. fixed: same pin, initial_workers required. throughput: always scale. The 2026-09-07/08 multi runs lost ~4 min per job to mid-job scale-downs between the parent and child stages (ADR 0034 D9).",
+      "isOptional": true,
+      "regexes": [
+        "^(auto|throughput|fixed)?$"
+      ]
+    },
+    {
       "name": "batch_size",
       "label": "Batch size per generate_batch call",
       "helpText": "Records per LLM batch. Default 16.",
@@ -241,10 +259,10 @@
     {
       "name": "uniqueness_mode",
       "label": "Uniqueness enforcement mode",
-      "helpText": "exact (default) diverts every duplicate to the DLQ behind up to three shuffle barriers, so no row lands until generation finishes. streaming lands rows as they are generated and measures the duplicate rate instead; duplicate rows LAND, the run is still marked FAILED_BLOCKER, so re-run with write_disposition=overwrite.",
+      "helpText": "exact (default) diverts every duplicate to the DLQ behind ONE full-row shuffle barrier (PK/identity rules resolved from key-only groups, ADR 0034). exact_chained keeps the pre-ADR-0034 three-barrier chain (row digest -> PK -> identity) for A/B runs. streaming lands rows as they are generated and measures the duplicate rate instead; duplicate rows LAND, the run is still marked FAILED_BLOCKER, so re-run with write_disposition=overwrite.",
       "isOptional": true,
       "regexes": [
-        "^(exact|streaming)?$"
+        "^(exact|exact_chained|streaming)?$"
       ]
     },
     {

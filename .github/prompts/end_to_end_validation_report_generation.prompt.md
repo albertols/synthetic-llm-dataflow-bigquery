@@ -243,7 +243,12 @@ It uses ADC to compute, generically (schema introspected from
   workers-ready → cleanup) + dominant fused stage; and **worker-log engine
   milestones**: setup packages, **embedder warm-pull + load time**, **model
   weights loading**, **vLLM ignition**, **sdgx/CTGAN fit**, FAISS load, and the
-  **generation-stall max seconds** — with chronological durations between them,
+  **generation-stall max seconds** (read it as the longest
+  `DoFn.setup()` / bundle-processor-creation stall, NOT a batch stall:
+  the probe mines Beam's "Bundle processor … has been creating for at
+  least N seconds" WARNING, whose traceback names the setup frame —
+  on the 2026-08-29 R6 cold run it was `_fetch_identifier_domains`
+  paging 944k source values, ADR 0034) — with chronological durations between them,
   plus the worker image package versions (vllm/torch/transformers/faiss/sdgx).
 
 ### LLM-lifecycle forensics (mandatory)

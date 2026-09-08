@@ -176,6 +176,65 @@ The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
   unconditionally — required for the custom `ModelHandler`/DoFn `setup()`
   lifecycle this pipeline relies on to build the vLLM client once per worker
   rather than per bundle. Don't remove it.
+- **Initial worker count — `initial_workers` (ADR 0034).** Dataflow
+  starts a batch job below `maxWorkers` and scales up on backlog: the
+  2026-08-29 R6 pair launched on 2 workers and reached 4 only ~4 min into
+  the first generate stage (3 harness boots at 15:01 / 17:08), so
+  C_TABLE ran its first 8 minutes at ~2.5k rows/s against a 10.5k rows/s
+  steady state. Pass `initial_workers=4` (= `maxWorkers`) on every
+  10M-row trigger; leave it empty for smoke runs. The launcher pins it
+  through `WorkerOptions.num_workers` (`run_pipeline.configure_pipeline_options`),
+  the same channel as `disk_size_gb`; `run_e2e.sh` tiers carry it as
+  `job.num_workers` (`R7`) and as the template param `initial_workers`.
+- **Autoscaling mode — `autoscaling=auto|throughput|fixed` (ADR 0034
+  D9).** A fleet you sized by hand should stay that size: `auto`
+  (default) pins Dataflow's `autoscaling_algorithm=NONE` exactly when
+  `initial_workers` is given, `fixed` pins it and refuses to launch
+  without `initial_workers`, `throughput` keeps THROUGHPUT_BASED. The
+  2026-09-07 15:53 and 09-08 multi runs scaled 1 → 4 for the parent, fell
+  to 1–2 workers through the parent's load and the child's pool phase,
+  and re-provisioned VMs for the child — ≈ 4 min per job. `R7`/`R7m`
+  now carry `initial_workers=4` + `autoscaling=fixed`; an explicit Beam
+  `--autoscaling_algorithm` always wins.
+- **SDK-container topology — `sdk_containers=single|multi` (ADR 0034).**
+  `single` (default) is the pin described in the next bullet. `multi`
+  lifts it: Runner v2 starts one SDK process per vCPU, so the generate
+  stages — pure-Python DoFns that shared ONE interpreter per worker on
+  the R6 pair (8 harness threads, ~1 of 8 vCPUs busy, ~10.5k rows/s
+  fleet-wide) — get eight interpreters per worker. The vLLM client makes
+  that safe: a cross-process spawn mutex (a bound loopback port,
+  `spawn_lock_port` = 8001) serializes the pull → spawn → ready window
+  across processes, every other process binds to the one server through
+  the existing reuse probe, and teardown keeps the server alive
+  (`vllm_server_kept_alive`). The embedder loads lazily, so the seven
+  non-spawning processes hold no CUDA context. `multi` is an
+  **acceptance experiment**, not yet the default: run `R7m` (or trigger
+  the DAG with `sdk_containers=multi`) and read `sdk_container_topology`,
+  `vllm_spawn_lock_acquired` / `vllm_spawn_lock_wait` (exactly one
+  acquired per worker), `engine_shared holders=`, and the generate
+  stage's `batch_done` rate before promoting it. **Measured 2026-09-07
+  (R7 pair, 10M rows/table):** `single` ≈ 76.5 min, `multi` ≈ 50.5 min
+  — 10k-row batches in 5.6–6.7 s instead of 26–29 s, one spawn lock per
+  worker, no CUDA OOM, the fleet on 1–2 workers for most of the job
+  because `initial_workers` was left empty. Pass `sdk_containers=multi`
+  **and** `initial_workers=4` (+ `autoscaling=fixed`) together for a
+  10M run. Under `multi` the cold RAG population embed stays on the GPU
+  but is bounded to `rag_embed_shards` (2) processes, and the pool
+  branch waits for it before its first LLM call spawns vLLM (ADR 0034
+  D8 rev. 2 — rev. 1's CPU embeds starved the model pull and the vLLM
+  init on 2026-09-08: 598 s ignition, a 15-min population stage). The
+  one-figure comparison of both topologies inside a worker is
+  `docs/designs/assets/sdk-containers-topology.png` (design doc §5).
+- **NVIDIA MPS — evaluated, not enabled (ADR 0034).** Dataflow's
+  `worker_accelerator=…;use_nvidia_mps` shares one CUDA context across
+  SDK processes and is meant for `RunInference` with `model_copies > 1`
+  on one GPU. This pipeline runs ONE vLLM server per worker reached over
+  HTTP from every process; the only other GPU tenant is the cold
+  population embed, bounded to two processes that finish before vLLM
+  spawns, so MPS has no work to schedule and would only add a daemon in
+  front of the driver. Do not
+  add it without a design change that puts a second model process on the
+  card.
 - **ONE SDK process per GPU worker — add `no_use_multiple_sdk_containers`.**
   Runner v2's default spawns one sibling SDK process per vCPU (8 on
   `n1-standard-8` / `g2-standard-8`), and **every sibling runs the full DoFn
@@ -430,8 +489,15 @@ exactly this.
 
 | Value | Landing | Duplicates | Use when |
 |---|---|---|---|
-| `exact` (default) | after up to 3 shuffle barriers | diverted to the DLQ | you need duplicates removed |
+| `exact` (default) | after ONE full-row shuffle barrier (PK/identity resolved from key-only groups, [ADR 0034](adr/0034-generation-throughput-single-barrier-shared-engines.md)) | diverted to the DLQ | you need duplicates removed |
+| `exact_chained` | after 3 chained full-row barriers (row digest → PK → identity, the pre-ADR-0034 path) | diverted to the DLQ | A/B against `exact` only — same envelopes and counts, ~3x the shuffle bytes |
 | `streaming` | **incremental, as generated** | **land**, rate measured and gated | you want rows visible early and will re-run on a gate failure |
+
+`exact` and `exact_chained` divert the same rows with the same `rule_id`s
+and exact counts; `exact` keeps the row with the smallest digest per
+collision (deterministic) where the chain kept an arbitrary one. The
+2026-08-29 R6 pair measured the chain at ~26 of 94 minutes per job
+(123 GB through Dataflow Shuffle, `resource exhausted` retry storms).
 
 In `streaming`, duplicate rows land. The run is still marked
 `FAILED_BLOCKER` in `validation_runs`, so recover with
@@ -477,6 +543,10 @@ Store / pool lifecycle:
 | `pool_branch_setup_done` / `pool_branch_emitted` | the build branch ran |
 | `freetext_pool_built target=` | per-column pool landed; compare targets across stats tiers for the exact-distinct lift |
 | `freetext_pools_warm columns=` | every pool came from the persisted store / process cache — the designed warm path (ADR 0020/0033), not idle hardware |
+| `engine_shared holders=N` | this generate DoFn reused the process's engine (ADR 0034 D2): N holders share one build — 4 builds per table on the R7 single run instead of 32 |
+| `source_values_arrow_fallback error=` / `source_values_storage_api_disabled` | the Storage Read API attempt failed (`PermissionDenied` = grant `roles/bigquery.readSessionUser`); REST paging serves the process. A following `*_source_filter_error` means the fetch itself failed — the ADR 0023 filters are INACTIVE, treat the run's pools as tainted |
+| `vllm_spawn_lock_acquired` / `vllm_spawn_lock_wait` / `vllm_server_kept_alive` | `sdk_containers=multi` (ADR 0034 D6): exactly one process per worker acquires the spawn window; waiters bind to its server via the reuse probe; the server outlives the client that spawned it |
+| `sdk_container_topology topology=` | launcher: `single` (one SDK process per worker) or `multi` (one per vCPU) — decides the cross-process vLLM mode and the CPU population embed |
 | `llm_route_unused` (WARNING) | this setup has NO LLM-derived pool at all (every column expandable / typed / binary) — GPU workers idle; plan a CPU-only rerun (ADR 0027/0033) |
 | `freetext_pool_skipped_expandable` | the column draws from its shape mix — no pool built, by design (ADR 0026) |
 | `freetext_pool_ladder_retried column= error=` (WARNING) | a ladder thread hit a transient client condition and was rebuilt in-process; expect `freetext_pool_built` right after — a second failure raises (ADR 0033) |
@@ -732,6 +802,10 @@ ordering, dry-run first).
 
 **Trigger config:** `{"num_rows":"10000000","batch_size":"1000"}` — same
 table(s), same digest.
+
+**Fleet:** `initial_workers=4`, `autoscaling=fixed`, `sdk_containers=multi`
+(tier `R7m`, ADR 0034 D5/D6/D9) — the 09-07/09-08 multi runs lost ≈ 4 min
+per job to autoscaler dips between the parent and child stages.
 
 **Preconditions:** all stores populated and NOT truncated since the last
 cold run (`freetext_pools`, `rag_chunks`, `source_table_stats`); no

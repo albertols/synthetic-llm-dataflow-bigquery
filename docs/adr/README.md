@@ -66,3 +66,4 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0031 — Referential integrity by construction: joint FK key draws (IPF-fitted weights, fk.orphan gate; supersedes per-column pools)](0031-joint-fk-key-draws.md)
 - [0032 — Relationships are config, not table descriptions (config/relationships/*.yaml; supersedes 0021)](0032-relationships-as-config.md)
 - [0033 — Pool-ladder integrity at scale (transient-retry ladders, filter-sized targets, format-collapse exit, prose ceiling, warm-pool semantics; amends 0018/0022/0027)](0033-pool-ladder-integrity-at-scale.md)
+- [0034 — Generation throughput: one dedup barrier, one engine per process, a fleet that starts full, lazy embedder, Storage-API domains, the multi-process SDK experiment (amends 0019/0030/0033)](0034-generation-throughput-single-barrier-shared-engines.md)
