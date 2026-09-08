@@ -67,6 +67,80 @@ def _reset_setup_failures() -> None:
         _SETUP_FAILURES.clear()
 
 
+# ADR 0034 — ONE engine per (engine, run, landing table, reference digest)
+# per worker PROCESS, shared by every bundle thread. The 2026-08-29 R6
+# pair ran 32 GenerateRecordsDoFn instances per table and every one built
+# its own engine (chunk-store read, FAISS index, pool-store reads,
+# source-domain fetches, FK key-pool fit): 2,940 thread-seconds of setup
+# on C_TABLE alone, serialized on the process-level single-flight locks,
+# for state the sibling threads already held. Holders are refcounted; the
+# engine is torn down when the LAST holder releases it, so a lone DoFn
+# keeps the historical setup → teardown lifecycle.
+class _EngineEntry:
+    __slots__ = ("build_lock", "client", "engine", "evicted", "refs")
+
+    def __init__(self) -> None:
+        self.build_lock = threading.Lock()
+        self.engine = None
+        self.client = None  # the builder's ModelClient — torn down with it
+        self.refs = 0
+        self.evicted = False
+
+
+_ENGINE_REGISTRY: dict[tuple, _EngineEntry] = {}
+_ENGINE_REGISTRY_LOCK = threading.Lock()
+
+
+def _reset_engine_registry() -> None:
+    """Test hook — production state is deliberately process-lived."""
+    with _ENGINE_REGISTRY_LOCK:
+        _ENGINE_REGISTRY.clear()
+
+
+def _acquire_shared_engine(key: tuple, build, model_client):
+    """The process's engine for ``key``, building it (once) if absent.
+
+    Returns ``(engine, holders)``. The build runs under a per-key lock, so
+    concurrent siblings wait for one build instead of racing eight; a
+    build that raises leaves nothing behind (the next caller builds). An
+    entry evicted by the last release while a caller waited is retried
+    against a fresh entry, never handed out torn down.
+    """
+    while True:
+        with _ENGINE_REGISTRY_LOCK:
+            entry = _ENGINE_REGISTRY.get(key)
+            if entry is None:
+                entry = _EngineEntry()
+                _ENGINE_REGISTRY[key] = entry
+        with entry.build_lock:
+            if entry.evicted:
+                continue
+            if entry.engine is None:
+                entry.engine = build()
+                entry.client = model_client
+            with _ENGINE_REGISTRY_LOCK:
+                if _ENGINE_REGISTRY.get(key) is not entry:
+                    continue  # evicted between the build and the bind
+                entry.refs += 1
+                return entry.engine, entry.refs
+
+
+def _release_shared_engine(key: tuple, engine):
+    """Drop one holder; returns ``(engine, client)`` to tear down when it
+    was the last, else ``None``. Eviction happens under the registry lock
+    so no newcomer can bind to an engine about to be torn down."""
+    with _ENGINE_REGISTRY_LOCK:
+        entry = _ENGINE_REGISTRY.get(key)
+        if entry is None or entry.engine is not engine:
+            return None
+        entry.refs -= 1
+        if entry.refs > 0:
+            return None
+        del _ENGINE_REGISTRY[key]
+        entry.evicted = True
+    return entry.engine, entry.client
+
+
 class GenerateRecordsDoFn(beam.DoFn):
     """Wraps a `GenerationEngine` inside Beam's worker lifecycle."""
 
@@ -94,6 +168,7 @@ class GenerateRecordsDoFn(beam.DoFn):
         # instance, just one hop later.
         self.expect_fk_side = expect_fk_side
         self._engine = None  # built in setup() (or first process())
+        self._engine_key_held: tuple = ()
         # Identity columns this DoFn synthesizes — resolved once the
         # engine exists, since a constraint-routed column owns itself.
         self._identity_columns: list[str] = list(ctx.identity_columns or ())
@@ -259,9 +334,33 @@ class GenerateRecordsDoFn(beam.DoFn):
             )
             self.ctx = ctx
         engine_class = get_engine(self.engine_name)
-        self._engine = engine_class()
-        self._engine.setup(self.model_client, ctx)
+        key = self._engine_key(ctx)
+
+        def _build():
+            engine = engine_class()
+            engine.setup(self.model_client, ctx)
+            return engine
+
+        self._engine, holders = _acquire_shared_engine(
+            key, _build, self.model_client
+        )
+        self._engine_key_held = key
+        if holders > 1:
+            # Evidence line for the next run: N setups became one build.
+            log_milestone("engine_shared", engine=self.engine_name, holders=holders)
         self._resolve_identity_columns()
+
+    def _engine_key(self, ctx) -> tuple:
+        """What makes two DoFn instances interchangeable engine holders:
+        same engine, same run, same landing table (ADR 0030 puts N tables
+        in one process), same reference sample."""
+        schema = getattr(ctx, "table_schema", None)
+        return (
+            self.engine_name,
+            getattr(ctx, "pipeline_run_id", ""),
+            getattr(ctx, "landing_table", "") or getattr(schema, "fqn", ""),
+            getattr(ctx, "reference_digest", ""),
+        )
 
     def _resolve_identity_columns(self) -> None:
         """Identity columns this DoFn still synthesizes.
@@ -372,13 +471,25 @@ class GenerateRecordsDoFn(beam.DoFn):
             )
 
     def teardown(self):
+        # The shared engine (and the ModelClient it was built with) go
+        # down with the LAST holder; every DoFn still releases its own
+        # client, which is a no-op for a client that never ignited.
+        released = None
         try:
             if self._engine is not None:
                 try:
-                    self._engine.teardown()
+                    released = _release_shared_engine(
+                        self._engine_key_held, self._engine
+                    )
+                    if released is not None:
+                        released[0].teardown()
                 finally:
                     self._engine = None
         finally:
-            client_teardown = getattr(self.model_client, "teardown", None)
-            if callable(client_teardown):
-                client_teardown()
+            clients = [self.model_client]
+            if released is not None and released[1] is not self.model_client:
+                clients.append(released[1])
+            for client in clients:
+                client_teardown = getattr(client, "teardown", None)
+                if callable(client_teardown):
+                    client_teardown()

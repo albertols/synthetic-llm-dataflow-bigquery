@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -240,6 +241,40 @@ def _assert_dtype_supported(
         )
 
 
+class _PortMutex:
+    """Cross-PROCESS mutex for the spawn window: a bound loopback port.
+
+    Dataflow's default topology runs one SDK harness process per vCPU
+    (ADR 0034); `_SETUP_LOCK` only serializes the threads of ONE of them.
+    Every SDK container on a worker shares the host network — the same
+    fact the reuse probe on `127.0.0.1:8000` already relies on — so a
+    port only one process can bind is a lock every process can see, with
+    no shared filesystem assumption. Released by closing the socket, and
+    by the kernel if the holder dies.
+    """
+
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+        self._sock: socket.socket | None = None
+
+    def try_acquire(self) -> bool:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((self.host, self.port))
+            sock.listen(1)
+        except OSError:
+            sock.close()
+            return False
+        self._sock = sock
+        return True
+
+    def release(self) -> None:
+        sock, self._sock = self._sock, None
+        if sock is not None:
+            sock.close()
+
+
 class VLLMModelClient:
     """`ModelClient` impl that owns a vLLM OpenAI-compatible server.
 
@@ -259,6 +294,8 @@ class VLLMModelClient:
         startup_timeout_s: float = DEFAULT_STARTUP_TIMEOUT_S,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
         guided_decoding_backend: str = "outlines",
+        cross_process: bool = False,
+        spawn_lock_port: int | None = None,
     ) -> None:
         """Configure the client. No heavy work happens here.
 
@@ -281,8 +318,19 @@ class VLLMModelClient:
                 backend server-side (`structured_outputs_config`, default
                 `auto`); per-request backend selection no longer exists, so
                 this value is not sent with requests.
+            cross_process: sibling SDK PROCESSES on this worker race for the
+                one GPU (Dataflow's default multi-container topology, ADR
+                0034): the spawn window is guarded by `_PortMutex` on
+                ``spawn_lock_port`` and teardown never terminates the server
+                (another process may still be bound to it; the worker VM
+                reaps it at job end).
+            spawn_lock_port: the mutex port; default ``port + 1``.
         """
         self.model_uri = model_uri
+        self.cross_process = cross_process
+        self.spawn_lock_port = (
+            spawn_lock_port if spawn_lock_port is not None else port + 1
+        )
         self.vllm_server_kwargs: dict[str, Any] = dict(vllm_server_kwargs or {})
         self.local_model_dir = local_model_dir
         self.port = port
@@ -318,6 +366,8 @@ class VLLMModelClient:
         thread does the pull → spawn → ready sequence while the rest block,
         then bind to the now-healthy server via the reuse probe (2026-07-16
         b2_library run: 3 unserialized spawns OOMed each other off one T4).
+        Under ``cross_process`` the same window is also serialized across
+        the worker's SDK processes by `_PortMutex` (ADR 0034).
 
         1. Pull weights GCS → `local_model_dir` (skipped for a local path).
         2. Spawn the vLLM OpenAI server subprocess.
@@ -345,73 +395,122 @@ class VLLMModelClient:
                 if self.model_uri.startswith("gs://")
                 else self.model_uri
             )
-            if self._probe_reusable_server(expected_model):
-                self._served_model_name = expected_model
-                self._client = self._build_openai_client()
-                self._bind_server_locked()
-                log_milestone(
-                    "vllm_reuse", seconds=round(time.monotonic() - t0, 1)
-                )
-                log_milestone(
-                    "model_client_setup_done",
-                    seconds=round(time.monotonic() - t0, 1),
-                )
-                logger.info(
-                    "Reusing healthy vLLM server already serving %r at %s "
-                    "(skipping weight pull and spawn).",
-                    expected_model,
-                    self.base_url,
-                )
+            if self._try_reuse(expected_model, t0):
                 return
+            if self.cross_process:
+                self._setup_cross_process(expected_model, t0)
+                return
+            self._pull_spawn_bind(t0)
 
-            if self.model_uri.startswith("gs://"):
-                log_milestone("model_pull_start", uri=self.model_uri)
-                t_pull = time.monotonic()
-                self._pull_weights()
+    def _try_reuse(self, expected_model: str, t0: float) -> bool:
+        """Bind to a healthy server already serving `expected_model`."""
+        if not self._probe_reusable_server(expected_model):
+            return False
+        self._served_model_name = expected_model
+        self._client = self._build_openai_client()
+        self._bind_server_locked()
+        log_milestone("vllm_reuse", seconds=round(time.monotonic() - t0, 1))
+        log_milestone(
+            "model_client_setup_done",
+            seconds=round(time.monotonic() - t0, 1),
+        )
+        logger.info(
+            "Reusing healthy vLLM server already serving %r at %s "
+            "(skipping weight pull and spawn).",
+            expected_model,
+            self.base_url,
+        )
+        return True
+
+    def _setup_cross_process(self, expected_model: str, t0: float) -> None:
+        """Spawn only while holding the cross-process mutex; otherwise wait
+        for the holder's server to answer the reuse probe (ADR 0034)."""
+        deadline = time.monotonic() + self.startup_timeout_s
+        mutex = _PortMutex(self.host, self.spawn_lock_port)
+        announced = False
+        while True:
+            if mutex.try_acquire():
+                try:
+                    log_milestone(
+                        "vllm_spawn_lock_acquired", port=self.spawn_lock_port
+                    )
+                    # The previous holder may have brought the server up
+                    # between our last probe and the bind.
+                    if self._try_reuse(expected_model, t0):
+                        return
+                    self._pull_spawn_bind(t0)
+                    return
+                finally:
+                    mutex.release()
+            if not announced:
                 log_milestone(
-                    "model_pull_done",
-                    seconds=round(time.monotonic() - t_pull, 1),
-                )
-                self._served_model_name = self.local_model_dir
-            else:
-                # Already-local weights; serve them in place.
-                logger.info(
-                    "model_uri %r is not a gs:// URI — serving it as a local "
-                    "path (skipping GCS pull).",
-                    self.model_uri,
-                )
-                self._served_model_name = self.model_uri
-
-            # Fail fast on T4+bf16 instead of letting vLLM stall and the
-            # engines fall back to memorizing reference data.
-            self._assert_gpu_dtype_compatible()
-
-            failures = _SPAWN_FAILURES.get(self.base_url, 0)
-            if failures >= _MAX_CONSECUTIVE_SPAWN_FAILURES:
-                log_milestone(
-                    "vllm_spawn_suppressed",
-                    level=logging.ERROR,
-                    failures=failures,
+                    "vllm_spawn_lock_wait",
+                    port=self.spawn_lock_port,
                     url=self.base_url,
                 )
-                raise RuntimeError(
-                    f"vLLM startup failed {failures} consecutive times in "
-                    f"this process for {self.base_url}; suppressing further "
-                    "spawn attempts. See the first failure's log for the "
-                    "root cause (2026-07-27 run: 52 doomed spawn cycles "
-                    "burned 50 minutes before the job failed)."
+                announced = True
+            if self._try_reuse(expected_model, t0):
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"vLLM spawn lock on port {self.spawn_lock_port} was held "
+                    f"by another process for {self.startup_timeout_s}s and no "
+                    f"server serving {expected_model!r} appeared at "
+                    f"{self.base_url}."
                 )
+            time.sleep(self.poll_interval_s)
 
-            log_milestone("vllm_spawn")
-            self._spawn_until_ready(failures)
-            _SPAWN_FAILURES[self.base_url] = 0
-            self._client = self._build_openai_client()
-            self._bind_server_locked()
-            log_milestone("vllm_ready", seconds=round(time.monotonic() - t0, 1))
+    def _pull_spawn_bind(self, t0: float) -> None:
+        """The pull → dtype guard → spawn → ready → client sequence.
+        Caller holds `_SETUP_LOCK` (and the cross-process mutex)."""
+        if self.model_uri.startswith("gs://"):
+            log_milestone("model_pull_start", uri=self.model_uri)
+            t_pull = time.monotonic()
+            self._pull_weights()
             log_milestone(
-                "model_client_setup_done", seconds=round(time.monotonic() - t0, 1)
+                "model_pull_done",
+                seconds=round(time.monotonic() - t_pull, 1),
             )
-            logger.info("vLLM server ready at %s", self.base_url)
+            self._served_model_name = self.local_model_dir
+        else:
+            # Already-local weights; serve them in place.
+            logger.info(
+                "model_uri %r is not a gs:// URI — serving it as a local "
+                "path (skipping GCS pull).",
+                self.model_uri,
+            )
+            self._served_model_name = self.model_uri
+
+        # Fail fast on T4+bf16 instead of letting vLLM stall and the
+        # engines fall back to memorizing reference data.
+        self._assert_gpu_dtype_compatible()
+
+        failures = _SPAWN_FAILURES.get(self.base_url, 0)
+        if failures >= _MAX_CONSECUTIVE_SPAWN_FAILURES:
+            log_milestone(
+                "vllm_spawn_suppressed",
+                level=logging.ERROR,
+                failures=failures,
+                url=self.base_url,
+            )
+            raise RuntimeError(
+                f"vLLM startup failed {failures} consecutive times in "
+                f"this process for {self.base_url}; suppressing further "
+                "spawn attempts. See the first failure's log for the "
+                "root cause (2026-07-27 run: 52 doomed spawn cycles "
+                "burned 50 minutes before the job failed)."
+            )
+
+        log_milestone("vllm_spawn")
+        self._spawn_until_ready(failures)
+        _SPAWN_FAILURES[self.base_url] = 0
+        self._client = self._build_openai_client()
+        self._bind_server_locked()
+        log_milestone("vllm_ready", seconds=round(time.monotonic() - t0, 1))
+        log_milestone(
+            "model_client_setup_done", seconds=round(time.monotonic() - t0, 1)
+        )
+        logger.info("vLLM server ready at %s", self.base_url)
 
     def _spawn_until_ready(self, failures: int) -> None:
         """Spawn + readiness poll, waiting out a transiently unfittable card.
@@ -457,7 +556,15 @@ class VLLMModelClient:
         threads that were still generating against it).
 
         Safe to call when `setup()` never ran or already torn down.
+
+        Under ``cross_process`` the server is never terminated here: a
+        sibling SDK process may still be bound to it, and its refcount is
+        not ours to see. The subprocess handle is parked; the worker VM
+        reaps it at job end (ADR 0034).
         """
+        if self.cross_process:
+            self._teardown_cross_process()
+            return
         with _SETUP_LOCK:
             self._client = None
             if self._bound:
@@ -493,6 +600,30 @@ class VLLMModelClient:
                 server.wait(timeout=10)
             except Exception:
                 logger.error("vLLM server did not exit on SIGKILL.")
+
+    def _teardown_cross_process(self) -> None:
+        with _SETUP_LOCK:
+            self._client = None
+            was_bound = self._bound
+            if self._bound:
+                self._bound = False
+                _SERVER_REFS[self.base_url] = _SERVER_REFS.get(self.base_url, 1) - 1
+            server, self._server = self._server, None
+            if server is not None:
+                _PARKED_SERVERS[self.base_url] = server
+        if not was_bound and server is None:
+            # A client that never ignited left nothing running (2026-09-07
+            # R7m: 40 kept-alive lines, 38 of them from such clients).
+            return
+        fields: dict[str, Any] = {"url": self.base_url}
+        if server is not None:
+            fields["pid"] = getattr(server, "pid", None)
+        log_milestone("vllm_server_kept_alive", **fields)
+        logger.info(
+            "Keeping vLLM server at %s alive (cross-process mode): sibling "
+            "SDK processes may still be bound to it.",
+            self.base_url,
+        )
 
     # ------------------------------------------------------------------
     # Generation

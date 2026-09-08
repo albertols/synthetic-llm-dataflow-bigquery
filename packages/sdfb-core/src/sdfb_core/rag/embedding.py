@@ -30,7 +30,7 @@ import hashlib
 import logging
 import math
 import threading
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from sdfb_core.observability import log_milestone
 
@@ -153,30 +153,41 @@ class BgeEmbedder:
     """Production `Embedder` wrapping `bge-small-en-v1.5` on CPU or CUDA.
 
     Loads from a **local directory** only (weights mirrored to GCS, warm-
-    pulled on the M4). `transformers` + `torch` are imported lazily in
-    `__init__` so this class can be referenced (and the module imported) on
-    a laptop without the `[embedding]` extra installed. Mean-pooled,
-    L2-normalized CLS-free pooling per the bge recipe.
+    pulled on the M4). `transformers` + `torch` are imported lazily — on
+    first use, never at module scope or construction — so this class can be
+    referenced (and the module imported) on a laptop without the
+    `[embedding]` extra installed. Mean-pooled, L2-normalized CLS-free
+    pooling per the bge recipe.
 
-    ``device="auto"`` resolves to CUDA when available (the 2026-07-25 E2E
-    embedded 33,610 chunks on CPU for 25 min while both T4s idled) — and
-    callers MUST `demote_to_cpu()` once bulk embedding is done, because
-    vLLM's ignition sizes its KV-cache budget from free GPU memory
-    (ADR 0019).
+    **Lazy by design (ADR 0034).** Construction records the path and the
+    requested device and loads NOTHING; `ensure_loaded()` (called by
+    `embed()`) imports the stack, resolves the device, loads the weights and
+    moves them — once. A store-warm generate setup (row-doc vectors from
+    `rag_chunks`, pools from `freetext_pools`) never embeds a text, and the
+    2026-08-29 R6 pair built 32 such embedders per table, each eagerly
+    loading 130 MB of weights into a CUDA context beside vLLM.
+
+    ``device="auto"`` resolves to CUDA when available and roomy (the
+    2026-07-25 E2E embedded 33,610 chunks on CPU for 25 min while both T4s
+    idled) — and callers MUST `demote_to_cpu()` once bulk embedding is done,
+    because vLLM's ignition sizes its KV-cache budget from free GPU memory
+    (ADR 0019). A demote BEFORE any load pins the eventual load to CPU: the
+    caller has handed the card to vLLM, and a later seed-example embed is
+    tiny.
 
     This class is exercised on the M4 (mark such tests `@pytest.mark.gpu`
     or guard on import availability); the contract tests use
     `HashingEmbedder` instead.
     """
 
-    # Construction is serialized per process (2026-07-24 E2E postmortem):
+    # Loading is serialized per process (2026-07-24 E2E postmortem):
     # transformers v5's lazy `_LazyModule` is not thread-safe — 8 Beam bundle
     # threads hitting the first `from transformers import AutoModel`
     # concurrently raise `ImportError: cannot import name 'AutoModel'` for
     # most of them (reproduced 30/30 locally on 5.8.1). Holding the lock over
     # `from_pretrained` too keeps concurrent mmap weight-loads from stacking
     # up. Instances stay per-caller: HF fast tokenizers are NOT safe to
-    # share across threads ("Already borrowed"), so we serialize the build,
+    # share across threads ("Already borrowed"), so we serialize the load,
     # not the object.
     _construction_lock: threading.Lock = threading.Lock()
 
@@ -188,13 +199,45 @@ class BgeEmbedder:
         max_length: int = 512,
         device: str = "cpu",
     ) -> None:
+        self._model_path = model_path
+        self._dim = dim
+        self._max_length = max_length
+        # The requested device ("auto" | "cuda" | "cpu"); resolved at load.
+        self._requested = device
+        self._device = device
+        self._torch: Any = None
+        self._tokenizer: Any = None
+        self._model: Any = None
+        self._loaded = False
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+    @property
+    def device(self) -> str:
+        """The resolved device once loaded; the requested one before."""
+        return self._device
+
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    def ensure_loaded(self) -> None:
+        """Import the HF stack, resolve the device and load the weights —
+        once, process-serialized. Idempotent."""
+        if self._loaded:
+            return
         with BgeEmbedder._construction_lock:
+            if self._loaded:
+                return
             # Lazy heavy imports — never at module scope (keeps sdfb-core
             # pure).
             import torch
             from transformers import AutoModel, AutoTokenizer
 
-            requested = device
+            requested = self._requested
+            device = requested
             if device == "auto":
                 device = _resolve_auto_device(torch)
             # One milestone at the seam covers every embedder user (engine
@@ -204,16 +247,16 @@ class BgeEmbedder:
             # and nothing in the logs said so.
             log_milestone("embedder_device", device=device, requested=requested)
             self._torch = torch
-            self._dim = dim
-            self._max_length = max_length
             self._device = device
             # local_files_only=True is belt-and-braces on top of
             # HF_HUB_OFFLINE=1: a local path with this flag can never reach
             # the Hub.
             self._tokenizer = AutoTokenizer.from_pretrained(
-                model_path, local_files_only=True
+                self._model_path, local_files_only=True
             )
-            model = AutoModel.from_pretrained(model_path, local_files_only=True)
+            model = AutoModel.from_pretrained(
+                self._model_path, local_files_only=True
+            )
             # Belt and braces on top of the free-VRAM check above: another
             # process can fill the card between the check and the move. A
             # slower CPU embedder is right; a failed DoFn.setup() is not —
@@ -233,21 +276,20 @@ class BgeEmbedder:
                 self._device = device
                 self._model = model.to(device)
             self._model.eval()
-
-    @property
-    def dim(self) -> int:
-        return self._dim
-
-    @property
-    def device(self) -> str:
-        return self._device
+            self._loaded = True
 
     def demote_to_cpu(self) -> None:
         """Move weights to CPU and release the CUDA cache. Idempotent.
 
         Callers demote as soon as bulk embedding is done: vLLM's ignition
         sizes its KV-cache budget from free GPU memory, so a resident
-        embedder must not still be holding VRAM by then (ADR 0019)."""
+        embedder must not still be holding VRAM by then (ADR 0019). Before
+        any load there is nothing to release — the eventual load is pinned
+        to CPU instead, so a demoted embedder can never take VRAM later."""
+        if not self._loaded:
+            self._requested = "cpu"
+            self._device = "cpu"
+            return
         if self._device != "cuda":
             return
         self._model = self._model.to("cpu")
@@ -260,6 +302,7 @@ class BgeEmbedder:
         log_milestone("embedder_demoted")
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.ensure_loaded()
         torch = self._torch
         out: list[list[float]] = []
         # Modest batches keep CPU memory bounded on a 10k-row reference.

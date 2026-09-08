@@ -9,6 +9,8 @@ defaults:
     machine_type: n1-standard-8
     accelerator: "type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx"
     max_workers: "1"          # cost cap: override per tier only if needed
+    num_workers: ""           # initial workers; empty = Dataflow default (ADR 0034)
+    sdk_containers: single    # single = one SDK process per worker (GPU pin); multi lifts it (ADR 0034)
     expect: SUCCESS
   params:
     reference_rows_limit: "10000"
@@ -55,3 +57,14 @@ tiers:
     params: {seed: "42"}
   P7:      # pk gate isolated from identity synthesis
     params: {identity_cols: ""}
+  R7:      # 10M-row scale tier: start at the worker ceiling AND keep it
+           # (ADR 0034 D5/D9 — the R6 pair autoscaled 2->4 only ~4 min into
+           # the first stage; the 09-07/08 multi runs then lost ~4 min per
+           # job to scale-downs between the parent and child stages)
+    params: {num_rows: "10000000", batch_size: "10000", initial_workers: "4", autoscaling: fixed}
+    job: {max_workers: "4", num_workers: "4"}
+  R7m:     # R7 on Dataflow's default multi-process SDK topology (ADR 0034
+           # experiment: 8 Python processes per worker instead of 1; the
+           # cross-process vLLM spawn mutex keeps one server per worker)
+    params: {num_rows: "10000000", batch_size: "10000", initial_workers: "4", autoscaling: fixed}
+    job: {max_workers: "4", num_workers: "4", sdk_containers: multi}

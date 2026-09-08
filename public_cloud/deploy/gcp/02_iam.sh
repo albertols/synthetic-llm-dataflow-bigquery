@@ -30,6 +30,10 @@ grant "${WORKER_SA}" roles/dataflow.worker
 grant "${WORKER_SA}" roles/dataflow.developer
 grant "${WORKER_SA}" roles/bigquery.dataEditor
 grant "${WORKER_SA}" roles/bigquery.jobUser
+# ADR 0034 D4: source-domain fetches stream through the BigQuery Storage
+# Read API (bigquery.readsessions.create). Without this the worker logs
+# `source_values_storage_api_disabled` once and pages via REST.
+grant "${WORKER_SA}" roles/bigquery.readSessionUser
 grant "${WORKER_SA}" roles/artifactregistry.reader
 
 # Cloud Build (custom SA => CLOUD_LOGGING_ONLY in both cloudbuild YAMLs).

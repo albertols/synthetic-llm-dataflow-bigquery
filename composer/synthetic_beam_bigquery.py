@@ -262,13 +262,51 @@ default_dag_params = {
                     "empty. The table is NEVER auto-created: bq mk it from "
                     "config/bq_schema/synthetic_rag/freetext_pools.schema.json.",
     ),
+    "sdk_containers": Param(
+        default="single",
+        type="string",
+        enum=["single", "multi"],
+        description="SDK-container topology for vLLM launches (ADR 0034). "
+                    "single = one SDK process per worker "
+                    "(no_use_multiple_sdk_containers, RUN_PLAYBOOK §3): the "
+                    "generate stages run on ONE Python interpreter per worker "
+                    "(~1 of 8 vCPUs busy on the 2026-08-29 R6 pair). multi = "
+                    "Dataflow's default, one SDK process per vCPU; the "
+                    "vLLM client's cross-process spawn mutex keeps one "
+                    "server per worker. Ignored for client_type=fake.",
+    ),
+    "initial_workers": Param(
+        default="",
+        type="string",
+        description="Initial Dataflow worker count (ADR 0034). Empty = "
+                    "Dataflow's default (2 on the 2026-08-29 R6 pair, "
+                    "autoscaled to 4 only ~4 min into the first generate "
+                    "stage). Pass '4' (= maxWorkers) for 10M-row runs so the "
+                    "first stage starts on the whole fleet. Never above "
+                    "maxWorkers.",
+    ),
+    "autoscaling": Param(
+        default="auto",
+        type="string",
+        enum=["auto", "throughput", "fixed"],
+        description="auto = a fleet sized by initial_workers stays that "
+                    "size (Dataflow autoscaling NONE), otherwise "
+                    "THROUGHPUT_BASED. fixed = same pin, initial_workers "
+                    "required. throughput = always scale (ADR 0034 D9: the "
+                    "2026-09-07/08 multi runs lost ~4 min per job to "
+                    "mid-job scale-downs between the parent and child "
+                    "stages).",
+    ),
     "uniqueness_mode": Param(
         default="exact",
         type="string",
-        enum=["exact", "streaming"],
-        description="exact = divert every duplicate to the DLQ behind up to "
-                    "three shuffle barriers; no row lands until generation "
-                    "finishes. streaming = rows land AS GENERATED and the "
+        enum=["exact", "exact_chained", "streaming"],
+        description="exact = divert every duplicate to the DLQ behind ONE "
+                    "full-row shuffle barrier (PK/identity resolved from "
+                    "key-only groups, ADR 0034); no row lands until generation "
+                    "finishes. exact_chained = the pre-ADR-0034 three-barrier "
+                    "chain (row digest -> PK -> identity), kept for A/B runs. "
+                    "streaming = rows land AS GENERATED and the "
                     "duplicate rate is measured instead of removed (WS6 W3). "
                     "In streaming mode duplicate rows LAND — a failing gate "
                     "still marks the run FAILED_BLOCKER; recover by "
@@ -432,7 +470,11 @@ with models.DAG(
                         # (job ..._13_23_14-11053114042412770609). The CPU
                         # smoke keeps the default: siblings parallelize the
                         # fake path — harmless duplicate again.
-                        "{{ 'no_use_multiple_sdk_containers' if params.client_type == 'vllm' else 'upload_graph' }}",
+                        # ADR 0034: sdk_containers=multi lifts the pin —
+                        # the vLLM client's cross-process spawn mutex
+                        # (port 8001) keeps one server per worker while
+                        # every vCPU gets its own Python interpreter.
+                        "{{ 'no_use_multiple_sdk_containers' if (params.client_type == 'vllm' and params.sdk_containers == 'single') else 'upload_graph' }}",
                         f"use_network_tags={network_tags_chain}",
                         f"use_network_tags_for_flex_templates={network_tags_chain}",
                     ],
@@ -500,6 +542,8 @@ with models.DAG(
                     "landing_table": "{{SDFB_LANDING_TABLE}}",
                     "dlq_table": "{{SDFB_DLQ_TABLE}}",
                     "num_rows": "{{ params.num_rows }}",
+                    "initial_workers": "{{ params.initial_workers }}",
+                    "autoscaling": "{{ params.autoscaling }}",
                     "batch_size": "{{ params.batch_size }}",
                     "similarity": "{{ params.similarity }}",
                     # Salted per trigger: retriggering the same logical date

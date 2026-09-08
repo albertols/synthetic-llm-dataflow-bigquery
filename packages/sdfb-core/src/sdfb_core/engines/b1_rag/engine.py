@@ -1986,8 +1986,9 @@ class _FormatGate:
     template, candidates must instead reproduce an observed run-collapsed
     mask: digit/letter run lengths stay free (novelty), whitespace runs
     and punctuation are exact. Prose columns (neither applies) pass all
-    — `prose` is True there, so callers can apply the prose-only length
-    ceiling (ADR 0033) and skip the example preflight.
+    — `prose` is True there, so callers skip the example preflight.
+    `length_blind` (prose OR mask-gated) is where the fixed-width length
+    ceiling applies (ADR 0033 / ADR 0034).
     """
 
     def __init__(self, prof: ColumnProfile) -> None:
@@ -2001,6 +2002,10 @@ class _FormatGate:
             }
         self._name_lower = prof.name.lower()
         self.prose = self.lengths is None and self._masks is None
+        # A mask gate collapses letter/digit runs and cannot see length
+        # (ADR 0034: A_COL_019 ran to 48 chars under a mask gate against a
+        # 35-char source); only the length-bucket gate pins length itself.
+        self.length_blind = self.prose or self._masks is not None
 
     def __call__(self, v: str) -> bool:
         if self.lengths is not None and self._charset is not None:
@@ -2070,13 +2075,17 @@ def _pool_llm_yield(
     # length bucket, stay within the observed charset, and never contain
     # the column name. Prose columns (no template) skip the gate.
     _in_format = _format_gate(prof)
-    # Prose-only length ceiling (ADR 0033): a fixed-width source field
-    # truncates at its width; the prose gate passes everything, so the
+    # Length ceiling for length-blind gates (ADR 0033 prose, ADR 0034
+    # masks): a fixed-width source field truncates at its width; the prose
+    # gate passes everything and the mask gate collapses runs, so the
     # prompt's length band was advisory (2026-08-26 R6 A_COL_019: source
-    # max 35, pool values to 62). Enforce it the way the source does —
-    # by truncation — BEFORE the novelty check, so a clamped value is
-    # still rejected if it collides with a real one.
-    ceiling = length_ceiling(prof.observed_values) if _in_format.prose else None
+    # max 35, pool values to 62; 2026-08-29 under a mask gate: to 48).
+    # Enforce it the way the source does — by truncation — BEFORE the
+    # format and novelty checks, so a clamped value is still rejected if
+    # it collides with a real one.
+    ceiling = (
+        length_ceiling(prof.observed_values) if _in_format.length_blind else None
+    )
     n_clamped = 0
     collapse_rounds = 0
 

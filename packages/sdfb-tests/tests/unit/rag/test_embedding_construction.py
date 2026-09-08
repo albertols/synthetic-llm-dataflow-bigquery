@@ -63,7 +63,7 @@ def test_bge_embedder_constructions_never_overlap(fake_hf_stack, tmp_path):
 
     def build():
         try:
-            BgeEmbedder(str(tmp_path))
+            BgeEmbedder(str(tmp_path)).ensure_loaded()
         except Exception as e:  # pragma: no cover - failure diagnostics
             errors.append(e)
 
@@ -74,7 +74,7 @@ def test_bge_embedder_constructions_never_overlap(fake_hf_stack, tmp_path):
         t.join()
 
     assert not errors
-    # 8 constructions happened (2 from_pretrained calls each) …
+    # 8 loads happened (2 from_pretrained calls each) …
     assert fake_hf_stack["calls"] == 16
     # … but never two loader calls in flight at once.
     assert fake_hf_stack["max_active"] == 1

@@ -2,7 +2,7 @@
 """Render a tiers.yaml (tier, table) preset into flex-template-run inputs.
 
 Prints eval-able shell lines (PARAMS / MACHINE_TYPE / ACCELERATOR /
-MAX_WORKERS / EXPECT). Pure python + PyYAML; unit-tested laptop-side.
+MAX_WORKERS / NUM_WORKERS / SDK_CONTAINERS / EXPECT). Pure python + PyYAML; unit-tested laptop-side.
 """
 from __future__ import annotations
 
@@ -11,7 +11,18 @@ from pathlib import Path
 
 import yaml
 
-JOB_KEYS = ("machine_type", "accelerator", "max_workers", "expect")
+# `num_workers` = the INITIAL worker count (ADR 0034): empty leaves
+# Dataflow's default (the 2026-08-29 R6 pair started on 2 and autoscaled to
+# 4 only ~4 min into the first generate stage); a scale tier starts at its
+# ceiling so the first stage never runs at a fraction of the fleet.
+# `sdk_containers`: "single" keeps `no_use_multiple_sdk_containers` (one
+# Python process per worker — GIL-bound generation, RUN_PLAYBOOK §3);
+# "multi" lifts it (one process per vCPU; the cross-process vLLM spawn
+# mutex keeps one server per worker, ADR 0034).
+JOB_KEYS = (
+    "machine_type", "accelerator", "max_workers", "num_workers",
+    "sdk_containers", "expect",
+)
 
 
 def _expand(value: str, variables: dict[str, str]) -> str:
@@ -50,6 +61,8 @@ def to_shell(params: dict[str, str], job: dict[str, str]) -> str:
         f"MACHINE_TYPE='{job['machine_type']}'",
         f"ACCELERATOR='{job['accelerator']}'",
         f"MAX_WORKERS='{job['max_workers']}'",
+        f"NUM_WORKERS='{job['num_workers']}'",
+        f"SDK_CONTAINERS='{job['sdk_containers']}'",
         f"EXPECT='{job['expect']}'",
     ]
     return "\n".join(lines)
