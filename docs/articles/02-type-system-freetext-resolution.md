@@ -3,6 +3,7 @@ title: "LLM and Statistical Synthetic Data with Dataflow — Part 2: the type sy
 series_index: 2
 sources:
   - docs/DDL_CONTRACT_GUIDE.md
+  - docs/adr/0005-live-select-reference-data.md
   - docs/adr/0013-distribution-estimator-spine.md
   - docs/adr/0019-rag-population-scoped-to-consumers.md
   - docs/adr/0020-freetext-pools-as-persisted-artifact.md
@@ -13,11 +14,14 @@ sources:
   - docs/adr/0028-constraint-router-relational-plan.md
   - docs/adr/0033-pool-ladder-integrity-at-scale.md
   - docs/adr/0034-generation-throughput-single-barrier-shared-engines.md
+  - docs/designs/2026-07-24-reference-sample-scaling.md
+  - docs/designs/2026-08-05-source-table-stats.md
   - docs/designs/2026-08-10-prompt-constraints.md
   - docs/designs/2026-08-22-constraint-router-scale.md
   - docs/designs/2026-08-29-r6-scale-pool-ladder-integrity.md
 figures:
   - docs/articles/assets/generation-plan-routing.png
+  - docs/designs/assets/sampling-error-dkw.png
   - docs/articles/assets/freetext-resolution-flow.png
   - docs/designs/assets/constraint-router-pk-blocker.png
   - docs/designs/assets/constraint-router-outcomes.png
@@ -67,9 +71,27 @@ for, and the bulk is sampled from marginals on CPU. The LLM's one job is
 the thing statistics cannot do: invent plausible *prose* that is not a
 copy.
 
+### What this article leans on
+
+| | Name | Role in this article | Primary source |
+|---|---|---|---|
+| 📰 series | Part 1 — the routing story | where the `generation_plan` and the "one route per column" idea come from | [Building banking synthetic data — intro](01-building-banking-synthetic-data-intro.md) |
+| 📰 series | Parts 3 · 4 · 5 | serving runtime · B.1 retrieval geometry · `b2_library` deep dive | upcoming |
+| 🧠 GenAI | LLM tabular generation | why the LLM runs O(1) times per column, not per row | [GReaT, Borisov et al. 2023](https://arxiv.org/abs/2210.06280) · [FASTGEN, Nguyen et al. 2025](https://arxiv.org/abs/2507.15839) |
+| 🧠 GenAI | per-cell LLM sampling, and why not | the ~9,500× cost gap; distributions flattened toward uniform | [Yang et al. 2025](https://arxiv.org/abs/2507.19334) · [Sidorenko 2025](https://arxiv.org/abs/2505.02659) |
+| 🧠 GenAI | KV prefix caching | one byte-identical prompt per column, paid for once, reused every ladder round | [vLLM automatic prefix caching](https://docs.vllm.ai/en/stable/design/prefix_caching/) |
+| 🧠 GenAI | guided decoding / structured outputs | a `pattern` compiled into the decoder's grammar; JSON arrays by construction | [Willard & Louf 2023](https://arxiv.org/abs/2307.09702) · [vLLM structured outputs](https://docs.vllm.ai/en/latest/features/structured_outputs.html) |
+| 🧠 GenAI | RAG as prompt seeding | eight exemplars per column, retrieved once per pool build, never per row | [FAISS](https://github.com/facebookresearch/faiss) ([Douze et al. 2024](https://arxiv.org/abs/2401.08281)) · [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) ([C-Pack](https://arxiv.org/abs/2309.07597)) |
+| 🧠 GenAI | training-data extraction | why an echoed seed is a leak; the novelty gate runs against the full domain | [Carlini et al. 2021](https://arxiv.org/abs/2012.07805) |
+| 📐 statistics | sampling error of a 10k sample | what the reference sample can and cannot see (DKW bound) | [Dvoretzky, Kiefer & Wolfowitz 1956](https://doi.org/10.1214/aoms/1177728174) · [Massart 1990](https://doi.org/10.1214/aop/1176990746) |
+| 📐 statistics | inverse-CDF sampling | the numeric route: uniform draws through the column's decile vector | [Devroye 1986, ch. II](https://luc.devroye.org/rnbookindex.html) |
+| 📐 statistics | approximate aggregates over the full table | exact-tier stats: HLL++ distinct counts, quantiles, top-k in one scan | [Heule et al. 2013](https://research.google.com/pubs/archive/40671.pdf) · [BigQuery approximate aggregation](https://cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions) |
+| 📐 statistics | CTGAN | the model behind `b2_library`'s default backend | [Xu et al., NeurIPS 2019](https://arxiv.org/abs/1907.00503) · [sdgx](https://github.com/hitsz-ids/synthetic-data-generator) |
+| 🔀 Beam | `RunInference` | the transform the vLLM model handler plugs into | [ML inference in Beam](https://beam.apache.org/documentation/ml/about-ml/) |
+
 ### How to read this article
 
-Two kinds of paragraphs sit under the figures, and they are labelled so
+Three kinds of paragraphs sit under the figures, and they are labelled so
 they are never confused:
 
 - 📉 **What the run showed** — a measurement from a named E2E run, usually
@@ -80,7 +102,7 @@ they are never confused:
 - 💡 **Concept, not a run** — a figure that teaches the mechanism with
   synthetic data; it carries no measured number.
 
-Diagrams with none of these labels describe the current implementation.
+NOTE: Diagrams with none of these labels describe the current implementation.
 A ledger at the end of the article lists every lesson → fix pair in one
 table, so the mechanism sections can be read on their own.
 
@@ -138,6 +160,123 @@ can do is collide with a real one — so identifiers are generated from the
 column's **full** source domain, not the 10k sample. And the head-values
 row exists because an LLM asked for "values like `N/A`" produces variations
 of `N/A`; the pipeline copies the literal at its measured share instead.
+
+## The 10k reference sample: what it sees, and what it cannot
+
+Everything the profiler decided above, it decided from a **reference
+sample**, and the sample is the most-cited and least-explained number in
+this pipeline. Here is the whole contract.
+
+**What it is.** One query at launch, run driver-side, live against the
+source table every run (no snapshot — [ADR 0005](../adr/0005-live-select-reference-data.md)):
+
+```sql
+SELECT * FROM `source` AS ref
+ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(ref))
+LIMIT 10000            -- --reference_rows_limit
+```
+
+The rows are hashed into the `reference_digest`, and that digest is the
+key of everything downstream: the persisted pools, the `rag_chunks`, the
+stats rows, the `validation_runs` provenance. Same table contents → same
+sample → same digest → the next run is warm. A changed table, or a
+changed `--reference_rows_limit`, is a new digest and a cold run.
+
+The ordering clause is not decoration. It was a lesson:
+
+📉 **What the run showed.** The first E2E runs used a bare `LIMIT`. A bare
+`LIMIT` returns a storage-contiguous slice, and on 2026-07-15 half the
+sample came from a single load batch: columns with hundreds of distinct
+values were typed as small categoricals, and every marginal was skewed
+toward one day's data.
+
+🔧 **What the code does now.** Ordering by a fingerprint of the whole row
+spreads the sample across the table deterministically. It is the same
+sample on every retrigger, which is what makes the digest a usable cache
+key at all.
+
+**Scope — what depends on it, and what does not.** The sample feeds six
+consumers, and they are not equally sensitive to its size:
+
+| Consumer | Needs from the sample | Sensitivity to size |
+|---|---|---|
+| column profiles (types, frequencies, deciles, null shares, shapes) | marginals | **high** — everything below applies |
+| `reference_digest` | determinism | none |
+| `rag_chunks` + FAISS index | mode coverage for the eight exemplars | low — the row chunks are a 1,024-row prefix; more rows do not change eight seeds |
+| free-text pool seeds | diverse in-prompt exemplars | low — bounded by the 512 pool cap, not by the sample |
+| `b2_library` fit | a training set | moderate — plateaus |
+| validation gate | the baseline it compares against | **high** — the sample's own error is the gate's noise floor |
+
+Just as important is what **never** depends on it. The novelty rejection
+set is the column's **full** source domain (up to 1M distinct values),
+not the sample. The taint preflight queries the live table. The
+source-filter cardinality that sizes a pool target is fetched from the
+table. And with `--source_stats=exact`, one aggregate scan of the whole
+table supplies HLL++ distinct counts, quantiles and top-k that override
+the sample's estimates. The sample decides *what kind* of column it is
+looking at and *what the marginals look like*; the privacy and
+cardinality questions are answered against the table.
+
+**Implications — the arithmetic behind 10,000.** The sample size follows
+the *estimand*, not the output volume: generating 10M rows from profiles
+fitted on 10k is not statistically worse per row than generating 10k.
+What changes at scale is that an estimation error stops being noise and
+becomes a property of every generated row.
+
+*What a sample buys: at n = 10k every column's full CDF is pinned to
+within ±1.36 points of mass at 95% confidence, and the same curve is the
+noise floor of any gate that compares synthetic output to the sample:*
+
+![DKW sampling error vs n](../designs/assets/sampling-error-dkw.png)
+
+💡 **Concept, not a run.** The curve is the DKW inequality with Massart's
+tight constant, ε = √(ln 40 / 2n) at 95% confidence. Halving the error
+costs four times the rows, forever. What that means column by column:
+
+- **Marginals are fine.** Deciles and category shares of anything that
+  is not rare are estimated to about a point of mass.
+- **Rare categories are the first casualty.** A category needs roughly
+  3/p rows to appear at all: a 1% category is well estimated, a 0.1%
+  category is merely present (about ten rows), a 0.01% category is a coin
+  flip to exist in the sample — and a category absent from the sample is
+  absent from **all** generated output.
+- **Tails are fragile.** p99 rests on a hundred points, p99.9 on ten,
+  p99.99 on one. For amounts and overdraft-shaped columns whose extremes
+  matter downstream, the sample alone is not enough.
+- **Cardinality is truncated at the sample size.** A 10k sample cannot
+  see more than 10k distinct values, and usually sees far fewer — which is
+  exactly the pool-target lesson later in this article (94 seen versus
+  4,022 real). This is the one estimate the sample gets *systematically*
+  wrong, and the reason the exact tier and the source-filter count exist.
+- **Segments inherit all of the above.** A 1% segment has an effective
+  sample of 100 rows; every within-segment estimate is a 100-row estimate.
+
+**Pros and cons, honestly.**
+
+| | |
+|---|---|
+| ✅ cheap and fast | one query, cents, seconds; profiling is driver-side and costs the DAG nothing |
+| ✅ deterministic | same contents → same digest → warm pools, warm chunks, comparable validation scores |
+| ✅ bounded blast radius | reference rows live in the driver and the workers' setup; nothing per-row ever touches the table |
+| ✅ enough for what it is asked | marginals, types, shapes, and eight seeds plateau long before 10k |
+| ⚠️ blind to rarity and tails | anything below ~0.1% share or beyond p99.9 is a guess |
+| ⚠️ blind to cardinality | never trust a sample distinct count — the code no longer does |
+| ⚠️ live, so it drifts | two runs on a changing table see different rows; compare digests before comparing scores |
+| ⚠️ PII is not masked in the sample | a DEV-only assumption today; the sample is real data in the driver's memory and, redacted, in the logs |
+
+**What you can set, and what happens when you do.**
+
+| Knob | Default | Effect | The aftermath |
+|---|---|---|---|
+| `--reference_rows_limit` | 10,000 | more rows → smaller ε (4× rows per halving), better tails and rare categories | a new digest: every pool and chunk rebuilds, the run is cold; driver memory and profiling time grow linearly; cardinality is *still* truncated at n |
+| `--source_stats` | `sample` | `exact` adds one aggregate scan: HLL++ distinct, deciles, top-k over the whole table; exact distinct sizes the pool target | one BigQuery scan of the source per run; a failed scan degrades loudly to the sample tier (`source_stats_exact_failed`), never kills the run |
+| `--source_stats_table` / `--source_stats_json` | off | persist the stats rows / artifact | rows keyed by `(table, digest, tier, profiler version)`; existing rows are never rewritten |
+| `--reference_table` | required | which table the sample is drawn from | the digest is the *only* provenance of "what rows did we see"; a filtered or different reference changes the population silently — the digest changes, the log does not explain why |
+| stratified sampling | not a flag | a per-stratum `QUALIFY ROW_NUMBER() OVER (PARTITION BY … ORDER BY FARM_FINGERPRINT(…))` query | the design doc's remedy for rare segments; not wired into the launcher today |
+
+The rule of thumb that falls out of this: **do not raise the sample to
+fix cardinality or privacy — those are answered against the table. Raise
+it when a tail or a rare category matters, and expect a cold run.**
 
 ## Five exits before the LLM
 
@@ -676,6 +815,7 @@ it:
 
 | Figure | 📉 What the run showed | 🔧 What the code does now |
 |---|---|---|
+| *(no figure)* storage-contiguous sample | a bare `LIMIT` took half the 2026-07-15 sample from one load batch; hundreds-distinct columns typed as small categoricals | `ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(row))` — deterministic, spread across the table, stable digest |
 | PK blocker | a declared PK drew from the 512-cap pool; 999,488 of 1M rows DLQ'd as `pk.duplicate` after 37 min | samplable `pattern` → Tier P sampler; launcher refuses a run whose routed key capacity < `num_rows` |
 | Router outcomes | prose clause leaked 12 rejects; a "binary fallback" served 58 real values against a never-copy clause | `pattern` → grammar or sampler; Tier B byte template; the copying fallback is gone |
 | Format gate | a 28-char example on a 31-char column: 386 of 393 values refused, three rounds wasted; prose ran to 62 chars past a 35-char wall | `prompt_constraint_example_off_format` at launch; `freetext_pool_format_collapse`; `freetext_pool_length_clamped` |
@@ -712,6 +852,10 @@ it:
    and gate the generate stage behind a barrier.
 9. **`strict_freetext` is the default with a real model.** No silent
    fallback lands data.
+10. **The 10k sample sizes the estimate, not the output.** It is
+    deterministic and cheap, blind to rare categories, tails and
+    cardinality — and cardinality and privacy are answered against the
+    full table, never against the sample.
 
 ## Where this goes next
 
@@ -741,6 +885,18 @@ and B.2 routing parity are the two candidates this article touches).
 - Devroye — *Non-Uniform Random Variate Generation*, Springer 1986
   ([full text](https://luc.devroye.org/rnbookindex.html)), ch. II for
   the inverse-CDF sampling the numeric route uses.
+- Dvoretzky, Kiefer & Wolfowitz — *Asymptotic Minimax Character of the
+  Sample Distribution Function*, Ann. Math. Statist. 1956 —
+  [doi:10.1214/aoms/1177728174](https://doi.org/10.1214/aoms/1177728174);
+  Massart — *The Tight Constant in the Dvoretzky-Kiefer-Wolfowitz
+  Inequality*, Ann. Probab. 1990 —
+  [doi:10.1214/aop/1176990746](https://doi.org/10.1214/aop/1176990746).
+  The bound behind "10k rows ≈ ±1.36% of mass".
+- Heule, Nunkesser & Hall — *HyperLogLog in Practice*, EDBT 2013 —
+  [Google Research](https://research.google.com/pubs/archive/40671.pdf);
+  [BigQuery approximate aggregate functions](https://cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions)
+  and [hash functions](https://cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions)
+  (`FARM_FINGERPRINT`). The exact-tier stats and the deterministic sample.
 
 **The LLM side of tabular and free-text synthesis**
 
