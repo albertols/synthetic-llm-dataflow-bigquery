@@ -103,8 +103,10 @@ they are never confused:
   synthetic data; it carries no measured number.
 
 NOTE: Diagrams with none of these labels describe the current implementation.
-A ledger at the end of the article lists every lesson → fix pair in one
-table, so the mechanism sections can be read on their own.
+A lesson that has no figure says so, and its numbers come from the ADR or
+code comment that recorded the run. A ledger at the end of the article
+lists every lesson → fix pair in one table, so the mechanism sections can
+be read on their own.
 
 ## Where Part 1 stopped: one route per column
 
@@ -182,18 +184,24 @@ stats rows, the `validation_runs` provenance. Same table contents → same
 sample → same digest → the next run is warm. A changed table, or a
 changed `--reference_rows_limit`, is a new digest and a cold run.
 
-The ordering clause is not decoration. It was a lesson:
+The ordering clause is not decoration. It was a lesson — one of the few
+in this article with no figure: the numbers below come from the launcher
+code that records the run, not from a figure script.
 
 📉 **What the run showed.** The first E2E runs used a bare `LIMIT`. A bare
-`LIMIT` returns a storage-contiguous slice, and on 2026-07-15 half the
-sample came from a single load batch: columns with hundreds of distinct
-values were typed as small categoricals, and every marginal was skewed
-toward one day's data.
+`LIMIT` returns a storage-contiguous slice, and on 2026-07-15 51% of the
+sample came from a single load batch. The profiler saw that slice as the
+table: columns with 897 distinct values were typed as ≤9-value
+categoricals, and the marginals and fidelity scores were skewed with
+them.
 
 🔧 **What the code does now.** Ordering by a fingerprint of the whole row
 spreads the sample across the table deterministically. It is the same
 sample on every retrigger, which is what makes the digest a usable cache
-key at all.
+key at all. The proof is in two places: `validation_runs` carries the
+`reference_digest` and `reference_row_count` of every run, and the worker
+milestone `b1_embed_done rows=` must equal `--reference_rows_limit`, not
+the table's row count.
 
 **Scope — what depends on it, and what does not.** The sample feeds six
 consumers, and they are not equally sensitive to its size:
@@ -815,7 +823,7 @@ it:
 
 | Figure | 📉 What the run showed | 🔧 What the code does now |
 |---|---|---|
-| *(no figure)* storage-contiguous sample | a bare `LIMIT` took half the 2026-07-15 sample from one load batch; hundreds-distinct columns typed as small categoricals | `ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(row))` — deterministic, spread across the table, stable digest |
+| *(no figure)* storage-contiguous sample | a bare `LIMIT` took 51% of the 2026-07-15 sample from one load batch; 897-distinct columns typed as ≤9-value categoricals | `ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(row))` — deterministic, spread across the table, stable digest |
 | PK blocker | a declared PK drew from the 512-cap pool; 999,488 of 1M rows DLQ'd as `pk.duplicate` after 37 min | samplable `pattern` → Tier P sampler; launcher refuses a run whose routed key capacity < `num_rows` |
 | Router outcomes | prose clause leaked 12 rejects; a "binary fallback" served 58 real values against a never-copy clause | `pattern` → grammar or sampler; Tier B byte template; the copying fallback is gone |
 | Format gate | a 28-char example on a 31-char column: 386 of 393 values refused, three rounds wasted; prose ran to 62 chars past a 35-char wall | `prompt_constraint_example_off_format` at launch; `freetext_pool_format_collapse`; `freetext_pool_length_clamped` |
