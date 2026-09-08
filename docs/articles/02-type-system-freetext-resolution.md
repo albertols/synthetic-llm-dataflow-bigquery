@@ -6,6 +6,7 @@ sources:
   - docs/adr/0013-distribution-estimator-spine.md
   - docs/adr/0019-rag-population-scoped-to-consumers.md
   - docs/adr/0020-freetext-pools-as-persisted-artifact.md
+  - docs/adr/0022-stats-driven-generation.md
   - docs/adr/0023-source-domain-pool-rejection.md
   - docs/adr/0024-structured-prompt-constraint-templates.md
   - docs/adr/0026-measurement-first-mask-integrity.md
@@ -55,6 +56,34 @@ the same order, and the loudest gate is "does this value exist in the real
 table?" — if it does, the value is dropped, and if the run lands one
 anyway, the run fails.
 
+The split between statistics and LLM is not a taste: cell-by-cell LLM
+generation of a whole table is roughly four orders of magnitude slower
+than statistical sampling ([Yang et al. 2025](https://arxiv.org/abs/2507.19334))
+and follows token frequency rather than data frequency, flattening
+distributions toward uniform ([Sidorenko 2025](https://arxiv.org/abs/2505.02659)).
+So the LLM runs O(1) times per column, the spine that
+[FASTGEN](https://arxiv.org/abs/2507.15839) (Nguyen et al. 2025) argues
+for, and the bulk is sampled from marginals on CPU. The LLM's one job is
+the thing statistics cannot do: invent plausible *prose* that is not a
+copy.
+
+### How to read this article
+
+Two kinds of paragraphs sit under the figures, and they are labelled so
+they are never confused:
+
+- 📉 **What the run showed** — a measurement from a named E2E run, usually
+  a defect. This is the lesson. The number in it belongs to the figure.
+- 🔧 **What the code does now** — the mechanism that exists *today*
+  because of that run, with the worker-log milestone or preflight that
+  names it. This is the current implementation.
+- 💡 **Concept, not a run** — a figure that teaches the mechanism with
+  synthetic data; it carries no measured number.
+
+Diagrams with none of these labels describe the current implementation.
+A ledger at the end of the article lists every lesson → fix pair in one
+table, so the mechanism sections can be read on their own.
+
 ## Where Part 1 stopped: one route per column
 
 *Every column takes exactly one route — free-text is the only route that
@@ -63,7 +92,7 @@ columns onto it:*
 
 ![generation_plan routing](assets/generation-plan-routing.png)
 
-The router behind that figure is not a classifier trained on anything. It
+The router behind the figure is not a classifier trained on anything. It
 is a **profiler** that reads the BigQuery DDL type, the ≤10k-row reference
 sample, and the column's description JSON, and applies a fixed decision
 order. The order matters more than the thresholds, so here it is verbatim
@@ -75,9 +104,10 @@ from the code (`profile_columns` in the B.1 engine):
 2. Exactly one distinct non-null value and no nulls → **constant**, copied
    verbatim.
 3. Numeric BigQuery types → **numeric**, sampled through an inverse CDF
-   over the column's decile vector (Part 8 owns the math). Twenty or fewer
-   distinct values demote to categorical — a "number" with five values is
-   a code list.
+   over the column's decile vector (the textbook method — [Devroye 1986,
+   ch. II](https://luc.devroye.org/rnbookindex.html); Part 8 owns the
+   math). Twenty or fewer distinct values demote to categorical — a
+   "number" with five values is a code list.
 4. STRUCT / REPEATED → categorical over the JSON rendering.
 5. String-like types → the string profiler, below.
 6. Temporal types → **temporal**, range-sampled with the observed
@@ -146,23 +176,30 @@ exits:
 small LLM pool and expanded by templates. It is deferred, and the ADRs say
 so; I mention it only so nobody goes looking for it in the code.)
 
+### The run that made the router necessary
+
 Why does a type system need a router on top of it? Because the pool route
-has a cap, and a cap is fine for prose and fatal for keys. The run that
-made this obvious:
+has a cap, and a cap is fine for prose and fatal for keys.
 
 *512 values cannot key 1M rows — a declared primary key drew from a
 constrained pool while its own pattern clause defined a 10²⁴-value space:*
 
 ![PK blocker](../designs/assets/constraint-router-pk-blocker.png)
 
-The key column had a perfectly good regex clause in its description. The
-pool route honored it as a *prompt hint*, built its 512 values, and the
-uniqueness gate then diverted 999,488 of 1,000,000 rows to the dead-letter
-queue as `pk.duplicate` — discovered 37 minutes and 1,586 GPU-seconds
-after launch. The fix was not a bigger pool. The fix was that a samplable
-`pattern` becomes a **sampler**, and that a launcher preflight now refuses
-a run whose routed key capacity is below `num_rows`. Two other findings
-from the same run shaped the tiers:
+📉 **What the run showed.** The key column had a perfectly good regex
+clause in its description. The pool route honored it as a *prompt hint*,
+built its 512 values, and the uniqueness gate then diverted 999,488 of
+1,000,000 rows to the dead-letter queue as `pk.duplicate` — discovered
+37 minutes and 1,586 GPU-seconds after launch. The right panel is the
+same run's clock: every GPU second sat in the pool phase; generation
+itself ran on CPU.
+
+🔧 **What the code does now.** The fix was not a bigger pool. A samplable
+`pattern` now becomes a **sampler** (Tier P, unbounded cardinality), and a
+launcher preflight refuses a run whose routed key capacity is below
+`num_rows` — the job never starts, so the 37 minutes are never spent.
+
+Two other findings from the same run shaped the tiers:
 
 *Guided decoding rejects nothing, the prose clause leaked twelve rejects,
 and the binary "fallback" landed verbatim source values against a clause
@@ -170,14 +207,22 @@ that said "never copied":*
 
 ![Router outcomes](../designs/assets/constraint-router-outcomes.png)
 
-The left panel is the argument for guided decoding: a pattern compiled
-into the decoder's grammar produced zero off-format values, while the
-same intent written as prose leaked twelve past the prompt. The right
-panel is the argument for Tier B: the pre-router "binary fallback" had
-quietly served 58 distinct **real** values from a 19,815-value domain —
-copy rate 100%, on a column whose clause forbade copying. A silent fallback
-is a privacy leak wearing a green checkmark; now a never-copy clause may
-never be served source values, by construction.
+📉 **What the run showed.** Left panel: a pattern compiled into the
+decoder's grammar produced zero off-format values, while the same intent
+written as prose leaked twelve past the prompt. Right panel: the
+pre-router "binary fallback" had quietly served 58 distinct **real**
+values from a 19,815-value domain — copy rate 100%, on a column whose
+clause forbade copying. A silent fallback is a privacy leak wearing a
+green checkmark.
+
+🔧 **What the code does now.** A `pattern` is enforced by construction —
+as a Tier P sampler when samplable, otherwise compiled into vLLM's
+[structured-output grammar](https://docs.vllm.ai/en/latest/features/structured_outputs.html)
+(the mechanism is the finite-state guided decoding of
+[Willard & Louf 2023](https://arxiv.org/abs/2307.09702)). Binary payloads
+take Tier B, a template that never reaches the LLM, and a never-copy
+clause may never be served source values: the binary fallback that did so
+no longer exists.
 
 ## Steering a column: `llm_prompt_constraint` and `route: "llm"`
 
@@ -205,8 +250,8 @@ renderer, shared by both engines:
 Unknown keys warn and are skipped; a marked-but-unparseable clause stops
 the launch. The rendered clause is a **per-column constant suffix after a
 shared prefix**, keys in a fixed order — which is what lets vLLM's
-automatic prefix caching reuse the KV prefix round after round (Part 3
-goes deeper into serving).
+[automatic prefix caching](https://docs.vllm.ai/en/stable/design/prefix_caching/)
+reuse the KV prefix round after round (Part 3 goes deeper into serving).
 
 The authoring priority is the one lesson worth carrying out of this
 section: **write `pattern` first, then `families`, then `charset`, then
@@ -220,14 +265,21 @@ gate refused 386 of 393 parsed values:*
 
 ![Format gate](../designs/assets/r6-scale-format-gate.png)
 
-The model echoed the example's length faithfully, the gate refused
-faithfully, and three rounds of GPU time produced nothing until the shape
-fallback took over. Today that example is caught at preflight
-(`prompt_constraint_example_off_format`) — the clause is still the
-operator's to fix. The right panel is the second lesson from the same
-runs: a prose column with a fixed-width source has no "long values", it
-has values that were **cut** — so the ladder now clamps to the observed
-ceiling instead of letting the model run to 62 characters.
+📉 **What the run showed.** Left panel: the model echoed the example's
+length faithfully, the gate refused faithfully, and three rounds of GPU
+time produced nothing until the shape fallback took over. Right panel: a
+prose column whose source is a fixed-width field had a hard 35-character
+wall, and the synthetic values ran past it to 62 — a "long tail" the
+source never had.
+
+🔧 **What the code does now.** An off-format example is caught at launch
+(`prompt_constraint_example_off_format`) before any GPU time is spent —
+the clause is still the operator's to fix. Two full rounds with zero
+in-format values now end a ladder early (`freetext_pool_format_collapse`)
+instead of riding out the budget. And a fixed-width source clamps the
+ladder to the observed ceiling (`freetext_pool_length_clamped`): a field
+stored at a fixed width has no long values, it has values that were
+**cut**, so candidates are cut the same way.
 
 A minimal clause, and the only line that changes a typed column's route:
 
@@ -257,11 +309,18 @@ copy:*
 ![The pool ladder](assets/freetext-pool-ladder.png)
 
 The ladder is the whole "LLM runs O(1) times" claim from Part 1 made
-concrete. Its constants:
+concrete. The purple elements in the figure are one idea: the prompt —
+shared instruction prefix, eight seed exemplars, the rendered clause, the
+length hint — is byte-identical for every round of a column, so vLLM's
+[automatic prefix caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching.html)
+computes its KV cache on round 1 and every later round reuses it; only
+the sampling parameters change. That is why a round costs decode time,
+not prefill time, and why the escalation ladder is cheap to climb. The
+ladder's constants:
 
 | Constant | Default | Why |
 |---|---|---|
-| pool cap | 512 values | a GPU-time decision, not a fidelity one: on a T4 a 512-value ladder is minutes |
+| pool cap | 512 values | a GPU-time budget, not a fidelity target — see the next section |
 | target | min(512, `num_rows`, distinct) | distinct = exact source stats → source-filter cardinality → sample distinct, in that order |
 | values per request | 32, as one JSON array | one round trip per round, not per value |
 | completions per request | n = 4 | four independent arrays, de-duplicated across them |
@@ -273,9 +332,54 @@ concrete. Its constants:
 | rejection set | observed sample ∪ full source domain (≤ 1M distinct) ∪ clause examples | what a candidate must not be |
 | parallel ladders | ≤ 4 per worker | columns are independent; the GPU is not |
 
-Two of those rows fixed real defects, and the figures own the numbers.
-The **target** row exists because a column's 10k-sample cardinality is not
-its cardinality:
+### What the 512 cap buys, and what it costs
+
+The cap is the one constant readers push back on, so here is exactly what
+it does. `FREE_TEXT_POOL_MAX = 512` is a **ceiling on the number of
+distinct LLM-generated values a column can have**, and everything else
+in the table derives from it:
+
+- **It bounds the GPU bill per column.** Rounds are capped at
+  2 × ⌈target / 128⌉, so a full 512-value pool is at most eight
+  requests of 32 × 4 candidates. When the model complies, the router
+  figure above shows a whole 512-value pool costing between roughly 80
+  and 230 T4-seconds; when the model fights the format gate, the
+  collapse and stagnation exits stop it well before the eight-round
+  budget. Multiply by the number of free-text columns, divide by the
+  four parallel ladders per worker, and that is the entire LLM cost of a
+  cold run — paid once per reference digest, because the pool is
+  persisted.
+- **It is a diversity ceiling, by design.** The generate stage draws from
+  the pool *with replacement*: a pooled column in a 10M-row table
+  repeats each of its 512 values tens of thousands of times, however
+  many distinct values the source had. A distinct-count parity check on
+  that column will read as a defect (the measured-state figure at the
+  end shows exactly this: synthetic distinct pinned at ~512 against
+  source cardinalities of 20k–146k). This is the intended trade: the LLM
+  supplies *semantics* — plausible merchant names, plausible remarks —
+  and cardinality comes from somewhere else.
+- **It is fatal for keys, so keys are refused.** A primary key that
+  reaches the pool route caps at 512 unique values, which is the PK
+  blocker run above. Today the launcher computes the routed capacity of
+  every key column and refuses to submit when it is below `num_rows`.
+- **Raising it is not the fix it looks like.** The rejection set grows
+  with the pool, and the model's novel yield decays round over round —
+  that decay is why the stagnation exit exists at all. Doubling the cap
+  roughly doubles the round budget and does not double the distinct
+  count. When a column needs cardinality, the answer is a `pattern`
+  (Tier P has no cap), an identifier or expandable shape (templates have
+  no cap), or accepting that the column carries meaning, not identity.
+- **It is part of the pool's identity.** The persisted pool is keyed by
+  `(reference_digest, model_uri, column, target)`; changing the cap
+  changes the target, so the next run builds a new pool rather than
+  reading a stale one.
+- **It has nothing to do with privacy.** The novelty gate runs on every
+  candidate whatever the cap; a smaller or larger pool is equally free
+  of copies.
+
+Two other rows of the constants table fixed real defects, and the figures
+own the numbers. The **target** row exists because a column's 10k-sample
+cardinality is not its cardinality:
 
 *A pool target was sized from the 10k sample (94 distinct) while the
 source filter fetched by the same setup held 4,022 — the source-domain
@@ -283,17 +387,32 @@ count now sizes the target:*
 
 ![Pool targets](../designs/assets/r6-scale-pool-targets.png)
 
-And the **clamp** exists because of the "values that were cut" argument —
-the concept figure shows the three length distributions the rule tells
-apart, and the rule itself: p95 equals the maximum *and* the maximum sits
-a real distance above p05 means a fixed-width field, so candidates are
-truncated before the novelty check rather than rejected after it:
+📉 **What the run showed.** Five pools were built in both R6 runs; four
+reached the 512 cap and one stopped at 94 — the sample's distinct count —
+even though the source filter fetched in the same setup held 4,022
+values. The pool was starved by its own sizing, not by the model.
+
+🔧 **What the code does now.** The target is sized from the best distinct
+count available, in a fixed order: the exact source statistics when they
+exist, else the cardinality of the source filter (which is fetched
+*before* sizing for exactly this reason), and only then the sample
+distinct. The same column now targets min(4,022, 512) = 512.
+
+And the **clamp** row is the "values that were cut" argument from the
+format-gate figure, generalised into a rule:
 
 *A field stored at a fixed width does not have long values — it has values
 that were cut; the ceiling rule separates that shape from a genuinely
 long tail:*
 
 ![Length ceiling concept](../designs/assets/r6-scale-length-ceiling-concept.png)
+
+💡 **Concept, not a run.** The three length distributions are synthetic.
+The rule they illustrate is the one in the code: when p95 equals the
+maximum *and* the maximum sits a real distance above p05, the field is
+fixed-width, and candidates are truncated to it before the novelty check
+rather than rejected after it. A genuinely long tail (p95 below max) is
+left alone.
 
 ### The failovers, all of them loud
 
@@ -313,7 +432,14 @@ someone else's pipeline, because every exit is a place where a silent
 - **Transient failure** (`freetext_pool_ladder_retried`): vLLM not ready,
   or a KV budget that cannot fit the request yet. The column is rebuilt
   once, sequentially, after its siblings — never swallowed into a lax
-  fallback. This one was found the hard way:
+  fallback.
+- **`strict_freetext`** — the default whenever a real model client is
+  configured. Nothing usable after every escalation level raises
+  `FreeTextEmptyYieldError` out of `DoFn.setup()`: the run fails instead of
+  landing exemplar copies. The lax mode exists for the fake client in
+  tests; with a real model it is a WARNING you should never see.
+
+The transient-failure exit was found the hard way:
 
 *One lost fit race failed a bundle whose three sibling ladders had already
 finished — transient errors are now classified, collected, and retried
@@ -321,11 +447,18 @@ once instead of failing the branch:*
 
 ![Pool race](../designs/assets/r6-scale-pool-race.png)
 
-- **`strict_freetext`** — the default whenever a real model client is
-  configured. Nothing usable after every escalation level raises
-  `FreeTextEmptyYieldError` out of `DoFn.setup()`: the run fails instead of
-  landing exemplar copies. The lax mode exists for the fake client in
-  tests; with a real model it is a WARNING you should never see.
+📉 **What the run showed.** Two threads set up engines on the same worker.
+Thread 1 waited for vLLM to fit its request, gave up after five 20-second
+waits, and its error was re-raised at the end of the bundle — *after* the
+three sibling ladders had finished, 706 seconds of pool work thrown away.
+Dataflow's retry then re-embedded and rebuilt everything.
+
+🔧 **What the code does now.** "Not ready" and "cannot fit yet" are
+classified as transient, collected instead of raised, and the affected
+column is rebuilt once, sequentially, after its siblings — the milestone
+is `freetext_pool_ladder_retried`. The fit-wait window was widened to
+cover what the measurement said the fit actually needed. A genuine error
+still fails the bundle.
 
 ## Calls into vLLM, at a high level
 
@@ -334,17 +467,19 @@ topology. What the ladder needs from it fits in a paragraph:
 
 - **Structured output, not prose parsing.** Each round is one request to
   the chat endpoint with `response_format = json_schema`; a user `pattern`
-  becomes part of the grammar the decoder is constrained to. Malformed
-  output is impossible by construction; a completion that is not a JSON
-  array is dropped with a WARNING, not repaired.
+  becomes part of the grammar the decoder is constrained to
+  ([vLLM structured outputs](https://docs.vllm.ai/en/latest/features/structured_outputs.html)).
+  Malformed output is impossible by construction; a completion that is
+  not a JSON array is dropped with a WARNING, not repaired.
 - **No request seed when n > 1** — a pinned seed collapses the four
   completions into four copies. Determinism lives elsewhere: the pool is
   persisted, and every draw from it is seeded per batch.
 - **Prefix caching is a property of the prompt, not a flag.** The shared
   instruction prefix, the seeds and the rendered clause are byte-identical
-  across rounds, so vLLM's automatic prefix caching reuses the KV prefix;
-  the one seed strategy that rotates exemplars per round forfeits it by
-  design and says so in its help text.
+  across rounds, so vLLM's
+  [automatic prefix caching](https://docs.vllm.ai/en/stable/design/prefix_caching/)
+  reuses the KV prefix; the one seed strategy that rotates exemplars per
+  round forfeits it by design and says so in its help text.
 - **The KV budget is measured, not assumed.** The client sizes
   `gpu-memory-utilization` and `max-model-len` from free VRAM at ignition;
   a request the budget cannot fit waits (`vllm_unfittable_wait`) inside a
@@ -358,10 +493,14 @@ phase:*
 
 ![Where time went](../designs/assets/r6-scale-where-time-went.png)
 
-Everything after the pool phase in that run was CPU: vectorized draws,
-validation, dedup, load. (Part 3 and Part 8 tell the throughput story —
-that 93-minute job runs in well under an hour on the same fleet after the
-v0.2.0 changes, and the GPU minutes did not move.)
+📉 **What the run showed.** Everything after the pool phase in that run
+was CPU: vectorized draws, validation, dedup, load. The GPUs were billed
+for the whole job and used for a few minutes of it.
+
+🔧 **What the code does now.** Nothing changed in the ladder — this is the
+design working as intended. What changed is around it: Part 3 and Part 8
+tell how the v0.2.0 throughput work brought that 93-minute job to well
+under an hour on the same fleet, and the GPU minutes did not move.
 
 ## RAG interplay: yes — and only as prompt seeds
 
@@ -372,22 +511,41 @@ it is not used for any other column kind.** The marginal statistics that
 drive numerics, categoricals and temporals come from a pure statistical
 pass over the reference sample; embeddings play no part in them.
 
-*Retrieval is a prompt-seeding device, not a per-row lookup — `rag_chunks`
-is read once per pool build, `freetext_pools` makes the second run skip
-the GPU entirely, and `b2_library` reaches the same guardrails without
-touching either store:*
+*Retrieval is a prompt-seeding device, not a per-row lookup — ①
+`rag_chunks` is read once per pool build, ② `freetext_pools` makes the
+second run skip the GPU entirely, and ③ `b2_library` reaches the same
+guardrails without touching either store:*
 
 ![Who reads what](assets/freetext-components.png)
+
+Follow the numbered arrows:
+
+- **①** The pool branch reads `rag_chunks` once per pool build — the
+  seeds go into the prompt, the prompt goes to vLLM, and nothing in the
+  generate stage ever touches the chunks again. The population branch
+  writes them only on a cold run.
+- **②** The pool branch's blocking LOAD into `freetext_pools` is what the
+  *next* run reads: a store hit in `setup()` means the generate stage
+  never ignites vLLM at all.
+- **③** `b2_library` bypasses both stores — a lazy 32-value pool per
+  column, built per batch through the same ladder — and lands in the same
+  three lines of defense as `b1_rag`.
 
 The `rag_chunks` table holds two kinds of chunk, and each has one
 consumer:
 
 - **`row_doc` chunks** — the first 1,024 reference rows serialized
-  per-column and embedded with a small open-weight embedder
-  (`bge-small-en-v1.5`, 384 dimensions, pulled once from GCS). The engine
-  loads them into an exact FAISS index and retrieves the top-8 rows
-  nearest the sample centroid — representative rows, not lookalikes of a
-  query. They are the fallback seeds.
+  per-column (the row-as-text framing of
+  [GReaT, Borisov et al. 2023](https://arxiv.org/abs/2210.06280)) and
+  embedded with a small open-weight embedder
+  ([`bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5),
+  384 dimensions, from the [C-Pack](https://arxiv.org/abs/2309.07597)
+  family; pulled once from GCS, never from the Hub at runtime). The
+  engine loads them into an exact
+  [FAISS](https://github.com/facebookresearch/faiss) index
+  ([Douze et al. 2024](https://arxiv.org/abs/2401.08281)) and retrieves
+  the top-8 rows nearest the sample centroid — representative rows, not
+  lookalikes of a query. They are the fallback seeds.
 - **`free_text_col` chunks** — the distinct values of each free-text
   column (≤ 1,024 per column), deduplicated driver-side. They are the
   primary seeds: eight per column, chosen by centroid or k-center over the
@@ -403,7 +561,9 @@ first attempt ran fifty-six CPU embedders and starved the model pull.
 
 So: are `rag_chunks` used for "the rest of the fields"? No. Are they used
 for free-text? Yes — to seed the prompt, never to copy from. A seed can be
-echoed by the model; the novelty gate counts echoes and the rejection set
+echoed by the model (the extraction risk
+[Carlini et al. 2021](https://arxiv.org/abs/2012.07805) describe is
+exactly an echo); the novelty gate counts echoes and the rejection set
 drops them.
 
 ## The pool store in BigQuery: build once, read forever
@@ -445,8 +605,10 @@ digest*, amortized across every run that shares it.
 Part 1 promised the two engines are one flag apart, and for free-text the
 seam is worth describing honestly:
 
-- `b2_library` wraps an open-source tabular synthesizer (`sdgx`, CTGAN,
-  with an empirical fallback) fitted once per worker process. Typed
+- `b2_library` wraps an open-source tabular synthesizer —
+  [`sdgx`](https://github.com/hitsz-ids/synthetic-data-generator), whose
+  default model is CTGAN ([Xu et al., NeurIPS 2019](https://arxiv.org/abs/1907.00503)),
+  with an empirical fallback — fitted once per worker process. Typed
   columns come from the library.
 - Free-text is patched **per batch** by a hook that builds a lazy 32-value
   LLM pool per column and caches it in-process — the same escalation
@@ -461,7 +623,7 @@ seam is worth describing honestly:
   owning nothing. The ADRs list "B.2 routing parity" as the open item, and
   Part 5 is the engine's own deep dive.
 
-## The measured state of free-text, and what it taught
+## The measured state of free-text, and the lessons ledger
 
 Nothing above was designed on a whiteboard first. The prompt-constraint
 work started from a measurement that looked like a model problem and
@@ -474,22 +636,57 @@ format — while seven more sat at the ~512 pool-cap diversity ceiling:*
 
 ![Prompt-constraints evidence](../designs/assets/prompt-constraints-evidence.png)
 
-The identifier case is the one worth remembering, because its fix is a
-sampling rule, not a prompt: when the observed top masks cover too little
-of the column, drawing per-position characters independently produces
-masks that never existed. Drawing a *whole observed mask* first, then
-filling it, reproduces the source mask marginal by construction:
+📉 **What the run showed.** Left panel: three columns reproduced
+essentially none of the source's top formats, and the causes were
+different in each — an identifier whose per-position draws produced masks
+that never existed, a column whose whitespace runs were normalised away
+before the gate could see them, and a sparse column whose eight seeds
+under-represented its format. Right panel: seven more columns sat at the
+512-value ceiling against source cardinalities of 20k–146k.
+
+🔧 **What the code does now.** The identifier case draws a *whole observed
+mask* first and fills it (the concept figure below). The whitespace and
+sparse cases share one gate: a candidate must reproduce an observed
+*collapsed* mask — digit and letter runs collapse, whitespace runs stay
+literal — so whitespace-normalised output is rejected and a wrong-format
+guess is rejected even when the seeds under-represented the format,
+because the observed sample still carries the true masks; an operator
+`format` or `pattern` clause then closes the loop from the prompt side.
+And the right panel is the cap doing
+exactly what it is meant to do — it is the reason Tier P, shape expansion
+and the persisted store exist: cardinality comes from samplers and
+templates, the LLM supplies *semantics*, and neither is asked to do the
+other's job.
 
 *Drawing a whole observed mask and then filling it reproduces the source
 mask marginal; drawing positions independently collapses it:*
 
 ![Mask collapse concept](../designs/assets/prompt-constraints-mask-collapse.png)
 
-The right panel of the evidence figure — synthetic distinct pinned at
-~512 against source cardinalities of 20k–146k — is the cap doing exactly
-what it is meant to do, and the reason Tier P, shape expansion and the
-persisted store exist: cardinality comes from samplers and templates,
-the LLM supplies *semantics*, and neither is asked to do the other's job.
+💡 **Concept, not a run.** When the observed top masks cover too little
+of a column, drawing per-position characters independently produces
+masks that never existed; drawing a whole observed mask and then filling
+it reproduces the source mask marginal by construction. Its fix is a
+sampling rule, not a prompt.
+
+### The ledger
+
+Every lesson in this article, and the mechanism that exists because of
+it:
+
+| Figure | 📉 What the run showed | 🔧 What the code does now |
+|---|---|---|
+| PK blocker | a declared PK drew from the 512-cap pool; 999,488 of 1M rows DLQ'd as `pk.duplicate` after 37 min | samplable `pattern` → Tier P sampler; launcher refuses a run whose routed key capacity < `num_rows` |
+| Router outcomes | prose clause leaked 12 rejects; a "binary fallback" served 58 real values against a never-copy clause | `pattern` → grammar or sampler; Tier B byte template; the copying fallback is gone |
+| Format gate | a 28-char example on a 31-char column: 386 of 393 values refused, three rounds wasted; prose ran to 62 chars past a 35-char wall | `prompt_constraint_example_off_format` at launch; `freetext_pool_format_collapse`; `freetext_pool_length_clamped` |
+| Pool targets | one pool sized from the sample (94) while the fetched filter held 4,022 | target = exact stats → source-filter cardinality → sample distinct, filter fetched before sizing |
+| Pool race | a lost fit-wait failed a bundle after its three sibling ladders had finished | transient errors classified and retried once, sequentially (`freetext_pool_ladder_retried`); wider fit window |
+| Where time went | vLLM busy 7.9 min of a 93-min 10M run; GPUs billed throughout | unchanged — the O(1) design confirmed; v0.2.0 moved the CPU side |
+| Prompt-constraints evidence | three 0%-recall columns, three mechanisms; seven at the 512 ceiling | mask-first identifier draws; collapsed-mask candidate gate (whitespace kept literal); `format`/`pattern` clause for the under-seeded column; the ceiling is by design |
+| *(no figure)* 108 pool builds in a 68-min job | identical pools rebuilt 36× per column, 19.1 GPU-hours | `freetext_pools` persisted per digest; `AwaitFreeTextPools` barrier |
+| *(no figure)* warm pools replayed a since-fixed memorization bug | `exists()` was the only guard | taint preflight: overlap query per column, delete + rebuild on any hit |
+| *(no figure)* 56 CPU embedders starved the model pull | the multi-process topology fanned the cold embed out | embed bounded to two processes per job; pool branch waits for it |
+| *(no figure)* B.2 paid three LLM calls per batch on a pool that could not succeed | 35 minutes of retries | empty yield negative-cached per column |
 
 ## What to remember
 
@@ -499,18 +696,21 @@ the LLM supplies *semantics*, and neither is asked to do the other's job.
 2. **The ladder is bounded on every axis** — values per request, requests
    per column, escalation levels, pool size — and every exit is a named
    milestone.
-3. **Novelty is checked against the full source domain**, not the sample,
+3. **The 512 cap is a GPU budget and a diversity ceiling**, on purpose.
+   Cardinality comes from patterns and templates; the LLM supplies
+   meaning. Keys are refused before launch.
+4. **Novelty is checked against the full source domain**, not the sample,
    and `freetext.copy_fraction` is a run-level BLOCKER. A pool can be
    short or empty; it cannot be a copy.
-4. **`pattern` beats prose.** A samplable pattern is enforced by
+5. **`pattern` beats prose.** A samplable pattern is enforced by
    construction; prose is a request the gate then polices.
-5. **Examples are judged before they are used**, by the same gate that
+6. **Examples are judged before they are used**, by the same gate that
    judges the model.
-6. **RAG seeds prompts; it does not generate rows.** Eight exemplars per
+7. **RAG seeds prompts; it does not generate rows.** Eight exemplars per
    column, retrieved once per pool build.
-7. **Pools persist per reference digest**, are taint-checked before reuse,
+8. **Pools persist per reference digest**, are taint-checked before reuse,
    and gate the generate stage behind a barrier.
-8. **`strict_freetext` is the default with a real model.** No silent
+9. **`strict_freetext` is the default with a real model.** No silent
    fallback lands data.
 
 ## Where this goes next
@@ -527,6 +727,62 @@ comment section is part of the project: corrections, experiment ideas
 and "have you tried X" feed the backlog (a Tier S seed-and-expand route
 and B.2 routing parity are the two candidates this article touches).
 
+## References
+
+**The statistical side**
+
+- Xu, Skoularidou, Cuesta-Infante, Veeramachaneni — *Modeling Tabular
+  Data using Conditional GAN* (CTGAN), NeurIPS 2019 —
+  [arXiv 1907.00503](https://arxiv.org/abs/1907.00503). The model behind
+  `b2_library`'s default backend.
+- [`sdgx` — Synthetic Data Generator](https://github.com/hitsz-ids/synthetic-data-generator)
+  (hitsz-ids, Apache-2.0), the library `b2_library` wraps; the
+  [Synthetic Data Vault](https://sdv.dev/) is the family it belongs to.
+- Devroye — *Non-Uniform Random Variate Generation*, Springer 1986
+  ([full text](https://luc.devroye.org/rnbookindex.html)), ch. II for
+  the inverse-CDF sampling the numeric route uses.
+
+**The LLM side of tabular and free-text synthesis**
+
+- Borisov, Seßler, Leemann, Pawelczyk, Kasneci — *Language Models are
+  Realistic Tabular Data Generators* (GReaT), ICLR 2023 —
+  [arXiv 2210.06280](https://arxiv.org/abs/2210.06280). Row-as-text
+  serialization; the per-row generation cost this pipeline avoids.
+- Nguyen, Schafft, Hale et al. — *FASTGEN: Fast and Cost-Effective
+  Synthetic Tabular Data Generation with LLMs*, 2025 —
+  [arXiv 2507.15839](https://arxiv.org/abs/2507.15839). The
+  "LLM infers, statistics sample" spine both engines follow.
+- Yang, Zhang, Prenkaj et al. — *Doubling Your Data in Minutes: Ultra-fast
+  Tabular Data Generation via LLM-Induced Dependency Graphs*, 2025 —
+  [arXiv 2507.19334](https://arxiv.org/abs/2507.19334). The ~9,500×
+  cost gap between per-cell LLM generation and statistical sampling.
+- Sidorenko — *A Note on Statistically Accurate Tabular Data Generation
+  Using Large Language Models*, 2025 —
+  [arXiv 2505.02659](https://arxiv.org/abs/2505.02659). Why per-cell LLM
+  sampling flattens distributions toward uniform.
+- Carlini, Tramèr, Wallace et al. — *Extracting Training Data from Large
+  Language Models*, USENIX Security 2021 —
+  [arXiv 2012.07805](https://arxiv.org/abs/2012.07805). Why an echoed
+  seed is a leak, and why the novelty gate runs against the full domain.
+- Willard & Louf — *Efficient Guided Generation for Large Language
+  Models*, 2023 — [arXiv 2307.09702](https://arxiv.org/abs/2307.09702).
+  The finite-state guided decoding behind `pattern` → grammar.
+
+**Mechanisms and components**
+
+- vLLM — [automatic prefix caching: design](https://docs.vllm.ai/en/stable/design/prefix_caching/)
+  and [feature page](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching.html);
+  [structured outputs](https://docs.vllm.ai/en/latest/features/structured_outputs.html).
+- FAISS — [facebookresearch/faiss](https://github.com/facebookresearch/faiss);
+  Douze, Guzhva, Deng et al. — *The Faiss library*, 2024 —
+  [arXiv 2401.08281](https://arxiv.org/abs/2401.08281).
+- BGE embedder — [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5)
+  model card; Xiao, Liu, Zhang, Muennighoff — *C-Pack: Packed Resources
+  for General Chinese Embeddings*, 2023 —
+  [arXiv 2309.07597](https://arxiv.org/abs/2309.07597).
+- Apache Beam — [ML inference in Beam pipelines](https://beam.apache.org/documentation/ml/about-ml/)
+  (`RunInference`, the transform the model handler plugs into).
+
 ---
 
 *Provenance (dropped on Medium): sources and figures per front-matter;
@@ -540,4 +796,5 @@ scripts from their `MEASURED` / `CONCEPT` blocks — every measured number
 quoted above is typed once, in those scripts. Tables are pasted to Medium
 as images or lists. Configuration constants (pool cap 512, 32 × 4 values
 per round, 8 seeds, 1M-value domain cap, 1,024-row/value chunk caps,
-32-value B.2 pools) are the defaults at the synced commit.*
+32-value B.2 pools) are the defaults at the synced commit. External
+links retrieved 2026-09-08.*
