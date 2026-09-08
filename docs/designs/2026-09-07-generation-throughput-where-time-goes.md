@@ -343,44 +343,34 @@ whole fleet. Pinned by the launcher through `WorkerOptions.num_workers`,
 the `disk_size_gb` channel; an explicit Beam `--num_workers` wins.
 `run_e2e.sh` tier `R7` carries it as `job.num_workers`.
 
-**`sdk_containers=single`** (default) — the RUN_PLAYBOOK §3 pin, one SDK
-process per worker:
+**`sdk_containers=single|multi`** — one figure, both modes, everything
+that changes inside a worker:
 
-```mermaid
-flowchart LR
-  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
-  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
-  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+![sdk_containers topology](assets/sdk-containers-topology.png)
 
-  subgraph W["worker: 8 vCPUs, 1 T4"]
-    S["🔀 sdk-0-0<br/>8 threads, one GIL"]:::beam
-    V["🧠 vLLM server<br/>:8000"]:::gpu
-  end
-  S --> V
-```
+*`single` (default, the RUN_PLAYBOOK §3 pin) runs one SDK harness
+process per worker: eight threads on one GIL, so the pure-Python generate
+stages keep about one vCPU busy while the process owns the vLLM spawn
+outright. `multi` (Dataflow's default) runs one process per vCPU, eight
+GILs, and the launcher — which reads the topology from the experiments
+and logs `sdk_container_topology` — builds the vLLM client with
+`cross_process=True`: a bound loopback port (`_PortMutex`, :8001) makes
+one process the spawner, the other seven wait and reuse its server
+through the `/v1/models` probe, and teardown keeps the server alive. The
+price is eight engine builds per worker instead of one; the population
+embed is bounded to `rag_embed_shards` processes per job and finishes
+before the spawn (ADR 0034 D6, D8).* Source
+`assets/sdk-containers-topology.drawio`, exported side by side.
 
-**`sdk_containers=multi`** (experiment) — Dataflow's default, one SDK
-process per vCPU; the launcher detects it from the experiments
-(`sdk_container_topology`) and builds the vLLM client with
-`cross_process=True`:
+What the multi option measured, in the figures that own the numbers:
 
-```mermaid
-flowchart LR
-  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
-  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
-  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
-  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
-
-  subgraph W["worker: 8 vCPUs, 1 T4, shared host network"]
-    S0["🔀 sdk-0-0<br/>wins the spawn mutex"]:::beam
-    S1["🔀 sdk-0-1 … sdk-0-7<br/>wait, then reuse"]:::beam
-    M["🛡️ _PortMutex :8001<br/>bound loopback port"]:::cpu
-    V["🧠 vLLM server :8000<br/>kept alive at teardown"]:::gpu
-  end
-  S0 -- "vllm_spawn_lock_acquired" --> M --> V
-  S1 -- "vllm_spawn_lock_wait" --> M
-  S1 -. "reuse probe /v1/models" .-> V
-```
+| Finding | Figure | What to read |
+|---|---|---|
+| The GIL ceiling is real: at one interpreter per worker the fleet rate saturates well below the vCPU count; at eight it multiplies | `assets/throughput-gil-ceiling.png` | measured single vs multi fleet rate, the linear projection hatched |
+| The whole job shrinks, and only the generate + dedup phases move | `assets/throughput-evolution.png` | the R7 single → multi bars; startup and the cold pool branch stay put |
+| Setup is paid once per process, not once per thread | `assets/throughput-setup-cost.png` | `dofn_setup_done` per instance; eight per worker under multi, all sharing one spawn |
+| One spawn per worker, no lost race, no OOM | ADR 0034 § Acceptance evidence | `vllm_spawn_lock_acquired` ×1, `vllm_spawn_lock_wait` on the rest, one `vllm_ready` |
+| Eight GPU embedders beside the spawn hurt; fifty-six CPU embedders hurt more | ADR 0034 D8 (rev. 1 → rev. 2) | 344 s → 598.7 s → target 183 s ignition across the three multi runs |
 
 **NVIDIA MPS — evaluated, not adopted.** Dataflow's
 [Multi-Process Service](https://docs.cloud.google.com/dataflow/docs/gpu/use-nvidia-mps)
@@ -480,4 +470,5 @@ BLUE / ORANGE / AQUA with the OKLab separation check on every run.
 | setup cost | `assets/throughput-setup-cost.png` | per-instance `dofn_setup_done` / `b1_pools_built` seconds, 32 per table, cold and warm |
 | shuffle barriers | `assets/throughput-shuffle-barriers.png` | `TotalShuffleDataProcessed` measured for the chain vs the single-barrier projection (hatched) |
 | GIL ceiling | `assets/throughput-gil-ceiling.png` | measured fleet rate at one interpreter per worker vs. eight (R7 multi, four workers); the 8× linear projection hatched |
-| evolution | `assets/throughput-evolution.png` | critical-path phases of the three runs (R6 cold, R7 single, R7 multi) with wall time and worker ramp |
+| evolution | `assets/throughput-evolution.png` | critical-path phases of the five runs (R6 cold, R7 single, R7 multi, the 09-07 multi with rebuilt pools, the 09-08 multi cold with CPU embeds) with wall time and worker ramp |
+| sdk_containers topology | `assets/sdk-containers-topology.drawio` → `.png` | concept figure, no measured numbers: one worker under `single` vs `multi` — threads and GILs per vCPU, the engine registry per process, the vLLM spawn mutex and reuse, the bounded population embed; exported with the next-ai-drawio MCP plugin |

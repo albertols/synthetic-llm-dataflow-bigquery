@@ -222,7 +222,9 @@ The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
   but is bounded to `rag_embed_shards` (2) processes, and the pool
   branch waits for it before its first LLM call spawns vLLM (ADR 0034
   D8 rev. 2 — rev. 1's CPU embeds starved the model pull and the vLLM
-  init on 2026-09-08: 598 s ignition, a 15-min population stage).
+  init on 2026-09-08: 598 s ignition, a 15-min population stage). The
+  one-figure comparison of both topologies inside a worker is
+  `docs/designs/assets/sdk-containers-topology.png` (design doc §5).
 - **NVIDIA MPS — evaluated, not enabled (ADR 0034).** Dataflow's
   `worker_accelerator=…;use_nvidia_mps` shares one CUDA context across
   SDK processes and is meant for `RunInference` with `model_copies > 1`

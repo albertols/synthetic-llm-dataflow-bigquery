@@ -127,7 +127,11 @@ reuse probe (`vllm_spawn_lock_wait` / `vllm_spawn_lock_acquired`), and
 teardown keeps the server alive (`vllm_server_kept_alive`) because a
 sibling process's refcount is invisible. D3 keeps the seven non-spawning
 processes off the GPU. The default stays `single` until the R7m
-acceptance run reads clean.
+acceptance run reads clean. Both topologies, side by side — threads and
+GILs per vCPU, the engine registry per process, the spawn mutex and
+reuse, the bounded population embed — are drawn once in the design
+doc's `assets/sdk-containers-topology.png` (drawio source committed
+beside it).
 
 **D7 — The fixed-width ceiling applies to mask-gated columns.**
 `_FormatGate.length_blind` (prose OR collapsed-mask gate) is where
