@@ -312,3 +312,39 @@ def test_independent_tables_share_one_pipeline(
         build_relational_pipeline(p, specs)  # unique labels: must not raise
     assert len(_read_jsonl(tmp_path / "a")) == 20
     assert len(_read_jsonl(tmp_path / "b")) == 20
+
+
+def test_edge_key_sample_cap_bounds_the_parent_keys_the_child_sees(tmp_path):
+    """ADR 0035: the side-input sample size is per edge, set by preflight
+    from the child's PK — a flat 100k starved C_TABLE's PK on 2026-09-09."""
+    from apache_beam.testing.util import assert_that
+    from sdfb_beam.pipeline import _edge_key_pools
+
+    parent_rows = [{"customer_id": i} for i in range(300)]
+    capped = FkEdgeSpec(
+        child_cols=("CUST_ID",), ref_cols=("customer_id",),
+        parent_landing="p.land.customers", parent_pk=("customer_id",),
+        key_sample_cap=150,
+    )
+    default = FkEdgeSpec(
+        child_cols=("CUST_ID",), ref_cols=("customer_id",),
+        parent_landing="p.land.customers", parent_pk=("customer_id",),
+    )
+
+    def _has_keys(n: int):
+        def _check(payloads):
+            (payload,) = payloads
+            (edge,) = payload
+            assert len(edge["keys"]) == n, len(edge["keys"])
+        return _check
+
+    with beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"])) as p:
+        parent = p | beam.Create(parent_rows)
+        assert_that(
+            _edge_key_pools(parent, capped, "capped/"), _has_keys(150),
+            label="capped",
+        )
+        assert_that(
+            _edge_key_pools(parent, default, "default/"), _has_keys(300),
+            label="default",
+        )
