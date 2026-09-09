@@ -261,7 +261,7 @@ costs four times the rows, forever. What that means column by column:
 
 **Pros and cons, honestly.**
 
-| | |
+| Property | Why it matters |
 |---|---|
 | ✅ cheap and fast | one query, cents, seconds; profiling is driver-side and costs the DAG nothing |
 | ✅ deterministic | same contents → same digest → warm pools, warm chunks, comparable validation scores |
