@@ -9,6 +9,7 @@ that contains an FK is unique by construction (the 2026-09-09 runs lost
 from __future__ import annotations
 
 import random
+import time
 from collections import Counter
 
 import pytest
@@ -82,6 +83,23 @@ class TestCellTable:
     def test_zero_weight_row_is_rejected(self):
         with pytest.raises(ValueError, match="positive count"):
             CellTable(cols=("X",), rows=[(1,), (2,)], counts=[1, 0])
+
+    def test_small_draw_on_a_big_table_stays_cheap(self):
+        """ADR 0036 D3 claims O(k), not O(k*C). `random.choices` rebuilds
+        the cumulative weights on EVERY call, so the rejection loop was
+        O(k*C) — 746 us per key at C=10,000, i.e. ~20 minutes of pure draw
+        for a 100M-key parent. The cumulative table is built once in
+        `__post_init__` instead and each draw is a bisect."""
+        table = CellTable(
+            cols=("X",),
+            rows=[(i,) for i in range(10_000)],
+            counts=[1.0 + (i % 7) for i in range(10_000)],
+        )
+        rng = random.Random(0)
+        started = time.perf_counter()
+        for _ in range(1_000):
+            assert len(table.draw(3, rng, exact=True)) == 3
+        assert time.perf_counter() - started < 2.0
 
 
 class TestExpandKeys:

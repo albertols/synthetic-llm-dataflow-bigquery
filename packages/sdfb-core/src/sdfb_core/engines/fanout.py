@@ -88,16 +88,30 @@ class CellTable:
     cols: tuple[str, ...]
     rows: list[tuple]
     counts: list[float]
+    _cum: tuple[float, ...] = field(init=False, repr=False)
+    _total: float = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if len(self.rows) != len(self.counts) or not self.rows:
             raise ValueError("cell table needs one positive count per row")
         if not all(c > 0 for c in self.counts):
             raise ValueError("cell table needs one positive count per row")
+        # Cumulative counts ONCE, exactly as `FanoutHistogram` does.
+        # `random.choices(..., weights=...)` rebuilds them on every call, so
+        # a k-draw cost O(k*C) and not the O(k) ADR 0036 D3 claims — 746 us
+        # per key at C = 10,000, ~20 minutes of pure draw on a 100M-key
+        # parent.
+        cum = tuple(accumulate(float(c) for c in self.counts))
+        object.__setattr__(self, "_cum", cum)
+        object.__setattr__(self, "_total", cum[-1])
 
     @property
     def size(self) -> int:
         return len(self.rows)
+
+    def _weighted_index(self, rng: random.Random) -> int:
+        """One weighted index in O(log C) — a bisect over `_cum`."""
+        return min(bisect_right(self._cum, rng.random() * self._total), self.size - 1)
 
     def draw(self, k: int, rng: random.Random, *, exact: bool) -> list[tuple]:
         """``k`` cells. ``exact`` = without replacement (raises when
@@ -105,7 +119,7 @@ class CellTable:
         if k <= 0:
             return []
         if not exact:
-            return rng.choices(self.rows, weights=self.counts, k=k)
+            return [self.rows[self._weighted_index(rng)] for _ in range(k)]
         if k > self.size:
             raise ValueError(
                 f"{k} children requested from {self.size} cells over "
@@ -114,8 +128,7 @@ class CellTable:
         if k <= self.size * _REJECTION_MAX_FILL:
             chosen: dict[int, None] = {}
             while len(chosen) < k:
-                (idx,) = rng.choices(range(self.size), weights=self.counts, k=1)
-                chosen.setdefault(idx, None)
+                chosen.setdefault(self._weighted_index(rng), None)
             return [self.rows[i] for i in chosen]
         # Weighted permutation via full sort: key = u^(1/w), take the k largest.
         # O(C log C) full sort (not k-based selection).
