@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 from sdfb_beam.cli.run_pipeline import (
     in_set_parent_edges,
     resolve_driven_uniqueness_mode,
     resolve_fanout,
+    resolve_table_rows,
 )
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.relationships import RelationshipRegistry
@@ -106,3 +108,51 @@ def test_driven_uniqueness_mode():
     assert resolve_driven_uniqueness_mode("streaming", driven=True, identity_cols=()) == "streaming"
     assert resolve_driven_uniqueness_mode("streaming", driven=True, identity_cols=("X",)) == "exact"
     assert resolve_driven_uniqueness_mode("streaming", driven=False, identity_cols=()) is None
+
+
+def test_driven_child_without_derived_rows_stops():
+    with pytest.raises(SystemExit, match="preflight P4"):
+        resolve_table_rows(
+            "proj.synthetic_data.C_TABLE", driven=True, derived_rows=None, launch_rows=1000,
+        )
+    assert resolve_table_rows(
+        "proj.synthetic_data.C_TABLE", driven=True, derived_rows=40, launch_rows=1000,
+    ) == 40
+    assert resolve_table_rows(
+        "proj.synthetic_data.C_TABLE", driven=False, derived_rows=None, launch_rows=1000,
+    ) == 1000
+
+
+def test_resolve_fanout_stops_on_unknown_driving_columns(monkeypatch):
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(
+        rp, "measure_fanout",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("measure_fanout must not run")),
+    )
+    schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.C_TABLE"},
+         "schema": [{"name": n, "type": "STRING", "mode": "REQUIRED"}
+                    for n in ("D_COL_001", "C_COL_002")]}  # D_COL_024 missing
+    )
+    with pytest.raises(SystemExit, match="preflight P2"):
+        resolve_fanout(
+            _REG, "proj.synthetic_data.C_TABLE", "proj.src.C_TABLE",
+            in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+            reference_rows=_ROWS, table_schema=schema, stats_store=None, bq_client=object(),
+        )
+
+
+def test_resolve_fanout_reports_a_measurement_failure_as_a_preflight_stop(monkeypatch):
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(
+        rp, "measure_fanout",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    with pytest.raises(SystemExit, match="fan-out measurement"):
+        resolve_fanout(
+            _REG, "proj.synthetic_data.C_TABLE", "proj.src.C_TABLE",
+            in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+            reference_rows=_ROWS, table_schema=_SCHEMA, stats_store=None, bq_client=object(),
+        )

@@ -98,6 +98,7 @@ from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
 
 if TYPE_CHECKING:
+    from sdfb_core.contracts.relationships import FkEdge
     from sdfb_core.engines import ModelClient
 
 logger = logging.getLogger(__name__)
@@ -788,6 +789,29 @@ def resolve_driven_uniqueness_mode(
     return "exact" if identity_cols else flag
 
 
+def resolve_table_rows(
+    landing_table: str, *, driven: bool, derived_rows: int | None, launch_rows: int
+) -> int:
+    """This table's ``num_rows`` (ADR 0036): a DRIVEN child's row count is
+    ``derived_rows`` (from the measured source fan-out) — NEVER the
+    launch-wide ``--num_rows``, which would silently size it wrong. A
+    root/undriven table keeps ``launch_rows``. A driven child with no
+    derivable count (missing histogram mass, or the driving parent's row
+    count unknown) is a loud stop, not a silent fallback."""
+    if not driven:
+        return launch_rows
+    if not derived_rows:
+        raise SystemExit(
+            f"[preflight P4] {landing_table}: this table is generated from "
+            f"its parent's keys but its row count could not be derived "
+            f"(derived_rows={derived_rows!r}; the source fan-out histogram "
+            f"or the parent's row count is missing, or the source parent "
+            f"has no children). A driven child never takes the launch-wide "
+            f"--num_rows."
+        )
+    return derived_rows
+
+
 def resolve_fanout(
     registry: RelationshipRegistry,
     landing_table: str,
@@ -798,17 +822,28 @@ def resolve_fanout(
     table_schema,
     stats_store,
     bq_client,
-) -> tuple[dict | None, dict]:
+) -> tuple[dict | None, dict[FkEdge, str]]:
     """``(FanoutPlan payload or None, edge roles)`` for one table (ADR
     0036). Measures (or reads the cache) for the driving edge only when
     its parent generates in the same launch — an external or root table
     (no driving edge) is undriven, and the caller keeps ``args.num_rows``.
     ``RelationshipError`` (an ambiguous or unimplied edge set) propagates
-    to the caller."""
+    to the caller. The driving edge's columns are checked against the
+    schema (P2) before any BigQuery call, and a measurement failure is
+    reported as a preflight ``SystemExit`` (never an escaping traceback)
+    so the relational runner's collect-then-fail loop can report it
+    alongside every other table's stop."""
     roles = registry.edge_roles(landing_table)  # RelationshipError propagates
     driving = next((e for e, r in roles.items() if r == "driving"), None)
     if driving is None or driving.ref.rsplit(".", 1)[-1] not in in_set_names:
         return None, roles
+    valid = {c.name for c in table_schema.columns}
+    unknown = [c for c in driving.cols if c not in valid]
+    if unknown:
+        raise SystemExit(
+            f"[preflight P2] {landing_table}: the driving edge names "
+            f"unknown columns {unknown}. Fix the model file (or the table)."
+        )
     relations = registry.relations(landing_table)
     pk = tuple(relations.pk) if relations else ()
     profiles = profile_columns(table_schema, reference_rows) if reference_rows else {}
@@ -821,11 +856,17 @@ def resolve_fanout(
     measured = stats_store.get(source_table, tuple(driving.cols), sha) if stats_store else None
     source = "cache"
     if measured is None:
-        measured = measure_fanout(
-            source_child=source_table, child_cols=tuple(driving.cols),
-            source_parent=source_parent, ref_cols=tuple(driving.ref_cols),
-            cell_cols=cell_cols, client=bq_client,
-        )
+        try:
+            measured = measure_fanout(
+                source_child=source_table, child_cols=tuple(driving.cols),
+                source_parent=source_parent, ref_cols=tuple(driving.ref_cols),
+                cell_cols=cell_cols, client=bq_client,
+            )
+        except Exception as exc:
+            raise SystemExit(
+                f"[preflight] {landing_table}: fan-out measurement on "
+                f"{source_table} failed: {type(exc).__name__}: {exc}"
+            ) from exc
         source = "measured"
         if stats_store:
             stats_store.put(source_table, tuple(driving.cols), sha, measured)
@@ -1627,7 +1668,12 @@ def _prepare_table_spec(
     # mode all derive from the measured source fan-out instead of the
     # launch's flat --num_rows/--uniqueness_mode.
     driven = fanout is not None
-    num_rows = pf.derived_rows if (driven and pf.derived_rows) else args.num_rows
+    num_rows = resolve_table_rows(
+        args.landing_table,
+        driven=driven,
+        derived_rows=pf.derived_rows,
+        launch_rows=args.num_rows,
+    )
     batch_size = resolve_batch_size(args.batch_size, num_rows)
     uniqueness_mode = (
         resolve_driven_uniqueness_mode(
