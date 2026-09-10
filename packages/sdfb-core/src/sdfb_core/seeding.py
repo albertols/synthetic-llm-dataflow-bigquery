@@ -18,3 +18,13 @@ def derive_batch_seed(run_id: str, batch_id: int) -> int:
         f"{run_id}\x1f{batch_id}".encode(), digest_size=8
     ).digest()
     return int.from_bytes(digest, "big") >> 1
+
+
+def derive_key_seed(run_id: str, key: tuple) -> int:
+    """Stable seed for one parent key's children (design 2026-09-10):
+    the same parent yields the same children on a re-run of ``run_id``
+    and on a retried bundle. ``repr`` keeps mixed-type tuples total."""
+    digest = hashlib.blake2b(
+        f"{run_id}\x1f{key!r}".encode(), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big") >> 1
