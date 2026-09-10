@@ -56,6 +56,17 @@ def test_measure_fanout_builds_histogram_with_zero_bucket_and_cells():
                             "counts": [40.0, 20.0]}
 
 
+def test_measure_fanout_builds_a_client_when_none_is_given(monkeypatch):
+    fake = _Client()
+    monkeypatch.setattr("google.cloud.bigquery.Client", lambda: fake)
+    out = measure_fanout(
+        source_child="p.src.C_TABLE", child_cols=("D_COL_001",),
+        source_parent="p.src.B_TABLE", ref_cols=("D_COL_001",),
+        cell_cols=(),
+    )
+    assert out["histogram"] == {"0": 50, "1": 30, "2": 20}
+
+
 def test_measure_fanout_without_cell_columns():
     out = measure_fanout(
         source_child="p.src.C", child_cols=("K",), source_parent="p.src.P",

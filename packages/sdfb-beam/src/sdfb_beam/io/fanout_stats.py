@@ -47,10 +47,10 @@ def _distinct_key_sql(cols: tuple[str, ...]) -> str:
     A single column skips the CONCAT entirely; two or more are joined by a
     single-quoted separator literal with no trailing separator, e.g.
     ``COUNT(DISTINCT CONCAT(CAST(`c1` AS STRING), '\\x1f', CAST(`c2` AS
-    STRING)))``.
+    STRING)))``. Callers pass already-``_validated`` columns — this does
+    not re-validate.
     """
-    checked = _validated(cols)
-    casts = [f"CAST(`{c}` AS STRING)" for c in checked]
+    casts = [f"CAST(`{c}` AS STRING)" for c in cols]
     if len(casts) == 1:
         return f"COUNT(DISTINCT {casts[0]})"
     joined = f", '{_TUPLE_SEP}', ".join(casts)
@@ -68,22 +68,30 @@ def measure_fanout(
     source_parent: str,
     ref_cols: tuple[str, ...],
     cell_cols: tuple[str, ...],
-    client: Any,
+    client: Any = None,
 ) -> dict:
     """``{"histogram", "cells", "parents", "children"}`` from three
     GROUP BY queries; ``cells`` is None without cell columns."""
+    if client is None:  # pragma: no cover - GCP-only path
+        from google.cloud import bigquery
+
+        client = bigquery.Client()
     child_sql = (
         f"SELECT n AS k, COUNT(*) AS parents FROM (SELECT {_cols(child_cols)}, "
         f"COUNT(*) AS n FROM `{source_child}` GROUP BY {_cols(child_cols)}) GROUP BY n"
     )
     histogram = {int(r["k"]): int(r["parents"]) for r in _rows(client.query(child_sql))}
+    ref = _validated(ref_cols)
     parent_sql = (
-        f"SELECT {_distinct_key_sql(ref_cols)} AS parents FROM `{source_parent}` WHERE "
-        + " AND ".join(f"`{c}` IS NOT NULL" for c in _validated(ref_cols))
+        f"SELECT {_distinct_key_sql(ref)} AS parents FROM `{source_parent}` WHERE "
+        + " AND ".join(f"`{c}` IS NOT NULL" for c in ref)
     )
     (parent_row,) = _rows(client.query(parent_sql))
     parents = int(parent_row["parents"])
     with_children = sum(histogram.values())
+    # The child GROUP BY above can never emit k=0 (COUNT(*) over an actual
+    # group is always >= 1), so histogram.get(0, 0) is always 0 here — this
+    # line's only job is filling the zero bucket from the parent count.
     histogram[0] = max(0, parents - with_children) + histogram.get(0, 0)
     children = sum(k * n for k, n in histogram.items())
     cells = None
