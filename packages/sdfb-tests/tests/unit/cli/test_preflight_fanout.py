@@ -86,3 +86,18 @@ def test_an_unbounded_member_makes_the_check_inexact_and_passes():
         num_rows=1_000, fk_parent_rows={"parent": 1_000},
         blocker_failure_ratio=0.2, fanout=_fanout(500),
     )
+
+
+def test_missing_cell_table_with_exact_members_stops():
+    """Fail CLOSED (ADR 0036 review): the PK's completing members are
+    categorical, so the per-key draw needs a cell table — and there is
+    none. Reading that as "0 cells measured, so 0 fit" would let a launch
+    through on a measurement that never happened."""
+    fanout = dict(_fanout(3))
+    fanout["cells"] = None
+    with pytest.raises(SystemExit, match=r"preflight P4.*no cell table was measured"):
+        preflight(
+            _schema(), (), (), _rows(), relations=_REG.relations("child"),
+            num_rows=1_000, fk_parent_rows={"parent": 1_000},
+            blocker_failure_ratio=0.2, fanout=fanout,
+        )

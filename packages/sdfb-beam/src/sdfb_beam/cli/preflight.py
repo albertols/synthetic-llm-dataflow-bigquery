@@ -539,6 +539,19 @@ def _check_driven_pk(
     table = fanout.get("cells") or {}
     n_cells = len(table.get("rows") or ())
     max_k = max(int(k) for k in (fanout.get("histogram") or {"0": 0}))
+    if max_k > 0 and n_cells == 0:
+        # Fail CLOSED: the PK needs these members to be a key, and the
+        # measurement that would supply them is missing entirely — a
+        # different fault from "measured, and too small" below.
+        raise SystemExit(
+            f"[preflight P4] {table_schema.fqn}: the declared PK "
+            f"{list(effective_pk)} is completed by {list(cells)} outside "
+            f"the driving edge ({','.join(driving)}), but no cell table "
+            f"was measured for {list(cells)} — the per-key draw has "
+            f"nothing to draw from. Re-measure the source fan-out (clear "
+            f"the `fk_fanout_stats` cache entry) or fix the `pk:` in the "
+            f"relationship model."
+        )
     if max_k > n_cells:
         raise SystemExit(
             f"[preflight P4] {table_schema.fqn}: the driving edge "

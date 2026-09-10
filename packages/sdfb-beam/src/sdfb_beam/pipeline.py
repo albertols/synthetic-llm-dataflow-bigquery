@@ -639,8 +639,10 @@ def _fanout_requests(
     )
     # An undeclared parent PK (`parent_pk == ()`) proves nothing about
     # uniqueness, so the projection is deduplicated — otherwise a
-    # duplicated key in the request stream yields byte-identical
-    # children (per-key seeds), colliding on the child's own PK.
+    # duplicated key in the request stream yields PK-IDENTICAL children
+    # (the per-key seed replays the same key and the same cells; the free
+    # columns differ, since those are sampled per chunk position),
+    # colliding on the child's own PK.
     pk_in_tuple = bool(edge.parent_pk) and set(edge.parent_pk) <= set(edge.ref_cols)
     if not pk_in_tuple:
         keys = keys | f"{prefix}FanoutDistinct" >> beam.Distinct()
@@ -659,9 +661,18 @@ def _fanout_requests(
 def _fanout_request_payload(ks: list[tuple], mean_fanout: float) -> dict:
     """One key-batch request. Stable ``batch_id`` — never Python's
     process-salted `hash()` — so a retried bundle reproduces the same
-    seed (`derive_batch_seed`)."""
-    batch_id = int.from_bytes(
-        hashlib.blake2b(repr(ks[0]).encode(), digest_size=4).digest(), "big"
+    seed (`derive_batch_seed`).
+
+    63 bits, not 32: at the 100M-key ceiling a 32-bit id collides on the
+    birthday bound long before the batch count does, and two batches
+    sharing an id share a seed. The final ``>> 1`` keeps it positive so it
+    survives a BigQuery INT64 round trip in a DLQ envelope.
+    """
+    batch_id = (
+        int.from_bytes(
+            hashlib.blake2b(repr(ks[0]).encode(), digest_size=8).digest(), "big"
+        )
+        >> 1
     )
     return {
         "batch_id": batch_id,

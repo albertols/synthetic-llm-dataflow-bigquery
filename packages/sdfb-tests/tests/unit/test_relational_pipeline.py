@@ -44,6 +44,22 @@ def _child_reference() -> list[dict]:
     ]
 
 
+class _LabelCollector(PipelineVisitor):
+    """Every transform label in a built graph, for DAG-shape assertions."""
+
+    def __init__(self):
+        self.labels: list[str] = []
+
+    def visit_transform(self, node):
+        self.labels.append(node.full_label)
+
+
+def _labels_of(pipeline) -> list[str]:
+    visitor = _LabelCollector()
+    pipeline.visit(visitor)
+    return visitor.labels
+
+
 def _read_jsonl(prefix: Path) -> list[dict]:
     rows: list[dict] = []
     for f in sorted(prefix.parent.glob(prefix.name + "*")):
@@ -399,16 +415,7 @@ def test_driven_child_is_generated_from_parent_keys_without_a_side_input(
     with beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"])) as p:
         build_relational_pipeline(p, specs)
 
-    class _LabelCollector(PipelineVisitor):
-        def __init__(self):
-            self.labels: list[str] = []
-
-        def visit_transform(self, node):
-            self.labels.append(node.full_label)
-
-    visitor = _LabelCollector()
-    p.visit(visitor)
-    labels = visitor.labels
+    labels = _labels_of(p)
     parent_rows = _read_jsonl(tmp_path / "parent")
     child_rows = _read_jsonl(tmp_path / "child")
     parent_keys = {r["customer_id"] for r in parent_rows}
@@ -429,8 +436,9 @@ def test_fanout_without_a_declared_parent_pk_deduplicates_keys(
     tmp_path, customers_schema, customers_reference
 ):
     """A duplicated key in the fan-out request stream re-seeds the SAME
-    per-key draw (`derive_key_seed`), so byte-identical children collide
-    on the child's own PK. `FkEdgeSpec.parent_pk=()` (undeclared) proves
+    per-key draw (`derive_key_seed`), so PK-identical children collide on
+    the child's own PK (the key and cells repeat exactly; the free
+    columns differ, being sampled per chunk position). `FkEdgeSpec.parent_pk=()` (undeclared) proves
     nothing about uniqueness, so `_fanout_requests` must Distinct the
     projection instead of trusting an absent PK."""
     parent_cfg = PipelineConfig(
@@ -476,16 +484,7 @@ def test_fanout_without_a_declared_parent_pk_deduplicates_keys(
     with beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"])) as p:
         build_relational_pipeline(p, specs)
 
-    class _LabelCollector(PipelineVisitor):
-        def __init__(self):
-            self.labels: list[str] = []
-
-        def visit_transform(self, node):
-            self.labels.append(node.full_label)
-
-    visitor = _LabelCollector()
-    p.visit(visitor)
-    labels = visitor.labels
+    labels = _labels_of(p)
     child_rows = _read_jsonl(tmp_path / "child_nopk")
     assert any("orders_fan/FanoutDistinct" in lbl for lbl in labels)
     pairs = [(r["CUST_ID"], r["LINE"]) for r in child_rows]

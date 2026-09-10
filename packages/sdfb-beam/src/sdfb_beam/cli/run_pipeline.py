@@ -123,6 +123,12 @@ _DEFAULT_STATE_CACHE_MB = 512
 DEFAULT_BATCH_SIZE = 16
 _TARGET_ELEMENTS = 1_000
 
+# ADR 0036: keys per fan-out request element. A near-zero measured mean
+# fan-out would otherwise divide `batch_size` by ~1e-6 and put millions of
+# key tuples in ONE element — a single unsplittable bundle and a huge DLQ
+# envelope if it crashes.
+_MAX_KEYS_PER_BATCH = 10_000
+
 
 # WS5 §3 — the seeding experiment's only variable. Three arms off ONE build
 # so the E2E runs differ in exactly one thing.
@@ -1827,7 +1833,10 @@ def _prepare_table_spec(
     # to land ~batch_size children per element (the composer's floor of
     # 100 keys/batch otherwise).
     keys_per_batch = (
-        max(1, round(batch_size / max(_mean_k(fanout["histogram"]), 1e-6)))
+        min(
+            _MAX_KEYS_PER_BATCH,
+            max(1, round(batch_size / max(_mean_k(fanout["histogram"]), 1e-6))),
+        )
         if driven
         else 100
     )

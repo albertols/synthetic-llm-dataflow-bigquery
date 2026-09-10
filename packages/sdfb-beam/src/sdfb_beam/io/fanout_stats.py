@@ -24,7 +24,12 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Rarely-typed control char used as a tuple-key separator in the joint
 # COUNT(DISTINCT CONCAT(...)) below — chosen because it cannot appear in a
 # CAST(... AS STRING) value from any column BigQuery lets us read here.
-_TUPLE_SEP = "\x1f"
+# The SQL literal carries the ESCAPE (`'\\x1f'`, four printable chars), not
+# a raw 0x1F byte: the query text is logged, copied into the BigQuery
+# console and diffed by humans, and an invisible control byte in it
+# survives none of that intact. BigQuery parses `\\x1f` in a string literal
+# to the same character.
+_TUPLE_SEP = "\\x1f"
 
 # Percentile cut points for the fan-out milestone below.
 _P50 = 0.5

@@ -23,8 +23,9 @@ A model file, whole::
             ref:      A_TABLE         # bare name = in this model
             ref_cols: [A_COL_001, A_COL_002]
             enforced: true            # false = documented, never generated from
+            drives:   true            # this edge generates the child (ADR 0036)
 
-Two flags, two different jobs:
+Three flags, three different jobs:
 
 * ``enabled: false`` (table) — the table leaves the GRAPH. Anything that
   reached the rest of the model only through it detaches with it, so one
@@ -34,6 +35,12 @@ Two flags, two different jobs:
 * ``enforced: false`` (edge) — the relationship is real and drawn, but
   no keys are drawn from it. For join keys that exist in the business
   model and not in the DDL.
+* ``drives: true`` (edge, ADR 0036) — this is the edge the child is
+  GENERATED from: its parent's landed keys become the child's request
+  stream, one child row per source fan-out draw. Needed only to
+  disambiguate when a table has several enforced in-model edges (a lone
+  one drives by itself); every other enforced edge must then be implied
+  by it, or `edge_roles` stops the launch.
 
 Column-level ``llm_prompt_constraint`` stays in COLUMN descriptions
 (:mod:`sdfb_core.contracts.prompt_constraint`) — that is per-column

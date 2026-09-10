@@ -71,9 +71,10 @@ composer: [Ruling 3] `_fanout_requests` runs a `Distinct` on the
 projected keys unless the projection contains a NON-EMPTY parent PK
 (`edge.parent_pk`) — an undeclared parent PK proves nothing about
 uniqueness, so a duplicated key in the request stream would otherwise
-yield byte-identical children (seeds are per-key, D5) colliding on the
-child's own PK. [Ruling 2] Each request carries `n = max(1,
-round(len(keys) * mean_fanout))` alongside `keys` — `GenerateRecordsDoFn`
+yield PK-IDENTICAL children (seeds are per-key, D5: the key and the
+cells repeat exactly; the free columns differ, being sampled per chunk
+position) colliding on the child's own PK. [Ruling 2] Each request
+carries `n = max(1, round(len(keys) * mean_fanout))` alongside `keys` — `GenerateRecordsDoFn`
 generates from `keys`, but the BLOCKER gate's `engine_failure` DLQ
 weighting (`_dlq_rule_weight`, `sdfb_beam/pipeline.py`) reads
 `raw_request["n"]` to count a crashed batch as its *expected* lost rows
@@ -275,6 +276,11 @@ set it from the tuple.
   this ADR narrows their scope to "not a driven in-job edge," it does
   not delete them (`_route_parent_edges` still builds `_side_input_pools`
   for `side_input`-mode edges).
+- `RelationshipRegistry.sha12()` now covers `drives`, so EVERY model's
+  sha changes once when this merges: the first launch after it re-measures
+  each driving edge (`source=measured` rather than `source=cache`) and
+  appends a fresh `fk_fanout_stats` row. One extra scan per edge, once —
+  not a regression.
 - New BigQuery table: `synthetic_data_quality.fk_fanout_stats`
   (`config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json`
   — `source_table`, `edge_cols`, `model_sha`, `measured_at`, `payload`;
