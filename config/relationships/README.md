@@ -71,6 +71,36 @@ parent's landed rows.
 Worked example: `A ← B ← C`. Set `enabled: false` on `B` and a launch on
 `A` generates `A` alone — `C` reached `A` only through `B`.
 
+### Driven fan-out: widened edges and the implied rule (ADR 0036)
+
+A child whose PK contains its parent's FK (a per-parent key, not a
+table-wide one) is generated FROM its parent's landed keys instead of a
+random draw against a sampled key pool — see ADR 0036 for why a random
+draw collides. That child needs exactly one **driving edge**: the
+parent whose keys it consumes. Everything else follows from `cols` and
+`drives`:
+
+- **Widen the driving edge to carry inherited columns.** `ref_cols`
+  need not be the parent's PK alone — add every column a grandchild
+  will need FROM this table's own key tuple. `C_TABLE`'s edge to
+  `B_TABLE` widens from `[D_COL_001] → B_TABLE` to `[D_COL_001,
+  D_COL_024, D_COL_025, C_COL_009] → B_TABLE (same cols)`: the tuple
+  already travels jointly, so grouping by the wide tuple equals
+  grouping by the account, and `A_TABLE` (driven by `C_TABLE`) copies
+  the extra columns straight from the key instead of sampling them.
+- **One driving edge, the rest implied.** When a child has several
+  enforced in-model edges, mark exactly one `drives: true`. An edge is
+  **implied** — satisfied by construction, no keys drawn from it, no
+  launch stop — when its columns are a subset of the driving edge's
+  columns AND the driving parent carries those columns from that other
+  parent through its own enforced edge, transitively. `A_TABLE`'s edge
+  straight to `B_TABLE` is implied through `C_TABLE`'s widened edge
+  above: `A_TABLE` never draws `B_TABLE` keys itself, but its rows are
+  still valid children of `B_TABLE` because `C_TABLE` already proved
+  it. An edge that is neither driving nor implied is a preflight stop
+  naming the exact edit — widen the driving parent's edge to carry the
+  missing columns, or mark the ambiguous edge `drives: true` yourself.
+
 ## What a launch does with it
 
 | Target(s) | `--generate_fk_relationships` | Result |

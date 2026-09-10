@@ -602,6 +602,11 @@ Relational:
 | `pk_capacity_tight capacity= num_rows= expected_pk_duplicate_share=` (WARNING, launcher) | the PK tuple draws at random from a bounded space (FK-bound / categorical members) and 1–20 % of rows are expected to divert as `pk.duplicate` — under the gate, but the table lands fewer rows than requested (ADR 0035). Over the gate the launch stops at preflight P4 naming the largest gate-safe `--num_rows` |
 | `identity_constraint_owned` | the named identity columns are generated from their DECLARED CLAUSE (Tier P/B), not UUID synthesis (ADR 0028 amendment) |
 | `fk.orphan` in `validation_runs.dlq_by_rule` | rows that referenced a non-existent parent. Non-zero = a generator regression (the draw is joint by construction) — a BLOCKER, not a tolerance |
+| `fk_edge_role edge= role=driving\|implied\|external` (launcher + worker preflight) | which edge a child is generated FROM, which are satisfied by construction (ADR 0036) |
+| `fk_fanout_measured edge= parents= children= mean= p50= p95= max= zero_share= source=measured\|cache` (launcher) | the SOURCE ratio the driven child reproduces; `cache` = read from `fk_fanout_stats` instead of re-scanning |
+| `relational_single_job … rows_detail=<name>:<rows>,…` (launcher) | derived row count per table — roots take `--num_rows`, driven children derive from their parent's landed keys and the measured fan-out |
+| `fanout_bound driving_cols= cells= exact_cells= mean_fanout=` (worker, once per engine build) | the engine bound the driven child's recipe; `exact_cells=True` = the PK-completing cells alone must key the child (drawn without replacement) |
+| `batch_start batch_id= keys=` / `batch_done batch_id= keys= rows= seconds=` (worker) | a key batch: parent keys in, children out (ADR 0036) — replaces `n=`/`rows=` for a driven child's batches |
 
 ---
 
@@ -799,6 +804,30 @@ entropy/top1 drift — the documented trade-off.
 
 Multi-table alternative: `scripts/run_tableset.py` (parent-first
 ordering, dry-run first).
+
+**Driven fan-out (ADR 0036) — three-table chain, `B_TABLE → C_TABLE →
+A_TABLE`.** When a child's PK contains its parent's FK (C_TABLE's
+`(D_COL_001, C_COL_002, D_COL_018)` inside each B_TABLE account), the
+`9b` recipe above does not apply — a random FK-pool draw collides
+(ADR 0035); the child must generate FROM its parent's landed keys.
+Model edit (`config/relationships/<model>.yaml`, before the launch):
+widen C_TABLE's edge to B_TABLE so it carries every column A_TABLE will
+need inherited (`cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009] →
+B_TABLE`), and mark A_TABLE's edge to C_TABLE `drives: true` — A_TABLE
+also has an enforced edge straight to B_TABLE, which then resolves
+`implied` (satisfied by construction through C_TABLE) instead of
+stopping the launch as ambiguous. New flags on the launch trigger:
+`--fk_fanout_stats_table=${PROJECT}.synthetic_data_quality.fk_fanout_stats`
+(empty = measure the source fan-out fresh every launch; set it once the
+model is stable so a re-launch pays no BigQuery scan) and
+`--driven_uniqueness_mode=streaming` (default — C_TABLE and A_TABLE
+skip the ADR 0034 landing-path barrier because their PK is unique by
+construction; an identity-bearing driven child keeps `exact` regardless
+of this flag). `--num_rows` is passed on B_TABLE only — C_TABLE and
+A_TABLE derive theirs (`relational_single_job rows_detail=`).
+Milestones and pass criteria: §7's new rows above, plus the same §8.4
+orphan query per driven edge and `pk.duplicate` expected **0** (not
+just under the gate) on both C_TABLE and A_TABLE.
 
 ### 9c. 10M scale (warm everything)
 

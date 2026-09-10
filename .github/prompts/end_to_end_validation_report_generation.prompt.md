@@ -453,6 +453,24 @@ MUST NOT spend tokens re-deriving it:
    threshold 0). Quote its `validation_runs.dlq_by_rule` count. A run
    with 0 enforced edges has NO orphan measurement — say "not
    verified", never "passed".
+8. **Driven fan-out (ADR 0036).** A table generated from its parent's
+   landed keys (not a random FK-pool draw) reads through three
+   milestones instead of `fk_key_pool_bound`: `fk_edge_role
+   edge=(cols)->ref role=driving|implied|external` names which edge the
+   child generates FROM (report the driving edge; an implied edge is
+   satisfied by construction, not measured); `fk_fanout_measured edge=
+   parents= children= mean= p50= p95= max= zero_share= source=` is the
+   SOURCE ratio the child is expected to reproduce (`source=cache` means
+   this launch reused a prior scan — say so, it is not a fresh
+   measurement); `relational_single_job rows_detail=<name>:<rows>,…` is
+   the derived row count per driven table — report it next to
+   `--num_rows`, which only ever applies to roots. A driven table's
+   PK-completing cells are drawn without replacement, so its PK is
+   unique BY CONSTRUCTION: `pk.duplicate > 0` (or non-zero
+   `validation_runs.dlq_by_rule`) on a driven child is a **generator
+   regression**, never a tolerance — report it exactly the way `fk.orphan`
+   is reported for a side-input edge, not folded into ordinary
+   `pk.duplicate` commentary about random draws.
 
 ## Step 6 — Export a shareable bundle (internal `real/` + de-identified `oss/`) and prune the duplicates
 

@@ -1,9 +1,10 @@
 # Parent-driven fan-out generation — children are generated from their parent's keys
 
-**Status:** DESIGN (2026-09-10) — approved in brainstorming (scale requirement folded in the same day), awaiting implementation plan
+**Status:** ACCEPTED (laptop, 2026-09-10) — ADR 0036; Dataflow acceptance pending the M4 three-table launch
+**Implementation rulings** made during Tasks 1–11 that this doc predates (design intent unchanged, mechanism refined) are recorded in [ADR 0036 §Decision](../adr/0036-parent-driven-fanout-generation.md#decision) D1–D6, numbered inline as `[Ruling N]`.
 **Depends on:** [ADR 0030](../adr/0030-single-job-relational-generation.md) (single-job relational launch) · [ADR 0031](../adr/0031-joint-fk-key-draws.md) (joint key tuples) · [ADR 0032](../adr/0032-relationships-as-config.md) (model files) · [ADR 0035](../adr/0035-pk-capacity-fk-bound-members.md) (why random draws cannot key a child)
 **Supersedes, for in-job edges:** the FK key-pool side input and its cap (ADR 0030/0031/0035), the IPF child-marginal weighting (ADR 0031 D2), and `--num_rows` on driven children
-**Will be decided by:** ADR 0036
+**Decided by:** [ADR 0036](../adr/0036-parent-driven-fanout-generation.md)
 **Evidence:** the two 2026-09-09 three-table launches in [`make_pk_capacity_figures.py`](../../scripts/doc/make_pk_capacity_figures.py) — 87.9% then 56.5% `pk.duplicate` on C_TABLE at 10M rows, both from random draws of a PK that contains an FK
 
 ## 1. Evidence — what the two runs proved
