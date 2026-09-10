@@ -152,6 +152,7 @@ class GenerateRecordsDoFn(beam.DoFn):
         similarity: float = 0.5,
         seed: int | None = None,
         expect_fk_side: bool = False,
+        chunk_rows: int = 1000,
     ) -> None:
         super().__init__()
         self.engine_name = engine_name
@@ -167,6 +168,7 @@ class GenerateRecordsDoFn(beam.DoFn):
         # relaxed here: the build still happens exactly once per DoFn
         # instance, just one hop later.
         self.expect_fk_side = expect_fk_side
+        self.chunk_rows = chunk_rows
         self._engine = None  # built in setup() (or first process())
         self._engine_key_held: tuple = ()
         # Identity columns this DoFn synthesizes — resolved once the
@@ -393,7 +395,8 @@ class GenerateRecordsDoFn(beam.DoFn):
     def _process_with_scope(self, request, fk_side: list | None = None):
         if self._engine is None:
             self._ensure_engine(self.ctx, fk_side)
-        n = int(request["n"])
+        keys = request.get("keys")
+        n = len(keys) if keys is not None else int(request["n"])
         batch_id = int(request["batch_id"])
         if self.base_seed is None:
             # No explicit seed: derive one so batches never replay each other
@@ -411,7 +414,7 @@ class GenerateRecordsDoFn(beam.DoFn):
             pool_seed = self.base_seed
         cfg = GenerationConfig(
             seed=seed,
-            batch_size=n,
+            batch_size=n if keys is None else self.chunk_rows,
             similarity=self.similarity,
             engine_specific={
                 "pool_seed": pool_seed,
@@ -426,13 +429,18 @@ class GenerateRecordsDoFn(beam.DoFn):
                 "prompt_debug": getattr(self.ctx, "prompt_debug", "off"),
             },
         )
-        log_milestone("batch_start", batch_id=batch_id, n=n)
+        if keys is not None:
+            log_milestone("batch_start", batch_id=batch_id, keys=n)
+        else:
+            log_milestone("batch_start", batch_id=batch_id, n=n)
         t0 = time.monotonic()
         count = 0
         try:
-            for row_index, record in enumerate(
-                self._engine.generate_batch(n, cfg)  # type: ignore[union-attr]
-            ):
+            if keys is not None:
+                records = self._engine.generate_for_keys([tuple(k) for k in keys], cfg)  # type: ignore[union-attr]
+            else:
+                records = self._engine.generate_batch(n, cfg)  # type: ignore[union-attr]
+            for row_index, record in enumerate(records):
                 self._yielded.inc()
                 count += 1
                 # Python-mode dump keeps datetime / Decimal as Python
@@ -450,12 +458,21 @@ class GenerateRecordsDoFn(beam.DoFn):
                         row_index=row_index,
                     )
                 yield row
-            log_milestone(
-                "batch_done",
-                batch_id=batch_id,
-                rows=count,
-                seconds=round(time.monotonic() - t0, 1),
-            )
+            if keys is not None:
+                log_milestone(
+                    "batch_done",
+                    batch_id=batch_id,
+                    keys=n,
+                    rows=count,
+                    seconds=round(time.monotonic() - t0, 1),
+                )
+            else:
+                log_milestone(
+                    "batch_done",
+                    batch_id=batch_id,
+                    rows=count,
+                    seconds=round(time.monotonic() - t0, 1),
+                )
             self._batch_seconds.update(int((time.monotonic() - t0) * 1000))
         except Exception as e:
             self._failed.inc()
