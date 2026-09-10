@@ -73,6 +73,11 @@ class PreflightResult:
     fk_key_sample_caps: dict[tuple[str, ...], int] = field(
         default_factory=dict
     )
+    # ADR 0036 — for a DRIVEN child (a `fanout` payload was given): the
+    # row count this table's fan-out implies, `round(parent_rows * mean
+    # k)`. None when the table is not driven, or the driving parent's
+    # row count is unknown.
+    derived_rows: int | None = None
 
 
 def _missing(cols: tuple[str, ...], valid: set[str]) -> list[str]:
@@ -501,6 +506,85 @@ def _check_pk_is_a_key(
     )
 
 
+def pk_cell_columns(
+    effective_pk: tuple[str, ...],
+    driving_cols: tuple[str, ...],
+    profiles: Mapping[str, ColumnProfile],
+) -> tuple[tuple[str, ...], bool]:
+    """``(cell columns, exact)`` for a driven child (ADR 0036): the PK
+    members outside the driving edge that the engine re-emits from a
+    domain (CATEGORICAL / CONSTANT); ``exact`` when they are ALL the
+    remaining members, so the cells alone must key the child."""
+    rest = tuple(c for c in effective_pk if c not in set(driving_cols))
+    cells = tuple(
+        c for c in rest
+        if (p := profiles.get(c)) is not None
+        and p.kind in (ColumnKind.CATEGORICAL, ColumnKind.CONSTANT)
+    )
+    return cells, len(cells) == len(rest)
+
+
+def _check_driven_pk(
+    table_schema: TableSchema,
+    effective_pk: tuple[str, ...],
+    fanout: Mapping,
+    profiles: Mapping[str, ColumnProfile],
+) -> None:
+    """P4 for a DRIVEN child: the largest source fan-out must fit in the
+    PK-completing cells, else the declared PK is not a key in the source."""
+    driving = tuple(fanout.get("driving_cols") or ())
+    cells, exact = pk_cell_columns(effective_pk, driving, profiles)
+    if not exact:
+        return
+    table = fanout.get("cells") or {}
+    n_cells = len(table.get("rows") or ())
+    max_k = max(int(k) for k in (fanout.get("histogram") or {"0": 0}))
+    if max_k > n_cells:
+        raise SystemExit(
+            f"[preflight P4] {table_schema.fqn}: the driving edge "
+            f"({','.join(driving)}) fans out to {max_k} children per parent "
+            f"in the source, but the PK-completing members {list(cells)} "
+            f"cover only {n_cells} cells — the declared PK "
+            f"{list(effective_pk)} is not a key of the source. Fix the `pk:` "
+            f"in the relationship model."
+        )
+
+
+def _driven_child_rows(
+    table_schema: TableSchema,
+    effective_pk: tuple[str, ...],
+    num_rows: int,
+    fanout: Mapping,
+    profiles: Mapping[str, ColumnProfile],
+    edge_roles: Mapping[FkEdge, str] | None,
+    fk_parent_rows: Mapping[str, int] | None,
+) -> int | None:
+    """P4 + row-count derivation for a DRIVEN child (ADR 0036): the
+    source fan-out is checked against the PK-completing cells
+    (``_check_driven_pk``, may stop the launch), then this table's row
+    count derives from the driving parent's rows and the mean fan-out —
+    ``None`` when the total histogram mass or the driving parent's row
+    count is unknown."""
+    if num_rows > 0 and effective_pk:
+        _check_driven_pk(table_schema, effective_pk, fanout, profiles)
+    hist = {
+        int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()
+    }
+    total = sum(hist.values())
+    driving_ref = next(
+        (e.ref for e, r in (edge_roles or {}).items() if r == "driving"),
+        None,
+    )
+    parent_rows = (
+        (fk_parent_rows or {}).get(driving_ref) if driving_ref else None
+    )
+    if total and parent_rows:
+        return round(
+            parent_rows * sum(k * n for k, n in hist.items()) / total
+        )
+    return None
+
+
 def preflight(
     table_schema: TableSchema,
     pk_cols: tuple[str, ...],
@@ -512,6 +596,8 @@ def preflight(
     num_rows: int = 0,
     fk_parent_rows: Mapping[str, int] | None = None,
     blocker_failure_ratio: float = 1.0,
+    fanout: Mapping | None = None,
+    edge_roles: Mapping[FkEdge, str] | None = None,
 ) -> PreflightResult:
     """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -521,7 +607,15 @@ def preflight(
     random-draw branch. FK activation is no longer a preflight concern
     (ADR 0029 rev B): fk_parent_landing derives from the landing table,
     and an unlanded/empty parent stops loudly at pool-load time
-    instead."""
+    instead.
+
+    ``fanout`` (the Task 8 payload, ADR 0036) marks this table a DRIVEN
+    child: P4 switches from the random-draw model to
+    ``_check_driven_pk`` (the source fan-out must fit the PK-completing
+    cells), and ``PreflightResult.derived_rows`` is set from the mean
+    fan-out and the driving parent's row count. ``edge_roles`` (from
+    ``RelationshipRegistry.edge_roles``) logs one ``fk_edge_role``
+    milestone per enforced edge and locates the driving parent."""
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
@@ -615,10 +709,29 @@ def preflight(
                 sample_rows=len(reference_rows),
             )
 
-    # P4 — PK generation capacity (ADR 0028; FK/categorical-aware and
-    # FK-sample-sizing since ADR 0035).
+    # ADR 0036 — one milestone per enforced edge, naming its role
+    # (driving / implied / external) so a launch log answers "which
+    # parent is this table generated FROM" without opening the model.
+    for edge, role in (edge_roles or {}).items():
+        log_milestone(
+            "fk_edge_role",
+            table=fqn,
+            edge=f"({','.join(edge.cols)})->{edge.ref}",
+            role=role,
+        )
+
+    # P4 — PK generation capacity. A DRIVEN child (``fanout`` given, ADR
+    # 0036) is checked per key against the source fan-out instead of the
+    # random-draw model (ADR 0028/0035), and its row count derives from
+    # the driving parent's rows and the mean fan-out.
     fk_key_sample_caps: dict[tuple[str, ...], int] = {}
-    if num_rows > 0 and effective_pk:
+    derived_rows: int | None = None
+    if fanout is not None:
+        derived_rows = _driven_child_rows(
+            table_schema, tuple(effective_pk), num_rows, fanout, profiles,
+            edge_roles, fk_parent_rows,
+        )
+    elif num_rows > 0 and effective_pk:
         fk_key_sample_caps = _check_pk_capacity(
             table_schema, tuple(effective_pk), num_rows,
             profiles=profiles,
@@ -643,6 +756,7 @@ def preflight(
         relations,
         warnings,
         fk_key_sample_caps=fk_key_sample_caps,
+        derived_rows=derived_rows,
     )
 
 
