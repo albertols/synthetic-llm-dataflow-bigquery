@@ -49,8 +49,8 @@ tables:
       - cols:     [COL_D, COL_E]      # this table's columns
         ref:      B_TABLE             # a table in THIS model…
         ref_cols: [COL_F, COL_G]      # …and its columns, same arity
-        enforced: true                # default true — see "Two flags"
-        drives:   false               # default false — see "Edge roles"
+        enforced: true                # default true — see "Three flags"
+        drives:   false               # default false — see "Three flags"
         note:     optional prose
 ```
 
@@ -60,7 +60,7 @@ external). `ref_cols` need not be the parent's full PK: any projection
 works, because the child draws from `SELECT DISTINCT ref_cols` of the
 parent's landed rows.
 
-## Two flags, two different jobs
+## Three flags, three different jobs
 
 | Flag | Where | Meaning |
 |---|---|---|

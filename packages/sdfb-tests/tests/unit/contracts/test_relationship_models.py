@@ -339,3 +339,54 @@ tables:
         card = self._registry(self._THREE).card("A_TABLE")
         assert "[enforced, DRIVES]" in card
         assert "[enforced, implied via C_TABLE]" in card
+
+    def test_diamond_ancestry_is_implied_through_the_reaching_branch(self):
+        # ADR 0036 fix: _carries must track (table, cols) not just table,
+        # so a table visited with one column set that fails doesn't poison
+        # a later branch with different column names that succeeds.
+        text = """
+model: diamond
+tables:
+  TARGET:
+    pk: [K, Z]
+  SH:
+    pk: [K, Z]
+    fk:
+      - cols: [K, Z]
+        ref: TARGET
+        ref_cols: [K, Z]
+  P:
+    pk: [K, Z]
+    fk:
+      - cols: [K, Z]
+        ref: SH
+        ref_cols: [A, B]
+  Q:
+    pk: [K, Z]
+    fk:
+      - cols: [K, Z]
+        ref: SH
+        ref_cols: [K, Z]
+  M:
+    pk: [K, Z]
+    fk:
+      - cols: [K, Z]
+        ref: P
+        ref_cols: [K, Z]
+      - cols: [K, Z]
+        ref: Q
+        ref_cols: [K, Z]
+  CHILD:
+    pk: [K, Z, C]
+    fk:
+      - cols: [K, Z]
+        ref: M
+        ref_cols: [K, Z]
+        drives: true
+      - cols: [K, Z]
+        ref: TARGET
+        ref_cols: [K, Z]
+"""
+        reg = self._registry(text)
+        to_m, to_target = reg.enforced_edges("CHILD")
+        assert reg.edge_roles("CHILD") == {to_m: "driving", to_target: "implied"}

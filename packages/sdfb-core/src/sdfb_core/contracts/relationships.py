@@ -305,12 +305,19 @@ class RelationshipRegistry:
         parent_cols = {driving.ref_cols[pos[c]] for c in edge.cols}
         return self._carries(driving.ref, edge.ref, parent_cols, seen=set())
 
-    def _carries(self, table: str, target: str, cols: set[str], seen: set[str]) -> bool:
+    def _carries(
+        self,
+        table: str,
+        target: str,
+        cols: set[str],
+        seen: set[tuple[str, frozenset[str]]],
+    ) -> bool:
         if table == target:
             return True
-        if table in seen:
+        key = (table, frozenset(cols))
+        if key in seen:
             return False
-        seen.add(table)
+        seen.add(key)
         for up in self.enforced_edges(table):
             if up.external or not cols <= set(up.cols):
                 continue
