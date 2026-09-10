@@ -141,6 +141,33 @@ def _release_shared_engine(key: tuple, engine):
     return entry.engine, entry.client
 
 
+# Parent keys kept verbatim in a crashed key-batch's DLQ envelope. The
+# batch itself can hold `--keys_per_batch` (up to 10k) tuples, and the
+# envelope is a BigQuery row the gate reads back — a sample plus the
+# totals diagnoses the crash; the full list only inflates the table.
+_DLQ_KEY_SAMPLE = 10
+
+
+def _failed_request(request: dict, keys, n: int) -> dict:
+    """The `raw_request` an ``engine_failure`` envelope carries.
+
+    A row request passes through unchanged (it is already three scalars).
+    A KEY request is summarized: `batch_id`, a bounded key sample,
+    `keys_total`, and `n` — which `_dlq_rule_weight` (`sdfb_beam/pipeline
+    .py`) reads to weight the crashed batch by its EXPECTED lost rows
+    (`len(keys) * mean_fanout`), so dropping it would silently
+    under-count against the BLOCKER gate.
+    """
+    if keys is None:
+        return request
+    return {
+        "batch_id": request.get("batch_id"),
+        "n": request.get("n", n),
+        "keys": [list(k) for k in keys[:_DLQ_KEY_SAMPLE]],
+        "keys_total": len(keys),
+    }
+
+
 class GenerateRecordsDoFn(beam.DoFn):
     """Wraps a `GenerationEngine` inside Beam's worker lifecycle."""
 
@@ -479,7 +506,7 @@ class GenerateRecordsDoFn(beam.DoFn):
             yield beam.pvalue.TaggedOutput(
                 "failed",
                 {
-                    "raw_request": request,
+                    "raw_request": _failed_request(request, keys, n),
                     "error_type": "engine",
                     "error_detail": f"{type(e).__name__}: {e}",
                     "rule_id": "engine_failure",

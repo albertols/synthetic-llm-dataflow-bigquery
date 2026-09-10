@@ -53,3 +53,37 @@ def test_keys_request_yields_two_children_per_key(caplog):
         out = p | beam.Create([request]) | beam.ParDo(dofn).with_outputs("failed", main="main")
         assert_that(out.main, _check)
     assert "name=batch_done" in caplog.text and "keys=3" in caplog.text
+
+
+class _RaisingEngine:
+    """Engine whose key-batch generation blows up mid-batch."""
+
+    def generate_for_keys(self, keys, cfg):
+        raise RuntimeError("cell draw exploded")
+        yield  # pragma: no cover - makes this a generator function
+
+
+def test_a_failed_key_batch_summarizes_its_keys_in_the_dlq():
+    """ADR 0036 review I7: `raw_request: request` embedded the WHOLE key
+    list — at `--keys_per_batch=10000` that is a multi-MB DLQ row per
+    crashed batch, written to BigQuery and read back by the gate. The
+    envelope keeps a bounded sample plus the totals, and `n` so
+    `_dlq_rule_weight` still weights the batch by its expected rows."""
+    dofn = GenerateRecordsDoFn(
+        engine_name="b1_rag", model_client=FakeModelClient(reference_pool=_ROWS),
+        ctx=_ctx(),
+    )
+    dofn._engine = _RaisingEngine()
+    keys = [(f"K{i}",) for i in range(25)]
+    request = {"batch_id": 7, "keys": keys, "n": 50}
+
+    out = list(dofn.process(request))
+    assert len(out) == 1
+    envelope = out[0].value
+    assert envelope["rule_id"] == "engine_failure"
+    raw = envelope["raw_request"]
+    assert raw["keys_total"] == 25
+    assert len(raw["keys"]) == 10
+    assert raw["keys"][0] == ["K0"]
+    assert raw["n"] == 50  # the gate's expected-lost-rows weight
+    assert raw["batch_id"] == 7

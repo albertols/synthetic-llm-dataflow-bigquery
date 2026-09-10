@@ -853,6 +853,7 @@ def resolve_fanout(
         source_table,
     )
     sha = registry.sha12()
+    edge_label = f"({','.join(driving.cols)})->{driving.ref}"
     measured = stats_store.get(source_table, tuple(driving.cols), sha) if stats_store else None
     source = "cache"
     if measured is None:
@@ -860,7 +861,7 @@ def resolve_fanout(
             measured = measure_fanout(
                 source_child=source_table, child_cols=tuple(driving.cols),
                 source_parent=source_parent, ref_cols=tuple(driving.ref_cols),
-                cell_cols=cell_cols, client=bq_client,
+                cell_cols=cell_cols, client=bq_client, edge=edge_label,
             )
         except Exception as exc:
             raise SystemExit(
@@ -870,7 +871,7 @@ def resolve_fanout(
         source = "measured"
         if stats_store:
             stats_store.put(source_table, tuple(driving.cols), sha, measured)
-    log_fanout_measured(f"({','.join(driving.cols)})->{driving.ref}", measured, source=source)
+    log_fanout_measured(edge_label, measured, source=source)
     return fanout_payload(measured, tuple(driving.cols), exact), roles
 
 

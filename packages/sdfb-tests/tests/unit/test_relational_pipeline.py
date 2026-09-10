@@ -549,3 +549,78 @@ def test_a_side_input_edge_next_to_the_driving_edge_stops_the_build(
     p = beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"]))
     with pytest.raises(ValueError, match="must be implied"):
         build_relational_pipeline(p, specs)
+
+
+def test_a_null_inherited_column_rides_through_the_fanout_projection(
+    tmp_path, customers_schema, customers_reference
+):
+    """ADR 0036 review I5: a widened driving edge carries INHERITED columns
+    next to the join key. Requiring every position to be non-NULL silently
+    dropped the whole parent — and every child it should have produced —
+    because one inherited column was NULL. Only the join-key positions (the
+    parent PK inside the ref tuple) may gate; inherited NULLs are copied
+    verbatim."""
+    parent_schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.customers_nullable"},
+         "schema": [
+             {"name": "customer_id", "type": "INT64", "mode": "REQUIRED"},
+             {"name": "segment", "type": "STRING", "mode": "NULLABLE"},
+         ]}
+    )
+    # Every parent row's inherited `segment` is NULL: pre-fix the projection
+    # dropped all of them and the child landed nothing.
+    parent_ref = [{"customer_id": 1000 + i, "segment": None} for i in range(20)]
+    parent_cfg = PipelineConfig(
+        table_schema=parent_schema, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=parent_ref),
+        num_rows=20, batch_size=20, run_id="fan-parent-null",
+        landing_table="p.land.customers_nullable",
+        log_table_prefix="customers_nullable",
+        identity_columns=("customer_id",),
+    )
+    child_schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.orders_null"},
+         "schema": [
+             {"name": "CUST_ID", "type": "INT64", "mode": "REQUIRED"},
+             {"name": "SEGMENT", "type": "STRING", "mode": "NULLABLE"},
+             {"name": "LINE", "type": "STRING", "mode": "REQUIRED"},
+         ]}
+    )
+    child_ref = [
+        {"CUST_ID": 900000 + i, "SEGMENT": "s", "LINE": "xyz"[i % 3]}
+        for i in range(40)
+    ]
+    child_cfg = PipelineConfig(
+        table_schema=child_schema, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=child_ref),
+        num_rows=20, batch_size=20, run_id="fan-child-null",
+        landing_table="p.land.orders_null", log_table_prefix="orders_null",
+        pk_columns=("CUST_ID", "LINE"), uniqueness_mode="streaming",
+        fanout={"driving_cols": ["CUST_ID", "SEGMENT"], "histogram": {"1": 1},
+                "cells": {"cols": ["LINE"], "rows": [["x"], ["y"], ["z"]],
+                          "counts": [1, 1, 1]},
+                "exact_cells": True},
+    )
+    specs = [
+        TableSpec(config=parent_cfg, reference_rows=parent_ref,
+                  landing_sink=WriteToJsonLines(str(tmp_path / "parent_null")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_parent_null"))),
+        TableSpec(config=child_cfg, reference_rows=child_ref,
+                  landing_sink=WriteToJsonLines(str(tmp_path / "child_null")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_child_null")),
+                  parent_edges=(FkEdgeSpec(
+                      child_cols=("CUST_ID", "SEGMENT"),
+                      ref_cols=("customer_id", "segment"),
+                      parent_landing="p.land.customers_nullable",
+                      parent_pk=("customer_id",), mode="fanout",
+                      keys_per_batch=10),)),
+    ]
+    with beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"])) as p:
+        build_relational_pipeline(p, specs)
+
+    parent_rows = _read_jsonl(tmp_path / "parent_null")
+    child_rows = _read_jsonl(tmp_path / "child_null")
+    assert parent_rows, "the parent must land rows for the test to mean anything"
+    assert child_rows, "every parent key was dropped for a NULL INHERITED column"
+    assert {r["CUST_ID"] for r in child_rows} <= {r["customer_id"] for r in parent_rows}
+    assert all(r["SEGMENT"] is None for r in child_rows)  # copied verbatim

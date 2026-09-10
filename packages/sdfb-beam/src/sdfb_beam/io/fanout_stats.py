@@ -12,6 +12,7 @@ never holds two rows of one parent (design §10).
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -69,9 +70,14 @@ def measure_fanout(
     ref_cols: tuple[str, ...],
     cell_cols: tuple[str, ...],
     client: Any = None,
+    edge: str = "",
 ) -> dict:
     """``{"histogram", "cells", "parents", "children"}`` from three
-    GROUP BY queries; ``cells`` is None without cell columns."""
+    GROUP BY queries; ``cells`` is None without cell columns.
+
+    ``edge`` labels the ``fk_fanout_source_orphans`` warning below and is
+    otherwise unused.
+    """
     if client is None:  # pragma: no cover - GCP-only path
         from google.cloud import bigquery
 
@@ -89,6 +95,25 @@ def measure_fanout(
     (parent_row,) = _rows(client.query(parent_sql))
     parents = int(parent_row["parents"])
     with_children = sum(histogram.values())
+    if with_children > parents:
+        # The SOURCE child holds tuples its own parent does not (the
+        # source's FK is not enforced, or the two tables were snapshotted
+        # at different times). The zero bucket is then unmeasurable — it
+        # is clamped to 0, not negative — and `children / parents` is an
+        # UPPER bound on the true mean, which sizes the whole driven
+        # child. Announced, never inferred from a suspicious ratio.
+        log_milestone(
+            "fk_fanout_source_orphans",
+            level=logging.WARNING,
+            edge=edge,
+            child_tuples=with_children,
+            parent_tuples=parents,
+            note=(
+                "child tuples without a parent in the source; the zero "
+                "bucket is unmeasurable and the mean fan-out is an upper "
+                "bound"
+            ),
+        )
     # The child GROUP BY above can never emit k=0 (COUNT(*) over an actual
     # group is always >= 1), so histogram.get(0, 0) is always 0 here — this
     # line's only job is filling the zero bucket from the parent count.

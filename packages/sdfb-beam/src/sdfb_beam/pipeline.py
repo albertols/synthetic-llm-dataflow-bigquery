@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import apache_beam as beam
+from apache_beam.metrics import Metrics
 from apache_beam.transforms import combiners
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext, ModelClient
@@ -580,6 +581,42 @@ def _key_pool_payload(
     return [{"cols": cols, "keys": list(keys)}]
 
 
+def _join_key_positions(edge: FkEdgeSpec) -> tuple[int, ...]:
+    """Positions inside ``edge.ref_cols`` that must not be NULL.
+
+    A widened driving edge (D4) carries INHERITED columns next to the join
+    key, and an inherited NULL is ordinary data — the child copies it
+    verbatim. Only the join key itself has to be present, so the gate is
+    the parent PK's positions inside the ref tuple. With no declared
+    parent PK (or a PK that does not appear in the tuple at all) there is
+    nothing to single out and every position gates, as before.
+    """
+    pk = set(edge.parent_pk)
+    positions = tuple(i for i, c in enumerate(edge.ref_cols) if c in pk)
+    return positions or tuple(range(len(edge.ref_cols)))
+
+
+class _DropNullJoinKeysDoFn(beam.DoFn):
+    """Drop a parent key tuple whose JOIN-KEY columns are NULL, counting
+    each drop as ``fanout / keys_dropped_null``.
+
+    A dropped tuple costs the child every row that parent would have
+    produced, so the count is a run-level fact the report reads next to
+    the derived row count — never a silent Filter.
+    """
+
+    def __init__(self, positions: tuple[int, ...]) -> None:
+        super().__init__()
+        self._positions = tuple(positions)
+        self._dropped = Metrics.counter("fanout", "keys_dropped_null")
+
+    def process(self, key: tuple):
+        if any(key[i] is None for i in self._positions):
+            self._dropped.inc()
+            return
+        yield key
+
+
 def _fanout_requests(
     parent_valid, edge: FkEdgeSpec, prefix: str, mean_fanout: float
 ) -> Any:
@@ -597,7 +634,9 @@ def _fanout_requests(
     """
     keys = parent_valid | f"{prefix}FanoutKeys" >> beam.Map(
         lambda r, rc=edge.ref_cols: tuple(r[c] for c in rc)
-    ) | f"{prefix}FanoutDropNull" >> beam.Filter(lambda t: all(v is not None for v in t))
+    ) | f"{prefix}FanoutDropNull" >> beam.ParDo(
+        _DropNullJoinKeysDoFn(_join_key_positions(edge))
+    )
     # An undeclared parent PK (`parent_pk == ()`) proves nothing about
     # uniqueness, so the projection is deduplicated — otherwise a
     # duplicated key in the request stream yields byte-identical
