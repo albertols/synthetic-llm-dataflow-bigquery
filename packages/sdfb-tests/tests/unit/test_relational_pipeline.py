@@ -422,3 +422,70 @@ def test_driven_child_is_generated_from_parent_keys_without_a_side_input(
     assert any("orders_fan/FanoutKeys" in lbl for lbl in labels)  # no side-input sample
     assert "orders_fan/edge0/FkSample" not in joined
     assert "orders_fan/edge0/FkPools" not in joined
+
+
+def test_fanout_without_a_declared_parent_pk_deduplicates_keys(
+    tmp_path, customers_schema, customers_reference
+):
+    """A duplicated key in the fan-out request stream re-seeds the SAME
+    per-key draw (`derive_key_seed`), so byte-identical children collide
+    on the child's own PK. `FkEdgeSpec.parent_pk=()` (undeclared) proves
+    nothing about uniqueness, so `_fanout_requests` must Distinct the
+    projection instead of trusting an absent PK."""
+    parent_cfg = PipelineConfig(
+        table_schema=customers_schema, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        num_rows=50, batch_size=25, run_id="fan-parent-nopk",
+        landing_table="p.land.customers", log_table_prefix="customers",
+        # No identity_columns / pk_columns declared: the customers fixture
+        # has only 10 distinct customer_id values, so 50 generated rows
+        # land duplicate ids — that is the point.
+    )
+    child_schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.orders_fan"},
+         "schema": [
+             {"name": "CUST_ID", "type": "INT64", "mode": "REQUIRED"},
+             {"name": "LINE", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "AMOUNT", "type": "INT64", "mode": "REQUIRED"},
+         ]}
+    )
+    child_ref = [{"CUST_ID": 900000 + i, "LINE": "xyz"[i % 3], "AMOUNT": i * 3} for i in range(40)]
+    child_cfg = PipelineConfig(
+        table_schema=child_schema, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=child_ref),
+        num_rows=100, batch_size=20, run_id="fan-child-nopk",
+        landing_table="p.land.orders_fan", log_table_prefix="orders_fan",
+        pk_columns=("CUST_ID", "LINE"), uniqueness_mode="streaming",
+        fanout={"driving_cols": ["CUST_ID"], "histogram": {"0": 1, "1": 2, "3": 1},
+                "cells": {"cols": ["LINE"], "rows": [["x"], ["y"], ["z"]], "counts": [1, 1, 1]},
+                "exact_cells": True},
+    )
+    specs = [
+        TableSpec(config=parent_cfg, reference_rows=customers_reference,
+                  landing_sink=WriteToJsonLines(str(tmp_path / "parent_nopk")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_parent_nopk"))),
+        TableSpec(config=child_cfg, reference_rows=child_ref,
+                  landing_sink=WriteToJsonLines(str(tmp_path / "child_nopk")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_child_nopk")),
+                  parent_edges=(FkEdgeSpec(child_cols=("CUST_ID",), ref_cols=("customer_id",),
+                                           parent_landing="p.land.customers",
+                                           parent_pk=(), mode="fanout",
+                                           keys_per_batch=10),)),
+    ]
+    with beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"])) as p:
+        build_relational_pipeline(p, specs)
+
+    class _LabelCollector(PipelineVisitor):
+        def __init__(self):
+            self.labels: list[str] = []
+
+        def visit_transform(self, node):
+            self.labels.append(node.full_label)
+
+    visitor = _LabelCollector()
+    p.visit(visitor)
+    labels = visitor.labels
+    child_rows = _read_jsonl(tmp_path / "child_nopk")
+    assert any("orders_fan/FanoutDistinct" in lbl for lbl in labels)
+    pairs = [(r["CUST_ID"], r["LINE"]) for r in child_rows]
+    assert len(set(pairs)) == len(child_rows)

@@ -582,7 +582,7 @@ def _key_pool_payload(
 
 def _fanout_requests(
     parent_valid, edge: FkEdgeSpec, prefix: str, mean_fanout: float
-):
+) -> Any:
     """The parent's landed key tuples as key-batch requests for a DRIVEN
     child (ADR 0036): project, Distinct only when the tuple lacks the
     parent PK, Reshuffle off the parent's write path, batch.
@@ -598,7 +598,12 @@ def _fanout_requests(
     keys = parent_valid | f"{prefix}FanoutKeys" >> beam.Map(
         lambda r, rc=edge.ref_cols: tuple(r[c] for c in rc)
     ) | f"{prefix}FanoutDropNull" >> beam.Filter(lambda t: all(v is not None for v in t))
-    if not set(edge.parent_pk) <= set(edge.ref_cols):
+    # An undeclared parent PK (`parent_pk == ()`) proves nothing about
+    # uniqueness, so the projection is deduplicated — otherwise a
+    # duplicated key in the request stream yields byte-identical
+    # children (per-key seeds), colliding on the child's own PK.
+    pk_in_tuple = bool(edge.parent_pk) and set(edge.parent_pk) <= set(edge.ref_cols)
+    if not pk_in_tuple:
         keys = keys | f"{prefix}FanoutDistinct" >> beam.Distinct()
     batches = (
         keys
