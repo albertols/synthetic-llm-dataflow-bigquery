@@ -146,3 +146,19 @@ def test_teardown_releases_state(engine_class, model_client, ctx):
     engine.teardown()
     with pytest.raises(RuntimeError):
         list(engine.generate_batch(1, GenerationConfig(seed=42)))
+
+
+def test_context_carries_the_fanout_payload():
+    """ADR 0036: a driven child is generated from parent keys; the
+    GenerationContext carries the FanoutPlan.to_payload() dict."""
+    schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.d.t"},
+         "schema": [{"name": "ID", "type": "STRING", "mode": "REQUIRED"}]}
+    )
+    ctx = GenerationContext(
+        table_schema=schema, reference_rows=[{"ID": "a"}],
+        reference_digest="d", pipeline_run_id="r",
+        fanout={"driving_cols": ["ID"], "histogram": {"1": 1}, "cells": None,
+                "exact_cells": False},
+    )
+    assert ctx.fanout is not None and ctx.fanout["driving_cols"] == ["ID"]

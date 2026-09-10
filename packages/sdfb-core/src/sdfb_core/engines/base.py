@@ -13,7 +13,7 @@ REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.bas
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -264,6 +264,11 @@ class GenerationContext(BaseModel):
     # log shows the same model the driver planned from — no second graph
     # implementation, nothing to drift.
     relationship_card: str = ""
+    # Design 2026-09-10 (ADR 0036): a DRIVEN child's recipe — the
+    # `FanoutPlan.to_payload()` dict (driving edge columns, the SOURCE
+    # fan-out histogram, the PK-completing cell table). None = this table
+    # generates from `--num_rows` batch requests as before.
+    fanout: dict | None = None
     # Multi-table launches (ADR 0030): the landing table NAME used to
     # qualify column references in pretty log payloads
     # (`<LANDING>.<col>`) so oss/ replacements stay unambiguous when N
@@ -356,6 +361,20 @@ class GenerationEngine(ABC):
         Raises `RuntimeError` if `setup()` has not run, or has been
         followed by `teardown()`.
         """
+
+    def generate_for_keys(
+        self,
+        keys: Sequence[tuple],
+        cfg: GenerationConfig,
+    ) -> Iterator[GeneratedRecord]:
+        """Yield the children of ``keys`` (design 2026-09-10, ADR 0036):
+        per key, the fan-out and the PK-completing cells come from
+        ``ctx.fanout`` (`sdfb_core.engines.fanout.expand_keys`), inherited
+        columns are copied from the key tuple, and every other column is
+        this engine's own sampling. ``cfg.batch_size`` bounds the rows
+        sampled at once (chunked emission). Engines that cannot be driven
+        keep this default."""
+        raise NotImplementedError(f"{type(self).__name__} cannot generate from parent keys")
 
     @abstractmethod
     def teardown(self) -> None:
