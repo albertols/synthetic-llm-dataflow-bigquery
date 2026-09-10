@@ -1,7 +1,7 @@
 # ADR 0035 — PK capacity counts FK-bound and categorical members; the FK key sample is sized by the child's PK
 
-**Status:** ACCEPTED (2026-09-10) — laptop-verified (DirectRunner + unit tests); Dataflow acceptance pending the next three-table launch
-**Evidence:** `2026-09-09_09_00_54-16364509521974163594` (`integration_tests/…/worker_logs.jsonl`) — the first `B_TABLE → C_TABLE → A_TABLE` launch, 10M rows/table: B_TABLE clean in 2h50m, C_TABLE's BLOCKER gate raised at 3h16m with `blocker_count=8789594 observed=0.879 > gate=0.2`, A_TABLE cancelled with it (`WORK_PROGRESS_UPDATE_LEASE_ALREADY_CANCELLED`)
+**Status:** ACCEPTED (2026-09-10), **rev 2 the same day** — D2 amended to joint skewed cells and D5 added after the re-run below; laptop-verified (DirectRunner + unit tests); Dataflow acceptance pending the next three-table launch
+**Evidence:** run 1 `2026-09-09_09_00_54-16364509521974163594` — the first `B_TABLE → C_TABLE → A_TABLE` launch, 10M rows/table: B_TABLE clean in 2h50m, C_TABLE's BLOCKER gate raised at 3h16m with `blocker_count=8789594 observed=0.879 > gate=0.2`, A_TABLE cancelled with it (`WORK_PROGRESS_UPDATE_LEASE_ALREADY_CANCELLED`). Run 2 `2026-09-09_16_44_42-563627394951127087` — same launch on rev 1 of this ADR: the sized sample reached the DAG (`fk_key_pool_bound … key_tuples=1000000`, A_TABLE edges at the 100k floor) and C_TABLE still tripped at 3h41m with `blocker_count=5652926 observed=0.565` — the per-column uniform model had let a 10M launch through (`integration_tests/<job>/worker_logs.jsonl` for both)
 **Amends:** [ADR 0028](0028-constraint-router-relational-plan.md) (P4 capacity check) · [ADR 0030](0030-single-job-relational-generation.md) (the flat 100k side-input cap) · [ADR 0031](0031-joint-fk-key-draws.md) D6 (the cap is announced — now also sized)
 **Keeps:** [ADR 0031](0031-joint-fk-key-draws.md) joint draws and IPF weighting · [ADR 0034](0034-generation-throughput-single-barrier-shared-engines.md) single dedup barrier — the barrier did exactly its job; this ADR stops the launch that would feed it 8.8M duplicates
 **Figure:** `scripts/doc/make_pk_capacity_figures.py` → `docs/designs/assets/pk-capacity-random-draws.png`
@@ -36,8 +36,12 @@ plain categorical were both "unbounded", so P4 returned early.
 ![PK capacity under random draws](../designs/assets/pk-capacity-random-draws.png)
 
 *Left — a PK tuple assembled from random draws is balls into bins:
-capacity equal to `num_rows` still loses 36.8% of rows, and the run sat
-at capacity/rows = 0.12 (measured 87.9%, predicted 87.9%). Right —
+capacity equal to `num_rows` still loses 36.8% of rows, and run 1 sat
+at capacity/rows = 0.12 (measured 87.9%, predicted 87.9%). Run 2, with
+the sized 1M-key sample, sits ABOVE the uniform curve (56.5% measured,
+32% uniform): the two categorical members are skewed and jointly cover
+fewer cells than their distinct counts multiply to, so collisions
+concentrate in the heavy cells. Right —
 C_TABLE's capacity is (keys the child sees) × 12: 1.2M at the flat cap,
 12M at this ADR's ceiling, 120M with the whole parent; the largest
 gate-safe run under the ceiling is ~5.6M rows and even the whole parent
@@ -56,20 +60,31 @@ CONSTANT counts 1. Non-STRING members with cosmetic clauses stay
 unbounded (the 2026-08-22 A_TABLE false stop, ADR 0030). The hard rule
 `product < num_rows` is unchanged.
 
-**D2 — random-draw members are judged against the gate, not the
-product.** Members drawn without collision rejection (FK, categorical,
-`values` enums, the free-text pool cap) make the tuple a
-balls-into-bins process. P4 computes the expected `pk.duplicate` share
-`1 − K/N·(1 − e^(−N/K))` and stops when it exceeds the run's
-`blocker_failure_ratio`, naming the largest `num_rows` that stays under
-the gate. Between 1% and the gate it logs `pk_capacity_tight`
-(WARNING). Pattern-routed members keep ADR 0028's emitted-set rejection
-and stay on the product rule alone.
+**D2 (rev 2) — random-draw members are judged against the gate over
+the sample's JOINT cells, not a uniform product.** Members drawn
+without collision rejection (FK, categorical, `values` enums, the
+free-text pool cap) make the tuple a balls-into-bins process. The
+categorical members re-emit the reference sample's joint distribution,
+so P4 takes the observed value tuples of those members as cells with
+their row counts as weights and computes
+`E[distinct] = Σ_c U·(1 − e^(−N·p_c/U))` with `U` the uniform part (FK
+keys × exact/uniform members); uniform weights reduce to rev 1's
+`1 − K/N·(1 − e^(−N/K))`. It stops when the expected `pk.duplicate`
+share exceeds the run's `blocker_failure_ratio`, naming the cells, the
+effective (inverse-Simpson) cell count and the largest `num_rows` under
+the gate; between 1% and the gate it logs `pk_capacity_tight`
+(WARNING). Rev 1 multiplied per-column distinct counts under a uniform
+assumption: on run 2's shape that reads ~18% for a 24-cell grid where
+the sample holds 12 skewed cells and the run lost 56.5%.
+`sdfb_core/engines/pk_capacity.py::expected_duplicate_share_cells`,
+`::effective_cells`. Pattern-routed members keep ADR 0028's emitted-set
+rejection and stay on the product rule alone.
 
 **D3 — the FK key sample is sized by the child's PK, per edge.**
 `FkEdgeSpec.key_sample_cap` replaces the module-level constant in the
 composer. Preflight sizes it: `ceil(MARGIN × num_rows / other_capacity)`
-where `other_capacity` is the product of the PK's non-FK members,
+where `other_capacity` is the uniform members' product × the effective
+cell count of the sampled members (rev 2),
 clamped to `[FK_KEY_SAMPLE_FLOOR = 100k, FK_KEY_SAMPLE_CEILING = 1M]`
 (`sdfb_core/engines/pk_capacity.py`). `MARGIN = 10` puts expected
 duplicates at ~4.8%. Edges outside the child's PK, and PKs with an
@@ -82,6 +97,21 @@ message says so and names the ADR 0031 co-partitioned join as the path
 beyond it. For this run's shape at 10M rows that is the outcome: the
 operator's choices are `--num_rows ≤ ~5.6M` for C_TABLE, an unbounded PK
 member, or the join.
+
+**D5 (rev 2) — worker logs carry the relational contract as one line
+per fact.** The once-per-plan `generation_plan_pretty` (indent-2 JSON)
+and `relational_e2e` (indent-2 JSON) entries, and the fenced mermaid
+below the worker's `relationship_model` card, were echoed by every
+engine instance (8 per table) and made up 40% of run 2's worker log by
+bytes — the entries an operator needs (`fk_key_pool_bound`,
+`BlockerThresholdExceeded`) drowned in them. The worker now emits one
+single-line `relational_e2e` (landing, PK, identity, edge and clause
+counts), one single-line `relational_fk_edge` per edge (parent landing,
+`key_tuples`, `active`), and the pipe/arrow card without the fence
+(stripped even if the driver sends one). The launcher's own
+`relationship_model` entry keeps the mermaid source for the report
+tooling. `generation_plan` (compact) is unchanged and, with `table=`,
+disambiguates multi-table logs on its own.
 
 ## Alternatives considered
 
@@ -120,13 +150,20 @@ member, or the join.
 
 ## Acceptance
 
-- [x] `tests/unit/engines/test_pk_capacity.py` reproduces the run's
+- [x] `tests/unit/engines/test_pk_capacity.py` reproduces run 1's
   87.9% from `(10M, 1.21M)`; sizing hits the floor, the interior and the
-  ceiling on the three shapes.
+  ceiling on the three shapes; a 12-cell skew over 1M keys lands in
+  run 2's 45–65% band where uniform cells say 32%.
 - [x] `tests/unit/cli/test_preflight_relational_capacity.py::TestP4FkBoundAndCategoricalMembers`
   — the launch shape stops at 10M and passes at 1M with the sized cap;
   an unbounded sibling keeps the floor; the product rule still applies
-  without a gate.
+  without a gate. `::TestP4JointSkewedCategoricalMembers` — run 2's
+  shape (24-cell grid, 12 skewed joint cells) stops at 10M naming the
+  cells and their effective count; the sample is sized from them.
+- [x] `tests/unit/engines/test_plan_pretty_logging.py` — no pretty JSON,
+  one-line `relational_e2e` + `relational_fk_edge`, card without mermaid.
+- [x] Run 2 verified D3's plumbing on Dataflow: `key_tuples=1000000` on
+  the C_TABLE edge, 100k on A_TABLE's; duplicates fell 87.9% → 56.5%.
 - [x] `tests/unit/test_relational_pipeline.py::test_edge_key_sample_cap_bounds_the_parent_keys_the_child_sees`
   — DirectRunner: the composer honours the per-edge cap.
 - [ ] Next M4 launch of `B_TABLE → C_TABLE → A_TABLE` at C_TABLE

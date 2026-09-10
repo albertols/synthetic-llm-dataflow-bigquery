@@ -1557,7 +1557,9 @@ def _prepare_table_spec(
         # The card the launcher printed, carried verbatim to the workers
         # (ADR 0032): the model is resolved ONCE, driver-side, and both
         # logs show the same thing.
-        relationship_card=registry.log_body(args.landing_table),
+        # Pipes and arrows for the worker echo (ADR 0035 rev); the mermaid
+        # fence lives in the launcher's own relationship_model entry.
+        relationship_card=registry.card(args.landing_table),
         source_distinct=source_distinct,
         # ADR 0023 generate-path seam: B.2 builds pools lazily in workers.
         source_values_table=args.reference_table,

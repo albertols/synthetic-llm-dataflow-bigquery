@@ -94,3 +94,58 @@ class TestMaxRowsUnderShare:
 
     def test_unbounded_capacity_never_limits(self):
         assert max_rows_under_share(None, 0.2) is None
+
+
+class TestCellWeightedShare:
+    """The 2026-09-09_16_44_42 run (job …-563627394951127087): the sized
+    1M-key sample reached the DAG (`key_tuples=1000000`) and C_TABLE
+    still lost 56.5% of 10M rows — the uniform model said 32%. The two
+    categorical PK members are SKEWED and jointly cover fewer cells than
+    the product of their distinct counts, so collisions concentrate in
+    the heavy cells. The model must take the joint cell weights."""
+
+    def test_uniform_cells_equal_the_flat_formula(self):
+        from sdfb_core.engines.pk_capacity import expected_duplicate_share_cells
+
+        flat = expected_duplicate_share(10_000_000, 12_000_000)
+        cells = expected_duplicate_share_cells(
+            10_000_000, 1_000_000, [1.0] * 12
+        )
+        assert cells == pytest.approx(flat, abs=1e-9)
+
+    def test_skew_raises_the_share_at_the_same_cell_count(self):
+        from sdfb_core.engines.pk_capacity import expected_duplicate_share_cells
+
+        skewed = [40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1]
+        share = expected_duplicate_share_cells(10_000_000, 1_000_000, skewed)
+        assert share > expected_duplicate_share(10_000_000, 12_000_000)
+        # The run-2 neighbourhood: a 12-cell skew of this shape sits
+        # between 45% and 65% duplicates at 10M rows over 1M keys.
+        assert 0.45 < share < 0.65
+
+    def test_weights_need_not_be_normalised(self):
+        from sdfb_core.engines.pk_capacity import expected_duplicate_share_cells
+
+        a = expected_duplicate_share_cells(1_000, 100, [3, 1])
+        b = expected_duplicate_share_cells(1_000, 100, [0.75, 0.25])
+        assert a == pytest.approx(b)
+
+    def test_effective_cells_is_the_inverse_simpson_index(self):
+        from sdfb_core.engines.pk_capacity import effective_cells
+
+        assert effective_cells([1, 1]) == pytest.approx(2.0)
+        assert effective_cells([0.9, 0.1]) == pytest.approx(1 / 0.82)
+        assert effective_cells([5]) == pytest.approx(1.0)
+
+    def test_max_rows_honours_cells(self):
+        from sdfb_core.engines.pk_capacity import (
+            expected_duplicate_share_cells,
+            max_rows_under_share,
+        )
+
+        skewed = [40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1]
+        rows = max_rows_under_share(1_000_000, 0.2, cell_weights=skewed)
+        assert expected_duplicate_share_cells(rows, 1_000_000, skewed) <= 0.2
+        assert expected_duplicate_share_cells(rows + rows // 100, 1_000_000, skewed) > 0.2
+        # Skew lowers the gate-safe run vs the same count of uniform cells.
+        assert rows < max_rows_under_share(1_000_000, 0.2, cell_weights=[1.0] * 12)

@@ -264,8 +264,9 @@ class TestP4FkBoundAndCategoricalMembers:
         )
 
     @staticmethod
-    def _rows(n: int = 400) -> list[dict]:
-        # C2 has 4 values, D18 has 3 -> the categoricals contribute x12.
+    def _rows(n: int = 480) -> list[dict]:
+        # C2 has 4 values, D18 has 3 -> the categoricals contribute x12
+        # (480 rows: every (C2, D18) cell holds exactly 40, no skew).
         return [
             {
                 "D1": f"E2F3{i:020X}",
@@ -344,3 +345,68 @@ class TestP4FkBoundAndCategoricalMembers:
             relations=self._relations(), num_rows=1_000_000,
         )
         assert ("D1",) in result.fk_key_sample_caps
+
+
+class TestP4JointSkewedCategoricalMembers:
+    """2026-09-09_16_44_42 job …-563627394951127087 (ADR 0035 rev): the
+    sized 1M-key sample reached the DAG and C_TABLE still lost 56.5% of
+    10M rows. P4 had multiplied the two categoricals' DISTINCT counts
+    (uniform cells); the sample knew the truth — the pair is skewed and
+    jointly covers fewer cells. P4 must weigh the joint cells."""
+
+    _MODEL = TestP4FkBoundAndCategoricalMembers._MODEL
+    _schema = staticmethod(TestP4FkBoundAndCategoricalMembers._schema)
+
+    @staticmethod
+    def _rows(n: int = 1_000) -> list[dict]:
+        # Per-column distinct: C2 has 6 values, D18 has 4 -> product 24.
+        # Joint: only 12 (C2, D18) pairs ever occur, and they are skewed
+        # (the first pair carries 40% of rows).
+        pairs = [
+            ("C0", "K0"), ("C1", "K1"), ("C2", "K2"), ("C3", "K3"),
+            ("C4", "K0"), ("C5", "K1"), ("C0", "K2"), ("C1", "K3"),
+            ("C2", "K0"), ("C3", "K1"), ("C4", "K2"), ("C5", "K3"),
+        ]
+        weights = [40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1]
+        rows = []
+        i = 0
+        for (c2, d18), w in zip(pairs, weights, strict=True):
+            for _ in range(w * n // 100):
+                rows.append({"D1": f"E2F3{i:020X}", "C2": c2, "D18": d18,
+                             "AMT": i * 7, "SEQ": i})
+                i += 1
+        return rows
+
+    def test_the_2026_09_09_16_44_launch_stops_at_second_zero(self):
+        # Uniform x24 over 1M keys would pass (~18% expected); the joint
+        # skewed cells put the run over the 20% gate by a wide margin.
+        with pytest.raises(SystemExit, match=r"preflight P4") as exc:
+            preflight(
+                self._schema(), (), (), self._rows(),
+                relations=_relations(self._MODEL, table="child"),
+                num_rows=10_000_000,
+                fk_parent_rows={"parent": 10_000_000},
+                blocker_failure_ratio=0.2,
+            )
+        message = str(exc.value)
+        assert "cells=12" in message          # joint cells, not 6 x 4
+        assert "effective" in message         # the skew is named
+        assert "pk.duplicate" in message
+
+    def test_fk_sample_is_sized_from_effective_cells(self):
+        from sdfb_core.engines.pk_capacity import (
+            effective_cells,
+            fk_key_sample_cap,
+        )
+
+        result = preflight(
+            self._schema(), (), (), self._rows(),
+            relations=_relations(self._MODEL, table="child"),
+            num_rows=200_000,
+            fk_parent_rows={"parent": 10_000_000},
+            blocker_failure_ratio=0.2,
+        )
+        n_eff = effective_cells([40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1])
+        assert result.fk_key_sample_caps == {
+            ("D1",): fk_key_sample_cap(200_000, n_eff)
+        }

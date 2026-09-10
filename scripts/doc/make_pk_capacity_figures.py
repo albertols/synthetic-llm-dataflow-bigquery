@@ -4,11 +4,15 @@
 
 Writes docs/designs/assets/pk-capacity-random-draws.png. Claims:
 
-  left  (CONCEPT + one EVIDENCE point) — a PK tuple drawn at random with
-        no collision rejection is balls-into-bins: capacity EQUAL to
-        num_rows still loses 36.8% of rows as pk.duplicate; the
+  left  (CONCEPT + two EVIDENCE points) — a PK tuple drawn at random
+        with no collision rejection is balls-into-bins: capacity EQUAL
+        to num_rows still loses 36.8% of rows as pk.duplicate; the
         2026-09-09 C_TABLE run sat at capacity/num_rows = 0.12 and lost
-        87.9% (measured) against 87.9% (predicted).
+        87.9% (measured) against 87.9% (predicted). The re-run with the
+        sized 1M-key sample (12M tuples, 1.2x) lost 56.5% where the
+        uniform curve says 32%: the categorical members are skewed, so
+        the point sits ABOVE the curve — the model must weigh the joint
+        cells (`expected_duplicate_share_cells`).
   right (EVIDENCE) — C_TABLE's tuple capacity is (parent keys the child
         sees) x 12; at the flat 100k cap that is 1.2M tuples for 10M
         rows. The ADR 0035 ceiling (1M keys) lifts it to 12M — still 32%
@@ -57,6 +61,12 @@ PK_DUPLICATES = 8_789_594          # blocker_count (all pk.duplicate)
 BLOCKER_GATE = 0.2                 # blocker_failure_ratio (env=dev)
 FK_KEYS_SEEN = 100_000             # key_tuples: the ADR 0030 side-input cap
 PARENT_ROWS = 10_000_000           # B_TABLE landed rows = distinct PK keys
+# Run 2 — same launch with the ADR 0035 sized sample
+# (2026-09-09_16_44_42-563627394951127087): `fk_key_pool_bound
+# key_tuples=1000000`, `BlockerThresholdExceeded blocker_count=5652926`.
+RUN2 = "2026-09-09_16_44_42-563627394951127087"
+RUN2_FK_KEYS_SEEN = 1_000_000
+RUN2_PK_DUPLICATES = 5_652_926
 
 # DERIVED: rows that survived the barrier, and the factor the two
 # categorical PK members contribute (survivors ~ capacity at N/K = 8.3).
@@ -110,11 +120,23 @@ def panel_curve(ax):
         (run_ratio, measured), xytext=(0.5, 0.62), color=INK, fontsize=9,
         arrowprops={"arrowstyle": "-", "color": MUTED, "linewidth": 0.8},
     )
+    run2_ratio = RUN2_FK_KEYS_SEEN * OTHER_FACTOR / NUM_ROWS
+    run2 = RUN2_PK_DUPLICATES / NUM_ROWS
+    ax.scatter([run2_ratio], [run2], s=70, color=ORANGE, zorder=5,
+               edgecolor=SURFACE, linewidth=1.5)
+    ax.annotate(
+        f"{RUN2[:10]} re-run, sized 1M-key sample\n"
+        f"capacity/rows = {run2_ratio:.1f} · measured {run2:.1%}\n"
+        f"uniform model {expected_duplicate_share(NUM_ROWS, RUN2_FK_KEYS_SEEN * OTHER_FACTOR):.1%}"
+        f" — skewed cells sit above the curve",
+        (run2_ratio, run2), xytext=(2.6, 0.78), color=INK, fontsize=9,
+        arrowprops={"arrowstyle": "-", "color": MUTED, "linewidth": 0.8},
+    )
     one = expected_duplicate_share(1_000, 1_000)
     ax.scatter([1.0], [one], s=55, color=BLUE, zorder=5,
                edgecolor=SURFACE, linewidth=1.5)
     ax.annotate(f"capacity = rows\nstill {one:.1%} duplicates",
-                (1.0, one), xytext=(1.6, 0.42), color=INK, fontsize=9,
+                (1.0, one), xytext=(0.12, 0.30), color=INK, fontsize=9,
                 arrowprops={"arrowstyle": "-", "color": MUTED, "linewidth": 0.8})
     margin = expected_duplicate_share(1_000, 1_000 * FK_KEY_SAMPLE_MARGIN)
     ax.scatter([FK_KEY_SAMPLE_MARGIN], [margin], s=55, color=AQUA, zorder=5,
@@ -222,6 +244,11 @@ def _check_palette():
 def main() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
     _check_palette()
+    print(
+        f"{RUN2}: {RUN2_PK_DUPLICATES / NUM_ROWS:.1%} measured pk.duplicate at "
+        f"{RUN2_FK_KEYS_SEEN:,} keys; uniform model "
+        f"{expected_duplicate_share(NUM_ROWS, RUN2_FK_KEYS_SEEN * OTHER_FACTOR):.1%}"
+    )
     print(
         f"{RUN}: {PK_DUPLICATES / NUM_ROWS:.1%} measured pk.duplicate; "
         f"predicted {expected_duplicate_share(NUM_ROWS, SURVIVORS):.1%} "

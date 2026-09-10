@@ -408,25 +408,29 @@ code ref; keep it tight; no dashboards / Vertex / external LLM suggestions
 
 Every launcher/worker log carries the run's relationship model in ONE
 `SDFB_MILESTONE name=relationship_model … sha=<sha>` entry (ADR 0032):
-a glanceable card first (model name, the `config/relationships/` FILE it
+a glanceable card (model name, the `config/relationships/` FILE it
 came from, tables with `pk(...)`/`identity(...)`, generation waves, and
-every edge as `-->` enforced / `..>` documented / `[DISABLED — detached]`)
-and a fenced ```mermaid block below it (the pasteable source), plus the
-`relational_e2e` JSON entry (landing table, FK edges with parent-landing
-FQNs + key-tuple counts, PK, clauses). The report MUST show the model
-visually, and MUST NOT spend tokens re-deriving it:
+every edge as `-->` enforced / `..>` documented / `[DISABLED — detached]`).
+The LAUNCHER entry also carries a fenced ```mermaid block below the card
+(the pasteable source); the WORKER entry is the card only (ADR 0035 rev —
+pipes and arrows, no fence). The worker adds one single-line
+`relational_e2e` (landing table, PK, identity, edge + clause counts) and
+one single-line `relational_fk_edge` per edge (parent-landing FQN,
+`key_tuples=`, `active=`). The report MUST show the model visually, and
+MUST NOT spend tokens re-deriving it:
 
-1. Grep the worker/launcher log for `relationship_model` and note its
-   `sha=<sha>`.
+1. Grep the launcher log (or `runs/fk_models/`) for `relationship_model`
+   and note its `sha=<sha>`.
 2. If `runs/fk_models/<sha>.mmd` exists → embed that file's
    content VERBATIM as a ```mermaid block in report.md §0 (run under
    test). Do not redraw, restyle, or re-label it.
 3. If it does not exist → copy the fenced mermaid block (between the
-   ```mermaid fences inside relationship_model) into
+   ```mermaid fences inside the LAUNCHER's relationship_model entry; or
+   run `scripts/relationships/card.py --mermaid`) into
    `runs/fk_models/<sha>.mmd` (create the dir if needed),
    then embed it. The next report with the same model reuses it for free.
 4. Aliases: the diagram in `oss/` must use the registry aliases
-   (`A_TABLE`…), never real table names — the worker-logged mermaid uses
+   (`A_TABLE`…), never real table names — the logged mermaid uses
    real FQNs, so run it through the same redaction as every other doc
    (the exporter does this for `--doc`-registered files automatically;
    an fk_model block inside report.md is redacted with the report).

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -41,7 +42,8 @@ from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
 from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.pk_capacity import (
     FK_KEY_SAMPLE_CEILING,
-    expected_duplicate_share,
+    effective_cells,
+    expected_duplicate_share_cells,
     fk_key_sample_cap,
     max_rows_under_share,
 )
@@ -176,8 +178,100 @@ def _unconstrained_factor(profile: ColumnProfile | None) -> int | None:
     return None
 
 
+def _is_sampled_member(pc, profile: ColumnProfile | None) -> bool:
+    """True for an unconstrained CATEGORICAL/CONSTANT member — the
+    engine re-emits its observed joint distribution, so its collision
+    behaviour is the reference sample's, not a uniform draw."""
+    return pc is None and profile is not None and profile.kind in (
+        ColumnKind.CATEGORICAL,
+        ColumnKind.CONSTANT,
+    )
+
+
+def _joint_cell_weights(
+    reference_rows: list[dict], cols: tuple[str, ...]
+) -> list[float]:
+    """Row counts of every observed value tuple over ``cols`` (ADR 0035
+    rev): the joint cells, not the product of per-column distinct counts
+    — the 2026-09-09_16_44 pair covered 12 cells of a 24-cell grid, and
+    skewed, so the uniform model read 18% where the run lost 56.5%."""
+    counts = Counter(tuple(str(r.get(c)) for c in cols) for r in reference_rows)
+    return [float(n) for n in counts.values()] or [1.0]
+
+
 # Expected pk.duplicate share above which P4 warns even under the gate.
 _PK_DUPLICATE_WARN_SHARE = 0.01
+
+
+@dataclass
+class _PkMembers:
+    """The PK's non-FK members, folded (ADR 0035): named factors, the
+    product of the uniform/exact ones, the sampled (categorical) member
+    names, and whether any member draws at random or is unbounded."""
+
+    factors: dict[str, int] = field(default_factory=dict)
+    uniform: int = 1
+    sampled_cols: list[str] = field(default_factory=list)
+    unbounded: bool = False
+    random_draw: bool = False
+
+
+def _fold_pk_members(
+    table_schema: TableSchema,
+    effective_pk: tuple[str, ...],
+    skip: set[str],
+    profiles: Mapping[str, ColumnProfile],
+) -> _PkMembers:
+    by_name = {c.name: c for c in table_schema.columns}
+    m = _PkMembers()
+    for col in effective_pk:
+        if col in skip:
+            continue
+        field_ = by_name.get(col)
+        if field_ is None:
+            continue
+        pc = parse_prompt_constraint(field_.description, column=col)
+        profile = profiles.get(col)
+        factor, at_random = _pk_capacity_factor(field_, pc, profile)
+        if factor is None:
+            m.unbounded = True  # one unbounded member covers the tuple
+            return m
+        m.factors[col] = factor
+        m.random_draw = m.random_draw or at_random
+        if _is_sampled_member(pc, profile):
+            m.sampled_cols.append(col)
+        else:
+            m.uniform *= factor
+    return m
+
+
+def _random_draw_stop(
+    fqn: str,
+    effective_pk: tuple[str, ...],
+    num_rows: int,
+    product: int,
+    detail: str,
+    share: float,
+    gate: float,
+    max_rows: int | None,
+    at_ceiling: bool,
+) -> SystemExit:
+    ceiling_note = (
+        f" The FK key sample is at its {FK_KEY_SAMPLE_CEILING:,}-tuple "
+        f"side-input ceiling; beyond it the parent join must move to "
+        f"the co-partitioned shuffle (ADR 0031)."
+        if at_ceiling
+        else ""
+    )
+    return SystemExit(
+        f"[preflight P4] {fqn}: the declared PK tuple {list(effective_pk)} "
+        f"draws at RANDOM from {product:,} possible tuples ({detail}); "
+        f"{share:.1%} of num_rows={num_rows:,} would divert as "
+        f"pk.duplicate — over the {gate:.0%} BLOCKER gate. Largest run "
+        f"under the gate: {max_rows:,} rows. Fix one of: --num_rows <= "
+        f"{max_rows:,}; a PK member with an unbounded typed route or a "
+        f"samplable 'pattern'; a parent that lands more keys.{ceiling_note}"
+    )
 
 
 def _check_pk_capacity(
@@ -186,6 +280,7 @@ def _check_pk_capacity(
     num_rows: int,
     *,
     profiles: Mapping[str, ColumnProfile] | None = None,
+    reference_rows: list[dict] | None = None,
     fk_edges: tuple[FkEdge, ...] = (),
     fk_parent_rows: Mapping[str, int] | None = None,
     blocker_failure_ratio: float = 1.0,
@@ -203,52 +298,48 @@ def _check_pk_capacity(
     the parent's row count when known. Members drawn at random with no
     collision rejection make the tuple a balls-into-bins process, so
     beyond the hard ``product < num_rows`` rule the expected duplicate
-    share is compared with the BLOCKER gate (2026-09-09: ~1.2M tuples
-    for 10M rows -> 87.9% pk.duplicate, 3h16m after launch)."""
-    by_name = {c.name: c for c in table_schema.columns}
-    profiles = profiles or {}
+    share is compared with the BLOCKER gate — over the JOINT cells the
+    sampled (categorical) members cover in the reference sample, with
+    their observed skew (2026-09-09: 87.9% at the flat cap; 56.5% with
+    the sized sample where the per-column uniform model said 32%)."""
     fk_parent_rows = fk_parent_rows or {}
     pk_set = set(effective_pk)
     edges = tuple(
         fk for fk in fk_edges if fk.enforced and pk_set & set(fk.cols)
     )
-    fk_member_cols = {c for fk in edges for c in fk.cols}
-    factors: dict[str, int] = {}
-    other = 1
-    unbounded = False
-    random_draw = False
-    for col in effective_pk:
-        if col in fk_member_cols:
-            continue
-        field = by_name.get(col)
-        if field is None:
-            continue
-        pc = parse_prompt_constraint(field.description, column=col)
-        factor, at_random = _pk_capacity_factor(field, pc, profiles.get(col))
-        if factor is None:
-            unbounded = True  # one unbounded member covers the tuple
-            break
-        factors[col] = factor
-        other *= factor
-        random_draw = random_draw or at_random
-    caps = {
-        tuple(fk.cols): fk_key_sample_cap(num_rows, None if unbounded else other)
-        for fk in edges
-    }
-    if unbounded:
+    m = _fold_pk_members(
+        table_schema, effective_pk,
+        skip={c for fk in edges for c in fk.cols},
+        profiles=profiles or {},
+    )
+    cells = (
+        _joint_cell_weights(reference_rows or [], tuple(m.sampled_cols))
+        if m.sampled_cols
+        else [1.0]
+    )
+    n_eff = effective_cells(cells)
+    other = None if m.unbounded else m.uniform * n_eff
+    caps = {tuple(fk.cols): fk_key_sample_cap(num_rows, other) for fk in edges}
+    if m.unbounded:
         return caps
-    product = other
+    uniform = m.uniform
     for fk in edges:
-        cap = caps[tuple(fk.cols)]
         parent_rows = fk_parent_rows.get(fk.ref)
+        cap = caps[tuple(fk.cols)]
         key_count = min(cap, parent_rows) if parent_rows else cap
-        label = f"fk({','.join(fk.cols)})->{fk.ref}"
-        factors[label] = key_count
-        product *= key_count
-        random_draw = True
-    if not factors:
+        m.factors[f"fk({','.join(fk.cols)})->{fk.ref}"] = key_count
+        uniform *= key_count
+        m.random_draw = True
+    if not m.factors:
         return caps
-    detail = ", ".join(f"{c}={f:,}" for c, f in factors.items())
+    product = uniform * len(cells)
+    detail = ", ".join(f"{c}={f:,}" for c, f in m.factors.items())
+    if m.sampled_cols:
+        detail += (
+            f"; cells={len(cells)} joint values of "
+            f"({', '.join(m.sampled_cols)}) in the sample, effective "
+            f"{n_eff:.1f} after skew"
+        )
     if product < num_rows:
         raise SystemExit(
             f"[preflight P4] {table_schema.fqn}: the declared PK tuple "
@@ -259,28 +350,15 @@ def _check_pk_capacity(
             f"constraint from one member so its typed route stays "
             f"unbounded."
         )
-    if not random_draw:
+    if not m.random_draw:
         return caps
-    share = expected_duplicate_share(num_rows, product)
+    share = expected_duplicate_share_cells(num_rows, uniform, cells)
     if share > blocker_failure_ratio:
-        max_rows = max_rows_under_share(product, blocker_failure_ratio)
-        ceiling_note = (
-            f" The FK key sample is at its {FK_KEY_SAMPLE_CEILING:,}-tuple "
-            f"side-input ceiling; beyond it the parent join must move to "
-            f"the co-partitioned shuffle (ADR 0031)."
-            if any(c >= FK_KEY_SAMPLE_CEILING for c in caps.values())
-            else ""
-        )
-        raise SystemExit(
-            f"[preflight P4] {table_schema.fqn}: the declared PK tuple "
-            f"{list(effective_pk)} draws at RANDOM from {product:,} "
-            f"possible tuples ({detail}); {share:.1%} of num_rows="
-            f"{num_rows:,} would divert as pk.duplicate — over the "
-            f"{blocker_failure_ratio:.0%} BLOCKER gate. Largest run under "
-            f"the gate: {max_rows:,} rows. Fix one of: --num_rows <= "
-            f"{max_rows:,}; a PK member with an unbounded typed route or "
-            f"a samplable 'pattern'; a parent that lands more keys."
-            f"{ceiling_note}"
+        raise _random_draw_stop(
+            table_schema.fqn, effective_pk, num_rows, product, detail, share,
+            blocker_failure_ratio,
+            max_rows_under_share(uniform, blocker_failure_ratio, cells),
+            at_ceiling=any(c >= FK_KEY_SAMPLE_CEILING for c in caps.values()),
         )
     if share > _PK_DUPLICATE_WARN_SHARE:
         log_milestone(
@@ -459,6 +537,7 @@ def preflight(
         if num_rows > 0 and pk_cols:
             _check_pk_capacity(
                 table_schema, pk_cols, num_rows, profiles=profiles,
+                reference_rows=reference_rows,
                 blocker_failure_ratio=blocker_failure_ratio,
             )
         return PreflightResult(pk_cols, identity_cols, None, warnings)
@@ -543,6 +622,7 @@ def preflight(
         fk_key_sample_caps = _check_pk_capacity(
             table_schema, tuple(effective_pk), num_rows,
             profiles=profiles,
+            reference_rows=reference_rows,
             fk_edges=enforced_fk,
             fk_parent_rows=fk_parent_rows,
             blocker_failure_ratio=blocker_failure_ratio,

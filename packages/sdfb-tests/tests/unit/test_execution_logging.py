@@ -79,9 +79,18 @@ class TestQualifiedPrettyColumns:
             engine.setup(_C(), ctx)
         clear_generation_plan_log()
 
-    def test_multi_table_prefix_qualifies_columns(self, caplog):
+    def test_multi_table_plan_names_its_table(self, caplog):
+        """ADR 0035 rev: the indent-2 pretty plan (which carried
+        LANDING.COL keys) is gone; the compact `generation_plan` keeps
+        bare column keys and the `table=` field disambiguates a
+        multi-table worker log."""
         self._setup(caplog, prefix="B_TABLE")
-        assert '"B_TABLE.KEY"' in caplog.text  # plan + constraints keys
+        plan = [r.getMessage() for r in caplog.records
+                if "name=generation_plan " in r.getMessage()]
+        assert len(plan) == 1
+        assert "table=p.src.b_table" in plan[0]
+        assert '"KEY"' in plan[0]
+        assert "name=generation_plan_pretty" not in caplog.text
 
     def test_single_table_keys_stay_bare(self, caplog):
         self._setup(caplog, prefix="")
