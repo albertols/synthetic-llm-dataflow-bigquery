@@ -240,9 +240,8 @@ class RelationshipRegistry:
         relations = self.relations(table)
         return True if relations is None else relations.enabled
 
-    def enforced_edges(self, table: str) -> tuple[FkEdge, ...]:
-        """Edges this table actually draws keys from: enforced, and with
-        BOTH ends enabled (a detached parent hands out nothing)."""
+    def _raw_enforced(self, table: str) -> tuple[FkEdge, ...]:
+        """Enforced edges exactly as declared: both ends enabled."""
         relations = self.relations(table)
         if relations is None or not relations.enabled:
             return ()
@@ -251,6 +250,84 @@ class RelationshipRegistry:
             for edge in relations.fk
             if edge.enforced
             and (edge.external or self.enabled(edge.ref))
+        )
+
+    def enforced_edges(self, table: str) -> tuple[FkEdge, ...]:
+        """Edges this table actually draws keys from: enforced, both ends
+        enabled, and WIDENED with the column pairs the model's own
+        children pin (`derived_widenings`, ADR 0036 rev): when a child
+        references the same columns in this table AND in this table's
+        parent, those columns are inherited from the parent, so this
+        table's edge to it carries them."""
+        return tuple(
+            self._widened(table, edge) for edge in self._raw_enforced(table)
+        )
+
+    def _widened(self, table: str, edge: FkEdge) -> FkEdge:
+        added = [
+            pair
+            for rec in self._widenings()
+            if rec["table"] == _name(table) and rec["ref"] == edge.ref
+            for pair in rec["added"]
+            if pair[0] not in edge.cols
+        ]
+        if not added:
+            return edge
+        return edge.model_copy(
+            update={
+                "cols": edge.cols + tuple(c for c, _ in added),
+                "ref_cols": edge.ref_cols + tuple(r for _, r in added),
+            }
+        )
+
+    def _widenings(self) -> list[dict]:
+        """Column pairs a parent's edge to a grandparent must carry, pinned
+        by a child that references the SAME columns in both (the model
+        asserts the correspondence). Derived, never written back."""
+        records: list[dict] = []
+        for model in self.models:
+            for child, relations in model.tables.items():
+                if not relations.enabled:
+                    continue
+                edges = [e for e in self._raw_enforced(child) if not e.external]
+                for i, e1 in enumerate(edges):
+                    for e2 in edges[i + 1 :]:
+                        if e1.cols != e2.cols or e1.ref == e2.ref:
+                            continue
+                        for near, far in ((e1, e2), (e2, e1)):
+                            # `near.ref` must itself hold a direct edge to `far.ref`.
+                            for up in self._raw_enforced(near.ref):
+                                if up.external or up.ref != far.ref:
+                                    continue
+                                known = set(zip(up.cols, up.ref_cols, strict=True))
+                                added = [
+                                    (n, f)
+                                    for n, f in zip(near.ref_cols, far.ref_cols, strict=True)
+                                    if (n, f) not in known and n not in up.cols
+                                ]
+                                if added:
+                                    records.append(
+                                        {"table": near.ref, "ref": far.ref,
+                                         "via": child, "added": added}
+                                    )
+        return records
+
+    def derived_widenings(self) -> list[dict]:
+        """``[{"table", "ref", "via", "added": [(col, ref_col), …]}, …]`` —
+        every edge the registry widened, for the launcher to announce."""
+        return self._widenings()
+
+    def _descends(self, table: str, ancestor: str, seen: set[str] | None = None) -> bool:
+        """True when ``table`` reaches ``ancestor`` over enforced edges."""
+        seen = seen if seen is not None else set()
+        if table == ancestor:
+            return True
+        if table in seen:
+            return False
+        seen.add(table)
+        return any(
+            not e.external and self._descends(e.ref, ancestor, seen)
+            for e in self._raw_enforced(table)
         )
 
     def edge_roles(self, table: str) -> dict[FkEdge, str]:
@@ -271,15 +348,27 @@ class RelationshipRegistry:
             driving = internal[0]
         else:
             marked = [e for e in internal if e.drives]
-            if len(marked) != 1:
-                names = ", ".join(f"({','.join(e.cols)})->{e.ref}" for e in internal)
-                raise RelationshipError(
-                    f"{_name(table)}: {len(internal)} enforced edges [{names}] "
-                    f"and {len(marked)} marked `drives: true` — mark exactly "
-                    f"one edge `drives: true` (the parent whose keys this "
-                    f"table is generated from)"
-                )
-            driving = marked[0]
+            if len(marked) == 1:
+                driving = marked[0]
+            else:
+                # Unmarked (the operator only toggled `enabled`): the DAG
+                # decides — the parent that itself descends from every
+                # other candidate parent is the most-derived one and drives.
+                parents = {e.ref for e in internal}
+                lowest = [
+                    e for e in internal
+                    if all(self._descends(e.ref, other) for other in parents if other != e.ref)
+                ]
+                if len(marked) > 1 or len({e.ref for e in lowest}) != 1:
+                    names = ", ".join(f"({','.join(e.cols)})->{e.ref}" for e in internal)
+                    raise RelationshipError(
+                        f"{_name(table)}: {len(internal)} enforced edges [{names}] "
+                        f"and {len(marked)} marked `drives: true`, and no parent "
+                        f"descends from all the others — mark exactly one edge "
+                        f"`drives: true` (the parent whose keys this table is "
+                        f"generated from)"
+                    )
+                driving = lowest[0]
         roles[driving] = "driving"
         for edge in internal:
             if edge is driving:
@@ -561,7 +650,12 @@ class RelationshipRegistry:
             roles = self.edge_roles(name)
         except RelationshipError:
             roles = {}
-        for edge in relations.fk:
+        widened_by = {
+            (rec["ref"], tuple(rec["added"])): rec["via"]
+            for rec in self._widenings() if rec["table"] == name
+        }
+        for declared in relations.fk:
+            edge = self._widened(name, declared) if declared.enforced else declared
             arrow = "-->" if edge.enforced else "..>"
             tag = "enforced" if edge.enforced else "documented, never drawn"
             if edge.enforced and not relations.enabled:
@@ -581,6 +675,10 @@ class RelationshipRegistry:
                     )
                     if driving:
                         tag = f"enforced, implied via {_name(driving.ref)}"
+            if edge is not declared:
+                added = tuple(zip(edge.cols[len(declared.cols):], edge.ref_cols[len(declared.ref_cols):], strict=True))
+                via = widened_by.get((edge.ref, added), "?")
+                tag += f", widened via {via} (+{','.join(c for c, _ in added)})"
             lines.append(
                 f"        |   +- ({','.join(edge.cols)}) {arrow} "
                 f"{edge.ref} ({','.join(edge.ref_cols)})   [{tag}]"

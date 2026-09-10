@@ -302,22 +302,29 @@ tables:
         assert reg.driving_edge("B_TABLE") is None
         assert reg.edge_roles("B_TABLE") == {}
 
-    def test_two_unmarked_edges_stop_with_the_edit(self):
+    def test_two_unmarked_edges_resolve_when_one_parent_descends_from_the_other(self):
+        # ADR 0036 rev 2: no `drives:` needed — C_TABLE descends from
+        # B_TABLE, so C_TABLE's edge drives and B_TABLE's is implied.
         text = self._THREE.replace("        drives: true\n", "")
-        with pytest.raises(RelationshipError, match=r"drives: true"):
-            self._registry(text).edge_roles("A_TABLE")
+        reg = self._registry(text)
+        to_c, to_b = reg.enforced_edges("A_TABLE")
+        assert reg.edge_roles("A_TABLE") == {to_c: "driving", to_b: "implied"}
 
-    def test_an_edge_the_driving_parent_does_not_carry_stops(self):
-        # C_TABLE's edge no longer carries the account tuple -> A_TABLE's
-        # B_TABLE edge is not implied.
+    def test_a_narrow_parent_edge_is_widened_from_the_childs_pins(self):
+        # C_TABLE's declared edge carries only D_COL_001; A_TABLE references
+        # (D_COL_024, D_COL_025, C_COL_009) in BOTH C_TABLE and B_TABLE, so
+        # the registry widens C_TABLE's edge with those pairs (rev 2).
         text = self._THREE.replace(
             "      - cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009]\n"
             "        ref: B_TABLE\n"
             "        ref_cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009]\n",
             "      - cols: [D_COL_001]\n        ref: B_TABLE\n        ref_cols: [D_COL_001]\n",
         )
-        with pytest.raises(RelationshipError, match=r"neither driving nor implied"):
-            self._registry(text).edge_roles("A_TABLE")
+        reg = self._registry(text)
+        (edge,) = reg.enforced_edges("C_TABLE")
+        assert edge.cols == ("D_COL_001", "D_COL_024", "D_COL_025", "C_COL_009")
+        to_c, to_b = reg.enforced_edges("A_TABLE")
+        assert reg.edge_roles("A_TABLE") == {to_c: "driving", to_b: "implied"}
 
     def test_external_edges_are_external(self):
         text = """
@@ -390,3 +397,96 @@ tables:
         reg = self._registry(text)
         to_m, to_target = reg.enforced_edges("CHILD")
         assert reg.edge_roles("CHILD") == {to_m: "driving", to_target: "implied"}
+
+
+class TestDerivedRolesFromToggledTables:
+    """2026-09-10 launch …-8177138577202163642: the operator flipped
+    B_TABLE to `enabled: true` in the real model and preflight stopped
+    A_TABLE for two enforced edges with no `drives:`. Toggling tables is
+    the model's whole point (ADR 0032), so the registry must resolve
+    what the DAG already says: the DRIVING parent is the candidate that
+    itself descends from every other candidate (C_TABLE -> B_TABLE), and
+    the other edge is implied once the driving parent's edge to that
+    parent is WIDENED with the column pairs the child's two edges pin
+    (C.(C_COL_006,C_COL_007,C_COL_009) == B.(B_COL_023,B_COL_011,B_COL_013))."""
+
+    _KW = """
+model: kw
+tables:
+  B_TABLE:
+    pk: [B_COL_008]
+  C_TABLE:
+    pk: [C_COL_001, C_COL_002, C_COL_004]
+    fk:
+      - cols: [C_COL_001]
+        ref: B_TABLE
+        ref_cols: [B_COL_008]
+  A_TABLE:
+    pk: [A_COL_001, A_COL_002, A_COL_003, A_COL_004, A_COL_005]
+    fk:
+      - cols: [A_COL_001, A_COL_002, A_COL_003]
+        ref: C_TABLE
+        ref_cols: [C_COL_006, C_COL_007, C_COL_009]
+      - cols: [A_COL_001, A_COL_002, A_COL_003]
+        ref: B_TABLE
+        ref_cols: [B_COL_023, B_COL_011, B_COL_013]
+"""
+
+    def _registry(self, text: str) -> RelationshipRegistry:
+        return RelationshipRegistry.from_sources([("config/relationships/kw.yaml", text)])
+
+    def test_the_toggled_model_resolves_without_drives(self):
+        reg = self._registry(self._KW)
+        to_c, to_b = reg.enforced_edges("A_TABLE")
+        assert reg.edge_roles("A_TABLE") == {to_c: "driving", to_b: "implied"}
+
+    def test_the_driving_parents_edge_is_widened_with_the_inherited_columns(self):
+        reg = self._registry(self._KW)
+        (edge,) = reg.enforced_edges("C_TABLE")
+        assert edge.cols == ("C_COL_001", "C_COL_006", "C_COL_007", "C_COL_009")
+        assert edge.ref_cols == ("B_COL_008", "B_COL_023", "B_COL_011", "B_COL_013")
+        (rec,) = reg.derived_widenings()
+        assert rec["table"] == "C_TABLE" and rec["ref"] == "B_TABLE"
+        assert rec["via"] == "A_TABLE"
+        assert rec["added"] == [("C_COL_006", "B_COL_023"), ("C_COL_007", "B_COL_011"),
+                                ("C_COL_009", "B_COL_013")]
+
+    def test_the_declared_model_is_untouched_and_the_sha_is_stable(self):
+        reg = self._registry(self._KW)
+        declared = reg.relations("C_TABLE").fk
+        assert declared[0].cols == ("C_COL_001",)  # widening is derived, not written back
+        assert reg.sha12() == self._registry(self._KW).sha12()
+
+    def test_card_shows_the_widening(self):
+        card = self._registry(self._KW).card("A_TABLE")
+        assert "DRIVES" in card
+        assert "widened via A_TABLE" in card
+
+    def test_unrelated_parents_still_need_drives(self):
+        text = """
+model: m
+tables:
+  P:
+    pk: [K]
+  Q:
+    pk: [K]
+  CHILD:
+    pk: [K, X]
+    fk:
+      - cols: [K]
+        ref: P
+        ref_cols: [K]
+      - cols: [K]
+        ref: Q
+        ref_cols: [K]
+"""
+        with pytest.raises(RelationshipError, match=r"drives: true"):
+            self._registry(text).edge_roles("CHILD")
+
+    def test_no_edge_between_the_parents_cannot_be_widened(self):
+        # C_TABLE has NO edge to B_TABLE: nothing to widen, and B_TABLE is
+        # not an ancestor of C_TABLE, so the driving parent is ambiguous.
+        text = self._KW.replace(
+            "    fk:\n      - cols: [C_COL_001]\n        ref: B_TABLE\n        ref_cols: [B_COL_008]\n", "")
+        with pytest.raises(RelationshipError, match=r"drives: true"):
+            self._registry(text).edge_roles("A_TABLE")

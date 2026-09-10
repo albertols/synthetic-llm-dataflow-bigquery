@@ -248,6 +248,8 @@ backend would raise on the very columns D4 overrides afterward — and
 parent key or an inherited column after `generate_for_keys` has already
 set it from the tuple.
 
+**Rev 2 (2026-09-10 evening) — D4 amended after launch `…-8177138577202163642` stopped A_TABLE for two unmarked edges.** Toggling `enabled` must be enough: with no `drives:`, the most-derived candidate parent (the one that descends from every other candidate) drives, and the driving parent's edge to the other parent is widened with the column pairs the child pins (`RelationshipRegistry.derived_widenings`, logged as `fk_edge_widened`). `drives: true` remains the override for parents with no ancestry between them. Mermaid is no longer written to any log (launcher card is pipes and arrows; `card.py --mermaid` renders the diagram).
+
 ## Alternatives considered
 
 - **Co-partitioned join** (ADR 0031 §6, and design doc §10). Coverage,

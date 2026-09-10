@@ -60,6 +60,19 @@ external). `ref_cols` need not be the parent's full PK: any projection
 works, because the child draws from `SELECT DISTINCT ref_cols` of the
 parent's landed rows.
 
+## Toggling tables: what the registry derives for you
+
+`enabled: true/false` is the only edit a launch needs. When a child ends up
+with several enforced edges and none is marked `drives: true`, the registry
+picks the **most-derived parent** — the candidate that itself descends from
+every other candidate over enforced edges (A_TABLE → C_TABLE drives when
+C_TABLE → B_TABLE exists). It then **widens** the driving parent's edge to
+the other parent with the column pairs the child pins by referencing the
+same columns in both (`fk_edge_widened` in the launcher log), so the other
+edge is *implied* and the inherited columns are copied from the
+grandparent. `drives: true` is only needed when no parent descends from
+the others, and the launch says so.
+
 ## Three flags, three different jobs
 
 | Flag | Where | Meaning |

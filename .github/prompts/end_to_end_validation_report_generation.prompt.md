@@ -411,9 +411,10 @@ Every launcher/worker log carries the run's relationship model in ONE
 a glanceable card (model name, the `config/relationships/` FILE it
 came from, tables with `pk(...)`/`identity(...)`, generation waves, and
 every edge as `-->` enforced / `..>` documented / `[DISABLED — detached]`).
-The LAUNCHER entry also carries a fenced ```mermaid block below the card
-(the pasteable source); the WORKER entry is the card only (ADR 0035 rev —
-pipes and arrows, no fence). The worker adds one single-line
+No log carries mermaid any more (2026-09-10): launcher and worker entries
+are the pipe/arrow card only. The diagram source comes from
+`scripts/relationships/card.py --table <T> --mermaid` (same registry, same
+sha), never from a log. The worker adds one single-line
 `relational_e2e` (landing table, PK, identity, edge + clause counts) and
 one single-line `relational_fk_edge` per edge (parent-landing FQN,
 `key_tuples=`, `active=`). The report MUST show the model visually, and
@@ -424,13 +425,12 @@ MUST NOT spend tokens re-deriving it:
 2. If `runs/fk_models/<sha>.mmd` exists → embed that file's
    content VERBATIM as a ```mermaid block in report.md §0 (run under
    test). Do not redraw, restyle, or re-label it.
-3. If it does not exist → copy the fenced mermaid block (between the
-   ```mermaid fences inside the LAUNCHER's relationship_model entry; or
-   run `scripts/relationships/card.py --mermaid`) into
+3. If it does not exist → run `scripts/relationships/card.py --table <T>
+   --mermaid` (with the launch's model files) and write its output into
    `runs/fk_models/<sha>.mmd` (create the dir if needed),
    then embed it. The next report with the same model reuses it for free.
 4. Aliases: the diagram in `oss/` must use the registry aliases
-   (`A_TABLE`…), never real table names — the logged mermaid uses
+   (`A_TABLE`…), never real table names — the rendered mermaid uses
    real FQNs, so run it through the same redaction as every other doc
    (the exporter does this for `--doc`-registered files automatically;
    an fk_model block inside report.md is redacted with the report).

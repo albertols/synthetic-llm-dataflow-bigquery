@@ -1065,8 +1065,8 @@ def log_relationship_model(
 
     `relationship_model` carries the card (tables, PK, identity, every
     edge with enforced/documented/disabled state, generation waves, and
-    the file it came from) plus the fenced mermaid source below it for
-    report tooling. `fk_generation_mode` stays as the one-line greppable
+    the file it came from) — pipes and arrows only; the mermaid source
+    is rendered by `scripts/relationships/card.py --mermaid`, never logged. `fk_generation_mode` stays as the one-line greppable
     state. Nothing here is inferred: it is the model file, rendered.
     """
     log_milestone("fk_generation_mode", table=table_fqn, mode=mode)
@@ -1075,9 +1075,21 @@ def log_relationship_model(
     documented = sum(
         1 for e in (relations.fk if relations else ()) if not e.enforced
     )
+    for rec in registry.derived_widenings():
+        log_milestone(
+            "fk_edge_widened",
+            table=rec["table"],
+            ref=rec["ref"],
+            via=rec["via"],
+            added=",".join(f"{c}->{r}" for c, r in rec["added"]),
+            note="inherited columns pinned by a child that references the "
+            "same columns in both tables (ADR 0036)",
+        )
+    # Pipes and arrows only (2026-09-10): no mermaid in any log; the
+    # diagram comes from `scripts/relationships/card.py --mermaid`.
     log_milestone_text(
         "relationship_model",
-        registry.log_body(table_fqn),
+        registry.card(table_fqn),
         level=(
             logging.WARNING
             if mode == "relational" and relations is not None and not enforced
