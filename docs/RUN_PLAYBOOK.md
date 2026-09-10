@@ -603,6 +603,7 @@ Relational:
 | `identity_constraint_owned` | the named identity columns are generated from their DECLARED CLAUSE (Tier P/B), not UUID synthesis (ADR 0028 amendment) |
 | `fk.orphan` in `validation_runs.dlq_by_rule` | rows that referenced a non-existent parent. Non-zero = a generator regression (the draw is joint by construction) — a BLOCKER, not a tolerance |
 | `fk_edge_role edge= role=driving\|implied\|external` (launcher + worker preflight) | which edge a child is generated FROM, which are satisfied by construction (ADR 0036) |
+| `fk_fanout_cache_unavailable table= op= error=` (launcher, WARNING) | the optional `fk_fanout_stats` cache could not be read/written (missing table, permission, transient) — the launch measured without it (ADR 0036) |
 | `fk_fanout_measured edge= parents= children= mean= p50= p95= max= zero_share= source=measured\|cache` (launcher) | the SOURCE ratio the driven child reproduces; `cache` = read from `fk_fanout_stats` instead of re-scanning |
 | `relational_single_job … rows_detail=<name>:<rows>,…` (launcher) | derived row count per table — roots take `--num_rows`, driven children derive from their parent's landed keys and the measured fan-out |
 | `fanout_bound driving_cols= cells= exact_cells= mean_fanout=` (worker, once per engine build) | the engine bound the driven child's recipe; `exact_cells=True` = the PK-completing cells alone must key the child (drawn without replacement) |
@@ -854,6 +855,8 @@ the number of parent key tuples the fan-out projection discarded because
 a JOIN-KEY column was NULL. Inherited (non-join) NULLs ride through and
 are copied verbatim, so a non-zero counter means the parent landed NULLs
 in the driving edge's own columns — expect 0 on a PK-declared parent.
+
+**The cache table is optional.** If `--fk_fanout_stats_table` names a table that does not exist (or cannot be read or written), the launcher logs `fk_fanout_cache_unavailable` (WARNING) once per table and measures the fan-out from the source instead; nothing else changes.
 
 **Cache invalidation.** The `fk_fanout_stats` row is keyed by
 `(source_table, edge_cols, model_sha)` ONLY — nothing in the key tracks

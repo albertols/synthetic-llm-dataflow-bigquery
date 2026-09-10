@@ -156,3 +156,35 @@ def test_resolve_fanout_reports_a_measurement_failure_as_a_preflight_stop(monkey
             in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
             reference_rows=_ROWS, table_schema=_SCHEMA, stats_store=None, bq_client=object(),
         )
+
+
+class _BrokenStore:
+    """A cache whose table does not exist: every call raises, as the
+    BigQuery client does with NotFound."""
+
+    def get(self, t, cols, sha):
+        raise RuntimeError("404 Not found: Table p:synthetic_data_quality.fk_fanout_stats")
+
+    def put(self, t, cols, sha, payload):
+        raise RuntimeError("404 Not found: Table p:synthetic_data_quality.fk_fanout_stats")
+
+
+def test_a_missing_cache_table_is_optional(monkeypatch, caplog):
+    """The fk_fanout_stats table is a convenience, not a prerequisite: a
+    cache that cannot be read or written warns once and the launch
+    measures without it (2026-09-10 operator ask)."""
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure)
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        payload, _roles = resolve_fanout(
+            _REG, "proj.synthetic_data.C_TABLE", "proj.src.C_TABLE",
+            in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+            reference_rows=_ROWS, table_schema=_SCHEMA, stats_store=_BrokenStore(),
+            bq_client=object(),
+        )
+    assert payload is not None and payload["driving_cols"] == ["D_COL_001", "D_COL_024"]
+    assert "name=fk_fanout_cache_unavailable" in caplog.text
+    assert "name=fk_fanout_measured" in caplog.text and "source=measured" in caplog.text

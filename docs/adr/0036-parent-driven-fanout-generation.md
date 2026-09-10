@@ -281,7 +281,10 @@ set it from the tuple.
   each driving edge (`source=measured` rather than `source=cache`) and
   appends a fresh `fk_fanout_stats` row. One extra scan per edge, once —
   not a regression.
-- New BigQuery table: `synthetic_data_quality.fk_fanout_stats`
+- New OPTIONAL BigQuery table: `synthetic_data_quality.fk_fanout_stats`
+  — a cache, never a prerequisite: a store that cannot be read or
+  written logs `fk_fanout_cache_unavailable` (WARNING) and the launch
+  measures without it (2026-09-10 operator decision).
   (`config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json`
   — `source_table`, `edge_cols`, `model_sha`, `measured_at`, `payload`;
   no partition, appended by `LOAD`). Provisioned the same way as `dlq`

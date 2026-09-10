@@ -818,6 +818,41 @@ def resolve_table_rows(
     return derived_rows
 
 
+def _cache_unavailable(landing_table: str, op: str, exc: Exception) -> None:
+    """The fk_fanout_stats table is a convenience, never a prerequisite
+    (2026-09-10 operator ask): a cache that cannot be read or written —
+    the table does not exist, no permission, a transient error — warns
+    and the launch measures without it."""
+    log_milestone(
+        "fk_fanout_cache_unavailable",
+        level=logging.WARNING,
+        table=landing_table,
+        op=op,
+        error=f"{type(exc).__name__}: {str(exc)[:160]}",
+        note="fan-out measured without the cache; create "
+        "synthetic_data_quality.fk_fanout_stats (optional) to cache it",
+    )
+
+
+def _cache_read(stats_store, landing_table: str, source_table: str, cols, sha: str):
+    if not stats_store:
+        return None
+    try:
+        return stats_store.get(source_table, cols, sha)
+    except Exception as exc:  # any cache failure is non-fatal by design
+        _cache_unavailable(landing_table, "get", exc)
+        return None
+
+
+def _cache_write(stats_store, landing_table: str, source_table: str, cols, sha: str, measured: dict) -> None:
+    if not stats_store:
+        return
+    try:
+        stats_store.put(source_table, cols, sha, measured)
+    except Exception as exc:  # any cache failure is non-fatal by design
+        _cache_unavailable(landing_table, "put", exc)
+
+
 def resolve_fanout(
     registry: RelationshipRegistry,
     landing_table: str,
@@ -860,7 +895,7 @@ def resolve_fanout(
     )
     sha = registry.sha12()
     edge_label = f"({','.join(driving.cols)})->{driving.ref}"
-    measured = stats_store.get(source_table, tuple(driving.cols), sha) if stats_store else None
+    measured = _cache_read(stats_store, landing_table, source_table, tuple(driving.cols), sha)
     source = "cache"
     if measured is None:
         try:
@@ -875,8 +910,7 @@ def resolve_fanout(
                 f"{source_table} failed: {type(exc).__name__}: {exc}"
             ) from exc
         source = "measured"
-        if stats_store:
-            stats_store.put(source_table, tuple(driving.cols), sha, measured)
+        _cache_write(stats_store, landing_table, source_table, tuple(driving.cols), sha, measured)
     log_fanout_measured(edge_label, measured, source=source)
     return fanout_payload(measured, tuple(driving.cols), exact), roles
 

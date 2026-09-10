@@ -39,7 +39,7 @@ All sinks are `FILE_LOADS` + `WRITE_APPEND` + `CREATE_NEVER`, so the three desti
 | **DLQ** | `project.synthetic_data_quality.dlq` | `config/bq_schema/synthetic_data_quality/dlq.schema.json` | DAY-partition on `dlq_inserted_at`. |
 | **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. |
 | **rag_chunks** (WS2) | `project.synthetic_rag.rag_chunks` | `config/bq_schema/synthetic_rag/rag_chunks.schema.json` | DAY-partition on `created_at`. **One shared store for the whole project**: chunks from *every* source `dataset.table` coexist, scoped by `source_fqn` and pinned to a vector space by (`embedder_id`, `embedder_version`) — adding a new source table needs **no** new RAG table. Optional (only needed for `--build_rag_layer` / b1 chunk reuse). |
-| **fk_fanout_stats** (ADR 0036) | `project.synthetic_data_quality.fk_fanout_stats` | `config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json` | No partition — a point cache keyed by `(source_table, edge_cols, model_sha)`, appended by `LOAD`. Optional (`--fk_fanout_stats_table` empty = measure every launch, no cache); needed for a driven child (parent-driven fan-out generation) to skip re-scanning the source on a re-launch. |
+| **fk_fanout_stats** (ADR 0036) | `project.synthetic_data_quality.fk_fanout_stats` | `config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json` | **OPTIONAL** — no partition. Absent, unreadable or unwritable: the launcher logs `fk_fanout_cache_unavailable` (WARNING) and measures the fan-out every launch instead of caching it. |
 
 Datasets to create: **`synthetic_data`** (landing), **`synthetic_data_quality`** (dlq + validation_runs), and — for the WS2 RAG layer — **`synthetic_rag`** (rag_chunks), in the reference data's region (`europe-west3` here). Schema files are laid out by dataset under `config/bq_schema/<dataset>/<table>.schema.json`. The committed-schema tables map 1:1 to JSON files:
 
@@ -53,6 +53,7 @@ bq mk --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.js
 bq mk --schema config/bq_schema/synthetic_rag/rag_chunks.schema.json \
       --time_partitioning_field created_at \
       project:synthetic_rag.rag_chunks
+# optional — skip it and the launcher measures the fan-out every launch
 bq mk --schema config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json \
       project:synthetic_data_quality.fk_fanout_stats
 ```
