@@ -60,6 +60,14 @@ external). `ref_cols` need not be the parent's full PK: any projection
 works, because the child draws from `SELECT DISTINCT ref_cols` of the
 parent's landed rows.
 
+## Samples are never loaded from a directory scan
+
+`example_*.yaml` and `*.example.yaml` are documentation. The loader skips
+them when it scans a directory (`relationships_example_skipped` in the
+launcher log), so a real model that reuses the sample's anonymised aliases
+(`A_TABLE`, `B_TABLE`, …) never collides with it. To load a sample on
+purpose, point `--relationships_uri` at the file itself.
+
 ## Toggling tables: what the registry derives for you
 
 `enabled: true/false` is the only edit a launch needs. When a child ends up
