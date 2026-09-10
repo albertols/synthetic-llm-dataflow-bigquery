@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import apache_beam as beam
+import pytest
 from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.pipeline import PipelineVisitor
 from sdfb_beam.io.local_sinks import WriteToJsonLines
@@ -489,3 +490,62 @@ def test_fanout_without_a_declared_parent_pk_deduplicates_keys(
     assert any("orders_fan/FanoutDistinct" in lbl for lbl in labels)
     pairs = [(r["CUST_ID"], r["LINE"]) for r in child_rows]
     assert len(set(pairs)) == len(child_rows)
+
+
+def test_a_side_input_edge_next_to_the_driving_edge_stops_the_build(
+    tmp_path, customers_schema, customers_reference
+):
+    """ADR 0036 review I4: a driven child has NO side input (D1), so a
+    `side_input` edge sitting next to the driving edge was routed nowhere —
+    its FK columns fell back to the child's own marginals and the edge lost
+    referential integrity silently. It must be `implied` (satisfied by
+    construction through the driving parent) or the launch stops."""
+    parent_cfg = PipelineConfig(
+        table_schema=customers_schema, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        num_rows=10, batch_size=10, run_id="fan-parent-mixed",
+        landing_table="p.land.customers", log_table_prefix="customers",
+        identity_columns=("customer_id",),
+    )
+    child_schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.orders_fan"},
+         "schema": [
+             {"name": "CUST_ID", "type": "INT64", "mode": "REQUIRED"},
+             {"name": "LINE", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "REGION", "type": "STRING", "mode": "REQUIRED"},
+         ]}
+    )
+    child_ref = [
+        {"CUST_ID": 900000 + i, "LINE": "xyz"[i % 3], "REGION": "r"} for i in range(40)
+    ]
+    child_cfg = PipelineConfig(
+        table_schema=child_schema, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=child_ref),
+        num_rows=20, batch_size=20, run_id="fan-child-mixed",
+        landing_table="p.land.orders_fan", log_table_prefix="orders_fan",
+        pk_columns=("CUST_ID", "LINE"), uniqueness_mode="streaming",
+        fanout={"driving_cols": ["CUST_ID"], "histogram": {"1": 1},
+                "cells": {"cols": ["LINE"], "rows": [["x"], ["y"], ["z"]],
+                          "counts": [1, 1, 1]},
+                "exact_cells": True},
+    )
+    specs = [
+        TableSpec(config=parent_cfg, reference_rows=customers_reference,
+                  landing_sink=WriteToJsonLines(str(tmp_path / "parent_mixed")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_parent_mixed"))),
+        TableSpec(config=child_cfg, reference_rows=child_ref,
+                  landing_sink=WriteToJsonLines(str(tmp_path / "child_mixed")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_child_mixed")),
+                  parent_edges=(
+                      FkEdgeSpec(child_cols=("CUST_ID",), ref_cols=("customer_id",),
+                                 parent_landing="p.land.customers",
+                                 parent_pk=("customer_id",), mode="fanout",
+                                 keys_per_batch=10),
+                      FkEdgeSpec(child_cols=("REGION",), ref_cols=("region",),
+                                 parent_landing="p.land.customers",
+                                 parent_pk=("customer_id",), mode="side_input"),
+                  )),
+    ]
+    p = beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"]))
+    with pytest.raises(ValueError, match="must be implied"):
+        build_relational_pipeline(p, specs)

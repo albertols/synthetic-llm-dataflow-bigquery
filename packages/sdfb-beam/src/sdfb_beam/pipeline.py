@@ -708,6 +708,17 @@ def _route_parent_edges(
     )
     if fanout_edge is not None:
         edge, parent = fanout_edge
+        if side_input_edges:
+            # A driven child has no side input at all (D1), so a
+            # side_input edge here would be silently discarded and its
+            # referential integrity lost without a signal — exactly the
+            # last-edge-wins corruption D4 exists to stop.
+            raise ValueError(
+                f"{spec.config.landing_table}: a driven child's other "
+                f"in-job edges must be implied; found side_input edges "
+                f"{[e.child_cols for _, e, _ in side_input_edges]} next to "
+                f"the driving edge {edge.child_cols}"
+            )
         if spec.config.fanout is None:
             raise ValueError(
                 f"{spec.config.landing_table}: a fanout-mode parent "

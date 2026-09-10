@@ -49,6 +49,16 @@ edge — `_partition_parent_edges` and `_route_parent_edges`
 one `fanout`-mode edge (drives the request stream) and any number of
 `side_input`-mode edges (today's ADR 0030/0031 path, for edges outside
 the driving one) or `implied`-mode edges (contribute nothing — D4).
+The two are mutually exclusive on ONE table: a driven child has no side
+input at all, so a `side_input` edge next to the driving edge would be
+routed nowhere and its columns would quietly fall back to the child's
+own marginals — `_route_parent_edges` raises
+`"a driven child's other in-job edges must be implied"` instead, naming
+both edges' columns. An in-job edge next to a driving edge is either
+`implied` or the launch stops; an edge whose parent is EXTERNAL to the
+launch is unaffected (it reaches the engine as a driver-side
+`fk_key_pools` payload and both engines draw it as whole tuples inside
+`generate_for_keys`).
 [Ruling 9] `--num_rows` is a single launch-wide flag that applies to
 roots; a driven child's request stream is sized entirely from its
 parent's landed keys and the measured fan-out (D5) — the design doc's

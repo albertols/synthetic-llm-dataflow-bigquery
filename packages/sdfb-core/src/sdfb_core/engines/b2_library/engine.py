@@ -308,6 +308,16 @@ class B2LibraryEngine(GenerationEngine):
             columns = self._backend.sample_columns(n, rng, temperature=temperature)
             for name in self._free_text_cols:
                 columns[name] = self._freetext_hook.sample(self._profiles[name], n, cfg, rng)
+            # Enforced FK edges OUTSIDE the driving one (side-input or
+            # already-landed BQ pools, ADR 0031) still draw whole parent key
+            # tuples — `generate_batch` step 2b, which a driven child would
+            # otherwise skip entirely and fall back to per-column marginals,
+            # re-crossing the tuples it must not cross. Applied BEFORE the
+            # driving/cell overrides so the driving edge wins any overlap.
+            for pool in self._fk_key_pools:
+                drawn = pool.draw(n, rng, use_numpy=True)
+                for i, name in enumerate(pool.cols):
+                    columns[name] = [t[i] for t in drawn]
             for j, name in enumerate(plan.driving_cols):
                 columns[name] = [key[j] for key, _ in chunk]
             if plan.cells is not None:

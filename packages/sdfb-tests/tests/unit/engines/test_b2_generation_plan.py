@@ -216,3 +216,57 @@ def test_b2_rest_columns_do_not_repeat_across_chunks():
     amts = [r["AMT"] for r in out]
     assert len(amts) == 60
     assert amts[:6] != amts[6:12]
+
+
+def test_b2_generate_for_keys_keeps_external_key_pool_tuples():
+    """ADR 0036 review I3: a driven child may ALSO carry an enforced
+    EXTERNAL edge (a side-input / BQ key pool). `generate_batch` step 2b
+    draws those as whole tuples (ADR 0031); `generate_for_keys` skipped the
+    block entirely, so those columns fell back to per-column marginals and
+    the edge lost referential integrity the moment a table was driven."""
+    from sdfb_core.contracts import TableSchema
+    from sdfb_core.engines import GenerationConfig, GenerationContext, get_engine
+
+    schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.child_t"},
+         "schema": [
+             {"name": "PID", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "CAT", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "CC", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "BR", "type": "INT64", "mode": "REQUIRED"},
+             {"name": "AMT", "type": "INT64", "mode": "REQUIRED"},
+         ]}
+    )
+    # The reference sample's own CC/BR values are NOT in the parent pool —
+    # only the tuple draw can put a pool tuple on the row.
+    rows = [
+        {"PID": f"P{i:04d}", "CAT": "abc"[i % 3], "CC": "XX", "BR": 900 + i % 5,
+         "AMT": i}
+        for i in range(60)
+    ]
+    pool_keys = [("ES", 10), ("ES", 11), ("PT", 12)]
+    ctx = GenerationContext(
+        table_schema=schema, reference_rows=rows, reference_digest="b2-fanout-fk",
+        pipeline_run_id="b2-run", pk_columns=["PID", "CAT"],
+        fanout={"driving_cols": ["PID"], "histogram": {"3": 1},
+                "cells": {"cols": ["CAT"], "rows": [["a"], ["b"], ["c"]],
+                          "counts": [1, 1, 1]},
+                "exact_cells": True},
+        fk_key_pools=[{"cols": ["CC", "BR"], "keys": [list(k) for k in pool_keys]}],
+    )
+
+    class _Client:
+        def generate_json(self, *, prompt, n=1, **kw):
+            return [{"values": []}]
+
+    engine = get_engine("b2_library")(use_sdgx=False)
+    engine.setup(_Client(), ctx)
+    keys = [(f"K{i}",) for i in range(20)]
+    out = [
+        r.model_dump()
+        for r in engine.generate_for_keys(keys, GenerationConfig(seed=2, batch_size=6))
+    ]
+    assert len(out) == 60
+    assert {(r["CC"], r["BR"]) for r in out} <= set(pool_keys)
+    # The driving edge still wins its own columns.
+    assert all((r["PID"],) in keys for r in out)
