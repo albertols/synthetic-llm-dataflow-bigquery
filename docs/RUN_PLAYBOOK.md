@@ -827,7 +827,40 @@ of this flag). `--num_rows` is passed on B_TABLE only — C_TABLE and
 A_TABLE derive theirs (`relational_single_job rows_detail=`).
 Milestones and pass criteria: §7's new rows above, plus the same §8.4
 orphan query per driven edge and `pk.duplicate` expected **0** (not
-just under the gate) on both C_TABLE and A_TABLE.
+just under the gate) on both C_TABLE and A_TABLE. `streaming` mode
+MEASURES `pk.duplicate` on its own digest branch (ADR 0036 D6), so that
+0 is a reading, not a blank — but read it next to the independent
+post-run check below, which counts the landed table rather than the
+generated stream.
+
+**Post-run independent PK check (per driven table, expect 0 rows):**
+
+```sql
+SELECT COUNT(*) AS duplicated_pk_tuples FROM (
+  SELECT D_COL_001, C_COL_002, D_COL_018, COUNT(*) AS c
+  FROM `${PROJECT}.synthetic_data.c_table`
+  GROUP BY D_COL_001, C_COL_002, D_COL_018
+  HAVING c > 1
+)
+```
+
+Non-zero here with `pk.duplicate = 0` in `validation_runs` means the
+in-DAG measurement missed rows (a wiring defect); non-zero in both is a
+generator regression — start at `fanout_bound` and the `[preflight P4]`
+cell counts.
+
+**Dropped parent keys.** `fanout / keys_dropped_null` (Beam counter) is
+the number of parent key tuples the fan-out projection discarded because
+a JOIN-KEY column was NULL. Inherited (non-join) NULLs ride through and
+are copied verbatim, so a non-zero counter means the parent landed NULLs
+in the driving edge's own columns — expect 0 on a PK-declared parent.
+
+**Cache invalidation.** The `fk_fanout_stats` row is keyed by
+`(source_table, edge_cols, model_sha)` ONLY — nothing in the key tracks
+the source's content. If the source table changes shape (rows added, the
+fan-out ratio moves), a cached payload keeps replaying the OLD ratio.
+Re-measure by editing the model file (any field — `sha12()` covers all of
+them) or by deleting the cached row.
 
 ### 9c. 10M scale (warm everything)
 

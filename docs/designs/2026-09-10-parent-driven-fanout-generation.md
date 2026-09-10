@@ -172,12 +172,18 @@ pass as today. The random-draw check stays for root tables.
   inside the DoFn call and carries across chunks of the same key.
 - **Uniqueness mode for driven children.** A PK completed by the
   fan-out draw is unique by construction, so a driven child with no
-  identity columns defaults to `--uniqueness_mode=streaming`
-  (duplicates MEASURED on the digest branch, no landing-path barrier —
-  WS6 W3); the gate still folds the measured count, and a non-zero
-  reading is a generator regression. Roots and identity-bearing tables
-  keep `exact` (ADR 0034). At 100M rows the barrier is the dominant
-  stage, so this is the largest single saving of the design.
+  identity columns defaults to `--uniqueness_mode=streaming` (no
+  landing-path barrier — WS6 W3); the gate still folds the measured
+  count, and a non-zero reading is a generator regression. Streaming
+  measures on TWO digest branches: the whole-row digest
+  (`row.duplicate`) and, whenever `pk_columns` is declared, the PK
+  tuple's digest (`pk.duplicate`) — without the second branch the very
+  claim this design makes (the PK is unique by construction) would be
+  the one thing the driven default cannot see. A byte-identical row
+  counts under both rules, so the pair is an upper bound. Roots and
+  identity-bearing tables keep `exact` (ADR 0034). At 100M rows the
+  barrier is the dominant stage, so this is the largest single saving
+  of the design.
 - **Downstream is unchanged**: ValidateRecord, the single uniqueness
   barrier (ADR 0034), DLQ, FILE_LOADS sinks, run summary and gate.
   `num_rows_requested` becomes the derived expectation.
@@ -217,7 +223,7 @@ pass as today. The random-draw check stays for root tables.
 | `fk_edge_role edge= role=driving\|implied\|external` | launcher, per edge | which edge generates, which is satisfied by construction |
 | `relational_single_job rows_detail=` | launcher | derived row count per table, before the GPU spends |
 | `relational_fk_edge … mode=fanout keys_in=` | worker, per driven edge | the edge generated from parent keys, and how many |
-| `pk.duplicate` in `validation_runs.dlq_by_rule` | run summary | expect **0** on a fan-out-completed PK; non-zero = generator regression (the ADR 0031 `fk.orphan` reading) |
+| `pk.duplicate` in `validation_runs.dlq_by_rule` | run summary — measured in BOTH `exact` and `streaming` mode (the streaming PK digest branch) | expect **0** on a fan-out-completed PK; non-zero = generator regression (the ADR 0031 `fk.orphan` reading). Counted alongside `row.duplicate`, so a byte-identical row shows in both: an upper bound |
 | playbook orphan query | post-run | independent integrity check, now for every driven edge |
 
 ## 8. Acceptance criteria

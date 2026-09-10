@@ -142,3 +142,53 @@ def test_streaming_dag_has_no_groupbykey_between_generate_and_write():
     streaming = " ".join(_labels("streaming"))
     assert "CombineByRowDigest" in exact
     assert "CombineByRowDigest" not in streaming
+
+
+_PK_ROWS = [
+    {"pk": "1", "v": "x"},
+    {"pk": "1", "v": "y"},  # same PK, different free column — a PK duplicate only
+    {"pk": "2", "v": "z"},
+]
+
+
+def test_streaming_measures_pk_duplicates():
+    """A driven child defaults to streaming (ADR 0036 D6) and its PK is the
+    thing under test. Measuring only the whole-row digest would read PASSED
+    on a run that landed duplicate PKs with different free columns."""
+    with TestPipeline() as p:
+        out = (
+            p
+            | beam.Create(_PK_ROWS)
+            | EnforceUniqueness(pk_columns=["pk"], mode="streaming")
+        )
+        assert_that(
+            out["rule_counts"],
+            equal_to([("row.duplicate", 0), ("pk.duplicate", 1)]),
+        )
+
+
+def test_streaming_pk_duplicates_are_an_upper_bound_on_full_row_repeats():
+    """A byte-identical row is counted under BOTH rules — the two branches
+    are independent measurements, and the gate treats the sum as an upper
+    bound (documented in `_expand_streaming`)."""
+    rows = [{"pk": "1", "v": "x"}, {"pk": "1", "v": "x"}]
+    with TestPipeline() as p:
+        out = (
+            p
+            | beam.Create(rows)
+            | EnforceUniqueness(pk_columns=["pk"], mode="streaming")
+        )
+        assert_that(
+            out["rule_counts"],
+            equal_to([("row.duplicate", 1), ("pk.duplicate", 1)]),
+        )
+
+
+def test_streaming_without_pk_columns_publishes_no_pk_rule():
+    with TestPipeline() as p:
+        out = (
+            p
+            | beam.Create(_PK_ROWS)
+            | EnforceUniqueness(mode="streaming")
+        )
+        assert_that(out["rule_counts"], equal_to([("row.duplicate", 0)]))

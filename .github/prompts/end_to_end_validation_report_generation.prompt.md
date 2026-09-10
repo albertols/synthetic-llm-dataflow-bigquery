@@ -470,7 +470,20 @@ MUST NOT spend tokens re-deriving it:
    `validation_runs.dlq_by_rule`) on a driven child is a **generator
    regression**, never a tolerance — report it exactly the way `fk.orphan`
    is reported for a side-input edge, not folded into ordinary
-   `pk.duplicate` commentary about random draws.
+   `pk.duplicate` commentary about random draws. A driven child usually
+   runs `--driven_uniqueness_mode=streaming`, which MEASURES both
+   `row.duplicate` and `pk.duplicate` on digest branches without
+   diverting anything to the DLQ — so on such a table the rule counts are
+   measurements of what LANDED, and a byte-identical row is counted under
+   both rules (an upper bound; never subtract one from the other). Always
+   corroborate with the RUN_PLAYBOOK §9b independent PK query
+   (`GROUP BY <pk cols> HAVING COUNT(*) > 1` on the landing table,
+   expected 0): the two disagreeing is itself the finding — a 0 in
+   `validation_runs` next to a non-zero query result is a measurement
+   wiring defect, not a clean run. Also read `fanout / keys_dropped_null`
+   (Beam counter): non-zero means parent key tuples were discarded for a
+   NULL join-key column, so the child's landed row count is below the
+   derived expectation by that many parents' worth of children.
 
 ## Step 6 — Export a shareable bundle (internal `real/` + de-identified `oss/`) and prune the duplicates
 

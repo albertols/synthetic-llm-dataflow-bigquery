@@ -198,8 +198,18 @@ FK gate is skipped for driven edges; the playbook orphan query is the
 independent check.** A PK completed by the fan-out draw is unique by
 construction (D3), so the ADR 0034 full-row barrier buys nothing on
 the landing path for it — duplicates are still MEASURED (the digest
-branch, WS6 W3) and fold into the BLOCKER gate, but nothing blocks
-landing. `resolve_driven_uniqueness_mode` (`sdfb_beam/cli/run_pipeline.py`)
+branches, WS6 W3) and fold into the BLOCKER gate, but nothing blocks
+landing. Streaming measures on TWO branches, not one: the whole-row
+digest (`row.duplicate`) always, and the PK tuple's digest
+(`pk.duplicate` — `_pk_digest` → `StreamingPkDigest` /
+`StreamingPkCount`, `sdfb_beam/dofns/uniqueness.py`) whenever
+`pk_columns` is declared. Measuring only the row digest would have left
+the driven default blind to exactly the claim this ADR makes: a PK
+regression lands duplicate PKs whose free columns differ, and the run
+reads PASSED. A byte-identical row is counted under BOTH rules, so the
+pair is an UPPER BOUND on distinct defective rows — the safe direction
+for a gate, and the reason no reconciliation between the branches is
+attempted. `resolve_driven_uniqueness_mode` (`sdfb_beam/cli/run_pipeline.py`)
 returns `--driven_uniqueness_mode` (default `streaming`) for a driven
 table UNLESS it declares `identity` columns, in which case it keeps
 `exact` — an identity column is freshly generated per row (not derived
@@ -316,8 +326,11 @@ set it from the tuple.
   implied edge to B_TABLE both hold, nothing diverts to C_TABLE's DLQ.
 - [ ] M4: `B_TABLE → C_TABLE → A_TABLE` at 10M B_TABLE rows on
   Dataflow, per design doc §8.5 — C_TABLE and A_TABLE derive their row
-  counts, `validation_runs` reads PASSED with `pk.duplicate` absent (or
-  zero) on both driven tables, the RUN_PLAYBOOK orphan query returns 0
-  on both driven edges, `stats_diff_<child>.md` keeps the FK columns
+  counts, `validation_runs` reads PASSED with `pk.duplicate` reading 0
+  on both driven tables — measurable in `streaming` mode since the PK
+  digest branch (D6), so a zero reading is now evidence rather than the
+  absence of a measurement — the RUN_PLAYBOOK orphan query returns 0
+  on both driven edges, the playbook's independent post-run PK
+  `GROUP BY … HAVING COUNT(*) > 1` query returns 0, `stats_diff_<child>.md` keeps the FK columns
   inside the ADR 0025 band, and `fk_fanout_measured`/`fk_edge_role`/
   `rows_detail`/`fanout_bound` read as this ADR predicts.
