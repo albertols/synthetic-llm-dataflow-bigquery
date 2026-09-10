@@ -82,6 +82,10 @@ class FkEdge(BaseModel):
     # False = documented-only: drawn in the card, never a source of keys.
     enforced: bool = True
     note: str = ""
+    # Design 2026-09-10 (ADR 0036): the edge whose parent keys this table
+    # is generated FROM. Needed only when a child has several enforced
+    # in-model edges; a lone edge drives by itself.
+    drives: bool = False
 
     @field_validator("cols", "ref_cols")
     @classmethod
@@ -242,6 +246,80 @@ class RelationshipRegistry:
             and (edge.external or self.enabled(edge.ref))
         )
 
+    def edge_roles(self, table: str) -> dict[FkEdge, str]:
+        """Role of every enforced edge (ADR 0036): ``driving`` (the
+        parent whose keys this child is generated from), ``implied``
+        (its columns are a subset of the driving edge's, and the driving
+        parent carries them from that parent through its own enforced
+        edge, transitively) or ``external``. Anything else is a launch
+        stop: today the engine writes each edge's columns in turn and
+        the last edge silently wins."""
+        edges = self.enforced_edges(table)
+        roles: dict[FkEdge, str] = {e: "external" for e in edges if e.external}
+        internal = [e for e in edges if not e.external]
+        if not internal:
+            return roles
+        driving: FkEdge
+        if len(internal) == 1:
+            driving = internal[0]
+        else:
+            marked = [e for e in internal if e.drives]
+            if len(marked) != 1:
+                names = ", ".join(f"({','.join(e.cols)})->{e.ref}" for e in internal)
+                raise RelationshipError(
+                    f"{_name(table)}: {len(internal)} enforced edges [{names}] "
+                    f"and {len(marked)} marked `drives: true` — mark exactly "
+                    f"one edge `drives: true` (the parent whose keys this "
+                    f"table is generated from)"
+                )
+            driving = marked[0]
+        roles[driving] = "driving"
+        for edge in internal:
+            if edge is driving:
+                continue
+            if self._implied(edge, driving):
+                roles[edge] = "implied"
+                continue
+            raise RelationshipError(
+                f"{_name(table)}: edge ({','.join(edge.cols)})->{edge.ref} is "
+                f"neither driving nor implied by the driving edge "
+                f"({','.join(driving.cols)})->{driving.ref}: widen "
+                f"{driving.ref}'s edge to {edge.ref} to carry "
+                f"[{','.join(edge.cols)}], or mark this edge `drives: true`"
+            )
+        return roles
+
+    def driving_edge(self, table: str) -> FkEdge | None:
+        return next(
+            (e for e, r in self.edge_roles(table).items() if r == "driving"), None
+        )
+
+    def _implied(self, edge: FkEdge, driving: FkEdge) -> bool:
+        """``edge`` is satisfied by construction when its columns ride on
+        the driving edge AND the driving parent obtains them from
+        ``edge.ref`` (transitively over enforced edges)."""
+        if not set(edge.cols) <= set(driving.cols):
+            return False
+        # The parent-side names of edge.cols on the driving parent.
+        pos = {c: i for i, c in enumerate(driving.cols)}
+        parent_cols = {driving.ref_cols[pos[c]] for c in edge.cols}
+        return self._carries(driving.ref, edge.ref, parent_cols, seen=set())
+
+    def _carries(self, table: str, target: str, cols: set[str], seen: set[str]) -> bool:
+        if table == target:
+            return True
+        if table in seen:
+            return False
+        seen.add(table)
+        for up in self.enforced_edges(table):
+            if up.external or not cols <= set(up.cols):
+                continue
+            pos = {c: i for i, c in enumerate(up.cols)}
+            upstream = {up.ref_cols[pos[c]] for c in cols}
+            if self._carries(up.ref, target, upstream, seen):
+                return True
+        return False
+
     # -- graph -------------------------------------------------------------
 
     def _adjacency(self) -> dict[str, set[str]]:
@@ -340,7 +418,7 @@ class RelationshipRegistry:
                 f"{int(r.enabled)}:"
                 + "|".join(
                     f"{','.join(e.cols)}->{e.ref}:{','.join(e.ref_cols)}:"
-                    f"{int(e.enforced)}"
+                    f"{int(e.enforced)}:{int(e.drives)}"
                     for e in r.fk
                 )
                 for m in self.models
@@ -464,6 +542,11 @@ class RelationshipRegistry:
             f" {prefix} | {name:<24} {' '.join(keys) or '(no keys declared)'}"
             f"{state}"
         ]
+        # Compute roles once per table (ADR 0036).
+        try:
+            roles = self.edge_roles(name)
+        except RelationshipError:
+            roles = {}
         for edge in relations.fk:
             arrow = "-->" if edge.enforced else "..>"
             tag = "enforced" if edge.enforced else "documented, never drawn"
@@ -473,6 +556,17 @@ class RelationshipRegistry:
                 edge.external or self.enabled(edge.ref)
             ):
                 tag = "parent DISABLED — not drawn"
+            # Render edge roles (ADR 0036).
+            elif edge.enforced and tag == "enforced" and roles:
+                role = roles.get(edge)
+                if role == "driving":
+                    tag = "enforced, DRIVES"
+                elif role == "implied":
+                    driving = next(
+                        (e for e, r in roles.items() if r == "driving"), None
+                    )
+                    if driving:
+                        tag = f"enforced, implied via {_name(driving.ref)}"
             lines.append(
                 f"        |   +- ({','.join(edge.cols)}) {arrow} "
                 f"{edge.ref} ({','.join(edge.ref_cols)})   [{tag}]"

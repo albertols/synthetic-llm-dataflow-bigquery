@@ -252,3 +252,90 @@ class TestWaves:
         component = reg.component("A_TABLE")
         flat = [t for w in reg.generation_waves(component) for t in w]
         assert tuple(flat) == reg.generation_order(component)
+
+class TestEdgeRoles:
+    """Design 2026-09-10 (ADR 0036): one DRIVING edge per child — the
+    parent whose keys the child is generated from; every other enforced
+    in-model edge must be IMPLIED (its columns are carried by the driving
+    parent from that other parent), else the launch stops. Today the
+    engine writes each edge's columns in turn and the last one wins."""
+
+    _THREE = """
+model: kw
+tables:
+  B_TABLE:
+    pk: [D_COL_001]
+  C_TABLE:
+    pk: [D_COL_001, C_COL_002, D_COL_018]
+    fk:
+      - cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009]
+        ref: B_TABLE
+        ref_cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009]
+  A_TABLE:
+    pk: [D_COL_024, D_COL_025, C_COL_009, C_COL_045, A_COL_005]
+    fk:
+      - cols: [D_COL_024, D_COL_025, C_COL_009]
+        ref: C_TABLE
+        ref_cols: [D_COL_024, D_COL_025, C_COL_009]
+        drives: true
+      - cols: [D_COL_024, D_COL_025, C_COL_009]
+        ref: B_TABLE
+        ref_cols: [D_COL_024, D_COL_025, C_COL_009]
+"""
+
+    def _registry(self, text: str) -> RelationshipRegistry:
+        return RelationshipRegistry.from_sources([("config/relationships/kw.yaml", text)])
+
+    def test_single_edge_drives_by_itself(self):
+        reg = self._registry(self._THREE)
+        (edge,) = reg.enforced_edges("C_TABLE")
+        assert reg.edge_roles("C_TABLE") == {edge: "driving"}
+        assert reg.driving_edge("C_TABLE") == edge
+
+    def test_marked_edge_drives_and_the_other_is_implied(self):
+        reg = self._registry(self._THREE)
+        to_c, to_b = reg.enforced_edges("A_TABLE")
+        assert reg.edge_roles("A_TABLE") == {to_c: "driving", to_b: "implied"}
+
+    def test_root_has_no_driving_edge(self):
+        reg = self._registry(self._THREE)
+        assert reg.driving_edge("B_TABLE") is None
+        assert reg.edge_roles("B_TABLE") == {}
+
+    def test_two_unmarked_edges_stop_with_the_edit(self):
+        text = self._THREE.replace("        drives: true\n", "")
+        with pytest.raises(RelationshipError, match=r"drives: true"):
+            self._registry(text).edge_roles("A_TABLE")
+
+    def test_an_edge_the_driving_parent_does_not_carry_stops(self):
+        # C_TABLE's edge no longer carries the account tuple -> A_TABLE's
+        # B_TABLE edge is not implied.
+        text = self._THREE.replace(
+            "      - cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009]\n"
+            "        ref: B_TABLE\n"
+            "        ref_cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009]\n",
+            "      - cols: [D_COL_001]\n        ref: B_TABLE\n        ref_cols: [D_COL_001]\n",
+        )
+        with pytest.raises(RelationshipError, match=r"neither driving nor implied"):
+            self._registry(text).edge_roles("A_TABLE")
+
+    def test_external_edges_are_external(self):
+        text = """
+model: m
+tables:
+  T:
+    pk: [ID]
+    fk:
+      - cols: [X]
+        ref: ds.other
+        ref_cols: [X]
+"""
+        reg = self._registry(text)
+        (edge,) = reg.enforced_edges("T")
+        assert reg.edge_roles("T") == {edge: "external"}
+        assert reg.driving_edge("T") is None
+
+    def test_card_names_the_roles(self):
+        card = self._registry(self._THREE).card("A_TABLE")
+        assert "[enforced, DRIVES]" in card
+        assert "[enforced, implied via C_TABLE]" in card
