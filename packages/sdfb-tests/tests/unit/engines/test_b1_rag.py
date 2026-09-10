@@ -652,3 +652,82 @@ def test_b1_date_string_temporal_clamps_and_drops_sentinel_anchors():
     assert non_sentinel
     years = {datetime.strptime(v, "%Y-%m-%d").year for v in non_sentinel}
     assert min(years) >= now_year - 10  # clamp holds through the sampler
+
+
+class TestGenerateForKeys:
+    """ADR 0036: a driven child from parent keys — inherited columns
+    copied, PK cells unique per key, the rest sampled as usual."""
+
+    _SCHEMA = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.src.child_t"},
+            "schema": [
+                {"name": "PID", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "REGION", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "CAT", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "AMT", "type": "INT64", "mode": "REQUIRED"},
+            ],
+        }
+    )
+
+    @staticmethod
+    def _rows():
+        return [
+            {"PID": f"P{i:04d}", "REGION": "ES" if i % 2 else "PT",
+             "CAT": "abc"[i % 3], "AMT": i * 3}
+            for i in range(60)
+        ]
+
+    def _ctx(self):
+        return GenerationContext(
+            table_schema=self._SCHEMA,
+            reference_rows=self._rows(),
+            reference_digest="fanout-digest",
+            pipeline_run_id="fanout-run",
+            pk_columns=["PID", "CAT"],
+            fanout={
+                "driving_cols": ["PID", "REGION"],
+                "histogram": {"0": 1, "2": 2, "3": 1},
+                "cells": {"cols": ["CAT"], "rows": [["a"], ["b"], ["c"]],
+                          "counts": [3, 2, 1]},
+                "exact_cells": True,
+            },
+        )
+
+    class _Client:
+        def generate_json(self, *, prompt, n=1, **kw):
+            return [{"values": [f"gen-{i}" for i in range(32)]}]
+
+    def test_children_carry_their_parent_and_unique_cells(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        engine.setup(self._Client(), self._ctx())
+        keys = [(f"K{i}", "ES" if i % 2 else "PT") for i in range(40)]
+        cfg = GenerationConfig(seed=1, batch_size=1_000)
+        rows = [r.model_dump() for r in engine.generate_for_keys(keys, cfg)]
+        assert rows
+        for r in rows:
+            assert (r["PID"], r["REGION"]) in keys          # inherited verbatim
+            assert isinstance(r["AMT"], int)                # the rest is sampled
+        per_key: dict = {}
+        for r in rows:
+            per_key.setdefault(r["PID"], []).append(r["CAT"])
+        for cats in per_key.values():
+            assert len(cats) == len(set(cats)) and len(cats) <= 3
+        # Fan-out histogram: only 0, 2, 3 children per key.
+        assert {len(v) for v in per_key.values()} <= {2, 3}
+
+    def test_same_keys_same_children(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        engine.setup(self._Client(), self._ctx())
+        keys = [(f"K{i}", "ES") for i in range(20)]
+        cfg = GenerationConfig(seed=1, batch_size=7)  # chunked at 7 rows
+        a = [(r.PID, r.CAT) for r in engine.generate_for_keys(keys, cfg)]
+        b = [(r.PID, r.CAT) for r in engine.generate_for_keys(keys, cfg)]
+        assert a == b
+
+    def test_without_a_plan_it_refuses(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        ctx = self._ctx().model_copy(update={"fanout": None})
+        engine.setup(self._Client(), ctx)
+        with pytest.raises(RuntimeError, match="fanout"):
+            list(engine.generate_for_keys([("K1", "ES")], GenerationConfig(seed=1)))
