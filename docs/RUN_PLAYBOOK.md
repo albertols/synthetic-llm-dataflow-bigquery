@@ -867,6 +867,15 @@ fan-out ratio moves), a cached payload keeps replaying the OLD ratio.
 Re-measure by editing the model file (any field — `sha12()` covers all of
 them) or by deleting the cached row.
 
+**Did PK/FK enforcement actually happen?** After the job lands, run the
+`/e2e_fk_pk_validator` prompt
+(`.github/prompts/e2e_fk_pk_validator.prompt.md`) with the model file and
+the `JOB_ID`: it derives the contract from the registry (widened edges,
+roles, disabled tables), reads the launch's own milestones, and runs the
+PK-duplicate, identity, whole-tuple orphan and fan-out queries through the
+local `bq` CLI (read-only), cross-checking each count against
+`validation_runs.dlq_by_rule`. One PASS/FAIL per (table, check).
+
 ### 9c. 10M scale (warm everything)
 
 **Trigger config:** `{"num_rows":"10000000","batch_size":"1000"}` — same

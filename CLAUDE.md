@@ -99,6 +99,7 @@ The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. Se
 - **How to declare per-column prompt constraints** (Terraform ⇄ `_ddl.json` worked examples) → [`docs/DDL_CONTRACT_GUIDE.md`](docs/DDL_CONTRACT_GUIDE.md).
 - **How to actually run a deployment** (GPU verdict, run matrix, Dataflow options, L4 capacity strategy, report recipe) → [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md).
 - **How to validate a run after it lands** (duplication/memorization/schema defects traced to code + Dataflow observability) → [`.github/prompts/end_to_end_validation_report_generation.prompt.md`](.github/prompts/end_to_end_validation_report_generation.prompt.md).
+- **Did PK/FK enforcement actually happen on a relational job** (registry-derived contract, launch milestones, read-only `bq` PK-duplicate / orphan / fan-out queries cross-checked against `validation_runs`) → [`.github/prompts/e2e_fk_pk_validator.prompt.md`](.github/prompts/e2e_fk_pk_validator.prompt.md).
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Cross-session preferences and project context** → `~/.claude/projects/.../memory/MEMORY.md`.
