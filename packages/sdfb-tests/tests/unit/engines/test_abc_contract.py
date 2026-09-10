@@ -162,3 +162,15 @@ def test_context_carries_the_fanout_payload():
                 "exact_cells": False},
     )
     assert ctx.fanout is not None and ctx.fanout["driving_cols"] == ["ID"]
+
+
+def test_both_engines_implement_generate_for_keys():
+    """ADR 0036: a driven child is generated from parent keys; both
+    engines must own the entry point (the base refuses)."""
+    from sdfb_core.engines import GenerationEngine, get_engine
+    from sdfb_core.engines.b1_rag import B1RagEngine
+    from sdfb_core.engines.b2_library import B2LibraryEngine
+
+    assert B1RagEngine.generate_for_keys is not GenerationEngine.generate_for_keys
+    assert B2LibraryEngine.generate_for_keys is not GenerationEngine.generate_for_keys
+    assert get_engine("b1_rag") is B1RagEngine

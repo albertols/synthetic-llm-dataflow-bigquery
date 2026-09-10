@@ -25,7 +25,7 @@ module works on a laptop with only base deps installed.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import numpy as np
 
@@ -45,6 +45,7 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     ModelClient,
 )
+from sdfb_core.engines.fanout import FanoutPlan, expand_keys
 from sdfb_core.engines.fk_keys import bind_fk_key_pools
 from sdfb_core.engines.generation_plan import (
     build_constraints_detail,
@@ -80,6 +81,9 @@ class B2LibraryEngine(GenerationEngine):
         self._fitted: bool = False
         # Enforced FK edges (ADR 0031) — joint parent-key tuple pools.
         self._fk_key_pools: list = []
+        # A DRIVEN child's recipe (ADR 0036), bound in setup() from
+        # ``ctx.fanout``; None keeps generate_batch's num_rows-driven path.
+        self._fanout: FanoutPlan | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -110,6 +114,24 @@ class B2LibraryEngine(GenerationEngine):
                     categories=values,
                     weights=tuple(1.0 / len(values) for _ in values),
                 )
+        payload = getattr(ctx, "fanout", None)
+        self._fanout = FanoutPlan.from_payload(payload) if payload else None
+        if self._fanout is not None:
+            for name in self._fanout.driving_cols:
+                base = self._profiles.get(name)
+                if base is not None:
+                    self._profiles[name] = ColumnProfile(
+                        name=base.name, bq_type=base.bq_type,
+                        kind=ColumnKind.CATEGORICAL, nullable=base.nullable,
+                        null_fraction=0.0, categories=(), weights=(),
+                    )
+            log_milestone(
+                "fanout_bound",
+                driving_cols=",".join(self._fanout.driving_cols),
+                cells=self._fanout.cells.size if self._fanout.cells else 0,
+                exact_cells=self._fanout.exact_cells,
+                mean_fanout=round(self._fanout.histogram.mean, 3),
+            )
         self._free_text_cols = [
             name
             for name, p in self._profiles.items()
@@ -251,14 +273,52 @@ class B2LibraryEngine(GenerationEngine):
                 continue
 
     def _assemble_row(
-        self, columns: dict[str, list], col_order: list[str], i: int
+        self,
+        columns: dict[str, list],
+        col_order: list[str],
+        i: int,
+        *,
+        passthrough: frozenset[str] = frozenset(),
     ) -> dict:
         row: dict = {}
         for name in col_order:
-            profile = self._profiles.get(name)
             raw = columns[name][i] if name in columns else None
+            if name in passthrough:
+                row[name] = raw
+                continue
+            profile = self._profiles.get(name)
             row[name] = enforce_value(profile, raw) if profile is not None else raw
         return row
+
+    def generate_for_keys(
+        self, keys: Sequence[tuple], cfg: GenerationConfig
+    ) -> Iterator[GeneratedRecord]:
+        if not self._fitted or self._backend is None or self._record_model is None:
+            raise RuntimeError("B2LibraryEngine.generate_for_keys called before setup()")
+        if self._fanout is None:
+            raise RuntimeError("B2LibraryEngine.generate_for_keys: ctx.fanout is not set")
+        assert self._ctx is not None
+        plan = self._fanout
+        rng = np.random.default_rng(cfg.seed)
+        temperature = _similarity_to_sampling_temperature(cfg.similarity)
+        col_order = [c.name for c in self._ctx.table_schema.columns]
+        chunk_rows = max(1, int(cfg.batch_size or 1000))
+        for chunk in expand_keys(plan, keys, self._ctx.pipeline_run_id, chunk_rows):
+            n = len(chunk)
+            columns = self._backend.sample_columns(n, rng, temperature=temperature)
+            for name in self._free_text_cols:
+                columns[name] = self._freetext_hook.sample(self._profiles[name], n, cfg, rng)
+            for j, name in enumerate(plan.driving_cols):
+                columns[name] = [key[j] for key, _ in chunk]
+            if plan.cells is not None:
+                for j, name in enumerate(plan.cells.cols):
+                    columns[name] = [cell[j] for _, cell in chunk]
+            for i in range(n):
+                row = self._assemble_row(columns, col_order, i, passthrough=plan.columns)
+                try:
+                    yield self._record_model.model_validate(row)
+                except Exception:
+                    continue
 
 
 def _similarity_to_sampling_temperature(similarity: float) -> float:

@@ -209,6 +209,15 @@ def _sample_categorical(
     similarity→0 ⇒ temperature→~2 (diverge) in the engine.
     """
     cats = list(p.categories)
+    if not cats:
+        # A driven child's inherited-edge placeholder (ADR 0036): the real
+        # values are not known at fit time — `generate_for_keys` overwrites
+        # this column from the parent keys right after sampling — so there
+        # is nothing to draw from. Mirrors `_fill_from_profile`'s empty-
+        # categories fallback; without this guard `np.asarray([])` on the
+        # empty `cats` list below defaults to float64 (not bool), and the
+        # sparsity mask's `~sparse` raises TypeError.
+        return [None] * n
     weights = np.asarray(p.weights, dtype=float)
     if weights.sum() <= 0:
         weights = np.ones(len(cats))

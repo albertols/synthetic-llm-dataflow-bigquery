@@ -139,3 +139,80 @@ def test_b1_and_b2_plans_do_not_dedupe_each_other(monkeypatch):
     clear_free_text_pool_cache()
     assert len(b2_plans) == 1
     assert len(b1_plans) == 1
+
+
+def test_b2_generate_for_keys_matches_the_b1_contract():
+    """ADR 0036: both engines are driven the same way."""
+    from sdfb_core.contracts import TableSchema
+    from sdfb_core.engines import GenerationConfig, GenerationContext, get_engine
+
+    schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.child_t"},
+         "schema": [
+             {"name": "PID", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "CAT", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "AMT", "type": "INT64", "mode": "REQUIRED"},
+         ]}
+    )
+    rows = [{"PID": f"P{i:04d}", "CAT": "abc"[i % 3], "AMT": i} for i in range(60)]
+    ctx = GenerationContext(
+        table_schema=schema, reference_rows=rows, reference_digest="b2-fanout",
+        pipeline_run_id="b2-run", pk_columns=["PID", "CAT"],
+        fanout={"driving_cols": ["PID"], "histogram": {"1": 1, "3": 1},
+                "cells": {"cols": ["CAT"], "rows": [["a"], ["b"], ["c"]], "counts": [1, 1, 1]},
+                "exact_cells": True},
+    )
+
+    class _Client:
+        def generate_json(self, *, prompt, n=1, **kw):
+            return [{"values": []}]
+
+    engine = get_engine("b2_library")(use_sdgx=False)
+    engine.setup(_Client(), ctx)
+    keys = [(f"K{i}",) for i in range(30)]
+    out = [r.model_dump() for r in engine.generate_for_keys(keys, GenerationConfig(seed=2, batch_size=8))]
+    assert out and all((r["PID"],) in keys for r in out)
+    per_key: dict = {}
+    for r in out:
+        per_key.setdefault(r["PID"], []).append(r["CAT"])
+    assert all(len(v) == len(set(v)) for v in per_key.values())
+    assert {len(v) for v in per_key.values()} <= {1, 3}
+
+
+def test_b2_rest_columns_do_not_repeat_across_chunks():
+    """ADR 0036: the per-chunk `rest` sampling must consume ONE rng across
+    the whole call, not replay a fresh stream per chunk."""
+    from sdfb_core.contracts import TableSchema
+    from sdfb_core.engines import GenerationConfig, GenerationContext, get_engine
+
+    schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.child_t"},
+         "schema": [
+             {"name": "PID", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "CAT", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "AMT", "type": "INT64", "mode": "REQUIRED"},
+         ]}
+    )
+    rows = [{"PID": f"P{i:04d}", "CAT": "abc"[i % 3], "AMT": i} for i in range(60)]
+    ctx = GenerationContext(
+        table_schema=schema, reference_rows=rows, reference_digest="b2-fanout",
+        pipeline_run_id="b2-run", pk_columns=["PID", "CAT"],
+        fanout={"driving_cols": ["PID"], "histogram": {"3": 1},
+                "cells": {"cols": ["CAT"], "rows": [["a"], ["b"], ["c"]], "counts": [1, 1, 1]},
+                "exact_cells": True},
+    )
+
+    class _Client:
+        def generate_json(self, *, prompt, n=1, **kw):
+            return [{"values": []}]
+
+    engine = get_engine("b2_library")(use_sdgx=False)
+    engine.setup(_Client(), ctx)
+    keys = [(f"K{i}",) for i in range(20)]
+    out = [
+        r.model_dump()
+        for r in engine.generate_for_keys(keys, GenerationConfig(seed=2, batch_size=6))
+    ]
+    amts = [r["AMT"] for r in out]
+    assert len(amts) == 60
+    assert amts[:6] != amts[6:12]
