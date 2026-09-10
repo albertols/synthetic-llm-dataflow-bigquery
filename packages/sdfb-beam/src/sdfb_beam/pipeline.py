@@ -20,6 +20,7 @@ REFs:
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +29,7 @@ import apache_beam as beam
 from apache_beam.transforms import combiners
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext, ModelClient
+from sdfb_core.engines.fanout import FanoutPlan
 from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
@@ -154,6 +156,29 @@ class PipelineConfig:
     # before its first LLM call spawns vLLM.
     rag_embed_device: str = "auto"
     rag_embed_shards: int = 2
+    # ADR 0036 driven-child recipe: a DRIVEN child's `FanoutPlan.to_payload()`
+    # dict (driving edge columns, the source fan-out histogram, the
+    # PK-completing cell table). Threaded to `GenerationContext.fanout`;
+    # None = this table generates from `--num_rows` batch requests as
+    # before.
+    fanout: dict | None = None
+
+
+def _default_requests(
+    p: beam.Pipeline, config: PipelineConfig, label_prefix: str
+):
+    """Driver-side batch request specs from ``--num_rows``/``batch_size``
+    — the request stream for a table with no fanout-mode parent edge
+    (ADR 0036's ``requests`` override replaces this for a driven child)."""
+    request_specs: list[dict] = []
+    remaining = config.num_rows
+    batch_id = 0
+    while remaining > 0:
+        n = min(config.batch_size, remaining)
+        request_specs.append({"batch_id": batch_id, "n": n})
+        remaining -= n
+        batch_id += 1
+    return p | f"{label_prefix}CreateRequests" >> beam.Create(request_specs)
 
 
 def build_pipeline(
@@ -169,6 +194,7 @@ def build_pipeline(
     source_value_store: Any = None,
     label_prefix: str = "",
     fk_side: Any = None,
+    requests: Any = None,
 ) -> dict[str, Any]:
     """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -181,6 +207,10 @@ def build_pipeline(
     is that mode's parent-keys side input (`AsSingleton` of a list of
     ``{"cols", "keys"}`` edge payloads, ADR 0031) — it defers the child's
     engine build to the first bundle (`GenerateRecordsDoFn.expect_fk_side`).
+    ``requests`` is ADR 0036's DRIVEN-child alternative: a PCollection of
+    request dicts (`_fanout_requests`) that REPLACES the driver-built
+    ``Create(request_specs)`` below — a driven child has no `--num_rows`
+    batch plan, only its parent's landed key batches.
     """
     for label, cols in (
         ("identity_columns", config.identity_columns),
@@ -224,19 +254,11 @@ def build_pipeline(
         relationship_card=config.relationship_card,
         source_distinct=config.source_distinct,
         source_values_table=config.source_values_table,
+        fanout=config.fanout,
     )
 
-    # Build batch request specs eagerly — driver-side, before the graph.
-    request_specs: list[dict] = []
-    remaining = config.num_rows
-    batch_id = 0
-    while remaining > 0:
-        n = min(config.batch_size, remaining)
-        request_specs.append({"batch_id": batch_id, "n": n})
-        remaining -= n
-        batch_id += 1
-
-    requests = p | f"{label_prefix}CreateRequests" >> beam.Create(request_specs)
+    if requests is None:
+        requests = _default_requests(p, config, label_prefix)
 
     # WS2 §4b.1 — optional rag_chunks population branch. The driver decides
     # (existence check) whether to pass a sink; None ⇒ branch absent, DAG
@@ -455,6 +477,7 @@ def _generate_pardo(config: PipelineConfig, ctx, fk_side):
         similarity=config.similarity,
         seed=config.seed,
         expect_fk_side=fk_side is not None,
+        chunk_rows=config.batch_size,
     )
     if fk_side is not None:
         return beam.ParDo(dofn, fk_side=fk_side)
@@ -484,6 +507,12 @@ class FkEdgeSpec:
     # Parent key tuples the child sees (ADR 0035): the floor unless the
     # child's PK contains this edge's columns, then preflight's sizing.
     key_sample_cap: int = FK_KEY_SAMPLE_FLOOR
+    # ADR 0036: "side_input" (ADR 0030 key sample), "fanout" (this edge DRIVES
+    # the child — its parent's keys are the child's generation input) or
+    # "implied" (satisfied by construction through the driving edge; no DAG
+    # edge at all).
+    mode: str = "side_input"
+    keys_per_batch: int = 100
 
 
 @dataclass(frozen=True)
@@ -551,6 +580,139 @@ def _key_pool_payload(
     return [{"cols": cols, "keys": list(keys)}]
 
 
+def _fanout_requests(
+    parent_valid, edge: FkEdgeSpec, prefix: str, mean_fanout: float
+):
+    """The parent's landed key tuples as key-batch requests for a DRIVEN
+    child (ADR 0036): project, Distinct only when the tuple lacks the
+    parent PK, Reshuffle off the parent's write path, batch.
+
+    Each request carries ``n`` — the batch's EXPECTED child-row count
+    (``len(keys) * mean_fanout``, never below 1) — alongside ``keys``.
+    ``GenerateRecordsDoFn`` prefers ``keys`` for actual generation, but
+    the BLOCKER gate weights an ``engine_failure`` DLQ envelope by
+    ``raw_request["n"]`` (`_dlq_rule_weight`): without it, a crashed key
+    batch would count as a single lost row instead of the ~mean_fanout
+    rows it was expected to produce.
+    """
+    keys = parent_valid | f"{prefix}FanoutKeys" >> beam.Map(
+        lambda r, rc=edge.ref_cols: tuple(r[c] for c in rc)
+    ) | f"{prefix}FanoutDropNull" >> beam.Filter(lambda t: all(v is not None for v in t))
+    if not set(edge.parent_pk) <= set(edge.ref_cols):
+        keys = keys | f"{prefix}FanoutDistinct" >> beam.Distinct()
+    batches = (
+        keys
+        | f"{prefix}FanoutReshuffle" >> beam.Reshuffle()
+        | f"{prefix}FanoutBatch" >> beam.BatchElements(
+            min_batch_size=edge.keys_per_batch, max_batch_size=edge.keys_per_batch
+        )
+    )
+    return batches | f"{prefix}FanoutRequests" >> beam.Map(
+        _fanout_request_payload, mean_fanout=mean_fanout
+    )
+
+
+def _fanout_request_payload(ks: list[tuple], mean_fanout: float) -> dict:
+    """One key-batch request. Stable ``batch_id`` — never Python's
+    process-salted `hash()` — so a retried bundle reproduces the same
+    seed (`derive_batch_seed`)."""
+    batch_id = int.from_bytes(
+        hashlib.blake2b(repr(ks[0]).encode(), digest_size=4).digest(), "big"
+    )
+    return {
+        "batch_id": batch_id,
+        "keys": list(ks),
+        "n": max(1, round(len(ks) * mean_fanout)),
+    }
+
+
+def _partition_parent_edges(
+    spec: TableSpec, valid_by_landing: dict[str, Any]
+) -> tuple[tuple[FkEdgeSpec, Any] | None, list[tuple[int, FkEdgeSpec, Any]]]:
+    """``(fanout_edge, side_input_edges)`` for one table's ``parent_edges``
+    (ADR 0036): "fanout" DRIVES the child (at most one — its parent's
+    keys become the generation request stream); "side_input" keeps the
+    ADR 0030/0031 sampled-key-pool path; "implied" is satisfied by
+    construction through the driving edge and contributes nothing."""
+    fanout_edge: tuple[FkEdgeSpec, Any] | None = None
+    side_input_edges: list[tuple[int, FkEdgeSpec, Any]] = []
+    for j, edge in enumerate(spec.parent_edges):
+        if edge.mode == "implied":
+            continue
+        parent = valid_by_landing.get(edge.parent_landing)
+        if parent is None:
+            raise ValueError(
+                f"{spec.config.landing_table}: parent "
+                f"{edge.parent_landing!r} not built earlier in the "
+                f"spec list — specs must be parents-first"
+            )
+        if edge.mode == "fanout":
+            if fanout_edge is not None:
+                raise ValueError(
+                    f"{spec.config.landing_table}: at most one "
+                    f"fanout-mode parent edge is supported, got a "
+                    f"second one at index {j}"
+                )
+            fanout_edge = (edge, parent)
+        elif edge.mode == "side_input":
+            side_input_edges.append((j, edge, parent))
+        else:
+            raise ValueError(
+                f"{spec.config.landing_table}: unknown FkEdgeSpec.mode "
+                f"{edge.mode!r} on edge {j}"
+            )
+    return fanout_edge, side_input_edges
+
+
+def _side_input_pools(
+    side_input_edges: list[tuple[int, FkEdgeSpec, Any]], prefix: str
+):
+    """The ADR 0030/0031 merged parent-key side input for a table's
+    ``side_input``-mode edges (unchanged path; ``fk_side=None`` when
+    there are none)."""
+    if not side_input_edges:
+        return None
+    edge_pools = [
+        _edge_key_pools(parent, edge, f"{prefix}edge{j}/")
+        for j, edge, parent in side_input_edges
+    ]
+    if len(edge_pools) == 1:
+        merged = edge_pools[0]
+    else:
+        merged = (
+            tuple(edge_pools)
+            | f"{prefix}FkEdgeFlatten" >> beam.Flatten()
+            | f"{prefix}FkMerge"
+            >> beam.CombineGlobally(
+                lambda payloads: [edge for p in payloads for edge in p]
+            )
+        )
+    return beam.pvalue.AsSingleton(merged)
+
+
+def _route_parent_edges(
+    spec: TableSpec, valid_by_landing: dict[str, Any], prefix: str
+) -> tuple[Any, Any]:
+    """``(fk_side, requests)`` for one table (ADR 0036). A fanout edge
+    takes over the request stream and forces ``fk_side=None`` — no side
+    input at all, so `_fk_integrity_stage` skips the gate by itself;
+    otherwise today's side-input path (or neither, for a table with no
+    parent edges) applies unchanged."""
+    fanout_edge, side_input_edges = _partition_parent_edges(
+        spec, valid_by_landing
+    )
+    if fanout_edge is not None:
+        edge, parent = fanout_edge
+        if spec.config.fanout is None:
+            raise ValueError(
+                f"{spec.config.landing_table}: a fanout-mode parent "
+                f"edge needs PipelineConfig.fanout set (ADR 0036)"
+            )
+        mean_fanout = FanoutPlan.from_payload(spec.config.fanout).histogram.mean
+        return None, _fanout_requests(parent, edge, prefix, mean_fanout)
+    return _side_input_pools(side_input_edges, prefix), None
+
+
 def build_relational_pipeline(
     p: beam.Pipeline, specs: list[TableSpec]
 ) -> dict[str, dict[str, Any]]:
@@ -568,34 +730,7 @@ def build_relational_pipeline(
     for spec in specs:
         name = spec.config.landing_table.rsplit(".", 1)[-1]
         prefix = f"{name}/"
-        side = None
-        if spec.parent_edges:
-            edge_pools = []
-            for j, edge in enumerate(spec.parent_edges):
-                parent = valid_by_landing.get(edge.parent_landing)
-                if parent is None:
-                    raise ValueError(
-                        f"{spec.config.landing_table}: parent "
-                        f"{edge.parent_landing!r} not built earlier in the "
-                        f"spec list — specs must be parents-first"
-                    )
-                edge_pools.append(
-                    _edge_key_pools(parent, edge, f"{prefix}edge{j}/")
-                )
-            if len(edge_pools) == 1:
-                merged = edge_pools[0]
-            else:
-                merged = (
-                    tuple(edge_pools)
-                    | f"{prefix}FkEdgeFlatten" >> beam.Flatten()
-                    | f"{prefix}FkMerge"
-                    >> beam.CombineGlobally(
-                        lambda payloads: [
-                            edge for p in payloads for edge in p
-                        ]
-                    )
-                )
-            side = beam.pvalue.AsSingleton(merged)
+        side, requests = _route_parent_edges(spec, valid_by_landing, prefix)
         results[spec.config.landing_table] = build_pipeline(
             p,
             reference_rows=spec.reference_rows,
@@ -608,6 +743,7 @@ def build_relational_pipeline(
             source_value_store=spec.source_value_store,
             label_prefix=prefix,
             fk_side=side,
+            requests=requests,
         )
         valid_by_landing[spec.config.landing_table] = results[
             spec.config.landing_table

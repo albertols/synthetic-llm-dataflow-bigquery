@@ -11,6 +11,7 @@ from pathlib import Path
 
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.pipeline import PipelineVisitor
 from sdfb_beam.io.local_sinks import WriteToJsonLines
 from sdfb_beam.pipeline import (
     FkEdgeSpec,
@@ -348,3 +349,76 @@ def test_edge_key_sample_cap_bounds_the_parent_keys_the_child_sees(tmp_path):
             _edge_key_pools(parent, default, "default/"), _has_keys(300),
             label="default",
         )
+
+
+def test_driven_child_is_generated_from_parent_keys_without_a_side_input(
+    tmp_path, customers_schema, customers_reference
+):
+    """ADR 0036: every child FK value is a landed parent key, the PK is
+    unique by construction, and no fk side input exists in the graph."""
+    parent_cfg = PipelineConfig(
+        table_schema=customers_schema, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=customers_reference),
+        num_rows=50, batch_size=25, run_id="fan-parent",
+        landing_table="p.land.customers", log_table_prefix="customers",
+        identity_columns=("customer_id",),
+    )
+    child_schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.orders_fan"},
+         "schema": [
+             {"name": "CUST_ID", "type": "INT64", "mode": "REQUIRED"},
+             {"name": "LINE", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "AMOUNT", "type": "INT64", "mode": "REQUIRED"},
+         ]}
+    )
+    child_ref = [{"CUST_ID": 900000 + i, "LINE": "xyz"[i % 3], "AMOUNT": i * 3} for i in range(40)]
+    child_cfg = PipelineConfig(
+        table_schema=child_schema, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=child_ref),
+        num_rows=100,  # derived expectation; not a request count
+        batch_size=20, run_id="fan-child", landing_table="p.land.orders_fan",
+        log_table_prefix="orders_fan", pk_columns=("CUST_ID", "LINE"),
+        uniqueness_mode="streaming",
+        fanout={"driving_cols": ["CUST_ID"], "histogram": {"0": 1, "1": 2, "3": 1},
+                "cells": {"cols": ["LINE"], "rows": [["x"], ["y"], ["z"]], "counts": [1, 1, 1]},
+                "exact_cells": True},
+    )
+    specs = [
+        TableSpec(config=parent_cfg, reference_rows=customers_reference,
+                  landing_sink=WriteToJsonLines(str(tmp_path / "parent")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_parent"))),
+        TableSpec(config=child_cfg, reference_rows=child_ref,
+                  landing_sink=WriteToJsonLines(str(tmp_path / "child")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_child")),
+                  parent_edges=(FkEdgeSpec(child_cols=("CUST_ID",), ref_cols=("customer_id",),
+                                           parent_landing="p.land.customers",
+                                           parent_pk=("customer_id",), mode="fanout",
+                                           keys_per_batch=10),)),
+    ]
+    with beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"])) as p:
+        build_relational_pipeline(p, specs)
+
+    class _LabelCollector(PipelineVisitor):
+        def __init__(self):
+            self.labels: list[str] = []
+
+        def visit_transform(self, node):
+            self.labels.append(node.full_label)
+
+    visitor = _LabelCollector()
+    p.visit(visitor)
+    labels = visitor.labels
+    parent_rows = _read_jsonl(tmp_path / "parent")
+    child_rows = _read_jsonl(tmp_path / "child")
+    parent_keys = {r["customer_id"] for r in parent_rows}
+    assert child_rows and {r["CUST_ID"] for r in child_rows} <= parent_keys
+    assert len({(r["CUST_ID"], r["LINE"]) for r in child_rows}) == len(child_rows)  # PK unique
+    per_key = {}
+    for r in child_rows:
+        per_key.setdefault(r["CUST_ID"], 0)
+        per_key[r["CUST_ID"]] += 1
+    assert set(per_key.values()) <= {1, 3}
+    joined = "".join(labels)
+    assert any("orders_fan/FanoutKeys" in lbl for lbl in labels)  # no side-input sample
+    assert "orders_fan/edge0/FkSample" not in joined
+    assert "orders_fan/edge0/FkPools" not in joined
