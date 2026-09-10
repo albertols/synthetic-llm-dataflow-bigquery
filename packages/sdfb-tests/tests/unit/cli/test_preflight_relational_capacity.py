@@ -410,3 +410,48 @@ class TestP4JointSkewedCategoricalMembers:
         assert result.fk_key_sample_caps == {
             ("D1",): fk_key_sample_cap(200_000, n_eff)
         }
+
+
+class TestP4EdgeToDisabledParent:
+    """2026-09-10 launch …-4049668522929163666: B_TABLE flipped to
+    ``enabled: false`` so C_TABLE became a root, its card said
+    ``parent DISABLED — not drawn``, yet P4 still counted the FK member
+    at the 1M key-sample ceiling and stopped a 10M run at 56.5 %. An
+    edge the launch never draws must not bound the PK."""
+
+    _MODEL = (
+        "model: m\ntables:\n"
+        "  parent:\n    pk: [PID]\n    enabled: false\n"
+        "  t:\n    pk: [ID]\n    fk:\n"
+        "      - cols: [ID]\n        ref: parent\n        ref_cols: [PID]\n"
+    )
+
+    def _registry(self):
+        from sdfb_core.contracts.relationships import RelationshipRegistry
+
+        return RelationshipRegistry.from_sources([("test.yaml", self._MODEL)])
+
+    def test_an_undrawn_edge_leaves_the_pk_member_to_its_own_route(self):
+        registry = self._registry()
+        assert registry.enforced_edges("t") == ()  # the launcher draws nothing
+        result = preflight(
+            _schema("", _E2F), (), (), _rows(),
+            relations=registry.relations("t"),
+            enforced_fk=registry.enforced_edges("t"),
+            num_rows=2_000_000, blocker_failure_ratio=0.2,
+        )
+        assert result.fk_key_sample_caps == {}
+
+    def test_the_same_edge_to_an_enabled_parent_still_bounds_the_pk(self):
+        from sdfb_core.contracts.relationships import RelationshipRegistry
+
+        registry = RelationshipRegistry.from_sources(
+            [("test.yaml", self._MODEL.replace("    enabled: false\n", ""))]
+        )
+        with pytest.raises(SystemExit, match="preflight P4"):
+            preflight(
+                _schema("", _E2F), (), (), _rows(),
+                relations=registry.relations("t"),
+                enforced_fk=registry.enforced_edges("t"),
+                num_rows=2_000_000, blocker_failure_ratio=0.2,
+            )

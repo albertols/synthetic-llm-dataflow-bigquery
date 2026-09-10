@@ -85,7 +85,7 @@ the others, and the launch says so.
 
 | Flag | Where | Meaning |
 |---|---|---|
-| `enabled: false` | table | **Detach.** The table leaves the graph; anything that reached the rest of the model only through it detaches with it. It still generates when you target it directly — the flag governs participation, not permission. |
+| `enabled: false` | table | **Detach.** The table leaves the graph; anything that reached the rest of the model only through it detaches with it. It still generates when you target it directly — the flag governs participation, not permission. A child's edge to a disabled parent is not drawn and not counted by preflight P4: that FK member keeps its own route (pattern, typed, categorical). |
 | `enforced: false` | edge | **Document only.** The relationship is real and appears in the card and the diagram, but no keys are drawn from it and `fk.orphan` has nothing to check. For join keys that exist in the business model and not in the DDL. |
 | `drives: true` | edge | **Driving edge.** When a child has multiple enforced in-model parents, mark exactly one edge `drives: true` — the parent whose keys this table is generated from (ADR 0036). Every other enforced edge must be **implied** by that parent's relational structure, else the launch stops. |
 

@@ -1324,6 +1324,9 @@ def _load_reference_and_preflight(
         blocker_failure_ratio=thresholds.blocker_failure_ratio,
         fanout=fanout,
         edge_roles=edge_roles,
+        # The edges this launch DRAWS (both ends enabled, widened) — not
+        # the declared ones, or a disabled parent bounds the PK (P4).
+        enforced_fk=registry.enforced_edges(args.landing_table),
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)

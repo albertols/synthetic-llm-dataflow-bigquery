@@ -598,6 +598,22 @@ def _driven_child_rows(
     return None
 
 
+def _drawn_edges(
+    relations: TableRelations, enforced_fk: tuple[FkEdge, ...] | None
+) -> tuple[FkEdge, ...]:
+    """The edges P2/P3/P4 reason about: the ones the launch DRAWS.
+
+    Documented edges (`enforced: false`) describe a relationship whose
+    join key need not be in the DDL — they never draw keys, so their
+    columns are exempt by definition. So is an edge whose parent is
+    DISABLED (`registry.enforced_edges` drops it): the member keeps its
+    own route, exactly as the card's "not drawn" says. Callers without
+    a registry fall back to the declared `enforced: true` edges."""
+    if enforced_fk is not None:
+        return enforced_fk
+    return tuple(fk for fk in relations.fk if fk.enforced)
+
+
 def preflight(
     table_schema: TableSchema,
     pk_cols: tuple[str, ...],
@@ -611,6 +627,7 @@ def preflight(
     blocker_failure_ratio: float = 1.0,
     fanout: Mapping | None = None,
     edge_roles: Mapping[FkEdge, str] | None = None,
+    enforced_fk: tuple[FkEdge, ...] | None = None,
 ) -> PreflightResult:
     """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -628,7 +645,14 @@ def preflight(
     cells), and ``PreflightResult.derived_rows`` is set from the mean
     fan-out and the driving parent's row count. ``edge_roles`` (from
     ``RelationshipRegistry.edge_roles``) logs one ``fk_edge_role``
-    milestone per enforced edge and locates the driving parent."""
+    milestone per enforced edge and locates the driving parent.
+
+    ``enforced_fk`` is the set of edges the launch actually DRAWS —
+    ``RelationshipRegistry.enforced_edges`` (both ends enabled, widened,
+    ADR 0032/0036). Without it, preflight falls back to the declared
+    ``enforced: true`` edges, which cannot see a DISABLED parent: the
+    2026-09-10 launch counted C_TABLE's undrawn edge to B_TABLE at the
+    1M key-sample ceiling and stopped a root table at P4."""
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
@@ -653,10 +677,7 @@ def preflight(
     # where a typo in `config/relationships/*.yaml` stops the launch, at
     # the cost of one comparison, instead of generating the wrong shape.
     valid = {c.name for c in table_schema.columns}
-    # Documented edges (`enforced: false`) describe a relationship whose
-    # join key need not be in the DDL — they never draw keys, so their
-    # columns are exempt by definition.
-    enforced_fk = tuple(fk for fk in relations.fk if fk.enforced)
+    enforced_fk = _drawn_edges(relations, enforced_fk)
     fk_cols = tuple(c for fk in enforced_fk for c in fk.cols)
     for label, cols in (
         ("pk", relations.pk),
