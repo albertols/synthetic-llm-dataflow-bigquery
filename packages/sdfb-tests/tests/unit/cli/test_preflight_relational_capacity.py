@@ -227,3 +227,186 @@ class TestP5PkIsActuallyAKey:
 
     def test_num_rows_zero_never_stops(self):
         preflight(_schema(), (), (), self._rows(60), relations=_PK_RELATIONS)
+
+
+class TestP4FkBoundAndCategoricalMembers:
+    """2026-09-09 job …-16364509521974163594 (ADR 0035): C_TABLE's PK is
+    (D_COL_001 -> B_TABLE, C_COL_002, D_COL_018). With B_TABLE in the
+    launch, D_COL_001 became an FK member drawn from the 100k side-input
+    sample; the two categoricals multiply that by ~12. Ten million draws
+    into ~1.2M tuples: 87.9% pk.duplicate, gate tripped after 3h16m.
+    P4 must bound FK-bound and categorical members — and size the FK
+    key sample the DAG will broadcast."""
+
+    _MODEL = (
+        "model: m\ntables:\n"
+        "  parent:\n    pk: [PID]\n"
+        "  child:\n    pk: [D1, C2, D18]\n    fk:\n"
+        "      - cols: [D1]\n        ref: parent\n        ref_cols: [PID]\n"
+    )
+
+    def _relations(self):
+        return _relations(self._MODEL, table="child")
+
+    @staticmethod
+    def _schema(extra_pk_type: str | None = None) -> TableSchema:
+        cols = [
+            {"name": "D1", "type": "STRING", "mode": "REQUIRED"},
+            {"name": "C2", "type": "STRING", "mode": "REQUIRED"},
+            {"name": "D18", "type": "STRING", "mode": "REQUIRED"},
+            {"name": "AMT", "type": "INT64", "mode": "REQUIRED"},
+        ]
+        if extra_pk_type:
+            cols.append({"name": "SEQ", "type": extra_pk_type, "mode": "REQUIRED"})
+        return TableSchema.model_validate(
+            {"table_info": {"table_id": "p.d.child", "description": ""},
+             "schema": cols}
+        )
+
+    @staticmethod
+    def _rows(n: int = 480) -> list[dict]:
+        # C2 has 4 values, D18 has 3 -> the categoricals contribute x12
+        # (480 rows: every (C2, D18) cell holds exactly 40, no skew).
+        return [
+            {
+                "D1": f"E2F3{i:020X}",
+                "C2": f"C{i % 4}",
+                "D18": f"K{i % 3}",
+                "AMT": i * 7,
+                "SEQ": i,
+            }
+            for i in range(n)
+        ]
+
+    def test_the_2026_09_09_launch_stops_at_second_zero(self):
+        with pytest.raises(SystemExit, match=r"preflight P4") as exc:
+            preflight(
+                self._schema(), (), (), self._rows(),
+                relations=self._relations(), num_rows=10_000_000,
+                fk_parent_rows={"parent": 10_000_000},
+                blocker_failure_ratio=0.2,
+            )
+        message = str(exc.value)
+        assert "pk.duplicate" in message
+        assert "D1" in message and "C2" in message and "D18" in message
+        assert "%" in message  # the expected duplicate share, not just a product
+
+    def test_one_million_rows_pass_and_size_the_fk_sample(self):
+        from sdfb_core.engines.pk_capacity import fk_key_sample_cap
+
+        result = preflight(
+            self._schema(), (), (), self._rows(),
+            relations=self._relations(), num_rows=1_000_000,
+            fk_parent_rows={"parent": 10_000_000},
+            blocker_failure_ratio=0.2,
+        )
+        assert result.fk_key_sample_caps == {
+            ("D1",): fk_key_sample_cap(1_000_000, 12)
+        }
+
+    def test_a_small_parent_bounds_the_fk_member(self):
+        # 500 parent keys x 12 = 6 000 tuples for 5 000 rows -> ~32%
+        # expected duplicates, over the 20% gate.
+        with pytest.raises(SystemExit, match=r"preflight P4"):
+            preflight(
+                self._schema(), (), (), self._rows(),
+                relations=self._relations(), num_rows=5_000,
+                fk_parent_rows={"parent": 500},
+                blocker_failure_ratio=0.2,
+            )
+
+    def test_an_unbounded_sibling_member_covers_the_tuple(self):
+        model = self._MODEL.replace("pk: [D1, C2, D18]", "pk: [D1, C2, D18, SEQ]")
+        result = preflight(
+            self._schema("INT64"), (), (), self._rows(),
+            relations=_relations(model, table="child"), num_rows=10_000_000,
+            fk_parent_rows={"parent": 10_000_000},
+            blocker_failure_ratio=0.2,
+        )
+        from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
+
+        assert result.fk_key_sample_caps == {("D1",): FK_KEY_SAMPLE_FLOOR}
+
+    def test_categorical_only_pk_stops_on_the_product_rule(self):
+        # No gate given: the hard product rule alone (12 tuples < 1 000).
+        # 12 sample rows = 12 distinct (C2, D18) tuples, so P5 stays quiet.
+        model = "model: m\ntables:\n  child:\n    pk: [C2, D18]\n"
+        with pytest.raises(SystemExit, match=r"preflight P4"):
+            preflight(
+                self._schema(), (), (), self._rows(12),
+                relations=_relations(model, table="child"), num_rows=1_000,
+            )
+
+    def test_without_a_gate_only_the_product_rule_applies(self):
+        # 100k (floor, parent unknown) x 12 = 1.2M >= 1M passes without a
+        # gate — the birthday stop needs the gate to compare against.
+        result = preflight(
+            self._schema(), (), (), self._rows(),
+            relations=self._relations(), num_rows=1_000_000,
+        )
+        assert ("D1",) in result.fk_key_sample_caps
+
+
+class TestP4JointSkewedCategoricalMembers:
+    """2026-09-09_16_44_42 job …-563627394951127087 (ADR 0035 rev): the
+    sized 1M-key sample reached the DAG and C_TABLE still lost 56.5% of
+    10M rows. P4 had multiplied the two categoricals' DISTINCT counts
+    (uniform cells); the sample knew the truth — the pair is skewed and
+    jointly covers fewer cells. P4 must weigh the joint cells."""
+
+    _MODEL = TestP4FkBoundAndCategoricalMembers._MODEL
+    _schema = staticmethod(TestP4FkBoundAndCategoricalMembers._schema)
+
+    @staticmethod
+    def _rows(n: int = 1_000) -> list[dict]:
+        # Per-column distinct: C2 has 6 values, D18 has 4 -> product 24.
+        # Joint: only 12 (C2, D18) pairs ever occur, and they are skewed
+        # (the first pair carries 40% of rows).
+        pairs = [
+            ("C0", "K0"), ("C1", "K1"), ("C2", "K2"), ("C3", "K3"),
+            ("C4", "K0"), ("C5", "K1"), ("C0", "K2"), ("C1", "K3"),
+            ("C2", "K0"), ("C3", "K1"), ("C4", "K2"), ("C5", "K3"),
+        ]
+        weights = [40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1]
+        rows = []
+        i = 0
+        for (c2, d18), w in zip(pairs, weights, strict=True):
+            for _ in range(w * n // 100):
+                rows.append({"D1": f"E2F3{i:020X}", "C2": c2, "D18": d18,
+                             "AMT": i * 7, "SEQ": i})
+                i += 1
+        return rows
+
+    def test_the_2026_09_09_16_44_launch_stops_at_second_zero(self):
+        # Uniform x24 over 1M keys would pass (~18% expected); the joint
+        # skewed cells put the run over the 20% gate by a wide margin.
+        with pytest.raises(SystemExit, match=r"preflight P4") as exc:
+            preflight(
+                self._schema(), (), (), self._rows(),
+                relations=_relations(self._MODEL, table="child"),
+                num_rows=10_000_000,
+                fk_parent_rows={"parent": 10_000_000},
+                blocker_failure_ratio=0.2,
+            )
+        message = str(exc.value)
+        assert "cells=12" in message          # joint cells, not 6 x 4
+        assert "effective" in message         # the skew is named
+        assert "pk.duplicate" in message
+
+    def test_fk_sample_is_sized_from_effective_cells(self):
+        from sdfb_core.engines.pk_capacity import (
+            effective_cells,
+            fk_key_sample_cap,
+        )
+
+        result = preflight(
+            self._schema(), (), (), self._rows(),
+            relations=_relations(self._MODEL, table="child"),
+            num_rows=200_000,
+            fk_parent_rows={"parent": 10_000_000},
+            blocker_failure_ratio=0.2,
+        )
+        n_eff = effective_cells([40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1])
+        assert result.fk_key_sample_caps == {
+            ("D1",): fk_key_sample_cap(200_000, n_eff)
+        }

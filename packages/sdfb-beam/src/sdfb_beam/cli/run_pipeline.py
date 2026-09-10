@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -48,6 +49,7 @@ from sdfb_core.contracts.prompt_constraint import parse_llm_prompt_constraint
 from sdfb_core.contracts.relationships import (
     RelationshipRegistry,
 )
+from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
@@ -1067,6 +1069,19 @@ def _load_reference_and_preflight(
         table=args.reference_table,
         limit=args.reference_rows_limit,
     )
+    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
+    # ADR 0035: an in-set parent lands at most this launch's num_rows
+    # keys; an external parent's count is unknown here and stays at the
+    # sample cap (an upper bound — never a false stop).
+    fk_parent_rows = {
+        fk.ref: args.num_rows
+        for fk in registry.enforced_edges(args.landing_table)
+        if fk.ref.rsplit(".", 1)[-1] in in_set_names
+    }
+    thresholds = resolve_thresholds(
+        getattr(args, "thresholds_uri", "config/thresholds.yml"),
+        getattr(args, "env", "dev"),
+    )
     pf = preflight(
         table_schema,
         tuple(c.strip() for c in args.pk_cols.split(",") if c.strip()),
@@ -1075,8 +1090,11 @@ def _load_reference_and_preflight(
         relations=registry.relations(args.landing_table),
         prompt_constraints_enabled=args.prompt_constraints == "on",
         # ADR 0028 P4: refuse a PK whose routed generator cannot cover
-        # num_rows — before any graph exists.
+        # num_rows — before any graph exists. ADR 0035: FK-bound and
+        # categorical members count too, against the run's gate.
         num_rows=args.num_rows,
+        fk_parent_rows=fk_parent_rows,
+        blocker_failure_ratio=thresholds.blocker_failure_ratio,
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
@@ -1086,7 +1104,6 @@ def _load_reference_and_preflight(
     # An empty parent pool is a loud, actionable stop.
     fk_pools: dict = {}
     fk_key_pools: list[dict] = []
-    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
     enforced_fk = registry.enforced_edges(args.landing_table)
     external_fk = tuple(
         fk
@@ -1386,6 +1403,33 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def in_set_parent_edges(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    *,
+    in_set_names: set[str],
+    key_sample_caps: Mapping[tuple[str, ...], int],
+) -> tuple[FkEdgeSpec, ...]:
+    """This table's enforced edges whose parent generates in the same
+    job, as composer specs. ``key_sample_caps`` (preflight P4, ADR 0035)
+    sizes the parent key sample per edge inside the child's PK; other
+    edges keep the composer's floor."""
+    return tuple(
+        FkEdgeSpec(
+            child_cols=tuple(fk.cols),
+            ref_cols=tuple(fk.ref_cols),
+            parent_landing=parent_landing_fqn(
+                fk.ref, derive_fk_parent_landing(landing_table)
+            ),
+            key_sample_cap=key_sample_caps.get(
+                tuple(fk.cols), FK_KEY_SAMPLE_FLOOR
+            ),
+        )
+        for fk in registry.enforced_edges(landing_table)
+        if fk.ref.rsplit(".", 1)[-1] in in_set_names
+    )
+
+
 def _prepare_table_spec(
     args,
     model_client,
@@ -1513,7 +1557,9 @@ def _prepare_table_spec(
         # The card the launcher printed, carried verbatim to the workers
         # (ADR 0032): the model is resolved ONCE, driver-side, and both
         # logs show the same thing.
-        relationship_card=registry.log_body(args.landing_table),
+        # Pipes and arrows for the worker echo (ADR 0035 rev); the mermaid
+        # fence lives in the launcher's own relationship_model entry.
+        relationship_card=registry.card(args.landing_table),
         source_distinct=source_distinct,
         # ADR 0023 generate-path seam: B.2 builds pools lazily in workers.
         source_values_table=args.reference_table,
@@ -1564,17 +1610,11 @@ def _prepare_table_spec(
     # In-set enforced edges: parents live in THIS job's spec list — no BQ
     # pool load; the composer wires the parent's landed keys as a side
     # input (ADR 0030). parent_pk is patched in by the relational runner.
-    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
-    parent_edges = tuple(
-        FkEdgeSpec(
-            child_cols=tuple(fk.cols),
-            ref_cols=tuple(fk.ref_cols),
-            parent_landing=parent_landing_fqn(
-                fk.ref, derive_fk_parent_landing(args.landing_table)
-            ),
-        )
-        for fk in registry.enforced_edges(args.landing_table)
-        if fk.ref.rsplit(".", 1)[-1] in in_set_names
+    parent_edges = in_set_parent_edges(
+        registry,
+        args.landing_table,
+        in_set_names={t.rsplit(".", 1)[-1] for t in in_set_landing},
+        key_sample_caps=pf.fk_key_sample_caps,
     )
 
     return TableSpec(

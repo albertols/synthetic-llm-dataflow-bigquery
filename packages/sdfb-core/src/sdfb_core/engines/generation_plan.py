@@ -16,7 +16,7 @@ from typing import Any
 
 from sdfb_core.engines.text_shapes import shape_mix_is_identifier_like
 from sdfb_core.observability import (
-    log_milestone_pretty,
+    log_milestone,
     log_milestone_text,
     sha12,
 )
@@ -146,39 +146,23 @@ def log_plan_pretty(
     profiles: dict[str, Any],
     pool_sources: dict[str, str] | None = None,
 ) -> None:
-    """The two once-per-plan pretty entries (ADR 0028 follow-up).
+    """The once-per-plan relational entries (ADR 0028 follow-up; compact
+    since ADR 0035 rev).
 
     Emitted by both engines right after their compact ``generation_plan``
-    milestone, under the same once-guard: an indent-2
-    ``generation_plan_pretty`` for quick per-column inspection, and a
-    ``relational_e2e`` block naming every relational table the run
-    touches — landing table, PK, each FK edge with its parent landing
-    table and loaded pool size — plus the fetched constraint clauses.
-    One glance answers "did the whole relational contract reach this
-    run", which the 2026-08-21 job could not (its FK was silently
-    inactive)."""
+    milestone, under the same once-guard: ONE single-line
+    ``relational_e2e`` (landing table, PK, identity, edge and clause
+    counts) and ONE single-line ``relational_fk_edge`` per edge (its
+    parent landing table, key-tuple count and activation). One glance
+    answers "did the whole relational contract reach this run", which
+    the 2026-08-21 job could not (its FK was silently inactive). The
+    indent-2 ``generation_plan_pretty`` JSON is gone: eight engine
+    instances per table echoed it and on the 2026-09-09 three-table
+    runs the pretty entries were 40% of the worker log by bytes.
+    ``pool_sources`` rides on ``generation_plan``; it is accepted here
+    for the engines' unchanged call shape."""
+    del pool_sources  # on `generation_plan` already
     table = ctx.table_schema.fqn
-    prefix = getattr(ctx, "log_table_prefix", "") or ""
-
-    def _q(cols: dict) -> dict:
-        # Multi-table runs (ADR 0030): LANDING_NAME.COL keys, so a pasted
-        # worker log or _full_report names every column unambiguously and
-        # oss/ replacements stay mechanical.
-        if not prefix:
-            return cols
-        return {f"{prefix}.{k}": v for k, v in cols.items()}
-
-    plan_payload: dict[str, Any] = {
-        "engine": engine,
-        "table": table,
-        "plan": build_plan(profiles),
-        "columns": _q(build_plan_detail(profiles)),
-    }
-    if pool_sources:
-        plan_payload["pool_sources"] = dict(sorted(pool_sources.items()))
-    log_milestone_pretty(
-        "generation_plan_pretty", plan_payload, engine=engine, table=table
-    )
 
     fk_pools: dict[str, tuple] = getattr(ctx, "fk_pools", {}) or {}
     edges: list[dict] = list(getattr(ctx, "fk_edges", []) or [])
@@ -193,47 +177,52 @@ def log_plan_pretty(
         tuple(p.get("cols") or ()): len(p.get("keys") or ())
         for p in key_pools
     }
-    fk_view = []
+    constraints = build_constraints_detail(profiles)
+    log_milestone(
+        "relational_e2e",
+        engine=engine,
+        table=table,
+        landing=getattr(ctx, "landing_table", "") or "",
+        pk=",".join(getattr(ctx, "pk_columns", []) or []),
+        identity=",".join(getattr(ctx, "identity_columns", []) or []),
+        fk_edges=len(edges),
+        constraints=len(constraints),
+    )
     for edge in edges:
         cols = tuple(edge.get("cols") or ())
+        fields: dict[str, Any] = {
+            "cols": ",".join(cols),
+            "ref": edge.get("ref", ""),
+            "ref_cols": ",".join(edge.get("ref_cols") or ()),
+            "parent_landing": edge.get("parent_landing", ""),
+            "enforced": edge.get("enforced", True),
+        }
         key_tuples = tuples_by_cols.get(cols)
         if key_tuples is None:
             pool_size = len(fk_pools.get(cols[0] if cols else "", ()))
-            fk_view.append(
-                {**edge, "pool_size": pool_size, "active": pool_size > 0}
-            )
-            continue
-        fk_view.append(
-            {
-                **edge,
-                "key_tuples": key_tuples,
-                "joint": True,
-                "active": key_tuples > 0,
-            }
-        )
-    relational_payload = {
-        "source_table": table,
-        "landing_table": getattr(ctx, "landing_table", "") or None,
-        "pk": list(getattr(ctx, "pk_columns", []) or []),
-        "identity": list(getattr(ctx, "identity_columns", []) or []),
-        "fk": fk_view,
-        "llm_prompt_constraints": _q(build_constraints_detail(profiles)),
-    }
-    log_milestone_pretty(
-        "relational_e2e", relational_payload, engine=engine, table=table
-    )
+            fields.update(pool_size=pool_size, active=pool_size > 0)
+        else:
+            fields.update(key_tuples=key_tuples, joint=True, active=key_tuples > 0)
+        log_milestone("relational_fk_edge", engine=engine, table=table, **fields)
     _log_relationship_card(engine, table, ctx)
+
+
+_MERMAID_FENCE = "\n```mermaid"
 
 
 def _log_relationship_card(engine: str, table: str, ctx) -> None:
     """The launcher's relationship card, echoed once per plan in the
-    WORKER log (ADR 0032).
+    WORKER log (ADR 0032) — pipes and arrows only.
 
     Workers are where a run is debugged, and a card the driver rendered
     is the same card — the model was resolved once, from
-    `config/relationships/`, and travels as text.
+    `config/relationships/`, and travels as text. The fenced mermaid
+    source stays in the LAUNCHER entry for the report tooling; here it
+    was one 30-line block per engine instance nobody could read past
+    (2026-09-09), so a fence is stripped even if the driver sent one.
     """
     card = getattr(ctx, "relationship_card", "") or ""
+    card = card.split(_MERMAID_FENCE, 1)[0].rstrip()
     if not card.strip():
         return
     log_milestone_text(

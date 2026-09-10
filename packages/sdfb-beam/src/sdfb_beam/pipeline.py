@@ -28,6 +28,7 @@ import apache_beam as beam
 from apache_beam.transforms import combiners
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext, ModelClient
+from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
     MAX_ROW_DOC_ROWS,
@@ -460,10 +461,11 @@ def _generate_pardo(config: PipelineConfig, ctx, fk_side):
     return beam.ParDo(dofn)
 
 
-# In-DAG FK key-pool cap (ADR 0030) — mirrors io/fk_pools._DEFAULT_LIMIT:
-# a child samples from at most this many parent key tuples; the side input
-# stays a few MB even under 100M-row parents.
-_FK_SIDE_SAMPLE_CAP = 100_000
+# In-DAG FK key-pool cap (ADR 0030) — the floor: a child samples from at
+# most this many parent key tuples unless its PK contains the FK, in which
+# case preflight sizes the edge's `key_sample_cap` from num_rows and the
+# sibling PK members (ADR 0035 — the 2026-09-09 C_TABLE collapse).
+_FK_SIDE_SAMPLE_CAP = FK_KEY_SAMPLE_FLOOR
 
 
 @dataclass(frozen=True)
@@ -479,6 +481,9 @@ class FkEdgeSpec:
     ref_cols: tuple[str, ...]
     parent_landing: str
     parent_pk: tuple[str, ...] = ()
+    # Parent key tuples the child sees (ADR 0035): the floor unless the
+    # child's PK contains this edge's columns, then preflight's sizing.
+    key_sample_cap: int = FK_KEY_SAMPLE_FLOOR
 
 
 @dataclass(frozen=True)
@@ -518,23 +523,25 @@ def _edge_key_pools(parent_valid, edge: FkEdgeSpec, prefix: str):
     sampled = (
         tuples
         | f"{prefix}FkSample"
-        >> combiners.Sample.FixedSizeGlobally(_FK_SIDE_SAMPLE_CAP)
+        >> combiners.Sample.FixedSizeGlobally(edge.key_sample_cap)
     )
     return sampled | f"{prefix}FkPools" >> beam.Map(
-        _key_pool_payload, cols=list(edge.child_cols)
+        _key_pool_payload, cols=list(edge.child_cols), cap=edge.key_sample_cap
     )
 
 
-def _key_pool_payload(keys, cols: list[str]) -> list[dict]:
+def _key_pool_payload(
+    keys, cols: list[str], cap: int = _FK_SIDE_SAMPLE_CAP
+) -> list[dict]:
     """One edge's side-input payload. The cap is announced, never
     silent: a child sampling 100k of a larger parent's keys references
     only those, which caps its own FK distinct count."""
-    if len(keys) >= _FK_SIDE_SAMPLE_CAP:
+    if len(keys) >= cap:
         log_milestone(
             "fk_key_pool_capped",
             level=logging.WARNING,
             columns=",".join(cols),
-            cap=_FK_SIDE_SAMPLE_CAP,
+            cap=cap,
             detail=(
                 "the parent holds at least as many distinct keys as the "
                 "cap; the child references a uniform sample of them, so "
