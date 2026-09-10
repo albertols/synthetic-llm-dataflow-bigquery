@@ -725,6 +725,15 @@ class TestGenerateForKeys:
         b = [(r.PID, r.CAT) for r in engine.generate_for_keys(keys, cfg)]
         assert a == b
 
+    def test_rest_columns_do_not_repeat_across_chunks(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        engine.setup(self._Client(), self._ctx())
+        keys = [(f"K{i}", "ES") for i in range(40)]
+        cfg = GenerationConfig(seed=1, batch_size=7)
+        amts = [r.AMT for r in engine.generate_for_keys(keys, cfg)]
+        assert len(amts) > 14
+        assert amts[:7] != amts[7:14]
+
     def test_without_a_plan_it_refuses(self):
         engine = B1RagEngine(embedder=HashingEmbedder())
         ctx = self._ctx().model_copy(update={"fanout": None})

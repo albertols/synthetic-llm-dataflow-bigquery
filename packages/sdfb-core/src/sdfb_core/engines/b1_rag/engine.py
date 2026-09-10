@@ -111,6 +111,7 @@ from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
 from sdfb_core.rag.index import build_index
 from sdfb_core.rag.retrieval import retrieve_centroid_top_k, select_seed_examples
 from sdfb_core.rag.serialize import serialize_rows
+from sdfb_core.seeding import derive_batch_seed
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable, Iterator, Sequence
@@ -712,10 +713,25 @@ class B1RagEngine(GenerationEngine):
         plan = self._fanout
         similarity = float(cfg.similarity)
         chunk_rows = max(1, int(cfg.batch_size or 1000))
-        for chunk in expand_keys(plan, keys, self._ctx.pipeline_run_id, chunk_rows):
+        for chunk_index, chunk in enumerate(
+            expand_keys(plan, keys, self._ctx.pipeline_run_id, chunk_rows)
+        ):
+            # Chunks must not replay each other's "rest" columns: cfg.seed
+            # held constant would re-seed _sample_columns/_sample_free_text
+            # identically per chunk (the key/cell draws stay fine — they're
+            # seeded per key inside expand_keys). The per-chunk seed is a
+            # pure function of (run id, cfg.seed, chunk index), so re-runs
+            # of the same call still reproduce (test_same_keys_same_children).
+            chunk_cfg = cfg.model_copy(
+                update={
+                    "seed": derive_batch_seed(
+                        f"{self._ctx.pipeline_run_id}:{cfg.seed}", chunk_index
+                    )
+                }
+            )
             n = len(chunk)
-            columns = self._sample_columns(n, cfg, similarity)
-            columns.update(self._sample_free_text(n, cfg, similarity))
+            columns = self._sample_columns(n, chunk_cfg, similarity)
+            columns.update(self._sample_free_text(n, chunk_cfg, similarity))
             for j, name in enumerate(plan.driving_cols):
                 columns[name] = [key[j] for key, _ in chunk]
             if plan.cells is not None:
