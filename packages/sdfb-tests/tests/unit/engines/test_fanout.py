@@ -79,6 +79,10 @@ class TestCellTable:
         drawn = table.draw(4_000, random.Random(9), exact=True)  # k ~ C: permutation path
         assert len(set(drawn)) == 4_000
 
+    def test_zero_weight_row_is_rejected(self):
+        with pytest.raises(ValueError, match="positive count"):
+            CellTable(cols=("X",), rows=[(1,), (2,)], counts=[1, 0])
+
 
 class TestExpandKeys:
     _plan = FanoutPlan(

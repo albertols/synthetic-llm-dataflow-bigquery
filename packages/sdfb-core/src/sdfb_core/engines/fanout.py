@@ -92,6 +92,8 @@ class CellTable:
     def __post_init__(self) -> None:
         if len(self.rows) != len(self.counts) or not self.rows:
             raise ValueError("cell table needs one positive count per row")
+        if not all(c > 0 for c in self.counts):
+            raise ValueError("cell table needs one positive count per row")
 
     @property
     def size(self) -> int:
@@ -115,7 +117,8 @@ class CellTable:
                 (idx,) = rng.choices(range(self.size), weights=self.counts, k=1)
                 chosen.setdefault(idx, None)
             return [self.rows[i] for i in chosen]
-        # Weighted permutation: key = u^(1/w), take the k largest.
+        # Weighted permutation via full sort: key = u^(1/w), take the k largest.
+        # O(C log C) full sort (not k-based selection).
         keyed = sorted(
             range(self.size),
             key=lambda i: -(rng.random() ** (1.0 / self.counts[i])),
