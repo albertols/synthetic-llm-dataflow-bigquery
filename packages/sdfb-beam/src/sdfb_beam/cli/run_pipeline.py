@@ -47,8 +47,10 @@ from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.prompt_constraint import parse_llm_prompt_constraint
 from sdfb_core.contracts.relationships import (
+    RelationshipError,
     RelationshipRegistry,
 )
+from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import (
     log_build_info,
@@ -60,11 +62,17 @@ from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.stats import PROFILER_VERSION, profile_source_table, stats_rows
 from sdfb_core.validation import Thresholds
 
-from sdfb_beam.cli.preflight import preflight
+from sdfb_beam.cli.preflight import pk_cell_columns, preflight
 from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_beam.io.fanout_stats import (
+    BigQueryFanoutStatsStore,
+    fanout_payload,
+    log_fanout_measured,
+    measure_fanout,
+)
 from sdfb_beam.io.fk_pools import (
     load_fk_key_pools,
     parent_landing_fqn,
@@ -263,6 +271,14 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "sits between generation and BigQuery. In streaming mode duplicate rows LAND — the run is still marked "
                         "FAILED_BLOCKER, so re-run with "
                         "--write_disposition=overwrite.")
+    p.add_argument("--fk_fanout_stats_table", default="",
+                   help="FQN of synthetic_data_quality.fk_fanout_stats (ADR 0036 cache of "
+                        "the SOURCE fan-out histogram + PK cells per driving edge). "
+                        "Empty = measure every launch, never cache.")
+    p.add_argument("--driven_uniqueness_mode", default="streaming", choices=list(UNIQUENESS_MODES),
+                   help="Uniqueness mode for a DRIVEN child without identity columns "
+                        "(ADR 0036): its PK is unique by construction, so `streaming` "
+                        "measures duplicates without the landing-path barrier.")
     p.add_argument("--pool_seed_strategy", default="centroid",
                    choices=list(POOL_SEED_STRATEGIES),
                    help="How the 8 free-text prompt seeds are chosen. "
@@ -760,6 +776,74 @@ def derive_source_fqn(landing_table: str, reference_table: str) -> str:
     return f"{src_dataset}.{landing_table.rsplit('.', 1)[-1]}"
 
 
+def resolve_driven_uniqueness_mode(
+    flag: str, *, driven: bool, identity_cols: tuple
+) -> str | None:
+    """None = not driven (keep --uniqueness_mode); identity columns keep
+    `exact` (ADR 0036): an identity column is fresh-generated per row, so
+    the child's PK is not unique by construction the way a pure fan-out
+    key is."""
+    if not driven:
+        return None
+    return "exact" if identity_cols else flag
+
+
+def resolve_fanout(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    source_table: str,
+    *,
+    in_set_names: set[str],
+    reference_rows: list[dict],
+    table_schema,
+    stats_store,
+    bq_client,
+) -> tuple[dict | None, dict]:
+    """``(FanoutPlan payload or None, edge roles)`` for one table (ADR
+    0036). Measures (or reads the cache) for the driving edge only when
+    its parent generates in the same launch — an external or root table
+    (no driving edge) is undriven, and the caller keeps ``args.num_rows``.
+    ``RelationshipError`` (an ambiguous or unimplied edge set) propagates
+    to the caller."""
+    roles = registry.edge_roles(landing_table)  # RelationshipError propagates
+    driving = next((e for e, r in roles.items() if r == "driving"), None)
+    if driving is None or driving.ref.rsplit(".", 1)[-1] not in in_set_names:
+        return None, roles
+    relations = registry.relations(landing_table)
+    pk = tuple(relations.pk) if relations else ()
+    profiles = profile_columns(table_schema, reference_rows) if reference_rows else {}
+    cell_cols, exact = pk_cell_columns(pk, tuple(driving.cols), profiles)
+    source_parent = derive_source_fqn(
+        parent_landing_fqn(driving.ref, derive_fk_parent_landing(landing_table)),
+        source_table,
+    )
+    sha = registry.sha12()
+    measured = stats_store.get(source_table, tuple(driving.cols), sha) if stats_store else None
+    source = "cache"
+    if measured is None:
+        measured = measure_fanout(
+            source_child=source_table, child_cols=tuple(driving.cols),
+            source_parent=source_parent, ref_cols=tuple(driving.ref_cols),
+            cell_cols=cell_cols, client=bq_client,
+        )
+        source = "measured"
+        if stats_store:
+            stats_store.put(source_table, tuple(driving.cols), sha, measured)
+    log_fanout_measured(f"({','.join(driving.cols)})->{driving.ref}", measured, source=source)
+    return fanout_payload(measured, tuple(driving.cols), exact), roles
+
+
+def _mean_k(hist: Mapping[str, int]) -> float:
+    """Mean children-per-parent from a fan-out histogram (string keys,
+    ADR 0036 payload shape: ``{"0": n0, "1": n1, ...}``). 0.0 for an
+    empty histogram — the caller floors ``keys_per_batch`` at 1 anyway."""
+    parents = sum(hist.values())
+    if not parents:
+        return 0.0
+    children = sum(int(k) * n for k, n in hist.items())
+    return children / parents
+
+
 def assert_fk_pools_nonempty(
     fks, fk_pools: dict, parent_landing: str
 ) -> None:
@@ -1052,6 +1136,40 @@ def configure_pipeline_options(
             )
 
 
+def _resolve_table_fanout(
+    args,
+    table_schema,
+    registry: RelationshipRegistry,
+    in_set_names: set[str],
+    reference_rows: list[dict],
+) -> tuple[dict | None, dict]:
+    """``(fanout payload, edge roles)`` for `_load_reference_and_preflight`
+    (ADR 0036). Only attempted for an in-set relational launch: a
+    single-table run has no in-job sibling that could drive it, so its
+    own ``args.num_rows`` always stands and this is skipped entirely. An
+    ambiguous or unimplied edge set (``RelationshipError`` from
+    ``registry.edge_roles``) surfaces as the same collect-then-fail
+    ``SystemExit`` every other P2 launch stop uses, so the relational
+    runner's per-table loop reports it alongside the other tables."""
+    if not (in_set_names and parse_bool_flag(args.generate_fk_relationships)):
+        return None, {}
+    stats_store = (
+        BigQueryFanoutStatsStore(args.fk_fanout_stats_table)
+        if getattr(args, "fk_fanout_stats_table", "")
+        else None
+    )
+    try:
+        return resolve_fanout(
+            registry, args.landing_table, args.reference_table,
+            in_set_names=in_set_names, reference_rows=reference_rows,
+            table_schema=table_schema, stats_store=stats_store, bq_client=None,
+        )
+    except RelationshipError as exc:
+        raise SystemExit(
+            f"[preflight P2] {args.landing_table}: {exc}"
+        ) from exc
+
+
 def _load_reference_and_preflight(
     args,
     table_schema,
@@ -1062,7 +1180,9 @@ def _load_reference_and_preflight(
     table's relations come from `config/relationships/`, pk/identity
     default from them (CLI fills the gaps for tables no model declares),
     and unknown columns fail fast — all driver-side, before any graph
-    exists."""
+    exists. ADR 0036: resolves the driving edge's roles and, when its
+    parent is in-set, its measured (or cached) source fan-out — carried
+    into `preflight` so a driven child's row count derives from it."""
     logger.info("Loading reference rows from %s (limit=%d)",
                 args.reference_table, args.reference_rows_limit)
     reference_rows = load_reference_rows(
@@ -1070,17 +1190,30 @@ def _load_reference_and_preflight(
         limit=args.reference_rows_limit,
     )
     in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
-    # ADR 0035: an in-set parent lands at most this launch's num_rows
-    # keys; an external parent's count is unknown here and stays at the
-    # sample cap (an upper bound — never a false stop).
+    # ADR 0035: an in-set parent lands at most its own resolved row
+    # count. ADR 0036: a driven parent's count may itself be DERIVED
+    # from its own parent — `rows_by_landing` (filled by
+    # `_run_relational_job` in plan order) carries that forward instead
+    # of the launch's flat `num_rows`. An external parent's count is
+    # unknown here and stays at the sample cap (an upper bound — never
+    # a false stop).
+    rows_by_landing: Mapping[str, int] = getattr(args, "_rows_by_landing", {})
     fk_parent_rows = {
-        fk.ref: args.num_rows
+        fk.ref: rows_by_landing.get(
+            parent_landing_fqn(
+                fk.ref, derive_fk_parent_landing(args.landing_table)
+            ),
+            args.num_rows,
+        )
         for fk in registry.enforced_edges(args.landing_table)
         if fk.ref.rsplit(".", 1)[-1] in in_set_names
     }
     thresholds = resolve_thresholds(
         getattr(args, "thresholds_uri", "config/thresholds.yml"),
         getattr(args, "env", "dev"),
+    )
+    fanout, edge_roles = _resolve_table_fanout(
+        args, table_schema, registry, in_set_names, reference_rows
     )
     pf = preflight(
         table_schema,
@@ -1095,6 +1228,8 @@ def _load_reference_and_preflight(
         num_rows=args.num_rows,
         fk_parent_rows=fk_parent_rows,
         blocker_failure_ratio=thresholds.blocker_failure_ratio,
+        fanout=fanout,
+        edge_roles=edge_roles,
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
@@ -1125,7 +1260,10 @@ def _load_reference_and_preflight(
             derive_fk_parent_landing(args.landing_table)
         )
     source_distinct = _emit_source_stats(args, table_schema, reference_rows, pf)
-    return reference_rows, pf, fk_pools, fk_key_pools, source_distinct
+    return (
+        reference_rows, pf, fk_pools, fk_key_pools, source_distinct,
+        fanout, edge_roles,
+    )
 
 
 def _emit_source_stats(
@@ -1409,11 +1547,17 @@ def in_set_parent_edges(
     *,
     in_set_names: set[str],
     key_sample_caps: Mapping[tuple[str, ...], int],
+    edge_roles: Mapping | None = None,
+    keys_per_batch: int = 100,
 ) -> tuple[FkEdgeSpec, ...]:
     """This table's enforced edges whose parent generates in the same
     job, as composer specs. ``key_sample_caps`` (preflight P4, ADR 0035)
     sizes the parent key sample per edge inside the child's PK; other
-    edges keep the composer's floor."""
+    edges keep the composer's floor. ``edge_roles`` (ADR 0036) sets each
+    spec's ``mode``: the driving edge is ``"fanout"``, an edge satisfied
+    by construction through it is ``"implied"``, everything else stays
+    the ADR 0030 ``"side_input"``."""
+    roles = edge_roles or {}
     return tuple(
         FkEdgeSpec(
             child_cols=tuple(fk.cols),
@@ -1424,6 +1568,10 @@ def in_set_parent_edges(
             key_sample_cap=key_sample_caps.get(
                 tuple(fk.cols), FK_KEY_SAMPLE_FLOOR
             ),
+            mode={"driving": "fanout", "implied": "implied"}.get(
+                roles.get(fk, ""), "side_input"
+            ),
+            keys_per_batch=keys_per_batch,
         )
         for fk in registry.enforced_edges(landing_table)
         if fk.ref.rsplit(".", 1)[-1] in in_set_names
@@ -1468,10 +1616,27 @@ def _prepare_table_spec(
         fk_pools,
         fk_key_pools,
         source_distinct,
+        fanout,
+        edge_roles,
     ) = _load_reference_and_preflight(
         args, table_schema, registry, in_set_landing=in_set_landing
     )
     log_relationship_model(args.landing_table, registry, mode=fk_mode)
+
+    # ADR 0036 — a DRIVEN child's row count, batch size and uniqueness
+    # mode all derive from the measured source fan-out instead of the
+    # launch's flat --num_rows/--uniqueness_mode.
+    driven = fanout is not None
+    num_rows = pf.derived_rows if (driven and pf.derived_rows) else args.num_rows
+    batch_size = resolve_batch_size(args.batch_size, num_rows)
+    uniqueness_mode = (
+        resolve_driven_uniqueness_mode(
+            getattr(args, "driven_uniqueness_mode", "streaming"),
+            driven=driven,
+            identity_cols=tuple(pf.identity_cols),
+        )
+        or args.uniqueness_mode
+    )
 
     thresholds = resolve_thresholds(args.thresholds_uri, args.env)
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
@@ -1505,8 +1670,8 @@ def _prepare_table_spec(
         table_schema=table_schema,
         engine_name=args.engine,
         model_client=model_client,
-        num_rows=args.num_rows,
-        batch_size=resolve_batch_size(args.batch_size, args.num_rows),
+        num_rows=num_rows,
+        batch_size=batch_size,
         similarity=args.similarity,
         seed=int(args.seed) if str(args.seed).strip() else None,
         run_id=args.run_id,
@@ -1528,7 +1693,8 @@ def _prepare_table_spec(
         pool_pattern_guidance=parse_bool_flag(args.pool_pattern_guidance),
         freetext_pools_table=args.freetext_pools_table,
         pool_seed_strategy=validate_seed_strategy(args.pool_seed_strategy),
-        uniqueness_mode=args.uniqueness_mode,
+        uniqueness_mode=uniqueness_mode,
+        fanout=fanout,
         rag_embed_device=resolve_rag_embed_device(model_client),
         freetext_expansion=args.freetext_expansion,
         prompt_constraints=args.prompt_constraints == "on",
@@ -1610,11 +1776,21 @@ def _prepare_table_spec(
     # In-set enforced edges: parents live in THIS job's spec list — no BQ
     # pool load; the composer wires the parent's landed keys as a side
     # input (ADR 0030). parent_pk is patched in by the relational runner.
+    # ADR 0036: a driven child's fanout edge batches parent keys sized
+    # to land ~batch_size children per element (the composer's floor of
+    # 100 keys/batch otherwise).
+    keys_per_batch = (
+        max(1, round(batch_size / max(_mean_k(fanout["histogram"]), 1e-6)))
+        if driven
+        else 100
+    )
     parent_edges = in_set_parent_edges(
         registry,
         args.landing_table,
         in_set_names={t.rsplit(".", 1)[-1] for t in in_set_landing},
         key_sample_caps=pf.fk_key_sample_caps,
+        edge_roles=edge_roles,
+        keys_per_batch=keys_per_batch,
     )
 
     return TableSpec(
@@ -1726,6 +1902,11 @@ def _run_relational_job(
     pin_owners = set(parse_landing_tables(args.landing_table))
     specs = []
     prep_failures: list[tuple[str, str]] = []
+    # ADR 0036: a grandchild's derived row count depends on its parent's
+    # RESOLVED count (itself possibly derived), not the launch's flat
+    # --num_rows — plan order is parents-first, so filling this as each
+    # spec lands carries it forward to the next table's preflight.
+    rows_by_landing: dict[str, int] = {}
     for run in plan.runs:
         table_args = argparse.Namespace(**vars(args))
         table_args.landing_table = run.landing_table
@@ -1734,6 +1915,7 @@ def _run_relational_job(
         table_args.fk_parent_landing = (
             args.fk_parent_landing or run.fk_parent_landing
         )
+        table_args._rows_by_landing = rows_by_landing
         if run.landing_table not in pin_owners:
             table_args.ddl_uri = ""  # pin describes the target only
         # Collect-then-fail (2026-08-22 launch lesson): one table's
@@ -1747,6 +1929,9 @@ def _run_relational_job(
                     in_set_landing=in_set,
                     registry=registry,
                 )
+            )
+            rows_by_landing[specs[-1].config.landing_table] = (
+                specs[-1].config.num_rows
             )
         except SystemExit as exc:
             logger.error(
@@ -1788,6 +1973,14 @@ def _run_relational_job(
         edges_detail=",".join(
             f"{s.config.landing_table.rsplit('.', 1)[-1]}:"
             f"{len(s.parent_edges)}"
+            for s in specs
+        ),
+        # ADR 0036 — each table's RESOLVED row count (a driven child's
+        # derived count, everyone else's --num_rows), so the launch card
+        # answers "how many rows did each table land" without re-deriving
+        # fan-out math from the log.
+        rows_detail=",".join(
+            f"{s.config.landing_table.rsplit('.', 1)[-1]}:{s.config.num_rows}"
             for s in specs
         ),
     )
