@@ -491,18 +491,22 @@ def test_fanout_without_a_declared_parent_pk_deduplicates_keys(
     assert len(set(pairs)) == len(child_rows)
 
 
-def test_a_side_input_edge_next_to_the_driving_edge_stops_the_build(
+def test_a_side_input_edge_next_to_the_driving_edge_is_a_star(
     tmp_path, customers_schema, customers_reference
 ):
-    """ADR 0036 review I4: a driven child has NO side input (D1), so a
-    `side_input` edge sitting next to the driving edge was routed nowhere —
-    its FK columns fell back to the child's own marginals and the edge lost
-    referential integrity silently. It must be `implied` (satisfied by
-    construction through the driving parent) or the launch stops."""
+    """ADR 0037 §5: a driven child MAY carry an independent (side-input)
+    edge next to its driving edge — the star-schema fact.
+
+    ADR 0036 D1 stopped the build here because a side-input edge sharing
+    columns with the driving edge would have been overwritten; that case
+    is `conditional` now, so what remains on the side-input path is
+    disjoint by construction. The edge keeps the whole ADR 0030/0031
+    path: a sampled parent-key pool on the Generate ParDo AND the
+    `fk.orphan` gate that measures it."""
     parent_cfg = PipelineConfig(
         table_schema=customers_schema, engine_name="b1_rag",
         model_client=FakeModelClient(reference_pool=customers_reference),
-        num_rows=10, batch_size=10, run_id="fan-parent-mixed",
+        num_rows=20, batch_size=20, run_id="fan-parent-star",
         landing_table="p.land.customers", log_table_prefix="customers",
         identity_columns=("customer_id",),
     )
@@ -514,13 +518,16 @@ def test_a_side_input_edge_next_to_the_driving_edge_stops_the_build(
              {"name": "REGION", "type": "STRING", "mode": "REQUIRED"},
          ]}
     )
+    # REGION values deliberately DISJOINT from anything the parent can
+    # land, so containment proves the side input reached the engine.
     child_ref = [
-        {"CUST_ID": 900000 + i, "LINE": "xyz"[i % 3], "REGION": "r"} for i in range(40)
+        {"CUST_ID": 900000 + i, "LINE": "xyz"[i % 3], "REGION": f"ZZ{i}"}
+        for i in range(40)
     ]
     child_cfg = PipelineConfig(
         table_schema=child_schema, engine_name="b1_rag",
         model_client=FakeModelClient(reference_pool=child_ref),
-        num_rows=20, batch_size=20, run_id="fan-child-mixed",
+        num_rows=20, batch_size=20, run_id="fan-child-star",
         landing_table="p.land.orders_fan", log_table_prefix="orders_fan",
         pk_columns=("CUST_ID", "LINE"), uniqueness_mode="streaming",
         fanout={"driving_cols": ["CUST_ID"], "histogram": {"1": 1},
@@ -530,24 +537,47 @@ def test_a_side_input_edge_next_to_the_driving_edge_stops_the_build(
     )
     specs = [
         TableSpec(config=parent_cfg, reference_rows=customers_reference,
-                  landing_sink=WriteToJsonLines(str(tmp_path / "parent_mixed")),
-                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_parent_mixed"))),
+                  landing_sink=WriteToJsonLines(str(tmp_path / "parent_star")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_parent_star"))),
         TableSpec(config=child_cfg, reference_rows=child_ref,
-                  landing_sink=WriteToJsonLines(str(tmp_path / "child_mixed")),
-                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_child_mixed")),
+                  landing_sink=WriteToJsonLines(str(tmp_path / "child_star")),
+                  dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_child_star")),
                   parent_edges=(
                       FkEdgeSpec(child_cols=("CUST_ID",), ref_cols=("customer_id",),
                                  parent_landing="p.land.customers",
                                  parent_pk=("customer_id",), mode="fanout",
                                  keys_per_batch=10),
-                      FkEdgeSpec(child_cols=("REGION",), ref_cols=("region",),
+                      FkEdgeSpec(child_cols=("REGION",), ref_cols=("country",),
                                  parent_landing="p.land.customers",
                                  parent_pk=("customer_id",), mode="side_input"),
                   )),
     ]
-    p = beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"]))
-    with pytest.raises(ValueError, match="must be implied"):
+    with beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"])) as p:
         build_relational_pipeline(p, specs)
+
+    labels = _labels_of(p)
+    # BOTH paths are wired for the same table: the driving request stream
+    # and the independent edge's sampled pool + its gate.
+    assert any("orders_fan/FanoutKeys" in lbl for lbl in labels)
+    assert any("orders_fan/edge1/FkPools" in lbl for lbl in labels)
+    assert any(lbl.startswith("orders_fan/Generate") for lbl in labels)
+    assert any("orders_fan/EnforceFkIntegrity" in lbl for lbl in labels)
+
+    parent_rows = _read_jsonl(tmp_path / "parent_star")
+    child_rows = _read_jsonl(tmp_path / "child_star")
+    assert parent_rows and child_rows
+    parent_keys = {r["customer_id"] for r in parent_rows}
+    parent_countries = {
+        r["country"] for r in parent_rows if r["country"] is not None
+    }
+    assert {r["CUST_ID"] for r in child_rows} <= parent_keys      # driving
+    assert {r["REGION"] for r in child_rows} <= parent_countries  # independent
+    # …and the gate MEASURED it: no row was diverted as an orphan.
+    assert not [
+        r
+        for r in _read_jsonl(tmp_path / "dlq_child_star")
+        if r.get("rule_id") == "fk.orphan"
+    ]
 
 
 def test_a_null_inherited_column_rides_through_the_fanout_projection(
@@ -623,3 +653,136 @@ def test_a_null_inherited_column_rides_through_the_fanout_projection(
     assert child_rows, "every parent key was dropped for a NULL INHERITED column"
     assert {r["CUST_ID"] for r in child_rows} <= {r["customer_id"] for r in parent_rows}
     assert all(r["SEGMENT"] is None for r in child_rows)  # copied verbatim
+
+
+_STAR_CHILD_SCHEMA = TableSchema.model_validate(
+    {
+        "table_info": {"table_id": "p.src.orders_star"},
+        "schema": [
+            {"name": "CUST_ID", "type": "INT64", "mode": "REQUIRED"},
+            {"name": "LINE", "type": "STRING", "mode": "REQUIRED"},
+            {"name": "REGION", "type": "STRING", "mode": "REQUIRED"},
+            {"name": "R", "type": "STRING", "mode": "REQUIRED"},
+        ],
+    }
+)
+
+_DRIVING_EDGE = FkEdgeSpec(
+    child_cols=("CUST_ID",), ref_cols=("customer_id",),
+    parent_landing="p.land.customers", parent_pk=("customer_id",),
+    mode="fanout", keys_per_batch=10,
+)
+_IMPLIED_EDGE = FkEdgeSpec(
+    child_cols=("CUST_ID",), ref_cols=("customer_id",),
+    parent_landing="p.land.hub", mode="implied",
+)
+_INDEPENDENT_EDGE = FkEdgeSpec(
+    child_cols=("REGION",), ref_cols=("country",),
+    parent_landing="p.land.dim", mode="side_input",
+)
+_CONDITIONAL_EDGE = FkEdgeSpec(
+    child_cols=("CUST_ID", "R"), ref_cols=("customer_id", "r"),
+    parent_landing="p.land.right", mode="conditional",
+    overlap=("CUST_ID",), candidate_cap=8,
+)
+
+
+def _star_table_spec(tmp_path, edges: tuple) -> TableSpec:
+    """A child TableSpec carrying `edges` — enough for the pure routing
+    functions, which never touch the sinks or the reference rows."""
+    cfg = PipelineConfig(
+        table_schema=_STAR_CHILD_SCHEMA, engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=[]),
+        num_rows=10, batch_size=10, run_id="partition",
+        landing_table="p.land.orders_star", log_table_prefix="orders_star",
+    )
+    return TableSpec(
+        config=cfg, reference_rows=[],
+        landing_sink=WriteToJsonLines(str(tmp_path / "star")),
+        dlq_sink=WriteToJsonLines(str(tmp_path / "dlq_star")),
+        parent_edges=edges,
+    )
+
+
+def test_partition_parent_edges_splits_driving_independent_and_conditional(
+    tmp_path,
+):
+    """ADR 0037 §2: every enforced in-set edge gets exactly one of four
+    roles, and the partition is what routes it to its DAG path."""
+    from sdfb_beam.pipeline import _partition_parent_edges
+
+    spec = _star_table_spec(
+        tmp_path,
+        (_DRIVING_EDGE, _IMPLIED_EDGE, _INDEPENDENT_EDGE, _CONDITIONAL_EDGE),
+    )
+    # `p.land.hub` is deliberately ABSENT: an implied edge is satisfied
+    # through the driving parent and must never look its own parent up.
+    valid = {
+        "p.land.customers": "PARENT_DRIVING",
+        "p.land.dim": "PARENT_INDEPENDENT",
+        "p.land.right": "PARENT_CONDITIONAL",
+    }
+    fanout, side_inputs, conditional = _partition_parent_edges(spec, valid)
+    assert fanout == (_DRIVING_EDGE, "PARENT_DRIVING")
+    assert side_inputs == [(2, _INDEPENDENT_EDGE, "PARENT_INDEPENDENT")]
+    assert conditional == [(3, _CONDITIONAL_EDGE, "PARENT_CONDITIONAL")]
+    # The edge id names the child columns — the key the request payload,
+    # the plan and the engine all agree on.
+    assert _CONDITIONAL_EDGE.edge_id == "CUST_ID,R"
+
+
+def test_a_conditional_edge_without_a_driving_edge_stops_the_build(tmp_path):
+    """A conditional edge draws its candidates by joining the DRIVING
+    key's shared columns; with no driving edge there is nothing to join
+    against, so the edge would silently lose referential integrity."""
+    from sdfb_beam.pipeline import _partition_parent_edges
+
+    spec = _star_table_spec(tmp_path, (_INDEPENDENT_EDGE, _CONDITIONAL_EDGE))
+    with pytest.raises(ValueError) as err:
+        _partition_parent_edges(
+            spec,
+            {"p.land.dim": "PARENT_INDEPENDENT", "p.land.right": "PARENT_C"},
+        )
+    assert "p.land.orders_star" in str(err.value)
+    assert "CUST_ID" in str(err.value) and "R" in str(err.value)
+
+
+def test_fanout_request_payload_carries_matches_aligned_with_the_keys():
+    """The conditional candidates ride WITH the keys, positionally
+    aligned, so the engine can hand key i its own candidate list — and a
+    plan with no conditional edge keeps today's payload byte for byte."""
+    from sdfb_beam.pipeline import _fanout_request_payload
+
+    plain = _fanout_request_payload([("t1", "l1"), ("t2", "l2")], 2.0)
+    assert "matches" not in plain
+    assert plain["keys"] == [("t1", "l1"), ("t2", "l2")]
+
+    paired = _fanout_request_payload(
+        [(("t1", "l1"), {"T,R": [("r1",)]}), (("t2", "l2"), {"T,R": []})], 2.0
+    )
+    assert paired["matches"] == {"T,R": [[("r1",)], []]}
+    assert paired["keys"] == [("t1", "l1"), ("t2", "l2")]
+    assert paired["n"] == plain["n"] == 4
+    # Same first key ⇒ same batch seed: carrying candidates must not
+    # re-seed a retried bundle.
+    assert paired["batch_id"] == plain["batch_id"]
+
+
+def test_an_overlap_column_the_driving_edge_lacks_stops_the_build(tmp_path):
+    """The join key is read off the driving key tuple BY POSITION, so an
+    overlap column the driving edge does not carry has no position at
+    all — it must fail by name, not as `x not in tuple` deep in the
+    graph build."""
+    from sdfb_beam.pipeline import _partition_parent_edges
+
+    stray = FkEdgeSpec(
+        child_cols=("REGION", "R"), ref_cols=("country", "r"),
+        parent_landing="p.land.right", mode="conditional",
+        overlap=("REGION",),
+    )
+    spec = _star_table_spec(tmp_path, (_DRIVING_EDGE, stray))
+    with pytest.raises(ValueError, match="REGION"):
+        _partition_parent_edges(
+            spec,
+            {"p.land.customers": "PARENT_DRIVING", "p.land.right": "PARENT_C"},
+        )

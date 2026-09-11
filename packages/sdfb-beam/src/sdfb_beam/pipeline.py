@@ -511,9 +511,28 @@ class FkEdgeSpec:
     # ADR 0036: "side_input" (ADR 0030 key sample), "fanout" (this edge DRIVES
     # the child — its parent's keys are the child's generation input) or
     # "implied" (satisfied by construction through the driving edge; no DAG
-    # edge at all).
+    # edge at all). ADR 0037 adds "conditional": the edge shares columns
+    # with the driving edge, so its remaining columns are CO-PARTITIONED —
+    # joined on the shared values instead of drawn from a pool.
     mode: str = "side_input"
     keys_per_batch: int = 100
+    # ADR 0037 — conditional edges only. `overlap` is the child columns
+    # this edge shares with the driving edge (child names, in
+    # `child_cols` order); the rest come from a parent row that holds the
+    # shared value. `candidate_cap` is the Top-M bound per shared value
+    # (`--fk_candidate_cap`), so a hot shared key never carries an
+    # unbounded candidate list into a request. `nullable` says whether
+    # every `rest` column is NULLABLE in the landing schema — the engine's
+    # NULL policy for a key with no candidate (design §4 ruling B).
+    overlap: tuple[str, ...] = ()
+    candidate_cap: int = 64
+    nullable: bool = False
+
+    @property
+    def edge_id(self) -> str:
+        """The name the payload, the plan and the engine agree on for
+        this edge (`ConditionalEdge.id`)."""
+        return ",".join(self.child_cols)
 
 
 @dataclass(frozen=True)
@@ -617,12 +636,157 @@ class _DropNullJoinKeysDoFn(beam.DoFn):
         yield key
 
 
+class _DropNullCandidateKeysDoFn(beam.DoFn):
+    """Drop a co-parent candidate whose SHARED (join-key) value is NULL,
+    counting each drop as ``fanout / candidates_dropped_null``.
+
+    SQL equality never matches NULL, so such a row is not referenceable —
+    but it is also a row the child could have inherited a value from, so
+    the loss is counted, never silently filtered.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._dropped = Metrics.counter("fanout", "candidates_dropped_null")
+
+    def process(self, element: tuple):
+        join_key, _rest = element
+        if any(v is None for v in join_key):
+            self._dropped.inc()
+            return
+        yield element
+
+
+def _candidate_rank(element: tuple, run_id: str) -> tuple:
+    """``(join_key, rest_value)`` → ``(join_key, (rank, rest_value))``.
+
+    The rank is `blake2b(run_id + rest_value)`, never Python's
+    process-salted `hash()`: the Top-M below must pick the SAME M
+    candidates on a retried bundle and on a re-run of the same run_id.
+    Putting the rank first makes the tuple comparison deterministic; a
+    rank tie (64 bits) falls through to the value itself.
+    """
+    join_key, rest_value = element
+    rank = int.from_bytes(
+        hashlib.blake2b(
+            (run_id + repr(rest_value)).encode(), digest_size=8
+        ).digest(),
+        "big",
+    )
+    return (join_key, (rank, rest_value))
+
+
+def _conditional_candidates(
+    parent_valid, edge: FkEdgeSpec, prefix: str, run_id: str
+) -> Any:
+    """One conditional edge's co-parent → ``(join_key, [rest_value, …])``
+    (design 2026-09-11 §4).
+
+    ``join_key`` is the edge's SHARED columns (the ones the driving key
+    already fixes), ``rest_value`` everything else the edge owns, so the
+    CoGroupByKey below hands a driving key only values its co-parent
+    actually holds for that shared value. Both sides are keyed on narrow
+    tuples — never on rows — and the per-key list is capped at
+    ``candidate_cap`` by the combine, so a hot shared value costs a
+    bounded amount of shuffle and a bounded request payload.
+    """
+    join_cols = tuple(
+        edge.ref_cols[edge.child_cols.index(o)] for o in edge.overlap
+    )
+    rest_cols = tuple(
+        edge.ref_cols[edge.child_cols.index(c)]
+        for c in edge.child_cols
+        if c not in edge.overlap
+    )
+    projected = (
+        parent_valid
+        | f"{prefix}CandidateProject" >> beam.Map(
+            lambda r, jc=join_cols, rc=rest_cols: (
+                tuple(r[c] for c in jc),
+                tuple(r[c] for c in rc),
+            )
+        )
+        | f"{prefix}CandidateDropNull"
+        >> beam.ParDo(_DropNullCandidateKeysDoFn())
+    )
+    # The parent PK inside the projection makes every projected pair
+    # unique already (EnforceUniqueness landed it), so the Distinct
+    # shuffle is pure cost — the `_edge_key_pools` precedent.
+    pk_projected = bool(edge.parent_pk) and set(edge.parent_pk) <= set(
+        join_cols + rest_cols
+    )
+    if not pk_projected:
+        projected = projected | f"{prefix}CandidateDistinct" >> beam.Distinct()
+    return (
+        projected
+        | f"{prefix}CandidateRank" >> beam.Map(_candidate_rank, run_id=run_id)
+        | f"{prefix}CandidateTopM"
+        >> combiners.Top.SmallestPerKey(edge.candidate_cap)
+        | f"{prefix}Candidates" >> beam.Map(_drop_candidate_rank)
+    )
+
+
+def _drop_candidate_rank(element: tuple) -> tuple:
+    """``(join_key, [(rank, rest_value), …])`` → ``(join_key, [rest_value, …])``."""
+    join_key, ranked = element
+    return (join_key, [value for _rank, value in ranked])
+
+
+def _key_by_overlap(
+    element, positions: tuple[int, ...], paired: bool
+) -> tuple:
+    """A driving key (or a key that already carries matches) keyed by the
+    columns it shares with one conditional edge.
+
+    The driving key tuple is aligned to the driving edge's ``ref_cols``,
+    and ``child_cols[i]`` names ``ref_cols[i]``, so the position of a
+    shared CHILD column inside the driving edge's ``child_cols`` is its
+    position inside the key. ``paired`` is decided at graph-construction
+    time — never sniffed from the element — so the second conditional
+    edge in a chain cannot mistake a key for a pair.
+    """
+    key, matches = element if paired else (element, {})
+    return (tuple(key[i] for i in positions), (key, matches))
+
+
+def _emit_matches(element: tuple, edge_id: str):
+    """One CoGroupByKey group → its driving keys, each carrying this
+    edge's candidate list (``[]`` when the co-parent has none for the
+    shared value — the key must still reach the engine, which owns the
+    NULL policy)."""
+    _join_key, group = element
+    candidates = list(group["c"])
+    matched = candidates[0] if candidates else []
+    for key, matches in group["k"]:
+        yield (key, {**matches, edge_id: matched})
+
+
+def _attach_matches(keyed, cands, edge: FkEdgeSpec, prefix: str) -> Any:
+    """Join one conditional edge's candidates onto the driving keys.
+
+    ``keyed`` elements are ``(join_key, (key, matches_so_far))`` and
+    ``cands`` ``(join_key, [rest_value, …])``; the result is
+    ``(key, matches)`` ready for the next edge in the chain."""
+    return (
+        {"k": keyed, "c": cands}
+        | f"{prefix}CandidateJoin" >> beam.CoGroupByKey()
+        | f"{prefix}AttachMatches"
+        >> beam.FlatMap(_emit_matches, edge_id=edge.edge_id)
+    )
+
+
 def _fanout_requests(
-    parent_valid, edge: FkEdgeSpec, prefix: str, mean_fanout: float
+    parent_valid,
+    edge: FkEdgeSpec,
+    prefix: str,
+    mean_fanout: float,
+    conditional: tuple[tuple[int, FkEdgeSpec, Any], ...] = (),
+    run_id: str = "",
 ) -> Any:
     """The parent's landed key tuples as key-batch requests for a DRIVEN
     child (ADR 0036): project, Distinct only when the tuple lacks the
-    parent PK, Reshuffle off the parent's write path, batch.
+    parent PK, join each conditional edge's candidates on the shared
+    columns (ADR 0037), Reshuffle off the parent's write path, batch.
 
     Each request carries ``n`` — the batch's EXPECTED child-row count
     (``len(keys) * mean_fanout``, never below 1) — alongside ``keys``.
@@ -646,6 +810,23 @@ def _fanout_requests(
     pk_in_tuple = bool(edge.parent_pk) and set(edge.parent_pk) <= set(edge.ref_cols)
     if not pk_in_tuple:
         keys = keys | f"{prefix}FanoutDistinct" >> beam.Distinct()
+    # One CoGroupByKey per conditional edge, BEFORE the Reshuffle: the
+    # candidates ride with their key into the batch, so generation stays
+    # a pure per-request function (no second side input, no lookup).
+    paired = False
+    for j, cond, cond_parent in conditional:
+        cond_prefix = f"{prefix}cond{j}/"
+        positions = tuple(
+            edge.child_cols.index(o) for o in cond.overlap
+        )
+        candidates = _conditional_candidates(
+            cond_parent, cond, cond_prefix, run_id
+        )
+        keyed = keys | f"{cond_prefix}KeyByOverlap" >> beam.Map(
+            _key_by_overlap, positions=positions, paired=paired
+        )
+        keys = _attach_matches(keyed, candidates, cond, cond_prefix)
+        paired = True
     batches = (
         keys
         | f"{prefix}FanoutReshuffle" >> beam.Reshuffle()
@@ -658,7 +839,21 @@ def _fanout_requests(
     )
 
 
-def _fanout_request_payload(ks: list[tuple], mean_fanout: float) -> dict:
+# A conditional join leaves `(key, {edge_id: candidates})` behind.
+_KEY_WITH_MATCHES_LEN = 2
+
+
+def _is_keyed_with_matches(element) -> bool:
+    """``(key, {edge_id: candidates})`` — the shape a conditional join
+    leaves behind, as opposed to a bare key tuple."""
+    return (
+        isinstance(element, tuple)
+        and len(element) == _KEY_WITH_MATCHES_LEN
+        and isinstance(element[1], dict)
+    )
+
+
+def _fanout_request_payload(ks: list, mean_fanout: float) -> dict:
     """One key-batch request. Stable ``batch_id`` — never Python's
     process-salted `hash()` — so a retried bundle reproduces the same
     seed (`derive_batch_seed`).
@@ -667,30 +862,63 @@ def _fanout_request_payload(ks: list[tuple], mean_fanout: float) -> dict:
     birthday bound long before the batch count does, and two batches
     sharing an id share a seed. The final ``>> 1`` keeps it positive so it
     survives a BigQuery INT64 round trip in a DLQ envelope.
+
+    Elements are bare key tuples, or ``(key, matches)`` pairs when the
+    child has conditional edges (ADR 0037). In the second case the
+    payload gains ``"matches": {edge_id: [candidates_for_key_0, …]}``,
+    POSITIONALLY aligned with ``keys`` — an unmatched key holds ``[]``
+    rather than disappearing. A plan with no conditional edge keeps the
+    payload byte for byte, so the `batch_id` (and therefore every
+    downstream seed) is unchanged.
     """
+    keyed = [_is_keyed_with_matches(e) for e in ks]
+    keys = [e[0] if k else e for e, k in zip(ks, keyed, strict=True)]
     batch_id = (
         int.from_bytes(
-            hashlib.blake2b(repr(ks[0]).encode(), digest_size=8).digest(), "big"
+            hashlib.blake2b(repr(keys[0]).encode(), digest_size=8).digest(), "big"
         )
         >> 1
     )
-    return {
+    payload = {
         "batch_id": batch_id,
-        "keys": list(ks),
+        "keys": list(keys),
         "n": max(1, round(len(ks) * mean_fanout)),
     }
+    if not any(keyed):
+        return payload
+    edge_ids: list[str] = []
+    for element, is_pair in zip(ks, keyed, strict=True):
+        if is_pair:
+            edge_ids.extend(e for e in element[1] if e not in edge_ids)
+    payload["matches"] = {
+        edge_id: [
+            (element[1].get(edge_id, []) if is_pair else [])
+            for element, is_pair in zip(ks, keyed, strict=True)
+        ]
+        for edge_id in edge_ids
+    }
+    return payload
 
 
 def _partition_parent_edges(
     spec: TableSpec, valid_by_landing: dict[str, Any]
-) -> tuple[tuple[FkEdgeSpec, Any] | None, list[tuple[int, FkEdgeSpec, Any]]]:
-    """``(fanout_edge, side_input_edges)`` for one table's ``parent_edges``
-    (ADR 0036): "fanout" DRIVES the child (at most one — its parent's
-    keys become the generation request stream); "side_input" keeps the
-    ADR 0030/0031 sampled-key-pool path; "implied" is satisfied by
-    construction through the driving edge and contributes nothing."""
+) -> tuple[
+    tuple[FkEdgeSpec, Any] | None,
+    list[tuple[int, FkEdgeSpec, Any]],
+    list[tuple[int, FkEdgeSpec, Any]],
+]:
+    """``(fanout_edge, side_input_edges, conditional_edges)`` for one
+    table's ``parent_edges`` — the four roles of ADR 0037 §2 mapped onto
+    the three DAG paths: "fanout" DRIVES the child (at most one — its
+    parent's keys become the generation request stream); "side_input" is
+    an INDEPENDENT edge on the ADR 0030/0031 sampled-key-pool path;
+    "conditional" is co-partitioned with the driving key
+    (`_conditional_candidates`); "implied" is satisfied by construction
+    through the driving edge and contributes nothing (not even a parent
+    lookup)."""
     fanout_edge: tuple[FkEdgeSpec, Any] | None = None
     side_input_edges: list[tuple[int, FkEdgeSpec, Any]] = []
+    conditional_edges: list[tuple[int, FkEdgeSpec, Any]] = []
     for j, edge in enumerate(spec.parent_edges):
         if edge.mode == "implied":
             continue
@@ -711,12 +939,39 @@ def _partition_parent_edges(
             fanout_edge = (edge, parent)
         elif edge.mode == "side_input":
             side_input_edges.append((j, edge, parent))
+        elif edge.mode == "conditional":
+            conditional_edges.append((j, edge, parent))
         else:
             raise ValueError(
                 f"{spec.config.landing_table}: unknown FkEdgeSpec.mode "
                 f"{edge.mode!r} on edge {j}"
             )
-    return fanout_edge, side_input_edges
+    if conditional_edges and fanout_edge is None:
+        # A conditional edge draws its candidates by joining on the
+        # columns it SHARES with the driving key; with no driving edge
+        # there is no join key, and the edge would silently fall back to
+        # the child's own marginals (the ADR 0036 D4 corruption).
+        raise ValueError(
+            f"{spec.config.landing_table}: conditional parent edges "
+            f"{[list(e.child_cols) for _, e, _ in conditional_edges]} "
+            f"need a fanout-mode (driving) edge on the same table to "
+            f"join against, and this table has none (ADR 0037)"
+        )
+    for _j, edge, _parent in conditional_edges:
+        # The join key is read off the DRIVING key tuple by position, so
+        # an overlap column the driving edge does not carry would fail
+        # deep inside the graph build as `x not in tuple`.
+        unshared = [c for c in edge.overlap if c not in fanout_edge[0].child_cols]
+        if unshared:
+            raise ValueError(
+                f"{spec.config.landing_table}: conditional edge "
+                f"{list(edge.child_cols)} declares overlap columns "
+                f"{unshared} that the driving edge "
+                f"{list(fanout_edge[0].child_cols)} does not carry — the "
+                f"overlap is the edge's columns SHARED with the driving "
+                f"edge (ADR 0037 §4)"
+            )
+    return fanout_edge, side_input_edges, conditional_edges
 
 
 def _side_input_pools(
@@ -748,35 +1003,41 @@ def _side_input_pools(
 def _route_parent_edges(
     spec: TableSpec, valid_by_landing: dict[str, Any], prefix: str
 ) -> tuple[Any, Any]:
-    """``(fk_side, requests)`` for one table (ADR 0036). A fanout edge
-    takes over the request stream and forces ``fk_side=None`` — no side
-    input at all, so `_fk_integrity_stage` skips the gate by itself;
-    otherwise today's side-input path (or neither, for a table with no
-    parent edges) applies unchanged."""
-    fanout_edge, side_input_edges = _partition_parent_edges(
+    """``(fk_side, requests)`` for one table (ADR 0036/0037). The three
+    paths are independent, and a STAR-schema child takes two of them at
+    once: a fanout edge supplies the request stream (with its conditional
+    edges' candidates already joined on), while independent edges keep
+    the ADR 0030/0031 sampled-key-pool side input — which is also what
+    wires `_fk_integrity_stage`'s gate, correctly, over exactly the edges
+    that are not integral by construction.
+
+    ADR 0036 D1 forbade the combination because a side-input edge sharing
+    columns with the driving edge would be overwritten; that shape is
+    `conditional` now, so what is left on the side-input path is disjoint
+    from the driving key by construction (design §5)."""
+    fanout_edge, side_input_edges, conditional_edges = _partition_parent_edges(
         spec, valid_by_landing
     )
-    if fanout_edge is not None:
-        edge, parent = fanout_edge
-        if side_input_edges:
-            # A driven child has no side input at all (D1), so a
-            # side_input edge here would be silently discarded and its
-            # referential integrity lost without a signal — exactly the
-            # last-edge-wins corruption D4 exists to stop.
-            raise ValueError(
-                f"{spec.config.landing_table}: a driven child's other "
-                f"in-job edges must be implied; found side_input edges "
-                f"{[e.child_cols for _, e, _ in side_input_edges]} next to "
-                f"the driving edge {edge.child_cols}"
-            )
-        if spec.config.fanout is None:
-            raise ValueError(
-                f"{spec.config.landing_table}: a fanout-mode parent "
-                f"edge needs PipelineConfig.fanout set (ADR 0036)"
-            )
-        mean_fanout = FanoutPlan.from_payload(spec.config.fanout).histogram.mean
-        return None, _fanout_requests(parent, edge, prefix, mean_fanout)
-    return _side_input_pools(side_input_edges, prefix), None
+    if fanout_edge is not None and spec.config.fanout is None:
+        raise ValueError(
+            f"{spec.config.landing_table}: a fanout-mode parent "
+            f"edge needs PipelineConfig.fanout set (ADR 0036)"
+        )
+    fk_side = _side_input_pools(side_input_edges, prefix)
+    if fanout_edge is None:
+        return fk_side, None
+    edge, parent = fanout_edge
+    assert spec.config.fanout is not None  # checked above
+    mean_fanout = FanoutPlan.from_payload(spec.config.fanout).histogram.mean
+    requests = _fanout_requests(
+        parent,
+        edge,
+        prefix,
+        mean_fanout,
+        conditional=tuple(conditional_edges),
+        run_id=spec.config.run_id,
+    )
+    return fk_side, requests
 
 
 def build_relational_pipeline(
