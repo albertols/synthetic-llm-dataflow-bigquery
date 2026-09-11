@@ -536,9 +536,29 @@ def _check_driven_pk(
     cells, exact = pk_cell_columns(effective_pk, driving, profiles)
     if not exact:
         return
+    max_k = max(int(k) for k in (fanout.get("histogram") or {"0": 0}))
+    if not cells:
+        # The declared PK IS the driving edge (a true 1:1 child): there
+        # are no completing members, so `measure_fanout` never builds a
+        # cell table — by design, not by omission. The single trivial
+        # cell holds exactly one child per parent key; a source fan-out
+        # above 1 is the PK not being a key of the source (2026-09-11,
+        # E_TABLE stopped with "no cell table was measured for []").
+        if max_k > 1:
+            raise SystemExit(
+                f"[preflight P4] {table_schema.fqn}: the driving edge "
+                f"({','.join(driving)}) fans out to {max_k} children per "
+                f"parent in the source, but the declared PK "
+                f"{list(effective_pk)} equals the driving edge exactly — "
+                f"no completing members, so at most 1 child per parent key "
+                f"is representable. Add a discriminating column to the "
+                f"`pk:` in the relationship model, or confirm the source "
+                f"relationship really is 1:1 and the fan-out measurement "
+                f"is stale."
+            )
+        return
     table = fanout.get("cells") or {}
     n_cells = len(table.get("rows") or ())
-    max_k = max(int(k) for k in (fanout.get("histogram") or {"0": 0}))
     if max_k > 0 and n_cells == 0:
         # Fail CLOSED: the PK needs these members to be a key, and the
         # measurement that would supply them is missing entirely — a

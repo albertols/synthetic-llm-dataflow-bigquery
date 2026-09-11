@@ -101,3 +101,49 @@ def test_missing_cell_table_with_exact_members_stops():
             num_rows=1_000, fk_parent_rows={"parent": 1_000},
             blocker_failure_ratio=0.2, fanout=fanout,
         )
+
+
+_ONE_TO_ONE = """
+model: m2
+tables:
+  parent:
+    pk: [PID]
+  child1to1:
+    pk: [PID]
+    fk:
+      - cols: [PID]
+        ref: parent
+        ref_cols: [PID]
+"""
+
+
+def _one_to_one(histogram: dict) -> tuple[TableSchema, dict, dict]:
+    reg = RelationshipRegistry.from_sources([("config/relationships/m2.yaml", _ONE_TO_ONE)])
+    schema = TableSchema.model_validate({
+        "table_info": {"table_id": "p.d.child1to1"},
+        "schema": [{"name": "PID", "type": "STRING", "mode": "REQUIRED"}],
+    })
+    fanout = {"driving_cols": ["PID"], "histogram": histogram, "cells": None, "exact_cells": True}
+    return schema, reg.relations("child1to1"), fanout
+
+
+def test_pk_equal_to_driving_edge_needs_no_cell_table():
+    """E_TABLE-shape (2026-09-11): PK == driving edge columns exactly, a
+    true 1:1 with the parent — `cells` is legitimately empty (nothing to
+    measure), so max_k <= 1 passes with no cell table at all."""
+    schema, relations, fanout = _one_to_one({"0": 10, "1": 5})
+    preflight(
+        schema, (), (), [], relations=relations, num_rows=1_000,
+        fk_parent_rows={"parent": 1_000}, blocker_failure_ratio=0.2, fanout=fanout,
+    )
+
+
+def test_pk_equal_to_driving_edge_with_real_fanout_stops():
+    """Same shape, but the source has 2 children for one parent key — a
+    genuine PK violation, not a missing measurement."""
+    schema, relations, fanout = _one_to_one({"0": 10, "2": 5})
+    with pytest.raises(SystemExit, match=r"preflight P4.*equals the driving edge exactly"):
+        preflight(
+            schema, (), (), [], relations=relations, num_rows=1_000,
+            fk_parent_rows={"parent": 1_000}, blocker_failure_ratio=0.2, fanout=fanout,
+        )
