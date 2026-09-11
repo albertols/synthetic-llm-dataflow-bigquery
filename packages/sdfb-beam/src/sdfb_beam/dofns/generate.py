@@ -205,6 +205,10 @@ class GenerateRecordsDoFn(beam.DoFn):
         self._yielded = Metrics.counter("generation", "yielded")
         self._failed = Metrics.counter("generation", "failed")
         self._batch_seconds = Metrics.distribution("generation", "batch_msec")
+        # NULL policy (ruling B, design 2026-09-11 §4 / ADR 0037): keys
+        # dropped pre-generate for lacking a candidate on a non-nullable
+        # conditional edge. See `_filter_unmatched_keys`.
+        self._keys_unmatched = Metrics.counter("fanout", "keys_unmatched")
 
     def _scope(self):
         """Tag every milestone of this DoFn's engine with its landing
@@ -419,12 +423,96 @@ class GenerateRecordsDoFn(beam.DoFn):
         with self._scope():
             yield from self._process_with_scope(request, fk_side)
 
+    def _filter_unmatched_keys(self, keys, request, batch_id: int, n: int):
+        """NULL policy (ruling B, design 2026-09-11 §4 / ADR 0037): a key
+        with no candidate on a NON-nullable `ctx.fanout["conditional"]`
+        edge never reaches the engine — a nullable edge's NULL-fill is
+        the engine's own concern (`sdfb_core.engines.base.generate_for_
+        keys`). Dropped keys are counted and diverted to the DLQ as
+        `fk.unmatched`, weighted by their share of the batch's expected
+        rows so the BLOCKER gate does not silently under-count them.
+
+        Returns `(keys, matches, envelopes)`, index-aligned; `matches`
+        is never `None` here (the caller only passes `None` through when
+        the request carried no `"matches"` key at all)."""
+        matches = request.get("matches") or {}
+        fanout_ctx = self.ctx.fanout
+        conditional = (fanout_ctx.get("conditional") or []) if fanout_ctx else []
+        non_nullable = [entry for entry in conditional if entry.get("nullable") is False]
+        if not non_nullable:
+            return keys, matches, []
+
+        keep_idx: list[int] = []
+        offenders: dict[int, str] = {}
+        for i in range(len(keys)):
+            edge_id = None
+            for entry in non_nullable:
+                candidates = matches.get(entry["id"])
+                if candidates is None or len(candidates) <= i or not candidates[i]:
+                    edge_id = entry["id"]
+                    break
+            if edge_id is None:
+                keep_idx.append(i)
+            else:
+                offenders[i] = edge_id
+        if not offenders:
+            return keys, matches, []
+
+        weight_n = request.get("n", n)
+        expected = max(1, round(weight_n / len(keys)))
+        envelopes = [
+            {
+                "raw_request": {
+                    "batch_id": batch_id,
+                    "keys": [list(keys[i])],
+                    "n": expected,
+                },
+                "error_type": "referential_integrity",
+                "error_detail": f"no {offenders[i]} candidate for key {keys[i]!r}",
+                "rule_id": "fk.unmatched",
+                "stage": "pre_generate",
+            }
+            for i in sorted(offenders)
+        ]
+        filtered_keys = [keys[i] for i in keep_idx]
+        filtered_matches = {
+            edge_id: (
+                cand_list
+                if cand_list is None
+                else [cand_list[i] if i < len(cand_list) else [] for i in keep_idx]
+            )
+            for edge_id, cand_list in matches.items()
+        }
+        self._keys_unmatched.inc(len(offenders))
+        log_milestone("batch_unmatched", batch_id=batch_id, keys_dropped=len(offenders))
+        return filtered_keys, filtered_matches, envelopes
+
+    def _generate(self, keys, matches, n: int, cfg: GenerationConfig):
+        """Call the engine. `matches=` rides along ONLY when the request
+        carried a `"matches"` key (`matches is not None`) — otherwise
+        today's positional call stays byte-identical, since not every
+        `generate_for_keys` test double accepts the kwarg."""
+        if keys is None:
+            return self._engine.generate_batch(n, cfg)  # type: ignore[union-attr]
+        if matches is not None:
+            return self._engine.generate_for_keys(  # type: ignore[union-attr]
+                [tuple(k) for k in keys], cfg, matches=matches
+            )
+        return self._engine.generate_for_keys([tuple(k) for k in keys], cfg)  # type: ignore[union-attr]
+
     def _process_with_scope(self, request, fk_side: list | None = None):
         if self._engine is None:
             self._ensure_engine(self.ctx, fk_side)
         keys = request.get("keys")
         n = len(keys) if keys is not None else int(request["n"])
         batch_id = int(request["batch_id"])
+        matches = None
+        if keys is not None and "matches" in request:
+            keys, matches, envelopes = self._filter_unmatched_keys(
+                keys, request, batch_id, n
+            )
+            for envelope in envelopes:
+                yield beam.pvalue.TaggedOutput("failed", envelope)
         if self.base_seed is None:
             # No explicit seed: derive one so batches never replay each other
             # while the run stays reproducible per run_id (E2E report §2).
@@ -463,10 +551,7 @@ class GenerateRecordsDoFn(beam.DoFn):
         t0 = time.monotonic()
         count = 0
         try:
-            if keys is not None:
-                records = self._engine.generate_for_keys([tuple(k) for k in keys], cfg)  # type: ignore[union-attr]
-            else:
-                records = self._engine.generate_batch(n, cfg)  # type: ignore[union-attr]
+            records = self._generate(keys, matches, n, cfg)
             for row_index, record in enumerate(records):
                 self._yielded.inc()
                 count += 1

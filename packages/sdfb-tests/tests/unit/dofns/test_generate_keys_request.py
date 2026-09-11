@@ -87,3 +87,152 @@ def test_a_failed_key_batch_summarizes_its_keys_in_the_dlq():
     assert raw["keys"][0] == ["K0"]
     assert raw["n"] == 50  # the gate's expected-lost-rows weight
     assert raw["batch_id"] == 7
+
+
+class _RecordingEngine:
+    """Spy engine — captures exactly what `GenerateRecordsDoFn` hands to
+    `generate_for_keys`, isolating the DoFn's own pre-filtering from the
+    engines' own conditional-candidate resolution (covered separately by
+    `test_b1_rag.py::TestGenerateForKeysConditional`, Task 3)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def generate_for_keys(self, keys, cfg, matches=None):
+        self.calls.append((list(keys), matches))
+        return iter(())
+
+
+class _CounterSpy:
+    def __init__(self) -> None:
+        self.value = 0
+
+    def inc(self, n: int = 1) -> None:
+        self.value += n
+
+
+def _ctx_with_conditional(*, nullable: bool) -> GenerationContext:
+    return GenerationContext(
+        table_schema=_SCHEMA, reference_rows=_ROWS, reference_digest="dofn-fanout-cond",
+        pipeline_run_id="dofn-run", pk_columns=["PID", "CAT"],
+        fanout={"driving_cols": ["PID"], "histogram": {"2": 1},
+                "conditional": [{"id": "T,R", "cols": ["CAT"], "nullable": nullable}]},
+    )
+
+
+class TestConditionalMatchesNullPolicy:
+    """ADR 0037 / design 2026-09-11 §4 "NULL policy (ruling B)": a key
+    with no candidate on a non-nullable conditional edge never reaches
+    the engine — it is dropped, counted, and diverted as `fk.unmatched`
+    before `generate_for_keys` is called."""
+
+    def test_unmatched_key_on_non_nullable_edge_is_dropped_and_diverted(self):
+        dofn = GenerateRecordsDoFn(
+            engine_name="b1_rag", model_client=FakeModelClient(reference_pool=_ROWS),
+            ctx=_ctx_with_conditional(nullable=False),
+        )
+        engine = _RecordingEngine()
+        dofn._engine = engine
+        counter = _CounterSpy()
+        dofn._keys_unmatched = counter
+        request = {
+            "batch_id": 3,
+            "keys": [("K1",), ("K2",)],
+            "n": 10,
+            "matches": {"T,R": [[("r1",)], []]},
+        }
+
+        out = list(dofn.process(request))
+
+        assert len(out) == 1
+        envelope = out[0].value
+        assert envelope["rule_id"] == "fk.unmatched"
+        assert envelope["error_type"] == "referential_integrity"
+        assert envelope["stage"] == "pre_generate"
+        assert envelope["raw_request"] == {
+            "batch_id": 3,
+            "keys": [["K2"]],
+            "n": 5,  # max(1, round(10 / 2))
+        }
+        assert envelope["error_detail"] == "no T,R candidate for key ('K2',)"
+
+        assert len(engine.calls) == 1
+        kept_keys, kept_matches = engine.calls[0]
+        assert kept_keys == [("K1",)]
+        assert kept_matches == {"T,R": [[("r1",)]]}
+
+        assert counter.value == 1
+
+    def test_unmatched_key_on_nullable_edge_reaches_the_engine_unfiltered(self):
+        dofn = GenerateRecordsDoFn(
+            engine_name="b1_rag", model_client=FakeModelClient(reference_pool=_ROWS),
+            ctx=_ctx_with_conditional(nullable=True),
+        )
+        engine = _RecordingEngine()
+        dofn._engine = engine
+        counter = _CounterSpy()
+        dofn._keys_unmatched = counter
+        request = {
+            "batch_id": 4,
+            "keys": [("K1",), ("K2",)],
+            "n": 10,
+            "matches": {"T,R": [[("r1",)], []]},
+        }
+
+        out = list(dofn.process(request))
+
+        assert out == []  # no DLQ envelope — the engine NULL-fills instead
+        assert len(engine.calls) == 1
+        kept_keys, kept_matches = engine.calls[0]
+        assert kept_keys == [("K1",), ("K2",)]
+        assert kept_matches == {"T,R": [[("r1",)], []]}
+        assert counter.value == 0
+
+    def test_request_without_matches_calls_the_engine_positionally(self):
+        """No `matches` key on the request ⇒ today's call shape,
+        byte-identical (the engine here would TypeError on a stray
+        `matches=` kwarg it does not accept)."""
+
+        class _PositionalOnlyEngine:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            def generate_for_keys(self, keys, cfg):
+                self.calls.append(list(keys))
+                return iter(())
+
+        dofn = GenerateRecordsDoFn(
+            engine_name="b1_rag", model_client=FakeModelClient(reference_pool=_ROWS),
+            ctx=_ctx_with_conditional(nullable=False),
+        )
+        engine = _PositionalOnlyEngine()
+        dofn._engine = engine
+        counter = _CounterSpy()
+        dofn._keys_unmatched = counter
+        request = {"batch_id": 5, "keys": [("K1",), ("K2",)], "n": 10}
+
+        out = list(dofn.process(request))
+
+        assert out == []
+        assert engine.calls == [[("K1",), ("K2",)]]
+        assert counter.value == 0
+
+    def test_batch_unmatched_milestone_logs_the_drop_count(self, caplog):
+        dofn = GenerateRecordsDoFn(
+            engine_name="b1_rag", model_client=FakeModelClient(reference_pool=_ROWS),
+            ctx=_ctx_with_conditional(nullable=False),
+        )
+        dofn._engine = _RecordingEngine()
+        request = {
+            "batch_id": 9,
+            "keys": [("K1",), ("K2",)],
+            "n": 10,
+            "matches": {"T,R": [[("r1",)], []]},
+        }
+
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            list(dofn.process(request))
+
+        assert "name=batch_unmatched" in caplog.text
+        assert "batch_id=9" in caplog.text
+        assert "keys_dropped=1" in caplog.text
