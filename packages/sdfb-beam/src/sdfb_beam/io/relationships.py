@@ -42,7 +42,13 @@ def _patterns(uri: str) -> list[str]:
     return [f"{base}/*{suffix}" for suffix in _SUFFIXES]
 
 
-def _is_sample(path: str) -> bool:
+def is_sample_model(path: str) -> bool:
+    """True for a documentation sample (`example_*.yaml`, `*.example.yaml`).
+
+    Public because the two places that walk a relationships directory —
+    this loader's directory scan and `scripts/relationships/card.py`'s
+    local-path scan — must agree on exactly which files are samples.
+    """
     name = path.rsplit("/", 1)[-1]
     return name.startswith("example_") or ".example." in name
 
@@ -86,7 +92,9 @@ def load_relationship_registry(uri: str) -> RelationshipRegistry:
     # died on "A_TABLE declared in 2 models"). A URI that names a sample
     # file directly still loads it.
     direct = uri.rstrip("/").endswith((".yaml", ".yml"))
-    skipped = [] if direct else [p for p in sorted(set(paths)) if _is_sample(p)]
+    skipped = (
+        [] if direct else [p for p in sorted(set(paths)) if is_sample_model(p)]
+    )
     if skipped:
         log_milestone(
             "relationships_example_skipped",
@@ -138,4 +146,8 @@ def load_relationship_registry(uri: str) -> RelationshipRegistry:
     return registry
 
 
-__all__ = ["DEFAULT_RELATIONSHIPS_URI", "load_relationship_registry"]
+__all__ = [
+    "DEFAULT_RELATIONSHIPS_URI",
+    "is_sample_model",
+    "load_relationship_registry",
+]

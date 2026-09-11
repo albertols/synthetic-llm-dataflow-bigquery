@@ -176,6 +176,12 @@
       ]
     },
     {
+      "name": "thresholds_uri",
+      "label": "Thresholds file URI",
+      "helpText": "gs:// or local path to thresholds.yml selecting the pass/fail gates for the run's env tier. Default: config/thresholds.yml.",
+      "isOptional": true
+    },
+    {
       "name": "client_type",
       "label": "Model client type",
       "helpText": "vllm (production), mlx (M4 local smoke), fake (CI fixture).",
@@ -260,6 +266,33 @@
       "name": "uniqueness_mode",
       "label": "Uniqueness enforcement mode",
       "helpText": "exact (default) diverts every duplicate to the DLQ behind ONE full-row shuffle barrier (PK/identity rules resolved from key-only groups, ADR 0034). exact_chained keeps the pre-ADR-0034 three-barrier chain (row digest -> PK -> identity) for A/B runs. streaming lands rows as they are generated and measures the duplicate rate instead; duplicate rows LAND, the run is still marked FAILED_BLOCKER, so re-run with write_disposition=overwrite.",
+      "isOptional": true,
+      "regexes": [
+        "^(exact|exact_chained|streaming)?$"
+      ]
+    },
+    {
+      "name": "fk_fanout_stats_table",
+      "label": "FK fan-out stats table FQN",
+      "helpText": "project.dataset.table for synthetic_data_quality.fk_fanout_stats (ADR 0036 cache of the SOURCE fan-out histogram + PK cells per driving edge). Empty (default) = measure every launch, never cache.",
+      "isOptional": true,
+      "regexes": [
+        "^([a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+)?$"
+      ]
+    },
+    {
+      "name": "fk_candidate_cap",
+      "label": "FK candidate cap",
+      "helpText": "ADR 0037 \u2014 max candidate tuples per shared key for a conditional FK edge; a driven child's PK-completing members must cover the source fan-out within this cap. Default 64.",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "driven_uniqueness_mode",
+      "label": "Driven-child uniqueness mode",
+      "helpText": "Uniqueness mode for a DRIVEN child without identity columns (ADR 0036): its PK is unique by construction, so streaming (default) measures duplicates without the landing-path barrier. exact / exact_chained are available for A/B runs, same semantics as uniqueness_mode.",
       "isOptional": true,
       "regexes": [
         "^(exact|exact_chained|streaming)?$"

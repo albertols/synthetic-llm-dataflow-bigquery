@@ -928,7 +928,13 @@ excluded from it exactly as every NULL tuple already is.
 the source's content. If the source table changes shape (rows added, the
 fan-out ratio moves), a cached payload keeps replaying the OLD ratio.
 Re-measure by editing the model file (any field — `sha12()` covers all of
-them) or by deleting the cached row.
+them) or by deleting the cached row. The key also does not cover the
+PK-completing `cell_cols` measured alongside the histogram, so a child
+measured BEFORE its model gained a conditional or independent edge (ADR
+0037) keeps a stale cell table over a column that edge now supplies.
+After enabling a diamond or star branch, delete that table's
+`fk_fanout_stats` row (or edit the model so the sha changes) before
+relaunching.
 
 **Did PK/FK enforcement actually happen?** After the job lands, run the
 `/e2e_fk_pk_validator` prompt

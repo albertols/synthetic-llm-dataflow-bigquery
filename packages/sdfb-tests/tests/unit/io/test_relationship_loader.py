@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 import pytest
-from sdfb_beam.io.relationships import load_relationship_registry
+from sdfb_beam.io.relationships import is_sample_model, load_relationship_registry
 from sdfb_core.contracts.relationships import RelationshipError
 
 _MODEL_A = """
@@ -161,3 +161,10 @@ class TestDocumentationSamplesAreSkipped:
         _write(tmp_path, "example_retail.yaml", self._EXAMPLE)
         with pytest.raises(RelationshipError, match=r"no model files"):
             load_relationship_registry(str(tmp_path))
+
+    def test_is_sample_model_is_public_for_other_callers(self):
+        """`scripts/relationships/card.py` reuses this exact predicate for
+        its own local-directory scan (same rule, one definition)."""
+        assert is_sample_model("config/relationships/example_retail.yaml")
+        assert is_sample_model("config/relationships/retail.example.yaml")
+        assert not is_sample_model("config/relationships/retail.yaml")

@@ -28,16 +28,30 @@ _REL_DIR = "config/relationships"
 
 def _load(uri: str) -> RelationshipRegistry:
     """Local paths go through the pure-Python loader; anything else (a
-    gs:// URI) needs Beam's filesystems, imported only then."""
+    gs:// URI) needs Beam's filesystems, imported only then.
+
+    A directory scan skips documentation samples (`example_*.yaml`,
+    `*.example.yaml`) using the SAME rule as the Beam loader's directory
+    scan (`sdfb_beam.io.relationships.is_sample_model`) — otherwise this
+    script renders a committed sample next to a real model that reuses
+    the same anonymised aliases. A URI that names a sample file directly
+    still loads it.
+    """
+    from sdfb_beam.io.relationships import is_sample_model
+
     if "://" not in uri:
         from pathlib import Path
 
         base = Path(uri)
-        paths = (
-            sorted(p for p in base.glob("*.y*ml"))
-            if base.is_dir()
-            else [base]
-        )
+        if base.is_dir():
+            paths = []
+            for p in sorted(base.glob("*.y*ml")):
+                if is_sample_model(str(p)):
+                    print(f"skipping sample model: {p}", file=sys.stderr)
+                    continue
+                paths.append(p)
+        else:
+            paths = [base]
         return RelationshipRegistry.from_sources(
             [(str(p), p.read_text(encoding="utf-8")) for p in paths]
         )
