@@ -84,6 +84,10 @@ class TestParsing:
             ("model: m\ntables:\n  T:\n    fk:\n      - cols: [A]\n"
              "        ref: T\n        ref_cols: [A]\n",
              "references itself"),
+            ("model: m\ntables:\n  T:\n    fk:\n      - cols: [A]\n"
+             "        ref: ds.other\n        ref_cols: [A]\n"
+             "      - cols: [A]\n        ref: ds.other\n        ref_cols: [A]\n",
+             r"declared twice"),
             ("tables:\n  T:\n    pk: [A]\n", "model"),
         ],
     )

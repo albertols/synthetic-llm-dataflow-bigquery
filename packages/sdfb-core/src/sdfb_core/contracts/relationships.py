@@ -161,7 +161,21 @@ def parse_relationship_model(text: str, source: str = "") -> RelationshipModel:
 def _validate_refs(model: RelationshipModel) -> None:
     known = set(model.tables)
     for table, relations in model.tables.items():
+        seen: set[tuple[tuple[str, ...], str, tuple[str, ...]]] = set()
         for edge in relations.fk:
+            # Two fk: entries with the same (cols, ref, ref_cols) are a
+            # copy-paste mistake, not two edges: under value equality
+            # they collapse silently downstream (edge_roles' dict keying,
+            # edge_overlap/edge_rest's driving-edge comparison) instead
+            # of being caught here, at load time.
+            key = (edge.cols, edge.ref, edge.ref_cols)
+            if key in seen:
+                raise RelationshipError(
+                    f"{model.source}: {table}: edge "
+                    f"({','.join(edge.cols)})->{edge.ref} declared twice "
+                    f"— one fk entry per (cols, ref, ref_cols)"
+                )
+            seen.add(key)
             if edge.ref == table or _name(edge.ref) == table:
                 raise RelationshipError(
                     f"{model.source}: {table} references itself "
