@@ -240,10 +240,11 @@ DLQ rule `fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
 - [x] Registry: the shape sweep
   `packages/sdfb-tests/tests/unit/contracts/test_relationship_shapes.py`
   passes with both `xfail` markers removed (star fact and true diamond
-  resolve), and `test_relationship_models.py`'s two unmarked-parent
-  cases now assert "first declared drives, the other is conditional"
-  instead of a stop.
-- [x] DirectRunner, fake client, whole-tuple checks — the five shapes in
+  resolve — 10 passed, 0 xfail markers left on `ws12-fanout-generation`),
+  and `test_relationship_models.py`'s two unmarked-parent cases now
+  assert "first declared drives, the other is conditional" instead of a
+  stop (43 passed).
+- [ ] DirectRunner, fake client, whole-tuple checks — the five shapes in
   `packages/sdfb-tests/tests/unit/test_fanout_shapes.py`:
   - **star** — `dim_a`, `dim_b`, `fact`: every `fact` row's key tuple
     exists in each dimension, PK unique, row count within the histogram;
