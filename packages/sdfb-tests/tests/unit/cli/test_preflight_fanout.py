@@ -6,7 +6,11 @@ from __future__ import annotations
 import logging
 
 import pytest
-from sdfb_beam.cli.preflight import pk_cell_columns, preflight
+from sdfb_beam.cli.preflight import (
+    edge_supplied_members,
+    pk_cell_columns,
+    preflight,
+)
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.relationships import RelationshipRegistry
 from sdfb_core.engines.b1_rag.profile import profile_columns
@@ -300,7 +304,6 @@ def test_an_inexact_driven_pk_still_returns_the_independent_caps():
         fk_parent_rows={"A_TABLE": 1_000, "B_TABLE": 7},
         blocker_failure_ratio=0.2, fanout=_star_fanout(500),
         edge_roles=reg.edge_roles("F_TABLE"),
-        fk_member_caps={("B_ID",): 7},
     )
     assert result.fk_key_sample_caps == {("B_ID",): 7}
 
@@ -315,7 +318,6 @@ def test_an_independent_member_of_the_pk_is_a_per_key_factor():
             fk_parent_rows={"A_TABLE": 1_000, "B_TABLE": cap},
             blocker_failure_ratio=0.2, fanout=_star_fanout(max_k),
             edge_roles=reg.edge_roles("F_TABLE"),
-            fk_member_caps={("B_ID",): cap},
         )
 
     with pytest.raises(
@@ -434,10 +436,163 @@ def test_cells_independent_and_conditional_factors_multiply():
                             "DIM_TABLE": 3},
             blocker_failure_ratio=0.2, fanout=fanout,
             edge_roles=_MIX_REG.edge_roles("MIX_TABLE"),
-            fk_member_caps={("D",): 3},
             conditional_rest={"T,R": ("R",)}, candidate_cap=4,
         )
 
     _run(72)  # 6 cells x 3 keys x 4 candidates
     with pytest.raises(SystemExit, match=r"preflight P4.*73 children"):
         _run(73)
+
+
+# --- Fix round 1: rulings 12 (one supply rule) and 13 (caps inside) ----
+
+_PARTIAL = """
+model: partial
+tables:
+  A_TABLE:
+    pk: [A_ID]
+  B_TABLE:
+    pk: [B_ID, X]
+  F_TABLE:
+    pk: [A_ID, B_ID]
+    fk:
+      - cols: [A_ID]
+        ref: A_TABLE
+        ref_cols: [A_ID]
+        drives: true
+      - cols: [B_ID, X]
+        ref: B_TABLE
+        ref_cols: [B_ID, X]
+"""
+_PARTIAL_REG = RelationshipRegistry.from_sources(
+    [("config/relationships/partial.yaml", _PARTIAL)]
+)
+
+
+def _partial_schema() -> TableSchema:
+    return TableSchema.model_validate({
+        "table_info": {"table_id": "p.d.F_TABLE"},
+        "schema": [
+            {"name": n, "type": "STRING", "mode": "REQUIRED"}
+            for n in ("A_ID", "B_ID", "X")
+        ],
+    })
+
+
+def _partial_rows(n: int = 480) -> list[dict]:
+    return [{"A_ID": f"A1B2{i:020X}", "B_ID": f"B{i % 6}", "X": f"X{i % 4}"}
+            for i in range(n)]
+
+
+def test_one_supply_rule_covers_partial_and_disjoint_edges():
+    """Ruling 12: an edge SUPPLIES its columns whether or not the PK
+    contains them (the engine overwrites them from the pool either way),
+    and it COUNTS as a factor as soon as one of them is in the PK."""
+    roles = _PARTIAL_REG.edge_roles("F_TABLE")
+    # `B_ID` is in the PK, `X` is not — one factor, both columns known.
+    partial = edge_supplied_members(("A_ID", "B_ID"), roles, {})
+    assert partial.known == ("B_ID", "X")
+    assert [e.ref for e in partial.independent] == ["B_TABLE"]
+    # Neither column in the PK — still supplied, but no factor.
+    disjoint = edge_supplied_members(("A_ID",), roles, {})
+    assert disjoint.known == ("B_ID", "X") and disjoint.independent == ()
+
+
+def test_a_partially_contained_edge_does_not_false_stop():
+    """The review's B-1 scenario: the measurement was told to build NO
+    cell table (its `known` covers `B_ID`), so the check must reach the
+    same conclusion — anything else stops on a cell table that can never
+    be measured, with `clear the cache` as an impossible remedy."""
+
+    def _run(max_k: int, parent_keys: int):
+        return preflight(
+            _partial_schema(), (), (), _partial_rows(),
+            relations=_PARTIAL_REG.relations("F_TABLE"), num_rows=1_000,
+            fk_parent_rows={"A_TABLE": 1_000, "B_TABLE": parent_keys},
+            blocker_failure_ratio=0.2,
+            fanout={"driving_cols": ["A_ID"],
+                    "histogram": {"0": 3, str(max_k): 5},
+                    "cells": None, "exact_cells": True},
+            edge_roles=_PARTIAL_REG.edge_roles("F_TABLE"),
+        )
+
+    assert _run(5, 5).fk_key_sample_caps == {("B_ID", "X"): 5}
+    with pytest.raises(SystemExit) as exc:
+        _run(5, 3)
+    assert "no cell table was measured" not in str(exc.value)
+    assert "a parent that lands more keys" in str(exc.value)
+
+
+def test_independent_pools_are_sized_from_the_derived_rows():
+    """Ruling 13 / finding B-2: a driven child lands
+    `parent_rows x mean_fanout`, not `--num_rows`, so the pool that both
+    P4 and the composer use must be sized from the DERIVED count."""
+    from sdfb_core.engines.pk_capacity import fk_key_sample_cap
+
+    reg = _star_reg()
+    result = preflight(
+        _star_schema(), (), (), _star_rows(),
+        relations=reg.relations("F_TABLE"), num_rows=10_000,
+        fk_parent_rows={"A_TABLE": 10_000, "B_TABLE": 5_000_000},
+        blocker_failure_ratio=0.2,
+        fanout={"driving_cols": ["A_ID"], "histogram": {"30": 4},
+                "cells": None, "exact_cells": True},
+        edge_roles=reg.edge_roles("F_TABLE"),
+    )
+    assert result.derived_rows == 300_000
+    assert result.fk_key_sample_caps == {
+        ("B_ID",): fk_key_sample_cap(300_000, 1)
+    }
+    # The launch-wide count would have sized it an order of magnitude low.
+    assert fk_key_sample_cap(10_000, 1) != fk_key_sample_cap(300_000, 1)
+
+
+def test_a_none_candidate_cap_falls_back_to_the_default():
+    """A programmatic caller that leaves the flag unset must not get a
+    TypeError out of the capacity product."""
+    preflight(
+        _diamond_schema(), (), (), _diamond_rows(),
+        relations=_DIAMOND_REG.relations("BOTTOM_TABLE"), num_rows=1_000,
+        fk_parent_rows={"LEFT_TABLE": 1_000, "RIGHT_TABLE": 1_000},
+        blocker_failure_ratio=0.2, fanout=_diamond_fanout(50),
+        edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
+        conditional_rest={"T,R": ("R",)}, candidate_cap=None,
+    )
+    with pytest.raises(SystemExit, match=r"preflight P4.*--fk_candidate_cap"):
+        preflight(
+            _diamond_schema(), (), (), _diamond_rows(),
+            relations=_DIAMOND_REG.relations("BOTTOM_TABLE"), num_rows=1_000,
+            fk_parent_rows={"LEFT_TABLE": 1_000, "RIGHT_TABLE": 1_000},
+            blocker_failure_ratio=0.2, fanout=_diamond_fanout(100),
+            edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
+            conditional_rest={"T,R": ("R",)}, candidate_cap=None,
+        )
+
+
+def test_the_stop_names_a_sufficient_candidate_cap_not_just_the_floor():
+    """"raise it above 64" is not actionable when 65 still fails: with
+    one conditional edge and no other factor, 100 children per key need
+    a cap of 100."""
+    with pytest.raises(SystemExit) as exc:
+        preflight(
+            _diamond_schema(), (), (), _diamond_rows(),
+            relations=_DIAMOND_REG.relations("BOTTOM_TABLE"), num_rows=1_000,
+            fk_parent_rows={"LEFT_TABLE": 1_000, "RIGHT_TABLE": 1_000},
+            blocker_failure_ratio=0.2, fanout=_diamond_fanout(100),
+            edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
+            conditional_rest={"T,R": ("R",)}, candidate_cap=64,
+        )
+    assert "--fk_candidate_cap to at least 100" in str(exc.value)
+    # Two edges share the shortfall: 8 x 8 = 64 < 100, and 10 x 10 >= 100.
+    with pytest.raises(SystemExit) as exc2:
+        preflight(
+            _diamond_schema(), (), (), _diamond_rows(),
+            relations=_TWO_CONDITIONAL_REG.relations("BOTTOM_TABLE"),
+            num_rows=1_000,
+            fk_parent_rows={"LEFT_TABLE": 1_000, "RIGHT_TABLE": 1_000,
+                            "OTHER_TABLE": 1_000},
+            blocker_failure_ratio=0.2, fanout=_diamond_fanout(100),
+            edge_roles=_TWO_CONDITIONAL_REG.edge_roles("BOTTOM_TABLE"),
+            conditional_rest={"T,R": ("R",), "T,S": ("S",)}, candidate_cap=8,
+        )
+    assert "--fk_candidate_cap to at least 10" in str(exc2.value)

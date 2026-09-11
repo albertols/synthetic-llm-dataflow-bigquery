@@ -43,6 +43,7 @@ from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
 from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.pk_capacity import (
     FK_KEY_SAMPLE_CEILING,
+    FK_KEY_SAMPLE_FLOOR,
     effective_cells,
     expected_duplicate_share_cells,
     fk_key_sample_cap,
@@ -546,34 +547,88 @@ def pk_cell_columns(
     return cells, len(cells) == len(rest)
 
 
-def _pk_completing_edges(
-    effective_pk: tuple[str, ...],
-    independent_caps: Mapping[tuple[str, ...], int],
-    conditional_rest: Mapping[str, tuple[str, ...]],
-) -> tuple[
-    dict[tuple[str, ...], int], dict[str, tuple[str, ...]], tuple[str, ...]
-]:
-    """The non-driving edges that COMPLETE this PK (ADR 0037 §6), and
-    the columns they supply: independent edges whose columns all sit in
-    the PK, conditional edges whose (non-empty) ``rest`` all sits in it.
+@dataclass(frozen=True)
+class EdgeSupply:
+    """What a driven child's NON-driving edges hand the engine
+    (ADR 0037 §6): the columns they fill, and which of them bound the
+    PK. Built only by :func:`edge_supplied_members`."""
 
-    Partial membership is deliberately excluded: an edge that fills only
-    some PK members leaves the others to the cells, and counting its
-    whole pool as a per-key factor would overstate the capacity.
-    Members outside the PK never enter P4 at all."""
+    # Every column a non-driving edge writes, PK member or not.
+    known: tuple[str, ...]
+    # Independent edges whose columns touch the PK — each contributes its
+    # sampled key pool as a per-key factor.
+    independent: tuple[FkEdge, ...]
+    # ``edge_id`` of every conditional edge whose ``rest`` touches the PK
+    # — each contributes ``--fk_candidate_cap``.
+    conditional: tuple[str, ...]
+
+
+def edge_supplied_members(
+    effective_pk: tuple[str, ...],
+    edge_roles: Mapping[FkEdge, str] | None,
+    conditional_rest: Mapping[str, tuple[str, ...]] | None,
+) -> EdgeSupply:
+    """The ONE rule for what a non-driving edge supplies and when it
+    counts (ADR 0037 §6; ruling 12 of the 2026-09-11 review). Both
+    readers call THIS — `resolve_fanout` at measure time and
+    `_check_driven_pk` at check time — because two spellings of the rule
+    disagree on some model and the disagreement lands as a launch stop.
+
+    SUPPLIED (``known``) — an independent edge's whole column tuple (the
+    engine overwrites them from the sampled key pool) and a conditional
+    edge's ``rest`` (overwritten from the candidate draw). Supplied is
+    supplied whether or not the PK holds those columns: the engine does
+    not consult the PK before writing them, so a cell table measured
+    over one of them asks BigQuery for a domain nothing ever draws from.
+    This is `pk_cell_columns`'s ``known``.
+
+    COUNTS (``independent`` / ``conditional``) — an edge whose supplied
+    columns INTERSECT the PK contributes its factor. Partial containment
+    counts: a pool of ``cap`` whole tuples yields at most ``cap``
+    distinct values on any SUBSET of its columns, so the factor stays an
+    upper bound on what the edge adds to the key."""
     pk = set(effective_pk)
-    independent = {
-        cols: cap for cols, cap in independent_caps.items() if set(cols) <= pk
-    }
-    conditional = {
-        edge_id: rest
-        for edge_id, rest in conditional_rest.items()
-        if rest and set(rest) <= pk
-    }
-    known = tuple(c for cols in independent for c in cols) + tuple(
-        c for rest in conditional.values() for c in rest
-    )
-    return independent, conditional, known
+    known: list[str] = []
+    independent: list[FkEdge] = []
+    for edge, role in (edge_roles or {}).items():
+        if role != "independent":
+            continue
+        known.extend(edge.cols)
+        if pk & set(edge.cols):
+            independent.append(edge)
+    # Conditional edges are read off the MAPPING, never off `edge_roles`:
+    # its key is `edge_id` (`",".join(cols)`), and two conditional edges
+    # with the same child columns to different parents — which the
+    # parse-time duplicate check allows, it only rejects an identical
+    # (cols, ref, ref_cols) — collapse into one entry. Counting entries
+    # loses a factor instead of inventing one: the fail-CLOSED direction
+    # for P4. (Those two edges already collide on `FkEdgeSpec.edge_id`
+    # in the request payload's `matches`, which is Task 8's interface.)
+    conditional: list[str] = []
+    for edge_id, rest in (conditional_rest or {}).items():
+        known.extend(rest)
+        if pk & set(rest):
+            conditional.append(edge_id)
+    return EdgeSupply(tuple(known), tuple(independent), tuple(conditional))
+
+
+def _sufficient_candidate_cap(
+    max_k: int, other_factors: int, n_conditional: int
+) -> int:
+    """Smallest ``--fk_candidate_cap`` whose capacity reaches ``max_k``.
+
+    ``other_factors`` is the capacity WITHOUT the conditional term, so
+    the conditional edges must jointly supply ``ceil(max_k /
+    other_factors)`` combinations and each one contributes the same cap:
+    the ``n_conditional``-th root, rounded up. Computed on integers —
+    a float root is off by one exactly where the operator would retry."""
+    needed = -(-max_k // max(1, other_factors))
+    cap = max(1, int(needed ** (1.0 / max(1, n_conditional))))
+    while cap ** n_conditional < needed:
+        cap += 1
+    while cap > 1 and (cap - 1) ** n_conditional >= needed:
+        cap -= 1
+    return cap
 
 
 def _driven_pk_stop(
@@ -589,7 +644,11 @@ def _driven_pk_stop(
     candidate_cap: int,
 ) -> SystemExit:
     """The P4 stop for a driven child whose per-key capacity is short,
-    naming every factor that bounds it and the knob that moves it."""
+    naming every factor that bounds it and the knob that moves it.
+
+    Every listed factor is a genuine lever (capacity is their product),
+    and the cap advice is the value that actually WORKS — "above 64" is
+    not a fix when 65 fails too."""
     parts: list[str] = []
     if cells:
         parts.append(
@@ -608,7 +667,13 @@ def _driven_pk_stop(
         )
     fixes: list[str] = []
     if n_conditional:
-        fixes.append(f"raise --fk_candidate_cap above {candidate_cap:,}")
+        sufficient = _sufficient_candidate_cap(
+            max_k, capacity // candidate_cap ** n_conditional, n_conditional
+        )
+        fixes.append(
+            f"raise --fk_candidate_cap to at least {sufficient:,} "
+            f"(it is {candidate_cap:,})"
+        )
     if independent:
         fixes.append("a parent that lands more keys")
     fixes.append("the `pk:` in the relationship model")
@@ -634,7 +699,8 @@ def _check_driven_pk(
     *,
     independent_caps: Mapping[tuple[str, ...], int] = _NO_CAPS,
     conditional_rest: Mapping[str, tuple[str, ...]] = _NO_REST,
-    candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
+    candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
+    edge_roles: Mapping[FkEdge, str] | None = None,
 ) -> None:
     """P4 for a DRIVEN child: the largest source fan-out must fit in the
     per-key capacity the PK's completing members offer, else the declared
@@ -644,11 +710,24 @@ def _check_driven_pk(
     every independent edge's sampled key pool x ``--fk_candidate_cap``
     per conditional edge — each one a member the engine fills per child
     without repeating itself. A PK with none of them has capacity 1 and
-    is the ADR 0036 1:1 case, which keeps its own message."""
+    is the ADR 0036 1:1 case, which keeps its own message.
+
+    What each edge supplies, and whether it counts, is
+    `edge_supplied_members` — the same call `resolve_fanout` makes when
+    it decides which columns to measure a cell table over."""
     driving = tuple(fanout.get("driving_cols") or ())
-    independent, conditional, known = _pk_completing_edges(
-        effective_pk, independent_caps, conditional_rest
+    cap = (
+        DEFAULT_FK_CANDIDATE_CAP if candidate_cap is None else int(candidate_cap)
     )
+    supply = edge_supplied_members(effective_pk, edge_roles, conditional_rest)
+    independent = {
+        tuple(e.cols): int(
+            independent_caps.get(tuple(e.cols), FK_KEY_SAMPLE_FLOOR)
+        )
+        for e in supply.independent
+    }
+    conditional = supply.conditional
+    known = supply.known
     cells, exact = pk_cell_columns(effective_pk, driving, profiles, known=known)
     if not exact:
         return
@@ -670,9 +749,9 @@ def _check_driven_pk(
                 f"the `pk:` in the relationship model."
             )
     capacity = (n_cells or 1)
-    for cap in independent.values():
-        capacity *= cap
-    capacity *= candidate_cap ** len(conditional)
+    for pool in independent.values():
+        capacity *= pool
+    capacity *= cap ** len(conditional)
     if max_k <= capacity:
         return
     if not cells and not known:
@@ -695,8 +774,62 @@ def _check_driven_pk(
         )
     raise _driven_pk_stop(
         table_schema, effective_pk, driving, max_k, capacity, cells, n_cells,
-        independent, len(conditional), candidate_cap,
+        independent, len(conditional), cap,
     )
+
+
+def _derived_rows(
+    fanout: Mapping,
+    edge_roles: Mapping[FkEdge, str] | None,
+    fk_parent_rows: Mapping[str, int],
+) -> int | None:
+    """A DRIVEN child's row count (ADR 0036): ``round(driving parent's
+    rows x mean fan-out)``. ``None`` when the histogram carries no mass
+    or the driving parent's row count is unknown."""
+    hist = {
+        int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()
+    }
+    total = sum(hist.values())
+    driving_ref = next(
+        (e.ref for e, r in (edge_roles or {}).items() if r == "driving"),
+        None,
+    )
+    parent_rows = fk_parent_rows.get(driving_ref) if driving_ref else None
+    if total and parent_rows:
+        return round(
+            parent_rows * sum(k * n for k, n in hist.items()) / total
+        )
+    return None
+
+
+def _independent_pool_caps(
+    supply: EdgeSupply, rows: int, fk_parent_rows: Mapping[str, int]
+) -> dict[tuple[str, ...], int]:
+    """Per INDEPENDENT edge touching the PK, the parent key sample the
+    composer will broadcast (ADR 0037 §6; ruling 13). P4 counts it as a
+    per-key factor and `in_set_parent_edges` sizes the side input from
+    the SAME number, which reaches it through
+    ``PreflightResult.fk_key_sample_caps``.
+
+    ``rows`` is the child's DERIVED count when the fan-out gives one: a
+    driven child lands ``parent_rows x mean_fanout``, NEVER the
+    launch-wide ``--num_rows`` (ADR 0036 D5, `resolve_table_rows`). The
+    launch count is the fallback, and there it is a LOWER bound, not an
+    upper one — what keeps P4 honest in that case is the
+    ``[FLOOR, CEILING]`` clamp inside `fk_key_sample_cap`, not the count
+    (2026-09-11 review, finding B-2).
+
+    ``other=1``: the PK's cells and its sibling edges are counted in
+    `_check_driven_pk`, not folded in here. ``fk_parent_rows`` holds
+    IN-SET parents only, so an edge to an out-of-set parent keeps the
+    unclamped cap — unreachable today, since `plan_launch` expands to
+    the whole component and every enabled parent is in-set."""
+    caps: dict[tuple[str, ...], int] = {}
+    for edge in supply.independent:
+        cap = fk_key_sample_cap(rows, 1)
+        parent_rows = fk_parent_rows.get(edge.ref)
+        caps[tuple(edge.cols)] = min(cap, parent_rows) if parent_rows else cap
+    return caps
 
 
 def _driven_child_rows(
@@ -708,39 +841,28 @@ def _driven_child_rows(
     edge_roles: Mapping[FkEdge, str] | None,
     fk_parent_rows: Mapping[str, int] | None,
     *,
-    independent_caps: Mapping[tuple[str, ...], int] = _NO_CAPS,
     conditional_rest: Mapping[str, tuple[str, ...]] = _NO_REST,
-    candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
-) -> int | None:
-    """P4 + row-count derivation for a DRIVEN child (ADR 0036): the
-    source fan-out is checked against the PK-completing cells and the
-    members the other edges supply (``_check_driven_pk``, may stop the
-    launch), then this table's row count derives from the driving
-    parent's rows and the mean fan-out — ``None`` when the total
-    histogram mass or the driving parent's row count is unknown."""
+    candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
+) -> tuple[int | None, dict[tuple[str, ...], int]]:
+    """``(derived rows, independent pool caps)`` for a DRIVEN child.
+
+    ORDER MATTERS (ruling 13): the row count derives FIRST, because the
+    independent key pools are sized from it, and P4 then reads those
+    pools as per-key PK factors. `_check_driven_pk` may stop the launch;
+    when it does not, both values travel out on ``PreflightResult``."""
+    parent_rows = fk_parent_rows or {}
+    derived = _derived_rows(fanout, edge_roles, parent_rows)
+    supply = edge_supplied_members(effective_pk, edge_roles, conditional_rest)
+    caps = _independent_pool_caps(supply, derived or num_rows, parent_rows)
     if num_rows > 0 and effective_pk:
         _check_driven_pk(
             table_schema, effective_pk, fanout, profiles,
-            independent_caps=independent_caps,
+            independent_caps=caps,
             conditional_rest=conditional_rest,
             candidate_cap=candidate_cap,
+            edge_roles=edge_roles,
         )
-    hist = {
-        int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()
-    }
-    total = sum(hist.values())
-    driving_ref = next(
-        (e.ref for e, r in (edge_roles or {}).items() if r == "driving"),
-        None,
-    )
-    parent_rows = (
-        (fk_parent_rows or {}).get(driving_ref) if driving_ref else None
-    )
-    if total and parent_rows:
-        return round(
-            parent_rows * sum(k * n for k, n in hist.items()) / total
-        )
-    return None
+    return derived, caps
 
 
 def _drawn_edges(
@@ -774,9 +896,8 @@ def preflight(
     edge_roles: Mapping[FkEdge, str] | None = None,
     enforced_fk: tuple[FkEdge, ...] | None = None,
     edge_overlaps: Mapping[FkEdge, tuple[str, ...]] | None = None,
-    fk_member_caps: Mapping[tuple[str, ...], int] | None = None,
     conditional_rest: Mapping[str, tuple[str, ...]] | None = None,
-    candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
+    candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
 ) -> PreflightResult:
     """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -809,15 +930,16 @@ def preflight(
     is co-partitioned on. It is reporting only: no capacity check reads
     it.
 
-    ``fk_member_caps`` / ``conditional_rest`` / ``candidate_cap`` (ADR
-    0037 §6) are what P4 DOES read on a driven child: the sampled key
-    pool each INDEPENDENT edge will broadcast (child cols → cap, sized
-    by the launcher so the composer broadcasts the same number), each
-    CONDITIONAL edge's ``rest`` columns keyed by its ``edge_id``
-    (``",".join(cols)``), and the Top-M candidate cap. Every one of
-    those is a per-key PK factor next to the measured cells. The caps
-    travel back out on ``PreflightResult.fk_key_sample_caps``, exactly
-    as the ADR 0035 random-draw path returns its own."""
+    ``conditional_rest`` / ``candidate_cap`` (ADR 0037 §6) are what P4
+    DOES read on a driven child: each CONDITIONAL edge's ``rest``
+    columns keyed by its ``edge_id`` (``",".join(cols)``), and the Top-M
+    candidate cap (``None`` means the default). Together with every
+    INDEPENDENT edge's sampled key pool — sized HERE, from the derived
+    row count this same call produces (ruling 13), not by the caller —
+    they are per-key PK factors next to the measured cells. The pool
+    caps travel back out on ``PreflightResult.fk_key_sample_caps``, so
+    the composer broadcasts exactly the number P4 counted, exactly as
+    the ADR 0035 random-draw path returns its own."""
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
@@ -930,14 +1052,13 @@ def preflight(
     fk_key_sample_caps: dict[tuple[str, ...], int] = {}
     derived_rows: int | None = None
     if fanout is not None:
-        # ADR 0037: an independent edge inside the PK is BOTH a P4
-        # factor and a side input the composer must size — one cap, and
-        # it leaves on the result so `in_set_parent_edges` reads it.
-        fk_key_sample_caps = dict(fk_member_caps or {})
-        derived_rows = _driven_child_rows(
+        # ADR 0037: an independent edge touching the PK is BOTH a P4
+        # factor and a side input the composer must size — one cap,
+        # sized from the derived row count and leaving on the result so
+        # `in_set_parent_edges` broadcasts that same number.
+        derived_rows, fk_key_sample_caps = _driven_child_rows(
             table_schema, tuple(effective_pk), num_rows, fanout, profiles,
             edge_roles, fk_parent_rows,
-            independent_caps=fk_key_sample_caps,
             conditional_rest=conditional_rest or _NO_REST,
             candidate_cap=candidate_cap,
         )
@@ -970,4 +1091,11 @@ def preflight(
     )
 
 
-__all__ = ["PreflightResult", "preflight"]
+__all__ = [
+    "DEFAULT_FK_CANDIDATE_CAP",
+    "EdgeSupply",
+    "PreflightResult",
+    "edge_supplied_members",
+    "pk_cell_columns",
+    "preflight",
+]

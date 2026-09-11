@@ -680,3 +680,92 @@ def test_nullability_schema_prefers_the_landing_one():
     source, landing = _diamond_schema("NULLABLE"), _landing_schema("REQUIRED")
     assert rp.nullability_schema(landing, source) is landing
     assert rp.nullability_schema(None, source) is source
+
+
+_PARTIAL = """
+model: partial
+tables:
+  A_TABLE:
+    pk: [A_ID]
+  B_TABLE:
+    pk: [B_ID, X]
+  F_TABLE:
+    pk: [A_ID, B_ID]
+    fk:
+      - cols: [A_ID]
+        ref: A_TABLE
+        ref_cols: [A_ID]
+        drives: true
+      - cols: [B_ID, X]
+        ref: B_TABLE
+        ref_cols: [B_ID, X]
+"""
+_PARTIAL_REG = RelationshipRegistry.from_sources(
+    [("config/relationships/partial.yaml", _PARTIAL)]
+)
+_PARTIAL_SCHEMA = TableSchema.model_validate(
+    {"table_info": {"table_id": "p.land.F_TABLE"},
+     "schema": [{"name": n, "type": "STRING", "mode": "REQUIRED"}
+                for n in ("A_ID", "B_ID", "X")]}
+)
+_PARTIAL_ROWS = [
+    {"A_ID": f"A1B2{i:020X}", "B_ID": f"B{i % 6}", "X": f"X{i % 4}"}
+    for i in range(40)
+]
+
+
+def test_measure_and_check_agree_on_a_partially_contained_edge(monkeypatch):
+    """Ruling 12: `resolve_fanout`'s `known` and `_check_driven_pk`'s are
+    the SAME set — the launcher asks for no cell table over `B_ID`, and
+    P4 must not then demand one (review finding B-1)."""
+    import sdfb_beam.cli.run_pipeline as rp
+    from sdfb_beam.cli.preflight import edge_supplied_members
+
+    seen: dict = {}
+
+    def _spy(**kw):
+        seen.update(kw)
+        return {"histogram": {"1": 4}, "parents": 4, "children": 4,
+                "cells": None}
+
+    monkeypatch.setattr(rp, "measure_fanout", _spy)
+    payload, roles = resolve_fanout(
+        _PARTIAL_REG, "p.land.F_TABLE", "p.src.F_TABLE",
+        in_set_names={"A_TABLE", "B_TABLE", "F_TABLE"},
+        reference_rows=_PARTIAL_ROWS, table_schema=_PARTIAL_SCHEMA,
+        stats_store=None, bq_client=object(),
+    )
+    assert seen["cell_cols"] == ()
+    assert payload["exact_cells"] is True
+    # The very set P4 will use, from the one shared helper.
+    assert edge_supplied_members(
+        ("A_ID", "B_ID"), roles,
+        rp.conditional_rest_of(_PARTIAL_REG, "p.land.F_TABLE", roles),
+    ).known == ("B_ID", "X")
+
+
+def test_a_high_fanout_child_gets_a_pool_sized_for_its_derived_rows(
+    monkeypatch,
+):
+    """Finding B-2 end to end: --num_rows 100 with a mean fan-out of 30
+    lands 3,000 rows, and the broadcast pool is sized for those."""
+    import sdfb_beam.cli.run_pipeline as rp
+    from sdfb_core.engines.pk_capacity import fk_key_sample_cap
+
+    monkeypatch.setattr(rp, "load_reference_rows", lambda **kw: _STAR37_ROWS)
+    monkeypatch.setattr(rp, "measure_fanout", lambda **kw: {
+        "histogram": {"30": 4}, "parents": 4, "children": 120,
+        "cells": None})
+    args = _diamond_args("p.land.F_TABLE", reference_table="p.src.F_TABLE")
+    # The relational runner carries the already-resolved parent counts.
+    args._rows_by_landing = {"p.land.A_TABLE": 10_000,
+                             "p.land.B_TABLE": 5_000_000}
+    pf = rp._load_reference_and_preflight(
+        args, _STAR37_SCHEMA, _STAR37_REG, in_set_landing=_STAR37_IN_SET,
+    )[1]
+    assert pf.derived_rows == 300_000  # 10k parents x mean 30
+    assert pf.fk_key_sample_caps == {
+        ("B_ID",): fk_key_sample_cap(300_000, 1)
+    }
+    # --num_rows 100 would have sized the same pool at the ADR 0035 floor.
+    assert fk_key_sample_cap(args.num_rows, 1) != fk_key_sample_cap(300_000, 1)
