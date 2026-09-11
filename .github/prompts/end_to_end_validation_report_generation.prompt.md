@@ -450,9 +450,19 @@ MUST NOT spend tokens re-deriving it:
    this backwards; the fix is a one-line edit in the model file, which
    the card names.
 7. Referential integrity has a rule now: `fk.orphan` (BLOCKER,
-   threshold 0). Quote its `validation_runs.dlq_by_rule` count. A run
-   with 0 enforced edges has NO orphan measurement — say "not
-   verified", never "passed".
+   threshold 0) — rows that LANDED referencing a parent tuple that does
+   not exist; the draw is joint by construction, so any non-zero count
+   is a generator regression. Quote its `validation_runs.dlq_by_rule`
+   count. A run with 0 enforced edges has NO orphan measurement — say
+   "not verified", never "passed". A second rule sits next to it:
+   `fk.unmatched` (ADR 0037 ruling B) — rows NEVER GENERATED because a
+   driving key's shared value had no candidate in a `conditional`
+   parent and that edge's remaining columns are not all NULLABLE, so
+   the key was dropped before generation (weighted by its expected
+   rows). Unlike `fk.orphan` it is an INPUT fact — expected exactly when
+   the source genuinely lacks that branch — so report it with the
+   `fanout / keys_unmatched` counter (keys, not rows) beside it, and
+   never fold it into the orphan narrative.
 8. **Driven fan-out (ADR 0036).** A table generated from its parent's
    landed keys (not a random FK-pool draw) reads through three
    milestones instead of `fk_key_pool_bound`: `fk_edge_role
@@ -469,7 +479,10 @@ MUST NOT spend tokens re-deriving it:
    unique BY CONSTRUCTION: `pk.duplicate > 0` (or non-zero
    `validation_runs.dlq_by_rule`) on a driven child is a **generator
    regression**, never a tolerance — report it exactly the way `fk.orphan`
-   is reported for a side-input edge, not folded into ordinary
+   (a landed row with no parent; never expected) is reported for a
+   side-input edge, and keep both distinct from `fk.unmatched` (a row
+   never generated because the conditional parent had no candidate;
+   expected when the source lacks that branch) — not folded into ordinary
    `pk.duplicate` commentary about random draws. A driven child usually
    runs `--driven_uniqueness_mode=streaming`, which MEASURES both
    `row.duplicate` and `pk.duplicate` on digest branches without

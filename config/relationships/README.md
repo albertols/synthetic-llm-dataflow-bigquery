@@ -78,8 +78,10 @@ C_TABLE → B_TABLE exists). It then **widens** the driving parent's edge to
 the other parent with the column pairs the child pins by referencing the
 same columns in both (`fk_edge_widened` in the launcher log), so the other
 edge is *implied* and the inherited columns are copied from the
-grandparent. `drives: true` is only needed when no parent descends from
-the others, and the launch says so.
+grandparent. When no parent descends from the others, the
+FIRST DECLARED enforced edge drives and the launcher says so
+(`fk_driving_edge_defaulted`, WARNING) — `drives: true` is how you
+choose a different one. See "Which edge drives" below.
 
 ## Three flags, three different jobs
 
@@ -118,9 +120,162 @@ parent whose keys it consumes. Everything else follows from `cols` and
   straight to `B_TABLE` is implied through `C_TABLE`'s widened edge
   above: `A_TABLE` never draws `B_TABLE` keys itself, but its rows are
   still valid children of `B_TABLE` because `C_TABLE` already proved
-  it. An edge that is neither driving nor implied is a preflight stop
-  naming the exact edit — widen the driving parent's edge to carry the
-  missing columns, or mark the ambiguous edge `drives: true` yourself.
+  it. An edge that is neither driving nor implied is **not** a stop
+  any more: it is `independent` or `conditional` (ADR 0037 — next
+  section).
+
+### Multi-parent children: every edge has a role (ADR 0037)
+
+A child may reference several parents. The registry gives **every**
+enforced edge one of five roles — you never declare a role, and since
+ADR 0037 no combination of edges is a launch stop except two `drives:
+true` markers on one table.
+
+| role | when | DAG path | what a row gets |
+|---|---|---|---|
+| `driving` | the parent whose landed keys this child is generated from (ADR 0036) | the key-batch request stream | the whole driving tuple + inherited columns + PK cells |
+| `implied` | its columns are a subset of the driving edge's AND the driving parent carries them from that parent, transitively | none — nothing to draw | satisfied through the driving edge |
+| `independent` | shares **no** column with the driving edge (a star-schema dimension) | the sampled key pool as a side input (ADR 0030/0031) | a whole parent key tuple, drawn per row |
+| `conditional` | shares **at least one** column with the driving edge (a diamond branch) | a co-partitioned `CoGroupByKey` on the shared columns, before batching | shared columns from the driving key; the rest is a candidate that exists in the parent for that shared value |
+| `external` | the parent is outside the launch (`dataset.table`) | the driver-side key pool | a whole tuple |
+
+Overlap is by **child column name**: the child column `T` in `(T,L) ->
+left` and in `(T,R) -> right` is ONE column with ONE value, so it must
+satisfy both parents — that is why an overlapping edge cannot ride a
+side-input pool (the pool would overwrite `T`) and gets the join
+instead. The edge's columns outside the overlap are its `rest`; a
+`rest` that is empty makes the edge a pure **existence filter** (the
+child's key must also exist in that parent).
+
+The card names the role on every edge, so `card.py` is the check:
+
+```text
+        |   +- (B_KEY) --> dim_b (B_KEY)     [enforced, independent]
+        |   +- (T,R) --> right (T,R)         [enforced, conditional on (T)]
+```
+
+#### Which edge drives — the rule, in order
+
+1. **One** internal enforced edge → it drives.
+2. Exactly one edge marked `drives: true` → it drives.
+3. No marker: the parent that **descends from every other candidate
+   parent** drives, and its edge to the other parent is widened with the
+   child's pins (`fk_edge_widened`).
+4. No marker **and** no ancestry between the parents → the **first
+   declared** internal enforced edge drives. The launcher logs
+   `fk_driving_edge_defaulted table= edge= hint='mark drives: true to
+   choose'` at **WARNING** and the card tags it `DRIVES (first declared
+   — mark drives: true to choose)`. Reorder the `fk:` list or add
+   `drives: true` to choose a different one.
+5. More than one `drives: true` on one table → `RelationshipError`.
+   This is the only stop left.
+
+`drives: true` is always the override; toggling `enabled` is still
+enough to launch.
+
+#### `--fk_candidate_cap` (default 64)
+
+A conditional edge keeps at most `M = --fk_candidate_cap` candidate
+tuples per shared value (a deterministic hash-ordered sample), so a hot
+shared key never carries an unbounded list into a request. A key whose
+fan-out exceeds the candidates it was handed **wraps** — it reuses
+them, in a seeded order. Raising the cap only buys back the wrapping the
+cap itself caused: a shared value the parent simply has too few distinct
+candidates for wraps at any cap. See the figure in
+[ADR 0037](../../docs/adr/0037-multi-parent-children.md) (D4).
+
+#### When the parent has no candidate for a key (ruling B)
+
+A driving key whose shared value does not exist in the conditional
+parent at all:
+
+- **every `rest` column NULLABLE** in the landing schema → the engine
+  writes `NULL` there. The row lands, legitimately parentless (the
+  orphan query excludes NULL tuples, as it always has).
+- **otherwise** → the key is dropped **before** generation (no GPU spend
+  on a row that cannot be valid), counted as `fanout/keys_unmatched`,
+  and reported as one DLQ envelope per key, `rule_id="fk.unmatched"`,
+  weighted by that key's expected rows so the BLOCKER gate sees the
+  rows that were lost. An empty `rest` (existence filter) is never
+  nullable, so its unmatched keys are always dropped.
+
+`fk.unmatched` is NOT `fk.orphan`: an orphan is a generator regression
+and never expected, while an unmatched key means the SOURCE lacks that
+branch.
+
+#### Worked example — a star fact
+
+Two dimensions with no ancestry between them
+(`config/relationships/example_star_diamond.yaml`):
+
+```yaml
+  dim_a:
+    pk: [A_KEY]
+  dim_b:
+    pk: [B_KEY]
+  fact:
+    pk: [A_KEY, B_KEY, LINE_NO]
+    fk:
+      - cols: [A_KEY]   # first declared -> DRIVES (rule 4)
+        ref: dim_a
+        ref_cols: [A_KEY]
+      - cols: [B_KEY]   # no shared column -> independent
+        ref: dim_b
+        ref_cols: [B_KEY]
+```
+
+```text
+ wave 2 | fact                     pk(A_KEY,B_KEY,LINE_NO)
+        |   +- (A_KEY) --> dim_a (A_KEY)   [enforced, DRIVES (first declared — mark drives: true to choose)]
+        |   +- (B_KEY) --> dim_b (B_KEY)   [enforced, independent]
+```
+
+Add `drives: true` to the `dim_b` edge and the WARNING goes away with
+the roles swapped.
+
+#### Worked example — a true diamond
+
+`bottom` reaches `top` through both `left` and `right`, so `T` must be
+one value satisfying both:
+
+```yaml
+  top:
+    pk: [T]
+  left:
+    pk: [T, L]
+    fk: [{cols: [T], ref: top, ref_cols: [T]}]
+  right:
+    pk: [T, R]
+    fk: [{cols: [T], ref: top, ref_cols: [T]}]
+  bottom:
+    pk: [T, L, R]
+    fk:
+      - cols: [T, L]    # DRIVES: bottom is generated from left's keys
+        ref: left
+        ref_cols: [T, L]
+        drives: true
+      - cols: [T, R]    # shares T -> conditional on (T); R is joined in
+        ref: right
+        ref_cols: [T, R]
+```
+
+```text
+ wave 3 | bottom                   pk(T,L,R)
+        |   +- (T,L) --> left (T,L)   [enforced, DRIVES]
+        |   +- (T,R) --> right (T,R)   [enforced, conditional on (T)]
+```
+
+`T` and `L` are inherited from the driving key; `R` is drawn from the
+`right` rows that actually carry that `T`. The two branches are drawn
+independently given `T` — the source's joint `(L, R)` distribution is
+not reproduced (ADR 0037, Consequences).
+
+Render either shape without launching:
+
+```bash
+uv run --no-sync python3 scripts/relationships/card.py \
+  --relationships-uri config/relationships/example_star_diamond.yaml --all
+```
 
 ## What a launch does with it
 
@@ -156,6 +311,9 @@ run, never a source value — instead of a UUID. The launcher logs
 - every `fk.ref` names a table in the model, or is `dataset.table`
 - `cols` and `ref_cols` have the same arity, and neither is empty
 - a table belongs to exactly ONE model file
+- one `fk:` entry per `(cols, ref, ref_cols)` on a table — a duplicate
+  entry is a parse error (`declared twice`), because "the first declared
+  edge drives" must not depend on which copy you meant
 - enforced edges form a DAG (no cycles)
 - every column named by `pk` / `identity` / an enforced `fk.cols` exists in
   the real table (preflight P2 — this is where a YAML typo stops the run,
@@ -177,6 +335,10 @@ The `gs://` override keeps real names off the filesystem entirely.
 ```bash
 # see what a launch will do, without launching
 uv run --no-sync python3 scripts/relationships/card.py --table A_TABLE
+
+# the committed samples (a directory scan skips them; name the FILE)
+uv run --no-sync python3 scripts/relationships/card.py \
+  --relationships-uri config/relationships/example_star_diamond.yaml --all
 
 # check every table the models reference actually exists
 uv run --no-sync python3 scripts/deployment_prerequisites.py --project <p>

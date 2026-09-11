@@ -167,6 +167,16 @@ cap, wrapping starts only where the fan-out per shared value exceeds 64
 children **and** the parent offers more than 64 candidates for that
 value; the source's tail decides, and the cap is a flag.
 
+![Candidate cap vs wrapping](assets/multi-parent-candidate-cap.png)
+
+*A shared value reuses a candidate only when its fan-out outruns the
+list it was handed.* Formally a key wraps iff `k > min(c, M)` for
+candidate count `c` and cap `M = --fk_candidate_cap`; the wrapping
+attributable to `M` is confined to `c >= k > M` (the orange wedge),
+while `k > c` is forced by the source and identical at every cap.
+Mechanism: `_conditional_candidates` (`sdfb_beam/pipeline.py`) and
+`sdfb_core.engines.fanout.conditional_values`.
+
 ```mermaid
 sequenceDiagram
   participant K as driving key (T=t1, L=l7)

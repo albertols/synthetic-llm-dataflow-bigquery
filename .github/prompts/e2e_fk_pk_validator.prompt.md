@@ -30,8 +30,9 @@ number came from:
 
 1. **The model file**, parsed by the repo's own registry — never by hand. The
    registry is what the launch used: it hides disabled tables, drops
-   documented (`enforced: false`) edges, assigns `driving` / `implied` /
-   `external` roles and **widens** a parent's edge with the columns a child
+   documented (`enforced: false`) edges, assigns one of the five roles
+   `driving` / `implied` / `independent` / `conditional` / `external`
+   (ADR 0036/0037) and **widens** a parent's edge with the columns a child
    pins (`derived_widenings`, ADR 0036). Checking the raw YAML instead would
    verify a contract the launch never enforced.
 2. **The launch's own record** — the launcher/worker log for `JOB_ID`
@@ -51,7 +52,7 @@ anonymised (aliases only — `A_TABLE`, `B_COL_006`, … — per
 
 | Param | Example | Notes |
 |---|---|---|
-| `MODEL_FILE` | `config/relationships/example_retail.yaml` | the relationship model the launch ran with. A directory is accepted (the loader scans it and skips `example_*.yaml` samples); a single file is loaded as-is |
+| `MODEL_FILE` | `config/relationships/example_retail.yaml` | the relationship model the launch ran with. A directory is accepted (the loader scans it and skips `example_*.yaml` samples); a single file is loaded as-is. `example_star_diamond.yaml` is the multi-parent sample (ADR 0037) |
 | `JOB_ID` | `2026-09-10_11_00_44-8177138577202163642` | the Dataflow job id (one relational single-job launch = N tables) |
 | `PROJECT` | `<project-id>` | GCP project of the landing dataset |
 | `LANDING_DATASET` | `<project>.synthetic_data` | where `<TABLE>` landed (the model's bare table names are the landing table names) |
@@ -105,17 +106,21 @@ out = {"sha": reg.sha12(), "tables": {}, "widenings": reg.derived_widenings()}
 for model in reg.models:
     for name, rel in model.tables.items():
         entry = {"enabled": rel.enabled, "pk": list(rel.pk),
-                 "identity": list(rel.identity), "edges": [], "not_enforced": []}
+                 "identity": list(rel.identity), "edges": [], "not_enforced": [],
+                 "driving_choice": None}
         roles = {}
         if rel.enabled:
             try:
                 roles = reg.edge_roles(name)
+                entry["driving_choice"] = reg.driving_choice(name)
             except RelationshipError as exc:
                 entry["roles_error"] = str(exc)
         for e in reg.enforced_edges(name):          # widened, both ends enabled
             entry["edges"].append({"cols": list(e.cols), "ref": e.ref,
                                    "ref_cols": list(e.ref_cols),
-                                   "role": roles.get(e, "?")})
+                                   "role": roles.get(e, "?"),
+                                   "overlap": list(reg.edge_overlap(name, e)),
+                                   "rest": list(reg.edge_rest(name, e))})
         for e in rel.fk:                            # declared, never drawn
             if not e.enforced:
                 why = "documented"
@@ -141,6 +146,17 @@ Save stdout as `runs/<JOB_ID>/real/contract.json` (the card goes to stderr so th
   `edges[]` entry (these are the widened, enforced edges — for a driven child
   the `driving` edge's columns may be LONGER than the YAML's `cols`; that is
   the inherited-column widening and it IS the contract).
+- **Read the role, never guess it** (ADR 0037). `role` is one of
+  `driving` / `implied` / `independent` / `conditional` / `external`;
+  `overlap` names the columns a `conditional` edge shares with the driving
+  edge (empty for every other role) and `rest` the ones joined in — an
+  empty `rest` on a conditional edge is a pure existence filter.
+  `driving_choice` says how the driving edge was picked: `single`,
+  `marked` (`drives: true`), `derived` (most-derived parent, widened), or
+  `first_declared` — the default when nothing else decided. A
+  `first_declared` table should have logged `fk_driving_edge_defaulted`
+  (WARNING) at launch: report it as "the launch defaulted", not as a
+  defect, and note that one `drives: true` pins it.
 - **Report, do not verify**: `not_enforced[]` (documented edges, edges to a
   disabled parent) and `enabled: false` tables. A launch never drew keys for
   them; an orphan count there is meaningless.
@@ -170,7 +186,12 @@ Extract, with one `grep`/`python` pass over `msg` (entries are single-line
 |---|---|---|
 | `launch_config` | `run_ids`, `landing_tables`, `num_rows`, `write_disposition`, `uniqueness_mode`, `driven_uniqueness_mode` | scopes every later query; the run-id prefix is `<run_id>` up to `-NN-<TABLE>` |
 | `relationships_loaded` / `relationship_model … sha=` | `sha` | must equal `contract.json.sha`. **Mismatch = the launch used a different model file than `MODEL_FILE`; report it and continue, but label every verdict "against a different contract"** |
-| `fk_edge_role edge= role=` | per edge | must match `contract.json` roles |
+| `fk_edge_role edge= role= overlap=` | per edge | must match `contract.json` roles AND `overlap` (ADR 0037) |
+| `fk_driving_edge_defaulted table= edge= hint=` (WARNING) | per table | rule 4 fired — expect it on every table whose `driving_choice` is `first_declared`, and ONLY those. Present without a matching `first_declared`, or absent with one, means the launch read a different model |
+| `fk_edge_overlap_external table= edge= overlap=` (WARNING) | per edge | an external parent's edge overlaps the driving edge — integrity on that edge is NOT resolved; Step 5 records it `unverifiable-by-design`, never a PASS |
+| `relational_fk_edge … mode=side_input\|conditional overlap=` (worker) | per edge | the DAG path each non-driving edge took; a `conditional` role with `mode=side_input` (or the reverse) is a wiring finding |
+| `fanout_bound … conditional= candidate_cap=` (worker) | per driven table | how many conditional edges rode with the keys and the `--fk_candidate_cap` in force |
+| `batch_unmatched batch_id= keys_dropped=` (worker) | per batch | driving keys dropped before generation for a non-nullable conditional edge — sum them and compare with `fanout / keys_unmatched` and `fk.unmatched` |
 | `fk_edge_widened table= ref= via= added=` | the derived widening | must match `contract.json.widenings` |
 | `fk_fanout_measured edge= parents= children= mean= p50= p95= max= zero_share=` | the SOURCE fan-out | Step 5 compares the landed fan-out to it |
 | `relational_single_job … rows_detail=` | derived rows per table | Step 3 compares to `valid_count` |
@@ -196,7 +217,14 @@ ORDER BY landing_table, created_at DESC
 
 One row per table (keep the newest per `landing_table`). Parse `dlq_by_rule`
 (JSON string) and record per table: `pk.duplicate`, `fk.orphan`,
-`identity.unique`, `row.duplicate`, `engine_failure`. Note the uniqueness
+`fk.unmatched`, `identity.unique`, `row.duplicate`, `engine_failure`.
+`fk.unmatched` (ADR 0037 ruling B) counts rows NEVER GENERATED because a
+non-nullable `conditional` edge had no candidate for their driving key —
+it is weighted by each dropped key's expected rows, so it is a row count,
+not a key count (`fanout / keys_unmatched` is the key count). A run whose
+model declares no conditional edge must not have the key at all; absent is
+the expected reading, 0 is fine, and a missing key on a conditional model
+means the rule never fired. Note the uniqueness
 mode: under `streaming` (the driven-child default) `pk.duplicate` is
 MEASURED, not removed, so a non-zero value here means duplicate PKs LANDED —
 Step 4 must find them. Missing rows = the table never reached its summary
@@ -258,7 +286,33 @@ FROM child c LEFT JOIN parent p USING (k1, …, kk)
 
 Pass criterion: `orphans = 0`. For an **external** edge (`ref` is
 `dataset.table`) the parent is that FQN as given; if it is not readable,
-record `unverifiable` with the error.
+record `unverifiable` with the error. An external edge the launch logged
+`fk_edge_overlap_external` for is `unverifiable-by-design`: the driving
+edge overwrote its shared columns, so a non-zero orphan count there is
+the KNOWN limitation (ADR 0037 §9), not a regression — report it with
+the remedy (enable the parent inside the launch).
+
+**A `conditional` edge is checked with the SAME query.** Its role changes
+how the values were produced (the shared `overlap` columns came from the
+driving key, the `rest` from a co-partitioned join), not what integrity
+means: the whole tuple must exist in the parent, so run exactly the
+orphan query above over `cols`/`ref_cols` and expect `orphans = 0`. The
+NULL tuples that query already excludes are the **ruling-B rows** — a
+driving key whose shared value had no candidate, with every `rest` column
+NULLABLE, lands with `rest = NULL` and is legitimately parentless. Count
+them and report them as their own line (they are NOT orphans and NOT
+`fk.unmatched`, which covers the non-nullable case where the key was
+dropped instead):
+
+```sql
+SELECT COUNTIF(c1 IS NULL AND … AND ck IS NULL) AS null_tuples,
+       COUNT(*) AS child_rows
+FROM `${LANDING_DATASET}.C` [WHERE …]
+```
+
+An edge whose `rest` is empty (a pure existence filter) has no nullable
+case at all: every unmatched key was dropped, so `null_tuples` must be 0
+and the losses appear only in `fk.unmatched`.
 
 **Fan-out reproduction** (driven children only — the edge whose role is
 `driving`, when `fk_fanout_measured` exists for it):
@@ -310,6 +364,22 @@ Rules for the last column:
   remove rows, so a non-zero measurement with a clean table means the two
   looked at different data (run-id scoping, overwrite, or a second launch).
 
+**`fk.unmatched` is not `fk.orphan` — they have opposite expectations.**
+Give each conditional edge its own line and read them this way:
+
+| rule | what it counts | expected? |
+|---|---|---|
+| `fk.orphan` | a row LANDED whose whole FK tuple has no parent | **never** — the draw is joint by construction, so any non-zero value is a generator regression and a BLOCKER |
+| `fk.unmatched` | a row was NEVER GENERATED: the driving key's shared value had no candidate in the conditional parent, and the `rest` columns are not all NULLABLE, so the key was dropped before generation (ADR 0037 ruling B) | **expected when the SOURCE lacks that branch** — it is an input fact. Corroborate it: `SELECT COUNT(*) FROM (SELECT DISTINCT <overlap> FROM parent_of_the_driving_edge) EXCEPT DISTINCT (SELECT DISTINCT <overlap cols> FROM the conditional parent)` — if the source really is missing those shared values, the counts line up and the verdict stays PASS with a noted input gap; if the source HAS them, the join lost them and that is a defect |
+
+Cross-check the three views of the same event before judging: the DLQ row
+count (`fk.unmatched`), the Beam counter (`fanout / keys_unmatched`, KEYS
+not rows) and the summed `batch_unmatched keys_dropped=` lines must agree
+on the key count. Two of them disagreeing is itself the finding. A
+non-zero `fanout / candidates_dropped_null` alongside them means the
+conditional parent landed NULLs in the shared columns — that is where to
+start, not the join.
+
 ---
 
 ## Step 7 — Verdict and artifacts
@@ -317,7 +387,10 @@ Rules for the last column:
 **Verdict** (first line of the report): `PASS` when every enabled landed
 table has `pk_duplicates = 0`, `identity_duplicates = 0`, every enforced edge
 has `orphans = 0`, and every driven edge's fan-out is within noise; otherwise
-`FAIL` with the failing (table, check) pairs listed first. `INCOMPLETE` when
+`FAIL` with the failing (table, check) pairs listed first. A non-zero
+`fk.unmatched` does NOT by itself make the verdict `FAIL` — it fails only
+when the source DOES hold the missing shared values (Step 6); otherwise it
+is a PASS with a named input gap, reported with its row count. `INCOMPLETE` when
 a table in the contract did not land or the job failed — still list every
 check that could run.
 
@@ -331,7 +404,8 @@ Write:
 - `runs/<JOB_ID>/real/fk_pk_validation.json` — `{"job_id", "model_file",
   "model_sha", "launch_sha", "verdict", "tables": {T: {"landed", "total",
   "pk_duplicates", "identity": {...}, "validation_run": {...}}}, "edges":
-  [{"child", "parent", "cols", "ref_cols", "role", "orphans", "child_rows",
+  [{"child", "parent", "cols", "ref_cols", "role", "overlap", "rest",
+  "orphans", "child_rows", "null_tuples", "unmatched",
   "fanout": {...}}], "not_enforced": [...], "queries": [...]}` with real
   names; and `runs/<JOB_ID>/oss/fk_pk_validation.json` + the report's `oss/`
   twin with every real table/column/project name replaced by its alias
@@ -344,9 +418,11 @@ JSON, and the markdown quotes them.
 
 ---
 
-## Worked shape (the committed sample)
+## Worked shapes (the committed samples)
 
-`config/relationships/example_retail.yaml` yields, through Step 1:
+### 1 — a chain (`config/relationships/example_retail.yaml`)
+
+Through Step 1 it yields:
 
 - `A_TABLE` — root: PK `(A_COL_001, A_COL_002)`, identity `A_COL_009`.
 - `B_TABLE` — PK `B_COL_001`; enforced edge `(B_COL_006, B_COL_007) → A_TABLE
@@ -361,6 +437,36 @@ JSON, and the markdown quotes them.
 So the checks are: 4 PK checks (A, B, C, E), 1 identity check (A), 3 orphan
 checks (B→A, C→B, E→external), 2 fan-out comparisons (B→A, C→B) when the
 launch measured them, and 2 "declared, not enforced" lines.
+
+### 2 — a star and a diamond (`config/relationships/example_star_diamond.yaml`)
+
+The multi-parent shapes (ADR 0037). Step 1 yields two components:
+
+- **star** — `dim_a` (PK `A_KEY`) and `dim_b` (PK `B_KEY`) are roots;
+  `fact` (PK `(A_KEY, B_KEY, LINE_NO)`) has two enforced edges:
+  `(A_KEY) → dim_a` with role `driving` and
+  `driving_choice = "first_declared"` (no `drives:` marker, no ancestry
+  between the dims — the launch logged `fk_driving_edge_defaulted`), and
+  `(B_KEY) → dim_b` with role `independent`, `overlap = []` (it rode the
+  side-input key pool, so `fk_key_pool_bound` names it and the
+  `fk.orphan` gate measured it).
+- **diamond** — `top` (PK `T`) is the root; `left` (PK `(T, L)`) and
+  `right` (PK `(T, R)`) each drive off `top`; `bottom` (PK `(T, L, R)`)
+  has `(T, L) → left` as `driving` (marked `drives: true`) and
+  `(T, R) → right` as `conditional` with `overlap = ["T"]`,
+  `rest = ["R"]` — the worker logged
+  `relational_fk_edge mode=conditional overlap=T` for it.
+
+So the checks are: 7 PK checks (one per table), 0 identity checks, 6
+orphan checks — `fact→dim_a`, `fact→dim_b`, `left→top`, `right→top`,
+`bottom→left`, and `bottom→right` as the SAME whole-tuple query on
+`(T, R)` — plus, on `bottom→right`, the `null_tuples` count (ruling-B
+rows, expected only if `R` is NULLABLE) and the `fk.unmatched` line
+cross-checked against `fanout / keys_unmatched`. Every `fact` row must
+carry a `B_KEY` that exists in `dim_b`, and `bottom`'s single `T` must
+satisfy `left` AND `right` — that one column is the whole point of the
+conditional role, so an orphan on `bottom→right` with none on
+`bottom→left` means the join, not the pool, is the defect.
 
 ---
 

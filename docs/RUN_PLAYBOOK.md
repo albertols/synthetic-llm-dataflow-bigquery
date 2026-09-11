@@ -604,11 +604,18 @@ Relational:
 | `identity_constraint_owned` | the named identity columns are generated from their DECLARED CLAUSE (Tier P/B), not UUID synthesis (ADR 0028 amendment) |
 | `fk.orphan` in `validation_runs.dlq_by_rule` | rows that referenced a non-existent parent. Non-zero = a generator regression (the draw is joint by construction) — a BLOCKER, not a tolerance |
 | `fk_edge_widened table= ref= via= added=` (launcher) | the registry widened a parent's edge with inherited columns pinned by a child that references the same columns in both tables — no model edit needed (ADR 0036 rev) |
-| `fk_edge_role edge= role=driving\|implied\|external` (launcher + worker preflight) | which edge a child is generated FROM, which are satisfied by construction (ADR 0036) |
+| `fk_edge_role edge= role=driving\|implied\|independent\|conditional\|external overlap=` (launcher + worker preflight) | the role of EVERY enforced edge: which edge a child is generated FROM (`driving`), which are satisfied by construction (`implied`), which ride the side-input key pool (`independent` — a star-schema dimension, no column shared with the driving edge), which are joined on their shared columns (`conditional` — `overlap=` names them), and which point outside the launch (`external`). ADR 0036/0037 |
+| `fk_driving_edge_defaulted table= edge= hint='mark drives: true to choose'` (launcher, **WARNING**) | the child has several enforced parents, none marked `drives: true` and no ancestry between them, so the FIRST DECLARED edge drives (ADR 0037 ruling A). The launch is correct either way — mark the edge you meant, or reorder the `fk:` list, if it is not this one |
+| `fk_edge_overlap_external table= edge= overlap=` (launcher, **WARNING**) | an EXTERNAL parent's edge shares columns with the driving edge. The driver-side pool is drawn as a whole tuple and the driving edge overwrites the shared columns — integrity on that edge is NOT resolved. Enable the parent inside the launch to make it `conditional` (ADR 0037 §9) |
+| `relational_fk_edge … mode=side_input\|conditional overlap=` (worker, per edge) | the DAG path each non-driving edge actually took this run: `side_input` = the ADR 0031 key pool; `conditional` = the co-partitioned join, with `overlap=` naming the shared columns. A driving edge emits no such line (ADR 0036 ruling 8) |
 | `fk_fanout_cache_unavailable table= op= error=` (launcher, WARNING) | the optional `fk_fanout_stats` cache could not be read/written (missing table, permission, transient) — the launch measured without it (ADR 0036) |
 | `fk_fanout_measured edge= parents= children= mean= p50= p95= max= zero_share= source=measured\|cache` (launcher) | the SOURCE ratio the driven child reproduces; `cache` = read from `fk_fanout_stats` instead of re-scanning |
 | `relational_single_job … rows_detail=<name>:<rows>,…` (launcher) | derived row count per table — roots take `--num_rows`, driven children derive from their parent's landed keys and the measured fan-out |
-| `fanout_bound driving_cols= cells= exact_cells= mean_fanout=` (worker, once per engine build) | the engine bound the driven child's recipe; `exact_cells=True` = the PK-completing cells alone must key the child (drawn without replacement) |
+| `fanout_bound driving_cols= cells= exact_cells= mean_fanout= conditional= candidate_cap=` (worker, once per engine build) | the engine bound the driven child's recipe; `exact_cells=True` = the PK-completing cells alone must key the child (drawn without replacement); `conditional=<n>` = how many conditional edges ride with the keys and `candidate_cap=` the Top-M bound in force (`--fk_candidate_cap`, ADR 0037) |
+| `batch_unmatched batch_id= keys_dropped=` (worker) | driving keys removed from a batch BEFORE generation because a NON-nullable conditional edge had no candidate for them (ADR 0037 ruling B) — each one is also a `fk.unmatched` DLQ envelope |
+| `fanout / candidates_dropped_null` (Beam counter) | conditional-parent rows discarded because a SHARED (join-key) column was NULL. Non-zero means the parent landed NULLs in the columns the join keys on — expect 0 on a PK-declared parent |
+| `fanout / keys_unmatched` (Beam counter) | driving keys dropped for a non-nullable conditional edge with no candidate. Read it next to `fk.unmatched` in `dlq_by_rule`: the counter counts KEYS, the rule counts their expected ROWS |
+| `fk.unmatched` in `validation_runs.dlq_by_rule` | rows never generated because the conditional parent held no candidate for their shared value, weighted by each dropped key's expected rows (ADR 0037 ruling B). Unlike `fk.orphan` this is an INPUT fact, not a generator regression — a branch the source genuinely lacks. Non-zero with a source you expect to be complete = check the edge's columns and `fanout / candidates_dropped_null` |
 | `batch_start batch_id= keys=` / `batch_done batch_id= keys= rows= seconds=` (worker) | a key batch: parent keys in, children out (ADR 0036) — replaces `n=`/`rows=` for a driven child's batches |
 
 ---
@@ -857,6 +864,62 @@ the number of parent key tuples the fan-out projection discarded because
 a JOIN-KEY column was NULL. Inherited (non-join) NULLs ride through and
 are copied verbatim, so a non-zero counter means the parent landed NULLs
 in the driving edge's own columns — expect 0 on a PK-declared parent.
+
+**Multi-parent children (ADR 0037) — which parent drives, and the
+candidate cap.** A driven child may reference several parents. You do
+not declare roles; the registry derives them from the columns, and
+`scripts/relationships/card.py --table <CHILD>` prints them before you
+launch:
+
+- an edge that shares **no** column with the driving edge is
+  `independent` — it keeps the ADR 0030/0031 side-input key pool and the
+  `fk.orphan` gate, exactly as a root's edge would (a star-schema
+  dimension);
+- an edge that shares **at least one** column is `conditional` — the
+  shared columns come from the driving key, and the rest is joined in
+  from the parent rows that carry that shared value (a diamond branch).
+  `relational_fk_edge mode=conditional overlap=` (worker) is the
+  confirmation.
+
+**Which parent drives** is a pure function of the model file, in order:
+a lone enforced in-model edge drives; else exactly one edge marked
+`drives: true`; else the parent that descends from every other candidate
+parent (its edge to the other parent is widened, `fk_edge_widened`);
+else — no marker and no ancestry between the parents — the **first
+declared** enforced edge drives and the launcher logs
+`fk_driving_edge_defaulted table= edge= hint=` at WARNING. That WARNING
+is not a failure: the launch is correct either way, and the fix if it
+picked the wrong parent is one `drives: true` in the model file (two
+markers on one table is still the one `RelationshipError` left). An
+EXTERNAL parent whose edge overlaps the driving edge cannot be resolved
+at all — `fk_edge_overlap_external` (WARNING); enable the parent inside
+the launch to turn it into a `conditional` edge.
+
+`--fk_candidate_cap` (default `64`) bounds the candidate list a
+conditional edge carries per shared value (Top-M by a deterministic
+`blake2b(run_id, rest)` order). A key whose fan-out exceeds the list
+wraps — it reuses candidates in a seeded order — so raise the cap when a
+branch's within-key variety matters and the shuffle can afford it, lower
+it when a request gets too wide (`keys_per_batch` is lowered at launch so
+a request never exceeds 100k candidate values). A shared value the parent
+simply has too few distinct candidates for wraps at ANY cap; the figure
+in [ADR 0037](adr/0037-multi-parent-children.md) D4 shows the split.
+Preflight P4 folds both new members into the per-key PK capacity: an
+independent edge in the PK contributes its pool cap, a conditional edge's
+`rest` in the PK contributes at most `M` — a stop there names the edge or
+`--fk_candidate_cap`.
+
+**Unmatched conditional keys (`fk.unmatched`).** When the conditional
+parent holds NO row for a driving key's shared value, the engine writes
+`NULL` on the branch columns if every one of them is NULLABLE in the
+landing schema; otherwise the key is dropped before generation
+(`batch_unmatched`, `fanout / keys_unmatched`) and reported as
+`fk.unmatched` in `validation_runs.dlq_by_rule`, weighted by that key's
+expected rows. Expect non-zero only when the SOURCE genuinely lacks that
+branch — it is an input fact, not a generator regression the way
+`fk.orphan` is. The §8.4 orphan query is unchanged for a conditional
+edge: the same whole-tuple LEFT JOIN, and the ruling-B NULL rows are
+excluded from it exactly as every NULL tuple already is.
 
 **The cache table is optional.** If `--fk_fanout_stats_table` names a table that does not exist (or cannot be read or written), the launcher logs `fk_fanout_cache_unavailable` (WARNING) once per table and measures the fan-out from the source instead; nothing else changes.
 

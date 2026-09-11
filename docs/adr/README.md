@@ -69,3 +69,4 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0034 — Generation throughput: one dedup barrier, one engine per process, a fleet that starts full, lazy embedder, Storage-API domains, the multi-process SDK experiment (amends 0019/0030/0033)](0034-generation-throughput-single-barrier-shared-engines.md)
 - [0035 — PK capacity counts FK-bound and categorical members; the FK key sample is sized by the child's PK (amends 0028/0030/0031)](0035-pk-capacity-fk-bound-members.md)
 - [0036 — Parent-driven fan-out generation: children are generated from their parent's landed keys, not random draws (amends 0030/0031/0035)](0036-parent-driven-fanout-generation.md)
+- [0037 — Multi-parent children: independent and conditional edges give every declared FK edge a role and a DAG path (amends 0036)](0037-multi-parent-children.md)
