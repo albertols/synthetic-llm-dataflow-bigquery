@@ -25,6 +25,7 @@ import logging
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from sdfb_core.contracts.description_json import DescriptionJsonError
@@ -506,16 +507,37 @@ def _check_pk_is_a_key(
     )
 
 
+# ADR 0037 §4 — a conditional edge hands a driving key at most this many
+# parent candidate tuples (`--fk_candidate_cap`). Defined HERE, not in
+# `run_pipeline`, so P4 and the launcher agree on one number without
+# preflight importing the launcher (the import runs the other way).
+DEFAULT_FK_CANDIDATE_CAP = 64
+
+# Immutable empty defaults (a `{}` default would be shared mutable state).
+_NO_CAPS: Mapping[tuple[str, ...], int] = MappingProxyType({})
+_NO_REST: Mapping[str, tuple[str, ...]] = MappingProxyType({})
+
+
 def pk_cell_columns(
     effective_pk: tuple[str, ...],
     driving_cols: tuple[str, ...],
     profiles: Mapping[str, ColumnProfile],
+    known: tuple[str, ...] = (),
 ) -> tuple[tuple[str, ...], bool]:
     """``(cell columns, exact)`` for a driven child (ADR 0036): the PK
     members outside the driving edge that the engine re-emits from a
     domain (CATEGORICAL / CONSTANT); ``exact`` when they are ALL the
-    remaining members, so the cells alone must key the child."""
-    rest = tuple(c for c in effective_pk if c not in set(driving_cols))
+    remaining members, so the cells alone must key the child.
+
+    ``known`` (ADR 0037) are the PK members ANOTHER edge supplies: an
+    independent edge's columns (a whole tuple drawn from its sampled key
+    pool) and a conditional edge's ``rest`` (one candidate tuple per
+    shared key). They are neither cells — nothing measures a cell table
+    over an FK column the parent fills — nor free members that make the
+    check inexact; the capacity they contribute per parent key is its
+    own P4 factor (`_check_driven_pk`)."""
+    supplied = set(driving_cols) | set(known)
+    rest = tuple(c for c in effective_pk if c not in supplied)
     cells = tuple(
         c for c in rest
         if (p := profiles.get(c)) is not None
@@ -524,63 +546,157 @@ def pk_cell_columns(
     return cells, len(cells) == len(rest)
 
 
+def _pk_completing_edges(
+    effective_pk: tuple[str, ...],
+    independent_caps: Mapping[tuple[str, ...], int],
+    conditional_rest: Mapping[str, tuple[str, ...]],
+) -> tuple[
+    dict[tuple[str, ...], int], dict[str, tuple[str, ...]], tuple[str, ...]
+]:
+    """The non-driving edges that COMPLETE this PK (ADR 0037 §6), and
+    the columns they supply: independent edges whose columns all sit in
+    the PK, conditional edges whose (non-empty) ``rest`` all sits in it.
+
+    Partial membership is deliberately excluded: an edge that fills only
+    some PK members leaves the others to the cells, and counting its
+    whole pool as a per-key factor would overstate the capacity.
+    Members outside the PK never enter P4 at all."""
+    pk = set(effective_pk)
+    independent = {
+        cols: cap for cols, cap in independent_caps.items() if set(cols) <= pk
+    }
+    conditional = {
+        edge_id: rest
+        for edge_id, rest in conditional_rest.items()
+        if rest and set(rest) <= pk
+    }
+    known = tuple(c for cols in independent for c in cols) + tuple(
+        c for rest in conditional.values() for c in rest
+    )
+    return independent, conditional, known
+
+
+def _driven_pk_stop(
+    table_schema: TableSchema,
+    effective_pk: tuple[str, ...],
+    driving: tuple[str, ...],
+    max_k: int,
+    capacity: int,
+    cells: tuple[str, ...],
+    n_cells: int,
+    independent: Mapping[tuple[str, ...], int],
+    n_conditional: int,
+    candidate_cap: int,
+) -> SystemExit:
+    """The P4 stop for a driven child whose per-key capacity is short,
+    naming every factor that bounds it and the knob that moves it."""
+    parts: list[str] = []
+    if cells:
+        parts.append(
+            f"the PK-completing members {list(cells)} cover only "
+            f"{n_cells} cells"
+        )
+    for cols, cap in independent.items():
+        parts.append(
+            f"the independent edge ({','.join(cols)}) contributes at most "
+            f"{cap:,} parent keys"
+        )
+    if n_conditional:
+        parts.append(
+            f"{n_conditional} conditional edge(s) contribute at most "
+            f"--fk_candidate_cap={candidate_cap:,} candidates each"
+        )
+    fixes: list[str] = []
+    if n_conditional:
+        fixes.append(f"raise --fk_candidate_cap above {candidate_cap:,}")
+    if independent:
+        fixes.append("a parent that lands more keys")
+    fixes.append("the `pk:` in the relationship model")
+    fix = (
+        f"Fix one of: {'; '.join(fixes)}."
+        if len(fixes) > 1
+        else "Fix the `pk:` in the relationship model."
+    )
+    return SystemExit(
+        f"[preflight P4] {table_schema.fqn}: the driving edge "
+        f"({','.join(driving)}) fans out to {max_k} children per parent "
+        f"in the source, but the PK completes to only {capacity:,} rows "
+        f"per parent key ({'; '.join(parts)}) — the declared PK "
+        f"{list(effective_pk)} is not a key of the source. {fix}"
+    )
+
+
 def _check_driven_pk(
     table_schema: TableSchema,
     effective_pk: tuple[str, ...],
     fanout: Mapping,
     profiles: Mapping[str, ColumnProfile],
+    *,
+    independent_caps: Mapping[tuple[str, ...], int] = _NO_CAPS,
+    conditional_rest: Mapping[str, tuple[str, ...]] = _NO_REST,
+    candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
 ) -> None:
     """P4 for a DRIVEN child: the largest source fan-out must fit in the
-    PK-completing cells, else the declared PK is not a key in the source."""
+    per-key capacity the PK's completing members offer, else the declared
+    PK is not a key in the source.
+
+    That capacity is a PRODUCT (ADR 0037 §6): the measured cell table x
+    every independent edge's sampled key pool x ``--fk_candidate_cap``
+    per conditional edge — each one a member the engine fills per child
+    without repeating itself. A PK with none of them has capacity 1 and
+    is the ADR 0036 1:1 case, which keeps its own message."""
     driving = tuple(fanout.get("driving_cols") or ())
-    cells, exact = pk_cell_columns(effective_pk, driving, profiles)
+    independent, conditional, known = _pk_completing_edges(
+        effective_pk, independent_caps, conditional_rest
+    )
+    cells, exact = pk_cell_columns(effective_pk, driving, profiles, known=known)
     if not exact:
         return
     max_k = max(int(k) for k in (fanout.get("histogram") or {"0": 0}))
-    if not cells:
+    n_cells = 0
+    if cells:
+        n_cells = len((fanout.get("cells") or {}).get("rows") or ())
+        if max_k > 0 and n_cells == 0:
+            # Fail CLOSED: the PK needs these members to be a key, and
+            # the measurement that would supply them is missing entirely
+            # — a different fault from "measured, and too small" below.
+            raise SystemExit(
+                f"[preflight P4] {table_schema.fqn}: the declared PK "
+                f"{list(effective_pk)} is completed by {list(cells)} "
+                f"outside the driving edge ({','.join(driving)}), but no "
+                f"cell table was measured for {list(cells)} — the per-key "
+                f"draw has nothing to draw from. Re-measure the source "
+                f"fan-out (clear the `fk_fanout_stats` cache entry) or fix "
+                f"the `pk:` in the relationship model."
+            )
+    capacity = (n_cells or 1)
+    for cap in independent.values():
+        capacity *= cap
+    capacity *= candidate_cap ** len(conditional)
+    if max_k <= capacity:
+        return
+    if not cells and not known:
         # The declared PK IS the driving edge (a true 1:1 child): there
         # are no completing members, so `measure_fanout` never builds a
         # cell table — by design, not by omission. The single trivial
         # cell holds exactly one child per parent key; a source fan-out
         # above 1 is the PK not being a key of the source (2026-09-11,
         # E_TABLE stopped with "no cell table was measured for []").
-        if max_k > 1:
-            raise SystemExit(
-                f"[preflight P4] {table_schema.fqn}: the driving edge "
-                f"({','.join(driving)}) fans out to {max_k} children per "
-                f"parent in the source, but the declared PK "
-                f"{list(effective_pk)} equals the driving edge exactly — "
-                f"no completing members, so at most 1 child per parent key "
-                f"is representable. Add a discriminating column to the "
-                f"`pk:` in the relationship model, or confirm the source "
-                f"relationship really is 1:1 and the fan-out measurement "
-                f"is stale."
-            )
-        return
-    table = fanout.get("cells") or {}
-    n_cells = len(table.get("rows") or ())
-    if max_k > 0 and n_cells == 0:
-        # Fail CLOSED: the PK needs these members to be a key, and the
-        # measurement that would supply them is missing entirely — a
-        # different fault from "measured, and too small" below.
-        raise SystemExit(
-            f"[preflight P4] {table_schema.fqn}: the declared PK "
-            f"{list(effective_pk)} is completed by {list(cells)} outside "
-            f"the driving edge ({','.join(driving)}), but no cell table "
-            f"was measured for {list(cells)} — the per-key draw has "
-            f"nothing to draw from. Re-measure the source fan-out (clear "
-            f"the `fk_fanout_stats` cache entry) or fix the `pk:` in the "
-            f"relationship model."
-        )
-    if max_k > n_cells:
         raise SystemExit(
             f"[preflight P4] {table_schema.fqn}: the driving edge "
-            f"({','.join(driving)}) fans out to {max_k} children per parent "
-            f"in the source, but the PK-completing members {list(cells)} "
-            f"cover only {n_cells} cells — the declared PK "
-            f"{list(effective_pk)} is not a key of the source. Fix the `pk:` "
-            f"in the relationship model."
+            f"({','.join(driving)}) fans out to {max_k} children per "
+            f"parent in the source, but the declared PK "
+            f"{list(effective_pk)} equals the driving edge exactly — "
+            f"no completing members, so at most 1 child per parent key "
+            f"is representable. Add a discriminating column to the "
+            f"`pk:` in the relationship model, or confirm the source "
+            f"relationship really is 1:1 and the fan-out measurement "
+            f"is stale."
         )
+    raise _driven_pk_stop(
+        table_schema, effective_pk, driving, max_k, capacity, cells, n_cells,
+        independent, len(conditional), candidate_cap,
+    )
 
 
 def _driven_child_rows(
@@ -591,15 +707,24 @@ def _driven_child_rows(
     profiles: Mapping[str, ColumnProfile],
     edge_roles: Mapping[FkEdge, str] | None,
     fk_parent_rows: Mapping[str, int] | None,
+    *,
+    independent_caps: Mapping[tuple[str, ...], int] = _NO_CAPS,
+    conditional_rest: Mapping[str, tuple[str, ...]] = _NO_REST,
+    candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
 ) -> int | None:
     """P4 + row-count derivation for a DRIVEN child (ADR 0036): the
-    source fan-out is checked against the PK-completing cells
-    (``_check_driven_pk``, may stop the launch), then this table's row
-    count derives from the driving parent's rows and the mean fan-out —
-    ``None`` when the total histogram mass or the driving parent's row
-    count is unknown."""
+    source fan-out is checked against the PK-completing cells and the
+    members the other edges supply (``_check_driven_pk``, may stop the
+    launch), then this table's row count derives from the driving
+    parent's rows and the mean fan-out — ``None`` when the total
+    histogram mass or the driving parent's row count is unknown."""
     if num_rows > 0 and effective_pk:
-        _check_driven_pk(table_schema, effective_pk, fanout, profiles)
+        _check_driven_pk(
+            table_schema, effective_pk, fanout, profiles,
+            independent_caps=independent_caps,
+            conditional_rest=conditional_rest,
+            candidate_cap=candidate_cap,
+        )
     hist = {
         int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()
     }
@@ -649,6 +774,9 @@ def preflight(
     edge_roles: Mapping[FkEdge, str] | None = None,
     enforced_fk: tuple[FkEdge, ...] | None = None,
     edge_overlaps: Mapping[FkEdge, tuple[str, ...]] | None = None,
+    fk_member_caps: Mapping[tuple[str, ...], int] | None = None,
+    conditional_rest: Mapping[str, tuple[str, ...]] | None = None,
+    candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
 ) -> PreflightResult:
     """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -679,7 +807,17 @@ def preflight(
     ``RelationshipRegistry.edge_overlap`` per CONDITIONAL edge) adds
     ``overlap=`` to that edge's ``fk_edge_role`` line — the columns it
     is co-partitioned on. It is reporting only: no capacity check reads
-    it."""
+    it.
+
+    ``fk_member_caps`` / ``conditional_rest`` / ``candidate_cap`` (ADR
+    0037 §6) are what P4 DOES read on a driven child: the sampled key
+    pool each INDEPENDENT edge will broadcast (child cols → cap, sized
+    by the launcher so the composer broadcasts the same number), each
+    CONDITIONAL edge's ``rest`` columns keyed by its ``edge_id``
+    (``",".join(cols)``), and the Top-M candidate cap. Every one of
+    those is a per-key PK factor next to the measured cells. The caps
+    travel back out on ``PreflightResult.fk_key_sample_caps``, exactly
+    as the ADR 0035 random-draw path returns its own."""
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
@@ -792,9 +930,16 @@ def preflight(
     fk_key_sample_caps: dict[tuple[str, ...], int] = {}
     derived_rows: int | None = None
     if fanout is not None:
+        # ADR 0037: an independent edge inside the PK is BOTH a P4
+        # factor and a side input the composer must size — one cap, and
+        # it leaves on the result so `in_set_parent_edges` reads it.
+        fk_key_sample_caps = dict(fk_member_caps or {})
         derived_rows = _driven_child_rows(
             table_schema, tuple(effective_pk), num_rows, fanout, profiles,
             edge_roles, fk_parent_rows,
+            independent_caps=fk_key_sample_caps,
+            conditional_rest=conditional_rest or _NO_REST,
+            candidate_cap=candidate_cap,
         )
     elif num_rows > 0 and effective_pk:
         fk_key_sample_caps = _check_pk_capacity(

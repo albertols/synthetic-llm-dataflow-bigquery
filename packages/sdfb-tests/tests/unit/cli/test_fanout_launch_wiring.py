@@ -423,3 +423,95 @@ def test_fk_edge_metadata_without_roles_is_todays_dict():
     assert [set(e) for e in edges] == [
         {"cols", "ref", "ref_cols", "enforced", "parent_landing"}
     ] * 3
+
+
+# --- ADR 0037 §6: PK members another edge supplies ---------------------
+
+def test_resolve_fanout_does_not_measure_cells_over_a_conditional_member(
+    monkeypatch,
+):
+    """`R` sits in BOTTOM_TABLE's PK but the conditional edge supplies
+    it, so the launcher must not ask BigQuery for a cell table over it —
+    the cells are the members nothing else fills."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    seen: dict = {}
+
+    def _spy(**kw):
+        seen.update(kw)
+        return _measure_one_to_one(**kw)
+
+    monkeypatch.setattr(rp, "measure_fanout", _spy)
+    payload, _roles = resolve_fanout(
+        _DIAMOND_REG, "p.land.BOTTOM_TABLE", "p.src.BOTTOM_TABLE",
+        in_set_names={"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE",
+                      "BOTTOM_TABLE"},
+        reference_rows=_DIAMOND_ROWS, table_schema=_diamond_schema(),
+        stats_store=None, bq_client=object(),
+    )
+    assert seen["cell_cols"] == ()
+    assert payload["exact_cells"] is True
+
+
+_STAR37 = """
+model: star37
+tables:
+  A_TABLE:
+    pk: [A_ID]
+  B_TABLE:
+    pk: [B_ID]
+  F_TABLE:
+    pk: [A_ID, B_ID, SEQ]
+    fk:
+      - cols: [A_ID]
+        ref: A_TABLE
+        ref_cols: [A_ID]
+        drives: true
+      - cols: [B_ID]
+        ref: B_TABLE
+        ref_cols: [B_ID]
+"""
+_STAR37_REG = RelationshipRegistry.from_sources(
+    [("config/relationships/star37.yaml", _STAR37)]
+)
+_STAR37_IN_SET = frozenset(
+    f"p.land.{t}" for t in ("A_TABLE", "B_TABLE", "F_TABLE")
+)
+_STAR37_SCHEMA = TableSchema.model_validate(
+    {"table_info": {"table_id": "p.land.F_TABLE"},
+     "schema": [{"name": "A_ID", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "B_ID", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "SEQ", "type": "INT64", "mode": "REQUIRED"}]}
+)
+_STAR37_ROWS = [
+    {"A_ID": f"A1B2{i:020X}", "B_ID": f"B{i % 6}", "SEQ": i} for i in range(40)
+]
+
+
+def test_an_independent_pk_member_gets_a_sized_key_pool(monkeypatch):
+    """The cap P4 counted as a per-key factor is the SAME number the
+    composer broadcasts — it travels back out on `PreflightResult` and
+    into `in_set_parent_edges`, exactly as the random-draw path's caps
+    do (ADR 0035)."""
+    import sdfb_beam.cli.run_pipeline as rp
+    from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
+
+    monkeypatch.setattr(rp, "load_reference_rows", lambda **kw: _STAR37_ROWS)
+    monkeypatch.setattr(rp, "measure_fanout", lambda **kw: {
+        "histogram": {"2": 4}, "parents": 4, "children": 8, "cells": None})
+    args = _diamond_args("p.land.F_TABLE", reference_table="p.src.F_TABLE")
+    pf = rp._load_reference_and_preflight(
+        args, _STAR37_SCHEMA, _STAR37_REG, in_set_landing=_STAR37_IN_SET,
+    )[1]
+    # --num_rows 100 is the upper bound on what this child lands (its
+    # DERIVED count is the output of this very preflight), and B_TABLE
+    # lands at most that, so the sized pool is bounded by the parent.
+    assert pf.fk_key_sample_caps == {("B_ID",): 100}
+    edges = in_set_parent_edges(
+        _STAR37_REG, "p.land.F_TABLE",
+        in_set_names={"A_TABLE", "B_TABLE", "F_TABLE"},
+        key_sample_caps=pf.fk_key_sample_caps,
+        edge_roles=_STAR37_REG.edge_roles("F_TABLE"),
+    )
+    assert [(e.mode, e.key_sample_cap) for e in edges] == [
+        ("fanout", FK_KEY_SAMPLE_FLOOR), ("side_input", 100)]

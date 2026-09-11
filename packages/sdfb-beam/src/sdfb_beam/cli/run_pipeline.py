@@ -51,7 +51,10 @@ from sdfb_core.contracts.relationships import (
     RelationshipRegistry,
 )
 from sdfb_core.engines.b1_rag.profile import profile_columns
-from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
+from sdfb_core.engines.pk_capacity import (
+    FK_KEY_SAMPLE_FLOOR,
+    fk_key_sample_cap,
+)
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
@@ -62,7 +65,11 @@ from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.stats import PROFILER_VERSION, profile_source_table, stats_rows
 from sdfb_core.validation import Thresholds
 
-from sdfb_beam.cli.preflight import pk_cell_columns, preflight
+from sdfb_beam.cli.preflight import (
+    DEFAULT_FK_CANDIDATE_CAP,
+    pk_cell_columns,
+    preflight,
+)
 from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
@@ -145,7 +152,6 @@ _EDGE_MODES = {
 # tuples per conditional edge; `keys_per_batch` is lowered so the whole
 # request stays under this many values, whatever the cap is set to.
 _MAX_CONDITIONAL_VALUES_PER_REQUEST = 100_000
-DEFAULT_FK_CANDIDATE_CAP = 64
 
 
 # WS5 §3 — the seeding experiment's only variable. Three arms off ONE build
@@ -886,6 +892,30 @@ def _edge_label(edge) -> str:
     return f"({','.join(edge.cols)})->{edge.ref}"
 
 
+def _edge_supplied_columns(
+    registry: RelationshipRegistry, landing_table: str, roles: Mapping
+) -> tuple[str, ...]:
+    """Child columns a NON-driving edge fills (ADR 0037 §6): every
+    independent edge's columns (a whole tuple from its key pool) and
+    every conditional edge's ``rest`` (one candidate per shared key).
+
+    They are `pk_cell_columns`'s ``known``: measuring a cell table over
+    an FK column another parent supplies asks BigQuery for a domain the
+    engine never draws from, and counting it as a free member would make
+    an otherwise exact PK look inexact."""
+    return tuple(
+        c
+        for edge, role in roles.items()
+        if role == "independent"
+        for c in edge.cols
+    ) + tuple(
+        c
+        for edge, role in roles.items()
+        if role == "conditional"
+        for c in registry.edge_rest(landing_table, edge)
+    )
+
+
 def resolve_fanout(
     registry: RelationshipRegistry,
     landing_table: str,
@@ -921,7 +951,10 @@ def resolve_fanout(
     relations = registry.relations(landing_table)
     pk = tuple(relations.pk) if relations else ()
     profiles = profile_columns(table_schema, reference_rows) if reference_rows else {}
-    cell_cols, exact = pk_cell_columns(pk, tuple(driving.cols), profiles)
+    cell_cols, exact = pk_cell_columns(
+        pk, tuple(driving.cols), profiles,
+        known=_edge_supplied_columns(registry, landing_table, roles),
+    )
     source_parent = derive_source_fqn(
         parent_landing_fqn(driving.ref, derive_fk_parent_landing(landing_table)),
         source_table,
@@ -1345,6 +1378,39 @@ def _log_edge_role_warnings(
             )
 
 
+def _independent_member_caps(
+    args,
+    registry: RelationshipRegistry,
+    edge_roles: Mapping,
+    fk_parent_rows: Mapping[str, int],
+) -> dict[tuple[str, ...], int]:
+    """Per INDEPENDENT edge whose columns sit in this table's declared
+    PK, the parent key sample the composer will broadcast (ADR 0037 §6).
+
+    P4 counts it as a per-key PK factor and `in_set_parent_edges` sizes
+    the side input from the SAME number — it travels there through
+    `PreflightResult.fk_key_sample_caps`, as ADR 0035's random-draw caps
+    already do.
+
+    Sized from ``args.num_rows``: a driven child's DERIVED row count is
+    the output of the very preflight this feeds, so it does not exist
+    yet. The launch's flat count is an upper bound on what any table
+    lands, so the cap it implies is never too small — a wider sample is
+    a wider PK space, never a false stop. ``other=1`` because the PK's
+    cells and its sibling edges are counted inside `_check_driven_pk`,
+    not folded in here."""
+    relations = registry.relations(args.landing_table)
+    pk = set(relations.pk) if relations else set()
+    caps: dict[tuple[str, ...], int] = {}
+    for edge, role in edge_roles.items():
+        if role != "independent" or not set(edge.cols) <= pk:
+            continue
+        cap = fk_key_sample_cap(args.num_rows, 1)
+        parent_rows = fk_parent_rows.get(edge.ref)
+        caps[tuple(edge.cols)] = min(cap, parent_rows) if parent_rows else cap
+    return caps
+
+
 def _load_reference_and_preflight(
     args,
     table_schema,
@@ -1416,6 +1482,20 @@ def _load_reference_and_preflight(
             for edge, role in edge_roles.items()
             if role == "conditional"
         },
+        # ADR 0037 §6 — the members the non-driving edges supply are
+        # per-key PK factors: an independent edge's sampled key pool and
+        # a conditional edge's Top-M candidate list.
+        fk_member_caps=_independent_member_caps(
+            args, registry, edge_roles, fk_parent_rows
+        ),
+        conditional_rest={
+            ",".join(edge.cols): registry.edge_rest(args.landing_table, edge)
+            for edge, role in edge_roles.items()
+            if role == "conditional"
+        },
+        candidate_cap=int(
+            getattr(args, "fk_candidate_cap", DEFAULT_FK_CANDIDATE_CAP)
+        ),
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
