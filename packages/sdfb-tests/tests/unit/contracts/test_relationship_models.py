@@ -342,6 +342,31 @@ tables:
         assert reg.edge_roles("T") == {edge: "external"}
         assert reg.driving_edge("T") is None
 
+    def test_external_edge_next_to_a_driving_edge_keeps_its_role_and_reports_overlap(self):
+        # A table can legally have both an internal driving edge and an
+        # external one (a parent landed outside this model) that shares
+        # a column with it. The registry never routes the external edge
+        # (the launcher only logs the overlap, Task 6).
+        text = """
+model: m
+tables:
+  P:
+    pk: [ID]
+  T:
+    pk: [ID, X]
+    fk:
+      - cols: [ID]
+        ref: P
+        ref_cols: [ID]
+      - cols: [ID, X]
+        ref: ds.other
+        ref_cols: [ID, X]
+"""
+        reg = self._registry(text)
+        to_p, to_ext = reg.enforced_edges("T")
+        assert reg.edge_roles("T") == {to_p: "driving", to_ext: "external"}
+        assert reg.edge_overlap("T", to_ext) == ("ID",)
+
     def test_card_names_the_roles(self):
         card = self._registry(self._THREE).card("A_TABLE")
         assert "[enforced, DRIVES]" in card
@@ -450,6 +475,30 @@ tables:
         assert rec["via"] == "A_TABLE"
         assert rec["added"] == [("C_COL_006", "B_COL_023"), ("C_COL_007", "B_COL_011"),
                                 ("C_COL_009", "B_COL_013")]
+
+    def test_edge_overlap_and_rest_recognize_a_widened_driving_edge_by_value(self):
+        # C_TABLE's driving edge is WIDENED (via A_TABLE's pins, previous
+        # test) into a fresh FkEdge object on every enforced_edges() /
+        # edge_roles() call. edge_overlap/edge_rest must recognize "this
+        # IS the driving edge" by value, not by Python object identity,
+        # or a widened driving edge is silently misreported as
+        # conditional on all of its own columns (review round 1).
+        reg = self._registry(self._KW)
+        roles = reg.edge_roles("C_TABLE")
+        for edge, role in roles.items():
+            assert role == "driving"
+            assert reg.edge_overlap("C_TABLE", edge) == ()
+            assert reg.edge_rest("C_TABLE", edge) == ()
+
+        # Regression check for the fix: A_TABLE's genuinely IMPLIED edge
+        # (to_b) must still overlap the driving edge on its whole column
+        # tuple (a subset by construction) with an empty rest — it must
+        # not itself be mistaken for the driving edge once the check
+        # switches from `is` to `==`.
+        _to_c, to_b = reg.enforced_edges("A_TABLE")
+        assert reg.edge_roles("A_TABLE")[to_b] == "implied"
+        assert reg.edge_overlap("A_TABLE", to_b) == to_b.cols
+        assert reg.edge_rest("A_TABLE", to_b) == ()
 
     def test_the_declared_model_is_untouched_and_the_sha_is_stable(self):
         reg = self._registry(self._KW)

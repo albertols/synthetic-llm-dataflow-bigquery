@@ -422,22 +422,36 @@ class RelationshipRegistry:
         every model)."""
         return self._driving_edge_and_choice(table)[1]
 
+    def _overlap_with_driving(
+        self, table: str, edge: FkEdge
+    ) -> tuple[str, ...] | None:
+        """``edge``'s overlap with the driving edge, in ``edge.cols``
+        order — or ``None`` when ``edge`` IS the driving edge, or
+        ``table`` has no driving edge at all. Compared by VALUE
+        (``==``), not identity: `_widened()` returns a fresh `FkEdge`
+        via `model_copy()` on every call, so a widened driving edge
+        obtained from an earlier `enforced_edges()`/`edge_roles()` call
+        is never the same Python object as the one this method derives
+        — but it is always equal (frozen pydantic model, structural
+        `__eq__`), as :meth:`mermaid`'s `roles.get(widened)` already
+        relies on elsewhere in this file."""
+        driving, _ = self._driving_edge_and_choice(table)
+        if driving is None or edge == driving:
+            return None
+        return tuple(c for c in edge.cols if c in driving.cols)
+
     def edge_overlap(self, table: str, edge: FkEdge) -> tuple[str, ...]:
         """Child column names of ``edge`` that also appear in the
         driving edge's columns, in ``edge.cols`` order. Empty for the
         driving edge itself, and when ``table`` has no driving edge."""
-        driving, _ = self._driving_edge_and_choice(table)
-        if driving is None or edge is driving:
-            return ()
-        return tuple(c for c in edge.cols if c in driving.cols)
+        return self._overlap_with_driving(table, edge) or ()
 
     def edge_rest(self, table: str, edge: FkEdge) -> tuple[str, ...]:
         """``edge.cols`` outside :meth:`edge_overlap`. Empty for the
         driving edge itself, and when ``table`` has no driving edge."""
-        driving, _ = self._driving_edge_and_choice(table)
-        if driving is None or edge is driving:
+        overlap = self._overlap_with_driving(table, edge)
+        if overlap is None:
             return ()
-        overlap = set(self.edge_overlap(table, edge))
         return tuple(c for c in edge.cols if c not in overlap)
 
     def _implied(self, edge: FkEdge, driving: FkEdge) -> bool:
