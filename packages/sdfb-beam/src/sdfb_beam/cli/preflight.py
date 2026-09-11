@@ -648,6 +648,7 @@ def preflight(
     fanout: Mapping | None = None,
     edge_roles: Mapping[FkEdge, str] | None = None,
     enforced_fk: tuple[FkEdge, ...] | None = None,
+    edge_overlaps: Mapping[FkEdge, tuple[str, ...]] | None = None,
 ) -> PreflightResult:
     """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -672,7 +673,13 @@ def preflight(
     ADR 0032/0036). Without it, preflight falls back to the declared
     ``enforced: true`` edges, which cannot see a DISABLED parent: the
     2026-09-10 launch counted C_TABLE's undrawn edge to B_TABLE at the
-    1M key-sample ceiling and stopped a root table at P4."""
+    1M key-sample ceiling and stopped a root table at P4.
+
+    ``edge_overlaps`` (ADR 0037, the launcher's
+    ``RelationshipRegistry.edge_overlap`` per CONDITIONAL edge) adds
+    ``overlap=`` to that edge's ``fk_edge_role`` line — the columns it
+    is co-partitioned on. It is reporting only: no capacity check reads
+    it."""
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
@@ -766,12 +773,16 @@ def preflight(
     # ADR 0036 — one milestone per enforced edge, naming its role
     # (driving / implied / external) so a launch log answers "which
     # parent is this table generated FROM" without opening the model.
+    # ADR 0037 adds independent / conditional, and the shared columns a
+    # conditional edge is joined on.
     for edge, role in (edge_roles or {}).items():
+        overlap = (edge_overlaps or {}).get(edge) or ()
         log_milestone(
             "fk_edge_role",
             table=fqn,
             edge=f"({','.join(edge.cols)})->{edge.ref}",
             role=role,
+            **({"overlap": ",".join(overlap)} if overlap else {}),
         )
 
     # P4 — PK generation capacity. A DRIVEN child (``fanout`` given, ADR

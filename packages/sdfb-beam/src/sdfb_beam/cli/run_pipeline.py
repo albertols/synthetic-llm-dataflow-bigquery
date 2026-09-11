@@ -129,6 +129,24 @@ _TARGET_ELEMENTS = 1_000
 # envelope if it crashes.
 _MAX_KEYS_PER_BATCH = 10_000
 
+# ADR 0037 — the role a `RelationshipRegistry.edge_roles` edge plays in the
+# DAG (design §2): the driving edge's parent keys ARE the generation input,
+# an implied edge rides on it, an independent edge keeps the ADR 0030/0031
+# side-input pool, and a conditional edge is co-partitioned on the columns
+# it shares with the driving edge. `external` is absent on purpose — its
+# parent is outside the launch, so it never reaches `in_set_parent_edges`.
+_EDGE_MODES = {
+    "driving": "fanout",
+    "implied": "implied",
+    "independent": "side_input",
+    "conditional": "conditional",
+}
+# ADR 0037 §7 — a fan-out request carries `keys_per_batch * M` candidate
+# tuples per conditional edge; `keys_per_batch` is lowered so the whole
+# request stays under this many values, whatever the cap is set to.
+_MAX_CONDITIONAL_VALUES_PER_REQUEST = 100_000
+DEFAULT_FK_CANDIDATE_CAP = 64
+
 
 # WS5 §3 — the seeding experiment's only variable. Three arms off ONE build
 # so the E2E runs differ in exactly one thing.
@@ -155,7 +173,7 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
     return max(DEFAULT_BATCH_SIZE, num_rows // _TARGET_ELEMENTS)
 
 
-def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:  # noqa: PLR0915 — one flat list of flags; splitting it hides the CLI surface
     p = argparse.ArgumentParser(description="Synthetic Dataflow BigQuery — pipeline launcher")
     p.add_argument("--ddl_uri", default="",
                    help="gs:// or local path to _ddl.json — the OFFLINE "
@@ -282,6 +300,16 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="FQN of synthetic_data_quality.fk_fanout_stats (ADR 0036 cache of "
                         "the SOURCE fan-out histogram + PK cells per driving edge). "
                         "Empty = measure every launch, never cache.")
+    p.add_argument("--fk_candidate_cap", type=int,
+                   default=DEFAULT_FK_CANDIDATE_CAP,
+                   help="ADR 0037: Top-M candidates kept per SHARED value on a "
+                        "CONDITIONAL edge (an edge sharing columns with the "
+                        "driving edge — a diamond branch). A hot shared key "
+                        "never carries more than M parent candidates into a "
+                        "request; the engine wraps only when a key's fan-out "
+                        "outruns the list it was handed. Raising it widens the "
+                        "per-key choice and LOWERS keys_per_batch to keep a "
+                        "request under ~100k candidate values.")
     p.add_argument("--driven_uniqueness_mode", default="streaming", choices=list(UNIQUENESS_MODES),
                    help="Uniqueness mode for a DRIVEN child without identity columns "
                         "(ADR 0036): its PK is unique by construction, so `streaming` "
@@ -853,6 +881,11 @@ def _cache_write(stats_store, landing_table: str, source_table: str, cols, sha: 
         _cache_unavailable(landing_table, "put", exc)
 
 
+def _edge_label(edge) -> str:
+    """One FK edge as the launcher names it everywhere: ``(cols)->ref``."""
+    return f"({','.join(edge.cols)})->{edge.ref}"
+
+
 def resolve_fanout(
     registry: RelationshipRegistry,
     landing_table: str,
@@ -894,7 +927,7 @@ def resolve_fanout(
         source_table,
     )
     sha = registry.sha12()
-    edge_label = f"({','.join(driving.cols)})->{driving.ref}"
+    edge_label = _edge_label(driving)
     measured = _cache_read(stats_store, landing_table, source_table, tuple(driving.cols), sha)
     source = "cache"
     if measured is None:
@@ -1244,7 +1277,11 @@ def _resolve_table_fanout(
     ambiguous or unimplied edge set (``RelationshipError`` from
     ``registry.edge_roles``) surfaces as the same collect-then-fail
     ``SystemExit`` every other P2 launch stop uses, so the relational
-    runner's per-table loop reports it alongside the other tables."""
+    runner's per-table loop reports it alongside the other tables.
+
+    ADR 0037: a table that HAS a payload also carries its conditional
+    edges and the Top-M candidate cap into it — the engine reads both
+    off ``FanoutPlan``. A root (no payload) carries neither."""
     if not (in_set_names and parse_bool_flag(args.generate_fk_relationships)):
         return None, {}
     stats_store = (
@@ -1253,7 +1290,7 @@ def _resolve_table_fanout(
         else None
     )
     try:
-        return resolve_fanout(
+        payload, roles = resolve_fanout(
             registry, args.landing_table, args.reference_table,
             in_set_names=in_set_names, reference_rows=reference_rows,
             table_schema=table_schema, stats_store=stats_store, bq_client=None,
@@ -1262,6 +1299,50 @@ def _resolve_table_fanout(
         raise SystemExit(
             f"[preflight P2] {args.landing_table}: {exc}"
         ) from exc
+    if payload is not None:
+        payload["conditional"] = conditional_plan_entries(
+            registry, args.landing_table, roles, table_schema
+        )
+        payload["candidate_cap"] = int(
+            getattr(args, "fk_candidate_cap", DEFAULT_FK_CANDIDATE_CAP)
+        )
+    return payload, roles
+
+
+def _log_edge_role_warnings(
+    landing_table: str, registry: RelationshipRegistry, edge_roles: Mapping
+) -> None:
+    """The two WARNING milestones of ADR 0037 (design §3 rule 4, §9).
+
+    `fk_driving_edge_defaulted` — no `drives: true` and no ancestry
+    between the candidate parents, so the FIRST DECLARED edge drives: a
+    legal, reproducible launch the operator did not actually choose.
+    `fk_edge_overlap_external` — an external parent shares a column with
+    the driving edge, which the driving edge then overwrites; resolving
+    it needs the parent inside the launch, so it is named, not fixed."""
+    if not edge_roles:
+        return
+    driving = next((e for e, r in edge_roles.items() if r == "driving"), None)
+    if driving is None:
+        return
+    if registry.driving_choice(landing_table) == "first_declared":
+        log_milestone(
+            "fk_driving_edge_defaulted",
+            level=logging.WARNING,
+            table=landing_table,
+            edge=_edge_label(driving),
+            hint="mark drives: true to choose",
+        )
+    for edge, role in edge_roles.items():
+        overlap = registry.edge_overlap(landing_table, edge)
+        if role == "external" and overlap:
+            log_milestone(
+                "fk_edge_overlap_external",
+                level=logging.WARNING,
+                table=landing_table,
+                edge=_edge_label(edge),
+                overlap=",".join(overlap),
+            )
 
 
 def _load_reference_and_preflight(
@@ -1309,6 +1390,7 @@ def _load_reference_and_preflight(
     fanout, edge_roles = _resolve_table_fanout(
         args, table_schema, registry, in_set_names, reference_rows
     )
+    _log_edge_role_warnings(args.landing_table, registry, edge_roles)
     pf = preflight(
         table_schema,
         tuple(c.strip() for c in args.pk_cols.split(",") if c.strip()),
@@ -1327,6 +1409,13 @@ def _load_reference_and_preflight(
         # The edges this launch DRAWS (both ends enabled, widened) — not
         # the declared ones, or a disabled parent bounds the PK (P4).
         enforced_fk=registry.enforced_edges(args.landing_table),
+        # ADR 0037: the shared columns each conditional edge is joined
+        # on, so `fk_edge_role` names them in the launch log.
+        edge_overlaps={
+            edge: registry.edge_overlap(args.landing_table, edge)
+            for edge, role in edge_roles.items()
+            if role == "conditional"
+        },
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
@@ -1638,6 +1727,46 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _rest_is_nullable(rest: tuple[str, ...], table_schema) -> bool:
+    """ADR 0037 §4 ruling B: an unmatched key may land with NULLs only
+    when EVERY ``rest`` column is NULLABLE in the landing schema. An
+    empty ``rest`` (a pure existence filter, ``(K)->P`` driving and
+    ``(K)->Q`` conditional) has nothing to write a NULL into, so it is
+    never nullable — the key is dropped and counted instead."""
+    if table_schema is None or not rest:
+        return False
+    return all(
+        col.mode == "NULLABLE"
+        for col in table_schema.columns
+        if col.name in rest
+    )
+
+
+def conditional_plan_entries(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    roles: Mapping,
+    table_schema,
+) -> list[dict]:
+    """``FanoutPlan.conditional`` payload entries (ADR 0037): one per
+    conditional edge, in ``enforced_edges`` order. ``id`` is the string
+    the request payload, the plan and ``FkEdgeSpec.edge_id`` all agree
+    on; ``cols`` are the child columns the engine writes from the drawn
+    candidate (``rest``); ``nullable`` is the NULL policy for a key with
+    no candidate."""
+    return [
+        {
+            "id": ",".join(fk.cols),
+            "cols": list(registry.edge_rest(landing_table, fk)),
+            "nullable": _rest_is_nullable(
+                registry.edge_rest(landing_table, fk), table_schema
+            ),
+        }
+        for fk in registry.enforced_edges(landing_table)
+        if roles.get(fk) == "conditional"
+    ]
+
+
 def in_set_parent_edges(
     registry: RelationshipRegistry,
     landing_table: str,
@@ -1646,32 +1775,136 @@ def in_set_parent_edges(
     key_sample_caps: Mapping[tuple[str, ...], int],
     edge_roles: Mapping | None = None,
     keys_per_batch: int = 100,
+    table_schema=None,
+    candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
 ) -> tuple[FkEdgeSpec, ...]:
     """This table's enforced edges whose parent generates in the same
     job, as composer specs. ``key_sample_caps`` (preflight P4, ADR 0035)
     sizes the parent key sample per edge inside the child's PK; other
-    edges keep the composer's floor. ``edge_roles`` (ADR 0036) sets each
-    spec's ``mode``: the driving edge is ``"fanout"``, an edge satisfied
-    by construction through it is ``"implied"``, everything else stays
-    the ADR 0030 ``"side_input"``."""
+    edges keep the composer's floor. ``edge_roles`` (ADR 0036/0037) sets
+    each spec's ``mode`` through ``_EDGE_MODES``: the driving edge is
+    ``"fanout"``, an edge satisfied by construction through it is
+    ``"implied"``, an edge sharing columns with it is ``"conditional"``,
+    and one sharing none stays the ADR 0030 ``"side_input"``.
+
+    ``table_schema`` (the LANDING schema) decides each conditional
+    edge's ``nullable``; ``candidate_cap`` is ``--fk_candidate_cap``.
+    With conditional edges present ``keys_per_batch`` is LOWERED so one
+    request never carries more than ~100k candidate values (design §7) —
+    the cap itself is the operator's knob and is never touched."""
     roles = edge_roles or {}
-    return tuple(
-        FkEdgeSpec(
-            child_cols=tuple(fk.cols),
-            ref_cols=tuple(fk.ref_cols),
-            parent_landing=parent_landing_fqn(
-                fk.ref, derive_fk_parent_landing(landing_table)
-            ),
-            key_sample_cap=key_sample_caps.get(
-                tuple(fk.cols), FK_KEY_SAMPLE_FLOOR
-            ),
-            mode={"driving": "fanout", "implied": "implied"}.get(
-                roles.get(fk, ""), "side_input"
-            ),
-            keys_per_batch=keys_per_batch,
-        )
+    edges = [
+        fk
         for fk in registry.enforced_edges(landing_table)
         if fk.ref.rsplit(".", 1)[-1] in in_set_names
+    ]
+    n_conditional = sum(1 for fk in edges if roles.get(fk) == "conditional")
+    if n_conditional:
+        keys_per_batch = min(
+            keys_per_batch,
+            max(
+                1,
+                _MAX_CONDITIONAL_VALUES_PER_REQUEST
+                // (candidate_cap * n_conditional),
+            ),
+        )
+    specs = []
+    for fk in edges:
+        role = roles.get(fk, "")
+        parent = registry.relations(fk.ref)
+        specs.append(
+            FkEdgeSpec(
+                child_cols=tuple(fk.cols),
+                ref_cols=tuple(fk.ref_cols),
+                parent_landing=parent_landing_fqn(
+                    fk.ref, derive_fk_parent_landing(landing_table)
+                ),
+                # The parent PK lets the composer skip a Distinct shuffle
+                # when the projected tuple already holds it (Task 5) —
+                # harmless on every mode, worth millions of rows on a
+                # conditional edge's co-parent.
+                parent_pk=tuple(parent.pk) if parent else (),
+                key_sample_cap=key_sample_caps.get(
+                    tuple(fk.cols), FK_KEY_SAMPLE_FLOOR
+                ),
+                mode=_EDGE_MODES.get(role, "side_input"),
+                keys_per_batch=keys_per_batch,
+                overlap=(
+                    registry.edge_overlap(landing_table, fk)
+                    if role == "conditional"
+                    else ()
+                ),
+                candidate_cap=candidate_cap,
+                nullable=_rest_is_nullable(
+                    registry.edge_rest(landing_table, fk), table_schema
+                )
+                if role == "conditional"
+                else False,
+            )
+        )
+    return tuple(specs)
+
+
+def fk_edge_metadata(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    relations,
+    fk_parent_landing: str,
+    *,
+    in_set_names: set[str],
+    edge_roles: Mapping,
+) -> tuple[dict, ...]:
+    """``GenerationContext.fk_edges`` — one dict per DECLARED edge, the
+    worker's ``relational_fk_edge`` milestone source (ADR 0037 §8).
+
+    Every in-set enforced edge carries the DAG path it took (``mode``,
+    and ``overlap`` for a conditional edge). An edge outside the launch
+    (external parent) or not enforced carries no ``mode`` key at all and
+    the worker renders today's ``mode=side_input`` default, so no
+    existing log line moves.
+
+    ``edge_roles`` is keyed on the WIDENED edges ``enforced_edges``
+    returns (ADR 0036 rev 2), while ``relations.fk`` holds the declared
+    ones: a widened edge is matched back to its declaration by the
+    prefix the widening appended to."""
+    meta: dict[tuple[str, tuple[str, ...]], dict] = {}
+    for fk in registry.enforced_edges(landing_table):
+        role = edge_roles.get(fk)
+        if role not in _EDGE_MODES or fk.ref.rsplit(".", 1)[-1] not in in_set_names:
+            continue
+        entry: dict = {"mode": _EDGE_MODES[role]}
+        if role == "conditional":
+            entry["overlap"] = list(registry.edge_overlap(landing_table, fk))
+        meta[(fk.ref, tuple(fk.cols))] = entry
+
+    def _for(fk) -> dict:
+        exact = meta.get((fk.ref, tuple(fk.cols)))
+        if exact is not None:
+            return exact
+        width = len(fk.cols)
+        return next(
+            (
+                entry
+                for (ref, cols), entry in meta.items()
+                if ref == fk.ref and cols[:width] == tuple(fk.cols)
+            ),
+            {},
+        )
+
+    return tuple(
+        {
+            "cols": list(fk.cols),
+            "ref": fk.ref,
+            "ref_cols": list(fk.ref_cols),
+            "enforced": fk.enforced,
+            "parent_landing": (
+                parent_landing_fqn(fk.ref, fk_parent_landing)
+                if fk_parent_landing and fk.enforced
+                else ""
+            ),
+            **_for(fk),
+        }
+        for fk in (relations.fk if relations else ())
     )
 
 
@@ -1707,6 +1940,7 @@ def _prepare_table_spec(
             "UNVERIFIED this run",
         )
     registry = registry or RelationshipRegistry()
+    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
     (
         reference_rows,
         pf,
@@ -1808,19 +2042,13 @@ def _prepare_table_spec(
             if getattr(args, "_multi_table_plan", False) or in_set_landing
             else ""
         ),
-        fk_edges=tuple(
-            {
-                "cols": list(fk.cols),
-                "ref": fk.ref,
-                "ref_cols": list(fk.ref_cols),
-                "enforced": fk.enforced,
-                "parent_landing": (
-                    parent_landing_fqn(fk.ref, args.fk_parent_landing)
-                    if args.fk_parent_landing and fk.enforced
-                    else ""
-                ),
-            }
-            for fk in (pf.relations.fk if pf.relations else ())
+        fk_edges=fk_edge_metadata(
+            registry,
+            args.landing_table,
+            pf.relations,
+            args.fk_parent_landing,
+            in_set_names=in_set_names,
+            edge_roles=edge_roles,
         ),
         # The card the launcher printed, carried verbatim to the workers
         # (ADR 0032): the model is resolved ONCE, driver-side, and both
@@ -1892,10 +2120,14 @@ def _prepare_table_spec(
     parent_edges = in_set_parent_edges(
         registry,
         args.landing_table,
-        in_set_names={t.rsplit(".", 1)[-1] for t in in_set_landing},
+        in_set_names=in_set_names,
         key_sample_caps=pf.fk_key_sample_caps,
         edge_roles=edge_roles,
         keys_per_batch=keys_per_batch,
+        table_schema=table_schema,
+        candidate_cap=int(
+            getattr(args, "fk_candidate_cap", DEFAULT_FK_CANDIDATE_CAP)
+        ),
     )
 
     return TableSpec(

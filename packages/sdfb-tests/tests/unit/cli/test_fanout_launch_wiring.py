@@ -188,3 +188,238 @@ def test_a_missing_cache_table_is_optional(monkeypatch, caplog):
     assert payload is not None and payload["driving_cols"] == ["D_COL_001", "D_COL_024"]
     assert "name=fk_fanout_cache_unavailable" in caplog.text
     assert "name=fk_fanout_measured" in caplog.text and "source=measured" in caplog.text
+
+
+# --- ADR 0037: the flag, the plan payload, the WARNING milestones -----
+
+_DIAMOND = """
+model: diamond
+tables:
+  TOP_TABLE:
+    pk: [T]
+  LEFT_TABLE:
+    pk: [T, L]
+    fk:
+      - cols: [T]
+        ref: TOP_TABLE
+        ref_cols: [T]
+  RIGHT_TABLE:
+    pk: [T, R]
+    fk:
+      - cols: [T]
+        ref: TOP_TABLE
+        ref_cols: [T]
+  BOTTOM_TABLE:
+    pk: [T, L, R]
+    fk:
+      - cols: [T, L]
+        ref: LEFT_TABLE
+        ref_cols: [T, L]
+      - cols: [T, R]
+        ref: RIGHT_TABLE
+        ref_cols: [T, R]
+      - cols: [T]
+        ref: ds.EXT_TABLE
+        ref_cols: [T]
+"""
+_DIAMOND_REG = RelationshipRegistry.from_sources(
+    [("config/relationships/diamond.yaml", _DIAMOND)]
+)
+_DIAMOND_IN_SET = frozenset(
+    f"p.land.{t}"
+    for t in ("TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE")
+)
+
+
+def _diamond_schema(r_mode: str = "NULLABLE") -> TableSchema:
+    return TableSchema.model_validate(
+        {"table_info": {"table_id": "p.land.BOTTOM_TABLE"},
+         "schema": [{"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "L", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "R", "type": "STRING", "mode": r_mode}]}
+)
+
+
+_DIAMOND_ROWS = [
+    {"T": f"t{i % 2}", "L": f"l{i // 2}", "R": f"r{i % 2}"} for i in range(40)
+]
+
+
+def _measure_one_to_one(**kw):
+    """One child per parent, two PK-completing cells."""
+    return {"histogram": {"1": 4}, "parents": 4, "children": 4,
+            "cells": {"cols": ["R"], "rows": [["r0"], ["r1"]],
+                      "counts": [0.5, 0.5]}}
+
+
+def _diamond_args(landing: str, **over):
+    from sdfb_beam.cli.run_pipeline import parse_args
+
+    args, _ = parse_args([
+        "--reference_table", "p.src.BOTTOM_TABLE",
+        "--landing_table", landing,
+        "--dlq_table", "p.dq.dlq",
+        "--num_rows", "100",
+        "--run_id", "adr0037",
+        "--source_stats", "off",
+        "--model_uri", "gs://b/models/m/v/",
+    ])
+    for key, value in over.items():
+        setattr(args, key, value)
+    return args
+
+
+def test_fk_candidate_cap_is_a_flag_and_reaches_launch_config():
+    from sdfb_beam.cli.run_pipeline import parse_args
+
+    args, _ = parse_args([
+        "--reference_table", "p.src.T", "--landing_table", "p.land.T",
+        "--dlq_table", "p.dq.dlq", "--num_rows", "10", "--run_id", "r",
+        "--model_uri", "gs://b/models/m/v/",
+    ])
+    assert args.fk_candidate_cap == 64
+    # launch_config logs every non-private arg verbatim.
+    logged = {
+        k: v for k, v in sorted(vars(args).items())
+        if not k.startswith("_") and k != "model_client"
+    }
+    assert logged["fk_candidate_cap"] == 64
+    over, _ = parse_args([
+        "--reference_table", "p.src.T", "--landing_table", "p.land.T",
+        "--dlq_table", "p.dq.dlq", "--num_rows", "10", "--run_id", "r",
+        "--model_uri", "gs://b/models/m/v/", "--fk_candidate_cap", "16",
+    ])
+    assert over.fk_candidate_cap == 16
+
+
+def test_the_fanout_payload_carries_the_conditional_edges_and_the_cap(monkeypatch):
+    """Ruling 1: BOTH keys land on the payload the workers read."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    args = _diamond_args("p.land.BOTTOM_TABLE", fk_candidate_cap=32)
+    payload, roles = rp._resolve_table_fanout(
+        args, _diamond_schema(), _DIAMOND_REG,
+        {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+        _DIAMOND_ROWS,
+    )
+    assert payload["conditional"] == [
+        {"id": "T,R", "cols": ["R"], "nullable": True}
+    ]
+    assert payload["candidate_cap"] == 32
+    assert sorted(roles.values()) == ["conditional", "driving", "external"]
+
+
+def test_a_root_table_gets_no_conditional_payload(monkeypatch):
+    import sdfb_beam.cli.run_pipeline as rp
+
+    payload, _roles = rp._resolve_table_fanout(
+        _diamond_args("p.land.TOP_TABLE"), _diamond_schema(), _DIAMOND_REG,
+        {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+        _DIAMOND_ROWS,
+    )
+    assert payload is None
+
+
+def test_the_launcher_names_a_defaulted_driving_edge_and_an_external_overlap(
+    monkeypatch, caplog
+):
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "load_reference_rows", lambda **kw: _DIAMOND_ROWS)
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    monkeypatch.setattr(
+        rp, "load_fk_key_pools",
+        lambda fks, landing: [
+            {"cols": list(fk.cols), "keys": [tuple("t0" for _ in fk.cols)]}
+            for fk in fks
+        ],
+    )
+    args = _diamond_args("p.land.BOTTOM_TABLE")
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        result = rp._load_reference_and_preflight(
+            args, _diamond_schema(), _DIAMOND_REG,
+            in_set_landing=_DIAMOND_IN_SET,
+        )
+    fanout, edge_roles = result[5], result[6]
+    assert fanout["conditional"] == [
+        {"id": "T,R", "cols": ["R"], "nullable": True}
+    ]
+    assert fanout["candidate_cap"] == 64
+    assert sorted(edge_roles.values()) == ["conditional", "driving", "external"]
+
+    lines = caplog.text.splitlines()
+    defaulted = [ln for ln in lines if "name=fk_driving_edge_defaulted" in ln]
+    assert len(defaulted) == 1
+    assert "edge='(T,L)->LEFT_TABLE'" in defaulted[0]
+    assert "mark drives: true to choose" in defaulted[0]
+    external = [ln for ln in lines if "name=fk_edge_overlap_external" in ln]
+    assert len(external) == 1
+    assert "edge='(T)->ds.EXT_TABLE'" in external[0] and "overlap=T" in external[0]
+    # Ruling 2: the existing per-edge role milestone gains overlap=.
+    conditional = [
+        ln for ln in lines
+        if "name=fk_edge_role" in ln and "role=conditional" in ln
+    ]
+    assert len(conditional) == 1 and "overlap=T" in conditional[0]
+    assert not any(
+        "name=fk_edge_role" in ln and "role=driving" in ln and "overlap=" in ln
+        for ln in lines
+    )
+
+
+def test_a_single_edge_child_is_not_warned_about(monkeypatch, caplog):
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "load_reference_rows", lambda **kw: _DIAMOND_ROWS)
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.land.LEFT_TABLE"},
+         "schema": [{"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "L", "type": "STRING", "mode": "REQUIRED"}]}
+    )
+    args = _diamond_args("p.land.LEFT_TABLE")
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        result = rp._load_reference_and_preflight(
+            args, schema, _DIAMOND_REG, in_set_landing=_DIAMOND_IN_SET,
+        )
+    assert result[5]["conditional"] == []
+    assert "name=fk_driving_edge_defaulted" not in caplog.text
+    assert "name=fk_edge_overlap_external" not in caplog.text
+
+
+def test_fk_edge_metadata_names_the_dag_path_of_every_in_set_edge():
+    """Task 8 reads `mode`/`overlap` off these dicts in the worker log."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    edges = rp.fk_edge_metadata(
+        _DIAMOND_REG,
+        "p.land.BOTTOM_TABLE",
+        _DIAMOND_REG.relations("BOTTOM_TABLE"),
+        "p.land",
+        in_set_names={"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+        edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
+    )
+    assert [(e["cols"], e.get("mode"), e.get("overlap")) for e in edges] == [
+        (["T", "L"], "fanout", None),
+        (["T", "R"], "conditional", ["T"]),
+        (["T"], None, None),  # external: no mode key, the worker defaults
+    ]
+    assert edges[0]["parent_landing"] == "p.land.LEFT_TABLE"
+
+
+def test_fk_edge_metadata_without_roles_is_todays_dict():
+    import sdfb_beam.cli.run_pipeline as rp
+
+    edges = rp.fk_edge_metadata(
+        _DIAMOND_REG, "p.land.BOTTOM_TABLE",
+        _DIAMOND_REG.relations("BOTTOM_TABLE"), "",
+        in_set_names=set(), edge_roles={},
+    )
+    assert [set(e) for e in edges] == [
+        {"cols", "ref", "ref_cols", "enforced", "parent_landing"}
+    ] * 3
