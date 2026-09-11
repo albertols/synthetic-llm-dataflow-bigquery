@@ -663,8 +663,11 @@ def _candidate_rank(element: tuple, run_id: str) -> tuple:
     The rank is `blake2b(run_id + rest_value)`, never Python's
     process-salted `hash()`: the Top-M below must pick the SAME M
     candidates on a retried bundle and on a re-run of the same run_id.
-    Putting the rank first makes the tuple comparison deterministic; a
-    rank tie (64 bits) falls through to the value itself.
+    The combine orders on the rank ALONE (`_candidate_rank_only`) — only
+    the JOIN KEY is NULL-checked, so a `rest_value` legitimately holds a
+    None, and ordering on the whole pair would let a 64-bit rank tie
+    advance the comparison to `None < "a"` and kill the bundle (and its
+    retry, identically).
     """
     join_key, rest_value = element
     rank = int.from_bytes(
@@ -721,9 +724,16 @@ def _conditional_candidates(
         projected
         | f"{prefix}CandidateRank" >> beam.Map(_candidate_rank, run_id=run_id)
         | f"{prefix}CandidateTopM"
-        >> combiners.Top.SmallestPerKey(edge.candidate_cap)
+        >> combiners.Top.SmallestPerKey(
+            edge.candidate_cap, key=_candidate_rank_only
+        )
         | f"{prefix}Candidates" >> beam.Map(_drop_candidate_rank)
     )
+
+
+def _candidate_rank_only(ranked: tuple) -> int:
+    """Order key for the Top-M combine: the rank, never the value."""
+    return ranked[0]
 
 
 def _drop_candidate_rank(element: tuple) -> tuple:
@@ -835,25 +845,11 @@ def _fanout_requests(
         )
     )
     return batches | f"{prefix}FanoutRequests" >> beam.Map(
-        _fanout_request_payload, mean_fanout=mean_fanout
+        _fanout_request_payload, mean_fanout=mean_fanout, paired=paired
     )
 
 
-# A conditional join leaves `(key, {edge_id: candidates})` behind.
-_KEY_WITH_MATCHES_LEN = 2
-
-
-def _is_keyed_with_matches(element) -> bool:
-    """``(key, {edge_id: candidates})`` — the shape a conditional join
-    leaves behind, as opposed to a bare key tuple."""
-    return (
-        isinstance(element, tuple)
-        and len(element) == _KEY_WITH_MATCHES_LEN
-        and isinstance(element[1], dict)
-    )
-
-
-def _fanout_request_payload(ks: list, mean_fanout: float) -> dict:
+def _fanout_request_payload(ks: list, mean_fanout: float, *, paired: bool) -> dict:
     """One key-batch request. Stable ``batch_id`` — never Python's
     process-salted `hash()` — so a retried bundle reproduces the same
     seed (`derive_batch_seed`).
@@ -863,16 +859,21 @@ def _fanout_request_payload(ks: list, mean_fanout: float) -> dict:
     sharing an id share a seed. The final ``>> 1`` keeps it positive so it
     survives a BigQuery INT64 round trip in a DLQ envelope.
 
-    Elements are bare key tuples, or ``(key, matches)`` pairs when the
-    child has conditional edges (ADR 0037). In the second case the
-    payload gains ``"matches": {edge_id: [candidates_for_key_0, …]}``,
-    POSITIONALLY aligned with ``keys`` — an unmatched key holds ``[]``
-    rather than disappearing. A plan with no conditional edge keeps the
-    payload byte for byte, so the `batch_id` (and therefore every
-    downstream seed) is unchanged.
+    ``paired`` says whether a conditional join ran, so the elements are
+    ``(key, matches)`` pairs rather than bare key tuples. It is a
+    GRAPH-construction fact, never inferred from the element: a widened
+    driving edge (D4) can carry an inherited RECORD column, and
+    ``(cid, {...})`` is then a plain two-column key that a shape sniff
+    would read as a pair — scalar keys, a moved ``batch_id``, and a
+    spurious ``"matches"`` tripping the DoFn's gate.
+
+    When paired, the payload gains ``"matches": {edge_id:
+    [candidates_for_key_0, …]}``, POSITIONALLY aligned with ``keys`` — an
+    unmatched key holds ``[]`` rather than disappearing. Otherwise the
+    payload is byte for byte what ADR 0036 produced, so no downstream
+    seed moves.
     """
-    keyed = [_is_keyed_with_matches(e) for e in ks]
-    keys = [e[0] if k else e for e, k in zip(ks, keyed, strict=True)]
+    keys = [key for key, _matches in ks] if paired else list(ks)
     batch_id = (
         int.from_bytes(
             hashlib.blake2b(repr(keys[0]).encode(), digest_size=8).digest(), "big"
@@ -881,20 +882,19 @@ def _fanout_request_payload(ks: list, mean_fanout: float) -> dict:
     )
     payload = {
         "batch_id": batch_id,
-        "keys": list(keys),
+        "keys": keys,
         "n": max(1, round(len(ks) * mean_fanout)),
     }
-    if not any(keyed):
+    if not paired:
         return payload
-    edge_ids: list[str] = []
-    for element, is_pair in zip(ks, keyed, strict=True):
-        if is_pair:
-            edge_ids.extend(e for e in element[1] if e not in edge_ids)
+    # Every element carries every edge id (each one went through the same
+    # `_attach_matches` chain), so this is O(keys x edges) with O(1)
+    # membership — and it still holds if a future chain skips one.
+    edge_ids = dict.fromkeys(
+        edge_id for _key, matches in ks for edge_id in matches
+    )
     payload["matches"] = {
-        edge_id: [
-            (element[1].get(edge_id, []) if is_pair else [])
-            for element, is_pair in zip(ks, keyed, strict=True)
-        ]
+        edge_id: [matches.get(edge_id, []) for _key, matches in ks]
         for edge_id in edge_ids
     }
     return payload
@@ -957,21 +957,74 @@ def _partition_parent_edges(
             f"need a fanout-mode (driving) edge on the same table to "
             f"join against, and this table has none (ADR 0037)"
         )
+    if fanout_edge is not None:
+        _check_edges_against_driving(
+            spec, fanout_edge[0], side_input_edges, conditional_edges
+        )
+    return fanout_edge, side_input_edges, conditional_edges
+
+
+def _check_edges_against_driving(
+    spec: TableSpec,
+    driving: FkEdgeSpec,
+    side_input_edges: list[tuple[int, FkEdgeSpec, Any]],
+    conditional_edges: list[tuple[int, FkEdgeSpec, Any]],
+) -> None:
+    """What each non-driving edge must look like next to the driving one
+    (ADR 0037 §4/§5) — every violation here would otherwise surface as a
+    stalled job, a measured `fk.orphan` rate, or `tuple.index(x): x not
+    in tuple` from deep inside the graph build."""
+    driving_cols = set(driving.child_cols)
+    for _j, edge, _parent in side_input_edges:
+        # The star is sound only because the independent path is DISJOINT
+        # from the driving key: the engine draws a whole pool tuple and
+        # the driving key then OVERWRITES the shared column, landing a
+        # combination the parent never held (the ADR 0036 D1 corruption).
+        # The gate can only measure that; this names it.
+        shared = [c for c in edge.child_cols if c in driving_cols]
+        if shared:
+            raise ValueError(
+                f"{spec.config.landing_table}: side_input edge "
+                f"{list(edge.child_cols)} shares {shared} with the "
+                f"driving edge {list(driving.child_cols)} — an edge that "
+                f"overlaps the driving key must be conditional "
+                f"(mode='conditional', overlap={shared}), ADR 0037 §5"
+            )
     for _j, edge, _parent in conditional_edges:
-        # The join key is read off the DRIVING key tuple by position, so
-        # an overlap column the driving edge does not carry would fail
-        # deep inside the graph build as `x not in tuple`.
-        unshared = [c for c in edge.overlap if c not in fanout_edge[0].child_cols]
+        if not edge.overlap:
+            # Both sides would key on `()`: the Top-M combine and the
+            # CoGroupByKey collapse onto ONE key — no parallelism for the
+            # whole driving stream — and an edge with nothing in common
+            # with the driving key is independent by definition.
+            raise ValueError(
+                f"{spec.config.landing_table}: conditional edge "
+                f"{list(edge.child_cols)} declares an EMPTY overlap — an "
+                f"edge with no column shared with the driving edge "
+                f"{list(driving.child_cols)} is independent; use "
+                f"mode='side_input' (ADR 0037 §2)"
+            )
+        # The join key is read off the DRIVING key tuple by position, and
+        # the candidates off THIS edge's own columns, so an overlap column
+        # missing from either side fails as `x not in tuple` deep in the
+        # graph build.
+        unshared = [c for c in edge.overlap if c not in driving_cols]
         if unshared:
             raise ValueError(
                 f"{spec.config.landing_table}: conditional edge "
                 f"{list(edge.child_cols)} declares overlap columns "
                 f"{unshared} that the driving edge "
-                f"{list(fanout_edge[0].child_cols)} does not carry — the "
+                f"{list(driving.child_cols)} does not carry — the "
                 f"overlap is the edge's columns SHARED with the driving "
                 f"edge (ADR 0037 §4)"
             )
-    return fanout_edge, side_input_edges, conditional_edges
+        unowned = [c for c in edge.overlap if c not in edge.child_cols]
+        if unowned:
+            raise ValueError(
+                f"{spec.config.landing_table}: conditional edge "
+                f"{list(edge.child_cols)} declares overlap columns "
+                f"{unowned} that are not its own — the overlap is a "
+                f"SUBSET of the edge's child columns (ADR 0037 §4)"
+            )
 
 
 def _side_input_pools(
@@ -1018,17 +1071,17 @@ def _route_parent_edges(
     fanout_edge, side_input_edges, conditional_edges = _partition_parent_edges(
         spec, valid_by_landing
     )
-    if fanout_edge is not None and spec.config.fanout is None:
+    fanout_payload = spec.config.fanout
+    if fanout_edge is not None and fanout_payload is None:
         raise ValueError(
             f"{spec.config.landing_table}: a fanout-mode parent "
             f"edge needs PipelineConfig.fanout set (ADR 0036)"
         )
     fk_side = _side_input_pools(side_input_edges, prefix)
-    if fanout_edge is None:
+    if fanout_edge is None or fanout_payload is None:
         return fk_side, None
     edge, parent = fanout_edge
-    assert spec.config.fanout is not None  # checked above
-    mean_fanout = FanoutPlan.from_payload(spec.config.fanout).histogram.mean
+    mean_fanout = FanoutPlan.from_payload(fanout_payload).histogram.mean
     requests = _fanout_requests(
         parent,
         edge,
@@ -1226,16 +1279,23 @@ def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:
     """Map a DLQ envelope to a ``(rule_id, weight)`` pair for the BLOCKER
     gate's per-rule counts.
 
-    Every rule counts 1 envelope = 1 lost row, EXCEPT ``engine_failure``:
-    one such envelope represents a whole crashed batch (`raw_request` is
-    the batch request dict ``{"batch_id": ..., "n": ...}`` — see
-    `GenerateRecordsDoFn`'s ``failed`` tagged output), so it must weight by
-    the batch's row count or a half-failed run scores a misleadingly low
+    Every rule counts 1 envelope = 1 lost row, EXCEPT the two whose
+    envelope stands for a whole KEY BATCH or a whole KEY, both carrying
+    their lost-row count in ``raw_request["n"]``:
+
+    - ``engine_failure`` — one crashed batch request (`raw_request` is the
+      batch dict ``{"batch_id": ..., "n": ...}``; `GenerateRecordsDoFn`'s
+      ``failed`` tagged output).
+    - ``fk.unmatched`` (ADR 0037 §4 ruling B) — one DRIVING KEY dropped
+      for having no conditional candidate, weighted by the rows that key
+      was expected to produce (`n / len(keys)`).
+
+    Without the weight a half-failed run scores a misleadingly low
     observed_blocker_ratio and wrongly PASSES. Module-level (not a
     lambda) to stay picklable for the Dataflow worker harness.
     """
     rule_id = envelope.get("rule_id", "unknown")
-    if rule_id == "engine_failure":
+    if rule_id in ("engine_failure", "fk.unmatched"):
         try:
             return (rule_id, max(1, int(envelope.get("raw_request", {}).get("n", 1))))
         except (TypeError, ValueError):

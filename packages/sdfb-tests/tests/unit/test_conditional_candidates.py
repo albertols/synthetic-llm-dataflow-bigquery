@@ -86,6 +86,9 @@ def test_candidates_are_capped_deterministic_and_never_null(tmp_path):
     # Same run_id ⇒ same draw, in the same order: a retried bundle (or a
     # re-run of the job) reproduces the child rows exactly.
     assert _run_candidates("run-a", tmp_path, "again") == first
+    # …and the run id REACHES the rank: a different run draws a
+    # different sample (this is not luck — blake2b is seeded by it).
+    assert _run_candidates("run-b", tmp_path, "other") != first
 
 
 def test_attach_matches_gives_an_unmatched_driving_key_an_empty_list():
@@ -162,3 +165,51 @@ def test_requests_carry_each_key_its_own_candidates(tmp_path):
     assert set(seen) == {("t1", "l1"), ("t2", "l2")}
     assert len(seen[("t1", "l1")]) == _EDGE.candidate_cap
     assert seen[("t2", "l2")] == []
+
+
+def test_the_candidate_rank_is_an_int_seeded_by_the_run_id():
+    """The Top-M ordering must be a stable INT derived from the run id —
+    never Python's process-salted `hash()`, which would reorder the
+    candidates on every worker."""
+    from sdfb_beam.pipeline import _candidate_rank
+
+    join_key, (rank, value) = _candidate_rank((("t1",), ("r1",)), run_id="run-a")
+    assert join_key == ("t1",)
+    assert value == ("r1",)
+    assert isinstance(rank, int)
+    assert rank != _candidate_rank((("t1",), ("r1",)), run_id="run-b")[1][0]
+
+
+def _three_candidates_including_null(elements):
+    assert len(elements) == 1, elements
+    ((join_key, candidates),) = elements
+    assert join_key == ("t1",)
+    assert set(candidates) == {(None,), ("a",), ("b",)}, candidates
+
+
+def test_a_rank_tie_never_falls_through_to_the_candidate_values(monkeypatch):
+    """Only the JOIN KEY is NULL-checked, so a `rest_value` legitimately
+    holds None. Ordering on the whole `(rank, rest_value)` tuple means a
+    rank collision advances the comparison to the values and raises
+    `'<' not supported between 'NoneType' and 'str'` — and it does so
+    DETERMINISTICALLY, so the retried bundle dies too. The combine must
+    order on the rank alone."""
+    from sdfb_beam import pipeline as pipeline_mod
+
+    # Every candidate ranks the same: the tie is the point.
+    monkeypatch.setattr(
+        pipeline_mod,
+        "_candidate_rank",
+        lambda element, run_id: (element[0], (7, element[1])),
+    )
+    rows = [
+        {"T": "t1", "R": None},
+        {"T": "t1", "R": "a"},
+        {"T": "t1", "R": "b"},
+    ]
+    with TestPipeline() as p:
+        parent = p | beam.Create(rows)
+        assert_that(
+            _conditional_candidates(parent, _EDGE, "tie/", "run-a"),
+            _three_candidates_including_null,
+        )

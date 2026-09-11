@@ -753,12 +753,16 @@ def test_fanout_request_payload_carries_matches_aligned_with_the_keys():
     plan with no conditional edge keeps today's payload byte for byte."""
     from sdfb_beam.pipeline import _fanout_request_payload
 
-    plain = _fanout_request_payload([("t1", "l1"), ("t2", "l2")], 2.0)
+    plain = _fanout_request_payload(
+        [("t1", "l1"), ("t2", "l2")], 2.0, paired=False
+    )
     assert "matches" not in plain
     assert plain["keys"] == [("t1", "l1"), ("t2", "l2")]
 
     paired = _fanout_request_payload(
-        [(("t1", "l1"), {"T,R": [("r1",)]}), (("t2", "l2"), {"T,R": []})], 2.0
+        [(("t1", "l1"), {"T,R": [("r1",)]}), (("t2", "l2"), {"T,R": []})],
+        2.0,
+        paired=True,
     )
     assert paired["matches"] == {"T,R": [[("r1",)], []]}
     assert paired["keys"] == [("t1", "l1"), ("t2", "l2")]
@@ -786,3 +790,86 @@ def test_an_overlap_column_the_driving_edge_lacks_stops_the_build(tmp_path):
             spec,
             {"p.land.customers": "PARENT_DRIVING", "p.land.right": "PARENT_C"},
         )
+
+
+def test_an_overlap_column_the_conditional_edge_lacks_stops_the_build(tmp_path):
+    """`_conditional_candidates` indexes the CONDITIONAL edge's own
+    `child_cols` too, so an overlap column the driving edge carries but
+    this edge does not dies as `tuple.index(x)` deep in the build —
+    exactly the message the guard exists to replace."""
+    from sdfb_beam.pipeline import _partition_parent_edges
+
+    driving = FkEdgeSpec(
+        child_cols=("CUST_ID", "LINE"), ref_cols=("customer_id", "line"),
+        parent_landing="p.land.customers", parent_pk=("customer_id",),
+        mode="fanout",
+    )
+    stray = FkEdgeSpec(
+        child_cols=("CUST_ID", "R"), ref_cols=("customer_id", "r"),
+        parent_landing="p.land.right", mode="conditional",
+        overlap=("LINE",),
+    )
+    spec = _star_table_spec(tmp_path, (driving, stray))
+    with pytest.raises(ValueError, match="LINE"):
+        _partition_parent_edges(
+            spec,
+            {"p.land.customers": "PARENT_DRIVING", "p.land.right": "PARENT_C"},
+        )
+
+
+def test_a_conditional_edge_with_no_shared_column_stops_the_build(tmp_path):
+    """`overlap=()` keys BOTH sides of the join on `()`: the Top-M
+    combine and the CoGroupByKey collapse onto a single key — no
+    parallelism at all for the whole driving stream — and the edge is
+    semantically independent anyway (`relationships.edge_roles` calls it
+    that). Invisible until the job stalls, so it must stop at build."""
+    from sdfb_beam.pipeline import _partition_parent_edges
+
+    disjoint = FkEdgeSpec(
+        child_cols=("R",), ref_cols=("r",), parent_landing="p.land.right",
+        mode="conditional", overlap=(),
+    )
+    spec = _star_table_spec(tmp_path, (_DRIVING_EDGE, disjoint))
+    with pytest.raises(ValueError, match="side_input"):
+        _partition_parent_edges(
+            spec,
+            {"p.land.customers": "PARENT_DRIVING", "p.land.right": "PARENT_C"},
+        )
+
+
+def test_a_side_input_edge_sharing_the_driving_columns_stops_the_build(tmp_path):
+    """The star is only sound because the independent path is DISJOINT
+    from the driving key (design §5). An overlapping side-input edge has
+    its shared column overwritten by the driving key after the pool draw,
+    so it lands a tuple its parent never held — ADR 0036 D1's corruption,
+    which the gate can only MEASURE. The composer names it instead."""
+    from sdfb_beam.pipeline import _partition_parent_edges
+
+    overlapping = FkEdgeSpec(
+        child_cols=("CUST_ID", "REGION"), ref_cols=("customer_id", "country"),
+        parent_landing="p.land.dim", mode="side_input",
+    )
+    spec = _star_table_spec(tmp_path, (_DRIVING_EDGE, overlapping))
+    with pytest.raises(ValueError, match="must be conditional"):
+        _partition_parent_edges(
+            spec,
+            {"p.land.customers": "PARENT_DRIVING", "p.land.dim": "PARENT_I"},
+        )
+
+
+def test_a_dict_valued_key_column_is_never_mistaken_for_matches():
+    """A widened driving edge (D4) carries INHERITED columns, and a
+    RECORD one lands as a dict — so `(cid, {...})` is a plain two-column
+    key. Sniffing the element shape read it as a `(key, matches)` pair:
+    the keys became scalars, the batch_id moved (every downstream seed
+    with it) and a spurious `"matches"` tripped the DoFn's gate. The
+    payload must decide from the GRAPH, never from the element."""
+    from sdfb_beam.pipeline import _fanout_request_payload
+
+    ks = [(1, {"tier": "gold"}), (2, {"tier": "silver"})]
+    payload = _fanout_request_payload(ks, 2.0, paired=False)
+    assert "matches" not in payload
+    assert payload["keys"] == ks
+    # The batch_id hashes the WHOLE first key, not its first member.
+    scalar = _fanout_request_payload([1, 2], 2.0, paired=False)
+    assert payload["batch_id"] != scalar["batch_id"]
