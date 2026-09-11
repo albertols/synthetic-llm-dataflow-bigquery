@@ -160,6 +160,37 @@ class TestDlqNormalize:
         assert out["dlq_inserted_at"] == "2026-01-01T00:00:00+00:00"
         assert out["pipeline_step"] == "X"
 
+    def test_fk_unmatched_envelope_maps_pipeline_step(self):
+        """ADR 0037: `GenerateRecordsDoFn`'s `fk.unmatched` envelope
+        shares `error_type="referential_integrity"` with `fk.orphan`
+        (`EnforceFkIntegrityDoFn`, see the next test) — the two rules
+        must still resolve to their own pipeline step."""
+        raw = {
+            "raw_request": {"batch_id": 3, "keys": [["K2"]], "n": 5},
+            "error_type": "referential_integrity",
+            "error_detail": "no T,R candidate for key ('K2',)",
+            "rule_id": "fk.unmatched", "stage": "pre_generate",
+        }
+        out = normalize_dlq_record(raw, run_id="r4")
+        assert json.loads(out["raw_record"]) == {"batch_id": 3, "keys": [["K2"]], "n": 5}
+        assert out["error_type"] == "referential_integrity"
+        assert out["pipeline_step"] == "GenerateRecordsDoFn"
+        assert out["rule_id"] == "fk.unmatched"
+
+    def test_fk_orphan_envelope_keeps_its_own_pipeline_step(self):
+        """Same `error_type` as `fk.unmatched` above, different `rule_id`
+        (ADR 0031) — proves the mapping is keyed by rule, not error_type
+        alone, so adding `fk.unmatched` never relabels `fk.orphan` rows."""
+        raw = {
+            "raw_record": {"PID": "P1"}, "error_type": "referential_integrity",
+            "error_detail": "COL=('P1',) is not a landed parent key",
+            "rule_id": "fk.orphan", "stage": "pre_write",
+        }
+        out = normalize_dlq_record(raw, run_id="r5")
+        assert out["error_type"] == "referential_integrity"
+        assert out["pipeline_step"] == "EnforceFkIntegrityDoFn"
+        assert out["rule_id"] == "fk.orphan"
+
 
 def test_blocker_rule_ids_constant():
     assert "schema.types" in BLOCKER_RULE_IDS

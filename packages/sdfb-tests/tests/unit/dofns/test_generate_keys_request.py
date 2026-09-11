@@ -236,3 +236,71 @@ class TestConditionalMatchesNullPolicy:
         assert "name=batch_unmatched" in caplog.text
         assert "batch_id=9" in caplog.text
         assert "keys_dropped=1" in caplog.text
+
+    def test_middle_of_batch_drop_keeps_alignment_across_two_edges(self, caplog):
+        """Should-fix (review round 1, finding #1): a 4-key batch drops
+        keys 1 AND 2 (the MIDDLE of the batch, not the tail) on a
+        non-nullable edge, while a SECOND, nullable edge has candidates
+        for every key. Pins down that `keep_idx` re-indexes EVERY edge
+        in `matches` — not just the one that caused the drop — and that
+        the filtering is truly index-based, not a "drop the tail"
+        shortcut that would pass every other test in this file."""
+        ctx = GenerationContext(
+            table_schema=_SCHEMA, reference_rows=_ROWS, reference_digest="dofn-fanout-mid",
+            pipeline_run_id="dofn-run", pk_columns=["PID", "CAT"],
+            fanout={
+                "driving_cols": ["PID"], "histogram": {"2": 1},
+                "conditional": [
+                    {"id": "A,X", "cols": ["CAT"], "nullable": False},
+                    {"id": "B,Y", "cols": ["AMT"], "nullable": True},
+                ],
+            },
+        )
+        dofn = GenerateRecordsDoFn(
+            engine_name="b1_rag", model_client=FakeModelClient(reference_pool=_ROWS),
+            ctx=ctx,
+        )
+        engine = _RecordingEngine()
+        dofn._engine = engine
+        counter = _CounterSpy()
+        dofn._keys_unmatched = counter
+        keys = [("K0",), ("K1",), ("K2",), ("K3",)]
+        request = {
+            "batch_id": 11,
+            "keys": keys,
+            "n": 8,
+            "matches": {
+                # Non-nullable: no candidate at index 1 or 2 → those keys drop.
+                "A,X": [[("a0",)], [], [], [("a3",)]],
+                # Nullable: candidates for ALL four keys — never causes a
+                # drop, but MUST still be re-indexed alongside "A,X".
+                "B,Y": [[("b0",)], [("b1",)], [("b2",)], [("b3",)]],
+            },
+        }
+
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            out = list(dofn.process(request))
+
+        envelopes = [o.value for o in out]
+        assert len(envelopes) == 2
+        dropped_pids = {e["raw_request"]["keys"][0][0] for e in envelopes}
+        assert dropped_pids == {"K1", "K2"}
+        for envelope in envelopes:
+            assert envelope["rule_id"] == "fk.unmatched"
+            assert envelope["error_type"] == "referential_integrity"
+            assert envelope["stage"] == "pre_generate"
+            assert envelope["raw_request"]["n"] == 2  # max(1, round(8 / 4))
+            assert "A,X" in envelope["error_detail"]  # the offending edge
+
+        assert len(engine.calls) == 1
+        kept_keys, kept_matches = engine.calls[0]
+        assert kept_keys == [("K0",), ("K3",)]
+        assert kept_matches == {
+            "A,X": [[("a0",)], [("a3",)]],
+            "B,Y": [[("b0",)], [("b3",)]],
+        }
+
+        assert counter.value == 2
+        assert "name=batch_unmatched" in caplog.text
+        assert "batch_id=11" in caplog.text
+        assert "keys_dropped=2" in caplog.text
