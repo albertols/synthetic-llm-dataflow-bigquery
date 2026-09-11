@@ -462,7 +462,7 @@ tables:
         assert "DRIVES" in card
         assert "widened via A_TABLE" in card
 
-    def test_unrelated_parents_still_need_drives(self):
+    def test_unrelated_parents_default_to_the_first_declared_edge(self):
         text = """
 model: m
 tables:
@@ -480,13 +480,23 @@ tables:
         ref: Q
         ref_cols: [K]
 """
-        with pytest.raises(RelationshipError, match=r"drives: true"):
-            self._registry(text).edge_roles("CHILD")
+        reg = self._registry(text)
+        to_p, to_q = reg.enforced_edges("CHILD")
+        assert reg.edge_roles("CHILD") == {to_p: "driving", to_q: "conditional"}
+        assert reg.driving_choice("CHILD") == "first_declared"
+        assert reg.edge_overlap("CHILD", to_q) == ("K",)
+        assert reg.edge_rest("CHILD", to_q) == ()
+        assert "DRIVES (first declared" in reg.card("CHILD")
+        assert "conditional on (K)" in reg.card("CHILD")
 
     def test_no_edge_between_the_parents_cannot_be_widened(self):
-        # C_TABLE has NO edge to B_TABLE: nothing to widen, and B_TABLE is
-        # not an ancestor of C_TABLE, so the driving parent is ambiguous.
+        # C_TABLE has NO edge to B_TABLE: nothing to widen, and neither
+        # parent descends from the other, so ruling A applies (ADR 0037) —
+        # the first declared edge (to C_TABLE) drives and the other is
+        # conditional on the columns they share.
         text = self._KW.replace(
             "    fk:\n      - cols: [C_COL_001]\n        ref: B_TABLE\n        ref_cols: [B_COL_008]\n", "")
-        with pytest.raises(RelationshipError, match=r"drives: true"):
-            self._registry(text).edge_roles("A_TABLE")
+        reg = self._registry(text)
+        to_c, to_b = reg.enforced_edges("A_TABLE")
+        assert reg.edge_roles("A_TABLE") == {to_c: "driving", to_b: "conditional"}
+        assert reg.driving_choice("A_TABLE") == "first_declared"

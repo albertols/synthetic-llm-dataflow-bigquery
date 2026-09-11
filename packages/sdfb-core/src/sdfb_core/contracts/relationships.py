@@ -39,8 +39,13 @@ Three flags, three different jobs:
   GENERATED from: its parent's landed keys become the child's request
   stream, one child row per source fan-out draw. Needed only to
   disambiguate when a table has several enforced in-model edges (a lone
-  one drives by itself); every other enforced edge must then be implied
-  by it, or `edge_roles` stops the launch.
+  one drives by itself, and when no marker and no ancestry decides it,
+  the first declared edge defaults to driving — ADR 0037 ruling A).
+  Every other enforced edge is then `implied` (a subset of the driving
+  columns, carried transitively), `conditional` (shares columns with
+  the driving edge) or `independent` (shares none) — see
+  :meth:`RelationshipRegistry.edge_roles`. Only more than one edge
+  marked `drives: true` still stops the launch.
 
 Column-level ``llm_prompt_constraint`` stays in COLUMN descriptions
 (:mod:`sdfb_core.contracts.prompt_constraint`) — that is per-column
@@ -331,44 +336,24 @@ class RelationshipRegistry:
         )
 
     def edge_roles(self, table: str) -> dict[FkEdge, str]:
-        """Role of every enforced edge (ADR 0036): ``driving`` (the
-        parent whose keys this child is generated from), ``implied``
-        (its columns are a subset of the driving edge's, and the driving
-        parent carries them from that parent through its own enforced
-        edge, transitively) or ``external``. Anything else is a launch
-        stop: today the engine writes each edge's columns in turn and
-        the last edge silently wins."""
+        """Role of every enforced edge of ``table`` (ADR 0036/0037): the
+        ``driving`` edge is the parent whose keys the child is generated
+        from (:meth:`driving_choice` says how it was picked);
+        ``implied`` — a subset of the driving edge's columns, carried by
+        the driving parent from that parent through its own enforced
+        edges, transitively: nothing to draw; ``conditional`` — shares
+        at least one column with the driving edge (co-drawn from a
+        joint pool on the shared columns, ADR 0037 §4); ``independent``
+        — shares no column with the driving edge (drawn from a
+        side-input key pool, ADR 0037 §5); ``external`` — the parent is
+        outside this model. The only launch stop left is more than one
+        edge marked ``drives: true`` (rule 5)."""
         edges = self.enforced_edges(table)
         roles: dict[FkEdge, str] = {e: "external" for e in edges if e.external}
         internal = [e for e in edges if not e.external]
         if not internal:
             return roles
-        driving: FkEdge
-        if len(internal) == 1:
-            driving = internal[0]
-        else:
-            marked = [e for e in internal if e.drives]
-            if len(marked) == 1:
-                driving = marked[0]
-            else:
-                # Unmarked (the operator only toggled `enabled`): the DAG
-                # decides — the parent that itself descends from every
-                # other candidate parent is the most-derived one and drives.
-                parents = {e.ref for e in internal}
-                lowest = [
-                    e for e in internal
-                    if all(self._descends(e.ref, other) for other in parents if other != e.ref)
-                ]
-                if len(marked) > 1 or len({e.ref for e in lowest}) != 1:
-                    names = ", ".join(f"({','.join(e.cols)})->{e.ref}" for e in internal)
-                    raise RelationshipError(
-                        f"{_name(table)}: {len(internal)} enforced edges [{names}] "
-                        f"and {len(marked)} marked `drives: true`, and no parent "
-                        f"descends from all the others — mark exactly one edge "
-                        f"`drives: true` (the parent whose keys this table is "
-                        f"generated from)"
-                    )
-                driving = lowest[0]
+        driving, _ = self._pick_driving(table, internal)
         roles[driving] = "driving"
         for edge in internal:
             if edge is driving:
@@ -376,19 +361,84 @@ class RelationshipRegistry:
             if self._implied(edge, driving):
                 roles[edge] = "implied"
                 continue
-            raise RelationshipError(
-                f"{_name(table)}: edge ({','.join(edge.cols)})->{edge.ref} is "
-                f"neither driving nor implied by the driving edge "
-                f"({','.join(driving.cols)})->{driving.ref}: widen "
-                f"{driving.ref}'s edge to {edge.ref} to carry "
-                f"[{','.join(edge.cols)}], or mark this edge `drives: true`"
-            )
+            overlap = tuple(c for c in edge.cols if c in driving.cols)
+            roles[edge] = "conditional" if overlap else "independent"
         return roles
 
     def driving_edge(self, table: str) -> FkEdge | None:
         return next(
             (e for e, r in self.edge_roles(table).items() if r == "driving"), None
         )
+
+    def _pick_driving(
+        self, table: str, internal: list[FkEdge]
+    ) -> tuple[FkEdge, str]:
+        """The driving edge and how it was chosen (ADR 0037 §3, in
+        order): a lone internal edge drives itself (``"single"``);
+        exactly one edge marked ``drives: true`` (``"marked"``); the
+        parent that descends from every other candidate, widened with
+        the child's pins (``"derived"``, ADR 0036 rev 2); else — no
+        marker and no ancestry between the parents — the first declared
+        edge drives (``"first_declared"``, ruling A, 2026-09-11). More
+        than one edge marked ``drives: true`` is the only stop left."""
+        if len(internal) == 1:
+            return internal[0], "single"
+        marked = [e for e in internal if e.drives]
+        if len(marked) > 1:
+            names = ", ".join(f"({','.join(e.cols)})->{e.ref}" for e in internal)
+            raise RelationshipError(
+                f"{_name(table)}: {len(internal)} enforced edges [{names}] "
+                f"and {len(marked)} marked `drives: true` — mark exactly "
+                f"one edge `drives: true` (the parent whose keys this "
+                f"table is generated from)"
+            )
+        if len(marked) == 1:
+            return marked[0], "marked"
+        # Unmarked (the operator only toggled `enabled`): the DAG
+        # decides — the parent that itself descends from every other
+        # candidate parent is the most-derived one and drives.
+        parents = {e.ref for e in internal}
+        lowest = [
+            e for e in internal
+            if all(self._descends(e.ref, other) for other in parents if other != e.ref)
+        ]
+        if len({e.ref for e in lowest}) == 1:
+            return lowest[0], "derived"
+        # No marker, no ancestry between the parents (ADR 0037 ruling A,
+        # 2026-09-11): the first declared internal enforced edge drives.
+        return internal[0], "first_declared"
+
+    def _driving_edge_and_choice(self, table: str) -> tuple[FkEdge | None, str | None]:
+        internal = [e for e in self.enforced_edges(table) if not e.external]
+        if not internal:
+            return None, None
+        return self._pick_driving(table, internal)
+
+    def driving_choice(self, table: str) -> str | None:
+        """How the driving edge was picked (ADR 0037 §3): ``"single"``,
+        ``"marked"``, ``"derived"`` or ``"first_declared"`` — see
+        :meth:`_pick_driving`. ``None`` when ``table`` has no internal
+        enforced edge (a root, a disabled table, or a table outside
+        every model)."""
+        return self._driving_edge_and_choice(table)[1]
+
+    def edge_overlap(self, table: str, edge: FkEdge) -> tuple[str, ...]:
+        """Child column names of ``edge`` that also appear in the
+        driving edge's columns, in ``edge.cols`` order. Empty for the
+        driving edge itself, and when ``table`` has no driving edge."""
+        driving, _ = self._driving_edge_and_choice(table)
+        if driving is None or edge is driving:
+            return ()
+        return tuple(c for c in edge.cols if c in driving.cols)
+
+    def edge_rest(self, table: str, edge: FkEdge) -> tuple[str, ...]:
+        """``edge.cols`` outside :meth:`edge_overlap`. Empty for the
+        driving edge itself, and when ``table`` has no driving edge."""
+        driving, _ = self._driving_edge_and_choice(table)
+        if driving is None or edge is driving:
+            return ()
+        overlap = set(self.edge_overlap(table, edge))
+        return tuple(c for c in edge.cols if c not in overlap)
 
     def _implied(self, edge: FkEdge, driving: FkEdge) -> bool:
         """``edge`` is satisfied by construction when its columns ride on
@@ -584,7 +634,10 @@ class RelationshipRegistry:
         """House-style diagram source for the table's model — the ONE
         renderer reports embed (visual-first docs rule). Stores are
         cylinders, enforced edges solid, documented edges dashed, and a
-        disabled table is dimmed like an external one."""
+        disabled table is dimmed like an external one. Driving and
+        implied edges keep their plain ``cols → ref_cols`` label
+        unchanged; independent and conditional edges (ADR 0037) get an
+        extra suffix."""
         model = self.model_for(table)
         if model is None:
             return ""
@@ -604,9 +657,20 @@ class RelationshipRegistry:
         for ref in external:
             lines.append(f'  {node_id(ref)}[("⚪ {ref} (external)")]')
         for name, relations in model.tables.items():
+            try:
+                roles = self.edge_roles(name) if relations.enabled else {}
+            except RelationshipError:
+                roles = {}
             for edge in relations.fk:
                 arrow = "-->" if edge.enforced else "-.->"
                 label = f"{','.join(edge.cols)} → {','.join(edge.ref_cols)}"
+                widened = self._widened(name, edge) if edge.enforced else edge
+                role = roles.get(widened)
+                if role == "independent":
+                    label += " -- independent"
+                elif role == "conditional":
+                    overlap = self.edge_overlap(name, widened)
+                    label += f" -- conditional on {','.join(overlap)}"
                 lines.append(
                     f'  {node_id(name)} {arrow}|"{label}"| '
                     f"{node_id(edge.ref)}"
@@ -631,6 +695,28 @@ class RelationshipRegistry:
             return card
         return card + "\n\n```mermaid\n" + diagram + "\n```"
 
+    def _role_tag(
+        self, name: str, edge: FkEdge, roles: dict[FkEdge, str], choice: str | None
+    ) -> str | None:
+        """The ``[enforced, ...]`` suffix for one edge's role (card tags,
+        ADR 0036/0037), or ``None`` to keep the caller's plain
+        ``"enforced"`` tag (an edge :meth:`edge_roles` didn't classify —
+        should not happen once ``roles`` is non-empty)."""
+        role = roles.get(edge)
+        if role == "driving":
+            if choice == "first_declared":
+                return "enforced, DRIVES (first declared — mark drives: true to choose)"
+            return "enforced, DRIVES"
+        if role == "implied":
+            driving = next((e for e, r in roles.items() if r == "driving"), None)
+            return f"enforced, implied via {_name(driving.ref)}" if driving else None
+        if role == "independent":
+            return "enforced, independent"
+        if role == "conditional":
+            overlap = self.edge_overlap(name, edge)
+            return f"enforced, conditional on ({','.join(overlap)})"
+        return None
+
     def _table_lines(
         self, model: RelationshipModel, name: str, prefix: str
     ) -> list[str]:
@@ -645,11 +731,13 @@ class RelationshipRegistry:
             f" {prefix} | {name:<24} {' '.join(keys) or '(no keys declared)'}"
             f"{state}"
         ]
-        # Compute roles once per table (ADR 0036).
+        # Compute roles once per table (ADR 0036/0037).
         try:
             roles = self.edge_roles(name)
+            choice = self.driving_choice(name)
         except RelationshipError:
             roles = {}
+            choice = None
         widened_by = {
             (rec["ref"], tuple(rec["added"])): rec["via"]
             for rec in self._widenings() if rec["table"] == name
@@ -664,17 +752,9 @@ class RelationshipRegistry:
                 edge.external or self.enabled(edge.ref)
             ):
                 tag = "parent DISABLED — not drawn"
-            # Render edge roles (ADR 0036).
+            # Render edge roles (ADR 0036/0037).
             elif edge.enforced and tag == "enforced" and roles:
-                role = roles.get(edge)
-                if role == "driving":
-                    tag = "enforced, DRIVES"
-                elif role == "implied":
-                    driving = next(
-                        (e for e, r in roles.items() if r == "driving"), None
-                    )
-                    if driving:
-                        tag = f"enforced, implied via {_name(driving.ref)}"
+                tag = self._role_tag(name, edge, roles, choice) or tag
             if edge is not declared:
                 added = tuple(zip(edge.cols[len(declared.cols):], edge.ref_cols[len(declared.ref_cols):], strict=True))
                 via = widened_by.get((edge.ref, added), "?")

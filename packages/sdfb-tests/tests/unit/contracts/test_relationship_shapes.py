@@ -1,19 +1,19 @@
 """Every relational SHAPE a model file can declare, through the registry
-(ADR 0032/0036): what the launcher resolves — waves, driving/implied
-roles — with no `drives:` marker and no model edit beyond `enabled`.
+(ADR 0032/0036/0037): what the launcher resolves — waves, driving/
+implied/independent/conditional roles — with no `drives:` marker and no
+model edit beyond `enabled`.
 
 The 2026-09-11 5-table expansion showed the launch stopping on shapes
-the model can legitimately declare. Each case here is one shape; the
-strict-xfail ones are the RED tests for the shapes the registry cannot
-resolve yet (a child with two parents that are not on one ancestry
-line — the star-schema fact table and the true diamond). They turn
-green, and the marker comes off, when that lands.
+the model can legitimately declare. Each case here is one shape,
+including a child with two parents that are not on one ancestry line —
+the star-schema fact table and the true diamond — resolved by the
+`independent` and `conditional` roles (ADR 0037).
 """
 
 from __future__ import annotations
 
 import pytest
-from sdfb_core.contracts.relationships import RelationshipRegistry
+from sdfb_core.contracts.relationships import RelationshipError, RelationshipRegistry
 
 
 def _registry(text: str) -> RelationshipRegistry:
@@ -97,6 +97,27 @@ tables:
         assert reg.enforced_edges("c1") == ()
         assert reg.generation_waves(("c1", "c2")) == (("c1", "c2"),)
 
+    def test_star_fact_dimensions_are_independent(self):
+        reg = _registry(_STAR_FACT)
+        _to_a, to_b = reg.enforced_edges("fact")
+        assert reg.edge_overlap("fact", to_b) == ()
+        assert reg.edge_rest("fact", to_b) == ("B_ID",)
+        assert reg.driving_choice("fact") == "first_declared"
+        assert reg.driving_choice("dim_a") is None
+
+    def test_diamond_branch_overlap_and_rest(self):
+        reg = _registry(_DIAMOND)
+        _to_left, to_right = reg.enforced_edges("bottom")
+        assert reg.edge_overlap("bottom", to_right) == ("T",)
+        assert reg.edge_rest("bottom", to_right) == ("R",)
+        assert "conditional on (T)" in reg.card("bottom")
+
+    def test_two_marked_edges_still_stop(self):
+        text = _STAR_FACT.replace("ref: dim_a, ref_cols: [A_ID]}", "ref: dim_a, ref_cols: [A_ID], drives: true}") \
+                         .replace("ref: dim_b, ref_cols: [B_ID]}", "ref: dim_b, ref_cols: [B_ID], drives: true}")
+        with pytest.raises(RelationshipError, match="2 marked"):
+            _registry(text).edge_roles("fact")
+
 
 _STAR_FACT = """
 model: s
@@ -125,26 +146,16 @@ tables:
 
 
 class TestShapesStillPending:
-    """A child with two in-set parents that are not on one ancestry line.
-    Strict xfail: the day these pass, the marker comes off."""
+    """A child with two in-set parents that are not on one ancestry line —
+    the star-schema fact table and the true diamond. Resolved by the
+    `independent` and `conditional` roles (ADR 0037)."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="independent parents (star-schema fact): the registry needs "
-        "an 'independent' role and the pipeline a side-input pool next to "
-        "the driving edge",
-    )
     def test_star_schema_fact_with_two_independent_dimensions(self):
         reg = _registry(_STAR_FACT)
         roles = _roles(reg, "fact")
         assert roles["(A_ID)->dim_a"] == "driving"
         assert roles["(B_ID)->dim_b"] == "independent"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="true diamond: the second branch shares columns with the "
-        "driving edge and must be drawn conditionally on them",
-    )
     def test_true_diamond_rejoining_at_the_bottom(self):
         reg = _registry(_DIAMOND)
         roles = _roles(reg, "bottom")
