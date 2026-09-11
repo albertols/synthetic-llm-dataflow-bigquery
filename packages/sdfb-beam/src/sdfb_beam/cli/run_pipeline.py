@@ -2000,7 +2000,7 @@ def fk_edge_metadata(
     ``edge_roles`` is keyed on the WIDENED edges ``enforced_edges``
     returns (ADR 0036 rev 2), while ``relations.fk`` holds the declared
     ones. A declaration is resolved to its widened form by APPLYING the
-    same widening (`enforced_edges` = `_widened` over the raw enforced
+    same widening (`enforced_edges` = `widened` over the raw enforced
     edges), never by guessing from a column prefix: a documented
     ``(T)->P`` next to an enforced ``(T,R)->P`` prefix-matched the
     driving edge and claimed `mode=fanout` for an edge the launch never
@@ -2024,7 +2024,7 @@ def fk_edge_metadata(
         # The same widening `enforced_edges` applies, applied once more
         # to THIS declaration — the only way to name the widened edge a
         # declaration became without re-deriving the rule here.
-        widened = registry._widened(landing_table, fk)
+        widened = registry.widened(landing_table, fk)
         return meta.get((widened.ref, tuple(widened.cols)), {})
 
     return tuple(

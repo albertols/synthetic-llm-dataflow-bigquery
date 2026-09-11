@@ -504,6 +504,46 @@ tables:
         assert reg.edge_overlap("A_TABLE", to_b) == to_b.cols
         assert reg.edge_rest("A_TABLE", to_b) == ()
 
+    def test_widened_resolves_a_declaration_to_the_edge_the_launch_draws(self):
+        # The launcher (`fk_edge_metadata`) has to name the WIDENED edge
+        # a declaration became to look its role up — that must go through
+        # a PUBLIC method, not a private one across the package boundary
+        # (ADR 0037 review, ruling 11).
+        reg = self._registry(self._KW)
+        (declared,) = reg.relations("C_TABLE").fk
+        (enforced,) = reg.enforced_edges("C_TABLE")
+        assert declared != enforced  # this one IS widened, via A_TABLE
+        assert reg.widened("C_TABLE", declared) == enforced
+
+        # Nothing widens A_TABLE's own edges: each comes back equal to
+        # itself, so the launcher can call `widened` on every edge.
+        for edge in reg.relations("A_TABLE").fk:
+            assert reg.widened("A_TABLE", edge) == edge
+
+    def test_widened_leaves_a_documented_edge_alone(self):
+        # A documented edge next to the widened enforced one: the launch
+        # never draws it, so it is never widened either (its declared
+        # columns are what the card and the metadata show).
+        text = self._KW.replace(
+            """      - cols: [C_COL_001]
+        ref: B_TABLE
+        ref_cols: [B_COL_008]
+""",
+            """      - cols: [C_COL_001]
+        ref: B_TABLE
+        ref_cols: [B_COL_008]
+      - cols: [C_COL_003]
+        ref: B_TABLE
+        ref_cols: [B_COL_008]
+        enforced: false
+""",
+        )
+        reg = self._registry(text)
+        documented = next(
+            e for e in reg.relations("C_TABLE").fk if not e.enforced
+        )
+        assert reg.widened("C_TABLE", documented) == documented
+
     def test_the_declared_model_is_untouched_and_the_sha_is_stable(self):
         reg = self._registry(self._KW)
         declared = reg.relations("C_TABLE").fk

@@ -279,10 +279,22 @@ class RelationshipRegistry:
         parent, those columns are inherited from the parent, so this
         table's edge to it carries them."""
         return tuple(
-            self._widened(table, edge) for edge in self._raw_enforced(table)
+            self.widened(table, edge) for edge in self._raw_enforced(table)
         )
 
-    def _widened(self, table: str, edge: FkEdge) -> FkEdge:
+    def widened(self, table: str, edge: FkEdge) -> FkEdge:
+        """``edge`` as the launch actually DRAWS it: widened with the
+        column pairs the model's own children pin (`derived_widenings`,
+        ADR 0036 rev 2), or the very same object back when nothing
+        widens it. A documented edge (``enforced: false``) is returned
+        unchanged — the launch never draws it, so it keeps the columns
+        the model declares. Public because resolving a DECLARATION to
+        the edge `enforced_edges` returns is what the launcher's
+        `fk_edge_metadata` does to look an edge's role up, and guessing
+        that correspondence from a column prefix mis-stamped a
+        documented edge once already (ADR 0037 review round 1)."""
+        if not edge.enforced:
+            return edge
         added = [
             pair
             for rec in self._widenings()
@@ -442,7 +454,7 @@ class RelationshipRegistry:
         """``edge``'s overlap with the driving edge, in ``edge.cols``
         order — or ``None`` when ``edge`` IS the driving edge, or
         ``table`` has no driving edge at all. Compared by VALUE
-        (``==``), not identity: `_widened()` returns a fresh `FkEdge`
+        (``==``), not identity: `widened()` returns a fresh `FkEdge`
         via `model_copy()` on every call, so a widened driving edge
         obtained from an earlier `enforced_edges()`/`edge_roles()` call
         is never the same Python object as the one this method derives
@@ -692,7 +704,7 @@ class RelationshipRegistry:
             for edge in relations.fk:
                 arrow = "-->" if edge.enforced else "-.->"
                 label = f"{','.join(edge.cols)} → {','.join(edge.ref_cols)}"
-                widened = self._widened(name, edge) if edge.enforced else edge
+                widened = self.widened(name, edge)
                 role = roles.get(widened)
                 if role == "independent":
                     label += " -- independent"
@@ -771,7 +783,7 @@ class RelationshipRegistry:
             for rec in self._widenings() if rec["table"] == name
         }
         for declared in relations.fk:
-            edge = self._widened(name, declared) if declared.enforced else declared
+            edge = self.widened(name, declared)
             arrow = "-->" if edge.enforced else "..>"
             tag = "enforced" if edge.enforced else "documented, never drawn"
             if edge.enforced and not relations.enabled:
