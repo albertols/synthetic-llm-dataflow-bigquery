@@ -27,8 +27,10 @@ from sdfb_core.seeding import derive_key_seed
 
 __all__ = [
     "CellTable",
+    "ConditionalEdge",
     "FanoutHistogram",
     "FanoutPlan",
+    "conditional_values",
     "expand_keys",
 ]
 
@@ -155,6 +157,29 @@ class CellTable:
 
 
 @dataclass(frozen=True)
+class ConditionalEdge:
+    """A non-driving FK edge whose candidates come from a co-parent
+    joined on the driving key's overlap columns (design 2026-09-11 §4,
+    ADR 0037) — e.g. a child PK's remaining member is populated from a
+    second parent that shares part of the driving key."""
+
+    id: str
+    cols: tuple[str, ...]
+    nullable: bool
+
+    def to_payload(self) -> dict:
+        return {"id": self.id, "cols": list(self.cols), "nullable": bool(self.nullable)}
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> ConditionalEdge:
+        return cls(
+            id=str(payload["id"]),
+            cols=tuple(payload["cols"]),
+            nullable=bool(payload["nullable"]),
+        )
+
+
+@dataclass(frozen=True)
 class FanoutPlan:
     """One driven child's relational recipe."""
 
@@ -166,12 +191,18 @@ class FanoutPlan:
     # replacement. False when an unbounded member (pattern, numeric,
     # temporal) completes the PK and cells only need to follow weights.
     exact_cells: bool
+    # Non-driving FK edges resolved per key via `conditional_values`
+    # (design 2026-09-11 §4, ADR 0037). Added at the end so positional
+    # construction in existing tests/payloads keeps working.
+    conditional: tuple[ConditionalEdge, ...] = ()
 
     @property
     def columns(self) -> frozenset[str]:
         cols = set(self.driving_cols)
         if self.cells is not None:
             cols.update(self.cells.cols)
+        for edge in self.conditional:
+            cols.update(edge.cols)
         return frozenset(cols)
 
     def to_payload(self) -> dict:
@@ -180,17 +211,42 @@ class FanoutPlan:
             "histogram": self.histogram.to_payload(),
             "cells": self.cells.to_payload() if self.cells is not None else None,
             "exact_cells": bool(self.exact_cells),
+            "conditional": [edge.to_payload() for edge in self.conditional],
         }
 
     @classmethod
     def from_payload(cls, payload: dict) -> FanoutPlan:
         cells = payload.get("cells")
+        conditional = payload.get("conditional") or ()
         return cls(
             driving_cols=tuple(payload["driving_cols"]),
             histogram=FanoutHistogram.from_payload(payload["histogram"]),
             cells=CellTable.from_payload(cells) if cells else None,
             exact_cells=bool(payload.get("exact_cells", False)),
+            conditional=tuple(ConditionalEdge.from_payload(e) for e in conditional),
         )
+
+
+def conditional_values(
+    run_id: str,
+    key: tuple,
+    edge_id: str,
+    candidates: Sequence[Sequence],
+    k: int,
+) -> list[tuple]:
+    """The ``rest(X)`` values for ``k`` children of ``key`` on conditional
+    edge ``edge_id`` (design 2026-09-11 §4): a seeded shuffle of
+    ``candidates``, without replacement until the fan-out exceeds the
+    candidate count, then wrapping in the same shuffled order. No
+    candidates (an unmatched key) yields ``k`` empty tuples — the NULL
+    policy is the caller's (``GenerateRecordsDoFn`` / the engine)."""
+    if k <= 0:
+        return []
+    if not candidates:
+        return [()] * k
+    order = [tuple(c) for c in candidates]
+    random.Random(derive_key_seed(run_id, tuple(key), salt=edge_id)).shuffle(order)
+    return [order[i % len(order)] for i in range(k)]
 
 
 def expand_keys(

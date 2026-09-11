@@ -20,11 +20,19 @@ def derive_batch_seed(run_id: str, batch_id: int) -> int:
     return int.from_bytes(digest, "big") >> 1
 
 
-def derive_key_seed(run_id: str, key: tuple) -> int:
+def derive_key_seed(run_id: str, key: tuple, salt: str = "") -> int:
     """Stable seed for one parent key's children (design 2026-09-10):
     the same parent yields the same children on a re-run of ``run_id``
-    and on a retried bundle. ``repr`` keeps mixed-type tuples total."""
-    digest = hashlib.blake2b(
-        f"{run_id}\x1f{key!r}".encode(), digest_size=8
-    ).digest()
+    and on a retried bundle. ``repr`` keeps mixed-type tuples total.
+
+    ``salt`` (design 2026-09-11, ADR 0037) mixes in a second stream for
+    the same ``(run_id, key)`` — e.g. one per conditional edge, so two
+    edges shuffle a key's candidates independently. The default keeps
+    every seed derived before ``salt`` existed byte-identical: an empty
+    salt hashes exactly the pre-``salt`` payload, no separator added.
+    """
+    payload = f"{run_id}\x1f{key!r}"
+    if salt:
+        payload = f"{payload}\x1f{salt}"
+    digest = hashlib.blake2b(payload.encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big") >> 1

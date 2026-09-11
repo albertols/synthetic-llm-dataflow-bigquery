@@ -15,8 +15,10 @@ from collections import Counter
 import pytest
 from sdfb_core.engines.fanout import (
     CellTable,
+    ConditionalEdge,
     FanoutHistogram,
     FanoutPlan,
+    conditional_values,
     expand_keys,
 )
 from sdfb_core.seeding import derive_key_seed
@@ -162,3 +164,74 @@ def test_key_seed_is_stable_and_key_sensitive():
     assert derive_key_seed("r", ("a", 1)) == derive_key_seed("r", ("a", 1))
     assert derive_key_seed("r", ("a", 1)) != derive_key_seed("r", ("a", 2))
     assert derive_key_seed("r", ("a", 1)) != derive_key_seed("s", ("a", 1))
+
+
+class TestConditionalValues:
+    def test_conditional_values_are_without_replacement_until_wrap(self):
+        cands = [("r1",), ("r2",), ("r3",)]
+        out = conditional_values("run", ("t1",), "T,R", cands, 5)
+        assert sorted(out[:3]) == sorted(cands)  # a permutation
+        assert out[3:] == out[:2]  # then wraps in the same order
+
+    def test_conditional_values_are_deterministic_per_key_and_edge(self):
+        cands = [("a",), ("b",), ("c",), ("d",)]
+        assert conditional_values("run", ("k",), "E", cands, 4) == conditional_values(
+            "run", ("k",), "E", cands, 4
+        )
+
+    def test_conditional_values_without_candidates_are_empty_tuples(self):
+        assert conditional_values("run", ("k",), "E", [], 3) == [(), (), ()]
+
+    def test_conditional_values_nonpositive_k_is_empty(self):
+        assert conditional_values("run", ("k",), "E", [("a",), ("b",)], 0) == []
+        assert conditional_values("run", ("k",), "E", [("a",), ("b",)], -1) == []
+
+    def test_conditional_values_does_not_mutate_the_caller_list(self):
+        cands = [("a",), ("b",), ("c",)]
+        before = list(cands)
+        conditional_values("run", ("k",), "E", cands, 3)
+        assert cands == before
+
+
+class TestConditionalEdge:
+    def test_payload_round_trip(self):
+        edge = ConditionalEdge(id="T,R", cols=("R",), nullable=True)
+        assert ConditionalEdge.from_payload(edge.to_payload()) == edge
+
+    def test_to_payload_shape(self):
+        edge = ConditionalEdge(id="T,R", cols=("T", "R"), nullable=False)
+        assert edge.to_payload() == {"id": "T,R", "cols": ["T", "R"], "nullable": False}
+
+
+class TestFanoutPlanConditional:
+    def test_plan_payload_round_trips_conditional_edges(self):
+        plan = FanoutPlan(
+            driving_cols=("T", "L"),
+            histogram=FanoutHistogram({1: 1}),
+            cells=None,
+            exact_cells=True,
+            conditional=(ConditionalEdge(id="T,R", cols=("R",), nullable=True),),
+        )
+        assert FanoutPlan.from_payload(plan.to_payload()) == plan
+        assert "R" in plan.columns
+
+    def test_plan_payload_missing_conditional_key_defaults_to_empty(self):
+        plan = FanoutPlan(
+            driving_cols=("T", "L"),
+            histogram=FanoutHistogram({1: 1}),
+            cells=None,
+            exact_cells=True,
+            conditional=(ConditionalEdge(id="T,R", cols=("R",), nullable=True),),
+        )
+        assert FanoutPlan.from_payload({**plan.to_payload(), "conditional": None}).conditional == ()
+
+    def test_plan_without_conditional_edges_round_trips_to_empty_tuple(self):
+        plan = FanoutPlan(
+            driving_cols=("PID",),
+            histogram=FanoutHistogram({1: 1}),
+            cells=None,
+            exact_cells=False,
+        )
+        assert plan.conditional == ()
+        assert FanoutPlan.from_payload(plan.to_payload()).conditional == ()
+        assert plan.to_payload()["conditional"] == []
