@@ -515,3 +515,168 @@ def test_an_independent_pk_member_gets_a_sized_key_pool(monkeypatch):
     )
     assert [(e.mode, e.key_sample_cap) for e in edges] == [
         ("fanout", FK_KEY_SAMPLE_FLOOR), ("side_input", 100)]
+
+
+# --- ADR 0037 fix round 1: metadata matching, cap validation, nullability ---
+
+# An enforced composite edge and a DOCUMENTED prefix edge to the SAME
+# parent: the declared `(T)` must never inherit the enforced `(T,R)`'s mode.
+_PREFIX = """
+model: prefix
+tables:
+  P_TABLE:
+    pk: [T, R]
+  CH_TABLE:
+    pk: [T, R, S]
+    fk:
+      - cols: [T, R]
+        ref: P_TABLE
+        ref_cols: [T, R]
+      - cols: [T]
+        ref: P_TABLE
+        ref_cols: [T]
+        enforced: false
+"""
+_PREFIX_REG = RelationshipRegistry.from_sources(
+    [("config/relationships/prefix.yaml", _PREFIX)]
+)
+
+
+def test_a_documented_prefix_edge_never_inherits_the_enforced_edges_mode():
+    """`fk_edges` says which DAG path each edge took — a documented edge
+    took none, so it must carry no mode at all (it renders as the
+    worker's `side_input` default)."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    edges = rp.fk_edge_metadata(
+        _PREFIX_REG,
+        "p.land.CH_TABLE",
+        _PREFIX_REG.relations("CH_TABLE"),
+        "p.land",
+        in_set_names={"P_TABLE", "CH_TABLE"},
+        edge_roles=_PREFIX_REG.edge_roles("CH_TABLE"),
+    )
+    assert [(e["cols"], e["enforced"], e.get("mode")) for e in edges] == [
+        (["T", "R"], True, "fanout"),
+        (["T"], False, None),
+    ]
+
+
+def test_fk_candidate_cap_below_one_stops_the_launch():
+    """0 divided the keys_per_batch bound; a negative cap emptied every
+    candidate list silently."""
+    from sdfb_beam.cli.run_pipeline import parse_args
+
+    base = [
+        "--reference_table", "p.src.T", "--landing_table", "p.land.T",
+        "--dlq_table", "p.dq.dlq", "--num_rows", "10", "--run_id", "r",
+        "--model_uri", "gs://b/models/m/v/",
+    ]
+    for bad in ("0", "-3"):
+        with pytest.raises(SystemExit, match=r"--fk_candidate_cap"):
+            parse_args([*base, "--fk_candidate_cap", bad])
+    ok, _ = parse_args([*base, "--fk_candidate_cap", "1"])
+    assert ok.fk_candidate_cap == 1
+
+
+def _landing_schema(r_mode: str) -> TableSchema:
+    return TableSchema.model_validate(
+        {"table_info": {"table_id": "p.land.BOTTOM_TABLE"},
+         "schema": [{"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "L", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "R", "type": "STRING", "mode": r_mode}]}
+    )
+
+
+def test_resolve_schemas_returns_the_landing_schema_alongside(monkeypatch):
+    import sdfb_beam.cli.run_pipeline as rp
+
+    source, landing = _diamond_schema("NULLABLE"), _landing_schema("REQUIRED")
+    monkeypatch.setattr(
+        rp, "extract_table_schema",
+        lambda fqn: source if fqn == "p.src.B" else landing,
+    )
+    generation, target = rp.resolve_schemas("", "p.src.B", "p.land.B")
+    assert [c.mode for c in generation.columns] == ["REQUIRED", "REQUIRED", "NULLABLE"]
+    assert target is landing
+    # The one-schema wrapper every other call site uses is unchanged.
+    assert rp.resolve_table_schema("", "p.src.B", "p.land.B").columns == generation.columns
+
+
+def test_an_unreachable_landing_table_surfaces_no_schema(monkeypatch, caplog):
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    source = _diamond_schema("NULLABLE")
+
+    def _extract(fqn: str):
+        if fqn == "p.src.B":
+            return source
+        raise RuntimeError("landing table not found")
+
+    monkeypatch.setattr(rp, "extract_table_schema", _extract)
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        _generation, target = rp.resolve_schemas("", "p.src.B", "p.land.B")
+    assert target is None
+
+
+def test_nullable_reads_the_landing_modes_not_the_source(monkeypatch):
+    """Design §4 ruling B: the LANDING schema decides. The source's modes
+    mirror the lake table and are irrelevant to what the sink accepts."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    names = {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"}
+    args = _diamond_args("p.land.BOTTOM_TABLE")
+    # source R NULLABLE, landing R REQUIRED -> not nullable
+    payload, _roles = rp._resolve_table_fanout(
+        args, _diamond_schema("NULLABLE"), _DIAMOND_REG, names, _DIAMOND_ROWS,
+        landing_schema=_landing_schema("REQUIRED"),
+    )
+    assert payload["conditional"] == [
+        {"id": "T,R", "cols": ["R"], "nullable": False}
+    ]
+    # source R REQUIRED, landing R NULLABLE -> nullable
+    payload, _roles = rp._resolve_table_fanout(
+        args, _diamond_schema("REQUIRED"), _DIAMOND_REG, names, _DIAMOND_ROWS,
+        landing_schema=_landing_schema("NULLABLE"),
+    )
+    assert payload["conditional"] == [
+        {"id": "T,R", "cols": ["R"], "nullable": True}
+    ]
+
+
+def test_no_landing_schema_falls_back_to_the_source_and_says_so(
+    monkeypatch, caplog
+):
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    args = _diamond_args("p.land.BOTTOM_TABLE")
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        payload, _roles = rp._resolve_table_fanout(
+            args, _diamond_schema("NULLABLE"), _DIAMOND_REG,
+            {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+            _DIAMOND_ROWS, landing_schema=None,
+        )
+    assert payload["conditional"] == [
+        {"id": "T,R", "cols": ["R"], "nullable": True}  # the SOURCE's mode
+    ]
+    fallback = [
+        ln for ln in caplog.text.splitlines()
+        if "name=fk_nullable_from_source" in ln
+    ]
+    assert len(fallback) == 1
+    assert "edge='(T,R)->RIGHT_TABLE'" in fallback[0]
+    assert "table=p.land.BOTTOM_TABLE" in fallback[0]
+
+
+def test_nullability_schema_prefers_the_landing_one():
+    import sdfb_beam.cli.run_pipeline as rp
+
+    source, landing = _diamond_schema("NULLABLE"), _landing_schema("REQUIRED")
+    assert rp.nullability_schema(landing, source) is landing
+    assert rp.nullability_schema(None, source) is source

@@ -170,6 +170,43 @@ def validate_seed_strategy(value: str) -> str:
     return value
 
 
+def validate_candidate_cap(value) -> int:
+    """``--fk_candidate_cap`` is a Top-M bound: it must be at least 1.
+
+    Rejected at parse time, not repaired: 0 divides by zero inside the
+    `keys_per_batch` bound (`in_set_parent_edges`) and aborts the
+    launcher with a raw traceback instead of the collect-then-fail
+    preflight summary, and a negative cap passes silently into the
+    Top-M combine, where it yields ZERO candidates for every shared key
+    — the whole conditional edge degrades to "unmatched" with nothing in
+    the log naming the flag (review round 1, finding B2)."""
+    try:
+        cap = int(value)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap < 1:
+        raise SystemExit(
+            f"[launch] --fk_candidate_cap must be an integer >= 1, got "
+            f"{value!r}. It is the number of parent candidates kept per "
+            f"SHARED value on a conditional edge (ADR 0037): 0 divides the "
+            f"keys_per_batch bound by zero, and a negative cap empties "
+            f"every candidate list silently. Use {DEFAULT_FK_CANDIDATE_CAP} "
+            f"(the default) or higher."
+        )
+    return cap
+
+
+def candidate_cap_of(args) -> int:
+    """``--fk_candidate_cap`` off a launcher namespace, validated.
+
+    Every read site goes through this, so a namespace built by hand (a
+    test, a programmatic launch) cannot smuggle a 0 past `parse_args`
+    into the divisor or the Top-M combine."""
+    return validate_candidate_cap(
+        getattr(args, "fk_candidate_cap", DEFAULT_FK_CANDIDATE_CAP)
+    )
+
+
 def resolve_batch_size(requested: int, num_rows: int) -> int:
     """Rows per element. An explicit non-default ``--batch_size`` always wins."""
     if requested != DEFAULT_BATCH_SIZE:
@@ -306,7 +343,7 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:  # noqa
                    help="FQN of synthetic_data_quality.fk_fanout_stats (ADR 0036 cache of "
                         "the SOURCE fan-out histogram + PK cells per driving edge). "
                         "Empty = measure every launch, never cache.")
-    p.add_argument("--fk_candidate_cap", type=int,
+    p.add_argument("--fk_candidate_cap", type=validate_candidate_cap,
                    default=DEFAULT_FK_CANDIDATE_CAP,
                    help="ADR 0037: Top-M candidates kept per SHARED value on a "
                         "CONDITIONAL edge (an edge sharing columns with the "
@@ -566,7 +603,18 @@ def load_ddl(ddl_uri: str) -> TableSchema:
 def resolve_table_schema(
     ddl_uri: str, reference_table: str, landing_table: str = ""
 ) -> TableSchema:
-    """Live INFORMATION_SCHEMA extraction is AUTHORITATIVE at every launch,
+    """The generation schema — :func:`resolve_schemas` without the
+    landing schema beside it. Every caller that only steers generation
+    uses this; the ADR 0037 NULL policy needs the landing modes too."""
+    return resolve_schemas(ddl_uri, reference_table, landing_table)[0]
+
+
+def resolve_schemas(
+    ddl_uri: str, reference_table: str, landing_table: str = ""
+) -> tuple[TableSchema, TableSchema | None]:
+    """``(generation schema, LANDING schema or None)``.
+
+    Live INFORMATION_SCHEMA extraction is AUTHORITATIVE at every launch,
     and generation-steering metadata comes from the TARGET table only
     (ADR 0027 D2, 2026-08-21).
 
@@ -589,6 +637,13 @@ def resolve_table_schema(
        operator's declared fallback, extracted from the landing table per
        the propagation runbook, so its descriptions stand when the target
        is also unreachable.
+
+    The landing ``TableSchema`` travels back out because its column
+    MODES — not the source's — decide a conditional edge's NULL policy
+    (ADR 0037 design §4 ruling B). It is ``None`` when the landing table
+    is absent or unreachable (a ``--create_if_not_exists`` first run, a
+    permissions gap); the caller then falls back to the source's modes
+    and says so (:func:`nullability_schema`).
     """
     live_error: Exception | None = None
     if reference_table:
@@ -602,12 +657,12 @@ def resolve_table_schema(
                 table=reference_table,
                 columns=len(schema.columns),
             )
-            schema = _overlay_target_metadata(
+            schema, target = _overlay_target_metadata(
                 schema, landing_table, strip_on_missing=True
             )
             if ddl_uri:
                 _check_ddl_pin_staleness(schema, ddl_uri)
-            return schema
+            return schema, target
 
     if ddl_uri:
         if live_error is not None:
@@ -646,13 +701,17 @@ def resolve_table_schema(
 
 def _overlay_target_metadata(
     base: TableSchema, landing_table: str, *, strip_on_missing: bool
-) -> TableSchema:
-    """Replace `base`'s description surfaces with the TARGET table's.
+) -> tuple[TableSchema, TableSchema | None]:
+    """``(base with the TARGET's description surfaces, the TARGET)``.
 
     `strip_on_missing=True` (live-source base): the source's descriptions
     must never survive, so an unreachable target strips them to empty.
     `strip_on_missing=False` (offline pin base): the pin is the
     operator's declared fallback and its descriptions stand.
+
+    The target is returned as well — it is fetched here exactly once,
+    and ADR 0037 needs its column MODES (not its descriptions) for the
+    conditional NULL policy. `None` = the landing table was unreachable.
     """
     target: TableSchema | None = None
     if landing_table:
@@ -669,8 +728,8 @@ def _overlay_target_metadata(
             )
     if target is None:
         if not strip_on_missing:
-            return base
-        return _with_descriptions(base, "", {})
+            return base, None
+        return _with_descriptions(base, "", {}), None
     col_desc = {c.name: (c.description or "") for c in target.columns}
     schema = _with_descriptions(
         base, target.table_info.description or "", col_desc
@@ -680,7 +739,7 @@ def _overlay_target_metadata(
         table=landing_table,
         constraint_columns=len(_constraint_clauses(schema)),
     )
-    return schema
+    return schema, target
 
 
 def _with_descriptions(
@@ -1302,6 +1361,7 @@ def _resolve_table_fanout(
     registry: RelationshipRegistry,
     in_set_names: set[str],
     reference_rows: list[dict],
+    landing_schema=None,
 ) -> tuple[dict | None, dict]:
     """``(fanout payload, edge roles)`` for `_load_reference_and_preflight`
     (ADR 0036). Only attempted for an in-set relational launch: a
@@ -1314,7 +1374,10 @@ def _resolve_table_fanout(
 
     ADR 0037: a table that HAS a payload also carries its conditional
     edges and the Top-M candidate cap into it — the engine reads both
-    off ``FanoutPlan``. A root (no payload) carries neither."""
+    off ``FanoutPlan``. A root (no payload) carries neither.
+    ``landing_schema`` (from `resolve_schemas`) decides each conditional
+    edge's ``nullable``; without it the source's modes stand in and each
+    conditional edge logs `fk_nullable_from_source`."""
     if not (in_set_names and parse_bool_flag(args.generate_fk_relationships)):
         return None, {}
     stats_store = (
@@ -1333,13 +1396,33 @@ def _resolve_table_fanout(
             f"[preflight P2] {args.landing_table}: {exc}"
         ) from exc
     if payload is not None:
+        if landing_schema is None:
+            _warn_nullability_from_source(args.landing_table, roles)
         payload["conditional"] = conditional_plan_entries(
-            registry, args.landing_table, roles, table_schema
+            registry, args.landing_table, roles,
+            nullability_schema(landing_schema, table_schema),
         )
-        payload["candidate_cap"] = int(
-            getattr(args, "fk_candidate_cap", DEFAULT_FK_CANDIDATE_CAP)
-        )
+        payload["candidate_cap"] = candidate_cap_of(args)
     return payload, roles
+
+
+def _warn_nullability_from_source(landing_table: str, roles: Mapping) -> None:
+    """One WARNING per conditional edge when the LANDING schema could not
+    be read: its NULL policy is then decided by the SOURCE table's column
+    modes, which are another team's and need not match the sink's. A
+    landing column that is REQUIRED where the source is NULLABLE would
+    fail the FILE_LOADS job at the very end of a run."""
+    for edge, role in roles.items():
+        if role != "conditional":
+            continue
+        log_milestone(
+            "fk_nullable_from_source",
+            level=logging.WARNING,
+            table=landing_table,
+            edge=_edge_label(edge),
+            note="landing schema unreadable — this edge's NULL policy "
+            "reads the SOURCE table's column modes",
+        )
 
 
 def _log_edge_role_warnings(
@@ -1416,6 +1499,7 @@ def _load_reference_and_preflight(
     table_schema,
     registry: RelationshipRegistry,
     in_set_landing: frozenset[str] = frozenset(),
+    landing_schema=None,
 ):
     """Eager reference read + relational preflight (ADR 0032): the
     table's relations come from `config/relationships/`, pk/identity
@@ -1454,7 +1538,8 @@ def _load_reference_and_preflight(
         getattr(args, "env", "dev"),
     )
     fanout, edge_roles = _resolve_table_fanout(
-        args, table_schema, registry, in_set_names, reference_rows
+        args, table_schema, registry, in_set_names, reference_rows,
+        landing_schema=landing_schema,
     )
     _log_edge_role_warnings(args.landing_table, registry, edge_roles)
     pf = preflight(
@@ -1493,9 +1578,7 @@ def _load_reference_and_preflight(
             for edge, role in edge_roles.items()
             if role == "conditional"
         },
-        candidate_cap=int(
-            getattr(args, "fk_candidate_cap", DEFAULT_FK_CANDIDATE_CAP)
-        ),
+        candidate_cap=candidate_cap_of(args),
     )
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
@@ -1807,9 +1890,21 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def nullability_schema(landing_schema, source_schema):
+    """The schema whose column MODES decide a conditional edge's NULL
+    policy: the LANDING table's (ADR 0037 design §4 ruling B) — it is
+    the sink, and it is Terraformed independently of the lake table the
+    generation schema mirrors. Falls back to the source schema when the
+    landing table is absent or unreachable; `_resolve_table_fanout`
+    names that fallback with one `fk_nullable_from_source` per
+    conditional edge (review round 1, finding B3)."""
+    return landing_schema if landing_schema is not None else source_schema
+
+
 def _rest_is_nullable(rest: tuple[str, ...], table_schema) -> bool:
     """ADR 0037 §4 ruling B: an unmatched key may land with NULLs only
-    when EVERY ``rest`` column is NULLABLE in the landing schema. An
+    when EVERY ``rest`` column is NULLABLE — in the LANDING schema,
+    which the caller resolves with :func:`nullability_schema`. An
     empty ``rest`` (a pure existence filter, ``(K)->P`` driving and
     ``(K)->Q`` conditional) has nothing to write a NULL into, so it is
     never nullable — the key is dropped and counted instead."""
@@ -1945,8 +2040,12 @@ def fk_edge_metadata(
 
     ``edge_roles`` is keyed on the WIDENED edges ``enforced_edges``
     returns (ADR 0036 rev 2), while ``relations.fk`` holds the declared
-    ones: a widened edge is matched back to its declaration by the
-    prefix the widening appended to."""
+    ones. A declaration is resolved to its widened form by APPLYING the
+    same widening (`enforced_edges` = `_widened` over the raw enforced
+    edges), never by guessing from a column prefix: a documented
+    ``(T)->P`` next to an enforced ``(T,R)->P`` prefix-matched the
+    driving edge and claimed `mode=fanout` for an edge the launch never
+    draws (review round 1, finding B1)."""
     meta: dict[tuple[str, tuple[str, ...]], dict] = {}
     for fk in registry.enforced_edges(landing_table):
         role = edge_roles.get(fk)
@@ -1958,18 +2057,16 @@ def fk_edge_metadata(
         meta[(fk.ref, tuple(fk.cols))] = entry
 
     def _for(fk) -> dict:
-        exact = meta.get((fk.ref, tuple(fk.cols)))
-        if exact is not None:
-            return exact
-        width = len(fk.cols)
-        return next(
-            (
-                entry
-                for (ref, cols), entry in meta.items()
-                if ref == fk.ref and cols[:width] == tuple(fk.cols)
-            ),
-            {},
-        )
+        """This DECLARED edge's DAG path, or `{}` — an edge the launch
+        does not draw (documented-only, or an out-of-set parent) is
+        never stamped, whatever its columns look like."""
+        if not fk.enforced or fk.ref.rsplit(".", 1)[-1] not in in_set_names:
+            return {}
+        # The same widening `enforced_edges` applies, applied once more
+        # to THIS declaration — the only way to name the widened edge a
+        # declaration became without re-deriving the rule here.
+        widened = registry._widened(landing_table, fk)
+        return meta.get((widened.ref, tuple(widened.cols)), {})
 
     return tuple(
         {
@@ -1998,9 +2095,14 @@ def _prepare_table_spec(
     pools (EXTERNAL parents only — in-set parents arrive as in-DAG side
     inputs, ADR 0030), stores, sinks, config. Shared by the
     single-table runner and the single-job relational runner."""
-    table_schema = resolve_table_schema(
+    table_schema, landing_schema = resolve_schemas(
         args.ddl_uri, args.reference_table, args.landing_table
     )
+    # ADR 0037 §4 ruling B: the conditional NULL policy reads the SINK's
+    # column modes. `table_schema`'s modes mirror the SOURCE (only the
+    # description surfaces are overlaid from the landing table), so the
+    # two are only the same object when the landing table is unreadable.
+    nullable_schema = nullability_schema(landing_schema, table_schema)
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 
@@ -2030,7 +2132,8 @@ def _prepare_table_spec(
         fanout,
         edge_roles,
     ) = _load_reference_and_preflight(
-        args, table_schema, registry, in_set_landing=in_set_landing
+        args, table_schema, registry, in_set_landing=in_set_landing,
+        landing_schema=landing_schema,
     )
     log_relationship_model(args.landing_table, registry, mode=fk_mode)
 
@@ -2204,10 +2307,8 @@ def _prepare_table_spec(
         key_sample_caps=pf.fk_key_sample_caps,
         edge_roles=edge_roles,
         keys_per_batch=keys_per_batch,
-        table_schema=table_schema,
-        candidate_cap=int(
-            getattr(args, "fk_candidate_cap", DEFAULT_FK_CANDIDATE_CAP)
-        ),
+        table_schema=nullable_schema,
+        candidate_cap=candidate_cap_of(args),
     )
 
     return TableSpec(
