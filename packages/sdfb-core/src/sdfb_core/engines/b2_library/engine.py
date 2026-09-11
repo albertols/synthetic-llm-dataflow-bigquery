@@ -25,7 +25,7 @@ module works on a laptop with only base deps installed.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -44,6 +44,8 @@ from sdfb_core.engines.base import (
     GenerationContext,
     GenerationEngine,
     ModelClient,
+    apply_conditional_overrides,
+    conditional_values_by_key,
 )
 from sdfb_core.engines.fanout import FanoutPlan, expand_keys
 from sdfb_core.engines.fk_keys import bind_fk_key_pools
@@ -291,7 +293,10 @@ class B2LibraryEngine(GenerationEngine):
         return row
 
     def generate_for_keys(
-        self, keys: Sequence[tuple], cfg: GenerationConfig
+        self,
+        keys: Sequence[tuple],
+        cfg: GenerationConfig,
+        matches: Mapping[str, Sequence[Sequence[Sequence]]] | None = None,
     ) -> Iterator[GeneratedRecord]:
         if not self._fitted or self._backend is None or self._record_model is None:
             raise RuntimeError("B2LibraryEngine.generate_for_keys called before setup()")
@@ -299,11 +304,17 @@ class B2LibraryEngine(GenerationEngine):
             raise RuntimeError("B2LibraryEngine.generate_for_keys: ctx.fanout is not set")
         assert self._ctx is not None
         plan = self._fanout
+        run_id = self._ctx.pipeline_run_id
         rng = np.random.default_rng(cfg.seed)
         temperature = _similarity_to_sampling_temperature(cfg.similarity)
         col_order = [c.name for c in self._ctx.table_schema.columns]
         chunk_rows = max(1, int(cfg.batch_size or 1000))
-        for chunk in expand_keys(plan, keys, self._ctx.pipeline_run_id, chunk_rows):
+        # Non-driving FK edges resolved per key (design 2026-09-11 §4,
+        # ADR 0037) — computed ONCE up front (a no-op dict when the plan
+        # carries no conditional edges) and applied per chunk below.
+        cond_by_key = conditional_values_by_key(plan, keys, run_id, matches)
+        child_index: dict[tuple, int] = {}
+        for chunk in expand_keys(plan, keys, run_id, chunk_rows):
             n = len(chunk)
             columns = self._backend.sample_columns(n, rng, temperature=temperature)
             for name in self._free_text_cols:
@@ -318,12 +329,18 @@ class B2LibraryEngine(GenerationEngine):
                 drawn = pool.draw(n, rng, use_numpy=True)
                 for i, name in enumerate(pool.cols):
                     columns[name] = [t[i] for t in drawn]
+            cond_columns, skip = apply_conditional_overrides(
+                plan, chunk, cond_by_key, child_index
+            )
+            columns.update(cond_columns)
             for j, name in enumerate(plan.driving_cols):
                 columns[name] = [key[j] for key, _ in chunk]
             if plan.cells is not None:
                 for j, name in enumerate(plan.cells.cols):
                     columns[name] = [cell[j] for _, cell in chunk]
             for i in range(n):
+                if skip[i]:
+                    continue
                 row = self._assemble_row(columns, col_order, i, passthrough=plan.columns)
                 try:
                     yield self._record_model.model_validate(row)

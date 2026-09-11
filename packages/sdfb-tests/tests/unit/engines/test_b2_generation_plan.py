@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from typing import ClassVar
 
 import pytest
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import get_engine
 from sdfb_core.engines.b2_library import engine as b2_engine_mod
-from sdfb_core.engines.base import GenerationContext
+from sdfb_core.engines.base import GenerationConfig, GenerationContext
 from sdfb_core.engines.generation_plan import clear_generation_plan_log
 
 _DIGEST = "digest-b2-plan"
@@ -270,3 +271,74 @@ def test_b2_generate_for_keys_keeps_external_key_pool_tuples():
     assert {(r["CC"], r["BR"]) for r in out} <= set(pool_keys)
     # The driving edge still wins its own columns.
     assert all((r["PID"],) in keys for r in out)
+
+
+class TestGenerateForKeysConditional:
+    """ADR 0037 (design 2026-09-11 §4): B.2 twin of the B.1 conditional-edge
+    coverage in `test_b1_rag.py::TestGenerateForKeysConditional` — a
+    non-driving FK edge resolved per key from a co-parent's matches."""
+
+    _SCHEMA = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.src.multi_parent_t"},
+            "schema": [
+                {"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "L", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "R", "type": "STRING", "mode": "NULLABLE"},
+                {"name": "X", "type": "INT64", "mode": "REQUIRED"},
+            ],
+        }
+    )
+
+    @staticmethod
+    def _rows():
+        return [
+            {"T": f"t{i % 2}", "L": f"l{i % 2}", "R": f"r{i % 3}", "X": i}
+            for i in range(30)
+        ]
+
+    def _ctx(self, *, nullable: bool) -> GenerationContext:
+        return GenerationContext(
+            table_schema=self._SCHEMA,
+            reference_rows=self._rows(),
+            reference_digest="b2-conditional-digest",
+            pipeline_run_id="b2-conditional-run",
+            fanout={
+                "driving_cols": ["T", "L"],
+                "histogram": {"2": 1},
+                "conditional": [{"id": "T,R", "cols": ["R"], "nullable": nullable}],
+            },
+        )
+
+    class _Client:
+        def generate_json(self, *, prompt, n=1, **kw):
+            return [{"values": [f"gen-{i}" for i in range(32)]}]
+
+    _KEYS: ClassVar[list[tuple]] = [("t1", "l1"), ("t2", "l2")]
+    _MATCHES: ClassVar[dict] = {"T,R": [[("r1",), ("r2",)], []]}
+
+    def test_matched_key_gets_each_candidate_once_unmatched_key_dropped(self):
+        engine = get_engine("b2_library")(use_sdgx=False)
+        engine.setup(self._Client(), self._ctx(nullable=False))
+        cfg = GenerationConfig(seed=1, batch_size=1_000)
+        rows = [
+            r.model_dump()
+            for r in engine.generate_for_keys(self._KEYS, cfg, matches=self._MATCHES)
+        ]
+        t1_rows = [r for r in rows if r["T"] == "t1"]
+        t2_rows = [r for r in rows if r["T"] == "t2"]
+        assert len(t1_rows) == 2
+        assert {r["R"] for r in t1_rows} == {"r1", "r2"}
+        assert not t2_rows
+
+    def test_unmatched_key_on_a_nullable_edge_gets_null(self):
+        engine = get_engine("b2_library")(use_sdgx=False)
+        engine.setup(self._Client(), self._ctx(nullable=True))
+        cfg = GenerationConfig(seed=1, batch_size=1_000)
+        rows = [
+            r.model_dump()
+            for r in engine.generate_for_keys(self._KEYS, cfg, matches=self._MATCHES)
+        ]
+        t2_rows = [r for r in rows if r["T"] == "t2"]
+        assert len(t2_rows) == 2
+        assert all(r["R"] is None for r in t2_rows)

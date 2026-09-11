@@ -56,6 +56,8 @@ from sdfb_core.engines.base import (
     FreeTextEmptyYieldError,
     GenerationEngine,
     ModelClientTransientError,
+    apply_conditional_overrides,
+    conditional_values_by_key,
     escalating_sampling,
 )
 from sdfb_core.engines.constraint_sampler import (
@@ -114,7 +116,7 @@ from sdfb_core.rag.serialize import serialize_rows
 from sdfb_core.seeding import derive_batch_seed
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from sdfb_core.contracts import GeneratedRecord
     from sdfb_core.engines.base import (
@@ -703,7 +705,10 @@ class B1RagEngine(GenerationEngine):
                 continue
 
     def generate_for_keys(
-        self, keys: Sequence[tuple], cfg: GenerationConfig
+        self,
+        keys: Sequence[tuple],
+        cfg: GenerationConfig,
+        matches: Mapping[str, Sequence[Sequence[Sequence]]] | None = None,
     ) -> Iterator[GeneratedRecord]:
         if not self._ready or self._record_model is None or self._samplers is None:
             raise RuntimeError("B1RagEngine.generate_for_keys called before setup()")
@@ -711,10 +716,16 @@ class B1RagEngine(GenerationEngine):
             raise RuntimeError("B1RagEngine.generate_for_keys: ctx.fanout is not set")
         assert self._ctx is not None
         plan = self._fanout
+        run_id = self._ctx.pipeline_run_id
         similarity = float(cfg.similarity)
         chunk_rows = max(1, int(cfg.batch_size or 1000))
+        # Non-driving FK edges resolved per key (design 2026-09-11 §4,
+        # ADR 0037) — computed ONCE up front (a no-op dict when the plan
+        # carries no conditional edges) and applied per chunk below.
+        cond_by_key = conditional_values_by_key(plan, keys, run_id, matches)
+        child_index: dict[tuple, int] = {}
         for chunk_index, chunk in enumerate(
-            expand_keys(plan, keys, self._ctx.pipeline_run_id, chunk_rows)
+            expand_keys(plan, keys, run_id, chunk_rows)
         ):
             # Chunks must not replay each other's "rest" columns: cfg.seed
             # held constant would re-seed _sample_columns/_sample_free_text
@@ -724,20 +735,24 @@ class B1RagEngine(GenerationEngine):
             # of the same call still reproduce (test_same_keys_same_children).
             chunk_cfg = cfg.model_copy(
                 update={
-                    "seed": derive_batch_seed(
-                        f"{self._ctx.pipeline_run_id}:{cfg.seed}", chunk_index
-                    )
+                    "seed": derive_batch_seed(f"{run_id}:{cfg.seed}", chunk_index)
                 }
             )
             n = len(chunk)
             columns = self._sample_columns(n, chunk_cfg, similarity)
             columns.update(self._sample_free_text(n, chunk_cfg, similarity))
+            cond_columns, skip = apply_conditional_overrides(
+                plan, chunk, cond_by_key, child_index
+            )
+            columns.update(cond_columns)
             for j, name in enumerate(plan.driving_cols):
                 columns[name] = [key[j] for key, _ in chunk]
             if plan.cells is not None:
                 for j, name in enumerate(plan.cells.cols):
                     columns[name] = [cell[j] for _, cell in chunk]
             for i in range(n):
+                if skip[i]:
+                    continue
                 raw = {name: columns[name][i] for name in self._column_order}
                 try:
                     yield self._record_model.model_validate(raw)

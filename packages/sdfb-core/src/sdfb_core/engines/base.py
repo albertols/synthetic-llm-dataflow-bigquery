@@ -12,13 +12,16 @@ REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.bas
 
 from __future__ import annotations
 
+import random
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from sdfb_core.contracts import GeneratedRecord, TableSchema
+from sdfb_core.engines.fanout import FanoutPlan, conditional_values
+from sdfb_core.seeding import derive_key_seed
 
 
 class FreeTextEmptyYieldError(RuntimeError):
@@ -366,6 +369,7 @@ class GenerationEngine(ABC):
         self,
         keys: Sequence[tuple],
         cfg: GenerationConfig,
+        matches: Mapping[str, Sequence[Sequence[Sequence]]] | None = None,
     ) -> Iterator[GeneratedRecord]:
         """Yield the children of ``keys`` (design 2026-09-10, ADR 0036):
         per key, the fan-out and the PK-completing cells come from
@@ -373,7 +377,21 @@ class GenerationEngine(ABC):
         columns are copied from the key tuple, and every other column is
         this engine's own sampling. ``cfg.batch_size`` bounds the rows
         sampled at once (chunked emission). Engines that cannot be driven
-        keep this default."""
+        keep this default.
+
+        ``matches`` (design 2026-09-11 §4, ADR 0037) resolves
+        ``ctx.fanout``'s ``conditional`` edges: ``matches[edge.id][i]`` is
+        the candidate list for ``keys[i]`` — a missing edge id, ``None``,
+        or a too-short list means no candidates for that key. Child row
+        ``j`` (0-based within that key's fan-out) of a matched key gets
+        ``conditional_values(run_id, key, edge.id, candidates, k)[j]`` on
+        ``edge.cols``, applied after the pool draws and before the
+        driving-column / cell overrides. No candidates on a ``nullable``
+        edge sets every one of ``edge.cols`` to ``None``; no candidates on
+        a non-nullable edge means that key's rows are not emitted at all
+        (defensive — the DoFn drops such keys first). ``matches=None``
+        (or a plan with no conditional edges) reproduces today's output
+        byte-for-byte."""
         raise NotImplementedError(f"{type(self).__name__} cannot generate from parent keys")
 
     @abstractmethod
@@ -381,3 +399,105 @@ class GenerationEngine(ABC):
         """Release worker resources (vector index, fitted model, GPU
         references). After `teardown()`, `generate_batch` must raise
         `RuntimeError` until `setup()` is called again."""
+
+
+# ---------------------------------------------------------------------------
+# `generate_for_keys` conditional-edge wiring (design 2026-09-11 §4,
+# ADR 0037), shared between `engines/b1_rag/engine.py` and
+# `engines/b2_library/engine.py` so the two engines resolve
+# `ctx.fanout.conditional` identically. Not part of the ABC — both engines
+# call these from their own `generate_for_keys`.
+# ---------------------------------------------------------------------------
+
+
+def _candidates_for(
+    matches: Mapping[str, Sequence[Sequence[Sequence]]] | None,
+    edge_id: str,
+    i: int,
+) -> Sequence[Sequence]:
+    """``matches[edge_id][i]``, or ``()`` for a missing edge id, a
+    ``None`` ``matches`` mapping, a too-short per-key list, or a ``None``
+    entry — all of these mean "no candidates" for that key."""
+    if not matches:
+        return ()
+    per_key = matches.get(edge_id)
+    if not per_key or i >= len(per_key):
+        return ()
+    candidates = per_key[i]
+    return candidates if candidates else ()
+
+
+def conditional_values_by_key(
+    plan: FanoutPlan,
+    keys: Sequence[tuple],
+    run_id: str,
+    matches: Mapping[str, Sequence[Sequence[Sequence]]] | None,
+) -> dict[tuple, dict[str, list[tuple]] | None]:
+    """Per parent key: ``{edge.id: values}`` where ``values[j]`` is child
+    row ``j``'s override tuple for ``edge.cols`` — or ``None`` when a
+    non-nullable conditional edge has no candidates for that key, which
+    means the caller must emit NONE of that key's rows.
+
+    Draws each key's fan-out ``k`` with the exact same seeded RNG
+    `expand_keys` uses (`random.Random(derive_key_seed(run_id, key))` then
+    `plan.histogram.sample(rng)`) so the two stay in lockstep without this
+    module reaching into `fanout.py` internals — the histogram draw is
+    idempotent (a fresh `Random` instance per key), so replaying it here
+    does not disturb `expand_keys`'s own draw.
+    """
+    if not plan.conditional:
+        return {}
+    out: dict[tuple, dict[str, list[tuple]] | None] = {}
+    for i, key in enumerate(keys):
+        key_t = tuple(key)
+        rng = random.Random(derive_key_seed(run_id, key_t))
+        k = plan.histogram.sample(rng)
+        if k <= 0:
+            continue
+        per_edge: dict[str, list[tuple]] = {}
+        dropped = False
+        for edge in plan.conditional:
+            candidates = _candidates_for(matches, edge.id, i)
+            if not candidates and not edge.nullable:
+                dropped = True
+                break
+            per_edge[edge.id] = conditional_values(run_id, key_t, edge.id, candidates, k)
+        out[key_t] = None if dropped else per_edge
+    return out
+
+
+def apply_conditional_overrides(
+    plan: FanoutPlan,
+    chunk: Sequence[tuple[tuple, tuple]],
+    cond_by_key: dict[tuple, dict[str, list[tuple]] | None],
+    child_index: dict[tuple, int],
+) -> tuple[dict[str, list], list[bool]]:
+    """Per-row conditional-edge column overrides + a skip mask for one
+    `expand_keys` chunk, from the `conditional_values_by_key` cache.
+
+    ``child_index`` is the caller's running per-key child counter — it
+    MUST be created once per `generate_for_keys` call and passed to every
+    chunk unmutated-elsewhere, because `expand_keys` can split one key's
+    children across more than one chunk. Returns ``({}, [False, ...])``
+    (a no-op) when the plan has no conditional edges."""
+    n = len(chunk)
+    skip = [False] * n
+    if not plan.conditional:
+        return {}, skip
+    columns: dict[str, list] = {
+        name: [None] * n for edge in plan.conditional for name in edge.cols
+    }
+    for i, (key, _cell) in enumerate(chunk):
+        j = child_index.get(key, 0)
+        child_index[key] = j + 1
+        values_by_edge = cond_by_key.get(key)
+        if values_by_edge is None:
+            skip[i] = True
+            continue
+        for edge in plan.conditional:
+            row_values = values_by_edge[edge.id][j]
+            if row_values:
+                for p, name in enumerate(edge.cols):
+                    columns[name][i] = row_values[p]
+            # else: leave the pre-seeded None — the nullable-no-candidates case.
+    return columns, skip
