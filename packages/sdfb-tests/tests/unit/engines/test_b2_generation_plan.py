@@ -184,7 +184,10 @@ def test_b2_generate_for_keys_matches_the_b1_contract():
 def test_b2_fanout_bound_logs_zero_conditional_and_omits_candidate_cap(caplog):
     """ADR 0037 (design §8): `fanout_bound conditional=<n> candidate_cap=`
     — a plan with no conditional edges logs `conditional=0` and omits
-    `candidate_cap` entirely. B.2 mirror of the B.1 coverage."""
+    `candidate_cap` entirely. B.2 mirror of the B.1 coverage. Also pins
+    the four pre-existing fields (name + value) — review round 1
+    should-fix: `fanout_bound` had no prior regression coverage anywhere
+    in the suite."""
     from sdfb_core.contracts import TableSchema
     from sdfb_core.engines import GenerationContext, get_engine
 
@@ -213,6 +216,10 @@ def test_b2_fanout_bound_logs_zero_conditional_and_omits_candidate_cap(caplog):
     with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
         engine.setup(_Client(), ctx)
     assert "name=fanout_bound" in caplog.text
+    assert "driving_cols=PID" in caplog.text
+    assert "cells=3" in caplog.text
+    assert "exact_cells=True" in caplog.text
+    assert "mean_fanout=2.0" in caplog.text
     assert "conditional=0" in caplog.text
     assert "candidate_cap=" not in caplog.text
 

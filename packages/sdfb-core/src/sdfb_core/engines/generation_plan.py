@@ -153,14 +153,16 @@ def log_plan_pretty(
     milestone, under the same once-guard: ONE single-line
     ``relational_e2e`` (landing table, PK, identity, edge and clause
     counts) and ONE single-line ``relational_fk_edge`` per edge (its
-    parent landing table, key-tuple count and activation). One glance
-    answers "did the whole relational contract reach this run", which
-    the 2026-08-21 job could not (its FK was silently inactive). The
-    indent-2 ``generation_plan_pretty`` JSON is gone: eight engine
-    instances per table echoed it and on the 2026-09-09 three-table
-    runs the pretty entries were 40% of the worker log by bytes.
-    ``pool_sources`` rides on ``generation_plan``; it is accepted here
-    for the engines' unchanged call shape."""
+    parent landing table, key-tuple count, activation and — ADR 0037,
+    design 2026-09-11 §8 — the DAG path it took: ``mode=fanout|implied|
+    side_input|conditional``, plus ``overlap=`` for a conditional edge's
+    shared columns). One glance answers "did the whole relational
+    contract reach this run", which the 2026-08-21 job could not (its FK
+    was silently inactive). The indent-2 ``generation_plan_pretty`` JSON
+    is gone: eight engine instances per table echoed it and on the
+    2026-09-09 three-table runs the pretty entries were 40% of the
+    worker log by bytes. ``pool_sources`` rides on ``generation_plan``;
+    it is accepted here for the engines' unchanged call shape."""
     del pool_sources  # on `generation_plan` already
     table = ctx.table_schema.fqn
 

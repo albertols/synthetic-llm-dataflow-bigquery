@@ -748,11 +748,19 @@ class TestGenerateForKeys:
     ) -> None:
         """ADR 0037 (design §8): `fanout_bound conditional=<n>
         candidate_cap=` — a plan with no conditional edges logs
-        `conditional=0` and omits `candidate_cap` entirely."""
+        `conditional=0` and omits `candidate_cap` entirely. Also pins the
+        four pre-existing fields (name + value) so a future edit to the
+        same `fields` dict literal cannot silently drop/rename one —
+        review round 1 should-fix: `fanout_bound` had no prior regression
+        coverage anywhere in the suite."""
         engine = B1RagEngine(embedder=HashingEmbedder())
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
             engine.setup(self._Client(), self._ctx())
         assert "name=fanout_bound" in caplog.text
+        assert "driving_cols=PID,REGION" in caplog.text
+        assert "cells=3" in caplog.text
+        assert "exact_cells=True" in caplog.text
+        assert "mean_fanout=1.75" in caplog.text
         assert "conditional=0" in caplog.text
         assert "candidate_cap=" not in caplog.text
 
@@ -846,3 +854,18 @@ class TestGenerateForKeysConditional:
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
             engine.setup(self._Client(), ctx)
         assert "candidate_cap=64" in caplog.text
+
+    def test_fanout_bound_logs_candidate_cap_zero(self, caplog) -> None:
+        # Review round 1: the code guards with `candidate_cap is not
+        # None`, not truthiness — `0` is a valid (if degenerate) cap and
+        # must still be logged, not silently omitted like a falsy guard
+        # would do.
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        ctx = self._ctx(nullable=False)
+        assert ctx.fanout is not None
+        ctx = ctx.model_copy(
+            update={"fanout": {**ctx.fanout, "candidate_cap": 0}}
+        )
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), ctx)
+        assert "candidate_cap=0" in caplog.text
