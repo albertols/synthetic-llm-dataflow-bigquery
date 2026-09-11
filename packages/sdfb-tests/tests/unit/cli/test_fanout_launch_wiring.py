@@ -304,7 +304,7 @@ def test_the_fanout_payload_carries_the_conditional_edges_and_the_cap(monkeypatc
         _DIAMOND_ROWS,
     )
     assert payload["conditional"] == [
-        {"id": "T,R", "cols": ["R"], "nullable": True}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
     ]
     assert payload["candidate_cap"] == 32
     assert sorted(roles.values()) == ["conditional", "driving", "external"]
@@ -345,7 +345,7 @@ def test_the_launcher_names_a_defaulted_driving_edge_and_an_external_overlap(
         )
     fanout, edge_roles = result[5], result[6]
     assert fanout["conditional"] == [
-        {"id": "T,R", "cols": ["R"], "nullable": True}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
     ]
     assert fanout["candidate_cap"] == 64
     assert sorted(edge_roles.values()) == ["conditional", "driving", "external"]
@@ -635,7 +635,7 @@ def test_nullable_reads_the_landing_modes_not_the_source(monkeypatch):
         landing_schema=_landing_schema("REQUIRED"),
     )
     assert payload["conditional"] == [
-        {"id": "T,R", "cols": ["R"], "nullable": False}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False}
     ]
     # source R REQUIRED, landing R NULLABLE -> nullable
     payload, _roles = rp._resolve_table_fanout(
@@ -643,7 +643,7 @@ def test_nullable_reads_the_landing_modes_not_the_source(monkeypatch):
         landing_schema=_landing_schema("NULLABLE"),
     )
     assert payload["conditional"] == [
-        {"id": "T,R", "cols": ["R"], "nullable": True}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
     ]
 
 
@@ -663,7 +663,7 @@ def test_no_landing_schema_falls_back_to_the_source_and_says_so(
             _DIAMOND_ROWS, landing_schema=None,
         )
     assert payload["conditional"] == [
-        {"id": "T,R", "cols": ["R"], "nullable": True}  # the SOURCE's mode
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}  # the SOURCE's mode
     ]
     fallback = [
         ln for ln in caplog.text.splitlines()

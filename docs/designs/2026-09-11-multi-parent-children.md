@@ -144,7 +144,11 @@ edge `X` (`X.cols` → `P_X.ref_cols`):
   Several conditional edges chain one join each. The result goes through
   the existing Reshuffle → BatchElements → request payload, which gains
   `"matches": {edge_id: [candidates_for_key_0, …]}` aligned with `keys`.
-  `edge_id = ",".join(X.cols)`.
+  `edge_id = f"({','.join(X.cols)})->{X.ref}"` — the label the launcher's
+  milestones already print. The PARENT is part of the id: two conditional
+  edges from the SAME child columns to different parents are declarable,
+  and a columns-only id let the second join overwrite the first in
+  `matches` (review ruling 14).
 - **Engine** — `generate_for_keys(keys, cfg, matches=None)`. Per key,
   `sdfb_core.engines.fanout.conditional_values` shuffles the key's
   candidate list once with `derive_key_seed(run_id, key, edge_id)` and

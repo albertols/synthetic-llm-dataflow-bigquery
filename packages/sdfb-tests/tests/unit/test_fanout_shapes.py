@@ -200,10 +200,12 @@ def _diamond_specs(tmp_path: Path, tag: str, right_histogram: dict,
                               "exact_cells": True, "candidate_cap": 64,
                               # `id` IS `FkEdgeSpec.edge_id` — the DoFn and the
                               # engine look the candidates up by that string.
-                              "conditional": [{"id": "T,R", "cols": ["R"],
+                              "conditional": [{"id": f"(T,R)->{tag}_right",
+                                               "cols": ["R"],
                                                "nullable": nullable}]})
     edge_top = FkEdgeSpec(child_cols=("T",), ref_cols=("T",),
-                          parent_landing=f"p.land.{tag}_top", parent_pk=("T",),
+                          parent_landing=f"p.land.{tag}_top",
+                          parent_table=f"{tag}_top", parent_pk=("T",),
                           mode="fanout", keys_per_batch=10)
     return [
         _root(tmp_path, f"{tag}_top", "T", 12),
@@ -215,10 +217,12 @@ def _diamond_specs(tmp_path: Path, tag: str, right_histogram: dict,
                   **_sinks(tmp_path, f"{tag}_bottom"),
                   parent_edges=(
                       FkEdgeSpec(child_cols=("T", "L"), ref_cols=("T", "L"),
-                                 parent_landing=f"p.land.{tag}_left", parent_pk=("T", "L"),
+                                 parent_landing=f"p.land.{tag}_left",
+                                 parent_table=f"{tag}_left", parent_pk=("T", "L"),
                                  mode="fanout", keys_per_batch=10),
                       FkEdgeSpec(child_cols=("T", "R"), ref_cols=("T", "R"),
-                                 parent_landing=f"p.land.{tag}_right", parent_pk=("T", "R"),
+                                 parent_landing=f"p.land.{tag}_right",
+                                 parent_table=f"{tag}_right", parent_pk=("T", "R"),
                                  mode="conditional", overlap=("T",), candidate_cap=64,
                                  nullable=nullable),
                   )),
@@ -290,7 +294,8 @@ def test_existence_filter_drops_unmatched_keys(tmp_path):
                              "cells": {"cols": ["C_SEQ"], "rows": [["c1"], ["c2"]],
                                        "counts": [1, 1]},
                              "exact_cells": True, "candidate_cap": 64,
-                             "conditional": [{"id": "K", "cols": [], "nullable": False}]})
+                             "conditional": [{"id": "(K)->ex_q", "cols": [],
+                                              "nullable": False}]})
     specs = [
         TableSpec(config=_cfg(p_schema, p_ref, "ex_p", num_rows=60, seed=11,
                               pk_columns=("K",)),
@@ -302,11 +307,12 @@ def test_existence_filter_drops_unmatched_keys(tmp_path):
                   **_sinks(tmp_path, "ex_child"),
                   parent_edges=(
                       FkEdgeSpec(child_cols=("K",), ref_cols=("K",),
-                                 parent_landing="p.land.ex_p", parent_pk=("K",),
-                                 mode="fanout", keys_per_batch=10),
+                                 parent_landing="p.land.ex_p", parent_table="ex_p",
+                                 parent_pk=("K",), mode="fanout", keys_per_batch=10),
                       FkEdgeSpec(child_cols=("K",), ref_cols=("K",),
-                                 parent_landing="p.land.ex_q", parent_pk=("K",),
-                                 mode="conditional", overlap=("K",), candidate_cap=64),
+                                 parent_landing="p.land.ex_q", parent_table="ex_q",
+                                 parent_pk=("K",), mode="conditional",
+                                 overlap=("K",), candidate_cap=64),
                   )),
     ]
     _run(specs)
@@ -438,3 +444,93 @@ def test_graph_six_tables(tmp_path):
         assert len(_tuples(rows, *pk)) == len(rows)
     assert len(twin) == len(leaf)          # the all-ones histogram is a 1:1
     assert not _dlq(tmp_path, "g_fact", "fk.orphan")
+
+
+# ---------------------------------------------------------------------------
+# two co-parents: (K)->P driving, (K)->Q and (K)->R both conditional
+# ---------------------------------------------------------------------------
+
+
+def test_two_conditional_edges_to_different_parents(tmp_path):
+    """Ruling 14, end to end: a child whose SAME column is an existence
+    filter against TWO co-parents. Both filters must hold — under the old
+    `edge_id = ",".join(cols)` the two edges answered to one id, the second
+    `_emit_matches` overwrote the first in `matches`, and the surviving
+    edge's candidates answered for both (keys absent from `Q` landed).
+
+    `Q` misses `K6, K7` and `R` misses `K0, K1`, so each edge is the SOLE
+    reason some key is dropped — its id has to appear in the DLQ detail."""
+    p_schema = _schema("tp_p", [("K", "STRING"), ("P_VAL", "INT64")])
+    p_ref = [{"K": f"K{i % 8}", "P_VAL": i} for i in range(48)]
+    q_schema = _schema("tp_q", [("K", "STRING"), ("Q_VAL", "INT64")])
+    q_ref = [{"K": f"K{i % 6}", "Q_VAL": i} for i in range(48)]
+    r_schema = _schema("tp_r", [("K", "STRING"), ("R_VAL", "INT64")])
+    r_ref = [{"K": f"K{2 + i % 6}", "R_VAL": i} for i in range(48)]
+    child_schema = _schema("tp_child", [("K", "STRING"), ("C_SEQ", "STRING"),
+                                        ("C_VAL", "INT64")])
+    child_ref = [{"K": f"K{i % 8}", "C_SEQ": "cd"[i % 2], "C_VAL": i} for i in range(40)]
+    q_edge = FkEdgeSpec(child_cols=("K",), ref_cols=("K",),
+                        parent_landing="p.land.tp_q", parent_table="tp_q",
+                        parent_pk=("K",), mode="conditional", overlap=("K",),
+                        candidate_cap=64)
+    r_edge = FkEdgeSpec(child_cols=("K",), ref_cols=("K",),
+                        parent_landing="p.land.tp_r", parent_table="tp_r",
+                        parent_pk=("K",), mode="conditional", overlap=("K",),
+                        candidate_cap=64)
+    child_cfg = _cfg(child_schema, child_ref, "tp_child", num_rows=32,
+                     pk_columns=("K", "C_SEQ"), uniqueness_mode="streaming",
+                     fanout={"driving_cols": ["K"], "histogram": {"2": 1},
+                             "cells": {"cols": ["C_SEQ"], "rows": [["c1"], ["c2"]],
+                                       "counts": [1, 1]},
+                             "exact_cells": True, "candidate_cap": 64,
+                             # One entry per EDGE — `id` is the composer's
+                             # `edge_id`, which now carries the parent.
+                             "conditional": [
+                                 {"id": q_edge.edge_id, "cols": [], "nullable": False},
+                                 {"id": r_edge.edge_id, "cols": [], "nullable": False},
+                             ]})
+    specs = [
+        TableSpec(config=_cfg(p_schema, p_ref, "tp_p", num_rows=60, seed=11,
+                              pk_columns=("K",)),
+                  reference_rows=p_ref, **_sinks(tmp_path, "tp_p")),
+        TableSpec(config=_cfg(q_schema, q_ref, "tp_q", num_rows=60, seed=13,
+                              pk_columns=("K",)),
+                  reference_rows=q_ref, **_sinks(tmp_path, "tp_q")),
+        TableSpec(config=_cfg(r_schema, r_ref, "tp_r", num_rows=60, seed=17,
+                              pk_columns=("K",)),
+                  reference_rows=r_ref, **_sinks(tmp_path, "tp_r")),
+        TableSpec(config=child_cfg, reference_rows=child_ref,
+                  **_sinks(tmp_path, "tp_child"),
+                  parent_edges=(
+                      FkEdgeSpec(child_cols=("K",), ref_cols=("K",),
+                                 parent_landing="p.land.tp_p", parent_table="tp_p",
+                                 parent_pk=("K",), mode="fanout", keys_per_batch=10),
+                      q_edge,
+                      r_edge,
+                  )),
+    ]
+    _run(specs)
+
+    p_keys = _tuples(_read(tmp_path / "tp_p"), "K")
+    q_keys = _tuples(_read(tmp_path / "tp_q"), "K")
+    r_keys = _tuples(_read(tmp_path / "tp_r"), "K")
+    child = _read(tmp_path / "tp_child")
+    # Each co-parent must exclude keys the OTHER one holds, or the claim
+    # that both filters ran is vacuous.
+    assert q_keys - r_keys and r_keys - q_keys
+    assert child
+    assert _tuples(child, "K") <= q_keys & r_keys
+    assert len(_tuples(child, "K", "C_SEQ")) == len(child)   # PK unique
+    dropped = p_keys - (q_keys & r_keys)
+    envelopes = _dlq(tmp_path, "tp_child", "fk.unmatched")
+    # One envelope per dropped KEY, whichever edge (or both) rejected it.
+    assert len(envelopes) == len(dropped)
+    blamed = set()
+    for envelope in envelopes:
+        raw = json.loads(envelope["raw_record"])
+        assert (raw["keys"][0][0],) in dropped
+        assert raw["n"] >= 1
+        blamed.add(envelope["error_detail"].split()[1])
+    # Both edges are named: the ids are distinct end to end.
+    assert blamed == {q_edge.edge_id, r_edge.edge_id}
+

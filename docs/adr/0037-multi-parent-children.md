@@ -100,7 +100,11 @@ rows are projected to `(join_key, rest_value)` and reduced to at most
 shared key never carries an unbounded list. One `CoGroupByKey` per
 conditional edge attaches `matches = {edge_id: [candidates per key]}` to
 the existing Reshuffle → BatchElements → request payload
-(`edge_id = ",".join(edge.cols)`). Parent rows whose join key holds a
+(`edge_id = f"({','.join(edge.cols)})->{edge.ref}"`, one helper —
+`sdfb_core.engines.fanout.conditional_edge_id` — for the composer, the
+plan and preflight's `conditional_rest`; the parent is part of the id so
+two conditional edges from the same child columns to different parents
+cannot collide, review ruling 14). Parent rows whose join key holds a
 NULL are dropped and counted (`fanout/candidates_dropped_null`). Inside
 the engine, `sdfb_core.engines.fanout.conditional_values` shuffles the
 key's candidate list once with `derive_key_seed(run_id, key, edge_id)`

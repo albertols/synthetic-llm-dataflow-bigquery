@@ -335,7 +335,7 @@ def test_a_conditional_member_of_the_pk_is_bounded_by_the_candidate_cap():
             fk_parent_rows={"LEFT_TABLE": 1_000, "RIGHT_TABLE": 1_000},
             blocker_failure_ratio=0.2, fanout=_diamond_fanout(max_k),
             edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
-            conditional_rest={"T,R": ("R",)}, candidate_cap=cap,
+            conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=cap,
         )
 
     with pytest.raises(SystemExit, match=r"preflight P4.*--fk_candidate_cap"):
@@ -354,7 +354,8 @@ def test_two_conditional_members_multiply():
                             "OTHER_TABLE": 1_000},
             blocker_failure_ratio=0.2, fanout=fanout,
             edge_roles=_TWO_CONDITIONAL_REG.edge_roles("BOTTOM_TABLE"),
-            conditional_rest={"T,R": ("R",), "T,S": ("S",)}, candidate_cap=8,
+            conditional_rest={"(T,R)->RIGHT_TABLE": ("R",),
+                              "(T,S)->OTHER_TABLE": ("S",)}, candidate_cap=8,
         )
 
     _run(60)  # 8 x 8 = 64 candidate combinations per driving key
@@ -436,7 +437,7 @@ def test_cells_independent_and_conditional_factors_multiply():
                             "DIM_TABLE": 3},
             blocker_failure_ratio=0.2, fanout=fanout,
             edge_roles=_MIX_REG.edge_roles("MIX_TABLE"),
-            conditional_rest={"T,R": ("R",)}, candidate_cap=4,
+            conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=4,
         )
 
     _run(72)  # 6 cells x 3 keys x 4 candidates
@@ -556,7 +557,7 @@ def test_a_none_candidate_cap_falls_back_to_the_default():
         fk_parent_rows={"LEFT_TABLE": 1_000, "RIGHT_TABLE": 1_000},
         blocker_failure_ratio=0.2, fanout=_diamond_fanout(50),
         edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
-        conditional_rest={"T,R": ("R",)}, candidate_cap=None,
+        conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=None,
     )
     with pytest.raises(SystemExit, match=r"preflight P4.*--fk_candidate_cap"):
         preflight(
@@ -565,7 +566,7 @@ def test_a_none_candidate_cap_falls_back_to_the_default():
             fk_parent_rows={"LEFT_TABLE": 1_000, "RIGHT_TABLE": 1_000},
             blocker_failure_ratio=0.2, fanout=_diamond_fanout(100),
             edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
-            conditional_rest={"T,R": ("R",)}, candidate_cap=None,
+            conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=None,
         )
 
 
@@ -580,7 +581,7 @@ def test_the_stop_names_a_sufficient_candidate_cap_not_just_the_floor():
             fk_parent_rows={"LEFT_TABLE": 1_000, "RIGHT_TABLE": 1_000},
             blocker_failure_ratio=0.2, fanout=_diamond_fanout(100),
             edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
-            conditional_rest={"T,R": ("R",)}, candidate_cap=64,
+            conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=64,
         )
     assert "--fk_candidate_cap to at least 100" in str(exc.value)
     # Two edges share the shortfall: 8 x 8 = 64 < 100, and 10 x 10 >= 100.
@@ -593,6 +594,7 @@ def test_the_stop_names_a_sufficient_candidate_cap_not_just_the_floor():
                             "OTHER_TABLE": 1_000},
             blocker_failure_ratio=0.2, fanout=_diamond_fanout(100),
             edge_roles=_TWO_CONDITIONAL_REG.edge_roles("BOTTOM_TABLE"),
-            conditional_rest={"T,R": ("R",), "T,S": ("S",)}, candidate_cap=8,
+            conditional_rest={"(T,R)->RIGHT_TABLE": ("R",),
+                              "(T,S)->OTHER_TABLE": ("S",)}, candidate_cap=8,
         )
     assert "--fk_candidate_cap to at least 10" in str(exc2.value)

@@ -30,6 +30,7 @@ __all__ = [
     "ConditionalEdge",
     "FanoutHistogram",
     "FanoutPlan",
+    "conditional_edge_id",
     "conditional_values",
     "expand_keys",
 ]
@@ -154,6 +155,23 @@ class CellTable:
             rows=[tuple(r) for r in payload["rows"]],
             counts=[float(c) for c in payload["counts"]],
         )
+
+
+def conditional_edge_id(cols: Sequence[str], ref: str) -> str:
+    """The ONE name a conditional edge answers to — ``(cols)->ref``, the
+    label the launcher's milestones already print.
+
+    The composer (`FkEdgeSpec.edge_id`), the plan (`ConditionalEdge.id`),
+    the request payload's ``matches`` and preflight's ``conditional_rest``
+    must all spell it the same way or an edge's candidates are looked up
+    under a key nothing wrote. It carries the PARENT because the child
+    columns alone do not identify an edge: two conditional edges from the
+    same columns to DIFFERENT parents are declarable (the parse-time
+    duplicate check only rejects an identical ``(cols, ref, ref_cols)``),
+    and under a columns-only id they collided — the second join
+    overwrote the first in ``matches``, so one edge's candidates
+    answered for both (ADR 0037 review, ruling 14)."""
+    return f"({','.join(cols)})->{ref}"
 
 
 @dataclass(frozen=True)

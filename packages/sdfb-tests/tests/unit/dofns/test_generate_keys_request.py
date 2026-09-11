@@ -116,7 +116,8 @@ def _ctx_with_conditional(*, nullable: bool) -> GenerationContext:
         table_schema=_SCHEMA, reference_rows=_ROWS, reference_digest="dofn-fanout-cond",
         pipeline_run_id="dofn-run", pk_columns=["PID", "CAT"],
         fanout={"driving_cols": ["PID"], "histogram": {"2": 1},
-                "conditional": [{"id": "T,R", "cols": ["CAT"], "nullable": nullable}]},
+                "conditional": [{"id": "(T,R)->right", "cols": ["CAT"],
+                                 "nullable": nullable}]},
     )
 
 
@@ -139,7 +140,7 @@ class TestConditionalMatchesNullPolicy:
             "batch_id": 3,
             "keys": [("K1",), ("K2",)],
             "n": 10,
-            "matches": {"T,R": [[("r1",)], []]},
+            "matches": {"(T,R)->right": [[("r1",)], []]},
         }
 
         out = list(dofn.process(request))
@@ -154,12 +155,14 @@ class TestConditionalMatchesNullPolicy:
             "keys": [["K2"]],
             "n": 5,  # max(1, round(10 / 2))
         }
-        assert envelope["error_detail"] == "no T,R candidate for key ('K2',)"
+        assert envelope["error_detail"] == (
+            "no (T,R)->right candidate for key ('K2',)"
+        )
 
         assert len(engine.calls) == 1
         kept_keys, kept_matches = engine.calls[0]
         assert kept_keys == [("K1",)]
-        assert kept_matches == {"T,R": [[("r1",)]]}
+        assert kept_matches == {"(T,R)->right": [[("r1",)]]}
 
         assert counter.value == 1
 
@@ -176,7 +179,7 @@ class TestConditionalMatchesNullPolicy:
             "batch_id": 4,
             "keys": [("K1",), ("K2",)],
             "n": 10,
-            "matches": {"T,R": [[("r1",)], []]},
+            "matches": {"(T,R)->right": [[("r1",)], []]},
         }
 
         out = list(dofn.process(request))
@@ -185,7 +188,7 @@ class TestConditionalMatchesNullPolicy:
         assert len(engine.calls) == 1
         kept_keys, kept_matches = engine.calls[0]
         assert kept_keys == [("K1",), ("K2",)]
-        assert kept_matches == {"T,R": [[("r1",)], []]}
+        assert kept_matches == {"(T,R)->right": [[("r1",)], []]}
         assert counter.value == 0
 
     def test_request_without_matches_calls_the_engine_positionally(self):
@@ -227,7 +230,7 @@ class TestConditionalMatchesNullPolicy:
             "batch_id": 9,
             "keys": [("K1",), ("K2",)],
             "n": 10,
-            "matches": {"T,R": [[("r1",)], []]},
+            "matches": {"(T,R)->right": [[("r1",)], []]},
         }
 
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
@@ -251,8 +254,8 @@ class TestConditionalMatchesNullPolicy:
             fanout={
                 "driving_cols": ["PID"], "histogram": {"2": 1},
                 "conditional": [
-                    {"id": "A,X", "cols": ["CAT"], "nullable": False},
-                    {"id": "B,Y", "cols": ["AMT"], "nullable": True},
+                    {"id": "(A,X)->px", "cols": ["CAT"], "nullable": False},
+                    {"id": "(B,Y)->py", "cols": ["AMT"], "nullable": True},
                 ],
             },
         )
@@ -271,10 +274,10 @@ class TestConditionalMatchesNullPolicy:
             "n": 8,
             "matches": {
                 # Non-nullable: no candidate at index 1 or 2 → those keys drop.
-                "A,X": [[("a0",)], [], [], [("a3",)]],
+                "(A,X)->px": [[("a0",)], [], [], [("a3",)]],
                 # Nullable: candidates for ALL four keys — never causes a
-                # drop, but MUST still be re-indexed alongside "A,X".
-                "B,Y": [[("b0",)], [("b1",)], [("b2",)], [("b3",)]],
+                # drop, but MUST still be re-indexed alongside "(A,X)->px".
+                "(B,Y)->py": [[("b0",)], [("b1",)], [("b2",)], [("b3",)]],
             },
         }
 
@@ -290,14 +293,14 @@ class TestConditionalMatchesNullPolicy:
             assert envelope["error_type"] == "referential_integrity"
             assert envelope["stage"] == "pre_generate"
             assert envelope["raw_request"]["n"] == 2  # max(1, round(8 / 4))
-            assert "A,X" in envelope["error_detail"]  # the offending edge
+            assert "(A,X)->px" in envelope["error_detail"]  # the offending edge
 
         assert len(engine.calls) == 1
         kept_keys, kept_matches = engine.calls[0]
         assert kept_keys == [("K0",), ("K3",)]
         assert kept_matches == {
-            "A,X": [[("a0",)], [("a3",)]],
-            "B,Y": [[("b0",)], [("b3",)]],
+            "(A,X)->px": [[("a0",)], [("a3",)]],
+            "(B,Y)->py": [[("b0",)], [("b3",)]],
         }
 
         assert counter.value == 2

@@ -597,13 +597,14 @@ def edge_supplied_members(
         if pk & set(edge.cols):
             independent.append(edge)
     # Conditional edges are read off the MAPPING, never off `edge_roles`:
-    # its key is `edge_id` (`",".join(cols)`), and two conditional edges
-    # with the same child columns to different parents — which the
-    # parse-time duplicate check allows, it only rejects an identical
-    # (cols, ref, ref_cols) — collapse into one entry. Counting entries
-    # loses a factor instead of inventing one: the fail-CLOSED direction
-    # for P4. (Those two edges already collide on `FkEdgeSpec.edge_id`
-    # in the request payload's `matches`, which is Task 8's interface.)
+    # its key is `edge_id` (`conditional_edge_id`, `(cols)->parent`) — the
+    # same string the plan entries and the request payload's `matches`
+    # use. The PARENT is part of it, so two conditional edges with the
+    # same child columns to different parents (declarable: the parse-time
+    # duplicate check only rejects an identical (cols, ref, ref_cols))
+    # keep separate entries and each contributes its own factor. Under
+    # the old columns-only id they collapsed into one here, and collided
+    # in `matches` besides (ruling 14).
     conditional: list[str] = []
     for edge_id, rest in (conditional_rest or {}).items():
         known.extend(rest)
@@ -932,7 +933,8 @@ def preflight(
 
     ``conditional_rest`` / ``candidate_cap`` (ADR 0037 §6) are what P4
     DOES read on a driven child: each CONDITIONAL edge's ``rest``
-    columns keyed by its ``edge_id`` (``",".join(cols)``), and the Top-M
+    columns keyed by its ``edge_id`` (`conditional_edge_id` —
+    ``(cols)->parent``), and the Top-M
     candidate cap (``None`` means the default). Together with every
     INDEPENDENT edge's sampled key pool — sized HERE, from the derived
     row count this same call produces (ruling 13), not by the caller —

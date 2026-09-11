@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from sdfb_beam.cli.run_pipeline import (
     conditional_plan_entries,
+    conditional_rest_of,
     in_set_parent_edges,
 )
 from sdfb_core.contracts import TableSchema
@@ -124,9 +125,37 @@ tables:
         ref_cols: [K]
 """
 
+# Two conditional edges with the SAME child column to DIFFERENT parents.
+# The parse-time duplicate check only rejects an identical
+# (cols, ref, ref_cols), so this model is declarable — and under the old
+# `edge_id = ",".join(cols)` both edges answered to "K".
+_TWO_PARENTS = """
+model: twoparents
+tables:
+  P_TABLE:
+    pk: [K]
+  Q_TABLE:
+    pk: [K]
+  R_TABLE:
+    pk: [K]
+  CH_TABLE:
+    pk: [K, S]
+    fk:
+      - cols: [K]
+        ref: P_TABLE
+        ref_cols: [K]
+      - cols: [K]
+        ref: Q_TABLE
+        ref_cols: [K]
+      - cols: [K]
+        ref: R_TABLE
+        ref_cols: [K]
+"""
+
 _STAR_NAMES = {"DIM_A_TABLE", "DIM_B_TABLE", "FACT_TABLE"}
 _DIAMOND_NAMES = {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"}
 _EXISTENCE_NAMES = {"P_TABLE", "Q_TABLE", "CH_TABLE"}
+_TWO_PARENT_NAMES = {"P_TABLE", "Q_TABLE", "R_TABLE", "CH_TABLE"}
 
 
 def _reg(text: str, name: str) -> RelationshipRegistry:
@@ -191,7 +220,7 @@ def test_diamond_bottom_gets_a_conditional_edge_on_the_shared_column():
     ]
     assert edges[0].overlap == ()
     assert edges[1].overlap == ("T",)
-    assert edges[1].edge_id == "T,R"
+    assert edges[1].edge_id == "(T,R)->RIGHT_TABLE"
     assert edges[1].candidate_cap == 64
     assert edges[1].parent_pk == ("T", "R")
     # Every `rest` column NULLABLE in the landing schema.
@@ -237,7 +266,7 @@ def test_conditional_plan_entries_name_the_rest_columns():
         registry.edge_roles("BOTTOM_TABLE"),
         _schema(("T", "REQUIRED"), ("L", "REQUIRED"), ("R", "NULLABLE")),
     )
-    assert entries == [{"id": "T,R", "cols": ["R"], "nullable": True}]
+    assert entries == [{"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}]
     # The plan id and the composer's edge id are ONE string (Task 5).
     edges = in_set_parent_edges(
         registry,
@@ -273,4 +302,41 @@ def test_a_pure_existence_filter_is_never_nullable():
     assert edges[1].nullable is False
     assert conditional_plan_entries(
         registry, "proj.synthetic_data.CH_TABLE", roles, schema
-    ) == [{"id": "K", "cols": [], "nullable": False}]
+    ) == [{"id": "(K)->Q_TABLE", "cols": [], "nullable": False}]
+
+
+def test_two_conditional_edges_to_different_parents_get_distinct_ids():
+    """Ruling 14: the id carries the PARENT. Two conditional edges with
+    the SAME child column to different parents are declarable, and under
+    `",".join(cols)` they collided on ONE id — in the request payload's
+    `matches` (the second join overwrote the first), in the plan's
+    `conditional` entries and in `conditional_rest`. One edge's filter
+    then answered for both."""
+    registry = _reg(_TWO_PARENTS, "twoparents")
+    roles = registry.edge_roles("CH_TABLE")
+    schema = _schema(("K", "NULLABLE"), ("S", "NULLABLE"))
+    edges = in_set_parent_edges(
+        registry,
+        "proj.synthetic_data.CH_TABLE",
+        in_set_names=_TWO_PARENT_NAMES,
+        key_sample_caps={},
+        edge_roles=roles,
+        table_schema=schema,
+    )
+    assert [(e.child_cols, e.mode) for e in edges] == [
+        (("K",), "fanout"),
+        (("K",), "conditional"),
+        (("K",), "conditional"),
+    ]
+    assert [e.edge_id for e in edges[1:]] == ["(K)->Q_TABLE", "(K)->R_TABLE"]
+    assert len({e.edge_id for e in edges[1:]}) == 2
+
+    entries = conditional_plan_entries(
+        registry, "proj.synthetic_data.CH_TABLE", roles, schema
+    )
+    assert [e["id"] for e in entries] == [e.edge_id for e in edges[1:]]
+    # `conditional_rest` keys on the same id — one entry per edge, not one
+    # collapsed entry (P4 would otherwise lose a capacity factor).
+    assert sorted(
+        conditional_rest_of(registry, "proj.synthetic_data.CH_TABLE", roles)
+    ) == ["(K)->Q_TABLE", "(K)->R_TABLE"]

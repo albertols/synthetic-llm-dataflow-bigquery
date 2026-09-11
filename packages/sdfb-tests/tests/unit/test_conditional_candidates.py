@@ -28,6 +28,7 @@ _EDGE = FkEdgeSpec(
     child_cols=("T", "R"),
     ref_cols=("T", "R"),
     parent_landing="p.land.right",
+    parent_table="right",
     parent_pk=(),
     mode="conditional",
     overlap=("T",),
@@ -107,8 +108,8 @@ def test_attach_matches_gives_an_unmatched_driving_key_an_empty_list():
             _attach_matches(keys, cands, _EDGE, "attach/"),
             equal_to(
                 [
-                    (("t1", "l1"), {"T,R": [("r1",), ("r2",)]}),
-                    (("t2", "l2"), {"T,R": []}),
+                    (("t1", "l1"), {"(T,R)->right": [("r1",), ("r2",)]}),
+                    (("t2", "l2"), {"(T,R)->right": []}),
                 ]
             ),
         )
@@ -158,7 +159,7 @@ def test_requests_carry_each_key_its_own_candidates(tmp_path):
     assert payloads
     seen = {}
     for payload in payloads:
-        matches = payload["matches"]["T,R"]
+        matches = payload["matches"][_EDGE.edge_id]
         assert len(matches) == len(payload["keys"])
         for key, candidates in zip(payload["keys"], matches, strict=True):
             seen[key] = candidates

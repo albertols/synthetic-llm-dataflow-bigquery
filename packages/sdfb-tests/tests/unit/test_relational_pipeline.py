@@ -682,7 +682,7 @@ _INDEPENDENT_EDGE = FkEdgeSpec(
 )
 _CONDITIONAL_EDGE = FkEdgeSpec(
     child_cols=("CUST_ID", "R"), ref_cols=("customer_id", "r"),
-    parent_landing="p.land.right", mode="conditional",
+    parent_landing="p.land.right", parent_table="right", mode="conditional",
     overlap=("CUST_ID",), candidate_cap=8,
 )
 
@@ -726,9 +726,9 @@ def test_partition_parent_edges_splits_driving_independent_and_conditional(
     assert fanout == (_DRIVING_EDGE, "PARENT_DRIVING")
     assert side_inputs == [(2, _INDEPENDENT_EDGE, "PARENT_INDEPENDENT")]
     assert conditional == [(3, _CONDITIONAL_EDGE, "PARENT_CONDITIONAL")]
-    # The edge id names the child columns — the key the request payload,
-    # the plan and the engine all agree on.
-    assert _CONDITIONAL_EDGE.edge_id == "CUST_ID,R"
+    # The edge id names the child columns AND the parent — the key the
+    # request payload, the plan and the engine all agree on (ruling 14).
+    assert _CONDITIONAL_EDGE.edge_id == "(CUST_ID,R)->right"
 
 
 def test_a_conditional_edge_without_a_driving_edge_stops_the_build(tmp_path):
@@ -760,11 +760,12 @@ def test_fanout_request_payload_carries_matches_aligned_with_the_keys():
     assert plain["keys"] == [("t1", "l1"), ("t2", "l2")]
 
     paired = _fanout_request_payload(
-        [(("t1", "l1"), {"T,R": [("r1",)]}), (("t2", "l2"), {"T,R": []})],
+        [(("t1", "l1"), {"(T,R)->right": [("r1",)]}),
+         (("t2", "l2"), {"(T,R)->right": []})],
         2.0,
         paired=True,
     )
-    assert paired["matches"] == {"T,R": [[("r1",)], []]}
+    assert paired["matches"] == {"(T,R)->right": [[("r1",)], []]}
     assert paired["keys"] == [("t1", "l1"), ("t2", "l2")]
     assert paired["n"] == plain["n"] == 4
     # Same first key ⇒ same batch seed: carrying candidates must not
@@ -781,7 +782,7 @@ def test_an_overlap_column_the_driving_edge_lacks_stops_the_build(tmp_path):
 
     stray = FkEdgeSpec(
         child_cols=("REGION", "R"), ref_cols=("country", "r"),
-        parent_landing="p.land.right", mode="conditional",
+        parent_landing="p.land.right", parent_table="right", mode="conditional",
         overlap=("REGION",),
     )
     spec = _star_table_spec(tmp_path, (_DRIVING_EDGE, stray))
@@ -806,7 +807,7 @@ def test_an_overlap_column_the_conditional_edge_lacks_stops_the_build(tmp_path):
     )
     stray = FkEdgeSpec(
         child_cols=("CUST_ID", "R"), ref_cols=("customer_id", "r"),
-        parent_landing="p.land.right", mode="conditional",
+        parent_landing="p.land.right", parent_table="right", mode="conditional",
         overlap=("LINE",),
     )
     spec = _star_table_spec(tmp_path, (driving, stray))

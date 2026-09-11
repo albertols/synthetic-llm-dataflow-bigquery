@@ -30,7 +30,7 @@ from apache_beam.metrics import Metrics
 from apache_beam.transforms import combiners
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext, ModelClient
-from sdfb_core.engines.fanout import FanoutPlan
+from sdfb_core.engines.fanout import FanoutPlan, conditional_edge_id
 from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
@@ -504,6 +504,11 @@ class FkEdgeSpec:
     child_cols: tuple[str, ...]
     ref_cols: tuple[str, ...]
     parent_landing: str
+    # The parent's BARE model name (`FkEdge.ref`), which `edge_id` needs to
+    # tell two edges from the same columns to different parents apart
+    # (ruling 14). `parent_landing` stays the FQN the composer looks the
+    # built PCollection up by.
+    parent_table: str = ""
     parent_pk: tuple[str, ...] = ()
     # Parent key tuples the child sees (ADR 0035): the floor unless the
     # child's PK contains this edge's columns, then preflight's sizing.
@@ -531,8 +536,9 @@ class FkEdgeSpec:
     @property
     def edge_id(self) -> str:
         """The name the payload, the plan and the engine agree on for
-        this edge (`ConditionalEdge.id`)."""
-        return ",".join(self.child_cols)
+        this edge (`ConditionalEdge.id`) — `(child_cols)->parent_table`,
+        built by the ONE helper every producer calls."""
+        return conditional_edge_id(self.child_cols, self.parent_table)
 
 
 @dataclass(frozen=True)

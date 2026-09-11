@@ -169,7 +169,7 @@ def test_key_seed_is_stable_and_key_sensitive():
 class TestConditionalValues:
     def test_conditional_values_are_without_replacement_until_wrap(self):
         cands = [("r1",), ("r2",), ("r3",)]
-        out = conditional_values("run", ("t1",), "T,R", cands, 5)
+        out = conditional_values("run", ("t1",), "(T,R)->right", cands, 5)
         assert sorted(out[:3]) == sorted(cands)  # a permutation
         assert out[3:] == out[:2]  # then wraps in the same order
 
@@ -195,12 +195,13 @@ class TestConditionalValues:
 
 class TestConditionalEdge:
     def test_payload_round_trip(self):
-        edge = ConditionalEdge(id="T,R", cols=("R",), nullable=True)
+        edge = ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True)
         assert ConditionalEdge.from_payload(edge.to_payload()) == edge
 
     def test_to_payload_shape(self):
-        edge = ConditionalEdge(id="T,R", cols=("T", "R"), nullable=False)
-        assert edge.to_payload() == {"id": "T,R", "cols": ["T", "R"], "nullable": False}
+        edge = ConditionalEdge(id="(T,R)->right", cols=("T", "R"), nullable=False)
+        assert edge.to_payload() == {"id": "(T,R)->right", "cols": ["T", "R"],
+                                     "nullable": False}
 
 
 class TestFanoutPlanConditional:
@@ -210,7 +211,7 @@ class TestFanoutPlanConditional:
             histogram=FanoutHistogram({1: 1}),
             cells=None,
             exact_cells=True,
-            conditional=(ConditionalEdge(id="T,R", cols=("R",), nullable=True),),
+            conditional=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
         )
         assert FanoutPlan.from_payload(plan.to_payload()) == plan
         assert "R" in plan.columns
@@ -221,7 +222,7 @@ class TestFanoutPlanConditional:
             histogram=FanoutHistogram({1: 1}),
             cells=None,
             exact_cells=True,
-            conditional=(ConditionalEdge(id="T,R", cols=("R",), nullable=True),),
+            conditional=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
         )
         assert FanoutPlan.from_payload({**plan.to_payload(), "conditional": None}).conditional == ()
 

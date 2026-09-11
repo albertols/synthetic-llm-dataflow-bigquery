@@ -350,7 +350,8 @@ class TestGenerateForKeysConditional:
             fanout={
                 "driving_cols": ["T", "L"],
                 "histogram": {"2": 1},
-                "conditional": [{"id": "T,R", "cols": ["R"], "nullable": nullable}],
+                "conditional": [{"id": "(T,R)->right", "cols": ["R"],
+                                 "nullable": nullable}],
             },
         )
 
@@ -359,7 +360,7 @@ class TestGenerateForKeysConditional:
             return [{"values": [f"gen-{i}" for i in range(32)]}]
 
     _KEYS: ClassVar[list[tuple]] = [("t1", "l1"), ("t2", "l2")]
-    _MATCHES: ClassVar[dict] = {"T,R": [[("r1",), ("r2",)], []]}
+    _MATCHES: ClassVar[dict] = {"(T,R)->right": [[("r1",), ("r2",)], []]}
 
     def test_matched_key_gets_each_candidate_once_unmatched_key_dropped(self):
         engine = get_engine("b2_library")(use_sdgx=False)

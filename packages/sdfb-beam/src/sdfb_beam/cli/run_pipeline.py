@@ -51,6 +51,7 @@ from sdfb_core.contracts.relationships import (
     RelationshipRegistry,
 )
 from sdfb_core.engines.b1_rag.profile import profile_columns
+from sdfb_core.engines.fanout import conditional_edge_id
 from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import (
     log_build_info,
@@ -945,8 +946,10 @@ def _cache_write(stats_store, landing_table: str, source_table: str, cols, sha: 
 
 
 def _edge_label(edge) -> str:
-    """One FK edge as the launcher names it everywhere: ``(cols)->ref``."""
-    return f"({','.join(edge.cols)})->{edge.ref}"
+    """One FK edge as the launcher names it everywhere: ``(cols)->ref``
+    — the same string a conditional edge answers to as its ``edge_id``,
+    so the milestones and the payload keys read alike."""
+    return conditional_edge_id(edge.cols, edge.ref)
 
 
 def conditional_rest_of(
@@ -956,11 +959,13 @@ def conditional_rest_of(
 
     ONE builder for both readers — `resolve_fanout`'s cell measurement
     and `preflight`'s P4 — so they can never disagree about what a
-    conditional edge supplies. ``edge_id`` is ``",".join(cols)``, the
+    conditional edge supplies. ``edge_id`` is `conditional_edge_id`, the
     string `FkEdgeSpec.edge_id` and the request payload's ``matches``
     key already use."""
     return {
-        ",".join(edge.cols): registry.edge_rest(landing_table, edge)
+        conditional_edge_id(edge.cols, edge.ref): registry.edge_rest(
+            landing_table, edge
+        )
         for edge, role in roles.items()
         if role == "conditional"
     }
@@ -1885,12 +1890,14 @@ def conditional_plan_entries(
     """``FanoutPlan.conditional`` payload entries (ADR 0037): one per
     conditional edge, in ``enforced_edges`` order. ``id`` is the string
     the request payload, the plan and ``FkEdgeSpec.edge_id`` all agree
-    on; ``cols`` are the child columns the engine writes from the drawn
+    on (`conditional_edge_id` — it carries the parent, so two edges from
+    the same columns to different parents keep separate entries);
+    ``cols`` are the child columns the engine writes from the drawn
     candidate (``rest``); ``nullable`` is the NULL policy for a key with
     no candidate."""
     return [
         {
-            "id": ",".join(fk.cols),
+            "id": conditional_edge_id(fk.cols, fk.ref),
             "cols": list(registry.edge_rest(landing_table, fk)),
             "nullable": _rest_is_nullable(
                 registry.edge_rest(landing_table, fk), table_schema
@@ -1953,6 +1960,9 @@ def in_set_parent_edges(
                 parent_landing=parent_landing_fqn(
                     fk.ref, derive_fk_parent_landing(landing_table)
                 ),
+                # The bare model name — `edge_id` is `(cols)->parent`, so
+                # two edges to different parents never share an id.
+                parent_table=fk.ref,
                 # The parent PK lets the composer skip a Distinct shuffle
                 # when the projected tuple already holds it (Task 5) —
                 # harmless on every mode, worth millions of rows on a
