@@ -16,6 +16,7 @@ model download, no GPU, no GCP.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
@@ -742,6 +743,19 @@ class TestGenerateForKeys:
         with pytest.raises(RuntimeError, match="fanout"):
             list(engine.generate_for_keys([("K1", "ES")], GenerationConfig(seed=1)))
 
+    def test_fanout_bound_logs_zero_conditional_and_omits_candidate_cap(
+        self, caplog
+    ) -> None:
+        """ADR 0037 (design §8): `fanout_bound conditional=<n>
+        candidate_cap=` — a plan with no conditional edges logs
+        `conditional=0` and omits `candidate_cap` entirely."""
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), self._ctx())
+        assert "name=fanout_bound" in caplog.text
+        assert "conditional=0" in caplog.text
+        assert "candidate_cap=" not in caplog.text
+
 
 class TestGenerateForKeysConditional:
     """ADR 0037 (design 2026-09-11 §4): a non-driving FK edge resolved per
@@ -812,3 +826,23 @@ class TestGenerateForKeysConditional:
         t2_rows = [r for r in rows if r["T"] == "t2"]
         assert len(t2_rows) == 2
         assert all(r["R"] is None for r in t2_rows)
+
+    def test_fanout_bound_logs_conditional_count(self, caplog) -> None:
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), self._ctx(nullable=False))
+        assert "name=fanout_bound" in caplog.text
+        assert "conditional=1" in caplog.text
+
+    def test_fanout_bound_logs_candidate_cap_when_present(self, caplog) -> None:
+        # `candidate_cap` rides next to `conditional` in the plan payload
+        # (Task 6, absent until the launcher writes it).
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        ctx = self._ctx(nullable=False)
+        assert ctx.fanout is not None
+        ctx = ctx.model_copy(
+            update={"fanout": {**ctx.fanout, "candidate_cap": 64}}
+        )
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), ctx)
+        assert "candidate_cap=64" in caplog.text

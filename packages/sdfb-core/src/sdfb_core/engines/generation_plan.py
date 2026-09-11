@@ -196,7 +196,16 @@ def log_plan_pretty(
             "ref_cols": ",".join(edge.get("ref_cols") or ()),
             "parent_landing": edge.get("parent_landing", ""),
             "enforced": edge.get("enforced", True),
+            # ADR 0037 (design §8): the DAG path this edge took —
+            # "fanout" (drives), "implied", "side_input" (independent,
+            # the pre-ADR-0037 default) or "conditional". Legacy/partial
+            # metadata (no "mode" key yet) defaults to "side_input", the
+            # path every edge took before this design.
+            "mode": edge.get("mode", "side_input"),
         }
+        overlap = edge.get("overlap")
+        if overlap:
+            fields["overlap"] = ",".join(overlap)
         key_tuples = tuples_by_cols.get(cols)
         if key_tuples is None:
             pool_size = len(fk_pools.get(cols[0] if cols else "", ()))

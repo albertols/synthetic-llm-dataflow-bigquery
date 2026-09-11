@@ -150,6 +150,73 @@ class TestCompactRelationalEntries:
         assert len(_entries(caplog, "relational_fk_edge")) == 1
 
 
+class TestEdgeModeObservability:
+    """ADR 0037 (design §8): `relational_fk_edge mode=side_input|conditional
+    overlap=` names the DAG path each edge took — the driving/implied
+    modes already exist on `FkEdgeSpec.mode` and pass through unchanged;
+    this covers the two new roles plus the pre-ADR-0037 default."""
+
+    @staticmethod
+    def _ctx_for_edge(edge: dict) -> GenerationContext:
+        return GenerationContext(
+            table_schema=_SCHEMA,
+            reference_rows=_rows(),
+            reference_digest="edge-mode-digest",
+            pipeline_run_id="edge-mode-run",
+            pk_columns=["KEY"],
+            landing_table="p.landing.child_t",
+            fk_edges=[edge],
+            fk_pools={"PARENT_ID": tuple(f"P{i}" for i in range(7))},
+        )
+
+    def test_conditional_edge_logs_mode_and_overlap(self, caplog) -> None:
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        edge = {
+            "cols": ["PARENT_ID"],
+            "ref": "src.parent_t",
+            "parent_landing": "p.landing.parent_t",
+            "mode": "conditional",
+            "overlap": ["T_COL"],
+        }
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(_StubClient(), self._ctx_for_edge(edge))
+        (entry,) = _entries(caplog, "relational_fk_edge")
+        assert "mode=conditional" in entry
+        assert "overlap=T_COL" in entry
+
+    def test_independent_edge_logs_mode_side_input_without_overlap(
+        self, caplog
+    ) -> None:
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        edge = {
+            "cols": ["PARENT_ID"],
+            "ref": "src.parent_t",
+            "parent_landing": "p.landing.parent_t",
+            "mode": "side_input",
+        }
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(_StubClient(), self._ctx_for_edge(edge))
+        (entry,) = _entries(caplog, "relational_fk_edge")
+        assert "mode=side_input" in entry
+        assert "overlap=" not in entry
+
+    def test_edge_without_mode_key_defaults_to_side_input(self, caplog) -> None:
+        # Legacy metadata (pre-ADR-0037, or a launcher not yet on Task 6):
+        # an edge dict with no "mode" key must not crash and must default
+        # to the pre-existing side-input path.
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        edge = {
+            "cols": ["PARENT_ID"],
+            "ref": "src.parent_t",
+            "parent_landing": "p.landing.parent_t",
+        }
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(_StubClient(), self._ctx_for_edge(edge))
+        (entry,) = _entries(caplog, "relational_fk_edge")
+        assert "mode=side_input" in entry
+        assert "overlap=" not in entry
+
+
 class TestWorkerRelationshipCard:
     """ADR 0032 — the worker echoes the card the LAUNCHER rendered from
     `config/relationships/`. Pipes and arrows are enough at 3am; the

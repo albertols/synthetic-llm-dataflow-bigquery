@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -118,7 +119,8 @@ class B2LibraryEngine(GenerationEngine):
                 )
         payload = getattr(ctx, "fanout", None)
         self._fanout = FanoutPlan.from_payload(payload) if payload else None
-        if self._fanout is not None:
+        if payload:
+            assert self._fanout is not None
             for name in self._fanout.driving_cols:
                 base = self._profiles.get(name)
                 if base is not None:
@@ -127,13 +129,22 @@ class B2LibraryEngine(GenerationEngine):
                         kind=ColumnKind.CATEGORICAL, nullable=base.nullable,
                         null_fraction=0.0, categories=(), weights=(),
                     )
-            log_milestone(
-                "fanout_bound",
-                driving_cols=",".join(self._fanout.driving_cols),
-                cells=self._fanout.cells.size if self._fanout.cells else 0,
-                exact_cells=self._fanout.exact_cells,
-                mean_fanout=round(self._fanout.histogram.mean, 3),
-            )
+            fields: dict[str, Any] = {
+                "driving_cols": ",".join(self._fanout.driving_cols),
+                "cells": self._fanout.cells.size if self._fanout.cells else 0,
+                "exact_cells": self._fanout.exact_cells,
+                "mean_fanout": round(self._fanout.histogram.mean, 3),
+                # ADR 0037 (design §8): the count of non-driving
+                # conditional edges this plan resolves per key, and the
+                # Top-M candidate cap (Task 6,
+                # `ctx.fanout["candidate_cap"]`) when the launcher has
+                # written one.
+                "conditional": len(self._fanout.conditional),
+            }
+            candidate_cap = payload.get("candidate_cap")
+            if candidate_cap is not None:
+                fields["candidate_cap"] = candidate_cap
+            log_milestone("fanout_bound", **fields)
         self._free_text_cols = [
             name
             for name, p in self._profiles.items()

@@ -9,6 +9,7 @@ lazily per batch, so there is no `pool_sources` field at setup time.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 from typing import ClassVar
 
@@ -180,6 +181,42 @@ def test_b2_generate_for_keys_matches_the_b1_contract():
     assert {len(v) for v in per_key.values()} <= {1, 3}
 
 
+def test_b2_fanout_bound_logs_zero_conditional_and_omits_candidate_cap(caplog):
+    """ADR 0037 (design §8): `fanout_bound conditional=<n> candidate_cap=`
+    — a plan with no conditional edges logs `conditional=0` and omits
+    `candidate_cap` entirely. B.2 mirror of the B.1 coverage."""
+    from sdfb_core.contracts import TableSchema
+    from sdfb_core.engines import GenerationContext, get_engine
+
+    schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.src.child_t"},
+         "schema": [
+             {"name": "PID", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "CAT", "type": "STRING", "mode": "REQUIRED"},
+             {"name": "AMT", "type": "INT64", "mode": "REQUIRED"},
+         ]}
+    )
+    rows = [{"PID": f"P{i:04d}", "CAT": "abc"[i % 3], "AMT": i} for i in range(60)]
+    ctx = GenerationContext(
+        table_schema=schema, reference_rows=rows, reference_digest="b2-fanout",
+        pipeline_run_id="b2-run", pk_columns=["PID", "CAT"],
+        fanout={"driving_cols": ["PID"], "histogram": {"1": 1, "3": 1},
+                "cells": {"cols": ["CAT"], "rows": [["a"], ["b"], ["c"]], "counts": [1, 1, 1]},
+                "exact_cells": True},
+    )
+
+    class _Client:
+        def generate_json(self, *, prompt, n=1, **kw):
+            return [{"values": []}]
+
+    engine = get_engine("b2_library")(use_sdgx=False)
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        engine.setup(_Client(), ctx)
+    assert "name=fanout_bound" in caplog.text
+    assert "conditional=0" in caplog.text
+    assert "candidate_cap=" not in caplog.text
+
+
 def test_b2_rest_columns_do_not_repeat_across_chunks():
     """ADR 0036: the per-chunk `rest` sampling must consume ONE rng across
     the whole call, not replay a fresh stream per chunk."""
@@ -342,3 +379,23 @@ class TestGenerateForKeysConditional:
         t2_rows = [r for r in rows if r["T"] == "t2"]
         assert len(t2_rows) == 2
         assert all(r["R"] is None for r in t2_rows)
+
+    def test_fanout_bound_logs_conditional_count(self, caplog) -> None:
+        engine = get_engine("b2_library")(use_sdgx=False)
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), self._ctx(nullable=False))
+        assert "name=fanout_bound" in caplog.text
+        assert "conditional=1" in caplog.text
+
+    def test_fanout_bound_logs_candidate_cap_when_present(self, caplog) -> None:
+        # `candidate_cap` rides next to `conditional` in the plan payload
+        # (Task 6, absent until the launcher writes it).
+        engine = get_engine("b2_library")(use_sdgx=False)
+        ctx = self._ctx(nullable=False)
+        assert ctx.fanout is not None
+        ctx = ctx.model_copy(
+            update={"fanout": {**ctx.fanout, "candidate_cap": 64}}
+        )
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), ctx)
+        assert "candidate_cap=64" in caplog.text

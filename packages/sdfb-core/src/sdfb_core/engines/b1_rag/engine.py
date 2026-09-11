@@ -462,13 +462,21 @@ class B1RagEngine(GenerationEngine):
                     kind=ColumnKind.CATEGORICAL, nullable=base.nullable,
                     null_fraction=0.0, categories={}, observed_values=(),
                 )
-        log_milestone(
-            "fanout_bound",
-            driving_cols=",".join(self._fanout.driving_cols),
-            cells=self._fanout.cells.size if self._fanout.cells else 0,
-            exact_cells=self._fanout.exact_cells,
-            mean_fanout=round(self._fanout.histogram.mean, 3),
-        )
+        fields: dict[str, Any] = {
+            "driving_cols": ",".join(self._fanout.driving_cols),
+            "cells": self._fanout.cells.size if self._fanout.cells else 0,
+            "exact_cells": self._fanout.exact_cells,
+            "mean_fanout": round(self._fanout.histogram.mean, 3),
+            # ADR 0037 (design §8): the count of non-driving conditional
+            # edges this plan resolves per key, and the Top-M candidate
+            # cap (Task 6, `ctx.fanout["candidate_cap"]`) when the
+            # launcher has written one.
+            "conditional": len(self._fanout.conditional),
+        }
+        candidate_cap = payload.get("candidate_cap")
+        if candidate_cap is not None:
+            fields["candidate_cap"] = candidate_cap
+        log_milestone("fanout_bound", **fields)
 
     def _fetch_identifier_domains(self, ctx: GenerationContext) -> None:
         """Full source domains for identifier-shaped columns, via the
