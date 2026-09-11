@@ -259,6 +259,9 @@ def test_nullable_branch_lands_null(tmp_path):
     assert matched and unmatched
     assert all(r["R"] is None for r in unmatched)
     assert _tuples(matched, "T", "R") <= _tuples(right, "T", "R")
+    # PK unique on the NARROWED key — `R` is excluded because a NULL member
+    # is not a key (ADR 0031), which is exactly what this shape lands.
+    assert len(_tuples(bottom, "T", "L", "S")) == len(bottom)
     assert not _read(tmp_path / "dlq_nul_bottom")
 
 
@@ -314,6 +317,7 @@ def test_existence_filter_drops_unmatched_keys(tmp_path):
     # The shape is only meaningful if BOTH sides of the filter are populated.
     assert 0 < len(p_keys & q_keys) < len(p_keys)
     assert child and _tuples(child, "K") <= q_keys
+    assert len(_tuples(child, "K", "C_SEQ")) == len(child)   # PK unique
     envelopes = _dlq(tmp_path, "ex_child", "fk.unmatched")
     assert len(envelopes) == len(p_keys - q_keys)
     for envelope in envelopes:
