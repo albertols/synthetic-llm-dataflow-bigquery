@@ -149,3 +149,38 @@ class TestCellWeightedShare:
         assert expected_duplicate_share_cells(rows + rows // 100, 1_000_000, skewed) > 0.2
         # Skew lowers the gate-safe run vs the same count of uniform cells.
         assert rows < max_rows_under_share(1_000_000, 0.2, cell_weights=[1.0] * 12)
+
+
+class TestAstronomicalCapacity:
+    """2026-09-11 launch …-3742133137251240056: C_TABLE's PK member
+    D_COL_001 became a pattern sampler (3.6e27 strings) once its parent
+    was disabled, and P4 predicted 100 % duplicates at 10M rows over a
+    2.2e29-tuple space — `1 - exp(-x)` cancels to 0.0 for x ≈ 1e-20.
+    The share must be computed with `expm1`."""
+
+    _D_COL_001 = 3_626_777_458_843_887_524_118_528  # ^(E2F[13]|2301)[0-9A-F]{20}$
+    _UNIFORM = _D_COL_001 * 2 * 37
+
+    def test_flat_share_over_an_astronomical_space_is_zero(self):
+        assert expected_duplicate_share(10_000_000, self._UNIFORM) < 1e-12
+
+    def test_cell_share_over_an_astronomical_space_is_zero(self):
+        from sdfb_core.engines.pk_capacity import expected_duplicate_share_cells
+
+        skewed = [40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1]
+        share = expected_duplicate_share_cells(10_000_000, self._D_COL_001, skewed)
+        assert share < 1e-12
+
+    def test_the_share_stays_exact_where_it_used_to_work(self):
+        from sdfb_core.engines.pk_capacity import expected_duplicate_share_cells
+
+        # The 2026-09-09_16_44 neighbourhood (56.5 % measured) is unchanged.
+        skewed = [40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1]
+        assert 0.45 < expected_duplicate_share_cells(10_000_000, 1_000_000, skewed) < 0.65
+        assert expected_duplicate_share(10_000_000, 12_000_000) == pytest.approx(
+            1 - 1.2 * (1 - math.exp(-1 / 1.2))
+        )
+
+    def test_max_rows_under_the_gate_is_far_beyond_ten_million(self):
+        skewed = [40, 20, 12, 8, 6, 4, 3, 2, 2, 1, 1, 1]
+        assert max_rows_under_share(self._D_COL_001, 0.2, skewed) > 10**20

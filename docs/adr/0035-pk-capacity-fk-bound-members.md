@@ -148,6 +148,11 @@ disambiguates multi-table logs on its own.
   launch that flipped B_TABLE to `enabled: false` made C_TABLE a root, and
   P4 still counted its undrawn edge at the 1M ceiling (56.5% predicted,
   false stop). A PK member whose parent is disabled keeps its own route.
+- The share is computed with `expm1`, never `1 - exp(-x)`: the follow-up
+  launch (…-3742133137251240056) put a 3.6e27-string pattern sampler in
+  the tuple, `x ≈ 1e-20` cancelled to 0.0, and P4 predicted 100 %
+  duplicates with a "largest gate-safe run" of 6.9e24 rows — a second
+  false stop on the same root table.
 - Deferred: the co-partitioned join beyond the ceiling; PK-tuple
   enumeration in the engine; an external parent's true key count
   (preflight uses the loader's limit as an upper bound, never a false

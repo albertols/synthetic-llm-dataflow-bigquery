@@ -55,7 +55,10 @@ def expected_duplicate_share(num_rows: int, capacity: int | None) -> float:
     if capacity <= 0:
         return 1.0
     ratio = num_rows / capacity
-    distinct = capacity * (1.0 - math.exp(-ratio))
+    # -expm1(-x), never 1 - exp(-x): for x ~ 1e-20 (a pattern sampler's
+    # 1e27 strings) the subtraction cancels to 0.0 and the share to 100 %
+    # (2026-09-11 launch …-3742133137251240056, a false P4 stop).
+    distinct = capacity * -math.expm1(-ratio)
     return max(0.0, 1.0 - distinct / num_rows)
 
 
@@ -81,7 +84,7 @@ def expected_duplicate_share_cells(
     if uniform_capacity <= 0:
         return 1.0
     distinct = sum(
-        uniform_capacity * (1.0 - math.exp(-num_rows * p / uniform_capacity))
+        uniform_capacity * -math.expm1(-num_rows * p / uniform_capacity)
         for p in _normalised(cell_weights)
     )
     return max(0.0, 1.0 - distinct / num_rows)
