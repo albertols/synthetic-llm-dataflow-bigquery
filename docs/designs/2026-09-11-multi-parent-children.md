@@ -181,9 +181,11 @@ edge `X` (`X.cols` → `P_X.ref_cols`):
   conditional edge is still shuffled per key either way
   (`derive_key_seed(run_id, key, salt=edge_id)`).
 - **Capping vs. wrapping.** Capacity is the product of the dimensions
-  that are genuinely bounded: the cell count ONLY when `exact_cells`,
-  times each conditional edge's ACTUAL candidate count for that key — or
-  **1** when an edge has none, because NULL-filling that edge is exactly
+  that genuinely bound the PRIMARY KEY: the cell count ONLY when
+  `exact_cells`, times — per conditional edge whose `rest` supplies a PK
+  member (`ConditionalEdge.pk_member`, set by the launcher from
+  `effective_pk_of`) — its ACTUAL candidate count for that key, or
+  **1** when that edge has none, because NULL-filling that edge is exactly
   ONE combination (a NULL is not a key member, ADR 0031, so it neither
   drops the key nor multiplies what it can represent — fix wave E2's
   correction: a candidate-less nullable edge used to disable capping for
@@ -199,6 +201,20 @@ edge `X` (`X.cols` → `P_X.ref_cols`):
   legitimately represent — and its candidate digits wrap (`i % capacity`
   over the candidate radices alone) while its cells keep drawing
   independently from their measured weights, untouched by the wrap.
+- **An edge outside the PK bounds nothing (fix wave G1).** A role of
+  `conditional` only means the edge SHARES a column with the driving
+  edge; whether its `rest` keys anything is a separate question, and only
+  the edges that do may multiply the capacity. A child PK `(T, GRADE, R)`
+  with 2 `GRADE` cells, a keying edge offering 3 candidates and a LOOKUP
+  edge offering 20 computed `2 × 3 × 20 = 120 ≥ 100`, emitted all 100
+  children of a hot key and reported `shortfall == 0` — but only
+  `2 × 3 = 6` distinct `(GRADE, R)` pairs exist, so 94 rows landed or
+  diverted as `pk.duplicate` with no `fanout_rows_capped`. Preflight P4
+  (§6) always counted only the PK-touching edges, so the two now spell
+  ONE rule. The non-PK edges walk their own radices, so each child still
+  draws its own candidate instead of freezing on the first. `pk_member`
+  defaults to **false** when a payload omits it: under-counting caps
+  early and says so, over-counting is silent.
 - **NULL policy (ruling B, 2026-09-11; both schemas since fix wave A4)**
   — a key with no candidate: when every `rest(X)` column is NULLABLE in
   BOTH the landing schema AND the generation schema, the engine writes
@@ -212,8 +228,14 @@ edge `X` (`X.cols` → `P_X.ref_cols`):
   silently reject the row and the engine's own `except Exception: continue`
   would discard it with no envelope, counter or milestone), the edge is
   treated as NON-nullable and one
-  `fk_nullable_schema_mismatch table= edge= landing= generation=` WARNING
-  names it. `rest(X)` empty (pure existence filter) is never nullable: an
+  `fk_nullable_schema_mismatch table= edge= landing= generation= reason=
+  pk=` WARNING names it. The same applies to a `rest` column inside the
+  PK the run ENFORCES — the relationship model's `pk:` (ADR 0032), with
+  `TableSchema.primary_keys` standing in only when the model declares
+  none (`reason=declared_pk`, fix waves F2 + G2): the record model
+  rejects a NULL there whatever the mode says, and reading the BQ
+  constraint alone never fired on the canonical setup, where it is
+  `None`. `rest(X)` empty (pure existence filter) is never nullable: an
   unmatched key is dropped and counted.
 
 **Claim (figure `multi-parent-candidate-cap.png`):** with the default
@@ -308,7 +330,7 @@ skip P4 as today; streaming uniqueness measures `pk.duplicate`.
 | path | shuffle | memory | bound |
 |---|---|---|---|
 | independent | one sampled side input per edge (≤ 1M tuples, ADR 0035 ceiling) | per worker: the pool | unchanged from ADR 0031 |
-| conditional | per edge: one Distinct (skipped when the projection holds the parent PK) + one Top-M combine on the parent side, one CoGroupByKey on the driving keys | per request: `keys_per_batch × M × Σ\|rest\|` values | `keys_per_batch` is lowered so candidate TUPLES per request never exceed 100k (see note) |
+| conditional | per edge: one Distinct (skipped when the projection holds the parent PK) + one Top-M combine on the parent side, one CoGroupByKey on the driving keys | per request: `keys_per_batch × M × Σ\|rest\|` values | `keys_per_batch` is lowered so candidate TUPLES per request never exceed 100k — until `M × n` passes 100k on its own, which WARNS (see note) |
 | driving | unchanged | unchanged | unchanged |
 
 The conditional row's 100k ceiling bounds candidate TUPLES, not the raw
@@ -325,7 +347,13 @@ VALUE, reused by every driving key carrying that value, not a per-key
 allotment, so clamping it collapsed a 1:1 driving edge's shared value to
 one candidate — a point mass, most of the co-parent's rows never
 referenced, on the default flag). The payload-size concern A3 was
-reaching for is already served by `keys_per_batch` above.
+reaching for is already served by `keys_per_batch` above — up to the
+point where it cannot be. `100_000 // (M × n)` floors at 1, so once
+`M × n` exceeds 100k on its own, ONE key per request still carries
+`M × n` tuples and nothing bounds it further. The cap stays unclamped
+(F1's ruling), and the degenerate bound is named instead: one
+`fk_candidate_request_unbounded table= candidate_cap= conditional_edges=
+tuples_per_request= ceiling=` WARNING per table at launch (fix wave G5).
 
 Hot shared keys: the parent side is capped at M by the combine, the
 driving side is an iterable the runner streams. Both joins are keyed on
@@ -338,11 +366,12 @@ parent.
 |---|---|---|
 | `fk_edge_role … role=independent\|conditional overlap=` | launcher, per edge | the role and, for conditional, the shared columns |
 | `fk_driving_edge_defaulted table= edge=` (WARNING) | launcher | rule 4 chose; mark `drives: true` to choose yourself |
-| `fk_edge_overlap_external table= edge= other= overlap= note=` (WARNING) | launcher, once per overlapping PAIR with an external end | fix wave F3: `edge=` is always the external one, `other=` what it clashes with — driving∩external, external∩external or external∩any non-driving edge; the last write wins, so `other`'s tuple may not exist in its own parent |
-| `fk_nullable_schema_mismatch table= edge= landing= generation= reason= pk=` (WARNING) | launcher, once per conditional edge | fix waves A4 + F2: `reason=` is `generation_pk`, `schema_mode_mismatch`, or both — landing/generation schemas disagree on this edge's `rest` nullability, and/or a `rest` column (named in `pk=`) sits in the generation schema's declared PK, which rejects NULL regardless of mode |
+| `fk_edge_overlap_external table= edge= other= overlap= note=` (WARNING) | launcher, once per overlapping PAIR with an external end — **including a single-table launch**, where no edge roles are resolved (fix wave G3) | fix wave F3: `edge=` is always the external one, `other=` what it clashes with — driving∩external, external∩external or external∩any non-driving edge; the last write wins, so `other`'s tuple may not exist in its own parent |
+| `fk_nullable_schema_mismatch table= edge= landing= generation= reason= pk=` (WARNING) | launcher, once per conditional edge | fix waves A4 + F2 + G2: `reason=` is `declared_pk`, `schema_mode_mismatch`, or both — landing/generation schemas disagree on this edge's `rest` nullability, and/or a `rest` column (named in `pk=`) sits in the PK the run ENFORCES (the model's `pk:`, else the DDL constraint), which rejects NULL regardless of mode |
+| `fk_candidate_request_unbounded table= candidate_cap= conditional_edges= tuples_per_request= ceiling=` (WARNING) | launcher, per table | fix wave G5: `--fk_candidate_cap × conditional edges` passes the 100k per-request ceiling on its own, so `keys_per_batch` has floored at 1 and bounds the request no further. Lower the cap |
 | `relational_fk_edge mode=side_input\|conditional overlap=` | worker, per edge | the DAG path each edge took |
 | `fanout_bound … conditional=<n> candidate_cap=` | worker, once | the engine's plan (`candidate_cap` is `--fk_candidate_cap` verbatim — fix wave F1) |
-| `fanout_rows_capped requested= emitted= capacity=` (WARNING) | worker, once per process PER DRIVEN TABLE | fix waves A1/E2/E3: a key's bounded dimensions (cells when `exact_cells`, times each conditional edge's candidate count or 1) could not represent its full fan-out, so `emitted < requested`; keyed on the landing table so every driven table of a single-job run reports its own capping |
+| `fanout_rows_capped requested= emitted= capacity=` (WARNING) | worker, once per process PER DRIVEN TABLE | fix waves A1/E2/E3/G1/G4: a key's PK-bounding dimensions (cells when `exact_cells`, times the candidate count — or 1 — of each conditional edge whose `rest` supplies a PK member) could not represent its full fan-out, so `emitted < requested`; keyed on the landing table so every driven table of a single-job run reports its own capping |
 | `fanout/candidates_dropped_null`, `fanout/keys_unmatched` | counters | parent rows with a NULL shared key; keys with no candidate (non-nullable) |
 | `fk.unmatched` | DLQ rule | one envelope per dropped key, weighted by its expected rows |
 
@@ -361,7 +390,11 @@ edges with the role in the label.
   to an external edge. Every such
   pair logs one `fk_edge_overlap_external table= edge= other= overlap=
   note=` WARNING (`edge=` always the external one) instead of stopping
-  the launch. The risk is named plainly, not resolved: the last edge
+  the launch — in a SINGLE-TABLE launch too, where no edge roles are
+  resolved at all and the classic denormalised child (both parents
+  external) used to launch with no stop AND no signal, its rows diverting
+  as `fk.orphan` at run time with nothing in the launch log naming the
+  overlap (fix wave G3). The risk is named plainly, not resolved: the last edge
   written keeps the shared column, so the OTHER edge's tuple may not
   exist in its own parent — unchanged from before ADR 0037, now visible
   instead of silent. Bring the parent into the launch to resolve it.

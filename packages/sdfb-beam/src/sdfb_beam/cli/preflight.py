@@ -729,7 +729,14 @@ def _check_driven_pk(
 
     What each edge supplies, and whether it counts, is
     `edge_supplied_members` — the same call `resolve_fanout` makes when
-    it decides which columns to measure a cell table over."""
+    it decides which columns to measure a cell table over.
+
+    The ENGINE spells the same rule: only a conditional edge whose
+    ``rest`` supplies a PK member multiplies a key's capacity there
+    (``ConditionalEdge.pk_member``, set by the launcher from this same
+    effective PK). Before fix wave G1 it multiplied EVERY conditional
+    edge, so a model this check passed — counting the PK-touching edges
+    only — still emitted children the PK could not tell apart."""
     driving = tuple(fanout.get("driving_cols") or ())
     cap = (
         DEFAULT_FK_CANDIDATE_CAP if candidate_cap is None else int(candidate_cap)

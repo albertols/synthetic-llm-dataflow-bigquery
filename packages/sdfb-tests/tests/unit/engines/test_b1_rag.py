@@ -836,6 +836,53 @@ class TestGenerateForKeysConditional:
         assert len(t2_rows) == 2
         assert all(r["R"] is None for r in t2_rows)
 
+    def _capping_ctx(self, landing_table: str) -> GenerationContext:
+        """A plan whose per-key capacity (2 cells x 2 candidates) falls
+        short of its fan-out (5), so EVERY key caps."""
+        return GenerationContext(
+            table_schema=self._SCHEMA,
+            reference_rows=self._rows(),
+            reference_digest="capping-digest",
+            pipeline_run_id="capping-run",
+            landing_table=landing_table,
+            fanout={
+                "driving_cols": ["T", "L"],
+                "histogram": {"5": 1},
+                "cells": {"cols": ["X"], "rows": [[1], [2]], "counts": [1, 1]},
+                "exact_cells": True,
+                "conditional": [{"id": "(T,R)->right", "cols": ["R"],
+                                 "nullable": False, "pk_member": True}],
+            },
+        )
+
+    def test_every_driven_table_reports_its_own_capping(self, caplog):
+        """G4: the ``table=`` argument this engine hands
+        `conditional_draws` is what scopes the once-per-table
+        `fanout_rows_capped` guard (fix wave E3). Nothing drove that
+        argument from an ENGINE, so deleting it at this call site
+        restored the process-global bucket — every driven table after the
+        first capping in silence in a single-job relational run (ADR
+        0030) — with the whole suite green.
+        """
+        from sdfb_core.engines import base as base_mod
+
+        base_mod._reset_rows_capped_log()
+        matches = {"(T,R)->right": [[("r1",), ("r2",)], [("r1",), ("r2",)]]}
+        cfg = GenerationConfig(seed=1, batch_size=1_000)
+        with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+            for table in ("p.land.child_a", "p.land.child_b"):
+                engine = B1RagEngine(embedder=HashingEmbedder())
+                engine.setup(self._Client(), self._capping_ctx(table))
+                rows = list(
+                    engine.generate_for_keys(self._KEYS, cfg, matches=matches)
+                )
+                assert len(rows) == 8   # 2 keys x min(5, 2 cells x 2 cands)
+        capped = [
+            ln for ln in caplog.text.splitlines()
+            if "name=fanout_rows_capped" in ln
+        ]
+        assert len(capped) == 2   # one per driven table, not one per process
+
     def test_fanout_bound_logs_conditional_count(self, caplog) -> None:
         engine = B1RagEngine(embedder=HashingEmbedder())
         with caplog.at_level(logging.INFO, logger="sdfb.milestone"):

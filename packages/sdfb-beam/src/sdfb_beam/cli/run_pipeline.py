@@ -971,6 +971,27 @@ def conditional_rest_of(
     }
 
 
+def effective_pk_of(
+    registry: RelationshipRegistry, landing_table: str, args
+) -> tuple[str, ...]:
+    """The PK this run actually ENFORCES, resolved the way `preflight`
+    resolves it: the relationship model's `pk:` (ADR 0032, the single
+    source of truth), with `--pk_cols` filling the gap only for a table no
+    model declares (`relations.pk or pk_cols`).
+
+    It is the tuple `EnforceUniqueness` keys on and `pk.duplicate` is
+    measured against, so every launcher decision that turns on "is this
+    column a key member" reads THIS — never `TableSchema.primary_keys`,
+    the BigQuery table constraint copied into `_ddl.json`, which is
+    `None` on the canonical ADR 0032 setup (fix wave G1/G2)."""
+    relations = registry.relations(landing_table)
+    declared = tuple(relations.pk) if relations else ()
+    if declared:
+        return declared
+    raw = str(getattr(args, "pk_cols", "") or "")
+    return tuple(c.strip() for c in raw.split(",") if c.strip())
+
+
 def resolve_fanout(
     registry: RelationshipRegistry,
     landing_table: str,
@@ -1403,6 +1424,10 @@ def _resolve_table_fanout(
             registry, args.landing_table, roles,
             nullability_schema(landing_schema, table_schema),
             table_schema,
+            # The PK this run enforces — it decides both the NULL policy
+            # (a key member can never NULL-fill) and which edges bound a
+            # key's capacity (fix waves G1/G2).
+            effective_pk=effective_pk_of(registry, args.landing_table, args),
         )
         # Fix wave F1 (reverting A3): `--fk_candidate_cap` is `M`, the
         # size of the Top-M candidate SAMPLE the composer keeps per JOIN
@@ -1452,9 +1477,16 @@ def _log_edge_role_warnings(
     `drives: true` is inert for it and an external parent has no
     `tables:` entry to disable — so every such pair is NAMED here
     (WARNING) rather than stopping the launch (fix wave F3; the
-    cross-edge ownership stop keeps its teeth for in-model pairs)."""
-    if not edge_roles:
-        return
+    cross-edge ownership stop keeps its teeth for in-model pairs).
+
+    The overlap report does NOT depend on roles having been resolved (fix
+    wave G3). `_resolve_table_fanout` returns `{}` for a non-relational
+    launch, so the classic denormalised child — BOTH parents external,
+    the very shape fix wave F3 stopped stopping — launched with no stop
+    AND no signal: at run time the second pool overwrites the shared
+    column and its rows divert as `fk.orphan`, potentially the whole run,
+    with nothing in the launch log naming the overlap. Only the
+    driving-edge WARNING needs a resolved role."""
     driving = next((e for e, r in edge_roles.items() if r == "driving"), None)
     if (
         driving is not None
@@ -1467,8 +1499,8 @@ def _log_edge_role_warnings(
             edge=_edge_label(driving),
             hint="mark drives: true to choose",
         )
-    for external, other, overlap in registry.external_overlaps(
-        landing_table, edge_roles
+    for external, other, overlap in _external_overlaps(
+        landing_table, registry, edge_roles
     ):
         log_milestone(
             "fk_edge_overlap_external",
@@ -1482,6 +1514,28 @@ def _log_edge_role_warnings(
             "wins, so the other edge's tuple may not exist in its "
             "parent. Bring the parent into the launch to resolve it",
         )
+
+
+def _external_overlaps(
+    landing_table: str, registry: RelationshipRegistry, edge_roles: Mapping
+) -> tuple:
+    """`registry.external_overlaps`, resolving the roles ITSELF when the
+    caller has none — a single-table launch, or one with FK generation
+    off (fix wave G3).
+
+    A model whose roles cannot be resolved at all (the cross-edge
+    ownership stop) is reported here, not raised: this is the WARNING
+    path, and a relational launch has already surfaced that same
+    `RelationshipError` as a `[preflight P2]` SystemExit through
+    `resolve_fanout`."""
+    try:
+        return registry.external_overlaps(landing_table, edge_roles or None)
+    except RelationshipError as exc:
+        logger.warning(
+            "edge roles for %s could not be resolved (%s) — the "
+            "external-overlap check did not run", landing_table, exc,
+        )
+        return ()
 
 
 def _load_reference_and_preflight(
@@ -1895,6 +1949,23 @@ def _column_modes(schema, rest: tuple[str, ...]) -> list[str]:
     return [modes.get(col, "") for col in rest]
 
 
+def _enforced_pk(generation, effective_pk: tuple[str, ...]) -> set[str]:
+    """The PK the nullability guard must read (fix wave G2).
+
+    ``effective_pk`` is what the run ENFORCES — the relationship model's
+    `pk:` (ADR 0032), i.e. what `preflight` resolves and what
+    `EnforceUniqueness` keys on. ``TableSchema.primary_keys`` is the
+    BigQuery table CONSTRAINT the extractor copies into `_ddl.json` (its
+    own docstring: "useful context, never the source of truth"), and on
+    the canonical ADR 0032 setup it is ``None`` — so reading it alone
+    meant the guard NEVER fired: ADR 0037's own diamond (BOTTOM declares
+    `pk: [T, L, R]`, `R` NULLABLE in both schemas) NULL-filled a declared
+    key member, those rows landed and their repeats diverted as
+    `pk.duplicate`. The constraint stands in only when the model declares
+    no PK at all."""
+    return set(effective_pk or (getattr(generation, "primary_keys", None) or ()))
+
+
 def _rest_is_nullable(
     rest: tuple[str, ...],
     table_schema,
@@ -1903,6 +1974,7 @@ def _rest_is_nullable(
     table: str = "",
     edge_id: str = "",
     warn: bool = True,
+    effective_pk: tuple[str, ...] = (),
 ) -> bool:
     """ADR 0037 §4 ruling B: an unmatched key may land with NULLs only
     when EVERY ``rest`` column is NULLABLE — in BOTH schemas (fix wave
@@ -1924,14 +1996,19 @@ def _rest_is_nullable(
     single-schema behaviour (both reads hit the same schema).
 
     A column MODE is not the whole contract (fix wave F2): the record
-    model ``derive_record_model`` builds rejects ``None`` on every column
-    of the generation schema's DECLARED ``primary_keys`` whatever its
-    mode says (``_make_pk_base`` — BQ allows a NULLABLE PK column), and
-    the engines swallow that ``ValidationError`` the same silent way. On
-    ADR 0037's own diamond the child PK's last member IS the co-parent's
-    column, so a rest column in the declared PK is the default shape, not
-    a corner: such an edge is NON-nullable however both schemas mode it,
-    and the reason rides on the milestone."""
+    model ``derive_record_model`` builds rejects ``None`` on every
+    declared PK column whatever its mode says (``_make_pk_base`` — BQ
+    allows a NULLABLE PK column), and the engines swallow that
+    ``ValidationError`` the same silent way. On ADR 0037's own diamond
+    the child PK's last member IS the co-parent's column, so a rest
+    column in the PK is the default shape, not a corner: such an edge is
+    NON-nullable however both schemas mode it, and the reason rides on
+    the milestone.
+
+    WHICH PK (fix wave G2): ``effective_pk`` — the PK this run ENFORCES,
+    from the relationship model (`effective_pk_of`) — with the schema's
+    ``primary_keys`` standing in only when the model declares none
+    (:func:`_enforced_pk`)."""
     if table_schema is None or not rest:
         return False
     generation = table_schema if generation_schema is None else generation_schema
@@ -1940,13 +2017,11 @@ def _rest_is_nullable(
     landing_ok = all(mode == "NULLABLE" for mode in landing_modes)
     generation_ok = all(mode == "NULLABLE" for mode in generation_modes)
     declared_pk = tuple(
-        col
-        for col in rest
-        if col in set(getattr(generation, "primary_keys", None) or ())
+        col for col in rest if col in _enforced_pk(generation, effective_pk)
     )
     reasons = []
     if declared_pk:
-        reasons.append("generation_pk")
+        reasons.append("declared_pk")
     if landing_ok != generation_ok:
         reasons.append("schema_mode_mismatch")
     if warn and reasons:
@@ -1961,9 +2036,11 @@ def _rest_is_nullable(
             pk=",".join(declared_pk),
             note="this edge cannot NULL-fill an unmatched key: the "
             "landing and generation schemas disagree on its rest "
-            "columns' modes, and/or a rest column sits in the generation "
-            "schema's declared PRIMARY KEY, which the record model "
-            "refuses a NULL on whatever the mode says. Treated as "
+            "columns' modes, and/or a rest column sits in the PRIMARY KEY "
+            "this run enforces (the relationship model's `pk:`, or the "
+            "DDL constraint when the model declares none), which the "
+            "record model refuses a NULL on whatever the mode says. "
+            "Treated as "
             "NON-nullable, so the key diverts as a visible fk.unmatched "
             "instead of landing rows the record model would silently "
             "reject",
@@ -1977,6 +2054,8 @@ def conditional_plan_entries(
     roles: Mapping,
     table_schema,
     generation_schema=None,
+    *,
+    effective_pk: tuple[str, ...],
 ) -> list[dict]:
     """``FanoutPlan.conditional`` payload entries (ADR 0037): one per
     conditional edge, in ``enforced_edges`` order. ``id`` is the string
@@ -1985,22 +2064,42 @@ def conditional_plan_entries(
     the same columns to different parents keep separate entries);
     ``cols`` are the child columns the engine writes from the drawn
     candidate (``rest``); ``nullable`` is the NULL policy for a key with
-    no candidate."""
-    return [
-        {
-            "id": conditional_edge_id(fk.cols, fk.ref),
-            "cols": list(registry.edge_rest(landing_table, fk)),
-            "nullable": _rest_is_nullable(
-                registry.edge_rest(landing_table, fk),
-                table_schema,
-                generation_schema,
-                table=landing_table,
-                edge_id=conditional_edge_id(fk.cols, fk.ref),
-            ),
-        }
-        for fk in registry.enforced_edges(landing_table)
-        if roles.get(fk) == "conditional"
-    ]
+    no candidate; ``pk_member`` says whether ``rest`` supplies a member
+    of ``effective_pk``.
+
+    ``effective_pk`` is `effective_pk_of` — the PK this run enforces, the
+    same tuple preflight P4 counts its factors against. It decides BOTH
+    remaining fields (fix waves G1/G2): a key member can never NULL-fill,
+    and ONLY a PK-supplying edge may multiply a key's capacity in
+    `joint_key_draw`."""
+    pk = set(effective_pk)
+    entries: list[dict] = []
+    for fk in registry.enforced_edges(landing_table):
+        if roles.get(fk) != "conditional":
+            continue
+        rest = registry.edge_rest(landing_table, fk)
+        edge_id = conditional_edge_id(fk.cols, fk.ref)
+        entries.append(
+            {
+                "id": edge_id,
+                "cols": list(rest),
+                "nullable": _rest_is_nullable(
+                    rest,
+                    table_schema,
+                    generation_schema,
+                    table=landing_table,
+                    edge_id=edge_id,
+                    effective_pk=effective_pk,
+                ),
+                # `edge_roles` calls an edge conditional for SHARING a
+                # column with the driving edge, which says nothing about
+                # whether its `rest` keys anything: a lookup edge whose
+                # rest sits outside the PK distinguishes no child, so it
+                # must not inflate the cap (fix wave G1).
+                "pk_member": bool(pk & set(rest)),
+            }
+        )
+    return entries
 
 
 def in_set_parent_edges(
@@ -2014,6 +2113,7 @@ def in_set_parent_edges(
     table_schema=None,
     generation_schema=None,
     candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
+    effective_pk: tuple[str, ...] = (),
 ) -> tuple[FkEdgeSpec, ...]:
     """This table's enforced edges whose parent generates in the same
     job, as composer specs. ``key_sample_caps`` (preflight P4, ADR 0035)
@@ -2025,10 +2125,17 @@ def in_set_parent_edges(
     and one sharing none stays the ADR 0030 ``"side_input"``.
 
     ``table_schema`` (the LANDING schema) decides each conditional
-    edge's ``nullable``; ``candidate_cap`` is ``--fk_candidate_cap``.
+    edge's ``nullable``, together with ``effective_pk`` — the PK this run
+    enforces (`effective_pk_of`), which no key member may NULL-fill (fix
+    wave G2); the plan entries read the same two.
+    ``candidate_cap`` is ``--fk_candidate_cap``.
+
     With conditional edges present ``keys_per_batch`` is LOWERED so one
     request never carries more than ~100k candidate values (design §7) —
-    the cap itself is the operator's knob and is never touched."""
+    the cap itself is the operator's knob and is never touched. Once
+    ``cap x edges`` passes that ceiling on its own the bound degenerates
+    to one key per request and stops bounding anything, which is a
+    `fk_candidate_request_unbounded` WARNING (fix wave G5)."""
     roles = edge_roles or {}
     edges = [
         fk
@@ -2037,14 +2144,32 @@ def in_set_parent_edges(
     ]
     n_conditional = sum(1 for fk in edges if roles.get(fk) == "conditional")
     if n_conditional:
-        keys_per_batch = min(
-            keys_per_batch,
-            max(
-                1,
-                _MAX_CONDITIONAL_VALUES_PER_REQUEST
-                // (candidate_cap * n_conditional),
-            ),
-        )
+        per_request = candidate_cap * n_conditional
+        bound = _MAX_CONDITIONAL_VALUES_PER_REQUEST // per_request
+        if bound < 1:
+            # Fix wave G5: the bound has STOPPED bounding. The floor below
+            # pins it at ONE key per request, and that one key still
+            # carries `cap x edges` candidate tuples — past the ceiling,
+            # with no ceiling on the cap itself (fix wave F1 reverted
+            # clamping it: the clamp collapsed the co-parent choice to a
+            # point mass). Nothing is repaired silently here; the knob
+            # that did it is named instead.
+            log_milestone(
+                "fk_candidate_request_unbounded",
+                level=logging.WARNING,
+                table=landing_table,
+                candidate_cap=candidate_cap,
+                conditional_edges=n_conditional,
+                tuples_per_request=per_request,
+                ceiling=_MAX_CONDITIONAL_VALUES_PER_REQUEST,
+                note="--fk_candidate_cap x conditional edges already "
+                "exceeds the per-request candidate ceiling at ONE key per "
+                "request, so keys_per_batch cannot bound the request any "
+                "further. Lower --fk_candidate_cap: past the candidates a "
+                "co-parent actually holds per shared value it buys no "
+                "per-key variety, only request size.",
+            )
+        keys_per_batch = min(keys_per_batch, max(1, bound))
     specs = []
     for fk in edges:
         role = roles.get(fk, "")
@@ -2082,6 +2207,7 @@ def in_set_parent_edges(
                     # `conditional_plan_entries` already named any
                     # disagreement; one WARNING per edge, not two.
                     warn=False,
+                    effective_pk=effective_pk,
                 )
                 if role == "conditional"
                 else False,
@@ -2384,6 +2510,10 @@ def _prepare_table_spec(
         candidate_cap=(fanout or {}).get(
             "candidate_cap", candidate_cap_of(args)
         ),
+        # The PK this run enforces — the same tuple `pf.pk_cols` carries,
+        # resolved by the one rule both readers share (fix wave G2), so
+        # the composer spec's NULL policy cannot drift from the plan's.
+        effective_pk=effective_pk_of(registry, args.landing_table, args),
     )
 
     return TableSpec(

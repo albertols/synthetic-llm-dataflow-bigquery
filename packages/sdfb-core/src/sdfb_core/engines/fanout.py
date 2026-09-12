@@ -23,6 +23,7 @@ from bisect import bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import accumulate
+from math import prod
 
 from sdfb_core.seeding import derive_key_seed
 
@@ -201,9 +202,29 @@ class ConditionalEdge:
     id: str
     cols: tuple[str, ...]
     nullable: bool
+    # Does this edge's `rest` (``cols``) supply a member of the child's
+    # EFFECTIVE PK — the relationship model's `pk:` (ADR 0032), which is
+    # what preflight resolves and what `EnforceUniqueness` keys on? ONLY
+    # such an edge multiplies a key's capacity (`joint_key_draw`): an edge
+    # the PK does not read distinguishes nothing, so counting it emitted
+    # children the PK cannot tell apart (final review G1).
+    #
+    # The default is False — absent means "bounds nothing" — because the
+    # two errors are not symmetric. Under-counting caps a key EARLY and
+    # says so (`fanout_rows_capped`, a non-zero shortfall the operator
+    # sees); over-counting emits rows the PK cannot represent, which land
+    # or divert as `pk.duplicate` with NOTHING in the log. A payload
+    # written before this field, or by a caller that does not know the PK,
+    # therefore inflates no capacity.
+    pk_member: bool = False
 
     def to_payload(self) -> dict:
-        return {"id": self.id, "cols": list(self.cols), "nullable": bool(self.nullable)}
+        return {
+            "id": self.id,
+            "cols": list(self.cols),
+            "nullable": bool(self.nullable),
+            "pk_member": bool(self.pk_member),
+        }
 
     @classmethod
     def from_payload(cls, payload: dict) -> ConditionalEdge:
@@ -211,6 +232,7 @@ class ConditionalEdge:
             id=str(payload["id"]),
             cols=tuple(payload["cols"]),
             nullable=bool(payload["nullable"]),
+            pk_member=bool(payload.get("pk_member", False)),
         )
 
 
@@ -280,8 +302,10 @@ class KeyDraw:
     children representable.
 
     ``capacity`` is the product of the dimensions that genuinely BOUND
-    the combination (`joint_key_draw`); ``requested`` is the fan-out the
-    histogram drew. ``shortfall`` is what a capped key could not emit —
+    the PRIMARY KEY (`joint_key_draw`) — the cells when they key the
+    child, times each conditional edge whose ``rest`` supplies a PK
+    member; ``requested`` is the fan-out the histogram drew.
+    ``shortfall`` is what a capped key could not emit —
     the DoFn-visible number behind `fanout_rows_capped`. It is a per-key
     CEILING only for an ``exact_cells`` plan: an inexact PK is completed
     by an unbounded member, so nothing caps and ``shortfall`` is 0.
@@ -310,8 +334,10 @@ def _mixed_radix(index: int, radices: Sequence[int]) -> list[int]:
     child then takes a different cell, exactly as
     `CellTable.draw(exact=True)` did, and the candidate digits only start
     advancing once the cells are exhausted — the regime where the old
-    code raised. An inexact plan passes the candidate radices alone; its
-    cells are not a dimension of the walk at all.
+    code raised. An inexact plan passes the PK-supplying candidate radices
+    alone; its cells are not a dimension of the walk at all. The edges
+    the PK does not read walk their own radices (`joint_key_draw`), so
+    they vary per child without bounding anything.
     """
     digits: list[int] = []
     rest = index
@@ -319,6 +345,45 @@ def _mixed_radix(index: int, radices: Sequence[int]) -> list[int]:
         digits.append(rest % radix)
         rest //= radix
     return digits
+
+
+def _walk_dimensions(
+    plan: FanoutPlan, orders: Sequence[Sequence[tuple]]
+) -> tuple[list[int], list[int], list[tuple[bool, int]]]:
+    """``(bounding radices, free radices, per-edge (bounded, digit))`` —
+    the TWO walks `joint_key_draw` runs over one key's children.
+
+    The BOUNDING walk enumerates the dimensions that DISTINGUISH THE PK:
+    the cells when they key the child (leading, so ADR 0036's regime is
+    unchanged), then every conditional edge whose ``rest`` supplies a PK
+    member. Its period IS the capacity.
+
+    The FREE walk carries the edges the PK does not read. They still hand
+    each child its own candidate, but they distinguish nothing, so
+    multiplying them into the cap emitted rows the PK cannot tell apart
+    (final review G1). Keeping them on their own walk also stops a capped
+    key freezing every child on the first lookup candidate, which riding
+    the slow end of one joint walk would have done.
+
+    A candidate-less edge contributes a radix of 1 (the NULL fill), NOT a
+    skipped cap: the whole combination used to stop being capped as soon
+    as one nullable edge came back empty, and the cell dimension then
+    wrapped into PK duplicates with ``shortfall == 0`` (final review, E2).
+    """
+    bound: list[int] = []
+    if plan.exact_cells:
+        bound.append(plan.cells.size if plan.cells is not None else 1)
+    free: list[int] = []
+    digit_of: list[tuple[bool, int]] = []
+    for edge, order in zip(plan.conditional, orders, strict=True):
+        radix = max(1, len(order))
+        if edge.pk_member:
+            digit_of.append((True, len(bound)))
+            bound.append(radix)
+        else:
+            digit_of.append((False, len(free)))
+            free.append(radix)
+    return bound, free, digit_of
 
 
 def joint_key_draw(
@@ -353,14 +418,27 @@ def joint_key_draw(
     re-run reproduces the children exactly.
 
     ``capacity`` is the product of the dimensions that genuinely bound
-    the combination: the cell table when it keys the child, times, per
-    conditional edge, its ACTUAL candidate count — or 1 when it has none,
-    because NULL-filling an edge is exactly ONE combination. (A NULL is
-    not a key member, ADR 0031: such an edge neither drops the key nor
-    multiplies what it can represent.) The fan-out is capped at that
-    capacity when, and only when, ``exact_cells`` — an inexact PK is
-    completed by an unbounded member, so capping would drop rows the PK
-    can represent and the candidate digits wrap instead.
+    the PRIMARY KEY: the cell table when it keys the child, times — per
+    conditional edge whose ``rest`` supplies a PK member
+    (``ConditionalEdge.pk_member``) — its ACTUAL candidate count, or 1
+    when it has none, because NULL-filling an edge is exactly ONE
+    combination. (A NULL is not a key member, ADR 0031: such an edge
+    neither drops the key nor multiplies what it can represent.)
+
+    An edge the PK does NOT read is a FREE dimension: it still hands
+    every child its own candidate, off its own walk, but it multiplies
+    NOTHING. Counting it let a key emit children the PK cannot tell
+    apart (final review G1: 2 cells x 3 keying candidates x 20 LOOKUP
+    candidates "represented" 100 children, of which 94 were PK
+    duplicates — ``shortfall == 0``, no `fanout_rows_capped`, and the
+    duplicates landed or diverted as `pk.duplicate`). `edge_roles` calls
+    an edge ``conditional`` for sharing a column with the driving edge,
+    which says nothing about whether its ``rest`` keys anything.
+
+    The fan-out is capped at that capacity when, and only when,
+    ``exact_cells`` — an inexact PK is completed by an unbounded member,
+    so capping would drop rows the PK can represent and the candidate
+    digits wrap instead.
     """
     key_t = tuple(key)
     rng = random.Random(derive_key_seed(run_id, key_t))
@@ -373,17 +451,10 @@ def joint_key_draw(
         order = [tuple(c) for c in candidate_list]
         random.Random(derive_key_seed(run_id, key_t, salt=edge.id)).shuffle(order)
         orders.append(order)
-    # A candidate-less edge contributes a radix of 1 (the NULL fill), NOT a
-    # skipped cap: the whole combination used to stop being capped as soon
-    # as one nullable edge came back empty, and the cell dimension then
-    # wrapped into PK duplicates with `shortfall == 0` (final review, E2).
-    radices = [max(1, len(order)) for order in orders]
     cell_digit = plan.exact_cells
-    if cell_digit:
-        radices.insert(0, plan.cells.size if plan.cells is not None else 1)
-    capacity = 1
-    for radix in radices:
-        capacity *= radix
+    bound_radices, free_radices, digit_of = _walk_dimensions(plan, orders)
+    capacity = prod(bound_radices)
+    free_period = prod(free_radices)
     n_children = min(k, capacity) if plan.exact_cells else k
     cell_order = plan.cells.permutation(rng) if (plan.cells and cell_digit) else []
     weighted = (
@@ -391,19 +462,22 @@ def joint_key_draw(
         if (plan.cells is not None and not cell_digit)
         else []
     )
-    offset = 1 if cell_digit else 0
     cells: list[tuple] = []
     for i in range(n_children):
-        digits = _mixed_radix(i % capacity, radices)
+        bound = _mixed_radix(i % capacity, bound_radices)
+        free = _mixed_radix(i % free_period, free_radices)
         if plan.cells is None:
             cells.append(())
         elif cell_digit:
-            cells.append(plan.cells.rows[cell_order[digits[0]]])
+            cells.append(plan.cells.rows[cell_order[bound[0]]])
         else:
             cells.append(weighted[i])
         for j, edge in enumerate(plan.conditional):
             order = orders[j]
-            values[edge.id].append(order[digits[j + offset]] if order else ())
+            bounded, digit = digit_of[j]
+            values[edge.id].append(
+                order[(bound if bounded else free)[digit]] if order else ()
+            )
     return KeyDraw(tuple(cells), values, k, capacity)
 
 

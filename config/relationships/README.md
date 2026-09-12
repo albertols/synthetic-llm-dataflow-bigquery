@@ -223,7 +223,11 @@ external∩external, or external∩any non-driving edge — instead logs one
 (`edge=` always the external one): the last edge written keeps the
 shared column, so `other`'s tuple may not exist in its own parent — a
 real risk, unchanged from before ADR 0037, now visible instead of
-silent. Bring the parent inside the launch to resolve it.
+silent. Bring the parent inside the launch to resolve it. The report
+reads the MODEL, not the launch's resolved edge roles, so it fires in a
+SINGLE-TABLE launch too (fix wave G3) — the shape where it matters most,
+since a denormalised child's parents are all external and no roles are
+resolved at all.
 
 **Out of scope for now:** resolving the clash automatically instead of
 stopping the launch, via a candidate/pool-level join on the columns the
@@ -245,9 +249,14 @@ value to one candidate — a point mass, on the default flag).
 
 A key whose fan-out exceeds the candidates it was handed is CAPPED at
 the joint capacity — the cell count ONLY when the PK's completing
-members are exact, times each conditional edge's actual candidate count
-for that key, or **1** when it has none (a NULL fill is one
-combination) — if, and only if, the PK's completing members are exact;
+members are exact, times the actual candidate count (or **1**, a NULL
+fill) of each conditional edge whose `rest` supplies a **PK member** —
+if, and only if, the PK's completing members are exact. An edge whose
+`rest` sits outside the `pk:` distinguishes no child, so it multiplies
+nothing (fix wave G1: counting it emitted rows the PK could not
+represent, which landed or diverted as `pk.duplicate` with no warning);
+preflight P4 always counted only the PK-touching edges, and the engine
+now spells the same rule.
 the shortfall is reported once per worker process **per driven table**
 as `fanout_rows_capped`. An INEXACT PK never caps: its candidate digits
 wrap instead (reusing candidates in a seeded order) while its cells keep
@@ -265,15 +274,18 @@ parent at all:
 - **every `rest` column NULLABLE** in BOTH the landing schema AND the
   generation schema (fix wave A4 — landing alone let a REQUIRED
   generation column reject the row silently) **AND absent from the
-  generation schema's declared PRIMARY KEY** (fix wave F2 — the record
-  model rejects a NULL on a declared PK column whatever its mode says;
+  PRIMARY KEY THE RUN ENFORCES** — this file's `pk:`, with the DDL
+  constraint standing in only when the model declares none (fix waves
+  F2 + G2 — the record model rejects a NULL on a declared PK column
+  whatever its mode says, and reading the BQ table constraint alone
+  never fired on the canonical setup, where it is absent;
   on ADR 0037's own diamond the child PK's last member IS the
   co-parent's column, so this is the default shape, not a corner) → the
   engine writes `NULL` there. The row lands, legitimately parentless
   (the orphan query excludes NULL tuples, as it always has). Either
   failure is treated as NON-nullable and logged once per edge as
   `fk_nullable_schema_mismatch … reason= pk=` (WARNING) — `reason=` is
-  `generation_pk`, `schema_mode_mismatch`, or both, and `pk=` names the
+  `declared_pk`, `schema_mode_mismatch`, or both, and `pk=` names the
   offending `rest` columns.
 - **otherwise** → the key is dropped **before** generation (no GPU spend
   on a row that cannot be valid), counted as `fanout/keys_unmatched`,

@@ -144,12 +144,30 @@ present:
 Each conditional edge is shuffled per key either way
 (`derive_key_seed(run_id, key, salt=edge_id)`).
 
-Capacity is the product of the dimensions that are genuinely bounded:
-the cell count ONLY when `exact_cells`, times each conditional edge's
-ACTUAL candidate count for that key — or **1** when an edge has none,
-because NULL-filling that edge is exactly ONE combination (a NULL is not
-a key member, ADR 0031, so it neither drops the key nor multiplies what
-it can represent — fix wave E2). The fan-out is CAPPED at that capacity
+Capacity is the product of the dimensions that genuinely bound the
+PRIMARY KEY: the cell count ONLY when `exact_cells`, times — per
+conditional edge whose `rest` supplies a PK member — its ACTUAL
+candidate count for that key, or **1** when that edge has none, because
+NULL-filling it is exactly ONE combination (a NULL is not a key member,
+ADR 0031, so it neither drops the key nor multiplies what it can
+represent — fix wave E2).
+
+An edge the PK does NOT read multiplies **nothing** (fix wave G1). Each
+plan entry carries `pk_member`, set by the launcher from the PK the run
+enforces (`effective_pk_of` — the relationship model's `pk:`), and only
+those edges enter the capacity; the others are a FREE dimension that
+still hands every child its own candidate, off its own walk. `edge_roles`
+calls an edge `conditional` for SHARING a column with the driving edge,
+which says nothing about whether its `rest` keys anything — so a lookup
+edge used to inflate the cap by its whole candidate count: a child PK
+`(T, GRADE, R)` with 2 cells x 3 keying candidates x 20 lookup
+candidates "represented" a fan-out of 100, emitted all 100 children and
+reported `shortfall == 0`, while only 6 distinct `(GRADE, R)` pairs
+exist — 94 rows that land or divert as `pk.duplicate`, with no
+`fanout_rows_capped` in the log. Preflight P4 always counted only the
+PK-touching edges (D6), so the engine and the check now spell ONE rule.
+`pk_member` defaults to **false** in a payload that omits it:
+under-counting caps early and SAYS so, over-counting is silent. The fan-out is CAPPED at that capacity
 (`min(k, capacity)`) if, and only if, `plan.exact_cells`; a capped key's
 shortfall is reported once per worker process **per driven table**
 (fix wave E3) as `fanout_rows_capped`. An INEXACT PK never caps — an
@@ -201,7 +219,12 @@ default flag). The payload-size concern A3 was reaching for is already
 served by `keys_per_batch` (`in_set_parent_edges` in `run_pipeline.py`):
 with `n` conditional edges present it is lowered so a request never
 carries more than `keys_per_batch × M × n ≈ 100_000` candidate TUPLES
-(`100_000 // (M × n)`, floored at 1) — that is not the same as the
+(`100_000 // (M × n)`, floored at 1). That floor is where the bound
+STOPS bounding: once `M × n` alone exceeds 100k, one key per request
+still carries `M × n` tuples and nothing bounds it further, so the
+launcher logs one `fk_candidate_request_unbounded table= candidate_cap=
+conditional_edges= tuples_per_request= ceiling=` WARNING naming the knob
+(fix wave G5). The cap itself is still NOT clamped — F1 reverted that — that is not the same as the
 per-request VALUE count, since each tuple carries `|rest|` columns, so
 the true value count is `keys_per_batch × M × Σ|rest|` (summed over the
 conditional edges), which exceeds the 100k tuple ceiling whenever any
@@ -227,7 +250,7 @@ silent defect:
   it, as it already excludes every NULL tuple. Either disagreement is
   treated as NON-nullable and logged once per edge as
   `fk_nullable_schema_mismatch table= edge= landing= generation=
-  reason= pk=` (WARNING) — `reason=` is `generation_pk`,
+  reason= pk=` (WARNING) — `reason=` is `declared_pk`,
   `schema_mode_mismatch`, or both comma-joined, and `pk=` names the
   offending rest columns;
 - otherwise `GenerateRecordsDoFn` removes the key **before** generation
@@ -275,18 +298,31 @@ when rule 4 fired, `fk_edge_overlap_external table= edge= other=
 overlap= note=` (WARNING) once per overlapping PAIR with at least one
 external end — driving∩external, external∩external, or external∩any
 non-driving edge (fix wave F3; `edge=` is always the external one,
-`other=` the edge it clashes with) — and
+`other=` the edge it clashes with), reported from
+`registry.external_overlaps` whether or not edge ROLES were resolved, so
+a single-table launch (where they are not) warns too (fix wave G5's
+sibling, G3) — `fk_candidate_request_unbounded table= candidate_cap=
+conditional_edges= tuples_per_request= ceiling=` (WARNING) when
+`--fk_candidate_cap × conditional edges` passes the per-request ceiling
+on its own (D4, fix wave G5) — and
 `fk_nullable_schema_mismatch table= edge= landing= generation= reason=
 pk=` (WARNING) once per conditional edge when nullability fails (D5,
-fix waves A4 + F2; `reason=` is `generation_pk`, `schema_mode_mismatch`,
-or both). Worker: `relational_fk_edge mode=side_input|conditional
+fix waves A4 + F2 + G2; `reason=` is `declared_pk`,
+`schema_mode_mismatch`, or both). The PK that guard reads is the one the
+run ENFORCES — the relationship model's `pk:` (ADR 0032), with
+`TableSchema.primary_keys` (the BQ table constraint copied into
+`_ddl.json`) standing in only when the model declares none. Reading the
+constraint alone never fired on the canonical setup, where it is `None`:
+this diamond's own `R` — a declared key member — was NULL-filled, landed,
+and its repeats diverted as `pk.duplicate` (fix wave G2). Worker: `relational_fk_edge mode=side_input|conditional
 overlap=` per edge, `fanout_bound … conditional=<n> candidate_cap=` once
 per engine build (`candidate_cap` is `--fk_candidate_cap` verbatim — D4),
 and `fanout_rows_capped requested= emitted= capacity=` (WARNING) once
 per worker process **per driven table** (fix wave E3 — a single-job
 relational run with several driven tables used to report only the
-FIRST one to cap) the first time `joint_key_draw` caps a key below its
-requested fan-out (D3, fix wave A1/E2). Counters
+FIRST one to cap; the per-table scope is pinned at both engines' call
+sites, fix wave G4) the first time `joint_key_draw` caps a key below its
+requested fan-out (D3, fix waves A1/E2/G1). Counters
 `fanout/candidates_dropped_null` and `fanout/keys_unmatched`; DLQ rule
 `fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
 

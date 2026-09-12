@@ -258,6 +258,63 @@ def test_keys_per_batch_is_bounded_by_the_candidate_cap():
     assert [e.keys_per_batch for e in edges] == [1562, 1562]  # 100_000 // 64
 
 
+def test_a_cap_past_the_request_ceiling_says_so(caplog):
+    """G5: `keys_per_batch = 100_000 // (cap x n_conditional)` with a
+    `max(1, ...)` floor silently stops bounding once the product passes
+    100k, and the cap validator imposes no ceiling — so the request goes
+    back to carrying whatever the operator asked for, with nothing in the
+    log. The cap itself is NOT clamped (fix wave F1 reverted that: it
+    collapsed the co-parent choice); the bound hitting its floor is
+    named instead."""
+    import logging
+
+    registry = _reg(_DIAMOND, "diamond")
+    schema = _schema(("T", "REQUIRED"), ("L", "REQUIRED"), ("R", "NULLABLE"))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        edges = in_set_parent_edges(
+            registry,
+            "proj.synthetic_data.BOTTOM_TABLE",
+            in_set_names=_DIAMOND_NAMES,
+            key_sample_caps={},
+            edge_roles=registry.edge_roles("BOTTOM_TABLE"),
+            keys_per_batch=5000,
+            table_schema=schema,
+            candidate_cap=200_000,
+        )
+    assert [e.keys_per_batch for e in edges] == [1, 1]   # the floor, degenerate
+    warned = [
+        ln for ln in caplog.text.splitlines()
+        if "name=fk_candidate_request_unbounded" in ln
+    ]
+    assert len(warned) == 1
+    assert "candidate_cap=200000" in warned[0]
+    assert "conditional_edges=1" in warned[0]
+    assert "tuples_per_request=200000" in warned[0]
+
+
+def test_a_cap_the_bound_can_still_hold_is_not_warned_about(caplog):
+    """The default cap leaves `keys_per_batch` doing its job, so no
+    operator-facing noise."""
+    import logging
+
+    registry = _reg(_DIAMOND, "diamond")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        edges = in_set_parent_edges(
+            registry,
+            "proj.synthetic_data.BOTTOM_TABLE",
+            in_set_names=_DIAMOND_NAMES,
+            key_sample_caps={},
+            edge_roles=registry.edge_roles("BOTTOM_TABLE"),
+            keys_per_batch=5000,
+            table_schema=_schema(("T", "REQUIRED"), ("L", "REQUIRED"),
+                                 ("R", "NULLABLE")),
+        )
+    assert [e.keys_per_batch for e in edges] == [1562, 1562]
+    assert "name=fk_candidate_request_unbounded" not in caplog.text
+
+
 def test_conditional_plan_entries_name_the_rest_columns():
     registry = _reg(_DIAMOND, "diamond")
     entries = conditional_plan_entries(
@@ -265,8 +322,14 @@ def test_conditional_plan_entries_name_the_rest_columns():
         "proj.synthetic_data.BOTTOM_TABLE",
         registry.edge_roles("BOTTOM_TABLE"),
         _schema(("T", "REQUIRED"), ("L", "REQUIRED"), ("R", "NULLABLE")),
+        effective_pk=("T", "L", "R"),
     )
-    assert entries == [{"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}]
+    # `R` completes the declared PK, so it bounds a key (G1) and can never
+    # NULL-fill however the schema modes it (G2) — the canonical diamond.
+    assert entries == [
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": True}
+    ]
     # The plan id and the composer's edge id are ONE string (Task 5).
     edges = in_set_parent_edges(
         registry,
@@ -301,8 +364,14 @@ def test_a_pure_existence_filter_is_never_nullable():
     assert edges[1].overlap == ("K",)
     assert edges[1].nullable is False
     assert conditional_plan_entries(
-        registry, "proj.synthetic_data.CH_TABLE", roles, schema
-    ) == [{"id": "(K)->Q_TABLE", "cols": [], "nullable": False}]
+        registry, "proj.synthetic_data.CH_TABLE", roles, schema,
+        effective_pk=tuple(registry.relations("proj.synthetic_data.CH_TABLE").pk),
+    ) == [
+        {"id": "(K)->Q_TABLE", "cols": [], "nullable": False,
+         # An empty `rest` supplies no column at all, so it can bound no
+         # key — the existence filter never multiplies the capacity.
+         "pk_member": False}
+    ]
 
 
 def test_two_conditional_edges_to_different_parents_get_distinct_ids():
@@ -332,7 +401,8 @@ def test_two_conditional_edges_to_different_parents_get_distinct_ids():
     assert len({e.edge_id for e in edges[1:]}) == 2
 
     entries = conditional_plan_entries(
-        registry, "proj.synthetic_data.CH_TABLE", roles, schema
+        registry, "proj.synthetic_data.CH_TABLE", roles, schema,
+        effective_pk=tuple(registry.relations("proj.synthetic_data.CH_TABLE").pk),
     )
     assert [e["id"] for e in entries] == [e.edge_id for e in edges[1:]]
     # `conditional_rest` keys on the same id — one entry per edge, not one

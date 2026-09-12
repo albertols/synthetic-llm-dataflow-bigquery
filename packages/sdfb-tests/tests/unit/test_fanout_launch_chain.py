@@ -182,7 +182,9 @@ def _build_specs(tmp_path: Path, registry, order: list[str]):
             fanout = {
                 **_MEASURED[name],
                 "conditional": conditional_plan_entries(
-                    registry, landing_table, roles, landing_schema
+                    registry, landing_table, roles, landing_schema,
+                    # The model's own `pk:` — the PK the run enforces.
+                    effective_pk=tuple(registry.relations(landing_table).pk),
                 ),
                 "candidate_cap": _CANDIDATE_CAP,
             }
@@ -260,6 +262,10 @@ def test_the_example_model_launches_as_declared(tmp_path):
     ]
     assert [c["id"] for c in fanout["bottom"]["conditional"]] == ["(T,R)->right"]
     assert fanout["bottom"]["conditional"][0]["cols"] == ["R"]
+    # G1: `R` completes bottom's `pk: [T, L, R]`, so this edge is the one
+    # that may multiply a key's capacity — read off the MODEL, never
+    # guessed from the role (`conditional` only means "shares a column").
+    assert fanout["bottom"]["conditional"][0]["pk_member"] is True
     assert fanout["bottom"]["candidate_cap"] == _CANDIDATE_CAP
     # The star's fact has no conditional edge at all.
     assert fanout["fact"]["conditional"] == []

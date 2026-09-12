@@ -183,7 +183,12 @@ class TestJointKeyDraw:
     """
 
     _CELLS = CellTable(cols=("S",), rows=[("s1",), ("s2",)], counts=[1, 1])
-    _EDGE = ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=False)
+    # `pk_member=True`: the diamond's `R` is the child PK's last member —
+    # the shape ADR 0037 is about, and the only kind of edge that may
+    # multiply a key's capacity (G1).
+    _EDGE = ConditionalEdge(
+        id="(T,R)->right", cols=("R",), nullable=False, pk_member=True
+    )
 
     def _plan(self, k: int, *, cells=..., exact: bool = True, edges=None):
         return FanoutPlan(
@@ -287,7 +292,9 @@ class TestJointKeyDraw:
         child that the cells can represent lands with a NULL rest."""
         plan = self._plan(
             2,
-            edges=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
+            edges=(ConditionalEdge(
+                id="(T,R)->right", cols=("R",), nullable=True, pk_member=True
+            ),),
         )
         draw = joint_key_draw(plan, ("t1",), "run-1", [[]])
         assert draw.capacity == 2  # 2 cells x 1 NULL fill
@@ -303,7 +310,9 @@ class TestJointKeyDraw:
         rows, with `shortfall == 0` so no `fanout_rows_capped` fired."""
         plan = self._plan(
             5,
-            edges=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
+            edges=(ConditionalEdge(
+                id="(T,R)->right", cols=("R",), nullable=True, pk_member=True
+            ),),
         )
         draw = joint_key_draw(plan, ("t1",), "run-1", [[]])
         assert draw.capacity == 2
@@ -319,11 +328,95 @@ class TestJointKeyDraw:
         plan = self._plan(
             2,
             cells=None,
-            edges=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
+            edges=(ConditionalEdge(
+                id="(T,R)->right", cols=("R",), nullable=True, pk_member=True
+            ),),
         )
         draw = joint_key_draw(plan, ("t1",), "run-1", [[]])
         assert draw.capacity == 1 and draw.n_children == 1 and draw.shortfall == 1
         assert draw.values["(T,R)->right"] == [()]
+
+    def test_only_pk_supplying_edges_bound_the_capacity(self):
+        """G1 (blocker): a conditional edge whose `rest` supplies NO PK
+        member used to multiply the capacity all the same.
+
+        Child PK `(T, GRADE, R)`; the cells cover `GRADE` (2 rows); edge
+        A `(T,R)->right` supplies `R`, a PK member (3 candidates for this
+        key); edge B `(T,DESC)->lookup` supplies `DESC`, which is NOT in
+        the PK (20 candidates). The source fans out to 100.
+
+        Preflight passes — it counts only the PK-touching edges (2 x 64
+        >= 100) — and the engine then computed 2 x 3 x 20 = 120 >= 100,
+        emitted all 100 children and reported `shortfall == 0`. Only
+        2 x 3 = 6 distinct `(GRADE, R)` combinations exist, so 94 of
+        those rows were PK duplicates that land (or divert as
+        `pk.duplicate`) with no `fanout_rows_capped` warning. Drop edge B
+        and the same key correctly capped at 6.
+        """
+        plan = FanoutPlan(
+            driving_cols=("T",),
+            histogram=FanoutHistogram({100: 1}),
+            cells=CellTable(cols=("GRADE",), rows=[("g1",), ("g2",)], counts=[1, 1]),
+            exact_cells=True,
+            conditional=(
+                ConditionalEdge(
+                    id="(T,R)->right", cols=("R",), nullable=False, pk_member=True
+                ),
+                ConditionalEdge(
+                    id="(T,DESC)->lookup",
+                    cols=("DESC",),
+                    nullable=False,
+                    pk_member=False,
+                ),
+            ),
+        )
+        draw = joint_key_draw(
+            plan, ("t1",), "run-1",
+            [
+                [(f"r{i}",) for i in range(3)],
+                [(f"d{i}",) for i in range(20)],
+            ],
+        )
+        assert draw.capacity == 6          # 2 cells x 3 PK-supplying candidates
+        assert draw.n_children == 6
+        assert draw.shortfall == 94
+        pk_combos = [
+            (draw.cells[i], draw.values["(T,R)->right"][i])
+            for i in range(draw.n_children)
+        ]
+        assert len(set(pk_combos)) == 6
+
+    def test_a_non_pk_edge_still_gets_a_candidate_per_child(self):
+        """G1's other half: the lookup edge stops inflating the cap, but
+        each child still draws its own candidate from the shuffled list —
+        riding the slow end of one joint walk would have frozen every
+        child of a capped key on the same lookup row."""
+        plan = FanoutPlan(
+            driving_cols=("T",),
+            histogram=FanoutHistogram({100: 1}),
+            cells=CellTable(cols=("GRADE",), rows=[("g1",), ("g2",)], counts=[1, 1]),
+            exact_cells=True,
+            conditional=(
+                ConditionalEdge(
+                    id="(T,R)->right", cols=("R",), nullable=False, pk_member=True
+                ),
+                ConditionalEdge(
+                    id="(T,DESC)->lookup",
+                    cols=("DESC",),
+                    nullable=False,
+                    pk_member=False,
+                ),
+            ),
+        )
+        offered = [(f"d{i}",) for i in range(20)]
+        draw = joint_key_draw(
+            plan, ("t1",), "run-1",
+            [[(f"r{i}",) for i in range(3)], offered],
+        )
+        lookup = draw.values["(T,DESC)->lookup"]
+        assert len(lookup) == draw.n_children == 6
+        assert set(lookup) <= set(offered)
+        assert len(set(lookup)) == 6   # one per child, not one per key
 
     def test_the_draw_is_deterministic_per_run_and_key(self):
         """Same run + same key ⇒ the same children (a retried bundle must
@@ -354,7 +447,12 @@ class TestJointDrawThroughExpandKeys:
     ONCE, `expand_keys` emits their cells and `apply_conditional_overrides`
     writes the matching candidate — including across a chunk split."""
 
-    _EDGE = ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=False)
+    # `pk_member=True`: the diamond's `R` is the child PK's last member —
+    # the shape ADR 0037 is about, and the only kind of edge that may
+    # multiply a key's capacity (G1).
+    _EDGE = ConditionalEdge(
+        id="(T,R)->right", cols=("R",), nullable=False, pk_member=True
+    )
     _PLAN = FanoutPlan(
         driving_cols=("T",),
         histogram=FanoutHistogram({4: 1}),
@@ -479,14 +577,41 @@ class TestLegacyPathUnchanged:
 
 
 class TestConditionalEdge:
+    def test_pk_member_defaults_to_bounding_nothing(self):
+        """G1: the flag decides whether this edge MULTIPLIES a key's
+        capacity, so an ABSENT value must never inflate it. Under-counting
+        caps a key early and says so (`fanout_rows_capped`, a non-zero
+        shortfall); over-counting emits rows the PK cannot represent, and
+        they land or divert as `pk.duplicate` with nothing in the log. A
+        payload written before this field — or by a caller that does not
+        know the PK — therefore bounds nothing."""
+        edge = ConditionalEdge.from_payload(
+            {"id": "(T,DESC)->lookup", "cols": ["DESC"], "nullable": False}
+        )
+        assert edge.pk_member is False
+        plan = FanoutPlan(
+            driving_cols=("T",),
+            histogram=FanoutHistogram({9: 1}),
+            cells=CellTable(cols=("GRADE",), rows=[("g1",), ("g2",)], counts=[1, 1]),
+            exact_cells=True,
+            conditional=(edge,),
+        )
+        draw = joint_key_draw(
+            plan, ("t1",), "run-1", [[(f"d{i}",) for i in range(20)]]
+        )
+        assert draw.capacity == 2      # the cells alone, never x 20
+        assert draw.shortfall == 7
+
     def test_payload_round_trip(self):
-        edge = ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True)
+        edge = ConditionalEdge(
+                id="(T,R)->right", cols=("R",), nullable=True, pk_member=True
+            )
         assert ConditionalEdge.from_payload(edge.to_payload()) == edge
 
     def test_to_payload_shape(self):
         edge = ConditionalEdge(id="(T,R)->right", cols=("T", "R"), nullable=False)
         assert edge.to_payload() == {"id": "(T,R)->right", "cols": ["T", "R"],
-                                     "nullable": False}
+                                     "nullable": False, "pk_member": False}
 
 
 class TestFanoutPlanConditional:
@@ -496,7 +621,9 @@ class TestFanoutPlanConditional:
             histogram=FanoutHistogram({1: 1}),
             cells=None,
             exact_cells=True,
-            conditional=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
+            conditional=(ConditionalEdge(
+                id="(T,R)->right", cols=("R",), nullable=True, pk_member=True
+            ),),
         )
         assert FanoutPlan.from_payload(plan.to_payload()) == plan
         assert "R" in plan.columns
@@ -507,7 +634,9 @@ class TestFanoutPlanConditional:
             histogram=FanoutHistogram({1: 1}),
             cells=None,
             exact_cells=True,
-            conditional=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
+            conditional=(ConditionalEdge(
+                id="(T,R)->right", cols=("R",), nullable=True, pk_member=True
+            ),),
         )
         assert FanoutPlan.from_payload({**plan.to_payload(), "conditional": None}).conditional == ()
 

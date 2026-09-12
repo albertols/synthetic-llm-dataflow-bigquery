@@ -304,8 +304,12 @@ def test_the_fanout_payload_carries_the_conditional_edges_and_the_cap(monkeypatc
         {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
         _DIAMOND_ROWS,
     )
+    # G1/G2: `R` completes BOTTOM's declared `pk: [T, L, R]`, so it can
+    # never NULL-fill (the record model rejects a NULL there) and it IS
+    # the edge that bounds a key's capacity.
     assert payload["conditional"] == [
-        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": True}
     ]
     # Fix wave F1: `M` is the size of the Top-M candidate SAMPLE shared by
     # every driving key carrying the same join value — NOT a per-key
@@ -350,7 +354,8 @@ def test_the_launcher_names_a_defaulted_driving_edge_and_an_external_overlap(
         )
     fanout, edge_roles = result[5], result[6]
     assert fanout["conditional"] == [
-        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": True}
     ]
     assert fanout["candidate_cap"] == DEFAULT_FK_CANDIDATE_CAP  # the flag
     assert sorted(edge_roles.values()) == ["conditional", "driving", "external"]
@@ -635,7 +640,12 @@ def test_nullable_needs_both_schemas_to_agree(monkeypatch, caplog):
     and the engine's `except Exception: continue` discarded every one of
     that key's rows — no envelope, no counter, no milestone. Nullable now
     needs BOTH; a disagreement drops the key visibly as `fk.unmatched`
-    and says so once."""
+    and says so once.
+
+    Read on `_NO_PK_DIAMOND_REG`: this is the MODE rule in isolation, and
+    on the canonical diamond `R` sits in the declared `pk:`, which
+    refuses the NULL whatever the modes say (fix wave G2, covered by
+    `test_the_model_declared_pk_blocks_the_null_fill`)."""
     import logging
 
     import sdfb_beam.cli.run_pipeline as rp
@@ -646,13 +656,14 @@ def test_nullable_needs_both_schemas_to_agree(monkeypatch, caplog):
 
     def _resolve(generation: str, landing: str):
         return rp._resolve_table_fanout(
-            args, _diamond_schema(generation), _DIAMOND_REG, names,
+            args, _diamond_schema(generation), _NO_PK_DIAMOND_REG, names,
             _DIAMOND_ROWS, landing_schema=_landing_schema(landing),
         )[0]
 
     # generation NULLABLE, landing REQUIRED -> the sink refuses the NULL.
     assert _resolve("NULLABLE", "REQUIRED")["conditional"] == [
-        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": False}
     ]
     # generation REQUIRED, landing NULLABLE -> the RECORD MODEL refuses it.
     # (The case above disagrees too, and warned — clear it so this
@@ -661,7 +672,8 @@ def test_nullable_needs_both_schemas_to_agree(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
         payload = _resolve("REQUIRED", "NULLABLE")
     assert payload["conditional"] == [
-        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": False}
     ]
     mismatch = [
         ln for ln in caplog.text.splitlines()
@@ -672,7 +684,8 @@ def test_nullable_needs_both_schemas_to_agree(monkeypatch, caplog):
     assert "landing=NULLABLE" in mismatch[0] and "generation=REQUIRED" in mismatch[0]
     # Both NULLABLE -> the ADR 0037 NULL-fill branch, as before.
     assert _resolve("NULLABLE", "NULLABLE")["conditional"] == [
-        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True,
+         "pk_member": False}
     ]
 
 
@@ -710,7 +723,8 @@ def test_a_rest_column_in_the_declared_pk_is_never_nullable(monkeypatch, caplog)
         )
     # BOTH schemas say NULLABLE — and the record model still refuses it.
     assert payload["conditional"] == [
-        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": True}
     ]
     mismatch = [
         ln for ln in caplog.text.splitlines()
@@ -719,7 +733,7 @@ def test_a_rest_column_in_the_declared_pk_is_never_nullable(monkeypatch, caplog)
     assert len(mismatch) == 1
     assert "edge='(T,R)->RIGHT_TABLE'" in mismatch[0]
     # The operator has to see WHY the edge lost its NULL branch.
-    assert "reason=generation_pk" in mismatch[0] and "pk=R" in mismatch[0]
+    assert "reason=declared_pk" in mismatch[0] and "pk=R" in mismatch[0]
     # The composer spec agrees with the plan entry.
     edges = in_set_parent_edges(
         _DIAMOND_REG, "p.land.BOTTOM_TABLE",
@@ -728,6 +742,7 @@ def test_a_rest_column_in_the_declared_pk_is_never_nullable(monkeypatch, caplog)
         edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
         table_schema=_landing_schema("NULLABLE"),
         generation_schema=generation,
+        effective_pk=("T", "L", "R"),
     )
     assert [e.nullable for e in edges if e.mode == "conditional"] == [False]
 
@@ -736,7 +751,10 @@ def test_a_declared_pk_that_misses_the_rest_columns_keeps_the_null_branch(
     monkeypatch,
 ):
     """The PK rule is per-column: a declared PK that does not name the
-    edge's `rest` leaves ADR 0037's NULL-fill branch exactly as it was."""
+    edge's `rest` leaves ADR 0037's NULL-fill branch exactly as it was.
+
+    On `_NO_PK_DIAMOND_REG`, so the DDL constraint `[T, L]` IS the
+    enforced PK (fix wave G2's fallback) — the model declares none."""
     import sdfb_beam.cli.run_pipeline as rp
 
     monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
@@ -748,12 +766,13 @@ def test_a_declared_pk_that_misses_the_rest_columns_keeps_the_null_branch(
          "primary_keys": ["T", "L"]}
     )
     payload, _roles = rp._resolve_table_fanout(
-        _diamond_args("p.land.BOTTOM_TABLE"), generation, _DIAMOND_REG,
+        _diamond_args("p.land.BOTTOM_TABLE"), generation, _NO_PK_DIAMOND_REG,
         {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
         _DIAMOND_ROWS, landing_schema=_landing_schema("NULLABLE"),
     )
     assert payload["conditional"] == [
-        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True,
+         "pk_member": False}
     ]
 
 
@@ -852,6 +871,106 @@ def test_two_external_parents_warn_instead_of_stopping_the_launch(caplog):
     assert "overlap=A_KEY" in external[0]
 
 
+# G2: the PK the nullability guard must read is the run's EFFECTIVE one —
+# the relationship model's `pk:` (ADR 0032), not `TableSchema.primary_keys`
+# (the BigQuery table constraint the extractor copies into `_ddl.json` and
+# its own docstring calls "useful context, never the source of truth").
+_NO_PK_DIAMOND = _DIAMOND.replace("    pk: [T, L, R]\n", "")
+_NO_PK_DIAMOND_REG = RelationshipRegistry.from_sources(
+    [("config/relationships/diamond.yaml", _NO_PK_DIAMOND)]
+)
+
+
+def test_the_model_declared_pk_blocks_the_null_fill(monkeypatch, caplog):
+    """G2 (blocker): on the CANONICAL ADR 0032 setup the PK of record is
+    the relationship model's `pk:` and `TableSchema.primary_keys` is
+    None, so the fix-wave-F2 guard never fired. ADR 0037's own diamond
+    (BOTTOM declares `pk: [T, L, R]`, `R` NULLABLE in both schemas) then
+    NULL-filled a declared key member: the rows land and their repeats
+    divert as `pk.duplicate`."""
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        payload, _roles = rp._resolve_table_fanout(
+            _diamond_args("p.land.BOTTOM_TABLE"),
+            _diamond_schema("NULLABLE"),          # NO `primary_keys` at all
+            _DIAMOND_REG,
+            {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+            _DIAMOND_ROWS, landing_schema=_landing_schema("NULLABLE"),
+        )
+    assert payload["conditional"] == [
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": True}
+    ]
+    mismatch = [
+        ln for ln in caplog.text.splitlines()
+        if "name=fk_nullable_schema_mismatch" in ln
+    ]
+    assert len(mismatch) == 1
+    assert "reason=declared_pk" in mismatch[0] and "pk=R" in mismatch[0]
+
+
+def test_the_ddl_constraint_stands_in_when_the_model_declares_no_pk(
+    monkeypatch, caplog
+):
+    """The fallback half of G2: with no `pk:` in the model the guard
+    reads the DDL constraint, exactly as fix wave F2 did."""
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    generation = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.land.BOTTOM_TABLE"},
+         "schema": [{"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "L", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "R", "type": "STRING", "mode": "NULLABLE"}],
+         "primary_keys": ["T", "L", "R"]}
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        payload, _roles = rp._resolve_table_fanout(
+            _diamond_args("p.land.BOTTOM_TABLE"), generation, _NO_PK_DIAMOND_REG,
+            {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+            _DIAMOND_ROWS, landing_schema=_landing_schema("NULLABLE"),
+        )
+    # No model `pk:`, so nothing bounds the key — but the DDL constraint
+    # still refuses the NULL the record model would reject.
+    assert payload["conditional"] == [
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": False}
+    ]
+    assert "reason=declared_pk" in caplog.text
+
+
+def test_an_external_overlap_is_named_in_a_single_table_launch(caplog):
+    """G3: `_log_edge_role_warnings` returned early on empty roles and
+    `_resolve_table_fanout` returns `{}` for a non-relational launch, so
+    a denormalised child whose parents are BOTH external launched with no
+    stop AND no signal — at run time the second pool overwrites the shared
+    column and the rows divert as `fk.orphan`, with nothing in the launch
+    log naming the overlap."""
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        rp._log_edge_role_warnings("p.land.CH_TABLE", _DENORM_REG, {})
+    external = [
+        ln for ln in caplog.text.splitlines()
+        if "name=fk_edge_overlap_external" in ln
+    ]
+    assert len(external) == 1
+    assert "edge='(A_KEY)->ds.A_TABLE'" in external[0]
+    assert "other='(A_KEY,B_KEY)->ds.B_TABLE'" in external[0]
+    assert "overlap=A_KEY" in external[0]
+
+
 def test_no_landing_schema_falls_back_to_the_source_and_says_so(
     monkeypatch, caplog
 ):
@@ -863,12 +982,14 @@ def test_no_landing_schema_falls_back_to_the_source_and_says_so(
     args = _diamond_args("p.land.BOTTOM_TABLE")
     with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
         payload, _roles = rp._resolve_table_fanout(
-            args, _diamond_schema("NULLABLE"), _DIAMOND_REG,
+            args, _diamond_schema("NULLABLE"), _NO_PK_DIAMOND_REG,
             {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
             _DIAMOND_ROWS, landing_schema=None,
         )
     assert payload["conditional"] == [
-        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}  # the SOURCE's mode
+        # The SOURCE's mode — and no model `pk:` to override it.
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True,
+         "pk_member": False}
     ]
     fallback = [
         ln for ln in caplog.text.splitlines()

@@ -223,9 +223,14 @@ def _diamond_specs(tmp_path: Path, tag: str, right_histogram: dict,
                               "exact_cells": True, "candidate_cap": 64,
                               # `id` IS `FkEdgeSpec.edge_id` — the DoFn and the
                               # engine look the candidates up by that string.
+                              # `R` bounds a key only when the PK HOLDS it:
+                              # the nullable shape drops it from the PK (a
+                              # NULL member is not a key, ADR 0031), so it
+                              # must not multiply the capacity there (G1).
                               "conditional": [{"id": f"(T,R)->{tag}_right",
                                                "cols": ["R"],
-                                               "nullable": nullable}]})
+                                               "nullable": nullable,
+                                               "pk_member": "R" in bottom_pk}]})
     edge_top = FkEdgeSpec(child_cols=("T",), ref_cols=("T",),
                           parent_landing=f"p.land.{tag}_top",
                           parent_table=f"{tag}_top", parent_pk=("T",),
