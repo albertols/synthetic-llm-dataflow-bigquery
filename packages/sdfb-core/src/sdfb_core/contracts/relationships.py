@@ -55,6 +55,7 @@ the column it steers.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import yaml
@@ -431,16 +432,25 @@ class RelationshipRegistry:
 
         The DRIVING edge is deliberately outside the pairing:
         ``implied`` / ``independent`` / ``conditional`` are disjoint from
-        it by construction, and an ``external`` edge that overlaps it is
-        design 2026-09-11 §9's NAMED limitation — the driving key
-        overwrites the shared columns, the launcher logs
-        ``fk_edge_overlap_external``, and the fix is to enable the parent
-        — not a stop.
+        it by construction.
+
+        So is every ``external`` edge (fix wave F3). Design 2026-09-11 §9
+        names an external overlap as a LIMITATION, not a stop, and none
+        of the remedies above can be applied to one: an external edge
+        never becomes ``implied`` (:meth:`edge_roles` assigns the role
+        before any subset analysis), ``drives: true`` is inert for it
+        (:meth:`_pick_driving` only considers in-model edges), and an
+        external parent has no ``tables:`` entry to disable. Stopping
+        there refused the classic denormalised child — every parent
+        external, all on one ancestry line — which the identical shape
+        with IN-MODEL parents ships today as ``implied``. Those pairs are
+        reported by :meth:`external_overlaps` and logged as
+        ``fk_edge_overlap_external`` (WARNING) instead.
         """
         owners: list[tuple[FkEdge, str, tuple[str, ...]]] = []
         for edge in edges:
             role = roles.get(edge)
-            if role is None or role == "driving":
+            if role is None or role in ("driving", "external"):
                 continue
             owners.append((edge, role, self._written_cols(table, edge, role)))
         for index, (first, first_role, first_cols) in enumerate(owners):
@@ -457,9 +467,55 @@ class RelationshipRegistry:
                     f"draw overwrites the first, landing a tuple its parent "
                     f"never held. Make one edge's columns a SUBSET of the "
                     f"other's so it is implied, mark the edge this table is "
-                    f"generated from `drives: true`, or disable one parent "
-                    f"(`enabled: false`)."
+                    f"generated from `drives: true`, document one edge "
+                    f"(`enforced: false`, so no keys are drawn from it), or "
+                    f"disable one parent (`enabled: false`)."
                 )
+
+    def external_overlaps(
+        self, table: str, roles: Mapping[FkEdge, str] | None = None
+    ) -> tuple[tuple[FkEdge, FkEdge, tuple[str, ...]], ...]:
+        """``(external edge, other edge, shared columns)`` for every pair
+        of ``table``'s enforced edges that WRITE a column in common and
+        has at least one EXTERNAL parent — the launcher's
+        ``fk_edge_overlap_external`` WARNING source (fix wave F3).
+
+        Covers the pre-ADR-0037 case (``driving`` n ``external``) and the
+        two the ownership stop must not be fatal on: ``external`` n
+        ``external`` and ``external`` n any non-driving edge. The launch
+        writes the edges in declaration order, so the last writer keeps
+        the shared columns and the loser's tuple need not exist in its
+        parent — a real risk, reported rather than stopped, because
+        nothing the operator can declare resolves it while the parent
+        stays outside the launch.
+
+        ``roles`` is the mapping the caller already resolved (it is keyed
+        on the WIDENED edges :meth:`enforced_edges` returns); omitting it
+        resolves them here, which may raise the ownership stop.
+        """
+        resolved = self.edge_roles(table) if roles is None else roles
+        written: list[tuple[FkEdge, str, tuple[str, ...]]] = []
+        for edge in self.enforced_edges(table):
+            role = resolved.get(edge)
+            if role is None:
+                continue
+            written.append((edge, role, self._written_cols(table, edge, role)))
+        pairs: list[tuple[FkEdge, FkEdge, tuple[str, ...]]] = []
+        for index, (first, first_role, first_cols) in enumerate(written):
+            for second, second_role, second_cols in written[index + 1 :]:
+                if "external" not in (first_role, second_role):
+                    continue
+                shared = tuple(c for c in first_cols if c in second_cols)
+                if not shared:
+                    continue
+                # The EXTERNAL edge is named first: it is the one the
+                # operator cannot route, so it leads the milestone.
+                pairs.append(
+                    (second, first, shared)
+                    if first_role != "external"
+                    else (first, second, shared)
+                )
+        return tuple(pairs)
 
     def driving_edge(self, table: str) -> FkEdge | None:
         return next(

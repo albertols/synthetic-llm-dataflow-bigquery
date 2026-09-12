@@ -294,3 +294,97 @@ tables:
         assert _roles(reg, "CH") == {
             "(K)->P": "driving", "(K)->Q": "conditional", "(K)->R": "conditional",
         }
+
+
+# An external parent is one the launch never generates: its rows are
+# already landed, so nothing the launch does can change what it holds.
+_DENORM_EXTERNAL = """
+model: dx
+tables:
+  CH:
+    pk: [A_KEY, B_KEY]
+    fk:
+      - {cols: [A_KEY], ref: ds.A_TABLE, ref_cols: [A_KEY]}
+      - {cols: [A_KEY, B_KEY], ref: ds.B_TABLE, ref_cols: [A_KEY, B_KEY]}
+"""
+
+# One in-model driving edge, one in-model conditional edge (rest = `X`)
+# and an external edge that covers BOTH columns.
+_EXTERNAL_OVER_IN_MODEL = """
+model: xm
+tables:
+  drv: {pk: [K]}
+  pa: {pk: [K, X]}
+  CH:
+    pk: [K, X]
+    fk:
+      - {cols: [K], ref: drv, ref_cols: [K]}
+      - {cols: [K, X], ref: pa, ref_cols: [K, X]}
+      - {cols: [K, X], ref: ds.EXT_TABLE, ref_cols: [K, X]}
+"""
+
+
+def _overlap_labels(reg: RelationshipRegistry, table: str):
+    return [
+        (f"({','.join(a.cols)})->{a.ref}", f"({','.join(b.cols)})->{b.ref}", cols)
+        for a, b, cols in reg.external_overlaps(table)
+    ]
+
+
+class TestExternalEdgesWarnRatherThanStop:
+    """`external` edges are outside the ownership STOP (fix wave F3).
+
+    Commit 76cafa5 credited every edge with WRITING its columns, external
+    ones included, and `edge_roles` assigns `external` BEFORE any
+    implied/subset analysis — so the classic denormalised child (every
+    parent external, all on one ancestry line) hard-stopped a launch that
+    ran fine at 2728203, and none of the three remedies in the message
+    could be applied: an external edge can never become `implied` (the
+    role is assigned first), `drives: true` is inert for it
+    (`_pick_driving` only considers in-model edges), and an external
+    parent has no `tables:` entry to disable. The identical shape with
+    IN-MODEL parents is legal and ships today (the narrower edge becomes
+    `implied`), so the external variant must resolve too — the risk is
+    REPORTED as an overlap, never fatal.
+    """
+
+    def test_two_external_parents_on_one_ancestry_line_resolve(self):
+        assert _roles(_registry(_DENORM_EXTERNAL), "CH") == {
+            "(A_KEY)->ds.A_TABLE": "external",
+            "(A_KEY,B_KEY)->ds.B_TABLE": "external",
+        }
+
+    def test_the_external_pair_is_reported_with_both_edges_and_the_columns(self):
+        assert _overlap_labels(_registry(_DENORM_EXTERNAL), "CH") == [
+            ("(A_KEY)->ds.A_TABLE", "(A_KEY,B_KEY)->ds.B_TABLE", ("A_KEY",)),
+        ]
+
+    def test_an_external_edge_over_in_model_edges_resolves_and_reports(self):
+        # The external edge overlaps BOTH the driving edge (on `K`) and
+        # the conditional edge's `rest` (on `X`); the second pair is the
+        # one 76cafa5 turned into a stop.
+        reg = _registry(_EXTERNAL_OVER_IN_MODEL)
+        assert _roles(reg, "CH") == {
+            "(K)->drv": "driving",
+            "(K,X)->pa": "conditional",
+            "(K,X)->ds.EXT_TABLE": "external",
+        }
+        assert _overlap_labels(reg, "CH") == [
+            ("(K,X)->ds.EXT_TABLE", "(K)->drv", ("K",)),
+            ("(K,X)->ds.EXT_TABLE", "(K,X)->pa", ("X",)),
+        ]
+
+    def test_an_in_model_clash_still_raises(self):
+        # The stop is unchanged for a pair of IN-MODEL non-driving edges:
+        # both remedies it names can actually be applied there.
+        for text, table in ((_TWO_INDEPENDENT, "child"), (_TWO_CONDITIONAL, "bottom")):
+            with pytest.raises(RelationshipError):
+                _registry(text).edge_roles(table)
+
+    def test_the_stop_names_documenting_an_edge_as_a_way_out(self):
+        # `enforced: false` keeps the relationship in the card and takes
+        # the edge out of every draw — a legitimate resolution the
+        # message omitted.
+        with pytest.raises(RelationshipError) as err:
+            _registry(_TWO_INDEPENDENT).edge_roles("child")
+        assert "enforced: false" in str(err.value)

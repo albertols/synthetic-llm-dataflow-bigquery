@@ -1404,15 +1404,15 @@ def _resolve_table_fanout(
             nullability_schema(landing_schema, table_schema),
             table_schema,
         )
-        flag_cap = candidate_cap_of(args)
-        payload["candidate_cap"] = effective_candidate_cap(flag_cap, payload)
-        log_milestone(
-            "fk_candidate_cap_effective",
-            table=args.landing_table,
-            flag=flag_cap,
-            effective=payload["candidate_cap"],
-            max_k=max(int(k) for k in (payload.get("histogram") or {"0": 0})),
-        )
+        # Fix wave F1 (reverting A3): `--fk_candidate_cap` is `M`, the
+        # size of the Top-M candidate SAMPLE the composer keeps per JOIN
+        # VALUE — one sample shared by every driving key carrying that
+        # value, NOT a per-key allotment. Clamping it to the measured max
+        # fan-out collapsed a 1:1 driving edge to M=1, leaving every child
+        # on a shared value the identical candidate (a point mass, most of
+        # the co-parent's rows never referenced). Request size is bounded
+        # by `keys_per_batch` (`in_set_parent_edges`) instead.
+        payload["candidate_cap"] = candidate_cap_of(args)
     return payload, roles
 
 
@@ -1443,15 +1443,23 @@ def _log_edge_role_warnings(
     `fk_driving_edge_defaulted` — no `drives: true` and no ancestry
     between the candidate parents, so the FIRST DECLARED edge drives: a
     legal, reproducible launch the operator did not actually choose.
-    `fk_edge_overlap_external` — an external parent shares a column with
-    the driving edge, which the driving edge then overwrites; resolving
-    it needs the parent inside the launch, so it is named, not fixed."""
+    `fk_edge_overlap_external` — an EXTERNAL parent's edge writes a child
+    column another edge also writes: the driving edge (which overwrites
+    it), another external edge, or any non-driving edge. The last writer
+    keeps the column, so the loser's tuple need not exist in its parent.
+    Nothing the operator can declare resolves it while the parent stays
+    outside the launch — an external edge never becomes `implied`,
+    `drives: true` is inert for it and an external parent has no
+    `tables:` entry to disable — so every such pair is NAMED here
+    (WARNING) rather than stopping the launch (fix wave F3; the
+    cross-edge ownership stop keeps its teeth for in-model pairs)."""
     if not edge_roles:
         return
     driving = next((e for e, r in edge_roles.items() if r == "driving"), None)
-    if driving is None:
-        return
-    if registry.driving_choice(landing_table) == "first_declared":
+    if (
+        driving is not None
+        and registry.driving_choice(landing_table) == "first_declared"
+    ):
         log_milestone(
             "fk_driving_edge_defaulted",
             level=logging.WARNING,
@@ -1459,16 +1467,21 @@ def _log_edge_role_warnings(
             edge=_edge_label(driving),
             hint="mark drives: true to choose",
         )
-    for edge, role in edge_roles.items():
-        overlap = registry.edge_overlap(landing_table, edge)
-        if role == "external" and overlap:
-            log_milestone(
-                "fk_edge_overlap_external",
-                level=logging.WARNING,
-                table=landing_table,
-                edge=_edge_label(edge),
-                overlap=",".join(overlap),
-            )
+    for external, other, overlap in registry.external_overlaps(
+        landing_table, edge_roles
+    ):
+        log_milestone(
+            "fk_edge_overlap_external",
+            level=logging.WARNING,
+            table=landing_table,
+            edge=_edge_label(external),
+            other=_edge_label(other),
+            overlap=",".join(overlap),
+            note="an external parent's edge writes the same child "
+            "column(s) as another edge of this table; the last write "
+            "wins, so the other edge's tuple may not exist in its "
+            "parent. Bring the parent into the launch to resolve it",
+        )
 
 
 def _load_reference_and_preflight(
@@ -1874,25 +1887,6 @@ def nullability_schema(landing_schema, source_schema):
     return landing_schema if landing_schema is not None else source_schema
 
 
-def effective_candidate_cap(cap: int, fanout) -> int:
-    """``min(--fk_candidate_cap, max_k)`` — the Top-M bound a driven child
-    can actually consume (ADR 0037 final review, fix wave A3).
-
-    ``--fk_candidate_cap`` is the operator CEILING and its validation is
-    unchanged; this is what the launch USES. No parent key takes more
-    candidates than its largest measured fan-out, so a cap above ``max_k``
-    only makes the composer's Top-M combine carry — and every request
-    payload ship — candidates nothing can draw. Without a measurable
-    histogram (a non-driven table) the flag stands as given; a histogram
-    whose only bucket is 0 still needs 1, since a cap of 0 empties every
-    candidate list.
-    """
-    histogram = (fanout or {}).get("histogram") or {}
-    if not histogram:
-        return int(cap)
-    return max(1, min(int(cap), max(int(k) for k in histogram)))
-
-
 def _column_modes(schema, rest: tuple[str, ...]) -> list[str]:
     """Each ``rest`` column's mode in ``schema`` (``""`` when absent)."""
     if schema is None:
@@ -1927,16 +1921,35 @@ def _rest_is_nullable(
     milestone. When the two disagree the edge is treated as NON-nullable,
     so the key is dropped as a visible ``fk.unmatched``, and the
     disagreement is named once. Omitting ``generation_schema`` keeps the
-    single-schema behaviour (both reads hit the same schema)."""
+    single-schema behaviour (both reads hit the same schema).
+
+    A column MODE is not the whole contract (fix wave F2): the record
+    model ``derive_record_model`` builds rejects ``None`` on every column
+    of the generation schema's DECLARED ``primary_keys`` whatever its
+    mode says (``_make_pk_base`` — BQ allows a NULLABLE PK column), and
+    the engines swallow that ``ValidationError`` the same silent way. On
+    ADR 0037's own diamond the child PK's last member IS the co-parent's
+    column, so a rest column in the declared PK is the default shape, not
+    a corner: such an edge is NON-nullable however both schemas mode it,
+    and the reason rides on the milestone."""
     if table_schema is None or not rest:
         return False
+    generation = table_schema if generation_schema is None else generation_schema
     landing_modes = _column_modes(table_schema, rest)
-    generation_modes = _column_modes(
-        table_schema if generation_schema is None else generation_schema, rest
-    )
+    generation_modes = _column_modes(generation, rest)
     landing_ok = all(mode == "NULLABLE" for mode in landing_modes)
     generation_ok = all(mode == "NULLABLE" for mode in generation_modes)
-    if warn and landing_ok != generation_ok:
+    declared_pk = tuple(
+        col
+        for col in rest
+        if col in set(getattr(generation, "primary_keys", None) or ())
+    )
+    reasons = []
+    if declared_pk:
+        reasons.append("generation_pk")
+    if landing_ok != generation_ok:
+        reasons.append("schema_mode_mismatch")
+    if warn and reasons:
         log_milestone(
             "fk_nullable_schema_mismatch",
             level=logging.WARNING,
@@ -1944,12 +1957,18 @@ def _rest_is_nullable(
             edge=edge_id,
             landing=",".join(landing_modes),
             generation=",".join(generation_modes),
-            note="the landing and generation schemas disagree on this "
-            "edge's rest columns — treating it as NON-nullable, so an "
-            "unmatched key is dropped as fk.unmatched instead of "
-            "landing rows the record model would silently reject",
+            reason=",".join(reasons),
+            pk=",".join(declared_pk),
+            note="this edge cannot NULL-fill an unmatched key: the "
+            "landing and generation schemas disagree on its rest "
+            "columns' modes, and/or a rest column sits in the generation "
+            "schema's declared PRIMARY KEY, which the record model "
+            "refuses a NULL on whatever the mode says. Treated as "
+            "NON-nullable, so the key diverts as a visible fk.unmatched "
+            "instead of landing rows the record model would silently "
+            "reject",
         )
-    return landing_ok and generation_ok
+    return landing_ok and generation_ok and not declared_pk
 
 
 def conditional_plan_entries(
@@ -2360,8 +2379,8 @@ def _prepare_table_spec(
         keys_per_batch=keys_per_batch,
         table_schema=nullable_schema,
         generation_schema=table_schema,
-        # The payload already holds the EFFECTIVE cap (fix wave A3), so
-        # the specs and the workers cannot drift apart.
+        # The payload holds the operator's `--fk_candidate_cap` (fix
+        # wave F1), so the specs and the workers read ONE number.
         candidate_cap=(fanout or {}).get(
             "candidate_cap", candidate_cap_of(args)
         ),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from sdfb_beam.cli.run_pipeline import (
+    DEFAULT_FK_CANDIDATE_CAP,
     in_set_parent_edges,
     resolve_driven_uniqueness_mode,
     resolve_fanout,
@@ -306,10 +307,11 @@ def test_the_fanout_payload_carries_the_conditional_edges_and_the_cap(monkeypatc
     assert payload["conditional"] == [
         {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
     ]
-    # Fix wave A3: `_measure_one_to_one` measures max_k=1, and no key can
-    # consume more than max_k candidates — the operator ceiling of 32
-    # shrinks to the measured 1.
-    assert payload["candidate_cap"] == 1
+    # Fix wave F1: `M` is the size of the Top-M candidate SAMPLE shared by
+    # every driving key carrying the same join value — NOT a per-key
+    # allotment — so the measured max fan-out (1 here) must not clamp it.
+    # The payload carries `--fk_candidate_cap` exactly as the operator set it.
+    assert payload["candidate_cap"] == 32
     assert sorted(roles.values()) == ["conditional", "driving", "external"]
 
 
@@ -350,7 +352,7 @@ def test_the_launcher_names_a_defaulted_driving_edge_and_an_external_overlap(
     assert fanout["conditional"] == [
         {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
     ]
-    assert fanout["candidate_cap"] == 1  # min(--fk_candidate_cap, max_k)
+    assert fanout["candidate_cap"] == DEFAULT_FK_CANDIDATE_CAP  # the flag
     assert sorted(edge_roles.values()) == ["conditional", "driving", "external"]
 
     lines = caplog.text.splitlines()
@@ -674,22 +676,108 @@ def test_nullable_needs_both_schemas_to_agree(monkeypatch, caplog):
     ]
 
 
-def test_the_candidate_cap_never_exceeds_the_measured_fanout(monkeypatch, caplog):
-    """Fix wave A3: the launcher knows `max_k` when it builds the specs,
-    and no key can consume more than `max_k` candidates — so the Top-M
-    combine and every request payload shrink to `min(cap, max_k)`.
-    `--fk_candidate_cap` stays the operator CEILING."""
+def test_a_rest_column_in_the_declared_pk_is_never_nullable(monkeypatch, caplog):
+    """Fix wave F2: a column MODE is not the whole nullability contract.
+
+    `derive_record_model` builds a PK base that rejects `None` on every
+    column of the GENERATION schema's declared `primary_keys`, REGARDLESS
+    of mode (`_make_pk_base`), and both engines swallow the resulting
+    ValidationError with `except Exception: continue` — so a NULL-filled
+    row on a declared-PK rest column disappears with no envelope, counter
+    or milestone: exactly the silent loss fix wave A4 set out to close.
+    On ADR 0037's own diamond the child PK's last member IS the
+    co-parent's column, so this is the default shape, not a corner.
+    """
     import logging
 
     import sdfb_beam.cli.run_pipeline as rp
 
-    assert rp.effective_candidate_cap(64, {"histogram": {"0": 3, "5": 2}}) == 5
-    assert rp.effective_candidate_cap(4, {"histogram": {"0": 3, "9": 2}}) == 4
-    # No histogram to measure: the flag stands.
-    assert rp.effective_candidate_cap(64, None) == 64
-    assert rp.effective_candidate_cap(64, {"histogram": {}}) == 64
-    # A table whose parents all have zero children cannot take 0 candidates.
-    assert rp.effective_candidate_cap(64, {"histogram": {"0": 7}}) == 1
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    generation = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.land.BOTTOM_TABLE"},
+         "schema": [{"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "L", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "R", "type": "STRING", "mode": "NULLABLE"}],
+         "primary_keys": ["T", "L", "R"]}
+    )
+    args = _diamond_args("p.land.BOTTOM_TABLE")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        payload, _roles = rp._resolve_table_fanout(
+            args, generation, _DIAMOND_REG,
+            {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+            _DIAMOND_ROWS, landing_schema=_landing_schema("NULLABLE"),
+        )
+    # BOTH schemas say NULLABLE — and the record model still refuses it.
+    assert payload["conditional"] == [
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False}
+    ]
+    mismatch = [
+        ln for ln in caplog.text.splitlines()
+        if "name=fk_nullable_schema_mismatch" in ln
+    ]
+    assert len(mismatch) == 1
+    assert "edge='(T,R)->RIGHT_TABLE'" in mismatch[0]
+    # The operator has to see WHY the edge lost its NULL branch.
+    assert "reason=generation_pk" in mismatch[0] and "pk=R" in mismatch[0]
+    # The composer spec agrees with the plan entry.
+    edges = in_set_parent_edges(
+        _DIAMOND_REG, "p.land.BOTTOM_TABLE",
+        in_set_names={"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+        key_sample_caps={},
+        edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
+        table_schema=_landing_schema("NULLABLE"),
+        generation_schema=generation,
+    )
+    assert [e.nullable for e in edges if e.mode == "conditional"] == [False]
+
+
+def test_a_declared_pk_that_misses_the_rest_columns_keeps_the_null_branch(
+    monkeypatch,
+):
+    """The PK rule is per-column: a declared PK that does not name the
+    edge's `rest` leaves ADR 0037's NULL-fill branch exactly as it was."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    generation = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.land.BOTTOM_TABLE"},
+         "schema": [{"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "L", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "R", "type": "STRING", "mode": "NULLABLE"}],
+         "primary_keys": ["T", "L"]}
+    )
+    payload, _roles = rp._resolve_table_fanout(
+        _diamond_args("p.land.BOTTOM_TABLE"), generation, _DIAMOND_REG,
+        {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+        _DIAMOND_ROWS, landing_schema=_landing_schema("NULLABLE"),
+    )
+    assert payload["conditional"] == [
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
+    ]
+
+
+def test_the_candidate_cap_is_the_operators_flag_not_the_measured_fanout(
+    monkeypatch, caplog
+):
+    """Fix wave F1 (reverting A3): `M` bounds the Top-M candidate SAMPLE
+    the composer keeps per JOIN VALUE — ONE sample shared by every driving
+    key that carries that value — not a per-key allotment.
+
+    Clamping it to the measured max fan-out collapses a 1:1 driving edge to
+    `M = 1`, so `Top.SmallestPerKey` keeps exactly one of the co-parent's
+    rows for that value and every child across every driving key lands the
+    identical candidate: a point mass per shared value, with the co-parent's
+    other rows never referenced. The payload and the composer spec carry
+    `--fk_candidate_cap` verbatim; the payload-size argument A3 was reaching
+    for is already served by the `keys_per_batch` bound.
+    """
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    # The clamp helper is gone: nothing derives a cap from a histogram.
+    assert not hasattr(rp, "effective_candidate_cap")
 
     monkeypatch.setattr(
         rp, "measure_fanout",
@@ -704,15 +792,10 @@ def test_the_candidate_cap_never_exceeds_the_measured_fanout(monkeypatch, caplog
             {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
             _DIAMOND_ROWS,
         )
-    assert payload["candidate_cap"] == 9  # min(32, max_k=9)
-    effective = [
-        ln for ln in caplog.text.splitlines()
-        if "name=fk_candidate_cap_effective" in ln
-    ]
-    assert len(effective) == 1
-    assert "flag=32" in effective[0] and "effective=9" in effective[0]
+    assert payload["candidate_cap"] == 32  # max_k=9 does NOT clamp it
+    assert "name=fk_candidate_cap_effective" not in caplog.text
     # The composer spec carries the SAME number, so the Top-M combine and
-    # the per-request payload shrink together.
+    # the per-request payload cannot drift apart.
     edges = in_set_parent_edges(
         _DIAMOND_REG, "p.land.BOTTOM_TABLE",
         in_set_names={"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
@@ -722,7 +805,51 @@ def test_the_candidate_cap_never_exceeds_the_measured_fanout(monkeypatch, caplog
         candidate_cap=payload["candidate_cap"],
     )
     conditional = [e for e in edges if e.mode == "conditional"]
-    assert conditional and all(e.candidate_cap == 9 for e in conditional)
+    assert conditional and all(e.candidate_cap == 32 for e in conditional)
+
+
+# Fix wave F3: the classic DENORMALISED child — every parent EXTERNAL and
+# on one ancestry line, the narrower edge's column contained in the wider
+# one. This launched fine at 2728203; the cross-edge ownership stop must
+# not fire on it, because none of the stop's remedies can be applied to an
+# external edge.
+_DENORM = """
+model: denorm
+tables:
+  CH_TABLE:
+    pk: [A_KEY, B_KEY]
+    fk:
+      - cols: [A_KEY]
+        ref: ds.A_TABLE
+        ref_cols: [A_KEY]
+      - cols: [A_KEY, B_KEY]
+        ref: ds.B_TABLE
+        ref_cols: [A_KEY, B_KEY]
+"""
+_DENORM_REG = RelationshipRegistry.from_sources(
+    [("config/relationships/denorm.yaml", _DENORM)]
+)
+
+
+def test_two_external_parents_warn_instead_of_stopping_the_launch(caplog):
+    """Fix wave F3: both parents are outside the launch, so the launcher
+    NAMES the overlap once and runs — a warning, not a stop."""
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    roles = _DENORM_REG.edge_roles("p.land.CH_TABLE")
+    assert sorted(roles.values()) == ["external", "external"]
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        rp._log_edge_role_warnings("p.land.CH_TABLE", _DENORM_REG, roles)
+    external = [
+        ln for ln in caplog.text.splitlines()
+        if "name=fk_edge_overlap_external" in ln
+    ]
+    assert len(external) == 1
+    assert "edge='(A_KEY)->ds.A_TABLE'" in external[0]
+    assert "other='(A_KEY,B_KEY)->ds.B_TABLE'" in external[0]
+    assert "overlap=A_KEY" in external[0]
 
 
 def test_no_landing_schema_falls_back_to_the_source_and_says_so(
