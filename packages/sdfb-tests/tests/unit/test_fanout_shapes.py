@@ -21,6 +21,10 @@ actually landed them:
 - nullable      — the same shape with a NULLABLE rest: the unmatched keys
                   land with NULL instead of being dropped, and nothing
                   reaches the DLQ.
+- skew          — an INEXACT PK (a synthesized member completes it) under a
+                  conditional edge: the PK-completing cells are then not a
+                  key, so they keep their 9:1 SOURCE marginal instead of
+                  being drawn without replacement (final review, E1).
 - graph         — six tables mixing a tree, a star fact and a 1:1 chain in
                   ONE job: every enforced edge holds, every PK is unique.
 
@@ -317,6 +321,84 @@ def test_nullable_branch_lands_null(tmp_path):
     # is not a key (ADR 0031), which is exactly what this shape lands.
     assert len(_tuples(bottom, "T", "L", "S")) == len(bottom)
     assert not _read(tmp_path / "dlq_nul_bottom")
+
+
+# ---------------------------------------------------------------------------
+# skew: an INEXACT PK under a conditional edge — the cells are a MARGINAL
+# ---------------------------------------------------------------------------
+
+
+def test_inexact_cells_keep_their_skewed_marginal(tmp_path):
+    """ADR 0037 final review E1, end to end — the combination every other
+    shape here was missing: `exact_cells=False` AND a conditional edge.
+
+    `GRADE` is NOT a PK member (a synthesized `SEQ_ID` completes the key),
+    so ADR 0036 does not need it to key anything: its cells carry only the
+    source MARGINAL — 9:1 — and are drawn WITH replacement. The joint walk
+    indexed a weighted PERMUTATION prefix regardless of exactness, which
+    hands every key one of each cell at a fan-out of 2 and lands an exact
+    50:50 — a whole column's distribution inverted, with not one
+    end-to-end shape noticing.
+    """
+    right_schema = _schema("sk_right", [("T", "STRING"), ("R", "STRING"),
+                                        ("R_VAL", "INT64")])
+    right_ref = [{"T": f"t{i % 8}", "R": "rst"[i % 3], "R_VAL": i * 2} for i in range(40)]
+    right_cfg = _cfg(right_schema, right_ref, "sk_right", num_rows=40,
+                     pk_columns=("T", "R"), uniqueness_mode="streaming",
+                     fanout={"driving_cols": ["T"], "histogram": {"2": 1},
+                             "cells": {"cols": ["R"], "rows": [["r1"], ["r2"]],
+                                       "counts": [1, 1]},
+                             "exact_cells": True, "conditional": [],
+                             "candidate_cap": 64})
+    child_schema = _schema("sk_child", [("T", "STRING"), ("R", "STRING"),
+                                        ("GRADE", "STRING"), ("SEQ_ID", "STRING"),
+                                        ("C_VAL", "INT64")])
+    child_ref = [{"T": f"t{i % 8}", "R": "rst"[i % 3], "GRADE": "gh"[i % 2],
+                  "SEQ_ID": f"seq{i % 8}", "C_VAL": i * 13} for i in range(40)]
+    right_edge = FkEdgeSpec(child_cols=("T", "R"), ref_cols=("T", "R"),
+                            parent_landing="p.land.sk_right", parent_table="sk_right",
+                            parent_pk=("T", "R"), mode="conditional", overlap=("T",),
+                            candidate_cap=64)
+    top_edge = FkEdgeSpec(child_cols=("T",), ref_cols=("T",),
+                          parent_landing="p.land.sk_top", parent_table="sk_top",
+                          parent_pk=("T",), mode="fanout", keys_per_batch=10)
+    # The PK is (T, SEQ_ID): `SEQ_ID` is synthesized per row, which is the
+    # UNBOUNDED member that makes the cells inexact in the first place.
+    child_cfg = _cfg(child_schema, child_ref, "sk_child", num_rows=80,
+                     pk_columns=("T", "SEQ_ID"), identity_columns=("SEQ_ID",),
+                     uniqueness_mode="streaming",
+                     fanout={"driving_cols": ["T"], "histogram": {"2": 1},
+                             "cells": {"cols": ["GRADE"], "rows": [["g1"], ["g2"]],
+                                       "counts": [9, 1]},
+                             "exact_cells": False, "candidate_cap": 64,
+                             "conditional": [{"id": right_edge.edge_id,
+                                              "cols": ["R"], "nullable": False}]})
+    _run([
+        _root(tmp_path, "sk_top", "T", 40),
+        TableSpec(config=right_cfg, reference_rows=right_ref,
+                  **_sinks(tmp_path, "sk_right"), parent_edges=(top_edge,)),
+        TableSpec(config=child_cfg, reference_rows=child_ref,
+                  **_sinks(tmp_path, "sk_child"),
+                  parent_edges=(top_edge, right_edge)),
+    ])
+
+    right = _read(tmp_path / "sk_right")
+    child = _read(tmp_path / "sk_child")
+    assert right and child
+    assert _tuples(child, "T", "R") <= _tuples(right, "T", "R")   # conditional, whole tuple
+    assert len(_tuples(child, "T", "SEQ_ID")) == len(child)       # PK unique
+    assert len(child) >= 60, len(child)   # 40 driving keys x 2: a stable sample
+    heavy = sum(1 for row in child if row["GRADE"] == "g1") / len(child)
+    # Source weight 0.9. A permutation prefix lands EXACTLY 0.5 here; the
+    # upper bound catches the opposite collapse (the rare cell never drawn).
+    assert 0.75 < heavy < 1.0, heavy
+    # The direct signature of drawing WITH replacement: some key holds the
+    # same cell twice, which a permutation prefix can never do.
+    by_key: dict[str, list[str]] = {}
+    for row in child:
+        by_key.setdefault(row["T"], []).append(row["GRADE"])
+    assert any(len(set(g)) == 1 for g in by_key.values() if len(g) > 1), by_key
+    _assert_no_unexpected_dlq(tmp_path, "sk_child")
 
 
 # ---------------------------------------------------------------------------
