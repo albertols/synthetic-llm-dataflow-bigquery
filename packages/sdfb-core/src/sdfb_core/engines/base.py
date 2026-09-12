@@ -427,10 +427,16 @@ def _candidates_for(
     return candidates if candidates else ()
 
 
-# Capping is a per-run property of the MODEL (the declared PK cannot
-# represent the source fan-out), not of a key, so one WARNING per worker
-# process says it once instead of once per hot parent. Process-lived by
-# design; `_reset_rows_capped_log` is the test hook.
+# Capping is a per-run property of one driven table's MODEL (its declared
+# PK cannot represent the source fan-out), not of a key — so it is said
+# once per TABLE instead of once per hot parent. The guard key is that
+# table's LANDING table (`ctx.landing_table`): the narrowest identifier
+# the generation context carries that cannot collide between two driven
+# tables of one job, with the display prefix as fallback. A single-job
+# relational run (ADR 0030) generates several driven tables in ONE worker
+# process, and a process-global guard reported only the FIRST of them to
+# cap — every later table's capping was invisible (final review, E3).
+# Process-lived by design; `_reset_rows_capped_log` is the test hook.
 _ROWS_CAPPED_LOGGED: set[str] = set()
 
 
@@ -439,10 +445,14 @@ def _reset_rows_capped_log() -> None:
     _ROWS_CAPPED_LOGGED.clear()
 
 
-def _log_rows_capped(draw: KeyDraw) -> None:
-    if _ROWS_CAPPED_LOGGED:
+def _log_rows_capped(draw: KeyDraw, table: str) -> None:
+    """One WARNING per driven table. The line's ``table=`` field comes
+    from the ambient `milestone_scope` the generate DoFn sets, so it is
+    spelled exactly like every other engine milestone in the run; only
+    the GUARD is keyed on the landing table."""
+    if table in _ROWS_CAPPED_LOGGED:
         return
-    _ROWS_CAPPED_LOGGED.add("logged")
+    _ROWS_CAPPED_LOGGED.add(table)
     log_milestone(
         "fanout_rows_capped",
         level=logging.WARNING,
@@ -453,7 +463,7 @@ def _log_rows_capped(draw: KeyDraw) -> None:
         "represent (cells x conditional candidates); the extra children "
         "are NOT emitted — they would be PK duplicates. Raise "
         "--fk_candidate_cap, or fix the `pk:` in the relationship model. "
-        "Logged once per worker.",
+        "Logged once per worker process PER TABLE.",
     )
 
 
@@ -462,6 +472,8 @@ def conditional_draws(
     keys: Sequence[tuple],
     run_id: str,
     matches: Mapping[str, Sequence[Sequence[Sequence]]] | None,
+    *,
+    table: str = "",
 ) -> dict[tuple, KeyDraw | None]:
     """Per parent key, the JOINT draw its children come from
     (`joint_key_draw`) — or ``None`` when a non-nullable conditional edge
@@ -476,6 +488,10 @@ def conditional_draws(
     Returns ``{}`` for a plan with no conditional edges — the ADR 0036
     path, which draws its cells inside `expand_keys` and never allocates
     any of this.
+
+    ``table`` scopes the once-per-table `fanout_rows_capped` milestone
+    (`_log_rows_capped`): the engines pass their landing table, so each
+    driven table of a single-job relational run reports its own capping.
     """
     if not plan.conditional:
         return {}
@@ -497,7 +513,7 @@ def conditional_draws(
         if draw.requested <= 0:
             continue
         if draw.shortfall:
-            _log_rows_capped(draw)
+            _log_rows_capped(draw, table)
         out[key_t] = draw
     return out
 

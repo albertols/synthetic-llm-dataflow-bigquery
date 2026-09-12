@@ -3,7 +3,8 @@
 A child table generated from its parent's landed keys: per key, how many
 children (the SOURCE fan-out histogram, zero bucket included), which
 PK-completing cells (drawn WITHOUT replacement from the source's joint
-cell distribution), and which columns are inherited (copied from the
+cell distribution when they must KEY the child, by that distribution's
+weights otherwise), and which columns are inherited (copied from the
 key tuple). This is the part both engines share; everything that is not
 a key, a cell or an inherited column is the engine's own sampling.
 
@@ -146,6 +147,11 @@ class CellTable:
         a child's cell is then a pure function of its combination index,
         so two children of one key can never collide on it, and the
         weights still decide which cells come first.
+
+        ONLY for an ``exact_cells`` plan. When the cells do not key the
+        child they carry a marginal, and a permutation prefix flattens
+        it — a 99:1 cell table handed out 50:50 at a fan-out of 2 (ADR
+        0037 final review, E1). Those plans call `draw(exact=False)`.
         """
         return sorted(
             range(self.size),
@@ -273,9 +279,12 @@ class KeyDraw:
     a whole key batch instead of using the candidates that make those
     children representable.
 
-    ``capacity`` is the real per-key ceiling (the product); ``requested``
-    is the fan-out the histogram drew. ``shortfall`` is what a capped key
-    could not emit — the DoFn-visible number behind `fanout_rows_capped`.
+    ``capacity`` is the product of the dimensions that genuinely BOUND
+    the combination (`joint_key_draw`); ``requested`` is the fan-out the
+    histogram drew. ``shortfall`` is what a capped key could not emit —
+    the DoFn-visible number behind `fanout_rows_capped`. It is a per-key
+    CEILING only for an ``exact_cells`` plan: an inexact PK is completed
+    by an unbounded member, so nothing caps and ``shortfall`` is 0.
     """
 
     cells: tuple[tuple, ...]
@@ -296,11 +305,13 @@ def _mixed_radix(index: int, radices: Sequence[int]) -> list[int]:
     """``index`` decomposed over ``radices``, FIRST radix varying fastest.
 
     Injective on ``[0, prod(radices))``, which is what makes every
-    child's combination distinct. The cells come first deliberately: for
-    the ADR 0036 regime (``k <= n_cells``) each child then takes a
-    different cell, exactly as `CellTable.draw(exact=True)` did, and the
-    candidate digits only start advancing once the cells are exhausted —
-    the regime where the old code raised.
+    child's combination distinct. An ``exact_cells`` plan puts the cells
+    first deliberately: for the ADR 0036 regime (``k <= n_cells``) each
+    child then takes a different cell, exactly as
+    `CellTable.draw(exact=True)` did, and the candidate digits only start
+    advancing once the cells are exhausted — the regime where the old
+    code raised. An inexact plan passes the candidate radices alone; its
+    cells are not a dimension of the walk at all.
     """
     digits: list[int] = []
     rest = index
@@ -316,24 +327,40 @@ def joint_key_draw(
     run_id: str,
     candidates: Sequence[Sequence[Sequence]],
 ) -> KeyDraw:
-    """One key's children over the CROSS PRODUCT of its cells and its
-    conditional edges' candidates (design 2026-09-11 §4, ADR 0037).
+    """One key's children over the CROSS PRODUCT of its BOUNDED
+    dimensions (design 2026-09-11 §4, ADR 0037).
 
     ``candidates[j]`` is edge ``plan.conditional[j]``'s candidate list
     for this key (empty = no candidates; the NULL policy is the caller's).
-    Child ``i`` takes its combination from `_mixed_radix` over
-    ``(n_cells, c_1, …, c_m)``, indexing a per-key seeded PERMUTATION of
-    the cell rows (weighted, `CellTable.permutation`) and of each
-    candidate list — the same per-key / per-edge seeds the rest of the
-    fan-out layer uses, so a re-run reproduces the children exactly.
 
-    The fan-out is CAPPED at the capacity only when the combination must
-    key the child: ``exact_cells`` (every PK member outside the driving
-    edge is a cell or an edge-supplied column) AND every edge actually
-    has candidates. An inexact PK is completed by an unbounded member, so
-    capping there would drop rows the PK can represent; an edge with no
-    candidates NULL-fills, and a NULL is not a key member (ADR 0031), so
-    it must not shrink a key's fan-out either. Both wrap instead.
+    The cells follow ADR 0036's rule, which turns on EXACTNESS and not on
+    the presence of conditional edges (ADR 0037 final review, E1):
+
+    - ``exact_cells`` — the cells must KEY the child, so they are drawn
+      without replacement: the leading `_mixed_radix` digit indexes a
+      per-key seeded weighted PERMUTATION (`CellTable.permutation`) and
+      two children of one key can never share a cell.
+    - otherwise — an unbounded PK member (pattern, numeric, temporal)
+      keys the child and the cells only carry their measured MARGINAL,
+      so each child draws one WITH replacement
+      (`CellTable.draw(exact=False)`). A permutation prefix here handed a
+      99:1 cell table out 50:50 at a fan-out of 2, silently inverting
+      that column's distribution for the whole table.
+
+    Each conditional edge is shuffled per key either way, and child ``i``
+    reads its candidate digits from the same `_mixed_radix` walk — the
+    per-key / per-edge seeds the rest of the fan-out layer uses, so a
+    re-run reproduces the children exactly.
+
+    ``capacity`` is the product of the dimensions that genuinely bound
+    the combination: the cell table when it keys the child, times, per
+    conditional edge, its ACTUAL candidate count — or 1 when it has none,
+    because NULL-filling an edge is exactly ONE combination. (A NULL is
+    not a key member, ADR 0031: such an edge neither drops the key nor
+    multiplies what it can represent.) The fan-out is capped at that
+    capacity when, and only when, ``exact_cells`` — an inexact PK is
+    completed by an unbounded member, so capping would drop rows the PK
+    can represent and the candidate digits wrap instead.
     """
     key_t = tuple(key)
     rng = random.Random(derive_key_seed(run_id, key_t))
@@ -346,24 +373,37 @@ def joint_key_draw(
         order = [tuple(c) for c in candidate_list]
         random.Random(derive_key_seed(run_id, key_t, salt=edge.id)).shuffle(order)
         orders.append(order)
-    n_cells = plan.cells.size if plan.cells is not None else 1
-    radices = [n_cells, *(max(1, len(order)) for order in orders)]
+    # A candidate-less edge contributes a radix of 1 (the NULL fill), NOT a
+    # skipped cap: the whole combination used to stop being capped as soon
+    # as one nullable edge came back empty, and the cell dimension then
+    # wrapped into PK duplicates with `shortfall == 0` (final review, E2).
+    radices = [max(1, len(order)) for order in orders]
+    cell_digit = plan.exact_cells
+    if cell_digit:
+        radices.insert(0, plan.cells.size if plan.cells is not None else 1)
     capacity = 1
     for radix in radices:
         capacity *= radix
-    n_children = min(k, capacity) if (plan.exact_cells and all(orders)) else k
-    cell_order = plan.cells.permutation(rng) if plan.cells is not None else []
+    n_children = min(k, capacity) if plan.exact_cells else k
+    cell_order = plan.cells.permutation(rng) if (plan.cells and cell_digit) else []
+    weighted = (
+        plan.cells.draw(n_children, rng, exact=False)
+        if (plan.cells is not None and not cell_digit)
+        else []
+    )
+    offset = 1 if cell_digit else 0
     cells: list[tuple] = []
     for i in range(n_children):
         digits = _mixed_radix(i % capacity, radices)
-        cells.append(
-            plan.cells.rows[cell_order[digits[0]]]
-            if plan.cells is not None
-            else ()
-        )
+        if plan.cells is None:
+            cells.append(())
+        elif cell_digit:
+            cells.append(plan.cells.rows[cell_order[digits[0]]])
+        else:
+            cells.append(weighted[i])
         for j, edge in enumerate(plan.conditional):
             order = orders[j]
-            values[edge.id].append(order[digits[j + 1]] if order else ())
+            values[edge.id].append(order[digits[j + offset]] if order else ())
     return KeyDraw(tuple(cells), values, k, capacity)
 
 

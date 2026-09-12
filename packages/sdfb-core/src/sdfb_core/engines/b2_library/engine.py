@@ -326,7 +326,13 @@ class B2LibraryEngine(GenerationEngine):
         # decides each child's cell AND its candidate tuples together, so
         # `expand_keys` and the overrides below stay two halves of one
         # combination index (fix wave A1).
-        draws = conditional_draws(plan, keys, run_id, matches)
+        # `table=` scopes the `fanout_rows_capped` milestone to THIS
+        # driven table (final review, E3) — several of them share one
+        # worker process in a single-job relational run (ADR 0030).
+        draws = conditional_draws(
+            plan, keys, run_id, matches,
+            table=self._ctx.landing_table or self._ctx.log_table_prefix,
+        )
         child_index: dict[tuple, int] = {}
         for chunk in expand_keys(
             plan, keys, run_id, chunk_rows,

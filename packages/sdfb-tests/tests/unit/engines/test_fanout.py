@@ -259,18 +259,71 @@ class TestJointKeyDraw:
         draw = joint_key_draw(plan, ("t1",), "run-1", [[("r1",), ("r2",)]])
         assert draw.n_children == 5 and draw.shortfall == 0
 
-    def test_a_nullable_edge_without_candidates_keeps_every_child(self):
+    def test_an_inexact_cell_draw_follows_the_weights_not_a_permutation(self):
+        """E1 (blocker): with `exact_cells=False` the cells are the
+        measured MARGINAL, drawn WITH replacement — ADR 0036 draws them
+        without replacement only when they must KEY the child.
+
+        The joint walk indexed a permutation PREFIX unconditionally, so
+        a fan-out of 2 over a 99:1 cell table handed every key one of
+        each and landed 50:50 — silently inverting that column's
+        distribution for the whole table."""
+        cells = CellTable(cols=("S",), rows=[("heavy",), ("rare",)], counts=[99, 1])
+        plan = self._plan(2, cells=cells, exact=False)
+        seen: Counter = Counter()
+        for i in range(400):
+            draw = joint_key_draw(plan, (f"t{i}",), "run-1", [[("r1",), ("r2",)]])
+            assert draw.n_children == 2  # inexact never caps
+            seen.update(draw.cells)
+        total = sum(seen.values())
+        assert total == 800
+        # True share is 0.99; a permutation prefix gives exactly 0.50.
+        assert seen[("heavy",)] / total > 0.9
+
+    def test_a_nullable_edge_without_candidates_null_fills_every_cell(self):
         """A NULL rest is not a key member (ADR 0031), so an edge that
-        NULL-fills must not shrink the fan-out — the ADR 0037 nullable
-        branch lands ALL of an unmatched key's children."""
+        NULL-fills contributes exactly ONE combination instead of
+        dropping the key: the cells still bound the fan-out, and every
+        child that the cells can represent lands with a NULL rest."""
+        plan = self._plan(
+            2,
+            edges=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
+        )
+        draw = joint_key_draw(plan, ("t1",), "run-1", [[]])
+        assert draw.capacity == 2  # 2 cells x 1 NULL fill
+        assert draw.n_children == 2 and draw.shortfall == 0
+        assert draw.values["(T,R)->right"] == [(), ()]
+        assert len(set(draw.cells)) == 2
+
+    def test_a_candidateless_nullable_edge_does_not_disable_capping(self):
+        """E2: the guard was `exact_cells and all(orders)`, so ONE
+        candidate-less nullable edge switched capping off for the whole
+        combination. A fan-out of 5 over a 2-row cell table then emitted
+        5 children holding 2 distinct (cell, rest) tuples — 3 PK-identical
+        rows, with `shortfall == 0` so no `fanout_rows_capped` fired."""
+        plan = self._plan(
+            5,
+            edges=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
+        )
+        draw = joint_key_draw(plan, ("t1",), "run-1", [[]])
+        assert draw.capacity == 2
+        assert draw.n_children == 2
+        assert draw.shortfall == 3
+        assert len(set(self._combos(draw, plan))) == 2
+        assert draw.values["(T,R)->right"] == [(), ()]  # the NULL fill still works
+
+    def test_a_null_fill_with_no_cells_can_represent_one_child_only(self):
+        """The degenerate end of the same rule: no cells and a NULL rest
+        means the driving key IS the whole PK, so exactly one child is
+        representable — the rest would be PK duplicates."""
         plan = self._plan(
             2,
             cells=None,
             edges=(ConditionalEdge(id="(T,R)->right", cols=("R",), nullable=True),),
         )
         draw = joint_key_draw(plan, ("t1",), "run-1", [[]])
-        assert draw.n_children == 2
-        assert draw.values["(T,R)->right"] == [(), ()]
+        assert draw.capacity == 1 and draw.n_children == 1 and draw.shortfall == 1
+        assert draw.values["(T,R)->right"] == [()]
 
     def test_the_draw_is_deterministic_per_run_and_key(self):
         """Same run + same key ⇒ the same children (a retried bundle must
@@ -350,27 +403,61 @@ class TestJointDrawThroughExpandKeys:
         ]
         assert set(emitted) == {("t1",)}
 
-    def test_capping_logs_one_milestone_per_worker(self, caplog):
+    # Both keys carry candidates, so BOTH reach the draw and BOTH cap —
+    # the old fixture listed one per-key entry, so key two was dropped
+    # before it drew and the milestone guard could not fail (E3).
+    _BOTH: ClassVar[dict] = {
+        "(T,R)->right": [[("r1",), ("r2",)], [("r1",), ("r2",)]]
+    }
+    _CAPPED_PLAN = FanoutPlan(
+        driving_cols=("T",),
+        histogram=FanoutHistogram({9: 1}),  # 9 > 2 cells x 2 candidates
+        cells=CellTable(cols=("S",), rows=[("s1",), ("s2",)], counts=[1, 1]),
+        exact_cells=True,
+        conditional=(_EDGE,),
+    )
+
+    @staticmethod
+    def _capped_lines(caplog) -> list[str]:
+        return [
+            ln for ln in caplog.text.splitlines() if "name=fanout_rows_capped" in ln
+        ]
+
+    def test_capping_logs_one_milestone_for_many_keys_of_one_table(self, caplog):
+        """Two keys of ONE table both cap ⇒ exactly one WARNING. The old
+        test could not fail: its second key was dropped before it drew,
+        so deleting the guard kept the suite green."""
         import logging as _logging
 
         from sdfb_core.engines import base as base_mod
 
         base_mod._reset_rows_capped_log()
-        plan = FanoutPlan(
-            driving_cols=("T",),
-            histogram=FanoutHistogram({9: 1}),
-            cells=CellTable(cols=("S",), rows=[("s1",), ("s2",)], counts=[1, 1]),
-            exact_cells=True,
-            conditional=(self._EDGE,),
-        )
         with caplog.at_level(_logging.WARNING, logger="sdfb.milestone"):
-            conditional_draws(plan, [("t1",), ("t2",)], "run-1", self._MATCHES)
-        capped = [
-            ln for ln in caplog.text.splitlines()
-            if "name=fanout_rows_capped" in ln
-        ]
-        assert len(capped) == 1
-        assert "capacity=4" in capped[0]
+            draws = conditional_draws(
+                self._CAPPED_PLAN, [("t1",), ("t2",)], "run-1", self._BOTH,
+                table="p.land.child_a",
+            )
+        assert [d.shortfall for d in draws.values()] == [5, 5]  # both really capped
+        lines = self._capped_lines(caplog)
+        assert len(lines) == 1
+        assert "capacity=4" in lines[0]
+
+    def test_every_driven_table_reports_its_own_capping(self, caplog):
+        """E3: the guard is scoped per LANDING TABLE, not per process. In
+        a single-job relational run (ADR 0030) several driven tables share
+        one worker, and a process-global guard reported only the first."""
+        import logging as _logging
+
+        from sdfb_core.engines import base as base_mod
+
+        base_mod._reset_rows_capped_log()
+        with caplog.at_level(_logging.WARNING, logger="sdfb.milestone"):
+            for table in ("p.land.child_a", "p.land.child_b"):
+                conditional_draws(
+                    self._CAPPED_PLAN, [("t1",), ("t2",)], "run-1", self._BOTH,
+                    table=table,
+                )
+        assert len(self._capped_lines(caplog)) == 2
 
 
 class TestLegacyPathUnchanged:
