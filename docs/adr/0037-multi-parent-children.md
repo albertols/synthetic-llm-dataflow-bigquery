@@ -441,7 +441,7 @@ requested fan-out (D3, fix waves A1/E2/G1). Counters
   `test_relationship_models.py`'s two unmarked-parent cases now assert
   "first declared drives, the other is conditional" instead of a stop
   (47 passed).
-- [ ] DirectRunner, fake client, whole-tuple checks — the eight shapes in
+- [x] DirectRunner, fake client, whole-tuple checks — the eight shapes in
   `packages/sdfb-tests/tests/unit/test_fanout_shapes.py` (8 passed):
   - **star** — `dim_a`, `dim_b`, `fact`: every `fact` row's key tuple
     exists in each dimension, PK unique, row count within the histogram;

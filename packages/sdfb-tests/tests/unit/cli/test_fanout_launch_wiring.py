@@ -1095,3 +1095,52 @@ def test_a_high_fanout_child_gets_a_pool_sized_for_its_derived_rows(
     }
     # --num_rows 100 would have sized the same pool at the ADR 0035 floor.
     assert fk_key_sample_cap(args.num_rows, 1) != fk_key_sample_cap(300_000, 1)
+
+
+# G2 round 2 — the two PK sources are a UNION, never a replacement: the
+# model's `pk:` is what the run ENFORCES, the DDL constraint is what the
+# record model validates against, and a NULL in either is fatal.
+_NARROW_PK_DIAMOND_REG = RelationshipRegistry.from_sources(
+    [(
+        "config/relationships/diamond.yaml",
+        _DIAMOND.replace("    pk: [T, L, R]\n", "    pk: [T, L]\n"),
+    )]
+)
+
+
+def test_the_two_pk_sources_are_unioned_not_replaced(monkeypatch, caplog):
+    """A rest column the DDL declares a key member but the model's `pk:`
+    omits must still refuse the NULL fill. `_enforced_pk` read the model
+    PK as a REPLACEMENT, so this window reopened the fix-wave-F2 blocker:
+    the edge came out nullable, the engine NULL-filled `R`, and the record
+    model (built from `TableSchema.primary_keys`) rejected every one of
+    that key's rows inside `except Exception: continue` — no envelope, no
+    counter, no milestone.
+
+    `pk_member` stays False: capacity counts only what distinguishes the
+    ENFORCED key, and `R` is outside the model's `pk:`."""
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
+    generation = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.land.BOTTOM_TABLE"},
+         "schema": [{"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "L", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "R", "type": "STRING", "mode": "NULLABLE"}],
+         "primary_keys": ["T", "L", "R"]}
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        payload, _roles = rp._resolve_table_fanout(
+            _diamond_args("p.land.BOTTOM_TABLE"), generation,
+            _NARROW_PK_DIAMOND_REG,
+            {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+            _DIAMOND_ROWS, landing_schema=_landing_schema("NULLABLE"),
+        )
+    assert payload["conditional"] == [
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False,
+         "pk_member": False}
+    ]
+    assert "reason=declared_pk" in caplog.text

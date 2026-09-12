@@ -1961,9 +1961,15 @@ def _enforced_pk(generation, effective_pk: tuple[str, ...]) -> set[str]:
     meant the guard NEVER fired: ADR 0037's own diamond (BOTTOM declares
     `pk: [T, L, R]`, `R` NULLABLE in both schemas) NULL-filled a declared
     key member, those rows landed and their repeats diverted as
-    `pk.duplicate`. The constraint stands in only when the model declares
-    no PK at all."""
-    return set(effective_pk or (getattr(generation, "primary_keys", None) or ()))
+    `pk.duplicate`. The two are UNIONED, never substituted: the model's
+    `pk:` is what the run enforces, the DDL constraint is what
+    `derive_record_model` validates against, and a NULL in EITHER is
+    fatal — a column the constraint declares and the model omits would
+    otherwise be NULL-filled and then dropped inside the engine's
+    `except Exception: continue`, with no envelope and no milestone."""
+    return set(effective_pk) | set(
+        getattr(generation, "primary_keys", None) or ()
+    )
 
 
 def _rest_is_nullable(
