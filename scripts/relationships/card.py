@@ -26,19 +26,29 @@ from sdfb_core.contracts.relationships import (
 _REL_DIR = "config/relationships"
 
 
+def _is_sample_model(path: str) -> bool:
+    """True for a documentation sample (`example_*.yaml`, `*.example.yaml`).
+
+    Inlined rather than imported: this script's local-directory path must
+    stay pure-Python (no `apache_beam`), so it cannot import
+    `sdfb_beam.io.relationships`. `sdfb_beam.io.relationships.is_sample_model`
+    is the authority on this rule — the two must agree, so change them
+    together.
+    """
+    name = path.rsplit("/", 1)[-1]
+    return name.startswith("example_") or ".example." in name
+
+
 def _load(uri: str) -> RelationshipRegistry:
     """Local paths go through the pure-Python loader; anything else (a
     gs:// URI) needs Beam's filesystems, imported only then.
 
     A directory scan skips documentation samples (`example_*.yaml`,
-    `*.example.yaml`) using the SAME rule as the Beam loader's directory
-    scan (`sdfb_beam.io.relationships.is_sample_model`) — otherwise this
-    script renders a committed sample next to a real model that reuses
-    the same anonymised aliases. A URI that names a sample file directly
-    still loads it.
+    `*.example.yaml`) via `_is_sample_model` above — otherwise this script
+    renders a committed sample next to a real model that reuses the same
+    anonymised aliases. A URI that names a sample file directly still
+    loads it.
     """
-    from sdfb_beam.io.relationships import is_sample_model
-
     if "://" not in uri:
         from pathlib import Path
 
@@ -46,7 +56,7 @@ def _load(uri: str) -> RelationshipRegistry:
         if base.is_dir():
             paths = []
             for p in sorted(base.glob("*.y*ml")):
-                if is_sample_model(str(p)):
+                if _is_sample_model(str(p)):
                     print(f"skipping sample model: {p}", file=sys.stderr)
                     continue
                 paths.append(p)

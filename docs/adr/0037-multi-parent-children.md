@@ -1,6 +1,6 @@
 # ADR 0037 — Multi-parent children: every declared FK edge gets a role and a DAG path
 
-**Status:** ACCEPTED (laptop, 2026-09-11) — DirectRunner + unit tests on `ws12-fanout-generation`; Dataflow acceptance rides with the M4 relational launch
+**Status:** PROPOSED (2026-09-11) — registry/unit tests pass on `ws12-fanout-generation` (Acceptance, first box); laptop acceptance is pending the DirectRunner suite (`test_fanout_shapes.py`, second box) finishing on the same branch, and Dataflow acceptance rides with the M4 relational launch
 **Design:** [`2026-09-11-multi-parent-children.md`](../designs/2026-09-11-multi-parent-children.md) — the argument, the mechanism in detail, and the scale analysis. This ADR records the decision only.
 **Evidence:** the three 2026-09-11 preflight stops on the five-table expansion of the anonymised core-accounts model (`ef66717`, `ca8f948`, `8573665`) and the registry shape sweep written afterwards (`packages/sdfb-tests/tests/unit/contracts/test_relationship_shapes.py`)
 **Amends:** [ADR 0036](0036-parent-driven-fanout-generation.md) — D1's "a driven child has no side input at all" and D4's "anything that is neither driving nor implied is a `RelationshipError`" (see ADR 0036 **Rev 3**)
@@ -129,11 +129,21 @@ holds for that value; the wrapping attributable to `M` is confined to
 and identical at every cap (concept figure, seeded; the mechanism is
 `_conditional_candidates` in `sdfb_beam/pipeline.py` and
 `conditional_values` in `sdfb_core/engines/fanout.py`). 64 is the
-default because it bounds a request at `keys_per_batch × M × |rest|`
-values while leaving the overwhelming majority of shared values
-unwrapped; raise it when a branch's within-key variety matters more than
-the shuffle, lower it when a request gets too wide. `keys_per_batch` is
-lowered at launch so a request never exceeds 100k candidate values.
+default because it leaves the overwhelming majority of shared values
+unwrapped while keeping a request's candidate list bounded; raise it
+when a branch's within-key variety matters more than the shuffle, lower
+it when a request gets too wide. `--fk_candidate_cap` is the
+operator-set ceiling on `M`; the effective cap used to size a request is
+`min(--fk_candidate_cap, measured max fan-out)` once the fan-out
+measurement is available, so the operator ceiling and the effective cap
+can differ. What `keys_per_batch` (`in_set_parent_edges` in
+`run_pipeline.py`) actually bounds is candidate TUPLES per request: with
+`n` conditional edges it is lowered so `keys_per_batch × M × n` never
+exceeds 100k. That is not the same as the per-request VALUE count —
+each tuple carries `|rest|` columns, so the true value count is
+`keys_per_batch × M × Σ|rest|` (summed over the conditional edges), which
+exceeds the 100k tuple ceiling whenever any conditional edge's `rest`
+spans more than one column.
 
 **D5 — an unmatched conditional key writes NULL when it can, and is
 dropped, counted and reported when it cannot (ruling B).** A driving key
@@ -227,6 +237,37 @@ DLQ rule `fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
   the parent side, and one `CoGroupByKey` on the driving keys. Per
   request, `keys_per_batch × M × |rest|` values. The independent and
   driving paths are unchanged.
+- **A new launch stop: two NON-driving edges cannot write the same
+  child column.** `edge_roles` gave every non-driving edge a role from
+  its overlap with the DRIVING edge alone and never compared non-driving
+  edges with EACH OTHER, so two of them could claim one column and the
+  last one drawn silently won — two `independent` edges land nearly
+  every row as `fk.orphan` (after the GPU already generated it), and two
+  `conditional` edges whose `rest` overlaps are not gated by `fk.orphan`
+  at all, so those referentially broken rows LAND uncaught.
+  `RelationshipRegistry._check_column_ownership` (final review) now
+  raises `RelationshipError` on the first such pair:
+
+  ```text
+  child: edges (X,Y)->pa [independent] and (X,Z)->pb [independent] both write (X) — one child column cannot be owned by two edges: the second draw overwrites the first, landing a tuple its parent never held. Make one edge's columns a SUBSET of the other's so it is implied, mark the edge this table is generated from `drives: true`, or disable one parent (`enabled: false`).
+  ```
+
+  Three ways out: make one edge's columns a subset of the other's (so it
+  resolves `implied`), mark the actually-driving edge `drives: true`, or
+  disable one of the two parents. **Out of scope for now**: resolving
+  the clash automatically instead of stopping the launch, via a
+  candidate/pool-level join on the columns the two parents share, which
+  would let both edges draw jointly from the intersection instead of one
+  overwriting the other. Not implemented (final-review ruling 15).
+- **A driving-edge mislabel fixed.** A child with two enforced edges to
+  the SAME parent and no `drives:` marker used to report the choice as
+  `"derived"` (rule 3's ancestry check ran over an empty set of "other"
+  candidate parents and was vacuously true for every edge). Rule 3 now
+  requires at least two DISTINCT candidate parents; with only one, the
+  launch falls through to rule 4 (`"first_declared"`), so the operator
+  now gets the `fk_driving_edge_defaulted` WARNING and the card tag
+  `DRIVES (first declared — mark drives: true to choose)`. The edge
+  actually chosen is unchanged.
 - **Limitations, named (design §9), not defects:**
   - *external parent with a column overlap* — the driver-side pool is
     drawn as a whole tuple and the driving edge overwrites the shared
@@ -244,10 +285,11 @@ DLQ rule `fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
 - [x] Registry: the shape sweep
   `packages/sdfb-tests/tests/unit/contracts/test_relationship_shapes.py`
   passes with both `xfail` markers removed (star fact and true diamond
-  resolve — 10 passed, 0 xfail markers left on `ws12-fanout-generation`),
+  resolve, plus the cross-edge column-ownership stop from the final
+  review — 16 passed, 0 xfail markers left on `ws12-fanout-generation`),
   and `test_relationship_models.py`'s two unmarked-parent cases now
   assert "first declared drives, the other is conditional" instead of a
-  stop (43 passed).
+  stop (47 passed).
 - [ ] DirectRunner, fake client, whole-tuple checks — the five shapes in
   `packages/sdfb-tests/tests/unit/test_fanout_shapes.py`:
   - **star** — `dim_a`, `dim_b`, `fact`: every `fact` row's key tuple

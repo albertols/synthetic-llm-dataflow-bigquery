@@ -286,7 +286,7 @@
       "helpText": "ADR 0037 \u2014 max candidate tuples per shared key for a conditional FK edge; a driven child's PK-completing members must cover the source fan-out within this cap. Default 64.",
       "isOptional": true,
       "regexes": [
-        "^[0-9]*$"
+        "^([1-9][0-9]*)?$"
       ]
     },
     {

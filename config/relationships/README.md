@@ -158,20 +158,66 @@ The card names the role on every edge, so `card.py` is the check:
 
 1. **One** internal enforced edge → it drives.
 2. Exactly one edge marked `drives: true` → it drives.
-3. No marker: the parent that **descends from every other candidate
-   parent** drives, and its edge to the other parent is widened with the
-   child's pins (`fk_edge_widened`).
-4. No marker **and** no ancestry between the parents → the **first
-   declared** internal enforced edge drives. The launcher logs
-   `fk_driving_edge_defaulted table= edge= hint='mark drives: true to
-   choose'` at **WARNING** and the card tags it `DRIVES (first declared
-   — mark drives: true to choose)`. Reorder the `fk:` list or add
-   `drives: true` to choose a different one.
+3. No marker, with **at least two DISTINCT candidate parents**: the
+   parent that **descends from every other candidate parent** drives,
+   and its edge to the other parent is widened with the child's pins
+   (`fk_edge_widened`).
+4. No marker, and either no ancestry between the parents **or only ONE
+   distinct candidate parent** (two enforced edges to the SAME parent —
+   final review, ADR 0037: rule 3's ancestry check ran over an empty
+   set of "other" parents and was vacuously true, mislabelling this case
+   `"derived"`) → the **first declared** internal enforced edge drives.
+   The launcher logs `fk_driving_edge_defaulted table= edge= hint='mark
+   drives: true to choose'` at **WARNING** and the card tags it `DRIVES
+   (first declared — mark drives: true to choose)`. Reorder the `fk:`
+   list or add `drives: true` to choose a different one. The edge chosen
+   is the same either way; only the label and the WARNING changed.
 5. More than one `drives: true` on one table → `RelationshipError`.
-   This is the only stop left.
+6. Two **non-driving** edges writing the same child column →
+   `RelationshipError`. See "Two non-driving edges cannot write the same
+   column" below.
 
 `drives: true` is always the override; toggling `enabled` is still
 enough to launch.
+
+#### Two non-driving edges cannot write the same column
+
+`edge_roles` gives every non-driving edge a role from its overlap with
+the DRIVING edge alone — it never compared two non-driving edges with
+EACH OTHER, so two of them could claim the same child column and the
+last one drawn silently won: two `independent` edges each write a whole
+pool tuple in declaration order, so the second destroys the first's
+columns and nearly every row is diverted as `fk.orphan` — after the GPU
+already generated it; two `conditional` edges whose `rest` overlaps are
+applied in plan order and `conditional` edges are not gated by
+`fk.orphan` at all, so those referentially broken rows LAND uncaught.
+`RelationshipRegistry._check_column_ownership` (final review, ADR 0037)
+now raises on the first such pair:
+
+```text
+child: edges (X,Y)->pa [independent] and (X,Z)->pb [independent] both write (X) — one child column cannot be owned by two edges: the second draw overwrites the first, landing a tuple its parent never held. Make one edge's columns a SUBSET of the other's so it is implied, mark the edge this table is generated from `drives: true`, or disable one parent (`enabled: false`).
+```
+
+Three ways out, matching the message:
+
+1. Make one edge's columns a **subset** of the other's, so the registry
+   resolves it as `implied` instead of a second independent write.
+2. Mark the edge this table is actually generated from `drives: true`.
+3. **Disable** one of the two parents (`enabled: false`).
+
+The DRIVING edge itself is deliberately outside this check — `implied` /
+`independent` / `conditional` are disjoint from it by construction (the
+role IS the overlap test with the driving edge). An `external` edge that
+overlaps the DRIVING edge stays the pre-existing, un-stopped
+`fk_edge_overlap_external` WARNING (design 2026-09-11 §9) — not this
+stop.
+
+**Out of scope for now:** resolving the clash automatically instead of
+stopping the launch, via a candidate/pool-level join on the columns the
+two parents share — that would let both non-driving edges draw jointly
+from the intersection instead of one silently overwriting the other.
+Not implemented; recorded as future work in
+[ADR 0037](../../docs/adr/0037-multi-parent-children.md) Consequences.
 
 #### `--fk_candidate_cap` (default 64)
 

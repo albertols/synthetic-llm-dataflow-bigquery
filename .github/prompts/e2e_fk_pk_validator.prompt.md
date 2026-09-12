@@ -372,13 +372,21 @@ Give each conditional edge its own line and read them this way:
 | `fk.orphan` | a row LANDED whose whole FK tuple has no parent | **never** — the draw is joint by construction, so any non-zero value is a generator regression and a BLOCKER |
 | `fk.unmatched` | a row was NEVER GENERATED: the driving key's shared value had no candidate in the conditional parent, and the `rest` columns are not all NULLABLE, so the key was dropped before generation (ADR 0037 ruling B) | **expected when the SOURCE lacks that branch** — it is an input fact. Corroborate it: `SELECT COUNT(*) FROM (SELECT DISTINCT <overlap> FROM parent_of_the_driving_edge) EXCEPT DISTINCT (SELECT DISTINCT <overlap cols> FROM the conditional parent)` — if the source really is missing those shared values, the counts line up and the verdict stays PASS with a noted input gap; if the source HAS them, the join lost them and that is a defect |
 
-Cross-check the three views of the same event before judging: the DLQ row
-count (`fk.unmatched`), the Beam counter (`fanout / keys_unmatched`, KEYS
-not rows) and the summed `batch_unmatched keys_dropped=` lines must agree
-on the key count. Two of them disagreeing is itself the finding. A
-non-zero `fanout / candidates_dropped_null` alongside them means the
-conditional parent landed NULLs in the shared columns — that is where to
-start, not the join.
+Cross-check the three views of the same event before judging, but they are
+not all the same unit. The Beam counter (`fanout / keys_unmatched`) and the
+summed `batch_unmatched keys_dropped=` lines are both KEY counts and must
+agree with each other exactly — disagreement between those two is itself
+the finding. `validation_runs.dlq_by_rule`'s `fk.unmatched` figure is
+ROW-weighted instead: `_dlq_rule_weight` (`pipeline.py`) sums each dropped
+key's `raw_request["n"]` — that key's expected row count — rather than
+counting 1 per key, so it does not compare 1:1 against the key counters.
+Cross-check it against `fanout / keys_unmatched × mean` (the edge's
+`mean=` from its `fk_fanout_measured` line) instead of the raw key count;
+report both the row-weighted DLQ figure and the key-weighted counter
+rather than expecting them to match one-for-one. A non-zero
+`fanout / candidates_dropped_null` alongside them means the conditional
+parent landed NULLs in the shared columns — that is where to start, not
+the join.
 
 ---
 

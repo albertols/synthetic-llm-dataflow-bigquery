@@ -189,7 +189,7 @@ sequenceDiagram
   participant G as generate_for_keys
   K->>J: (t1) → key
   C->>J: (t1) → [r3, r9, r1] (Top-M by hash)
-  J->>G: key + matches {"T,R": [r3, r9, r1]}
+  J->>G: key + matches {"(T,R)->right": [r3, r9, r1]}
   G->>G: k = 5 children; order = shuffle([r3,r9,r1]) = [r9,r3,r1]
   G-->>G: rows get R = r9, r3, r1, r9, r3 (wrap after 3)
 ```
@@ -228,8 +228,20 @@ skip P4 as today; streaming uniqueness measures `pk.duplicate`.
 | path | shuffle | memory | bound |
 |---|---|---|---|
 | independent | one sampled side input per edge (≤ 1M tuples, ADR 0035 ceiling) | per worker: the pool | unchanged from ADR 0031 |
-| conditional | per edge: one Distinct (skipped when the projection holds the parent PK) + one Top-M combine on the parent side, one CoGroupByKey on the driving keys | per request: `keys_per_batch × M × |rest|` values | `keys_per_batch` is lowered so a request never exceeds 100k candidate values |
+| conditional | per edge: one Distinct (skipped when the projection holds the parent PK) + one Top-M combine on the parent side, one CoGroupByKey on the driving keys | per request: `keys_per_batch × M × Σ\|rest\|` values | `keys_per_batch` is lowered so candidate TUPLES per request never exceed 100k (see note) |
 | driving | unchanged | unchanged | unchanged |
+
+The conditional row's 100k ceiling bounds candidate TUPLES, not the raw
+value count: `keys_per_batch` (`in_set_parent_edges` in
+`run_pipeline.py`) is lowered so `keys_per_batch × M × n` — one tuple
+per key per conditional edge, `n` conditional edges — never exceeds
+100k. The per-request VALUE count is `keys_per_batch × M × Σ|rest|`
+(summed over the conditional edges' `rest` column counts), which
+exceeds the tuple ceiling whenever a conditional edge's `rest` spans
+more than one column. `M` here is the *effective* cap —
+`min(--fk_candidate_cap, measured max fan-out)` once the fan-out
+measurement is available — not the raw `--fk_candidate_cap` operator
+ceiling.
 
 Hot shared keys: the parent side is capped at M by the combine, the
 driving side is an iterable the runner streams. Both joins are keyed on

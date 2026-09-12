@@ -607,7 +607,7 @@ Relational:
 | `fk_edge_role edge= role=driving\|implied\|independent\|conditional\|external overlap=` (launcher + worker preflight) | the role of EVERY enforced edge: which edge a child is generated FROM (`driving`), which are satisfied by construction (`implied`), which ride the side-input key pool (`independent` — a star-schema dimension, no column shared with the driving edge), which are joined on their shared columns (`conditional` — `overlap=` names them), and which point outside the launch (`external`). ADR 0036/0037 |
 | `fk_driving_edge_defaulted table= edge= hint='mark drives: true to choose'` (launcher, **WARNING**) | the child has several enforced parents, none marked `drives: true` and no ancestry between them, so the FIRST DECLARED edge drives (ADR 0037 ruling A). The launch is correct either way — mark the edge you meant, or reorder the `fk:` list, if it is not this one |
 | `fk_edge_overlap_external table= edge= overlap=` (launcher, **WARNING**) | an EXTERNAL parent's edge shares columns with the driving edge. The driver-side pool is drawn as a whole tuple and the driving edge overwrites the shared columns — integrity on that edge is NOT resolved. Enable the parent inside the launch to make it `conditional` (ADR 0037 §9) |
-| `relational_fk_edge … mode=fanout\|implied\|side_input\|conditional overlap=` (worker, per edge) | the DAG path EVERY edge actually took this run — one line per edge, including the driving one (`mode=fanout`) and an `implied` one. `side_input` = the ADR 0031 key pool (an `independent` edge, and the pre-ADR-0037 default for legacy metadata); `conditional` = the co-partitioned join, with `overlap=` naming the shared columns. Only `side_input` and `conditional` are exclusive to non-driving edges; compare each line's `mode=` with the launcher's `fk_edge_role role=` for that edge — a disagreement is a wiring defect (ADR 0037) |
+| `relational_fk_edge … mode=fanout\|implied\|side_input\|conditional overlap=` (worker, per edge) | the DAG path EVERY edge actually took this run — one line per edge, including the driving one (`mode=fanout`) and an `implied` one. `side_input` = the ADR 0031 key pool: an `independent` edge, the pre-ADR-0037 default for legacy metadata, OR an `external` edge — its parent is outside the launch, so `fk_edge_metadata` gives it no `mode` key at all and the worker falls back to `side_input` by design, not a defect. `conditional` = the co-partitioned join, with `overlap=` naming the shared columns. Compare each line's `mode=` with the launcher's `fk_edge_role role=` for that edge: `role=independent`, legacy metadata, and `role=external` all legitimately show `mode=side_input`; any OTHER role/mode pairing (e.g. `role=driving` without `mode=fanout`) is a wiring defect (ADR 0037) |
 | `fk_fanout_cache_unavailable table= op= error=` (launcher, WARNING) | the optional `fk_fanout_stats` cache could not be read/written (missing table, permission, transient) — the launch measured without it (ADR 0036) |
 | `fk_fanout_measured edge= parents= children= mean= p50= p95= max= zero_share= source=measured\|cache` (launcher) | the SOURCE ratio the driven child reproduces; `cache` = read from `fk_fanout_stats` instead of re-scanning |
 | `relational_single_job … rows_detail=<name>:<rows>,…` (launcher) | derived row count per table — roots take `--num_rows`, driven children derive from their parent's landed keys and the measured fan-out |
@@ -895,15 +895,22 @@ EXTERNAL parent whose edge overlaps the driving edge cannot be resolved
 at all — `fk_edge_overlap_external` (WARNING); enable the parent inside
 the launch to turn it into a `conditional` edge.
 
-`--fk_candidate_cap` (default `64`) bounds the candidate list a
-conditional edge carries per shared value (Top-M by a deterministic
-`blake2b(run_id, rest)` order). A key whose fan-out exceeds the list
-wraps — it reuses candidates in a seeded order — so raise the cap when a
-branch's within-key variety matters and the shuffle can afford it, lower
-it when a request gets too wide (`keys_per_batch` is lowered at launch so
-a request never exceeds 100k candidate values). A shared value the parent
-simply has too few distinct candidates for wraps at ANY cap; the figure
-in [ADR 0037](adr/0037-multi-parent-children.md) D4 shows the split.
+`--fk_candidate_cap` (default `64`) is the OPERATOR ceiling on the
+candidate list a conditional edge carries per shared value (Top-M by a
+deterministic `blake2b(run_id, rest)` order); the effective cap used to
+size a request is `min(--fk_candidate_cap, measured max fan-out)` once
+the fan-out measurement is available. A key whose fan-out exceeds the
+list wraps — it reuses candidates in a seeded order — so raise the cap
+when a branch's within-key variety matters and the shuffle can afford
+it, lower it when a request gets too wide. `keys_per_batch` is lowered
+at launch so candidate TUPLES per request (`keys_per_batch × cap ×`
+number of conditional edges) never exceed 100k — that bounds tuples,
+not the raw per-request VALUE count, which is
+`keys_per_batch × cap × Σ|rest|` and can run higher when a conditional
+edge's `rest` spans more than one column (ADR 0037 D4). A shared value
+the parent simply has too few distinct candidates for wraps at ANY cap;
+the figure in [ADR 0037](adr/0037-multi-parent-children.md) D4 shows the
+split.
 Preflight P4 folds both new members into the per-key PK capacity: an
 independent edge in the PK contributes its pool cap, a conditional edge's
 `rest` in the PK contributes at most `M` — a stop there names the edge or
@@ -928,13 +935,19 @@ excluded from it exactly as every NULL tuple already is.
 the source's content. If the source table changes shape (rows added, the
 fan-out ratio moves), a cached payload keeps replaying the OLD ratio.
 Re-measure by editing the model file (any field — `sha12()` covers all of
-them) or by deleting the cached row. The key also does not cover the
-PK-completing `cell_cols` measured alongside the histogram, so a child
-measured BEFORE its model gained a conditional or independent edge (ADR
-0037) keeps a stale cell table over a column that edge now supplies.
-After enabling a diamond or star branch, delete that table's
-`fk_fanout_stats` row (or edit the model so the sha changes) before
-relaunching.
+them) or by deleting the cached row. Gaining or losing a driving,
+conditional or independent `fk:` entry (ADR 0037) already forces this on
+its own: `sha12()`'s canonical string covers every `fk:` entry (`cols`,
+`ref`, `ref_cols`, `enforced`, `drives`), so the sha changes and the next
+launch is a cache miss — no manual step needed. What the key does NOT
+cover is the PK-completing `cell_cols` measured alongside the histogram:
+those come from `pk_cell_columns` over the reference-data column
+profiles (categorical vs. identifier), not from the `fk:` list. A child
+whose cell columns change WITHOUT any `fk:` entry changing — for example
+a source column's profile flipping between categorical and identifier as
+the table grows — keeps a stale cell table under the unchanged sha.
+Since nothing in the model file moved, editing it won't help; delete
+that table's `fk_fanout_stats` row directly to force a re-measurement.
 
 **Did PK/FK enforcement actually happen?** After the job lands, run the
 `/e2e_fk_pk_validator` prompt
