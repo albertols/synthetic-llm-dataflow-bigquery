@@ -74,7 +74,7 @@ def test_fanout_within_cells_passes_and_derives_rows(caplog):
 
 
 def test_fanout_beyond_cells_stops():
-    with pytest.raises(SystemExit, match=r"preflight P4.*13 children.*12 cells"):
+    with pytest.raises(SystemExit, match=r"preflight P4.*up to 13 times.*12 cells"):
         preflight(
             _schema(), (), (), _rows(), relations=_REG.relations("child"),
             num_rows=1_000, fk_parent_rows={"parent": 1_000},
@@ -452,7 +452,7 @@ def test_cells_and_conditional_factors_multiply_but_an_independent_pool_does_not
         )
 
     _run(24)  # 6 cells x 4 candidates
-    with pytest.raises(SystemExit, match=r"preflight P4.*25 children"):
+    with pytest.raises(SystemExit, match=r"preflight P4.*up to 25 times"):
         _run(25)
     # The conditional factor is an UPPER bound: a key whose co-parent
     # offers fewer candidates emits fewer children (fix wave A1 counts

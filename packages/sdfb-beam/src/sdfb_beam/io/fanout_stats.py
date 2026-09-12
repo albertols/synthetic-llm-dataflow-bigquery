@@ -113,10 +113,12 @@ def measure_fanout(
             edge=edge,
             child_tuples=with_children,
             parent_tuples=parents,
+            orphan_keys=with_children - parents,
+            matched_share=round(parents / max(1, with_children), 4),
             note=(
                 "child tuples without a parent in the source; the zero "
-                "bucket is unmeasurable and the mean fan-out is an upper "
-                "bound"
+                "bucket is unmeasurable, and this child generates from "
+                "the matched share of its key space only"
             ),
         )
     # The child GROUP BY above can never emit k=0 (COUNT(*) over an actual
@@ -155,8 +157,16 @@ def fanout_payload(measured: dict, driving_cols: tuple[str, ...], exact_cells: b
 
 
 def log_fanout_measured(edge: str, measured: dict, *, source: str) -> None:
-    """One ``fk_fanout_measured`` milestone: p50/p95 over PARENTS (the
-    histogram's counts), mean children-per-parent, and the zero share."""
+    """One ``fk_fanout_measured`` milestone.
+
+    Every figure is over the histogram, which counts rows per CHILD KEY
+    VALUE: p50, p95, max and the mean all describe the same distribution,
+    so the mean can never exceed the max. It used to divide the total
+    child rows by the PARENT key count, which on an orphan-heavy source
+    reported 22.3 beside a max of 13 (launch 2026-09-12_14_50_30) — the
+    quantity an operator needs there is ``key_values`` and
+    ``orphan_keys``, logged beside it, which say how much of the child's
+    key space the parent actually covers."""
     hist = {int(k): n for k, n in measured["histogram"].items()}
     total = sum(hist.values()) or 1
     order = sorted(hist)
@@ -169,12 +179,15 @@ def log_fanout_measured(edge: str, measured: dict, *, source: str) -> None:
         if cum / total >= _P95:
             p95 = k
             break
+    key_values = sum(n for k, n in hist.items() if k > 0)
     log_milestone(
         "fk_fanout_measured",
         edge=edge,
         parents=measured["parents"],
         children=measured["children"],
-        mean=round(measured["children"] / max(1, measured["parents"]), 4),
+        key_values=key_values,
+        orphan_keys=max(0, key_values - int(measured["parents"])),
+        mean=round(measured["children"] / total, 4),
         p50=p50,
         p95=p95,
         max=order[-1],

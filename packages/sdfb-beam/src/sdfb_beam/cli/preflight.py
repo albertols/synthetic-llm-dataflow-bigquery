@@ -686,10 +686,10 @@ def _driven_pk_stop(
         else "Fix the `pk:` in the relationship model."
     )
     return SystemExit(
-        f"[preflight P4] {table_schema.fqn}: the driving edge "
-        f"({','.join(driving)}) fans out to {max_k} children per parent "
-        f"in the source, but the PK completes to only {capacity:,} rows "
-        f"per parent key ({'; '.join(parts)}) — the declared PK "
+        f"[preflight P4] {table_schema.fqn}: one value of the driving "
+        f"edge ({','.join(driving)}) appears up to {max_k} times in the "
+        f"source child, but the PK completes to only {capacity:,} rows "
+        f"per key value ({'; '.join(parts)}) — the declared PK "
         f"{list(effective_pk)} is not a key of the source. {fix}"
     )
 
@@ -779,15 +779,17 @@ def _check_driven_pk(
         # above 1 is the PK not being a key of the source (2026-09-11,
         # E_TABLE stopped with "no cell table was measured for []").
         raise SystemExit(
-            f"[preflight P4] {table_schema.fqn}: the driving edge "
-            f"({','.join(driving)}) fans out to {max_k} children per "
-            f"parent in the source, but the declared PK "
+            f"[preflight P4] {table_schema.fqn}: one value of the "
+            f"driving edge ({','.join(driving)}) appears up to {max_k} "
+            f"times in the source child, but the declared PK "
             f"{list(effective_pk)} equals the driving edge exactly — "
-            f"no completing members, so at most 1 child per parent key "
-            f"is representable. Add a discriminating column to the "
-            f"`pk:` in the relationship model, or confirm the source "
-            f"relationship really is 1:1 and the fan-out measurement "
-            f"is stale."
+            f"no completing members, so only ONE row per key value is "
+            f"representable and the rest would be pk.duplicate. Add a "
+            f"discriminating column to the `pk:` in the relationship "
+            f"model (the sibling table's own PK usually names one), "
+            f"drop the `pk:` if the source has no key, or confirm the "
+            f"source relationship really is 1:1 and the measurement is "
+            f"stale."
         )
     raise _driven_pk_stop(
         table_schema, effective_pk, driving, max_k, capacity, cells, n_cells,

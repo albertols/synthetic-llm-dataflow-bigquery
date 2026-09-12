@@ -133,3 +133,59 @@ def test_no_orphan_milestone_when_every_child_tuple_has_a_parent(caplog):
             cell_cols=(), client=_Client(),
         )
     assert "fk_fanout_source_orphans" not in caplog.text
+
+
+# Launch 2026-09-12_14_50_30 logged, for one edge in a single milestone:
+#   children=1172025 max=13 mean=22.3052 p50=2 p95=2 parents=52545
+# A mean cannot exceed the maximum. The histogram counts rows per CHILD
+# KEY VALUE, but the mean divided the total child rows by the PARENT key
+# count — and 583,134 of that child's key values have no parent in the
+# source, so the figure an operator reads was 11x the measured one.
+def _measured(histogram: dict, parents: int) -> dict:
+    children = sum(k * n for k, n in histogram.items())
+    return {"histogram": histogram, "parents": parents, "children": children,
+            "cells": None}
+
+
+def test_the_logged_mean_never_exceeds_the_histogram_max(caplog):
+    import logging
+
+    from sdfb_beam.io.fanout_stats import log_fanout_measured
+
+    # Five key values of two rows each, but only two parent keys exist:
+    # the source child holds tuples its parent does not.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        log_fanout_measured("(K)->P", _measured({2: 5}, parents=2), source="measured")
+    line = next(ln for ln in caplog.text.splitlines() if "fk_fanout_measured" in ln)
+    assert "mean=2.0" in line, line
+    assert "max=2" in line and "mean=5.0" not in line
+
+
+def test_the_orphan_key_values_reach_the_log(caplog):
+    """The operator must see WHY the mean is per key value and not per
+    parent: 3 of the 5 key values have no parent in the source."""
+    import logging
+
+    from sdfb_beam.io.fanout_stats import log_fanout_measured
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        log_fanout_measured("(K)->P", _measured({2: 5}, parents=2), source="measured")
+    line = next(ln for ln in caplog.text.splitlines() if "fk_fanout_measured" in ln)
+    assert "key_values=5" in line and "orphan_keys=3" in line
+
+
+def test_a_clean_source_keeps_todays_numbers(caplog):
+    """No orphans: the zero bucket is real, the histogram total IS the
+    parent count, and the mean is unchanged from before this fix."""
+    import logging
+
+    from sdfb_beam.io.fanout_stats import log_fanout_measured
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        log_fanout_measured("(K)->P", _measured({0: 4, 1: 3, 2: 3}, parents=10),
+                            source="measured")
+    line = next(ln for ln in caplog.text.splitlines() if "fk_fanout_measured" in ln)
+    assert "mean=0.9" in line and "orphan_keys=0" in line and "key_values=6" in line
