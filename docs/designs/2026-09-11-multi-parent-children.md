@@ -151,40 +151,54 @@ edge `X` (`X.cols` → `P_X.ref_cols`):
   `matches` (review ruling 14).
 - **Engine** — `generate_for_keys(keys, cfg, matches=None)`. Per key,
   `sdfb_core.engines.base.conditional_draws` calls
-  `sdfb_core.engines.fanout.joint_key_draw` (fix wave A1, final review):
-  the cell each child carries AND every conditional edge's candidate are
-  decided JOINTLY, one walk over the CROSS PRODUCT
-  `(n_cells, c_1, …, c_m)`. Child `i` takes
-  `_mixed_radix(i, (n_cells, c_1, …, c_m))` — the FIRST radix varying
-  fastest — and indexes a per-key seeded permutation of the cell rows
-  (`CellTable.permutation`) and of each edge's shuffled candidate list
-  (`derive_key_seed(run_id, key, salt=edge_id)`). Cells varying fastest
-  means a key within its cell table still takes a different weighted
-  cell exactly as ADR 0036 drew them; candidate digits only start
-  advancing once the cells are exhausted. This replaced two INDEPENDENT
-  `i % len` cyclic walks (`conditional_values`, deleted) whose realised
-  combinations were only `lcm(n_cells, c_1, …, c_m)`, not their product
-  — 2 cells × 2 candidates gave 2 combinations for 4 children, not 4 —
-  and which RAISED inside `CellTable.draw(k, exact=True)` the moment a
-  key's fan-out exceeded an exact cell table. The fan-out is now CAPPED
-  at `min(k, n_cells × c_1 × … × c_m)` instead — see the capping rule
-  below — and `apply_conditional_overrides` reads the candidate half of
-  the `KeyDraw` and writes it on `rest(X)`'s child columns **after** the
-  pool draws and **before** the driving/cell overrides, exactly where
-  B.2 already applies pool tuples.
-- **Capping vs. wrapping** — the joint fan-out is CAPPED at the product
-  only when `plan.exact_cells` holds (every PK-completing member outside
-  the driving edge is a cell or an edge-supplied column) AND every
-  conditional edge has at least one candidate for that key; a capped
-  key's shortfall (`requested - emitted`) is reported once per worker
-  process as `fanout_rows_capped`. Two cases still WRAP the full
-  requested sequence instead: an INEXACT PK (an unbounded member
-  completes it, so cells+candidates cannot be the whole story and
-  dropping rows would misrepresent what the PK can hold) and a
-  conditional edge with NO candidate for that key when it is nullable
-  (every one of that key's children NULL-fills on that edge, and a NULL
-  is not a key member — ADR 0031 — so it must not shrink the key's
-  fan-out either).
+  `sdfb_core.engines.fanout.joint_key_draw` (fix wave A1, final review;
+  the cell rule corrected by fix wave E1): the cell each child carries
+  AND every conditional edge's candidate are decided JOINTLY, one walk
+  over the CROSS PRODUCT of the dimensions that genuinely BOUND the
+  combination. This replaced two INDEPENDENT `i % len` cyclic walks
+  (`conditional_values`, deleted) whose realised combinations were only
+  `lcm(n_cells, c_1, …, c_m)`, not their product — 2 cells × 2 candidates
+  gave 2 combinations for 4 children, not 4 — and which RAISED inside
+  `CellTable.draw(k, exact=True)` the moment a key's fan-out exceeded an
+  exact cell table. `apply_conditional_overrides` reads the candidate
+  half of the `KeyDraw` and writes it on `rest(X)`'s child columns
+  **after** the pool draws and **before** the driving/cell overrides,
+  exactly where B.2 already applies pool tuples.
+- **The cell rule turns on EXACTNESS, not on conditional edges** (fix
+  wave E1). `plan.exact_cells` — the cells must KEY the child, so child
+  `i`'s FIRST `_mixed_radix` digit indexes a per-key seeded weighted
+  PERMUTATION of the cell rows (`CellTable.permutation`): two children of
+  one key never share a cell, exactly as ADR 0036 drew them, and
+  candidate digits only start advancing once the cells are exhausted.
+  Otherwise — an unbounded PK member (pattern, numeric, temporal) keys
+  the child instead — the cells carry only their measured MARGINAL: each
+  child draws one independently WITH replacement
+  (`CellTable.draw(exact=False)`), and the cell dimension is NOT part of
+  the mixed-radix walk at all. A permutation prefix here handed a 99:1
+  cell table out 50:50 at a fan-out of 2, silently inverting that
+  column's distribution for the whole table — the defect the earlier
+  wording ("the cell digit varies fastest… either way") missed. Each
+  conditional edge is still shuffled per key either way
+  (`derive_key_seed(run_id, key, salt=edge_id)`).
+- **Capping vs. wrapping.** Capacity is the product of the dimensions
+  that are genuinely bounded: the cell count ONLY when `exact_cells`,
+  times each conditional edge's ACTUAL candidate count for that key — or
+  **1** when an edge has none, because NULL-filling that edge is exactly
+  ONE combination (a NULL is not a key member, ADR 0031, so it neither
+  drops the key nor multiplies what it can represent — fix wave E2's
+  correction: a candidate-less nullable edge used to disable capping for
+  the WHOLE combination instead of contributing a factor of 1, which let
+  a 2-row cell table emit PK-duplicate rows with `shortfall == 0`, no
+  warning). The fan-out is CAPPED at that capacity (`min(k, capacity)`)
+  if, and only if, `plan.exact_cells`; a capped key's shortfall
+  (`requested - emitted`) is reported once per worker process **per
+  driven table** (fix wave E3 — keyed on the landing table, so a
+  single-job relational run's later driven tables are no longer
+  invisible) as `fanout_rows_capped`. An INEXACT PK never caps — an
+  unbounded member completes it, so capping would drop rows the PK can
+  legitimately represent — and its candidate digits wrap (`i % capacity`
+  over the candidate radices alone) while its cells keep drawing
+  independently from their measured weights, untouched by the wrap.
 - **NULL policy (ruling B, 2026-09-11; both schemas since fix wave A4)**
   — a key with no candidate: when every `rest(X)` column is NULLABLE in
   BOTH the landing schema AND the generation schema, the engine writes
@@ -248,7 +262,7 @@ sequenceDiagram
   G->>G: k = 5 requested; n_cells = 1 (trivial); capacity = 1 x 3 = 3
   G->>G: order = shuffle([r3,r9,r1]) = [r9,r3,r1]
   G-->>G: rows get R = r9, r3, r1 — CAPPED at 3, not wrapped to 5
-  G-->>G: fanout_rows_capped requested=5 emitted=3 capacity=3 (once/worker)
+  G-->>G: fanout_rows_capped requested=5 emitted=3 capacity=3 (once/worker/table)
 ```
 
 ## 5. The independent path — nothing new, one wall removed
@@ -270,8 +284,7 @@ side-input path is disjoint by construction.
 factor per key, not two:
 
 - a **conditional** edge whose `rest` sits in the PK contributes at most
-  the RAW `--fk_candidate_cap` (P4 reads the flag, not §4's effective
-  cap — the stop/pass verdict is identical either way):
+  `--fk_candidate_cap` (the operator's flag, used as-is — §4):
   `max_k ≤ n_cells × Π (--fk_candidate_cap)` — one factor per conditional
   edge in the PK — or the launch stops naming the edge or the flag. This
   factor is an UPPER bound, not a promise: `joint_key_draw` (§4) caps a
@@ -305,11 +318,14 @@ per key per conditional edge, `n` conditional edges — never exceeds
 100k. The per-request VALUE count is `keys_per_batch × M × Σ|rest|`
 (summed over the conditional edges' `rest` column counts), which
 exceeds the tuple ceiling whenever a conditional edge's `rest` spans
-more than one column. `M` here is the *effective* cap,
-`effective_candidate_cap(flag, fanout) = max(1, min(flag, measured max
-fan-out))` (fix wave A3, logged as `fk_candidate_cap_effective`) — not
-the raw `--fk_candidate_cap` operator ceiling, which §6's P4 check still
-reads.
+more than one column. `M` here is `--fk_candidate_cap`, the operator's
+flag, used VERBATIM (fix wave F1 reverted an A3 attempt to clamp it to
+the measured max fan-out: `M` sizes the Top-M SAMPLE per shared JOIN
+VALUE, reused by every driving key carrying that value, not a per-key
+allotment, so clamping it collapsed a 1:1 driving edge's shared value to
+one candidate — a point mass, most of the co-parent's rows never
+referenced, on the default flag). The payload-size concern A3 was
+reaching for is already served by `keys_per_batch` above.
 
 Hot shared keys: the parent side is capped at M by the combine, the
 driving side is an iterable the runner streams. Both joins are keyed on
@@ -322,11 +338,11 @@ parent.
 |---|---|---|
 | `fk_edge_role … role=independent\|conditional overlap=` | launcher, per edge | the role and, for conditional, the shared columns |
 | `fk_driving_edge_defaulted table= edge=` (WARNING) | launcher | rule 4 chose; mark `drives: true` to choose yourself |
-| `fk_candidate_cap_effective table= flag= effective= max_k=` | launcher, once per driven table | fix wave A3: the value actually used (`min(flag, max_k)`), not the raw flag |
-| `fk_nullable_schema_mismatch table= edge= landing= generation=` (WARNING) | launcher, once per conditional edge | fix wave A4: landing and generation schemas disagree on this edge's `rest` nullability — treated as NON-nullable |
+| `fk_edge_overlap_external table= edge= other= overlap= note=` (WARNING) | launcher, once per overlapping PAIR with an external end | fix wave F3: `edge=` is always the external one, `other=` what it clashes with — driving∩external, external∩external or external∩any non-driving edge; the last write wins, so `other`'s tuple may not exist in its own parent |
+| `fk_nullable_schema_mismatch table= edge= landing= generation= reason= pk=` (WARNING) | launcher, once per conditional edge | fix waves A4 + F2: `reason=` is `generation_pk`, `schema_mode_mismatch`, or both — landing/generation schemas disagree on this edge's `rest` nullability, and/or a `rest` column (named in `pk=`) sits in the generation schema's declared PK, which rejects NULL regardless of mode |
 | `relational_fk_edge mode=side_input\|conditional overlap=` | worker, per edge | the DAG path each edge took |
-| `fanout_bound … conditional=<n> candidate_cap=` | worker, once | the engine's plan (`candidate_cap` is the EFFECTIVE value) |
-| `fanout_rows_capped requested= emitted= capacity=` (WARNING) | worker, once per process | fix wave A1: a key's cells+candidates could not represent its full fan-out, so `emitted < requested` |
+| `fanout_bound … conditional=<n> candidate_cap=` | worker, once | the engine's plan (`candidate_cap` is `--fk_candidate_cap` verbatim — fix wave F1) |
+| `fanout_rows_capped requested= emitted= capacity=` (WARNING) | worker, once per process PER DRIVEN TABLE | fix waves A1/E2/E3: a key's bounded dimensions (cells when `exact_cells`, times each conditional edge's candidate count or 1) could not represent its full fan-out, so `emitted < requested`; keyed on the landing table so every driven table of a single-job run reports its own capping |
 | `fanout/candidates_dropped_null`, `fanout/keys_unmatched` | counters | parent rows with a NULL shared key; keys with no candidate (non-nullable) |
 | `fk.unmatched` | DLQ rule | one envelope per dropped key, weighted by its expected rows |
 
@@ -336,11 +352,19 @@ edges with the role in the label.
 
 ## 9. Out of scope, named
 
-- **External parent with a column overlap** — the driver-side pool is
+- **Any external edge sharing a written column with another edge** —
+  not just the original driving∩external case (the driver-side pool is
   drawn as a whole tuple and the driving edge overwrites the shared
-  columns (B.2's existing rule). Logged once as
-  `fk_edge_overlap_external` (WARNING); resolving it needs the parent in
-  the launch. Enable the parent.
+  columns): fix wave F3 extended coverage to external∩external and
+  external∩any non-driving edge too, since the cross-edge ownership stop
+  (final review, ADR 0037 Consequences) cannot apply any of its remedies
+  to an external edge. Every such
+  pair logs one `fk_edge_overlap_external table= edge= other= overlap=
+  note=` WARNING (`edge=` always the external one) instead of stopping
+  the launch. The risk is named plainly, not resolved: the last edge
+  written keeps the shared column, so the OTHER edge's tuple may not
+  exist in its own parent — unchanged from before ADR 0037, now visible
+  instead of silent. Bring the parent into the launch to resolve it.
 - **Weighted conditional draws** — candidates are uniform within the
   match set. ADR 0031's IPF weighting stays on the independent path.
 - **Correlation between branches** — a diamond's `L` and `R` are drawn
@@ -349,8 +373,8 @@ edges with the role in the label.
 
 ## 10. Acceptance
 
-DirectRunner, fake client, whole-tuple checks — seven tests in
-`packages/sdfb-tests/tests/unit/test_fanout_shapes.py` (7 passed):
+DirectRunner, fake client, whole-tuple checks — eight tests in
+`packages/sdfb-tests/tests/unit/test_fanout_shapes.py` (8 passed):
 
 - **star**: `dim_a`, `dim_b`, `fact` — every `fact` row's `A_ID` in
   `dim_a`, `B_ID` in `dim_b`; PK unique; row count within the histogram.
@@ -362,6 +386,12 @@ DirectRunner, fake client, whole-tuple checks — seven tests in
   conditional edge covering the rest — the cells and candidates jointly
   offer 2×2=4 combinations, so all 3 land, pairwise distinct, in the
   exact regime that used to raise inside `CellTable.draw(exact=True)`.
+- **inexact cells keep their skewed marginal** (fix wave E1,
+  `test_inexact_cells_keep_their_skewed_marginal`): an UNBOUNDED PK
+  member (a synthesized `SEQ_ID`) plus a conditional edge together — the
+  cell column is drawn WITH replacement from its 9:1 source weights,
+  landing > 0.75 on the heavy cell (a permutation prefix lands exactly
+  0.5) with at least one key repeating a cell across its children.
 - **existence filter**: `(K)->P` driving, `(K)->Q` conditional with
   empty rest: every landed `K` is in `Q`; the keys not in `Q` reach the
   DLQ as `fk.unmatched` with the expected-row weight.

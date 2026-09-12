@@ -188,9 +188,9 @@ Extract, with one `grep`/`python` pass over `msg` (entries are single-line
 | `relationships_loaded` / `relationship_model … sha=` | `sha` | must equal `contract.json.sha`. **Mismatch = the launch used a different model file than `MODEL_FILE`; report it and continue, but label every verdict "against a different contract"** |
 | `fk_edge_role edge= role= overlap=` | per edge | must match `contract.json` roles AND `overlap` (ADR 0037) |
 | `fk_driving_edge_defaulted table= edge= hint=` (WARNING) | per table | rule 4 fired — expect it on every table whose `driving_choice` is `first_declared`, and ONLY those. Present without a matching `first_declared`, or absent with one, means the launch read a different model |
-| `fk_edge_overlap_external table= edge= overlap=` (WARNING) | per edge | an external parent's edge overlaps the driving edge — integrity on that edge is NOT resolved; Step 5 records it `unverifiable-by-design`, never a PASS |
+| `fk_edge_overlap_external table= edge= other= overlap= note=` (WARNING) | per overlapping PAIR with an external end | fix wave F3: `edge=` is always the external one, `other=` what it clashes with — driving∩external, external∩external, or external∩any non-driving edge, all three legitimate (the cross-edge ownership stop never applies to an external edge). Integrity on that pair is NOT resolved; Step 5 records it `unverifiable-by-design`, never a PASS |
 | `relational_fk_edge … mode=fanout\|implied\|side_input\|conditional overlap=` (worker) | one line per edge, INCLUDING the driving one (`mode=fanout`) | the DAG path EVERY edge actually took this run; `overlap=` names the shared columns and appears only on `conditional` edges. `side_input` legitimately covers THREE roles: `independent`, the pre-ADR-0037 default for legacy metadata, and `external` (its parent is outside the launch, so it carries no `mode` key at all and the worker falls back to `side_input` by design — not a defect). Compare each line's `mode=` with the launcher's `fk_edge_role role=` for that edge — a disagreement OTHER than one of those three legitimate `side_input` pairings (e.g. a `conditional` role logged as `mode=side_input`, or `role=driving` without `mode=fanout`) is a wiring finding (ADR 0037) |
-| `fanout_bound … conditional= candidate_cap=` (worker) | per driven table | how many conditional edges rode with the keys and the EFFECTIVE `--fk_candidate_cap` in force (fix wave A3 — `min(flag, measured max fan-out)`, not the raw flag; cross-check against the launcher's `fk_candidate_cap_effective effective=`) |
+| `fanout_bound … conditional= candidate_cap=` (worker) | per driven table | how many conditional edges rode with the keys and `--fk_candidate_cap` VERBATIM (fix wave F1 reverted an A3 attempt to clamp this to the measured max fan-out — there is no separate "effective" value any more) |
 | `batch_unmatched batch_id= keys_dropped=` (worker) | per batch | driving keys dropped before generation for a non-nullable conditional edge — sum them and compare with `fanout / keys_unmatched` and `fk.unmatched` |
 | `fk_edge_widened table= ref= via= added=` | the derived widening | must match `contract.json.widenings` |
 | `fk_fanout_measured edge= parents= children= mean= p50= p95= max= zero_share=` | the SOURCE fan-out | Step 5 compares the landed fan-out to it |
@@ -337,11 +337,17 @@ Compare `mean`, `p95`, `max`, `zero_share` with the launch's
 relative) is a finding, and a `max` above the source's `max` is impossible
 by construction and therefore a generator regression. A landed `mean` or
 `max` BELOW the measured value is not automatically a finding, though —
-check the worker log for `fanout_rows_capped requested= emitted=
-capacity=` (fix wave A1) first: a key whose PK-completing cells and
-conditional candidates jointly offer fewer combinations than its source
-fan-out is deliberately capped, not a regression. Present with no
-`fanout_rows_capped` line, a shortfall IS a finding.
+check the worker log, SCOPED TO THIS TABLE, for
+`fanout_rows_capped requested= emitted= capacity=` (fix waves A1/E2/E3 —
+logged once per worker process PER driven table, so check the table
+under review specifically, not just whether the milestone fired
+anywhere in the log) first: a key whose bounded dimensions (its cell
+count only when the PK's completing members are exact, times each
+conditional edge's actual candidate count or 1 when it has none) offer
+fewer combinations than its source fan-out is deliberately capped, not a
+regression — this never fires for an inexact PK, which wraps instead and
+never caps. Present with no `fanout_rows_capped` line for this table, a
+shortfall IS a finding.
 
 Documented / disabled edges: list them under "declared, not enforced" with
 no verdict. If both columns sets exist in the landed DDLs you MAY run the

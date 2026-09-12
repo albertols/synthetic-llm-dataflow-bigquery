@@ -173,9 +173,9 @@ The card names the role on every edge, so `card.py` is the check:
    list or add `drives: true` to choose a different one. The edge chosen
    is the same either way; only the label and the WARNING changed.
 5. More than one `drives: true` on one table → `RelationshipError`.
-6. Two **non-driving** edges writing the same child column →
+6. Two **non-driving, IN-MODEL** edges writing the same child column →
    `RelationshipError`. See "Two non-driving edges cannot write the same
-   column" below.
+   column" below. (An `external` edge is exempt — see that section.)
 
 `drives: true` is always the override; toggling `enabled` is still
 enough to launch.
@@ -195,22 +195,35 @@ applied in plan order and `conditional` edges are not gated by
 now raises on the first such pair:
 
 ```text
-child: edges (X,Y)->pa [independent] and (X,Z)->pb [independent] both write (X) — one child column cannot be owned by two edges: the second draw overwrites the first, landing a tuple its parent never held. Make one edge's columns a SUBSET of the other's so it is implied, mark the edge this table is generated from `drives: true`, or disable one parent (`enabled: false`).
+child: edges (X,Y)->pa [independent] and (X,Z)->pb [independent] both write (X) — one child column cannot be owned by two edges: the second draw overwrites the first, landing a tuple its parent never held. Make one edge's columns a SUBSET of the other's so it is implied, mark the edge this table is generated from `drives: true`, document one edge (`enforced: false`, so no keys are drawn from it), or disable one parent (`enabled: false`).
 ```
 
-Three ways out, matching the message:
+Four ways out, matching the message:
 
 1. Make one edge's columns a **subset** of the other's, so the registry
    resolves it as `implied` instead of a second independent write.
 2. Mark the edge this table is actually generated from `drives: true`.
-3. **Disable** one of the two parents (`enabled: false`).
+3. **Document** one edge (`enforced: false`) — a documented edge is
+   drawn in the card and never draws keys, so it stops competing for the
+   column.
+4. **Disable** one of the two parents (`enabled: false`).
 
 The DRIVING edge itself is deliberately outside this check — `implied` /
 `independent` / `conditional` are disjoint from it by construction (the
-role IS the overlap test with the driving edge). An `external` edge that
-overlaps the DRIVING edge stays the pre-existing, un-stopped
-`fk_edge_overlap_external` WARNING (design 2026-09-11 §9) — not this
-stop.
+role IS the overlap test with the driving edge). **Every `external`
+edge is exempt too** (fix wave F3): none of the four remedies apply to
+one — an external edge never becomes `implied` (its role is assigned
+before any subset analysis), `drives: true` is inert for it, and an
+external parent has no `tables:` entry to disable or document. Stopping
+there refused the classic denormalised child (every parent external, on
+one ancestry line) that the identical shape with in-model parents ships
+today as `implied`. Every pair with an external end — driving∩external,
+external∩external, or external∩any non-driving edge — instead logs one
+`fk_edge_overlap_external table= edge= other= overlap= note=` WARNING
+(`edge=` always the external one): the last edge written keeps the
+shared column, so `other`'s tuple may not exist in its own parent — a
+real risk, unchanged from before ADR 0037, now visible instead of
+silent. Bring the parent inside the launch to resolve it.
 
 **Out of scope for now:** resolving the clash automatically instead of
 stopping the launch, via a candidate/pool-level join on the columns the
@@ -223,21 +236,25 @@ Not implemented; recorded as future work in
 
 A conditional edge keeps at most `M = --fk_candidate_cap` candidate
 tuples per shared value (a deterministic hash-ordered sample), so a hot
-shared key never carries an unbounded list into a request. `M` is the
-OPERATOR ceiling; the value actually used is the EFFECTIVE cap,
-`min(--fk_candidate_cap, measured max fan-out)`, logged once per driven
-table as `fk_candidate_cap_effective`.
+shared key never carries an unbounded list into a request. `M` is used
+VERBATIM — the operator's flag, not clamped to anything measured (fix
+wave F1 reverted an attempt to clamp it to the measured max fan-out:
+`M` sizes a SAMPLE shared by every driving key on that join value, not a
+per-key allotment, so clamping it collapsed a 1:1 driving edge's shared
+value to one candidate — a point mass, on the default flag).
 
 A key whose fan-out exceeds the candidates it was handed is CAPPED at
-the joint cells × candidates capacity, not wrapped, whenever the PK's
-completing members are exact and the edge has at least one candidate
-for that key — the common case; the shortfall is reported once per
-worker as `fanout_rows_capped`. Wrapping (reusing candidates in a seeded
-order) survives only for an inexact PK or a nullable edge with zero
-candidates for that key. Raising the cap only buys back the
-capping/wrapping the cap itself caused: a shared value the parent simply
-has too few distinct candidates for is capped or wrapped the same way at
-any cap. See the figure in
+the joint capacity — the cell count ONLY when the PK's completing
+members are exact, times each conditional edge's actual candidate count
+for that key, or **1** when it has none (a NULL fill is one
+combination) — if, and only if, the PK's completing members are exact;
+the shortfall is reported once per worker process **per driven table**
+as `fanout_rows_capped`. An INEXACT PK never caps: its candidate digits
+wrap instead (reusing candidates in a seeded order) while its cells keep
+drawing independently from their measured weights. Raising the cap only
+buys back the capping/wrapping the cap itself caused: a shared value the
+parent simply has too few distinct candidates for is capped or wrapped
+the same way at any cap. See the figure in
 [ADR 0037](../../docs/adr/0037-multi-parent-children.md) (D4).
 
 #### When the parent has no candidate for a key (ruling B)
@@ -247,11 +264,17 @@ parent at all:
 
 - **every `rest` column NULLABLE** in BOTH the landing schema AND the
   generation schema (fix wave A4 — landing alone let a REQUIRED
-  generation column reject the row silently) → the engine writes `NULL`
-  there. The row lands, legitimately parentless (the orphan query
-  excludes NULL tuples, as it always has). A disagreement between the
-  two schemas is treated as NON-nullable and logged once per edge as
-  `fk_nullable_schema_mismatch` (WARNING).
+  generation column reject the row silently) **AND absent from the
+  generation schema's declared PRIMARY KEY** (fix wave F2 — the record
+  model rejects a NULL on a declared PK column whatever its mode says;
+  on ADR 0037's own diamond the child PK's last member IS the
+  co-parent's column, so this is the default shape, not a corner) → the
+  engine writes `NULL` there. The row lands, legitimately parentless
+  (the orphan query excludes NULL tuples, as it always has). Either
+  failure is treated as NON-nullable and logged once per edge as
+  `fk_nullable_schema_mismatch … reason= pk=` (WARNING) — `reason=` is
+  `generation_pk`, `schema_mode_mismatch`, or both, and `pk=` names the
+  offending `rest` columns.
 - **otherwise** → the key is dropped **before** generation (no GPU spend
   on a row that cannot be valid), counted as `fanout/keys_unmatched`,
   and reported as one DLQ envelope per key, `rule_id="fk.unmatched"`,

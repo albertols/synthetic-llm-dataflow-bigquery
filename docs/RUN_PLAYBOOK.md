@@ -606,15 +606,14 @@ Relational:
 | `fk_edge_widened table= ref= via= added=` (launcher) | the registry widened a parent's edge with inherited columns pinned by a child that references the same columns in both tables — no model edit needed (ADR 0036 rev) |
 | `fk_edge_role edge= role=driving\|implied\|independent\|conditional\|external overlap=` (launcher + worker preflight) | the role of EVERY enforced edge: which edge a child is generated FROM (`driving`), which are satisfied by construction (`implied`), which ride the side-input key pool (`independent` — a star-schema dimension, no column shared with the driving edge), which are joined on their shared columns (`conditional` — `overlap=` names them), and which point outside the launch (`external`). ADR 0036/0037 |
 | `fk_driving_edge_defaulted table= edge= hint='mark drives: true to choose'` (launcher, **WARNING**) | the child has several enforced parents, none marked `drives: true` and no ancestry between them, so the FIRST DECLARED edge drives (ADR 0037 ruling A). The launch is correct either way — mark the edge you meant, or reorder the `fk:` list, if it is not this one |
-| `fk_edge_overlap_external table= edge= overlap=` (launcher, **WARNING**) | an EXTERNAL parent's edge shares columns with the driving edge. The driver-side pool is drawn as a whole tuple and the driving edge overwrites the shared columns — integrity on that edge is NOT resolved. Enable the parent inside the launch to make it `conditional` (ADR 0037 §9) |
-| `fk_candidate_cap_effective table= flag= effective= max_k=` (launcher, once per driven table) | fix wave A3: `effective = min(flag, max_k)` — the value the composer's Top-M combine and every request payload actually use. Preflight P4 still checks against the RAW `flag`, never this value |
-| `fk_nullable_schema_mismatch table= edge= landing= generation=` (launcher, **WARNING**, once per conditional edge) | fix wave A4: the landing schema and the generation schema disagree on this edge's `rest` nullability (comma-joined per-column modes) — treated as NON-nullable, so an unmatched key diverts as `fk.unmatched` instead of NULL-filling a row the record model would silently reject |
+| `fk_edge_overlap_external table= edge= other= overlap= note=` (launcher, **WARNING**) | fix wave F3: one line per overlapping PAIR with an EXTERNAL end — driving∩external, external∩external, or external∩any non-driving edge (`edge=` is always the external one, `other=` what it clashes with). The launch does NOT stop: the last edge written keeps the shared column, so `other`'s tuple may not exist in its own parent — bring the parent into the launch to resolve it |
+| `fk_nullable_schema_mismatch table= edge= landing= generation= reason= pk=` (launcher, **WARNING**, once per conditional edge) | fix waves A4 + F2: `reason=` is `generation_pk`, `schema_mode_mismatch`, or both comma-joined — the landing/generation schemas disagree on this edge's `rest` nullability (comma-joined per-column modes), and/or a `rest` column named in `pk=` sits in the generation schema's declared PRIMARY KEY, which rejects a NULL regardless of mode. Either way the edge is treated as NON-nullable, so an unmatched key diverts as `fk.unmatched` instead of NULL-filling a row the record model would silently reject |
 | `relational_fk_edge … mode=fanout\|implied\|side_input\|conditional overlap=` (worker, per edge) | the DAG path EVERY edge actually took this run — one line per edge, including the driving one (`mode=fanout`) and an `implied` one. `side_input` = the ADR 0031 key pool: an `independent` edge, the pre-ADR-0037 default for legacy metadata, OR an `external` edge — its parent is outside the launch, so `fk_edge_metadata` gives it no `mode` key at all and the worker falls back to `side_input` by design, not a defect. `conditional` = the co-partitioned join, with `overlap=` naming the shared columns. Compare each line's `mode=` with the launcher's `fk_edge_role role=` for that edge: `role=independent`, legacy metadata, and `role=external` all legitimately show `mode=side_input`; any OTHER role/mode pairing (e.g. `role=driving` without `mode=fanout`) is a wiring defect (ADR 0037) |
 | `fk_fanout_cache_unavailable table= op= error=` (launcher, WARNING) | the optional `fk_fanout_stats` cache could not be read/written (missing table, permission, transient) — the launch measured without it (ADR 0036) |
 | `fk_fanout_measured edge= parents= children= mean= p50= p95= max= zero_share= source=measured\|cache` (launcher) | the SOURCE ratio the driven child reproduces; `cache` = read from `fk_fanout_stats` instead of re-scanning |
 | `relational_single_job … rows_detail=<name>:<rows>,…` (launcher) | derived row count per table — roots take `--num_rows`, driven children derive from their parent's landed keys and the measured fan-out |
-| `fanout_bound driving_cols= cells= exact_cells= mean_fanout= conditional= candidate_cap=` (worker, once per engine build) | the engine bound the driven child's recipe; `exact_cells=True` = the PK-completing cells alone must key the child (drawn without replacement); `conditional=<n>` = how many conditional edges ride with the keys and `candidate_cap=` the EFFECTIVE Top-M bound in force (fix wave A3 — `min(--fk_candidate_cap, max_k)`, not the raw flag; see `fk_candidate_cap_effective`) |
-| `fanout_rows_capped requested= emitted= capacity=` (worker, **WARNING**, once per worker process) | fix wave A1: a key's cells + conditional candidates together offer fewer distinct combinations (`capacity`) than its measured fan-out (`requested`), so `joint_key_draw` capped it at `emitted = capacity` instead of dropping rows the PK cannot represent — the missing children are gone, not wrapped. Applies only when the PK's completing members are exact AND every conditional edge had a candidate for that key; an inexact PK or a nullable edge with zero candidates wraps instead. Raise `--fk_candidate_cap` or fix the `pk:` |
+| `fanout_bound driving_cols= cells= exact_cells= mean_fanout= conditional= candidate_cap=` (worker, once per engine build) | the engine bound the driven child's recipe; `exact_cells=True` = the PK-completing cells alone must key the child (drawn without replacement, a weighted permutation) — `False` = an unbounded PK member keys it instead, cells follow their measured weights WITH replacement and are NOT part of the joint walk; `conditional=<n>` = how many conditional edges ride with the keys and `candidate_cap=` is `--fk_candidate_cap` VERBATIM (fix wave F1 reverted an A3 clamp to the measured max fan-out) |
+| `fanout_rows_capped requested= emitted= capacity=` (worker, **WARNING**, once per worker process PER DRIVEN TABLE) | fix waves A1/E2/E3: `capacity` is the product of the dimensions that genuinely bound the combination — the cell count ONLY when `exact_cells`, times each conditional edge's actual candidate count for that key, or 1 when it has none (a NULL fill is one combination). Capping applies IF AND ONLY IF `exact_cells`; an inexact PK never caps, and its candidate digits wrap instead while its cells keep drawing independently from their weights. The guard is keyed on the landing table (`table=` comes from the ambient milestone scope), so every driven table of a single-job relational run reports its own capping — not just the first one to cap. Raise `--fk_candidate_cap` or fix the `pk:` |
 | `batch_unmatched batch_id= keys_dropped=` (worker) | driving keys removed from a batch BEFORE generation because a NON-nullable conditional edge had no candidate for them (ADR 0037 ruling B) — each one is also a `fk.unmatched` DLQ envelope |
 | `fanout / candidates_dropped_null` (Beam counter) | conditional-parent rows discarded because a SHARED (join-key) column was NULL. Non-zero means the parent landed NULLs in the columns the join keys on — expect 0 on a PK-declared parent |
 | `fanout / keys_unmatched` (Beam counter) | driving keys dropped for a non-nullable conditional edge with no candidate. Read it next to `fk.unmatched` in `dlq_by_rule`: the counter counts KEYS, the rule counts their expected ROWS |
@@ -893,26 +892,35 @@ declared** enforced edge drives and the launcher logs
 `fk_driving_edge_defaulted table= edge= hint=` at WARNING. That WARNING
 is not a failure: the launch is correct either way, and the fix if it
 picked the wrong parent is one `drives: true` in the model file (two
-markers on one table is still the one `RelationshipError` left). An
-EXTERNAL parent whose edge overlaps the driving edge cannot be resolved
-at all — `fk_edge_overlap_external` (WARNING); enable the parent inside
-the launch to turn it into a `conditional` edge.
+markers on one table is still the one `RelationshipError` left). Every
+overlapping pair with an EXTERNAL end — driving∩external,
+external∩external, or external∩any non-driving edge — cannot be
+resolved by any model edit (fix wave F3: an external edge never becomes
+`implied`, `drives: true` is inert for it, and it has no `tables:` entry
+to disable or document), so none of them stop the launch: each logs
+`fk_edge_overlap_external table= edge= other= overlap= note=` (WARNING,
+`edge=` always the external one) instead. The last edge written keeps
+the shared column, so `other`'s tuple may not exist in its own parent —
+bring the parent inside the launch to resolve it.
 
-`--fk_candidate_cap` (default `64`) is the OPERATOR ceiling on the
-candidate list a conditional edge carries per shared value (Top-M by a
-deterministic `blake2b(run_id, rest)` order); the EFFECTIVE cap actually
-used to size the composer's Top-M combine and every request payload is
-`effective_candidate_cap(flag, fanout) = max(1, min(flag, measured max
-fan-out))` (fix wave A3), logged once per driven table as
-`fk_candidate_cap_effective table= flag= effective= max_k=`. A key whose
-fan-out exceeds its candidate list is CAPPED at the joint capacity
-(cells × candidates), not wrapped, whenever the PK's completing members
-are exact and the edge has at least one candidate for that key — the
-common case; wrapping survives only for an inexact PK or a nullable edge
-with zero candidates for that key (fix wave A1, `joint_key_draw`; ADR
-0037 D3). A capped key's shortfall is reported once per worker process
-as `fanout_rows_capped requested= emitted= capacity=` (WARNING) — raise
-the cap when a branch's within-key variety matters and the shuffle can
+`--fk_candidate_cap` (default `64`) is `M`, the operator's flag, used
+VERBATIM: the composer's Top-M combine and every request payload carry
+it unclamped (fix wave F1 reverted an A3 attempt to clamp it to the
+measured max fan-out — `M` sizes the candidate SAMPLE per shared JOIN
+VALUE, reused by every driving key carrying that value, not a per-key
+allotment, so clamping it collapsed a 1:1 driving edge's shared value to
+one candidate, a point mass, on the default flag). A key whose fan-out
+exceeds its candidate list is CAPPED at the joint capacity — the cell
+count ONLY when the PK's completing members are exact, times each
+conditional edge's actual candidate count for that key, or **1** when it
+has none (a NULL fill is one combination, fix wave E2) — if, and only
+if, the PK's completing members are exact; an INEXACT PK never caps, and
+its candidate digits wrap instead while its cells keep drawing
+independently from their measured weights (fix wave E1, `joint_key_draw`;
+ADR 0037 D3). A capped key's shortfall is reported once per worker
+process **per driven table** (fix wave E3) as
+`fanout_rows_capped requested= emitted= capacity=` (WARNING) — raise the
+cap when a branch's within-key variety matters and the shuffle can
 afford it, lower it when a request gets too wide. `keys_per_batch` is
 lowered at launch so candidate TUPLES per request (`keys_per_batch × cap
 ×` number of conditional edges) never exceed 100k — that bounds tuples,
@@ -926,32 +934,37 @@ candidate-list split that feeds it.
 
 Preflight P4 folds ONE new member into the per-key PK capacity, not two
 (fix wave A2 corrected this): a conditional edge's `rest` in the PK
-contributes at most the RAW `--fk_candidate_cap` (P4 reads the flag, not
-the effective cap — same stop/pass verdict either way) — a stop there
-names the edge or the flag. An INDEPENDENT edge in the PK contributes
-NOTHING: its pool is drawn per ROW WITH REPLACEMENT, so two children of
-one parent key can draw the same parent tuple, and counting its pool cap
-here used to declare PKs safe that the engine then duplicated. The
-conditional factor itself is an UPPER bound — a model whose co-parent is
-thin still passes P4 and caps at run time, visibly, via
-`fanout_rows_capped`.
+contributes at most `--fk_candidate_cap` (the operator's flag, used
+as-is) — a stop there names the edge or the flag. An INDEPENDENT edge in
+the PK contributes NOTHING: its pool is drawn per ROW WITH REPLACEMENT,
+so two children of one parent key can draw the same parent tuple, and
+counting its pool cap here used to declare PKs safe that the engine then
+duplicated. The conditional factor itself is an UPPER bound — a model
+whose co-parent is thin still passes P4 and caps at run time, visibly,
+via `fanout_rows_capped`.
 
 **Unmatched conditional keys (`fk.unmatched`).** When the conditional
 parent holds NO row for a driving key's shared value, the engine writes
 `NULL` on the branch columns if every one of them is NULLABLE in BOTH
 the landing schema AND the generation schema (fix wave A4 — landing
 alone let a REQUIRED generation column silently reject the row inside
-`model_validate`, with no envelope, counter or milestone); a
-disagreement between the two schemas is treated as NON-nullable and
-logged once per edge as `fk_nullable_schema_mismatch table= edge=
-landing= generation=` (WARNING). Otherwise the key is dropped before
-generation (`batch_unmatched`, `fanout / keys_unmatched`) and reported
-as `fk.unmatched` in `validation_runs.dlq_by_rule`, weighted by that
-key's expected rows. Expect non-zero only when the SOURCE genuinely
-lacks that branch — it is an input fact, not a generator regression the
-way `fk.orphan` is. The §8.4 orphan query is unchanged for a conditional
-edge: the same whole-tuple LEFT JOIN, and the ruling-B NULL rows are
-excluded from it exactly as every NULL tuple already is.
+`model_validate`, with no envelope, counter or milestone) AND absent
+from the generation schema's declared PRIMARY KEY (fix wave F2 — the
+record model rejects a NULL on a declared PK column whatever its mode
+says; on ADR 0037's own diamond the child PK's last member IS the
+co-parent's column, so this is the default shape, not a corner). Either
+failure is treated as NON-nullable and logged once per edge as
+`fk_nullable_schema_mismatch table= edge= landing= generation= reason=
+pk=` (WARNING; `reason=` is `generation_pk`, `schema_mode_mismatch`, or
+both, and `pk=` names the offending `rest` columns). Otherwise the key
+is dropped before generation (`batch_unmatched`, `fanout /
+keys_unmatched`) and reported as `fk.unmatched` in
+`validation_runs.dlq_by_rule`, weighted by that key's expected rows.
+Expect non-zero only when the SOURCE genuinely lacks that branch — it is
+an input fact, not a generator regression the way `fk.orphan` is. The
+§8.4 orphan query is unchanged for a conditional edge: the same
+whole-tuple LEFT JOIN, and the ruling-B NULL rows are excluded from it
+exactly as every NULL tuple already is.
 
 **The cache table is optional.** If `--fk_fanout_stats_table` names a table that does not exist (or cannot be read or written), the launcher logs `fk_fanout_cache_unavailable` (WARNING) once per table and measures the fan-out from the source instead; nothing else changes.
 

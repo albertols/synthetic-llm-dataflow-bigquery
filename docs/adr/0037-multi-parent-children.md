@@ -108,17 +108,12 @@ cannot collide, review ruling 14). Parent rows whose join key holds a
 NULL are dropped and counted (`fanout/candidates_dropped_null`).
 
 Inside the engine, the cell each child carries and every conditional
-edge's candidate are decided JOINTLY (final review fix wave A1) —
+edge's candidate are decided JOINTLY (final review fix wave A1, cell
+rule corrected by fix wave E1) —
 `sdfb_core.engines.base.conditional_draws` calls
-`sdfb_core.engines.fanout.joint_key_draw` once per key, one walk over the
-CROSS PRODUCT `(n_cells, c_1, …, c_m)`: child `i` takes
-`_mixed_radix(i, (n_cells, c_1, …, c_m))` and indexes a per-key seeded
-permutation of the cell rows (`CellTable.permutation`) and of each
-edge's shuffled candidate list (`derive_key_seed(run_id, key,
-salt=edge_id)`). The cell digit varies FASTEST, so a key within its cell
-table still takes a different weighted cell exactly as ADR 0036 drew
-them, and the candidate digits only start advancing once the cells are
-exhausted. This replaced two INDEPENDENT `i % len` cyclic walks
+`sdfb_core.engines.fanout.joint_key_draw` once per key, one walk over
+the CROSS PRODUCT of the dimensions that genuinely BOUND the
+combination. This replaced two INDEPENDENT `i % len` cyclic walks
 (`conditional_values`, deleted) whose realised combinations were only
 `lcm(n_cells, c_1, …, c_m)` — NOT their product, so e.g. 2 cells × 2
 candidates gave 2 combinations for 4 children, not 4 — and which RAISED
@@ -127,23 +122,47 @@ exceeded an exact cell table, killing the whole batch as
 `engine_failure` instead of drawing from the candidates that make those
 children representable.
 
-The fan-out is CAPPED at the joint capacity `n_cells × c_1 × … × c_m`
-(`min(k, capacity)`) only when `plan.exact_cells` holds (every
-PK-completing member outside the driving edge is a cell or an
-edge-supplied column) AND every conditional edge has at least one
-candidate for that key; a capped key's shortfall is reported once per
-worker process as `fanout_rows_capped`. An INEXACT PK (an unbounded
-member still completes it) or a conditional edge with NO candidate for
-that key (nullable — every one of that key's children NULL-fills
-instead) both WRAP the existing sequence rather than cap it: capping
-either would drop rows the PK can legitimately represent, or shrink a
-key's fan-out on account of a NULL that is not a key member (ADR 0031).
-`apply_conditional_overrides` reads the candidate half of the `KeyDraw`
-and writes it on `rest`'s child columns after the pool draws and before
-the driving/cell overrides. The shared columns always come from the
-driving key, so the diamond's `T` is one value satisfying both parents
-by construction. The join is keyed on narrow tuples, never on rows: no
-new side input grows with the driving parent.
+The cell rule turns on EXACTNESS, not on whether conditional edges are
+present:
+
+- `plan.exact_cells` (every PK-completing member outside the driving
+  edge is a cell or an edge-supplied column) — the cells must KEY the
+  child, so they lead the walk: child `i` takes
+  `_mixed_radix(i, (n_cells, c_1, …, c_m))` and the FIRST digit indexes
+  a per-key seeded weighted PERMUTATION of the cell rows
+  (`CellTable.permutation`), so two children of one key never share a
+  cell. The candidate digits only start advancing once the cells are
+  exhausted.
+- otherwise — an unbounded PK member (pattern, numeric, temporal) keys
+  the child instead, so the cells carry only their measured MARGINAL:
+  each child draws one independently WITH replacement
+  (`CellTable.draw(exact=False)`), and the cell dimension is NOT part of
+  the mixed-radix walk at all. A permutation prefix here handed a 99:1
+  cell table out 50:50 at a fan-out of 2 — silently inverting that
+  column's distribution for the whole table (fix wave E1's finding).
+
+Each conditional edge is shuffled per key either way
+(`derive_key_seed(run_id, key, salt=edge_id)`).
+
+Capacity is the product of the dimensions that are genuinely bounded:
+the cell count ONLY when `exact_cells`, times each conditional edge's
+ACTUAL candidate count for that key — or **1** when an edge has none,
+because NULL-filling that edge is exactly ONE combination (a NULL is not
+a key member, ADR 0031, so it neither drops the key nor multiplies what
+it can represent — fix wave E2). The fan-out is CAPPED at that capacity
+(`min(k, capacity)`) if, and only if, `plan.exact_cells`; a capped key's
+shortfall is reported once per worker process **per driven table**
+(fix wave E3) as `fanout_rows_capped`. An INEXACT PK never caps — an
+unbounded member completes it, so capping would drop rows the PK can
+legitimately represent — and its candidate digits wrap (`i % capacity`
+over the candidate radices alone) while its cells keep drawing
+independently from their measured weights, one per child, untouched by
+the wrap. `apply_conditional_overrides` reads the candidate half of the
+`KeyDraw` and writes it on `rest`'s child columns after the pool draws
+and before the driving/cell overrides. The shared columns always come
+from the driving key, so the diamond's `T` is one value satisfying both
+parents by construction. The join is keyed on narrow tuples, never on
+rows: no new side input grows with the driving parent.
 
 **D4 — `--fk_candidate_cap` (default 64) is the Top-M bound, and it is
 a flag because the source's tail decides.**
@@ -155,38 +174,38 @@ Formally, the PARENT-side candidate LIST for a shared value holds
 `min(c, M)` entries, where `c` is the distinct candidates the
 conditional parent holds for that value (concept figure, seeded; the
 list is built by `_conditional_candidates` in `sdfb_beam/pipeline.py`).
-What the ENGINE does with a fan-out `k` beyond that list is D3's capping
-rule, not a blanket wrap: with an exact PK and a non-empty list (the
-common case) it CAPS at the joint capacity (`joint_key_draw`,
-`sdfb_core/engines/fanout.py`) and reports the shortfall as
-`fanout_rows_capped`; wrapping survives only for an inexact PK or a
-nullable edge with zero candidates for that key. Within the list itself
-the wrapping attributable to `M` is confined to `c ≥ k > M` — the orange
-wedge — while `k > c` is forced by the source and identical at every
-cap. 64 is the default because it leaves the overwhelming majority of
-shared values with a full, uncapped list while keeping a request's
-candidate list bounded; raise it when a branch's within-key variety
-matters more than the shuffle, lower it when a request gets too wide.
+`M` sizes this SAMPLE — one per shared JOIN VALUE, reused by every
+driving key that carries it, not a per-key allotment. What the ENGINE
+does with a fan-out `k` beyond the list it receives is D3's capping
+rule: with `plan.exact_cells` it CAPS at the joint capacity
+(`joint_key_draw`, `sdfb_core/engines/fanout.py`) — including a
+candidate-less nullable edge, which contributes a capacity factor of 1
+rather than disabling capping (fix wave E2) — and reports the shortfall
+as `fanout_rows_capped`; an INEXACT PK never caps, and its candidate
+digits wrap instead. Within the list itself the wrapping attributable to
+`M` is confined to `c ≥ k > M` — the orange wedge — while `k > c` is
+forced by the source and identical at every cap. 64 is the default
+because it leaves the overwhelming majority of shared values with a
+full, uncapped list while keeping a request's candidate list bounded;
+raise it when a branch's within-key variety matters more than the
+shuffle, lower it when a request gets too wide.
 
-`--fk_candidate_cap` is the operator-set ceiling on `M`; the value
-actually used to size the composer's Top-M combine and every request
-payload is the EFFECTIVE cap, `effective_candidate_cap(flag, fanout) =
-max(1, min(flag, measured max fan-out))` (`sdfb_beam/cli/run_pipeline.py`,
-fix wave A3), logged once per driven table as
-`fk_candidate_cap_effective table= flag= effective= max_k=`. No parent
-key takes more candidates than its largest measured fan-out, so a flag
-above `max_k` only makes the combine carry, and every request payload
-ship, candidates nothing can draw. Preflight P4 (D6) still reads the RAW
-flag, not the effective cap — the two give the identical stop/pass
-verdict, since a factor of `min(flag, max_k)` is `≥ max_k` exactly when
-`flag ≥ max_k`. What `keys_per_batch` (`in_set_parent_edges` in
-`run_pipeline.py`) actually bounds is candidate TUPLES per request: with
-`n` conditional edges it is lowered so `keys_per_batch × M × n` never
-exceeds 100k. That is not the same as the per-request VALUE count —
-each tuple carries `|rest|` columns, so the true value count is
-`keys_per_batch × M × Σ|rest|` (summed over the conditional edges), which
-exceeds the 100k tuple ceiling whenever any conditional edge's `rest`
-spans more than one column.
+`--fk_candidate_cap` is `M` — the operator's flag, used VERBATIM: the
+composer's Top-M combine and every request payload carry it unclamped
+(fix wave F1 reverted an A3 attempt to clamp it to the measured max
+fan-out — that clamp collapsed a 1:1 driving edge's shared value to
+`Top.SmallestPerKey` keeping exactly ONE of the co-parent's rows, so
+EVERY driving key sharing that value landed the identical candidate: a
+point mass with nine of ten parent rows never referenced, on the
+default flag). The payload-size concern A3 was reaching for is already
+served by `keys_per_batch` (`in_set_parent_edges` in `run_pipeline.py`):
+with `n` conditional edges present it is lowered so a request never
+carries more than `keys_per_batch × M × n ≈ 100_000` candidate TUPLES
+(`100_000 // (M × n)`, floored at 1) — that is not the same as the
+per-request VALUE count, since each tuple carries `|rest|` columns, so
+the true value count is `keys_per_batch × M × Σ|rest|` (summed over the
+conditional edges), which exceeds the 100k tuple ceiling whenever any
+conditional edge's `rest` spans more than one column.
 
 **D5 — an unmatched conditional key writes NULL when it can, and is
 dropped, counted and reported when it cannot (ruling B).** A driving key
@@ -196,13 +215,21 @@ silent defect:
 - when **every** `rest` column is NULLABLE in BOTH the landing schema
   AND the generation schema (fix wave A4 — landing alone let a REQUIRED
   generation column reject the row inside `model_validate` and vanish
-  silently through the engine's own `except Exception: continue`), the
-  engine writes NULL there — the tuple is then legitimately parentless
-  and the ADR 0031 orphan query excludes it, as it already excludes
-  every NULL tuple. A disagreement between the two schemas is treated as
-  NON-nullable and logged once per edge as `fk_nullable_schema_mismatch
-  table= edge= landing= generation=` (WARNING), naming both schemas'
-  per-column modes;
+  silently through the engine's own `except Exception: continue`) AND
+  **absent from the generation schema's declared `primary_keys`** (fix
+  wave F2 — `derive_record_model`'s `_make_pk_base` rejects `None` on
+  every declared PK column whatever its mode says, BQ allows a NULLABLE
+  PK column, and the engines swallow that same `ValidationError` the
+  same silent way; on ADR 0037's own diamond the child PK's last member
+  IS the co-parent's column, so a rest column in the declared PK is the
+  default shape, not a corner), the engine writes NULL there — the tuple
+  is then legitimately parentless and the ADR 0031 orphan query excludes
+  it, as it already excludes every NULL tuple. Either disagreement is
+  treated as NON-nullable and logged once per edge as
+  `fk_nullable_schema_mismatch table= edge= landing= generation=
+  reason= pk=` (WARNING) — `reason=` is `generation_pk`,
+  `schema_mode_mismatch`, or both comma-joined, and `pk=` names the
+  offending rest columns;
 - otherwise `GenerateRecordsDoFn` removes the key **before** generation
   (no GPU spend on a row that cannot be valid), increments
   `fanout/keys_unmatched`, logs `batch_unmatched batch_id= keys_dropped=`
@@ -221,11 +248,11 @@ that branch, which a report should read as an input fact.
 UPPER bound (fix wave A2 corrected the original design).**
 `_check_driven_pk` (`sdfb_beam/cli/preflight.py`) keeps its shape (exact
 members only, ADR 0035/0036): a **conditional** edge whose `rest` sits
-in the child's PK contributes at most the RAW `--fk_candidate_cap`
-(P4 does not use D4's effective cap — the verdict is identical either
-way), so the check becomes `max_k ≤ n_cells × Π (--fk_candidate_cap)`
-— one factor per conditional edge in the PK — or the launch stops naming
-the edge or the flag. An **independent** edge is deliberately NOT a
+in the child's PK contributes at most `--fk_candidate_cap` (the
+operator's flag, used as-is — D4), so the check becomes
+`max_k ≤ n_cells × Π (--fk_candidate_cap)` — one factor per conditional
+edge in the PK — or the launch stops naming the edge or the flag. An
+**independent** edge is deliberately NOT a
 factor: its pool is drawn per ROW WITH REPLACEMENT (`_draw_fk_columns`),
 so two children of one parent key CAN and DO draw the same parent tuple
 — counting its pool cap here declared PKs safe that the engine then
@@ -244,18 +271,22 @@ PK still skips it and streaming uniqueness measures `pk.duplicate`.
 **D7 — every role and every path is one milestone line.** Launcher:
 `fk_edge_role edge= role= overlap=` per enforced edge (the `overlap=`
 field is new), `fk_driving_edge_defaulted table= edge= hint=` (WARNING)
-when rule 4 fired, `fk_edge_overlap_external table= edge= overlap=`
-(WARNING) for the limitation in Consequences, `fk_candidate_cap_effective
-table= flag= effective= max_k=` once per driven table (D4, fix wave A3),
-and `fk_nullable_schema_mismatch table= edge= landing= generation=`
-(WARNING) once per conditional edge when the two schemas disagree (D5,
-fix wave A4). Worker: `relational_fk_edge mode=side_input|conditional
+when rule 4 fired, `fk_edge_overlap_external table= edge= other=
+overlap= note=` (WARNING) once per overlapping PAIR with at least one
+external end — driving∩external, external∩external, or external∩any
+non-driving edge (fix wave F3; `edge=` is always the external one,
+`other=` the edge it clashes with) — and
+`fk_nullable_schema_mismatch table= edge= landing= generation= reason=
+pk=` (WARNING) once per conditional edge when nullability fails (D5,
+fix waves A4 + F2; `reason=` is `generation_pk`, `schema_mode_mismatch`,
+or both). Worker: `relational_fk_edge mode=side_input|conditional
 overlap=` per edge, `fanout_bound … conditional=<n> candidate_cap=` once
-per engine build (`candidate_cap` here is the EFFECTIVE value from
-`fk_candidate_cap_effective`, not the raw flag), and
-`fanout_rows_capped requested= emitted= capacity=` (WARNING) once per
-worker process the first time `joint_key_draw` caps a key below its
-requested fan-out (D3, fix wave A1). Counters
+per engine build (`candidate_cap` is `--fk_candidate_cap` verbatim — D4),
+and `fanout_rows_capped requested= emitted= capacity=` (WARNING) once
+per worker process **per driven table** (fix wave E3 — a single-job
+relational run with several driven tables used to report only the
+FIRST one to cap) the first time `joint_key_draw` caps a key below its
+requested fan-out (D3, fix wave A1/E2). Counters
 `fanout/candidates_dropped_null` and `fanout/keys_unmatched`; DLQ rule
 `fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
 
@@ -307,28 +338,34 @@ requested fan-out (D3, fix wave A1). Counters
   the parent side, and one `CoGroupByKey` on the driving keys. Per
   request, `keys_per_batch × M × |rest|` values. The independent and
   driving paths are unchanged.
-- **A new launch stop: two NON-driving edges cannot write the same
-  child column.** `edge_roles` gave every non-driving edge a role from
-  its overlap with the DRIVING edge alone and never compared non-driving
-  edges with EACH OTHER, so two of them could claim one column and the
-  last one drawn silently won — two `independent` edges land nearly
-  every row as `fk.orphan` (after the GPU already generated it), and two
-  `conditional` edges whose `rest` overlaps are not gated by `fk.orphan`
-  at all, so those referentially broken rows LAND uncaught.
-  `RelationshipRegistry._check_column_ownership` (final review) now
-  raises `RelationshipError` on the first such pair:
+- **A new launch stop: two NON-driving, IN-MODEL edges cannot write the
+  same child column.** `edge_roles` gave every non-driving edge a role
+  from its overlap with the DRIVING edge alone and never compared
+  non-driving edges with EACH OTHER, so two of them could claim one
+  column and the last one drawn silently won — two `independent` edges
+  land nearly every row as `fk.orphan` (after the GPU already generated
+  it), and two `conditional` edges whose `rest` overlaps are not gated
+  by `fk.orphan` at all, so those referentially broken rows LAND
+  uncaught. `RelationshipRegistry._check_column_ownership` (final
+  review) now raises `RelationshipError` on the first such pair:
 
   ```text
-  child: edges (X,Y)->pa [independent] and (X,Z)->pb [independent] both write (X) — one child column cannot be owned by two edges: the second draw overwrites the first, landing a tuple its parent never held. Make one edge's columns a SUBSET of the other's so it is implied, mark the edge this table is generated from `drives: true`, or disable one parent (`enabled: false`).
+  child: edges (X,Y)->pa [independent] and (X,Z)->pb [independent] both write (X) — one child column cannot be owned by two edges: the second draw overwrites the first, landing a tuple its parent never held. Make one edge's columns a SUBSET of the other's so it is implied, mark the edge this table is generated from `drives: true`, document one edge (`enforced: false`, so no keys are drawn from it), or disable one parent (`enabled: false`).
   ```
 
-  Three ways out: make one edge's columns a subset of the other's (so it
-  resolves `implied`), mark the actually-driving edge `drives: true`, or
-  disable one of the two parents. **Out of scope for now**: resolving
-  the clash automatically instead of stopping the launch, via a
-  candidate/pool-level join on the columns the two parents share, which
-  would let both edges draw jointly from the intersection instead of one
-  overwriting the other. Not implemented (final-review ruling 15).
+  Four ways out: make one edge's columns a subset of the other's (so it
+  resolves `implied`), mark the actually-driving edge `drives: true`,
+  document one edge (`enforced: false`), or disable one of the two
+  parents (`enabled: false`). **`external` edges are excluded from this
+  stop** (fix wave F3 — see the Limitations bullet below): none of the
+  four remedies apply to one, since an external edge never becomes
+  `implied`, `drives: true` is inert for it, and an external parent has
+  no `tables:` entry to disable or document. **Out of scope for now**:
+  resolving an in-model clash automatically instead of stopping the
+  launch, via a candidate/pool-level join on the columns the two parents
+  share, which would let both edges draw jointly from the intersection
+  instead of one overwriting the other. Not implemented (final-review
+  ruling 15).
 - **A driving-edge mislabel fixed.** A child with two enforced edges to
   the SAME parent and no `drives:` marker used to report the choice as
   `"derived"` (rule 3's ancestry check ran over an empty set of "other"
@@ -339,11 +376,18 @@ requested fan-out (D3, fix wave A1). Counters
   `DRIVES (first declared — mark drives: true to choose)`. The edge
   actually chosen is unchanged.
 - **Limitations, named (design §9), not defects:**
-  - *external parent with a column overlap* — the driver-side pool is
+  - *any external edge sharing a written column with another edge* — not
+    just the pre-ADR-0037 driving∩external case (the driver-side pool is
     drawn as a whole tuple and the driving edge overwrites the shared
-    columns (B.2's existing rule). Logged once as
-    `fk_edge_overlap_external` (WARNING); resolving it needs the parent
-    inside the launch. Enable the parent.
+    columns): fix wave F3 extended this to external∩external and
+    external∩any non-driving edge too, since the cross-edge ownership
+    stop above cannot apply a remedy to an external edge. The launcher
+    logs one `fk_edge_overlap_external table= edge= other= overlap=
+    note=` WARNING per overlapping pair (`edge=` is always the external
+    one). Named plainly, not resolved: the last edge written keeps the
+    shared column, so the OTHER edge's tuple may not exist in its own
+    parent — a real risk, unchanged from before ADR 0037, now visible
+    instead of silent. Bring the parent inside the launch to resolve it.
   - *uniform candidates* — no weighting within a match set (see
     Alternatives).
   - *no correlation between branches* — a diamond's `L` and `R` are
@@ -355,13 +399,14 @@ requested fan-out (D3, fix wave A1). Counters
 - [x] Registry: the shape sweep
   `packages/sdfb-tests/tests/unit/contracts/test_relationship_shapes.py`
   passes with both `xfail` markers removed (star fact and true diamond
-  resolve, plus the cross-edge column-ownership stop from the final
-  review — 16 passed, 0 xfail markers left on `ws12-fanout-generation`),
-  and `test_relationship_models.py`'s two unmarked-parent cases now
-  assert "first declared drives, the other is conditional" instead of a
-  stop (47 passed).
-- [ ] DirectRunner, fake client, whole-tuple checks — the seven shapes in
-  `packages/sdfb-tests/tests/unit/test_fanout_shapes.py` (7 passed):
+  resolve, plus the cross-edge column-ownership stop and the
+  `TestExternalEdgesWarnRatherThanStop` shapes fix wave F3 added — 21
+  passed, 0 xfail markers left on `ws12-fanout-generation`), and
+  `test_relationship_models.py`'s two unmarked-parent cases now assert
+  "first declared drives, the other is conditional" instead of a stop
+  (47 passed).
+- [ ] DirectRunner, fake client, whole-tuple checks — the eight shapes in
+  `packages/sdfb-tests/tests/unit/test_fanout_shapes.py` (8 passed):
   - **star** — `dim_a`, `dim_b`, `fact`: every `fact` row's key tuple
     exists in each dimension, PK unique, row count within the histogram;
   - **diamond** — `top`, `left`, `right`, `bottom`: every `(T,L)` in
@@ -373,6 +418,13 @@ requested fan-out (D3, fix wave A1). Counters
     rest: the cells and candidates jointly offer 2×2=4 combinations, so
     all 3 are representable and pairwise distinct — the exact regime
     that used to raise inside `CellTable.draw(k, exact=True)`;
+  - **inexact cells keep their skewed marginal** (fix wave E1,
+    `test_inexact_cells_keep_their_skewed_marginal`) — an UNBOUNDED PK
+    member (`SEQ_ID`) plus a conditional edge together: the cell column
+    is drawn WITH replacement from its 9:1 source weights, landing
+    > 0.75 on the heavy cell (a permutation prefix would land exactly
+    0.5) and at least one key repeating a cell across its children — the
+    combination no other shape here exercises end to end;
   - **existence filter** — `(K)->P` driving, `(K)->Q` conditional with
     empty rest: every landed `K` is in `Q`, and the keys that are not
     reach the DLQ as `fk.unmatched` with the expected-row weight;
