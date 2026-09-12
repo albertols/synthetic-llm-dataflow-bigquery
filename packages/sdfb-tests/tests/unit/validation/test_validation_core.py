@@ -201,3 +201,73 @@ def test_engine_failure_counts_as_blocker():
     from sdfb_core.validation.summary import BLOCKER_RULE_IDS
 
     assert "engine_failure" in BLOCKER_RULE_IDS
+
+
+class TestAdjustedTableGate:
+    """ADR 0038 — an ADJUSTED table's `pk.duplicate` is expected, so it
+    stops counting toward the BLOCKER gate. Every other table's, and
+    every other rule on the adjusted table itself, keeps blocking."""
+
+    def test_pk_duplicate_is_excluded_for_an_adjusted_table(self):
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=50,
+            dlq_by_rule={"pk.duplicate": 50}, thresholds=_thresholds(0.05),
+            excluded_blocker_rules=("pk.duplicate",),
+        )
+        assert s.blocker_count == 0
+        assert s.dlq_count == 50            # still counted and reported
+        assert s.status == STATUS_PASSED
+        assert s.excluded_blocker_rules == "pk.duplicate"
+
+    def test_another_tables_pk_duplicate_still_blocks(self):
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=50,
+            dlq_by_rule={"pk.duplicate": 50}, thresholds=_thresholds(0.05),
+        )
+        assert s.blocker_count == 50
+        assert s.status == STATUS_FAILED_BLOCKER
+        assert s.excluded_blocker_rules == ""
+
+    def test_an_adjusted_table_still_blocks_on_every_other_rule(self):
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=50,
+            dlq_by_rule={"pk.duplicate": 40, "null.required": 10},
+            thresholds=_thresholds(0.05),
+            excluded_blocker_rules=("pk.duplicate",),
+        )
+        assert s.blocker_count == 10
+        assert s.status == STATUS_FAILED_BLOCKER
+
+    def test_the_repeat_shares_are_compared_in_the_summary(self):
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=80,
+            dlq_by_rule={"row.duplicate": 20, "pk.duplicate": 51},
+            thresholds=_thresholds(0.05),
+            excluded_blocker_rules=("pk.duplicate",),
+            source_repeat_share=0.5025,
+        )
+        assert s.source_repeat_share == pytest.approx(0.5025)
+        assert s.landing_repeat_share == pytest.approx(0.51)
+        assert s.repeat_share_delta == pytest.approx(0.51 - 0.5025)
+        assert s.repeat_share_within_tolerance is True
+
+    def test_a_landing_share_far_from_the_source_is_flagged(self):
+        # A fan-out capped to one child per key lands ~0 repeats.
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=100,
+            dlq_by_rule={}, thresholds=_thresholds(0.05),
+            excluded_blocker_rules=("pk.duplicate",),
+            source_repeat_share=0.5025,
+        )
+        assert s.landing_repeat_share == pytest.approx(0.0)
+        assert s.repeat_share_within_tolerance is False
+
+    def test_no_source_share_claims_no_verdict(self):
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=100,
+            dlq_by_rule={}, thresholds=_thresholds(0.05),
+        )
+        assert s.source_repeat_share is None
+        assert s.repeat_share_within_tolerance is None
+        row = s.to_bq_row()
+        assert row["repeat_share_within_tolerance"] is None

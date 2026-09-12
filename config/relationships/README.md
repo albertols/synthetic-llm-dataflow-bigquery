@@ -401,6 +401,53 @@ clause the router can sample) is generated from that clause — unique per
 run, never a source value — instead of a UUID. The launcher logs
 `identity_constraint_owned` when that happens.
 
+### …but if the SOURCE disagrees, the source wins (ADR 0038)
+
+The stop above reads the 10,000-row reference **sample**. A driven child
+(one generated from its parent's landed keys, ADR 0036) gets something
+much stronger: a **full-source** fan-out measurement. When THAT proves
+the declared `pk:` is not a key of the source, the launch no longer
+stops. It:
+
+1. **drops** that `pk:` from the EFFECTIVE model for this run — nothing
+   else changes, so the table still generates from its driving edge with
+   the measured fan-out untouched and reproduces the source's key-repeat
+   distribution;
+2. prints a multi-line `MODEL ADJUSTED` banner and one
+   `model_adjusted table= change= declared= measured= consequence=`
+   WARNING milestone per adjustment;
+3. emits the **effective model** as YAML — your file with those tables'
+   `pk:` removed and a comment naming the measurement — beside the job's
+   staged artifacts and verbatim in the log
+   (`model_adjustment_model`). Paste it back here to make it permanent;
+4. keeps MEASURING `pk.duplicate` on that table (it is forced to
+   `uniqueness_mode=streaming`, so nothing is removed) but stops
+   COUNTING it toward the BLOCKER gate, naming the exclusion in
+   `validation_runs.excluded_blocker_rules`. Every other table's
+   `pk.duplicate` still blocks;
+5. writes the proof: `validation_runs.source_repeat_share` vs
+   `landing_repeat_share`, their delta, and whether it is within ±0.05.
+
+This is the 2026-09-12 `E_TABLE` case: its `pk:` was a single column
+that is also its driving FK edge, and the source carries a median of two
+rows per key value (50.25% of its rows repeat a key). The sample saw 40
+duplicates in 10,000 rows and could not tell.
+
+Two things this does NOT do:
+
+- **the sample never adjusts anything.** 0.4% duplicates in a 10k sample
+  is far too weak to drop a declared key on; it stays the warning (and
+  the >50% stop) it always was.
+- **it never edits this file.** The adjustment is per-launch and
+  re-derived from the measurement every launch. Making it permanent is
+  your deliberate paste.
+
+Pass `--on_model_conflict=stop` to refuse the launch instead, exactly as
+before ADR 0038. Model SELF-contradictions — an unknown column, two
+edges both `drives: true`, two edges writing one child column, an
+ambiguous role — stop under BOTH settings, because no measurement can
+resolve a model that contradicts itself.
+
 ## Rules the loader enforces at launch
 
 - every `fk.ref` names a table in the model, or is `dataset.table`

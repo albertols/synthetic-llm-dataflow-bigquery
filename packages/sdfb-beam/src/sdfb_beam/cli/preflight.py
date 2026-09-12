@@ -29,6 +29,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from sdfb_core.contracts.description_json import DescriptionJsonError
+from sdfb_core.contracts.model_adjustment import (
+    ModelAdjustment,
+    source_repeat_share,
+)
 from sdfb_core.contracts.prompt_constraint import (
     parse_llm_prompt_constraint,
     parse_prompt_constraint,
@@ -79,6 +83,12 @@ class PreflightResult:
     # k)`. None when the table is not driven, or the driving parent's
     # row count is unknown.
     derived_rows: int | None = None
+    # ADR 0038 — every change the full-source measurement forced on the
+    # DECLARED model (today: a `pk:` the source proves is not a key).
+    # `pk_cols` above is already the ADJUSTED tuple; these records carry
+    # what was dropped and why, for the launcher's banner, the emitted
+    # YAML, and the gate exclusion.
+    adjustments: tuple[ModelAdjustment, ...] = ()
 
 
 def _missing(cols: tuple[str, ...], valid: set[str]) -> list[str]:
@@ -543,7 +553,13 @@ def pk_cell_columns(
         if (p := profiles.get(c)) is not None
         and p.kind in (ColumnKind.CATEGORICAL, ColumnKind.CONSTANT)
     )
-    return cells, len(cells) == len(rest)
+    # NO PK at all (never declared, or DROPPED by an ADR 0038 adjustment)
+    # keys nothing, so the cells cannot be the thing that keys the child:
+    # `exact` must be False. Read the other way — `len(()) == len(())` —
+    # `joint_key_draw` capped every such child at `min(k, capacity)` with
+    # a capacity of 1, i.e. ONE row per parent key, silently discarding
+    # the measured fan-out the table was sized from.
+    return cells, bool(effective_pk) and len(cells) == len(rest)
 
 
 @dataclass(frozen=True)
@@ -694,6 +710,71 @@ def _driven_pk_stop(
     )
 
 
+# ADR 0038 — what a MEASURED model conflict does. `stop` is the
+# pre-0038 behaviour, message for message (`--on_model_conflict`).
+ON_CONFLICT_ADJUST = "adjust"
+ON_CONFLICT_STOP = "stop"
+ON_MODEL_CONFLICT_MODES = (ON_CONFLICT_ADJUST, ON_CONFLICT_STOP)
+
+
+_MEDIAN_QUANTILE = 0.5
+
+
+def _histogram_p50(hist: Mapping[int, int]) -> int:
+    """Median children-per-key over a fan-out histogram (the same
+    definition `log_fanout_measured` prints as ``p50=``)."""
+    total = sum(hist.values())
+    if not total:
+        return 0
+    cumulative = 0
+    for k in sorted(hist):
+        cumulative += hist[k]
+        if cumulative / total >= _MEDIAN_QUANTILE:
+            return k
+    return max(hist)
+
+
+def _pk_not_a_key_adjustment(
+    table_schema: TableSchema,
+    effective_pk: tuple[str, ...],
+    driving: tuple[str, ...],
+    fanout: Mapping,
+    detail: str,
+) -> ModelAdjustment:
+    """The ADR 0038 record for "the source proves this `pk:` is not a
+    key": drop it, say so, and carry the SOURCE repeat share the landing
+    table now has to reproduce.
+
+    Nothing else about the table changes — the fan-out histogram is
+    untouched, so the child still lands its measured children per parent
+    key and copies the source's key-repeat distribution by construction.
+    Capping, narrowing or synthesizing a key would all break exactly that.
+    """
+    hist = {int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()}
+    share = source_repeat_share(hist)
+    max_k = max(hist) if hist else 0
+    return ModelAdjustment(
+        table=table_schema.fqn,
+        change="pk_dropped",
+        declared=f"pk {list(effective_pk)}",
+        measured=(
+            f"the full source repeats it — one value of the driving edge "
+            f"({','.join(driving)}) carries up to {max_k} rows "
+            f"(p50={_histogram_p50(hist)}); {detail}"
+        ),
+        consequence=(
+            f"`pk:` DROPPED from the effective model for "
+            f"{table_schema.fqn}; the table still generates from its "
+            f"driving edge with the measured fan-out untouched, so it "
+            f"reproduces the source's key repeats. pk.duplicate is still "
+            f"MEASURED on it (uniqueness_mode=streaming) but no longer "
+            f"counts toward the BLOCKER gate"
+        ),
+        declared_pk=tuple(effective_pk),
+        source_repeat_share=share,
+    )
+
+
 def _check_driven_pk(
     table_schema: TableSchema,
     effective_pk: tuple[str, ...],
@@ -704,7 +785,8 @@ def _check_driven_pk(
     conditional_rest: Mapping[str, tuple[str, ...]] = _NO_REST,
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     edge_roles: Mapping[FkEdge, str] | None = None,
-) -> None:
+    on_conflict: str = ON_CONFLICT_ADJUST,
+) -> ModelAdjustment | None:
     """P4 for a DRIVEN child: the largest source fan-out must fit in the
     per-key capacity the PK's completing members offer, else the declared
     PK is not a key in the source.
@@ -736,7 +818,15 @@ def _check_driven_pk(
     (``ConditionalEdge.pk_member``, set by the launcher from this same
     effective PK). Before fix wave G1 it multiplied EVERY conditional
     edge, so a model this check passed — counting the PK-touching edges
-    only — still emitted children the PK could not tell apart."""
+    only — still emitted children the PK could not tell apart.
+
+    ADR 0038: both "the declared PK is not a key of the source" verdicts
+    below are PROVEN by a full-source measurement, so under the default
+    ``on_conflict="adjust"`` they return a :class:`ModelAdjustment`
+    instead of raising — the caller drops the `pk:` and shouts. With
+    ``"stop"`` the pre-0038 SystemExit comes back, message for message.
+    The third raise (a missing cell table) is NOT a proven conflict — it
+    is a missing MEASUREMENT — and keeps stopping either way."""
     driving = tuple(fanout.get("driving_cols") or ())
     cap = (
         DEFAULT_FK_CANDIDATE_CAP if candidate_cap is None else int(candidate_cap)
@@ -750,7 +840,7 @@ def _check_driven_pk(
     known = supply.known
     cells, exact = pk_cell_columns(effective_pk, driving, profiles, known=known)
     if not exact:
-        return
+        return None
     max_k = max(int(k) for k in (fanout.get("histogram") or {"0": 0}))
     n_cells = 0
     if cells:
@@ -770,7 +860,7 @@ def _check_driven_pk(
             )
     capacity = (n_cells or 1) * cap ** len(conditional)
     if max_k <= capacity:
-        return
+        return None
     if not cells and not known:
         # The declared PK IS the driving edge (a true 1:1 child): there
         # are no completing members, so `measure_fanout` never builds a
@@ -778,22 +868,34 @@ def _check_driven_pk(
         # cell holds exactly one child per parent key; a source fan-out
         # above 1 is the PK not being a key of the source (2026-09-11,
         # E_TABLE stopped with "no cell table was measured for []").
-        raise SystemExit(
-            f"[preflight P4] {table_schema.fqn}: one value of the "
-            f"driving edge ({','.join(driving)}) appears up to {max_k} "
-            f"times in the source child, but the declared PK "
-            f"{list(effective_pk)} equals the driving edge exactly — "
-            f"no completing members, so only ONE row per key value is "
-            f"representable and the rest would be pk.duplicate. Add a "
-            f"discriminating column to the `pk:` in the relationship "
-            f"model (the sibling table's own PK usually names one), "
-            f"drop the `pk:` if the source has no key, or confirm the "
-            f"source relationship really is 1:1 and the measurement is "
-            f"stale."
+        if on_conflict == ON_CONFLICT_STOP:
+            raise SystemExit(
+                f"[preflight P4] {table_schema.fqn}: one value of the "
+                f"driving edge ({','.join(driving)}) appears up to {max_k} "
+                f"times in the source child, but the declared PK "
+                f"{list(effective_pk)} equals the driving edge exactly — "
+                f"no completing members, so only ONE row per key value is "
+                f"representable and the rest would be pk.duplicate. Add a "
+                f"discriminating column to the `pk:` in the relationship "
+                f"model (the sibling table's own PK usually names one), "
+                f"drop the `pk:` if the source has no key, or confirm the "
+                f"source relationship really is 1:1 and the measurement is "
+                f"stale."
+            )
+        return _pk_not_a_key_adjustment(
+            table_schema, effective_pk, driving, fanout,
+            "the declared PK equals the driving edge exactly, so it has "
+            "no completing member that could tell those rows apart",
         )
-    raise _driven_pk_stop(
-        table_schema, effective_pk, driving, max_k, capacity, cells, n_cells,
-        tuple(independent), len(conditional), cap,
+    if on_conflict == ON_CONFLICT_STOP:
+        raise _driven_pk_stop(
+            table_schema, effective_pk, driving, max_k, capacity, cells,
+            n_cells, tuple(independent), len(conditional), cap,
+        )
+    return _pk_not_a_key_adjustment(
+        table_schema, effective_pk, driving, fanout,
+        f"the PK's completing members represent only {capacity:,} rows "
+        f"per key value",
     )
 
 
@@ -862,26 +964,36 @@ def _driven_child_rows(
     *,
     conditional_rest: Mapping[str, tuple[str, ...]] = _NO_REST,
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
-) -> tuple[int | None, dict[tuple[str, ...], int]]:
-    """``(derived rows, independent pool caps)`` for a DRIVEN child.
+    on_conflict: str = ON_CONFLICT_ADJUST,
+) -> tuple[int | None, dict[tuple[str, ...], int], ModelAdjustment | None]:
+    """``(derived rows, independent pool caps, adjustment)`` for a DRIVEN
+    child.
 
     ORDER MATTERS (ruling 13): the row count derives FIRST, because the
     independent key pools are sized from it, and P4 then reads those
     pools as per-key PK factors. `_check_driven_pk` may stop the launch;
-    when it does not, both values travel out on ``PreflightResult``."""
+    when it does not, both values travel out on ``PreflightResult``.
+
+    ADR 0038: when it returns an ADJUSTMENT instead, the derived row
+    count and the pool caps stay EXACTLY as computed — the caps from the
+    DECLARED PK, which is the larger (upper-bound) sizing, so dropping
+    the key never narrows what the composer broadcasts and no FK
+    guarantee moves. Only the key itself goes."""
     parent_rows = fk_parent_rows or {}
     derived = _derived_rows(fanout, edge_roles, parent_rows)
     supply = edge_supplied_members(effective_pk, edge_roles, conditional_rest)
     caps = _independent_pool_caps(supply, derived or num_rows, parent_rows)
+    adjustment = None
     if num_rows > 0 and effective_pk:
-        _check_driven_pk(
+        adjustment = _check_driven_pk(
             table_schema, effective_pk, fanout, profiles,
             independent_caps=caps,
             conditional_rest=conditional_rest,
             candidate_cap=candidate_cap,
             edge_roles=edge_roles,
+            on_conflict=on_conflict,
         )
-    return derived, caps
+    return derived, caps, adjustment
 
 
 def _drawn_edges(
@@ -898,6 +1010,71 @@ def _drawn_edges(
     if enforced_fk is not None:
         return enforced_fk
     return tuple(fk for fk in relations.fk if fk.enforced)
+
+
+def _run_p4(
+    table_schema: TableSchema,
+    effective_pk: tuple[str, ...],
+    num_rows: int,
+    *,
+    profiles: Mapping[str, ColumnProfile],
+    reference_rows: list[dict],
+    enforced_fk: tuple[FkEdge, ...],
+    fk_parent_rows: Mapping[str, int] | None,
+    blocker_failure_ratio: float,
+    fanout: Mapping | None,
+    edge_roles: Mapping[FkEdge, str] | None,
+    conditional_rest: Mapping[str, tuple[str, ...]] | None,
+    candidate_cap: int | None,
+    on_model_conflict: str,
+) -> tuple[
+    tuple[str, ...],
+    int | None,
+    dict[tuple[str, ...], int],
+    tuple[ModelAdjustment, ...],
+]:
+    """P4 in one place: ``(effective pk, derived rows, key-sample caps,
+    adjustments)``.
+
+    Two regimes, never both. A DRIVEN child (``fanout`` given, ADR 0036)
+    is checked per key against the source fan-out; everyone else against
+    the random-draw capacity model (ADR 0028/0035). Only the first can
+    ADJUST (ADR 0038) — the second's verdict is a GENERATOR limit with a
+    row-count remedy, not the source contradicting the model, so it keeps
+    stopping under both `--on_model_conflict` settings.
+    """
+    if fanout is None:
+        caps: dict[tuple[str, ...], int] = {}
+        if num_rows > 0 and effective_pk:
+            caps = _check_pk_capacity(
+                table_schema, effective_pk, num_rows,
+                profiles=profiles,
+                reference_rows=reference_rows,
+                fk_edges=enforced_fk,
+                fk_parent_rows=fk_parent_rows,
+                blocker_failure_ratio=blocker_failure_ratio,
+            )
+        return effective_pk, None, caps, ()
+    # ADR 0037: an independent edge touching the PK is BOTH a P4 factor
+    # and a side input the composer must size — one cap, sized from the
+    # derived row count and leaving on the result so `in_set_parent_edges`
+    # broadcasts that same number.
+    derived_rows, caps, adjustment = _driven_child_rows(
+        table_schema, effective_pk, num_rows, fanout, profiles,
+        edge_roles, fk_parent_rows,
+        conditional_rest=conditional_rest or _NO_REST,
+        candidate_cap=candidate_cap,
+        on_conflict=on_model_conflict,
+    )
+    if adjustment is None:
+        return effective_pk, derived_rows, caps, ()
+    # ADR 0038 — the source won. The declared members survive on the
+    # adjustment record (`declared_pk`) so `pk.duplicate` is still
+    # MEASURED against them; the EFFECTIVE key is empty, so nothing keys,
+    # caps or dedupes on it any more. That empties the P4 cell exactness
+    # too (`pk_cell_columns`), which is what keeps `joint_key_draw` from
+    # capping the fan-out to one row per parent key.
+    return (), derived_rows, caps, (adjustment,)
 
 
 def preflight(
@@ -917,6 +1094,7 @@ def preflight(
     edge_overlaps: Mapping[FkEdge, tuple[str, ...]] | None = None,
     conditional_rest: Mapping[str, tuple[str, ...]] | None = None,
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
+    on_model_conflict: str = ON_CONFLICT_ADJUST,
 ) -> PreflightResult:
     """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -959,7 +1137,18 @@ def preflight(
     they are per-key PK factors next to the measured cells. The pool
     caps travel back out on ``PreflightResult.fk_key_sample_caps``, so
     the composer broadcasts exactly the number P4 counted, exactly as
-    the ADR 0035 random-draw path returns its own."""
+    the ADR 0035 random-draw path returns its own.
+
+    ``on_model_conflict`` (ADR 0038, ``--on_model_conflict``) decides
+    what a MEASURED contradiction does. ``adjust`` (default): a declared
+    `pk:` the full-source fan-out proves is not a key is DROPPED from
+    the effective model, recorded on ``PreflightResult.adjustments``, and
+    the launch carries on. ``stop``: the pre-0038 SystemExit, message for
+    message. Only a full-source measurement adjusts — the P2 column
+    check, the P3 closure check, an ambiguous/contradictory edge set and
+    the ADR 0035 capacity gate all keep stopping, because no data
+    resolves a model that contradicts itself or a generator that cannot
+    cover the requested rows."""
     warnings: list[str] = []
     fqn = table_schema.fqn
     _report_prompt_constraints(table_schema, prompt_constraints_enabled)
@@ -1028,6 +1217,16 @@ def preflight(
         )
 
     # P5 — is the declared PK actually a key of this data?
+    #
+    # ADR 0038 boundary: this reads the 10,000-row REFERENCE SAMPLE, and
+    # a sample never adjusts the model. On launch 2026-09-12_14_50_30 it
+    # reported 40 duplicate tuples of 10,000 rows for E_TABLE — 0.4%,
+    # far under the `_PK_NOT_A_KEY_RATIO` bar — on a table whose FULL
+    # source repeats the median key value twice. A signal that weak
+    # neither proves a key nor disproves one, so it stays exactly what it
+    # is: a warning (plus the existing stop when the sample alone already
+    # proves the run cannot fill `num_rows`). Only the full-source
+    # fan-out measurement below adjusts anything.
     if effective_pk and reference_rows:
         tuples = {
             tuple(r.get(c) for c in effective_pk) for r in reference_rows
@@ -1069,28 +1268,19 @@ def preflight(
     # 0036) is checked per key against the source fan-out instead of the
     # random-draw model (ADR 0028/0035), and its row count derives from
     # the driving parent's rows and the mean fan-out.
-    fk_key_sample_caps: dict[tuple[str, ...], int] = {}
-    derived_rows: int | None = None
-    if fanout is not None:
-        # ADR 0037: an independent edge touching the PK is BOTH a P4
-        # factor and a side input the composer must size — one cap,
-        # sized from the derived row count and leaving on the result so
-        # `in_set_parent_edges` broadcasts that same number.
-        derived_rows, fk_key_sample_caps = _driven_child_rows(
-            table_schema, tuple(effective_pk), num_rows, fanout, profiles,
-            edge_roles, fk_parent_rows,
-            conditional_rest=conditional_rest or _NO_REST,
-            candidate_cap=candidate_cap,
-        )
-    elif num_rows > 0 and effective_pk:
-        fk_key_sample_caps = _check_pk_capacity(
-            table_schema, tuple(effective_pk), num_rows,
-            profiles=profiles,
-            reference_rows=reference_rows,
-            fk_edges=enforced_fk,
-            fk_parent_rows=fk_parent_rows,
-            blocker_failure_ratio=blocker_failure_ratio,
-        )
+    effective_pk, derived_rows, fk_key_sample_caps, adjustments = _run_p4(
+        table_schema, tuple(effective_pk), num_rows,
+        profiles=profiles,
+        reference_rows=reference_rows,
+        enforced_fk=enforced_fk,
+        fk_parent_rows=fk_parent_rows,
+        blocker_failure_ratio=blocker_failure_ratio,
+        fanout=fanout,
+        edge_roles=edge_roles,
+        conditional_rest=conditional_rest,
+        candidate_cap=candidate_cap,
+        on_model_conflict=on_model_conflict,
+    )
 
     log_milestone(
         "relations_loaded",
@@ -1108,11 +1298,15 @@ def preflight(
         warnings,
         fk_key_sample_caps=fk_key_sample_caps,
         derived_rows=derived_rows,
+        adjustments=adjustments,
     )
 
 
 __all__ = [
     "DEFAULT_FK_CANDIDATE_CAP",
+    "ON_CONFLICT_ADJUST",
+    "ON_CONFLICT_STOP",
+    "ON_MODEL_CONFLICT_MODES",
     "EdgeSupply",
     "PreflightResult",
     "edge_supplied_members",

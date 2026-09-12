@@ -29,6 +29,10 @@ import apache_beam as beam
 from apache_beam.metrics import Metrics
 from apache_beam.transforms import combiners
 from sdfb_core.contracts import TableSchema
+from sdfb_core.contracts.model_adjustment import (
+    REPEAT_SHARE_TOLERANCE,
+    ModelAdjustment,
+)
 from sdfb_core.engines import GenerationContext, ModelClient
 from sdfb_core.engines.fanout import FanoutPlan, conditional_edge_id
 from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
@@ -79,7 +83,24 @@ class PipelineConfig:
     identity_columns: tuple[str, ...] = ()
     # Declared primary-key columns; duplicate PK tuples divert to the DLQ as
     # rule_id=pk.duplicate (BLOCKER). Empty = PK not declared (rule idle).
+    # ADR 0038: EFFECTIVE, not declared — an adjusted table's is empty,
+    # so nothing keys, dedupes or caps on a key the source disproved.
     pk_columns: tuple[str, ...] = ()
+    # ADR 0038 — the DECLARED PK of an adjusted table, kept for
+    # MEASUREMENT only. `EnforceUniqueness` still counts `pk.duplicate`
+    # against it (in `streaming` mode, so no row is removed), which is
+    # how the run proves the landing table reproduces the source's
+    # key-repeat share. Nothing else reads it.
+    pk_measure_columns: tuple[str, ...] = ()
+    # ADR 0038 — rule_ids excluded from the BLOCKER gate's numerator for
+    # this table, and why. `pk.duplicate` on an adjusted table: the
+    # duplicates are the point, so counting them would fail every
+    # faithful run. Named in the summary row, never hidden.
+    gate_excluded_rules: tuple[str, ...] = ()
+    # ADR 0038 — the SOURCE key-repeat share this table must reproduce
+    # (`1 - key_values / children` over the fan-out histogram). The run
+    # summary compares it with the landed share.
+    source_repeat_share: float | None = None
     # Real-LLM runs re-raise on free-text LLM failure instead of silently
     # copying exemplars. Set from client_type at the CLI boundary.
     strict_freetext: bool = False
@@ -216,6 +237,7 @@ def build_pipeline(
     for label, cols in (
         ("identity_columns", config.identity_columns),
         ("pk_columns", config.pk_columns),
+        ("pk_measure_columns", config.pk_measure_columns),
     ):
         if cols:
             valid_columns = {c.name for c in config.table_schema.columns}
@@ -356,7 +378,12 @@ def build_pipeline(
     # the DLQ instead of landing (first occurrence per key wins).
     uniq = batch_validated.main | f"{label_prefix}EnforceUniqueness" >> EnforceUniqueness(
         identity_columns=list(config.identity_columns),
-        pk_columns=list(config.pk_columns),
+        # ADR 0038 — an ADJUSTED table has no effective PK, but its
+        # DECLARED one is exactly the claim under test: `pk.duplicate`
+        # must still be MEASURED against it. The launcher pins such a
+        # table to `streaming`, where the PK branch is digest-only and
+        # removes nothing, so measuring here cannot divert a row.
+        pk_columns=list(config.pk_columns or config.pk_measure_columns),
         mode=config.uniqueness_mode,
         # ADR 0034: the exact barrier shuffles rows as value tuples in
         # schema order — half the bytes of a keyed dict per row.
@@ -410,6 +437,8 @@ def build_pipeline(
                 landing_table=config.landing_table,
                 engine=config.engine_name,
                 model_uri=config.model_uri,
+                excluded_blocker_rules=tuple(config.gate_excluded_rules),
+                source_repeat_share=config.source_repeat_share,
             )
         )
         write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
@@ -554,6 +583,10 @@ class TableSpec:
     freetext_pools_store: Any = None
     source_value_store: Any = None
     parent_edges: tuple[FkEdgeSpec, ...] = ()
+    # ADR 0038 — what the full-source measurement forced on this table's
+    # DECLARED relationship model. The launcher collects them across
+    # every spec and announces the launch's adjustments once.
+    adjustments: tuple[ModelAdjustment, ...] = ()
 
 
 def _edge_key_pools(parent_valid, edge: FkEdgeSpec, prefix: str):
@@ -1362,8 +1395,17 @@ def _build_validation_run_row(
     landing_table: str,
     engine: str,
     model_uri: str,
+    excluded_blocker_rules: tuple[str, ...] = (),
+    source_repeat_share: float | None = None,
 ) -> dict:
-    """Driver of the single validation_runs row (side inputs are singletons)."""
+    """Driver of the single validation_runs row (side inputs are singletons).
+
+    ADR 0038: an ADJUSTED table arrives with ``excluded_blocker_rules``
+    (its `pk.duplicate`, which is now expected) and the SOURCE repeat
+    share it must reproduce. The comparison is logged as well as
+    written — the summary row is the audit trail, the milestone is what
+    an operator greps while the job is still running.
+    """
     summary = build_run_summary(
         run_id=run_id,
         reference_digest=reference_digest,
@@ -1375,7 +1417,33 @@ def _build_validation_run_row(
         landing_table=landing_table,
         engine=engine,
         model_uri=model_uri,
+        excluded_blocker_rules=excluded_blocker_rules,
+        source_repeat_share=source_repeat_share,
     )
+    if summary.source_repeat_share is not None:
+        log_milestone(
+            "model_adjustment_repeat_share",
+            level=(
+                logging.WARNING
+                if summary.repeat_share_within_tolerance is not True
+                else logging.INFO
+            ),
+            table=landing_table,
+            source=round(summary.source_repeat_share, 4),
+            landing=(
+                round(summary.landing_repeat_share, 4)
+                if summary.landing_repeat_share is not None
+                else ""
+            ),
+            delta=(
+                round(summary.repeat_share_delta, 4)
+                if summary.repeat_share_delta is not None
+                else ""
+            ),
+            tolerance=REPEAT_SHARE_TOLERANCE,
+            within_tolerance=summary.repeat_share_within_tolerance,
+            excluded_blocker_rules=summary.excluded_blocker_rules,
+        )
     return summary.to_bq_row()
 
 

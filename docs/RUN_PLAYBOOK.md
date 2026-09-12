@@ -620,6 +620,10 @@ Relational:
 | `fanout / candidates_dropped_null` (Beam counter) | conditional-parent rows discarded because a SHARED (join-key) column was NULL. Non-zero means the parent landed NULLs in the columns the join keys on — expect 0 on a PK-declared parent |
 | `fanout / keys_unmatched` (Beam counter) | driving keys dropped for a non-nullable conditional edge with no candidate. Read it next to `fk.unmatched` in `dlq_by_rule`: the counter counts KEYS, the rule counts their expected ROWS |
 | `fk.unmatched` in `validation_runs.dlq_by_rule` | rows never generated because the conditional parent held no candidate for their shared value, weighted by each dropped key's expected rows (ADR 0037 ruling B). Unlike `fk.orphan` this is an INPUT fact, not a generator regression — a branch the source genuinely lacks. Non-zero with a source you expect to be complete = check the edge's columns and `fanout / candidates_dropped_null` |
+| `model_adjustments count= tables=` + the multi-line `MODEL ADJUSTED` block (launcher, **WARNING**, once per launch) | ADR 0038: this run did NOT generate with the model on disk. The block states, per table, what the model declared, what the full source measured, what was dropped, and the consequence — plus the SOURCE key-repeat share the landing table has to match. A run with this block is never a clean run; read it before reading anything else |
+| `model_adjusted table= change=pk_dropped declared= measured= consequence= source_repeat_share=` (launcher, **WARNING**, one per adjustment) | the greppable one-line form of the same fact. `declared` is the `pk:` the model carried; `measured` is what the full-source fan-out proved (max rows per key value, p50, and why the PK cannot tell them apart); `source_repeat_share` is `1 - key_values/children` over the histogram. Fix it permanently by pasting the emitted YAML into `config/relationships/` — or re-launch with `--on_model_conflict=stop` to refuse instead |
+| `model_adjustment_model model= source= uri= tables=` + the YAML body (launcher, **WARNING**, one per adjusted model FILE) | the EFFECTIVE relationship model this run generated with: the declared model with the adjusted tables' `pk:` removed and a comment naming the measurement that removed it. `uri=` is where it was also written (`--staging_location`/`--temp_location` + `/model_adjustments/`), or `(not written)` — the log copy always exists. `model_adjustment_model_unwritten` (WARNING) precedes it when the artifact write failed; the launch continues by design |
+| `model_adjustment_repeat_share table= source= landing= delta= tolerance= within_tolerance= excluded_blocker_rules=` (worker, end of run; **WARNING** unless `within_tolerance=True`) | ADR 0038's proof that the copy is faithful: the SOURCE key-repeat share measured at launch against the one the landing table actually reached (`pk.duplicate` over `valid_count + row.duplicate`). `within_tolerance=False` means the adjusted table did NOT reproduce its source — a fan-out capped to one child per key lands ≈0.00 against a source ≈0.50. The same five figures land in `validation_runs` (`source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`, `excluded_blocker_rules`) |
 | `batch_start batch_id= keys=` / `batch_done batch_id= keys= rows= seconds=` (worker) | a key batch: parent keys in, children out (ADR 0036) — replaces `n=`/`rows=` for a driven child's batches |
 
 ---
@@ -846,6 +850,32 @@ MEASURES `pk.duplicate` on its own digest branch (ADR 0036 D6), so that
 0 is a reading, not a blank — but read it next to the independent
 post-run check below, which counts the landed table rather than the
 generated stream.
+
+**`--on_model_conflict=adjust|stop` (ADR 0038, default `adjust`).** A
+driven child whose declared `pk:` the FULL SOURCE proves is not a key
+(the 2026-09-12 `E_TABLE` stop: its `pk:` IS its driving edge, and the
+source carries a median of 2 rows per key value) no longer stops the
+launch. The launcher DROPS that key from the effective model, prints the
+`MODEL ADJUSTED` banner, emits the effective model as YAML, and
+generates with the measured fan-out untouched — so the landing table
+reproduces the source's key-repeat share. Consequences on the run:
+
+- that table is FORCED to `uniqueness_mode=streaming` regardless of
+  `--driven_uniqueness_mode` and of identity columns (nothing may be
+  removed), so its `identity.unique` is not measured this run;
+- `pk.duplicate` on that table is still MEASURED but **excluded from the
+  BLOCKER gate** (`validation_runs.excluded_blocker_rules`). Its
+  expected value is NOT 0 — it is the source's repeat share, and
+  `repeat_share_within_tolerance` is the criterion instead. Every OTHER
+  table's `pk.duplicate` is unchanged and still expected 0;
+- the post-run PK check below, run on an ADJUSTED table, is expected to
+  return the source's duplicate count, not 0. Compare it with
+  `validation_runs.landing_repeat_share`, not with zero.
+
+Pass `--on_model_conflict=stop` to get the pre-0038 refusal back, word
+for word. Model SELF-contradictions (unknown columns, two `drives: true`
+edges, an ambiguous role) and the ADR 0035 capacity gate stop under
+BOTH settings.
 
 **Post-run independent PK check (per driven table, expect 0 rows):**
 

@@ -290,6 +290,15 @@
       ]
     },
     {
+      "name": "on_model_conflict",
+      "label": "On a measured model conflict",
+      "helpText": "ADR 0038 \u2014 what a MEASURED contradiction between the relationship model and the SOURCE does. adjust (default) = drop the declared pk: the full-source fan-out proves is not a key, announce it in the MODEL ADJUSTED banner, emit the effective model as YAML, and carry on; the landing table then reproduces the source's key-repeat share and that table's pk.duplicate stops counting toward the BLOCKER gate. stop = refuse the launch, as before ADR 0038. Model self-contradictions and the ADR 0035 capacity gate stop under both settings.",
+      "isOptional": true,
+      "regexes": [
+        "^(adjust|stop)?$"
+      ]
+    },
+    {
       "name": "driven_uniqueness_mode",
       "label": "Driven-child uniqueness mode",
       "helpText": "Uniqueness mode for a DRIVEN child without identity columns (ADR 0036): its PK is unique by construction, so streaming (default) measures duplicates without the landing-path barrier. exact / exact_chained are available for A/B runs, same semantics as uniqueness_mode.",

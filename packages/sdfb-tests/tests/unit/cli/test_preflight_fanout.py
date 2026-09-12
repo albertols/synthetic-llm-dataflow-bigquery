@@ -1,5 +1,12 @@
 """ADR 0036 preflight: driven children are checked per key, not by the
-random-draw model; edge roles are logged; the row count derives."""
+random-draw model; edge roles are logged; the row count derives.
+
+Every STOP asserted here pins ``on_model_conflict="stop"`` (ADR 0038).
+The P4 verdicts are unchanged — the source still disproves the declared
+PK in exactly these cases — but the default is now to ADJUST the model
+and carry on (`test_model_adjustment.py`). The stop, and every word of
+its message, is still what the escape hatch produces.
+"""
 
 from __future__ import annotations
 
@@ -79,6 +86,7 @@ def test_fanout_beyond_cells_stops():
             _schema(), (), (), _rows(), relations=_REG.relations("child"),
             num_rows=1_000, fk_parent_rows={"parent": 1_000},
             blocker_failure_ratio=0.2, fanout=_fanout(13),
+            on_model_conflict="stop",
         )
 
 
@@ -150,6 +158,7 @@ def test_pk_equal_to_driving_edge_with_real_fanout_stops():
         preflight(
             schema, (), (), [], relations=relations, num_rows=1_000,
             fk_parent_rows={"parent": 1_000}, blocker_failure_ratio=0.2, fanout=fanout,
+            on_model_conflict="stop",
         )
 
 
@@ -324,6 +333,7 @@ def test_an_independent_member_of_the_pk_is_not_a_per_key_factor():
             fk_parent_rows={"A_TABLE": 1_000, "B_TABLE": parent_keys},
             blocker_failure_ratio=0.2, fanout=_star_fanout(max_k),
             edge_roles=reg.edge_roles("F_TABLE"),
+            on_model_conflict="stop",
         )
 
     for parent_keys in (3, 5, 5_000_000):
@@ -345,6 +355,7 @@ def test_a_conditional_member_of_the_pk_is_bounded_by_the_candidate_cap():
             blocker_failure_ratio=0.2, fanout=_diamond_fanout(max_k),
             edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
             conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=cap,
+            on_model_conflict="stop",
         )
 
     with pytest.raises(SystemExit, match=r"preflight P4.*--fk_candidate_cap"):
@@ -365,6 +376,7 @@ def test_two_conditional_members_multiply():
             edge_roles=_TWO_CONDITIONAL_REG.edge_roles("BOTTOM_TABLE"),
             conditional_rest={"(T,R)->RIGHT_TABLE": ("R",),
                               "(T,S)->OTHER_TABLE": ("S",)}, candidate_cap=8,
+            on_model_conflict="stop",
         )
 
     _run(60)  # 8 x 8 = 64 candidate combinations per driving key
@@ -449,6 +461,7 @@ def test_cells_and_conditional_factors_multiply_but_an_independent_pool_does_not
             blocker_failure_ratio=0.2, fanout=fanout,
             edge_roles=_MIX_REG.edge_roles("MIX_TABLE"),
             conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=4,
+            on_model_conflict="stop",
         )
 
     _run(24)  # 6 cells x 4 candidates
@@ -532,6 +545,7 @@ def test_a_partially_contained_edge_does_not_false_stop():
                     "histogram": {"0": 3, str(max_k): 5},
                     "cells": None, "exact_cells": True},
             edge_roles=_PARTIAL_REG.edge_roles("F_TABLE"),
+            on_model_conflict="stop",
         )
 
     # The caps still travel out (the composer sizes its side input from
@@ -586,6 +600,7 @@ def test_a_none_candidate_cap_falls_back_to_the_default():
             blocker_failure_ratio=0.2, fanout=_diamond_fanout(100),
             edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
             conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=None,
+            on_model_conflict="stop",
         )
 
 
@@ -601,6 +616,7 @@ def test_the_stop_names_a_sufficient_candidate_cap_not_just_the_floor():
             blocker_failure_ratio=0.2, fanout=_diamond_fanout(100),
             edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
             conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=64,
+            on_model_conflict="stop",
         )
     assert "--fk_candidate_cap to at least 100" in str(exc.value)
     # Two edges share the shortfall: 8 x 8 = 64 < 100, and 10 x 10 >= 100.
@@ -615,5 +631,6 @@ def test_the_stop_names_a_sufficient_candidate_cap_not_just_the_floor():
             edge_roles=_TWO_CONDITIONAL_REG.edge_roles("BOTTOM_TABLE"),
             conditional_rest={"(T,R)->RIGHT_TABLE": ("R",),
                               "(T,S)->OTHER_TABLE": ("S",)}, candidate_cap=8,
+            on_model_conflict="stop",
         )
     assert "--fk_candidate_cap to at least 10" in str(exc2.value)

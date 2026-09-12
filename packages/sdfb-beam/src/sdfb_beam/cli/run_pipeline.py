@@ -26,7 +26,7 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -45,6 +45,12 @@ from apache_beam.options.pipeline_options import (
 )
 from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
+from sdfb_core.contracts.model_adjustment import (
+    ModelAdjustment,
+    adjusted_model_yaml,
+    adjusted_models,
+    adjustment_banner,
+)
 from sdfb_core.contracts.prompt_constraint import parse_llm_prompt_constraint
 from sdfb_core.contracts.relationships import (
     RelationshipError,
@@ -65,12 +71,14 @@ from sdfb_core.validation import Thresholds
 
 from sdfb_beam.cli.preflight import (
     DEFAULT_FK_CANDIDATE_CAP,
+    ON_CONFLICT_ADJUST,
+    ON_MODEL_CONFLICT_MODES,
     edge_supplied_members,
     pk_cell_columns,
     preflight,
 )
 from sdfb_beam.ddl import extract_table_schema
-from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
+from sdfb_beam.dofns.uniqueness import MODE_STREAMING, UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.io.fanout_stats import (
@@ -356,6 +364,21 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:  # noqa
                    help="Uniqueness mode for a DRIVEN child without identity columns "
                         "(ADR 0036): its PK is unique by construction, so `streaming` "
                         "measures duplicates without the landing-path barrier.")
+    p.add_argument("--on_model_conflict", default=ON_CONFLICT_ADJUST,
+                   choices=list(ON_MODEL_CONFLICT_MODES),
+                   help="What a MEASURED contradiction between the "
+                        "relationship model and the SOURCE does (ADR "
+                        "0038). adjust (default) = drop the declared `pk:` "
+                        "the full-source fan-out proves is not a key, "
+                        "announce it in the MODEL ADJUSTED banner, emit "
+                        "the effective model as YAML, and carry on — the "
+                        "landing table then reproduces the source's "
+                        "key-repeat share, and that table's pk.duplicate "
+                        "stops counting toward the BLOCKER gate. stop = "
+                        "refuse the launch, exactly as before ADR 0038. "
+                        "Model SELF-contradictions (unknown columns, two "
+                        "`drives: true` edges, an ambiguous role) and the "
+                        "ADR 0035 capacity gate stop under BOTH settings.")
     p.add_argument("--pool_seed_strategy", default="centroid",
                    choices=list(POOL_SEED_STRATEGIES),
                    help="How the 8 free-text prompt seeds are chosen. "
@@ -876,15 +899,51 @@ def derive_source_fqn(landing_table: str, reference_table: str) -> str:
 
 
 def resolve_driven_uniqueness_mode(
-    flag: str, *, driven: bool, identity_cols: tuple
+    flag: str, *, driven: bool, identity_cols: tuple, adjusted: bool = False
 ) -> str | None:
     """None = not driven (keep --uniqueness_mode); identity columns keep
     `exact` (ADR 0036): an identity column is fresh-generated per row, so
     the child's PK is not unique by construction the way a pure fan-out
-    key is."""
+    key is.
+
+    ``adjusted`` (ADR 0038) overrides both: a table whose declared `pk:`
+    the SOURCE disproved is SUPPOSED to land repeated keys, and `exact`
+    would divert exactly those rows to the DLQ. `streaming` measures
+    `pk.duplicate` on a digest-only branch and removes nothing — which
+    is also what makes the landing key-repeat share comparable with the
+    source's. The cost is that `identity.unique` is measured on no
+    branch at all in `streaming` mode; identity values are synthesized
+    per row from `(run_id, batch_id, row_index, column)`, and
+    `row.duplicate` still covers engine replay, so the loss is a
+    reporting one, not a guarantee."""
     if not driven:
         return None
+    if adjusted:
+        return MODE_STREAMING
     return "exact" if identity_cols else flag
+
+
+def adjusted_fanout_payload(
+    fanout: dict | None, adjustments: Sequence[ModelAdjustment]
+) -> dict | None:
+    """The fan-out payload an ADJUSTED table generates from (ADR 0038).
+
+    `resolve_fanout` measures BEFORE preflight, so its ``exact_cells``
+    was decided against the DECLARED PK. Once that PK is dropped the
+    cells key nothing, and an ``exact_cells`` plan is capped at
+    ``min(k, capacity)`` by `joint_key_draw` — with no cells that is ONE
+    row per parent key, i.e. the measured fan-out silently discarded and
+    the exact opposite of reproducing the source.
+
+    Everything else is left ALONE. The histogram is the measurement the
+    table is sized from, and the cell table stays as measured: inexact
+    cells are drawn WITH replacement from their weighted marginal, so
+    the column keeps its source distribution instead of being narrowed
+    to a per-key permutation.
+    """
+    if fanout is None or not adjustments:
+        return fanout
+    return {**fanout, "exact_cells": False}
 
 
 def resolve_table_rows(
@@ -1253,6 +1312,130 @@ def log_relationship_model(
     )
 
 
+def log_model_adjustments(
+    adjustments: Sequence[ModelAdjustment],
+) -> None:
+    """Announce every ADR 0038 adjustment, loudly and twice.
+
+    The BANNER is one multi-line WARNING block in the relationship
+    card's style — launcher-side, where multi-line is the readable
+    shape. The MILESTONES are one greppable WARNING line per adjustment
+    (``model_adjusted table= change= declared= measured= consequence=``),
+    the form every worker-side surface and every log miner already
+    reads. A run that generated against a model the operator did not
+    write must be impossible to mistake for a clean one, so neither is
+    optional and neither is INFO.
+    """
+    if not adjustments:
+        return
+    log_milestone_text(
+        "model_adjustments",
+        adjustment_banner(adjustments),
+        level=logging.WARNING,
+        count=len(adjustments),
+        tables=",".join(a.table_name for a in adjustments),
+    )
+    for adjustment in adjustments:
+        log_milestone(
+            "model_adjusted",
+            level=logging.WARNING,
+            table=adjustment.table,
+            change=adjustment.change,
+            declared=adjustment.declared,
+            measured=adjustment.measured,
+            consequence=adjustment.consequence,
+            source_repeat_share=(
+                round(adjustment.source_repeat_share, 4)
+                if adjustment.source_repeat_share is not None
+                else ""
+            ),
+        )
+
+
+def adjusted_model_artifact_uri(options: PipelineOptions, run_id: str, model: str) -> str:
+    """Where the emitted effective model goes: beside the job's own
+    staged artifacts (``--staging_location``, else ``--temp_location``),
+    under ``model_adjustments/``. With neither — a DirectRunner laptop
+    run — it lands in the working directory, which is where every other
+    local artifact lands."""
+    gco = options.view_as(GoogleCloudOptions)
+    base = (gco.staging_location or gco.temp_location or "").rstrip("/")
+    name = f"{sanitize_job_name('sdfb', run_id)}.{model}.yaml"
+    return f"{base}/model_adjustments/{name}" if base else name
+
+
+def emit_effective_model(
+    registry: RelationshipRegistry,
+    adjustments: Sequence[ModelAdjustment],
+    options: PipelineOptions,
+    run_id: str,
+) -> list[str]:
+    """Hand the operator back the model this run ACTUALLY generated with.
+
+    One YAML document per model file that owns an adjusted table — the
+    declared model with those tables' ``pk:`` removed and a comment
+    naming the measurement that removed it — written beside the job's
+    staged artifacts and ALSO logged verbatim. The log copy is the one
+    that always survives: a run whose bucket the reader cannot reach
+    still carries its effective model in `worker_logs.jsonl`.
+
+    A write failure is announced and never fatal: the model is already
+    in the log, and refusing to launch over an artifact would trade a
+    generated dataset for a file.
+    """
+    written: list[str] = []
+    for model, mine in adjusted_models(registry.models, adjustments):
+        text = adjusted_model_yaml(model, mine)
+        uri = adjusted_model_artifact_uri(options, run_id, model.model)
+        try:
+            with FileSystems.create(uri, mime_type="text/plain") as handle:
+                handle.write(text.encode("utf-8"))
+            written.append(uri)
+        except Exception as exc:
+            log_milestone(
+                "model_adjustment_model_unwritten",
+                level=logging.WARNING,
+                uri=uri,
+                model=model.model,
+                error=f"{type(exc).__name__}: {str(exc)[:160]}",
+                note="the effective model is in the "
+                "model_adjustment_model entry below; paste it into "
+                "config/relationships/ by hand",
+            )
+            uri = "(not written)"
+        log_milestone_text(
+            "model_adjustment_model",
+            text,
+            level=logging.WARNING,
+            model=model.model,
+            source=model.source,
+            uri=uri,
+            tables=",".join(a.table_name for a in mine),
+        )
+    return written
+
+
+def report_model_adjustments(
+    specs: Sequence[TableSpec],
+    registry: RelationshipRegistry,
+    options: PipelineOptions,
+    run_id: str,
+) -> tuple[ModelAdjustment, ...]:
+    """Every table's adjustments, announced ONCE for the whole launch.
+
+    Collected here rather than logged inside `preflight` so the banner,
+    the per-adjustment milestones and the emitted model sit together in
+    the log, and so a launch that stops later (another table's preflight
+    failed) never claims to have adjusted anything.
+    """
+    adjustments = tuple(a for s in specs for a in s.adjustments)
+    if not adjustments:
+        return ()
+    log_model_adjustments(adjustments)
+    emit_effective_model(registry, adjustments, options, run_id)
+    return adjustments
+
+
 def resolve_landing_dispositions(
     write_disposition: str, create_if_not_exists: bool
 ) -> tuple[str, str]:
@@ -1619,7 +1802,17 @@ def _load_reference_and_preflight(
             registry, args.landing_table, edge_roles
         ),
         candidate_cap=candidate_cap_of(args),
+        # ADR 0038 — what a MEASURED contradiction does. `adjust` (the
+        # default) drops the disproved `pk:` and carries on; `stop` is
+        # the pre-0038 refusal, message for message.
+        on_model_conflict=getattr(
+            args, "on_model_conflict", ON_CONFLICT_ADJUST
+        ),
     )
+    # ADR 0038 — `resolve_fanout` decided `exact_cells` against the
+    # DECLARED PK, above. With that PK dropped the cells key nothing, and
+    # an exact plan would cap the fan-out instead of reproducing it.
+    fanout = adjusted_fanout_payload(fanout, pf.adjustments)
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
     # ADR 0029 rev B — FK activation derives, never asks: with the flag
@@ -2350,11 +2543,18 @@ def _prepare_table_spec(
         launch_rows=args.num_rows,
     )
     batch_size = resolve_batch_size(args.batch_size, num_rows)
+    # ADR 0038 — an ADJUSTED table keeps its DECLARED PK for measurement
+    # only: `pk.duplicate` is still counted against it (that is the
+    # evidence the landing table copies the source's key repeats), it
+    # simply stops keying, deduplicating and gating.
+    adjusted = pf.adjustments
+    pk_measure_columns = adjusted[0].declared_pk if adjusted else ()
     uniqueness_mode = (
         resolve_driven_uniqueness_mode(
             getattr(args, "driven_uniqueness_mode", "streaming"),
             driven=driven,
             identity_cols=tuple(pf.identity_cols),
+            adjusted=bool(adjusted),
         )
         or args.uniqueness_mode
     )
@@ -2397,7 +2597,16 @@ def _prepare_table_spec(
         seed=int(args.seed) if str(args.seed).strip() else None,
         run_id=args.run_id,
         identity_columns=pf.identity_cols,
+        # ADR 0038: the EFFECTIVE PK — empty on an adjusted table.
         pk_columns=pf.pk_cols,
+        pk_measure_columns=pk_measure_columns,
+        # `pk.duplicate` is expected on an adjusted table, so it must not
+        # weigh on the BLOCKER gate — named in the summary row, never
+        # hidden. Every other table's keeps blocking.
+        gate_excluded_rules=("pk.duplicate",) if adjusted else (),
+        source_repeat_share=(
+            adjusted[0].source_repeat_share if adjusted else None
+        ),
         strict_freetext=resolve_engine_strictness(args.client_type),
         model_uri=args.model_uri,
         embedder_uri=args.embedder_uri,
@@ -2516,10 +2725,11 @@ def _prepare_table_spec(
         candidate_cap=(fanout or {}).get(
             "candidate_cap", candidate_cap_of(args)
         ),
-        # The PK this run enforces — the same tuple `pf.pk_cols` carries,
-        # resolved by the one rule both readers share (fix wave G2), so
-        # the composer spec's NULL policy cannot drift from the plan's.
-        effective_pk=effective_pk_of(registry, args.landing_table, args),
+        # The PK this run enforces — `pf.pk_cols`, which `effective_pk_of`
+        # resolves by the identical rule (fix wave G2) but WITHOUT the
+        # ADR 0038 adjustment: reading the registry here would hand the
+        # composer a key the source disproved and preflight dropped.
+        effective_pk=pf.pk_cols,
     )
 
     return TableSpec(
@@ -2534,6 +2744,7 @@ def _prepare_table_spec(
             source_value_store if freetext_pools_store is not None else None
         ),
         parent_edges=parent_edges,
+        adjustments=adjusted,
     )
 
 
@@ -2568,6 +2779,9 @@ def _run_one_table(
         cross_process=cross_process,
     )
     spec = _prepare_table_spec(args, model_client, registry=registry)
+    report_model_adjustments(
+        [spec], registry or RelationshipRegistry(), options, args.run_id
+    )
 
     with beam.Pipeline(options=options) as p:
         result = build_pipeline(
@@ -2691,6 +2905,12 @@ def _run_relational_job(
         )
         for s in specs
     ]
+    # ADR 0038 — say what this launch generated with, before it
+    # generates anything: the banner, one milestone per adjustment, and
+    # the effective model handed back as YAML.
+    report_model_adjustments(
+        specs, registry or RelationshipRegistry(), options, args.run_id
+    )
     total_edges = sum(len(s.parent_edges) for s in specs)
     log_milestone(
         "relational_single_job",
