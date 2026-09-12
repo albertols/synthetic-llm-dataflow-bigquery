@@ -372,24 +372,94 @@ class RelationshipRegistry:
         joint pool on the shared columns, ADR 0037 §4); ``independent``
         — shares no column with the driving edge (drawn from a
         side-input key pool, ADR 0037 §5); ``external`` — the parent is
-        outside this model. The only launch stop left is more than one
-        edge marked ``drives: true`` (rule 5)."""
+        outside this model. Two launch stops remain: more than
+        one edge marked ``drives: true`` (rule 5), and two NON-DRIVING
+        edges writing the same child column
+        (:meth:`_check_column_ownership`)."""
         edges = self.enforced_edges(table)
         roles: dict[FkEdge, str] = {e: "external" for e in edges if e.external}
         internal = [e for e in edges if not e.external]
-        if not internal:
-            return roles
-        driving, _ = self._pick_driving(table, internal)
-        roles[driving] = "driving"
-        for edge in internal:
-            if edge is driving:
-                continue
-            if self._implied(edge, driving):
-                roles[edge] = "implied"
-                continue
-            overlap = tuple(c for c in edge.cols if c in driving.cols)
-            roles[edge] = "conditional" if overlap else "independent"
+        if internal:
+            driving, _ = self._pick_driving(table, internal)
+            roles[driving] = "driving"
+            for edge in internal:
+                if edge is driving:
+                    continue
+                if self._implied(edge, driving):
+                    roles[edge] = "implied"
+                    continue
+                overlap = tuple(c for c in edge.cols if c in driving.cols)
+                roles[edge] = "conditional" if overlap else "independent"
+        self._check_column_ownership(table, edges, roles)
         return roles
+
+    def _written_cols(
+        self, table: str, edge: FkEdge, role: str
+    ) -> tuple[str, ...]:
+        """The child columns this edge actually WRITES into a generated
+        row: nothing for ``implied`` (the driving key already carries
+        them), only :meth:`edge_rest` for ``conditional`` (the shared
+        columns come from the driving key), and the whole ``cols`` tuple
+        for ``driving``, ``independent`` and ``external`` — a driving key
+        or a whole pool draw."""
+        if role == "implied":
+            return ()
+        if role == "conditional":
+            return self.edge_rest(table, edge)
+        return edge.cols
+
+    def _check_column_ownership(
+        self, table: str, edges: tuple[FkEdge, ...], roles: dict[FkEdge, str]
+    ) -> None:
+        """No child column may be WRITTEN by two NON-DRIVING edges
+        (ADR 0037 final review).
+
+        :meth:`edge_roles` gives each non-driving edge a role from its
+        overlap with the DRIVING edge alone, and never compares the
+        non-driving edges with each other — so two of them could claim
+        one column and the last writer silently won. Two ``independent``
+        edges write whole pool tuples in declaration order
+        (``_draw_fk_columns`` in B.1, the pool loop in B.2), so the first
+        edge's tuple is destroyed and nearly every row is diverted as
+        ``fk.orphan`` — after the GPU has already generated it. Two
+        ``conditional`` edges whose ``rest``s overlap are written in plan
+        order by ``apply_conditional_overrides``, and conditional edges
+        are not gated at all (the gate only sees side-input pools), so
+        those referentially broken rows LAND. Both shapes raised here
+        before ADR 0037 (D4's blanket "neither driving nor implied"
+        stop); this is that stop, by name.
+
+        The DRIVING edge is deliberately outside the pairing:
+        ``implied`` / ``independent`` / ``conditional`` are disjoint from
+        it by construction, and an ``external`` edge that overlaps it is
+        design 2026-09-11 §9's NAMED limitation — the driving key
+        overwrites the shared columns, the launcher logs
+        ``fk_edge_overlap_external``, and the fix is to enable the parent
+        — not a stop.
+        """
+        owners: list[tuple[FkEdge, str, tuple[str, ...]]] = []
+        for edge in edges:
+            role = roles.get(edge)
+            if role is None or role == "driving":
+                continue
+            owners.append((edge, role, self._written_cols(table, edge, role)))
+        for index, (first, first_role, first_cols) in enumerate(owners):
+            for second, second_role, second_cols in owners[index + 1 :]:
+                shared = tuple(c for c in first_cols if c in second_cols)
+                if not shared:
+                    continue
+                raise RelationshipError(
+                    f"{_name(table)}: edges "
+                    f"({','.join(first.cols)})->{first.ref} [{first_role}] "
+                    f"and ({','.join(second.cols)})->{second.ref} "
+                    f"[{second_role}] both write ({','.join(shared)}) — one "
+                    f"child column cannot be owned by two edges: the second "
+                    f"draw overwrites the first, landing a tuple its parent "
+                    f"never held. Make one edge's columns a SUBSET of the "
+                    f"other's so it is implied, mark the edge this table is "
+                    f"generated from `drives: true`, or disable one parent "
+                    f"(`enabled: false`)."
+                )
 
     def driving_edge(self, table: str) -> FkEdge | None:
         return next(
@@ -401,9 +471,10 @@ class RelationshipRegistry:
     ) -> tuple[FkEdge, str]:
         """The driving edge and how it was chosen (ADR 0037 §3, in
         order): a lone internal edge drives itself (``"single"``);
-        exactly one edge marked ``drives: true`` (``"marked"``); the
-        parent that descends from every other candidate, widened with
-        the child's pins (``"derived"``, ADR 0036 rev 2); else — no
+        exactly one edge marked ``drives: true`` (``"marked"``); with
+        at least two DISTINCT candidate parents, the parent that
+        descends from every other one, widened with the child's pins
+        (``"derived"``, ADR 0036 rev 2); else — no
         marker and no ancestry between the parents — the first declared
         edge drives (``"first_declared"``, ruling A, 2026-09-11). More
         than one edge marked ``drives: true`` is the only stop left."""
@@ -422,14 +493,23 @@ class RelationshipRegistry:
             return marked[0], "marked"
         # Unmarked (the operator only toggled `enabled`): the DAG
         # decides — the parent that itself descends from every other
-        # candidate parent is the most-derived one and drives.
+        # candidate parent is the most-derived one and drives. That needs
+        # a real choice, so at least two DISTINCT candidate parents: with
+        # two edges to the SAME parent the `all(...)` below runs over an
+        # EMPTY set and is vacuously true for every edge, so rule 3
+        # returned the first declared edge labelled "derived" though
+        # nothing was derived and nothing was widened — and the operator
+        # lost rule 4's `fk_driving_edge_defaulted` WARNING and its
+        # `DRIVES (first declared …)` card tag, the only hint that
+        # `drives: true` was theirs to set (ADR 0037 final review).
         parents = {e.ref for e in internal}
-        lowest = [
-            e for e in internal
-            if all(self._descends(e.ref, other) for other in parents if other != e.ref)
-        ]
-        if len({e.ref for e in lowest}) == 1:
-            return lowest[0], "derived"
+        if len(parents) > 1:
+            lowest = [
+                e for e in internal
+                if all(self._descends(e.ref, other) for other in parents if other != e.ref)
+            ]
+            if len({e.ref for e in lowest}) == 1:
+                return lowest[0], "derived"
         # No marker, no ancestry between the parents (ADR 0037 ruling A,
         # 2026-09-11): the first declared internal enforced edge drives.
         return internal[0], "first_declared"

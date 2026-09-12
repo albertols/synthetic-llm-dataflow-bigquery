@@ -593,3 +593,81 @@ tables:
         to_c, to_b = reg.enforced_edges("A_TABLE")
         assert reg.edge_roles("A_TABLE") == {to_c: "driving", to_b: "conditional"}
         assert reg.driving_choice("A_TABLE") == "first_declared"
+
+
+class TestDrivingChoiceLabels:
+    """Rule 3 ("the most-derived parent drives") needs a real CHOICE.
+
+    With two enforced edges to the SAME parent there is one candidate
+    parent, so `all(self._descends(...))` runs over an EMPTY set and is
+    vacuously true for every edge: rule 3 fired, returned the first
+    declared edge, and labelled it `"derived"` — though nothing was
+    derived and nothing was widened. The operator then got neither the
+    `fk_driving_edge_defaulted` WARNING nor the card's
+    `DRIVES (first declared …)` tag that rule 4 promises, and had no
+    hint that `drives: true` was theirs to set (ADR 0037 final review).
+    """
+
+    _SAME_PARENT = """
+model: sp
+tables:
+  P:
+    pk: [K1, K2]
+  CHILD:
+    pk: [A, B]
+    fk:
+      - cols: [A]
+        ref: P
+        ref_cols: [K1]
+      - cols: [B]
+        ref: P
+        ref_cols: [K2]
+"""
+
+    # Two DISTINCT parents with ancestry between them: C_TABLE holds an
+    # edge to B_TABLE, so C_TABLE is the most-derived parent and rule 3
+    # genuinely decides.
+    _ANCESTRY = """
+model: an
+tables:
+  B_TABLE:
+    pk: [B_COL_008]
+  C_TABLE:
+    pk: [C_COL_001]
+    fk:
+      - cols: [C_COL_001]
+        ref: B_TABLE
+        ref_cols: [B_COL_008]
+  A_TABLE:
+    pk: [A_COL_001, A_COL_002]
+    fk:
+      - cols: [A_COL_001]
+        ref: B_TABLE
+        ref_cols: [B_COL_008]
+      - cols: [A_COL_001]
+        ref: C_TABLE
+        ref_cols: [C_COL_001]
+"""
+
+    def _registry(self, text: str) -> RelationshipRegistry:
+        return RelationshipRegistry.from_sources(
+            [("config/relationships/labels.yaml", text)]
+        )
+
+    def test_two_edges_to_one_parent_default_instead_of_deriving(self):
+        reg = self._registry(self._SAME_PARENT)
+        to_a, _to_b = reg.enforced_edges("CHILD")
+        assert reg.driving_choice("CHILD") == "first_declared"
+        assert reg.edge_roles("CHILD")[to_a] == "driving"
+        # …and the operator is told, on the card, that the launch chose
+        # for them and how to choose themselves.
+        assert "DRIVES (first declared" in reg.card("CHILD")
+
+    def test_two_distinct_parents_with_ancestry_still_derive(self):
+        reg = self._registry(self._ANCESTRY)
+        _to_b, to_c = reg.enforced_edges("A_TABLE")
+        assert reg.driving_choice("A_TABLE") == "derived"
+        # The most-derived parent drives even though it is declared
+        # SECOND — that is the whole point of rule 3.
+        assert reg.edge_roles("A_TABLE")[to_c] == "driving"
+        assert "DRIVES (first declared" not in reg.card("A_TABLE")

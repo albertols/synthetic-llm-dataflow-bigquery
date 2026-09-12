@@ -214,3 +214,111 @@ def test_a_rank_tie_never_falls_through_to_the_candidate_values(monkeypatch):
             _conditional_candidates(parent, _EDGE, "tie/", "run-a"),
             _three_candidates_including_null,
         )
+
+
+# --- the two join translations -------------------------------------------
+#
+# A conditional edge is read on BOTH sides by index, never by name:
+#
+#   parent side   `edge.ref_cols[edge.child_cols.index(o)]` — the PARENT's
+#                 name for a shared child column
+#   driving side  `driving.child_cols.index(o)` — that column's POSITION
+#                 inside the driving key tuple
+#
+# Both collapse to the identity when the child and parent spell a column
+# the same way AND both edges list the shared columns in the same order,
+# which every other test in the suite does. These two pin them.
+
+_RENAMED = FkEdgeSpec(
+    child_cols=("T", "R"),
+    # The co-parent calls them PT / PR — child names are NOT parent names.
+    ref_cols=("PT", "PR"),
+    parent_landing="p.land.right",
+    parent_table="right",
+    mode="conditional",
+    overlap=("T",),
+    candidate_cap=8,
+)
+
+_RENAMED_PARENT_ROWS = [{"PT": "t1", "PR": f"r{i}"} for i in range(4)]
+
+
+def _one_key_with_the_parents_own_columns(elements):
+    assert len(elements) == 1, elements
+    ((join_key, candidates),) = elements
+    assert join_key == ("t1",)
+    assert set(candidates) == {(f"r{i}",) for i in range(4)}, candidates
+
+
+def test_the_parent_side_translates_child_names_to_parent_names():
+    """`join_cols = edge.overlap` (child names) would look up `T` on a
+    co-parent row that only has `PT` — a KeyError per element, and only
+    for models whose parent spells the column differently."""
+    with TestPipeline() as p:
+        parent = p | beam.Create(_RENAMED_PARENT_ROWS)
+        assert_that(
+            _conditional_candidates(parent, _RENAMED, "renamed/", "run-a"),
+            _one_key_with_the_parents_own_columns,
+        )
+
+
+def test_a_multi_column_overlap_joins_by_position_not_by_declaration_order(
+    tmp_path,
+):
+    """The driving edge lists the shared columns as (A, B); the
+    conditional edge lists them as (B, A) — a legal declaration, since
+    `overlap` is in the CONDITIONAL edge's `cols` order. The parent-side
+    projection and the driving-side positions must therefore agree on
+    (B, A), not each on its own order: getting it wrong produces a join
+    key that matches NOTHING, so every key rides on with an empty
+    candidate list and the whole conditional edge silently evaporates.
+    """
+    from sdfb_beam.pipeline import _fanout_requests
+
+    driving = FkEdgeSpec(
+        child_cols=("A", "B"),
+        ref_cols=("pa", "pb"),
+        parent_landing="p.land.left",
+        parent_pk=("pa", "pb"),
+        mode="fanout",
+        keys_per_batch=10,
+    )
+    conditional = FkEdgeSpec(
+        # (B, A) — the reverse of the driving edge's order — plus R.
+        child_cols=("B", "A", "R"),
+        ref_cols=("qb", "qa", "qr"),
+        parent_landing="p.land.right",
+        parent_table="right",
+        mode="conditional",
+        overlap=("B", "A"),
+        candidate_cap=8,
+    )
+    # Values are never interchangeable: a swapped join key matches no
+    # co-parent row at all.
+    driving_rows = [{"pa": "a1", "pb": "b1"}]
+    co_parent_rows = [{"qb": "b1", "qa": "a1", "qr": f"r{i}"} for i in range(3)]
+    out = tmp_path / "ordered"
+    with TestPipeline() as p:
+        left = p | "Left" >> beam.Create(driving_rows)
+        right = p | "Right" >> beam.Create(co_parent_rows)
+        requests = _fanout_requests(
+            left, driving, "ordered/", 2.0,
+            conditional=((1, conditional, right),),
+            run_id="run-a",
+        )
+        _ = (
+            requests
+            | "Repr" >> beam.Map(repr)
+            | "Write" >> beam.io.WriteToText(str(out))
+        )
+    payloads = [
+        ast.literal_eval(line)
+        for f in sorted(out.parent.glob(out.name + "*"))
+        for line in f.read_text().splitlines()
+        if line
+    ]
+    assert payloads, "the conditional join produced no request at all"
+    (payload,) = payloads
+    assert payload["keys"] == [("a1", "b1")]
+    (candidates,) = payload["matches"][conditional.edge_id]
+    assert {c for c in candidates} == {("r0",), ("r1",), ("r2",)}, candidates

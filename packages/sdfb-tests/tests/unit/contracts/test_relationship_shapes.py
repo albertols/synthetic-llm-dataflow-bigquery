@@ -161,3 +161,136 @@ class TestShapesStillPending:
         roles = _roles(reg, "bottom")
         assert roles["(T,L)->left"] == "driving"
         assert roles["(T,R)->right"] == "conditional"
+
+
+# Two INDEPENDENT edges that both claim the child column `X`: neither
+# shares a column with the driving edge, so each is handed the ADR
+# 0030/0031 side-input pool and each writes its WHOLE tuple into the row
+# (`_draw_fk_columns` in B.1, the pool loop in B.2). The second write
+# lands on top of the first's `X`, so the first edge's tuple is destroyed
+# and `EnforceFkIntegrityDoFn` diverts nearly every row as `fk.orphan` —
+# after the GPU has already generated it.
+_TWO_INDEPENDENT = """
+model: ti
+tables:
+  drv: {pk: [D]}
+  pa: {pk: [X, Y]}
+  pb: {pk: [X, Z]}
+  child:
+    pk: [D, X, Y, Z]
+    fk:
+      - {cols: [D], ref: drv, ref_cols: [D]}
+      - {cols: [X, Y], ref: pa, ref_cols: [X, Y]}
+      - {cols: [X, Z], ref: pb, ref_cols: [X, Z]}
+"""
+
+# Two CONDITIONAL edges whose `rest`s overlap on `L`. `mid` is NOT under
+# `left`, so the candidate `mid` supplies for `L` need not exist in
+# `left` for the same `T` — and `apply_conditional_overrides` writes the
+# edges in plan order, so the surviving `(T, L)` is whatever the last
+# edge said. Conditional edges are not gated at all (`_fk_integrity_stage`
+# only sees side-input pools), so those rows land in BigQuery silently.
+_TWO_CONDITIONAL = """
+model: tc
+tables:
+  top: {pk: [T]}
+  left:
+    pk: [T, L]
+    fk: [{cols: [T], ref: top, ref_cols: [T]}]
+  mid:
+    pk: [T, L, M]
+    fk: [{cols: [T], ref: top, ref_cols: [T]}]
+  bottom:
+    pk: [T, L, M, S]
+    fk:
+      - {cols: [T], ref: top, ref_cols: [T]}
+      - {cols: [T, L], ref: left, ref_cols: [T, L]}
+      - {cols: [T, L, M], ref: mid, ref_cols: [T, L, M]}
+"""
+
+
+class TestCrossEdgeColumnOwnership:
+    """Two NON-DRIVING edges may not own the same child column.
+
+    `edge_roles` gives each non-driving edge a role from its overlap with
+    the DRIVING edge alone, so until ADR 0037's final review nothing
+    compared the non-driving edges with EACH OTHER. Both shapes below
+    resolved to a clean role assignment and then corrupted the data
+    downstream — silently, in the conditional case. Both raised a
+    `RelationshipError` before this branch (ADR 0036 D4's blanket stop);
+    they must raise again, by name.
+
+    The columns an edge WRITES: `driving` its `cols`, `implied` nothing,
+    `independent` all its `cols`, `conditional` its `rest`, `external`
+    its `cols`. The DRIVING edge is deliberately outside the check —
+    `implied`/`independent`/`conditional` are disjoint from it by
+    construction, and an `external` edge overlapping it is design §9's
+    named limitation (logged as `fk_edge_overlap_external`, resolved by
+    enabling the parent), not a stop.
+    """
+
+    def test_two_independent_edges_cannot_share_a_column(self):
+        reg = _registry(_TWO_INDEPENDENT)
+        with pytest.raises(RelationshipError) as err:
+            reg.edge_roles("child")
+        message = str(err.value)
+        assert "child" in message
+        assert "(X,Y)->pa" in message and "(X,Z)->pb" in message
+        assert "X" in message
+        assert "drives: true" in message
+
+    def test_two_conditional_edges_cannot_share_a_rest_column(self):
+        reg = _registry(_TWO_CONDITIONAL)
+        with pytest.raises(RelationshipError) as err:
+            reg.edge_roles("bottom")
+        message = str(err.value)
+        assert "bottom" in message
+        assert "(T,L)->left" in message and "(T,L,M)->mid" in message
+        assert "L" in message
+
+    def test_the_stop_names_the_role_of_each_clashing_edge(self):
+        # The operator has to know WHICH mechanism claimed the column to
+        # pick a fix, so the roles ride in the message.
+        with pytest.raises(RelationshipError, match="independent"):
+            _registry(_TWO_INDEPENDENT).edge_roles("child")
+        with pytest.raises(RelationshipError, match="conditional"):
+            _registry(_TWO_CONDITIONAL).edge_roles("bottom")
+
+    def test_the_card_still_renders_a_clashing_model(self):
+        # `card`/`mermaid` swallow a RelationshipError so an operator can
+        # still SEE the model that stopped the launch.
+        card = _registry(_TWO_INDEPENDENT).card("child")
+        assert "(X,Y) --> pa" in card
+
+    def test_shapes_with_disjoint_written_columns_still_resolve(self):
+        # Every shape ADR 0037 shipped: the star's dimensions write
+        # disjoint columns, the diamond's conditional branch writes only
+        # its `rest`, and an implied edge writes nothing at all.
+        assert _roles(_registry(_STAR_FACT), "fact") == {
+            "(A_ID)->dim_a": "driving", "(B_ID)->dim_b": "independent",
+        }
+        assert _roles(_registry(_DIAMOND), "bottom") == {
+            "(T,L)->left": "driving", "(T,R)->right": "conditional",
+        }
+
+    def test_two_conditional_edges_with_empty_rests_are_pure_filters(self):
+        # `(K)->P` drives; `(K)->Q` and `(K)->R` are existence filters —
+        # `rest` is empty on both, so neither WRITES anything and three
+        # edges on one column are legitimate (the cli `_TWO_PARENTS`
+        # shape).
+        reg = _registry("""
+model: f
+tables:
+  P: {pk: [K]}
+  Q: {pk: [K]}
+  R: {pk: [K]}
+  CH:
+    pk: [K, S]
+    fk:
+      - {cols: [K], ref: P, ref_cols: [K]}
+      - {cols: [K], ref: Q, ref_cols: [K]}
+      - {cols: [K], ref: R, ref_cols: [K]}
+""")
+        assert _roles(reg, "CH") == {
+            "(K)->P": "driving", "(K)->Q": "conditional", "(K)->R": "conditional",
+        }

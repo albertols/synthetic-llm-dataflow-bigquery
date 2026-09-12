@@ -976,7 +976,8 @@ def _check_edges_against_driving(
     side_input_edges: list[tuple[int, FkEdgeSpec, Any]],
     conditional_edges: list[tuple[int, FkEdgeSpec, Any]],
 ) -> None:
-    """What each non-driving edge must look like next to the driving one
+    """What each non-driving edge must look like next to the driving one,
+    AND what every pair of in-job edges must look like next to each other
     (ADR 0037 §4/§5) — every violation here would otherwise surface as a
     stalled job, a measured `fk.orphan` rate, or `tuple.index(x): x not
     in tuple` from deep inside the graph build."""
@@ -1031,6 +1032,45 @@ def _check_edges_against_driving(
                 f"{unowned} that are not its own — the overlap is a "
                 f"SUBSET of the edge's child columns (ADR 0037 §4)"
             )
+    # Every PAIR of in-job edges, not only each edge against the DRIVING
+    # one: the guard was one-sided, so a side_input edge disjoint from
+    # the driving key but sharing a column with a CONDITIONAL edge's
+    # `rest` built without complaint — and `apply_conditional_overrides`,
+    # which runs AFTER the pool draws, then clobbered the pool-drawn
+    # tuple. `overlap` is DECLARED rather than derived, so the driving
+    # edge belongs in the pairing too: a column it carries that the
+    # conditional edge omits from `overlap` falls into that edge's `rest`
+    # and overwrites the driving key itself. Defence in depth behind
+    # `RelationshipRegistry.edge_roles`, which stops the same shapes for
+    # model-declared launches; this catches hand-built specs.
+    in_job = [driving, *(e for _j, e, _p in side_input_edges + conditional_edges)]
+    for index, first in enumerate(in_job):
+        for second in in_job[index + 1 :]:
+            written = _written_child_cols(second)
+            shared = [c for c in _written_child_cols(first) if c in written]
+            if shared:
+                raise ValueError(
+                    f"{spec.config.landing_table}: edges "
+                    f"{list(first.child_cols)} (mode={first.mode!r}) and "
+                    f"{list(second.child_cols)} (mode={second.mode!r}) both "
+                    f"WRITE {shared} — one child column cannot be owned by "
+                    f"two edges: the second draw overwrites the first and "
+                    f"lands a tuple its parent never held (ADR 0037 §2)"
+                )
+
+
+def _written_child_cols(edge: FkEdgeSpec) -> tuple[str, ...]:
+    """The child columns this edge actually WRITES into a generated row.
+
+    A `conditional` edge writes only its `rest` — the shared columns come
+    from the driving key, never from the candidate. Every other in-job
+    mode writes its whole tuple: the driving key itself, or a whole pool
+    draw. `implied` edges never reach here — `_partition_parent_edges`
+    drops them precisely because they write nothing at all.
+    """
+    if edge.mode == "conditional":
+        return tuple(c for c in edge.child_cols if c not in edge.overlap)
+    return edge.child_cols
 
 
 def _side_input_pools(

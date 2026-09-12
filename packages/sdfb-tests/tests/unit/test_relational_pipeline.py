@@ -874,3 +874,65 @@ def test_a_dict_valued_key_column_is_never_mistaken_for_matches():
     # The batch_id hashes the WHOLE first key, not its first member.
     scalar = _fanout_request_payload([1, 2], 2.0, paired=False)
     assert payload["batch_id"] != scalar["batch_id"]
+
+
+def test_a_side_input_edge_clashing_with_a_conditional_rest_stops_the_build(
+    tmp_path,
+):
+    """The composer's guard was one-sided: it compared every non-driving
+    edge with the DRIVING columns and never with each other. A
+    side_input edge disjoint from the driving key but sharing a column
+    with a conditional edge's `rest` therefore built without complaint —
+    and then the conditional override clobbered the pool-drawn tuple
+    (`apply_conditional_overrides` runs after the pool draws), landing a
+    combination the side-input parent never held. Defence in depth
+    behind the registry's own cross-edge stop, for hand-built specs."""
+    from sdfb_beam.pipeline import _partition_parent_edges
+
+    clashing = FkEdgeSpec(
+        child_cols=("R",), ref_cols=("r",), parent_landing="p.land.dim",
+        mode="side_input",
+    )
+    spec = _star_table_spec(tmp_path, (_DRIVING_EDGE, _CONDITIONAL_EDGE, clashing))
+    with pytest.raises(ValueError) as err:
+        _partition_parent_edges(
+            spec,
+            {
+                "p.land.customers": "PARENT_DRIVING",
+                "p.land.right": "PARENT_C",
+                "p.land.dim": "PARENT_I",
+            },
+        )
+    message = str(err.value)
+    assert "p.land.orders_star" in message
+    assert "conditional" in message and "side_input" in message
+    assert "'R'" in message
+
+
+def test_a_conditional_rest_colliding_with_the_driving_key_stops_the_build(
+    tmp_path,
+):
+    """`overlap` is DECLARED, not derived, so a conditional edge can
+    name a driving column it does NOT list as shared: that column then
+    falls into `rest` and the candidate draw overwrites the driving
+    key's own value — the ADR 0036 D1 corruption, from the conditional
+    path this time."""
+    from sdfb_beam.pipeline import _partition_parent_edges
+
+    driving = FkEdgeSpec(
+        child_cols=("CUST_ID", "LINE"), ref_cols=("customer_id", "line"),
+        parent_landing="p.land.customers", parent_pk=("customer_id", "line"),
+        mode="fanout",
+    )
+    sloppy = FkEdgeSpec(
+        child_cols=("CUST_ID", "LINE", "R"),
+        ref_cols=("customer_id", "line", "r"),
+        parent_landing="p.land.right", parent_table="right",
+        mode="conditional", overlap=("CUST_ID",),
+    )
+    spec = _star_table_spec(tmp_path, (driving, sloppy))
+    with pytest.raises(ValueError, match="LINE"):
+        _partition_parent_edges(
+            spec,
+            {"p.land.customers": "PARENT_DRIVING", "p.land.right": "PARENT_C"},
+        )
