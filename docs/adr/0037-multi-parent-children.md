@@ -105,16 +105,45 @@ the existing Reshuffle → BatchElements → request payload
 plan and preflight's `conditional_rest`; the parent is part of the id so
 two conditional edges from the same child columns to different parents
 cannot collide, review ruling 14). Parent rows whose join key holds a
-NULL are dropped and counted (`fanout/candidates_dropped_null`). Inside
-the engine, `sdfb_core.engines.fanout.conditional_values` shuffles the
-key's candidate list once with `derive_key_seed(run_id, key, edge_id)`
-and hands child `i` the `i % len`-th entry — without replacement until
-the fan-out exceeds the candidate count, then wrapping — and writes it
-on `rest`'s child columns after the pool draws and before the
-driving/cell overrides. The shared columns always come from the driving
-key, so the diamond's `T` is one value satisfying both parents by
-construction. The join is keyed on narrow tuples, never on rows: no new
-side input grows with the driving parent.
+NULL are dropped and counted (`fanout/candidates_dropped_null`).
+
+Inside the engine, the cell each child carries and every conditional
+edge's candidate are decided JOINTLY (final review fix wave A1) —
+`sdfb_core.engines.base.conditional_draws` calls
+`sdfb_core.engines.fanout.joint_key_draw` once per key, one walk over the
+CROSS PRODUCT `(n_cells, c_1, …, c_m)`: child `i` takes
+`_mixed_radix(i, (n_cells, c_1, …, c_m))` and indexes a per-key seeded
+permutation of the cell rows (`CellTable.permutation`) and of each
+edge's shuffled candidate list (`derive_key_seed(run_id, key,
+salt=edge_id)`). The cell digit varies FASTEST, so a key within its cell
+table still takes a different weighted cell exactly as ADR 0036 drew
+them, and the candidate digits only start advancing once the cells are
+exhausted. This replaced two INDEPENDENT `i % len` cyclic walks
+(`conditional_values`, deleted) whose realised combinations were only
+`lcm(n_cells, c_1, …, c_m)` — NOT their product, so e.g. 2 cells × 2
+candidates gave 2 combinations for 4 children, not 4 — and which RAISED
+inside `CellTable.draw(k, exact=True)` the moment a key's fan-out
+exceeded an exact cell table, killing the whole batch as
+`engine_failure` instead of drawing from the candidates that make those
+children representable.
+
+The fan-out is CAPPED at the joint capacity `n_cells × c_1 × … × c_m`
+(`min(k, capacity)`) only when `plan.exact_cells` holds (every
+PK-completing member outside the driving edge is a cell or an
+edge-supplied column) AND every conditional edge has at least one
+candidate for that key; a capped key's shortfall is reported once per
+worker process as `fanout_rows_capped`. An INEXACT PK (an unbounded
+member still completes it) or a conditional edge with NO candidate for
+that key (nullable — every one of that key's children NULL-fills
+instead) both WRAP the existing sequence rather than cap it: capping
+either would drop rows the PK can legitimately represent, or shrink a
+key's fan-out on account of a NULL that is not a key member (ADR 0031).
+`apply_conditional_overrides` reads the candidate half of the `KeyDraw`
+and writes it on `rest`'s child columns after the pool draws and before
+the driving/cell overrides. The shared columns always come from the
+driving key, so the diamond's `T` is one value satisfying both parents
+by construction. The join is keyed on narrow tuples, never on rows: no
+new side input grows with the driving parent.
 
 **D4 — `--fk_candidate_cap` (default 64) is the Top-M bound, and it is
 a flag because the source's tail decides.**
@@ -122,21 +151,35 @@ a flag because the source's tail decides.**
 ![Candidate cap vs wrapping](../designs/assets/multi-parent-candidate-cap.png)
 
 *Raising the cap buys back only the wrapping the cap itself caused.*
-Formally, a shared value wraps iff its fan-out `k` exceeds
-`min(c, M)`, where `c` is the distinct candidates the conditional parent
-holds for that value; the wrapping attributable to `M` is confined to
-`c ≥ k > M` — the orange wedge — while `k > c` is forced by the source
-and identical at every cap (concept figure, seeded; the mechanism is
-`_conditional_candidates` in `sdfb_beam/pipeline.py` and
-`conditional_values` in `sdfb_core/engines/fanout.py`). 64 is the
-default because it leaves the overwhelming majority of shared values
-unwrapped while keeping a request's candidate list bounded; raise it
-when a branch's within-key variety matters more than the shuffle, lower
-it when a request gets too wide. `--fk_candidate_cap` is the
-operator-set ceiling on `M`; the effective cap used to size a request is
-`min(--fk_candidate_cap, measured max fan-out)` once the fan-out
-measurement is available, so the operator ceiling and the effective cap
-can differ. What `keys_per_batch` (`in_set_parent_edges` in
+Formally, the PARENT-side candidate LIST for a shared value holds
+`min(c, M)` entries, where `c` is the distinct candidates the
+conditional parent holds for that value (concept figure, seeded; the
+list is built by `_conditional_candidates` in `sdfb_beam/pipeline.py`).
+What the ENGINE does with a fan-out `k` beyond that list is D3's capping
+rule, not a blanket wrap: with an exact PK and a non-empty list (the
+common case) it CAPS at the joint capacity (`joint_key_draw`,
+`sdfb_core/engines/fanout.py`) and reports the shortfall as
+`fanout_rows_capped`; wrapping survives only for an inexact PK or a
+nullable edge with zero candidates for that key. Within the list itself
+the wrapping attributable to `M` is confined to `c ≥ k > M` — the orange
+wedge — while `k > c` is forced by the source and identical at every
+cap. 64 is the default because it leaves the overwhelming majority of
+shared values with a full, uncapped list while keeping a request's
+candidate list bounded; raise it when a branch's within-key variety
+matters more than the shuffle, lower it when a request gets too wide.
+
+`--fk_candidate_cap` is the operator-set ceiling on `M`; the value
+actually used to size the composer's Top-M combine and every request
+payload is the EFFECTIVE cap, `effective_candidate_cap(flag, fanout) =
+max(1, min(flag, measured max fan-out))` (`sdfb_beam/cli/run_pipeline.py`,
+fix wave A3), logged once per driven table as
+`fk_candidate_cap_effective table= flag= effective= max_k=`. No parent
+key takes more candidates than its largest measured fan-out, so a flag
+above `max_k` only makes the combine carry, and every request payload
+ship, candidates nothing can draw. Preflight P4 (D6) still reads the RAW
+flag, not the effective cap — the two give the identical stop/pass
+verdict, since a factor of `min(flag, max_k)` is `≥ max_k` exactly when
+`flag ≥ max_k`. What `keys_per_batch` (`in_set_parent_edges` in
 `run_pipeline.py`) actually bounds is candidate TUPLES per request: with
 `n` conditional edges it is lowered so `keys_per_batch × M × n` never
 exceeds 100k. That is not the same as the per-request VALUE count —
@@ -150,10 +193,16 @@ dropped, counted and reported when it cannot (ruling B).** A driving key
 whose shared value has no candidate in the conditional parent is not a
 silent defect:
 
-- when **every** `rest` column is NULLABLE in the landing schema, the
+- when **every** `rest` column is NULLABLE in BOTH the landing schema
+  AND the generation schema (fix wave A4 — landing alone let a REQUIRED
+  generation column reject the row inside `model_validate` and vanish
+  silently through the engine's own `except Exception: continue`), the
   engine writes NULL there — the tuple is then legitimately parentless
   and the ADR 0031 orphan query excludes it, as it already excludes
-  every NULL tuple;
+  every NULL tuple. A disagreement between the two schemas is treated as
+  NON-nullable and logged once per edge as `fk_nullable_schema_mismatch
+  table= edge= landing= generation=` (WARNING), naming both schemas'
+  per-column modes;
 - otherwise `GenerateRecordsDoFn` removes the key **before** generation
   (no GPU spend on a row that cannot be valid), increments
   `fanout/keys_unmatched`, logs `batch_unmatched batch_id= keys_dropped=`
@@ -168,26 +217,47 @@ distinct rule from `fk.orphan` on purpose — an orphan is a generator
 regression and never expected; an unmatched key means the SOURCE lacks
 that branch, which a report should read as an input fact.
 
-**D6 — preflight P4 gains two per-key factors; nothing else about it
-changes.** `_check_driven_pk` (`sdfb_beam/cli/preflight.py`) keeps its
-shape (exact members only, ADR 0035/0036): an **independent** edge whose
-columns sit in the child's PK contributes its pool cap as a per-key
-factor, and a **conditional** edge whose `rest` sits in the PK
-contributes at most `M`, so the check becomes
-`max_k ≤ n_cells × Π pool_caps × Π M` or the launch stops naming the
-edge (or `--fk_candidate_cap`). Members outside the PK never enter P4;
-an inexact PK still skips it and streaming uniqueness measures
-`pk.duplicate`.
+**D6 — preflight P4 gains ONE per-key factor, not two, and it is an
+UPPER bound (fix wave A2 corrected the original design).**
+`_check_driven_pk` (`sdfb_beam/cli/preflight.py`) keeps its shape (exact
+members only, ADR 0035/0036): a **conditional** edge whose `rest` sits
+in the child's PK contributes at most the RAW `--fk_candidate_cap`
+(P4 does not use D4's effective cap — the verdict is identical either
+way), so the check becomes `max_k ≤ n_cells × Π (--fk_candidate_cap)`
+— one factor per conditional edge in the PK — or the launch stops naming
+the edge or the flag. An **independent** edge is deliberately NOT a
+factor: its pool is drawn per ROW WITH REPLACEMENT (`_draw_fk_columns`),
+so two children of one parent key CAN and DO draw the same parent tuple
+— counting its pool cap here declared PKs safe that the engine then
+duplicated (the review's finding). Its columns still count as `known`
+(no cell table is measured over them, so they cost nothing), but the
+stop names it as a NON-factor ("drawn per ROW with replacement, so it
+bounds nothing per key") and no longer offers "a parent that lands more
+keys" as a remedy, because it never was one. The conditional factor
+itself is an UPPER bound, not a promise: `joint_key_draw` (D3) caps a
+key at what its co-parent ACTUALLY offered that key, not at the flag,
+and reports any shortfall as `fanout_rows_capped` — a model whose
+co-parents are thin passes P4 and still caps at run time, observably
+rather than silently. Members outside the PK never enter P4; an inexact
+PK still skips it and streaming uniqueness measures `pk.duplicate`.
 
 **D7 — every role and every path is one milestone line.** Launcher:
 `fk_edge_role edge= role= overlap=` per enforced edge (the `overlap=`
 field is new), `fk_driving_edge_defaulted table= edge= hint=` (WARNING)
 when rule 4 fired, `fk_edge_overlap_external table= edge= overlap=`
-(WARNING) for the limitation in Consequences. Worker:
-`relational_fk_edge mode=side_input|conditional overlap=` per edge and
-`fanout_bound … conditional=<n> candidate_cap=` once per engine build.
-Counters `fanout/candidates_dropped_null` and `fanout/keys_unmatched`;
-DLQ rule `fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
+(WARNING) for the limitation in Consequences, `fk_candidate_cap_effective
+table= flag= effective= max_k=` once per driven table (D4, fix wave A3),
+and `fk_nullable_schema_mismatch table= edge= landing= generation=`
+(WARNING) once per conditional edge when the two schemas disagree (D5,
+fix wave A4). Worker: `relational_fk_edge mode=side_input|conditional
+overlap=` per edge, `fanout_bound … conditional=<n> candidate_cap=` once
+per engine build (`candidate_cap` here is the EFFECTIVE value from
+`fk_candidate_cap_effective`, not the raw flag), and
+`fanout_rows_capped requested= emitted= capacity=` (WARNING) once per
+worker process the first time `joint_key_draw` caps a key below its
+requested fan-out (D3, fix wave A1). Counters
+`fanout/candidates_dropped_null` and `fanout/keys_unmatched`; DLQ rule
+`fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
 
 ## Alternatives considered
 
@@ -290,12 +360,19 @@ DLQ rule `fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
   and `test_relationship_models.py`'s two unmarked-parent cases now
   assert "first declared drives, the other is conditional" instead of a
   stop (47 passed).
-- [ ] DirectRunner, fake client, whole-tuple checks — the five shapes in
-  `packages/sdfb-tests/tests/unit/test_fanout_shapes.py`:
+- [ ] DirectRunner, fake client, whole-tuple checks — the seven shapes in
+  `packages/sdfb-tests/tests/unit/test_fanout_shapes.py` (7 passed):
   - **star** — `dim_a`, `dim_b`, `fact`: every `fact` row's key tuple
     exists in each dimension, PK unique, row count within the histogram;
   - **diamond** — `top`, `left`, `right`, `bottom`: every `(T,L)` in
     `left`, every `(T,R)` in `right`, and the two `T`s are one value;
+  - **beyond the cells** (fix wave A1,
+    `test_fanout_beyond_the_cells_rides_the_conditional_candidates`) — a
+    driven child asks 3 children
+    per key from a 2-row cell table with a conditional edge covering the
+    rest: the cells and candidates jointly offer 2×2=4 combinations, so
+    all 3 are representable and pairwise distinct — the exact regime
+    that used to raise inside `CellTable.draw(k, exact=True)`;
   - **existence filter** — `(K)->P` driving, `(K)->Q` conditional with
     empty rest: every landed `K` is in `Q`, and the keys that are not
     reach the DLQ as `fk.unmatched` with the expected-row weight;
@@ -303,7 +380,12 @@ DLQ rule `fk.unmatched`. No mermaid in any log (ADR 0036 rev 2).
     `right`: those rows land with `R = NULL` and no DLQ envelope;
   - **graph** — six tables mixing a tree, a star fact, a diamond and a
     1:1 chain: zero orphans on every enforced edge, `generation_waves`
-    order respected.
+    order respected;
+  - **two conditional edges to different parents** (review ruling 14) —
+    a child column that is an existence filter against TWO co-parents at
+    once: each edge's candidate list is looked up by its own
+    `edge_id = (cols)->ref`, so neither overwrites the other in
+    `matches` and each is the sole reason for its own keys' DLQ entries.
 - [ ] M4/Dataflow: a relational launch whose model declares a star or a
   diamond — `fk_edge_role … role=independent|conditional overlap=` and
   `relational_fk_edge mode=conditional` read as this ADR predicts, the

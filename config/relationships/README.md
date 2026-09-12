@@ -223,11 +223,21 @@ Not implemented; recorded as future work in
 
 A conditional edge keeps at most `M = --fk_candidate_cap` candidate
 tuples per shared value (a deterministic hash-ordered sample), so a hot
-shared key never carries an unbounded list into a request. A key whose
-fan-out exceeds the candidates it was handed **wraps** — it reuses
-them, in a seeded order. Raising the cap only buys back the wrapping the
-cap itself caused: a shared value the parent simply has too few distinct
-candidates for wraps at any cap. See the figure in
+shared key never carries an unbounded list into a request. `M` is the
+OPERATOR ceiling; the value actually used is the EFFECTIVE cap,
+`min(--fk_candidate_cap, measured max fan-out)`, logged once per driven
+table as `fk_candidate_cap_effective`.
+
+A key whose fan-out exceeds the candidates it was handed is CAPPED at
+the joint cells × candidates capacity, not wrapped, whenever the PK's
+completing members are exact and the edge has at least one candidate
+for that key — the common case; the shortfall is reported once per
+worker as `fanout_rows_capped`. Wrapping (reusing candidates in a seeded
+order) survives only for an inexact PK or a nullable edge with zero
+candidates for that key. Raising the cap only buys back the
+capping/wrapping the cap itself caused: a shared value the parent simply
+has too few distinct candidates for is capped or wrapped the same way at
+any cap. See the figure in
 [ADR 0037](../../docs/adr/0037-multi-parent-children.md) (D4).
 
 #### When the parent has no candidate for a key (ruling B)
@@ -235,9 +245,13 @@ candidates for wraps at any cap. See the figure in
 A driving key whose shared value does not exist in the conditional
 parent at all:
 
-- **every `rest` column NULLABLE** in the landing schema → the engine
-  writes `NULL` there. The row lands, legitimately parentless (the
-  orphan query excludes NULL tuples, as it always has).
+- **every `rest` column NULLABLE** in BOTH the landing schema AND the
+  generation schema (fix wave A4 — landing alone let a REQUIRED
+  generation column reject the row silently) → the engine writes `NULL`
+  there. The row lands, legitimately parentless (the orphan query
+  excludes NULL tuples, as it always has). A disagreement between the
+  two schemas is treated as NON-nullable and logged once per edge as
+  `fk_nullable_schema_mismatch` (WARNING).
 - **otherwise** → the key is dropped **before** generation (no GPU spend
   on a row that cannot be valid), counted as `fanout/keys_unmatched`,
   and reported as one DLQ envelope per key, `rule_id="fk.unmatched"`,
