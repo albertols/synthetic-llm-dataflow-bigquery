@@ -307,3 +307,79 @@ class TestConditionalMatchesNullPolicy:
         assert "name=batch_unmatched" in caplog.text
         assert "batch_id=11" in caplog.text
         assert "keys_dropped=2" in caplog.text
+
+    def test_a_crash_after_a_drop_does_not_double_count_the_dropped_rows(
+        self, caplog
+    ):
+        """Fix wave A5: `n` was never recomputed after
+        `_filter_unmatched_keys`, so an engine crash AFTER a drop emitted
+        an `engine_failure` envelope whose `raw_request["n"]` still
+        counted the dropped keys' rows — rows already weighted into their
+        own `fk.unmatched` envelopes. `_dlq_rule_weight` then charged the
+        BLOCKER ratio twice for them, and `batch_start` / `batch_done`
+        reported the PRE-filter key count."""
+
+        class _RaisingConditionalEngine:
+            def generate_for_keys(self, keys, cfg, matches=None):
+                raise RuntimeError("cell draw exploded")
+                yield  # pragma: no cover - makes this a generator function
+
+        dofn = GenerateRecordsDoFn(
+            engine_name="b1_rag", model_client=FakeModelClient(reference_pool=_ROWS),
+            ctx=_ctx_with_conditional(nullable=False),
+        )
+        dofn._engine = _RaisingConditionalEngine()
+        dofn._keys_unmatched = _CounterSpy()
+        request = {
+            "batch_id": 21,
+            "keys": [("K1",), ("K2",), ("K3",), ("K4",)],
+            "n": 8,  # 4 keys x mean fan-out 2
+            "matches": {"(T,R)->right": [[("r1",)], [], [], [("r4",)]]},
+        }
+
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            out = list(dofn.process(request))
+
+        envelopes = [o.value for o in out]
+        unmatched = [e for e in envelopes if e["rule_id"] == "fk.unmatched"]
+        failures = [e for e in envelopes if e["rule_id"] == "engine_failure"]
+        assert len(unmatched) == 2 and len(failures) == 1
+        # Each dropped key already carries its own expected rows...
+        assert [e["raw_request"]["n"] for e in unmatched] == [2, 2]
+        # ...so the crashed batch may only claim what is LEFT.
+        assert failures[0]["raw_request"]["n"] == 4
+        assert failures[0]["raw_request"]["keys_total"] == 2
+        assert [k[0] for k in failures[0]["raw_request"]["keys"]] == ["K1", "K4"]
+        # The logs report the SURVIVING batch, with the drop still visible.
+        start = [ln for ln in caplog.text.splitlines() if "name=batch_start" in ln]
+        assert len(start) == 1
+        assert "keys=2" in start[0] and "keys_dropped=2" in start[0]
+
+    def test_a_batch_with_no_drops_keeps_todays_counts(self, caplog):
+        """The A5 recompute must not move a batch that dropped nothing."""
+
+        class _RaisingConditionalEngine:
+            def generate_for_keys(self, keys, cfg, matches=None):
+                raise RuntimeError("boom")
+                yield  # pragma: no cover
+
+        dofn = GenerateRecordsDoFn(
+            engine_name="b1_rag", model_client=FakeModelClient(reference_pool=_ROWS),
+            ctx=_ctx_with_conditional(nullable=False),
+        )
+        dofn._engine = _RaisingConditionalEngine()
+        dofn._keys_unmatched = _CounterSpy()
+        request = {
+            "batch_id": 22,
+            "keys": [("K1",), ("K2",)],
+            "n": 4,
+            "matches": {"(T,R)->right": [[("r1",)], [("r2",)]]},
+        }
+
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            out = list(dofn.process(request))
+
+        assert [o.value["rule_id"] for o in out] == ["engine_failure"]
+        assert out[0].value["raw_request"]["n"] == 4
+        start = [ln for ln in caplog.text.splitlines() if "name=batch_start" in ln]
+        assert "keys=2" in start[0] and "keys_dropped" not in start[0]

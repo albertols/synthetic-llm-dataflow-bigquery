@@ -46,7 +46,7 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     ModelClient,
     apply_conditional_overrides,
-    conditional_values_by_key,
+    conditional_draws,
 )
 from sdfb_core.engines.fanout import FanoutPlan, expand_keys
 from sdfb_core.engines.fk_keys import bind_fk_key_pools
@@ -321,11 +321,17 @@ class B2LibraryEngine(GenerationEngine):
         col_order = [c.name for c in self._ctx.table_schema.columns]
         chunk_rows = max(1, int(cfg.batch_size or 1000))
         # Non-driving FK edges resolved per key (design 2026-09-11 §4,
-        # ADR 0037) — computed ONCE up front (a no-op dict when the plan
-        # carries no conditional edges) and applied per chunk below.
-        cond_by_key = conditional_values_by_key(plan, keys, run_id, matches)
+        # ADR 0037) — the JOINT per-key draw, computed ONCE up front (a
+        # no-op dict when the plan carries no conditional edges). It
+        # decides each child's cell AND its candidate tuples together, so
+        # `expand_keys` and the overrides below stay two halves of one
+        # combination index (fix wave A1).
+        draws = conditional_draws(plan, keys, run_id, matches)
         child_index: dict[tuple, int] = {}
-        for chunk in expand_keys(plan, keys, run_id, chunk_rows):
+        for chunk in expand_keys(
+            plan, keys, run_id, chunk_rows,
+            draws=draws if plan.conditional else None,
+        ):
             n = len(chunk)
             columns = self._backend.sample_columns(n, rng, temperature=temperature)
             for name in self._free_text_cols:
@@ -341,7 +347,7 @@ class B2LibraryEngine(GenerationEngine):
                 for i, name in enumerate(pool.cols):
                     columns[name] = [t[i] for t in drawn]
             cond_columns, skip = apply_conditional_overrides(
-                plan, chunk, cond_by_key, child_index
+                plan, chunk, draws, child_index
             )
             columns.update(cond_columns)
             for j, name in enumerate(plan.driving_cols):

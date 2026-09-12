@@ -43,7 +43,6 @@ from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
 from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.pk_capacity import (
     FK_KEY_SAMPLE_CEILING,
-    FK_KEY_SAMPLE_FLOOR,
     effective_cells,
     expected_duplicate_share_cells,
     fk_key_sample_cap,
@@ -640,7 +639,7 @@ def _driven_pk_stop(
     capacity: int,
     cells: tuple[str, ...],
     n_cells: int,
-    independent: Mapping[tuple[str, ...], int],
+    independent: tuple[tuple[str, ...], ...],
     n_conditional: int,
     candidate_cap: int,
 ) -> SystemExit:
@@ -649,22 +648,27 @@ def _driven_pk_stop(
 
     Every listed factor is a genuine lever (capacity is their product),
     and the cap advice is the value that actually WORKS — "above 64" is
-    not a fix when 65 fails too."""
+    not a fix when 65 fails too. An INDEPENDENT edge is named too, but as
+    what it is: a per-ROW draw with replacement, which bounds nothing per
+    key (fix wave A2) — so "a parent that lands more keys" is no longer
+    offered as a remedy, because it never was one."""
     parts: list[str] = []
     if cells:
         parts.append(
             f"the PK-completing members {list(cells)} cover only "
             f"{n_cells} cells"
         )
-    for cols, cap in independent.items():
+    for cols in independent:
         parts.append(
-            f"the independent edge ({','.join(cols)}) contributes at most "
-            f"{cap:,} parent keys"
+            f"the independent edge ({','.join(cols)}) is drawn per ROW "
+            f"with replacement, so it bounds nothing per key"
         )
     if n_conditional:
         parts.append(
             f"{n_conditional} conditional edge(s) contribute at most "
-            f"--fk_candidate_cap={candidate_cap:,} candidates each"
+            f"--fk_candidate_cap={candidate_cap:,} candidates each (an "
+            f"upper bound: a key whose parent offers fewer candidates "
+            f"emits fewer children)"
         )
     fixes: list[str] = []
     if n_conditional:
@@ -675,8 +679,6 @@ def _driven_pk_stop(
             f"raise --fk_candidate_cap to at least {sufficient:,} "
             f"(it is {candidate_cap:,})"
         )
-    if independent:
-        fixes.append("a parent that lands more keys")
     fixes.append("the `pk:` in the relationship model")
     fix = (
         f"Fix one of: {'; '.join(fixes)}."
@@ -707,11 +709,23 @@ def _check_driven_pk(
     per-key capacity the PK's completing members offer, else the declared
     PK is not a key in the source.
 
-    That capacity is a PRODUCT (ADR 0037 §6): the measured cell table x
-    every independent edge's sampled key pool x ``--fk_candidate_cap``
-    per conditional edge — each one a member the engine fills per child
-    without repeating itself. A PK with none of them has capacity 1 and
-    is the ADR 0036 1:1 case, which keeps its own message.
+    That capacity is a PRODUCT (ADR 0037 §6, corrected by the final
+    review): the measured cell table x ``--fk_candidate_cap`` per
+    CONDITIONAL edge — each one a member the engine fills per child
+    without repeating itself (`joint_key_draw` walks their cross
+    product). A PK with none of them has capacity 1 and is the ADR 0036
+    1:1 case, which keeps its own message.
+
+    An INDEPENDENT edge is NOT a factor. Its pool is drawn per ROW WITH
+    REPLACEMENT (`_draw_fk_columns`), so two children of one parent can
+    and do draw the same parent key: counting it declared PKs safe that
+    the engine then duplicated. Its columns stay in ``known`` — the
+    engine still writes them, so no cell table is measured over them.
+
+    The conditional factor is an UPPER bound, not a promise: a key whose
+    co-parent offers fewer than ``--fk_candidate_cap`` candidates emits
+    fewer children, and `joint_key_draw` counts the shortfall
+    (`fanout_rows_capped`).
 
     What each edge supplies, and whether it counts, is
     `edge_supplied_members` — the same call `resolve_fanout` makes when
@@ -721,12 +735,10 @@ def _check_driven_pk(
         DEFAULT_FK_CANDIDATE_CAP if candidate_cap is None else int(candidate_cap)
     )
     supply = edge_supplied_members(effective_pk, edge_roles, conditional_rest)
-    independent = {
-        tuple(e.cols): int(
-            independent_caps.get(tuple(e.cols), FK_KEY_SAMPLE_FLOOR)
-        )
-        for e in supply.independent
-    }
+    # Named in the stop (so the operator sees why the edge does NOT help),
+    # never multiplied into the capacity. `independent_caps` still sizes
+    # the composer's side input — that is `_independent_pool_caps`' job.
+    independent = tuple(tuple(e.cols) for e in supply.independent)
     conditional = supply.conditional
     known = supply.known
     cells, exact = pk_cell_columns(effective_pk, driving, profiles, known=known)
@@ -749,10 +761,7 @@ def _check_driven_pk(
                 f"fan-out (clear the `fk_fanout_stats` cache entry) or fix "
                 f"the `pk:` in the relationship model."
             )
-    capacity = (n_cells or 1)
-    for pool in independent.values():
-        capacity *= pool
-    capacity *= cap ** len(conditional)
+    capacity = (n_cells or 1) * cap ** len(conditional)
     if max_k <= capacity:
         return
     if not cells and not known:
@@ -775,7 +784,7 @@ def _check_driven_pk(
         )
     raise _driven_pk_stop(
         table_schema, effective_pk, driving, max_k, capacity, cells, n_cells,
-        independent, len(conditional), cap,
+        tuple(independent), len(conditional), cap,
     )
 
 

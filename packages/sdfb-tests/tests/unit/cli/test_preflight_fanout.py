@@ -308,23 +308,32 @@ def test_an_inexact_driven_pk_still_returns_the_independent_caps():
     assert result.fk_key_sample_caps == {("B_ID",): 7}
 
 
-def test_an_independent_member_of_the_pk_is_a_per_key_factor():
+def test_an_independent_member_of_the_pk_is_not_a_per_key_factor():
+    """Fix wave A2 (blocker): an INDEPENDENT edge's pool is drawn PER ROW
+    WITH REPLACEMENT (`_draw_fk_columns`), so it adds nothing to per-key
+    distinctness. P4 used to multiply it in, declaring a PK impossible to
+    duplicate that the engine then duplicated: 5 children per key, a
+    5-key pool, and the same pool value drawn twice inside one parent.
+    However large the parent, the stop must stand."""
     reg = _star_reg("[A_ID, B_ID]")
 
-    def _run(max_k: int, cap: int):
+    def _run(max_k: int, parent_keys: int):
         return preflight(
             _star_schema(), (), (), _star_rows(),
             relations=reg.relations("F_TABLE"), num_rows=1_000,
-            fk_parent_rows={"A_TABLE": 1_000, "B_TABLE": cap},
+            fk_parent_rows={"A_TABLE": 1_000, "B_TABLE": parent_keys},
             blocker_failure_ratio=0.2, fanout=_star_fanout(max_k),
             edge_roles=reg.edge_roles("F_TABLE"),
         )
 
-    with pytest.raises(
-        SystemExit, match=r"preflight P4.*a parent that lands more keys"
-    ):
-        _run(5, 3)
-    assert _run(5, 5).fk_key_sample_caps == {("B_ID",): 5}
+    for parent_keys in (3, 5, 5_000_000):
+        with pytest.raises(SystemExit) as exc:
+            _run(5, parent_keys)
+        assert "drawn per ROW" in str(exc.value)
+        # The knob that never worked is no longer advertised.
+        assert "a parent that lands more keys" not in str(exc.value)
+    # A fan-out of 1 needs no completing member at all.
+    assert _run(1, 5).fk_key_sample_caps == {("B_ID",): 5}
 
 
 def test_a_conditional_member_of_the_pk_is_bounded_by_the_candidate_cap():
@@ -417,9 +426,11 @@ def _mix_rows(n: int = 480) -> list[dict]:
             for i in range(n)]
 
 
-def test_cells_independent_and_conditional_factors_multiply():
-    """The three PK factors of design §6 on one table: 6 measured joint
-    cells x a 3-key independent pool x a 4-candidate conditional edge."""
+def test_cells_and_conditional_factors_multiply_but_an_independent_pool_does_not():
+    """Design §6's factors, corrected by fix wave A2: 6 measured joint
+    cells x a 4-candidate conditional edge = 24 children per key. The
+    3-key independent pool is NOT a third factor — it is drawn per row,
+    with replacement."""
 
     def _run(max_k: int):
         fanout = {
@@ -440,9 +451,15 @@ def test_cells_independent_and_conditional_factors_multiply():
             conditional_rest={"(T,R)->RIGHT_TABLE": ("R",)}, candidate_cap=4,
         )
 
-    _run(72)  # 6 cells x 3 keys x 4 candidates
-    with pytest.raises(SystemExit, match=r"preflight P4.*73 children"):
-        _run(73)
+    _run(24)  # 6 cells x 4 candidates
+    with pytest.raises(SystemExit, match=r"preflight P4.*25 children"):
+        _run(25)
+    # The conditional factor is an UPPER bound: a key whose co-parent
+    # offers fewer candidates emits fewer children (fix wave A1 counts
+    # them), so the stop must not sell the cap as a guarantee.
+    with pytest.raises(SystemExit) as exc:
+        _run(25)
+    assert "upper bound" in str(exc.value)
 
 
 # --- Fix round 1: rulings 12 (one supply rule) and 13 (caps inside) ----
@@ -517,11 +534,13 @@ def test_a_partially_contained_edge_does_not_false_stop():
             edge_roles=_PARTIAL_REG.edge_roles("F_TABLE"),
         )
 
-    assert _run(5, 5).fk_key_sample_caps == {("B_ID", "X"): 5}
+    # The caps still travel out (the composer sizes its side input from
+    # them) — but they bound no PK, so a fan-out of 1 is what passes.
+    assert _run(1, 5).fk_key_sample_caps == {("B_ID", "X"): 5}
     with pytest.raises(SystemExit) as exc:
         _run(5, 3)
     assert "no cell table was measured" not in str(exc.value)
-    assert "a parent that lands more keys" in str(exc.value)
+    assert "drawn per ROW" in str(exc.value)
 
 
 def test_independent_pools_are_sized_from_the_derived_rows():

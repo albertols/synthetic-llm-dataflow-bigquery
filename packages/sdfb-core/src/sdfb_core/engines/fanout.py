@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import random
 from bisect import bisect_right
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import accumulate
 
@@ -30,9 +30,10 @@ __all__ = [
     "ConditionalEdge",
     "FanoutHistogram",
     "FanoutPlan",
+    "KeyDraw",
     "conditional_edge_id",
-    "conditional_values",
     "expand_keys",
+    "joint_key_draw",
 ]
 
 # Above this fraction of the table, sampling without replacement switches
@@ -133,13 +134,23 @@ class CellTable:
             while len(chosen) < k:
                 chosen.setdefault(self._weighted_index(rng), None)
             return [self.rows[i] for i in chosen]
-        # Weighted permutation via full sort: key = u^(1/w), take the k largest.
-        # O(C log C) full sort (not k-based selection).
-        keyed = sorted(
+        return [self.rows[i] for i in self.permutation(rng)[:k]]
+
+    def permutation(self, rng: random.Random) -> list[int]:
+        """Every row index once, in weighted random order (Efraimidis &
+        Spirakis 2006: sort on ``u^(1/w)``).
+
+        A prefix of it IS a draw without replacement, which is why the
+        exact draw's high-fill branch takes the first ``k``. The joint
+        per-key walk (`joint_key_draw`) indexes into the WHOLE thing:
+        a child's cell is then a pure function of its combination index,
+        so two children of one key can never collide on it, and the
+        weights still decide which cells come first.
+        """
+        return sorted(
             range(self.size),
             key=lambda i: -(rng.random() ** (1.0 / self.counts[i])),
         )
-        return [self.rows[i] for i in keyed[:k]]
 
     def to_payload(self) -> dict:
         return {
@@ -245,26 +256,115 @@ class FanoutPlan:
         )
 
 
-def conditional_values(
-    run_id: str,
+@dataclass(frozen=True)
+class KeyDraw:
+    """One parent key's children, decided JOINTLY (ADR 0037 final review,
+    fix wave A1): the cell each child carries and, per conditional edge,
+    the candidate tuple it carries — index-aligned, one entry per child.
+
+    Why jointly. The cell sequence and each edge's candidate sequence
+    used to be independent cyclic walks (``i % len`` each), so the
+    realised number of distinct ``(cell, cand_1, …, cand_m)``
+    combinations per key was ``lcm(n_cells, c_1, …, c_m)``, NOT their
+    product — 2 cells and 2 candidates gave 2 combinations for 4
+    children, i.e. PK duplicates on a shape preflight had just declared
+    safe. And the cells were drawn by ``CellTable.draw(k, exact=True)``,
+    which RAISED as soon as the fan-out exceeded the cell table, killing
+    a whole key batch instead of using the candidates that make those
+    children representable.
+
+    ``capacity`` is the real per-key ceiling (the product); ``requested``
+    is the fan-out the histogram drew. ``shortfall`` is what a capped key
+    could not emit — the DoFn-visible number behind `fanout_rows_capped`.
+    """
+
+    cells: tuple[tuple, ...]
+    values: dict[str, list[tuple]]
+    requested: int
+    capacity: int
+
+    @property
+    def n_children(self) -> int:
+        return len(self.cells)
+
+    @property
+    def shortfall(self) -> int:
+        return max(0, self.requested - len(self.cells))
+
+
+def _mixed_radix(index: int, radices: Sequence[int]) -> list[int]:
+    """``index`` decomposed over ``radices``, FIRST radix varying fastest.
+
+    Injective on ``[0, prod(radices))``, which is what makes every
+    child's combination distinct. The cells come first deliberately: for
+    the ADR 0036 regime (``k <= n_cells``) each child then takes a
+    different cell, exactly as `CellTable.draw(exact=True)` did, and the
+    candidate digits only start advancing once the cells are exhausted —
+    the regime where the old code raised.
+    """
+    digits: list[int] = []
+    rest = index
+    for radix in radices:
+        digits.append(rest % radix)
+        rest //= radix
+    return digits
+
+
+def joint_key_draw(
+    plan: FanoutPlan,
     key: tuple,
-    edge_id: str,
-    candidates: Sequence[Sequence],
-    k: int,
-) -> list[tuple]:
-    """The ``rest(X)`` values for ``k`` children of ``key`` on conditional
-    edge ``edge_id`` (design 2026-09-11 §4): a seeded shuffle of
-    ``candidates``, without replacement until the fan-out exceeds the
-    candidate count, then wrapping in the same shuffled order. No
-    candidates (an unmatched key) yields ``k`` empty tuples — the NULL
-    policy is the caller's (``GenerateRecordsDoFn`` / the engine)."""
+    run_id: str,
+    candidates: Sequence[Sequence[Sequence]],
+) -> KeyDraw:
+    """One key's children over the CROSS PRODUCT of its cells and its
+    conditional edges' candidates (design 2026-09-11 §4, ADR 0037).
+
+    ``candidates[j]`` is edge ``plan.conditional[j]``'s candidate list
+    for this key (empty = no candidates; the NULL policy is the caller's).
+    Child ``i`` takes its combination from `_mixed_radix` over
+    ``(n_cells, c_1, …, c_m)``, indexing a per-key seeded PERMUTATION of
+    the cell rows (weighted, `CellTable.permutation`) and of each
+    candidate list — the same per-key / per-edge seeds the rest of the
+    fan-out layer uses, so a re-run reproduces the children exactly.
+
+    The fan-out is CAPPED at the capacity only when the combination must
+    key the child: ``exact_cells`` (every PK member outside the driving
+    edge is a cell or an edge-supplied column) AND every edge actually
+    has candidates. An inexact PK is completed by an unbounded member, so
+    capping there would drop rows the PK can represent; an edge with no
+    candidates NULL-fills, and a NULL is not a key member (ADR 0031), so
+    it must not shrink a key's fan-out either. Both wrap instead.
+    """
+    key_t = tuple(key)
+    rng = random.Random(derive_key_seed(run_id, key_t))
+    k = plan.histogram.sample(rng)
+    values: dict[str, list[tuple]] = {edge.id: [] for edge in plan.conditional}
     if k <= 0:
-        return []
-    if not candidates:
-        return [()] * k
-    order = [tuple(c) for c in candidates]
-    random.Random(derive_key_seed(run_id, tuple(key), salt=edge_id)).shuffle(order)
-    return [order[i % len(order)] for i in range(k)]
+        return KeyDraw((), values, 0, 0)
+    orders: list[list[tuple]] = []
+    for edge, candidate_list in zip(plan.conditional, candidates, strict=True):
+        order = [tuple(c) for c in candidate_list]
+        random.Random(derive_key_seed(run_id, key_t, salt=edge.id)).shuffle(order)
+        orders.append(order)
+    n_cells = plan.cells.size if plan.cells is not None else 1
+    radices = [n_cells, *(max(1, len(order)) for order in orders)]
+    capacity = 1
+    for radix in radices:
+        capacity *= radix
+    n_children = min(k, capacity) if (plan.exact_cells and all(orders)) else k
+    cell_order = plan.cells.permutation(rng) if plan.cells is not None else []
+    cells: list[tuple] = []
+    for i in range(n_children):
+        digits = _mixed_radix(i % capacity, radices)
+        cells.append(
+            plan.cells.rows[cell_order[digits[0]]]
+            if plan.cells is not None
+            else ()
+        )
+        for j, edge in enumerate(plan.conditional):
+            order = orders[j]
+            values[edge.id].append(order[digits[j + 1]] if order else ())
+    return KeyDraw(tuple(cells), values, k, capacity)
 
 
 def expand_keys(
@@ -272,23 +372,40 @@ def expand_keys(
     keys: Sequence[tuple],
     run_id: str,
     chunk_rows: int,
+    draws: Mapping[tuple, KeyDraw | None] | None = None,
 ) -> Iterator[list[tuple[tuple, tuple]]]:
     """``(key, cell)`` pairs for every child of every key, in chunks of at
     most ``chunk_rows`` — a hot parent never makes an oversized bundle,
     and a key's cells stay unique across the split because they are
-    drawn once per key."""
+    drawn once per key.
+
+    ``draws`` (ADR 0037) is the per-key `joint_key_draw` result a plan
+    WITH conditional edges must be expanded from: the cells then come out
+    of the joint walk that also decides each child's candidates, so the
+    two stay index-aligned across a chunk split. A key absent from the
+    mapping, or mapped to ``None`` (dropped: no candidate on a
+    non-nullable edge), emits nothing. Without it — every ADR 0036 plan —
+    the cells are drawn here exactly as before.
+    """
     chunk_rows = max(1, int(chunk_rows))
     chunk: list[tuple[tuple, tuple]] = []
     for key in keys:
-        rng = random.Random(derive_key_seed(run_id, tuple(key)))
-        k = plan.histogram.sample(rng)
-        if k <= 0:
-            continue
-        cells: list[tuple] = (
-            plan.cells.draw(k, rng, exact=plan.exact_cells)
-            if plan.cells is not None
-            else [()] * k
-        )
+        cells: list[tuple]
+        if draws is not None:
+            draw = draws.get(tuple(key))
+            if draw is None:
+                continue
+            cells = list(draw.cells)
+        else:
+            rng = random.Random(derive_key_seed(run_id, tuple(key)))
+            k = plan.histogram.sample(rng)
+            if k <= 0:
+                continue
+            cells = (
+                plan.cells.draw(k, rng, exact=plan.exact_cells)
+                if plan.cells is not None
+                else [()] * k
+            )
         for cell in cells:
             chunk.append((tuple(key), tuple(cell)))
             if len(chunk) >= chunk_rows:

@@ -87,6 +87,22 @@ def _dlq(tmp_path: Path, name: str, rule_id: str) -> list[dict]:
     return [r for r in _read(tmp_path / f"dlq_{name}") if r.get("rule_id") == rule_id]
 
 
+def _assert_no_unexpected_dlq(tmp_path: Path, name: str, *allowed: str) -> None:
+    """No envelope this shape did not ASK for (ADR 0037 final review).
+
+    Each shape asserted only on `fk.orphan` / `fk.unmatched`, so a run
+    whose key batches died as `engine_failure` — every child of every key
+    lost, the whole point of the shape unproven — still passed. Anything
+    outside `allowed` fails here, with the offending envelopes named."""
+    unexpected = [
+        r for r in _read(tmp_path / f"dlq_{name}")
+        if r.get("rule_id") not in allowed
+    ]
+    assert not unexpected, [
+        (r.get("rule_id"), r.get("error_detail")) for r in unexpected[:3]
+    ]
+
+
 def _root(tmp_path: Path, name: str, key: str, rows: int) -> TableSpec:
     """A root table whose `key` is a synthesized identity column (unique by
     construction) and whose payload column is plain numeric — no free-text
@@ -153,6 +169,7 @@ def test_star_fact_two_dimensions(tmp_path):
     assert len(dim_a) <= len(fact) <= len(dim_a) * 3
     # …and the gate MEASURED the independent edge rather than assuming it.
     assert not _dlq(tmp_path, "star_fact", "fk.orphan")
+    _assert_no_unexpected_dlq(tmp_path, "star_fact")
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +178,8 @@ def test_star_fact_two_dimensions(tmp_path):
 
 
 def _diamond_specs(tmp_path: Path, tag: str, right_histogram: dict,
-                   rest_mode: str, nullable: bool) -> list[TableSpec]:
+                   rest_mode: str, nullable: bool,
+                   bottom_histogram: dict | None = None) -> list[TableSpec]:
     """`top` -> {`left`, `right`} -> `bottom`, the true diamond of design §1.
 
     `bottom` is driven by `left` (the whole `(T, L)` tuple) and carries a
@@ -194,7 +212,8 @@ def _diamond_specs(tmp_path: Path, tag: str, right_histogram: dict,
     bottom_pk = ("T", "L", "R", "S") if rest_mode == "REQUIRED" else ("T", "L", "S")
     bottom_cfg = _cfg(bottom_schema, bottom_ref, f"{tag}_bottom", num_rows=48,
                       pk_columns=bottom_pk, uniqueness_mode="streaming",
-                      fanout={"driving_cols": ["T", "L"], "histogram": {"1": 1, "2": 1},
+                      fanout={"driving_cols": ["T", "L"],
+                              "histogram": bottom_histogram or {"1": 1, "2": 1},
                               "cells": {"cols": ["S"], "rows": [["s1"], ["s2"]],
                                         "counts": [1, 1]},
                               "exact_cells": True, "candidate_cap": 64,
@@ -244,6 +263,37 @@ def test_diamond_two_branches_rejoin(tmp_path):
     assert _tuples(bottom, "T", "R") <= _tuples(right, "T", "R")    # conditional
     assert len(_tuples(bottom, "T", "L", "R", "S")) == len(bottom)  # PK unique
     assert not _dlq(tmp_path, "dia_bottom", "fk.unmatched")
+    _assert_no_unexpected_dlq(tmp_path, "dia_bottom")
+
+
+def test_fanout_beyond_the_cells_rides_the_conditional_candidates(tmp_path):
+    """Fix wave A1 end to end (the shape the review found missing): the
+    driven child asks for THREE children per driving key from a TWO-row
+    cell table, with a conditional edge covering the rest.
+
+    Before the fix `CellTable.draw(3, rng, exact=True)` RAISED inside the
+    engine and the whole key batch landed as `engine_failure` — a
+    configuration preflight accepts, because the cells and the edge's
+    candidates jointly offer 2 x 2 = 4 combinations. Three children per
+    key are representable, and the three PKs must differ."""
+    _run(_diamond_specs(tmp_path, "cap", {"2": 1}, "REQUIRED", False,
+                        bottom_histogram={"3": 1}))
+
+    right = _read(tmp_path / "cap_right")
+    bottom = _read(tmp_path / "cap_bottom")
+    assert right and bottom
+    assert _tuples(bottom, "T", "R") <= _tuples(right, "T", "R")   # conditional
+    assert len(_tuples(bottom, "T", "L", "R", "S")) == len(bottom)  # PK unique
+    per_key: dict[tuple, list[tuple]] = {}
+    for row in bottom:
+        per_key.setdefault((row["T"], row["L"]), []).append((row["S"], row["R"]))
+    # The fan-out really did exceed the cell table…
+    assert any(len(v) == 3 for v in per_key.values()), per_key
+    # …and every child of a key still holds a DIFFERENT (cell, candidate)
+    # combination — the joint walk, not two independent cyclic ones.
+    for combos in per_key.values():
+        assert len(set(combos)) == len(combos)
+    _assert_no_unexpected_dlq(tmp_path, "cap_bottom")
 
 
 def test_nullable_branch_lands_null(tmp_path):
@@ -326,6 +376,7 @@ def test_existence_filter_drops_unmatched_keys(tmp_path):
     assert len(_tuples(child, "K", "C_SEQ")) == len(child)   # PK unique
     envelopes = _dlq(tmp_path, "ex_child", "fk.unmatched")
     assert len(envelopes) == len(p_keys - q_keys)
+    _assert_no_unexpected_dlq(tmp_path, "ex_child", "fk.unmatched")
     for envelope in envelopes:
         # `raw_record` is the normalized envelope's JSON-encoded raw_request.
         raw = json.loads(envelope["raw_record"])
@@ -444,6 +495,8 @@ def test_graph_six_tables(tmp_path):
         assert len(_tuples(rows, *pk)) == len(rows)
     assert len(twin) == len(leaf)          # the all-ones histogram is a 1:1
     assert not _dlq(tmp_path, "g_fact", "fk.orphan")
+    for table in ("g_mid", "g_leaf", "g_fact", "g_twin"):
+        _assert_no_unexpected_dlq(tmp_path, table)
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +578,7 @@ def test_two_conditional_edges_to_different_parents(tmp_path):
     envelopes = _dlq(tmp_path, "tp_child", "fk.unmatched")
     # One envelope per dropped KEY, whichever edge (or both) rejected it.
     assert len(envelopes) == len(dropped)
+    _assert_no_unexpected_dlq(tmp_path, "tp_child", "fk.unmatched")
     blamed = set()
     for envelope in envelopes:
         raw = json.loads(envelope["raw_record"])

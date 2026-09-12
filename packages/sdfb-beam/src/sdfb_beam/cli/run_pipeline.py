@@ -1402,8 +1402,17 @@ def _resolve_table_fanout(
         payload["conditional"] = conditional_plan_entries(
             registry, args.landing_table, roles,
             nullability_schema(landing_schema, table_schema),
+            table_schema,
         )
-        payload["candidate_cap"] = candidate_cap_of(args)
+        flag_cap = candidate_cap_of(args)
+        payload["candidate_cap"] = effective_candidate_cap(flag_cap, payload)
+        log_milestone(
+            "fk_candidate_cap_effective",
+            table=args.landing_table,
+            flag=flag_cap,
+            effective=payload["candidate_cap"],
+            max_k=max(int(k) for k in (payload.get("histogram") or {"0": 0})),
+        )
     return payload, roles
 
 
@@ -1865,20 +1874,82 @@ def nullability_schema(landing_schema, source_schema):
     return landing_schema if landing_schema is not None else source_schema
 
 
-def _rest_is_nullable(rest: tuple[str, ...], table_schema) -> bool:
+def effective_candidate_cap(cap: int, fanout) -> int:
+    """``min(--fk_candidate_cap, max_k)`` — the Top-M bound a driven child
+    can actually consume (ADR 0037 final review, fix wave A3).
+
+    ``--fk_candidate_cap`` is the operator CEILING and its validation is
+    unchanged; this is what the launch USES. No parent key takes more
+    candidates than its largest measured fan-out, so a cap above ``max_k``
+    only makes the composer's Top-M combine carry — and every request
+    payload ship — candidates nothing can draw. Without a measurable
+    histogram (a non-driven table) the flag stands as given; a histogram
+    whose only bucket is 0 still needs 1, since a cap of 0 empties every
+    candidate list.
+    """
+    histogram = (fanout or {}).get("histogram") or {}
+    if not histogram:
+        return int(cap)
+    return max(1, min(int(cap), max(int(k) for k in histogram)))
+
+
+def _column_modes(schema, rest: tuple[str, ...]) -> list[str]:
+    """Each ``rest`` column's mode in ``schema`` (``""`` when absent)."""
+    if schema is None:
+        return ["" for _ in rest]
+    modes = {c.name: c.mode for c in schema.columns}
+    return [modes.get(col, "") for col in rest]
+
+
+def _rest_is_nullable(
+    rest: tuple[str, ...],
+    table_schema,
+    generation_schema=None,
+    *,
+    table: str = "",
+    edge_id: str = "",
+    warn: bool = True,
+) -> bool:
     """ADR 0037 §4 ruling B: an unmatched key may land with NULLs only
-    when EVERY ``rest`` column is NULLABLE — in the LANDING schema,
-    which the caller resolves with :func:`nullability_schema`. An
-    empty ``rest`` (a pure existence filter, ``(K)->P`` driving and
-    ``(K)->Q`` conditional) has nothing to write a NULL into, so it is
-    never nullable — the key is dropped and counted instead."""
+    when EVERY ``rest`` column is NULLABLE — in BOTH schemas (fix wave
+    A4). An empty ``rest`` (a pure existence filter, ``(K)->P`` driving
+    and ``(K)->Q`` conditional) has nothing to write a NULL into, so it
+    is never nullable — the key is dropped and counted instead.
+
+    ``table_schema`` is the LANDING schema (the sink, resolved by
+    :func:`nullability_schema`); ``generation_schema`` is the one the
+    engines derive their record model from, whose modes mirror the
+    SOURCE table. Landing alone is not enough: where landing said
+    NULLABLE and generation said REQUIRED, the DoFn kept the unmatched
+    key, the engine wrote ``None``, ``model_validate`` rejected the row
+    and the engine's ``except Exception: continue`` discarded every one
+    of that key's rows — silently, with no envelope, counter or
+    milestone. When the two disagree the edge is treated as NON-nullable,
+    so the key is dropped as a visible ``fk.unmatched``, and the
+    disagreement is named once. Omitting ``generation_schema`` keeps the
+    single-schema behaviour (both reads hit the same schema)."""
     if table_schema is None or not rest:
         return False
-    return all(
-        col.mode == "NULLABLE"
-        for col in table_schema.columns
-        if col.name in rest
+    landing_modes = _column_modes(table_schema, rest)
+    generation_modes = _column_modes(
+        table_schema if generation_schema is None else generation_schema, rest
     )
+    landing_ok = all(mode == "NULLABLE" for mode in landing_modes)
+    generation_ok = all(mode == "NULLABLE" for mode in generation_modes)
+    if warn and landing_ok != generation_ok:
+        log_milestone(
+            "fk_nullable_schema_mismatch",
+            level=logging.WARNING,
+            table=table,
+            edge=edge_id,
+            landing=",".join(landing_modes),
+            generation=",".join(generation_modes),
+            note="the landing and generation schemas disagree on this "
+            "edge's rest columns — treating it as NON-nullable, so an "
+            "unmatched key is dropped as fk.unmatched instead of "
+            "landing rows the record model would silently reject",
+        )
+    return landing_ok and generation_ok
 
 
 def conditional_plan_entries(
@@ -1886,6 +1957,7 @@ def conditional_plan_entries(
     landing_table: str,
     roles: Mapping,
     table_schema,
+    generation_schema=None,
 ) -> list[dict]:
     """``FanoutPlan.conditional`` payload entries (ADR 0037): one per
     conditional edge, in ``enforced_edges`` order. ``id`` is the string
@@ -1900,7 +1972,11 @@ def conditional_plan_entries(
             "id": conditional_edge_id(fk.cols, fk.ref),
             "cols": list(registry.edge_rest(landing_table, fk)),
             "nullable": _rest_is_nullable(
-                registry.edge_rest(landing_table, fk), table_schema
+                registry.edge_rest(landing_table, fk),
+                table_schema,
+                generation_schema,
+                table=landing_table,
+                edge_id=conditional_edge_id(fk.cols, fk.ref),
             ),
         }
         for fk in registry.enforced_edges(landing_table)
@@ -1917,6 +1993,7 @@ def in_set_parent_edges(
     edge_roles: Mapping | None = None,
     keys_per_batch: int = 100,
     table_schema=None,
+    generation_schema=None,
     candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
 ) -> tuple[FkEdgeSpec, ...]:
     """This table's enforced edges whose parent generates in the same
@@ -1980,7 +2057,12 @@ def in_set_parent_edges(
                 ),
                 candidate_cap=candidate_cap,
                 nullable=_rest_is_nullable(
-                    registry.edge_rest(landing_table, fk), table_schema
+                    registry.edge_rest(landing_table, fk),
+                    table_schema,
+                    generation_schema,
+                    # `conditional_plan_entries` already named any
+                    # disagreement; one WARNING per edge, not two.
+                    warn=False,
                 )
                 if role == "conditional"
                 else False,
@@ -2277,7 +2359,12 @@ def _prepare_table_spec(
         edge_roles=edge_roles,
         keys_per_batch=keys_per_batch,
         table_schema=nullable_schema,
-        candidate_cap=candidate_cap_of(args),
+        generation_schema=table_schema,
+        # The payload already holds the EFFECTIVE cap (fix wave A3), so
+        # the specs and the workers cannot drift apart.
+        candidate_cap=(fanout or {}).get(
+            "candidate_cap", candidate_cap_of(args)
+        ),
     )
 
     return TableSpec(

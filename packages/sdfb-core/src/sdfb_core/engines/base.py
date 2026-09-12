@@ -12,7 +12,7 @@ REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.bas
 
 from __future__ import annotations
 
-import random
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from typing import NamedTuple, Protocol, runtime_checkable
@@ -20,8 +20,8 @@ from typing import NamedTuple, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
 
 from sdfb_core.contracts import GeneratedRecord, TableSchema
-from sdfb_core.engines.fanout import FanoutPlan, conditional_values
-from sdfb_core.seeding import derive_key_seed
+from sdfb_core.engines.fanout import FanoutPlan, KeyDraw, joint_key_draw
+from sdfb_core.observability import log_milestone
 
 
 class FreeTextEmptyYieldError(RuntimeError):
@@ -427,53 +427,89 @@ def _candidates_for(
     return candidates if candidates else ()
 
 
-def conditional_values_by_key(
+# Capping is a per-run property of the MODEL (the declared PK cannot
+# represent the source fan-out), not of a key, so one WARNING per worker
+# process says it once instead of once per hot parent. Process-lived by
+# design; `_reset_rows_capped_log` is the test hook.
+_ROWS_CAPPED_LOGGED: set[str] = set()
+
+
+def _reset_rows_capped_log() -> None:
+    """Test hook — production state is deliberately process-lived."""
+    _ROWS_CAPPED_LOGGED.clear()
+
+
+def _log_rows_capped(draw: KeyDraw) -> None:
+    if _ROWS_CAPPED_LOGGED:
+        return
+    _ROWS_CAPPED_LOGGED.add("logged")
+    log_milestone(
+        "fanout_rows_capped",
+        level=logging.WARNING,
+        requested=draw.requested,
+        emitted=draw.n_children,
+        capacity=draw.capacity,
+        note="a parent key's source fan-out exceeds what its PK can "
+        "represent (cells x conditional candidates); the extra children "
+        "are NOT emitted — they would be PK duplicates. Raise "
+        "--fk_candidate_cap, or fix the `pk:` in the relationship model. "
+        "Logged once per worker.",
+    )
+
+
+def conditional_draws(
     plan: FanoutPlan,
     keys: Sequence[tuple],
     run_id: str,
     matches: Mapping[str, Sequence[Sequence[Sequence]]] | None,
-) -> dict[tuple, dict[str, list[tuple]] | None]:
-    """Per parent key: ``{edge.id: values}`` where ``values[j]`` is child
-    row ``j``'s override tuple for ``edge.cols`` — or ``None`` when a
-    non-nullable conditional edge has no candidates for that key, which
-    means the caller must emit NONE of that key's rows.
+) -> dict[tuple, KeyDraw | None]:
+    """Per parent key, the JOINT draw its children come from
+    (`joint_key_draw`) — or ``None`` when a non-nullable conditional edge
+    has no candidates for that key, which means the caller must emit NONE
+    of its rows.
 
-    Draws each key's fan-out ``k`` with the exact same seeded RNG
-    `expand_keys` uses (`random.Random(derive_key_seed(run_id, key))` then
-    `plan.histogram.sample(rng)`) so the two stay in lockstep without this
-    module reaching into `fanout.py` internals — the histogram draw is
-    idempotent (a fresh `Random` instance per key), so replaying it here
-    does not disturb `expand_keys`'s own draw.
+    `expand_keys` reads the cells off these draws and
+    `apply_conditional_overrides` reads the per-edge candidate tuples, so
+    a child's cell and its candidates are two halves of ONE combination
+    index. Keys whose fan-out drew 0 are absent, exactly as before.
+
+    Returns ``{}`` for a plan with no conditional edges — the ADR 0036
+    path, which draws its cells inside `expand_keys` and never allocates
+    any of this.
     """
     if not plan.conditional:
         return {}
-    out: dict[tuple, dict[str, list[tuple]] | None] = {}
+    out: dict[tuple, KeyDraw | None] = {}
     for i, key in enumerate(keys):
         key_t = tuple(key)
-        rng = random.Random(derive_key_seed(run_id, key_t))
-        k = plan.histogram.sample(rng)
-        if k <= 0:
-            continue
-        per_edge: dict[str, list[tuple]] = {}
+        candidates: list[Sequence[Sequence]] = []
         dropped = False
         for edge in plan.conditional:
-            candidates = _candidates_for(matches, edge.id, i)
-            if not candidates and not edge.nullable:
+            edge_candidates = _candidates_for(matches, edge.id, i)
+            if not edge_candidates and not edge.nullable:
                 dropped = True
                 break
-            per_edge[edge.id] = conditional_values(run_id, key_t, edge.id, candidates, k)
-        out[key_t] = None if dropped else per_edge
+            candidates.append(edge_candidates)
+        if dropped:
+            out[key_t] = None
+            continue
+        draw = joint_key_draw(plan, key_t, run_id, candidates)
+        if draw.requested <= 0:
+            continue
+        if draw.shortfall:
+            _log_rows_capped(draw)
+        out[key_t] = draw
     return out
 
 
 def apply_conditional_overrides(
     plan: FanoutPlan,
     chunk: Sequence[tuple[tuple, tuple]],
-    cond_by_key: dict[tuple, dict[str, list[tuple]] | None],
+    draws: Mapping[tuple, KeyDraw | None],
     child_index: dict[tuple, int],
 ) -> tuple[dict[str, list], list[bool]]:
     """Per-row conditional-edge column overrides + a skip mask for one
-    `expand_keys` chunk, from the `conditional_values_by_key` cache.
+    `expand_keys` chunk, from the `conditional_draws` cache.
 
     ``child_index`` is the caller's running per-key child counter — it
     MUST be created once per `generate_for_keys` call and passed to every
@@ -490,12 +526,12 @@ def apply_conditional_overrides(
     for i, (key, _cell) in enumerate(chunk):
         j = child_index.get(key, 0)
         child_index[key] = j + 1
-        values_by_edge = cond_by_key.get(key)
-        if values_by_edge is None:
+        draw = draws.get(key)
+        if draw is None:
             skip[i] = True
             continue
         for edge in plan.conditional:
-            row_values = values_by_edge[edge.id][j]
+            row_values = draw.values[edge.id][j]
             if row_values:
                 for p, name in enumerate(edge.cols):
                     columns[name][i] = row_values[p]

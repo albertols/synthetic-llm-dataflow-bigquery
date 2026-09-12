@@ -432,15 +432,20 @@ class GenerateRecordsDoFn(beam.DoFn):
         `fk.unmatched`, weighted by their share of the batch's expected
         rows so the BLOCKER gate does not silently under-count them.
 
-        Returns `(keys, matches, envelopes)`, index-aligned; `matches`
-        is never `None` here (the caller only passes `None` through when
-        the request carried no `"matches"` key at all)."""
+        Returns `(keys, matches, envelopes, expected_rows)`,
+        index-aligned; `matches` is never `None` here (the caller only
+        passes `None` through when the request carried no `"matches"` key
+        at all). `expected_rows` is what the SURVIVING keys are still
+        expected to produce: each dropped key's share is already weighted
+        into its own `fk.unmatched` envelope, so leaving the request's
+        original `n` in place would let a later engine crash claim those
+        rows a SECOND time against the BLOCKER ratio (fix wave A5)."""
         matches = request.get("matches") or {}
         fanout_ctx = self.ctx.fanout
         conditional = (fanout_ctx.get("conditional") or []) if fanout_ctx else []
         non_nullable = [entry for entry in conditional if entry.get("nullable") is False]
         if not non_nullable:
-            return keys, matches, []
+            return keys, matches, [], request.get("n", n)
 
         keep_idx: list[int] = []
         offenders: dict[int, str] = {}
@@ -456,7 +461,7 @@ class GenerateRecordsDoFn(beam.DoFn):
             else:
                 offenders[i] = edge_id
         if not offenders:
-            return keys, matches, []
+            return keys, matches, [], request.get("n", n)
 
         weight_n = request.get("n", n)
         expected = max(1, round(weight_n / len(keys)))
@@ -485,7 +490,12 @@ class GenerateRecordsDoFn(beam.DoFn):
         }
         self._keys_unmatched.inc(len(offenders))
         log_milestone("batch_unmatched", batch_id=batch_id, keys_dropped=len(offenders))
-        return filtered_keys, filtered_matches, envelopes
+        return (
+            filtered_keys,
+            filtered_matches,
+            envelopes,
+            max(0, weight_n - expected * len(offenders)),
+        )
 
     def _generate(self, keys, matches, n: int, cfg: GenerationConfig):
         """Call the engine. `matches=` rides along ONLY when the request
@@ -500,6 +510,25 @@ class GenerateRecordsDoFn(beam.DoFn):
             )
         return self._engine.generate_for_keys([tuple(k) for k in keys], cfg)  # type: ignore[union-attr]
 
+    def _batch_seeds(self, batch_id: int) -> tuple[int, int]:
+        """``(batch seed, pool seed)`` for one request.
+
+        No explicit seed: derive one so batches never replay each other
+        while the run stays reproducible per run_id (E2E report §2). The
+        pool seed is batch-INDEPENDENT — once-per-worker artifacts (the
+        B.2 free-text pool build) must be stable within a run and vary
+        across runs via the salted run_id; `batch_id=-1` keeps it outside
+        every real batch's seed namespace. With an explicit seed the pool
+        build is reproducible across reruns regardless of which batch
+        reaches the worker first (P6).
+        """
+        if self.base_seed is None:
+            return (
+                derive_batch_seed(self.ctx.pipeline_run_id, batch_id),
+                derive_batch_seed(self.ctx.pipeline_run_id, -1),
+            )
+        return self.base_seed + batch_id, self.base_seed
+
     def _process_with_scope(self, request, fk_side: list | None = None):
         if self._engine is None:
             self._ensure_engine(self.ctx, fk_side)
@@ -507,26 +536,24 @@ class GenerateRecordsDoFn(beam.DoFn):
         n = len(keys) if keys is not None else int(request["n"])
         batch_id = int(request["batch_id"])
         matches = None
+        keys_dropped = 0
         if keys is not None and "matches" in request:
-            keys, matches, envelopes = self._filter_unmatched_keys(
+            kept, matches, envelopes, expected_rows = self._filter_unmatched_keys(
                 keys, request, batch_id, n
             )
+            keys_dropped = len(keys) - len(kept)
+            keys = kept
+            if keys_dropped:
+                # The batch is now the SURVIVING keys: every count that
+                # stands for it — the milestones, and the expected-rows
+                # weight a crashed batch carries into the DLQ — follows
+                # (fix wave A5). `request` is a Beam element, so it is
+                # copied rather than mutated.
+                n = len(keys)
+                request = {**request, "n": expected_rows}
             for envelope in envelopes:
                 yield beam.pvalue.TaggedOutput("failed", envelope)
-        if self.base_seed is None:
-            # No explicit seed: derive one so batches never replay each other
-            # while the run stays reproducible per run_id (E2E report §2).
-            seed = derive_batch_seed(self.ctx.pipeline_run_id, batch_id)
-            # Batch-independent seed for once-per-worker artifacts (the B.2
-            # free-text pool build): stable within a run, varies across runs
-            # via the salted run_id. batch_id=-1 keeps it outside every real
-            # batch's seed namespace.
-            pool_seed = derive_batch_seed(self.ctx.pipeline_run_id, -1)
-        else:
-            seed = self.base_seed + batch_id
-            # Explicit seed ⇒ the pool build is reproducible across reruns
-            # regardless of which batch reaches the worker first (P6).
-            pool_seed = self.base_seed
+        seed, pool_seed = self._batch_seeds(batch_id)
         cfg = GenerationConfig(
             seed=seed,
             batch_size=n if keys is None else self.chunk_rows,
@@ -544,8 +571,9 @@ class GenerateRecordsDoFn(beam.DoFn):
                 "prompt_debug": getattr(self.ctx, "prompt_debug", "off"),
             },
         )
+        dropped_field = {"keys_dropped": keys_dropped} if keys_dropped else {}
         if keys is not None:
-            log_milestone("batch_start", batch_id=batch_id, keys=n)
+            log_milestone("batch_start", batch_id=batch_id, keys=n, **dropped_field)
         else:
             log_milestone("batch_start", batch_id=batch_id, n=n)
         t0 = time.monotonic()
@@ -577,6 +605,7 @@ class GenerateRecordsDoFn(beam.DoFn):
                     keys=n,
                     rows=count,
                     seconds=round(time.monotonic() - t0, 1),
+                    **dropped_field,
                 )
             else:
                 log_milestone(

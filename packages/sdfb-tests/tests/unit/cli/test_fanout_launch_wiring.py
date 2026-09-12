@@ -306,7 +306,10 @@ def test_the_fanout_payload_carries_the_conditional_edges_and_the_cap(monkeypatc
     assert payload["conditional"] == [
         {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
     ]
-    assert payload["candidate_cap"] == 32
+    # Fix wave A3: `_measure_one_to_one` measures max_k=1, and no key can
+    # consume more than max_k candidates — the operator ceiling of 32
+    # shrinks to the measured 1.
+    assert payload["candidate_cap"] == 1
     assert sorted(roles.values()) == ["conditional", "driving", "external"]
 
 
@@ -347,7 +350,7 @@ def test_the_launcher_names_a_defaulted_driving_edge_and_an_external_overlap(
     assert fanout["conditional"] == [
         {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
     ]
-    assert fanout["candidate_cap"] == 64
+    assert fanout["candidate_cap"] == 1  # min(--fk_candidate_cap, max_k)
     assert sorted(edge_roles.values()) == ["conditional", "driving", "external"]
 
     lines = caplog.text.splitlines()
@@ -621,30 +624,105 @@ def test_an_unreachable_landing_table_surfaces_no_schema(monkeypatch, caplog):
     assert target is None
 
 
-def test_nullable_reads_the_landing_modes_not_the_source(monkeypatch):
-    """Design §4 ruling B: the LANDING schema decides. The source's modes
-    mirror the lake table and are irrelevant to what the sink accepts."""
+def test_nullable_needs_both_schemas_to_agree(monkeypatch, caplog):
+    """Fix wave A4 (blocker): the LANDING schema is the sink, but the
+    engines validate every generated row against a record model derived
+    from the GENERATION schema, whose modes mirror the SOURCE table. When
+    landing said NULLABLE and generation said REQUIRED, the DoFn kept the
+    unmatched key, the engine wrote None, `model_validate` rejected it
+    and the engine's `except Exception: continue` discarded every one of
+    that key's rows — no envelope, no counter, no milestone. Nullable now
+    needs BOTH; a disagreement drops the key visibly as `fk.unmatched`
+    and says so once."""
+    import logging
+
     import sdfb_beam.cli.run_pipeline as rp
 
     monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one)
     names = {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"}
     args = _diamond_args("p.land.BOTTOM_TABLE")
-    # source R NULLABLE, landing R REQUIRED -> not nullable
-    payload, _roles = rp._resolve_table_fanout(
-        args, _diamond_schema("NULLABLE"), _DIAMOND_REG, names, _DIAMOND_ROWS,
-        landing_schema=_landing_schema("REQUIRED"),
-    )
+
+    def _resolve(generation: str, landing: str):
+        return rp._resolve_table_fanout(
+            args, _diamond_schema(generation), _DIAMOND_REG, names,
+            _DIAMOND_ROWS, landing_schema=_landing_schema(landing),
+        )[0]
+
+    # generation NULLABLE, landing REQUIRED -> the sink refuses the NULL.
+    assert _resolve("NULLABLE", "REQUIRED")["conditional"] == [
+        {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False}
+    ]
+    # generation REQUIRED, landing NULLABLE -> the RECORD MODEL refuses it.
+    # (The case above disagrees too, and warned — clear it so this
+    # assertion counts ONE edge's milestone, not the file's history.)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        payload = _resolve("REQUIRED", "NULLABLE")
     assert payload["conditional"] == [
         {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": False}
     ]
-    # source R REQUIRED, landing R NULLABLE -> nullable
-    payload, _roles = rp._resolve_table_fanout(
-        args, _diamond_schema("REQUIRED"), _DIAMOND_REG, names, _DIAMOND_ROWS,
-        landing_schema=_landing_schema("NULLABLE"),
-    )
-    assert payload["conditional"] == [
+    mismatch = [
+        ln for ln in caplog.text.splitlines()
+        if "name=fk_nullable_schema_mismatch" in ln
+    ]
+    assert len(mismatch) == 1
+    assert "edge='(T,R)->RIGHT_TABLE'" in mismatch[0]
+    assert "landing=NULLABLE" in mismatch[0] and "generation=REQUIRED" in mismatch[0]
+    # Both NULLABLE -> the ADR 0037 NULL-fill branch, as before.
+    assert _resolve("NULLABLE", "NULLABLE")["conditional"] == [
         {"id": "(T,R)->RIGHT_TABLE", "cols": ["R"], "nullable": True}
     ]
+
+
+def test_the_candidate_cap_never_exceeds_the_measured_fanout(monkeypatch, caplog):
+    """Fix wave A3: the launcher knows `max_k` when it builds the specs,
+    and no key can consume more than `max_k` candidates — so the Top-M
+    combine and every request payload shrink to `min(cap, max_k)`.
+    `--fk_candidate_cap` stays the operator CEILING."""
+    import logging
+
+    import sdfb_beam.cli.run_pipeline as rp
+
+    assert rp.effective_candidate_cap(64, {"histogram": {"0": 3, "5": 2}}) == 5
+    assert rp.effective_candidate_cap(4, {"histogram": {"0": 3, "9": 2}}) == 4
+    # No histogram to measure: the flag stands.
+    assert rp.effective_candidate_cap(64, None) == 64
+    assert rp.effective_candidate_cap(64, {"histogram": {}}) == 64
+    # A table whose parents all have zero children cannot take 0 candidates.
+    assert rp.effective_candidate_cap(64, {"histogram": {"0": 7}}) == 1
+
+    monkeypatch.setattr(
+        rp, "measure_fanout",
+        lambda **kw: {"histogram": {"1": 2, "9": 2}, "parents": 4, "children": 20,
+                      "cells": {"cols": ["R"], "rows": [["r0"], ["r1"]],
+                                "counts": [0.5, 0.5]}},
+    )
+    args = _diamond_args("p.land.BOTTOM_TABLE", fk_candidate_cap=32)
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+        payload, _roles = rp._resolve_table_fanout(
+            args, _diamond_schema(), _DIAMOND_REG,
+            {"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+            _DIAMOND_ROWS,
+        )
+    assert payload["candidate_cap"] == 9  # min(32, max_k=9)
+    effective = [
+        ln for ln in caplog.text.splitlines()
+        if "name=fk_candidate_cap_effective" in ln
+    ]
+    assert len(effective) == 1
+    assert "flag=32" in effective[0] and "effective=9" in effective[0]
+    # The composer spec carries the SAME number, so the Top-M combine and
+    # the per-request payload shrink together.
+    edges = in_set_parent_edges(
+        _DIAMOND_REG, "p.land.BOTTOM_TABLE",
+        in_set_names={"TOP_TABLE", "LEFT_TABLE", "RIGHT_TABLE", "BOTTOM_TABLE"},
+        key_sample_caps={},
+        edge_roles=_DIAMOND_REG.edge_roles("BOTTOM_TABLE"),
+        table_schema=_landing_schema("NULLABLE"),
+        candidate_cap=payload["candidate_cap"],
+    )
+    conditional = [e for e in edges if e.mode == "conditional"]
+    assert conditional and all(e.candidate_cap == 9 for e in conditional)
 
 
 def test_no_landing_schema_falls_back_to_the_source_and_says_so(

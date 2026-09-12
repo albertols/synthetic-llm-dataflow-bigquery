@@ -57,7 +57,7 @@ from sdfb_core.engines.base import (
     GenerationEngine,
     ModelClientTransientError,
     apply_conditional_overrides,
-    conditional_values_by_key,
+    conditional_draws,
     escalating_sampling,
 )
 from sdfb_core.engines.constraint_sampler import (
@@ -728,12 +728,18 @@ class B1RagEngine(GenerationEngine):
         similarity = float(cfg.similarity)
         chunk_rows = max(1, int(cfg.batch_size or 1000))
         # Non-driving FK edges resolved per key (design 2026-09-11 §4,
-        # ADR 0037) — computed ONCE up front (a no-op dict when the plan
-        # carries no conditional edges) and applied per chunk below.
-        cond_by_key = conditional_values_by_key(plan, keys, run_id, matches)
+        # ADR 0037) — the JOINT per-key draw, computed ONCE up front (a
+        # no-op dict when the plan carries no conditional edges). It
+        # decides each child's cell AND its candidate tuples together, so
+        # `expand_keys` and the overrides below stay two halves of one
+        # combination index (fix wave A1).
+        draws = conditional_draws(plan, keys, run_id, matches)
         child_index: dict[tuple, int] = {}
         for chunk_index, chunk in enumerate(
-            expand_keys(plan, keys, run_id, chunk_rows)
+            expand_keys(
+                plan, keys, run_id, chunk_rows,
+                draws=draws if plan.conditional else None,
+            )
         ):
             # Chunks must not replay each other's "rest" columns: cfg.seed
             # held constant would re-seed _sample_columns/_sample_free_text
@@ -750,7 +756,7 @@ class B1RagEngine(GenerationEngine):
             columns = self._sample_columns(n, chunk_cfg, similarity)
             columns.update(self._sample_free_text(n, chunk_cfg, similarity))
             cond_columns, skip = apply_conditional_overrides(
-                plan, chunk, cond_by_key, child_index
+                plan, chunk, draws, child_index
             )
             columns.update(cond_columns)
             for j, name in enumerate(plan.driving_cols):
