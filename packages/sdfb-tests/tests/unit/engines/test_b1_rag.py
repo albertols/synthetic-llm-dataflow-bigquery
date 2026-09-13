@@ -16,9 +16,11 @@ model download, no GPU, no GCP.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
+from typing import ClassVar
 
 import pytest
 from sdfb_beam.handlers.fake_client import FakeModelClient
@@ -652,3 +654,266 @@ def test_b1_date_string_temporal_clamps_and_drops_sentinel_anchors():
     assert non_sentinel
     years = {datetime.strptime(v, "%Y-%m-%d").year for v in non_sentinel}
     assert min(years) >= now_year - 10  # clamp holds through the sampler
+
+
+class TestGenerateForKeys:
+    """ADR 0036: a driven child from parent keys — inherited columns
+    copied, PK cells unique per key, the rest sampled as usual."""
+
+    _SCHEMA = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.src.child_t"},
+            "schema": [
+                {"name": "PID", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "REGION", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "CAT", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "AMT", "type": "INT64", "mode": "REQUIRED"},
+            ],
+        }
+    )
+
+    @staticmethod
+    def _rows():
+        return [
+            {"PID": f"P{i:04d}", "REGION": "ES" if i % 2 else "PT",
+             "CAT": "abc"[i % 3], "AMT": i * 3}
+            for i in range(60)
+        ]
+
+    def _ctx(self):
+        return GenerationContext(
+            table_schema=self._SCHEMA,
+            reference_rows=self._rows(),
+            reference_digest="fanout-digest",
+            pipeline_run_id="fanout-run",
+            pk_columns=["PID", "CAT"],
+            fanout={
+                "driving_cols": ["PID", "REGION"],
+                "histogram": {"0": 1, "2": 2, "3": 1},
+                "cells": {"cols": ["CAT"], "rows": [["a"], ["b"], ["c"]],
+                          "counts": [3, 2, 1]},
+                "exact_cells": True,
+            },
+        )
+
+    class _Client:
+        def generate_json(self, *, prompt, n=1, **kw):
+            return [{"values": [f"gen-{i}" for i in range(32)]}]
+
+    def test_children_carry_their_parent_and_unique_cells(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        engine.setup(self._Client(), self._ctx())
+        keys = [(f"K{i}", "ES" if i % 2 else "PT") for i in range(40)]
+        cfg = GenerationConfig(seed=1, batch_size=1_000)
+        rows = [r.model_dump() for r in engine.generate_for_keys(keys, cfg)]
+        assert rows
+        for r in rows:
+            assert (r["PID"], r["REGION"]) in keys          # inherited verbatim
+            assert isinstance(r["AMT"], int)                # the rest is sampled
+        per_key: dict = {}
+        for r in rows:
+            per_key.setdefault(r["PID"], []).append(r["CAT"])
+        for cats in per_key.values():
+            assert len(cats) == len(set(cats)) and len(cats) <= 3
+        # Fan-out histogram: only 0, 2, 3 children per key.
+        assert {len(v) for v in per_key.values()} <= {2, 3}
+
+    def test_same_keys_same_children(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        engine.setup(self._Client(), self._ctx())
+        keys = [(f"K{i}", "ES") for i in range(20)]
+        cfg = GenerationConfig(seed=1, batch_size=7)  # chunked at 7 rows
+        a = [(r.PID, r.CAT) for r in engine.generate_for_keys(keys, cfg)]
+        b = [(r.PID, r.CAT) for r in engine.generate_for_keys(keys, cfg)]
+        assert a == b
+
+    def test_rest_columns_do_not_repeat_across_chunks(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        engine.setup(self._Client(), self._ctx())
+        keys = [(f"K{i}", "ES") for i in range(40)]
+        cfg = GenerationConfig(seed=1, batch_size=7)
+        amts = [r.AMT for r in engine.generate_for_keys(keys, cfg)]
+        assert len(amts) > 14
+        assert amts[:7] != amts[7:14]
+
+    def test_without_a_plan_it_refuses(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        ctx = self._ctx().model_copy(update={"fanout": None})
+        engine.setup(self._Client(), ctx)
+        with pytest.raises(RuntimeError, match="fanout"):
+            list(engine.generate_for_keys([("K1", "ES")], GenerationConfig(seed=1)))
+
+    def test_fanout_bound_logs_zero_conditional_and_omits_candidate_cap(
+        self, caplog
+    ) -> None:
+        """ADR 0037 (design §8): `fanout_bound conditional=<n>
+        candidate_cap=` — a plan with no conditional edges logs
+        `conditional=0` and omits `candidate_cap` entirely. Also pins the
+        four pre-existing fields (name + value) so a future edit to the
+        same `fields` dict literal cannot silently drop/rename one —
+        review round 1 should-fix: `fanout_bound` had no prior regression
+        coverage anywhere in the suite."""
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), self._ctx())
+        assert "name=fanout_bound" in caplog.text
+        assert "driving_cols=PID,REGION" in caplog.text
+        assert "cells=3" in caplog.text
+        assert "exact_cells=True" in caplog.text
+        assert "mean_fanout=1.75" in caplog.text
+        assert "conditional=0" in caplog.text
+        assert "candidate_cap=" not in caplog.text
+
+
+class TestGenerateForKeysConditional:
+    """ADR 0037 (design 2026-09-11 §4): a non-driving FK edge resolved per
+    key from a co-parent's matched candidates, riding alongside the driven
+    child's `generate_for_keys` call."""
+
+    _SCHEMA = TableSchema.model_validate(
+        {
+            "table_info": {"table_id": "p.src.multi_parent_t"},
+            "schema": [
+                {"name": "T", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "L", "type": "STRING", "mode": "REQUIRED"},
+                {"name": "R", "type": "STRING", "mode": "NULLABLE"},
+                {"name": "X", "type": "INT64", "mode": "REQUIRED"},
+            ],
+        }
+    )
+
+    @staticmethod
+    def _rows():
+        return [
+            {"T": f"t{i % 2}", "L": f"l{i % 2}", "R": f"r{i % 3}", "X": i}
+            for i in range(30)
+        ]
+
+    def _ctx(self, *, nullable: bool):
+        return GenerationContext(
+            table_schema=self._SCHEMA,
+            reference_rows=self._rows(),
+            reference_digest="conditional-digest",
+            pipeline_run_id="conditional-run",
+            fanout={
+                "driving_cols": ["T", "L"],
+                "histogram": {"2": 1},
+                "conditional": [{"id": "(T,R)->right", "cols": ["R"],
+                                 "nullable": nullable}],
+            },
+        )
+
+    class _Client:
+        def generate_json(self, *, prompt, n=1, **kw):
+            return [{"values": [f"gen-{i}" for i in range(32)]}]
+
+    _KEYS: ClassVar[list[tuple]] = [("t1", "l1"), ("t2", "l2")]
+    _MATCHES: ClassVar[dict] = {"(T,R)->right": [[("r1",), ("r2",)], []]}
+
+    def test_matched_key_gets_each_candidate_once_unmatched_key_dropped(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        engine.setup(self._Client(), self._ctx(nullable=False))
+        cfg = GenerationConfig(seed=1, batch_size=1_000)
+        rows = [
+            r.model_dump()
+            for r in engine.generate_for_keys(self._KEYS, cfg, matches=self._MATCHES)
+        ]
+        t1_rows = [r for r in rows if r["T"] == "t1"]
+        t2_rows = [r for r in rows if r["T"] == "t2"]
+        assert len(t1_rows) == 2
+        assert {r["R"] for r in t1_rows} == {"r1", "r2"}
+        assert not t2_rows
+
+    def test_unmatched_key_on_a_nullable_edge_gets_null(self):
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        engine.setup(self._Client(), self._ctx(nullable=True))
+        cfg = GenerationConfig(seed=1, batch_size=1_000)
+        rows = [
+            r.model_dump()
+            for r in engine.generate_for_keys(self._KEYS, cfg, matches=self._MATCHES)
+        ]
+        t2_rows = [r for r in rows if r["T"] == "t2"]
+        assert len(t2_rows) == 2
+        assert all(r["R"] is None for r in t2_rows)
+
+    def _capping_ctx(self, landing_table: str) -> GenerationContext:
+        """A plan whose per-key capacity (2 cells x 2 candidates) falls
+        short of its fan-out (5), so EVERY key caps."""
+        return GenerationContext(
+            table_schema=self._SCHEMA,
+            reference_rows=self._rows(),
+            reference_digest="capping-digest",
+            pipeline_run_id="capping-run",
+            landing_table=landing_table,
+            fanout={
+                "driving_cols": ["T", "L"],
+                "histogram": {"5": 1},
+                "cells": {"cols": ["X"], "rows": [[1], [2]], "counts": [1, 1]},
+                "exact_cells": True,
+                "conditional": [{"id": "(T,R)->right", "cols": ["R"],
+                                 "nullable": False, "pk_member": True}],
+            },
+        )
+
+    def test_every_driven_table_reports_its_own_capping(self, caplog):
+        """G4: the ``table=`` argument this engine hands
+        `conditional_draws` is what scopes the once-per-table
+        `fanout_rows_capped` guard (fix wave E3). Nothing drove that
+        argument from an ENGINE, so deleting it at this call site
+        restored the process-global bucket — every driven table after the
+        first capping in silence in a single-job relational run (ADR
+        0030) — with the whole suite green.
+        """
+        from sdfb_core.engines import base as base_mod
+
+        base_mod._reset_rows_capped_log()
+        matches = {"(T,R)->right": [[("r1",), ("r2",)], [("r1",), ("r2",)]]}
+        cfg = GenerationConfig(seed=1, batch_size=1_000)
+        with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+            for table in ("p.land.child_a", "p.land.child_b"):
+                engine = B1RagEngine(embedder=HashingEmbedder())
+                engine.setup(self._Client(), self._capping_ctx(table))
+                rows = list(
+                    engine.generate_for_keys(self._KEYS, cfg, matches=matches)
+                )
+                assert len(rows) == 8   # 2 keys x min(5, 2 cells x 2 cands)
+        capped = [
+            ln for ln in caplog.text.splitlines()
+            if "name=fanout_rows_capped" in ln
+        ]
+        assert len(capped) == 2   # one per driven table, not one per process
+
+    def test_fanout_bound_logs_conditional_count(self, caplog) -> None:
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), self._ctx(nullable=False))
+        assert "name=fanout_bound" in caplog.text
+        assert "conditional=1" in caplog.text
+
+    def test_fanout_bound_logs_candidate_cap_when_present(self, caplog) -> None:
+        # `candidate_cap` rides next to `conditional` in the plan payload
+        # (Task 6, absent until the launcher writes it).
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        ctx = self._ctx(nullable=False)
+        assert ctx.fanout is not None
+        ctx = ctx.model_copy(
+            update={"fanout": {**ctx.fanout, "candidate_cap": 64}}
+        )
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), ctx)
+        assert "candidate_cap=64" in caplog.text
+
+    def test_fanout_bound_logs_candidate_cap_zero(self, caplog) -> None:
+        # Review round 1: the code guards with `candidate_cap is not
+        # None`, not truthiness — `0` is a valid (if degenerate) cap and
+        # must still be logged, not silently omitted like a falsy guard
+        # would do.
+        engine = B1RagEngine(embedder=HashingEmbedder())
+        ctx = self._ctx(nullable=False)
+        assert ctx.fanout is not None
+        ctx = ctx.model_copy(
+            update={"fanout": {**ctx.fanout, "candidate_cap": 0}}
+        )
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            engine.setup(self._Client(), ctx)
+        assert "candidate_cap=0" in caplog.text

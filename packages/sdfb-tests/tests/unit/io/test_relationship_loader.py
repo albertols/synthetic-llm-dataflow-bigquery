@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 import pytest
-from sdfb_beam.io.relationships import load_relationship_registry
+from sdfb_beam.io.relationships import is_sample_model, load_relationship_registry
 from sdfb_core.contracts.relationships import RelationshipError
 
 _MODEL_A = """
@@ -129,3 +129,42 @@ def test_loaded_milestone_reports_what_the_run_will_use(tmp_path, caplog):
     assert "models=retail" in caplog.text
     assert "tables=2" in caplog.text
     assert f"sha={registry.sha12()}" in caplog.text
+
+
+class TestDocumentationSamplesAreSkipped:
+    """Launch 2026-09-10_12_09_34-5531344118137403488 died at registry
+    load: the committed `example_retail.yaml` sample declares the same
+    anonymised aliases (A_TABLE…) as the operator's real model, and the
+    one-source-of-truth rule refused both. A directory scan now skips
+    `example_*.yaml` / `*.example.yaml` samples (announced once); a URI
+    that names a sample file directly still loads it."""
+
+    _KW = "model: kw\ntables:\n  A_TABLE:\n    pk: [K]\n  B_TABLE:\n    pk: [K]\n    fk:\n      - cols: [K]\n        ref: A_TABLE\n        ref_cols: [K]\n"
+    _EXAMPLE = "model: example_retail\ntables:\n  A_TABLE:\n    pk: [X]\n"
+
+    def test_a_directory_scan_skips_the_samples(self, tmp_path, caplog):
+        _write(tmp_path, "example_retail.yaml", self._EXAMPLE)
+        _write(tmp_path, "retail.example.yaml", self._EXAMPLE)
+        _write(tmp_path, "kw.yaml", self._KW)
+        with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+            registry = load_relationship_registry(str(tmp_path))
+        assert [m.model for m in registry.models] == ["kw"]
+        assert "name=relationships_example_skipped" in caplog.text
+        assert "example_retail.yaml" in caplog.text
+
+    def test_a_sample_named_directly_still_loads(self, tmp_path):
+        path = _write(tmp_path, "example_retail.yaml", self._EXAMPLE)
+        registry = load_relationship_registry(str(path))
+        assert [m.model for m in registry.models] == ["example_retail"]
+
+    def test_only_samples_in_an_explicit_directory_still_stops(self, tmp_path):
+        _write(tmp_path, "example_retail.yaml", self._EXAMPLE)
+        with pytest.raises(RelationshipError, match=r"no model files"):
+            load_relationship_registry(str(tmp_path))
+
+    def test_is_sample_model_is_public_for_other_callers(self):
+        """`scripts/relationships/card.py` reuses this exact predicate for
+        its own local-directory scan (same rule, one definition)."""
+        assert is_sample_model("config/relationships/example_retail.yaml")
+        assert is_sample_model("config/relationships/retail.example.yaml")
+        assert not is_sample_model("config/relationships/retail.yaml")

@@ -102,3 +102,54 @@ def test_flex_template_and_composer_expose_autoscaling():
     dag_text = _COMPOSER_DAG.read_text()
     assert '"autoscaling": Param(' in dag_text
     assert '"autoscaling": "{{ params.autoscaling }}"' in dag_text
+
+
+def test_flex_template_exposes_fk_candidate_cap():
+    """ADR 0037: run_pipeline.py's `--fk_candidate_cap` (Top-M candidates
+    per shared key on a conditional FK edge) had no flex-template metadata
+    entry, so a UI/tiers.yaml launch could not discover or set it (the
+    flag itself still passes through undeclared — ADR 0024 §3c
+    precedent)."""
+    import re
+
+    param = _metadata_param("fk_candidate_cap")
+    assert param["isOptional"] is True
+    (regex,) = param["regexes"]
+    for ok in ("", "1", "64", "1000"):
+        assert re.fullmatch(regex, ok), ok
+    assert not re.fullmatch(regex, "-1")
+    assert not re.fullmatch(regex, "sixty-four")
+
+
+def test_flex_template_exposes_fk_fanout_stats_table():
+    """ADR 0036 cache table for the fan-out histogram; optional and may
+    be empty (measure every launch, never cache)."""
+    import re
+
+    param = _metadata_param("fk_fanout_stats_table")
+    assert param["isOptional"] is True
+    (regex,) = param["regexes"]
+    assert re.fullmatch(regex, "")
+    assert re.fullmatch(regex, "proj.synthetic_data_quality.fk_fanout_stats")
+    assert not re.fullmatch(regex, "not-a-fqn")
+
+
+def test_flex_template_driven_uniqueness_mode_matches_cli_modes():
+    """`--driven_uniqueness_mode` (ADR 0036) reuses the same UNIQUENESS_MODES
+    choices as `--uniqueness_mode`; the metadata regex must not drift from
+    them, same guard as `test_uniqueness_mode_surfaces_accept_every_cli_mode`."""
+    import re
+
+    from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
+
+    param = _metadata_param("driven_uniqueness_mode")
+    assert param["isOptional"] is True
+    (regex,) = param["regexes"]
+    for mode in (*UNIQUENESS_MODES, ""):
+        assert re.fullmatch(regex, mode), mode
+    assert not re.fullmatch(regex, "verbose")
+
+
+def test_flex_template_exposes_thresholds_uri():
+    param = _metadata_param("thresholds_uri")
+    assert param["isOptional"] is True

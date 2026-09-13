@@ -115,6 +115,12 @@ for model in registry.models:
     card = registry.card(first)          # the launcher's own rendering
     mermaid = registry.mermaid(first)    # the house-style diagram
 
+    roles = {name: registry.edge_roles(name) for name in model.tables}
+    choice = {name: registry.driving_choice(name) for name in model.tables}
+    overlap = {(name, edge): registry.edge_overlap(name, edge)
+               for name in model.tables
+               for edge in registry.enforced_edges(name)}
+
 tables_desc = {r["table_name"]: (r.get("description") or "").strip("\"' ")
                for r in json.load(open("/tmp/table_descriptions.json"))}
 ```
@@ -122,6 +128,19 @@ tables_desc = {r["table_name"]: (r.get("description") or "").strip("\"' ")
 `registry.card(table)` is EXACTLY what a launch logs — reuse it, never
 re-render it. `registry.component(table)` is what a scenario-2 launch on
 that table would generate; `registry.generation_waves(...)` is the order.
+
+**Edge roles are RESOLVED, never inferred.** Every enforced edge has one
+of five roles and the registry is the only thing that may decide it —
+`registry.edge_roles(table)` returns `driving` / `implied` /
+`independent` / `conditional` / `external` per edge,
+`driving_choice(table)` says how the driving edge was picked (`single` /
+`marked` / `derived` / `first_declared`), and `edge_overlap(table, edge)`
+(with `edge_rest`) gives a conditional edge's shared columns. Never work
+a role out by eye from `cols`, and never call an edge "ambiguous"
+because it has a sibling: ADR 0037 leaves exactly ONE stop (two edges
+marked `drives: true`), and a `first_declared` choice is a WARNING the
+launch logs, not an error. A `RelationshipError` out of `edge_roles` is
+a LOUD finding — quote it.
 
 Per column, collect `route`, the rendered clause
 (`parse_llm_prompt_constraint(description, column=name)`), and EVERY
@@ -142,12 +161,35 @@ Document contract, in this order:
    - `registry.card(table)` verbatim inside a ```text fence — the same
      card the launcher logs (waves, `pk(...)`, `identity(...)`,
      `-->` enforced / `..>` documented, `[DISABLED — detached]`);
+     under it, the **role legend** — the five tags the card can print
+     and what each means (ADR 0036/0037), so the card is readable
+     without this prompt:
+     `[enforced, DRIVES]` the parent whose landed keys this child is
+     generated from · `[enforced, DRIVES (first declared — mark drives:
+     true to choose)]` the same, chosen by default because nothing else
+     decided (WARNING at launch) · `[enforced, implied via X]` satisfied
+     by construction through the driving parent, no keys drawn ·
+     `[enforced, independent]` no column shared with the driving edge —
+     drawn from the sampled side-input key pool · `[enforced,
+     conditional on (T)]` shares `(T)` with the driving edge — `T` comes
+     from the driving key and the rest is joined from the parent rows
+     carrying that `T`. An edge to a parent outside the model is
+     `external` (drawn from a driver-side pool);
    - `registry.mermaid(table)` inside a ```mermaid fence — the rendered
-     picture. Do NOT redraw or restyle either.
+     picture. Do NOT redraw or restyle either. Its edge labels carry
+     the same roles: a plain `cols → ref_cols` label is a driving or
+     implied edge, `-- independent` marks a side-input edge, and
+     `-- conditional on <cols>` marks a joined one; solid = enforced,
+     dashed = documented, dimmed node = disabled or external. State
+     that legend under the fence.
 3. **Per-table facts** — one subsection per table: `pk` (composite order
    preserved), `identity`, each FK edge as `(cols) --> ref (ref_cols)`
    with `[documented]` where `enforced: false`, `[DISABLED]` where the
-   table is detached, constrained-column counts split by route
+   table is detached, the edge's ROLE from `edge_roles` (plus
+   `overlap=(…)` for a `conditional` edge, and the table's
+   `driving_choice` — flag `first_declared`, it is the one the operator
+   may want to pin with `drives: true`), constrained-column counts
+   split by route
    (`N forced route=llm / M auto`), and a `⚠ not in any model` marker
    for dataset tables no model declares (they generate alone, with
    PK/identity from CLI flags).

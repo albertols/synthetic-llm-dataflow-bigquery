@@ -42,6 +42,17 @@ def _patterns(uri: str) -> list[str]:
     return [f"{base}/*{suffix}" for suffix in _SUFFIXES]
 
 
+def is_sample_model(path: str) -> bool:
+    """True for a documentation sample (`example_*.yaml`, `*.example.yaml`).
+
+    Public because the two places that walk a relationships directory —
+    this loader's directory scan and `scripts/relationships/card.py`'s
+    local-path scan — must agree on exactly which files are samples.
+    """
+    name = path.rsplit("/", 1)[-1]
+    return name.startswith("example_") or ".example." in name
+
+
 def load_relationship_registry(uri: str) -> RelationshipRegistry:
     """Every model file under ``uri``, validated into one registry.
 
@@ -75,8 +86,25 @@ def load_relationship_registry(uri: str) -> RelationshipRegistry:
                 f"launcher's service account storage.objects.list/get on "
                 f"the bucket."
             ) from exc
+    # Documentation samples (`example_*.yaml`, `*.example.yaml`) live next
+    # to real models in the packaged directory and use the same anonymised
+    # aliases; a directory scan skips them (launch …-5531344118137403488
+    # died on "A_TABLE declared in 2 models"). A URI that names a sample
+    # file directly still loads it.
+    direct = uri.rstrip("/").endswith((".yaml", ".yml"))
+    skipped = (
+        [] if direct else [p for p in sorted(set(paths)) if is_sample_model(p)]
+    )
+    if skipped:
+        log_milestone(
+            "relationships_example_skipped",
+            uri=uri,
+            files=",".join(p.rsplit("/", 1)[-1] for p in skipped),
+            note="documentation samples are never loaded from a directory "
+            "scan; name the file directly to load one",
+        )
     sources: list[tuple[str, str]] = []
-    for path in sorted(set(paths)):
+    for path in sorted(set(paths) - set(skipped)):
         try:
             with FileSystems.open(path) as handle:
                 sources.append((path, handle.read().decode("utf-8")))
@@ -118,4 +146,8 @@ def load_relationship_registry(uri: str) -> RelationshipRegistry:
     return registry
 
 
-__all__ = ["DEFAULT_RELATIONSHIPS_URI", "load_relationship_registry"]
+__all__ = [
+    "DEFAULT_RELATIONSHIPS_URI",
+    "is_sample_model",
+    "load_relationship_registry",
+]

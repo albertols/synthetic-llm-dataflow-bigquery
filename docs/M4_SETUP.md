@@ -92,7 +92,7 @@ uv sync --package sdfb-beam --extra mlx                  # real-LLM smoke (see M
 uv run pytest -m "not gpu and not gcp" -q
 ```
 
-Expected: all green (~1,330 tests as of 2026-08-31; the exact count grows —
+Expected: all green (~1,737 tests as of 2026-09-14; the exact count grows —
 any failure is a setup problem, not a flaky suite).
 
 If any test fails: paste the last ~30 lines back — that's the fastest signal something diverges between the laptop and M4 environments.

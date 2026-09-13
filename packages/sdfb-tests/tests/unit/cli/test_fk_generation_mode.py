@@ -80,9 +80,9 @@ class TestRelationshipCard:
         assert "config/relationships/sales.yaml" in text  # provenance
         assert "pk(ID)" in text and "identity(ORDER_UUID)" in text
         assert "-->" in text and "..>" in text  # enforced + documented
-        # …then the fenced mermaid for report recycling.
-        assert "```mermaid" in text and "flowchart" in text
-        assert "-.->" in text  # documented edge stays visible in the diagram
+        # Pipes and arrows only (2026-09-10 operator ask): no mermaid in
+        # any log; `scripts/relationships/card.py --mermaid` renders it.
+        assert "mermaid" not in text and "flowchart" not in text
         assert "enforced=1" in text and "documented=1" in text
 
     def test_a_table_no_model_declares_says_so(self, caplog):

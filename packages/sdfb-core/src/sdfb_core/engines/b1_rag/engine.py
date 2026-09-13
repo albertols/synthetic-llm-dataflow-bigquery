@@ -56,12 +56,15 @@ from sdfb_core.engines.base import (
     FreeTextEmptyYieldError,
     GenerationEngine,
     ModelClientTransientError,
+    apply_conditional_overrides,
+    conditional_draws,
     escalating_sampling,
 )
 from sdfb_core.engines.constraint_sampler import (
     ByteTemplateSampler,
     compile_pattern_sampler,
 )
+from sdfb_core.engines.fanout import FanoutPlan, expand_keys
 from sdfb_core.engines.fk_keys import bind_fk_key_pools
 from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.generation_plan import (
@@ -110,9 +113,10 @@ from sdfb_core.rag.embedding import BgeEmbedder, Embedder, HashingEmbedder
 from sdfb_core.rag.index import build_index
 from sdfb_core.rag.retrieval import retrieve_centroid_top_k, select_seed_examples
 from sdfb_core.rag.serialize import serialize_rows
+from sdfb_core.seeding import derive_batch_seed
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from sdfb_core.contracts import GeneratedRecord
     from sdfb_core.engines.base import (
@@ -255,6 +259,9 @@ class B1RagEngine(GenerationEngine):
         # bound in setup(); their columns bypass the per-column samplers.
         self._fk_key_pools: list = []
         self._fk_columns: set[str] = set()
+        # A DRIVEN child's recipe (ADR 0036), bound in setup() from
+        # ``ctx.fanout``; None keeps generate_batch's num_rows-driven path.
+        self._fanout: FanoutPlan | None = None
         self._index: ExactIPIndex | None = None
         self._embedder: Embedder | None = None
         self._ref_vectors: list[list[float]] = []
@@ -311,6 +318,7 @@ class B1RagEngine(GenerationEngine):
         # keeps them OFF the free-text/LLM path and out of the per-column
         # samplers; `_draw_fk_columns` owns their values.
         self._bind_fk_key_pools(ctx)
+        self._bind_fanout(ctx)
         self._samplers = {
             name: ColumnSampler(prof) for name, prof in self._profiles.items()
         }
@@ -434,6 +442,41 @@ class B1RagEngine(GenerationEngine):
                     categories={v: 1 for v in values},
                     observed_values=values,
                 )
+
+    def _bind_fanout(self, ctx: GenerationContext) -> None:
+        """A driven child's recipe (ADR 0036): the driving-edge columns
+        (FK + inherited) leave the per-column samplers exactly as FK
+        columns do; the cell columns stay sampled and are overridden."""
+        payload = getattr(ctx, "fanout", None)
+        if not payload:
+            self._fanout = None
+            return
+        self._fanout = FanoutPlan.from_payload(payload)
+        assert self._profiles is not None
+        for name in self._fanout.driving_cols:
+            self._fk_columns.add(name)
+            base = self._profiles.get(name)
+            if base is not None:
+                self._profiles[name] = ColumnProfile(
+                    name=base.name, bq_type=base.bq_type,
+                    kind=ColumnKind.CATEGORICAL, nullable=base.nullable,
+                    null_fraction=0.0, categories={}, observed_values=(),
+                )
+        fields: dict[str, Any] = {
+            "driving_cols": ",".join(self._fanout.driving_cols),
+            "cells": self._fanout.cells.size if self._fanout.cells else 0,
+            "exact_cells": self._fanout.exact_cells,
+            "mean_fanout": round(self._fanout.histogram.mean, 3),
+            # ADR 0037 (design §8): the count of non-driving conditional
+            # edges this plan resolves per key, and the Top-M candidate
+            # cap (Task 6, `ctx.fanout["candidate_cap"]`) when the
+            # launcher has written one.
+            "conditional": len(self._fanout.conditional),
+        }
+        candidate_cap = payload.get("candidate_cap")
+        if candidate_cap is not None:
+            fields["candidate_cap"] = candidate_cap
+        log_milestone("fanout_bound", **fields)
 
     def _fetch_identifier_domains(self, ctx: GenerationContext) -> None:
         """Full source domains for identifier-shaped columns, via the
@@ -668,6 +711,73 @@ class B1RagEngine(GenerationEngine):
                 # Repair-loop budget / DLQ routing belong downstream in the
                 # DoFn; the engine silently drops un-coercible candidates.
                 continue
+
+    def generate_for_keys(
+        self,
+        keys: Sequence[tuple],
+        cfg: GenerationConfig,
+        matches: Mapping[str, Sequence[Sequence[Sequence]]] | None = None,
+    ) -> Iterator[GeneratedRecord]:
+        if not self._ready or self._record_model is None or self._samplers is None:
+            raise RuntimeError("B1RagEngine.generate_for_keys called before setup()")
+        if self._fanout is None:
+            raise RuntimeError("B1RagEngine.generate_for_keys: ctx.fanout is not set")
+        assert self._ctx is not None
+        plan = self._fanout
+        run_id = self._ctx.pipeline_run_id
+        similarity = float(cfg.similarity)
+        chunk_rows = max(1, int(cfg.batch_size or 1000))
+        # Non-driving FK edges resolved per key (design 2026-09-11 §4,
+        # ADR 0037) — the JOINT per-key draw, computed ONCE up front (a
+        # no-op dict when the plan carries no conditional edges). It
+        # decides each child's cell AND its candidate tuples together, so
+        # `expand_keys` and the overrides below stay two halves of one
+        # combination index (fix wave A1).
+        # `table=` scopes the `fanout_rows_capped` milestone to THIS
+        # driven table (final review, E3) — several of them share one
+        # worker process in a single-job relational run (ADR 0030).
+        draws = conditional_draws(
+            plan, keys, run_id, matches,
+            table=self._ctx.landing_table or self._ctx.log_table_prefix,
+        )
+        child_index: dict[tuple, int] = {}
+        for chunk_index, chunk in enumerate(
+            expand_keys(
+                plan, keys, run_id, chunk_rows,
+                draws=draws if plan.conditional else None,
+            )
+        ):
+            # Chunks must not replay each other's "rest" columns: cfg.seed
+            # held constant would re-seed _sample_columns/_sample_free_text
+            # identically per chunk (the key/cell draws stay fine — they're
+            # seeded per key inside expand_keys). The per-chunk seed is a
+            # pure function of (run id, cfg.seed, chunk index), so re-runs
+            # of the same call still reproduce (test_same_keys_same_children).
+            chunk_cfg = cfg.model_copy(
+                update={
+                    "seed": derive_batch_seed(f"{run_id}:{cfg.seed}", chunk_index)
+                }
+            )
+            n = len(chunk)
+            columns = self._sample_columns(n, chunk_cfg, similarity)
+            columns.update(self._sample_free_text(n, chunk_cfg, similarity))
+            cond_columns, skip = apply_conditional_overrides(
+                plan, chunk, draws, child_index
+            )
+            columns.update(cond_columns)
+            for j, name in enumerate(plan.driving_cols):
+                columns[name] = [key[j] for key, _ in chunk]
+            if plan.cells is not None:
+                for j, name in enumerate(plan.cells.cols):
+                    columns[name] = [cell[j] for _, cell in chunk]
+            for i in range(n):
+                if skip[i]:
+                    continue
+                raw = {name: columns[name][i] for name in self._column_order}
+                try:
+                    yield self._record_model.model_validate(raw)
+                except Exception:
+                    continue
 
     # -- internals ----------------------------------------------------------
 

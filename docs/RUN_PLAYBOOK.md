@@ -139,6 +139,66 @@ posture: `source_stats=sample`, `freetext_expansion=identifiers`,
 
 The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
 
+### 2a. Sizing a launch — read the ROW PROJECTION before you pay for it
+
+`--num_rows` sizes the ROOT tables only. Every DRIVEN child is sized by
+the measurement, not by the flag: its count is its parent's DISTINCT
+landed keys times the mean fan-out measured on the source
+([ADR 0036](adr/0036-parent-driven-fanout-generation.md) D5,
+[ADR 0038](adr/0038-measured-conflicts-adjust-the-model.md) fix H3). Two
+ordinary fan-outs compound, so a five-table launch asking for 210,958
+rows generated 32,858,875 of them, 94.2% in one table
+(`2026-09-13_06_10_16-12600311608685394436`).
+
+The launcher now says so before the graph is built
+([ADR 0039](adr/0039-row-projection-before-the-graph.md)). Find
+`ROW PROJECTION` in the DRIVER log — it is the last block before the DAG
+and reads like this (that launch's own figures):
+
+```text
+ROW PROJECTION | 5 table(s), 32,858,875 rows — what this launch WILL generate, decided before the graph is built (ADR 0039)
+ B_TABLE |       210,958 |   0.6% |                      | root — sized by --num_rows=210,958
+ C_TABLE |       846,891 |   2.6% | #                    | driven by B_TABLE — 210,958 distinct keys x 4.0145 mean fan-out on (D_COL_001,D_COL_024,D_COL_025,C_COL_009)->B_TABLE
+ E_TABLE |       423,999 |   1.3% |                      | driven by B_TABLE — 210,958 distinct keys x 2.0099 mean fan-out on (D_COL_001)->B_TABLE
+ A_TABLE |    30,937,138 |  94.2% | ###################  | driven by C_TABLE — 846,891 distinct keys x 36.5302 mean fan-out on (D_COL_024,D_COL_025,C_COL_009)->C_TABLE
+ F_TABLE |       439,889 |   1.3% |                      | driven by E_TABLE — 210,958 distinct keys x 2.0852 mean fan-out on (D_COL_001)->E_TABLE (its parent lands 423,999 rows over 210,958 DISTINCT keys — ADR 0038)
+ TOTAL   |    32,858,875 | 100.0% |                      | across 5 table(s) — 94.2% of the run is A_TABLE
+ WARNINGS | 3 — a measured relationship makes part of this projection unsound
+```
+
+**What to do with it, in order:**
+
+1. **Read the TOTAL and the bar column first.** If one table owns most of
+   the run, that table decides the job's wall clock and cost — nothing
+   else you tune will matter much.
+2. **Re-size by the ROOT.** A driven child cannot be capped directly;
+   halving `--num_rows` halves every root and, through the same measured
+   means, everything below it. (Dropping a table out of the launch is the
+   other lever — see `enabled:` in
+   [`config/relationships/README.md`](../config/relationships/README.md).)
+3. **Read every WARNING before launching.** Each names the measurement
+   that triggered it and the consequence for the LANDED table. A clean
+   launch prints the projection and no warnings at all, so a warning here
+   is never noise:
+
+| Warning `code=` | Threshold | Read it as |
+|---|---|---|
+| `fk_source_orphans` | `matched_share < 0.5` | the source child holds far more distinct key values on this driving edge than its parent offers. The count is honest, the MODEL is suspect: the landed table reproduces only the matched slice of the source's key range, and the fan-out's zero bucket is unmeasurable so the mean is an UPPER bound. Check the edge names the columns you meant |
+| `projection_explodes` | driven rows `> 10x --num_rows` | the multiplier and the parent chain that produced it. This is what turns a five-table run into an eighteen-hour one; it is the measured fan-out compounded, not a defect. Lower `--num_rows` or drop the table |
+| `fanout_zero_share` | `zero_share > 0.5` | most source parents have no child at all on this edge, so the landed child covers a fraction of its parents — by construction, exactly as the source does. The row count is unaffected |
+| `adjusted_key_projection` | the table's `pk:` was adjusted (ADR 0038) | its projection assumes the source's key-repeat share reproduces, and its DISTINCT-key count (not its rows) is what every descendant is sized from. `model_adjustment_repeat_share` at the end of the run is the proof it held |
+
+4. **After the run, check the projection held.** Every
+   `row_projection_table rows=` must equal that table's
+   `validation_runs.num_rows_requested` and its entry in
+   `relational_single_job rows_detail=`; the per-table milestone carries
+   `requested=` beside `rows=` so a mismatch is one grep.
+
+A table whose count could not be derived prints `not derivable` with the
+reason and is EXCLUDED from the total (`row_projection_total
+underivable=`) — never silently sized at `--num_rows`, which for a driven
+child is the one number certainly wrong.
+
 ---
 
 ## 3. Dataflow options
@@ -594,12 +654,46 @@ Relational:
 
 | Milestone | Reads as |
 |---|---|
+| `relationships_example_skipped uri= files=` (launcher) | documentation samples (`example_*.yaml`, `*.example.yaml`) found next to the real models and left out of the scan — name a sample file directly to load it |
 | `relationships_loaded` / `relationships_absent` (launcher) | which model FILES this launch read, their models, table count and sha (ADR 0032); absent = every table generates alone |
-| `relationship_model` (launcher AND every worker; **WARNING** when a relational launch enforces 0 edges) | the whole model at a glance — tables with PK/identity, every edge as `-->` enforced / `..>` documented, `[DISABLED — detached]` tables, the generation waves, and the FILE it came from |
+| `relationship_model` (launcher AND every worker; **WARNING** when a relational launch enforces 0 edges) | the whole model at a glance — tables with PK/identity, every edge as `-->` enforced / `..>` documented, `[DISABLED — detached]` tables, the generation waves, and the FILE it came from. Pipes and arrows only, launcher and worker alike — no mermaid in any log (2026-09-10); `scripts/relationships/card.py --mermaid` renders the diagram |
+| `relational_e2e landing= pk= identity= fk_edges= constraints=` + one `relational_fk_edge cols= ref= parent_landing= key_tuples= active=` per edge (worker, once per plan) | did the whole relational contract reach this run — one line each, replacing the indent-2 JSON blocks that were 40 % of the 2026-09-09 worker logs |
 | `fk_key_pool_bound columns= key_tuples= weighting= null_fraction=` | one per enforced edge (ADR 0031). `weighting=child_marginal` = the IPF fit ran; `uniform` = no overlap between the child's sample and the parent's keys — check the edge is the one you meant |
-| `fk_key_pool_capped` (WARNING) | the parent holds ≥ the 100k side-input cap of distinct keys — the child references a uniform sample of them |
+| `fk_key_pool_capped cap=` (WARNING) | the parent holds ≥ the edge's side-input cap of distinct keys — the child references a uniform sample of them. The cap is 100k unless the child's PK contains the FK, then preflight sizes it up to 1M (ADR 0035) |
+| `pk_capacity_tight capacity= num_rows= expected_pk_duplicate_share=` (WARNING, launcher) | the PK tuple draws at random from a bounded space (FK-bound / categorical members) and 1–20 % of rows are expected to divert as `pk.duplicate` — under the gate, but the table lands fewer rows than requested (ADR 0035). Over the gate the launch stops at preflight P4 naming the largest gate-safe `--num_rows` |
 | `identity_constraint_owned` | the named identity columns are generated from their DECLARED CLAUSE (Tier P/B), not UUID synthesis (ADR 0028 amendment) |
 | `fk.orphan` in `validation_runs.dlq_by_rule` | rows that referenced a non-existent parent. Non-zero = a generator regression (the draw is joint by construction) — a BLOCKER, not a tolerance |
+| `fk_edge_widened table= ref= via= added=` (launcher) | the registry widened a parent's edge with inherited columns pinned by a child that references the same columns in both tables — no model edit needed (ADR 0036 rev) |
+| `fk_edge_role edge= role=driving\|implied\|independent\|conditional\|external overlap=` (launcher + worker preflight) | the role of EVERY enforced edge: which edge a child is generated FROM (`driving`), which are satisfied by construction (`implied`), which ride the side-input key pool (`independent` — a star-schema dimension, no column shared with the driving edge), which are joined on their shared columns (`conditional` — `overlap=` names them), and which point outside the launch (`external`). ADR 0036/0037 |
+| `fk_driving_edge_defaulted table= edge= hint='mark drives: true to choose'` (launcher, **WARNING**) | the child has several enforced parents, none marked `drives: true` and no ancestry between them, so the FIRST DECLARED edge drives (ADR 0037 ruling A). The launch is correct either way — mark the edge you meant, or reorder the `fk:` list, if it is not this one |
+| `fk_edge_overlap_external table= edge= other= overlap= note=` (launcher, **WARNING**) | fix wave F3: one line per overlapping PAIR with an EXTERNAL end — driving∩external, external∩external, or external∩any non-driving edge (`edge=` is always the external one, `other=` what it clashes with). The launch does NOT stop: the last edge written keeps the shared column, so `other`'s tuple may not exist in its own parent — bring the parent into the launch to resolve it. Fix wave G3: the report reads the MODEL, not the resolved edge roles, so it fires in a SINGLE-TABLE launch too — the shape where it matters most, since a denormalised child's parents are all external |
+| `fk_nullable_schema_mismatch table= edge= landing= generation= reason= pk=` (launcher, **WARNING**, once per conditional edge) | fix waves A4 + F2 + G2: `reason=` is `declared_pk`, `schema_mode_mismatch`, or both comma-joined — the landing/generation schemas disagree on this edge's `rest` nullability (comma-joined per-column modes), and/or a `rest` column named in `pk=` sits in the PRIMARY KEY the run ENFORCES, which rejects a NULL regardless of mode. That PK is the UNION of the relationship model's `pk:` (ADR 0032, what the run enforces) and `TableSchema.primary_keys` (the BQ table constraint in `_ddl.json`, what the record model validates against) — a NULL in either is fatal, so reading only one leaves a window where the edge is called nullable and every NULL-filled row is dropped inside the engine's `except Exception: continue`. Either way the edge is treated as NON-nullable, so an unmatched key diverts as `fk.unmatched` instead of NULL-filling a row the record model would silently reject |
+| `fk_candidate_request_unbounded table= candidate_cap= conditional_edges= tuples_per_request= ceiling=` (launcher, **WARNING**, per table) | fix wave G5: `--fk_candidate_cap × conditional edges` exceeds the 100k per-request candidate ceiling ON ITS OWN, so the `keys_per_batch` bound has floored at ONE key per request and bounds the request no further. The cap is deliberately NOT clamped (fix wave F1 reverted that — clamping collapsed the co-parent choice to a point mass), so this is the signal to lower `--fk_candidate_cap`: past the candidates a co-parent actually holds per shared value it buys no per-key variety, only request size |
+| `relational_fk_edge … mode=fanout\|implied\|side_input\|conditional overlap=` (worker, per edge) | the DAG path EVERY edge actually took this run — one line per edge, including the driving one (`mode=fanout`) and an `implied` one. `side_input` = the ADR 0031 key pool: an `independent` edge, the pre-ADR-0037 default for legacy metadata, OR an `external` edge — its parent is outside the launch, so `fk_edge_metadata` gives it no `mode` key at all and the worker falls back to `side_input` by design, not a defect. `conditional` = the co-partitioned join, with `overlap=` naming the shared columns. Compare each line's `mode=` with the launcher's `fk_edge_role role=` for that edge: `role=independent`, legacy metadata, and `role=external` all legitimately show `mode=side_input`; any OTHER role/mode pairing (e.g. `role=driving` without `mode=fanout`) is a wiring defect (ADR 0037) |
+| `fk_fanout_cache_unavailable table= op= error=` (launcher, WARNING) | the optional `fk_fanout_stats` cache could not be read/written (missing table, permission, transient) — the launch measured without it (ADR 0036) |
+| `fk_fanout_measured edge= parents= children= key_values= orphan_keys= mean= p50= p95= max= zero_share= source=measured\|cache` (launcher) | the SOURCE ratio the driven child reproduces; `cache` = read from `fk_fanout_stats` instead of re-scanning. Every figure is over the histogram, which counts rows per child KEY VALUE, so `mean` can never exceed `max`; `key_values` and `orphan_keys` say how much of the child's key space the parent actually covers |
+| `fk_fanout_source_orphans edge= child_tuples= parent_tuples= orphan_keys= matched_share=` (launcher, **WARNING**) | the source child holds key values its parent does not, so the zero bucket is unmeasurable and the child generates from the matched share of its key space only. A low `matched_share` means the driving edge is suspect — check the edge names the columns you meant |
+| `relational_single_job … rows_detail=<name>:<rows>,…` (launcher) | derived row count per table — roots take `--num_rows`, driven children derive from their parent's landed keys and the measured fan-out |
+| `row_projection tables= rows= warnings= dominant= dominant_share=` + the multi-line `ROW PROJECTION` block (launcher, once per launch; **WARNING** when it carries warnings) | ADR 0039: what this launch WILL generate, before the graph is built — per table the projected count and its derivation (root `--num_rows`, or parent DISTINCT keys x measured mean fan-out with the edge named), a bar column showing who owns the run, and the TOTAL `rows_detail` never took. Read it with §2a before launching |
+| `row_projection_table table= rows= basis=root\|driven\|underivable parent= parent_keys= mean_fanout= share= requested= note=` (launcher, one per table) | the greppable form of one block line. `rows=` is the projection, `requested=` the count the run actually asks for — they are the same number by construction (both are `round(parent_keys x mean_fanout)`), so a difference is a wiring defect. `basis=underivable` carries the reason in `note=` and leaves `rows=` EMPTY: no fallback to `--num_rows` |
+| `row_projection_total tables= rows= dominant= dominant_share= underivable=` (launcher, once) | the launch's total record count, the table that owns it, and how many tables were excluded because their count could not be derived. `rows=` must equal the sum of `relational_single_job rows_detail=` |
+| `row_projection_warning code= table= measurement= consequence=` (launcher, **WARNING**, one per unsound measurement) | ADR 0039's four codes — `fk_source_orphans` (matched_share < 0.5), `projection_explodes` (driven rows > 10x `--num_rows`), `fanout_zero_share` (zero_share > 0.5), `adjusted_key_projection` (this table's `pk:` was adjusted). `measurement=` names the figure and the milestone it came from; `consequence=` says what it means for the LANDED table. ZERO of these on a clean launch — the thresholds are deliberately loose (§2a) |
+| `fanout_bound driving_cols= cells= exact_cells= mean_fanout= conditional= candidate_cap=` (worker, once per engine build) | the engine bound the driven child's recipe; `exact_cells=True` = the PK-completing cells alone must key the child (drawn without replacement, a weighted permutation) — `False` = an unbounded PK member keys it instead, cells follow their measured weights WITH replacement and are NOT part of the joint walk; `conditional=<n>` = how many conditional edges ride with the keys and `candidate_cap=` is `--fk_candidate_cap` VERBATIM (fix wave F1 reverted an A3 clamp to the measured max fan-out) |
+| `fanout_rows_capped requested= emitted= capacity=` (worker, **WARNING**, once per worker process PER DRIVEN TABLE) | fix waves A1/E2/E3/G1/G4: `capacity` is the product of the dimensions that genuinely bound the PRIMARY KEY — the cell count ONLY when `exact_cells`, times the actual candidate count (or 1, a NULL fill) of each conditional edge whose `rest` supplies a PK MEMBER. An edge outside the PK distinguishes no child, so it multiplies nothing (before G1 it did, and the extra children landed as PK duplicates with `shortfall == 0`). Capping applies IF AND ONLY IF `exact_cells`; an inexact PK never caps, and its candidate digits wrap instead while its cells keep drawing independently from their weights. The guard is keyed on the landing table (`table=` comes from the ambient milestone scope), so every driven table of a single-job relational run reports its own capping — not just the first one to cap (both engines' call sites are pinned, fix wave G4). Raise `--fk_candidate_cap` or fix the `pk:` |
+| `batch_unmatched batch_id= keys_dropped=` (worker) | driving keys removed from a batch BEFORE generation because a NON-nullable conditional edge had no candidate for them (ADR 0037 ruling B) — each one is also a `fk.unmatched` DLQ envelope |
+| `fanout / candidates_dropped_null` (Beam counter) | conditional-parent rows discarded because a SHARED (join-key) column was NULL. Non-zero means the parent landed NULLs in the columns the join keys on — expect 0 on a PK-declared parent |
+| `fanout / keys_unmatched` (Beam counter) | driving keys dropped for a non-nullable conditional edge with no candidate. Read it next to `fk.unmatched` in `dlq_by_rule`: the counter counts KEYS, the rule counts their expected ROWS |
+| `fk.unmatched` in `validation_runs.dlq_by_rule` | rows never generated because the conditional parent held no candidate for their shared value, weighted by each dropped key's expected rows (ADR 0037 ruling B). Unlike `fk.orphan` this is an INPUT fact, not a generator regression — a branch the source genuinely lacks. Non-zero with a source you expect to be complete = check the edge's columns and `fanout / candidates_dropped_null` |
+| `model_adjustments count= tables=` + the multi-line `MODEL ADJUSTED` block (launcher, **WARNING**, once per launch) | ADR 0038: this run did NOT generate with the model on disk. The block states, per table, what the model declared, what the full source measured, what was dropped, and the consequence — plus the SOURCE key-repeat share the landing table has to match. A run with this block is never a clean run; read it before reading anything else |
+| `model_adjusted table= change=pk_dropped declared= measured= consequence= source_repeat_share=` (launcher, **WARNING**, one per adjustment) | the greppable one-line form of the same fact. `declared` is the `pk:` the model carried; `measured` is what the full source proved — since fix J, the DECLARED PK's own measurement (distinct key tuples over rows, the largest group) and why the key cannot tell those rows apart; `source_repeat_share` is `1 - key_tuples/rows` over **the declared PK**, the same columns `pk.duplicate` is counted over. It is absent only when the conflict was proven by the cell-capacity ladder instead, with no measurement of the key itself — then the banner says "not measured" rather than printing a share over other columns. Fix it permanently by pasting the emitted YAML into `config/relationships/` — or re-launch with `--on_model_conflict=stop` to refuse instead |
+| `source_pk_measured table= pk= rows= key_tuples= max_rows_per_key= repeat_share= source=measured\|cache\|histogram` (launcher, one per driven child with a `pk:`) | fix J: the DECLARED PK, measured on the SOURCE child — the evidence P4's verdict rests on. `source=histogram` means the declared PK IS the driving edge, so the fan-out already measured that tuple and **no second scan was paid for**; `measured` is one extra GROUP BY over the PK columns; `cache` is the `fk_fanout_stats` row, which holds both measurements under one key. Compare `predicted_observed` (not `repeat_share`) with the run's `blocker_failure_ratio`: the gate divides by generated PLUS diverted rows, so a source share `s` lands `s / (1 + s)`. Above the gate the model is ADJUSTED, at or below it the key is KEPT |
+| `preflight_pk_source_repeats table= pk= rows= key_tuples= max_rows_per_key= repeat_share= gate= note=` (launcher, **WARNING** when `repeat_share>0`) | fix J: the declared PK IS a key of this source within the run's BLOCKER gate, so it is KEPT and the repeats that remain divert as `pk.duplicate` like any other table's. A source that is 0.4% dirty must not lose its key. Expect `pk.duplicate` on this table at roughly `repeat_share × rows` — read it against the gate, not against zero |
+| `preflight_pk_capacity_below_fanout table= pk= max_fanout= capacity= candidate_cap= note=` (launcher, **WARNING**) | fix J: the ADR 0037 per-key capacity model (cells × `--fk_candidate_cap` per conditional edge) sits below the source's largest fan-out, but the declared PK's own measurement KEPT the key. Reported, never acted on — capacity estimates what a key can represent, the measurement measured it. If `pk.duplicate` overshoots the measured share, raise `--fk_candidate_cap` |
+| `model_adjustment_model model= source= uri= tables=` + the YAML body (launcher, **WARNING**, one per adjusted model FILE) | the EFFECTIVE relationship model this run generated with: the declared model with the adjusted tables' `pk:` removed and a comment naming the measurement that removed it. `uri=` is where it was also written (`--staging_location`/`--temp_location` + `/model_adjustments/`), or `(not written)` — the log copy always exists. `model_adjustment_model_unwritten` (WARNING) precedes it when the artifact write failed; the launch continues by design |
+| `model_adjustment_repeat_share table= source= landing= delta= tolerance= within_tolerance= excluded_blocker_rules=` (worker, end of run; **WARNING** unless `within_tolerance=True`) | ADR 0038's proof that the copy is faithful: the SOURCE key-repeat share measured at launch against the one the landing table actually reached (`pk.duplicate` over `valid_count + row.duplicate`). Both describe the DECLARED PK since fix J, so the verdict is like-for-like in every case (fix H4's `comparable=`/`note=` are gone with the mismatch that needed them). `within_tolerance=False` means the adjusted table did NOT reproduce its source — a fan-out capped to one child per key lands ≈0.00 against a source ≈0.50. The line is absent when the launch measured no source share for the table. The same figures land in `validation_runs` (`source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`, `excluded_blocker_rules`) |
+| `preflight_pk_sample_stop_deferred table= pk= distinct= sample_rows= duplicate_ratio= note=` (launcher, **WARNING**) | fix H2: the 10,000-row sample showed ≥50% duplicate PK tuples, and P5's stop DEFERRED because a full-source measurement is in scope for this table. The verdict is P4's, on the DECLARED PK's own measurement (fix J, `source_pk_measured` above) — it either adjusts the model (the `model_adjusted` row above) or, with `--on_model_conflict=stop`, refuses. Seeing this line with NO `model_adjusted` line after it means the full source repeats the key less often than the run's gate allows, and the sample was the weaker signal |
+| `model_adjustment_descendant_rows table= parent= parent_rows= parent_distinct_keys= mean_fanout= derived_rows= unadjusted_rows= note=` (launcher, **WARNING**) | fix H3: this table is driven by a parent whose own `pk:` was ADJUSTED away, so the parent lands REPEATED keys and this table fans out from its DISTINCT ones. `derived_rows` is `parent_distinct_keys × mean_fanout`; `unadjusted_rows` is what sizing it off the parent's rows would have requested — and could not have produced (the 2026-09-12 shape: 220,215 requested against ~109,556 producible). Expect `num_rows_requested` in `validation_runs` to match `derived_rows`, not `unadjusted_rows` |
+| `batch_start batch_id= keys=` / `batch_done batch_id= keys= rows= seconds=` (worker) | a key batch: parent keys in, children out (ADR 0036) — replaces `n=`/`rows=` for a driven child's batches |
 
 ---
 
@@ -797,6 +891,261 @@ entropy/top1 drift — the documented trade-off.
 
 Multi-table alternative: `scripts/run_tableset.py` (parent-first
 ordering, dry-run first).
+
+**Driven fan-out (ADR 0036) — three-table chain, `B_TABLE → C_TABLE →
+A_TABLE`.** When a child's PK contains its parent's FK (C_TABLE's
+`(D_COL_001, C_COL_002, D_COL_018)` inside each B_TABLE account), the
+`9b` recipe above does not apply — a random FK-pool draw collides
+(ADR 0035); the child must generate FROM its parent's landed keys.
+Model edit (`config/relationships/<model>.yaml`, before the launch):
+widen C_TABLE's edge to B_TABLE so it carries every column A_TABLE will
+need inherited (`cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009] →
+B_TABLE`), and mark A_TABLE's edge to C_TABLE `drives: true` — A_TABLE
+also has an enforced edge straight to B_TABLE, which then resolves
+`implied` (satisfied by construction through C_TABLE) instead of
+stopping the launch as ambiguous. New flags on the launch trigger:
+`--fk_fanout_stats_table=${PROJECT}.synthetic_data_quality.fk_fanout_stats`
+(empty = measure the source fan-out fresh every launch; set it once the
+model is stable so a re-launch pays no BigQuery scan) and
+`--driven_uniqueness_mode=streaming` (default — C_TABLE and A_TABLE
+skip the ADR 0034 landing-path barrier because their PK is unique by
+construction; an identity-bearing driven child keeps `exact` regardless
+of this flag). `--num_rows` is passed on B_TABLE only — C_TABLE and
+A_TABLE derive theirs (`relational_single_job rows_detail=`).
+Milestones and pass criteria: §7's new rows above, plus the same §8.4
+orphan query per driven edge and `pk.duplicate` expected **0** (not
+just under the gate) on both C_TABLE and A_TABLE. `streaming` mode
+MEASURES `pk.duplicate` on its own digest branch (ADR 0036 D6), so that
+0 is a reading, not a blank — but read it next to the independent
+post-run check below, which counts the landed table rather than the
+generated stream.
+
+**`--on_model_conflict=adjust|stop` (ADR 0038, default `adjust`).** A
+driven child whose declared `pk:` the FULL SOURCE proves is not a key
+(the 2026-09-12 `E_TABLE` stop: its `pk:` IS its driving edge, and the
+source carries a median of 2 rows per key value) no longer stops the
+launch. **What "proves" means, since fix J:** the DECLARED PK is
+measured on the source child — distinct key tuples over rows — and that
+share is compared with THIS RUN'S `blocker_failure_ratio`. Above the
+gate the key cannot survive generation and is dropped; at or below it
+the key is KEPT and `preflight_pk_source_repeats` reports the share. So
+the same table adjusts under a 0.2 gate and keeps its key under a 0.3
+one: the operator's own threshold decides. The measurement covers a PK
+with members outside the driving edge — `F_TABLE` on launch
+`…-12600311608685394436`, whose 0.2908 source share reached the BLOCKER
+gate because nothing had measured that key at launch time. The launcher DROPS that key from the effective model, prints the
+`MODEL ADJUSTED` banner, emits the effective model as YAML, and
+generates with the measured fan-out untouched — so the landing table
+reproduces the source's key-repeat share. Consequences on the run:
+
+- that table is FORCED to `uniqueness_mode=streaming` regardless of
+  `--driven_uniqueness_mode` and of identity columns (nothing may be
+  removed), so its `identity.unique` is not measured this run;
+- `pk.duplicate` on that table is still MEASURED but **excluded from the
+  BLOCKER gate** (`validation_runs.excluded_blocker_rules`). Its
+  expected value is NOT 0 — it is the source's repeat share, and
+  `repeat_share_within_tolerance` is the criterion instead. Every OTHER
+  table's `pk.duplicate` is unchanged and still expected 0;
+- the exclusion leaves **both sides** of the ratio (fix H1):
+  `observed_blocker_ratio` is `blocker_count` over the rows the run
+  GENERATED — `valid_count + dlq_count` minus the excluded rules'
+  counts — so every other blocker rule on that table still fails at the
+  configured threshold. Read the ratio against `num_rows_requested`,
+  not against `valid_count + dlq_count`, when
+  `excluded_blocker_rules` is non-empty;
+- `repeat_share_within_tolerance` is NULL when the launch measured no
+  source share for the table — the conflict was proven by the cell
+  capacity, not by a measurement of the key itself. That is the absence
+  of a verdict, not a failure. Fix J made every measured share
+  comparable (both sides describe the declared PK), so fix H4's
+  `repeat_share_note` column is no longer written;
+- a driven child of that table is sized off its parent's **distinct**
+  landed keys (fix H3, `model_adjustment_descendant_rows`), so its
+  `num_rows_requested` is roughly `(1 - source_repeat_share)` of what
+  the pre-H3 launcher would have asked for. A missed request on such a
+  table is a defect again, not arithmetic;
+- the post-run PK check below, run on an ADJUSTED table, is expected to
+  return the source's duplicate count, not 0. Compare it with
+  `validation_runs.landing_repeat_share`, not with zero.
+
+Pass `--on_model_conflict=stop` to get the pre-0038 refusal back, word
+for word. Model SELF-contradictions (unknown columns, two `drives: true`
+edges, an ambiguous role) and the ADR 0035 capacity gate stop under
+BOTH settings.
+
+**P5 defers to the measurement (fix H2).** The sample-based
+"the declared PK is not a key of this data" stop (§"PK capacity" above)
+does NOT fire on a table whose FULL source was measured: it logs
+`preflight_pk_sample_stop_deferred` and hands the verdict to P4, which
+adjusts (default) or refuses (`stop`). Before the fix a driven child
+whose 10k sample showed ≥50% duplicate keys exited the whole launch at
+`[preflight P5]` — zero rows for every planned table — with
+`--on_model_conflict` never read. A table with NO measurement keeps the
+P5 stop exactly as documented.
+
+**Post-run independent PK check (per driven table, expect 0 rows):**
+
+```sql
+SELECT COUNT(*) AS duplicated_pk_tuples FROM (
+  SELECT D_COL_001, C_COL_002, D_COL_018, COUNT(*) AS c
+  FROM `${PROJECT}.synthetic_data.c_table`
+  GROUP BY D_COL_001, C_COL_002, D_COL_018
+  HAVING c > 1
+)
+```
+
+Non-zero here with `pk.duplicate = 0` in `validation_runs` means the
+in-DAG measurement missed rows (a wiring defect); non-zero in both is a
+generator regression — start at `fanout_bound` and the `[preflight P4]`
+cell counts.
+
+**Dropped parent keys.** `fanout / keys_dropped_null` (Beam counter) is
+the number of parent key tuples the fan-out projection discarded because
+a JOIN-KEY column was NULL. Inherited (non-join) NULLs ride through and
+are copied verbatim, so a non-zero counter means the parent landed NULLs
+in the driving edge's own columns — expect 0 on a PK-declared parent.
+
+**Multi-parent children (ADR 0037) — which parent drives, and the
+candidate cap.** A driven child may reference several parents. You do
+not declare roles; the registry derives them from the columns, and
+`scripts/relationships/card.py --table <CHILD>` prints them before you
+launch:
+
+- an edge that shares **no** column with the driving edge is
+  `independent` — it keeps the ADR 0030/0031 side-input key pool and the
+  `fk.orphan` gate, exactly as a root's edge would (a star-schema
+  dimension);
+- an edge that shares **at least one** column is `conditional` — the
+  shared columns come from the driving key, and the rest is joined in
+  from the parent rows that carry that shared value (a diamond branch).
+  `relational_fk_edge mode=conditional overlap=` (worker) is the
+  confirmation.
+
+**Which parent drives** is a pure function of the model file, in order:
+a lone enforced in-model edge drives; else exactly one edge marked
+`drives: true`; else the parent that descends from every other candidate
+parent (its edge to the other parent is widened, `fk_edge_widened`);
+else — no marker and no ancestry between the parents — the **first
+declared** enforced edge drives and the launcher logs
+`fk_driving_edge_defaulted table= edge= hint=` at WARNING. That WARNING
+is not a failure: the launch is correct either way, and the fix if it
+picked the wrong parent is one `drives: true` in the model file (two
+markers on one table is still the one `RelationshipError` left). Every
+overlapping pair with an EXTERNAL end — driving∩external,
+external∩external, or external∩any non-driving edge — cannot be
+resolved by any model edit (fix wave F3: an external edge never becomes
+`implied`, `drives: true` is inert for it, and it has no `tables:` entry
+to disable or document), so none of them stop the launch: each logs
+`fk_edge_overlap_external table= edge= other= overlap= note=` (WARNING,
+`edge=` always the external one) instead. Fix wave G3: that report comes
+from the MODEL, not from resolved edge roles, so a single-table launch
+of a denormalised child (every parent external) warns too — it used to
+launch with no stop and no signal, its rows diverting as `fk.orphan`. The last edge written keeps
+the shared column, so `other`'s tuple may not exist in its own parent —
+bring the parent inside the launch to resolve it.
+
+`--fk_candidate_cap` (default `64`) is `M`, the operator's flag, used
+VERBATIM: the composer's Top-M combine and every request payload carry
+it unclamped (fix wave F1 reverted an A3 attempt to clamp it to the
+measured max fan-out — `M` sizes the candidate SAMPLE per shared JOIN
+VALUE, reused by every driving key carrying that value, not a per-key
+allotment, so clamping it collapsed a 1:1 driving edge's shared value to
+one candidate, a point mass, on the default flag). A key whose fan-out
+exceeds its candidate list is CAPPED at the joint capacity — the cell
+count ONLY when the PK's completing members are exact, times the actual
+candidate count (or **1**, a NULL fill) of each conditional edge whose
+`rest` supplies a PK MEMBER (fix waves E2 + G1: an edge outside the PK
+distinguishes no child, so it multiplies nothing — counting it emitted
+rows that landed as PK duplicates with no warning) — if, and only if,
+the PK's completing members are exact; an INEXACT PK never caps, and
+its candidate digits wrap instead while its cells keep drawing
+independently from their measured weights (fix wave E1, `joint_key_draw`;
+ADR 0037 D3). A capped key's shortfall is reported once per worker
+process **per driven table** (fix wave E3) as
+`fanout_rows_capped requested= emitted= capacity=` (WARNING) — raise the
+cap when a branch's within-key variety matters and the shuffle can
+afford it, lower it when a request gets too wide. `keys_per_batch` is
+lowered at launch so candidate TUPLES per request (`keys_per_batch × cap
+×` number of conditional edges) never exceed 100k — that bounds tuples,
+not the raw per-request VALUE count, which is
+`keys_per_batch × cap × Σ|rest|` and can run higher when a conditional
+edge's `rest` spans more than one column (ADR 0037 D4). Once `cap ×`
+the number of conditional edges passes 100k on its own, that bound
+floors at ONE key per request and stops bounding: the launcher logs
+`fk_candidate_request_unbounded table= candidate_cap= conditional_edges=
+tuples_per_request= ceiling=` (WARNING) instead of clamping the cap —
+lower `--fk_candidate_cap` (fix wave G5). A shared value
+the parent simply has too few distinct candidates for is capped or
+wrapped (per the rule above) the same way at ANY setting of the cap; the
+figure in [ADR 0037](adr/0037-multi-parent-children.md) D4 shows the
+candidate-list split that feeds it.
+
+Preflight P4 folds ONE new member into the per-key PK capacity, not two
+(fix wave A2 corrected this): a conditional edge's `rest` in the PK
+contributes at most `--fk_candidate_cap` (the operator's flag, used
+as-is) — a stop there names the edge or the flag. An INDEPENDENT edge in
+the PK contributes NOTHING: its pool is drawn per ROW WITH REPLACEMENT,
+so two children of one parent key can draw the same parent tuple, and
+counting its pool cap here used to declare PKs safe that the engine then
+duplicated. The conditional factor itself is an UPPER bound — a model
+whose co-parent is thin still passes P4 and caps at run time, visibly,
+via `fanout_rows_capped`.
+
+**Unmatched conditional keys (`fk.unmatched`).** When the conditional
+parent holds NO row for a driving key's shared value, the engine writes
+`NULL` on the branch columns if every one of them is NULLABLE in BOTH
+the landing schema AND the generation schema (fix wave A4 — landing
+alone let a REQUIRED generation column silently reject the row inside
+`model_validate`, with no envelope, counter or milestone) AND absent
+from the PRIMARY KEY THE RUN ENFORCES — the relationship model's `pk:`
+(ADR 0032), with the DDL constraint standing in only when the model
+declares none (fix waves F2 + G2 — the record model rejects a NULL on a
+declared PK column whatever its mode says, and reading the BQ constraint
+alone never fired on the canonical setup, where it is None; on ADR
+0037's own diamond the child PK's last member IS the co-parent's column,
+so this is the default shape, not a corner). Either failure is treated
+as NON-nullable and logged once per edge as
+`fk_nullable_schema_mismatch table= edge= landing= generation= reason=
+pk=` (WARNING; `reason=` is `declared_pk`, `schema_mode_mismatch`, or
+both, and `pk=` names the offending `rest` columns). Otherwise the key
+is dropped before generation (`batch_unmatched`, `fanout /
+keys_unmatched`) and reported as `fk.unmatched` in
+`validation_runs.dlq_by_rule`, weighted by that key's expected rows.
+Expect non-zero only when the SOURCE genuinely lacks that branch — it is
+an input fact, not a generator regression the way `fk.orphan` is. The
+§8.4 orphan query is unchanged for a conditional edge: the same
+whole-tuple LEFT JOIN, and the ruling-B NULL rows are excluded from it
+exactly as every NULL tuple already is.
+
+**The cache table is optional.** If `--fk_fanout_stats_table` names a table that does not exist (or cannot be read or written), the launcher logs `fk_fanout_cache_unavailable` (WARNING) once per table and measures the fan-out from the source instead; nothing else changes.
+
+**Cache invalidation.** The `fk_fanout_stats` row is keyed by
+`(source_table, edge_cols, model_sha)` ONLY — nothing in the key tracks
+the source's content. If the source table changes shape (rows added, the
+fan-out ratio moves), a cached payload keeps replaying the OLD ratio.
+Re-measure by editing the model file (any field — `sha12()` covers all of
+them) or by deleting the cached row. Gaining or losing a driving,
+conditional or independent `fk:` entry (ADR 0037) already forces this on
+its own: `sha12()`'s canonical string covers every `fk:` entry (`cols`,
+`ref`, `ref_cols`, `enforced`, `drives`), so the sha changes and the next
+launch is a cache miss — no manual step needed. What the key does NOT
+cover is the PK-completing `cell_cols` measured alongside the histogram:
+those come from `pk_cell_columns` over the reference-data column
+profiles (categorical vs. identifier), not from the `fk:` list. A child
+whose cell columns change WITHOUT any `fk:` entry changing — for example
+a source column's profile flipping between categorical and identifier as
+the table grows — keeps a stale cell table under the unchanged sha.
+Since nothing in the model file moved, editing it won't help; delete
+that table's `fk_fanout_stats` row directly to force a re-measurement.
+
+**Did PK/FK enforcement actually happen?** After the job lands, run the
+`/e2e_fk_pk_validator` prompt
+(`.github/prompts/e2e_fk_pk_validator.prompt.md`) with the model file and
+the `JOB_ID`: it derives the contract from the registry (widened edges,
+roles, disabled tables), reads the launch's own milestones, and runs the
+PK-duplicate, identity, whole-tuple orphan and fan-out queries through the
+local `bq` CLI (read-only), cross-checking each count against
+`validation_runs.dlq_by_rule`. One PASS/FAIL per (table, check).
 
 ### 9c. 10M scale (warm everything)
 

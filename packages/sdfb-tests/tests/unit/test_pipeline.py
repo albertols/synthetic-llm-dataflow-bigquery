@@ -115,6 +115,21 @@ class TestDlqRuleWeight:
         envelope = {"rule_id": "engine_failure", "raw_request": {"n": "oops"}}
         assert _dlq_rule_weight(envelope) == ("engine_failure", 1)
 
+    def test_fk_unmatched_weighted_by_the_keys_expected_rows(self):
+        """ADR 0037 §4 ruling B: a driving key dropped for having no
+        conditional candidate loses every row it would have produced, so
+        its envelope carries that share in `raw_request["n"]` — counting
+        it as 1 would let a run that lost half its rows PASS the gate."""
+        envelope = {
+            "rule_id": "fk.unmatched",
+            "error_type": "referential_integrity",
+            "raw_request": {"batch_id": 3, "keys": [["t1", "l1"]], "n": 7},
+        }
+        assert _dlq_rule_weight(envelope) == ("fk.unmatched", 7)
+
+    def test_fk_unmatched_without_a_weight_defaults_to_one(self):
+        assert _dlq_rule_weight({"rule_id": "fk.unmatched"}) == ("fk.unmatched", 1)
+
     def test_other_rule_weighted_one_per_envelope(self):
         envelope = {"rule_id": "row.duplicate", "raw_request": {"n": 16}}
         assert _dlq_rule_weight(envelope) == ("row.duplicate", 1)

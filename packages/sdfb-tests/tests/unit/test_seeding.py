@@ -1,8 +1,16 @@
-from sdfb_core.seeding import derive_batch_seed
+from sdfb_core.seeding import derive_batch_seed, derive_key_seed
 
 
 def test_deterministic_per_run_and_batch():
     assert derive_batch_seed("run-a", 0) == derive_batch_seed("run-a", 0)
+
+
+def test_default_salt_keeps_every_existing_seed_byte_identical():
+    assert derive_key_seed("r", ("k",)) == derive_key_seed("r", ("k",), salt="")
+
+
+def test_nonempty_salt_changes_the_seed():
+    assert derive_key_seed("r", ("k",)) != derive_key_seed("r", ("k",), salt="T,R")
 
 
 def test_batches_differ():

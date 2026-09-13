@@ -141,6 +141,33 @@ def _release_shared_engine(key: tuple, engine):
     return entry.engine, entry.client
 
 
+# Parent keys kept verbatim in a crashed key-batch's DLQ envelope. The
+# batch itself can hold `--keys_per_batch` (up to 10k) tuples, and the
+# envelope is a BigQuery row the gate reads back — a sample plus the
+# totals diagnoses the crash; the full list only inflates the table.
+_DLQ_KEY_SAMPLE = 10
+
+
+def _failed_request(request: dict, keys, n: int) -> dict:
+    """The `raw_request` an ``engine_failure`` envelope carries.
+
+    A row request passes through unchanged (it is already three scalars).
+    A KEY request is summarized: `batch_id`, a bounded key sample,
+    `keys_total`, and `n` — which `_dlq_rule_weight` (`sdfb_beam/pipeline
+    .py`) reads to weight the crashed batch by its EXPECTED lost rows
+    (`len(keys) * mean_fanout`), so dropping it would silently
+    under-count against the BLOCKER gate.
+    """
+    if keys is None:
+        return request
+    return {
+        "batch_id": request.get("batch_id"),
+        "n": request.get("n", n),
+        "keys": [list(k) for k in keys[:_DLQ_KEY_SAMPLE]],
+        "keys_total": len(keys),
+    }
+
+
 class GenerateRecordsDoFn(beam.DoFn):
     """Wraps a `GenerationEngine` inside Beam's worker lifecycle."""
 
@@ -152,6 +179,7 @@ class GenerateRecordsDoFn(beam.DoFn):
         similarity: float = 0.5,
         seed: int | None = None,
         expect_fk_side: bool = False,
+        chunk_rows: int = 1000,
     ) -> None:
         super().__init__()
         self.engine_name = engine_name
@@ -167,6 +195,7 @@ class GenerateRecordsDoFn(beam.DoFn):
         # relaxed here: the build still happens exactly once per DoFn
         # instance, just one hop later.
         self.expect_fk_side = expect_fk_side
+        self.chunk_rows = chunk_rows
         self._engine = None  # built in setup() (or first process())
         self._engine_key_held: tuple = ()
         # Identity columns this DoFn synthesizes — resolved once the
@@ -176,6 +205,10 @@ class GenerateRecordsDoFn(beam.DoFn):
         self._yielded = Metrics.counter("generation", "yielded")
         self._failed = Metrics.counter("generation", "failed")
         self._batch_seconds = Metrics.distribution("generation", "batch_msec")
+        # NULL policy (ruling B, design 2026-09-11 §4 / ADR 0037): keys
+        # dropped pre-generate for lacking a candidate on a non-nullable
+        # conditional edge. See `_filter_unmatched_keys`.
+        self._keys_unmatched = Metrics.counter("fanout", "keys_unmatched")
 
     def _scope(self):
         """Tag every milestone of this DoFn's engine with its landing
@@ -390,28 +423,140 @@ class GenerateRecordsDoFn(beam.DoFn):
         with self._scope():
             yield from self._process_with_scope(request, fk_side)
 
+    def _filter_unmatched_keys(self, keys, request, batch_id: int, n: int):
+        """NULL policy (ruling B, design 2026-09-11 §4 / ADR 0037): a key
+        with no candidate on a NON-nullable `ctx.fanout["conditional"]`
+        edge never reaches the engine — a nullable edge's NULL-fill is
+        the engine's own concern (`sdfb_core.engines.base.generate_for_
+        keys`). Dropped keys are counted and diverted to the DLQ as
+        `fk.unmatched`, weighted by their share of the batch's expected
+        rows so the BLOCKER gate does not silently under-count them.
+
+        Returns `(keys, matches, envelopes, expected_rows)`,
+        index-aligned; `matches` is never `None` here (the caller only
+        passes `None` through when the request carried no `"matches"` key
+        at all). `expected_rows` is what the SURVIVING keys are still
+        expected to produce: each dropped key's share is already weighted
+        into its own `fk.unmatched` envelope, so leaving the request's
+        original `n` in place would let a later engine crash claim those
+        rows a SECOND time against the BLOCKER ratio (fix wave A5)."""
+        matches = request.get("matches") or {}
+        fanout_ctx = self.ctx.fanout
+        conditional = (fanout_ctx.get("conditional") or []) if fanout_ctx else []
+        non_nullable = [entry for entry in conditional if entry.get("nullable") is False]
+        if not non_nullable:
+            return keys, matches, [], request.get("n", n)
+
+        keep_idx: list[int] = []
+        offenders: dict[int, str] = {}
+        for i in range(len(keys)):
+            edge_id = None
+            for entry in non_nullable:
+                candidates = matches.get(entry["id"])
+                if candidates is None or len(candidates) <= i or not candidates[i]:
+                    edge_id = entry["id"]
+                    break
+            if edge_id is None:
+                keep_idx.append(i)
+            else:
+                offenders[i] = edge_id
+        if not offenders:
+            return keys, matches, [], request.get("n", n)
+
+        weight_n = request.get("n", n)
+        expected = max(1, round(weight_n / len(keys)))
+        envelopes = [
+            {
+                "raw_request": {
+                    "batch_id": batch_id,
+                    "keys": [list(keys[i])],
+                    "n": expected,
+                },
+                "error_type": "referential_integrity",
+                "error_detail": f"no {offenders[i]} candidate for key {keys[i]!r}",
+                "rule_id": "fk.unmatched",
+                "stage": "pre_generate",
+            }
+            for i in sorted(offenders)
+        ]
+        filtered_keys = [keys[i] for i in keep_idx]
+        filtered_matches = {
+            edge_id: (
+                cand_list
+                if cand_list is None
+                else [cand_list[i] if i < len(cand_list) else [] for i in keep_idx]
+            )
+            for edge_id, cand_list in matches.items()
+        }
+        self._keys_unmatched.inc(len(offenders))
+        log_milestone("batch_unmatched", batch_id=batch_id, keys_dropped=len(offenders))
+        return (
+            filtered_keys,
+            filtered_matches,
+            envelopes,
+            max(0, weight_n - expected * len(offenders)),
+        )
+
+    def _generate(self, keys, matches, n: int, cfg: GenerationConfig):
+        """Call the engine. `matches=` rides along ONLY when the request
+        carried a `"matches"` key (`matches is not None`) — otherwise
+        today's positional call stays byte-identical, since not every
+        `generate_for_keys` test double accepts the kwarg."""
+        if keys is None:
+            return self._engine.generate_batch(n, cfg)  # type: ignore[union-attr]
+        if matches is not None:
+            return self._engine.generate_for_keys(  # type: ignore[union-attr]
+                [tuple(k) for k in keys], cfg, matches=matches
+            )
+        return self._engine.generate_for_keys([tuple(k) for k in keys], cfg)  # type: ignore[union-attr]
+
+    def _batch_seeds(self, batch_id: int) -> tuple[int, int]:
+        """``(batch seed, pool seed)`` for one request.
+
+        No explicit seed: derive one so batches never replay each other
+        while the run stays reproducible per run_id (E2E report §2). The
+        pool seed is batch-INDEPENDENT — once-per-worker artifacts (the
+        B.2 free-text pool build) must be stable within a run and vary
+        across runs via the salted run_id; `batch_id=-1` keeps it outside
+        every real batch's seed namespace. With an explicit seed the pool
+        build is reproducible across reruns regardless of which batch
+        reaches the worker first (P6).
+        """
+        if self.base_seed is None:
+            return (
+                derive_batch_seed(self.ctx.pipeline_run_id, batch_id),
+                derive_batch_seed(self.ctx.pipeline_run_id, -1),
+            )
+        return self.base_seed + batch_id, self.base_seed
+
     def _process_with_scope(self, request, fk_side: list | None = None):
         if self._engine is None:
             self._ensure_engine(self.ctx, fk_side)
-        n = int(request["n"])
+        keys = request.get("keys")
+        n = len(keys) if keys is not None else int(request["n"])
         batch_id = int(request["batch_id"])
-        if self.base_seed is None:
-            # No explicit seed: derive one so batches never replay each other
-            # while the run stays reproducible per run_id (E2E report §2).
-            seed = derive_batch_seed(self.ctx.pipeline_run_id, batch_id)
-            # Batch-independent seed for once-per-worker artifacts (the B.2
-            # free-text pool build): stable within a run, varies across runs
-            # via the salted run_id. batch_id=-1 keeps it outside every real
-            # batch's seed namespace.
-            pool_seed = derive_batch_seed(self.ctx.pipeline_run_id, -1)
-        else:
-            seed = self.base_seed + batch_id
-            # Explicit seed ⇒ the pool build is reproducible across reruns
-            # regardless of which batch reaches the worker first (P6).
-            pool_seed = self.base_seed
+        matches = None
+        keys_dropped = 0
+        if keys is not None and "matches" in request:
+            kept, matches, envelopes, expected_rows = self._filter_unmatched_keys(
+                keys, request, batch_id, n
+            )
+            keys_dropped = len(keys) - len(kept)
+            keys = kept
+            if keys_dropped:
+                # The batch is now the SURVIVING keys: every count that
+                # stands for it — the milestones, and the expected-rows
+                # weight a crashed batch carries into the DLQ — follows
+                # (fix wave A5). `request` is a Beam element, so it is
+                # copied rather than mutated.
+                n = len(keys)
+                request = {**request, "n": expected_rows}
+            for envelope in envelopes:
+                yield beam.pvalue.TaggedOutput("failed", envelope)
+        seed, pool_seed = self._batch_seeds(batch_id)
         cfg = GenerationConfig(
             seed=seed,
-            batch_size=n,
+            batch_size=n if keys is None else self.chunk_rows,
             similarity=self.similarity,
             engine_specific={
                 "pool_seed": pool_seed,
@@ -426,13 +571,16 @@ class GenerateRecordsDoFn(beam.DoFn):
                 "prompt_debug": getattr(self.ctx, "prompt_debug", "off"),
             },
         )
-        log_milestone("batch_start", batch_id=batch_id, n=n)
+        dropped_field = {"keys_dropped": keys_dropped} if keys_dropped else {}
+        if keys is not None:
+            log_milestone("batch_start", batch_id=batch_id, keys=n, **dropped_field)
+        else:
+            log_milestone("batch_start", batch_id=batch_id, n=n)
         t0 = time.monotonic()
         count = 0
         try:
-            for row_index, record in enumerate(
-                self._engine.generate_batch(n, cfg)  # type: ignore[union-attr]
-            ):
+            records = self._generate(keys, matches, n, cfg)
+            for row_index, record in enumerate(records):
                 self._yielded.inc()
                 count += 1
                 # Python-mode dump keeps datetime / Decimal as Python
@@ -450,19 +598,29 @@ class GenerateRecordsDoFn(beam.DoFn):
                         row_index=row_index,
                     )
                 yield row
-            log_milestone(
-                "batch_done",
-                batch_id=batch_id,
-                rows=count,
-                seconds=round(time.monotonic() - t0, 1),
-            )
+            if keys is not None:
+                log_milestone(
+                    "batch_done",
+                    batch_id=batch_id,
+                    keys=n,
+                    rows=count,
+                    seconds=round(time.monotonic() - t0, 1),
+                    **dropped_field,
+                )
+            else:
+                log_milestone(
+                    "batch_done",
+                    batch_id=batch_id,
+                    rows=count,
+                    seconds=round(time.monotonic() - t0, 1),
+                )
             self._batch_seconds.update(int((time.monotonic() - t0) * 1000))
         except Exception as e:
             self._failed.inc()
             yield beam.pvalue.TaggedOutput(
                 "failed",
                 {
-                    "raw_request": request,
+                    "raw_request": _failed_request(request, keys, n),
                     "error_type": "engine",
                     "error_detail": f"{type(e).__name__}: {e}",
                     "rule_id": "engine_failure",

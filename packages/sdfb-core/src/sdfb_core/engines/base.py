@@ -12,13 +12,16 @@ REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.bas
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from sdfb_core.contracts import GeneratedRecord, TableSchema
+from sdfb_core.engines.fanout import FanoutPlan, KeyDraw, joint_key_draw
+from sdfb_core.observability import log_milestone
 
 
 class FreeTextEmptyYieldError(RuntimeError):
@@ -264,6 +267,11 @@ class GenerationContext(BaseModel):
     # log shows the same model the driver planned from — no second graph
     # implementation, nothing to drift.
     relationship_card: str = ""
+    # Design 2026-09-10 (ADR 0036): a DRIVEN child's recipe — the
+    # `FanoutPlan.to_payload()` dict (driving edge columns, the SOURCE
+    # fan-out histogram, the PK-completing cell table). None = this table
+    # generates from `--num_rows` batch requests as before.
+    fanout: dict | None = None
     # Multi-table launches (ADR 0030): the landing table NAME used to
     # qualify column references in pretty log payloads
     # (`<LANDING>.<col>`) so oss/ replacements stay unambiguous when N
@@ -357,8 +365,191 @@ class GenerationEngine(ABC):
         followed by `teardown()`.
         """
 
+    def generate_for_keys(
+        self,
+        keys: Sequence[tuple],
+        cfg: GenerationConfig,
+        matches: Mapping[str, Sequence[Sequence[Sequence]]] | None = None,
+    ) -> Iterator[GeneratedRecord]:
+        """Yield the children of ``keys`` (design 2026-09-10, ADR 0036):
+        per key, the fan-out and the PK-completing cells come from
+        ``ctx.fanout`` (`sdfb_core.engines.fanout.expand_keys`), inherited
+        columns are copied from the key tuple, and every other column is
+        this engine's own sampling. ``cfg.batch_size`` bounds the rows
+        sampled at once (chunked emission). Engines that cannot be driven
+        keep this default.
+
+        ``matches`` (design 2026-09-11 §4, ADR 0037) resolves
+        ``ctx.fanout``'s ``conditional`` edges: ``matches[edge.id][i]`` is
+        the candidate list for ``keys[i]`` — a missing edge id, ``None``,
+        or a too-short list means no candidates for that key. Child row
+        ``j`` (0-based within that key's fan-out) of a matched key gets
+        ``conditional_values(run_id, key, edge.id, candidates, k)[j]`` on
+        ``edge.cols``, applied after the pool draws and before the
+        driving-column / cell overrides. No candidates on a ``nullable``
+        edge sets every one of ``edge.cols`` to ``None``; no candidates on
+        a non-nullable edge means that key's rows are not emitted at all
+        (defensive — the DoFn drops such keys first). ``matches=None``
+        (or a plan with no conditional edges) reproduces today's output
+        byte-for-byte."""
+        raise NotImplementedError(f"{type(self).__name__} cannot generate from parent keys")
+
     @abstractmethod
     def teardown(self) -> None:
         """Release worker resources (vector index, fitted model, GPU
         references). After `teardown()`, `generate_batch` must raise
         `RuntimeError` until `setup()` is called again."""
+
+
+# ---------------------------------------------------------------------------
+# `generate_for_keys` conditional-edge wiring (design 2026-09-11 §4,
+# ADR 0037), shared between `engines/b1_rag/engine.py` and
+# `engines/b2_library/engine.py` so the two engines resolve
+# `ctx.fanout.conditional` identically. Not part of the ABC — both engines
+# call these from their own `generate_for_keys`.
+# ---------------------------------------------------------------------------
+
+
+def _candidates_for(
+    matches: Mapping[str, Sequence[Sequence[Sequence]]] | None,
+    edge_id: str,
+    i: int,
+) -> Sequence[Sequence]:
+    """``matches[edge_id][i]``, or ``()`` for a missing edge id, a
+    ``None`` ``matches`` mapping, a too-short per-key list, or a ``None``
+    entry — all of these mean "no candidates" for that key."""
+    if not matches:
+        return ()
+    per_key = matches.get(edge_id)
+    if not per_key or i >= len(per_key):
+        return ()
+    candidates = per_key[i]
+    return candidates if candidates else ()
+
+
+# Capping is a per-run property of one driven table's MODEL (its declared
+# PK cannot represent the source fan-out), not of a key — so it is said
+# once per TABLE instead of once per hot parent. The guard key is that
+# table's LANDING table (`ctx.landing_table`): the narrowest identifier
+# the generation context carries that cannot collide between two driven
+# tables of one job, with the display prefix as fallback. A single-job
+# relational run (ADR 0030) generates several driven tables in ONE worker
+# process, and a process-global guard reported only the FIRST of them to
+# cap — every later table's capping was invisible (final review, E3).
+# Process-lived by design; `_reset_rows_capped_log` is the test hook.
+_ROWS_CAPPED_LOGGED: set[str] = set()
+
+
+def _reset_rows_capped_log() -> None:
+    """Test hook — production state is deliberately process-lived."""
+    _ROWS_CAPPED_LOGGED.clear()
+
+
+def _log_rows_capped(draw: KeyDraw, table: str) -> None:
+    """One WARNING per driven table. The line's ``table=`` field comes
+    from the ambient `milestone_scope` the generate DoFn sets, so it is
+    spelled exactly like every other engine milestone in the run; only
+    the GUARD is keyed on the landing table."""
+    if table in _ROWS_CAPPED_LOGGED:
+        return
+    _ROWS_CAPPED_LOGGED.add(table)
+    log_milestone(
+        "fanout_rows_capped",
+        level=logging.WARNING,
+        requested=draw.requested,
+        emitted=draw.n_children,
+        capacity=draw.capacity,
+        note="a parent key's source fan-out exceeds what its PK can "
+        "represent (cells x conditional candidates); the extra children "
+        "are NOT emitted — they would be PK duplicates. Raise "
+        "--fk_candidate_cap, or fix the `pk:` in the relationship model. "
+        "Logged once per worker process PER TABLE.",
+    )
+
+
+def conditional_draws(
+    plan: FanoutPlan,
+    keys: Sequence[tuple],
+    run_id: str,
+    matches: Mapping[str, Sequence[Sequence[Sequence]]] | None,
+    *,
+    table: str = "",
+) -> dict[tuple, KeyDraw | None]:
+    """Per parent key, the JOINT draw its children come from
+    (`joint_key_draw`) — or ``None`` when a non-nullable conditional edge
+    has no candidates for that key, which means the caller must emit NONE
+    of its rows.
+
+    `expand_keys` reads the cells off these draws and
+    `apply_conditional_overrides` reads the per-edge candidate tuples, so
+    a child's cell and its candidates are two halves of ONE combination
+    index. Keys whose fan-out drew 0 are absent, exactly as before.
+
+    Returns ``{}`` for a plan with no conditional edges — the ADR 0036
+    path, which draws its cells inside `expand_keys` and never allocates
+    any of this.
+
+    ``table`` scopes the once-per-table `fanout_rows_capped` milestone
+    (`_log_rows_capped`): the engines pass their landing table, so each
+    driven table of a single-job relational run reports its own capping.
+    """
+    if not plan.conditional:
+        return {}
+    out: dict[tuple, KeyDraw | None] = {}
+    for i, key in enumerate(keys):
+        key_t = tuple(key)
+        candidates: list[Sequence[Sequence]] = []
+        dropped = False
+        for edge in plan.conditional:
+            edge_candidates = _candidates_for(matches, edge.id, i)
+            if not edge_candidates and not edge.nullable:
+                dropped = True
+                break
+            candidates.append(edge_candidates)
+        if dropped:
+            out[key_t] = None
+            continue
+        draw = joint_key_draw(plan, key_t, run_id, candidates)
+        if draw.requested <= 0:
+            continue
+        if draw.shortfall:
+            _log_rows_capped(draw, table)
+        out[key_t] = draw
+    return out
+
+
+def apply_conditional_overrides(
+    plan: FanoutPlan,
+    chunk: Sequence[tuple[tuple, tuple]],
+    draws: Mapping[tuple, KeyDraw | None],
+    child_index: dict[tuple, int],
+) -> tuple[dict[str, list], list[bool]]:
+    """Per-row conditional-edge column overrides + a skip mask for one
+    `expand_keys` chunk, from the `conditional_draws` cache.
+
+    ``child_index`` is the caller's running per-key child counter — it
+    MUST be created once per `generate_for_keys` call and passed to every
+    chunk unmutated-elsewhere, because `expand_keys` can split one key's
+    children across more than one chunk. Returns ``({}, [False, ...])``
+    (a no-op) when the plan has no conditional edges."""
+    n = len(chunk)
+    skip = [False] * n
+    if not plan.conditional:
+        return {}, skip
+    columns: dict[str, list] = {
+        name: [None] * n for edge in plan.conditional for name in edge.cols
+    }
+    for i, (key, _cell) in enumerate(chunk):
+        j = child_index.get(key, 0)
+        child_index[key] = j + 1
+        draw = draws.get(key)
+        if draw is None:
+            skip[i] = True
+            continue
+        for edge in plan.conditional:
+            row_values = draw.values[edge.id][j]
+            if row_values:
+                for p, name in enumerate(edge.cols):
+                    columns[name][i] = row_values[p]
+            # else: leave the pre-seeded None — the nullable-no-candidates case.
+    return columns, skip

@@ -85,7 +85,7 @@ DDL-absent join key (the ADR 0029 use case) is reported as correctly
 display-only. Landing-dataset discovery now captures column sets from
 the same `get_table` call it already made for descriptions.
 
-**D6 — the 100k key cap is announced.** `fk_key_pool_capped` (WARNING)
+**D6 — the 100k key cap is announced** (sized per edge since [ADR 0035](0035-pk-capacity-fk-bound-members.md))**.** `fk_key_pool_capped` (WARNING)
 fires when a parent's distinct key count reaches the side-input sample
 cap, naming the consequence: the child references a uniform sample of
 parents, so its FK distinct count cannot exceed the cap. No silent

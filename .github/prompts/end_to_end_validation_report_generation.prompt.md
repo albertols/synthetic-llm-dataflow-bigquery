@@ -408,25 +408,29 @@ code ref; keep it tight; no dashboards / Vertex / external LLM suggestions
 
 Every launcher/worker log carries the run's relationship model in ONE
 `SDFB_MILESTONE name=relationship_model … sha=<sha>` entry (ADR 0032):
-a glanceable card first (model name, the `config/relationships/` FILE it
+a glanceable card (model name, the `config/relationships/` FILE it
 came from, tables with `pk(...)`/`identity(...)`, generation waves, and
-every edge as `-->` enforced / `..>` documented / `[DISABLED — detached]`)
-and a fenced ```mermaid block below it (the pasteable source), plus the
-`relational_e2e` JSON entry (landing table, FK edges with parent-landing
-FQNs + key-tuple counts, PK, clauses). The report MUST show the model
-visually, and MUST NOT spend tokens re-deriving it:
+every edge as `-->` enforced / `..>` documented / `[DISABLED — detached]`).
+No log carries mermaid any more (2026-09-10): launcher and worker entries
+are the pipe/arrow card only. The diagram source comes from
+`scripts/relationships/card.py --table <T> --mermaid` (same registry, same
+sha), never from a log. The worker adds one single-line
+`relational_e2e` (landing table, PK, identity, edge + clause counts) and
+one single-line `relational_fk_edge` per edge (parent-landing FQN,
+`key_tuples=`, `active=`). The report MUST show the model visually, and
+MUST NOT spend tokens re-deriving it:
 
-1. Grep the worker/launcher log for `relationship_model` and note its
-   `sha=<sha>`.
+1. Grep the launcher log (or `runs/fk_models/`) for `relationship_model`
+   and note its `sha=<sha>`.
 2. If `runs/fk_models/<sha>.mmd` exists → embed that file's
    content VERBATIM as a ```mermaid block in report.md §0 (run under
    test). Do not redraw, restyle, or re-label it.
-3. If it does not exist → copy the fenced mermaid block (between the
-   ```mermaid fences inside relationship_model) into
+3. If it does not exist → run `scripts/relationships/card.py --table <T>
+   --mermaid` (with the launch's model files) and write its output into
    `runs/fk_models/<sha>.mmd` (create the dir if needed),
    then embed it. The next report with the same model reuses it for free.
 4. Aliases: the diagram in `oss/` must use the registry aliases
-   (`A_TABLE`…), never real table names — the worker-logged mermaid uses
+   (`A_TABLE`…), never real table names — the rendered mermaid uses
    real FQNs, so run it through the same redaction as every other doc
    (the exporter does this for `--doc`-registered files automatically;
    an fk_model block inside report.md is redacted with the report).
@@ -446,9 +450,53 @@ visually, and MUST NOT spend tokens re-deriving it:
    this backwards; the fix is a one-line edit in the model file, which
    the card names.
 7. Referential integrity has a rule now: `fk.orphan` (BLOCKER,
-   threshold 0). Quote its `validation_runs.dlq_by_rule` count. A run
-   with 0 enforced edges has NO orphan measurement — say "not
-   verified", never "passed".
+   threshold 0) — rows that LANDED referencing a parent tuple that does
+   not exist; the draw is joint by construction, so any non-zero count
+   is a generator regression. Quote its `validation_runs.dlq_by_rule`
+   count. A run with 0 enforced edges has NO orphan measurement — say
+   "not verified", never "passed". A second rule sits next to it:
+   `fk.unmatched` (ADR 0037 ruling B) — rows NEVER GENERATED because a
+   driving key's shared value had no candidate in a `conditional`
+   parent and that edge's remaining columns are not all NULLABLE, so
+   the key was dropped before generation (weighted by its expected
+   rows). Unlike `fk.orphan` it is an INPUT fact — expected exactly when
+   the source genuinely lacks that branch — so report it with the
+   `fanout / keys_unmatched` counter (keys, not rows) beside it, and
+   never fold it into the orphan narrative.
+8. **Driven fan-out (ADR 0036).** A table generated from its parent's
+   landed keys (not a random FK-pool draw) reads through three
+   milestones instead of `fk_key_pool_bound`: `fk_edge_role
+   edge=(cols)->ref role=driving|implied|external` names which edge the
+   child generates FROM (report the driving edge; an implied edge is
+   satisfied by construction, not measured); `fk_fanout_measured edge=
+   parents= children= mean= p50= p95= max= zero_share= source=` is the
+   SOURCE ratio the child is expected to reproduce (`source=cache` means
+   this launch reused a prior scan — say so, it is not a fresh
+   measurement); `relational_single_job rows_detail=<name>:<rows>,…` is
+   the derived row count per driven table — report it next to
+   `--num_rows`, which only ever applies to roots. A driven table's
+   PK-completing cells are drawn without replacement, so its PK is
+   unique BY CONSTRUCTION: `pk.duplicate > 0` (or non-zero
+   `validation_runs.dlq_by_rule`) on a driven child is a **generator
+   regression**, never a tolerance — report it exactly the way `fk.orphan`
+   (a landed row with no parent; never expected) is reported for a
+   side-input edge, and keep both distinct from `fk.unmatched` (a row
+   never generated because the conditional parent had no candidate;
+   expected when the source lacks that branch) — not folded into ordinary
+   `pk.duplicate` commentary about random draws. A driven child usually
+   runs `--driven_uniqueness_mode=streaming`, which MEASURES both
+   `row.duplicate` and `pk.duplicate` on digest branches without
+   diverting anything to the DLQ — so on such a table the rule counts are
+   measurements of what LANDED, and a byte-identical row is counted under
+   both rules (an upper bound; never subtract one from the other). Always
+   corroborate with the RUN_PLAYBOOK §9b independent PK query
+   (`GROUP BY <pk cols> HAVING COUNT(*) > 1` on the landing table,
+   expected 0): the two disagreeing is itself the finding — a 0 in
+   `validation_runs` next to a non-zero query result is a measurement
+   wiring defect, not a clean run. Also read `fanout / keys_dropped_null`
+   (Beam counter): non-zero means parent key tuples were discarded for a
+   NULL join-key column, so the child's landed row count is below the
+   derived expectation by that many parents' worth of children.
 
 ## Step 6 — Export a shareable bundle (internal `real/` + de-identified `oss/`) and prune the duplicates
 
