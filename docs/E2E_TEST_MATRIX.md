@@ -68,17 +68,27 @@ Companion to [`docs/RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) §2. All runs are trigger
 
 ---
 
-## Tier 5 — Relational / FK integrity (ADR 0029–0033)
+## Tier 5 — Relational / FK integrity (ADR 0029–0038)
 
 Requires a relationship model in `config/relationships/` declaring the
 enforced edge, and the parent's landing table populated (never truncate it
 between the parent run and the child run). Full config recipe:
 [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) §9b.
 
+**Which path an edge takes decides what to assert** (ADR 0036/0037): a child
+generated from an IN-JOB parent is *driven* — its driving edge has no key
+pool at all, so look for `fk_fanout_measured` + `fanout_bound` + derived
+`rows_detail`, not `fk_key_pool_bound`. `fk_key_pool_bound` is the signal for
+the edges that still sample a pool: `independent` (a second parent sharing no
+column) and `external` (a parent outside the launch).
+
 | ID | Config | Purpose / what to assert |
 |----|--------|--------------------------|
-| F1 | parent + child, enforced edge, `fk_parent_landing` set | Referential integrity by construction: launcher `relationship_model` card shows ≥1 enforced edge; worker `fk_key_pool_bound` per edge; RUN_PLAYBOOK §8.4 orphan query = **0 rows**; `pk.duplicate` gate ACTIVE via the model's `pk`. |
+| F1 | parent + child, enforced edge, `fk_parent_landing` set | Referential integrity by construction: launcher `relationship_model` card shows ≥1 enforced edge; `fk_edge_role` names the role of every enforced edge; per edge, `fk_key_pool_bound` (pool path) **or** `fk_fanout_measured`/`fanout_bound` (driven path); RUN_PLAYBOOK §8.4 orphan query = **0 rows**; `pk.duplicate` gate ACTIVE via the model's `pk`. |
 | F2 | F1 at `num_rows=10000000` (warm digest) | FK integrity + pool-ladder integrity at scale (ADR 0033 gate): 0 orphans at 10M, no failed pool-branch work item, `freetext_pools_warm` on warm setups. |
+| F3 | three-table chain, parent at 10M rows, children driven (ADR 0036 acceptance) | Parent-driven fan-out on Dataflow: both children DERIVE their row counts (`rows_detail=`), `pk.duplicate` = 0 on both driven tables (measured, `streaming` mode), the orphan query returns 0 on both driven edges, and `fk_fanout_measured` / `fk_edge_role` / `fanout_bound` read as [ADR 0036](adr/0036-parent-driven-fanout-generation.md) predicts. |
+| F4 | a model declaring a star **and** a diamond (`config/relationships/example_star_diamond.yaml` shape, ADR 0037 acceptance) | Multi-parent children: `fk_edge_role … role=independent\|conditional overlap=` and `relational_fk_edge mode=conditional` present; the whole-tuple orphan query returns 0 on **every** enforced edge, conditional and implied included; `fk.unmatched` in `validation_runs.dlq_by_rule` is 0 or explained by a branch the source genuinely lacks. Verify with [`/e2e_fk_pk_validator`](../.github/prompts/e2e_fk_pk_validator.prompt.md). |
+| F5 | the F3/F4 model with a declared `pk:` the source repeats (ADR 0038 acceptance) | A measured conflict adjusts instead of stopping: `MODEL ADJUSTED` banner + `model_adjusted` milestone, the launch LANDS rows, `validation_runs.excluded_blocker_rules` names the adjusted table's `pk.duplicate`, and `repeat_share_within_tolerance = true` (source vs landing key-repeat share, ±0.05). `--on_model_conflict=stop` on the same model refuses at preflight P4 — run it once to confirm the escape hatch. |
 
 ---
 
@@ -90,7 +100,7 @@ between the parent run and the child run). Full config recipe:
 4. **R4' → R5' → R6' → R7'** on L4 (per the L4 stockout strategy in RUN_PLAYBOOK §4 — batch them into one capacity window).
 5. **P1–P8** on the T4 config once Tier 1 is green (P4/P5 last — they're the slow ones).
 6. **N2, N3** opportunistically alongside the L4/T4 windows.
-7. **F1–F2** once a parent table's baseline is green (they hold the parent's landing table between runs).
+7. **F1–F2** once a parent table's baseline is green (they hold the parent's landing table between runs), then **F3–F5** — the open Dataflow acceptance for ADRs 0036–0038; F5 rides on the F3 or F4 model rather than needing its own.
 8. Report per run via the [report prompt](../.github/prompts/end_to_end_validation_report_generation.prompt.md); attach bundles from `e2e_bundle_export.py`.
 
 ## Minimal must-do set (if capacity is tight)

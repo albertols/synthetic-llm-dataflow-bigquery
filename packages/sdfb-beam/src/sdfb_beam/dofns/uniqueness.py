@@ -22,7 +22,10 @@ three full-row ``CombinePerKey`` barriers). Kept for A/B runs; identical
 envelopes and counts.
 
 ``streaming`` — no barrier on the landing path; duplicates are MEASURED
-on a digest-only branch (WS6 W3).
+on digest-only branches (WS6 W3): the whole-row digest always, and the PK
+tuple's digest too when ``pk_columns`` is set (ADR 0036 D6). A
+byte-identical row therefore counts under both rules — the pair is an
+upper bound, which is the safe direction for a gate.
 
 Which record survives a collision: ``exact`` keeps the row with the
 smallest digest (deterministic); ``exact_chained`` keeps an arbitrary one
@@ -95,6 +98,16 @@ def _unpack_row(value, columns: Sequence[str] | None):
 
 def _key_of(row: dict, columns: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(str(row.get(c)) for c in columns)
+
+
+def _pk_digest(row: dict, columns: tuple[str, ...]) -> str:
+    """Digest of a row's PK tuple, keyed exactly as the exact modes key it.
+
+    The members are `_key_of`'s stringified values, so a PK collision is the
+    same event in every mode; hashing them keeps the streaming branch's
+    shuffle at a fixed 32 bytes per row regardless of how wide the PK is.
+    """
+    return row_digest(dict(zip(columns, _key_of(row, columns), strict=True)))
 
 
 class _FirstWinsCombineFn(beam.CombineFn):
@@ -422,6 +435,16 @@ class EnforceUniqueness(beam.PTransform):
         denominator and quietly weaken the blocker ratio, so streaming also
         publishes `distinct_count` for the caller to use as `valid_count` —
         distinct + excess is exactly the number of rows generated.
+
+        PK duplicates are measured on their OWN branch when ``pk_columns``
+        is set (ADR 0036 D6: a driven child defaults to this mode, and its
+        PK is precisely the claim under test — measuring only the whole-row
+        digest would read PASSED on a run that landed duplicate PKs whose
+        free columns differ). The two branches are independent, so a
+        byte-identical row is counted under BOTH ``row.duplicate`` and
+        ``pk.duplicate``: the gate reads the pair as an UPPER BOUND on
+        distinct defective rows, which is the correct direction for a
+        safety gate.
         """
         per_digest = (
             records
@@ -435,10 +458,24 @@ class EnforceUniqueness(beam.PTransform):
             | "ExcessPerDigest" >> beam.Map(lambda kv: kv[1] - 1)
             | "SumExcess" >> beam.CombineGlobally(sum)
         )
+        rule_counts = excess | "AsRuleCount" >> beam.Map(
+            lambda n: (RULE_ROW_DUPLICATE, n)
+        )
+        if self.pk_columns:
+            pk_cols = tuple(self.pk_columns)
+            pk_counts = (
+                records
+                | "StreamingPkDigest"
+                >> beam.Map(lambda r, c=pk_cols: _pk_digest(r, c))
+                | "StreamingPkCount" >> beam.combiners.Count.PerElement()
+                | "StreamingPkExcess" >> beam.Map(lambda kv: max(0, kv[1] - 1))
+                | "StreamingSumPkExcess" >> beam.CombineGlobally(sum)
+                | "AsPkRuleCount" >> beam.Map(lambda n: (RULE_PK_DUPLICATE, n))
+            )
+            rule_counts = (rule_counts, pk_counts) | "FlattenRuleCounts" >> beam.Flatten()
         return {
             "unique": records,
             "duplicates": records | "NoDuplicates" >> beam.FlatMap(lambda _: []),
-            "rule_counts": excess
-            | "AsRuleCount" >> beam.Map(lambda n: (RULE_ROW_DUPLICATE, n)),
+            "rule_counts": rule_counts,
             "distinct_count": per_digest | "CountDistinct" >> beam.combiners.Count.Globally(),
         }

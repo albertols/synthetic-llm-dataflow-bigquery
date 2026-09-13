@@ -146,3 +146,31 @@ def test_teardown_releases_state(engine_class, model_client, ctx):
     engine.teardown()
     with pytest.raises(RuntimeError):
         list(engine.generate_batch(1, GenerationConfig(seed=42)))
+
+
+def test_context_carries_the_fanout_payload():
+    """ADR 0036: a driven child is generated from parent keys; the
+    GenerationContext carries the FanoutPlan.to_payload() dict."""
+    schema = TableSchema.model_validate(
+        {"table_info": {"table_id": "p.d.t"},
+         "schema": [{"name": "ID", "type": "STRING", "mode": "REQUIRED"}]}
+    )
+    ctx = GenerationContext(
+        table_schema=schema, reference_rows=[{"ID": "a"}],
+        reference_digest="d", pipeline_run_id="r",
+        fanout={"driving_cols": ["ID"], "histogram": {"1": 1}, "cells": None,
+                "exact_cells": False},
+    )
+    assert ctx.fanout is not None and ctx.fanout["driving_cols"] == ["ID"]
+
+
+def test_both_engines_implement_generate_for_keys():
+    """ADR 0036: a driven child is generated from parent keys; both
+    engines must own the entry point (the base refuses)."""
+    from sdfb_core.engines import GenerationEngine, get_engine
+    from sdfb_core.engines.b1_rag import B1RagEngine
+    from sdfb_core.engines.b2_library import B2LibraryEngine
+
+    assert B1RagEngine.generate_for_keys is not GenerationEngine.generate_for_keys
+    assert B2LibraryEngine.generate_for_keys is not GenerationEngine.generate_for_keys
+    assert get_engine("b1_rag") is B1RagEngine

@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -44,10 +45,29 @@ from apache_beam.options.pipeline_options import (
 )
 from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.contracts import TableSchema
+from sdfb_core.contracts.model_adjustment import (
+    ModelAdjustment,
+    adjusted_model_yaml,
+    adjusted_models,
+    adjustment_banner,
+    landed_distinct_keys,
+    pk_measurement_from_histogram,
+)
 from sdfb_core.contracts.prompt_constraint import parse_llm_prompt_constraint
 from sdfb_core.contracts.relationships import (
+    RelationshipError,
     RelationshipRegistry,
 )
+from sdfb_core.contracts.row_projection import (
+    TableProjection,
+    project_table,
+    projected_total,
+    projection_banner,
+    projection_warnings,
+)
+from sdfb_core.engines.b1_rag.profile import profile_columns
+from sdfb_core.engines.fanout import conditional_edge_id
+from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
@@ -58,11 +78,26 @@ from sdfb_core.rag.embedding import embedder_identity
 from sdfb_core.stats import PROFILER_VERSION, profile_source_table, stats_rows
 from sdfb_core.validation import Thresholds
 
-from sdfb_beam.cli.preflight import preflight
+from sdfb_beam.cli.preflight import (
+    DEFAULT_FK_CANDIDATE_CAP,
+    ON_CONFLICT_ADJUST,
+    ON_MODEL_CONFLICT_MODES,
+    edge_supplied_members,
+    pk_cell_columns,
+    preflight,
+)
 from sdfb_beam.ddl import extract_table_schema
-from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
+from sdfb_beam.dofns.uniqueness import MODE_STREAMING, UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_beam.io.fanout_stats import (
+    BigQueryFanoutStatsStore,
+    fanout_payload,
+    log_fanout_measured,
+    log_pk_measured,
+    measure_fanout,
+    measure_pk_uniqueness,
+)
 from sdfb_beam.io.fk_pools import (
     load_fk_key_pools,
     parent_landing_fqn,
@@ -88,6 +123,7 @@ from sdfb_beam.pools.store import BigQueryFreeTextPoolStore
 from sdfb_beam.rag.store import BigQueryChunkStore
 
 if TYPE_CHECKING:
+    from sdfb_core.contracts.relationships import FkEdge
     from sdfb_core.engines import ModelClient
 
 logger = logging.getLogger(__name__)
@@ -112,6 +148,29 @@ _DEFAULT_STATE_CACHE_MB = 512
 DEFAULT_BATCH_SIZE = 16
 _TARGET_ELEMENTS = 1_000
 
+# ADR 0036: keys per fan-out request element. A near-zero measured mean
+# fan-out would otherwise divide `batch_size` by ~1e-6 and put millions of
+# key tuples in ONE element — a single unsplittable bundle and a huge DLQ
+# envelope if it crashes.
+_MAX_KEYS_PER_BATCH = 10_000
+
+# ADR 0037 — the role a `RelationshipRegistry.edge_roles` edge plays in the
+# DAG (design §2): the driving edge's parent keys ARE the generation input,
+# an implied edge rides on it, an independent edge keeps the ADR 0030/0031
+# side-input pool, and a conditional edge is co-partitioned on the columns
+# it shares with the driving edge. `external` is absent on purpose — its
+# parent is outside the launch, so it never reaches `in_set_parent_edges`.
+_EDGE_MODES = {
+    "driving": "fanout",
+    "implied": "implied",
+    "independent": "side_input",
+    "conditional": "conditional",
+}
+# ADR 0037 §7 — a fan-out request carries `keys_per_batch * M` candidate
+# tuples per conditional edge; `keys_per_batch` is lowered so the whole
+# request stays under this many values, whatever the cap is set to.
+_MAX_CONDITIONAL_VALUES_PER_REQUEST = 100_000
+
 
 # WS5 §3 — the seeding experiment's only variable. Three arms off ONE build
 # so the E2E runs differ in exactly one thing.
@@ -129,6 +188,43 @@ def validate_seed_strategy(value: str) -> str:
     return value
 
 
+def validate_candidate_cap(value) -> int:
+    """``--fk_candidate_cap`` is a Top-M bound: it must be at least 1.
+
+    Rejected at parse time, not repaired: 0 divides by zero inside the
+    `keys_per_batch` bound (`in_set_parent_edges`) and aborts the
+    launcher with a raw traceback instead of the collect-then-fail
+    preflight summary, and a negative cap passes silently into the
+    Top-M combine, where it yields ZERO candidates for every shared key
+    — the whole conditional edge degrades to "unmatched" with nothing in
+    the log naming the flag (review round 1, finding B2)."""
+    try:
+        cap = int(value)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap < 1:
+        raise SystemExit(
+            f"[launch] --fk_candidate_cap must be an integer >= 1, got "
+            f"{value!r}. It is the number of parent candidates kept per "
+            f"SHARED value on a conditional edge (ADR 0037): 0 divides the "
+            f"keys_per_batch bound by zero, and a negative cap empties "
+            f"every candidate list silently. Use {DEFAULT_FK_CANDIDATE_CAP} "
+            f"(the default) or higher."
+        )
+    return cap
+
+
+def candidate_cap_of(args) -> int:
+    """``--fk_candidate_cap`` off a launcher namespace, validated.
+
+    Every read site goes through this, so a namespace built by hand (a
+    test, a programmatic launch) cannot smuggle a 0 past `parse_args`
+    into the divisor or the Top-M combine."""
+    return validate_candidate_cap(
+        getattr(args, "fk_candidate_cap", DEFAULT_FK_CANDIDATE_CAP)
+    )
+
+
 def resolve_batch_size(requested: int, num_rows: int) -> int:
     """Rows per element. An explicit non-default ``--batch_size`` always wins."""
     if requested != DEFAULT_BATCH_SIZE:
@@ -138,7 +234,7 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
     return max(DEFAULT_BATCH_SIZE, num_rows // _TARGET_ELEMENTS)
 
 
-def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:  # noqa: PLR0915 — one flat list of flags; splitting it hides the CLI surface
     p = argparse.ArgumentParser(description="Synthetic Dataflow BigQuery — pipeline launcher")
     p.add_argument("--ddl_uri", default="",
                    help="gs:// or local path to _ddl.json — the OFFLINE "
@@ -261,6 +357,39 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         "sits between generation and BigQuery. In streaming mode duplicate rows LAND — the run is still marked "
                         "FAILED_BLOCKER, so re-run with "
                         "--write_disposition=overwrite.")
+    p.add_argument("--fk_fanout_stats_table", default="",
+                   help="FQN of synthetic_data_quality.fk_fanout_stats (ADR 0036 cache of "
+                        "the SOURCE fan-out histogram + PK cells per driving edge). "
+                        "Empty = measure every launch, never cache.")
+    p.add_argument("--fk_candidate_cap", type=validate_candidate_cap,
+                   default=DEFAULT_FK_CANDIDATE_CAP,
+                   help="ADR 0037: Top-M candidates kept per SHARED value on a "
+                        "CONDITIONAL edge (an edge sharing columns with the "
+                        "driving edge — a diamond branch). A hot shared key "
+                        "never carries more than M parent candidates into a "
+                        "request; the engine wraps only when a key's fan-out "
+                        "outruns the list it was handed. Raising it widens the "
+                        "per-key choice and LOWERS keys_per_batch to keep a "
+                        "request under ~100k candidate values.")
+    p.add_argument("--driven_uniqueness_mode", default="streaming", choices=list(UNIQUENESS_MODES),
+                   help="Uniqueness mode for a DRIVEN child without identity columns "
+                        "(ADR 0036): its PK is unique by construction, so `streaming` "
+                        "measures duplicates without the landing-path barrier.")
+    p.add_argument("--on_model_conflict", default=ON_CONFLICT_ADJUST,
+                   choices=list(ON_MODEL_CONFLICT_MODES),
+                   help="What a MEASURED contradiction between the "
+                        "relationship model and the SOURCE does (ADR "
+                        "0038). adjust (default) = drop the declared `pk:` "
+                        "the full-source fan-out proves is not a key, "
+                        "announce it in the MODEL ADJUSTED banner, emit "
+                        "the effective model as YAML, and carry on — the "
+                        "landing table then reproduces the source's "
+                        "key-repeat share, and that table's pk.duplicate "
+                        "stops counting toward the BLOCKER gate. stop = "
+                        "refuse the launch, exactly as before ADR 0038. "
+                        "Model SELF-contradictions (unknown columns, two "
+                        "`drives: true` edges, an ambiguous role) and the "
+                        "ADR 0035 capacity gate stop under BOTH settings.")
     p.add_argument("--pool_seed_strategy", default="centroid",
                    choices=list(POOL_SEED_STRATEGIES),
                    help="How the 8 free-text prompt seeds are chosen. "
@@ -507,7 +636,18 @@ def load_ddl(ddl_uri: str) -> TableSchema:
 def resolve_table_schema(
     ddl_uri: str, reference_table: str, landing_table: str = ""
 ) -> TableSchema:
-    """Live INFORMATION_SCHEMA extraction is AUTHORITATIVE at every launch,
+    """The generation schema — :func:`resolve_schemas` without the
+    landing schema beside it. Every caller that only steers generation
+    uses this; the ADR 0037 NULL policy needs the landing modes too."""
+    return resolve_schemas(ddl_uri, reference_table, landing_table)[0]
+
+
+def resolve_schemas(
+    ddl_uri: str, reference_table: str, landing_table: str = ""
+) -> tuple[TableSchema, TableSchema | None]:
+    """``(generation schema, LANDING schema or None)``.
+
+    Live INFORMATION_SCHEMA extraction is AUTHORITATIVE at every launch,
     and generation-steering metadata comes from the TARGET table only
     (ADR 0027 D2, 2026-08-21).
 
@@ -530,6 +670,13 @@ def resolve_table_schema(
        operator's declared fallback, extracted from the landing table per
        the propagation runbook, so its descriptions stand when the target
        is also unreachable.
+
+    The landing ``TableSchema`` travels back out because its column
+    MODES — not the source's — decide a conditional edge's NULL policy
+    (ADR 0037 design §4 ruling B). It is ``None`` when the landing table
+    is absent or unreachable (a ``--create_if_not_exists`` first run, a
+    permissions gap); the caller then falls back to the source's modes
+    and says so (:func:`nullability_schema`).
     """
     live_error: Exception | None = None
     if reference_table:
@@ -543,12 +690,12 @@ def resolve_table_schema(
                 table=reference_table,
                 columns=len(schema.columns),
             )
-            schema = _overlay_target_metadata(
+            schema, target = _overlay_target_metadata(
                 schema, landing_table, strip_on_missing=True
             )
             if ddl_uri:
                 _check_ddl_pin_staleness(schema, ddl_uri)
-            return schema
+            return schema, target
 
     if ddl_uri:
         if live_error is not None:
@@ -587,13 +734,17 @@ def resolve_table_schema(
 
 def _overlay_target_metadata(
     base: TableSchema, landing_table: str, *, strip_on_missing: bool
-) -> TableSchema:
-    """Replace `base`'s description surfaces with the TARGET table's.
+) -> tuple[TableSchema, TableSchema | None]:
+    """``(base with the TARGET's description surfaces, the TARGET)``.
 
     `strip_on_missing=True` (live-source base): the source's descriptions
     must never survive, so an unreachable target strips them to empty.
     `strip_on_missing=False` (offline pin base): the pin is the
     operator's declared fallback and its descriptions stand.
+
+    The target is returned as well — it is fetched here exactly once,
+    and ADR 0037 needs its column MODES (not its descriptions) for the
+    conditional NULL policy. `None` = the landing table was unreachable.
     """
     target: TableSchema | None = None
     if landing_table:
@@ -610,8 +761,8 @@ def _overlay_target_metadata(
             )
     if target is None:
         if not strip_on_missing:
-            return base
-        return _with_descriptions(base, "", {})
+            return base, None
+        return _with_descriptions(base, "", {}), None
     col_desc = {c.name: (c.description or "") for c in target.columns}
     schema = _with_descriptions(
         base, target.table_info.description or "", col_desc
@@ -621,7 +772,7 @@ def _overlay_target_metadata(
         table=landing_table,
         constraint_columns=len(_constraint_clauses(schema)),
     )
-    return schema
+    return schema, target
 
 
 def _with_descriptions(
@@ -756,6 +907,336 @@ def derive_source_fqn(landing_table: str, reference_table: str) -> str:
     sibling's table name (the repo's same-name convention)."""
     src_dataset = reference_table.rsplit(".", 1)[0]
     return f"{src_dataset}.{landing_table.rsplit('.', 1)[-1]}"
+
+
+def resolve_driven_uniqueness_mode(
+    flag: str, *, driven: bool, identity_cols: tuple, adjusted: bool = False
+) -> str | None:
+    """None = not driven (keep --uniqueness_mode); identity columns keep
+    `exact` (ADR 0036): an identity column is fresh-generated per row, so
+    the child's PK is not unique by construction the way a pure fan-out
+    key is.
+
+    ``adjusted`` (ADR 0038) overrides both: a table whose declared `pk:`
+    the SOURCE disproved is SUPPOSED to land repeated keys, and `exact`
+    would divert exactly those rows to the DLQ. `streaming` measures
+    `pk.duplicate` on a digest-only branch and removes nothing — which
+    is also what makes the landing key-repeat share comparable with the
+    source's. The cost is that `identity.unique` is measured on no
+    branch at all in `streaming` mode; identity values are synthesized
+    per row from `(run_id, batch_id, row_index, column)`, and
+    `row.duplicate` still covers engine replay, so the loss is a
+    reporting one, not a guarantee."""
+    if not driven:
+        return None
+    if adjusted:
+        return MODE_STREAMING
+    return "exact" if identity_cols else flag
+
+
+def adjusted_fanout_payload(
+    fanout: dict | None, adjustments: Sequence[ModelAdjustment]
+) -> dict | None:
+    """The fan-out payload an ADJUSTED table generates from (ADR 0038).
+
+    `resolve_fanout` measures BEFORE preflight, so its ``exact_cells``
+    was decided against the DECLARED PK. Once that PK is dropped the
+    cells key nothing, and an ``exact_cells`` plan is capped at
+    ``min(k, capacity)`` by `joint_key_draw` — with no cells that is ONE
+    row per parent key, i.e. the measured fan-out silently discarded and
+    the exact opposite of reproducing the source.
+
+    Everything else is left ALONE. The histogram is the measurement the
+    table is sized from, and the cell table stays as measured: inexact
+    cells are drawn WITH replacement from their weighted marginal, so
+    the column keeps its source distribution instead of being narrowed
+    to a per-key permutation.
+    """
+    if fanout is None or not adjustments:
+        return fanout
+    return {**fanout, "exact_cells": False}
+
+
+def distinct_keys_landed(
+    num_rows: int, adjustments: Sequence[ModelAdjustment]
+) -> int:
+    """How many DISTINCT key values this table hands its children (ADR
+    0038 fix H3) — its rows, unless its own `pk:` was ADJUSTED away, in
+    which case it lands the source's key repeats and holds
+    ``rows x (1 - source_repeat_share)`` distinct ones.
+
+    The composer already fans a child out over the parent's distinct keys
+    (`parent_pk=()` arms `FanoutDistinct`); this is the number the
+    child's row count must be DERIVED from so the request matches what
+    the DAG can produce.
+    """
+    share = next(
+        (
+            a.source_repeat_share
+            for a in adjustments
+            if a.source_repeat_share is not None
+        ),
+        None,
+    )
+    return landed_distinct_keys(num_rows, share)
+
+
+def resolve_table_rows(
+    landing_table: str, *, driven: bool, derived_rows: int | None, launch_rows: int
+) -> int:
+    """This table's ``num_rows`` (ADR 0036): a DRIVEN child's row count is
+    ``derived_rows`` (from the measured source fan-out) — NEVER the
+    launch-wide ``--num_rows``, which would silently size it wrong. A
+    root/undriven table keeps ``launch_rows``. A driven child with no
+    derivable count (missing histogram mass, or the driving parent's row
+    count unknown) is a loud stop, not a silent fallback."""
+    if not driven:
+        return launch_rows
+    if not derived_rows:
+        raise SystemExit(
+            f"[preflight P4] {landing_table}: this table is generated from "
+            f"its parent's keys but its row count could not be derived "
+            f"(derived_rows={derived_rows!r}; the source fan-out histogram "
+            f"or the parent's row count is missing, or the source parent "
+            f"has no children). A driven child never takes the launch-wide "
+            f"--num_rows."
+        )
+    return derived_rows
+
+
+def _cache_unavailable(landing_table: str, op: str, exc: Exception) -> None:
+    """The fk_fanout_stats table is a convenience, never a prerequisite
+    (2026-09-10 operator ask): a cache that cannot be read or written —
+    the table does not exist, no permission, a transient error — warns
+    and the launch measures without it."""
+    log_milestone(
+        "fk_fanout_cache_unavailable",
+        level=logging.WARNING,
+        table=landing_table,
+        op=op,
+        error=f"{type(exc).__name__}: {str(exc)[:160]}",
+        note="fan-out measured without the cache; create "
+        "synthetic_data_quality.fk_fanout_stats (optional) to cache it",
+    )
+
+
+def _cache_read(stats_store, landing_table: str, source_table: str, cols, sha: str):
+    if not stats_store:
+        return None
+    try:
+        return stats_store.get(source_table, cols, sha)
+    except Exception as exc:  # any cache failure is non-fatal by design
+        _cache_unavailable(landing_table, "get", exc)
+        return None
+
+
+def _cache_write(stats_store, landing_table: str, source_table: str, cols, sha: str, measured: dict) -> None:
+    if not stats_store:
+        return
+    try:
+        stats_store.put(source_table, cols, sha, measured)
+    except Exception as exc:  # any cache failure is non-fatal by design
+        _cache_unavailable(landing_table, "put", exc)
+
+
+def _edge_label(edge) -> str:
+    """One FK edge as the launcher names it everywhere: ``(cols)->ref``
+    — the same string a conditional edge answers to as its ``edge_id``,
+    so the milestones and the payload keys read alike."""
+    return conditional_edge_id(edge.cols, edge.ref)
+
+
+def conditional_rest_of(
+    registry: RelationshipRegistry, landing_table: str, roles: Mapping
+) -> dict[str, tuple[str, ...]]:
+    """``edge_id -> rest columns`` for every CONDITIONAL edge (ADR 0037).
+
+    ONE builder for both readers — `resolve_fanout`'s cell measurement
+    and `preflight`'s P4 — so they can never disagree about what a
+    conditional edge supplies. ``edge_id`` is `conditional_edge_id`, the
+    string `FkEdgeSpec.edge_id` and the request payload's ``matches``
+    key already use."""
+    return {
+        conditional_edge_id(edge.cols, edge.ref): registry.edge_rest(
+            landing_table, edge
+        )
+        for edge, role in roles.items()
+        if role == "conditional"
+    }
+
+
+def effective_pk_of(
+    registry: RelationshipRegistry, landing_table: str, args
+) -> tuple[str, ...]:
+    """The PK this run actually ENFORCES, resolved the way `preflight`
+    resolves it: the relationship model's `pk:` (ADR 0032, the single
+    source of truth), with `--pk_cols` filling the gap only for a table no
+    model declares (`relations.pk or pk_cols`).
+
+    It is the tuple `EnforceUniqueness` keys on and `pk.duplicate` is
+    measured against, so every launcher decision that turns on "is this
+    column a key member" reads THIS — never `TableSchema.primary_keys`,
+    the BigQuery table constraint copied into `_ddl.json`, which is
+    `None` on the canonical ADR 0032 setup (fix wave G1/G2)."""
+    relations = registry.relations(landing_table)
+    declared = tuple(relations.pk) if relations else ()
+    if declared:
+        return declared
+    raw = str(getattr(args, "pk_cols", "") or "")
+    return tuple(c.strip() for c in raw.split(",") if c.strip())
+
+
+def resolve_fanout(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    source_table: str,
+    *,
+    in_set_names: set[str],
+    reference_rows: list[dict],
+    table_schema,
+    stats_store,
+    bq_client,
+    effective_pk: tuple[str, ...] = (),
+) -> tuple[dict | None, dict[FkEdge, str]]:
+    """``(FanoutPlan payload or None, edge roles)`` for one table (ADR
+    0036). Measures (or reads the cache) for the driving edge only when
+    its parent generates in the same launch — an external or root table
+    (no driving edge) is undriven, and the caller keeps ``args.num_rows``.
+    ``RelationshipError`` (an ambiguous or unimplied edge set) propagates
+    to the caller. The driving edge's columns are checked against the
+    schema (P2) before any BigQuery call, and a measurement failure is
+    reported as a preflight ``SystemExit`` (never an escaping traceback)
+    so the relational runner's collect-then-fail loop can report it
+    alongside every other table's stop."""
+    roles = registry.edge_roles(landing_table)  # RelationshipError propagates
+    driving = next((e for e, r in roles.items() if r == "driving"), None)
+    if driving is None or driving.ref.rsplit(".", 1)[-1] not in in_set_names:
+        return None, roles
+    valid = {c.name for c in table_schema.columns}
+    unknown = [c for c in driving.cols if c not in valid]
+    if unknown:
+        raise SystemExit(
+            f"[preflight P2] {landing_table}: the driving edge names "
+            f"unknown columns {unknown}. Fix the model file (or the table)."
+        )
+    relations = registry.relations(landing_table)
+    # The key this run ENFORCES, which is what preflight checks: the
+    # model's `pk:`, or `--pk_cols` for a table no model keys. Reading
+    # `relations.pk` alone left a --pk_cols table with NO measurement,
+    # so P5 stood down for evidence that did not exist and P4 fell
+    # through — worse than before ADR 0038 (2026-09-13).
+    pk = tuple(effective_pk) or (tuple(relations.pk) if relations else ())
+    profiles = profile_columns(table_schema, reference_rows) if reference_rows else {}
+    # The columns another edge fills are NOT measured as cells — the
+    # same `edge_supplied_members` call P4 makes, so the measurement and
+    # the check can never disagree (ADR 0037 ruling 12).
+    cell_cols, exact = pk_cell_columns(
+        pk, tuple(driving.cols), profiles,
+        known=edge_supplied_members(
+            pk, roles, conditional_rest_of(registry, landing_table, roles)
+        ).known,
+    )
+    source_parent = derive_source_fqn(
+        parent_landing_fqn(driving.ref, derive_fk_parent_landing(landing_table)),
+        source_table,
+    )
+    sha = registry.sha12()
+    edge_label = _edge_label(driving)
+    measured = _cache_read(stats_store, landing_table, source_table, tuple(driving.cols), sha)
+    source = "cache"
+    if measured is None:
+        try:
+            measured = measure_fanout(
+                source_child=source_table, child_cols=tuple(driving.cols),
+                source_parent=source_parent, ref_cols=tuple(driving.ref_cols),
+                cell_cols=cell_cols, client=bq_client, edge=edge_label,
+            )
+        except Exception as exc:
+            raise SystemExit(
+                f"[preflight] {landing_table}: fan-out measurement on "
+                f"{source_table} failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        source = "measured"
+    log_fanout_measured(edge_label, measured, source=source)
+    if resolve_pk_measurement(
+        measured, pk, tuple(driving.cols),
+        landing_table=landing_table, source_table=source_table,
+        client=bq_client,
+    ) or source == "measured":
+        # Something in the payload is new — a fresh fan-out, a freshly
+        # measured PK, or both — so the cache row is (re)written once,
+        # holding BOTH measurements under the same key (ADR 0038 fix J).
+        _cache_write(
+            stats_store, landing_table, source_table,
+            tuple(driving.cols), sha, measured,
+        )
+    return fanout_payload(measured, tuple(driving.cols), exact), roles
+
+
+def resolve_pk_measurement(
+    measured: dict,
+    pk: tuple[str, ...],
+    driving_cols: tuple[str, ...],
+    *,
+    landing_table: str,
+    source_table: str,
+    client,
+) -> bool:
+    """Fill ``measured["pk"]`` — the DECLARED PK, measured on the SOURCE
+    child (ADR 0038 fix J). Returns True when a BigQuery scan was paid
+    for, so the caller knows the cached payload has to be rewritten.
+
+    Three ways in, cheapest first, and they are tried in that order:
+
+    * a cached payload already measured exactly these columns — nothing
+      to do (a model whose `pk:` changed changes the model sha, and with
+      it the cache key, so a stale tuple can never be trusted into the
+      check; one that does not match is ignored, not used);
+    * the declared PK IS the driving edge — the histogram already groups
+      the source child by those columns, so the measurement is read off
+      it for free (`pk_measurement_from_histogram`);
+    * otherwise one GROUP BY over the PK columns of the source child.
+
+    A table with no declared `pk:` has nothing to measure — `P4` never
+    checks a key that does not exist.
+    """
+    if not pk:
+        return False
+    cached = measured.get("pk")
+    if cached and tuple(cached.get("cols") or ()) == pk:
+        log_pk_measured(landing_table, cached, source="cache")
+        return False
+    if set(pk) == set(driving_cols):
+        from_hist = pk_measurement_from_histogram(
+            measured.get("histogram") or {}, pk
+        )
+        if from_hist is not None:
+            measured["pk"] = from_hist
+            log_pk_measured(landing_table, from_hist, source="histogram")
+        return False
+    try:
+        measured["pk"] = measure_pk_uniqueness(
+            source_child=source_table, pk_cols=pk, client=client,
+        )
+    except Exception as exc:
+        raise SystemExit(
+            f"[preflight] {landing_table}: declared PK measurement "
+            f"{list(pk)} on {source_table} failed: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    log_pk_measured(landing_table, measured["pk"], source="measured")
+    return True
+
+
+def _mean_k(hist: Mapping[str, int]) -> float:
+    """Mean children-per-parent from a fan-out histogram (string keys,
+    ADR 0036 payload shape: ``{"0": n0, "1": n1, ...}``). 0.0 for an
+    empty histogram — the caller floors ``keys_per_batch`` at 1 anyway."""
+    parents = sum(hist.values())
+    if not parents:
+        return 0.0
+    children = sum(int(k) * n for k, n in hist.items())
+    return children / parents
 
 
 def assert_fk_pools_nonempty(
@@ -897,8 +1378,8 @@ def log_relationship_model(
 
     `relationship_model` carries the card (tables, PK, identity, every
     edge with enforced/documented/disabled state, generation waves, and
-    the file it came from) plus the fenced mermaid source below it for
-    report tooling. `fk_generation_mode` stays as the one-line greppable
+    the file it came from) — pipes and arrows only; the mermaid source
+    is rendered by `scripts/relationships/card.py --mermaid`, never logged. `fk_generation_mode` stays as the one-line greppable
     state. Nothing here is inferred: it is the model file, rendered.
     """
     log_milestone("fk_generation_mode", table=table_fqn, mode=mode)
@@ -907,9 +1388,21 @@ def log_relationship_model(
     documented = sum(
         1 for e in (relations.fk if relations else ()) if not e.enforced
     )
+    for rec in registry.derived_widenings():
+        log_milestone(
+            "fk_edge_widened",
+            table=rec["table"],
+            ref=rec["ref"],
+            via=rec["via"],
+            added=",".join(f"{c}->{r}" for c, r in rec["added"]),
+            note="inherited columns pinned by a child that references the "
+            "same columns in both tables (ADR 0036)",
+        )
+    # Pipes and arrows only (2026-09-10): no mermaid in any log; the
+    # diagram comes from `scripts/relationships/card.py --mermaid`.
     log_milestone_text(
         "relationship_model",
-        registry.log_body(table_fqn),
+        registry.card(table_fqn),
         level=(
             logging.WARNING
             if mode == "relational" and relations is not None and not enforced
@@ -924,6 +1417,290 @@ def log_relationship_model(
         sha=registry.sha12(),
         mode=mode,
     )
+
+
+def log_model_adjustments(
+    adjustments: Sequence[ModelAdjustment],
+) -> None:
+    """Announce every ADR 0038 adjustment, loudly and twice.
+
+    The BANNER is one multi-line WARNING block in the relationship
+    card's style — launcher-side, where multi-line is the readable
+    shape. The MILESTONES are one greppable WARNING line per adjustment
+    (``model_adjusted table= change= declared= measured= consequence=``),
+    the form every worker-side surface and every log miner already
+    reads. A run that generated against a model the operator did not
+    write must be impossible to mistake for a clean one, so neither is
+    optional and neither is INFO.
+    """
+    if not adjustments:
+        return
+    log_milestone_text(
+        "model_adjustments",
+        adjustment_banner(adjustments),
+        level=logging.WARNING,
+        count=len(adjustments),
+        tables=",".join(a.table_name for a in adjustments),
+    )
+    for adjustment in adjustments:
+        log_milestone(
+            "model_adjusted",
+            level=logging.WARNING,
+            table=adjustment.table,
+            change=adjustment.change,
+            declared=adjustment.declared,
+            measured=adjustment.measured,
+            consequence=adjustment.consequence,
+            source_repeat_share=(
+                round(adjustment.source_repeat_share, 4)
+                if adjustment.source_repeat_share is not None
+                else ""
+            ),
+        )
+
+
+def adjusted_model_artifact_uri(options: PipelineOptions, run_id: str, model: str) -> str:
+    """Where the emitted effective model goes: beside the job's own
+    staged artifacts (``--staging_location``, else ``--temp_location``),
+    under ``model_adjustments/``. With neither — a DirectRunner laptop
+    run — it lands in the working directory, which is where every other
+    local artifact lands."""
+    gco = options.view_as(GoogleCloudOptions)
+    base = (gco.staging_location or gco.temp_location or "").rstrip("/")
+    name = f"{sanitize_job_name('sdfb', run_id)}.{model}.yaml"
+    return f"{base}/model_adjustments/{name}" if base else name
+
+
+def emit_effective_model(
+    registry: RelationshipRegistry,
+    adjustments: Sequence[ModelAdjustment],
+    options: PipelineOptions,
+    run_id: str,
+) -> list[str]:
+    """Hand the operator back the model this run ACTUALLY generated with.
+
+    One YAML document per model file that owns an adjusted table — the
+    declared model with those tables' ``pk:`` removed and a comment
+    naming the measurement that removed it — written beside the job's
+    staged artifacts and ALSO logged verbatim. The log copy is the one
+    that always survives: a run whose bucket the reader cannot reach
+    still carries its effective model in `worker_logs.jsonl`.
+
+    A write failure is announced and never fatal: the model is already
+    in the log, and refusing to launch over an artifact would trade a
+    generated dataset for a file.
+    """
+    written: list[str] = []
+    for model, mine in adjusted_models(registry.models, adjustments):
+        text = adjusted_model_yaml(model, mine)
+        uri = adjusted_model_artifact_uri(options, run_id, model.model)
+        try:
+            with FileSystems.create(uri, mime_type="text/plain") as handle:
+                handle.write(text.encode("utf-8"))
+            written.append(uri)
+        except Exception as exc:
+            log_milestone(
+                "model_adjustment_model_unwritten",
+                level=logging.WARNING,
+                uri=uri,
+                model=model.model,
+                error=f"{type(exc).__name__}: {str(exc)[:160]}",
+                note="the effective model is in the "
+                "model_adjustment_model entry below; paste it into "
+                "config/relationships/ by hand",
+            )
+            uri = "(not written)"
+        log_milestone_text(
+            "model_adjustment_model",
+            text,
+            level=logging.WARNING,
+            model=model.model,
+            source=model.source,
+            uri=uri,
+            tables=",".join(a.table_name for a in mine),
+        )
+    return written
+
+
+def report_model_adjustments(
+    specs: Sequence[TableSpec],
+    registry: RelationshipRegistry,
+    options: PipelineOptions,
+    run_id: str,
+) -> tuple[ModelAdjustment, ...]:
+    """Every table's adjustments, announced ONCE for the whole launch.
+
+    Collected here rather than logged inside `preflight` so the banner,
+    the per-adjustment milestones and the emitted model sit together in
+    the log, and so a launch that stops later (another table's preflight
+    failed) never claims to have adjusted anything.
+    """
+    adjustments = tuple(a for s in specs for a in s.adjustments)
+    if not adjustments:
+        return ()
+    log_model_adjustments(adjustments)
+    emit_effective_model(registry, adjustments, options, run_id)
+    return adjustments
+
+
+def table_projections(
+    specs: Sequence[TableSpec],
+    *,
+    launch_rows: int,
+    rows_by_landing: Mapping[str, int] | None = None,
+    keys_by_landing: Mapping[str, int] | None = None,
+) -> tuple[TableProjection, ...]:
+    """Each resolved spec's projected record count, in generation order
+    (ADR 0039).
+
+    Nothing is measured or re-derived here: the driving edge comes from
+    the spec the composer will use (`mode="fanout"`), the histogram and
+    the source parent count from the fan-out payload the preflight
+    already paid for, the parent's landed rows and DISTINCT keys from the
+    two dicts `_run_relational_job` fills in plan order — the very
+    numbers `preflight._derived_rows` sized the child with.
+    """
+    rows_by_landing = rows_by_landing or {}
+    keys_by_landing = keys_by_landing or {}
+    projections: list[TableProjection] = []
+    for spec in specs:
+        driving = next(
+            (e for e in spec.parent_edges if e.mode == "fanout"), None
+        )
+        repeat_share = next(
+            (
+                a.source_repeat_share
+                for a in spec.adjustments
+                if a.source_repeat_share is not None
+            ),
+            None,
+        )
+        if driving is None:
+            projections.append(
+                project_table(
+                    spec.config.landing_table,
+                    launch_rows=launch_rows,
+                    adjusted=bool(spec.adjustments),
+                    repeat_share=repeat_share,
+                )
+            )
+            continue
+        fanout = spec.config.fanout or {}
+        parent_rows = rows_by_landing.get(driving.parent_landing)
+        parent_keys = keys_by_landing.get(driving.parent_landing)
+        projections.append(
+            project_table(
+                spec.config.landing_table,
+                launch_rows=launch_rows,
+                parent=(
+                    driving.parent_table
+                    or driving.parent_landing.rsplit(".", 1)[-1]
+                ),
+                edge=driving.edge_id,
+                parent_rows=parent_rows,
+                # `_derived_rows` multiplies the DISTINCT keys and falls
+                # back to the rows — same expression, same order.
+                parent_keys=parent_keys or parent_rows,
+                histogram=fanout.get("histogram"),
+                source_parent_tuples=fanout.get("parents"),
+                adjusted=bool(spec.adjustments),
+                repeat_share=repeat_share,
+            )
+        )
+    return tuple(projections)
+
+
+def report_row_projection(
+    specs: Sequence[TableSpec],
+    *,
+    launch_rows: int,
+    rows_by_landing: Mapping[str, int] | None = None,
+    keys_by_landing: Mapping[str, int] | None = None,
+) -> tuple[TableProjection, ...]:
+    """How many rows this launch will generate, announced ONCE, before
+    the graph is built (ADR 0039).
+
+    The BLOCK is the operator surface — one multi-line entry in the
+    relationship card's style, per table the count and the measurement
+    it came from, then the total and any warning. The MILESTONES are the
+    greppable half: one `row_projection_table` per table,
+    `row_projection_total` for the launch, and one
+    `row_projection_warning` per unsound measurement, so a run's
+    structured record carries the projection even when nobody read the
+    log. A clean launch logs the block and NO warning at all.
+    """
+    projections = table_projections(
+        specs, launch_rows=launch_rows,
+        rows_by_landing=rows_by_landing, keys_by_landing=keys_by_landing,
+    )
+    if not projections:
+        return ()
+    warnings = projection_warnings(projections, launch_rows=launch_rows)
+    total = projected_total(projections)
+    derivable = [p for p in projections if p.rows is not None]
+    dominant = max(derivable, key=lambda p: p.rows or 0, default=None)
+    dominant_share = (
+        (dominant.rows or 0) / total if dominant is not None and total else 0.0
+    )
+    log_milestone_text(
+        "row_projection",
+        projection_banner(
+            projections, launch_rows=launch_rows, warnings=warnings
+        ),
+        level=logging.WARNING if warnings else logging.INFO,
+        tables=len(projections),
+        rows=total,
+        warnings=len(warnings),
+        dominant=dominant.table_name if dominant else "",
+        dominant_share=round(dominant_share, 4),
+    )
+    for spec, projection in zip(specs, projections, strict=True):
+        log_milestone(
+            "row_projection_table",
+            table=projection.table,
+            rows=projection.rows if projection.rows is not None else "",
+            basis=(
+                "underivable"
+                if projection.rows is None
+                else ("driven" if projection.driven else "root")
+            ),
+            parent=projection.parent,
+            parent_keys=(
+                projection.parent_keys
+                if projection.parent_keys is not None
+                else ""
+            ),
+            mean_fanout=(
+                round(projection.mean_fanout, 4)
+                if projection.mean_fanout is not None
+                else ""
+            ),
+            share=round((projection.rows or 0) / total, 4) if total else 0.0,
+            # The count the run will actually REQUEST. It is the same
+            # number by construction (`resolve_table_rows` divides the
+            # same product); printing both makes any drift between the
+            # projection and the launch visible in one grep.
+            requested=spec.config.num_rows,
+            note=projection.undecided,
+        )
+    log_milestone(
+        "row_projection_total",
+        tables=len(projections),
+        rows=total,
+        dominant=dominant.table_name if dominant else "",
+        dominant_share=round(dominant_share, 4),
+        underivable=len(projections) - len(derivable),
+    )
+    for warning in warnings:
+        log_milestone(
+            "row_projection_warning",
+            level=logging.WARNING,
+            code=warning.code,
+            table=warning.table,
+            measurement=warning.measurement,
+            consequence=warning.consequence,
+        )
+    return projections
 
 
 def resolve_landing_dispositions(
@@ -1050,23 +1827,232 @@ def configure_pipeline_options(
             )
 
 
+def _resolve_table_fanout(
+    args,
+    table_schema,
+    registry: RelationshipRegistry,
+    in_set_names: set[str],
+    reference_rows: list[dict],
+    landing_schema=None,
+) -> tuple[dict | None, dict]:
+    """``(fanout payload, edge roles)`` for `_load_reference_and_preflight`
+    (ADR 0036). Only attempted for an in-set relational launch: a
+    single-table run has no in-job sibling that could drive it, so its
+    own ``args.num_rows`` always stands and this is skipped entirely. An
+    ambiguous or unimplied edge set (``RelationshipError`` from
+    ``registry.edge_roles``) surfaces as the same collect-then-fail
+    ``SystemExit`` every other P2 launch stop uses, so the relational
+    runner's per-table loop reports it alongside the other tables.
+
+    ADR 0037: a table that HAS a payload also carries its conditional
+    edges and the Top-M candidate cap into it — the engine reads both
+    off ``FanoutPlan``. A root (no payload) carries neither.
+    ``landing_schema`` (from `resolve_schemas`) decides each conditional
+    edge's ``nullable``; without it the source's modes stand in and each
+    conditional edge logs `fk_nullable_from_source`."""
+    if not (in_set_names and parse_bool_flag(args.generate_fk_relationships)):
+        return None, {}
+    stats_store = (
+        BigQueryFanoutStatsStore(args.fk_fanout_stats_table)
+        if getattr(args, "fk_fanout_stats_table", "")
+        else None
+    )
+    try:
+        payload, roles = resolve_fanout(
+            registry, args.landing_table, args.reference_table,
+            in_set_names=in_set_names, reference_rows=reference_rows,
+            table_schema=table_schema, stats_store=stats_store, bq_client=None,
+            effective_pk=effective_pk_of(registry, args.landing_table, args),
+        )
+    except RelationshipError as exc:
+        raise SystemExit(
+            f"[preflight P2] {args.landing_table}: {exc}"
+        ) from exc
+    if payload is not None:
+        if landing_schema is None:
+            _warn_nullability_from_source(args.landing_table, roles)
+        payload["conditional"] = conditional_plan_entries(
+            registry, args.landing_table, roles,
+            nullability_schema(landing_schema, table_schema),
+            table_schema,
+            # The PK this run enforces — it decides both the NULL policy
+            # (a key member can never NULL-fill) and which edges bound a
+            # key's capacity (fix waves G1/G2).
+            effective_pk=effective_pk_of(registry, args.landing_table, args),
+        )
+        # Fix wave F1 (reverting A3): `--fk_candidate_cap` is `M`, the
+        # size of the Top-M candidate SAMPLE the composer keeps per JOIN
+        # VALUE — one sample shared by every driving key carrying that
+        # value, NOT a per-key allotment. Clamping it to the measured max
+        # fan-out collapsed a 1:1 driving edge to M=1, leaving every child
+        # on a shared value the identical candidate (a point mass, most of
+        # the co-parent's rows never referenced). Request size is bounded
+        # by `keys_per_batch` (`in_set_parent_edges`) instead.
+        payload["candidate_cap"] = candidate_cap_of(args)
+    return payload, roles
+
+
+def _warn_nullability_from_source(landing_table: str, roles: Mapping) -> None:
+    """One WARNING per conditional edge when the LANDING schema could not
+    be read: its NULL policy is then decided by the SOURCE table's column
+    modes, which are another team's and need not match the sink's. A
+    landing column that is REQUIRED where the source is NULLABLE would
+    fail the FILE_LOADS job at the very end of a run."""
+    for edge, role in roles.items():
+        if role != "conditional":
+            continue
+        log_milestone(
+            "fk_nullable_from_source",
+            level=logging.WARNING,
+            table=landing_table,
+            edge=_edge_label(edge),
+            note="landing schema unreadable — this edge's NULL policy "
+            "reads the SOURCE table's column modes",
+        )
+
+
+def _log_edge_role_warnings(
+    landing_table: str, registry: RelationshipRegistry, edge_roles: Mapping
+) -> None:
+    """The two WARNING milestones of ADR 0037 (design §3 rule 4, §9).
+
+    `fk_driving_edge_defaulted` — no `drives: true` and no ancestry
+    between the candidate parents, so the FIRST DECLARED edge drives: a
+    legal, reproducible launch the operator did not actually choose.
+    `fk_edge_overlap_external` — an EXTERNAL parent's edge writes a child
+    column another edge also writes: the driving edge (which overwrites
+    it), another external edge, or any non-driving edge. The last writer
+    keeps the column, so the loser's tuple need not exist in its parent.
+    Nothing the operator can declare resolves it while the parent stays
+    outside the launch — an external edge never becomes `implied`,
+    `drives: true` is inert for it and an external parent has no
+    `tables:` entry to disable — so every such pair is NAMED here
+    (WARNING) rather than stopping the launch (fix wave F3; the
+    cross-edge ownership stop keeps its teeth for in-model pairs).
+
+    The overlap report does NOT depend on roles having been resolved (fix
+    wave G3). `_resolve_table_fanout` returns `{}` for a non-relational
+    launch, so the classic denormalised child — BOTH parents external,
+    the very shape fix wave F3 stopped stopping — launched with no stop
+    AND no signal: at run time the second pool overwrites the shared
+    column and its rows divert as `fk.orphan`, potentially the whole run,
+    with nothing in the launch log naming the overlap. Only the
+    driving-edge WARNING needs a resolved role."""
+    driving = next((e for e, r in edge_roles.items() if r == "driving"), None)
+    if (
+        driving is not None
+        and registry.driving_choice(landing_table) == "first_declared"
+    ):
+        log_milestone(
+            "fk_driving_edge_defaulted",
+            level=logging.WARNING,
+            table=landing_table,
+            edge=_edge_label(driving),
+            hint="mark drives: true to choose",
+        )
+    for external, other, overlap in _external_overlaps(
+        landing_table, registry, edge_roles
+    ):
+        log_milestone(
+            "fk_edge_overlap_external",
+            level=logging.WARNING,
+            table=landing_table,
+            edge=_edge_label(external),
+            other=_edge_label(other),
+            overlap=",".join(overlap),
+            note="an external parent's edge writes the same child "
+            "column(s) as another edge of this table; the last write "
+            "wins, so the other edge's tuple may not exist in its "
+            "parent. Bring the parent into the launch to resolve it",
+        )
+
+
+def _external_overlaps(
+    landing_table: str, registry: RelationshipRegistry, edge_roles: Mapping
+) -> tuple:
+    """`registry.external_overlaps`, resolving the roles ITSELF when the
+    caller has none — a single-table launch, or one with FK generation
+    off (fix wave G3).
+
+    A model whose roles cannot be resolved at all (the cross-edge
+    ownership stop) is reported here, not raised: this is the WARNING
+    path, and a relational launch has already surfaced that same
+    `RelationshipError` as a `[preflight P2]` SystemExit through
+    `resolve_fanout`."""
+    try:
+        return registry.external_overlaps(landing_table, edge_roles or None)
+    except RelationshipError as exc:
+        logger.warning(
+            "edge roles for %s could not be resolved (%s) — the "
+            "external-overlap check did not run", landing_table, exc,
+        )
+        return ()
+
+
 def _load_reference_and_preflight(
     args,
     table_schema,
     registry: RelationshipRegistry,
     in_set_landing: frozenset[str] = frozenset(),
+    landing_schema=None,
 ):
     """Eager reference read + relational preflight (ADR 0032): the
     table's relations come from `config/relationships/`, pk/identity
     default from them (CLI fills the gaps for tables no model declares),
     and unknown columns fail fast — all driver-side, before any graph
-    exists."""
+    exists. ADR 0036: resolves the driving edge's roles and, when its
+    parent is in-set, its measured (or cached) source fan-out — carried
+    into `preflight` so a driven child's row count derives from it."""
     logger.info("Loading reference rows from %s (limit=%d)",
                 args.reference_table, args.reference_rows_limit)
     reference_rows = load_reference_rows(
         table=args.reference_table,
         limit=args.reference_rows_limit,
     )
+    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
+    # ADR 0035: an in-set parent lands at most its own resolved row
+    # count. ADR 0036: a driven parent's count may itself be DERIVED
+    # from its own parent — `rows_by_landing` (filled by
+    # `_run_relational_job` in plan order) carries that forward instead
+    # of the launch's flat `num_rows`. An external parent's count is
+    # unknown here and stays at the sample cap (an upper bound — never
+    # a false stop).
+    rows_by_landing: Mapping[str, int] = getattr(args, "_rows_by_landing", {})
+    # ADR 0038 fix H3: the DISTINCT keys each in-set parent lands, which
+    # is what a driven child fans out over. Same carry-forward, filled by
+    # `_run_relational_job` in plan order; it differs from the rows only
+    # for a parent whose own `pk:` was ADJUSTED away.
+    keys_by_landing: Mapping[str, int] = getattr(
+        args, "_distinct_keys_by_landing", {}
+    )
+    parent_landing = derive_fk_parent_landing(args.landing_table)
+    in_set_edges = [
+        fk
+        for fk in registry.enforced_edges(args.landing_table)
+        if fk.ref.rsplit(".", 1)[-1] in in_set_names
+    ]
+    fk_parent_rows = {
+        fk.ref: rows_by_landing.get(
+            parent_landing_fqn(fk.ref, parent_landing), args.num_rows
+        )
+        for fk in in_set_edges
+    }
+    fk_parent_distinct_keys = {
+        fk.ref: keys
+        for fk in in_set_edges
+        if (keys := keys_by_landing.get(
+            parent_landing_fqn(fk.ref, parent_landing)
+        ))
+    }
+    thresholds = resolve_thresholds(
+        getattr(args, "thresholds_uri", "config/thresholds.yml"),
+        getattr(args, "env", "dev"),
+    )
+    fanout, edge_roles = _resolve_table_fanout(
+        args, table_schema, registry, in_set_names, reference_rows,
+        landing_schema=landing_schema,
+    )
+    _log_edge_role_warnings(args.landing_table, registry, edge_roles)
     pf = preflight(
         table_schema,
         tuple(c.strip() for c in args.pk_cols.split(",") if c.strip()),
@@ -1075,9 +2061,45 @@ def _load_reference_and_preflight(
         relations=registry.relations(args.landing_table),
         prompt_constraints_enabled=args.prompt_constraints == "on",
         # ADR 0028 P4: refuse a PK whose routed generator cannot cover
-        # num_rows — before any graph exists.
+        # num_rows — before any graph exists. ADR 0035: FK-bound and
+        # categorical members count too, against the run's gate.
         num_rows=args.num_rows,
+        fk_parent_rows=fk_parent_rows,
+        # Fix H3: a driven child is sized off its parent's DISTINCT
+        # landed keys — an adjusted parent lands fewer than it has rows.
+        fk_parent_distinct_keys=fk_parent_distinct_keys,
+        blocker_failure_ratio=thresholds.blocker_failure_ratio,
+        fanout=fanout,
+        edge_roles=edge_roles,
+        # The edges this launch DRAWS (both ends enabled, widened) — not
+        # the declared ones, or a disabled parent bounds the PK (P4).
+        enforced_fk=registry.enforced_edges(args.landing_table),
+        # ADR 0037: the shared columns each conditional edge is joined
+        # on, so `fk_edge_role` names them in the launch log.
+        edge_overlaps={
+            edge: registry.edge_overlap(args.landing_table, edge)
+            for edge, role in edge_roles.items()
+            if role == "conditional"
+        },
+        # ADR 0037 §6 — a conditional edge's `rest` and the Top-M cap
+        # are per-key PK factors. An independent edge's key pool is one
+        # too, but preflight sizes it itself, from the derived row count
+        # only it knows (ruling 13), and returns it on the result.
+        conditional_rest=conditional_rest_of(
+            registry, args.landing_table, edge_roles
+        ),
+        candidate_cap=candidate_cap_of(args),
+        # ADR 0038 — what a MEASURED contradiction does. `adjust` (the
+        # default) drops the disproved `pk:` and carries on; `stop` is
+        # the pre-0038 refusal, message for message.
+        on_model_conflict=getattr(
+            args, "on_model_conflict", ON_CONFLICT_ADJUST
+        ),
     )
+    # ADR 0038 — `resolve_fanout` decided `exact_cells` against the
+    # DECLARED PK, above. With that PK dropped the cells key nothing, and
+    # an exact plan would cap the fan-out instead of reproducing it.
+    fanout = adjusted_fanout_payload(fanout, pf.adjustments)
     for warning in pf.warnings:
         logger.warning("preflight: %s", warning)
     # ADR 0029 rev B — FK activation derives, never asks: with the flag
@@ -1086,7 +2108,6 @@ def _load_reference_and_preflight(
     # An empty parent pool is a loud, actionable stop.
     fk_pools: dict = {}
     fk_key_pools: list[dict] = []
-    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
     enforced_fk = registry.enforced_edges(args.landing_table)
     external_fk = tuple(
         fk
@@ -1108,7 +2129,10 @@ def _load_reference_and_preflight(
             derive_fk_parent_landing(args.landing_table)
         )
     source_distinct = _emit_source_stats(args, table_schema, reference_rows, pf)
-    return reference_rows, pf, fk_pools, fk_key_pools, source_distinct
+    return (
+        reference_rows, pf, fk_pools, fk_key_pools, source_distinct,
+        fanout, edge_roles,
+    )
 
 
 def _emit_source_stats(
@@ -1386,6 +2410,363 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def nullability_schema(landing_schema, source_schema):
+    """The schema whose column MODES decide a conditional edge's NULL
+    policy: the LANDING table's (ADR 0037 design §4 ruling B) — it is
+    the sink, and it is Terraformed independently of the lake table the
+    generation schema mirrors. Falls back to the source schema when the
+    landing table is absent or unreachable; `_resolve_table_fanout`
+    names that fallback with one `fk_nullable_from_source` per
+    conditional edge (review round 1, finding B3)."""
+    return landing_schema if landing_schema is not None else source_schema
+
+
+def _column_modes(schema, rest: tuple[str, ...]) -> list[str]:
+    """Each ``rest`` column's mode in ``schema`` (``""`` when absent)."""
+    if schema is None:
+        return ["" for _ in rest]
+    modes = {c.name: c.mode for c in schema.columns}
+    return [modes.get(col, "") for col in rest]
+
+
+def _enforced_pk(generation, effective_pk: tuple[str, ...]) -> set[str]:
+    """The PK the nullability guard must read (fix wave G2).
+
+    ``effective_pk`` is what the run ENFORCES — the relationship model's
+    `pk:` (ADR 0032), i.e. what `preflight` resolves and what
+    `EnforceUniqueness` keys on. ``TableSchema.primary_keys`` is the
+    BigQuery table CONSTRAINT the extractor copies into `_ddl.json` (its
+    own docstring: "useful context, never the source of truth"), and on
+    the canonical ADR 0032 setup it is ``None`` — so reading it alone
+    meant the guard NEVER fired: ADR 0037's own diamond (BOTTOM declares
+    `pk: [T, L, R]`, `R` NULLABLE in both schemas) NULL-filled a declared
+    key member, those rows landed and their repeats diverted as
+    `pk.duplicate`. The two are UNIONED, never substituted: the model's
+    `pk:` is what the run enforces, the DDL constraint is what
+    `derive_record_model` validates against, and a NULL in EITHER is
+    fatal — a column the constraint declares and the model omits would
+    otherwise be NULL-filled and then dropped inside the engine's
+    `except Exception: continue`, with no envelope and no milestone."""
+    return set(effective_pk) | set(
+        getattr(generation, "primary_keys", None) or ()
+    )
+
+
+def _rest_is_nullable(
+    rest: tuple[str, ...],
+    table_schema,
+    generation_schema=None,
+    *,
+    table: str = "",
+    edge_id: str = "",
+    warn: bool = True,
+    effective_pk: tuple[str, ...] = (),
+) -> bool:
+    """ADR 0037 §4 ruling B: an unmatched key may land with NULLs only
+    when EVERY ``rest`` column is NULLABLE — in BOTH schemas (fix wave
+    A4). An empty ``rest`` (a pure existence filter, ``(K)->P`` driving
+    and ``(K)->Q`` conditional) has nothing to write a NULL into, so it
+    is never nullable — the key is dropped and counted instead.
+
+    ``table_schema`` is the LANDING schema (the sink, resolved by
+    :func:`nullability_schema`); ``generation_schema`` is the one the
+    engines derive their record model from, whose modes mirror the
+    SOURCE table. Landing alone is not enough: where landing said
+    NULLABLE and generation said REQUIRED, the DoFn kept the unmatched
+    key, the engine wrote ``None``, ``model_validate`` rejected the row
+    and the engine's ``except Exception: continue`` discarded every one
+    of that key's rows — silently, with no envelope, counter or
+    milestone. When the two disagree the edge is treated as NON-nullable,
+    so the key is dropped as a visible ``fk.unmatched``, and the
+    disagreement is named once. Omitting ``generation_schema`` keeps the
+    single-schema behaviour (both reads hit the same schema).
+
+    A column MODE is not the whole contract (fix wave F2): the record
+    model ``derive_record_model`` builds rejects ``None`` on every
+    declared PK column whatever its mode says (``_make_pk_base`` — BQ
+    allows a NULLABLE PK column), and the engines swallow that
+    ``ValidationError`` the same silent way. On ADR 0037's own diamond
+    the child PK's last member IS the co-parent's column, so a rest
+    column in the PK is the default shape, not a corner: such an edge is
+    NON-nullable however both schemas mode it, and the reason rides on
+    the milestone.
+
+    WHICH PK (fix wave G2): ``effective_pk`` — the PK this run ENFORCES,
+    from the relationship model (`effective_pk_of`) — with the schema's
+    ``primary_keys`` standing in only when the model declares none
+    (:func:`_enforced_pk`)."""
+    if table_schema is None or not rest:
+        return False
+    generation = table_schema if generation_schema is None else generation_schema
+    landing_modes = _column_modes(table_schema, rest)
+    generation_modes = _column_modes(generation, rest)
+    landing_ok = all(mode == "NULLABLE" for mode in landing_modes)
+    generation_ok = all(mode == "NULLABLE" for mode in generation_modes)
+    declared_pk = tuple(
+        col for col in rest if col in _enforced_pk(generation, effective_pk)
+    )
+    reasons = []
+    if declared_pk:
+        reasons.append("declared_pk")
+    if landing_ok != generation_ok:
+        reasons.append("schema_mode_mismatch")
+    if warn and reasons:
+        log_milestone(
+            "fk_nullable_schema_mismatch",
+            level=logging.WARNING,
+            table=table,
+            edge=edge_id,
+            landing=",".join(landing_modes),
+            generation=",".join(generation_modes),
+            reason=",".join(reasons),
+            pk=",".join(declared_pk),
+            note="this edge cannot NULL-fill an unmatched key: the "
+            "landing and generation schemas disagree on its rest "
+            "columns' modes, and/or a rest column sits in the PRIMARY KEY "
+            "this run enforces (the relationship model's `pk:`, or the "
+            "DDL constraint when the model declares none), which the "
+            "record model refuses a NULL on whatever the mode says. "
+            "Treated as "
+            "NON-nullable, so the key diverts as a visible fk.unmatched "
+            "instead of landing rows the record model would silently "
+            "reject",
+        )
+    return landing_ok and generation_ok and not declared_pk
+
+
+def conditional_plan_entries(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    roles: Mapping,
+    table_schema,
+    generation_schema=None,
+    *,
+    effective_pk: tuple[str, ...],
+) -> list[dict]:
+    """``FanoutPlan.conditional`` payload entries (ADR 0037): one per
+    conditional edge, in ``enforced_edges`` order. ``id`` is the string
+    the request payload, the plan and ``FkEdgeSpec.edge_id`` all agree
+    on (`conditional_edge_id` — it carries the parent, so two edges from
+    the same columns to different parents keep separate entries);
+    ``cols`` are the child columns the engine writes from the drawn
+    candidate (``rest``); ``nullable`` is the NULL policy for a key with
+    no candidate; ``pk_member`` says whether ``rest`` supplies a member
+    of ``effective_pk``.
+
+    ``effective_pk`` is `effective_pk_of` — the PK this run enforces, the
+    same tuple preflight P4 counts its factors against. It decides BOTH
+    remaining fields (fix waves G1/G2): a key member can never NULL-fill,
+    and ONLY a PK-supplying edge may multiply a key's capacity in
+    `joint_key_draw`."""
+    pk = set(effective_pk)
+    entries: list[dict] = []
+    for fk in registry.enforced_edges(landing_table):
+        if roles.get(fk) != "conditional":
+            continue
+        rest = registry.edge_rest(landing_table, fk)
+        edge_id = conditional_edge_id(fk.cols, fk.ref)
+        entries.append(
+            {
+                "id": edge_id,
+                "cols": list(rest),
+                "nullable": _rest_is_nullable(
+                    rest,
+                    table_schema,
+                    generation_schema,
+                    table=landing_table,
+                    edge_id=edge_id,
+                    effective_pk=effective_pk,
+                ),
+                # `edge_roles` calls an edge conditional for SHARING a
+                # column with the driving edge, which says nothing about
+                # whether its `rest` keys anything: a lookup edge whose
+                # rest sits outside the PK distinguishes no child, so it
+                # must not inflate the cap (fix wave G1).
+                "pk_member": bool(pk & set(rest)),
+            }
+        )
+    return entries
+
+
+def in_set_parent_edges(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    *,
+    in_set_names: set[str],
+    key_sample_caps: Mapping[tuple[str, ...], int],
+    edge_roles: Mapping | None = None,
+    keys_per_batch: int = 100,
+    table_schema=None,
+    generation_schema=None,
+    candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
+    effective_pk: tuple[str, ...] = (),
+) -> tuple[FkEdgeSpec, ...]:
+    """This table's enforced edges whose parent generates in the same
+    job, as composer specs. ``key_sample_caps`` (preflight P4, ADR 0035)
+    sizes the parent key sample per edge inside the child's PK; other
+    edges keep the composer's floor. ``edge_roles`` (ADR 0036/0037) sets
+    each spec's ``mode`` through ``_EDGE_MODES``: the driving edge is
+    ``"fanout"``, an edge satisfied by construction through it is
+    ``"implied"``, an edge sharing columns with it is ``"conditional"``,
+    and one sharing none stays the ADR 0030 ``"side_input"``.
+
+    ``table_schema`` (the LANDING schema) decides each conditional
+    edge's ``nullable``, together with ``effective_pk`` — the PK this run
+    enforces (`effective_pk_of`), which no key member may NULL-fill (fix
+    wave G2); the plan entries read the same two.
+    ``candidate_cap`` is ``--fk_candidate_cap``.
+
+    With conditional edges present ``keys_per_batch`` is LOWERED so one
+    request never carries more than ~100k candidate values (design §7) —
+    the cap itself is the operator's knob and is never touched. Once
+    ``cap x edges`` passes that ceiling on its own the bound degenerates
+    to one key per request and stops bounding anything, which is a
+    `fk_candidate_request_unbounded` WARNING (fix wave G5)."""
+    roles = edge_roles or {}
+    edges = [
+        fk
+        for fk in registry.enforced_edges(landing_table)
+        if fk.ref.rsplit(".", 1)[-1] in in_set_names
+    ]
+    n_conditional = sum(1 for fk in edges if roles.get(fk) == "conditional")
+    if n_conditional:
+        per_request = candidate_cap * n_conditional
+        bound = _MAX_CONDITIONAL_VALUES_PER_REQUEST // per_request
+        if bound < 1:
+            # Fix wave G5: the bound has STOPPED bounding. The floor below
+            # pins it at ONE key per request, and that one key still
+            # carries `cap x edges` candidate tuples — past the ceiling,
+            # with no ceiling on the cap itself (fix wave F1 reverted
+            # clamping it: the clamp collapsed the co-parent choice to a
+            # point mass). Nothing is repaired silently here; the knob
+            # that did it is named instead.
+            log_milestone(
+                "fk_candidate_request_unbounded",
+                level=logging.WARNING,
+                table=landing_table,
+                candidate_cap=candidate_cap,
+                conditional_edges=n_conditional,
+                tuples_per_request=per_request,
+                ceiling=_MAX_CONDITIONAL_VALUES_PER_REQUEST,
+                note="--fk_candidate_cap x conditional edges already "
+                "exceeds the per-request candidate ceiling at ONE key per "
+                "request, so keys_per_batch cannot bound the request any "
+                "further. Lower --fk_candidate_cap: past the candidates a "
+                "co-parent actually holds per shared value it buys no "
+                "per-key variety, only request size.",
+            )
+        keys_per_batch = min(keys_per_batch, max(1, bound))
+    specs = []
+    for fk in edges:
+        role = roles.get(fk, "")
+        parent = registry.relations(fk.ref)
+        specs.append(
+            FkEdgeSpec(
+                child_cols=tuple(fk.cols),
+                ref_cols=tuple(fk.ref_cols),
+                parent_landing=parent_landing_fqn(
+                    fk.ref, derive_fk_parent_landing(landing_table)
+                ),
+                # The bare model name — `edge_id` is `(cols)->parent`, so
+                # two edges to different parents never share an id.
+                parent_table=fk.ref,
+                # The parent PK lets the composer skip a Distinct shuffle
+                # when the projected tuple already holds it (Task 5) —
+                # harmless on every mode, worth millions of rows on a
+                # conditional edge's co-parent.
+                parent_pk=tuple(parent.pk) if parent else (),
+                key_sample_cap=key_sample_caps.get(
+                    tuple(fk.cols), FK_KEY_SAMPLE_FLOOR
+                ),
+                mode=_EDGE_MODES.get(role, "side_input"),
+                keys_per_batch=keys_per_batch,
+                overlap=(
+                    registry.edge_overlap(landing_table, fk)
+                    if role == "conditional"
+                    else ()
+                ),
+                candidate_cap=candidate_cap,
+                nullable=_rest_is_nullable(
+                    registry.edge_rest(landing_table, fk),
+                    table_schema,
+                    generation_schema,
+                    # `conditional_plan_entries` already named any
+                    # disagreement; one WARNING per edge, not two.
+                    warn=False,
+                    effective_pk=effective_pk,
+                )
+                if role == "conditional"
+                else False,
+            )
+        )
+    return tuple(specs)
+
+
+def fk_edge_metadata(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    relations,
+    fk_parent_landing: str,
+    *,
+    in_set_names: set[str],
+    edge_roles: Mapping,
+) -> tuple[dict, ...]:
+    """``GenerationContext.fk_edges`` — one dict per DECLARED edge, the
+    worker's ``relational_fk_edge`` milestone source (ADR 0037 §8).
+
+    Every in-set enforced edge carries the DAG path it took (``mode``,
+    and ``overlap`` for a conditional edge). An edge outside the launch
+    (external parent) or not enforced carries no ``mode`` key at all and
+    the worker renders today's ``mode=side_input`` default, so no
+    existing log line moves.
+
+    ``edge_roles`` is keyed on the WIDENED edges ``enforced_edges``
+    returns (ADR 0036 rev 2), while ``relations.fk`` holds the declared
+    ones. A declaration is resolved to its widened form by APPLYING the
+    same widening (`enforced_edges` = `widened` over the raw enforced
+    edges), never by guessing from a column prefix: a documented
+    ``(T)->P`` next to an enforced ``(T,R)->P`` prefix-matched the
+    driving edge and claimed `mode=fanout` for an edge the launch never
+    draws (review round 1, finding B1)."""
+    meta: dict[tuple[str, tuple[str, ...]], dict] = {}
+    for fk in registry.enforced_edges(landing_table):
+        role = edge_roles.get(fk)
+        if role not in _EDGE_MODES or fk.ref.rsplit(".", 1)[-1] not in in_set_names:
+            continue
+        entry: dict = {"mode": _EDGE_MODES[role]}
+        if role == "conditional":
+            entry["overlap"] = list(registry.edge_overlap(landing_table, fk))
+        meta[(fk.ref, tuple(fk.cols))] = entry
+
+    def _for(fk) -> dict:
+        """This DECLARED edge's DAG path, or `{}` — an edge the launch
+        does not draw (documented-only, or an out-of-set parent) is
+        never stamped, whatever its columns look like."""
+        if not fk.enforced or fk.ref.rsplit(".", 1)[-1] not in in_set_names:
+            return {}
+        # The same widening `enforced_edges` applies, applied once more
+        # to THIS declaration — the only way to name the widened edge a
+        # declaration became without re-deriving the rule here.
+        widened = registry.widened(landing_table, fk)
+        return meta.get((widened.ref, tuple(widened.cols)), {})
+
+    return tuple(
+        {
+            "cols": list(fk.cols),
+            "ref": fk.ref,
+            "ref_cols": list(fk.ref_cols),
+            "enforced": fk.enforced,
+            "parent_landing": (
+                parent_landing_fqn(fk.ref, fk_parent_landing)
+                if fk_parent_landing and fk.enforced
+                else ""
+            ),
+            **_for(fk),
+        }
+        for fk in (relations.fk if relations else ())
+    )
+
+
 def _prepare_table_spec(
     args,
     model_client,
@@ -1396,9 +2777,14 @@ def _prepare_table_spec(
     pools (EXTERNAL parents only — in-set parents arrive as in-DAG side
     inputs, ADR 0030), stores, sinks, config. Shared by the
     single-table runner and the single-job relational runner."""
-    table_schema = resolve_table_schema(
+    table_schema, landing_schema = resolve_schemas(
         args.ddl_uri, args.reference_table, args.landing_table
     )
+    # ADR 0037 §4 ruling B: the conditional NULL policy reads the SINK's
+    # column modes. `table_schema`'s modes mirror the SOURCE (only the
+    # description surfaces are overlaid from the landing table), so the
+    # two are only the same object when the landing table is unreadable.
+    nullable_schema = nullability_schema(landing_schema, table_schema)
     logger.info("Loaded schema for %s (%d columns)",
                 table_schema.fqn, len(table_schema.columns))
 
@@ -1418,16 +2804,47 @@ def _prepare_table_spec(
             "UNVERIFIED this run",
         )
     registry = registry or RelationshipRegistry()
+    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
     (
         reference_rows,
         pf,
         fk_pools,
         fk_key_pools,
         source_distinct,
+        fanout,
+        edge_roles,
     ) = _load_reference_and_preflight(
-        args, table_schema, registry, in_set_landing=in_set_landing
+        args, table_schema, registry, in_set_landing=in_set_landing,
+        landing_schema=landing_schema,
     )
     log_relationship_model(args.landing_table, registry, mode=fk_mode)
+
+    # ADR 0036 — a DRIVEN child's row count, batch size and uniqueness
+    # mode all derive from the measured source fan-out instead of the
+    # launch's flat --num_rows/--uniqueness_mode.
+    driven = fanout is not None
+    num_rows = resolve_table_rows(
+        args.landing_table,
+        driven=driven,
+        derived_rows=pf.derived_rows,
+        launch_rows=args.num_rows,
+    )
+    batch_size = resolve_batch_size(args.batch_size, num_rows)
+    # ADR 0038 — an ADJUSTED table keeps its DECLARED PK for measurement
+    # only: `pk.duplicate` is still counted against it (that is the
+    # evidence the landing table copies the source's key repeats), it
+    # simply stops keying, deduplicating and gating.
+    adjusted = pf.adjustments
+    pk_measure_columns = adjusted[0].declared_pk if adjusted else ()
+    uniqueness_mode = (
+        resolve_driven_uniqueness_mode(
+            getattr(args, "driven_uniqueness_mode", "streaming"),
+            driven=driven,
+            identity_cols=tuple(pf.identity_cols),
+            adjusted=bool(adjusted),
+        )
+        or args.uniqueness_mode
+    )
 
     thresholds = resolve_thresholds(args.thresholds_uri, args.env)
     logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f",
@@ -1461,13 +2878,22 @@ def _prepare_table_spec(
         table_schema=table_schema,
         engine_name=args.engine,
         model_client=model_client,
-        num_rows=args.num_rows,
-        batch_size=resolve_batch_size(args.batch_size, args.num_rows),
+        num_rows=num_rows,
+        batch_size=batch_size,
         similarity=args.similarity,
         seed=int(args.seed) if str(args.seed).strip() else None,
         run_id=args.run_id,
         identity_columns=pf.identity_cols,
+        # ADR 0038: the EFFECTIVE PK — empty on an adjusted table.
         pk_columns=pf.pk_cols,
+        pk_measure_columns=pk_measure_columns,
+        # `pk.duplicate` is expected on an adjusted table, so it must not
+        # weigh on the BLOCKER gate — named in the summary row, never
+        # hidden. Every other table's keeps blocking.
+        gate_excluded_rules=("pk.duplicate",) if adjusted else (),
+        source_repeat_share=(
+            adjusted[0].source_repeat_share if adjusted else None
+        ),
         strict_freetext=resolve_engine_strictness(args.client_type),
         model_uri=args.model_uri,
         embedder_uri=args.embedder_uri,
@@ -1484,7 +2910,8 @@ def _prepare_table_spec(
         pool_pattern_guidance=parse_bool_flag(args.pool_pattern_guidance),
         freetext_pools_table=args.freetext_pools_table,
         pool_seed_strategy=validate_seed_strategy(args.pool_seed_strategy),
-        uniqueness_mode=args.uniqueness_mode,
+        uniqueness_mode=uniqueness_mode,
+        fanout=fanout,
         rag_embed_device=resolve_rag_embed_device(model_client),
         freetext_expansion=args.freetext_expansion,
         prompt_constraints=args.prompt_constraints == "on",
@@ -1496,24 +2923,20 @@ def _prepare_table_spec(
             if getattr(args, "_multi_table_plan", False) or in_set_landing
             else ""
         ),
-        fk_edges=tuple(
-            {
-                "cols": list(fk.cols),
-                "ref": fk.ref,
-                "ref_cols": list(fk.ref_cols),
-                "enforced": fk.enforced,
-                "parent_landing": (
-                    parent_landing_fqn(fk.ref, args.fk_parent_landing)
-                    if args.fk_parent_landing and fk.enforced
-                    else ""
-                ),
-            }
-            for fk in (pf.relations.fk if pf.relations else ())
+        fk_edges=fk_edge_metadata(
+            registry,
+            args.landing_table,
+            pf.relations,
+            args.fk_parent_landing,
+            in_set_names=in_set_names,
+            edge_roles=edge_roles,
         ),
         # The card the launcher printed, carried verbatim to the workers
         # (ADR 0032): the model is resolved ONCE, driver-side, and both
         # logs show the same thing.
-        relationship_card=registry.log_body(args.landing_table),
+        # Pipes and arrows for the worker echo (ADR 0035 rev); the mermaid
+        # fence lives in the launcher's own relationship_model entry.
+        relationship_card=registry.card(args.landing_table),
         source_distinct=source_distinct,
         # ADR 0023 generate-path seam: B.2 builds pools lazily in workers.
         source_values_table=args.reference_table,
@@ -1564,17 +2987,36 @@ def _prepare_table_spec(
     # In-set enforced edges: parents live in THIS job's spec list — no BQ
     # pool load; the composer wires the parent's landed keys as a side
     # input (ADR 0030). parent_pk is patched in by the relational runner.
-    in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
-    parent_edges = tuple(
-        FkEdgeSpec(
-            child_cols=tuple(fk.cols),
-            ref_cols=tuple(fk.ref_cols),
-            parent_landing=parent_landing_fqn(
-                fk.ref, derive_fk_parent_landing(args.landing_table)
-            ),
+    # ADR 0036: a driven child's fanout edge batches parent keys sized
+    # to land ~batch_size children per element (the composer's floor of
+    # 100 keys/batch otherwise).
+    keys_per_batch = (
+        min(
+            _MAX_KEYS_PER_BATCH,
+            max(1, round(batch_size / max(_mean_k(fanout["histogram"]), 1e-6))),
         )
-        for fk in registry.enforced_edges(args.landing_table)
-        if fk.ref.rsplit(".", 1)[-1] in in_set_names
+        if driven
+        else 100
+    )
+    parent_edges = in_set_parent_edges(
+        registry,
+        args.landing_table,
+        in_set_names=in_set_names,
+        key_sample_caps=pf.fk_key_sample_caps,
+        edge_roles=edge_roles,
+        keys_per_batch=keys_per_batch,
+        table_schema=nullable_schema,
+        generation_schema=table_schema,
+        # The payload holds the operator's `--fk_candidate_cap` (fix
+        # wave F1), so the specs and the workers read ONE number.
+        candidate_cap=(fanout or {}).get(
+            "candidate_cap", candidate_cap_of(args)
+        ),
+        # The PK this run enforces — `pf.pk_cols`, which `effective_pk_of`
+        # resolves by the identical rule (fix wave G2) but WITHOUT the
+        # ADR 0038 adjustment: reading the registry here would hand the
+        # composer a key the source disproved and preflight dropped.
+        effective_pk=pf.pk_cols,
     )
 
     return TableSpec(
@@ -1589,6 +3031,7 @@ def _prepare_table_spec(
             source_value_store if freetext_pools_store is not None else None
         ),
         parent_edges=parent_edges,
+        adjustments=adjusted,
     )
 
 
@@ -1623,6 +3066,14 @@ def _run_one_table(
         cross_process=cross_process,
     )
     spec = _prepare_table_spec(args, model_client, registry=registry)
+    report_model_adjustments(
+        [spec], registry or RelationshipRegistry(), options, args.run_id
+    )
+    # ADR 0039 — one root table, so the projection is `--num_rows` and
+    # nothing else. It is printed anyway: the block is where an operator
+    # reads what a launch will generate, and a single-table launch must
+    # not be the one shape that stays silent.
+    report_row_projection([spec], launch_rows=args.num_rows)
 
     with beam.Pipeline(options=options) as p:
         result = build_pipeline(
@@ -1686,6 +3137,15 @@ def _run_relational_job(
     pin_owners = set(parse_landing_tables(args.landing_table))
     specs = []
     prep_failures: list[tuple[str, str]] = []
+    # ADR 0036: a grandchild's derived row count depends on its parent's
+    # RESOLVED count (itself possibly derived), not the launch's flat
+    # --num_rows — plan order is parents-first, so filling this as each
+    # spec lands carries it forward to the next table's preflight.
+    rows_by_landing: dict[str, int] = {}
+    # ADR 0038 fix H3: and the DISTINCT keys each one lands, which is
+    # what its children fan out over — the same number as its rows unless
+    # its `pk:` was adjusted away.
+    distinct_keys_by_landing: dict[str, int] = {}
     for run in plan.runs:
         table_args = argparse.Namespace(**vars(args))
         table_args.landing_table = run.landing_table
@@ -1694,6 +3154,8 @@ def _run_relational_job(
         table_args.fk_parent_landing = (
             args.fk_parent_landing or run.fk_parent_landing
         )
+        table_args._rows_by_landing = rows_by_landing
+        table_args._distinct_keys_by_landing = distinct_keys_by_landing
         if run.landing_table not in pin_owners:
             table_args.ddl_uri = ""  # pin describes the target only
         # Collect-then-fail (2026-08-22 launch lesson): one table's
@@ -1706,6 +3168,14 @@ def _run_relational_job(
                     model_client,
                     in_set_landing=in_set,
                     registry=registry,
+                )
+            )
+            rows_by_landing[specs[-1].config.landing_table] = (
+                specs[-1].config.num_rows
+            )
+            distinct_keys_by_landing[specs[-1].config.landing_table] = (
+                distinct_keys_landed(
+                    specs[-1].config.num_rows, specs[-1].adjustments
                 )
             )
         except SystemExit as exc:
@@ -1737,6 +3207,20 @@ def _run_relational_job(
         )
         for s in specs
     ]
+    # ADR 0038 — say what this launch generated with, before it
+    # generates anything: the banner, one milestone per adjustment, and
+    # the effective model handed back as YAML.
+    report_model_adjustments(
+        specs, registry or RelationshipRegistry(), options, args.run_id
+    )
+    # ADR 0039 — and say how many rows that model will GENERATE, per
+    # table and in total, while there is still time to stop.
+    report_row_projection(
+        specs,
+        launch_rows=args.num_rows,
+        rows_by_landing=rows_by_landing,
+        keys_by_landing=distinct_keys_by_landing,
+    )
     total_edges = sum(len(s.parent_edges) for s in specs)
     log_milestone(
         "relational_single_job",
@@ -1748,6 +3232,14 @@ def _run_relational_job(
         edges_detail=",".join(
             f"{s.config.landing_table.rsplit('.', 1)[-1]}:"
             f"{len(s.parent_edges)}"
+            for s in specs
+        ),
+        # ADR 0036 — each table's RESOLVED row count (a driven child's
+        # derived count, everyone else's --num_rows), so the launch card
+        # answers "how many rows did each table land" without re-deriving
+        # fan-out math from the log.
+        rows_detail=",".join(
+            f"{s.config.landing_table.rsplit('.', 1)[-1]}:{s.config.num_rows}"
             for s in specs
         ),
     )
