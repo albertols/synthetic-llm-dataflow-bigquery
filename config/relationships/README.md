@@ -89,7 +89,7 @@ choose a different one. See "Which edge drives" below.
 |---|---|---|
 | `enabled: false` | table | **Detach.** The table leaves the graph; anything that reached the rest of the model only through it detaches with it. It still generates when you target it directly — the flag governs participation, not permission. A child's edge to a disabled parent is not drawn and not counted by preflight P4: that FK member keeps its own route (pattern, typed, categorical). |
 | `enforced: false` | edge | **Document only.** The relationship is real and appears in the card and the diagram, but no keys are drawn from it and `fk.orphan` has nothing to check. For join keys that exist in the business model and not in the DDL. |
-| `drives: true` | edge | **Driving edge.** When a child has multiple enforced in-model parents, mark exactly one edge `drives: true` — the parent whose keys this table is generated from (ADR 0036). Every other enforced edge must be **implied** by that parent's relational structure, else the launch stops. |
+| `drives: true` | edge | **Driving edge.** When a child has multiple enforced in-model parents, mark exactly one edge `drives: true` — the parent whose keys this table is generated from (ADR 0036). Optional: with no marker the registry derives the driving edge (most-derived parent, else first declared). Every other enforced edge takes a role from its overlap with this one — `implied`, `independent` or `conditional` (ADR 0037) — and none of them is a launch stop; two `drives: true` on one table is. |
 
 Worked example: `A ← B ← C`. Set `enabled: false` on `B` and a launch on
 `A` generates `A` alone — `C` reached `A` only through `B`.
@@ -372,6 +372,46 @@ uv run --no-sync python3 scripts/relationships/card.py \
   --relationships-uri config/relationships/example_star_diamond.yaml --all
 ```
 
+## What the Dataflow job graph draws
+
+The role table above is also the map of what the job graph shows — and of
+what it deliberately does not. The graph draws **data dependencies**, so
+its arrows point the OPPOSITE way to this file's `fk:` arrows: out of a
+parent's landed rows, into the child that consumes them.
+
+| role | in the Dataflow job graph |
+|---|---|
+| `driving` | a real edge — the parent's `valid` rows → `FanoutKeys` (project the tuple, drop NULLs, `FanoutDistinct` unless the projection already holds the parent's PK) → `Reshuffle` → the child's key batches |
+| `conditional` | a real edge — the parent's rows → Top-M per shared value → `CoGroupByKey` with the driving keys |
+| `independent` | a **side input** into the child's generate step (the ADR 0030/0031 sampled key pool) |
+| `implied` | **nothing at all** — not even a parent lookup |
+| `external` | nothing — the parent is outside the launch and its key pool is built driver-side |
+
+So a child that declares several foreign keys often has **one** arrow
+into it, not one per key. That is correct, not a missing edge. Take the
+grandparent shape (`c` with edges to `p` and to `gp`): the `(G)->gp`
+edge resolves `implied`, because its columns are a subset of the driving
+edge's AND `p` itself carries `G` from `gp` — either through its own
+declared edge, or after the launcher **widens** that edge with the
+columns `c` pins (`fk_edge_widened`, ADR 0036 rev 2). So `c` copies `G`
+straight out of the driving key tuple it already received from `p`, and
+that value exists in `gp` because `p`'s own edge is what put it there.
+No data has to travel from `gp` to `c`, so no edge is drawn. **The graph
+shows where data moves; a key that needs no data of its own needs no
+arrow.**
+
+**Do not read integrity off the graph — prove it after the run.** The
+`/e2e_fk_pk_validator` prompt
+(`.github/prompts/e2e_fk_pk_validator.prompt.md`) reads the contract
+through this registry, so implied and widened edges arrive exactly as the
+launch resolved them, and runs one **whole-tuple orphan query per
+enforced edge** — the child's `cols` LEFT JOINed against
+`SELECT DISTINCT ref_cols` of the parent, NULL tuples excluded, expecting
+`orphans = 0` — then cross-checks every count against
+`validation_runs.dlq_by_rule`. An implied edge that drew no arrow is
+proven there like every other edge; an `external` one is checked against
+its own FQN when that table is readable.
+
 ## What a launch does with it
 
 | Target(s) | `--generate_fk_relationships` | Result |
@@ -395,6 +435,9 @@ the rest as `pk.duplicate` (2026-08-25: 99.4% duplicates in the sample →
 74 rows landed of 1,000,000, BLOCKER gate tripped 11 minutes and one GPU
 later). Fix the `pk:` (usually a missing discriminating column), lower
 `--num_rows`, or move the column to `identity:` if it was never a key.
+One exception, and it is the common relational one: a driven child whose
+FULL source was measured no longer stops here — the measurement decides
+instead (next section).
 
 A column listed under `identity:` that ALSO carries a `pattern` (or any
 clause the router can sample) is generated from that clause — unique per

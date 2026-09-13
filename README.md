@@ -31,7 +31,7 @@ Teams need realistic tabular data for development, testing, and analytics protot
 
 This pipeline reads a table's DDL and a bounded reference sample (≤10k rows, deterministic `FARM_FINGERPRINT` ordering), runs open-weight LLMs entirely inside your own cloud project, and writes validated synthetic rows back to BigQuery — with **memorization measured and gated on every run**. The fully self-hosted design (no data egress, open-weight models only, auditable per-run quality records) aligns directly with EU AI Act and data-sensitivity expectations.
 
-**Status:** v0.1.0 released ([release history](docs/releases/README.md)) — both engines, relational PK/FK generation, stats-driven fidelity, and the full validation/DLQ/audit chain, measured on real Dataflow GPU runs at 1M and 10M rows per table. 1,330 automated laptop tests green in CI; the standalone evaluation framework (Tier-1/2/3 metrics) remains branch-resident on `ws3-eval-framework`.
+**Status:** v0.3.0 ([release history](docs/releases/README.md)) — both engines, relational PK/FK generation, stats-driven fidelity, and the full validation/DLQ/audit chain, measured on real Dataflow GPU runs at 1M and 10M rows per table. v0.3.0 adds **parent-driven fan-out** (children generated from their parent's landed keys), **multi-parent children**, and a launch that **adjusts a declared model the source disproves** — laptop-proven on DirectRunner, with the Dataflow acceptance launch for that path still pending (see [Relational generation](#relational-generation-pkfk)). 1,737 automated laptop tests; the standalone evaluation framework (Tier-1/2/3 metrics) remains branch-resident on `ws3-eval-framework`.
 
 ## Architecture at a glance
 
@@ -41,7 +41,7 @@ One Dataflow job generates parent and child tables with FK integrity by construc
 
 Plain flow: `BigQuery (DDL + reference sample) → Dataflow GPU workers (GCS model weights warm-pulled; vLLM spawned in-worker; multi-threaded inference) → BigQuery (landing + DLQ + audit tables)`.
 
-The single-job relational shape (parents generated first, their keys propagated to child-table draws as side inputs) is [ADR 0030](docs/adr/0030-single-job-relational-generation.md); the diagram source is [`docs/assets/architecture-overview.drawio`](docs/assets/architecture-overview.drawio).
+The single-job relational shape (parents generated first, their landed keys reaching the children in the same job) is [ADR 0030](docs/adr/0030-single-job-relational-generation.md); since v0.3.0 a child is generated *from* those keys rather than sampling a key pool ([ADR 0036](docs/adr/0036-parent-driven-fanout-generation.md)) — see [Relational generation](#relational-generation-pkfk). The diagram source is [`docs/assets/architecture-overview.drawio`](docs/assets/architecture-overview.drawio).
 
 ## Generation engines
 
@@ -75,15 +75,87 @@ Per-column **prompt constraints** (operator-declared clauses, length bands, form
 
 ## Relational generation (PK/FK)
 
-The flagship result of v0.1.0: multi-table generation with **referential integrity by construction**, not post-hoc repair.
+Multi-table generation with **referential integrity by construction**, not post-hoc repair. One versioned model — [`config/relationships/*.yaml`](config/relationships/README.md), never a table description ([ADR 0032](docs/adr/0032-relationships-as-config.md)) — declares PK/FK/identity structure with `enabled` / `enforced` / `drives` flags, and every launcher and worker logs one **relationship card** so the enforced shape is auditable per run.
 
-- **Relationships are config, not annotations** ([ADR 0032](docs/adr/0032-relationships-as-config.md)): PK/FK/identity structure lives in versioned [`config/relationships/*.yaml`](config/relationships/README.md) files with `enabled`/`enforced` flags — table descriptions are never read for relational structure. Every launcher and worker logs one **relationship card** so the enforced shape is auditable per run.
-- **Joint FK draws** ([ADR 0031](docs/adr/0031-joint-fk-key-draws.md)): child FK columns are drawn as **joint key tuples from observed parent combinations**, weighted by IPF-fitted marginals — drawing composite keys per-column would have produced ≥97% orphans on the measured two-table case.
-- **Single-job pipeline** ([ADR 0030](docs/adr/0030-single-job-relational-generation.md)): one Dataflow job generates parents first and propagates their keys to child draws via side inputs — one vLLM server, table-tagged logs, no cross-job key handoff.
+**What v0.3.0 changed**, one sentence each:
+
+- **Children are generated FROM their parent's landed keys** ([ADR 0036](docs/adr/0036-parent-driven-fanout-generation.md)): the source's children-per-parent-key histogram is measured once against the source table (cached between launches when `--fk_fanout_stats_table` names one), the child's row count is *derived* from it rather than taken from `--num_rows`, and the PK members that complete the key outside the driving edge are drawn **without replacement per parent key** wherever they are enumerable — so the parent/child ratio, the child's key uniqueness and its referential integrity all hold by construction instead of being rejected afterwards. The two 10M-row launches that motivated this lost 87.9% then 56.5% of their rows to `pk.duplicate`, drawing those same keys at random ([ADR 0035](docs/adr/0035-pk-capacity-fk-bound-members.md)).
+- **A child may have SEVERAL parents** ([ADR 0037](docs/adr/0037-multi-parent-children.md)): the registry gives every enforced edge one of five roles — `driving`, `implied`, `independent`, `conditional`, `external` — and each role its own DAG path, so star schemas, diamonds, trees, chains (1:1 included), forests and a child that reaches both its parent and its grandparent all generate from one declared model. Nothing new is declared: the roles are derived from `cols` and the model's own DAG.
+- **A measured conflict adjusts the model, loudly** ([ADR 0038](docs/adr/0038-measured-conflicts-adjust-the-model.md)): when a full-source measurement of the *declared* `pk:` proves it is not a key of the source, the launch drops that key from the **effective** model for the run, prints a `MODEL ADJUSTED` banner, emits the effective YAML to paste back, and carries on — rather than refusing a five-table launch over a fact the pipeline had just paid to measure. `--on_model_conflict=stop` restores the refusal; a model that contradicts *itself* still stops under both settings.
+
+### The shapes one model can declare
+
+**Every one of these generates from a single declared model — each child has exactly one *driving* edge it is generated from, and every other edge gets a role instead of a launch stop.** Arrows point the way the model declares them, child → the parent it references:
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph star["⭐ star — a fact under two unrelated dimensions"]
+    DA[("🗄️ dim_a<br/>pk A_KEY")]:::store
+    DB[("🗄️ dim_b<br/>pk B_KEY")]:::store
+    FACT[("🗄️ fact<br/>pk A_KEY,B_KEY,LINE_NO")]:::store
+    FACT -->|"DRIVES"| DA
+    FACT -->|"independent"| DB
+  end
+
+  subgraph diamond["💎 diamond — two branches rejoining"]
+    TOP[("🗄️ top<br/>pk T")]:::store
+    LEFT[("🗄️ left<br/>pk T,L")]:::store
+    RIGHT[("🗄️ right<br/>pk T,R")]:::store
+    BOT[("🗄️ bottom<br/>pk T,L,R")]:::store
+    LEFT -->|"DRIVES"| TOP
+    RIGHT -->|"DRIVES"| TOP
+    BOT -->|"DRIVES"| LEFT
+    BOT -->|"conditional on (T)"| RIGHT
+  end
+
+  subgraph tree["🌳 chain and tree — one parent each"]
+    ROOT[("🗄️ root<br/>pk R")]:::store
+    MID[("🗄️ mid<br/>pk R,M")]:::store
+    LF1[("🗄️ leaf1<br/>pk R,M,L")]:::store
+    LF2[("🗄️ leaf2<br/>pk R,M,Q")]:::store
+    MID -->|"DRIVES"| ROOT
+    LF1 -->|"DRIVES"| MID
+    LF2 -->|"DRIVES"| MID
+  end
+
+  subgraph forest["🌲 forest — independent components, one of them 1:1"]
+    AA[("🗄️ a<br/>pk A")]:::store
+    BB[("🗄️ b<br/>pk A,B")]:::store
+    EE[("🗄️ e<br/>pk E")]:::store
+    FF[("🗄️ f<br/>pk E — the PK IS the edge")]:::store
+    BB -->|"DRIVES"| AA
+    FF -->|"DRIVES · 1:1"| EE
+  end
+
+  subgraph anc["🧬 a child reaching parent and grandparent"]
+    GP[("🗄️ gp<br/>pk G")]:::store
+    PA[("🗄️ p<br/>pk G,P")]:::store
+    CH[("🗄️ c<br/>pk G,P,C")]:::store
+    PA -->|"DRIVES"| GP
+    CH -->|"DRIVES"| PA
+    CH -->|"implied"| GP
+  end
+```
+
+Read your own model off it: one parent per child is the common case and needs no flags at all; a second parent with **no column in common** with the driving edge is `independent` (the star's `dim_b`, drawn as a whole key tuple from the sampled pool); a second parent **sharing** a column is `conditional` (the diamond's `right` — `T` comes from the driving key, `R` is a candidate that exists in `right` *for that* `T`); a parent the driving parent already reaches is `implied` and costs nothing. Where no parent descends from the others and no edge is marked `drives: true`, the **first declared** edge drives and the launcher says so (`fk_driving_edge_defaulted`, WARNING) — `drives: true` is how you choose. The registry sweep pins every shape above (`packages/sdfb-tests/tests/unit/contracts/test_relationship_shapes.py`) and the DirectRunner suite generates them end to end with whole-tuple FK checks (`packages/sdfb-tests/tests/unit/test_fanout_shapes.py`); the two multi-parent shapes are a runnable sample: [`config/relationships/example_star_diamond.yaml`](config/relationships/example_star_diamond.yaml).
+
+### One arrow in the job graph can carry several keys
+
+A child with several foreign keys usually shows **one** incoming arrow in the Dataflow job graph, not one per key. That is correct, not a missing edge: the job graph draws **data dependencies**, and an `implied` edge moves no data — the child copies those columns out of the driving key tuple it already received. The full role → job-graph mapping, and how to *prove* integrity after a run instead of inferring it from the picture, is in [`config/relationships/README.md` § What the Dataflow job graph draws](config/relationships/README.md#what-the-dataflow-job-graph-draws).
+
+### The rest of the chain, unchanged
+
+- **Joint FK draws** ([ADR 0031](docs/adr/0031-joint-fk-key-draws.md)): where a child draws from a key pool — an `independent` or `external` edge — FK columns are drawn as **joint key tuples from observed parent combinations**, weighted by IPF-fitted marginals; drawing composite keys per-column would have produced ≥97% orphans on the measured two-table case.
+- **Single-job pipeline** ([ADR 0030](docs/adr/0030-single-job-relational-generation.md)): one Dataflow job generates the whole enabled component, parents first — one vLLM server, table-tagged logs, no cross-job key handoff.
 - **Launch scenarios** ([ADR 0029](docs/adr/0029-fk-model-scenarios-and-history-mappings.md)): minimal-input launches (landing table + flag), derived FK activation, and closure expansion resolve which tables join a run.
-- **Orphan gate**: `fk.orphan` findings are BLOCKER-severity — a run that would land orphaned child rows fails.
+- **Orphan gate**: `fk.orphan` findings are BLOCKER-severity — a run that would land orphaned child rows fails. `fk.unmatched` (ADR 0037) is its deliberate opposite: a driving key whose conditional parent holds no candidate is an *input* fact, dropped before any GPU spend and counted, not a generator regression.
 
-Measured at scale ([ADR 0033](docs/adr/0033-pool-ladder-integrity-at-scale.md)): the R6 FK-enforced acceptance pair (1M + 10M rows/table) landed **0 orphans in 10,000,000 child rows** — evidence bundle: [`docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/`](docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/).
+Measured at scale ([ADR 0033](docs/adr/0033-pool-ladder-integrity-at-scale.md)): the R6 FK-enforced acceptance pair (1M + 10M rows/table) landed **0 orphans in 10,000,000 child rows** — evidence bundle: [`docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/`](docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/). That pair predates the fan-out path: ADRs 0036–0038 are laptop-proven (unit + DirectRunner) and their Dataflow acceptance is still open — the 2026-09-13 five-table launch generated three tables through the fan-out with the model adjustment live, then failed the BLOCKER gate on another table's declared key that nothing had measured yet — which is exactly the measurement ADR 0038 now makes at launch.
 
 ![FK orphan rate — per-column vs joint draws](docs/designs/assets/fk-orphan-rate.png)
 
@@ -125,7 +197,7 @@ Skew is tracked with **normalised entropy** and **`top1_share`** (a balanced enu
 
 ```bash
 uv sync --group dev
-uv run pytest -m "not gpu and not gcp" -q   # 1,330 tests, all green
+uv run pytest -m "not gpu and not gcp" -q   # 1,737 tests
 uv run ruff check .
 uv run mypy packages/sdfb-core/src          # hard CI gate — 0 errors
 ```
@@ -165,7 +237,7 @@ Real-run evidence flows through a fixed contract:
 
 | Layer | Where | What |
 |---|---|---|
-| Decisions | [`docs/adr/`](docs/adr/README.md) | 33 ADRs — every locked decision with alternatives and primary-source citations |
+| Decisions | [`docs/adr/`](docs/adr/README.md) | 38 ADRs — every locked decision with alternatives and primary-source citations |
 | Designs | [`docs/designs/`](docs/designs/) | visual-first design docs with regenerable figures ([`docs/designs/assets/`](docs/designs/assets/)) |
 | Guides | [`docs/`](docs/) | run playbook, CI/CD, deployment prerequisites, DDL contract guide, model layout, E2E matrix |
 | Releases | [`docs/releases/`](docs/releases/README.md) | per-version deterministic reports + promoted evidence bundles |
@@ -204,7 +276,7 @@ Synthetic-data concepts **as implemented here** — every term is backed by code
 - **PSI (population stability index)** — drift of a column's distribution vs the previous run (eval tier, branch-WIP).
 - **Determinism / seeding** — all sampling flows from `blake2b(run_id, batch_id)`-derived seeds: same inputs → same synthetic output, distinct batches → distinct draws.
 
-### Relational concepts (v0.1.0)
+### Relational concepts
 
 - **Relationship config** — the versioned `config/relationships/*.yaml` model declaring PK/FK/identity structure, with `enabled`/`enforced` flags; the single source of relational truth (table descriptions are never read).
 - **Relationship card** — the one-block launcher/worker log rendering the enforced relational shape of the run; the audit trail for what integrity was in force.
@@ -212,7 +284,15 @@ Synthetic-data concepts **as implemented here** — every term is backed by code
 - **IPF weights** — iterative proportional fitting over the joint tuple table so drawn combinations also reproduce each column's marginal distribution.
 - **Orphan rate** — fraction of child rows whose FK tuple matches no parent row; `fk.orphan` findings are BLOCKER-severity (measured: 0/10M on the R6 pair).
 - **Launch scenarios** — the three minimal-input ways a relational run resolves its table set: landing table + flag, derived FK activation, closure expansion.
-- **Parents-first / single-job propagation** — one Dataflow job generates parent tables, then feeds their keys to child generation as side inputs — no cross-job handoff.
+- **Parents-first / single-job propagation** — one Dataflow job generates parent tables before their children; a driven child takes the parent's landed keys as its generation input, and a parent it does not descend from reaches it as a side-input key pool — no cross-job handoff either way.
+- **Driving edge** — the one edge a child is generated *from*: its parent's landed keys become the child's request stream. Derived from the model (single edge · `drives: true` · most-derived parent · first declared), never guessed.
+- **Fan-out histogram** — children-per-parent-key, measured once over the **source** child table (never the 10k sample, which almost never holds two rows of one parent) and cached in `synthetic_data_quality.fk_fanout_stats`. It sizes a driven child: `rows = parent keys × mean fan-out`, not `--num_rows`.
+- **Cell table** — the joint distribution of the PK members that complete a driven child's key outside the driving edge; drawn **without replacement** per parent key, so two children of one key cannot collide on the PK.
+- **Edge role** — `driving` / `implied` / `independent` / `conditional` / `external`; assigned per enforced edge by column overlap with the driving edge, and mapped one-to-one onto a DAG path.
+- **Conditional edge** — a second parent sharing a column with the driving edge: joined co-partitioned on the shared columns, so the shared value comes from the driving key and the rest is a candidate that exists in that parent for it.
+- **Candidate cap (`--fk_candidate_cap`, default 64)** — the Top-M candidate tuples kept per shared value on a conditional edge, so a hot shared key never carries an unbounded list into a request.
+- **`fk.unmatched`** — DLQ rule for a driving key whose conditional parent has no candidate and whose remaining columns cannot be NULL: the key is dropped *before* generation (no GPU spend) and counted. Unlike `fk.orphan` it is an input fact, not a regression.
+- **Model adjustment (`--on_model_conflict`)** — when a full-source measurement proves a declared `pk:` is not a key of the source, the launch drops it from the **effective** model for that run, announces it (`MODEL ADJUSTED` banner, milestone, emitted YAML), keeps measuring `pk.duplicate` on that table while excluding it from the blocker gate, and writes source-vs-landing key-repeat shares as proof the copy is faithful.
 - **Constraint router** — the tiered router (prompt vs bounded tiers) that decides how each operator-declared column constraint is enforced during generation.
 - **Pool ladder** — the staged free-text pool sizing that scales pool targets with requested rows (not sample size), keeping distinct counts healthy at 1M/10M scale.
 - **Identity column** — a column owned by identity synthesis (UUIDs, account-style identifiers) — derived deterministically per row, never sampled from reference data.
@@ -248,7 +328,11 @@ Apache-2.0.
 
 | Claim / number | Source of truth |
 |---|---|
-| 1,330 laptop tests green (2026-08-31) | `uv run pytest -m "not gpu and not gcp" --collect-only` on `master` |
+| 1,737 laptop tests (2026-09-14) | `uv run --no-sync python3 -m pytest -m "not gpu and not gcp" --collect-only -q` on `ws12-fanout-generation` → `1737/1738 tests collected (1 deselected)` |
+| Children generated from parent keys — ratio, PK uniqueness and FK integrity by construction | [ADR 0036](docs/adr/0036-parent-driven-fanout-generation.md) · `packages/sdfb-tests/tests/unit/test_fanout_three_tables.py` (DirectRunner, three-table shape) |
+| Star / diamond / tree / chain / forest / grandparent all resolve to roles, and generate | [ADR 0037](docs/adr/0037-multi-parent-children.md) · `packages/sdfb-tests/tests/unit/contracts/test_relationship_shapes.py` (registry) · `packages/sdfb-tests/tests/unit/test_fanout_shapes.py` (DirectRunner, whole-tuple FK checks) |
+| A measured PK conflict adjusts the effective model instead of stopping the launch | [ADR 0038](docs/adr/0038-measured-conflicts-adjust-the-model.md) · `packages/sdfb-tests/tests/unit/cli/test_model_adjustment.py` · `packages/sdfb-tests/tests/unit/test_fanout_adjusted_pk.py` |
+| 87.9% then 56.5% `pk.duplicate` on random draws of an FK-bearing PK (10M rows/table) | [ADR 0035](docs/adr/0035-pk-capacity-fk-bound-members.md) — launches `2026-09-09_09_00_54-…`, `2026-09-09_16_44_42-…` |
 | 0 orphans / 10,000,000 child rows (R6 FK-enforced pair) | [`docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/`](docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/) · [ADR 0033](docs/adr/0033-pool-ladder-integrity-at-scale.md) |
 | 19.1 GPU-hours of duplicated pool builds (1M-row run, 36 rebuilds) | [ADR 0020](docs/adr/0020-freetext-pools-as-persisted-artifact.md) |
 | ~7,257 CPU-s bulk generation for 1M rows; batched Pandera bounds | [`docs/designs/2026-07-27-ws6-pipeline-shape.md`](docs/designs/2026-07-27-ws6-pipeline-shape.md) |

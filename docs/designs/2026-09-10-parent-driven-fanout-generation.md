@@ -1,6 +1,7 @@
 # Parent-driven fan-out generation — children are generated from their parent's keys
 
 **Status:** ACCEPTED (laptop, 2026-09-10) — ADR 0036; Dataflow acceptance pending the M4 three-table launch
+**Amended since:** §3's driving-edge table is superseded — ADR 0036 **rev 2** (derived driving parent + widening) and [ADR 0037](../adr/0037-multi-parent-children.md) (first-declared default; the `independent` and `conditional` roles replace the "neither driving nor implied" stop). The rest of this document stands; what a launch does when the full source disproves a declared `pk:` is [ADR 0038](../adr/0038-measured-conflicts-adjust-the-model.md), which post-dates this design.
 **Implementation rulings** made during Tasks 1–11 that this doc predates (design intent unchanged, mechanism refined) are recorded in [ADR 0036 §Decision](../adr/0036-parent-driven-fanout-generation.md#decision) D1–D6, numbered inline as `[Ruling N]`.
 **Depends on:** [ADR 0030](../adr/0030-single-job-relational-generation.md) (single-job relational launch) · [ADR 0031](../adr/0031-joint-fk-key-draws.md) (joint key tuples) · [ADR 0032](../adr/0032-relationships-as-config.md) (model files) · [ADR 0035](../adr/0035-pk-capacity-fk-bound-members.md) (why random draws cannot key a child)
 **Supersedes, for in-job edges:** the FK key-pool side input and its cap (ADR 0030/0031/0035), the IPF child-marginal weighting (ADR 0031 D2), and `--num_rows` on driven children
@@ -85,13 +86,25 @@ is generated from.
 | several, one marked `drives: true` | the marked edge | every other edge must be *implied* (below) |
 | several, none marked | — | **stop**: name the candidates and the one-line edit |
 
+> **Superseded, twice.** The last row never shipped as written: ADR 0036
+> **rev 2** derives the driving edge when no edge is marked (the
+> most-derived parent drives and its edge is widened), and
+> [ADR 0037](../adr/0037-multi-parent-children.md) D2 completes the rule
+> — with no marker and no ancestry, the **first declared** edge drives
+> with a `fk_driving_edge_defaulted` WARNING. The "must be *implied*"
+> column went with it: a non-implied edge is now `independent` or
+> `conditional`, not a stop. The only stop left is two edges marked
+> `drives: true` on one table.
+
 An edge is **implied** when its columns are a subset of the driving
 edge's columns and the driving parent carries those columns from that
 other parent through its own enforced edge (transitively). A_TABLE's
 edge to B_TABLE is implied through C_TABLE's widened edge. An edge that
-is neither driving nor implied is a preflight stop with the exact edit —
-today it is a silent overwrite (`_draw_fk_columns` writes each edge's
-columns in turn; the last edge wins).
+is neither driving nor implied was, at the time of writing, a preflight
+stop with the exact edit — before ADR 0036 it was a silent overwrite
+(`_draw_fk_columns` writes each edge's columns in turn; the last edge
+wins). ADR 0037 replaced that stop with the `independent` and
+`conditional` roles.
 
 ```mermaid
 flowchart BT

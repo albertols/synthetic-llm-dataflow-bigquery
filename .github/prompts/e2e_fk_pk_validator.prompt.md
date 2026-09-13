@@ -292,6 +292,15 @@ edge overwrote its shared columns, so a non-zero orphan count there is
 the KNOWN limitation (ADR 0037 §9), not a regression — report it with
 the remedy (enable the parent inside the launch).
 
+**An `implied` edge is checked here too — and it is the one the job
+graph never draws.** It moves no data (the child copies those columns out
+of the driving key tuple its parent already carries, widened where
+needed), so a child with several FKs shows ONE arrow into it in the
+Dataflow graph, not one per key. That is by design, not a missing edge:
+this query is where an implied edge is proven, and it must return
+`orphans = 0` exactly as a driving edge does. Same for an `independent`
+edge, which appears in the graph as a side input rather than an arrow.
+
 **A `conditional` edge is checked with the SAME query.** Its role changes
 how the values were produced (the shared `overlap` columns came from the
 driving key, the `rest` from a co-partitioned join), not what integrity
