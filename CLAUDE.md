@@ -12,7 +12,7 @@ Generate fictitious-but-realistic synthetic rows for a target BigQuery table, dr
 2. **No HuggingFace Hub at runtime.** Weights live in `gs://{bucket}/synthetic/models/{family}/{model}/{version}/`, pulled once on the M4. The `transformers` / `safetensors` libraries are fine as file-format readers — never call `from_pretrained("org/repo")` against the Hub. `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are set in the GPU container.
 3. **No Dataplex, no Looker.** Validation results land in BigQuery `synthetic_data_quality.*` tables and GCS HTML/JSON artifacts only. Do not propose dashboards or DQ scans.
 4. **No external LLM APIs.** GPT / Claude / Grok / Deepseek API calls violate the self-hosting contract. Off-pipeline benchmarking scripts are M2+ and out of M1 scope.
-5. **Single-table only for M1.** Primary-key awareness is in scope; FK / multi-table joins are M2+.
+5. **Relational generation is SHIPPED — this constraint is retired (v0.3.0).** A launch generates a whole connected component of `config/relationships/*.yaml` in ONE job: children are generated from their parent's landed keys, so ratio, PK uniqueness and referential integrity hold by construction (ADR 0036). A child may have several parents — star, diamond, tree, forest, 1:1 chain, arbitrary FK graph (ADR 0037). When measuring the source proves the declared model wrong, the launch adjusts the model, says so, and carries on (ADR 0038). The relationship model is the ONLY source of relational structure; table descriptions are never read for it.
 
 Locked rationale: `~/.claude/projects/-Users-serna-IdeaProjects-synthetic-dataflow-bigquery/memory/feedback_no_managed_gcp_services.md` and `…/project_synthetic_dataflow_m1_stack.md`.
 
@@ -27,7 +27,7 @@ Mark M4-only tests with `@pytest.mark.gpu` or `@pytest.mark.gcp`. The default `p
 
 ```bash
 uv sync --group dev
-uv run pytest -m "not gpu and not gcp" -q   # expect all green (845+ tests)
+uv run pytest -m "not gpu and not gcp" -q   # expect all green (1754 tests at v0.3.0)
 uv run ruff check .
 uv run mypy packages/sdfb-core/src          # hard CI gate — expect 0 errors
 ```
@@ -79,9 +79,9 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 Full milestone table: [`docs/ROADMAP.md`](docs/ROADMAP.md). Snapshot of M1:
 
 - ✅ §1 Bootstrap · ✅ §2 Contracts · ✅ §3 DDL extractor · ✅ §4 Fake client · ✅ §5 Engine ABC · ✅ §6 B.2 engine · ✅ §7 B.1 engine · ✅ §8 Beam DAG · ✅ §9 vLLM `ModelClient` (mock-tested) · ✅ §10 `docker/Dockerfile` + CI workflows · ✅ §12 thresholds gate + `validation_runs` writer
-- 🔒 §11 E2E Dataflow run (Gemma 4 on L4) — needs M4 + GCP
+- ✅ §11 E2E Dataflow run — done, including a five-table relational launch where every table succeeded (2026-09-13), which is the acceptance ADRs 0036–0038 were waiting on
 
-The laptop side of M1 is done; only the §11 E2E Dataflow run needs M4 + GCP. See [`docs/M4_SETUP.md`](docs/M4_SETUP.md) for onboarding.
+M1 is complete end to end, laptop and Dataflow. The work since has been relational: ADRs 0035-0038 and the five-table launch that proved them. See [`docs/M4_SETUP.md`](docs/M4_SETUP.md) for onboarding.
 
 ## Anti-patterns — do not do these
 
