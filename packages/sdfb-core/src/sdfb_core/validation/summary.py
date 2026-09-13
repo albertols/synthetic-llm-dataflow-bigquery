@@ -12,7 +12,7 @@ REF: .claude/skills/validation-mode-a.md
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
@@ -83,6 +83,13 @@ class RunSummary(BaseModel):
     landing_repeat_share: float | None = None
     repeat_share_delta: float | None = None
     repeat_share_within_tolerance: bool | None = None
+    # ADR 0038 fix H4 — empty when the two shares describe the same
+    # columns (and the verdict above stands); otherwise WHY no verdict
+    # was written. The source share is measured over the driving edge and
+    # `pk.duplicate` over the full declared PK, so a PK with completing
+    # members outside that edge describes a different, narrower key: a
+    # delta between them is arithmetic, not evidence.
+    repeat_share_note: str = ""
 
     def to_bq_row(self) -> dict:
         """JSON-load-shaped row. ``dlq_by_rule`` is a JSON string so the
@@ -90,6 +97,35 @@ class RunSummary(BaseModel):
         row = self.model_dump()
         row["dlq_by_rule"] = json.dumps(row["dlq_by_rule"], sort_keys=True, default=str)
         return row
+
+
+def gate_total(
+    valid_count: int,
+    dlq_by_rule: Mapping[str, int],
+    excluded: Collection[str] = (),
+) -> int:
+    """The BLOCKER gate's DENOMINATOR — the rows this run actually
+    generated, which is ``valid_count`` plus every DLQ row the gate
+    still weighs.
+
+    An EXCLUDED rule (ADR 0038) leaves BOTH sides of the ratio. Leaving
+    it in the denominator alone divides every OTHER blocker rule on that
+    table by the expected duplicates too, so the gate stops firing at the
+    configured threshold: on the 2026-09-12 E_TABLE shape a genuine
+    1,400-row `engine_failure` over 104,209 generated rows read 0.00886
+    against a 0.01 gate and PASSED, where the honest 0.01343 fails.
+    `pipeline._gate_inputs` already argues this arithmetic for
+    `valid_count` in streaming mode ("a silently weaker gate"); the same
+    reasoning ends at the excluded rules.
+
+    ``dlq_count`` and ``dlq_by_rule`` are deliberately NOT touched: the
+    summary row still REPORTS every diverted record. Only the gate's
+    arithmetic narrows.
+    """
+    excluded_ids = frozenset(excluded)
+    return int(valid_count) + sum(
+        c for rid, c in dlq_by_rule.items() if rid not in excluded_ids
+    )
 
 
 def build_run_summary(
@@ -107,6 +143,7 @@ def build_run_summary(
     created_at: str | None = None,
     excluded_blocker_rules: Sequence[str] = (),
     source_repeat_share: float | None = None,
+    repeat_share_note: str = "",
 ) -> RunSummary:
     """Fold counts + thresholds into a :class:`RunSummary` with a status.
 
@@ -122,6 +159,12 @@ def build_run_summary(
     the landed share is derived from the same counts (`pk.duplicate`
     over the rows generated) and the delta is checked against
     ``REPEAT_SHARE_TOLERANCE``.
+
+    ``repeat_share_note`` (fix H4) disarms the VERDICT while keeping both
+    measurements: a non-empty note means the two shares describe
+    different column sets (`ModelAdjustment.repeat_share_note` says
+    which), so the delta and the tolerance verdict are withheld and the
+    reason is written instead of a false negative.
     """
     excluded = frozenset(excluded_blocker_rules)
     dlq_count = sum(dlq_by_rule.values())
@@ -129,11 +172,15 @@ def build_run_summary(
         c for rid, c in dlq_by_rule.items()
         if rid in BLOCKER_RULE_IDS and rid not in excluded
     )
-    total = valid_count + dlq_count
+    total = gate_total(valid_count, dlq_by_rule, excluded)
     landed = landing_repeat_share(
         valid_count=valid_count, dlq_by_rule=dlq_by_rule
     )
-    delta, within = repeat_share_verdict(source_repeat_share, landed)
+    delta, within = (
+        (None, None)
+        if repeat_share_note
+        else repeat_share_verdict(source_repeat_share, landed)
+    )
     observed = (blocker_count / total) if total else 0.0
     status = (
         STATUS_FAILED_BLOCKER
@@ -164,13 +211,21 @@ def build_run_summary(
         ),
         repeat_share_delta=delta,
         repeat_share_within_tolerance=within,
+        repeat_share_note=repeat_share_note,
     )
 
 
 def evaluate_blocker_gate(summary: RunSummary) -> None:
     """Raise :class:`BlockerThresholdExceeded` if the summary failed the gate."""
     if summary.status == STATUS_FAILED_BLOCKER:
-        total = summary.valid_count + summary.dlq_count
+        # The same denominator `observed_blocker_ratio` was computed over
+        # — an excluded rule is out of both (`gate_total`), so the
+        # message never prints a ratio the operator cannot reproduce.
+        total = gate_total(
+            summary.valid_count,
+            summary.dlq_by_rule,
+            [r for r in summary.excluded_blocker_rules.split(",") if r],
+        )
         raise BlockerThresholdExceeded(
             f"BLOCKER failures {summary.blocker_count}/{total} = "
             f"{summary.observed_blocker_ratio:.4f} exceeds gate "

@@ -271,3 +271,81 @@ class TestAdjustedTableGate:
         assert s.repeat_share_within_tolerance is None
         row = s.to_bq_row()
         assert row["repeat_share_within_tolerance"] is None
+
+
+class TestExcludedRuleLeavesBothSidesOfTheRatio:
+    """H1 (2026-09-13 verification) — an excluded rule left the gate's
+    NUMERATOR but stayed in the DENOMINATOR through
+    ``total = valid_count + dlq_count``, so every OTHER blocker rule on
+    an adjusted table was divided by the expected duplicates too and
+    stopped firing at the configured threshold. The gate's total now
+    counts only the rows actually generated; ``dlq_count`` and
+    ``dlq_by_rule`` stay faithful for reporting.
+    """
+
+    # The 2026-09-12 E_TABLE shape: 105,609 derived rows at a 0.5025
+    # source repeat share, minus a genuine 1,400-row engine_failure.
+    _VALID = 105_609 - 1_400
+    _PK_DUPES = round(0.5025 * (105_609 - 1_400))
+
+    def test_a_genuine_engine_failure_fails_the_prd_gate(self):
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=self._VALID,
+            dlq_by_rule={
+                "pk.duplicate": self._PK_DUPES, "engine_failure": 1_400,
+            },
+            thresholds=_thresholds(0.01),
+            excluded_blocker_rules=("pk.duplicate",),
+            source_repeat_share=0.5025,
+        )
+        # The honest ratio is over the rows the run actually generated,
+        # NOT over those plus the expected duplicates.
+        assert s.observed_blocker_ratio == pytest.approx(
+            1_400 / (self._VALID + 1_400)
+        )
+        assert s.observed_blocker_ratio != pytest.approx(
+            1_400 / (self._VALID + self._PK_DUPES + 1_400), abs=1e-6
+        )
+        assert s.status == STATUS_FAILED_BLOCKER
+        # Reporting is untouched: the duplicates are still counted.
+        assert s.dlq_count == self._PK_DUPES + 1_400
+        assert s.dlq_by_rule["pk.duplicate"] == self._PK_DUPES
+
+    def test_a_schema_failure_reads_its_true_share(self):
+        """26,000 schema.types failures on the same table read 0.1639
+        against the dev 0.2 gate while the duplicates padded the
+        denominator; the true share is 0.2462."""
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=105_609 - 26_000,
+            dlq_by_rule={
+                "pk.duplicate": round(0.5025 * 105_609),
+                "schema.types": 26_000,
+            },
+            thresholds=_thresholds(0.2),
+            excluded_blocker_rules=("pk.duplicate",),
+        )
+        assert s.observed_blocker_ratio == pytest.approx(
+            26_000 / 105_609, abs=1e-4
+        )
+        assert s.status == STATUS_FAILED_BLOCKER
+
+    def test_a_non_adjusted_tables_ratio_is_unchanged(self):
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=900,
+            dlq_by_rule={"pk.duplicate": 100}, thresholds=_thresholds(0.2),
+        )
+        assert s.observed_blocker_ratio == pytest.approx(100 / 1_000)
+        assert s.status == STATUS_PASSED
+
+    def test_the_gate_message_names_the_honest_denominator(self):
+        s = build_run_summary(
+            run_id="r", reference_digest="d", valid_count=self._VALID,
+            dlq_by_rule={
+                "pk.duplicate": self._PK_DUPES, "engine_failure": 1_400,
+            },
+            thresholds=_thresholds(0.01),
+            excluded_blocker_rules=("pk.duplicate",),
+        )
+        with pytest.raises(BlockerThresholdExceeded) as exc:
+            evaluate_blocker_gate(s)
+        assert f"1400/{self._VALID + 1_400}" in str(exc.value)

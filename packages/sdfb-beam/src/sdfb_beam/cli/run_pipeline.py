@@ -50,6 +50,7 @@ from sdfb_core.contracts.model_adjustment import (
     adjusted_model_yaml,
     adjusted_models,
     adjustment_banner,
+    landed_distinct_keys,
 )
 from sdfb_core.contracts.prompt_constraint import parse_llm_prompt_constraint
 from sdfb_core.contracts.relationships import (
@@ -946,6 +947,30 @@ def adjusted_fanout_payload(
     return {**fanout, "exact_cells": False}
 
 
+def distinct_keys_landed(
+    num_rows: int, adjustments: Sequence[ModelAdjustment]
+) -> int:
+    """How many DISTINCT key values this table hands its children (ADR
+    0038 fix H3) — its rows, unless its own `pk:` was ADJUSTED away, in
+    which case it lands the source's key repeats and holds
+    ``rows x (1 - source_repeat_share)`` distinct ones.
+
+    The composer already fans a child out over the parent's distinct keys
+    (`parent_pk=()` arms `FanoutDistinct`); this is the number the
+    child's row count must be DERIVED from so the request matches what
+    the DAG can produce.
+    """
+    share = next(
+        (
+            a.source_repeat_share
+            for a in adjustments
+            if a.source_repeat_share is not None
+        ),
+        None,
+    )
+    return landed_distinct_keys(num_rows, share)
+
+
 def resolve_table_rows(
     landing_table: str, *, driven: bool, derived_rows: int | None, launch_rows: int
 ) -> int:
@@ -1750,15 +1775,31 @@ def _load_reference_and_preflight(
     # unknown here and stays at the sample cap (an upper bound — never
     # a false stop).
     rows_by_landing: Mapping[str, int] = getattr(args, "_rows_by_landing", {})
-    fk_parent_rows = {
-        fk.ref: rows_by_landing.get(
-            parent_landing_fqn(
-                fk.ref, derive_fk_parent_landing(args.landing_table)
-            ),
-            args.num_rows,
-        )
+    # ADR 0038 fix H3: the DISTINCT keys each in-set parent lands, which
+    # is what a driven child fans out over. Same carry-forward, filled by
+    # `_run_relational_job` in plan order; it differs from the rows only
+    # for a parent whose own `pk:` was ADJUSTED away.
+    keys_by_landing: Mapping[str, int] = getattr(
+        args, "_distinct_keys_by_landing", {}
+    )
+    parent_landing = derive_fk_parent_landing(args.landing_table)
+    in_set_edges = [
+        fk
         for fk in registry.enforced_edges(args.landing_table)
         if fk.ref.rsplit(".", 1)[-1] in in_set_names
+    ]
+    fk_parent_rows = {
+        fk.ref: rows_by_landing.get(
+            parent_landing_fqn(fk.ref, parent_landing), args.num_rows
+        )
+        for fk in in_set_edges
+    }
+    fk_parent_distinct_keys = {
+        fk.ref: keys
+        for fk in in_set_edges
+        if (keys := keys_by_landing.get(
+            parent_landing_fqn(fk.ref, parent_landing)
+        ))
     }
     thresholds = resolve_thresholds(
         getattr(args, "thresholds_uri", "config/thresholds.yml"),
@@ -1781,6 +1822,9 @@ def _load_reference_and_preflight(
         # categorical members count too, against the run's gate.
         num_rows=args.num_rows,
         fk_parent_rows=fk_parent_rows,
+        # Fix H3: a driven child is sized off its parent's DISTINCT
+        # landed keys — an adjusted parent lands fewer than it has rows.
+        fk_parent_distinct_keys=fk_parent_distinct_keys,
         blocker_failure_ratio=thresholds.blocker_failure_ratio,
         fanout=fanout,
         edge_roles=edge_roles,
@@ -2607,6 +2651,13 @@ def _prepare_table_spec(
         source_repeat_share=(
             adjusted[0].source_repeat_share if adjusted else None
         ),
+        # Fix H4 — when the source share describes the driving edge and
+        # `pk.duplicate` the (wider) declared PK, the two are not
+        # comparable: the summary writes this reason instead of a verdict
+        # over two different column sets.
+        repeat_share_note=(
+            adjusted[0].repeat_share_note if adjusted else ""
+        ),
         strict_freetext=resolve_engine_strictness(args.client_type),
         model_uri=args.model_uri,
         embedder_uri=args.embedder_uri,
@@ -2850,6 +2901,10 @@ def _run_relational_job(
     # --num_rows — plan order is parents-first, so filling this as each
     # spec lands carries it forward to the next table's preflight.
     rows_by_landing: dict[str, int] = {}
+    # ADR 0038 fix H3: and the DISTINCT keys each one lands, which is
+    # what its children fan out over — the same number as its rows unless
+    # its `pk:` was adjusted away.
+    distinct_keys_by_landing: dict[str, int] = {}
     for run in plan.runs:
         table_args = argparse.Namespace(**vars(args))
         table_args.landing_table = run.landing_table
@@ -2859,6 +2914,7 @@ def _run_relational_job(
             args.fk_parent_landing or run.fk_parent_landing
         )
         table_args._rows_by_landing = rows_by_landing
+        table_args._distinct_keys_by_landing = distinct_keys_by_landing
         if run.landing_table not in pin_owners:
             table_args.ddl_uri = ""  # pin describes the target only
         # Collect-then-fail (2026-08-22 launch lesson): one table's
@@ -2875,6 +2931,11 @@ def _run_relational_job(
             )
             rows_by_landing[specs[-1].config.landing_table] = (
                 specs[-1].config.num_rows
+            )
+            distinct_keys_by_landing[specs[-1].config.landing_table] = (
+                distinct_keys_landed(
+                    specs[-1].config.num_rows, specs[-1].adjustments
+                )
             )
         except SystemExit as exc:
             logger.error(

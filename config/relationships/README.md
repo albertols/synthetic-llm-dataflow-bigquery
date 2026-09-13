@@ -423,10 +423,23 @@ stops. It:
 4. keeps MEASURING `pk.duplicate` on that table (it is forced to
    `uniqueness_mode=streaming`, so nothing is removed) but stops
    COUNTING it toward the BLOCKER gate, naming the exclusion in
-   `validation_runs.excluded_blocker_rules`. Every other table's
-   `pk.duplicate` still blocks;
+   `validation_runs.excluded_blocker_rules`. The exclusion leaves BOTH
+   sides of the gate's ratio — the denominator is the rows the run
+   generated, not those plus the expected duplicates — so every OTHER
+   blocker rule on that table still fails at the configured threshold.
+   Every other table's `pk.duplicate` still blocks;
 5. writes the proof: `validation_runs.source_repeat_share` vs
-   `landing_repeat_share`, their delta, and whether it is within ±0.05.
+   `landing_repeat_share`, their delta, and whether it is within ±0.05 —
+   unless the two describe different column sets, in which case
+   `repeat_share_note` says so and no verdict is written. The source
+   share is measured over the DRIVING EDGE, so the comparison is
+   like-for-like only when the declared `pk:` IS that edge (E_TABLE's
+   case). A `pk:` that adds a completing member repeats strictly less
+   often than its driving edge's value does;
+6. sizes any table driven BY the adjusted one off its DISTINCT landed
+   keys, not its rows — an adjusted parent lands repeated keys, so
+   `rows × (1 - source_repeat_share)` of them are distinct, and that is
+   what a child fans out over (`model_adjustment_descendant_rows`).
 
 This is the 2026-09-12 `E_TABLE` case: its `pk:` was a single column
 that is also its driving FK edge, and the source carries a median of two
@@ -436,8 +449,11 @@ duplicates in 10,000 rows and could not tell.
 Two things this does NOT do:
 
 - **the sample never adjusts anything.** 0.4% duplicates in a 10k sample
-  is far too weak to drop a declared key on; it stays the warning (and
-  the >50% stop) it always was.
+  is far too weak to drop a declared key on; it stays the warning it
+  always was. Its >50% STOP also steps aside for a table whose full
+  source was measured (`preflight_pk_sample_stop_deferred`) — a signal
+  too weak to drop a key is too weak to veto one — and still stops every
+  table that has no measurement.
 - **it never edits this file.** The adjustment is per-launch and
   re-derived from the measurement every launch. Making it permanent is
   your deliberate paste.

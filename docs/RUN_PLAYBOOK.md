@@ -623,7 +623,9 @@ Relational:
 | `model_adjustments count= tables=` + the multi-line `MODEL ADJUSTED` block (launcher, **WARNING**, once per launch) | ADR 0038: this run did NOT generate with the model on disk. The block states, per table, what the model declared, what the full source measured, what was dropped, and the consequence — plus the SOURCE key-repeat share the landing table has to match. A run with this block is never a clean run; read it before reading anything else |
 | `model_adjusted table= change=pk_dropped declared= measured= consequence= source_repeat_share=` (launcher, **WARNING**, one per adjustment) | the greppable one-line form of the same fact. `declared` is the `pk:` the model carried; `measured` is what the full-source fan-out proved (max rows per key value, p50, and why the PK cannot tell them apart); `source_repeat_share` is `1 - key_values/children` over the histogram. Fix it permanently by pasting the emitted YAML into `config/relationships/` — or re-launch with `--on_model_conflict=stop` to refuse instead |
 | `model_adjustment_model model= source= uri= tables=` + the YAML body (launcher, **WARNING**, one per adjusted model FILE) | the EFFECTIVE relationship model this run generated with: the declared model with the adjusted tables' `pk:` removed and a comment naming the measurement that removed it. `uri=` is where it was also written (`--staging_location`/`--temp_location` + `/model_adjustments/`), or `(not written)` — the log copy always exists. `model_adjustment_model_unwritten` (WARNING) precedes it when the artifact write failed; the launch continues by design |
-| `model_adjustment_repeat_share table= source= landing= delta= tolerance= within_tolerance= excluded_blocker_rules=` (worker, end of run; **WARNING** unless `within_tolerance=True`) | ADR 0038's proof that the copy is faithful: the SOURCE key-repeat share measured at launch against the one the landing table actually reached (`pk.duplicate` over `valid_count + row.duplicate`). `within_tolerance=False` means the adjusted table did NOT reproduce its source — a fan-out capped to one child per key lands ≈0.00 against a source ≈0.50. The same five figures land in `validation_runs` (`source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`, `excluded_blocker_rules`) |
+| `model_adjustment_repeat_share table= source= landing= delta= tolerance= within_tolerance= comparable= excluded_blocker_rules= note=` (worker, end of run; **WARNING** only when `within_tolerance=False`) | ADR 0038's proof that the copy is faithful: the SOURCE key-repeat share measured at launch against the one the landing table actually reached (`pk.duplicate` over `valid_count + row.duplicate`). `within_tolerance=False` means the adjusted table did NOT reproduce its source — a fan-out capped to one child per key lands ≈0.00 against a source ≈0.50. `comparable=False` (fix H4) means there is deliberately NO verdict: the source share is measured over the DRIVING EDGE and `pk.duplicate` over the full DECLARED PK, and a PK with completing members outside that edge describes a different key — `note=` says so, and `within_tolerance` is NULL rather than a false negative. The same figures land in `validation_runs` (`source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`, `repeat_share_note`, `excluded_blocker_rules`) |
+| `preflight_pk_sample_stop_deferred table= pk= distinct= sample_rows= duplicate_ratio= note=` (launcher, **WARNING**) | fix H2: the 10,000-row sample showed ≥50% duplicate PK tuples, and P5's stop DEFERRED because a full-source fan-out measurement is in scope for this table. The verdict is P4's — it either adjusts the model (the `model_adjusted` row above) or, with `--on_model_conflict=stop`, refuses. Seeing this line with NO `model_adjusted` line after it means P4 found the declared PK fits the measured fan-out after all, and the sample was the weaker signal |
+| `model_adjustment_descendant_rows table= parent= parent_rows= parent_distinct_keys= mean_fanout= derived_rows= unadjusted_rows= note=` (launcher, **WARNING**) | fix H3: this table is driven by a parent whose own `pk:` was ADJUSTED away, so the parent lands REPEATED keys and this table fans out from its DISTINCT ones. `derived_rows` is `parent_distinct_keys × mean_fanout`; `unadjusted_rows` is what sizing it off the parent's rows would have requested — and could not have produced (the 2026-09-12 shape: 220,215 requested against ~109,556 producible). Expect `num_rows_requested` in `validation_runs` to match `derived_rows`, not `unadjusted_rows` |
 | `batch_start batch_id= keys=` / `batch_done batch_id= keys= rows= seconds=` (worker) | a key batch: parent keys in, children out (ADR 0036) — replaces `n=`/`rows=` for a driven child's batches |
 
 ---
@@ -868,6 +870,23 @@ reproduces the source's key-repeat share. Consequences on the run:
   expected value is NOT 0 — it is the source's repeat share, and
   `repeat_share_within_tolerance` is the criterion instead. Every OTHER
   table's `pk.duplicate` is unchanged and still expected 0;
+- the exclusion leaves **both sides** of the ratio (fix H1):
+  `observed_blocker_ratio` is `blocker_count` over the rows the run
+  GENERATED — `valid_count + dlq_count` minus the excluded rules'
+  counts — so every other blocker rule on that table still fails at the
+  configured threshold. Read the ratio against `num_rows_requested`,
+  not against `valid_count + dlq_count`, when
+  `excluded_blocker_rules` is non-empty;
+- `repeat_share_within_tolerance` is NULL with a non-empty
+  `repeat_share_note` when the two shares are not comparable (fix H4:
+  the declared PK is wider than the driving edge the source share was
+  measured over). That is not a failure — it is the absence of a
+  verdict, with the reason in the row;
+- a driven child of that table is sized off its parent's **distinct**
+  landed keys (fix H3, `model_adjustment_descendant_rows`), so its
+  `num_rows_requested` is roughly `(1 - source_repeat_share)` of what
+  the pre-H3 launcher would have asked for. A missed request on such a
+  table is a defect again, not arithmetic;
 - the post-run PK check below, run on an ADJUSTED table, is expected to
   return the source's duplicate count, not 0. Compare it with
   `validation_runs.landing_repeat_share`, not with zero.
@@ -876,6 +895,16 @@ Pass `--on_model_conflict=stop` to get the pre-0038 refusal back, word
 for word. Model SELF-contradictions (unknown columns, two `drives: true`
 edges, an ambiguous role) and the ADR 0035 capacity gate stop under
 BOTH settings.
+
+**P5 defers to the measurement (fix H2).** The sample-based
+"the declared PK is not a key of this data" stop (§"PK capacity" above)
+does NOT fire on a table whose FULL source was measured: it logs
+`preflight_pk_sample_stop_deferred` and hands the verdict to P4, which
+adjusts (default) or refuses (`stop`). Before the fix a driven child
+whose 10k sample showed ≥50% duplicate keys exited the whole launch at
+`[preflight P5]` — zero rows for every planned table — with
+`--on_model_conflict` never read. A table with NO measurement keeps the
+P5 stop exactly as documented.
 
 **Post-run independent PK check (per driven table, expect 0 rows):**
 

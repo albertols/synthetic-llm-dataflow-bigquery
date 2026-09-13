@@ -37,6 +37,7 @@ __all__ = [
     "adjusted_model_yaml",
     "adjusted_models",
     "adjustment_banner",
+    "landed_distinct_keys",
     "landing_repeat_share",
     "repeat_share_verdict",
     "source_repeat_share",
@@ -79,11 +80,58 @@ class ModelAdjustment:
     # counted against them, it simply stops gating (ADR 0038 §3).
     declared_pk: tuple[str, ...] = ()
     source_repeat_share: float | None = None
+    # The columns ``source_repeat_share`` is measured OVER: the driving
+    # edge, because the fan-out histogram groups the source child by it
+    # (fix H4). The LANDING share is `pk.duplicate` over the full
+    # declared PK, so the two describe the same key — and are comparable
+    # — only when these two column sets coincide.
+    repeat_share_basis: tuple[str, ...] = ()
 
     @property
     def table_name(self) -> str:
         """Bare table name — model files key on it, tables arrive FQN."""
         return self.table.rsplit(".", 1)[-1]
+
+    @property
+    def repeat_share_comparable(self) -> bool:
+        """Can the SOURCE share be compared with the LANDING one?
+
+        Only when both describe the same columns. The source share comes
+        off a GROUP BY the DRIVING edge; `pk.duplicate` is measured on the
+        full DECLARED PK (and stays that way — that is the reporting
+        contract). At the second conflict site — a PK with completing
+        members outside the driving edge — the declared PK is WIDER, so
+        its tuple repeats strictly less often than the driving edge's
+        value does and a faithful copy would score a delta far outside
+        tolerance: driving `(PID)` at 0.7778 against a faithful landing
+        `(PID, CAT)` at 0.5702 (fix H4). Equality, not containment, is
+        the test: a PK that merely SUBSETS the driving columns repeats
+        strictly MORE often, which is just as incomparable.
+        """
+        return bool(self.repeat_share_basis) and set(self.declared_pk) == set(
+            self.repeat_share_basis
+        )
+
+    @property
+    def repeat_share_note(self) -> str:
+        """Empty when the two shares are comparable; otherwise the reason
+        no verdict is written, for the operator who would otherwise read
+        a false negative."""
+        if self.repeat_share_comparable or self.source_repeat_share is None:
+            return ""
+        basis = (
+            f"the driving edge ({','.join(self.repeat_share_basis)})"
+            if self.repeat_share_basis
+            else "columns this launch did not record"
+        )
+        return (
+            f"not comparable: the source key-repeat share is measured over "
+            f"{basis}, while pk.duplicate is measured on the declared PK "
+            f"{list(self.declared_pk)} — different column sets, so the "
+            f"±{REPEAT_SHARE_TOLERANCE:.0%} verdict is NOT written. Both "
+            f"shares are still reported; a wider PK repeats strictly less "
+            f"often than its driving edge's value does"
+        )
 
 
 def source_repeat_share(histogram: Mapping[str | int, int]) -> float | None:
@@ -105,6 +153,29 @@ def source_repeat_share(histogram: Mapping[str | int, int]) -> float | None:
         return None
     key_values = sum(n for k, n in hist.items() if k > 0)
     return 1.0 - key_values / children
+
+
+def landed_distinct_keys(rows: int, repeat_share: float | None) -> int:
+    """How many DISTINCT key values a table LANDS (ADR 0038, fix H3).
+
+    A table whose PK the run enforces lands one row per key, so its rows
+    and its distinct keys are the same number. An ADJUSTED table does
+    not: it reproduces the source's key repeats, so
+    ``rows x (1 - source_repeat_share)`` of its rows carry a key value no
+    other row carries.
+
+    This is the multiplier a DESCENDANT must be sized from. The composer
+    fans a child out from its parent's DISTINCT keys (`parent_pk=()`
+    arms `FanoutDistinct` on an adjusted parent), and the fan-out
+    histogram's own denominator is the number of distinct SOURCE key
+    values — so multiplying the parent's ROWS instead asks the child for
+    rows it cannot produce: 220,215 requested against ~109,556
+    producible on the 2026-09-12 shape, a 50.25% shortfall recorded as a
+    missed request.
+    """
+    if rows <= 0 or repeat_share is None:
+        return max(0, int(rows))
+    return max(1, round(rows * (1.0 - repeat_share)))
 
 
 def landing_repeat_share(
@@ -161,11 +232,25 @@ def adjustment_banner(adjustments: Sequence[ModelAdjustment]) -> str:
         lines.append(f"   declared    | {adj.declared}")
         lines.append(f"   measured    | {adj.measured}")
         lines.append(f"   changed     | {adj.consequence}")
-        if share is not None:
+        if share is not None and adj.repeat_share_comparable:
             lines.append(
                 f"   source key-repeat share | {share:.2%} — the landing "
                 f"table must match it within {REPEAT_SHARE_TOLERANCE:.0%} "
                 f"(validation_runs.repeat_share_delta)"
+            )
+        elif share is not None:
+            # Fix H4: say the number AND say it is not the landing
+            # table's yardstick. A verdict over two different column sets
+            # is a false negative, and a false negative on this banner is
+            # worse than no verdict.
+            over = (
+                f" over ({','.join(adj.repeat_share_basis)})"
+                if adj.repeat_share_basis
+                else ""
+            )
+            lines.append(
+                f"   source key-repeat share | {share:.2%}{over} — "
+                f"{adj.repeat_share_note}"
             )
     lines.append(
         "  pk.duplicate on the adjusted table(s) is EXPECTED and is "

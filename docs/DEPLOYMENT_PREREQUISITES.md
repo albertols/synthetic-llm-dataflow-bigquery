@@ -37,7 +37,7 @@ All sinks are `FILE_LOADS` + `WRITE_APPEND` + `CREATE_NEVER`, so the three desti
 | **Reference / source** | `project.dataset.table` (`--reference_table`) | *pre-existing* | The table you clone. Read `SELECT * … LIMIT N` (`sdfb_beam/io/bq_sources.py`). Read access only. |
 | **Landing** | `project.synthetic_data.<source table>` (defaults to the DDL table name; override with `landing_table`) | **derived from the target DDL** | `sdfb_core/codegen/derive_bq_ddl.py` turns the `_ddl.json` into a BQ `TableSchema` → `bq mk`. **No committed schema file** — it's per-target (the preflight writes `config/bq_schema/synthetic_data/<table>.schema.json`). |
 | **DLQ** | `project.synthetic_data_quality.dlq` | `config/bq_schema/synthetic_data_quality/dlq.schema.json` | DAY-partition on `dlq_inserted_at`. |
-| **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. **ADR 0038 added five NULLABLE columns** (`excluded_blocker_rules`, `source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`) — an existing table must be widened before the next run or FILE_LOADS rejects the summary row (see below). |
+| **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. **ADR 0038 added six NULLABLE columns** (`excluded_blocker_rules`, `source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`, `repeat_share_note`) — an existing table must be widened before the next run or FILE_LOADS rejects the summary row (see below). |
 | **rag_chunks** (WS2) | `project.synthetic_rag.rag_chunks` | `config/bq_schema/synthetic_rag/rag_chunks.schema.json` | DAY-partition on `created_at`. **One shared store for the whole project**: chunks from *every* source `dataset.table` coexist, scoped by `source_fqn` and pinned to a vector space by (`embedder_id`, `embedder_version`) — adding a new source table needs **no** new RAG table. Optional (only needed for `--build_rag_layer` / b1 chunk reuse). |
 | **fk_fanout_stats** (ADR 0036) | `project.synthetic_data_quality.fk_fanout_stats` | `config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json` | **OPTIONAL** — no partition. Absent, unreadable or unwritable: the launcher logs `fk_fanout_cache_unavailable` (WARNING) and measures the fan-out every launch instead of caching it. |
 
@@ -58,7 +58,7 @@ bq mk --schema config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.js
       project:synthetic_data_quality.fk_fanout_stats
 ```
 
-An **existing** `validation_runs` predating ADR 0038 needs its five new
+An **existing** `validation_runs` predating ADR 0038 needs its six new
 NULLABLE columns before the next launch — adding columns is a
 non-breaking schema relaxation, so the committed file is applied
 directly:

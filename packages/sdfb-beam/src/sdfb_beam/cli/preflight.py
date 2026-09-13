@@ -489,6 +489,9 @@ def _check_pk_is_a_key(
     distinct: int,
     sample_rows: int,
     num_rows: int,
+    *,
+    measured: bool = False,
+    driven: bool = False,
 ) -> None:
     """Stop when the sample proves the run cannot fill ``num_rows``.
 
@@ -496,6 +499,24 @@ def _check_pk_is_a_key(
     larger synthetic table: the run lands about as many rows as the
     tuple has distinct values and diverts the rest. Cheap to see here,
     expensive to discover at the gate.
+
+    ``measured`` (ADR 0038, fix H2) — this table has a FULL-SOURCE
+    fan-out measurement in scope, so the measurement decides and this
+    stop must not fire. Every premise of the message below is false for
+    such a table: it does not draw its PK from marginals (it draws its
+    parent's keys times the measured fan-out), it never uses
+    ``--num_rows`` (`resolve_table_rows` returns the derived count), and
+    once P4 adjusts, its `pk.duplicate` is excluded from the gate. A
+    10,000-row sample pre-empting that verdict is how the 2026-09-12
+    launch produced zero rows for five tables — at P5, before
+    ``--on_model_conflict`` was ever read. The deferral is announced, so
+    the operator sees the hand-off rather than a silence.
+
+    ``driven`` without ``measured`` is the one driven case P5 can still
+    be reached in — a declared driving edge whose parent is NOT in this
+    launch — and there the premises hold again (the table generates from
+    marginals at ``--num_rows`` like a root), so the stop stands with a
+    message that says exactly that.
     """
     duplicate_ratio = 1 - distinct / sample_rows
     if (
@@ -504,16 +525,53 @@ def _check_pk_is_a_key(
         or num_rows <= distinct
     ):
         return
-    raise SystemExit(
+    if measured:
+        log_milestone(
+            "preflight_pk_sample_stop_deferred",
+            level=logging.WARNING,
+            table=fqn,
+            pk=",".join(pk),
+            distinct=distinct,
+            sample_rows=sample_rows,
+            duplicate_ratio=round(duplicate_ratio, 4),
+            note="the FULL-source fan-out measurement decides this "
+            "table's key, not the sample (ADR 0038): P4 checks the "
+            "declared PK against the measured fan-out and adjusts the "
+            "model — or, with --on_model_conflict=stop, refuses the "
+            "launch — if the source disproves it",
+        )
+        return
+    head = (
         f"[preflight P5] {fqn}: the declared PK {list(pk)} is not a key of "
         f"this data — only {distinct:,} distinct tuples in {sample_rows:,} "
-        f"sample rows ({duplicate_ratio:.1%} duplicates). Generation draws "
-        f"the same marginals, so a {num_rows:,}-row run would land on the "
-        f"order of {distinct:,} rows and divert the rest as pk.duplicate, "
-        f"tripping the BLOCKER gate. Fix one of: the `pk:` in the "
-        f"relationship model (add the column that discriminates rows), the "
-        f"row count (--num_rows <= the real key space), or move the column "
-        f"to `identity:` if it was never meant to be a key."
+        f"sample rows ({duplicate_ratio:.1%} duplicates)."
+    )
+    tail = (
+        f"a {num_rows:,}-row run would land on the order of {distinct:,} "
+        f"rows and divert the rest as pk.duplicate, tripping the BLOCKER "
+        f"gate. Fix one of: "
+    )
+    if driven:
+        raise SystemExit(
+            f"{head} This table declares a DRIVING FK edge, but no "
+            f"full-source fan-out was measured this launch (its driving "
+            f"parent is not generated here, or "
+            f"--generate_fk_relationships is off), so it generates from "
+            f"marginals at --num_rows like a root table and {tail}"
+            f"generate its driving parent in the SAME launch (the "
+            f"measured fan-out then decides, and a source that repeats "
+            f"the key ADJUSTS the model instead of stopping — ADR 0038), "
+            f"the `pk:` in the relationship model (add the column that "
+            f"discriminates rows), the row count (--num_rows <= the real "
+            f"key space), or move the column to `identity:` if it was "
+            f"never meant to be a key."
+        )
+    raise SystemExit(
+        f"{head} Generation draws the same marginals, so {tail}"
+        f"the `pk:` in the relationship model (add the column that "
+        f"discriminates rows), the row count (--num_rows <= the real key "
+        f"space), or move the column to `identity:` if it was never meant "
+        f"to be a key."
     )
 
 
@@ -526,6 +584,9 @@ DEFAULT_FK_CANDIDATE_CAP = 64
 # Immutable empty defaults (a `{}` default would be shared mutable state).
 _NO_CAPS: Mapping[tuple[str, ...], int] = MappingProxyType({})
 _NO_REST: Mapping[str, tuple[str, ...]] = MappingProxyType({})
+# Parent landing name -> DISTINCT key values it lands (fix H3). Empty =
+# no parent was adjusted, so rows and distinct keys coincide everywhere.
+_NO_PARENT_KEYS: Mapping[str, int] = MappingProxyType({})
 
 
 def pk_cell_columns(
@@ -772,6 +833,11 @@ def _pk_not_a_key_adjustment(
         ),
         declared_pk=tuple(effective_pk),
         source_repeat_share=share,
+        # Fix H4: the histogram groups the source child by the DRIVING
+        # edge, so that — and only that — is what `share` describes. The
+        # landing share is `pk.duplicate` over the declared PK, so the
+        # two are comparable exactly when the two column sets coincide.
+        repeat_share_basis=tuple(driving),
     )
 
 
@@ -900,13 +966,29 @@ def _check_driven_pk(
 
 
 def _derived_rows(
+    fqn: str,
     fanout: Mapping,
     edge_roles: Mapping[FkEdge, str] | None,
     fk_parent_rows: Mapping[str, int],
+    fk_parent_distinct_keys: Mapping[str, int] = _NO_PARENT_KEYS,
 ) -> int | None:
     """A DRIVEN child's row count (ADR 0036): ``round(driving parent's
-    rows x mean fan-out)``. ``None`` when the histogram carries no mass
-    or the driving parent's row count is unknown."""
+    DISTINCT landed keys x mean fan-out)``. ``None`` when the histogram
+    carries no mass or the driving parent's row count is unknown.
+
+    The multiplier is the parent's distinct KEY VALUES, not its rows (fix
+    H3). The composer fans a child out from its parent's distinct keys —
+    an adjusted parent's ``parent_pk=()`` arms `FanoutDistinct` — and the
+    histogram's own denominator is the number of distinct SOURCE key
+    values, so the two agree only on a parent that lands one row per key.
+    For a parent whose PK the run ENFORCES that is its row count and
+    nothing changes; for an ADJUSTED parent it is
+    ``rows x (1 - source_repeat_share)`` (`landed_distinct_keys`), and
+    asking for the larger number lands a permanent shortfall: 220,215
+    requested against ~109,556 producible on the 2026-09-12 shape,
+    written to `validation_runs` as a missed request with no milestone
+    naming the cause. Hence the milestone.
+    """
     hist = {
         int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()
     }
@@ -916,11 +998,28 @@ def _derived_rows(
         None,
     )
     parent_rows = fk_parent_rows.get(driving_ref) if driving_ref else None
-    if total and parent_rows:
-        return round(
-            parent_rows * sum(k * n for k, n in hist.items()) / total
+    if not (total and parent_rows):
+        return None
+    mean_fanout = sum(k * n for k, n in hist.items()) / total
+    keys = fk_parent_distinct_keys.get(driving_ref) or parent_rows
+    derived = round(keys * mean_fanout)
+    if keys < parent_rows:
+        log_milestone(
+            "model_adjustment_descendant_rows",
+            level=logging.WARNING,
+            table=fqn,
+            parent=driving_ref,
+            parent_rows=parent_rows,
+            parent_distinct_keys=keys,
+            mean_fanout=round(mean_fanout, 4),
+            derived_rows=derived,
+            unadjusted_rows=round(parent_rows * mean_fanout),
+            note="the driving parent's `pk:` was ADJUSTED away (ADR "
+            "0038), so it lands repeated keys and this table fans out "
+            "from its DISTINCT ones — sizing it off the parent's rows "
+            "would request rows the fan-out cannot produce",
         )
-    return None
+    return derived
 
 
 def _independent_pool_caps(
@@ -965,6 +1064,7 @@ def _driven_child_rows(
     conditional_rest: Mapping[str, tuple[str, ...]] = _NO_REST,
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     on_conflict: str = ON_CONFLICT_ADJUST,
+    fk_parent_distinct_keys: Mapping[str, int] = _NO_PARENT_KEYS,
 ) -> tuple[int | None, dict[tuple[str, ...], int], ModelAdjustment | None]:
     """``(derived rows, independent pool caps, adjustment)`` for a DRIVEN
     child.
@@ -980,7 +1080,10 @@ def _driven_child_rows(
     the key never narrows what the composer broadcasts and no FK
     guarantee moves. Only the key itself goes."""
     parent_rows = fk_parent_rows or {}
-    derived = _derived_rows(fanout, edge_roles, parent_rows)
+    derived = _derived_rows(
+        table_schema.fqn, fanout, edge_roles, parent_rows,
+        fk_parent_distinct_keys,
+    )
     supply = edge_supplied_members(effective_pk, edge_roles, conditional_rest)
     caps = _independent_pool_caps(supply, derived or num_rows, parent_rows)
     adjustment = None
@@ -1027,6 +1130,7 @@ def _run_p4(
     conditional_rest: Mapping[str, tuple[str, ...]] | None,
     candidate_cap: int | None,
     on_model_conflict: str,
+    fk_parent_distinct_keys: Mapping[str, int] | None = None,
 ) -> tuple[
     tuple[str, ...],
     int | None,
@@ -1065,6 +1169,7 @@ def _run_p4(
         conditional_rest=conditional_rest or _NO_REST,
         candidate_cap=candidate_cap,
         on_conflict=on_model_conflict,
+        fk_parent_distinct_keys=fk_parent_distinct_keys or _NO_PARENT_KEYS,
     )
     if adjustment is None:
         return effective_pk, derived_rows, caps, ()
@@ -1095,6 +1200,7 @@ def preflight(
     conditional_rest: Mapping[str, tuple[str, ...]] | None = None,
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     on_model_conflict: str = ON_CONFLICT_ADJUST,
+    fk_parent_distinct_keys: Mapping[str, int] | None = None,
 ) -> PreflightResult:
     """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -1138,6 +1244,14 @@ def preflight(
     caps travel back out on ``PreflightResult.fk_key_sample_caps``, so
     the composer broadcasts exactly the number P4 counted, exactly as
     the ADR 0035 random-draw path returns its own.
+
+    ``fk_parent_distinct_keys`` (FK ``ref`` → the DISTINCT key values
+    that parent LANDS, fix H3) is what a driven child's row count is
+    actually derived from, because that is what the composer fans out
+    over. It equals the parent's rows whenever the parent's PK is
+    enforced, and ``rows x (1 - source_repeat_share)`` when the parent's
+    own `pk:` was adjusted away — omit it and an adjusted parent's child
+    is asked for roughly twice the rows it can produce.
 
     ``on_model_conflict`` (ADR 0038, ``--on_model_conflict``) decides
     what a MEASURED contradiction does. ``adjust`` (default): a declared
@@ -1227,6 +1341,11 @@ def preflight(
     # is: a warning (plus the existing stop when the sample alone already
     # proves the run cannot fill `num_rows`). Only the full-source
     # fan-out measurement below adjusts anything.
+    #
+    # Fix H2: and where that measurement EXISTS (`fanout`), it also owns
+    # the verdict — the sample's stop defers to it, so P4 (adjust, or
+    # refuse under `--on_model_conflict=stop`) is what the operator sees.
+    # A table with no measurement keeps P5 exactly as it was.
     if effective_pk and reference_rows:
         tuples = {
             tuple(r.get(c) for c in effective_pk) for r in reference_rows
@@ -1234,7 +1353,11 @@ def preflight(
         if len(tuples) < len(reference_rows):
             dupes = len(reference_rows) - len(tuples)
             _check_pk_is_a_key(
-                fqn, effective_pk, len(tuples), len(reference_rows), num_rows
+                fqn, effective_pk, len(tuples), len(reference_rows), num_rows,
+                measured=fanout is not None,
+                driven=any(
+                    role == "driving" for role in (edge_roles or {}).values()
+                ),
             )
             warnings.append(
                 f"PK {list(effective_pk)} not unique in the reference sample "
@@ -1280,6 +1403,7 @@ def preflight(
         conditional_rest=conditional_rest,
         candidate_cap=candidate_cap,
         on_model_conflict=on_model_conflict,
+        fk_parent_distinct_keys=fk_parent_distinct_keys,
     )
 
     log_milestone(
