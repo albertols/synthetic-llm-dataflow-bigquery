@@ -1,10 +1,12 @@
 """ADR 0036: the SOURCE fan-out histogram and PK cells, measured once,
-cached by (source child, edge cols, model sha)."""
+cached by (source child, edge cols, model sha). ADR 0038 fix J adds the
+DECLARED PK's own measurement, cached in the same payload."""
 
 from __future__ import annotations
 
 import logging
 
+import pytest
 from sdfb_beam.io.fanout_stats import (
     BigQueryFanoutStatsStore,
     fanout_payload,
@@ -93,7 +95,7 @@ def test_fanout_payload_shape():
         driving_cols=("K", "INH"), exact_cells=False,
     )
     assert payload == {"driving_cols": ["K", "INH"], "histogram": {"0": 1, "2": 1},
-                       "cells": None, "exact_cells": False}
+                       "cells": None, "exact_cells": False, "pk_source": None}
 
 
 class _OrphanClient(_Client):
@@ -189,3 +191,89 @@ def test_a_clean_source_keeps_todays_numbers(caplog):
                             source="measured")
     line = next(ln for ln in caplog.text.splitlines() if "fk_fanout_measured" in ln)
     assert "mean=0.9" in line and "orphan_keys=0" in line and "key_values=6" in line
+
+
+# --- fix J: the DECLARED PK, measured on the source child -------------
+#
+# 2026-09-13 (…-12600311608685394436): F_TABLE declares
+# `pk: [D_COL_001, CONTINUOUS_NR]` and is driven by `(D_COL_001)`, so its
+# key has a member OUTSIDE the driving edge. The fan-out histogram
+# describes the EDGE, never that key, so nothing measured it and the run
+# died at the BLOCKER gate with 179,853 pk.duplicate (0.2908 > 0.2).
+
+
+class _PkClient:
+    """Answers the declared-PK measurement's single GROUP BY."""
+
+    def __init__(self, rows):
+        self.sql: list[str] = []
+        self._rows = rows
+
+    def query(self, sql, job_config=None):
+        self.sql.append(sql)
+        return _Result(self._rows)
+
+
+def test_measure_pk_uniqueness_counts_a_composite_key_as_one_tuple():
+    """A two-column PK is ONE key, not two columns: the GROUP BY is over
+    the tuple, so 12 rows over 9 tuples is a 25% repeat share — not the
+    per-column distinct counts, which would each read far higher."""
+    from sdfb_beam.io.fanout_stats import measure_pk_uniqueness
+
+    client = _PkClient([{"key_tuples": 9, "row_count": 12, "max_rows_per_key": 3}])
+    out = measure_pk_uniqueness(
+        source_child="p.src.F_TABLE",
+        pk_cols=("D_COL_001", "CONTINUOUS_NR"),
+        client=client,
+    )
+    assert out == {"cols": ["D_COL_001", "CONTINUOUS_NR"], "rows": 12,
+                   "key_tuples": 9, "max_rows_per_key": 3}
+    (sql,) = client.sql
+    assert "GROUP BY `D_COL_001`, `CONTINUOUS_NR`" in sql
+    assert "`p.src.F_TABLE`" in sql
+
+
+def test_the_pk_measurement_handles_nulls_the_way_the_histogram_does():
+    """NULL handling matches `measure_fanout`'s child GROUP BY: a NULL
+    member is a VALUE of the key, grouped with its equals. A
+    `COUNT(DISTINCT CONCAT(...))` would drop every NULL-bearing tuple
+    from the key count while the row count kept it, understating the
+    repeat share on exactly the sparse columns that motivate the check."""
+    from sdfb_beam.io.fanout_stats import measure_pk_uniqueness
+
+    client = _PkClient([{"key_tuples": 2, "row_count": 5, "max_rows_per_key": 4}])
+    measure_pk_uniqueness(
+        source_child="p.src.F_TABLE", pk_cols=("A", "B"), client=client,
+    )
+    (sql,) = client.sql
+    assert "IS NOT NULL" not in sql
+    assert "COUNT(DISTINCT" not in sql
+
+
+def test_the_pk_measurement_rejects_a_column_that_is_not_an_identifier():
+    from sdfb_beam.io.fanout_stats import measure_pk_uniqueness
+
+    with pytest.raises(ValueError, match="not a BigQuery column name"):
+        measure_pk_uniqueness(
+            source_child="p.src.F", pk_cols=("A`; DROP",), client=_PkClient([]),
+        )
+
+
+def test_the_pk_measurement_rides_in_the_cached_payload():
+    """Cached beside the fan-out under the same key, so a re-launch pays
+    for neither scan."""
+    from sdfb_beam.io.fanout_stats import fanout_payload
+
+    payload = fanout_payload(
+        {"histogram": {"0": 1, "2": 1}, "cells": None, "parents": 2,
+         "children": 2,
+         "pk": {"cols": ["K", "NR"], "rows": 12, "key_tuples": 9,
+                "max_rows_per_key": 3}},
+        driving_cols=("K",), exact_cells=False,
+    )
+    assert payload["pk_source"] == {"cols": ["K", "NR"], "rows": 12,
+                                    "key_tuples": 9, "max_rows_per_key": 3}
+    assert fanout_payload(
+        {"histogram": {}, "cells": None, "parents": 0, "children": 0},
+        driving_cols=("K",), exact_cells=False,
+    )["pk_source"] is None

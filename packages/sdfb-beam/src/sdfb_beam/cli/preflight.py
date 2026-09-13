@@ -31,7 +31,8 @@ from typing import TYPE_CHECKING
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
-    source_repeat_share,
+    pk_measurement_from_histogram,
+    pk_repeat_share,
 )
 from sdfb_core.contracts.prompt_constraint import (
     parse_llm_prompt_constraint,
@@ -500,10 +501,12 @@ def _check_pk_is_a_key(
     tuple has distinct values and diverts the rest. Cheap to see here,
     expensive to discover at the gate.
 
-    ``measured`` (ADR 0038, fix H2) — this table has a FULL-SOURCE
-    fan-out measurement in scope, so the measurement decides and this
-    stop must not fire. Every premise of the message below is false for
-    such a table: it does not draw its PK from marginals (it draws its
+    ``measured`` (ADR 0038, fixes H2 and J) — this table has a
+    FULL-SOURCE measurement in scope (a fan-out payload, which since fix
+    J always carries the DECLARED PK's own source measurement), so the
+    measurement decides and this stop must not fire. Every premise of
+    the message below is false for such a table: it does not draw its PK
+    from marginals (it draws its
     parent's keys times the measured fan-out), it never uses
     ``--num_rows`` (`resolve_table_rows` returns the derived count), and
     once P4 adjusts, its `pk.duplicate` is excluded from the gate. A
@@ -534,11 +537,12 @@ def _check_pk_is_a_key(
             distinct=distinct,
             sample_rows=sample_rows,
             duplicate_ratio=round(duplicate_ratio, 4),
-            note="the FULL-source fan-out measurement decides this "
-            "table's key, not the sample (ADR 0038): P4 checks the "
-            "declared PK against the measured fan-out and adjusts the "
-            "model — or, with --on_model_conflict=stop, refuses the "
-            "launch — if the source disproves it",
+            note="the FULL-source measurement of the DECLARED PK "
+            "decides this table's key, not the sample (ADR 0038 fix J): "
+            "P4 compares that measured repeat share with the run's "
+            "BLOCKER gate and adjusts the model — or, with "
+            "--on_model_conflict=stop, refuses the launch — when the "
+            "source repeats the key more often than the gate allows",
         )
         return
     head = (
@@ -801,6 +805,9 @@ def _pk_not_a_key_adjustment(
     driving: tuple[str, ...],
     fanout: Mapping,
     detail: str,
+    *,
+    share: float | None = None,
+    measurement: Mapping | None = None,
 ) -> ModelAdjustment:
     """The ADR 0038 record for "the source proves this `pk:` is not a
     key": drop it, say so, and carry the SOURCE repeat share the landing
@@ -810,19 +817,35 @@ def _pk_not_a_key_adjustment(
     untouched, so the child still lands its measured children per parent
     key and copies the source's key-repeat distribution by construction.
     Capping, narrowing or synthesizing a key would all break exactly that.
+
+    ``share`` / ``measurement`` (fix J) are the DECLARED PK's own
+    measurement on the source — the same columns `pk.duplicate` is
+    counted over, which is what makes the end-of-run faithfulness verdict
+    like-for-like in EVERY case (it replaces fix H4's driving-edge share,
+    which was comparable only when the PK happened to equal the edge).
+    A record built without one carries no share at all rather than a
+    number measured over different columns.
     """
     hist = {int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()}
-    share = source_repeat_share(hist)
     max_k = max(hist) if hist else 0
+    evidence = (
+        f"the full source repeats the declared PK — "
+        f"{int(measurement.get('key_tuples') or 0):,} distinct tuples in "
+        f"{int(measurement.get('rows') or 0):,} rows, {share:.2%} of them "
+        f"repeating one (the largest carries "
+        f"{int(measurement.get('max_rows_per_key') or 0)} rows)"
+        if measurement is not None and share is not None
+        else (
+            f"the full source repeats it — one value of the driving edge "
+            f"({','.join(driving)}) carries up to {max_k} rows "
+            f"(p50={_histogram_p50(hist)})"
+        )
+    )
     return ModelAdjustment(
         table=table_schema.fqn,
         change="pk_dropped",
         declared=f"pk {list(effective_pk)}",
-        measured=(
-            f"the full source repeats it — one value of the driving edge "
-            f"({','.join(driving)}) carries up to {max_k} rows "
-            f"(p50={_histogram_p50(hist)}); {detail}"
-        ),
+        measured=f"{evidence}; {detail}",
         consequence=(
             f"`pk:` DROPPED from the effective model for "
             f"{table_schema.fqn}; the table still generates from its "
@@ -833,11 +856,84 @@ def _pk_not_a_key_adjustment(
         ),
         declared_pk=tuple(effective_pk),
         source_repeat_share=share,
-        # Fix H4: the histogram groups the source child by the DRIVING
-        # edge, so that — and only that — is what `share` describes. The
-        # landing share is `pk.duplicate` over the declared PK, so the
-        # two are comparable exactly when the two column sets coincide.
-        repeat_share_basis=tuple(driving),
+    )
+
+
+def source_pk_measurement(
+    effective_pk: tuple[str, ...],
+    driving: tuple[str, ...],
+    fanout: Mapping,
+) -> Mapping | None:
+    """The DECLARED PK's measurement on the SOURCE child, or None
+    (ADR 0038 fix J).
+
+    Two ways to the SAME three numbers, never two rules:
+
+    * ``fanout["pk_source"]`` — the extra GROUP BY `measure_pk_uniqueness`
+      paid for, taken over exactly these columns (a stale payload whose
+      ``cols`` no longer match the declared PK is ignored, not trusted);
+    * the fan-out histogram, when the declared PK IS the driving edge —
+      it already groups the source child by those very columns, so the
+      key tuple is measured and no second scan exists to pay for.
+
+    None only where no measurement is in scope at all, which is where the
+    pre-fix-J capacity ladder remains the only evidence.
+    """
+    stats = fanout.get("pk_source")
+    if stats and tuple(stats.get("cols") or ()) == tuple(effective_pk):
+        return stats
+    if effective_pk and set(effective_pk) == set(driving):
+        return pk_measurement_from_histogram(
+            fanout.get("histogram") or {}, effective_pk
+        )
+    return None
+
+
+def _measured_pk_stop(
+    table_schema: TableSchema,
+    effective_pk: tuple[str, ...],
+    measurement: Mapping,
+    share: float,
+    gate: float,
+) -> SystemExit:
+    """``--on_model_conflict=stop`` on a MEASURED declared-PK conflict:
+    the refusal states the measurement that produced the verdict, so the
+    operator can check it against the source themselves."""
+    return SystemExit(
+        f"[preflight P4] {table_schema.fqn}: the declared PK "
+        f"{list(effective_pk)} is not a key of the source — "
+        f"{int(measurement.get('key_tuples') or 0):,} distinct tuples in "
+        f"{int(measurement.get('rows') or 0):,} rows, so {share:.1%} of "
+        f"them repeat a key, above this run's BLOCKER gate of {gate:.1%}. "
+        f"Generation reproduces the source, so that share would land as "
+        f"pk.duplicate and trip the gate. Fix one of: the `pk:` in the "
+        f"relationship model (add the column that discriminates rows, or "
+        f"drop it if the source has no key), or re-launch with "
+        f"--on_model_conflict=adjust (the default), which drops the key "
+        f"and excludes this table's pk.duplicate from the gate."
+    )
+
+
+def _one_to_one_stop(
+    table_schema: TableSchema,
+    effective_pk: tuple[str, ...],
+    driving: tuple[str, ...],
+    max_k: int,
+) -> SystemExit:
+    """``--on_model_conflict=stop`` on a 1:1 child whose source fans out:
+    the pre-0038 message, word for word."""
+    return SystemExit(
+        f"[preflight P4] {table_schema.fqn}: one value of the "
+        f"driving edge ({','.join(driving)}) appears up to {max_k} "
+        f"times in the source child, but the declared PK "
+        f"{list(effective_pk)} equals the driving edge exactly — "
+        f"no completing members, so only ONE row per key value is "
+        f"representable and the rest would be pk.duplicate. Add a "
+        f"discriminating column to the `pk:` in the relationship "
+        f"model (the sibling table's own PK usually names one), "
+        f"drop the `pk:` if the source has no key, or confirm the "
+        f"source relationship really is 1:1 and the measurement is "
+        f"stale."
     )
 
 
@@ -852,6 +948,7 @@ def _check_driven_pk(
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     edge_roles: Mapping[FkEdge, str] | None = None,
     on_conflict: str = ON_CONFLICT_ADJUST,
+    gate: float = 1.0,
 ) -> ModelAdjustment | None:
     """P4 for a DRIVEN child: the largest source fan-out must fit in the
     per-key capacity the PK's completing members offer, else the declared
@@ -886,13 +983,27 @@ def _check_driven_pk(
     edge, so a model this check passed — counting the PK-touching edges
     only — still emitted children the PK could not tell apart.
 
-    ADR 0038: both "the declared PK is not a key of the source" verdicts
-    below are PROVEN by a full-source measurement, so under the default
-    ``on_conflict="adjust"`` they return a :class:`ModelAdjustment`
+    ADR 0038: a "the declared PK is not a key of the source" verdict is
+    PROVEN by a full-source measurement, so under the default
+    ``on_conflict="adjust"`` it returns a :class:`ModelAdjustment`
     instead of raising — the caller drops the `pk:` and shouts. With
-    ``"stop"`` the pre-0038 SystemExit comes back, message for message.
-    The third raise (a missing cell table) is NOT a proven conflict — it
-    is a missing MEASUREMENT — and keeps stopping either way."""
+    ``"stop"`` the SystemExit comes back. A missing cell table is NOT a
+    proven conflict — it is a missing MEASUREMENT — and keeps stopping
+    either way.
+
+    ADR 0038 fix J — ONE decision path. The DECLARED PK's own measurement
+    on the source (`source_pk_measurement`) is the authority for "is this
+    a key of this data", and it is compared with the run's BLOCKER GATE,
+    not with any repetition: a share ABOVE the gate cannot survive
+    generation (it lands as `pk.duplicate` and fails the run), a share at
+    or below it is a dirty source whose few duplicates today's machinery
+    diverts — a 0.4% source must not lose its key. The driving-edge rule
+    is SUBSUMED, not duplicated: a PK that equals its driving edge is the
+    case where the histogram already measures that key. The capacity
+    ladder below stays as the evidence of LAST resort, for a table with
+    no measurement at all; where a measurement exists it only warns,
+    because the measurement has already answered the question the
+    capacity model estimates."""
     driving = tuple(fanout.get("driving_cols") or ())
     cap = (
         DEFAULT_FK_CANDIDATE_CAP if candidate_cap is None else int(candidate_cap)
@@ -905,27 +1016,90 @@ def _check_driven_pk(
     conditional = supply.conditional
     known = supply.known
     cells, exact = pk_cell_columns(effective_pk, driving, profiles, known=known)
-    if not exact:
-        return None
     max_k = max(int(k) for k in (fanout.get("histogram") or {"0": 0}))
-    n_cells = 0
-    if cells:
-        n_cells = len((fanout.get("cells") or {}).get("rows") or ())
-        if max_k > 0 and n_cells == 0:
-            # Fail CLOSED: the PK needs these members to be a key, and
-            # the measurement that would supply them is missing entirely
-            # — a different fault from "measured, and too small" below.
-            raise SystemExit(
-                f"[preflight P4] {table_schema.fqn}: the declared PK "
-                f"{list(effective_pk)} is completed by {list(cells)} "
-                f"outside the driving edge ({','.join(driving)}), but no "
-                f"cell table was measured for {list(cells)} — the per-key "
-                f"draw has nothing to draw from. Re-measure the source "
-                f"fan-out (clear the `fk_fanout_stats` cache entry) or fix "
-                f"the `pk:` in the relationship model."
-            )
+    n_cells = len((fanout.get("cells") or {}).get("rows") or ()) if cells else 0
     capacity = (n_cells or 1) * cap ** len(conditional)
-    if max_k <= capacity:
+    # Fix J — the DECLARED PK's own measurement, and the ONE comparison
+    # that decides: the run's BLOCKER gate.
+    measurement = source_pk_measurement(effective_pk, driving, fanout)
+    share = pk_repeat_share(measurement)
+    if measurement is not None and share is not None and share > gate:
+        completing = tuple(c for c in effective_pk if c not in driving)
+        detail = (
+            f"one value of the driving edge ({','.join(driving)}) carries "
+            f"up to {max_k} rows and the completing member(s) "
+            f"{list(completing)} do not tell them apart"
+            if completing
+            else "the declared PK equals the driving edge exactly, so it "
+            "has no completing member that could tell those rows apart"
+        )
+        if on_conflict == ON_CONFLICT_STOP:
+            raise (
+                _measured_pk_stop(
+                    table_schema, effective_pk, measurement, share, gate
+                )
+                if completing
+                else _one_to_one_stop(
+                    table_schema, effective_pk, driving, max_k
+                )
+            )
+        return _pk_not_a_key_adjustment(
+            table_schema, effective_pk, driving, fanout, detail,
+            share=share, measurement=measurement,
+        )
+    if exact and cells and max_k > 0 and n_cells == 0:
+        # Fail CLOSED: the PK needs these members to be a key, and the
+        # measurement that would supply them is missing entirely — a
+        # different fault from "measured, and too small" below, and not a
+        # proven conflict, so it stops under both settings (ADR 0038 D5).
+        raise SystemExit(
+            f"[preflight P4] {table_schema.fqn}: the declared PK "
+            f"{list(effective_pk)} is completed by {list(cells)} "
+            f"outside the driving edge ({','.join(driving)}), but no "
+            f"cell table was measured for {list(cells)} — the per-key "
+            f"draw has nothing to draw from. Re-measure the source "
+            f"fan-out (clear the `fk_fanout_stats` cache entry) or fix "
+            f"the `pk:` in the relationship model."
+        )
+    if measurement is not None and share is not None:
+        # The source says the declared PK IS a key of this data, within
+        # the gate. It is KEPT, and nothing below may take it away.
+        log_milestone(
+            "preflight_pk_source_repeats",
+            level=logging.WARNING if share > 0 else logging.INFO,
+            table=table_schema.fqn,
+            pk=",".join(effective_pk),
+            rows=int(measurement.get("rows") or 0),
+            key_tuples=int(measurement.get("key_tuples") or 0),
+            max_rows_per_key=int(measurement.get("max_rows_per_key") or 0),
+            repeat_share=round(share, 4),
+            gate=gate,
+            note="the declared PK is a key of this source within the "
+            "run's BLOCKER gate, so it is KEPT; the repeats that remain "
+            "divert as pk.duplicate like any other table's",
+        )
+        if exact and max_k > capacity:
+            # The capacity model ESTIMATES what a key can represent; the
+            # measurement MEASURED it. Say the two disagree — never act
+            # on it, or a 0.4%-dirty source loses its key to an estimate.
+            log_milestone(
+                "preflight_pk_capacity_below_fanout",
+                level=logging.WARNING,
+                table=table_schema.fqn,
+                pk=",".join(effective_pk),
+                max_fanout=max_k,
+                capacity=capacity,
+                candidate_cap=cap,
+                note="the per-key capacity model sits below the source's "
+                "largest fan-out, but the DECLARED PK's own source "
+                "measurement kept the key (ADR 0038 fix J): the expected "
+                "duplicates are the measured share above, under the gate. "
+                "Raise --fk_candidate_cap if pk.duplicate overshoots it",
+            )
+        return None
+    # No measurement over the declared PK: the pre-fix-J capacity ladder
+    # is the only evidence there is.
+    if not exact or max_k <= capacity:
         return None
     if not cells and not known:
         # The declared PK IS the driving edge (a true 1:1 child): there
@@ -935,18 +1109,8 @@ def _check_driven_pk(
         # above 1 is the PK not being a key of the source (2026-09-11,
         # E_TABLE stopped with "no cell table was measured for []").
         if on_conflict == ON_CONFLICT_STOP:
-            raise SystemExit(
-                f"[preflight P4] {table_schema.fqn}: one value of the "
-                f"driving edge ({','.join(driving)}) appears up to {max_k} "
-                f"times in the source child, but the declared PK "
-                f"{list(effective_pk)} equals the driving edge exactly — "
-                f"no completing members, so only ONE row per key value is "
-                f"representable and the rest would be pk.duplicate. Add a "
-                f"discriminating column to the `pk:` in the relationship "
-                f"model (the sibling table's own PK usually names one), "
-                f"drop the `pk:` if the source has no key, or confirm the "
-                f"source relationship really is 1:1 and the measurement is "
-                f"stale."
+            raise _one_to_one_stop(
+                table_schema, effective_pk, driving, max_k
             )
         return _pk_not_a_key_adjustment(
             table_schema, effective_pk, driving, fanout,
@@ -1065,6 +1229,7 @@ def _driven_child_rows(
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     on_conflict: str = ON_CONFLICT_ADJUST,
     fk_parent_distinct_keys: Mapping[str, int] = _NO_PARENT_KEYS,
+    gate: float = 1.0,
 ) -> tuple[int | None, dict[tuple[str, ...], int], ModelAdjustment | None]:
     """``(derived rows, independent pool caps, adjustment)`` for a DRIVEN
     child.
@@ -1095,6 +1260,7 @@ def _driven_child_rows(
             candidate_cap=candidate_cap,
             edge_roles=edge_roles,
             on_conflict=on_conflict,
+            gate=gate,
         )
     return derived, caps, adjustment
 
@@ -1170,6 +1336,7 @@ def _run_p4(
         candidate_cap=candidate_cap,
         on_conflict=on_model_conflict,
         fk_parent_distinct_keys=fk_parent_distinct_keys or _NO_PARENT_KEYS,
+        gate=blocker_failure_ratio,
     )
     if adjustment is None:
         return effective_pk, derived_rows, caps, ()
@@ -1346,6 +1513,13 @@ def preflight(
     # the verdict — the sample's stop defers to it, so P4 (adjust, or
     # refuse under `--on_model_conflict=stop`) is what the operator sees.
     # A table with no measurement keeps P5 exactly as it was.
+    #
+    # Fix J closes the gap that deference left: P4 used to reason only
+    # about the DRIVING EDGE's histogram, so a declared PK with a member
+    # outside that edge was deferred to a check that never looked at it.
+    # The payload now carries the declared PK's OWN source measurement,
+    # which is what P4 decides on — so the deference is total, and P5's
+    # sample is only ever the last word where nothing was measured.
     if effective_pk and reference_rows:
         tuples = {
             tuple(r.get(c) for c in effective_pk) for r in reference_rows
@@ -1436,4 +1610,5 @@ __all__ = [
     "edge_supplied_members",
     "pk_cell_columns",
     "preflight",
+    "source_pk_measurement",
 ]

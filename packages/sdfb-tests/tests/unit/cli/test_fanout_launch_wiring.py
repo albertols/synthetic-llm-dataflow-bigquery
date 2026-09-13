@@ -44,6 +44,22 @@ _SCHEMA = TableSchema.model_validate(
 _ROWS = [{"D_COL_001": f"K{i}", "D_COL_024": "A", "C_COL_002": "xy"[i % 2]} for i in range(40)]
 
 
+@pytest.fixture(autouse=True)
+def _stub_pk_measurement(monkeypatch):
+    """ADR 0038 fix J added ONE extra BigQuery scan to `resolve_fanout` —
+    the declared PK, measured on the source child. Every test here drives
+    the launcher with a fake/absent client, so the default is a stub that
+    reports a clean key (rows == key tuples); the tests that are ABOUT
+    the measurement override it with their own."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(
+        rp, "measure_pk_uniqueness",
+        lambda **kw: {"cols": list(kw["pk_cols"]), "rows": 10,
+                      "key_tuples": 10, "max_rows_per_key": 1},
+    )
+
+
 class _Store:
     def __init__(self):
         self.saved = {}
@@ -1144,3 +1160,121 @@ def test_the_two_pk_sources_are_unioned_not_replaced(monkeypatch, caplog):
          "pk_member": False}
     ]
     assert "reason=declared_pk" in caplog.text
+
+
+# --- ADR 0038 fix J: the DECLARED PK is measured on the source --------
+#
+# The fan-out histogram describes the DRIVING EDGE. A declared PK with a
+# member outside that edge (F_TABLE, launch …-12600311608685394436) had
+# no measured evidence at all, and the BLOCKER gate found out after the
+# GPU hours were spent. One extra GROUP BY, cached in the same payload.
+
+_PK_MEASURED = {"cols": ["D_COL_001", "C_COL_002"], "rows": 12,
+                "key_tuples": 9, "max_rows_per_key": 3}
+
+
+def _pk_measure_spy(calls):
+    def _measure(**kw):
+        calls.append(kw)
+        return dict(_PK_MEASURED, cols=list(kw["pk_cols"]))
+    return _measure
+
+
+def test_resolve_fanout_measures_the_declared_pk_and_caches_it(monkeypatch):
+    import sdfb_beam.cli.run_pipeline as rp
+
+    calls: list[dict] = []
+    monkeypatch.setattr(rp, "measure_fanout", _measure)
+    monkeypatch.setattr(rp, "measure_pk_uniqueness", _pk_measure_spy(calls))
+    store = _Store()
+    payload, _roles = resolve_fanout(
+        _REG, "proj.synthetic_data.C_TABLE", "proj.src.C_TABLE",
+        in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+        reference_rows=_ROWS, table_schema=_SCHEMA, stats_store=store,
+        bq_client=object(),
+    )
+    assert payload["pk_source"] == _PK_MEASURED
+    assert [c["pk_cols"] for c in calls] == [("D_COL_001", "C_COL_002")]
+    assert [c["source_child"] for c in calls] == ["proj.src.C_TABLE"]
+    # The cached payload carries it, so a re-launch re-scans NEITHER.
+    monkeypatch.setattr(rp, "measure_fanout", lambda **kw: (
+        _ for _ in ()).throw(AssertionError("fan-out measured twice")))
+    monkeypatch.setattr(rp, "measure_pk_uniqueness", lambda **kw: (
+        _ for _ in ()).throw(AssertionError("pk measured twice")))
+    again, _ = resolve_fanout(
+        _REG, "proj.synthetic_data.C_TABLE", "proj.src.C_TABLE",
+        in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+        reference_rows=_ROWS, table_schema=_SCHEMA, stats_store=store,
+        bq_client=object(),
+    )
+    assert again == payload
+
+
+def test_a_pk_equal_to_the_driving_edge_costs_no_second_scan(monkeypatch):
+    """The 1:1 case is the SAME decision, read off the histogram already
+    in hand: 2 parents, one with 2 children -> 2 rows over 1 key tuple."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    model = _MODEL.replace(
+        "  C_TABLE:\n    pk: [D_COL_001, C_COL_002]",
+        "  C_TABLE:\n    pk: [D_COL_001, D_COL_024]",
+    )
+    reg = RelationshipRegistry.from_sources(
+        [("config/relationships/kw.yaml", model)]
+    )
+    monkeypatch.setattr(rp, "measure_fanout", _measure)
+    monkeypatch.setattr(rp, "measure_pk_uniqueness", lambda **kw: (
+        _ for _ in ()).throw(AssertionError("must not scan")))
+    payload, _roles = resolve_fanout(
+        reg, "proj.synthetic_data.C_TABLE", "proj.src.C_TABLE",
+        in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+        reference_rows=_ROWS, table_schema=_SCHEMA, stats_store=None,
+        bq_client=object(),
+    )
+    assert payload["pk_source"] == {
+        "cols": ["D_COL_001", "D_COL_024"], "rows": 2, "key_tuples": 1,
+        "max_rows_per_key": 2,
+    }
+
+
+def test_a_cache_entry_from_before_fix_j_measures_only_the_pk(monkeypatch):
+    """An `fk_fanout_stats` row written by an older launch has no `pk`
+    key. The fan-out is NOT re-scanned; the PK alone is, and the merged
+    payload is written back."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    store = _Store()
+    store.saved[("proj.src.C_TABLE", ("D_COL_001", "D_COL_024"),
+                 _REG.sha12())] = _measure()
+    calls: list[dict] = []
+    monkeypatch.setattr(rp, "measure_fanout", lambda **kw: (
+        _ for _ in ()).throw(AssertionError("fan-out re-measured")))
+    monkeypatch.setattr(rp, "measure_pk_uniqueness", _pk_measure_spy(calls))
+    payload, _roles = resolve_fanout(
+        _REG, "proj.synthetic_data.C_TABLE", "proj.src.C_TABLE",
+        in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+        reference_rows=_ROWS, table_schema=_SCHEMA, stats_store=store,
+        bq_client=object(),
+    )
+    assert payload["pk_source"] == _PK_MEASURED
+    assert len(calls) == 1
+    assert store.saved[
+        ("proj.src.C_TABLE", ("D_COL_001", "D_COL_024"), _REG.sha12())
+    ]["pk"] == _PK_MEASURED
+
+
+def test_a_failed_pk_measurement_is_a_preflight_stop(monkeypatch):
+    """Same class of scan as the fan-out, same handling: a loud stop, not
+    a silent fall back to the unmeasured ladder."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    monkeypatch.setattr(rp, "measure_fanout", _measure)
+    monkeypatch.setattr(rp, "measure_pk_uniqueness", lambda **kw: (
+        _ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(SystemExit, match="declared PK measurement"):
+        resolve_fanout(
+            _REG, "proj.synthetic_data.C_TABLE", "proj.src.C_TABLE",
+            in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+            reference_rows=_ROWS, table_schema=_SCHEMA, stats_store=None,
+            bq_client=object(),
+        )

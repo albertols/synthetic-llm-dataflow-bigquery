@@ -17,6 +17,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from sdfb_core.contracts.model_adjustment import pk_repeat_share
 from sdfb_core.observability import log_milestone
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -146,13 +147,88 @@ def measure_fanout(
     }
 
 
+def measure_pk_uniqueness(
+    *,
+    source_child: str,
+    pk_cols: tuple[str, ...],
+    client: Any = None,
+) -> dict:
+    """``{"cols", "rows", "key_tuples", "max_rows_per_key"}`` — the
+    DECLARED PK, measured on the SOURCE child (ADR 0038 fix J).
+
+    The fan-out histogram describes the DRIVING EDGE. A PK with a member
+    outside that edge is a different column set, so nothing in the
+    histogram says whether it is a key of the data. This does, in one
+    GROUP BY over the key tuple:
+
+    ``SELECT COUNT(*) AS key_tuples, SUM(n) AS row_count, MAX(n) AS
+    max_rows_per_key FROM (SELECT <pk>, COUNT(*) AS n FROM <child> GROUP
+    BY <pk>)``
+
+    — the same inner shape ``measure_fanout`` groups the child by, so a
+    COMPOSITE key counts as one tuple and NULL handling matches: BigQuery
+    groups NULLs together, i.e. a NULL member is a VALUE of the key.
+    ``_distinct_key_sql``'s ``COUNT(DISTINCT CONCAT(...))`` is
+    deliberately NOT used here — CONCAT returns NULL if any member is
+    NULL, so every NULL-bearing tuple would leave the key count while
+    staying in the row count, understating the repeat share on exactly
+    the sparse columns that motivate this check.
+
+    One extra scan of the PK columns per driven child, cached beside the
+    fan-out payload. Skipped entirely when the declared PK IS the driving
+    edge — `pk_measurement_from_histogram` reads the same three numbers
+    off the histogram already in hand.
+    """
+    if client is None:  # pragma: no cover - GCP-only path
+        from google.cloud import bigquery
+
+        client = bigquery.Client()
+    cols = _cols(_validated(pk_cols))
+    sql = (
+        f"SELECT COUNT(*) AS key_tuples, SUM(n) AS row_count, "
+        f"MAX(n) AS max_rows_per_key FROM (SELECT {cols}, COUNT(*) AS n "
+        f"FROM `{source_child}` GROUP BY {cols})"
+    )
+    (row,) = _rows(client.query(sql))
+    return {
+        "cols": list(pk_cols),
+        "rows": int(row["row_count"] or 0),
+        "key_tuples": int(row["key_tuples"] or 0),
+        "max_rows_per_key": int(row["max_rows_per_key"] or 0),
+    }
+
+
+def log_pk_measured(table: str, measurement: dict, *, source: str) -> None:
+    """One ``source_pk_measured`` milestone — the evidence the P4 verdict
+    rests on (ADR 0038 fix J). ``source`` is ``measured``, ``cache`` or
+    ``histogram`` (the declared PK IS the driving edge, so the fan-out
+    already measured it and no second scan was paid for)."""
+    log_milestone(
+        "source_pk_measured",
+        table=table,
+        pk=",".join(measurement.get("cols") or ()),
+        rows=measurement.get("rows", 0),
+        key_tuples=measurement.get("key_tuples", 0),
+        max_rows_per_key=measurement.get("max_rows_per_key", 0),
+        repeat_share=round(pk_repeat_share(measurement) or 0.0, 4),
+        source=source,
+    )
+
+
 def fanout_payload(measured: dict, driving_cols: tuple[str, ...], exact_cells: bool) -> dict:
-    """The ``FanoutPlan`` payload shape (Task 1)."""
+    """The ``FanoutPlan`` payload shape (Task 1), plus the DECLARED PK's
+    own source measurement (``pk_source``, ADR 0038 fix J).
+
+    ``FanoutPlan.from_payload`` ignores the extra key — it is preflight's
+    evidence, not the engine's recipe — and it rides here so it is cached
+    and carried by exactly the same plumbing as the histogram.
+    """
     return {
         "driving_cols": list(driving_cols),
         "histogram": dict(measured["histogram"]),
         "cells": measured.get("cells"),
         "exact_cells": bool(exact_cells),
+        "pk_source": measured.get("pk"),
     }
 
 
@@ -256,4 +332,11 @@ class BigQueryFanoutStatsStore:
         self._bq().load_table_from_json([row], self.table_fqn, job_config=job_config).result()
 
 
-__all__ = ["BigQueryFanoutStatsStore", "fanout_payload", "log_fanout_measured", "measure_fanout"]
+__all__ = [
+    "BigQueryFanoutStatsStore",
+    "fanout_payload",
+    "log_fanout_measured",
+    "log_pk_measured",
+    "measure_fanout",
+    "measure_pk_uniqueness",
+]

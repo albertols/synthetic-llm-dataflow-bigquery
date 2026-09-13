@@ -18,7 +18,6 @@
   {"name": "source_repeat_share", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0038 \u2014 share of the SOURCE child's rows repeating a key value (1 - key_values/children over the fan-out histogram)."},
   {"name": "landing_repeat_share", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0038 \u2014 pk.duplicate over the rows generated (valid_count + row.duplicate); the landing table's key-repeat share."},
   {"name": "repeat_share_delta", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0038 \u2014 landing_repeat_share - source_repeat_share."},
-  {"name": "repeat_share_within_tolerance", "type": "BOOLEAN", "mode": "NULLABLE", "description": "ADR 0038 \u2014 |repeat_share_delta| <= REPEAT_SHARE_TOLERANCE (0.05); NULL when repeat_share_note says the two shares are not comparable."},
-  {"name": "repeat_share_note", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0038 \u2014 empty when the source and landing shares describe the same columns; otherwise why no verdict was written (the source share is measured over the driving edge, pk.duplicate over the full declared PK)."},
+  {"name": "repeat_share_within_tolerance", "type": "BOOLEAN", "mode": "NULLABLE", "description": "ADR 0038 \u2014 |repeat_share_delta| <= REPEAT_SHARE_TOLERANCE (0.05); NULL when the launch measured no source share for this table."},
   {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Row write time (UTC); DAY partition key."}
 ]

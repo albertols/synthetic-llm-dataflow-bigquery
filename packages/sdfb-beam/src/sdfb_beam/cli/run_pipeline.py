@@ -51,6 +51,7 @@ from sdfb_core.contracts.model_adjustment import (
     adjusted_models,
     adjustment_banner,
     landed_distinct_keys,
+    pk_measurement_from_histogram,
 )
 from sdfb_core.contracts.prompt_constraint import parse_llm_prompt_constraint
 from sdfb_core.contracts.relationships import (
@@ -86,7 +87,9 @@ from sdfb_beam.io.fanout_stats import (
     BigQueryFanoutStatsStore,
     fanout_payload,
     log_fanout_measured,
+    log_pk_measured,
     measure_fanout,
+    measure_pk_uniqueness,
 )
 from sdfb_beam.io.fk_pools import (
     load_fk_key_pools,
@@ -1141,9 +1144,75 @@ def resolve_fanout(
                 f"{source_table} failed: {type(exc).__name__}: {exc}"
             ) from exc
         source = "measured"
-        _cache_write(stats_store, landing_table, source_table, tuple(driving.cols), sha, measured)
     log_fanout_measured(edge_label, measured, source=source)
+    if resolve_pk_measurement(
+        measured, pk, tuple(driving.cols),
+        landing_table=landing_table, source_table=source_table,
+        client=bq_client,
+    ) or source == "measured":
+        # Something in the payload is new — a fresh fan-out, a freshly
+        # measured PK, or both — so the cache row is (re)written once,
+        # holding BOTH measurements under the same key (ADR 0038 fix J).
+        _cache_write(
+            stats_store, landing_table, source_table,
+            tuple(driving.cols), sha, measured,
+        )
     return fanout_payload(measured, tuple(driving.cols), exact), roles
+
+
+def resolve_pk_measurement(
+    measured: dict,
+    pk: tuple[str, ...],
+    driving_cols: tuple[str, ...],
+    *,
+    landing_table: str,
+    source_table: str,
+    client,
+) -> bool:
+    """Fill ``measured["pk"]`` — the DECLARED PK, measured on the SOURCE
+    child (ADR 0038 fix J). Returns True when a BigQuery scan was paid
+    for, so the caller knows the cached payload has to be rewritten.
+
+    Three ways in, cheapest first, and they are tried in that order:
+
+    * a cached payload already measured exactly these columns — nothing
+      to do (a model whose `pk:` changed changes the model sha, and with
+      it the cache key, so a stale tuple can never be trusted into the
+      check; one that does not match is ignored, not used);
+    * the declared PK IS the driving edge — the histogram already groups
+      the source child by those columns, so the measurement is read off
+      it for free (`pk_measurement_from_histogram`);
+    * otherwise one GROUP BY over the PK columns of the source child.
+
+    A table with no declared `pk:` has nothing to measure — `P4` never
+    checks a key that does not exist.
+    """
+    if not pk:
+        return False
+    cached = measured.get("pk")
+    if cached and tuple(cached.get("cols") or ()) == pk:
+        log_pk_measured(landing_table, cached, source="cache")
+        return False
+    if set(pk) == set(driving_cols):
+        from_hist = pk_measurement_from_histogram(
+            measured.get("histogram") or {}, pk
+        )
+        if from_hist is not None:
+            measured["pk"] = from_hist
+            log_pk_measured(landing_table, from_hist, source="histogram")
+        return False
+    try:
+        measured["pk"] = measure_pk_uniqueness(
+            source_child=source_table, pk_cols=pk, client=client,
+        )
+    except Exception as exc:
+        raise SystemExit(
+            f"[preflight] {landing_table}: declared PK measurement "
+            f"{list(pk)} on {source_table} failed: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    log_pk_measured(landing_table, measured["pk"], source="measured")
+    return True
 
 
 def _mean_k(hist: Mapping[str, int]) -> float:
@@ -2650,13 +2719,6 @@ def _prepare_table_spec(
         gate_excluded_rules=("pk.duplicate",) if adjusted else (),
         source_repeat_share=(
             adjusted[0].source_repeat_share if adjusted else None
-        ),
-        # Fix H4 — when the source share describes the driving edge and
-        # `pk.duplicate` the (wider) declared PK, the two are not
-        # comparable: the summary writes this reason instead of a verdict
-        # over two different column sets.
-        repeat_share_note=(
-            adjusted[0].repeat_share_note if adjusted else ""
         ),
         strict_freetext=resolve_engine_strictness(args.client_type),
         model_uri=args.model_uri,

@@ -576,14 +576,17 @@ def test_the_distinct_key_count_is_carried_from_the_adjustment():
     assert distinct_keys_landed(1_000, ()) == 1_000
 
 
-# --- H4. the faithfulness verdict compares like with like -------------
+# --- H4/J. the faithfulness verdict compares like with like -----------
 #
-# Finding H4: `source_repeat_share` is read off the DRIVING-EDGE
+# Finding H4: `source_repeat_share` was read off the DRIVING-EDGE
 # histogram while `landing_repeat_share` is `pk.duplicate` over the FULL
 # declared PK. At the second conflict site — a PK with completing
 # members outside the driving edge — those are different column sets, so
 # a perfectly faithful run was handed `within_tolerance=false` and a
-# WARNING saying the copy was broken.
+# WARNING saying the copy was broken. Fix J removes the mismatch at its
+# root: the source is measured over the DECLARED PK (section J below),
+# so a share, when there is one, is always comparable — and a launch
+# that measured none carries none.
 
 _CELL_SHAPE = """
 model: kw5
@@ -629,42 +632,39 @@ def _cell_preflight(**kw):
     )
 
 
-def test_a_pk_wider_than_the_driving_edge_is_not_comparable():
-    """The source share describes (PID); `pk.duplicate` describes
-    (PID, CAT). No verdict is written — and the reason is."""
+def test_a_wide_pk_without_its_own_measurement_claims_no_share():
+    """Fix J: a share measured over the DRIVING EDGE is not the declared
+    PK's, so it is no longer carried at all. This shape's conflict is
+    proven by the cell capacity, not by a measurement of (PID, CAT) — so
+    the adjustment states the conflict and claims no share, instead of
+    reporting one the landing table is not measured against."""
     result = _cell_preflight()
     (adjustment,) = result.adjustments
-    assert adjustment.source_repeat_share == pytest.approx(7 / 9, abs=1e-4)
-    assert adjustment.repeat_share_basis == ("PID",)
-    assert adjustment.repeat_share_comparable is False
-    note = adjustment.repeat_share_note
-    assert "PID" in note and "CAT" in note
-    assert "not comparable" in note
+    assert adjustment.declared_pk == ("PID", "CAT")
+    assert adjustment.source_repeat_share is None
 
 
-def test_the_e_table_case_keeps_its_real_verdict():
-    """There the declared PK IS the driving edge, so the two shares
-    describe the same columns and the ±0.05 verdict stands."""
+def test_the_one_to_one_case_carries_the_declared_pk_share():
+    """There the declared PK IS the driving edge, so the histogram
+    measures that very key tuple and the ±0.05 verdict stands."""
     result = _preflight({"0": 10, "2": 5})
     (adjustment,) = result.adjustments
-    assert adjustment.repeat_share_basis == ("PID",)
-    assert adjustment.repeat_share_comparable is True
-    assert adjustment.repeat_share_note == ""
+    assert adjustment.declared_pk == ("PID",)
+    assert adjustment.source_repeat_share == pytest.approx(0.5)
 
 
-def test_the_banner_says_when_the_shares_are_not_comparable():
+def test_the_banner_says_when_no_share_was_measured():
     (adjustment,) = _cell_preflight().adjustments
     banner = adjustment_banner([adjustment])
-    assert "77.78%" in banner
-    assert "not comparable" in banner
+    assert "not measured over ['PID', 'CAT']" in banner
+    assert "no ±5% verdict is written" in banner
 
 
-def test_the_summary_row_writes_the_reason_instead_of_a_false_verdict():
+def test_the_summary_row_withholds_the_verdict_when_no_share_was_measured():
     """The wiring through `pipeline._build_validation_run_row`: the
     landing share is still MEASURED on the full declared PK (reporting),
-    the delta and the verdict are withheld, and the note says why."""
-    import logging as _logging
-
+    and with no source share there is no delta and no verdict — never a
+    verdict against a share nobody measured."""
     from sdfb_beam.pipeline import _build_validation_run_row
     from sdfb_core.validation import Thresholds
 
@@ -679,11 +679,153 @@ def test_the_summary_row_writes_the_reason_instead_of_a_false_verdict():
         engine="b1_rag", model_uri="gs://b/m/v/",
         excluded_blocker_rules=("pk.duplicate",),
         source_repeat_share=adjustment.source_repeat_share,
-        repeat_share_note=adjustment.repeat_share_note,
     )
-    assert row["source_repeat_share"] == pytest.approx(7 / 9, abs=1e-4)
-    assert row["landing_repeat_share"] == pytest.approx(0.5702)
+    assert row["source_repeat_share"] is None
+    assert row["landing_repeat_share"] is None
     assert row["repeat_share_delta"] is None
     assert row["repeat_share_within_tolerance"] is None
-    assert "not comparable" in row["repeat_share_note"]
-    assert _logging  # keep the import honest if the milestone moves
+
+
+# --- J. the DECLARED PK is measured on the source, and decides --------
+#
+# Launch 2026-09-13 …-12600311608685394436: fix H's adjustment worked —
+# E_TABLE's key was dropped, F_TABLE was sized off the parent's distinct
+# keys, three tables generated. Then F_TABLE tripped the BLOCKER gate at
+# `blocker_count=179853 observed=0.2908 > gate=0.2`. Its
+# `pk: [D_COL_001, CONTINUOUS_NR]` is driven by `(D_COL_001)`, so its key
+# has a member OUTSIDE the driving edge and `_check_driven_pk` returned
+# early on it: the histogram describes the EDGE and says nothing about
+# that key. The declared PK's OWN source measurement now decides, and it
+# decides against the run's BLOCKER gate — not against any repetition.
+
+_J_SHAPE = """
+model: kw6
+tables:
+  parent:
+    pk: [PID]
+  child:
+    pk: [PID, NR]
+    fk:
+      - cols: [PID]
+        ref: parent
+        ref_cols: [PID]
+"""
+
+
+def _j_schema() -> TableSchema:
+    return TableSchema.model_validate({
+        "table_info": {"table_id": "p.d.childj"},
+        "schema": [{"name": "PID", "type": "STRING", "mode": "REQUIRED"},
+                   {"name": "NR", "type": "INT64", "mode": "REQUIRED"},
+                   {"name": "AMT", "type": "INT64", "mode": "REQUIRED"}],
+    })
+
+
+# The F_TABLE measurement, in miniature: 18 key values carry 81 rows.
+_J_HISTOGRAM = {"1": 11, "10": 7}
+# The declared PK, measured on the source: 0.2908 of the rows repeat a
+# (PID, NR) tuple — the share the landing table actually reached.
+_J_ABOVE_GATE = {"cols": ["PID", "NR"], "rows": 1_215_948,
+                 "key_tuples": 862_401, "max_rows_per_key": 4}
+# The same shape on a source that is merely DIRTY: 0.4% repeats.
+_J_BELOW_GATE = {"cols": ["PID", "NR"], "rows": 10_000,
+                 "key_tuples": 9_960, "max_rows_per_key": 2}
+
+
+def _j_preflight(pk_source: dict | None, **kw):
+    reg = RelationshipRegistry.from_sources(
+        [("config/relationships/kw6.yaml", _J_SHAPE)]
+    )
+    rows = [{"PID": f"E2F3{i:020X}", "NR": i, "AMT": i} for i in range(300)]
+    # `NR` is an unbounded INT64, so the cell check is INEXACT — the
+    # shape that used to return early, before anything measured the key.
+    fanout = {"driving_cols": ["PID"], "histogram": _J_HISTOGRAM,
+              "cells": None, "exact_cells": False, "pk_source": pk_source}
+    return preflight(
+        _j_schema(), (), (), rows, relations=reg.relations("child"),
+        num_rows=1_000, fk_parent_rows={"parent": 1_000},
+        blocker_failure_ratio=0.2, fanout=fanout,
+        edge_roles=reg.edge_roles("child"), **kw,
+    )
+
+
+def test_a_pk_with_a_completing_member_above_the_gate_adjusts():
+    """F_TABLE's shape. `CONTINUOUS_NR` is unbounded, so the cell check
+    returns early and nothing looked at the key — until now."""
+    from sdfb_core.contracts.model_adjustment import pk_repeat_share
+
+    result = _j_preflight(_J_ABOVE_GATE)
+    assert result.pk_cols == ()
+    (adjustment,) = result.adjustments
+    assert adjustment.change == "pk_dropped"
+    assert adjustment.declared_pk == ("PID", "NR")
+    assert adjustment.source_repeat_share == pytest.approx(
+        pk_repeat_share(_J_ABOVE_GATE)
+    )
+    assert adjustment.source_repeat_share == pytest.approx(0.2908, abs=1e-4)
+    # ...and the run proceeds: the fan-out is untouched, mean k = 81/18.
+    assert result.derived_rows == round(1_000 * 81 / 18)
+
+
+def test_the_same_shape_below_the_gate_keeps_its_key_and_warns(caplog):
+    """A source that is 0.4% dirty must NOT lose its key — today's
+    machinery diverts those few rows as pk.duplicate."""
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        result = _j_preflight(_J_BELOW_GATE)
+    assert result.pk_cols == ("PID", "NR")
+    assert result.adjustments == ()
+    assert "name=preflight_pk_source_repeats" in caplog.text
+    assert "repeat_share=0.004" in caplog.text
+    assert "gate=0.2" in caplog.text
+
+
+def test_the_measured_pk_conflict_still_refuses_under_stop():
+    with pytest.raises(SystemExit, match=r"preflight P4") as exc:
+        _j_preflight(_J_ABOVE_GATE, on_model_conflict="stop")
+    message = str(exc.value)
+    assert "['PID', 'NR']" in message
+    assert "29.1%" in message or "0.2908" in message
+
+
+def test_the_faithfulness_verdict_is_now_comparable_for_a_wide_pk():
+    """Fix H4 wrote "not comparable" here: the source share came off the
+    DRIVING EDGE while `pk.duplicate` is measured on the declared PK.
+    Both now describe the declared PK, so the ±0.05 verdict stands."""
+    from sdfb_beam.pipeline import _build_validation_run_row
+    from sdfb_core.validation import Thresholds
+
+    (adjustment,) = _j_preflight(_J_ABOVE_GATE).adjustments
+    row = _build_validation_run_row(
+        None,
+        valid_count=10_000,
+        dlq_by_rule={"pk.duplicate": 2_908},
+        thresholds=Thresholds(env="dev", blocker_failure_ratio=0.2),
+        run_id="r", reference_digest="d", num_rows=10_000,
+        reference_table="p.src.childj", landing_table="p.land.childj",
+        engine="b1_rag", model_uri="gs://b/m/v/",
+        excluded_blocker_rules=("pk.duplicate",),
+        source_repeat_share=adjustment.source_repeat_share,
+    )
+    assert row["source_repeat_share"] == pytest.approx(0.2908, abs=1e-4)
+    assert row["landing_repeat_share"] == pytest.approx(0.2908, abs=1e-4)
+    assert row["repeat_share_delta"] == pytest.approx(0.0, abs=1e-3)
+    assert row["repeat_share_within_tolerance"] is True
+
+
+def test_the_one_to_one_case_reads_the_same_measurement_off_the_histogram():
+    """ONE decision path: a declared PK that IS the driving edge is the
+    special case where the histogram already measures the key tuple — so
+    it costs no second scan and takes the same branch."""
+    from sdfb_core.contracts.model_adjustment import (
+        pk_measurement_from_histogram,
+        pk_repeat_share,
+        source_repeat_share,
+    )
+
+    measurement = pk_measurement_from_histogram({"0": 10, "2": 5}, ["PID"])
+    assert measurement == {"cols": ["PID"], "rows": 10, "key_tuples": 5,
+                           "max_rows_per_key": 2}
+    assert pk_repeat_share(measurement) == source_repeat_share(
+        {"0": 10, "2": 5}
+    )
+    assert pk_measurement_from_histogram({"0": 10}, ["PID"]) is None

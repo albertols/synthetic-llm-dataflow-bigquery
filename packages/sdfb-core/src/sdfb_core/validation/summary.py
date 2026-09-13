@@ -83,13 +83,6 @@ class RunSummary(BaseModel):
     landing_repeat_share: float | None = None
     repeat_share_delta: float | None = None
     repeat_share_within_tolerance: bool | None = None
-    # ADR 0038 fix H4 — empty when the two shares describe the same
-    # columns (and the verdict above stands); otherwise WHY no verdict
-    # was written. The source share is measured over the driving edge and
-    # `pk.duplicate` over the full declared PK, so a PK with completing
-    # members outside that edge describes a different, narrower key: a
-    # delta between them is arithmetic, not evidence.
-    repeat_share_note: str = ""
 
     def to_bq_row(self) -> dict:
         """JSON-load-shaped row. ``dlq_by_rule`` is a JSON string so the
@@ -143,7 +136,6 @@ def build_run_summary(
     created_at: str | None = None,
     excluded_blocker_rules: Sequence[str] = (),
     source_repeat_share: float | None = None,
-    repeat_share_note: str = "",
 ) -> RunSummary:
     """Fold counts + thresholds into a :class:`RunSummary` with a status.
 
@@ -158,13 +150,11 @@ def build_run_summary(
     ``source_repeat_share`` arms the comparison that proves the copy:
     the landed share is derived from the same counts (`pk.duplicate`
     over the rows generated) and the delta is checked against
-    ``REPEAT_SHARE_TOLERANCE``.
-
-    ``repeat_share_note`` (fix H4) disarms the VERDICT while keeping both
-    measurements: a non-empty note means the two shares describe
-    different column sets (`ModelAdjustment.repeat_share_note` says
-    which), so the delta and the tolerance verdict are withheld and the
-    reason is written instead of a false negative.
+    ``REPEAT_SHARE_TOLERANCE``. Both describe the DECLARED PK (fix J
+    measures the source over exactly the columns `pk.duplicate` counts),
+    so the verdict is like-for-like wherever a share arrives at all —
+    fix H4's "not comparable" case cannot occur any more, and a launch
+    that measured no share writes none.
     """
     excluded = frozenset(excluded_blocker_rules)
     dlq_count = sum(dlq_by_rule.values())
@@ -176,11 +166,7 @@ def build_run_summary(
     landed = landing_repeat_share(
         valid_count=valid_count, dlq_by_rule=dlq_by_rule
     )
-    delta, within = (
-        (None, None)
-        if repeat_share_note
-        else repeat_share_verdict(source_repeat_share, landed)
-    )
+    delta, within = repeat_share_verdict(source_repeat_share, landed)
     observed = (blocker_count / total) if total else 0.0
     status = (
         STATUS_FAILED_BLOCKER
@@ -211,7 +197,6 @@ def build_run_summary(
         ),
         repeat_share_delta=delta,
         repeat_share_within_tolerance=within,
-        repeat_share_note=repeat_share_note,
     )
 
 

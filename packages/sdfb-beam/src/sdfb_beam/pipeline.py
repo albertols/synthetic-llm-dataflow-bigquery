@@ -97,15 +97,12 @@ class PipelineConfig:
     # duplicates are the point, so counting them would fail every
     # faithful run. Named in the summary row, never hidden.
     gate_excluded_rules: tuple[str, ...] = ()
-    # ADR 0038 — the SOURCE key-repeat share this table must reproduce
-    # (`1 - key_values / children` over the fan-out histogram). The run
+    # ADR 0038 — the SOURCE key-repeat share this table must reproduce:
+    # `1 - key_tuples / rows` over the DECLARED PK, measured on the
+    # source child at launch (fix J), which is the same column set
+    # `pk_measure_columns` above counts `pk.duplicate` over. The run
     # summary compares it with the landed share.
     source_repeat_share: float | None = None
-    # ADR 0038 fix H4 — non-empty when that comparison is NOT like for
-    # like (the share describes the driving edge, `pk.duplicate` the
-    # declared PK): the reason, written to the summary row instead of a
-    # verdict. `ModelAdjustment.repeat_share_note` composes it.
-    repeat_share_note: str = ""
     # Real-LLM runs re-raise on free-text LLM failure instead of silently
     # copying exemplars. Set from client_type at the CLI boundary.
     strict_freetext: bool = False
@@ -444,7 +441,6 @@ def build_pipeline(
                 model_uri=config.model_uri,
                 excluded_blocker_rules=tuple(config.gate_excluded_rules),
                 source_repeat_share=config.source_repeat_share,
-                repeat_share_note=config.repeat_share_note,
             )
         )
         write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
@@ -1409,7 +1405,6 @@ def _build_validation_run_row(
     model_uri: str,
     excluded_blocker_rules: tuple[str, ...] = (),
     source_repeat_share: float | None = None,
-    repeat_share_note: str = "",
 ) -> dict:
     """Driver of the single validation_runs row (side inputs are singletons).
 
@@ -1432,19 +1427,17 @@ def _build_validation_run_row(
         model_uri=model_uri,
         excluded_blocker_rules=excluded_blocker_rules,
         source_repeat_share=source_repeat_share,
-        repeat_share_note=repeat_share_note,
     )
     if summary.source_repeat_share is not None:
         log_milestone(
             "model_adjustment_repeat_share",
-            # Fix H4: a WARNING is for a copy that MISSED its source,
-            # or for a comparable pair that produced no landing reading
-            # at all. "No verdict, and here is why" is neither, so it
-            # does not shout — `note=` carries it.
+            # A WARNING is for a copy that MISSED its source, or for a
+            # pair that produced no landing reading at all. Fix J makes
+            # the two shares describe the same columns in every case, so
+            # a delta outside tolerance is always evidence.
             level=(
                 logging.INFO
                 if summary.repeat_share_within_tolerance is True
-                or summary.repeat_share_note
                 else logging.WARNING
             ),
             table=landing_table,
@@ -1461,13 +1454,7 @@ def _build_validation_run_row(
             ),
             tolerance=REPEAT_SHARE_TOLERANCE,
             within_tolerance=summary.repeat_share_within_tolerance,
-            comparable=not summary.repeat_share_note,
             excluded_blocker_rules=summary.excluded_blocker_rules,
-            **(
-                {"note": summary.repeat_share_note}
-                if summary.repeat_share_note
-                else {}
-            ),
         )
     return summary.to_bq_row()
 

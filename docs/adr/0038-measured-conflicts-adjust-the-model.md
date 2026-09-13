@@ -1,7 +1,7 @@
 # ADR 0038 — The source is the authority: a MEASURED model conflict adjusts and announces; a self-contradiction still stops
 
-**Status:** PROPOSED (2026-09-13) — laptop acceptance green on `ws12-fanout-generation` (unit suite + the DirectRunner shape in `test_fanout_adjusted_pk.py`); Dataflow acceptance rides with the next M4 relational launch. **Fix wave H** (2026-09-13 adversarial verification of `d05c4f0`) is folded into D3, D4, D6 and the new D9: the gate's denominator, P5's deference, a descendant's sizing, and the comparability of the two repeat shares.
-**Evidence:** launch `2026-09-12_14_50_30-6058498192553696658` — the full five-table launch stopped with nothing generated. The measurements it left are in `integration_tests/2026-09-12_14_50_30-6058498192553696658/worker_logs.jsonl` (milestone `fk_fanout_measured edge='(D_COL_001)->B_TABLE'`, and the `preflight P4` stop on `E_TABLE`).
+**Status:** PROPOSED (2026-09-13) — laptop acceptance green on `ws12-fanout-generation` (unit suite + the two DirectRunner shapes in `test_fanout_adjusted_pk.py`); Dataflow acceptance rides with the next M4 relational launch. **Fix wave H** (2026-09-13 adversarial verification of `d05c4f0`) is folded into D3, D4, D6 and D9: the gate's denominator, P5's deference, a descendant's sizing, and the comparability of the two repeat shares. **Fix J** (2026-09-13, the launch H produced) replaces the driving-edge rule with the new D10: the DECLARED PK is measured on the source and decides against the run's BLOCKER gate — which also re-founds D4 and completes D6.
+**Evidence:** launch `2026-09-12_14_50_30-6058498192553696658` — the full five-table launch stopped with nothing generated (`integration_tests/2026-09-12_14_50_30-6058498192553696658/worker_logs.jsonl`: `fk_fanout_measured edge='(D_COL_001)->B_TABLE'`, and the `preflight P4` stop on `E_TABLE`) · launch `2026-09-13_06_10_16-12600311608685394436` — the SAME shape with this ADR live: the model adjusted, three tables generated, and `F_TABLE` then failed the gate at `blocker_count=179853 observed=0.2908 > gate=0.2` on a declared PK nothing had measured (`integration_tests/2026-09-13_06_10_16-12600311608685394436/`).
 **Amends:** [ADR 0036](0036-parent-driven-fanout-generation.md) D6 (the driven-child uniqueness mode is now FORCED, not defaulted, on an adjusted table) · [ADR 0037](0037-multi-parent-children.md) §6 (both P4 "the declared PK is not a key of the source" stops become adjustments by default)
 **Keeps:** [ADR 0032](0032-relationships-as-config.md) — `config/relationships/*.yaml` stays the single source of truth and the single input format; this ADR adds no key and no file · [ADR 0035](0035-pk-capacity-fk-bound-members.md) — the capacity gate is untouched and still stops (see D6) · [ADR 0036](0036-parent-driven-fanout-generation.md) — the driving edge, the fan-out histogram, the cell draw and the seeding are all left exactly as measured · [ADR 0031](0031-joint-fk-key-draws.md) — FK integrity by construction is untouched
 
@@ -115,22 +115,21 @@ For `E_TABLE`: $1 - 583{,}134 / 1{,}172{,}025 = 0.5025$. The run summary
 writes it next to the LANDING share — `pk.duplicate` over the rows
 generated (`valid_count + row.duplicate`, the honest denominator in
 streaming mode, since the two rules are independent branches) — plus the
-delta and a verdict. **Tolerance: ±0.05 absolute**, and the verdict only
-fires on like for like (fix H4): the source share is read off a GROUP BY the **driving
-edge**, while `pk.duplicate` is measured on the full **declared PK**.
-They describe the same key exactly when those two column sets coincide —
-`E_TABLE`'s case, where the declared PK *is* the driving edge. At the
-second conflict site (a PK with completing members outside the edge) the
-declared PK is wider and its tuple repeats strictly less often, so a
-perfectly faithful run would score a delta far outside tolerance:
-driving `(PID)` at 0.7778 against a faithful landing `(PID, CAT)` at
-0.5702. There the run writes both shares and
-`validation_runs.repeat_share_note` — *not comparable, and why* — rather
-than a false negative; `pk.duplicate` stays measured on the full
-declared PK either way, because that is the reporting contract. The
-alternative (re-measuring the landing share over the driving columns
-alone) would add a second digest branch to the DAG to answer a question
-no threshold gates. The copy is faithful
+delta and a verdict. **Tolerance: ±0.05 absolute**, and since **fix J**
+the two shares describe the SAME columns in every case: the source share
+is measured over the **declared PK** (D10), which is exactly what
+`pk.duplicate` is counted over (`PipelineConfig.pk_measure_columns`).
+
+Fix H4 had to disclaim that comparison, because the source share was
+read off a GROUP BY the **driving edge** — the same key only when the
+declared PK *is* that edge. The gap is not small: on launch
+`…-12600311608685394436` `F_TABLE`'s driving edge `(D_COL_001)` repeats
+**0.6175** of the source's rows while its declared PK
+`(D_COL_001, CONTINUOUS_NR)` lands at **0.2908**. Measuring the declared
+PK removes the mismatch at its root instead of annotating it, so
+`repeat_share_note` and `ModelAdjustment.repeat_share_basis` are gone:
+where a share exists it is comparable, and a launch that measured none
+writes none rather than a number over other columns. The copy is faithful
 by construction, so the only spread is sampling: the per-key draw
 converges at $O(1/\sqrt{\text{keys}})$ (well under half a point at
 `E_TABLE`'s 52,545 matched keys), plus the derived row count's rounding,
@@ -170,6 +169,11 @@ table that declares a driving edge whose parent is outside the launch —
 the one driven case P5 can still be reached in — gets a message that
 says so instead of claiming a fan-out nobody measured.
 
+Fix J completes that deference. H2 handed the verdict to a check that,
+for a PK with completing members, was not looking at the key; D10 makes
+P4 decide on the declared PK's own measurement, so the hand-off is total
+and P5's sample is the last word only where nothing was measured.
+
 **D9 — a descendant of an adjusted parent is sized off the parent's
 DISTINCT keys** (fix H3). A driven child's row count is
 `round(parent keys × mean fan-out)`, and the composer fans it out from
@@ -184,6 +188,61 @@ distinct keys: its rows when its PK is enforced,
 `rows × (1 - source repeat share)` when it was adjusted
 (`landed_distinct_keys`), and `model_adjustment_descendant_rows` fires
 whenever that shrinks a descendant's derived count.
+
+**D10 — the DECLARED PK is measured on the source, and that measurement
+decides — against the run's BLOCKER GATE** (fix J). D1 says a
+*full-source measurement* is the authority. Until fix J the only such
+measurement was the driving edge's fan-out histogram, which describes
+ONE column set. A declared PK with a member outside that edge was
+therefore never measured at all: `_check_driven_pk` reasoned about the
+histogram and returned early when the completing member was unbounded.
+Launch `…-12600311608685394436` is what that costs. The adjustment
+worked — `E_TABLE`'s key was dropped, the pasteable YAML was emitted,
+`F_TABLE` was sized off the parent's distinct keys, three tables
+generated — and then `F_TABLE`, whose `pk: [D_COL_001, CONTINUOUS_NR]`
+is driven by `(D_COL_001)`, failed the gate:
+
+```
+BlockerThresholdExceeded: …-04-F_TABLE blocker_count=179853
+  observed=0.2907744316776362 > gate=0.2 (env=dev)
+```
+
+The 10,000-row sample had said `duplicates=47` (0.47%) — too weak, as
+ever, to see it. So:
+
+1. **measure it.** One GROUP BY over the declared PK of the source
+   child (`measure_pk_uniqueness`): rows, distinct key tuples, and the
+   largest group — a COMPOSITE key counted as a tuple, NULLs grouped as
+   a value exactly as `measure_fanout`'s child GROUP BY does. Cached in
+   the same `fk_fanout_stats` payload under the same key, so a re-launch
+   re-scans neither measurement. When the declared PK IS the driving
+   edge the histogram already measures that tuple, and it is read off it
+   for **zero** extra BigQuery — which is what makes the old
+   driving-edge rule a special case of this one rather than a second
+   rule beside it.
+2. **compare it with the gate, not with any repetition.** The measured
+   repeat share is $1 - \text{key\_tuples}/\text{rows}$. ABOVE the run's
+   `blocker_failure_ratio`, the declared key cannot survive generation —
+   generation reproduces the source, so that share lands as
+   `pk.duplicate` and fails the run — and the `pk:` is dropped exactly as
+   D1–D4 prescribe. AT OR BELOW it, the key is KEPT and
+   `preflight_pk_source_repeats` says what the source measured: a table
+   whose source is 0.4% dirty must not lose its key, and today's
+   machinery diverts those few rows. `F_TABLE` at 0.2908 against a 0.2
+   gate adjusts and the run completes; the same table against a 0.3 gate
+   keeps its key and lands its duplicates as `pk.duplicate`, which is
+   the operator's own threshold doing the deciding.
+3. **ONE decision path.** The ADR 0037 capacity ladder (cells ×
+   `--fk_candidate_cap` per conditional edge) is now the evidence of
+   LAST resort — reached only where no measurement of the declared PK
+   exists. Where one does and it kept the key, a capacity model below
+   the source's largest fan-out is reported
+   (`preflight_pk_capacity_below_fanout`) and never acted on: capacity
+   ESTIMATES what a key can represent, the measurement MEASURED it, and
+   an estimate must not take a key the data says is real.
+
+Cost: one extra scan of the PK columns per driven child whose key is
+not its driving edge, once per (source table, edge, model sha).
 
 **D7 — the effective model is handed back.** Every model file owning an
 adjusted table is re-emitted as YAML the operator can paste into
@@ -204,21 +263,23 @@ run says so:
 
 ```mermaid
 flowchart TD
-  SRC[("🗄️ source child<br/>full-table GROUP BY")] --> M["🔀 measure_fanout<br/>histogram + cells"]
-  DECL[("📄 config/relationships<br/>pk: [D_COL_001]")] --> P4["⚙️ P4 _check_driven_pk"]
+  SRC[("🗄️ source child<br/>full-table GROUP BY")] --> M["🔀 measure_fanout<br/>histogram + cells (the driving EDGE)"]
+  SRC --> PKM["🔀 measure_pk_uniqueness<br/>the DECLARED PK: rows · key tuples · max group"]
+  DECL[("📄 config/relationships<br/>pk: [D_COL_001, CONTINUOUS_NR]")] --> P4["⚙️ P4 _check_driven_pk<br/>source repeat share vs the BLOCKER gate"]
   M --> P4
-  P4 -->|"fan-out fits the PK"| KEEP["⚪ pk kept<br/>nothing changes"]
-  P4 -->|"source repeats the key"| ADJ["🛡️ ModelAdjustment<br/>pk DROPPED"]
+  PKM --> P4
+  P4 -->|"share ≤ gate"| KEEP["⚪ pk KEPT<br/>the few repeats divert as pk.duplicate"]
+  P4 -->|"share > gate"| ADJ["🛡️ ModelAdjustment<br/>pk DROPPED"]
   ADJ --> BAN["📄 MODEL ADJUSTED banner<br/>+ model_adjusted milestone<br/>+ effective model YAML"]
   ADJ --> GEN["🔀 generate from the driving edge<br/>histogram UNTOUCHED"]
   GEN --> LAND[("🗄️ landing table<br/>repeats the key like the source")]
-  LAND --> CMP["⚙️ repeat-share comparison<br/>source vs landing, ±0.05"]
+  LAND --> CMP["⚙️ repeat-share comparison<br/>source vs landing, SAME columns, ±0.05"]
 
   classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
   classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
-  class M,GEN beam
+  class M,PKM,GEN beam
   class P4,ADJ,CMP cpu
   class SRC,DECL,BAN,LAND store
   class KEEP data
@@ -228,18 +289,20 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  SRC[("🗄️ source child<br/>full-table GROUP BY")] --> M["🔀 measure_fanout<br/>histogram + cells"]
-  DECL[("📄 config/relationships<br/>pk: [D_COL_001]")] --> P4["⚙️ P4 _check_driven_pk"]
+  SRC[("🗄️ source child<br/>full-table GROUP BY")] --> M["🔀 measure_fanout<br/>histogram + cells (the driving EDGE)"]
+  SRC --> PKM["🔀 measure_pk_uniqueness<br/>the DECLARED PK: rows · key tuples · max group"]
+  DECL[("📄 config/relationships<br/>pk: [D_COL_001, CONTINUOUS_NR]")] --> P4["⚙️ P4 _check_driven_pk<br/>source repeat share vs the BLOCKER gate"]
   M --> P4
-  P4 -->|"fan-out fits the PK"| KEEP["⚪ pk kept<br/>nothing changes"]
-  P4 -->|"source repeats the key"| STOP["🛡️ SystemExit<br/>preflight P4"]
+  PKM --> P4
+  P4 -->|"share ≤ gate"| KEEP["⚪ pk KEPT<br/>the few repeats divert as pk.duplicate"]
+  P4 -->|"share > gate"| STOP["🛡️ SystemExit<br/>preflight P4, naming the measurement"]
   STOP --> NONE["∅ nothing launched<br/>every planned table"]
 
   classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
   classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
-  class M beam
+  class M,PKM beam
   class P4,STOP cpu
   class SRC,DECL store
   class KEEP,NONE data
@@ -258,13 +321,19 @@ disagree about whether a launch is worth more than a declaration.
   holding the effective YAML, and — at the end of the run — a
   `model_adjustment_repeat_share` milestone plus five new
   `validation_runs` columns.
-- `validation_runs` gains six NULLABLE columns
+- `validation_runs` gains five NULLABLE columns
   (`excluded_blocker_rules`, `source_repeat_share`,
   `landing_repeat_share`, `repeat_share_delta`,
-  `repeat_share_within_tolerance`, `repeat_share_note`). The table must
-  be updated from
+  `repeat_share_within_tolerance`). The table must be updated from
   `config/bq_schema/synthetic_data_quality/validation_runs.schema.json`
-  before the next run, or FILE_LOADS rejects the row.
+  before the next run, or FILE_LOADS rejects the row. (Fix J removed the
+  sixth, `repeat_share_note`: with both shares over the declared PK
+  there is no "not comparable" case left to explain. A table already
+  widened for it keeps a harmless unused column.)
+- One extra BigQuery scan per driven child whose declared `pk:` is not
+  its driving edge — a single GROUP BY over the PK columns of the source
+  child, cached beside the fan-out under the same key. A child whose PK
+  IS the driving edge pays nothing: the histogram already measured it.
 - An adjusted table loses `identity.unique` MEASUREMENT, because
   `streaming` measures the row digest and the PK digest only. Identity
   values are synthesized per row from
@@ -341,12 +410,17 @@ disagree about whether a launch is worth more than a declaration.
 | the excluded rule leaves BOTH sides of the ratio — a genuine `engine_failure` / `schema.types` failure on an adjusted table still fails its gate, and a non-adjusted table's ratio is unchanged (H1) | `validation/test_validation_core.py::TestExcludedRuleLeavesBothSidesOfTheRatio` |
 | a hot SAMPLE defers to the measurement: the launch adjusts under the default, refuses with P4's message under `stop`, an undriven table still stops at P5, and a driven-but-unmeasured one stops with the corrected message (H2) | `cli/test_model_adjustment.py::test_a_hot_sample_defers_p5_to_the_full_source_measurement`, `…_refuses_at_p4_under_stop`, `…_an_undriven_table_with_the_same_sample_still_stops_at_p5`, `…_a_driven_but_unmeasured_table_stops_with_the_driven_message` |
 | a child of an ADJUSTED parent is sized off its DISTINCT keys; a child of an enforced-PK parent is unchanged (H3) | `cli/test_model_adjustment.py::test_a_child_of_an_adjusted_parent_is_sized_off_its_distinct_keys`, `…_an_enforced_pk_parent_is_unchanged`, `…_the_distinct_key_count_is_carried_from_the_adjustment` |
-| a PK wider than the driving edge writes "not comparable" + the reason instead of a false negative, while `E_TABLE` keeps its real verdict (H4) | `cli/test_model_adjustment.py::test_a_pk_wider_than_the_driving_edge_is_not_comparable`, `…_the_e_table_case_keeps_its_real_verdict`, `…_the_summary_row_writes_the_reason_instead_of_a_false_verdict` |
+| a PK wider than the driving edge is now COMPARABLE — the source share is measured over the declared PK, so the delta and the ±0.05 verdict are written; an adjustment with no measurement of its own claims no share at all, in the record, the banner and the summary row (H4 → J) | `cli/test_model_adjustment.py::test_the_faithfulness_verdict_is_now_comparable_for_a_wide_pk`, `…_a_wide_pk_without_its_own_measurement_claims_no_share`, `…_the_banner_says_when_no_share_was_measured`, `…_the_summary_row_withholds_the_verdict_when_no_share_was_measured`, `…_the_one_to_one_case_carries_the_declared_pk_share` |
+| the DECLARED PK is measured on the source: a composite key counts as ONE tuple, NULLs group as a value (no `IS NOT NULL`, no `COUNT(DISTINCT CONCAT(...))`), and a non-identifier column is refused (J) | `io/test_fanout_stats.py::test_measure_pk_uniqueness_counts_a_composite_key_as_one_tuple`, `…_handles_nulls_the_way_the_histogram_does`, `…_rejects_a_column_that_is_not_an_identifier` |
+| the measurement DECIDES against the gate: F_TABLE's shape adjusts above it and the run proceeds; the same shape below it keeps its key and warns; `--on_model_conflict=stop` still refuses, naming the measurement (J) | `cli/test_model_adjustment.py::test_a_pk_with_a_completing_member_above_the_gate_adjusts`, `…_the_same_shape_below_the_gate_keeps_its_key_and_warns`, `…_the_measured_pk_conflict_still_refuses_under_stop` |
+| ONE decision path: a PK that equals its driving edge reads the SAME measurement off the histogram, for zero extra BigQuery (J) | `cli/test_model_adjustment.py::test_the_one_to_one_case_reads_the_same_measurement_off_the_histogram`, `cli/test_fanout_launch_wiring.py::test_a_pk_equal_to_the_driving_edge_costs_no_second_scan` |
+| the measurement is cached in the same payload and not re-run; a pre-fix-J cache row re-scans the PK only; a failed scan is a loud preflight stop (J) | `cli/test_fanout_launch_wiring.py::test_resolve_fanout_measures_the_declared_pk_and_caches_it`, `…_a_cache_entry_from_before_fix_j_measures_only_the_pk`, `…_a_failed_pk_measurement_is_a_preflight_stop` |
+| the F_TABLE shape end to end: a driven child whose declared key adds a column the source repeats LANDS, keeps its FK tuples inside the parent, and reaches a landing repeat share within ±0.05 of the source's (J) | `test_fanout_adjusted_pk.py::test_a_driven_child_whose_declared_key_repeats_lands_rows` (200 parent keys, 400 landed rows, source share 0.1650) |
 | the banner and the milestone fire once per adjustment | `cli/test_model_adjustment.py::test_milestone_fires_once_per_adjustment` |
 | the emitted YAML parses through the registry with the PK removed and the reason attached | `cli/test_model_adjustment.py::test_the_emitted_yaml_parses_and_has_the_pk_removed`, `…_written_beside_the_staged_artifacts` |
 | a table with no conflict is untouched end to end | `cli/test_model_adjustment.py::test_a_table_with_no_conflict_is_untouched`, `…_the_reference_sample_warns_but_never_adjusts` |
 | the landing table reproduces the repeat share; FK tuples stay in the parent; the adjusted table's own child still generates | `test_fanout_adjusted_pk.py::test_an_adjusted_child_copies_the_source_repeat_share` (200 parent keys, 386 landed rows, landing share 0.4819 vs source 0.5000) |
-| Dataflow: the five-table launch that stopped now lands, with `repeat_share_within_tolerance = true` on `E_TABLE` | **pending the M4 re-run of `2026-09-12_14_50_30`** |
+| Dataflow: the five-table launch that stopped now lands, with `repeat_share_within_tolerance = true` on `E_TABLE` — and `F_TABLE`, which reached the gate on launch `…-12600311608685394436`, lands too | **pending the M4 re-run** |
 
 ## Provenance
 
@@ -365,6 +439,20 @@ That the child holds 583,134 key tuples against 52,545 parent tuples is
 itself why the pre-`7f71865` line reported `mean=22.3052` beside
 `max=13`: the mean divided by the PARENT count. It is the same
 orphan-heavy source the ±0.05 tolerance in D4 accounts for.
+
+Fix J's numbers come from the second committed launch,
+`2026-09-13_06_10_16-12600311608685394436`:
+
+| number | milestone / line |
+|---|---|
+| `blocker_count=179853 observed=0.2908 > gate=0.2` on `F_TABLE` | `BlockerThresholdExceeded` in `worker_logs.jsonl` |
+| 47 duplicate PK tuples in 10,000 sample rows | `preflight_pk_not_unique_in_sample pk=D_COL_001,CONTINUOUS_NR` |
+| 1,215,948 child rows · 465,079 key values on `(D_COL_001)` → a 0.6175 driving-edge repeat share | `fk_fanout_measured edge='(D_COL_001)->E_TABLE'` (`children=`, `key_values=`) |
+| `F_TABLE` sized at 439,889 rows off the adjusted parent's distinct keys | `model_adjustment_descendant_rows` |
+
+0.6175 is `1 - 465,079 / 1,215,948` — the driving edge's share, beside
+the declared PK's 0.2908 that the gate measured. Two numbers, one table,
+one launch: the reason D10 measures the key and not the edge.
 
 0.5025 is `1 - 583,134 / 1,172,025`, computed by
 `sdfb_core.contracts.model_adjustment.source_repeat_share`; the ADR does

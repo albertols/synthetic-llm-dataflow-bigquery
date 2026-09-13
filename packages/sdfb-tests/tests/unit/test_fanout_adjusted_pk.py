@@ -11,6 +11,7 @@ F_TABLE (driven by E_TABLE). The measured facts are hand-written, as in
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 import apache_beam as beam
@@ -198,3 +199,106 @@ def test_an_adjusted_child_copies_the_source_repeat_share(tmp_path):
     #    parent_pk=())
     assert {r["PID"] for r in grandchildren} <= e_keys
     assert len(grandchildren) == len(e_keys)
+
+
+# --- fix J: the F_TABLE shape (a key WIDER than its driving edge) -----
+#
+# Launch 2026-09-13 …-12600311608685394436: F_TABLE declares
+# `pk: [D_COL_001, CONTINUOUS_NR]` and is driven by `(D_COL_001)`, so the
+# fan-out histogram — which describes the EDGE — never saw that key. The
+# run generated, then died at the gate: 179,853 pk.duplicate, 0.2908
+# against a 0.2 blocker gate. Measured on the source, the declared PK's
+# own repeat share decides at LAUNCH instead, and the table lands.
+
+_J_ADJUSTMENT = (
+    ModelAdjustment(
+        table="p.land.G_TABLE", change="pk_dropped",
+        declared="pk [PID, NR]",
+        measured="the full source repeats the declared PK",
+        consequence="repeats land",
+        declared_pk=("PID", "NR"), source_repeat_share=None,
+    ),
+)
+
+
+def _wide_key_source(keys: int = 200) -> list[dict]:
+    """Two children per parent key, each carrying an independent draw of
+    the completing member — so the (PID, NR) tuple repeats exactly when
+    a key's two draws collide, which is what the source measurement sees
+    and what the landing table has to reproduce."""
+    rng = random.Random(7)
+    return [{"PID": f"P{k:05d}", "NR": rng.randrange(3), "G_VAL": k * 2 + c}
+            for k in range(keys) for c in range(2)]
+
+
+def test_a_driven_child_whose_declared_key_repeats_lands_rows(tmp_path):
+    p_schema = _schema("P_TABLE", [("PID", "STRING"), ("AMT", "INT64")])
+    p_ref = [{"PID": f"P{i:05d}", "AMT": i} for i in range(200)]
+    g_schema = _schema(
+        "G_TABLE",
+        [("PID", "STRING"), ("NR", "INT64"), ("G_VAL", "INT64")],
+    )
+    g_ref = _wide_key_source()
+    source_share = 1 - len({(r["PID"], r["NR"]) for r in g_ref}) / len(g_ref)
+    assert source_share > 0  # the key genuinely repeats in the source
+
+    def cfg(schema, ref, name, **kw):
+        return PipelineConfig(
+            table_schema=schema, engine_name="b1_rag",
+            model_client=FakeModelClient(reference_pool=ref),
+            run_id=f"fixj-{name}", landing_table=f"p.land.{name}",
+            log_table_prefix=name, batch_size=20, **kw,
+        )
+
+    p_cfg = cfg(p_schema, p_ref, "P_TABLE", num_rows=200,
+                pk_columns=("PID",), identity_columns=("PID",),
+                uniqueness_mode="streaming")
+    # G_TABLE, ADJUSTED on its OWN measurement: the declared key is
+    # (PID, NR) — a member outside the driving edge — and the source
+    # repeats it above the gate, so it is dropped and only MEASURED.
+    g_cfg = cfg(
+        g_schema, g_ref, "G_TABLE", num_rows=400,
+        pk_columns=(), pk_measure_columns=("PID", "NR"),
+        uniqueness_mode="streaming",
+        gate_excluded_rules=("pk.duplicate",),
+        source_repeat_share=source_share,
+        fanout={"driving_cols": ["PID"], "histogram": {"2": 1},
+                "cells": None, "exact_cells": False},
+    )
+
+    def sinks(name):
+        return dict(landing_sink=WriteToJsonLines(str(tmp_path / name)),
+                    dlq_sink=WriteToJsonLines(str(tmp_path / f"dlq_{name}")))
+
+    specs = [
+        TableSpec(config=p_cfg, reference_rows=p_ref, **sinks("P_TABLE")),
+        TableSpec(
+            config=g_cfg, reference_rows=g_ref, **sinks("G_TABLE"),
+            adjustments=_J_ADJUSTMENT,
+            parent_edges=(FkEdgeSpec(
+                child_cols=("PID",), ref_cols=("PID",),
+                parent_landing="p.land.P_TABLE", parent_pk=("PID",),
+                mode="fanout", keys_per_batch=10),),
+        ),
+    ]
+    with beam.Pipeline(options=PipelineOptions(["--runner=DirectRunner"])) as p:
+        build_relational_pipeline(p, specs)
+
+    parents = _read(tmp_path / "P_TABLE")
+    children = _read(tmp_path / "G_TABLE")
+    assert parents and children
+
+    # 1. it LANDS — the run that motivated this fix landed nothing on
+    #    this table, because the gate failed it after generation.
+    assert len(children) == 2 * len({r["PID"] for r in parents})
+
+    # 2. the FK tuples stay inside the parent
+    assert {r["PID"] for r in children} <= {r["PID"] for r in parents}
+    assert not _read(tmp_path / "dlq_G_TABLE")
+
+    # 3. the landing table repeats the DECLARED key about as often as the
+    #    source does — the same column set on both sides (fix J), so the
+    #    ±0.05 verdict means what it says.
+    landed = 1 - len({(r["PID"], r["NR"]) for r in children}) / len(children)
+    assert landed > 0, "a landing share of 0 would be the capped fan-out"
+    assert landed == pytest.approx(source_share, abs=REPEAT_SHARE_TOLERANCE)

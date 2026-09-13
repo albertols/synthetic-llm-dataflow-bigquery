@@ -26,6 +26,7 @@ from __future__ import annotations
 import textwrap
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import yaml
 
@@ -39,6 +40,8 @@ __all__ = [
     "adjustment_banner",
     "landed_distinct_keys",
     "landing_repeat_share",
+    "pk_measurement_from_histogram",
+    "pk_repeat_share",
     "repeat_share_verdict",
     "source_repeat_share",
 ]
@@ -79,59 +82,19 @@ class ModelAdjustment:
     # effective model but KEPT for measurement: `pk.duplicate` is still
     # counted against them, it simply stops gating (ADR 0038 §3).
     declared_pk: tuple[str, ...] = ()
+    # Measured over ``declared_pk`` — the SAME columns `pk.duplicate` is
+    # counted over at the end of the run (fix J), so the two shares are
+    # comparable in every case and the ±tolerance verdict always means
+    # what it says. None only where the launch had no measurement of the
+    # declared PK itself; then no share is claimed and no verdict is
+    # written, rather than a number measured over other columns (which is
+    # what fix H4's `repeat_share_basis` had to disclaim).
     source_repeat_share: float | None = None
-    # The columns ``source_repeat_share`` is measured OVER: the driving
-    # edge, because the fan-out histogram groups the source child by it
-    # (fix H4). The LANDING share is `pk.duplicate` over the full
-    # declared PK, so the two describe the same key — and are comparable
-    # — only when these two column sets coincide.
-    repeat_share_basis: tuple[str, ...] = ()
 
     @property
     def table_name(self) -> str:
         """Bare table name — model files key on it, tables arrive FQN."""
         return self.table.rsplit(".", 1)[-1]
-
-    @property
-    def repeat_share_comparable(self) -> bool:
-        """Can the SOURCE share be compared with the LANDING one?
-
-        Only when both describe the same columns. The source share comes
-        off a GROUP BY the DRIVING edge; `pk.duplicate` is measured on the
-        full DECLARED PK (and stays that way — that is the reporting
-        contract). At the second conflict site — a PK with completing
-        members outside the driving edge — the declared PK is WIDER, so
-        its tuple repeats strictly less often than the driving edge's
-        value does and a faithful copy would score a delta far outside
-        tolerance: driving `(PID)` at 0.7778 against a faithful landing
-        `(PID, CAT)` at 0.5702 (fix H4). Equality, not containment, is
-        the test: a PK that merely SUBSETS the driving columns repeats
-        strictly MORE often, which is just as incomparable.
-        """
-        return bool(self.repeat_share_basis) and set(self.declared_pk) == set(
-            self.repeat_share_basis
-        )
-
-    @property
-    def repeat_share_note(self) -> str:
-        """Empty when the two shares are comparable; otherwise the reason
-        no verdict is written, for the operator who would otherwise read
-        a false negative."""
-        if self.repeat_share_comparable or self.source_repeat_share is None:
-            return ""
-        basis = (
-            f"the driving edge ({','.join(self.repeat_share_basis)})"
-            if self.repeat_share_basis
-            else "columns this launch did not record"
-        )
-        return (
-            f"not comparable: the source key-repeat share is measured over "
-            f"{basis}, while pk.duplicate is measured on the declared PK "
-            f"{list(self.declared_pk)} — different column sets, so the "
-            f"±{REPEAT_SHARE_TOLERANCE:.0%} verdict is NOT written. Both "
-            f"shares are still reported; a wider PK repeats strictly less "
-            f"often than its driving edge's value does"
-        )
 
 
 def source_repeat_share(histogram: Mapping[str | int, int]) -> float | None:
@@ -153,6 +116,56 @@ def source_repeat_share(histogram: Mapping[str | int, int]) -> float | None:
         return None
     key_values = sum(n for k, n in hist.items() if k > 0)
     return 1.0 - key_values / children
+
+
+def pk_repeat_share(measurement: Mapping[str, Any] | None) -> float | None:
+    """Share of the SOURCE child's rows that repeat a DECLARED PK tuple —
+    ``1 - key_tuples / rows`` over the measurement
+    `sdfb_beam.io.fanout_stats.measure_pk_uniqueness` takes (ADR 0038
+    fix J).
+
+    This is the authority for "is the declared `pk:` a key of this
+    data". The fan-out histogram answers the same question for ONE
+    column set — the driving edge — so a key with a member outside that
+    edge (F_TABLE's `[D_COL_001, CONTINUOUS_NR]`, launch
+    …-12600311608685394436) had no measured evidence at all until this
+    one existed, and the BLOCKER gate discovered the answer after the
+    GPU hours were spent: 179,853 duplicates, 0.2908 against a 0.2 gate.
+
+    ``None`` when nothing was measured — no rows, or no measurement.
+    """
+    if not measurement:
+        return None
+    rows = int(measurement.get("rows") or 0)
+    if rows <= 0:
+        return None
+    return 1.0 - int(measurement.get("key_tuples") or 0) / rows
+
+
+def pk_measurement_from_histogram(
+    histogram: Mapping[str | int, int], cols: Sequence[str]
+) -> dict | None:
+    """The same three numbers, read off the fan-out histogram, for a
+    declared PK that IS the driving edge (ADR 0038 fix J).
+
+    The histogram counts rows per driving-edge VALUE, so for that PK it
+    already measures the key tuple: ``sum(k*n)`` rows over
+    ``sum(n for k>0)`` tuples, the largest carrying ``max(k)``. Reading
+    it here is what subsumes the old driving-edge-only rule into the one
+    declared-PK decision — and it costs no BigQuery at all.
+
+    ``None`` when the histogram carries no mass.
+    """
+    hist = {int(k): int(n) for k, n in histogram.items()}
+    rows = sum(k * n for k, n in hist.items())
+    if rows <= 0:
+        return None
+    return {
+        "cols": list(cols),
+        "rows": rows,
+        "key_tuples": sum(n for k, n in hist.items() if k > 0),
+        "max_rows_per_key": max(hist) if hist else 0,
+    }
 
 
 def landed_distinct_keys(rows: int, repeat_share: float | None) -> int:
@@ -232,25 +245,23 @@ def adjustment_banner(adjustments: Sequence[ModelAdjustment]) -> str:
         lines.append(f"   declared    | {adj.declared}")
         lines.append(f"   measured    | {adj.measured}")
         lines.append(f"   changed     | {adj.consequence}")
-        if share is not None and adj.repeat_share_comparable:
+        if share is not None:
             lines.append(
-                f"   source key-repeat share | {share:.2%} — the landing "
-                f"table must match it within {REPEAT_SHARE_TOLERANCE:.0%} "
+                f"   source key-repeat share | {share:.2%} over "
+                f"{list(adj.declared_pk)} — the landing table must match "
+                f"it within {REPEAT_SHARE_TOLERANCE:.0%} "
                 f"(validation_runs.repeat_share_delta)"
             )
-        elif share is not None:
-            # Fix H4: say the number AND say it is not the landing
-            # table's yardstick. A verdict over two different column sets
-            # is a false negative, and a false negative on this banner is
-            # worse than no verdict.
-            over = (
-                f" over ({','.join(adj.repeat_share_basis)})"
-                if adj.repeat_share_basis
-                else ""
-            )
+        else:
+            # No measurement of the DECLARED PK itself (the capacity
+            # ladder proved the conflict instead). Say that, rather than
+            # print a share measured over other columns: a verdict across
+            # two column sets is a false negative, and a false negative on
+            # this banner is worse than no verdict at all.
             lines.append(
-                f"   source key-repeat share | {share:.2%}{over} — "
-                f"{adj.repeat_share_note}"
+                "   source key-repeat share | not measured over "
+                f"{list(adj.declared_pk)} this launch — no "
+                f"±{REPEAT_SHARE_TOLERANCE:.0%} verdict is written"
             )
     lines.append(
         "  pk.duplicate on the adjusted table(s) is EXPECTED and is "

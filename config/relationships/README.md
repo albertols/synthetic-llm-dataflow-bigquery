@@ -405,9 +405,20 @@ run, never a source value — instead of a UUID. The launcher logs
 
 The stop above reads the 10,000-row reference **sample**. A driven child
 (one generated from its parent's landed keys, ADR 0036) gets something
-much stronger: a **full-source** fan-out measurement. When THAT proves
-the declared `pk:` is not a key of the source, the launch no longer
-stops. It:
+much stronger: the **declared `pk:` itself, measured over the full
+source child** — distinct key tuples over rows, a composite key counted
+as a tuple — beside the fan-out measurement of its driving edge.
+
+That measured repeat share is compared with **this run's BLOCKER gate**
+(`blocker_failure_ratio`, `config/thresholds.yml`), and that comparison
+is the whole decision:
+
+| measured source repeat share | what the launch does |
+|---|---|
+| **above** the gate | the key cannot survive generation — generation reproduces the source, so the share would land as `pk.duplicate` and fail the run. The `pk:` is DROPPED (below) |
+| **at or below** the gate | the key is KEPT. `preflight_pk_source_repeats` reports the share, and the few repeats divert as `pk.duplicate` like any other table's — a source that is 0.4% dirty does not lose its key |
+
+When the share is above the gate, the launch no longer stops. It:
 
 1. **drops** that `pk:` from the EFFECTIVE model for this run — nothing
    else changes, so the table still generates from its driving edge with
@@ -429,13 +440,12 @@ stops. It:
    blocker rule on that table still fails at the configured threshold.
    Every other table's `pk.duplicate` still blocks;
 5. writes the proof: `validation_runs.source_repeat_share` vs
-   `landing_repeat_share`, their delta, and whether it is within ±0.05 —
-   unless the two describe different column sets, in which case
-   `repeat_share_note` says so and no verdict is written. The source
-   share is measured over the DRIVING EDGE, so the comparison is
-   like-for-like only when the declared `pk:` IS that edge (E_TABLE's
-   case). A `pk:` that adds a completing member repeats strictly less
-   often than its driving edge's value does;
+   `landing_repeat_share`, their delta, and whether it is within ±0.05.
+   Both describe the DECLARED PK — the source share is measured over
+   exactly the columns `pk.duplicate` is counted over — so the verdict
+   is like-for-like whatever the shape of the key. (A conflict proven by
+   the cell-capacity ladder rather than by a measurement of the key
+   itself carries no share, and no verdict is written for it.);
 6. sizes any table driven BY the adjusted one off its DISTINCT landed
    keys, not its rows — an adjusted parent lands repeated keys, so
    `rows × (1 - source_repeat_share)` of them are distinct, and that is
@@ -445,6 +455,16 @@ This is the 2026-09-12 `E_TABLE` case: its `pk:` was a single column
 that is also its driving FK edge, and the source carries a median of two
 rows per key value (50.25% of its rows repeat a key). The sample saw 40
 duplicates in 10,000 rows and could not tell.
+
+It is also the 2026-09-13 `F_TABLE` case, which is why the measurement
+is of the KEY and not of the edge: `pk: [D_COL_001, CONTINUOUS_NR]`
+driven by `(D_COL_001)`. The driving edge repeats 61.75% of that
+source's rows; the declared key repeats 29.08% of them. Reading the edge
+says nothing about the key — that launch generated the table and then
+failed the BLOCKER gate at 0.2908 against 0.2. A declared `pk:` whose
+members are all inside the driving edge costs no extra scan (the fan-out
+already measured that tuple); one with a member outside it costs one
+GROUP BY, cached with the fan-out.
 
 Two things this does NOT do:
 
