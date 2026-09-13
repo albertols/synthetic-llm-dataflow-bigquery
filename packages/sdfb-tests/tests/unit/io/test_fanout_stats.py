@@ -94,8 +94,12 @@ def test_fanout_payload_shape():
         {"histogram": {"0": 1, "2": 1}, "cells": None, "parents": 2, "children": 2},
         driving_cols=("K", "INH"), exact_cells=False,
     )
+    # `parents` rides along for ADR 0039's projection warnings — an
+    # orphan-heavy source clamps the zero bucket to 0, so the source
+    # parent count cannot be read back off the histogram alone.
     assert payload == {"driving_cols": ["K", "INH"], "histogram": {"0": 1, "2": 1},
-                       "cells": None, "exact_cells": False, "pk_source": None}
+                       "cells": None, "exact_cells": False, "pk_source": None,
+                       "parents": 2}
 
 
 class _OrphanClient(_Client):

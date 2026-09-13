@@ -217,11 +217,18 @@ def log_pk_measured(table: str, measurement: dict, *, source: str) -> None:
 
 def fanout_payload(measured: dict, driving_cols: tuple[str, ...], exact_cells: bool) -> dict:
     """The ``FanoutPlan`` payload shape (Task 1), plus the DECLARED PK's
-    own source measurement (``pk_source``, ADR 0038 fix J).
+    own source measurement (``pk_source``, ADR 0038 fix J) and the source
+    PARENT's distinct tuple count (``parents``, ADR 0039).
 
-    ``FanoutPlan.from_payload`` ignores the extra key — it is preflight's
-    evidence, not the engine's recipe — and it rides here so it is cached
-    and carried by exactly the same plumbing as the histogram.
+    ``FanoutPlan.from_payload`` ignores both extra keys — they are
+    preflight's evidence, not the engine's recipe — and they ride here so
+    they are cached and carried by exactly the same plumbing as the
+    histogram. ``parents`` is what makes the launch's row projection able
+    to restate `fk_fanout_source_orphans`'s ``matched_share`` with no
+    second BigQuery call: an orphan-heavy source clamps the histogram's
+    zero bucket to 0, so the parent count cannot be read back off the
+    histogram alone. A payload cached before ADR 0039 has no such key and
+    the projection then claims no matched share at all.
     """
     return {
         "driving_cols": list(driving_cols),
@@ -229,6 +236,7 @@ def fanout_payload(measured: dict, driving_cols: tuple[str, ...], exact_cells: b
         "cells": measured.get("cells"),
         "exact_cells": bool(exact_cells),
         "pk_source": measured.get("pk"),
+        "parents": measured.get("parents"),
     }
 
 

@@ -139,6 +139,66 @@ posture: `source_stats=sample`, `freetext_expansion=identifiers`,
 
 The extended gates (stats contract, privacy, FK integrity, marginals) are §8.
 
+### 2a. Sizing a launch — read the ROW PROJECTION before you pay for it
+
+`--num_rows` sizes the ROOT tables only. Every DRIVEN child is sized by
+the measurement, not by the flag: its count is its parent's DISTINCT
+landed keys times the mean fan-out measured on the source
+([ADR 0036](adr/0036-parent-driven-fanout-generation.md) D5,
+[ADR 0038](adr/0038-measured-conflicts-adjust-the-model.md) fix H3). Two
+ordinary fan-outs compound, so a five-table launch asking for 210,958
+rows generated 32,858,875 of them, 94.2% in one table
+(`2026-09-13_06_10_16-12600311608685394436`).
+
+The launcher now says so before the graph is built
+([ADR 0039](adr/0039-row-projection-before-the-graph.md)). Find
+`ROW PROJECTION` in the DRIVER log — it is the last block before the DAG
+and reads like this (that launch's own figures):
+
+```text
+ROW PROJECTION | 5 table(s), 32,858,875 rows — what this launch WILL generate, decided before the graph is built (ADR 0039)
+ B_TABLE |       210,958 |   0.6% |                      | root — sized by --num_rows=210,958
+ C_TABLE |       846,891 |   2.6% | #                    | driven by B_TABLE — 210,958 distinct keys x 4.0145 mean fan-out on (D_COL_001,D_COL_024,D_COL_025,C_COL_009)->B_TABLE
+ E_TABLE |       423,999 |   1.3% |                      | driven by B_TABLE — 210,958 distinct keys x 2.0099 mean fan-out on (D_COL_001)->B_TABLE
+ A_TABLE |    30,937,138 |  94.2% | ###################  | driven by C_TABLE — 846,891 distinct keys x 36.5302 mean fan-out on (D_COL_024,D_COL_025,C_COL_009)->C_TABLE
+ F_TABLE |       439,889 |   1.3% |                      | driven by E_TABLE — 210,958 distinct keys x 2.0852 mean fan-out on (D_COL_001)->E_TABLE (its parent lands 423,999 rows over 210,958 DISTINCT keys — ADR 0038)
+ TOTAL   |    32,858,875 | 100.0% |                      | across 5 table(s) — 94.2% of the run is A_TABLE
+ WARNINGS | 3 — a measured relationship makes part of this projection unsound
+```
+
+**What to do with it, in order:**
+
+1. **Read the TOTAL and the bar column first.** If one table owns most of
+   the run, that table decides the job's wall clock and cost — nothing
+   else you tune will matter much.
+2. **Re-size by the ROOT.** A driven child cannot be capped directly;
+   halving `--num_rows` halves every root and, through the same measured
+   means, everything below it. (Dropping a table out of the launch is the
+   other lever — see `enabled:` in
+   [`config/relationships/README.md`](../config/relationships/README.md).)
+3. **Read every WARNING before launching.** Each names the measurement
+   that triggered it and the consequence for the LANDED table. A clean
+   launch prints the projection and no warnings at all, so a warning here
+   is never noise:
+
+| Warning `code=` | Threshold | Read it as |
+|---|---|---|
+| `fk_source_orphans` | `matched_share < 0.5` | the source child holds far more distinct key values on this driving edge than its parent offers. The count is honest, the MODEL is suspect: the landed table reproduces only the matched slice of the source's key range, and the fan-out's zero bucket is unmeasurable so the mean is an UPPER bound. Check the edge names the columns you meant |
+| `projection_explodes` | driven rows `> 10x --num_rows` | the multiplier and the parent chain that produced it. This is what turns a five-table run into an eighteen-hour one; it is the measured fan-out compounded, not a defect. Lower `--num_rows` or drop the table |
+| `fanout_zero_share` | `zero_share > 0.5` | most source parents have no child at all on this edge, so the landed child covers a fraction of its parents — by construction, exactly as the source does. The row count is unaffected |
+| `adjusted_key_projection` | the table's `pk:` was adjusted (ADR 0038) | its projection assumes the source's key-repeat share reproduces, and its DISTINCT-key count (not its rows) is what every descendant is sized from. `model_adjustment_repeat_share` at the end of the run is the proof it held |
+
+4. **After the run, check the projection held.** Every
+   `row_projection_table rows=` must equal that table's
+   `validation_runs.num_rows_requested` and its entry in
+   `relational_single_job rows_detail=`; the per-table milestone carries
+   `requested=` beside `rows=` so a mismatch is one grep.
+
+A table whose count could not be derived prints `not derivable` with the
+reason and is EXCLUDED from the total (`row_projection_total
+underivable=`) — never silently sized at `--num_rows`, which for a driven
+child is the one number certainly wrong.
+
 ---
 
 ## 3. Dataflow options
@@ -614,6 +674,10 @@ Relational:
 | `fk_fanout_measured edge= parents= children= key_values= orphan_keys= mean= p50= p95= max= zero_share= source=measured\|cache` (launcher) | the SOURCE ratio the driven child reproduces; `cache` = read from `fk_fanout_stats` instead of re-scanning. Every figure is over the histogram, which counts rows per child KEY VALUE, so `mean` can never exceed `max`; `key_values` and `orphan_keys` say how much of the child's key space the parent actually covers |
 | `fk_fanout_source_orphans edge= child_tuples= parent_tuples= orphan_keys= matched_share=` (launcher, **WARNING**) | the source child holds key values its parent does not, so the zero bucket is unmeasurable and the child generates from the matched share of its key space only. A low `matched_share` means the driving edge is suspect — check the edge names the columns you meant |
 | `relational_single_job … rows_detail=<name>:<rows>,…` (launcher) | derived row count per table — roots take `--num_rows`, driven children derive from their parent's landed keys and the measured fan-out |
+| `row_projection tables= rows= warnings= dominant= dominant_share=` + the multi-line `ROW PROJECTION` block (launcher, once per launch; **WARNING** when it carries warnings) | ADR 0039: what this launch WILL generate, before the graph is built — per table the projected count and its derivation (root `--num_rows`, or parent DISTINCT keys x measured mean fan-out with the edge named), a bar column showing who owns the run, and the TOTAL `rows_detail` never took. Read it with §2a before launching |
+| `row_projection_table table= rows= basis=root\|driven\|underivable parent= parent_keys= mean_fanout= share= requested= note=` (launcher, one per table) | the greppable form of one block line. `rows=` is the projection, `requested=` the count the run actually asks for — they are the same number by construction (both are `round(parent_keys x mean_fanout)`), so a difference is a wiring defect. `basis=underivable` carries the reason in `note=` and leaves `rows=` EMPTY: no fallback to `--num_rows` |
+| `row_projection_total tables= rows= dominant= dominant_share= underivable=` (launcher, once) | the launch's total record count, the table that owns it, and how many tables were excluded because their count could not be derived. `rows=` must equal the sum of `relational_single_job rows_detail=` |
+| `row_projection_warning code= table= measurement= consequence=` (launcher, **WARNING**, one per unsound measurement) | ADR 0039's four codes — `fk_source_orphans` (matched_share < 0.5), `projection_explodes` (driven rows > 10x `--num_rows`), `fanout_zero_share` (zero_share > 0.5), `adjusted_key_projection` (this table's `pk:` was adjusted). `measurement=` names the figure and the milestone it came from; `consequence=` says what it means for the LANDED table. ZERO of these on a clean launch — the thresholds are deliberately loose (§2a) |
 | `fanout_bound driving_cols= cells= exact_cells= mean_fanout= conditional= candidate_cap=` (worker, once per engine build) | the engine bound the driven child's recipe; `exact_cells=True` = the PK-completing cells alone must key the child (drawn without replacement, a weighted permutation) — `False` = an unbounded PK member keys it instead, cells follow their measured weights WITH replacement and are NOT part of the joint walk; `conditional=<n>` = how many conditional edges ride with the keys and `candidate_cap=` is `--fk_candidate_cap` VERBATIM (fix wave F1 reverted an A3 clamp to the measured max fan-out) |
 | `fanout_rows_capped requested= emitted= capacity=` (worker, **WARNING**, once per worker process PER DRIVEN TABLE) | fix waves A1/E2/E3/G1/G4: `capacity` is the product of the dimensions that genuinely bound the PRIMARY KEY — the cell count ONLY when `exact_cells`, times the actual candidate count (or 1, a NULL fill) of each conditional edge whose `rest` supplies a PK MEMBER. An edge outside the PK distinguishes no child, so it multiplies nothing (before G1 it did, and the extra children landed as PK duplicates with `shortfall == 0`). Capping applies IF AND ONLY IF `exact_cells`; an inexact PK never caps, and its candidate digits wrap instead while its cells keep drawing independently from their weights. The guard is keyed on the landing table (`table=` comes from the ambient milestone scope), so every driven table of a single-job relational run reports its own capping — not just the first one to cap (both engines' call sites are pinned, fix wave G4). Raise `--fk_candidate_cap` or fix the `pk:` |
 | `batch_unmatched batch_id= keys_dropped=` (worker) | driving keys removed from a batch BEFORE generation because a NON-nullable conditional edge had no candidate for them (ADR 0037 ruling B) — each one is also a `fk.unmatched` DLQ envelope |

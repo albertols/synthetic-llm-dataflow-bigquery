@@ -58,6 +58,13 @@ from sdfb_core.contracts.relationships import (
     RelationshipError,
     RelationshipRegistry,
 )
+from sdfb_core.contracts.row_projection import (
+    TableProjection,
+    project_table,
+    projected_total,
+    projection_banner,
+    projection_warnings,
+)
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.fanout import conditional_edge_id
 from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
@@ -1536,6 +1543,166 @@ def report_model_adjustments(
     return adjustments
 
 
+def table_projections(
+    specs: Sequence[TableSpec],
+    *,
+    launch_rows: int,
+    rows_by_landing: Mapping[str, int] | None = None,
+    keys_by_landing: Mapping[str, int] | None = None,
+) -> tuple[TableProjection, ...]:
+    """Each resolved spec's projected record count, in generation order
+    (ADR 0039).
+
+    Nothing is measured or re-derived here: the driving edge comes from
+    the spec the composer will use (`mode="fanout"`), the histogram and
+    the source parent count from the fan-out payload the preflight
+    already paid for, the parent's landed rows and DISTINCT keys from the
+    two dicts `_run_relational_job` fills in plan order — the very
+    numbers `preflight._derived_rows` sized the child with.
+    """
+    rows_by_landing = rows_by_landing or {}
+    keys_by_landing = keys_by_landing or {}
+    projections: list[TableProjection] = []
+    for spec in specs:
+        driving = next(
+            (e for e in spec.parent_edges if e.mode == "fanout"), None
+        )
+        repeat_share = next(
+            (
+                a.source_repeat_share
+                for a in spec.adjustments
+                if a.source_repeat_share is not None
+            ),
+            None,
+        )
+        if driving is None:
+            projections.append(
+                project_table(
+                    spec.config.landing_table,
+                    launch_rows=launch_rows,
+                    adjusted=bool(spec.adjustments),
+                    repeat_share=repeat_share,
+                )
+            )
+            continue
+        fanout = spec.config.fanout or {}
+        parent_rows = rows_by_landing.get(driving.parent_landing)
+        parent_keys = keys_by_landing.get(driving.parent_landing)
+        projections.append(
+            project_table(
+                spec.config.landing_table,
+                launch_rows=launch_rows,
+                parent=(
+                    driving.parent_table
+                    or driving.parent_landing.rsplit(".", 1)[-1]
+                ),
+                edge=driving.edge_id,
+                parent_rows=parent_rows,
+                # `_derived_rows` multiplies the DISTINCT keys and falls
+                # back to the rows — same expression, same order.
+                parent_keys=parent_keys or parent_rows,
+                histogram=fanout.get("histogram"),
+                source_parent_tuples=fanout.get("parents"),
+                adjusted=bool(spec.adjustments),
+                repeat_share=repeat_share,
+            )
+        )
+    return tuple(projections)
+
+
+def report_row_projection(
+    specs: Sequence[TableSpec],
+    *,
+    launch_rows: int,
+    rows_by_landing: Mapping[str, int] | None = None,
+    keys_by_landing: Mapping[str, int] | None = None,
+) -> tuple[TableProjection, ...]:
+    """How many rows this launch will generate, announced ONCE, before
+    the graph is built (ADR 0039).
+
+    The BLOCK is the operator surface — one multi-line entry in the
+    relationship card's style, per table the count and the measurement
+    it came from, then the total and any warning. The MILESTONES are the
+    greppable half: one `row_projection_table` per table,
+    `row_projection_total` for the launch, and one
+    `row_projection_warning` per unsound measurement, so a run's
+    structured record carries the projection even when nobody read the
+    log. A clean launch logs the block and NO warning at all.
+    """
+    projections = table_projections(
+        specs, launch_rows=launch_rows,
+        rows_by_landing=rows_by_landing, keys_by_landing=keys_by_landing,
+    )
+    if not projections:
+        return ()
+    warnings = projection_warnings(projections, launch_rows=launch_rows)
+    total = projected_total(projections)
+    derivable = [p for p in projections if p.rows is not None]
+    dominant = max(derivable, key=lambda p: p.rows or 0, default=None)
+    dominant_share = (
+        (dominant.rows or 0) / total if dominant is not None and total else 0.0
+    )
+    log_milestone_text(
+        "row_projection",
+        projection_banner(
+            projections, launch_rows=launch_rows, warnings=warnings
+        ),
+        level=logging.WARNING if warnings else logging.INFO,
+        tables=len(projections),
+        rows=total,
+        warnings=len(warnings),
+        dominant=dominant.table_name if dominant else "",
+        dominant_share=round(dominant_share, 4),
+    )
+    for spec, projection in zip(specs, projections, strict=True):
+        log_milestone(
+            "row_projection_table",
+            table=projection.table,
+            rows=projection.rows if projection.rows is not None else "",
+            basis=(
+                "underivable"
+                if projection.rows is None
+                else ("driven" if projection.driven else "root")
+            ),
+            parent=projection.parent,
+            parent_keys=(
+                projection.parent_keys
+                if projection.parent_keys is not None
+                else ""
+            ),
+            mean_fanout=(
+                round(projection.mean_fanout, 4)
+                if projection.mean_fanout is not None
+                else ""
+            ),
+            share=round((projection.rows or 0) / total, 4) if total else 0.0,
+            # The count the run will actually REQUEST. It is the same
+            # number by construction (`resolve_table_rows` divides the
+            # same product); printing both makes any drift between the
+            # projection and the launch visible in one grep.
+            requested=spec.config.num_rows,
+            note=projection.undecided,
+        )
+    log_milestone(
+        "row_projection_total",
+        tables=len(projections),
+        rows=total,
+        dominant=dominant.table_name if dominant else "",
+        dominant_share=round(dominant_share, 4),
+        underivable=len(projections) - len(derivable),
+    )
+    for warning in warnings:
+        log_milestone(
+            "row_projection_warning",
+            level=logging.WARNING,
+            code=warning.code,
+            table=warning.table,
+            measurement=warning.measurement,
+            consequence=warning.consequence,
+        )
+    return projections
+
+
 def resolve_landing_dispositions(
     write_disposition: str, create_if_not_exists: bool
 ) -> tuple[str, str]:
@@ -2902,6 +3069,11 @@ def _run_one_table(
     report_model_adjustments(
         [spec], registry or RelationshipRegistry(), options, args.run_id
     )
+    # ADR 0039 — one root table, so the projection is `--num_rows` and
+    # nothing else. It is printed anyway: the block is where an operator
+    # reads what a launch will generate, and a single-table launch must
+    # not be the one shape that stays silent.
+    report_row_projection([spec], launch_rows=args.num_rows)
 
     with beam.Pipeline(options=options) as p:
         result = build_pipeline(
@@ -3040,6 +3212,14 @@ def _run_relational_job(
     # the effective model handed back as YAML.
     report_model_adjustments(
         specs, registry or RelationshipRegistry(), options, args.run_id
+    )
+    # ADR 0039 — and say how many rows that model will GENERATE, per
+    # table and in total, while there is still time to stop.
+    report_row_projection(
+        specs,
+        launch_rows=args.num_rows,
+        rows_by_landing=rows_by_landing,
+        keys_by_landing=distinct_keys_by_landing,
     )
     total_edges = sum(len(s.parent_edges) for s in specs)
     log_milestone(
