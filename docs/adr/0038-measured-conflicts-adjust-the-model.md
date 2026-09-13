@@ -1,6 +1,6 @@
 # ADR 0038 — The source is the authority: a MEASURED model conflict adjusts and announces; a self-contradiction still stops
 
-**Status:** PROPOSED (2026-09-13) — laptop acceptance green on `ws12-fanout-generation` (unit suite + the two DirectRunner shapes in `test_fanout_adjusted_pk.py`); Dataflow acceptance rides with the next M4 relational launch. **Fix wave H** (2026-09-13 adversarial verification of `d05c4f0`) is folded into D3, D4, D6 and D9: the gate's denominator, P5's deference, a descendant's sizing, and the comparability of the two repeat shares. **Fix J** (2026-09-13, the launch H produced) replaces the driving-edge rule with the new D10: the DECLARED PK is measured on the source and decides against the run's BLOCKER gate — which also re-founds D4 and completes D6.
+**Status:** ACCEPTED (2026-09-14) — laptop acceptance green on `ws12-fanout-generation`, and Dataflow acceptance met by launch `2026-09-13_06_10_16-12600311608685394436`: the launcher adjusted one table's key, announced it, emitted the adjusted model, sized its descendant off the parent's DISTINCT keys, and all five tables succeeded — where the same model had generated nothing the day before. laptop acceptance green on `ws12-fanout-generation` (unit suite + the two DirectRunner shapes in `test_fanout_adjusted_pk.py`); Dataflow acceptance rides with the next M4 relational launch. **Fix wave H**  (2026-09-13 adversarial verification of `d05c4f0`) is folded into D3, D4, D6 and D9: the gate's denominator, P5's deference, a descendant's sizing, and the comparability of the two repeat shares. **Fix J** (2026-09-13, the launch H produced) replaces the driving-edge rule with the new D10: the DECLARED PK is measured on the source and decides against the run's BLOCKER gate — which also re-founds D4 and completes D6.
 **Evidence:** launch `2026-09-12_14_50_30-6058498192553696658` — the full five-table launch stopped with nothing generated (`integration_tests/2026-09-12_14_50_30-6058498192553696658/worker_logs.jsonl`: `fk_fanout_measured edge='(D_COL_001)->B_TABLE'`, and the `preflight P4` stop on `E_TABLE`) · launch `2026-09-13_06_10_16-12600311608685394436` — the SAME shape with this ADR live: the model adjusted, three tables generated, and `F_TABLE` then failed the gate at `blocker_count=179853 observed=0.2908 > gate=0.2` on a declared PK nothing had measured (`integration_tests/2026-09-13_06_10_16-12600311608685394436/`).
 **Amends:** [ADR 0036](0036-parent-driven-fanout-generation.md) D6 (the driven-child uniqueness mode is now FORCED, not defaulted, on an adjusted table) · [ADR 0037](0037-multi-parent-children.md) §6 (both P4 "the declared PK is not a key of the source" stops become adjustments by default)
 **Keeps:** [ADR 0032](0032-relationships-as-config.md) — `config/relationships/*.yaml` stays the single source of truth and the single input format; this ADR adds no key and no file · [ADR 0035](0035-pk-capacity-fk-bound-members.md) — the capacity gate is untouched and still stops (see D6) · [ADR 0036](0036-parent-driven-fanout-generation.md) — the driving edge, the fan-out histogram, the cell draw and the seeding are all left exactly as measured · [ADR 0031](0031-joint-fk-key-draws.md) — FK integrity by construction is untouched
@@ -426,8 +426,10 @@ disagree about whether a launch is worth more than a declaration.
 ## Provenance
 
 Measured numbers in this ADR come from one immutable source, the
-committed worker log of launch
+operator's local worker log of launch
 `2026-09-12_14_50_30-6058498192553696658`:
+
+(Launch logs live under the gitignored `integration_tests/` tree and carry the deployment's own project id, so they are read locally and never committed; the milestone names below are what to grep for in a re-run.)
 
 | number | milestone in `worker_logs.jsonl` |
 |---|---|
@@ -441,7 +443,7 @@ itself why the pre-`7f71865` line reported `mean=22.3052` beside
 `max=13`: the mean divided by the PARENT count. It is the same
 orphan-heavy source the ±0.05 tolerance in D4 accounts for.
 
-Fix J's numbers come from the second committed launch,
+Fix J's numbers come from the second local launch,
 `2026-09-13_06_10_16-12600311608685394436`:
 
 | number | milestone / line |

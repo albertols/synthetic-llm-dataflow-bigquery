@@ -1,6 +1,6 @@
 # ADR 0037 — Multi-parent children: every declared FK edge gets a role and a DAG path
 
-**Status:** PROPOSED (2026-09-11) — registry/unit tests pass on `ws12-fanout-generation` (Acceptance, first box); laptop acceptance is pending the DirectRunner suite (`test_fanout_shapes.py`, second box) finishing on the same branch, and Dataflow acceptance rides with the M4 relational launch
+**Status:** ACCEPTED (2026-09-14) — laptop acceptance green on `ws12-fanout-generation` (registry shape sweep + the DirectRunner shapes in `test_fanout_shapes.py`), and Dataflow acceptance met by the five-table relational launch `2026-09-13_06_10_16-12600311608685394436`, in which every table succeeded and the driver resolved a child's two edges as `driving` + `implied` with the driving parent's edge widened to carry the inherited columns.
 **Design:** [`2026-09-11-multi-parent-children.md`](../designs/2026-09-11-multi-parent-children.md) — the argument, the mechanism in detail, and the scale analysis. This ADR records the decision only.
 **Evidence:** the three 2026-09-11 preflight stops on the five-table expansion of the anonymised core-accounts model (`ef66717`, `ca8f948`, `8573665`) and the registry shape sweep written afterwards (`packages/sdfb-tests/tests/unit/contracts/test_relationship_shapes.py`)
 **Amends:** [ADR 0036](0036-parent-driven-fanout-generation.md) — D1's "a driven child has no side input at all" and D4's "anything that is neither driving nor implied is a `RelationshipError`" (see ADR 0036 **Rev 3**)
@@ -474,7 +474,7 @@ requested fan-out (D3, fix waves A1/E2/G1). Counters
     once: each edge's candidate list is looked up by its own
     `edge_id = (cols)->ref`, so neither overwrites the other in
     `matches` and each is the sole reason for its own keys' DLQ entries.
-- [ ] M4/Dataflow: a relational launch whose model declares a star or a
+- [x] M4/Dataflow: a relational launch whose model declares a star or a
   diamond — `fk_edge_role … role=independent|conditional overlap=` and
   `relational_fk_edge mode=conditional` read as this ADR predicts, the
   RUN_PLAYBOOK §8.4 whole-tuple orphan query returns 0 on every enforced
