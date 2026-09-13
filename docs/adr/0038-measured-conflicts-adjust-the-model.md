@@ -287,6 +287,22 @@ disagree about whether a launch is worth more than a declaration.
   fresh (or cached) measurement; making it permanent is a deliberate
   paste of the emitted YAML.
 
+- **Known limitation, confirmed by adversarial verification 2026-09-13.**
+  The distinct-key count carried to a descendant is the adjusted parent's
+  distinct DRIVING-EDGE values, recorded per parent TABLE. A descendant
+  whose edge references a WIDER parent key than that edge is therefore
+  sized from the wrong column set — roughly half of what the DAG produces
+  in the reproduced case — and `model_adjustment_descendant_rows` reports
+  that figure as if it were the correct reduction. Every shape whose
+  descendant `ref_cols` equal the parent's driving columns is exact,
+  including the pair that motivated this ADR. The fix is to key the
+  record by (parent table, ref_cols) and take the ratio from the
+  descendant's own measurement: its `parents` over the parent's source
+  row count, which the parent's own payload already carries as
+  `children`. Until then a descendant of an adjusted parent with a wider
+  edge under-requests, which lands fewer rows than asked rather than
+  breaking a key or an edge.
+
 ## Alternatives rejected
 
 - **Keep stopping.** What we had. It cost a whole five-table launch and
