@@ -223,6 +223,7 @@ ever, to see it. So:
 2. **compare it with the gate, not with any repetition.** The measured
    repeat share is $1 - \text{key\_tuples}/\text{rows}$. ABOVE the run's
    `blocker_failure_ratio`, the declared key cannot survive generation —
+   The comparison is not the raw share: the gate divides the diverted rows by the rows that REACH it, generated plus diverted, so a source that repeats a share `s` lands `s / (1 + s)`. The launcher compares THAT, so at a 0.2 gate the true boundary is a source share of 0.25 and a table in the 20-25% band keeps its key on a run that would have passed with it enforced.
    generation reproduces the source, so that share lands as
    `pk.duplicate` and fails the run — and the `pk:` is dropped exactly as
    D1–D4 prescribe. AT OR BELOW it, the key is KEPT and

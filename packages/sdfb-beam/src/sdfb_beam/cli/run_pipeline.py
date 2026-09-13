@@ -1089,6 +1089,7 @@ def resolve_fanout(
     table_schema,
     stats_store,
     bq_client,
+    effective_pk: tuple[str, ...] = (),
 ) -> tuple[dict | None, dict[FkEdge, str]]:
     """``(FanoutPlan payload or None, edge roles)`` for one table (ADR
     0036). Measures (or reads the cache) for the driving edge only when
@@ -1112,7 +1113,12 @@ def resolve_fanout(
             f"unknown columns {unknown}. Fix the model file (or the table)."
         )
     relations = registry.relations(landing_table)
-    pk = tuple(relations.pk) if relations else ()
+    # The key this run ENFORCES, which is what preflight checks: the
+    # model's `pk:`, or `--pk_cols` for a table no model keys. Reading
+    # `relations.pk` alone left a --pk_cols table with NO measurement,
+    # so P5 stood down for evidence that did not exist and P4 fell
+    # through — worse than before ADR 0038 (2026-09-13).
+    pk = tuple(effective_pk) or (tuple(relations.pk) if relations else ())
     profiles = profile_columns(table_schema, reference_rows) if reference_rows else {}
     # The columns another edge fills are NOT measured as cells — the
     # same `edge_supplied_members` call P4 makes, so the measurement and
@@ -1689,6 +1695,7 @@ def _resolve_table_fanout(
             registry, args.landing_table, args.reference_table,
             in_set_names=in_set_names, reference_rows=reference_rows,
             table_schema=table_schema, stats_store=stats_store, bq_client=None,
+            effective_pk=effective_pk_of(registry, args.landing_table, args),
         )
     except RelationshipError as exc:
         raise SystemExit(

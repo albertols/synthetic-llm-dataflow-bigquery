@@ -712,6 +712,15 @@ tables:
 """
 
 
+# The same six tables, but the child is keyed only by `--pk_cols`.
+_J_SHAPE_NO_PK = _J_SHAPE.replace("    pk: [PID, NR]\n", "")
+
+
+def _measure_one_to_one_j(**kwargs):
+    """A fan-out measurement stub: one child per parent key, no cells."""
+    return {"histogram": {1: 4}, "cells": None, "parents": 4, "children": 4}
+
+
 def _j_schema() -> TableSchema:
     return TableSchema.model_validate({
         "table_info": {"table_id": "p.d.childj"},
@@ -829,3 +838,67 @@ def test_the_one_to_one_case_reads_the_same_measurement_off_the_histogram():
         {"0": 10, "2": 5}
     )
     assert pk_measurement_from_histogram({"0": 10}, ["PID"]) is None
+
+
+# 2026-09-13 — the gate divides the diverted rows by the rows that REACH
+# it, so a source share `s` lands `s / (1 + s)`. Comparing `s` against the
+# gate misjudged every source in (gate, gate/(1-gate)]: at 0.2 that is the
+# whole 20-25% band, refused or stripped of its key on a run the gate
+# would have PASSED with it enforced.
+_J_IN_BAND = {"cols": ["PID", "NR"], "rows": 1_000_000,
+              "key_tuples": 780_000, "max_rows_per_key": 3}   # share 0.22
+_J_ABOVE_BAND = {"cols": ["PID", "NR"], "rows": 1_000_000,
+                 "key_tuples": 740_000, "max_rows_per_key": 3}  # share 0.26
+
+
+def test_a_share_the_gate_would_pass_keeps_its_key(caplog):
+    """0.22 of the source repeats, gate 0.2. A faithful landing puts
+    220,000 duplicates beside 1,000,000 rows, so the gate computes
+    0.1803 and PASSES — the key must survive."""
+    with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
+        result = _j_preflight(_J_IN_BAND)
+    assert result.pk_cols == ("PID", "NR")
+    assert result.adjustments == ()
+    assert "predicted_observed=0.1803" in caplog.text
+
+
+def test_a_share_the_gate_would_fail_still_adjusts():
+    """0.26 repeats lands 0.2063 at the gate, over 0.2, so the key goes."""
+    result = _j_preflight(_J_ABOVE_BAND)
+    assert result.pk_cols == ()
+    (adjustment,) = result.adjustments
+    assert adjustment.change == "pk_dropped"
+
+
+def test_the_real_f_table_share_is_still_above_the_boundary():
+    """Regression guard for the launch this came from: 0.2908 lands
+    0.2253, still over the 0.2 gate, so F_TABLE keeps adjusting."""
+    result = _j_preflight(_J_ABOVE_GATE)
+    assert result.pk_cols == ()
+
+
+def test_the_measurement_reads_the_key_the_run_enforces(monkeypatch):
+    """A table no model keys takes its PK from --pk_cols. Reading
+    `relations.pk` left it with NO measurement at all, so the sample stop
+    stood down for evidence that did not exist and the driven check fell
+    through — worse than before ADR 0038."""
+    import sdfb_beam.cli.run_pipeline as rp
+
+    seen = {}
+
+    def _capture(measured, pk, driving_cols, **kw):
+        seen["pk"] = pk
+        return False
+
+    monkeypatch.setattr(rp, "resolve_pk_measurement", _capture)
+    monkeypatch.setattr(rp, "measure_fanout", _measure_one_to_one_j)
+    reg = RelationshipRegistry.from_sources(
+        [("config/relationships/kw6.yaml", _J_SHAPE_NO_PK)]
+    )
+    rp.resolve_fanout(
+        reg, "p.land.child", "p.src.child",
+        in_set_names={"parent", "child"}, reference_rows=[],
+        table_schema=_j_schema(), stats_store=None, bq_client=None,
+        effective_pk=("PID", "NR"),
+    )
+    assert seen["pk"] == ("PID", "NR")

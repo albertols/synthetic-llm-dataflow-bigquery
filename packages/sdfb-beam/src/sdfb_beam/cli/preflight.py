@@ -1023,7 +1023,14 @@ def _check_driven_pk(
     # that decides: the run's BLOCKER gate.
     measurement = source_pk_measurement(effective_pk, driving, fanout)
     share = pk_repeat_share(measurement)
-    if measurement is not None and share is not None and share > gate:
+    # The gate divides the diverted rows by the rows that REACH it —
+    # generated PLUS diverted — so a source that repeats a share `s` of
+    # its rows lands `s / (1 + s)`, not `s`. Compare what the gate will
+    # actually compute: at a 0.2 gate the true boundary is a source
+    # share of 0.25, and every source in (0.20, 0.25] keeps its key on a
+    # run that would have PASSED with it enforced (2026-09-13).
+    predicted = share / (1.0 + share) if share is not None else None
+    if measurement is not None and predicted is not None and predicted > gate:
         completing = tuple(c for c in effective_pk if c not in driving)
         detail = (
             f"one value of the driving edge ({','.join(driving)}) carries "
@@ -1073,6 +1080,7 @@ def _check_driven_pk(
             key_tuples=int(measurement.get("key_tuples") or 0),
             max_rows_per_key=int(measurement.get("max_rows_per_key") or 0),
             repeat_share=round(share, 4),
+            predicted_observed=round(share / (1.0 + share), 4),
             gate=gate,
             note="the declared PK is a key of this source within the "
             "run's BLOCKER gate, so it is KEPT; the repeats that remain "

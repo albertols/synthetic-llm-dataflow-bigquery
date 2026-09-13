@@ -418,7 +418,9 @@ is the whole decision:
 | **above** the gate | the key cannot survive generation — generation reproduces the source, so the share would land as `pk.duplicate` and fail the run. The `pk:` is DROPPED (below) |
 | **at or below** the gate | the key is KEPT. `preflight_pk_source_repeats` reports the share, and the few repeats divert as `pk.duplicate` like any other table's — a source that is 0.4% dirty does not lose its key |
 
-When the share is above the gate, the launch no longer stops. It:
+The share is converted to what the gate will actually compute — a source that repeats `s` of its rows lands `s / (1 + s)`, because the gate counts generated plus diverted rows — so a 0.2 gate really refuses a source above 0.25.
+
+When that figure is above the gate, the launch no longer stops. It:
 
 1. **drops** that `pk:` from the EFFECTIVE model for this run — nothing
    else changes, so the table still generates from its driving edge with
