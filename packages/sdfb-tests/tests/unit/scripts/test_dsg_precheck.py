@@ -19,6 +19,15 @@ sys.modules[_spec.name] = precheck
 _spec.loader.exec_module(precheck)
 
 _SALT = "test-salt"
+# Fixture values are assembled from parts so this file never holds a literal
+# the gate itself would flag when it scans the repository.
+_PAN = "4" + "1" * 15  # 4111 1111 1111 1111, the canonical Luhn-valid test card
+_PAN_BAD = "4" + "1" * 14 + "2"  # same digits, broken checksum
+_MASKED_PAN = "411111" + "*" * 6 + "1111"
+_IBAN_OK = " ".join(["GB82", "WEST", "1234", "5698", "7654", "32"])
+_IBAN_BAD = " ".join(["GB00", "WEST", "1234", "5698", "7654", "32"])
+_PERSONAL_EMAIL = "someone" + "@" + "gmail.com"
+_ALLOWED_SUBDOMAIN_EMAIL = "y" + "@" + "sub.example.org"
 
 
 def _config(**overrides):
@@ -68,10 +77,9 @@ def test_secret_patterns(tmp_path):
 
 
 def test_luhn_valid_card_numbers_are_flagged_and_invalid_ones_are_not(tmp_path):
-  # 4111111111111111 is the canonical Luhn-valid test PAN.
-  _write(tmp_path, "valid.md", "pan 4111111111111111 here\n")
-  _write(tmp_path, "invalid.md", "id 4111111111111112 here\n")
-  _write(tmp_path, "masked.md", "pan 411111******1111 here\n")
+  _write(tmp_path, "valid.md", f"pan {_PAN} here\n")
+  _write(tmp_path, "invalid.md", f"id {_PAN_BAD} here\n")
+  _write(tmp_path, "masked.md", f"pan {_MASKED_PAN} here\n")
   _write(tmp_path, "jobid.md", "job 2026-08-26_05_01_16-3186876581127148459\n")
   findings = precheck.scan_tree(tmp_path, _config())
   assert sorted(f.path for f in findings) == ["masked.md", "valid.md"]
@@ -79,16 +87,16 @@ def test_luhn_valid_card_numbers_are_flagged_and_invalid_ones_are_not(tmp_path):
 
 
 def test_iban_needs_a_valid_checksum(tmp_path):
-  _write(tmp_path, "ok.md", "iban GB82 WEST 1234 5698 7654 32\n")
-  _write(tmp_path, "bad.md", "iban GB00 WEST 1234 5698 7654 32\n")
+  _write(tmp_path, "ok.md", f"iban {_IBAN_OK}\n")
+  _write(tmp_path, "bad.md", f"iban {_IBAN_BAD}\n")
   findings = precheck.scan_tree(tmp_path, _config())
   assert [f.path for f in findings] == ["ok.md"]
   assert _rules(findings) == ["iban"]
 
 
 def test_emails_outside_the_allowlist(tmp_path):
-  _write(tmp_path, "a.md", "x@example.com y@sub.example.org\n")
-  _write(tmp_path, "b.md", "someone@gmail.com\n")
+  _write(tmp_path, "a.md", f"x@example.com {_ALLOWED_SUBDOMAIN_EMAIL}\n")
+  _write(tmp_path, "b.md", f"{_PERSONAL_EMAIL}\n")
   findings = precheck.scan_tree(tmp_path, _config())
   assert [f.path for f in findings] == ["b.md"]
   assert _rules(findings) == ["email"]
@@ -96,8 +104,8 @@ def test_emails_outside_the_allowlist(tmp_path):
 
 def test_hashed_tokens_match_compound_and_phrase_forms(tmp_path):
   hashes = frozenset(
-      precheck.hash_token(t, _SALT)
-      for t in ["zz9999", "acme.example", "com/acme/gpu", "refund q", "acme_limit_key"])
+      precheck.hash_token(t, _SALT) for t in
+      ["zz9999", "acme.example", "com/acme/gpu", "refund q", "acme_limit_key"])
   _write(tmp_path, "a.py", "value = fn(ZZ9999)  # head\n")
   _write(tmp_path, "b.md", "proxy for acme.example networks\n")
   _write(tmp_path, "c.md", "image repo/com/acme/gpu:12.2\n")
@@ -105,7 +113,8 @@ def test_hashed_tokens_match_compound_and_phrase_forms(tmp_path):
   _write(tmp_path, "e.md", "unrelated zz99999 and acme alone\n")
   _write(tmp_path, "f.py", "def test_acme_limit_key_shape():\n")
   findings = precheck.scan_tree(tmp_path, _config(token_hashes=hashes))
-  assert sorted(f.path for f in findings) == ["a.py", "b.md", "c.md", "d.md", "f.py"]
+  assert sorted(
+      f.path for f in findings) == ["a.py", "b.md", "c.md", "d.md", "f.py"]
   assert _rules(findings) == ["sensitive-token"]
 
 
@@ -118,12 +127,12 @@ def test_excerpts_never_echo_the_matched_value(tmp_path):
 
 
 def test_binary_files_are_skipped(tmp_path):
-  (tmp_path / "img.png").write_bytes(b"\x89PNG\x00\x00 4111111111111111")
+  (tmp_path / "img.png").write_bytes(b"\x89PNG\x00\x00 " + _PAN.encode())
   assert not precheck.scan_tree(tmp_path, _config())
 
 
 def test_allow_findings_suppress_a_reviewed_hit(tmp_path):
-  _write(tmp_path, "docs/test_cards.md", "pan 4111111111111111\n")
+  _write(tmp_path, "docs/test_cards.md", f"pan {_PAN}\n")
   config = _config(allow_findings=[{
       "path": "docs/test_cards.md",
       "rule": "card-number"

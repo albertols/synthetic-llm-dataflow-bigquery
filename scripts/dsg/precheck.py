@@ -221,7 +221,7 @@ def _mask_tokens(line: str, tokens: Iterable[str]) -> str:
 
 
 def _list_files(root: Path) -> list[str]:
-  """Tracked files when `root` is a git work-tree top, else a full walk."""
+  """Tracked and untracked-unignored files at a git work-tree top, else a walk."""
   try:
     top = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
@@ -231,11 +231,14 @@ def _list_files(root: Path) -> list[str]:
   except (OSError, subprocess.CalledProcessError):
     top = ""
   if top and Path(top).resolve() == root.resolve():
-    listed = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z"],
-        capture_output=True,
-        text=True,
-        check=True).stdout
+    listed = subprocess.run([
+        "git", "-C",
+        str(root), "ls-files", "-z", "--cached", "--others",
+        "--exclude-standard"
+    ],
+                            capture_output=True,
+                            text=True,
+                            check=True).stdout
     # Tracked paths deleted in the working tree are not there to scan.
     return sorted(p for p in listed.split("\0") if p and (root / p).is_file())
   files = []
