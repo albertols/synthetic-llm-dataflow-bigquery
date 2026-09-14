@@ -7,11 +7,10 @@
 - [ ] Title is a conventional commit (`feat:`/`fix:`/`perf:`/`docs:`/`chore:`…) —
       it decides the SemVer bump (feat → minor, fix/perf → patch, `!` → major).
       Expected bump: `v_._._`
-- [ ] Evidence bundles for runs this PR relies on are promoted from local
-      `runs/<JOB_ID>/` and committed under
-      `docs/releases/<version>/evidence/<JOB_ID>/`; the JOB_IDs are listed
-      here: `…`
-- [ ] `oss/` bundle leak scan is clean for any newly committed artifacts
+- [ ] Runs this PR relies on are listed by JOB_ID here: `…`. Their evidence
+      bundles stay local in `runs/<JOB_ID>/`; only aggregate numbers reach
+      the repo (`scripts/dsg/precheck.py` rejects `**/evidence/**`)
+- [ ] `uv run python scripts/dsg/precheck.py` is clean
 - [ ] Docs/ADRs updated (or explicitly not needed)
 
 <!-- After merge: the release Action tags vX.Y.Z and commits
