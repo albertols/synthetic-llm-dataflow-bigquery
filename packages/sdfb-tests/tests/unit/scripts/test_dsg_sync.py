@@ -38,7 +38,7 @@ def _manifest(**overrides):
       "source_repo": "https://github.com/acme/demo",
       "target_repo": "Org/guides",
       "target_base": "main",
-      "branch_prefix": "sync/demo-",
+      "branch": "sync/demo",
       "pipeline_dir": _PIPE,
       "owned_paths": [_PIPE, "terraform/demo", "use_cases/Demo.md"],
       "preserve": [f"{_PIPE}/scripts/00_set_variables.sh"],
@@ -296,3 +296,35 @@ def test_export_ref_uses_git_archive_so_untracked_files_never_ship(tmp_path):
   sha, committed_at = sync.export_ref(repo, "HEAD", dest)
   assert len(sha) == 40 and committed_at.endswith("Z")
   assert sorted(p.name for p in dest.iterdir()) == [".gitignore", "tracked.txt"]
+
+
+def test_commit_uses_the_checkout_identity_and_no_trailers(tmp_path):
+  repo = tmp_path / "dsg"
+  repo.mkdir()
+  git = [
+      "git", "-C",
+      str(repo), "-c", "user.email=me@example.com", "-c", "user.name=me"
+  ]
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  _write(repo, "README.md", "# guides\n")
+  subprocess.run([*git, "add", "."], check=True)
+  subprocess.run([*git, "commit", "-qm", "init"], check=True)
+  subprocess.run(
+      ["git", "-C",
+       str(repo), "config", "user.email", "me@example.com"],
+      check=True)
+  subprocess.run(
+      ["git", "-C", str(repo), "config", "user.name", "me"], check=True)
+  _write(repo, f"{_PIPE}/main.py")
+  assert sync.commit(
+      repo, _manifest(), ref="v1.2.3", sha="a" * 40, extra_files=["README.md"])
+  log = subprocess.run(
+      ["git", "-C", str(repo), "log", "-1", "--format=%an|%B"],
+      capture_output=True,
+      text=True,
+      check=True).stdout
+  author, body = log.split("|", 1)
+  assert author == "me"
+  assert body.strip() == ("feat(demo): sync from source v1.2.3 (" + "a" * 12 +
+                          ")\n\nSource: https://github.com/acme/demo/tree/" +
+                          "a" * 40)

@@ -53,7 +53,8 @@ flowchart LR
 `use_cases/Synthetic_Data_Generation.md` is generated from one ref of this
 repository and replaced wholesale on every sync. `.sync-source.json` records
 the ref and sha. A change requested on the DSG side is made here, released,
-and synced.
+and synced. DSG commits and PRs carry only the maintainer's git identity: the DSG is
+Google-owned, so there are no co-author or tool-attribution trailers and no AI footers.
 
 **D2 — The DSG contract lives here, as an overlay.** DSG-only files are
 versioned in `dsg/`: launch scripts `01`–`05`, `setup.py`, Cloud Build
