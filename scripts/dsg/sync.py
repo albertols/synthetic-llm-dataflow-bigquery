@@ -588,16 +588,24 @@ def read_prev_sha(dsg_root: Path, manifest: Manifest) -> str | None:
 
 
 def commit(dsg_root: Path, manifest: Manifest, *, ref: str, sha: str,
-           extra_files: Sequence[str], trailers: Sequence[str]) -> bool:
-  paths = [*manifest.owned_paths, *extra_files]
+           extra_files: Sequence[str]) -> bool:
+  """Commit the synced paths under the checkout's own git identity.
+
+  The DSG is a Google-owned repository: the message carries the source ref
+  and nothing else, no co-author or tool trailers (ADR 0040).
+  """
+  tracked = set(_run(["git", "-C", str(dsg_root), "ls-files"]).splitlines())
+  paths = [
+      p for p in [*manifest.owned_paths, *extra_files]
+      if (dsg_root / p).exists() or p in tracked or any(
+          t.startswith(p + "/") for t in tracked)
+  ]
   _run(["git", "-C", str(dsg_root), "add", "-A", "--", *paths])
   if not _run(["git", "-C",
                str(dsg_root), "diff", "--cached", "--name-only"]).strip():
     return False
   message = (f"feat({manifest.pipeline_name}): sync from source {ref} "
              f"({sha[:12]})\n\nSource: {manifest.source_repo}/tree/{sha}\n")
-  if trailers:
-    message += "\n" + "\n".join(trailers) + "\n"
   _run(["git", "-C", str(dsg_root), "commit", "-q", "-m", message])
   return True
 
@@ -646,7 +654,6 @@ def main(argv: Sequence[str] | None = None) -> int:
       action="store_true",
       help="commit, push the fork branch, open/update the PR")
   parser.add_argument("--cloud-run", help="URL/id of a verifying Dataflow job")
-  parser.add_argument("--trailer", action="append", default=[])
   args = parser.parse_args(argv)
   dsg_root = args.dsg.expanduser().resolve()
 
@@ -701,13 +708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cloud_run=args.cloud_run)
     print(body)
     if args.commit or args.open_pr:
-      commit(
-          dsg_root,
-          manifest,
-          ref=args.ref,
-          sha=sha,
-          extra_files=index_files,
-          trailers=args.trailer)
+      commit(dsg_root, manifest, ref=args.ref, sha=sha, extra_files=index_files)
     if args.open_pr:
       title = manifest.pr_title.format(
           pipeline_name=manifest.pipeline_name, ref=args.ref)

@@ -52,12 +52,19 @@ ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + req
    - files outside the owned paths and index files → a manifest bug, stop;
    - anything under `docs/` you would not publish → tighten `include`;
    - `requirements.txt` changes you cannot trace to `uv.lock` → stop.
-4. **Commit, push and open or update the PR:**
+4. **Commit, push and open or update the PR.** The dry run left the DSG
+   checkout dirty, and the sync refuses a dirty checkout, so discard it first:
    ```bash
+   git -C ~/IdeaProjects/dataflow-solution-guides switch -f main
+   git -C ~/IdeaProjects/dataflow-solution-guides clean -fd -- \
+       pipelines/synthetic-llm-dataflow-bigquery terraform/synthetic-llm-dataflow-bigquery \
+       use_cases/Synthetic_Data_Generation.md
    uv run python scripts/dsg/sync.py --ref "$REF" --dsg ~/IdeaProjects/dataflow-solution-guides \
-       --gates full --open-pr [--cloud-run <dataflow job URL>] \
-       --trailer "Co-Authored-By: …"
+       --gates full --open-pr [--cloud-run <dataflow job URL>]
    ```
+   **Attribution:** the DSG is a Google-owned repository. Its commits and PR
+   carry only the maintainer's git identity. Pass no `--trailer` (no AI
+   co-author or session trailers) and never add an AI footer to the PR body.
    The same branch (`sync/synthetic-llm-dataflow-bigquery-<ref>`) is reused,
    so re-running updates the PR body instead of opening a second PR.
 5. **Watch DSG CI**: `gh pr checks <url> --watch`. Fix any red check **in the

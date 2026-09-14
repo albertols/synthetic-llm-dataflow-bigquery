@@ -12,9 +12,13 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 🔧 Changed
 
+- DSG sync commits carry only the maintainer's git identity: `scripts/dsg/sync.py` no longer accepts `--trailer`, and the `dsg-sync` skill says so and discards the dry-run state before publishing.
+
 ### ⚡ Performance
 
 ### 🐛 Fixed
+
+- `scripts/dsg/sync.py` commit no longer fails when an owned path does not exist in the DSG checkout.
 
 ### 🗑️ Removed
 
