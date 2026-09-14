@@ -10,13 +10,7 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 🚀 Added
 
-- Sensitive-content gate `scripts/dsg/precheck.py` in CI: forbidden paths, secret patterns, card numbers, IBANs, non-placeholder e-mails and salted-hash matches of known sensitive identifiers.
-
 ### 🔧 Changed
-
-- The image builds from public base images and PyPI; the private package-index and registry settings are gone from `pyproject.toml`, `docker/Dockerfile` and the Cloud Build config.
-- The Composer DAG takes optional network tags from the `DATAFLOW_NETWORK_TAGS` Variable instead of a hard-coded chain.
-- Docs, ADRs and examples no longer describe a specific organisation's environment; worked examples use a fictitious web shop.
 
 ### ⚡ Performance
 
@@ -24,9 +18,20 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 🗑️ Removed
 
-- `docs/CICD.md`, `scripts/probe_gpu_dataflow.sh`, the v0.1.0 evidence bundle and the internal planning notes; ADRs 0003 and 0012 are withdrawn (0012's GCS-client and driver decisions still hold).
-
 ### 📗 Docs
+
+## [v0.3.2] — 2026-09-14
+
+### 🚀 Added
+- Sensitive-content gate `scripts/dsg/precheck.py` in CI: forbidden paths, secret patterns, card numbers, IBANs, non-placeholder e-mails and salted-hash matches of known sensitive identifiers.
+
+### 🔧 Changed
+- The image builds from public base images and PyPI; the private package-index and registry settings are gone from `pyproject.toml`, `docker/Dockerfile` and the Cloud Build config.
+- The Composer DAG takes optional network tags from the `DATAFLOW_NETWORK_TAGS` Variable instead of a hard-coded chain.
+- Docs, ADRs and examples no longer describe a specific organisation's environment; worked examples use a fictitious web shop.
+
+### 🗑️ Removed
+- `docs/CICD.md`, `scripts/probe_gpu_dataflow.sh`, the v0.1.0 evidence bundle and the internal planning notes; ADRs 0003 and 0012 are withdrawn (0012's GCS-client and driver decisions still hold).
 
 ## [v0.3.1] — 2026-09-14
 
