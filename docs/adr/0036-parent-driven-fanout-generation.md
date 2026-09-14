@@ -1,6 +1,6 @@
 # ADR 0036 — Parent-driven fan-out generation: children are generated from their parent's landed keys
 
-**Status:** ACCEPTED (laptop, 2026-09-10) — DirectRunner + unit tests (Tasks 1–11, `e084813..3ed9dde`); Dataflow acceptance pending the M4 three-table launch
+**Status:** ACCEPTED (laptop 2026-09-10; Dataflow 2026-09-13). DirectRunner + unit tests (Tasks 1–11, `e084813..3ed9dde`); on Dataflow, the five-table relational launch `2026-09-13_06_10_16-12600311608685394436` generated its children from their parents' landed keys and every table succeeded (see ADR 0037 and ADR 0038)
 **Design:** [`2026-09-10-parent-driven-fanout-generation.md`](../designs/2026-09-10-parent-driven-fanout-generation.md)
 **Evidence:** the two 2026-09-09 launches in [ADR 0035](0035-pk-capacity-fk-bound-members.md) — 87.9% then 56.5% `pk.duplicate` on C_TABLE at 10M rows, both from random PK draws inside a per-parent key space; laptop `packages/sdfb-tests/tests/unit/test_fanout_three_tables.py` reproduces the three-table shape (`B_TABLE → C_TABLE → A_TABLE`) on DirectRunner with every FK, PK and ratio holding by construction
 **Amends:** [ADR 0030](0030-single-job-relational-generation.md) (the FK key-pool side input and its cap, for in-job driven edges only) · [ADR 0031](0031-joint-fk-key-draws.md) (the IPF child-marginal weighting, for in-job driven edges only) · [ADR 0035](0035-pk-capacity-fk-bound-members.md) (the random-draw PK-capacity check, for in-job driven edges only — its sizing and ceiling stay for root tables and external parents)

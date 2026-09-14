@@ -65,8 +65,9 @@ ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + req
    **Attribution:** the DSG is a Google-owned repository. Its commits and PR
    carry only the maintainer's git identity. Pass no `--trailer` (no AI
    co-author or session trailers) and never add an AI footer to the PR body.
-   The same branch (`sync/synthetic-llm-dataflow-bigquery-<ref>`) is reused,
-   so re-running updates the PR body instead of opening a second PR.
+   Every sync uses the one branch `sync/synthetic-llm-dataflow-bigquery`. While its
+   PR is open, a re-sync (for example of a newer tag) updates that PR's commit, title
+   and body. Once the PR has merged, the next sync opens a new one.
 5. **Watch DSG CI**: `gh pr checks <url> --watch`. Fix any red check **in the
    source**: add a gate to `sync.py` if CI caught something the gates missed,
    then release and re-sync. Never push a fix to the DSG branch by hand.

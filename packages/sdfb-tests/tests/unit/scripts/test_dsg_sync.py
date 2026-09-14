@@ -38,7 +38,7 @@ def _manifest(**overrides):
       "source_repo": "https://github.com/acme/demo",
       "target_repo": "Org/guides",
       "target_base": "main",
-      "branch_prefix": "sync/demo-",
+      "branch": "sync/demo",
       "pipeline_dir": _PIPE,
       "owned_paths": [_PIPE, "terraform/demo", "use_cases/Demo.md"],
       "preserve": [f"{_PIPE}/scripts/00_set_variables.sh"],

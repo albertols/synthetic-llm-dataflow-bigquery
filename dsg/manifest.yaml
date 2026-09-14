@@ -5,7 +5,8 @@
 source_repo: https://github.com/albertols/synthetic-llm-dataflow-bigquery
 target_repo: GoogleCloudPlatform/dataflow-solution-guides
 target_base: main
-branch_prefix: sync/synthetic-llm-dataflow-bigquery-
+# One branch for every sync: a re-sync updates its open PR.
+branch: sync/synthetic-llm-dataflow-bigquery
 pr_title: "feat({pipeline_name}): synthetic data generation solution guide ({ref})"
 pipeline_dir: pipelines/synthetic-llm-dataflow-bigquery
 

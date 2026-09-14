@@ -94,7 +94,7 @@ class Manifest:
   source_repo: str
   target_repo: str
   target_base: str
-  branch_prefix: str
+  branch: str
   pipeline_dir: str
   owned_paths: Sequence[str]
   preserve: Sequence[str]
@@ -568,10 +568,15 @@ def run_gates(export_root: Path, dsg_root: Path, manifest: Manifest, *,
 # --------------------------------------------------------------------------
 
 
-def prepare_branch(dsg_root: Path, manifest: Manifest, ref: str) -> str:
+def prepare_branch(dsg_root: Path, manifest: Manifest) -> str:
+  """Reset the one sync branch onto the DSG base branch.
+
+  A single branch carries every sync: while its PR is open a re-sync updates
+  that PR; once it has merged, the next sync opens a new one.
+  """
   if _run(["git", "-C", str(dsg_root), "status", "--porcelain"]).strip():
     raise SyncError(f"{dsg_root} has uncommitted changes")
-  branch = manifest.branch_prefix + re.sub(r"[^A-Za-z0-9._-]", "-", ref)
+  branch = manifest.branch
   _run(["git", "-C", str(dsg_root), "fetch", "upstream", manifest.target_base])
   _run([
       "git", "-C",
@@ -612,6 +617,11 @@ def commit(dsg_root: Path, manifest: Manifest, *, ref: str, sha: str,
 
 def push_and_open_pr(dsg_root: Path, manifest: Manifest, *, branch: str,
                      title: str, body: str) -> str:
+  # Refresh the lease: the fork may still hold this branch from an earlier sync.
+  subprocess.run(
+      ["git", "-C", str(dsg_root), "fetch", "origin", branch],
+      capture_output=True,
+      check=False)
   _run([
       "git", "-C",
       str(dsg_root), "push", "--force-with-lease", "-u", "origin", branch
@@ -675,8 +685,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       for f in findings:
         print(f"{f.path}:{f.line}: {f.rule}: {f.excerpt}")
       raise SyncError(f"precheck: {len(findings)} finding(s); nothing synced")
-    branch = None if args.no_branch else prepare_branch(dsg_root, manifest,
-                                                        args.ref)
+    branch = None if args.no_branch else prepare_branch(dsg_root, manifest)
     prev_sha = read_prev_sha(dsg_root, manifest)
     broken = rewrite_links(
         staging, dsg_root, manifest, sha=sha, export_root=export_root)
