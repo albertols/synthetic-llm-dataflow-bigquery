@@ -20,6 +20,8 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 📗 Docs
 
+## [v0.3.3] — 2026-09-14
+
 ## [v0.3.2] — 2026-09-14
 
 ### 🚀 Added
