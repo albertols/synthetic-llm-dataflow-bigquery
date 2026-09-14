@@ -92,9 +92,10 @@ class MLXModelClient:
       max_tokens: int | None = None,
       temperature: float = 0.7,
       n: int = 1,
-      seed: int | None = None,
-      top_p: float | None = None,
-      top_k: int | None = None,
+      # ModelClient Protocol knobs this best-effort client does not forward.
+      seed: int | None = None,  # pylint: disable=unused-argument
+      top_p: float | None = None,  # pylint: disable=unused-argument
+      top_k: int | None = None,  # pylint: disable=unused-argument
   ) -> list[dict]:
     """Call the LLM `n` times, parse each output as JSON.
 

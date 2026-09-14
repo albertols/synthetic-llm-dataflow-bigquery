@@ -29,17 +29,14 @@ class FreeTextPoolStore(Protocol):
 
   def fetch(self, reference_digest: str, model_uri: str) -> list[FreeTextPool]:
     """Every persisted pool for this reference sample + LLM."""
-    ...
 
   def exists(self, reference_digest: str, model_uri: str) -> bool:
     """True when ANY pool exists (the build stage's idempotency check)."""
-    ...
 
   def write_rows(self, rows: list[dict]) -> None:
     """Append `pool_to_row`-shaped rows, blocking until they are
         readable by a subsequent `fetch` (the build branch's write path —
         the pipeline gate downstream relies on this blocking contract)."""
-    ...
 
 
 @runtime_checkable
@@ -57,7 +54,6 @@ class SourceValueStore(Protocol):
     """Every distinct non-NULL value of `column`, as strings — or None
         when the column's cardinality exceeds the store's cap (the caller
         must then behave as if no store were attached, loudly)."""
-    ...
 
   # OPTIONAL extension (wave-4 v2, duck-typed via getattr so existing
   # implementations stay valid): `fetch_frequent(column, min_count)

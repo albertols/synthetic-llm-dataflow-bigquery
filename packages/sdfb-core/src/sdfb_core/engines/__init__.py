@@ -76,5 +76,5 @@ __all__ = [
 # (after `register_engine` is defined) to avoid a circular import; the engines'
 # heavy deps (faiss / sdgx) stay deferred inside them.
 # ---------------------------------------------------------------------------
-from sdfb_core.engines import b1_rag as _b1_rag  # noqa: E402, F401
-from sdfb_core.engines import b2_library as _b2_library  # noqa: E402, F401
+from sdfb_core.engines import b1_rag as _b1_rag  # noqa: E402, F401  # pylint: disable=wrong-import-position
+from sdfb_core.engines import b2_library as _b2_library  # noqa: E402, F401  # pylint: disable=wrong-import-position

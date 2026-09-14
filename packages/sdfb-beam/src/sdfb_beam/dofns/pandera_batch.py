@@ -35,6 +35,7 @@ class PanderaValidateBatchDoFn(beam.DoFn):
   def setup(self):
     self._schema = derive_pandera_schema(self.table_schema)
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, batch):
     if not batch:
       return

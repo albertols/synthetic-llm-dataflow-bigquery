@@ -46,6 +46,7 @@ class EnforceFkIntegrityDoFn(beam.DoFn):
       self._edges = self._edges + _compile(list(fk_side))
       self._bound_side = True
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, record, fk_side: list | None = None):
     self._bind(fk_side)
     for cols, keys in self._edges:

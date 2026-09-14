@@ -424,13 +424,13 @@ def main(argv: list[str] | None = None) -> int:
 
   out_json = Path(args.out_json)
   out_json.parent.mkdir(parents=True, exist_ok=True)
-  out_json.write_text(json.dumps(diff, indent=2, default=str))
+  out_json.write_text(json.dumps(diff, indent=2, default=str), encoding="utf-8")
   print(f"wrote {out_json}")
 
   if args.out_md:
     out_md = Path(args.out_md)
     out_md.parent.mkdir(parents=True, exist_ok=True)
-    out_md.write_text(render_md(diff))
+    out_md.write_text(render_md(diff), encoding="utf-8")
     print(f"wrote {out_md}")
 
   ranked = sorted(

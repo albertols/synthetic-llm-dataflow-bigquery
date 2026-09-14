@@ -371,7 +371,7 @@ class B1RagEngine(GenerationEngine):
     # tiny and run fine on CPU.
     demote = getattr(self._embedder, "demote_to_cpu", None)
     if callable(demote):
-      demote()
+      demote()  # pylint: disable=not-callable  # narrowed by callable() above
 
     # 4. infer free-text pools ONCE (the only O(1) LLM use in setup).
     t_pools = time.monotonic()
@@ -888,6 +888,7 @@ class B1RagEngine(GenerationEngine):
   def _sample_free_text(self, n: int, cfg: GenerationConfig,
                         similarity: float) -> dict[str, list]:
     """Sample free-text columns from their bounded LLM pools (w/ repl)."""
+    del similarity  # Unused: pool, routed and expansion draws ignore it.
     assert self._samplers is not None
     out: dict[str, list] = {}
     # A dedicated seeded RNG so free-text draws don't perturb the bulk
@@ -930,7 +931,7 @@ class B1RagEngine(GenerationEngine):
       if not pool and not expand:
         out[name] = [None] * n
         continue
-      observed = set(prof.observed_values) if expand else frozenset()
+      observed = frozenset(prof.observed_values) if expand else frozenset()
       mutate = expansion == "all" and prof.shape_mix is None and pool
 
       def _value(
@@ -2048,7 +2049,8 @@ class _FormatGate:
 
   def __call__(self, v: str) -> bool:
     if self.lengths is not None and self._charset is not None:
-      return (len(v) in self.lengths and set(v) <= self._charset and
+      # `lengths` is narrowed to a set by the `is not None` guard above.
+      return (len(v) in self.lengths and set(v) <= self._charset and  # pylint: disable=unsupported-membership-test
               self._name_lower not in v.lower())
     if self._masks is not None:
       return (collapsed_mask(v) in self._masks and
@@ -2107,7 +2109,7 @@ def _pool_llm_yield(
   # relaxed template exists) a candidate must also match an observed
   # length bucket, stay within the observed charset, and never contain
   # the column name. Prose columns (no template) skip the gate.
-  _in_format = _format_gate(prof)
+  in_format = _format_gate(prof)
   # Length ceiling for length-blind gates (ADR 0033 prose, ADR 0034
   # masks): a fixed-width source field truncates at its width; the prose
   # gate passes everything and the mask gate collapses runs, so the
@@ -2117,7 +2119,7 @@ def _pool_llm_yield(
   # format and novelty checks, so a clamped value is still rejected if
   # it collides with a real one.
   ceiling = (
-      length_ceiling(prof.observed_values) if _in_format.length_blind else None)
+      length_ceiling(prof.observed_values) if in_format.length_blind else None)
   n_clamped = 0
   collapse_rounds = 0
 
@@ -2157,7 +2159,7 @@ def _pool_llm_yield(
     parsed_values, clamped = _clamp_to_ceiling(
         _string_values(results, prof.name), ceiling)
     n_clamped += clamped
-    values = [v for v in parsed_values if _in_format(v)]
+    values = [v for v in parsed_values if in_format(v)]
     n_format_rejected += len(parsed_values) - len(values)
     # Format collapse: a full-yield round with zero in-format values.
     collapse_rounds = _collapse_rounds(collapse_rounds, parsed_values, values)

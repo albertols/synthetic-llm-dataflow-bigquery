@@ -19,6 +19,9 @@ entity: BLUE = real/reference, ORANGE = the risky/degenerate case,
 AQUA = the safe/derived quantity.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math

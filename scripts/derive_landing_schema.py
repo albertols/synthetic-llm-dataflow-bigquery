@@ -48,12 +48,12 @@ def main(argv: list[str] | None = None) -> int:
       "(project:dataset.table), with partitioning/clustering folded in.")
   args = p.parse_args(argv)
 
-  with open(args.ddl_json) as f:
+  with open(args.ddl_json, encoding="utf-8") as f:
     ts = TableSchema.model_validate(json.load(f))
 
   # Unwrap {"fields": [...]} → bare array for bq / Terraform.
   fields = derive_bq_schema(ts)["fields"]
-  with open(args.out, "w") as f:
+  with open(args.out, "w", encoding="utf-8") as f:
     json.dump(fields, f, indent=2)
     f.write("\n")
 

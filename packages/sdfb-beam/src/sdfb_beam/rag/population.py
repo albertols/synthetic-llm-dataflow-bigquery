@@ -72,6 +72,7 @@ class ChunkReferenceRowsDoFn(beam.DoFn):
     self.embedder_id = embedder_id
     self.embedder_version = embedder_version
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, row: dict):
     yield from chunk_row(
         row,
@@ -121,6 +122,7 @@ class EmbedChunksDoFn(beam.DoFn):
 
       self._embedder = HashingEmbedder(dim=384)
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, chunks: list[Chunk]):
     vectors = self._embedder.embed([c.chunk_text for c in chunks])
     created_at = datetime.now(UTC).isoformat()
@@ -131,7 +133,8 @@ class EmbedChunksDoFn(beam.DoFn):
     # Release VRAM before anything else (vLLM) sizes its budget.
     demote = getattr(self._embedder, "demote_to_cpu", None)
     if callable(demote):
-      demote()
+      # False positive: pylint does not narrow `demote` on callable().
+      demote()  # pylint: disable=not-callable
     self._embedder = None
 
 

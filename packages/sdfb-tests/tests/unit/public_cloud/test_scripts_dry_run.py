@@ -60,8 +60,8 @@ def test_env_sh_derives_names():
 def test_common_sh_run_and_probe_honor_dry_run():
   snippet = (
       f'source "{GCP_DIR}/env.sh" && source "{GCP_DIR}/lib/common.sh" --dry-run && '
-      'run gcloud projects create x && (probe gcloud projects describe x && echo FOUND || echo ABSENT)'
-  )
+      "run gcloud projects create x && "
+      "(probe gcloud projects describe x && echo FOUND || echo ABSENT)")
   out = subprocess.run(["bash", "-c", snippet],
                        capture_output=True,
                        text=True,
@@ -89,7 +89,8 @@ def test_bootstrap_dry_run_prints_expected_commands():
   assert r.returncode == 0, r.stderr
   out = r.stdout
   assert "+ gcloud projects create sdfb-e2e-test123" in out
-  assert "+ gcloud billing projects link sdfb-e2e-test123 --billing-account 000000-AAAAAA-BBBBBB" in out
+  assert ("+ gcloud billing projects link sdfb-e2e-test123 "
+          "--billing-account 000000-AAAAAA-BBBBBB") in out
   assert "dataflow.googleapis.com" in out and "billingbudgets.googleapis.com" in out
   assert "+ gcloud artifacts repositories create sdfb" in out
   assert "set-cleanup-policies" in out
@@ -190,11 +191,14 @@ def test_build_and_template_scripts_dry_run():
   r = run_script("06_build_image.sh")
   assert r.returncode == 0, r.stderr
   assert "builds submit" in r.stdout and "build_image.yaml" in r.stdout
-  assert "_IMAGE_URI=us-central1-docker.pkg.dev/sdfb-e2e-test123/sdfb/sdfb-python:testtag" in r.stdout
+  assert ("_IMAGE_URI=us-central1-docker.pkg.dev/sdfb-e2e-test123/sdfb/"
+          "sdfb-python:testtag") in r.stdout
 
   r = run_script("07_build_flex_template.sh")
   assert r.returncode == 0, r.stderr
-  assert "flex-template build gs://sdfb-e2e-test123-dataflow/templates/sdfb-testtag-template.json" in r.stdout
+  assert ("flex-template build "
+          "gs://sdfb-e2e-test123-dataflow/templates/sdfb-testtag-template.json"
+         ) in r.stdout
   assert "docker/flex_template_metadata.json" in r.stdout
 
 
@@ -203,7 +207,9 @@ def test_run_e2e_dry_run_assembles_submit_command():
   assert r.returncode == 0, r.stderr
   out = r.stdout
   assert "dataflow flex-template run" in out
-  assert "--template-file-gcs-location gs://sdfb-e2e-test123-dataflow/templates/sdfb-testtag-template.json" in out
+  assert ("--template-file-gcs-location "
+          "gs://sdfb-e2e-test123-dataflow/templates/sdfb-testtag-template.json"
+         ) in out
   assert "--worker-machine-type n1-standard-8" in out
   assert "worker_accelerator=type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx" in out
   assert "--max-workers 1" in out

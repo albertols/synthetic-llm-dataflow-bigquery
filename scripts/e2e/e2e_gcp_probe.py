@@ -214,7 +214,7 @@ def bq_cross_validation(client, source_fqn: str, landing_fqn: str, *,
     if name in src_cols:
       sentinel_re = r"'^(0001|9999)-'"
       day_re = r"'^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
-      in_src = (f"{col} IN (SELECT DISTINCT {col} FROM {_quote(source_fqn)})")
+      in_src = f"{col} IN (SELECT DISTINCT {col} FROM {_quote(source_fqn)})"
       mem = _row(
           client,
           f"""
@@ -904,7 +904,7 @@ def _worker_log_milestones(
       "pool_ladder":
           pool_ladder,
       "durations_seconds":
-          _milestone_durations(found, [m[0] for m in milestones]),
+          _milestone_durations(found),
       "generation_stall_max_seconds":
           round(stall_max, 1) if stall_max else None,
       "worker_packages":
@@ -948,8 +948,7 @@ def _entry_text(e: dict) -> str:
   return jp.get("message") or json.dumps(jp)[:500]
 
 
-def _milestone_durations(found: dict[str, str],
-                         order: list[str]) -> dict[str, float]:
+def _milestone_durations(found: dict[str, str]) -> dict[str, float]:
   from itertools import pairwise
 
   # Chronological ordering (not the regex order) so derived gaps are the
@@ -1078,7 +1077,7 @@ def main(argv: list[str] | None = None) -> int:
 
   out = Path(args.out)
   out.parent.mkdir(parents=True, exist_ok=True)
-  out.write_text(json.dumps(report, indent=2, default=str))
+  out.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
   print(f"wrote {out}  (caller={identity})")
   return 0
 

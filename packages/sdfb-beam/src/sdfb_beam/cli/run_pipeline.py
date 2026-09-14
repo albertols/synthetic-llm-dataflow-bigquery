@@ -34,7 +34,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import apache_beam as beam
-import sdfb_core.engines  # noqa: F401  populates ENGINE_REGISTRY at import time
+# Side-effect import: populates ENGINE_REGISTRY at import time.
+import sdfb_core.engines  # noqa: F401  # pylint: disable=unused-import
 import yaml
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.io.gcp.bigquery import BigQueryDisposition, WriteToBigQuery
@@ -398,7 +399,8 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "A/B runs. streaming = land rows as they "
       "are generated and MEASURE the duplicate rate "
       "instead of removing it, so no GroupByKey barrier "
-      "sits between generation and BigQuery. In streaming mode duplicate rows LAND — the run is still marked "
+      "sits between generation and BigQuery. In streaming mode "
+      "duplicate rows LAND — the run is still marked "
       "FAILED_BLOCKER, so re-run with "
       "--write_disposition=overwrite.")
   p.add_argument(
@@ -1432,8 +1434,9 @@ def log_relationship_model(
     `relationship_model` carries the card (tables, PK, identity, every
     edge with enforced/documented/disabled state, generation waves, and
     the file it came from) — pipes and arrows only; the mermaid source
-    is rendered by `scripts/relationships/card.py --mermaid`, never logged. `fk_generation_mode` stays as the one-line greppable
-    state. Nothing here is inferred: it is the model file, rendered.
+    is rendered by `scripts/relationships/card.py --mermaid`, never logged.
+    `fk_generation_mode` stays as the one-line greppable state. Nothing here
+    is inferred: it is the model file, rendered.
     """
   log_milestone("fk_generation_mode", table=table_fqn, mode=mode)
   relations = registry.relations(table_fqn)
@@ -2400,7 +2403,9 @@ def main(argv: list[str] | None = None) -> int:
     return _run_relational_job(plan, args, beam_argv, registry=registry)
   for i, run in enumerate(plan.runs):
     table_args = argparse.Namespace(**vars(args))
-    table_args._multi_table_plan = len(plan.runs) > 1
+    # Underscored on purpose: an internal Namespace channel read back via
+    # getattr(), never a CLI flag.
+    table_args._multi_table_plan = len(plan.runs) > 1  # pylint: disable=protected-access
     table_args.landing_table = run.landing_table
     table_args.reference_table = run.source_table
     table_args.run_id = run.run_id
@@ -3147,7 +3152,11 @@ def _run_relational_job(
     table_args.run_id = run.run_id
     table_args.fk_parent_landing = (
         args.fk_parent_landing or run.fk_parent_landing)
+    # Underscored on purpose: an internal Namespace channel read back via
+    # getattr(), never a CLI flag.
+    # pylint: disable-next=protected-access
     table_args._rows_by_landing = rows_by_landing
+    # pylint: disable-next=protected-access
     table_args._distinct_keys_by_landing = distinct_keys_by_landing
     if run.landing_table not in pin_owners:
       table_args.ddl_uri = ""  # pin describes the target only

@@ -67,6 +67,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 @dataclass(frozen=True)
 class PreflightResult:
+  """What preflight resolved for one table: PK, identity, caps and warnings."""
+
   pk_cols: tuple[str, ...]
   identity_cols: tuple[str, ...]
   # This table's entry in `config/relationships/` (ADR 0032), or None
@@ -144,10 +146,10 @@ def _report_prompt_constraints(table_schema: TableSchema,
 _POOL_ROUTED_BQ_TYPES = frozenset({"STRING", "JSON", "GEOGRAPHY", "BYTES"})
 
 
-def _pk_capacity_factor(field,
-                        pc,
-                        profile: ColumnProfile | None = None
-                       ) -> tuple[int | None, bool]:
+def _pk_capacity_factor(
+    field_,
+    pc,
+    profile: ColumnProfile | None = None) -> tuple[int | None, bool]:
   """One PK member's ``(unique-value capacity, draws_at_random)``;
     capacity ``None`` = unbounded.
 
@@ -165,8 +167,8 @@ def _pk_capacity_factor(field,
     return _unconstrained_factor(profile), profile is not None
   if pc.values:
     return len(pc.values), True
-  if (field.bq_type not in _POOL_ROUTED_BQ_TYPES or field.is_struct or
-      field.is_repeated):
+  if (field_.bq_type not in _POOL_ROUTED_BQ_TYPES or field_.is_struct or
+      field_.is_repeated):
     return None, False
   if pc.pattern:
     sampler = compile_pattern_sampler(pc.pattern, families=pc.families)
@@ -377,15 +379,15 @@ def _check_pk_capacity(
   return caps
 
 
-def _constraint_vehicle(prof, field) -> str:
+def _constraint_vehicle(prof, field_) -> str:
   """What this clause ACTUALLY drives (2026-08-22 operator ask): a
     clause is a generation vehicle only on the free-text path — forced
     by route:'llm' or reached by natural free-text classification.
     Everywhere else it is prompt steering at most, and the log says so
     instead of leaving the operator to infer it."""
   stringy = (
-      field.bq_type in _POOL_ROUTED_BQ_TYPES and not field.is_struct and
-      not field.is_repeated)
+      field_.bq_type in _POOL_ROUTED_BQ_TYPES and not field_.is_struct and
+      not field_.is_repeated)
   if not stringy:
     return (f"{prof.kind.value} typed route — a clause on a non-STRING "
             f"column is NEVER a generation vehicle "
@@ -882,7 +884,8 @@ def _check_driven_pk(
     fanout: Mapping,
     profiles: Mapping[str, ColumnProfile],
     *,
-    independent_caps: Mapping[tuple[str, ...], int] = _NO_CAPS,
+    # Passed by `_driven_child_rows`; deliberately NOT a capacity factor (see body).
+    independent_caps: Mapping[tuple[str, ...], int] = _NO_CAPS,  # pylint: disable=unused-argument
     conditional_rest: Mapping[str, tuple[str, ...]] = _NO_REST,
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     edge_roles: Mapping[FkEdge, str] | None = None,

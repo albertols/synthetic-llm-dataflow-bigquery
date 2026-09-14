@@ -62,12 +62,13 @@ class FakeModelClient:
       prompt: str,
       json_schema: dict,
       *,
-      max_tokens: int = 2048,
-      temperature: float = 0.7,
+      # ModelClient Protocol signature; the fake ignores the sampling knobs.
+      max_tokens: int = 2048,  # pylint: disable=unused-argument
+      temperature: float = 0.7,  # pylint: disable=unused-argument
       n: int = 1,
       seed: int | None = None,
-      top_p: float | None = None,
-      top_k: int | None = None,
+      top_p: float | None = None,  # pylint: disable=unused-argument
+      top_k: int | None = None,  # pylint: disable=unused-argument
   ) -> list[dict]:
     self.call_count += 1
     if self._mode == "canned":

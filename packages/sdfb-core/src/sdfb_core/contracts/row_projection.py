@@ -412,6 +412,7 @@ def projection_banner(
     milestones (`row_projection_table`) carry the same figures for log
     mining; this is the surface an operator sizing a run reads.
     """
+  del launch_rows  # Unused: root projections already carry it; kept for callers.
   if not projections:
     return ""
   total = projected_total(projections)

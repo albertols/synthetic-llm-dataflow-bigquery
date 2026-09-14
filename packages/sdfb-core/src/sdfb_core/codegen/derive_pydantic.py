@@ -15,7 +15,7 @@ REF: https://docs.pydantic.dev/latest/concepts/models/#dynamic-model-creation
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 from pydantic import Field, create_model, model_validator
 
@@ -115,7 +115,7 @@ def _make_pk_base(pk_columns: list[str]) -> type[GeneratedRecord]:
   class _PkValidatedRecord(GeneratedRecord):
 
     @model_validator(mode="after")
-    def _enforce_pk_non_null(self) -> _PkValidatedRecord:
+    def _enforce_pk_non_null(self) -> Self:
       missing = [c for c in pks if getattr(self, c, None) is None]
       if missing:
         raise ValueError(f"Primary-key column(s) must be non-null: {missing}")

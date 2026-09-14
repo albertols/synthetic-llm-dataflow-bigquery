@@ -116,7 +116,7 @@ class _FaissFlatIPIndex(ExactIPIndex):
     q = np.asarray([query], dtype="float32")
     self._faiss.normalize_L2(q)
     k = min(k, self._index.ntotal)
-    _scores, ids = self._index.search(q, k)
+    _, ids = self._index.search(q, k)
     return [int(i) for i in ids[0] if i >= 0]
 
   def release(self) -> None:

@@ -13,6 +13,9 @@ Palette matches the design-doc asset set (scripts/doc/make_ws6_figures.py):
 BLUE / ORANGE / AQUA with the OKLab separation check on every regeneration.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math
@@ -195,8 +198,8 @@ def fig_pool_race():
       })
   ax.text(
       RACE_T1_SPAWN + NEW_WINDOW_S / 2,
-      n + 0.25,
-      f"ADR 0033 window {NEW_WINDOW_S:.0f} s (needed {NEEDED_WINDOW_S:.0f} s; old {OLD_WINDOW_S:.0f} s)",
+      n + 0.25, (f"ADR 0033 window {NEW_WINDOW_S:.0f} s "
+                 f"(needed {NEEDED_WINDOW_S:.0f} s; old {OLD_WINDOW_S:.0f} s)"),
       ha="center",
       va="bottom",
       color=AQUA,
@@ -213,8 +216,8 @@ def fig_pool_race():
   _title(
       ax,
       "One lost fit race failed a bundle whose three sibling ladders had already finished",
-      "2026-08-25 R6 1M — A_TABLE/BuildFreeTextPools: attempt 1 (t+0 … t+706) and the Dataflow retry (t+711 … t+1188)"
-  )
+      "2026-08-25 R6 1M — A_TABLE/BuildFreeTextPools: attempt 1 (t+0 … t+706) "
+      "and the Dataflow retry (t+711 … t+1188)")
   fig.tight_layout()
   fig.savefig(ASSETS / "r6-scale-pool-race.png", dpi=160, facecolor=SURFACE)
   plt.close(fig)
@@ -256,7 +259,8 @@ def fig_pool_targets():
     ax.text(i + w / 2, t * 1.15, f"{t}", ha="center", color=INK, fontsize=8.5)
   i15 = POOL_COLUMNS.index("A_COL_015")
   ax.annotate(
-      f"target = sample distinct {A15_SAMPLE_DISTINCT}\n(Tier-2 stats absent)\n→ ADR 0033: min(4,022, cap) = {POOL_CAP}",
+      f"target = sample distinct {A15_SAMPLE_DISTINCT}\n(Tier-2 stats absent)\n"
+      f"→ ADR 0033: min(4,022, cap) = {POOL_CAP}",
       xy=(i15 + w / 2, POOL_TARGET[i15]),
       xytext=(i15 - 0.85, 9_000),
       color=ORANGE,
@@ -280,8 +284,8 @@ def fig_pool_targets():
   _title(
       ax,
       "The one starved pool was sized by the sample, not by the filter it had just fetched",
-      "both R6 runs (1M and 10M) built the same five LLM pools; four hit the 512 cap, A_COL_015 stopped at 94"
-  )
+      "both R6 runs (1M and 10M) built the same five LLM pools; "
+      "four hit the 512 cap, A_COL_015 stopped at 94")
   fig.tight_layout()
   fig.savefig(ASSETS / "r6-scale-pool-targets.png", dpi=160, facecolor=SURFACE)
   plt.close(fig)
@@ -315,7 +319,9 @@ def fig_format_gate():
       label="10M run")
   i37 = POOL_COLUMNS.index("A_COL_037")
   ax1.annotate(
-      f"{FORMAT_REJECTED_10M[i37]} of {A37_PARSED} parsed\n3 rounds x ~150 s → shape fallback\n(the clause example is 28 chars; the column is 31)",
+      f"{FORMAT_REJECTED_10M[i37]} of {A37_PARSED} parsed\n"
+      "3 rounds x ~150 s → shape fallback\n"
+      "(the clause example is 28 chars; the column is 31)",
       xy=(i37 + w / 2, FORMAT_REJECTED_10M[i37]),
       xytext=(1.2, 330),
       color=ORANGE,
@@ -408,8 +414,9 @@ def fig_where_time_went():
       linespacing=1.3)
   ax.text(
       WALL_MIN_10M + 8,
-      n + 0.05,
-      f"C_TABLE {ROWS_PER_S_10M['C_TABLE'] / 1e3:.1f}k rows/s\nA_TABLE {ROWS_PER_S_10M['A_TABLE'] / 1e3:.1f}k rows/s\nbatch p50 {BATCH_P50_S_10M:.0f} s / 10k rows",
+      n + 0.05, (f"C_TABLE {ROWS_PER_S_10M['C_TABLE'] / 1e3:.1f}k rows/s\n"
+                 f"A_TABLE {ROWS_PER_S_10M['A_TABLE'] / 1e3:.1f}k rows/s\n"
+                 f"batch p50 {BATCH_P50_S_10M:.0f} s / 10k rows"),
       ha="right",
       va="bottom",
       color=MUTED,
@@ -432,8 +439,8 @@ def fig_where_time_went():
   _style(ax, grid_axis="x")
   _title(
       ax, "The GPU served pool builds for 9 of 93 minutes",
-      "2026-08-26 R6 10M — one Dataflow job, two tables, wave 0 → wave 1 (ADR 0030); phases from worker milestones + job graph"
-  )
+      "2026-08-26 R6 10M — one Dataflow job, two tables, wave 0 → wave 1 (ADR 0030); "
+      "phases from worker milestones + job graph")
   fig.tight_layout()
   fig.savefig(
       ASSETS / "r6-scale-where-time-went.png", dpi=160, facecolor=SURFACE)

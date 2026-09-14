@@ -220,7 +220,7 @@ def _sample_sql(fqn: str,
   where = ""
   if nonempty_col is not None:
     c = f"CAST(`{nonempty_col}` AS STRING)"
-    where = (f"WHERE `{nonempty_col}` IS NOT NULL AND TRIM({c}) != '' ")
+    where = f"WHERE `{nonempty_col}` IS NOT NULL AND TRIM({c}) != '' "
   return (f"SELECT {cols_sql} FROM `{fqn}` AS t {where}"
           f"ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(t)) LIMIT @lim")
 
@@ -285,8 +285,8 @@ def collapse(mask: str) -> str:
     j = i
     while j < n and mask[j] == ch:
       j += 1
-    run = j - i
-    if ch in "9Aa␣" and run > 1:
+    run_len = j - i
+    if ch in "9Aa␣" and run_len > 1:
       out.append(f"{ch}+")
     else:
       out.append(mask[i:j])
@@ -442,10 +442,10 @@ def _shape_tv(src_mass: dict, syn_mass: dict) -> tuple[float, float, set]:
 
 
 def _diff_column(
-    col: str,
+    col: str,  # pylint: disable=unused-argument  # kept: callers pass it positionally
     src_agg,
     syn_agg,
-    src_prof,  # pylint: disable=unused-argument
+    src_prof,
     syn_prof) -> dict[str, Any]:
   findings: list[dict[str, str]] = []
 
@@ -921,12 +921,12 @@ def main(argv=None) -> int:
 
   if args.out_json:
     os.makedirs(os.path.dirname(args.out_json) or ".", exist_ok=True)
-    with open(args.out_json, "w") as f:
+    with open(args.out_json, "w", encoding="utf-8") as f:
       json.dump(result, f, indent=2, default=str)
     print(f"wrote {args.out_json}")
   if args.out_md:
     os.makedirs(os.path.dirname(args.out_md) or ".", exist_ok=True)
-    with open(args.out_md, "w") as f:
+    with open(args.out_md, "w", encoding="utf-8") as f:
       f.write(render_markdown(result["meta"], result["columns"]))
     print(f"wrote {args.out_md}")
 

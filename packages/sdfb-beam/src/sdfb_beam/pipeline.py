@@ -645,6 +645,7 @@ class _DropNullJoinKeysDoFn(beam.DoFn):
     self._positions = tuple(positions)
     self._dropped = Metrics.counter("fanout", "keys_dropped_null")
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, key: tuple):
     if any(key[i] is None for i in self._positions):
       self._dropped.inc()
@@ -666,7 +667,7 @@ class _DropNullCandidateKeysDoFn(beam.DoFn):
     self._dropped = Metrics.counter("fanout", "candidates_dropped_null")
 
   def process(self, element: tuple):
-    join_key, _rest = element
+    join_key, _ = element
     if any(v is None for v in join_key):
       self._dropped.inc()
       return
@@ -744,7 +745,7 @@ def _candidate_rank_only(ranked: tuple) -> int:
 def _drop_candidate_rank(element: tuple) -> tuple:
   """``(join_key, [(rank, rest_value), …])`` → ``(join_key, [rest_value, …])``."""
   join_key, ranked = element
-  return (join_key, [value for _rank, value in ranked])
+  return (join_key, [value for _, value in ranked])
 
 
 def _key_by_overlap(element, positions: tuple[int, ...], paired: bool) -> tuple:
@@ -767,7 +768,7 @@ def _emit_matches(element: tuple, edge_id: str):
     edge's candidate list (``[]`` when the co-parent has none for the
     shared value — the key must still reach the engine, which owns the
     NULL policy)."""
-  _join_key, group = element
+  _, group = element
   candidates = list(group["c"])
   matched = candidates[0] if candidates else []
   for key, matches in group["k"]:
@@ -871,7 +872,7 @@ def _fanout_request_payload(ks: list, mean_fanout: float, *,
     payload is byte for byte what ADR 0036 produced, so no downstream
     seed moves.
     """
-  keys = [key for key, _matches in ks] if paired else list(ks)
+  keys = [key for key, _ in ks] if paired else list(ks)
   batch_id = (
       int.from_bytes(
           hashlib.blake2b(repr(keys[0]).encode(), digest_size=8).digest(),
@@ -886,10 +887,9 @@ def _fanout_request_payload(ks: list, mean_fanout: float, *,
   # Every element carries every edge id (each one went through the same
   # `_attach_matches` chain), so this is O(keys x edges) with O(1)
   # membership — and it still holds if a future chain skips one.
-  edge_ids = dict.fromkeys(
-      edge_id for _key, matches in ks for edge_id in matches)
+  edge_ids = dict.fromkeys(edge_id for _, matches in ks for edge_id in matches)
   payload["matches"] = {
-      edge_id: [matches.get(edge_id, []) for _key, matches in ks]
+      edge_id: [matches.get(edge_id, []) for _, matches in ks]
       for edge_id in edge_ids
   }
   return payload
@@ -962,7 +962,7 @@ def _check_edges_against_driving(
     stalled job, a measured `fk.orphan` rate, or `tuple.index(x): x not
     in tuple` from deep inside the graph build."""
   driving_cols = set(driving.child_cols)
-  for _j, edge, _parent in side_input_edges:
+  for _, edge, _ in side_input_edges:
     # The star is sound only because the independent path is DISJOINT
     # from the driving key: the engine draws a whole pool tuple and
     # the driving key then OVERWRITES the shared column, landing a
@@ -976,7 +976,7 @@ def _check_edges_against_driving(
           f"driving edge {list(driving.child_cols)} — an edge that "
           f"overlaps the driving key must be conditional "
           f"(mode='conditional', overlap={shared}), ADR 0037 §5")
-  for _j, edge, _parent in conditional_edges:
+  for _, edge, _ in conditional_edges:
     if not edge.overlap:
       # Both sides would key on `()`: the Top-M combine and the
       # CoGroupByKey collapse onto ONE key — no parallelism for the
@@ -1017,7 +1017,7 @@ def _check_edges_against_driving(
   # and overwrites the driving key itself. Defence in depth behind
   # `RelationshipRegistry.edge_roles`, which stops the same shapes for
   # model-declared launches; this catches hand-built specs.
-  in_job = [driving, *(e for _j, e, _p in side_input_edges + conditional_edges)]
+  in_job = [driving, *(e for _, e, _ in side_input_edges + conditional_edges)]
   for index, first in enumerate(in_job):
     for second in in_job[index + 1:]:
       written = _written_child_cols(second)
@@ -1211,8 +1211,6 @@ def _population_branch(
 def _rag_shard_key(chunk, shards: int) -> int:
   """Deterministic shard for one chunk — ``shards`` keyed groups bound
     the population's embedder concurrency (ADR 0034 D8)."""
-  import hashlib
-
   digest = hashlib.blake2b(
       str(chunk.chunk_id).encode("utf-8"), digest_size=4).digest()
   return int.from_bytes(digest, "big") % max(1, int(shards))
@@ -1301,7 +1299,7 @@ def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:
 
 
 def _build_validation_run_row(
-    _seed,
+    unused_seed,
     *,
     valid_count: int,
     dlq_by_rule: dict[str, int],
@@ -1374,6 +1372,7 @@ class _BlockerGateDoFn(beam.DoFn):
     which left zero trace in `synthetic_data_quality.validation_runs`.
     """
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, row: dict, wait_on_write=None):  # pylint: disable=unused-argument
     if row.get("status") == STATUS_FAILED_BLOCKER:
       raise BlockerThresholdExceeded(

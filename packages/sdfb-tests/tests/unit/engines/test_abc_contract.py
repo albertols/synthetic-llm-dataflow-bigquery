@@ -183,7 +183,8 @@ def test_context_carries_the_fanout_payload():
           "exact_cells": False
       },
   )
-  assert ctx.fanout is not None and ctx.fanout["driving_cols"] == ["ID"]
+  # `fanout` is a pydantic field (default None) narrowed by the `is not None`.
+  assert ctx.fanout is not None and ctx.fanout["driving_cols"] == ["ID"]  # pylint: disable=unsubscriptable-object
 
 
 def test_both_engines_implement_generate_for_keys():

@@ -91,8 +91,8 @@ class _RaisingEngine:
   """Engine whose key-batch generation blows up mid-batch."""
 
   def generate_for_keys(self, keys, cfg):
+    yield from ()  # a generator function: raises on first iteration
     raise RuntimeError("cell draw exploded")
-    yield  # pragma: no cover - makes this a generator function
 
 
 def test_a_failed_key_batch_summarizes_its_keys_in_the_dlq():
@@ -391,8 +391,8 @@ class TestConditionalMatchesNullPolicy:
     class _RaisingConditionalEngine:
 
       def generate_for_keys(self, keys, cfg, matches=None):
+        yield from ()  # a generator function: raises on first iteration
         raise RuntimeError("cell draw exploded")
-        yield  # pragma: no cover - makes this a generator function
 
     dofn = GenerateRecordsDoFn(
         engine_name="b1_rag",
@@ -434,8 +434,8 @@ class TestConditionalMatchesNullPolicy:
     class _RaisingConditionalEngine:
 
       def generate_for_keys(self, keys, cfg, matches=None):
+        yield from ()  # a generator function: raises on first iteration
         raise RuntimeError("boom")
-        yield  # pragma: no cover
 
     dofn = GenerateRecordsDoFn(
         engine_name="b1_rag",

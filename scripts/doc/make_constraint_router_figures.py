@@ -25,6 +25,9 @@ ORANGE = defect / GPU-billed, AQUA = healthy / CPU. OKLab separation
 check runs on every regeneration.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math
@@ -217,7 +220,7 @@ def fig_outcomes():
   secs = [s for _, _, s, _, _ in CONSTRAINT_COLS]
   kinds = [k for _, k, _, _, _ in CONSTRAINT_COLS]
   ax.bar(x, secs, width=0.55, color=[route_color[k] for k in kinds])
-  for xi, (_col, _kind, s, rej, _) in enumerate(CONSTRAINT_COLS):
+  for xi, (_, _, s, rej, _) in enumerate(CONSTRAINT_COLS):
     top = f"{s} s" if s else "0 s (pre-LLM)"
     ax.text(xi, s + 6, top, ha="center", color=INK, fontsize=9)
     ax.text(xi, -34, f"rejects {rej}", ha="center", color=MUTED, fontsize=8)
@@ -252,7 +255,7 @@ def fig_outcomes():
       color=INK,
       fontsize=8,
       ha="right")
-  for xi, (_col, _, _, _, d) in enumerate(order):
+  for xi, (_, _, _, _, d) in enumerate(order):
     ax.text(xi, d + 8, str(d), ha="center", color=INK, fontsize=9)
   labels = [c for c, *_ in order]
   labels[labels.index("COL_047")] = (

@@ -255,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
   args = p.parse_args(argv)
   generate_fk = args.generate_fk_relationships == "true"
 
-  config = json.loads(Path(args.config).read_text())
+  config = json.loads(Path(args.config).read_text(encoding="utf-8"))
   config.setdefault("relationships_uri", args.relationships_uri)
   tables = list(config["tables"])
   registry = load_relationship_registry(args.relationships_uri)

@@ -13,7 +13,8 @@ from sdfb_core.engines.text_shapes import (
 def test_shape_mix_groups_by_mask_and_weights():
   vals = ["AB12", "CD34", "EF56", "12-99", "34-56"]
   shapes = build_shape_mix(vals)
-  weights = sorted(w for w, _ in shapes)
+  assert shapes is not None
+  weights = sorted(w for w, _ in shapes)  # pylint: disable=not-an-iterable  # asserted above
   assert weights == [2, 3]  # 3x 'AA99', 2x '99-99'
 
 
@@ -31,8 +32,10 @@ def test_shape_mix_none_on_empty_input():
 def test_shape_mix_top_k_keeps_heaviest():
   vals = ["A1"] * 5 + ["B2"] * 5 + ["c3", "d4-", "5e."]
   shapes = build_shape_mix(vals, top_k=1)
+  assert shapes is not None
   assert len(shapes) == 1
-  assert shapes[0][0] == 10  # the two-heavy masks share one 'A9' mask
+  # The two-heavy masks share one 'A9' mask.
+  assert shapes[0][0] == 10  # pylint: disable=unsubscriptable-object  # asserted above
 
 
 def test_shape_mix_samples_in_observed_shapes():

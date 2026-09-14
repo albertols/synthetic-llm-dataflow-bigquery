@@ -23,7 +23,7 @@ from typing import Any
 # the same seam Hypothesis' `from_regex` builds on; guarded so a future
 # rename degrades to "no pattern support" instead of an import crash.
 try:  # pragma: no cover - import guard
-  _PARSER: Any = re._parser  # type: ignore[attr-defined]
+  _PARSER: Any = re._parser  # type: ignore[attr-defined]  # pylint: disable=protected-access
 except AttributeError:  # pragma: no cover - future-python guard
   _PARSER = None
 
@@ -198,12 +198,12 @@ def _build(ops: list[Any]) -> _Node:
         raise UnsupportedPatternError("unbounded repetition")
       parts.append(_Repeat(int(lo), int(hi), _build(list(sub))))
     elif name == "SUBPATTERN":
-      _group, add_flags, del_flags, sub = arg
+      _, add_flags, del_flags, sub = arg
       if add_flags or del_flags:
         raise UnsupportedPatternError("inline flags unsupported")
       parts.append(_build(list(sub)))
     elif name == "BRANCH":
-      _unused, alts = arg
+      _, alts = arg
       parts.append(_Branch([_build(list(a)) for a in alts]))
     else:
       raise UnsupportedPatternError(f"op {name} unsupported")

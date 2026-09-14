@@ -24,6 +24,9 @@ BLUE = source truth, ORANGE = the naive/degenerate model, AQUA = the
 stats-driven sampler.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import calendar

@@ -50,6 +50,9 @@ artifact schemas predate this script, vary release to release, and a missing
 metric must render as `None` ("not measured"), never raise.
 """
 
+# matplotlib.use("Agg") and the sibling sys.path insert must precede these imports.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import argparse

@@ -139,7 +139,7 @@ def log_milestone_pretty(name: str,
   line = format_milestone(name, **fields)
   body = json.dumps(
       payload, indent=2, ensure_ascii=False, sort_keys=True, default=str)
-  _logger.log(level, line + "\n" + body)
+  _logger.log(level, "%s\n%s", line, body)
   return line
 
 
@@ -155,7 +155,7 @@ def log_milestone_text(name: str,
     `fk_model_pretty` diagram source is pasted straight into a mermaid
     renderer, so it must not be JSON-escaped."""
   line = format_milestone(name, **fields)
-  _logger.log(level, line + "\n" + body)
+  _logger.log(level, "%s\n%s", line, body)
   return line
 
 

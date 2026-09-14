@@ -119,8 +119,13 @@ tables:
     assert "conditional on (T)" in reg.card("bottom")
 
   def test_two_marked_edges_still_stop(self):
-    text = _STAR_FACT.replace("ref: dim_a, ref_cols: [A_ID]}", "ref: dim_a, ref_cols: [A_ID], drives: true}") \
-                     .replace("ref: dim_b, ref_cols: [B_ID]}", "ref: dim_b, ref_cols: [B_ID], drives: true}")
+    text = _STAR_FACT.replace(
+        "ref: dim_a, ref_cols: [A_ID]}",
+        "ref: dim_a, ref_cols: [A_ID], drives: true}",
+    ).replace(
+        "ref: dim_b, ref_cols: [B_ID]}",
+        "ref: dim_b, ref_cols: [B_ID], drives: true}",
+    )
     with pytest.raises(RelationshipError, match="2 marked"):
       _registry(text).edge_roles("fact")
 

@@ -143,7 +143,10 @@ class TestDocumentationSamplesAreSkipped:
     `example_*.yaml` / `*.example.yaml` samples (announced once); a URI
     that names a sample file directly still loads it."""
 
-  _KW = "model: kw\ntables:\n  A_TABLE:\n    pk: [K]\n  B_TABLE:\n    pk: [K]\n    fk:\n      - cols: [K]\n        ref: A_TABLE\n        ref_cols: [K]\n"
+  _KW = (
+      "model: kw\ntables:\n  A_TABLE:\n    pk: [K]\n  B_TABLE:\n    pk: [K]\n"
+      "    fk:\n      - cols: [K]\n        ref: A_TABLE\n        ref_cols: [K]\n"
+  )
   _EXAMPLE = "model: example_retail\ntables:\n  A_TABLE:\n    pk: [X]\n"
 
   def test_a_directory_scan_skips_the_samples(self, tmp_path, caplog):

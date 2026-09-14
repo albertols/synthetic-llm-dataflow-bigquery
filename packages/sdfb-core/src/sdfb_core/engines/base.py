@@ -141,7 +141,6 @@ class ModelClient(Protocol):
         explicit values override them (``top_k=0`` = consider all tokens).
         See `escalating_sampling` for why retries must send them.
         """
-    ...
 
 
 class GenerationConfig(BaseModel):
@@ -540,7 +539,7 @@ def apply_conditional_overrides(
   columns: dict[str, list] = {
       name: [None] * n for edge in plan.conditional for name in edge.cols
   }
-  for i, (key, _cell) in enumerate(chunk):
+  for i, (key, _) in enumerate(chunk):
     j = child_index.get(key, 0)
     child_index[key] = j + 1
     draw = draws.get(key)

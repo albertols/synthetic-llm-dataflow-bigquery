@@ -28,6 +28,9 @@ BLUE = exact/full-table truth, ORANGE = the defective path, AQUA = the
 wave-4 path. The OKLab separation check runs on every regeneration.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math

@@ -42,6 +42,7 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
       store=None,
       source_value_store=None,
   ) -> None:
+    super().__init__()
     self.engine_name = engine_name
     self.model_client = model_client
     self.ctx = ctx
@@ -87,13 +88,10 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
     prefix = getattr(self.ctx, "log_table_prefix", "")
     return milestone_scope(prefix) if prefix else nullcontext()
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, _element) -> Iterator[dict]:
-    scope = self._scope()
-    scope.__enter__()
-    try:
+    with self._scope():
       yield from self._process_scoped()
-    finally:
-      scope.__exit__(None, None, None)
 
   def _process_scoped(self) -> Iterator[dict]:
     pools = getattr(self._engine, "_free_text_pools", None) or {}

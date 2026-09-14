@@ -95,11 +95,9 @@ class Embedder(Protocol):
   @property
   def dim(self) -> int:
     """Embedding dimensionality (e.g. 384 for bge-small)."""
-    ...
 
   def embed(self, texts: Sequence[str]) -> list[list[float]]:
     """Return one vector per input string, in input order."""
-    ...
 
 
 class HashingEmbedder:

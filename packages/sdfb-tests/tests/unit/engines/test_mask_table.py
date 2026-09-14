@@ -306,7 +306,7 @@ class TestClassKindPreservation:
     ] * 3
     shapes = build_shape_mix(values)
     assert shapes is not None
-    for _, shape in shapes:
+    for _, shape in shapes:  # pylint: disable=not-an-iterable  # asserted non-None above
       assert not any(c.isdigit() for c in shape[0]), shape[0]
       assert not any(c.isdigit() for c in shape[1]), shape[1]
 

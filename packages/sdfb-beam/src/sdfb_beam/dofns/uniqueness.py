@@ -131,6 +131,7 @@ class _FirstWinsCombineFn(beam.CombineFn):
   def create_accumulator(self) -> tuple[object | None, int]:
     return (None, 0)
 
+  # pylint: disable-next=arguments-renamed  # Beam passes these positionally
   def add_input(self, accumulator: tuple[object | None, int],
                 element) -> tuple[object | None, int]:
     survivor, seen = accumulator
@@ -159,6 +160,7 @@ class _DistinctDigestsFn(beam.CombineFn):
   def create_accumulator(self) -> set:
     return set()
 
+  # pylint: disable-next=arguments-renamed  # Beam passes these positionally
   def add_input(self, accumulator: set, digest: str) -> set:
     accumulator.add(digest)
     return accumulator
@@ -186,10 +188,12 @@ class _ExpandCombined(beam.DoFn):
     """
 
   def __init__(self, rule_id: str) -> None:
+    super().__init__()
     self.rule_id = rule_id
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, kv):
-    _key, (survivor, seen) = kv
+    _, (survivor, seen) = kv
     if survivor is None:  # pragma: no cover - defensive
       return
     yield survivor
@@ -233,6 +237,7 @@ class _ResolveUniquenessDoFn(beam.DoFn):
       self._losers_source = pk_groups
     return self._pk_losers
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, kv, pk_groups=None, identity_groups=None):
     digest, (survivor, seen) = kv
     if survivor is None:  # pragma: no cover - defensive
@@ -300,8 +305,9 @@ class EnforceUniqueness(beam.PTransform):
     self.mode = mode
     self.columns = list(columns) if columns else None
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the PCollection positionally
   def expand(self, records):
-    identity_set = set(self.identity_columns)
+    identity_set = frozenset(self.identity_columns)
 
     def _row_key(r, ids=identity_set):
       return row_digest({k: v for k, v in r.items() if k not in ids})

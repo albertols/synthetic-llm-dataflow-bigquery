@@ -202,7 +202,8 @@ def test_relaxed_skips_single_value_length_buckets():
   values = [f"GRP{i:04d}" for i in range(80)] + ["ODDLENGTHONE"]
   shapes = build_relaxed_shapes(values)
   assert shapes is not None
-  assert all(len(shape) == 7 for _, shape in shapes)  # 12-char bucket dropped
+  # 12-char bucket dropped. (pylint infers `tuple([]) or None`; asserted above.)
+  assert all(len(shape) == 7 for _, shape in shapes)  # pylint: disable=not-an-iterable
 
 
 def test_relaxed_sampling_is_deterministic_and_weighted():

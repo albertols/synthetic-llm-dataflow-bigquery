@@ -21,6 +21,9 @@ ORANGE = defect, AQUA = healthy. OKLab separation check runs on every
 regeneration.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math

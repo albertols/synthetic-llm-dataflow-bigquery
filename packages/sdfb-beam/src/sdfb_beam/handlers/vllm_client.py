@@ -763,7 +763,6 @@ class VLLMModelClient:
     except ImportError:
       torch = None
     if torch is not None and torch.cuda.is_available():
-      import json as _json
       from pathlib import Path as _Path
 
       # Inspect the directory vLLM will actually serve: local_model_dir
@@ -772,7 +771,7 @@ class VLLMModelClient:
       # skip the guard.
       cfg_path = _Path(self._served_model_name) / "config.json"
       if cfg_path.exists():
-        cfg = _json.loads(cfg_path.read_text())
+        cfg = json.loads(cfg_path.read_text())
         _assert_dtype_supported(
             cfg.get("torch_dtype", ""),
             torch.cuda.get_device_capability(),
@@ -818,7 +817,6 @@ class VLLMModelClient:
     """(config dict, checkpoint bytes on disk) for the served model dir,
         or None when the dir cannot be sized (missing/unreadable config.json,
         no *.safetensors / *.bin checkpoint files)."""
-    import json as _json
     from pathlib import Path as _Path
 
     model_dir = _Path(self._served_model_name)
@@ -826,7 +824,7 @@ class VLLMModelClient:
     if not cfg_path.exists():
       return None
     try:
-      cfg = _json.loads(cfg_path.read_text())
+      cfg = json.loads(cfg_path.read_text())
     except (OSError, ValueError):
       return None
     weights_bytes = sum(
@@ -1053,4 +1051,4 @@ class VLLMModelClient:
 
 
 # Re-exported for backwards compatibility; the canonical home is `sdfb_beam.gcs`.
-_split_gs_uri = split_gs_uri
+_split_gs_uri = split_gs_uri  # pylint: disable=invalid-name

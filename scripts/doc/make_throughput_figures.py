@@ -13,6 +13,9 @@ Palette matches the design-doc asset set (scripts/doc/make_ws6_figures.py):
 BLUE / ORANGE / AQUA with the OKLab separation check on every regeneration.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math
@@ -141,7 +144,9 @@ ACCEPT_RUNS = ("R6 cold\n08-29", "R7 single\n09-07", "R7 multi\n09-07",
                "R7 multi warm\n09-07 (pools rebuilt)",
                "R7 multi cold\n09-08 (CPU embeds)")
 ACCEPT_WALL_MIN = (93.8, 76.5, 50.5, 52.5, 56.9)
-ACCEPT_PHASES_MIN = {  # per run: startup, cold pool branch (critical path), generation (both tables), dedup + load (both tables)
+# per run: startup, cold pool branch (critical path), generation (both tables),
+# dedup + load (both tables)
+ACCEPT_PHASES_MIN = {
     "startup (launcher + boot)": (15.9, 13.0, 12.4, 11.6, 15.5),
     "cold pool branch": (7.9, 10.1, 12.9, 9.7, 14.2),
     "generation C + A": (42.7, 36.4, 17.1, 21.1, 17.0),
@@ -312,11 +317,10 @@ def fig_where_time_went():
       color=ORANGE,
       fontsize=8.6,
       fontweight="600")
-  _title(
-      ax1,
-      f"Cold: {WALL_MIN_COLD:.1f} min — generation 42.7 min, dedup barriers 26.0 min, startup 15.9 min",
-      f"2026-08-29_07_33_36 R6 10M/table, cold pools (prior 10M run: {PRIOR_10M_WALL_MIN:.1f} min — no regression)"
-  )
+  _title(ax1, (f"Cold: {WALL_MIN_COLD:.1f} min — generation 42.7 min, "
+               "dedup barriers 26.0 min, startup 15.9 min"),
+         ("2026-08-29_07_33_36 R6 10M/table, cold pools "
+          f"(prior 10M run: {PRIOR_10M_WALL_MIN:.1f} min — no regression)"))
   ax1.set_xlabel(
       "minutes since job create (14:33:37Z)", color=MUTED, fontsize=9)
 
@@ -330,11 +334,10 @@ def fig_where_time_went():
       color=ORANGE,
       fontsize=8.6,
       fontweight="600")
-  _title(
-      ax2,
-      f"Warm: {WALL_MIN_WARM:.1f} min — the pool branch is the only phase warming removes",
-      "2026-08-29_09_49_17, immediate re-trigger of the cold job (same digest, pools/chunks/stats from the store)"
-  )
+  _title(ax2, (f"Warm: {WALL_MIN_WARM:.1f} min — "
+               "the pool branch is the only phase warming removes"),
+         ("2026-08-29_09_49_17, immediate re-trigger of the cold job "
+          "(same digest, pools/chunks/stats from the store)"))
   ax2.set_xlabel(
       "minutes since job create (16:49:17Z)", color=MUTED, fontsize=9)
   handles = [
@@ -428,7 +431,8 @@ def fig_generation_ramp():
       17_300,
       f"avg batches in flight: C {AVG_CONCURRENCY['C cold']:.0f}-{AVG_CONCURRENCY['C warm']:.0f}, "
       f"A {AVG_CONCURRENCY['A cold']:.0f}-{AVG_CONCURRENCY['A warm']:.0f}\n"
-      f"10k-row batch: {BATCH_SECONDS_FIRST:.0f} s alone, {BATCH_SECONDS_STEADY[0]}-{BATCH_SECONDS_STEADY[1]} s "
+      f"10k-row batch: {BATCH_SECONDS_FIRST:.0f} s alone, "
+      f"{BATCH_SECONDS_STEADY[0]}-{BATCH_SECONDS_STEADY[1]} s "
       f"at {THREADS_PER_WORKER} threads / interpreter",
       ha="left",
       va="top",
@@ -461,7 +465,7 @@ def fig_setup_cost():
       ("A_TABLE engine build\nwarm", POOLS_A_WARM, AQUA),
   )
   rng = np.random.default_rng(34)
-  for i, (_label, values, colour) in enumerate(groups):
+  for i, (_, values, colour) in enumerate(groups):
     vals = np.asarray(values)
     jitter = rng.uniform(-0.18, 0.18, size=vals.size)
     ax.scatter(
@@ -513,8 +517,8 @@ def fig_setup_cost():
   _title(
       ax,
       "Thirty-two engine builds per table, serialized on process locks and one GIL",
-      "dofn_setup_done seconds= (C_TABLE) and b1_pools_built seconds= (A_TABLE, deferred build) — 4 workers x 8 harness threads"
-  )
+      "dofn_setup_done seconds= (C_TABLE) and b1_pools_built seconds= "
+      "(A_TABLE, deferred build) — 4 workers x 8 harness threads")
   fig.tight_layout()
   fig.savefig(ASSETS / "throughput-setup-cost.png", dpi=160, facecolor=SURFACE)
   plt.close(fig)
@@ -526,7 +530,8 @@ def fig_shuffle_barriers():
     from six full-row shuffle passes per table to two — from 123 GB to
     roughly 45 GB per job — with the same envelopes and counts."""
   fig, ax = plt.subplots(figsize=(12.0, 5.0), facecolor=SURFACE)
-  per_pass_gb = SHUFFLE_GB_COLD / CHAINED_ROW_PASSES  # measured mean per full-row pass (both tables)
+  # measured mean per full-row pass (both tables)
+  per_pass_gb = SHUFFLE_GB_COLD / CHAINED_ROW_PASSES
   chained = SHUFFLE_GB_COLD
   single_rows = per_pass_gb * SINGLE_ROW_PASSES * TUPLE_PACK_RATIO
   single_keys = KEY_GROUP_BYTES_PER_ROW * ROWS_PER_TABLE * TABLES * 2 / 1e9  # x2: write + read
@@ -535,7 +540,7 @@ def fig_shuffle_barriers():
       ("exact_chained\n(R6 pair, measured)", chained, False),
       ("exact — single barrier\n(ADR 0034, projected)", single, True),
   )
-  for i, (_label, gb, projected) in enumerate(bars):
+  for i, (_, gb, projected) in enumerate(bars):
     ax.bar(
         i,
         gb,
@@ -592,8 +597,8 @@ def fig_shuffle_barriers():
   _title(
       ax,
       "One dedup barrier instead of three: six full-row shuffle passes per table become two",
-      "uniqueness_mode=exact before/after ADR 0034 — same row.duplicate / pk.duplicate / identity.unique envelopes, exact counts"
-  )
+      "uniqueness_mode=exact before/after ADR 0034 — same row.duplicate / "
+      "pk.duplicate / identity.unique envelopes, exact counts")
   fig.tight_layout()
   fig.savefig(
       ASSETS / "throughput-shuffle-barriers.png", dpi=160, facecolor=SURFACE)
@@ -615,7 +620,7 @@ def fig_gil_ceiling():
       ("8 interpreters / worker\nlinear projection",
        FLEET_ROWS_PER_S_MEASURED * 8, True),
   )
-  for i, (_label, f, projected) in enumerate(bars):
+  for i, (_, f, projected) in enumerate(bars):
     ax.bar(
         i,
         f,
@@ -665,8 +670,8 @@ def fig_gil_ceiling():
   _title(
       ax,
       "Generation was bound by one interpreter per worker: eight measured 3x at four workers",
-      "C_TABLE steady-state buckets — R6 pair (single) vs 2026-09-07 R7 multi; sdk_containers=multi is validated, the 8x projection is not"
-  )
+      "C_TABLE steady-state buckets — R6 pair (single) vs 2026-09-07 R7 multi; "
+      "sdk_containers=multi is validated, the 8x projection is not")
   fig.tight_layout()
   fig.savefig(ASSETS / "throughput-gil-ceiling.png", dpi=160, facecolor=SURFACE)
   plt.close(fig)
@@ -737,7 +742,8 @@ def fig_evolution():
   _style(ax, grid_axis="x")
   _title(
       ax, "Five runs, one job shape: 93.8 → 76.5 → 50.5 → 52.5 → 56.9 minutes",
-      "10M rows/table, C_TABLE ◄═ A_TABLE, T4 workers; initial_workers empty on every run — the last two lost their minutes to the autoscaler's dips and to CPU population embeds"
+      "10M rows/table, C_TABLE ◄═ A_TABLE, T4 workers; initial_workers empty on every run "
+      "— the last two lost their minutes to the autoscaler's dips and to CPU population embeds"
   )
   fig.tight_layout()
   fig.savefig(ASSETS / "throughput-evolution.png", dpi=160, facecolor=SURFACE)

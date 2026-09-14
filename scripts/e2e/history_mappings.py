@@ -57,13 +57,14 @@ class HistoryMappings:
   def load(cls, path: Path = DEFAULT_PATH) -> HistoryMappings:
     if not Path(path).exists():
       return cls()
-    data = json.loads(Path(path).read_text())
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
     return cls(tables=list(data.get("tables", [])))
 
   def save(self, path: Path = DEFAULT_PATH) -> Path:
     payload = {"version": 1, "tables": self.tables}
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
+    Path(path).write_text(
+        json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
     return Path(path)
 
   # -- lookups ---------------------------------------------------------
@@ -173,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     h.save(path)
     print(f"{args.alias} ← {entry['real_fqn']}")
     return 0
-  ddl = json.loads(Path(args.ddl_json).read_text())
+  ddl = json.loads(Path(args.ddl_json).read_text(encoding="utf-8"))
   cols = [c["name"] for c in ddl.get("schema", [])]
   entry = h.assign_table(args.real_fqn, cols)
   h.save(path)

@@ -50,6 +50,7 @@ class ValidateRecordDoFn(beam.DoFn):
         }
     return None
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, record):
     try:
       self._record_model.model_validate(record)  # type: ignore[union-attr]

@@ -12,6 +12,9 @@ aqua), reused so WS5 figures sit alongside the 2026-07-24 and 2026-07-25
 assets without a second visual language.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math
@@ -160,7 +163,8 @@ def fig_cost_anatomy():
   _title(
       ax2,
       "Every free-text column rebuilt 36 times",
-      f"{POOLS_REBUILT} rebuilds vs only {POOLS_CACHED} cache hits out of {POOLS_REBUILT+POOLS_CACHED} attempts",
+      f"{POOLS_REBUILT} rebuilds vs only {POOLS_CACHED} cache hits "
+      f"out of {POOLS_REBUILT+POOLS_CACHED} attempts",
   )
 
   fig.tight_layout()
@@ -235,7 +239,8 @@ def fig_autoscale_amplification():
   _title(
       ax,
       "Autoscaling multiplies the pool build — the cache is process-scoped",
-      "5 waves of DoFn setup(); each new worker process starts with an empty _POOL_CACHE and rebuilds all 3 columns",
+      "5 waves of DoFn setup(); each new worker process starts with an empty "
+      "_POOL_CACHE and rebuilds all 3 columns",
   )
 
   fig.tight_layout()
@@ -515,8 +520,8 @@ def fig_sampler_hoisting():
   _style(ax2)
   _title(
       ax2, "Two paths re-materialize; the third is capped",
-      "at batch_size=16 — categories cap at 50 in profile.py, so only numeric/temporal need hoisting"
-  )
+      "at batch_size=16 — categories cap at 50 in profile.py, "
+      "so only numeric/temporal need hoisting")
 
   fig.tight_layout()
   fig.savefig(ASSETS / "ws5-sampler-hoisting.png", dpi=160, facecolor=SURFACE)

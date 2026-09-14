@@ -21,6 +21,9 @@ Usage:
         --out runs/<JOB_ID>/oss/prompt_constraint_recommendations.md
 """
 
+# The sibling `redaction` import needs its sys.path entry inserted first.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import argparse

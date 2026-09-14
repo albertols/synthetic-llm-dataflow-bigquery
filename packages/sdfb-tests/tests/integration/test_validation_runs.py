@@ -17,8 +17,7 @@ from sdfb_core.codegen import derive_record_model
 from sdfb_core.engines import register_engine
 from sdfb_core.engines.base import GenerationEngine
 from sdfb_core.validation import STATUS_FAILED_BLOCKER, STATUS_PASSED, Thresholds
-from sdfb_tests import fakes  # noqa: F401 — registers MinimalEngine under "minimal"
-from sdfb_tests.fakes import FakeModelClient
+from sdfb_tests.fakes import FakeModelClient  # also registers MinimalEngine as "minimal"
 
 
 class _PartialFailureEngine(GenerationEngine):

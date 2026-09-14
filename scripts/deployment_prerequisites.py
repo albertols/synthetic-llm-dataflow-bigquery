@@ -284,7 +284,7 @@ def step1_source_ddl(ctx: Ctx) -> None:
 
   ctx.ddl_json_path = ddl_path
   ctx.table_schema = TableSchema.model_validate(
-      json.loads(ddl_path.read_text()))
+      json.loads(ddl_path.read_text(encoding="utf-8")))
 
   schema_file = Path(a.schemas_dir) / dataset / f"{table}.schema.json"
   schema_file.parent.mkdir(parents=True, exist_ok=True)
@@ -501,12 +501,14 @@ def _rag_table_contract(ctx, client, not_found, fqn, t_link) -> bool:
   try:
     live = client.get_table(fqn)
   except not_found:
+    schema_ref = (
+        schema_file if schema_file.exists() else
+        "config/bq_schema/synthetic_rag/rag_chunks.schema.json")
     ctx.add(
         "9b", f"RAG table · {table}", ACTION, f"{t_link} — not found",
         f"bq mk --table --time_partitioning_field {_RAG_PARTITION_FIELD} "
         f"--time_partitioning_type DAY {proj}:{ds}.{table} "
-        f"{schema_file if schema_file.exists() else 'config/bq_schema/synthetic_rag/rag_chunks.schema.json'}"
-    )
+        f"{schema_ref}")
     ctx.add("9c", "RAG vector index", SKIP, f"{t_link} — table missing")
     return False
   except Exception as e:  # pylint: disable=broad-exception-caught
@@ -614,10 +616,13 @@ def step10_freetext_pools(ctx: Ctx) -> None:
     required = list(FREETEXT_POOLS_MIN_COLUMNS)
   missing_cols = [c for c in required if c not in {f.name for f in live.schema}]
   if missing_cols:
+    schema_ref = (
+        schema_file if schema_file.exists() else
+        "config/bq_schema/synthetic_rag/freetext_pools.schema.json")
     ctx.add(
         "10", "Free-text pool store", ACTION,
         f"{t_link} — missing columns: {', '.join(missing_cols)}",
-        f"align the table with {schema_file if schema_file.exists() else 'config/bq_schema/synthetic_rag/freetext_pools.schema.json'} "
+        f"align the table with {schema_ref} "
         "— a drifted pool table degrades every run back to "
         "rebuilding pools per worker, silently")
   else:
@@ -670,10 +675,13 @@ def step11_source_stats(ctx: Ctx) -> None:
     required = list(SOURCE_STATS_MIN_COLUMNS)
   missing_cols = [c for c in required if c not in {f.name for f in live.schema}]
   if missing_cols:
+    schema_ref = (
+        schema_file if schema_file.exists() else
+        "config/bq_schema/synthetic_rag/source_table_stats.schema.json")
     ctx.add(
         "11", "Source stats store", ACTION,
         f"{t_link} — missing columns: {', '.join(missing_cols)}",
-        f"align the table with {schema_file if schema_file.exists() else 'config/bq_schema/synthetic_rag/source_table_stats.schema.json'} "
+        f"align the table with {schema_ref} "
         "— a drifted stats table fails the driver's write_rows load "
         "job mid-launch")
   else:

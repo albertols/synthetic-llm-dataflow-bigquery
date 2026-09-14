@@ -45,7 +45,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 def numpy_available() -> bool:
   """True if NumPy can be imported (selects the vectorized backend)."""
   try:
-    import numpy  # noqa: F401
+    import numpy  # noqa: F401  # pylint: disable=unused-import
 
     return True
   except ImportError:
@@ -188,15 +188,8 @@ class ColumnSampler:
     return self._from_pool_numpy(np, rng, p.text_examples or p.observed_values,
                                  n)
 
-  def _blend_floats_numpy(
-      self,
-      np,
-      rng,
-      obs,
-      lo: float,
-      hi: float,
-      n: int,  # pylint: disable=unused-argument
-      similarity: float) -> list:
+  def _blend_floats_numpy(self, rng, obs, lo: float, hi: float, n: int,
+                          similarity: float) -> list:
     """Anchored/uniform blend of n floats within [lo, hi].
 
         similarity→1: sample observed values + small jitter (tight).
@@ -250,7 +243,7 @@ class ColumnSampler:
     lo = float(p.numeric_min if p.numeric_min is not None else 0.0)
     hi = float(p.numeric_max if p.numeric_max is not None else 0.0)
     obs = self._temporal_obs_array(np)
-    base = self._blend_floats_numpy(np, rng, obs, lo, hi, n, similarity)
+    base = self._blend_floats_numpy(rng, obs, lo, hi, n, similarity)
     return self._inject_temporal_sentinels(
         self._render_temporal(base), rng.random)
 

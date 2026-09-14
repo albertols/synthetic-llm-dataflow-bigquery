@@ -244,7 +244,7 @@ class GenerateRecordsDoFn(beam.DoFn):
       self._setup_inner()
     except Exception:
       with _SETUP_FAILURES_LOCK:
-        _SETUP_FAILURES[failure_key] = (_SETUP_FAILURES.get(failure_key, 0) + 1)
+        _SETUP_FAILURES[failure_key] = _SETUP_FAILURES.get(failure_key, 0) + 1
       raise
     log_milestone(
         "dofn_setup_done",
@@ -408,6 +408,7 @@ class GenerateRecordsDoFn(beam.DoFn):
           "source values rejected) instead of UUID synthesis",
       )
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, request, fk_side: list | None = None):
     with self._scope():
       yield from self._process_with_scope(request, fk_side)

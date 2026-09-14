@@ -25,6 +25,8 @@ regeneration.
 
 # Heavy or optional dependencies are imported lazily, where they are used.
 # pylint: disable=import-outside-toplevel
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
 
 from __future__ import annotations
 

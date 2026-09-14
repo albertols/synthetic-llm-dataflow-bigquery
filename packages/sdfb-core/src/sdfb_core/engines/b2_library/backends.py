@@ -72,7 +72,6 @@ class SamplingBackend(Protocol):
       temperature: float = 1.0,
   ) -> dict[str, list]:
     """Sample ``n`` values for every non-free-text column."""
-    ...
 
 
 def _samplable_profiles(

@@ -7,8 +7,10 @@ production even when ``run_pipeline.py`` supports it. ``--prompt_debug``
 shipped in ADR 0024 without either exposure, so the milestone it gates
 (``freetext_pool_prompt``) could never be turned on from a real run.
 
-The composer check is textual (the DAG imports airflow, which is not a
+The composer check is static (the DAG imports airflow, which is not a
 laptop dependency) — same trade-off the file's other referencers accept.
+The DAG is read with ``ast``, never line-matched, so reformatting it
+(yapf, wrapped string literals) cannot break or fake these contracts.
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -16,6 +18,7 @@ laptop dependency) — same trade-off the file's other referencers accept.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -29,6 +32,73 @@ def _metadata_param(name: str) -> dict:
   by_name = {p["name"]: p for p in metadata["parameters"]}
   assert name in by_name, f"{name} missing from flex_template_metadata.json"
   return by_name[name]
+
+
+def _dict_entries(node: ast.AST):
+  """``(key, value_node)`` for every string-keyed entry of every dict
+    literal under ``node`` (``**`` unpackings have no key and are skipped)."""
+  for sub in ast.walk(node):
+    if isinstance(sub, ast.Dict):
+      for key, value in zip(sub.keys, sub.values, strict=True):
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+          yield key.value, value
+
+
+def _is_call_to(node: ast.AST, name: str) -> bool:
+  return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and
+          node.func.id == name)
+
+
+def _composer_params() -> dict[str, ast.Call]:
+  """Every ``"name": Param(...)`` the DAG declares, by name."""
+  tree = ast.parse(_COMPOSER_DAG.read_text())
+  return {
+      name: value
+      for name, value in _dict_entries(tree)
+      if _is_call_to(value, "Param")
+  }
+
+
+def _param_keyword(param: ast.Call, keyword: str):
+  (value,) = [kw.value for kw in param.keywords if kw.arg == keyword]
+  return ast.literal_eval(value)
+
+
+def _composer_launch_operator() -> ast.Call:
+  tree = ast.parse(_COMPOSER_DAG.read_text())
+  (operator,) = [
+      node for node in ast.walk(tree)
+      if _is_call_to(node, "DataflowStartFlexTemplateOperator")
+  ]
+  return operator
+
+
+def _composer_forwarded() -> dict[str, str]:
+  """The unconditional flex-template ``parameters`` the launch operator
+    forwards, as ``name -> string literal``."""
+  (parameters,) = [
+      value for name, value in _dict_entries(_composer_launch_operator())
+      if name == "parameters" and isinstance(value, ast.Dict)
+  ]
+  return {
+      key.value: value.value
+      for key, value in zip(parameters.keys, parameters.values, strict=True)
+      if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
+  }
+
+
+def _composer_experiments() -> list[str]:
+  """The launch operator's ``additionalExperiments`` string literals,
+    whitespace-normalized (Jinja is whitespace-insensitive)."""
+  (experiments,) = [
+      value for name, value in _dict_entries(_composer_launch_operator())
+      if name == "additionalExperiments" and isinstance(value, ast.List)
+  ]
+  return [
+      " ".join(str(elt.value).split())
+      for elt in experiments.elts
+      if isinstance(elt, ast.Constant)
+  ]
 
 
 def test_flex_template_exposes_prompt_debug():
@@ -48,9 +118,8 @@ def test_flex_template_prompt_debug_matches_cli_choices():
 
 
 def test_composer_dag_declares_and_forwards_prompt_debug():
-  dag_text = _COMPOSER_DAG.read_text()
-  assert '"prompt_debug": Param(' in dag_text
-  assert '"prompt_debug": "{{ params.prompt_debug }}"' in dag_text
+  assert "prompt_debug" in _composer_params()
+  assert _composer_forwarded()["prompt_debug"] == "{{ params.prompt_debug }}"
 
 
 def test_uniqueness_mode_surfaces_accept_every_cli_mode():
@@ -78,18 +147,19 @@ def test_flex_template_and_composer_expose_initial_workers():
   for ok in ("", "4", "16"):
     assert re.fullmatch(regex, ok), ok
   assert not re.fullmatch(regex, "four")
-  dag_text = _COMPOSER_DAG.read_text()
-  assert '"initial_workers": Param(' in dag_text
-  assert '"initial_workers": "{{ params.initial_workers }}"' in dag_text
+  assert "initial_workers" in _composer_params()
+  assert (_composer_forwarded()["initial_workers"] ==
+          "{{ params.initial_workers }}")
 
 
 def test_composer_dag_exposes_sdk_containers_topology():
   """ADR 0034: `sdk_containers=multi` lifts `no_use_multiple_sdk_containers`
     for a vLLM launch; `single` (default) keeps the RUN_PLAYBOOK §3 pin."""
-  dag_text = _COMPOSER_DAG.read_text()
-  assert '"sdk_containers": Param(' in dag_text
-  assert "enum=[\"single\", \"multi\"]" in dag_text
-  assert "params.sdk_containers == 'single'" in dag_text
+  params = _composer_params()
+  assert "sdk_containers" in params
+  assert _param_keyword(params["sdk_containers"], "enum") == ["single", "multi"]
+  assert any("params.sdk_containers == 'single'" in experiment
+             for experiment in _composer_experiments())
 
 
 def test_flex_template_and_composer_expose_autoscaling():
@@ -102,9 +172,8 @@ def test_flex_template_and_composer_expose_autoscaling():
   for ok in ("", "auto", "throughput", "fixed"):
     assert re.fullmatch(regex, ok), ok
   assert not re.fullmatch(regex, "none")
-  dag_text = _COMPOSER_DAG.read_text()
-  assert '"autoscaling": Param(' in dag_text
-  assert '"autoscaling": "{{ params.autoscaling }}"' in dag_text
+  assert "autoscaling" in _composer_params()
+  assert _composer_forwarded()["autoscaling"] == "{{ params.autoscaling }}"
 
 
 def test_flex_template_exposes_fk_candidate_cap():

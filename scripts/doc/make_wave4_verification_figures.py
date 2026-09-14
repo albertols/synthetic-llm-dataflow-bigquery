@@ -24,6 +24,9 @@ ORANGE = pre-fix, AQUA = wave-4 measured. OKLab separation check runs on
 every regeneration.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math
@@ -205,7 +208,7 @@ def fig_scrub_anatomy():
       bottom=bottom2,
       color=MUTED,
       label="unresolved (dense neighborhood)")
-  for xi, (_, coll, *_rest) in enumerate(SCRUB):
+  for xi, (_, coll, *_) in enumerate(SCRUB):
     ax.text(
         xi,
         coll + 12,

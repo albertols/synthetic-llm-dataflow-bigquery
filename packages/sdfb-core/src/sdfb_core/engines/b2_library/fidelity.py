@@ -404,7 +404,7 @@ def profile_column(field: FieldSchema,
   if kind is ColumnKind.NUMERIC:
     # NUMERIC verdicts come from _classify, which already proved every
     # value parses; float() re-raising here would be a classifier bug.
-    nums = sorted(float(cast("Any", v)) for v in non_null)
+    nums = sorted(float(cast(Any, v)) for v in non_null)
     is_int = field.bq_type in {"INTEGER", "INT64"}
     # NUMERIC/BIGNUMERIC: respect the declared scale (default 2 places
     # for fixed-point money-like columns) so sampled values pass the
@@ -537,7 +537,7 @@ def enforce_value(profile: ColumnProfile, value: object) -> object:
 def _enforce_numeric(profile: ColumnProfile, value: object) -> object:
   """Clip a sampled numeric to ``[min, max]`` and pin its type/scale."""
   try:
-    num = float(cast("Any", value))
+    num = float(cast(Any, value))
   except (TypeError, ValueError):
     return _representative(profile)
   if profile.minimum is not None:

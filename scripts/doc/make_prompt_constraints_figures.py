@@ -21,6 +21,8 @@ AQUA = the fixed/derived quantity.
 
 # Heavy or optional dependencies are imported lazily, where they are used.
 # pylint: disable=import-outside-toplevel
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
 
 from __future__ import annotations
 
@@ -111,7 +113,7 @@ def fig_evidence():
   y = range(len(cols))
   ax1.barh(y, recalls, height=0.62, color=ORANGE, zorder=3)
   for i, c in enumerate(cols):
-    _table, r, *_rest = RECALL_FAILERS[c]
+    _, r, *_ = RECALL_FAILERS[c]
     ax1.text(
         max(r, 0.004) + 0.015,
         i,

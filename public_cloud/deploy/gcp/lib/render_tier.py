@@ -36,7 +36,7 @@ def _expand(value: str, variables: dict[str, str]) -> str:
 
 
 def render(tiers_path: Path, tier: str, table: str, variables: dict[str, str]):
-  cfg = yaml.safe_load(Path(tiers_path).read_text())
+  cfg = yaml.safe_load(Path(tiers_path).read_text(encoding="utf-8"))
   if tier not in cfg["tiers"]:
     raise SystemExit(f"unknown tier {tier!r}; known: {sorted(cfg['tiers'])}")
   if table not in cfg["tables"]:

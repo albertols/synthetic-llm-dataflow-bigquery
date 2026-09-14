@@ -43,7 +43,8 @@ _MIN_QUANTILE_POINTS = 2
 _MAX_SECONDS_OF_DAY = 86_399.999_999
 
 
-def classify_temporal_values(  # noqa: PLR0911 — type classifier; sequential returns read clearer than nesting
+# PLR0911: a type classifier — sequential returns read clearer than nesting.
+def classify_temporal_values(  # noqa: PLR0911
     values: Sequence[object]) -> tuple[str, str | None] | None:
   """``(value_type, strftime_format)`` when EVERY value is uniformly
     temporal, else ``None`` (mixed types/formats stay on their existing
@@ -89,7 +90,7 @@ def to_epoch(value: object, value_type: str, fmt: str | None) -> float:
     return float(cast("date", value).toordinal())
   if value_type == VT_TIME:
     t = cast("time", value)
-    return (t.hour * 3600 + t.minute * 60 + t.second + t.microsecond / 1e6)
+    return t.hour * 3600 + t.minute * 60 + t.second + t.microsecond / 1e6
   return (parse_temporal_string(cast("str", value), cast("str", fmt)) -
           _EPOCH_NAIVE).total_seconds()
 

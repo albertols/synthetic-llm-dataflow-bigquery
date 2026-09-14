@@ -11,6 +11,9 @@ Palette matches the WS5/2026-07-24/2026-07-25 assets (see
 scripts/doc/make_ws5_figures.py) so the design-doc set reads as one system.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math
@@ -164,7 +167,7 @@ def fig_where_time_went():
            ("Idle — workers rebuilding pools", idle_min, ORANGE),
            ("GroupByKey barrier + BQ write", barrier_min, BLUE)]
   left = 0.0
-  for _label, val, colour in parts:
+  for _, val, colour in parts:
     ax1.barh(0, val, left=left, height=0.42, color=colour, zorder=3)
     ax1.text(
         left + val / 2,

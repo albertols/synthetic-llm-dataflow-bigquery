@@ -16,8 +16,7 @@ import pytest
 from apache_beam.options.pipeline_options import PipelineOptions
 from sdfb_beam.io.local_sinks import WriteToJsonLines
 from sdfb_beam.pipeline import PipelineConfig, _dlq_rule_weight, build_pipeline
-from sdfb_tests import fakes  # noqa: F401  registers "minimal" engine
-from sdfb_tests.fakes import FakeModelClient
+from sdfb_tests.fakes import FakeModelClient  # also registers the "minimal" engine
 
 
 def _config(schema, **overrides):

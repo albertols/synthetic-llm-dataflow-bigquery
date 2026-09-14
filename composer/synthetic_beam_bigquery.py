@@ -14,12 +14,18 @@ Substitution markers (workflow 3 seds these at import time):
   {{GCS_DATAFLOW_TEMPLATES}}  <env>-…-dataflow-templates bucket name
   {{GPU}}                     default of the `gpu` DAG param (l4 | t4; still runtime-overridable)
   {{SDFB_MODEL_URI}}          gs://<bucket>/synthetic/models/gemma4/…
-  {{SDFB_EMBEDDER_URI}}       gs://<bucket>/synthetic/models/embedders/… (B.1; empty ⇒ HashingEmbedder)
+  {{SDFB_EMBEDDER_URI}}       gs://<bucket>/synthetic/models/embedders/…
+                              (B.1; empty ⇒ HashingEmbedder)
   {{SDFB_DEFAULT_TABLE_FQN}}  project.dataset.table
-  {{SDFB_DDL_URI}}            gs://…/ddl.json (empty ⇒ operator omits ddl_uri; live INFORMATION_SCHEMA extraction)
-  {{SDFB_RAG_CHUNKS_TABLE}}   project.synthetic_rag.rag_chunks (B.1 chunk store; empty ⇒ params omitted, no reuse/population)
-  {{SDFB_FREETEXT_POOLS_TABLE}} project.synthetic_rag.freetext_pools (WS5 pool store; empty ⇒ params omitted, pools rebuild per worker)
-  {{SDFB_SOURCE_STATS_TABLE}}  project.synthetic_rag.source_table_stats (WS8 stats store; empty ⇒ param omitted, stats land as milestone + JSON artifact only)
+  {{SDFB_DDL_URI}}            gs://…/ddl.json (empty ⇒ operator omits ddl_uri;
+                              live INFORMATION_SCHEMA extraction)
+  {{SDFB_RAG_CHUNKS_TABLE}}   project.synthetic_rag.rag_chunks (B.1 chunk store;
+                              empty ⇒ params omitted, no reuse/population)
+  {{SDFB_FREETEXT_POOLS_TABLE}} project.synthetic_rag.freetext_pools (WS5 pool store;
+                              empty ⇒ params omitted, pools rebuild per worker)
+  {{SDFB_SOURCE_STATS_TABLE}}  project.synthetic_rag.source_table_stats (WS8 stats store;
+                              empty ⇒ param omitted, stats land as milestone + JSON
+                              artifact only)
   {{WRITE_DISPOSITION}}       default of the `write_disposition` DAG param (append | overwrite)
   {{SDFB_LANDING_TABLE}}      project.synthetic_data.<table> (defaults to the source table name)
   {{SDFB_DLQ_TABLE}}          project.synthetic_data_quality.dlq
@@ -461,16 +467,11 @@ with models.DAG(
               "jobName":
                   job_name,
               "environment": {
-                  "tempLocation":
-                      f"gs://{bucket_path}/temp/",
-                  "stagingLocation":
-                      f"gs://{bucket_path}/staging",
-                  "subnetwork":
-                      subnetwork,
-                  "ipConfiguration":
-                      "WORKER_IP_PRIVATE",
-                  "serviceAccountEmail":
-                      service_account,
+                  "tempLocation": f"gs://{bucket_path}/temp/",
+                  "stagingLocation": f"gs://{bucket_path}/staging",
+                  "subnetwork": subnetwork,
+                  "ipConfiguration": "WORKER_IP_PRIVATE",
+                  "serviceAccountEmail": service_account,
                   "additionalExperiments": [
                       "use_runner_v2",
                       "upload_graph",
@@ -487,10 +488,15 @@ with models.DAG(
                       # is requested (Dataflow dedupes it) — lets the BQ write
                       # path run on abundant CPU capacity when L4s are stocked
                       # out.
-                      "{{ ('worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver' if params.gpu == 'l4' else 'worker_accelerator=type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx') if params.client_type == 'vllm' else 'upload_graph' }}",
+                      "{{ ('worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver' "
+                      "if params.gpu == 'l4' else "
+                      "'worker_accelerator=type:nvidia-tesla-t4;count:1;"
+                      "install-nvidia-driver:5xx') "
+                      "if params.client_type == 'vllm' else 'upload_graph' }}",
                       # Consumes a matching GPU reservation when one exists
                       # (on-demand otherwise). CPU smoke path: harmless dup.
-                      "{{ 'automatically_use_created_reservation' if params.client_type == 'vllm' else 'upload_graph' }}",
+                      "{{ 'automatically_use_created_reservation' "
+                      "if params.client_type == 'vllm' else 'upload_graph' }}",
                       # ONE SDK process per GPU worker (RUN_PLAYBOOK §3).
                       # Runner v2's default spawns one sibling SDK process
                       # per vCPU (8 on n1/g2-standard-8) and EVERY sibling
@@ -508,7 +514,8 @@ with models.DAG(
                       # the vLLM client's cross-process spawn mutex
                       # (port 8001) keeps one server per worker while
                       # every vCPU gets its own Python interpreter.
-                      "{{ 'no_use_multiple_sdk_containers' if (params.client_type == 'vllm' and params.sdk_containers == 'single') else 'upload_graph' }}",
+                      "{{ 'no_use_multiple_sdk_containers' if (params.client_type == 'vllm' "
+                      "and params.sdk_containers == 'single') else 'upload_graph' }}",
                       *network_tag_experiments,
                   ],
                   "additionalUserLabels": {
@@ -517,15 +524,14 @@ with models.DAG(
                       "dag": dag_id,
                   },
                   "machineType":
-                      "{{ ('g2-standard-8' if params.gpu == 'l4' else 'n1-standard-8') if params.client_type == 'vllm' else 'e2-standard-8' }}",
-                  "maxWorkers":
-                      4,
+                      "{{ ('g2-standard-8' if params.gpu == 'l4' else 'n1-standard-8') "
+                      "if params.client_type == 'vllm' else 'e2-standard-8' }}",
+                  "maxWorkers": 4,
                   # Worker boot disk is pinned in run_pipeline.configure_pipeline_options
                   # (_DEFAULT_WORKER_DISK_GB), NOT here: the Flex Template
                   # environment.diskSizeGb does not propagate to the worker harness
                   # (workers booted at the 25GB default despite a 200 here).
-                  "workerRegion":
-                      region,
+                  "workerRegion": region,
               },
               "parameters": {
                   # Omitted entirely when the build left the DDL marker

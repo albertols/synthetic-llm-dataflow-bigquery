@@ -28,13 +28,11 @@ class ChunkStore(Protocol):
       embedder_version: str,
   ) -> list[Chunk]:
     """All chunks for the digest+kind in one pinned vector space."""
-    ...
 
   def exists(self, reference_digest: str, embedder_id: str,
              embedder_version: str) -> bool:
     """True when ANY chunk exists for the digest in this vector space
         (the population stage's idempotency check)."""
-    ...
 
 
 class InMemoryChunkStore:

@@ -28,6 +28,7 @@ class ExtractDDLMetadataDoFn(beam.DoFn):
     super().__init__()
     self.timeout = timeout
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, table_ref: dict):
     yield extract_ddl_metadata(
         project=table_ref["project"],

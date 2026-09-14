@@ -39,6 +39,9 @@ BLUE = the source's own limit, ORANGE = what the flag costs, AQUA =
 healthy. OKLab separation check runs on every regeneration.
 """
 
+# pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
+# pylint: disable=wrong-import-position
+
 from __future__ import annotations
 
 import math
@@ -224,7 +227,7 @@ def fig_candidate_cap():
   fig, axes = plt.subplots(
       1, len(CAPS), figsize=(16.2, 5.8), facecolor=SURFACE, sharey=True)
   for i, (ax, cap) in enumerate(zip(axes, CAPS, strict=True)):
-    panel_cap(ax, cap, candidates, fanout, jx, jy, first=(i == 0))
+    panel_cap(ax, cap, candidates, fanout, jx, jy, first=i == 0)
   handles, labels = axes[0].get_legend_handles_labels()
   fig.legend(
       handles,

@@ -270,20 +270,20 @@ def _cross_overlap(frames: dict[str, pd.DataFrame],
     }
     if len(sets) < _MIN_ENGINES_FOR_OVERLAP:
       continue
-    pairwise: dict[str, Any] = {}
+    pairs: dict[str, Any] = {}
     for i, a in enumerate(names):
       for b in names[i + 1:]:
         if a not in sets or b not in sets:
           continue
         sa, sb = sets[a], sets[b]
         union = len(sa | sb)
-        pairwise[f"{a}|{b}"] = {
+        pairs[f"{a}|{b}"] = {
             f"{a}_distinct": len(sa),
             f"{b}_distinct": len(sb),
             "shared": len(sa & sb),
             "jaccard": round(len(sa & sb) / union, 6) if union else 0.0,
         }
-    out[name] = pairwise
+    out[name] = pairs
   return out
 
 

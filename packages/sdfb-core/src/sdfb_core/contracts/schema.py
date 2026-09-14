@@ -155,7 +155,8 @@ class TableSchema(BaseModel):
     if not self.primary_keys:
       return self
     col_names = {c.name for c in self.columns}
-    unknown = [pk for pk in self.primary_keys if pk not in col_names]
+    # `primary_keys` is a pydantic field narrowed by the early return above.
+    unknown = [pk for pk in self.primary_keys if pk not in col_names]  # pylint: disable=not-an-iterable
     if unknown:
       raise ValueError(f"primary_keys reference unknown columns: {unknown}")
     return self

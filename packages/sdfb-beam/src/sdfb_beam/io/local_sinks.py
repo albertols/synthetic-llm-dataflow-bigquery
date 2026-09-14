@@ -30,6 +30,7 @@ class WriteToJsonLines(beam.PTransform):
     self.path_prefix = path_prefix
     self.num_shards = num_shards
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the PCollection positionally
   def expand(self, pcoll):  # type: ignore[override]
     return (pcoll
             | "ToJSON" >>

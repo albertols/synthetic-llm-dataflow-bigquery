@@ -51,6 +51,8 @@ Usage:
 
 # Heavy or optional dependencies are imported lazily, where they are used.
 # pylint: disable=import-outside-toplevel
+# The sibling `redaction` import needs its sys.path entry inserted first.
+# pylint: disable=wrong-import-position
 
 from __future__ import annotations
 
@@ -71,10 +73,12 @@ import redaction  # sibling import; path must be set up first
 # implementations now live in redaction.py.
 Mapping = redaction.Mapping
 build_mapping = redaction.build_mapping
+# pylint: disable=protected-access  # re-exported privates, kept for back-compat
 _split_fqn = redaction._split_fqn
 _collect_identifiers = redaction._collect_identifiers
 _collect_columns = redaction._collect_columns
 _collect_values = redaction._collect_values
+# pylint: enable=protected-access
 _register_csv = redaction.register_csv
 _redact_csv = redaction.redact_csv
 _leak_scan = redaction.leak_scan

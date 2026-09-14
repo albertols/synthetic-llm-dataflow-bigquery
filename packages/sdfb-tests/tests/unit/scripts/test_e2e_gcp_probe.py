@@ -182,8 +182,9 @@ def test_job_params_sanitizes_infra_identifiers(probe_module):
                   {
                       "key":
                           "subnetwork",
-                      "value":
-                          "https://www.googleapis.com/compute/v1/projects/net-proj/regions/r/subnetworks/sn-1"
+                      "value": (
+                          "https://www.googleapis.com/compute/v1/projects/net-proj/"
+                          "regions/r/subnetworks/sn-1")
                   },
                   {
                       "key": "use_network_tags",
