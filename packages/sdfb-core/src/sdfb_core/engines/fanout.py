@@ -46,100 +46,100 @@ _REJECTION_MAX_FILL = 0.5
 
 @dataclass(frozen=True)
 class FanoutHistogram:
-    """``k -> number of parent tuples with k children`` in the source."""
+  """``k -> number of parent tuples with k children`` in the source."""
 
-    parents_by_k: dict[int, int]
-    _ks: tuple[int, ...] = field(init=False, repr=False)
-    _cum: tuple[float, ...] = field(init=False, repr=False)
+  parents_by_k: dict[int, int]
+  _ks: tuple[int, ...] = field(init=False, repr=False)
+  _cum: tuple[float, ...] = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        if not self.parents_by_k or sum(self.parents_by_k.values()) <= 0:
-            raise ValueError("fan-out histogram is empty")
-        ks = tuple(sorted(int(k) for k in self.parents_by_k))
-        total = float(sum(self.parents_by_k.values()))
-        cum = tuple(accumulate(self.parents_by_k[k] / total for k in ks))
-        object.__setattr__(self, "_ks", ks)
-        object.__setattr__(self, "_cum", cum)
+  def __post_init__(self) -> None:
+    if not self.parents_by_k or sum(self.parents_by_k.values()) <= 0:
+      raise ValueError("fan-out histogram is empty")
+    ks = tuple(sorted(int(k) for k in self.parents_by_k))
+    total = float(sum(self.parents_by_k.values()))
+    cum = tuple(accumulate(self.parents_by_k[k] / total for k in ks))
+    object.__setattr__(self, "_ks", ks)
+    object.__setattr__(self, "_cum", cum)
 
-    @property
-    def mean(self) -> float:
-        total = sum(self.parents_by_k.values())
-        return sum(k * n for k, n in self.parents_by_k.items()) / total
+  @property
+  def mean(self) -> float:
+    total = sum(self.parents_by_k.values())
+    return sum(k * n for k, n in self.parents_by_k.items()) / total
 
-    @property
-    def max_k(self) -> int:
-        return max(self.parents_by_k)
+  @property
+  def max_k(self) -> int:
+    return max(self.parents_by_k)
 
-    @property
-    def zero_share(self) -> float:
-        return self.parents_by_k.get(0, 0) / sum(self.parents_by_k.values())
+  @property
+  def zero_share(self) -> float:
+    return self.parents_by_k.get(0, 0) / sum(self.parents_by_k.values())
 
-    def sample(self, rng: random.Random) -> int:
-        i = min(bisect_right(self._cum, rng.random()), len(self._ks) - 1)
-        return self._ks[i]
+  def sample(self, rng: random.Random) -> int:
+    i = min(bisect_right(self._cum, rng.random()), len(self._ks) - 1)
+    return self._ks[i]
 
-    def to_payload(self) -> dict[str, int]:
-        return {str(k): int(n) for k, n in sorted(self.parents_by_k.items())}
+  def to_payload(self) -> dict[str, int]:
+    return {str(k): int(n) for k, n in sorted(self.parents_by_k.items())}
 
-    @classmethod
-    def from_payload(cls, payload: dict) -> FanoutHistogram:
-        return cls({int(k): int(n) for k, n in payload.items()})
+  @classmethod
+  def from_payload(cls, payload: dict) -> FanoutHistogram:
+    return cls({int(k): int(n) for k, n in payload.items()})
 
 
 @dataclass(frozen=True)
 class CellTable:
-    """The joint values of the PK-completing categorical members, with
+  """The joint values of the PK-completing categorical members, with
     their source row counts as weights."""
 
-    cols: tuple[str, ...]
-    rows: list[tuple]
-    counts: list[float]
-    _cum: tuple[float, ...] = field(init=False, repr=False)
-    _total: float = field(init=False, repr=False)
+  cols: tuple[str, ...]
+  rows: list[tuple]
+  counts: list[float]
+  _cum: tuple[float, ...] = field(init=False, repr=False)
+  _total: float = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        if len(self.rows) != len(self.counts) or not self.rows:
-            raise ValueError("cell table needs one positive count per row")
-        if not all(c > 0 for c in self.counts):
-            raise ValueError("cell table needs one positive count per row")
-        # Cumulative counts ONCE, exactly as `FanoutHistogram` does.
-        # `random.choices(..., weights=...)` rebuilds them on every call, so
-        # a k-draw cost O(k*C) and not the O(k) ADR 0036 D3 claims — 746 us
-        # per key at C = 10,000, ~20 minutes of pure draw on a 100M-key
-        # parent.
-        cum = tuple(accumulate(float(c) for c in self.counts))
-        object.__setattr__(self, "_cum", cum)
-        object.__setattr__(self, "_total", cum[-1])
+  def __post_init__(self) -> None:
+    if len(self.rows) != len(self.counts) or not self.rows:
+      raise ValueError("cell table needs one positive count per row")
+    if not all(c > 0 for c in self.counts):
+      raise ValueError("cell table needs one positive count per row")
+    # Cumulative counts ONCE, exactly as `FanoutHistogram` does.
+    # `random.choices(..., weights=...)` rebuilds them on every call, so
+    # a k-draw cost O(k*C) and not the O(k) ADR 0036 D3 claims — 746 us
+    # per key at C = 10,000, ~20 minutes of pure draw on a 100M-key
+    # parent.
+    cum = tuple(accumulate(float(c) for c in self.counts))
+    object.__setattr__(self, "_cum", cum)
+    object.__setattr__(self, "_total", cum[-1])
 
-    @property
-    def size(self) -> int:
-        return len(self.rows)
+  @property
+  def size(self) -> int:
+    return len(self.rows)
 
-    def _weighted_index(self, rng: random.Random) -> int:
-        """One weighted index in O(log C) — a bisect over `_cum`."""
-        return min(bisect_right(self._cum, rng.random() * self._total), self.size - 1)
+  def _weighted_index(self, rng: random.Random) -> int:
+    """One weighted index in O(log C) — a bisect over `_cum`."""
+    return min(
+        bisect_right(self._cum,
+                     rng.random() * self._total), self.size - 1)
 
-    def draw(self, k: int, rng: random.Random, *, exact: bool) -> list[tuple]:
-        """``k`` cells. ``exact`` = without replacement (raises when
+  def draw(self, k: int, rng: random.Random, *, exact: bool) -> list[tuple]:
+    """``k`` cells. ``exact`` = without replacement (raises when
         ``k`` exceeds the table); otherwise weighted with replacement."""
-        if k <= 0:
-            return []
-        if not exact:
-            return [self.rows[self._weighted_index(rng)] for _ in range(k)]
-        if k > self.size:
-            raise ValueError(
-                f"{k} children requested from {self.size} cells over "
-                f"{list(self.cols)} — the declared PK is not a key"
-            )
-        if k <= self.size * _REJECTION_MAX_FILL:
-            chosen: dict[int, None] = {}
-            while len(chosen) < k:
-                chosen.setdefault(self._weighted_index(rng), None)
-            return [self.rows[i] for i in chosen]
-        return [self.rows[i] for i in self.permutation(rng)[:k]]
+    if k <= 0:
+      return []
+    if not exact:
+      return [self.rows[self._weighted_index(rng)] for _ in range(k)]
+    if k > self.size:
+      raise ValueError(f"{k} children requested from {self.size} cells over "
+                       f"{list(self.cols)} — the declared PK is not a key")
+    if k <= self.size * _REJECTION_MAX_FILL:
+      chosen: dict[int, None] = {}
+      while len(chosen) < k:
+        chosen.setdefault(self._weighted_index(rng), None)
+      return [self.rows[i] for i in chosen]
+    return [self.rows[i] for i in self.permutation(rng)[:k]]
 
-    def permutation(self, rng: random.Random) -> list[int]:
-        """Every row index once, in weighted random order (Efraimidis &
+  def permutation(self, rng: random.Random) -> list[int]:
+    """Every row index once, in weighted random order (Efraimidis &
         Spirakis 2006: sort on ``u^(1/w)``).
 
         A prefix of it IS a draw without replacement, which is why the
@@ -154,29 +154,29 @@ class CellTable:
         it — a 99:1 cell table handed out 50:50 at a fan-out of 2 (ADR
         0037 final review, E1). Those plans call `draw(exact=False)`.
         """
-        return sorted(
-            range(self.size),
-            key=lambda i: -(rng.random() ** (1.0 / self.counts[i])),
-        )
+    return sorted(
+        range(self.size),
+        key=lambda i: -(rng.random()**(1.0 / self.counts[i])),
+    )
 
-    def to_payload(self) -> dict:
-        return {
-            "cols": list(self.cols),
-            "rows": [list(r) for r in self.rows],
-            "counts": [float(c) for c in self.counts],
-        }
+  def to_payload(self) -> dict:
+    return {
+        "cols": list(self.cols),
+        "rows": [list(r) for r in self.rows],
+        "counts": [float(c) for c in self.counts],
+    }
 
-    @classmethod
-    def from_payload(cls, payload: dict) -> CellTable:
-        return cls(
-            cols=tuple(payload["cols"]),
-            rows=[tuple(r) for r in payload["rows"]],
-            counts=[float(c) for c in payload["counts"]],
-        )
+  @classmethod
+  def from_payload(cls, payload: dict) -> CellTable:
+    return cls(
+        cols=tuple(payload["cols"]),
+        rows=[tuple(r) for r in payload["rows"]],
+        counts=[float(c) for c in payload["counts"]],
+    )
 
 
 def conditional_edge_id(cols: Sequence[str], ref: str) -> str:
-    """The ONE name a conditional edge answers to — ``(cols)->ref``, the
+  """The ONE name a conditional edge answers to — ``(cols)->ref``, the
     label the launcher's milestones already print.
 
     The composer (`FkEdgeSpec.edge_id`), the plan (`ConditionalEdge.id`),
@@ -189,104 +189,104 @@ def conditional_edge_id(cols: Sequence[str], ref: str) -> str:
     and under a columns-only id they collided — the second join
     overwrote the first in ``matches``, so one edge's candidates
     answered for both (ADR 0037 review, ruling 14)."""
-    return f"({','.join(cols)})->{ref}"
+  return f"({','.join(cols)})->{ref}"
 
 
 @dataclass(frozen=True)
 class ConditionalEdge:
-    """A non-driving FK edge whose candidates come from a co-parent
+  """A non-driving FK edge whose candidates come from a co-parent
     joined on the driving key's overlap columns (design 2026-09-11 §4,
     ADR 0037) — e.g. a child PK's remaining member is populated from a
     second parent that shares part of the driving key."""
 
-    id: str
-    cols: tuple[str, ...]
-    nullable: bool
-    # Does this edge's `rest` (``cols``) supply a member of the child's
-    # EFFECTIVE PK — the relationship model's `pk:` (ADR 0032), which is
-    # what preflight resolves and what `EnforceUniqueness` keys on? ONLY
-    # such an edge multiplies a key's capacity (`joint_key_draw`): an edge
-    # the PK does not read distinguishes nothing, so counting it emitted
-    # children the PK cannot tell apart (final review G1).
-    #
-    # The default is False — absent means "bounds nothing" — because the
-    # two errors are not symmetric. Under-counting caps a key EARLY and
-    # says so (`fanout_rows_capped`, a non-zero shortfall the operator
-    # sees); over-counting emits rows the PK cannot represent, which land
-    # or divert as `pk.duplicate` with NOTHING in the log. A payload
-    # written before this field, or by a caller that does not know the PK,
-    # therefore inflates no capacity.
-    pk_member: bool = False
+  id: str
+  cols: tuple[str, ...]
+  nullable: bool
+  # Does this edge's `rest` (``cols``) supply a member of the child's
+  # EFFECTIVE PK — the relationship model's `pk:` (ADR 0032), which is
+  # what preflight resolves and what `EnforceUniqueness` keys on? ONLY
+  # such an edge multiplies a key's capacity (`joint_key_draw`): an edge
+  # the PK does not read distinguishes nothing, so counting it emitted
+  # children the PK cannot tell apart (final review G1).
+  #
+  # The default is False — absent means "bounds nothing" — because the
+  # two errors are not symmetric. Under-counting caps a key EARLY and
+  # says so (`fanout_rows_capped`, a non-zero shortfall the operator
+  # sees); over-counting emits rows the PK cannot represent, which land
+  # or divert as `pk.duplicate` with NOTHING in the log. A payload
+  # written before this field, or by a caller that does not know the PK,
+  # therefore inflates no capacity.
+  pk_member: bool = False
 
-    def to_payload(self) -> dict:
-        return {
-            "id": self.id,
-            "cols": list(self.cols),
-            "nullable": bool(self.nullable),
-            "pk_member": bool(self.pk_member),
-        }
+  def to_payload(self) -> dict:
+    return {
+        "id": self.id,
+        "cols": list(self.cols),
+        "nullable": bool(self.nullable),
+        "pk_member": bool(self.pk_member),
+    }
 
-    @classmethod
-    def from_payload(cls, payload: dict) -> ConditionalEdge:
-        return cls(
-            id=str(payload["id"]),
-            cols=tuple(payload["cols"]),
-            nullable=bool(payload["nullable"]),
-            pk_member=bool(payload.get("pk_member", False)),
-        )
+  @classmethod
+  def from_payload(cls, payload: dict) -> ConditionalEdge:
+    return cls(
+        id=str(payload["id"]),
+        cols=tuple(payload["cols"]),
+        nullable=bool(payload["nullable"]),
+        pk_member=bool(payload.get("pk_member", False)),
+    )
 
 
 @dataclass(frozen=True)
 class FanoutPlan:
-    """One driven child's relational recipe."""
+  """One driven child's relational recipe."""
 
-    driving_cols: tuple[str, ...]
-    histogram: FanoutHistogram
-    cells: CellTable | None
-    # True when EVERY PK member outside the driving edge is a cell column
-    # — then the cells alone must key the child and are drawn without
-    # replacement. False when an unbounded member (pattern, numeric,
-    # temporal) completes the PK and cells only need to follow weights.
-    exact_cells: bool
-    # Non-driving FK edges resolved per key via `conditional_values`
-    # (design 2026-09-11 §4, ADR 0037). Added at the end so positional
-    # construction in existing tests/payloads keeps working.
-    conditional: tuple[ConditionalEdge, ...] = ()
+  driving_cols: tuple[str, ...]
+  histogram: FanoutHistogram
+  cells: CellTable | None
+  # True when EVERY PK member outside the driving edge is a cell column
+  # — then the cells alone must key the child and are drawn without
+  # replacement. False when an unbounded member (pattern, numeric,
+  # temporal) completes the PK and cells only need to follow weights.
+  exact_cells: bool
+  # Non-driving FK edges resolved per key via `conditional_values`
+  # (design 2026-09-11 §4, ADR 0037). Added at the end so positional
+  # construction in existing tests/payloads keeps working.
+  conditional: tuple[ConditionalEdge, ...] = ()
 
-    @property
-    def columns(self) -> frozenset[str]:
-        cols = set(self.driving_cols)
-        if self.cells is not None:
-            cols.update(self.cells.cols)
-        for edge in self.conditional:
-            cols.update(edge.cols)
-        return frozenset(cols)
+  @property
+  def columns(self) -> frozenset[str]:
+    cols = set(self.driving_cols)
+    if self.cells is not None:
+      cols.update(self.cells.cols)
+    for edge in self.conditional:
+      cols.update(edge.cols)
+    return frozenset(cols)
 
-    def to_payload(self) -> dict:
-        return {
-            "driving_cols": list(self.driving_cols),
-            "histogram": self.histogram.to_payload(),
-            "cells": self.cells.to_payload() if self.cells is not None else None,
-            "exact_cells": bool(self.exact_cells),
-            "conditional": [edge.to_payload() for edge in self.conditional],
-        }
+  def to_payload(self) -> dict:
+    return {
+        "driving_cols": list(self.driving_cols),
+        "histogram": self.histogram.to_payload(),
+        "cells": self.cells.to_payload() if self.cells is not None else None,
+        "exact_cells": bool(self.exact_cells),
+        "conditional": [edge.to_payload() for edge in self.conditional],
+    }
 
-    @classmethod
-    def from_payload(cls, payload: dict) -> FanoutPlan:
-        cells = payload.get("cells")
-        conditional = payload.get("conditional") or ()
-        return cls(
-            driving_cols=tuple(payload["driving_cols"]),
-            histogram=FanoutHistogram.from_payload(payload["histogram"]),
-            cells=CellTable.from_payload(cells) if cells else None,
-            exact_cells=bool(payload.get("exact_cells", False)),
-            conditional=tuple(ConditionalEdge.from_payload(e) for e in conditional),
-        )
+  @classmethod
+  def from_payload(cls, payload: dict) -> FanoutPlan:
+    cells = payload.get("cells")
+    conditional = payload.get("conditional") or ()
+    return cls(
+        driving_cols=tuple(payload["driving_cols"]),
+        histogram=FanoutHistogram.from_payload(payload["histogram"]),
+        cells=CellTable.from_payload(cells) if cells else None,
+        exact_cells=bool(payload.get("exact_cells", False)),
+        conditional=tuple(ConditionalEdge.from_payload(e) for e in conditional),
+    )
 
 
 @dataclass(frozen=True)
 class KeyDraw:
-    """One parent key's children, decided JOINTLY (ADR 0037 final review,
+  """One parent key's children, decided JOINTLY (ADR 0037 final review,
     fix wave A1): the cell each child carries and, per conditional edge,
     the candidate tuple it carries — index-aligned, one entry per child.
 
@@ -311,22 +311,22 @@ class KeyDraw:
     by an unbounded member, so nothing caps and ``shortfall`` is 0.
     """
 
-    cells: tuple[tuple, ...]
-    values: dict[str, list[tuple]]
-    requested: int
-    capacity: int
+  cells: tuple[tuple, ...]
+  values: dict[str, list[tuple]]
+  requested: int
+  capacity: int
 
-    @property
-    def n_children(self) -> int:
-        return len(self.cells)
+  @property
+  def n_children(self) -> int:
+    return len(self.cells)
 
-    @property
-    def shortfall(self) -> int:
-        return max(0, self.requested - len(self.cells))
+  @property
+  def shortfall(self) -> int:
+    return max(0, self.requested - len(self.cells))
 
 
 def _mixed_radix(index: int, radices: Sequence[int]) -> list[int]:
-    """``index`` decomposed over ``radices``, FIRST radix varying fastest.
+  """``index`` decomposed over ``radices``, FIRST radix varying fastest.
 
     Injective on ``[0, prod(radices))``, which is what makes every
     child's combination distinct. An ``exact_cells`` plan puts the cells
@@ -339,18 +339,18 @@ def _mixed_radix(index: int, radices: Sequence[int]) -> list[int]:
     the PK does not read walk their own radices (`joint_key_draw`), so
     they vary per child without bounding anything.
     """
-    digits: list[int] = []
-    rest = index
-    for radix in radices:
-        digits.append(rest % radix)
-        rest //= radix
-    return digits
+  digits: list[int] = []
+  rest = index
+  for radix in radices:
+    digits.append(rest % radix)
+    rest //= radix
+  return digits
 
 
 def _walk_dimensions(
     plan: FanoutPlan, orders: Sequence[Sequence[tuple]]
 ) -> tuple[list[int], list[int], list[tuple[bool, int]]]:
-    """``(bounding radices, free radices, per-edge (bounded, digit))`` —
+  """``(bounding radices, free radices, per-edge (bounded, digit))`` —
     the TWO walks `joint_key_draw` runs over one key's children.
 
     The BOUNDING walk enumerates the dimensions that DISTINGUISH THE PK:
@@ -370,20 +370,20 @@ def _walk_dimensions(
     as one nullable edge came back empty, and the cell dimension then
     wrapped into PK duplicates with ``shortfall == 0`` (final review, E2).
     """
-    bound: list[int] = []
-    if plan.exact_cells:
-        bound.append(plan.cells.size if plan.cells is not None else 1)
-    free: list[int] = []
-    digit_of: list[tuple[bool, int]] = []
-    for edge, order in zip(plan.conditional, orders, strict=True):
-        radix = max(1, len(order))
-        if edge.pk_member:
-            digit_of.append((True, len(bound)))
-            bound.append(radix)
-        else:
-            digit_of.append((False, len(free)))
-            free.append(radix)
-    return bound, free, digit_of
+  bound: list[int] = []
+  if plan.exact_cells:
+    bound.append(plan.cells.size if plan.cells is not None else 1)
+  free: list[int] = []
+  digit_of: list[tuple[bool, int]] = []
+  for edge, order in zip(plan.conditional, orders, strict=True):
+    radix = max(1, len(order))
+    if edge.pk_member:
+      digit_of.append((True, len(bound)))
+      bound.append(radix)
+    else:
+      digit_of.append((False, len(free)))
+      free.append(radix)
+  return bound, free, digit_of
 
 
 def joint_key_draw(
@@ -392,7 +392,7 @@ def joint_key_draw(
     run_id: str,
     candidates: Sequence[Sequence[Sequence]],
 ) -> KeyDraw:
-    """One key's children over the CROSS PRODUCT of its BOUNDED
+  """One key's children over the CROSS PRODUCT of its BOUNDED
     dimensions (design 2026-09-11 §4, ADR 0037).
 
     ``candidates[j]`` is edge ``plan.conditional[j]``'s candidate list
@@ -440,45 +440,43 @@ def joint_key_draw(
     so capping would drop rows the PK can represent and the candidate
     digits wrap instead.
     """
-    key_t = tuple(key)
-    rng = random.Random(derive_key_seed(run_id, key_t))
-    k = plan.histogram.sample(rng)
-    values: dict[str, list[tuple]] = {edge.id: [] for edge in plan.conditional}
-    if k <= 0:
-        return KeyDraw((), values, 0, 0)
-    orders: list[list[tuple]] = []
-    for edge, candidate_list in zip(plan.conditional, candidates, strict=True):
-        order = [tuple(c) for c in candidate_list]
-        random.Random(derive_key_seed(run_id, key_t, salt=edge.id)).shuffle(order)
-        orders.append(order)
-    cell_digit = plan.exact_cells
-    bound_radices, free_radices, digit_of = _walk_dimensions(plan, orders)
-    capacity = prod(bound_radices)
-    free_period = prod(free_radices)
-    n_children = min(k, capacity) if plan.exact_cells else k
-    cell_order = plan.cells.permutation(rng) if (plan.cells and cell_digit) else []
-    weighted = (
-        plan.cells.draw(n_children, rng, exact=False)
-        if (plan.cells is not None and not cell_digit)
-        else []
-    )
-    cells: list[tuple] = []
-    for i in range(n_children):
-        bound = _mixed_radix(i % capacity, bound_radices)
-        free = _mixed_radix(i % free_period, free_radices)
-        if plan.cells is None:
-            cells.append(())
-        elif cell_digit:
-            cells.append(plan.cells.rows[cell_order[bound[0]]])
-        else:
-            cells.append(weighted[i])
-        for j, edge in enumerate(plan.conditional):
-            order = orders[j]
-            bounded, digit = digit_of[j]
-            values[edge.id].append(
-                order[(bound if bounded else free)[digit]] if order else ()
-            )
-    return KeyDraw(tuple(cells), values, k, capacity)
+  key_t = tuple(key)
+  rng = random.Random(derive_key_seed(run_id, key_t))
+  k = plan.histogram.sample(rng)
+  values: dict[str, list[tuple]] = {edge.id: [] for edge in plan.conditional}
+  if k <= 0:
+    return KeyDraw((), values, 0, 0)
+  orders: list[list[tuple]] = []
+  for edge, candidate_list in zip(plan.conditional, candidates, strict=True):
+    order = [tuple(c) for c in candidate_list]
+    random.Random(derive_key_seed(run_id, key_t, salt=edge.id)).shuffle(order)
+    orders.append(order)
+  cell_digit = plan.exact_cells
+  bound_radices, free_radices, digit_of = _walk_dimensions(plan, orders)
+  capacity = prod(bound_radices)
+  free_period = prod(free_radices)
+  n_children = min(k, capacity) if plan.exact_cells else k
+  cell_order = plan.cells.permutation(rng) if (plan.cells and
+                                               cell_digit) else []
+  weighted = (
+      plan.cells.draw(n_children, rng, exact=False) if
+      (plan.cells is not None and not cell_digit) else [])
+  cells: list[tuple] = []
+  for i in range(n_children):
+    bound = _mixed_radix(i % capacity, bound_radices)
+    free = _mixed_radix(i % free_period, free_radices)
+    if plan.cells is None:
+      cells.append(())
+    elif cell_digit:
+      cells.append(plan.cells.rows[cell_order[bound[0]]])
+    else:
+      cells.append(weighted[i])
+    for j, edge in enumerate(plan.conditional):
+      order = orders[j]
+      bounded, digit = digit_of[j]
+      values[edge.id].append(order[(
+          bound if bounded else free)[digit]] if order else ())
+  return KeyDraw(tuple(cells), values, k, capacity)
 
 
 def expand_keys(
@@ -488,7 +486,7 @@ def expand_keys(
     chunk_rows: int,
     draws: Mapping[tuple, KeyDraw | None] | None = None,
 ) -> Iterator[list[tuple[tuple, tuple]]]:
-    """``(key, cell)`` pairs for every child of every key, in chunks of at
+  """``(key, cell)`` pairs for every child of every key, in chunks of at
     most ``chunk_rows`` — a hot parent never makes an oversized bundle,
     and a key's cells stay unique across the split because they are
     drawn once per key.
@@ -501,29 +499,27 @@ def expand_keys(
     non-nullable edge), emits nothing. Without it — every ADR 0036 plan —
     the cells are drawn here exactly as before.
     """
-    chunk_rows = max(1, int(chunk_rows))
-    chunk: list[tuple[tuple, tuple]] = []
-    for key in keys:
-        cells: list[tuple]
-        if draws is not None:
-            draw = draws.get(tuple(key))
-            if draw is None:
-                continue
-            cells = list(draw.cells)
-        else:
-            rng = random.Random(derive_key_seed(run_id, tuple(key)))
-            k = plan.histogram.sample(rng)
-            if k <= 0:
-                continue
-            cells = (
-                plan.cells.draw(k, rng, exact=plan.exact_cells)
-                if plan.cells is not None
-                else [()] * k
-            )
-        for cell in cells:
-            chunk.append((tuple(key), tuple(cell)))
-            if len(chunk) >= chunk_rows:
-                yield chunk
-                chunk = []
-    if chunk:
+  chunk_rows = max(1, int(chunk_rows))
+  chunk: list[tuple[tuple, tuple]] = []
+  for key in keys:
+    cells: list[tuple]
+    if draws is not None:
+      draw = draws.get(tuple(key))
+      if draw is None:
+        continue
+      cells = list(draw.cells)
+    else:
+      rng = random.Random(derive_key_seed(run_id, tuple(key)))
+      k = plan.histogram.sample(rng)
+      if k <= 0:
+        continue
+      cells = (
+          plan.cells.draw(k, rng, exact=plan.exact_cells)
+          if plan.cells is not None else [()] * k)
+    for cell in cells:
+      chunk.append((tuple(key), tuple(cell)))
+      if len(chunk) >= chunk_rows:
         yield chunk
+        chunk = []
+  if chunk:
+    yield chunk

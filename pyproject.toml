@@ -50,6 +50,10 @@ dev = [
     # figure scripts (scripts/doc/, scripts/release/) — relied on an ad-hoc
     # local install until now; CI needs it declared.
     "matplotlib>=3.9",
+    # Style gate shared with the Dataflow Solution Guides: yapf
+    # `--style yapf` formats, pylint with the vendored dsg/pylintrc lints.
+    "yapf==0.43.0",
+    "pylint>=4.0,<5.0",
 ]
 
 [tool.ruff]
@@ -58,7 +62,9 @@ target-version = "py311"
 extend-exclude = ["packages/sdfb-tests/fixtures"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "N", "RUF", "SIM", "PL"]
+# No "I": yapf owns import wrapping and pylint (dsg/pylintrc) owns import
+# order; ruff's isort re-wraps what yapf formats and the two never converge.
+select = ["E", "F", "B", "UP", "N", "RUF", "SIM", "PL"]
 # PLC0415: deferred (function-level) imports are an architectural pattern here —
 # sdfb-core stays import-light and engines/handlers defer heavy/optional deps
 # (faiss, sdgx, torch, vllm, mlx) so the package imports without them.
@@ -69,6 +75,12 @@ ignore = ["E501", "PLR0913", "PLC0415"]
 # N806: `Record = derive_record_model(...)` binds a dynamically derived class —
 # PascalCase is the correct name for a class object, even in a local.
 "**/tests/**" = ["PLR2004", "N806"]
+
+[tool.yapf]
+based_on_style = "yapf"
+
+[tool.yapfignore]
+ignore_patterns = [".venv/**", "packages/sdfb-tests/fixtures/**"]
 
 [tool.mypy]
 python_version = "3.11"

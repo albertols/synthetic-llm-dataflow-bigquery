@@ -30,31 +30,31 @@ DEFAULT_RELATIONSHIPS_URI = "config/relationships"
 
 
 def _patterns(uri: str) -> list[str]:
-    """A file URI matches itself; anything else is treated as a folder.
+  """A file URI matches itself; anything else is treated as a folder.
 
     One level, no recursion: Beam's ``*`` does not cross ``/``, so
     ``gs://bucket/models`` finds ``gs://bucket/models/retail.yaml`` and
     NOT ``gs://bucket/models/legacy/retail.yaml``.
     """
-    if uri.endswith(_SUFFIXES):
-        return [uri]
-    base = uri.rstrip("/")
-    return [f"{base}/*{suffix}" for suffix in _SUFFIXES]
+  if uri.endswith(_SUFFIXES):
+    return [uri]
+  base = uri.rstrip("/")
+  return [f"{base}/*{suffix}" for suffix in _SUFFIXES]
 
 
 def is_sample_model(path: str) -> bool:
-    """True for a documentation sample (`example_*.yaml`, `*.example.yaml`).
+  """True for a documentation sample (`example_*.yaml`, `*.example.yaml`).
 
     Public because the two places that walk a relationships directory —
     this loader's directory scan and `scripts/relationships/card.py`'s
     local-path scan — must agree on exactly which files are samples.
     """
-    name = path.rsplit("/", 1)[-1]
-    return name.startswith("example_") or ".example." in name
+  name = path.rsplit("/", 1)[-1]
+  return name.startswith("example_") or ".example." in name
 
 
 def load_relationship_registry(uri: str) -> RelationshipRegistry:
-    """Every model file under ``uri``, validated into one registry.
+  """Every model file under ``uri``, validated into one registry.
 
     Three outcomes, and the difference matters more than the code:
 
@@ -66,84 +66,78 @@ def load_relationship_registry(uri: str) -> RelationshipRegistry:
       would generate every table alone and lose the whole model, which
       looks like a successful run.
     """
-    if not uri:
-        return RelationshipRegistry()
-    patterns = _patterns(uri)
-    paths: list[str] = []
-    for pattern in patterns:
-        try:
-            for match in FileSystems.match([pattern]):
-                paths.extend(
-                    metadata.path for metadata in match.metadata_list
-                )
-        except Exception as exc:
-            # A missing bucket, a denied read, a bad scheme. Never
-            # swallowed: this is the first thing a gs:// override gets
-            # wrong, and it must not read as "no relationships".
-            raise RelationshipError(
-                f"{uri}: could not be listed ({type(exc).__name__}: "
-                f"{exc}). Checked {patterns}. Fix the URI, or grant the "
-                f"launcher's service account storage.objects.list/get on "
-                f"the bucket."
-            ) from exc
-    # Documentation samples (`example_*.yaml`, `*.example.yaml`) live next
-    # to real models in the packaged directory and use the same anonymised
-    # aliases; a directory scan skips them (launch …-5531344118137403488
-    # died on "A_TABLE declared in 2 models"). A URI that names a sample
-    # file directly still loads it.
-    direct = uri.rstrip("/").endswith((".yaml", ".yml"))
-    skipped = (
-        [] if direct else [p for p in sorted(set(paths)) if is_sample_model(p)]
-    )
-    if skipped:
-        log_milestone(
-            "relationships_example_skipped",
-            uri=uri,
-            files=",".join(p.rsplit("/", 1)[-1] for p in skipped),
-            note="documentation samples are never loaded from a directory "
-            "scan; name the file directly to load one",
-        )
-    sources: list[tuple[str, str]] = []
-    for path in sorted(set(paths) - set(skipped)):
-        try:
-            with FileSystems.open(path) as handle:
-                sources.append((path, handle.read().decode("utf-8")))
-        except Exception as exc:
-            raise RelationshipError(
-                f"{path}: could not be read ({type(exc).__name__}: {exc}) — "
-                f"refusing to launch with a partially-loaded relational "
-                f"model"
-            ) from exc
-    if not sources:
-        if uri.rstrip("/") != DEFAULT_RELATIONSHIPS_URI.rstrip("/"):
-            raise RelationshipError(
-                f"{uri}: no model files there. Checked {patterns}. A "
-                f"relationships URI you pass explicitly must hold at "
-                f"least one .yaml/.yml model — refusing to generate every "
-                f"table in isolation as if none were declared. (Pass "
-                f"--relationships_uri='' to turn relationships off on "
-                f"purpose; note that the match is ONE level deep and the "
-                f"files must end in .yaml or .yml.)"
-            )
-        log_milestone(
-            "relationships_absent",
-            uri=uri,
-            note="no model files in the packaged default location — "
-            "every table generates in isolation with PK/identity from "
-            "the CLI flags",
-        )
-        return RelationshipRegistry()
-    registry = RelationshipRegistry.from_sources(sources)
+  if not uri:
+    return RelationshipRegistry()
+  patterns = _patterns(uri)
+  paths: list[str] = []
+  for pattern in patterns:
+    try:
+      for match in FileSystems.match([pattern]):
+        paths.extend(metadata.path for metadata in match.metadata_list)
+    except Exception as exc:
+      # A missing bucket, a denied read, a bad scheme. Never
+      # swallowed: this is the first thing a gs:// override gets
+      # wrong, and it must not read as "no relationships".
+      raise RelationshipError(
+          f"{uri}: could not be listed ({type(exc).__name__}: "
+          f"{exc}). Checked {patterns}. Fix the URI, or grant the "
+          f"launcher's service account storage.objects.list/get on "
+          f"the bucket.") from exc
+  # Documentation samples (`example_*.yaml`, `*.example.yaml`) live next
+  # to real models in the packaged directory and use the same anonymised
+  # aliases; a directory scan skips them (launch …-5531344118137403488
+  # died on "A_TABLE declared in 2 models"). A URI that names a sample
+  # file directly still loads it.
+  direct = uri.rstrip("/").endswith((".yaml", ".yml"))
+  skipped = ([] if direct else
+             [p for p in sorted(set(paths)) if is_sample_model(p)])
+  if skipped:
     log_milestone(
-        "relationships_loaded",
+        "relationships_example_skipped",
         uri=uri,
-        files=len(sources),
-        models=",".join(m.model for m in registry.models),
-        tables=sum(len(m.tables) for m in registry.models),
-        sha=registry.sha12(),
-        level=logging.INFO,
+        files=",".join(p.rsplit("/", 1)[-1] for p in skipped),
+        note="documentation samples are never loaded from a directory "
+        "scan; name the file directly to load one",
     )
-    return registry
+  sources: list[tuple[str, str]] = []
+  for path in sorted(set(paths) - set(skipped)):
+    try:
+      with FileSystems.open(path) as handle:
+        sources.append((path, handle.read().decode("utf-8")))
+    except Exception as exc:
+      raise RelationshipError(
+          f"{path}: could not be read ({type(exc).__name__}: {exc}) — "
+          f"refusing to launch with a partially-loaded relational "
+          f"model") from exc
+  if not sources:
+    if uri.rstrip("/") != DEFAULT_RELATIONSHIPS_URI.rstrip("/"):
+      raise RelationshipError(
+          f"{uri}: no model files there. Checked {patterns}. A "
+          f"relationships URI you pass explicitly must hold at "
+          f"least one .yaml/.yml model — refusing to generate every "
+          f"table in isolation as if none were declared. (Pass "
+          f"--relationships_uri='' to turn relationships off on "
+          f"purpose; note that the match is ONE level deep and the "
+          f"files must end in .yaml or .yml.)")
+    log_milestone(
+        "relationships_absent",
+        uri=uri,
+        note="no model files in the packaged default location — "
+        "every table generates in isolation with PK/identity from "
+        "the CLI flags",
+    )
+    return RelationshipRegistry()
+  registry = RelationshipRegistry.from_sources(sources)
+  log_milestone(
+      "relationships_loaded",
+      uri=uri,
+      files=len(sources),
+      models=",".join(m.model for m in registry.models),
+      tables=sum(len(m.tables) for m in registry.models),
+      sha=registry.sha12(),
+      level=logging.INFO,
+  )
+  return registry
 
 
 __all__ = [

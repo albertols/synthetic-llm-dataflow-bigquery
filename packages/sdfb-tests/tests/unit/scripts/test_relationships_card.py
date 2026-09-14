@@ -29,43 +29,42 @@ _EXAMPLE = "model: example_x\ntables:\n  A_TABLE:\n    pk: [A_COL_001]\n"
 
 
 def _write(tmp_path: Path, name: str, text: str) -> Path:
-    path = tmp_path / name
-    path.write_text(text)
-    return path
+  path = tmp_path / name
+  path.write_text(text)
+  return path
 
 
 def test_a_directory_scan_skips_committed_samples(tmp_path, capsys):
-    _write(tmp_path, "example_x.yaml", _EXAMPLE)
-    _write(tmp_path, "real.yaml", _REAL)
+  _write(tmp_path, "example_x.yaml", _EXAMPLE)
+  _write(tmp_path, "real.yaml", _REAL)
 
-    rc = card.main(["--relationships-uri", str(tmp_path), "--all"])
+  rc = card.main(["--relationships-uri", str(tmp_path), "--all"])
 
-    assert rc == 0
-    out = capsys.readouterr()
-    assert "real" in out.out
-    assert "example_x" not in out.out
-    assert "skipping sample model" in out.err
-    assert "example_x.yaml" in out.err
+  assert rc == 0
+  out = capsys.readouterr()
+  assert "real" in out.out
+  assert "example_x" not in out.out
+  assert "skipping sample model" in out.err
+  assert "example_x.yaml" in out.err
 
 
 def test_a_sample_named_directly_still_renders(tmp_path, capsys):
-    path = _write(tmp_path, "example_x.yaml", _EXAMPLE)
+  path = _write(tmp_path, "example_x.yaml", _EXAMPLE)
 
-    rc = card.main(["--relationships-uri", str(path), "--all"])
+  rc = card.main(["--relationships-uri", str(path), "--all"])
 
-    assert rc == 0
-    out = capsys.readouterr()
-    assert "example_x" in out.out
+  assert rc == 0
+  out = capsys.readouterr()
+  assert "example_x" in out.out
 
 
 def test_a_directory_with_only_samples_says_so_instead_of_crashing(
-    tmp_path, capsys
-):
-    _write(tmp_path, "example_x.yaml", _EXAMPLE)
+    tmp_path, capsys):
+  _write(tmp_path, "example_x.yaml", _EXAMPLE)
 
-    rc = card.main(["--relationships-uri", str(tmp_path), "--all"])
+  rc = card.main(["--relationships-uri", str(tmp_path), "--all"])
 
-    assert rc == 0
-    out = capsys.readouterr()
-    assert "no model files under" in out.out
-    assert "skipping sample model" in out.err
+  assert rc == 0
+  out = capsys.readouterr()
+  assert "no model files under" in out.out
+  assert "skipping sample model" in out.err

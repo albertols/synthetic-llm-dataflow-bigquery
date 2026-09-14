@@ -14,53 +14,52 @@ import json
 
 
 class DescriptionJsonError(ValueError):
-    """A description contains a marked-but-unparseable JSON object."""
+  """A description contains a marked-but-unparseable JSON object."""
 
 
 def _candidates(text: str):
-    """Yield brace-balanced ``{...}`` slices, ignoring braces inside strings."""
-    depth, start, in_str, esc = 0, -1, False, False
-    for i, ch in enumerate(text):
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}" and depth:
-            depth -= 1
-            if depth == 0:
-                yield text[start : i + 1]
+  """Yield brace-balanced ``{...}`` slices, ignoring braces inside strings."""
+  depth, start, in_str, esc = 0, -1, False, False
+  for i, ch in enumerate(text):
+    if in_str:
+      if esc:
+        esc = False
+      elif ch == "\\":
+        esc = True
+      elif ch == '"':
+        in_str = False
+      continue
+    if ch == '"':
+      in_str = True
+    elif ch == "{":
+      if depth == 0:
+        start = i
+      depth += 1
+    elif ch == "}" and depth:
+      depth -= 1
+      if depth == 0:
+        yield text[start:i + 1]
 
 
 def extract_embedded_json(text: str | None, marker_key: str) -> dict | None:
-    """First embedded JSON object of ``text`` carrying ``marker_key``.
+  """First embedded JSON object of ``text`` carrying ``marker_key``.
 
     Returns None when no balanced object mentions the marker; raises
     :class:`DescriptionJsonError` when one mentions it but does not parse.
     An object that parses without the marker as a KEY is not a match.
     """
-    for cand in _candidates(text or ""):
-        if f'"{marker_key}"' not in cand:
-            continue
-        try:
-            obj = json.loads(cand)
-        except json.JSONDecodeError as exc:
-            raise DescriptionJsonError(
-                f"description contains a {marker_key!r}-marked JSON object "
-                f"that does not parse: {exc}"
-            ) from exc
-        if isinstance(obj, dict) and marker_key in obj:
-            return obj
-    return None
+  for cand in _candidates(text or ""):
+    if f'"{marker_key}"' not in cand:
+      continue
+    try:
+      obj = json.loads(cand)
+    except json.JSONDecodeError as exc:
+      raise DescriptionJsonError(
+          f"description contains a {marker_key!r}-marked JSON object "
+          f"that does not parse: {exc}") from exc
+    if isinstance(obj, dict) and marker_key in obj:
+      return obj
+  return None
 
 
 __all__ = ["DescriptionJsonError", "extract_embedded_json"]

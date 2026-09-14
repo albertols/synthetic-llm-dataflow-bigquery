@@ -13,15 +13,14 @@ import hashlib
 
 
 def derive_batch_seed(run_id: str, batch_id: int) -> int:
-    """Stable, collision-resistant seed from (run_id, batch_id), in [0, 2^63)."""
-    digest = hashlib.blake2b(
-        f"{run_id}\x1f{batch_id}".encode(), digest_size=8
-    ).digest()
-    return int.from_bytes(digest, "big") >> 1
+  """Stable, collision-resistant seed from (run_id, batch_id), in [0, 2^63)."""
+  digest = hashlib.blake2b(
+      f"{run_id}\x1f{batch_id}".encode(), digest_size=8).digest()
+  return int.from_bytes(digest, "big") >> 1
 
 
 def derive_key_seed(run_id: str, key: tuple, salt: str = "") -> int:
-    """Stable seed for one parent key's children (design 2026-09-10):
+  """Stable seed for one parent key's children (design 2026-09-10):
     the same parent yields the same children on a re-run of ``run_id``
     and on a retried bundle. ``repr`` keeps mixed-type tuples total.
 
@@ -31,8 +30,8 @@ def derive_key_seed(run_id: str, key: tuple, salt: str = "") -> int:
     every seed derived before ``salt`` existed byte-identical: an empty
     salt hashes exactly the pre-``salt`` payload, no separator added.
     """
-    payload = f"{run_id}\x1f{key!r}"
-    if salt:
-        payload = f"{payload}\x1f{salt}"
-    digest = hashlib.blake2b(payload.encode(), digest_size=8).digest()
-    return int.from_bytes(digest, "big") >> 1
+  payload = f"{run_id}\x1f{key!r}"
+  if salt:
+    payload = f"{payload}\x1f{salt}"
+  digest = hashlib.blake2b(payload.encode(), digest_size=8).digest()
+  return int.from_bytes(digest, "big") >> 1

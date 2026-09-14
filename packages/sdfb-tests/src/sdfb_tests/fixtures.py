@@ -19,12 +19,12 @@ FIXTURES_ROOT: Path = Path(__file__).resolve().parent.parent.parent / "fixtures"
 
 
 def load_ddl(name: str) -> TableSchema:
-    """Load `fixtures/ddl/{name}_ddl.json` and parse it into a `TableSchema`."""
-    path = FIXTURES_ROOT / "ddl" / f"{name}_ddl.json"
-    return TableSchema.model_validate(json.loads(path.read_text()))
+  """Load `fixtures/ddl/{name}_ddl.json` and parse it into a `TableSchema`."""
+  path = FIXTURES_ROOT / "ddl" / f"{name}_ddl.json"
+  return TableSchema.model_validate(json.loads(path.read_text()))
 
 
 def load_reference(name: str) -> list[dict]:
-    """Load `fixtures/reference/{name}_reference.json` as a list of dicts."""
-    path = FIXTURES_ROOT / "reference" / f"{name}_reference.json"
-    return json.loads(path.read_text())
+  """Load `fixtures/reference/{name}_reference.json` as a list of dicts."""
+  path = FIXTURES_ROOT / "reference" / f"{name}_reference.json"
+  return json.loads(path.read_text())

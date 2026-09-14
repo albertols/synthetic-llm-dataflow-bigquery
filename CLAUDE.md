@@ -27,10 +27,18 @@ Mark M4-only tests with `@pytest.mark.gpu` or `@pytest.mark.gcp`. The default `p
 
 ```bash
 uv sync --group dev
-uv run pytest -m "not gpu and not gcp" -q   # expect all green (1754 tests at v0.3.0)
+uv run pytest -m "not gpu and not gcp" -q   # expect all green
 uv run ruff check .
 uv run mypy packages/sdfb-core/src          # hard CI gate — expect 0 errors
+uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg   # expect no output
+uv run pylint --rcfile dsg/pylintrc packages scripts composer public_cloud      # expect 10.00/10
+uv run python scripts/dsg/precheck.py       # sensitive-content gate — expect 0 findings
 ```
+
+Python is **Google style, 2-space indent** (yapf `--style yapf`, pylint with
+`dsg/pylintrc`, the Dataflow Solution Guides' config). Format with
+`uv run yapf -i -r --style yapf <paths>`; add a pylint pragma only for an
+intentional pattern, on the reported line, with a reason.
 
 Full machine setup: [`docs/M4_SETUP.md`](docs/M4_SETUP.md).
 

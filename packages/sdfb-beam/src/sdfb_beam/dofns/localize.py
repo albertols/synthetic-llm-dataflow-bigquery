@@ -27,23 +27,23 @@ EMBEDDER_LOCAL_DIR = "/local-ssd/embedder"
 
 
 def localize_embedder(ctx):
-    """Return a ctx whose ``embedder_uri`` is a worker-local path.
+  """Return a ctx whose ``embedder_uri`` is a worker-local path.
 
     A gs:// URI is warm-pulled to ``EMBEDDER_LOCAL_DIR`` (idempotent —
     ``localize_gcs_prefix`` marker-skips a completed pull) and the ctx is
     rewritten via ``model_copy``. Anything else (local path, empty string ⇒
     HashingEmbedder default) passes through unchanged.
     """
-    if not ctx.embedder_uri.startswith("gs://"):
-        return ctx
-    log_milestone("embedder_pull_start", uri=ctx.embedder_uri)
-    t_pull = time.monotonic()
-    local_dir = localize_gcs_prefix(ctx.embedder_uri, EMBEDDER_LOCAL_DIR)
-    log_milestone(
-        "embedder_pull_done",
-        seconds=round(time.monotonic() - t_pull, 1),
-    )
-    return ctx.model_copy(update={"embedder_uri": local_dir})
+  if not ctx.embedder_uri.startswith("gs://"):
+    return ctx
+  log_milestone("embedder_pull_start", uri=ctx.embedder_uri)
+  t_pull = time.monotonic()
+  local_dir = localize_gcs_prefix(ctx.embedder_uri, EMBEDDER_LOCAL_DIR)
+  log_milestone(
+      "embedder_pull_done",
+      seconds=round(time.monotonic() - t_pull, 1),
+  )
+  return ctx.model_copy(update={"embedder_uri": local_dir})
 
 
 __all__ = ["EMBEDDER_LOCAL_DIR", "localize_embedder"]

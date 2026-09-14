@@ -10,4 +10,6 @@ from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.io.local_sinks import WriteToJsonLines
 
-__all__ = ["WriteToJsonLines", "compute_reference_digest", "load_reference_rows"]
+__all__ = [
+    "WriteToJsonLines", "compute_reference_digest", "load_reference_rows"
+]
