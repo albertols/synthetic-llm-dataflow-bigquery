@@ -12,19 +12,24 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 🔧 Changed
 
-- DSG sync commits carry only the maintainer's git identity: `scripts/dsg/sync.py` no longer accepts `--trailer`, and the `dsg-sync` skill says so and discards the dry-run state before publishing.
-- Every DSG sync uses one branch, `sync/synthetic-llm-dataflow-bigquery`, so a re-sync updates the open DSG PR instead of opening another.
-
 ### ⚡ Performance
 
 ### 🐛 Fixed
-
-- `scripts/dsg/sync.py` commit no longer fails when an owned path does not exist in the DSG checkout.
 
 ### 🗑️ Removed
 
 ### 📗 Docs
 
+## [v0.4.1] — 2026-09-14
+
+### 🔧 Changed
+- DSG sync commits carry only the maintainer's git identity: `scripts/dsg/sync.py` no longer accepts `--trailer`, and the `dsg-sync` skill says so and discards the dry-run state before publishing.
+- Every DSG sync uses one branch, `sync/synthetic-llm-dataflow-bigquery`, so a re-sync updates the open DSG PR instead of opening another.
+
+### 🐛 Fixed
+- `scripts/dsg/sync.py` commit no longer fails when an owned path does not exist in the DSG checkout.
+
+### 📗 Docs
 - README status and "Measured on Dataflow" sections rewritten for the current state: the five-table relational launch `2026-09-13_06_10_16-12600311608685394436` succeeded on every table. ADR 0036's status now records that acceptance.
 
 ## [v0.4.0] — 2026-09-14
