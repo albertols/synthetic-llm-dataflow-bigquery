@@ -101,6 +101,7 @@ M1 is complete end to end, laptop and Dataflow. The work since has been relation
 - **How to validate a run after it lands** (duplication/memorization/schema defects traced to code + Dataflow observability) → [`.github/prompts/end_to_end_validation_report_generation.prompt.md`](.github/prompts/end_to_end_validation_report_generation.prompt.md).
 - **Did PK/FK enforcement actually happen on a relational job** (registry-derived contract, launch milestones, read-only `bq` PK-duplicate / orphan / fan-out queries cross-checked against `validation_runs`) → [`.github/prompts/e2e_fk_pk_validator.prompt.md`](.github/prompts/e2e_fk_pk_validator.prompt.md).
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
+- **What changed in a release, and where to write it** (the `[Unreleased]` block the release Action promotes into the tag's GitHub Release) → [`CHANGELOG.md`](CHANGELOG.md).
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Cross-session preferences and project context** → `~/.claude/projects/.../memory/MEMORY.md`.
 - **Personal-GCP E2E runs (T4, cost-capped)** → [`public_cloud/deploy/gcp/README.md`](public_cloud/deploy/gcp/README.md).

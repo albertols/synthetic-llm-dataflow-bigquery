@@ -6,6 +6,12 @@ name: Release tag + report
 # redacted before/after release report from committed evidence bundles in
 # docs/releases/<version>/evidence/ (legacy integration_test/ for old tags;
 # NO GCP access), and commits docs/releases/<version>/.
+#
+# It also publishes the GitHub Release for the tag: CHANGELOG.md's
+# [Unreleased] block is promoted to a dated section (committed in the same
+# [release-report] commit) and that exact text becomes the release body, so
+# the file and the releases page cannot drift. An empty block falls back to
+# the commit subjects — a release is never published noteless.
 
 on:
   push:
@@ -56,12 +62,24 @@ jobs:
             ${PREV:+--base-ref "$PREV"} \
             --head-ref "${{ github.sha }}" \
             --out-dir docs/releases
+      - name: Build release notes
+        if: steps.ver.outputs.skip != 'true'
+        run: |
+          PREV="${{ steps.ver.outputs.prev }}"
+          uv run --no-sync python3 scripts/release/make_release_notes.py \
+            --version "${{ steps.ver.outputs.version }}" \
+            --date "$(date -u +%Y-%m-%d)" \
+            ${PREV:+--prev "$PREV"} \
+            --changelog CHANGELOG.md \
+            --head-ref "${{ github.sha }}" \
+            --repo "${{ github.repository }}" \
+            --out "$RUNNER_TEMP/release_notes.md"
       - name: Tag, commit report, push
         if: steps.ver.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/releases
+          git add docs/releases CHANGELOG.md
           # Check if tag already exists (re-run safety)
           if git rev-parse -q --verify "refs/tags/${{ steps.ver.outputs.version }}" >/dev/null; then
             echo "tag already exists; nothing to do"
@@ -83,3 +101,17 @@ jobs:
             git tag -f "${{ steps.ver.outputs.version }}"
           done
           [ -n "$pushed" ] || { echo "push failed after 3 attempts" >&2; exit 1; }
+      - name: Publish GitHub Release
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          NOTES="$RUNNER_TEMP/release_notes.md"
+          # Re-run safety: the tag step above exits 0 on an existing tag, so
+          # this must update an already-published release rather than fail.
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release edit "$VERSION" --notes-file "$NOTES" --latest
+          else
+            gh release create "$VERSION" --title "$VERSION" --notes-file "$NOTES" --latest --verify-tag
+          fi
