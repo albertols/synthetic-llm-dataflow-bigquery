@@ -9,8 +9,6 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ## [Unreleased]
 
 ### 🚀 Added
-- **Every tag gets published release notes, from this file.** The release Action promotes the `[Unreleased]` block to a dated section and publishes that exact text as the tag's GitHub Release, so the changelog and the releases page cannot drift. Repo-relative links are pinned at the tag when published; a block nobody filled in falls back to the commit subjects, so a release is never published noteless ([`scripts/release/make_release_notes.py`](scripts/release/make_release_notes.py)).
-- README badge row: CI, latest release, licence, Python version, Apache Beam / Dataflow, self-hosted vLLM, Beam Summit 2025.
 
 ### 🔧 Changed
 
@@ -19,6 +17,14 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🐛 Fixed
 
 ### 🗑️ Removed
+
+### 📗 Docs
+
+## [v0.3.1] — 2026-09-14
+
+### 🚀 Added
+- **Every tag gets published release notes, from this file.** The release Action promotes the `[Unreleased]` block to a dated section and publishes that exact text as the tag's GitHub Release, so the changelog and the releases page cannot drift. Repo-relative links are pinned at the tag when published; a block nobody filled in falls back to the commit subjects, so a release is never published noteless ([`scripts/release/make_release_notes.py`](scripts/release/make_release_notes.py)).
+- README badge row: CI, latest release, licence, Python version, Apache Beam / Dataflow, self-hosted vLLM, Beam Summit 2025.
 
 ### 📗 Docs
 - Curated notes backfilled for v0.1.0 … v0.3.0, which previously showed as bare tags.
