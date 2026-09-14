@@ -31,7 +31,7 @@ uv run pytest -m "not gpu and not gcp" -q   # expect all green
 uv run ruff check .
 uv run mypy packages/sdfb-core/src          # hard CI gate — expect 0 errors
 uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg   # expect no output
-uv run pylint --rcfile dsg/pylintrc packages scripts composer public_cloud      # expect 10.00/10
+uv run pylint --rcfile dsg/pylintrc packages scripts composer public_cloud dsg  # expect 10.00/10
 uv run python scripts/dsg/precheck.py       # sensitive-content gate — expect 0 findings
 ```
 
@@ -112,6 +112,7 @@ M1 is complete end to end, laptop and Dataflow. The work since has been relation
 - **What changed in a release, and where to write it** (the `[Unreleased]` block the release Action promotes into the tag's GitHub Release) → [`CHANGELOG.md`](CHANGELOG.md).
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Personal-GCP E2E runs (T4, cost-capped)** → [`public_cloud/deploy/gcp/README.md`](public_cloud/deploy/gcp/README.md).
+- **Syncing a release into the Dataflow Solution Guides** (this repo is the golden source; the DSG copy is generated, never hand-edited) → `/dsg-sync <tag>` · skill [`.claude/skills/dsg-sync/SKILL.md`](.claude/skills/dsg-sync/SKILL.md) · [ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md). DSG-only files live in `dsg/`.
 
 ## Documentation convention — visual first
 

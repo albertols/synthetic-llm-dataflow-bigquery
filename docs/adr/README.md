@@ -72,3 +72,4 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0037 — Multi-parent children: independent and conditional edges give every declared FK edge a role and a DAG path (amends 0036)](0037-multi-parent-children.md)
 - [0038 — The source is the authority: a MEASURED model conflict adjusts the effective model and announces it; a self-contradiction still stops (`--on_model_conflict`; amends 0036/0037)](0038-measured-conflicts-adjust-the-model.md)
 - [0039 — A launch projects its record counts, per table and in total, before the graph is built; four measured warnings say where that projection is unsound (extends 0036/0038)](0039-row-projection-before-the-graph.md)
+- [0040 — Donated to the Dataflow Solution Guides; this repository stays the golden source (manifest-driven `/dsg-sync`, shared style and sensitive-content gates)](0040-dsg-donation-golden-source-sync.md)
