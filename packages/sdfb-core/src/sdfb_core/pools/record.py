@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class FreeTextPool:
-    """A pool identified by (reference_digest, model_uri, column, target).
+  """A pool identified by (reference_digest, model_uri, column, target).
 
     Keyed on ``model_uri`` — NOT an embedder identity — because these values
     were produced by that LLM; a different model yields a different pool for
@@ -19,13 +19,13 @@ class FreeTextPool:
     re-proving that a column stagnates below its target.
     """
 
-    reference_digest: str
-    model_uri: str
-    column: str
-    target: int
-    values: tuple[str, ...]
-    stagnated: bool = False
-    attempts: int = 0
+  reference_digest: str
+  model_uri: str
+  column: str
+  target: int
+  values: tuple[str, ...]
+  stagnated: bool = False
+  attempts: int = 0
 
 
 __all__ = ["FreeTextPool"]

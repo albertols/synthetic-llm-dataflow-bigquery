@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class GeneratedRecord(BaseModel):
-    """Marker base for all dynamically-derived synthetic record models.
+  """Marker base for all dynamically-derived synthetic record models.
 
     Subclasses are created via `pydantic.create_model` at runtime, one per
     target BigQuery table. They inherit configuration defaults from this
@@ -26,8 +26,8 @@ class GeneratedRecord(BaseModel):
         those parsed transparently.
     """
 
-    model_config = ConfigDict(
-        extra="forbid",
-        validate_assignment=True,
-        frozen=False,
-    )
+  model_config = ConfigDict(
+      extra="forbid",
+      validate_assignment=True,
+      frozen=False,
+  )

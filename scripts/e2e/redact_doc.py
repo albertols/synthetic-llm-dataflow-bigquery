@@ -33,44 +33,44 @@ import redaction  # sibling import; path must be set up first
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "--mapping",
-        type=Path,
-        required=True,
-        help="the bundle's real/mapping.json (Mapping.to_dict output)",
-    )
-    ap.add_argument(
-        "--in",
-        dest="in_path",
-        type=Path,
-        required=True,
-        help="markdown artifact to redact (left untouched)",
-    )
-    ap.add_argument(
-        "--out",
-        type=Path,
-        required=True,
-        help="redacted twin destination (parents created)",
-    )
-    args = ap.parse_args(argv)
+  ap = argparse.ArgumentParser(description=__doc__)
+  ap.add_argument(
+      "--mapping",
+      type=Path,
+      required=True,
+      help="the bundle's real/mapping.json (Mapping.to_dict output)",
+  )
+  ap.add_argument(
+      "--in",
+      dest="in_path",
+      type=Path,
+      required=True,
+      help="markdown artifact to redact (left untouched)",
+  )
+  ap.add_argument(
+      "--out",
+      type=Path,
+      required=True,
+      help="redacted twin destination (parents created)",
+  )
+  args = ap.parse_args(argv)
 
-    mapping = redaction.mapping_from_dict(json.loads(args.mapping.read_text()))
-    redacted = mapping.redact_text(args.in_path.read_text())
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(redacted)
-    print(f"redacted doc → {args.out}")
+  mapping = redaction.mapping_from_dict(json.loads(args.mapping.read_text()))
+  redacted = mapping.redact_text(args.in_path.read_text())
+  args.out.parent.mkdir(parents=True, exist_ok=True)
+  args.out.write_text(redacted)
+  print(f"redacted doc → {args.out}")
 
-    reals = list(mapping.identifiers) + list(mapping.columns)
-    hits = [real for real in reals if real and real in redacted]
-    if hits:
-        print("WARNING: possible residual tokens:")
-        for tok in hits:
-            print(f"  {tok!r}")
-        return 1
-    print("leak scan: clean ✅")
-    return 0
+  reals = list(mapping.identifiers) + list(mapping.columns)
+  hits = [real for real in reals if real and real in redacted]
+  if hits:
+    print("WARNING: possible residual tokens:")
+    for tok in hits:
+      print(f"  {tok!r}")
+    return 1
+  print("leak scan: clean ✅")
+  return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+  raise SystemExit(main())

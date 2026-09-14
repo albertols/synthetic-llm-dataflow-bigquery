@@ -25,71 +25,71 @@ from sdfb_core.validation.thresholds import Thresholds
 
 # rule_ids whose failures count toward the BLOCKER gate. Mirrors the
 # BLOCKER-severity rows in config/thresholds.yml.
-BLOCKER_RULE_IDS = frozenset(
-    {
-        "schema.types",
-        "null.required",
-        "pk.duplicate",
-        "row.duplicate",
-        "identity.unique",
-        # An engine crash (incl. strict_freetext re-raise reaching the DoFn)
-        # loses the whole batch — that must count toward the gate, not PASS
-        # with fewer rows. The pipeline layer (`sdfb_beam.pipeline._dlq_rule_weight`)
-        # weights each `engine_failure` DLQ envelope by its lost batch size
-        # (not 1-per-envelope like every other rule) before it ever reaches
-        # `dlq_by_rule` here, so "loses the whole batch" is arithmetically
-        # true by the time this function sees the counts.
-        "engine_failure",
-    }
-)
+BLOCKER_RULE_IDS = frozenset({
+    "schema.types",
+    "null.required",
+    "pk.duplicate",
+    "row.duplicate",
+    "identity.unique",
+    # An engine crash (incl. strict_freetext re-raise reaching the DoFn)
+    # loses the whole batch — that must count toward the gate, not PASS
+    # with fewer rows. The pipeline layer (`sdfb_beam.pipeline._dlq_rule_weight`)
+    # weights each `engine_failure` DLQ envelope by its lost batch size
+    # (not 1-per-envelope like every other rule) before it ever reaches
+    # `dlq_by_rule` here, so "loses the whole batch" is arithmetically
+    # true by the time this function sees the counts.
+    "engine_failure",
+})
 
 STATUS_PASSED = "PASSED"
 STATUS_FAILED_BLOCKER = "FAILED_BLOCKER"
 
 
-class BlockerThresholdExceeded(RuntimeError):  # noqa: N818 — name fixed by validation-mode-a skill
-    """Raised to FAIL the Dataflow job when the BLOCKER gate trips."""
+class BlockerThresholdExceeded(
+    RuntimeError):  # noqa: N818 — name fixed by validation-mode-a skill
+  """Raised to FAIL the Dataflow job when the BLOCKER gate trips."""
 
 
 class RunSummary(BaseModel):
-    """One row of ``synthetic_data_quality.validation_runs``."""
+  """One row of ``synthetic_data_quality.validation_runs``."""
 
-    run_id: str
-    reference_digest: str
-    reference_table: str = ""
-    landing_table: str = ""
-    engine: str = ""
-    model_uri: str = ""
-    env: str = "dev"
-    num_rows_requested: int = 0
-    valid_count: int = 0
-    dlq_count: int = 0
-    blocker_count: int = 0
-    dlq_by_rule: dict[str, int] = Field(default_factory=dict)
-    blocker_failure_ratio: float = 0.0
-    observed_blocker_ratio: float = 0.0
-    status: str = STATUS_PASSED
-    created_at: str = ""
-    # ADR 0038 — rule_ids left OUT of `blocker_count` for this table, as
-    # a comma-separated list. `pk.duplicate` lands here when the launch
-    # ADJUSTED this table's model (the duplicates are the point). Named
-    # in the row rather than hidden, so a PASSED summary always says what
-    # it did not weigh.
-    excluded_blocker_rules: str = ""
-    # ADR 0038 — the proof the adjusted copy is faithful: the SOURCE
-    # key-repeat share (measured at launch off the fan-out histogram)
-    # beside the one the landing table actually reached, and the verdict.
-    source_repeat_share: float | None = None
-    landing_repeat_share: float | None = None
-    repeat_share_delta: float | None = None
-    repeat_share_within_tolerance: bool | None = None
+  run_id: str
+  reference_digest: str
+  reference_table: str = ""
+  landing_table: str = ""
+  engine: str = ""
+  model_uri: str = ""
+  env: str = "dev"
+  num_rows_requested: int = 0
+  valid_count: int = 0
+  dlq_count: int = 0
+  blocker_count: int = 0
+  dlq_by_rule: dict[str, int] = Field(default_factory=dict)
+  blocker_failure_ratio: float = 0.0
+  observed_blocker_ratio: float = 0.0
+  status: str = STATUS_PASSED
+  created_at: str = ""
+  # ADR 0038 — rule_ids left OUT of `blocker_count` for this table, as
+  # a comma-separated list. `pk.duplicate` lands here when the launch
+  # ADJUSTED this table's model (the duplicates are the point). Named
+  # in the row rather than hidden, so a PASSED summary always says what
+  # it did not weigh.
+  excluded_blocker_rules: str = ""
+  # ADR 0038 — the proof the adjusted copy is faithful: the SOURCE
+  # key-repeat share (measured at launch off the fan-out histogram)
+  # beside the one the landing table actually reached, and the verdict.
+  source_repeat_share: float | None = None
+  landing_repeat_share: float | None = None
+  repeat_share_delta: float | None = None
+  repeat_share_within_tolerance: bool | None = None
 
-    def to_bq_row(self) -> dict:
-        """JSON-load-shaped row. ``dlq_by_rule`` is a JSON string so the
+  def to_bq_row(self) -> dict:
+    """JSON-load-shaped row. ``dlq_by_rule`` is a JSON string so the
         column can be a plain STRING (robust under FILE_LOADS)."""
-        row = self.model_dump()
-        row["dlq_by_rule"] = json.dumps(row["dlq_by_rule"], sort_keys=True, default=str)
-        return row
+    row = self.model_dump()
+    row["dlq_by_rule"] = json.dumps(
+        row["dlq_by_rule"], sort_keys=True, default=str)
+    return row
 
 
 def gate_total(
@@ -97,7 +97,7 @@ def gate_total(
     dlq_by_rule: Mapping[str, int],
     excluded: Collection[str] = (),
 ) -> int:
-    """The BLOCKER gate's DENOMINATOR — the rows this run actually
+  """The BLOCKER gate's DENOMINATOR — the rows this run actually
     generated, which is ``valid_count`` plus every DLQ row the gate
     still weighs.
 
@@ -115,10 +115,9 @@ def gate_total(
     summary row still REPORTS every diverted record. Only the gate's
     arithmetic narrows.
     """
-    excluded_ids = frozenset(excluded)
-    return int(valid_count) + sum(
-        c for rid, c in dlq_by_rule.items() if rid not in excluded_ids
-    )
+  excluded_ids = frozenset(excluded)
+  return int(valid_count) + sum(
+      c for rid, c in dlq_by_rule.items() if rid not in excluded_ids)
 
 
 def build_run_summary(
@@ -137,7 +136,7 @@ def build_run_summary(
     excluded_blocker_rules: Sequence[str] = (),
     source_repeat_share: float | None = None,
 ) -> RunSummary:
-    """Fold counts + thresholds into a :class:`RunSummary` with a status.
+  """Fold counts + thresholds into a :class:`RunSummary` with a status.
 
     ``excluded_blocker_rules`` (ADR 0038) drops rule_ids from the gate's
     NUMERATOR only — they stay in ``dlq_by_rule`` and ``dlq_count``, so
@@ -156,64 +155,57 @@ def build_run_summary(
     fix H4's "not comparable" case cannot occur any more, and a launch
     that measured no share writes none.
     """
-    excluded = frozenset(excluded_blocker_rules)
-    dlq_count = sum(dlq_by_rule.values())
-    blocker_count = sum(
-        c for rid, c in dlq_by_rule.items()
-        if rid in BLOCKER_RULE_IDS and rid not in excluded
-    )
-    total = gate_total(valid_count, dlq_by_rule, excluded)
-    landed = landing_repeat_share(
-        valid_count=valid_count, dlq_by_rule=dlq_by_rule
-    )
-    delta, within = repeat_share_verdict(source_repeat_share, landed)
-    observed = (blocker_count / total) if total else 0.0
-    status = (
-        STATUS_FAILED_BLOCKER
-        if observed > thresholds.blocker_failure_ratio
-        else STATUS_PASSED
-    )
-    return RunSummary(
-        run_id=run_id,
-        reference_digest=reference_digest,
-        reference_table=reference_table,
-        landing_table=landing_table,
-        engine=engine,
-        model_uri=model_uri,
-        env=thresholds.env,
-        num_rows_requested=num_rows_requested,
-        valid_count=valid_count,
-        dlq_count=dlq_count,
-        blocker_count=blocker_count,
-        dlq_by_rule=dict(dlq_by_rule),
-        blocker_failure_ratio=thresholds.blocker_failure_ratio,
-        observed_blocker_ratio=observed,
-        status=status,
-        created_at=created_at or datetime.now(tz=UTC).isoformat(),
-        excluded_blocker_rules=",".join(sorted(excluded)),
-        source_repeat_share=source_repeat_share,
-        landing_repeat_share=(
-            landed if source_repeat_share is not None else None
-        ),
-        repeat_share_delta=delta,
-        repeat_share_within_tolerance=within,
-    )
+  excluded = frozenset(excluded_blocker_rules)
+  dlq_count = sum(dlq_by_rule.values())
+  blocker_count = sum(c for rid, c in dlq_by_rule.items()
+                      if rid in BLOCKER_RULE_IDS and rid not in excluded)
+  total = gate_total(valid_count, dlq_by_rule, excluded)
+  landed = landing_repeat_share(
+      valid_count=valid_count, dlq_by_rule=dlq_by_rule)
+  delta, within = repeat_share_verdict(source_repeat_share, landed)
+  observed = (blocker_count / total) if total else 0.0
+  status = (
+      STATUS_FAILED_BLOCKER
+      if observed > thresholds.blocker_failure_ratio else STATUS_PASSED)
+  return RunSummary(
+      run_id=run_id,
+      reference_digest=reference_digest,
+      reference_table=reference_table,
+      landing_table=landing_table,
+      engine=engine,
+      model_uri=model_uri,
+      env=thresholds.env,
+      num_rows_requested=num_rows_requested,
+      valid_count=valid_count,
+      dlq_count=dlq_count,
+      blocker_count=blocker_count,
+      dlq_by_rule=dict(dlq_by_rule),
+      blocker_failure_ratio=thresholds.blocker_failure_ratio,
+      observed_blocker_ratio=observed,
+      status=status,
+      created_at=created_at or datetime.now(tz=UTC).isoformat(),
+      excluded_blocker_rules=",".join(sorted(excluded)),
+      source_repeat_share=source_repeat_share,
+      landing_repeat_share=(landed
+                            if source_repeat_share is not None else None),
+      repeat_share_delta=delta,
+      repeat_share_within_tolerance=within,
+  )
 
 
 def evaluate_blocker_gate(summary: RunSummary) -> None:
-    """Raise :class:`BlockerThresholdExceeded` if the summary failed the gate."""
-    if summary.status == STATUS_FAILED_BLOCKER:
-        # The same denominator `observed_blocker_ratio` was computed over
-        # — an excluded rule is out of both (`gate_total`), so the
-        # message never prints a ratio the operator cannot reproduce.
-        total = gate_total(
-            summary.valid_count,
-            summary.dlq_by_rule,
-            [r for r in summary.excluded_blocker_rules.split(",") if r],
-        )
-        raise BlockerThresholdExceeded(
-            f"BLOCKER failures {summary.blocker_count}/{total} = "
-            f"{summary.observed_blocker_ratio:.4f} exceeds gate "
-            f"{summary.blocker_failure_ratio:.4f} (env={summary.env}, "
-            f"run_id={summary.run_id})"
-        )
+  """Raise :class:`BlockerThresholdExceeded` if the summary failed the gate."""
+  if summary.status == STATUS_FAILED_BLOCKER:
+    # The same denominator `observed_blocker_ratio` was computed over
+    # — an excluded rule is out of both (`gate_total`), so the
+    # message never prints a ratio the operator cannot reproduce.
+    total = gate_total(
+        summary.valid_count,
+        summary.dlq_by_rule,
+        [r for r in summary.excluded_blocker_rules.split(",") if r],
+    )
+    raise BlockerThresholdExceeded(
+        f"BLOCKER failures {summary.blocker_count}/{total} = "
+        f"{summary.observed_blocker_ratio:.4f} exceeds gate "
+        f"{summary.blocker_failure_ratio:.4f} (env={summary.env}, "
+        f"run_id={summary.run_id})")

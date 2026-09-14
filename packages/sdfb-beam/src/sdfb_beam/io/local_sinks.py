@@ -14,7 +14,7 @@ import apache_beam as beam
 
 
 class WriteToJsonLines(beam.PTransform):
-    """Serialize a PCollection of dicts to JSONL on local disk / GCS text.
+  """Serialize a PCollection of dicts to JSONL on local disk / GCS text.
 
     Wraps Beam's `WriteToText` with `json.dumps(default=str)` so that
     `datetime`, `Decimal`, and other non-JSON-native types in record
@@ -25,23 +25,19 @@ class WriteToJsonLines(beam.PTransform):
     `num_shards>1`) or `<prefix>.jsonl` (when `num_shards=1`).
     """
 
-    def __init__(self, path_prefix: str, num_shards: int = 1) -> None:
-        super().__init__()
-        self.path_prefix = path_prefix
-        self.num_shards = num_shards
+  def __init__(self, path_prefix: str, num_shards: int = 1) -> None:
+    super().__init__()
+    self.path_prefix = path_prefix
+    self.num_shards = num_shards
 
-    def expand(self, pcoll):  # type: ignore[override]
-        return (
-            pcoll
-            | "ToJSON" >> beam.Map(
-                lambda r: json.dumps(r, default=str, sort_keys=True)
-            )
+  def expand(self, pcoll):  # type: ignore[override]
+    return (pcoll
+            | "ToJSON" >>
+            beam.Map(lambda r: json.dumps(r, default=str, sort_keys=True))
             | "WriteText" >> beam.io.WriteToText(
                 self.path_prefix,
                 file_name_suffix=".jsonl",
                 num_shards=self.num_shards,
-                shard_name_template=(
-                    "-SSSSS-of-NNNNN" if self.num_shards != 1 else ""
-                ),
-            )
-        )
+                shard_name_template=("-SSSSS-of-NNNNN"
+                                     if self.num_shards != 1 else ""),
+            ))

@@ -20,21 +20,21 @@ from sdfb_core.observability import parse_milestone
 
 
 class BoomOnceEngine(GenerationEngine):
-    """Fails setup() a class-controlled number of times, then succeeds."""
+  """Fails setup() a class-controlled number of times, then succeeds."""
 
-    name = "boom_once"
-    fail_remaining = 0  # tests set this
+  name = "boom_once"
+  fail_remaining = 0  # tests set this
 
-    def setup(self, model_client, ctx):
-        if BoomOnceEngine.fail_remaining > 0:
-            BoomOnceEngine.fail_remaining -= 1
-            raise RuntimeError("synthetic setup failure")
+  def setup(self, model_client, ctx):
+    if BoomOnceEngine.fail_remaining > 0:
+      BoomOnceEngine.fail_remaining -= 1
+      raise RuntimeError("synthetic setup failure")
 
-    def generate_batch(self, n, cfg):
-        return iter(())
+  def generate_batch(self, n, cfg):
+    return iter(())
 
-    def teardown(self):
-        pass
+  def teardown(self):
+    pass
 
 
 register_engine("boom_once", BoomOnceEngine)
@@ -42,65 +42,71 @@ register_engine("boom_once", BoomOnceEngine)
 
 @pytest.fixture(autouse=True)
 def _fresh_state():
-    generate_mod._reset_setup_failures()
-    BoomOnceEngine.fail_remaining = 0
-    yield
-    generate_mod._reset_setup_failures()
+  generate_mod._reset_setup_failures()
+  BoomOnceEngine.fail_remaining = 0
+  yield
+  generate_mod._reset_setup_failures()
 
 
 def _ctx() -> GenerationContext:
-    schema = TableSchema.model_validate(
-        {
-            "table_info": {"table_id": "demo.t"},
-            "schema": [{"name": "c", "type": "STRING", "mode": "REQUIRED"}],
-        }
-    )
-    return GenerationContext(table_schema=schema, pipeline_run_id="run-retry-1")
+  schema = TableSchema.model_validate({
+      "table_info": {
+          "table_id": "demo.t"
+      },
+      "schema": [{
+          "name": "c",
+          "type": "STRING",
+          "mode": "REQUIRED"
+      }],
+  })
+  return GenerationContext(table_schema=schema, pipeline_run_id="run-retry-1")
 
 
 def _dofn() -> GenerateRecordsDoFn:
-    return GenerateRecordsDoFn(
-        engine_name="boom_once",
-        model_client=FakeModelClient(reference_pool=[{"c": "x"}]),
-        ctx=_ctx(),
-    )
+  return GenerateRecordsDoFn(
+      engine_name="boom_once",
+      model_client=FakeModelClient(reference_pool=[{
+          "c": "x"
+      }]),
+      ctx=_ctx(),
+  )
 
 
 def _milestones(caplog) -> list[dict]:
-    return [
-        m for m in (parse_milestone(r.getMessage()) for r in caplog.records) if m
-    ]
+  return [
+      m for m in (parse_milestone(r.getMessage()) for r in caplog.records) if m
+  ]
 
 
 def test_retry_after_failure_emits_milestone(caplog):
-    BoomOnceEngine.fail_remaining = 1
-    with pytest.raises(RuntimeError):
-        _dofn().setup()
-    with caplog.at_level("WARNING"):
-        _dofn().setup()  # fresh DoFn, same process — the Dataflow retry shape
-    retries = [m for m in _milestones(caplog) if m["name"] == "dofn_setup_retry"]
-    assert retries and retries[0]["attempt"] == "2"
-    assert retries[0]["engine"] == "boom_once"
+  BoomOnceEngine.fail_remaining = 1
+  with pytest.raises(RuntimeError):
+    _dofn().setup()
+  with caplog.at_level("WARNING"):
+    _dofn().setup()  # fresh DoFn, same process — the Dataflow retry shape
+  retries = [m for m in _milestones(caplog) if m["name"] == "dofn_setup_retry"]
+  assert retries and retries[0]["attempt"] == "2"
+  assert retries[0]["engine"] == "boom_once"
 
 
 def test_parallel_clean_setups_emit_nothing(caplog):
-    with caplog.at_level("WARNING"):
-        _dofn().setup()
-        _dofn().setup()  # second clean instance = normal Beam parallelism
-    assert not [
-        m for m in _milestones(caplog) if m["name"] == "dofn_setup_retry"
-    ]
+  with caplog.at_level("WARNING"):
+    _dofn().setup()
+    _dofn().setup()  # second clean instance = normal Beam parallelism
+  assert not [m for m in _milestones(caplog) if m["name"] == "dofn_setup_retry"]
 
 
 def test_second_failure_bumps_attempt_number(caplog):
-    BoomOnceEngine.fail_remaining = 2
-    with pytest.raises(RuntimeError):
-        _dofn().setup()
-    with caplog.at_level("WARNING"), pytest.raises(RuntimeError):
-        _dofn().setup()
-    with caplog.at_level("WARNING"):
-        _dofn().setup()
-    attempts = [
-        m["attempt"] for m in _milestones(caplog) if m["name"] == "dofn_setup_retry"
-    ]
-    assert attempts == ["2", "3"]
+  BoomOnceEngine.fail_remaining = 2
+  with pytest.raises(RuntimeError):
+    _dofn().setup()
+  with caplog.at_level("WARNING"), pytest.raises(RuntimeError):
+    _dofn().setup()
+  with caplog.at_level("WARNING"):
+    _dofn().setup()
+  attempts = [
+      m["attempt"]
+      for m in _milestones(caplog)
+      if m["name"] == "dofn_setup_retry"
+  ]
+  assert attempts == ["2", "3"]

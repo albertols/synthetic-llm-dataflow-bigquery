@@ -49,28 +49,28 @@ _DIR_LOCKS_GUARD = threading.Lock()
 
 
 def _dir_lock(local_dir: str) -> threading.Lock:
-    with _DIR_LOCKS_GUARD:
-        return _DIR_LOCKS.setdefault(local_dir, threading.Lock())
+  with _DIR_LOCKS_GUARD:
+    return _DIR_LOCKS.setdefault(local_dir, threading.Lock())
 
 
 def split_gs_uri(uri: str) -> tuple[str, str]:
-    """Split `gs://bucket/path/to/prefix/` → `("bucket", "path/to/prefix/")`.
+  """Split `gs://bucket/path/to/prefix/` → `("bucket", "path/to/prefix/")`.
 
     The returned prefix keeps any trailing slash so `blob.name[len(prefix):]`
     yields paths relative to the model directory.
     """
-    if not uri.startswith("gs://"):
-        raise ValueError(f"Not a gs:// URI: {uri!r}")
-    parts = urlsplit(uri)
-    bucket = parts.netloc
-    prefix = parts.path.lstrip("/")
-    if not bucket:
-        raise ValueError(f"gs:// URI has no bucket: {uri!r}")
-    return bucket, prefix
+  if not uri.startswith("gs://"):
+    raise ValueError(f"Not a gs:// URI: {uri!r}")
+  parts = urlsplit(uri)
+  bucket = parts.netloc
+  prefix = parts.path.lstrip("/")
+  if not bucket:
+    raise ValueError(f"gs:// URI has no bucket: {uri!r}")
+  return bucket, prefix
 
 
 def localize_gcs_prefix(uri: str, local_dir: str) -> str:
-    """Warm-pull every blob under `uri` (gs://) into `local_dir`.
+  """Warm-pull every blob under `uri` (gs://) into `local_dir`.
 
     Returns `local_dir` for call-site convenience. Raises `RuntimeError` if
     the prefix contains no blobs (a mistyped URI would otherwise silently
@@ -80,66 +80,62 @@ def localize_gcs_prefix(uri: str, local_dir: str) -> str:
     setup() invocations: the first caller pulls, everyone else reuses (see
     module docstring).
     """
-    from pathlib import Path
+  from pathlib import Path
 
-    with _dir_lock(local_dir):
-        dest_root = Path(local_dir)
-        marker = dest_root / PULL_MARKER
-        if marker.is_file() and marker.read_text(encoding="utf-8") == uri:
-            logger.info("Reusing warm-pulled files at %s (marker hit)", local_dir)
-            return local_dir
-        return _pull_locked(uri, dest_root, marker)
+  with _dir_lock(local_dir):
+    dest_root = Path(local_dir)
+    marker = dest_root / PULL_MARKER
+    if marker.is_file() and marker.read_text(encoding="utf-8") == uri:
+      logger.info("Reusing warm-pulled files at %s (marker hit)", local_dir)
+      return local_dir
+    return _pull_locked(uri, dest_root, marker)
 
 
 def _pull_locked(uri: str, dest_root, marker) -> str:
-    """Do the actual pull; caller holds the destination lock."""
-    from google.cloud import storage
+  """Do the actual pull; caller holds the destination lock."""
+  from google.cloud import storage
 
-    bucket_name, prefix = split_gs_uri(uri)
-    logger.info(
-        "Warm-pulling gs://%s/%s → %s", bucket_name, prefix, dest_root
-    )
-    # A stale marker (different URI) must not survive a failed re-pull.
-    if marker.is_file():
-        marker.unlink()
+  bucket_name, prefix = split_gs_uri(uri)
+  logger.info("Warm-pulling gs://%s/%s → %s", bucket_name, prefix, dest_root)
+  # A stale marker (different URI) must not survive a failed re-pull.
+  if marker.is_file():
+    marker.unlink()
 
-    client = storage.Client()
-    dest_root.mkdir(parents=True, exist_ok=True)
-    # Sibling temp dir — same filesystem, so os.replace() below is an
-    # atomic rename, never a copy.
-    tmp_root = tempfile.mkdtemp(
-        prefix=dest_root.name + ".pull-", dir=str(dest_root.parent)
-    )
-    try:
-        staged: list[tuple[str, str]] = []
-        for blob in client.list_blobs(bucket_name, prefix=prefix):
-            rel = blob.name[len(prefix):].lstrip("/")
-            if not rel:
-                # The prefix "directory" placeholder blob, if present.
-                continue
-            tmp_dest = os.path.join(tmp_root, rel)
-            os.makedirs(os.path.dirname(tmp_dest), exist_ok=True)
-            blob.download_to_filename(tmp_dest)
-            staged.append((rel, tmp_dest))
-        if not staged:
-            raise RuntimeError(
-                f"No blobs found under gs://{bucket_name}/{prefix} — check "
-                f"the URI. Nothing was pulled to {dest_root}."
-            )
-        for rel, tmp_dest in staged:
-            final = dest_root / rel
-            final.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(tmp_dest, final)
-        # Marker last, and itself atomically: its presence must imply a
-        # complete tree.
-        marker_tmp = os.path.join(tmp_root, PULL_MARKER)
-        with open(marker_tmp, "w", encoding="utf-8") as f:
-            f.write(uri)
-        os.replace(marker_tmp, marker)
-    finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
-    logger.info("Pulled %d files to %s", len(staged), dest_root)
-    return str(dest_root)
+  client = storage.Client()
+  dest_root.mkdir(parents=True, exist_ok=True)
+  # Sibling temp dir — same filesystem, so os.replace() below is an
+  # atomic rename, never a copy.
+  tmp_root = tempfile.mkdtemp(
+      prefix=dest_root.name + ".pull-", dir=str(dest_root.parent))
+  try:
+    staged: list[tuple[str, str]] = []
+    for blob in client.list_blobs(bucket_name, prefix=prefix):
+      rel = blob.name[len(prefix):].lstrip("/")
+      if not rel:
+        # The prefix "directory" placeholder blob, if present.
+        continue
+      tmp_dest = os.path.join(tmp_root, rel)
+      os.makedirs(os.path.dirname(tmp_dest), exist_ok=True)
+      blob.download_to_filename(tmp_dest)
+      staged.append((rel, tmp_dest))
+    if not staged:
+      raise RuntimeError(
+          f"No blobs found under gs://{bucket_name}/{prefix} — check "
+          f"the URI. Nothing was pulled to {dest_root}.")
+    for rel, tmp_dest in staged:
+      final = dest_root / rel
+      final.parent.mkdir(parents=True, exist_ok=True)
+      os.replace(tmp_dest, final)
+    # Marker last, and itself atomically: its presence must imply a
+    # complete tree.
+    marker_tmp = os.path.join(tmp_root, PULL_MARKER)
+    with open(marker_tmp, "w", encoding="utf-8") as f:
+      f.write(uri)
+    os.replace(marker_tmp, marker)
+  finally:
+    shutil.rmtree(tmp_root, ignore_errors=True)
+  logger.info("Pulled %d files to %s", len(staged), dest_root)
+  return str(dest_root)
 
 
 __all__ = ["PULL_MARKER", "localize_gcs_prefix", "split_gs_uri"]

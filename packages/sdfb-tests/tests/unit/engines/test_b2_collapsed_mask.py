@@ -21,78 +21,78 @@ _PADDED = tuple(f"CQZWD{i % 10}   CS{i:010d}B" for i in range(60))
 
 
 def _padded_profile() -> ColumnProfile:
-    return ColumnProfile(
-        name="REF_CODE",
-        bq_type="STRING",
-        kind=ColumnKind.FREE_TEXT,
-        nullable=False,
-        null_fraction=0.0,
-        text_pool=_PADDED,
-        shape_mix=build_shape_mix(list(_PADDED)),
-    )
+  return ColumnProfile(
+      name="REF_CODE",
+      bq_type="STRING",
+      kind=ColumnKind.FREE_TEXT,
+      nullable=False,
+      null_fraction=0.0,
+      text_pool=_PADDED,
+      shape_mix=build_shape_mix(list(_PADDED)),
+  )
 
 
 class _SpaceCollapsingClient:
-    def generate_json(self, prompt, json_schema, **kw):
-        return [{"values": [
+
+  def generate_json(self, prompt, json_schema, **kw):
+    return [{
+        "values": [
             f"CQZWD7 CS9{i:09d}B" for i in range(40)  # single space, novel
-        ]}]
+        ]
+    }]
 
 
 def test_pool_gate_rejects_normalized_whitespace_then_mix_fallback():
-    hook = FreeTextHook(_SpaceCollapsingClient(), pool_size=16)
-    pool, _ = hook._generate_pool(
-        _padded_profile(), GenerationConfig(seed=3)
-    )
-    assert pool
-    observed = set(_PADDED)
-    for v in pool:
-        assert "   " in v, v          # triple-space run preserved
-        assert v not in observed      # verified novel
+  hook = FreeTextHook(_SpaceCollapsingClient(), pool_size=16)
+  pool, _ = hook._generate_pool(_padded_profile(), GenerationConfig(seed=3))
+  assert pool
+  observed = set(_PADDED)
+  for v in pool:
+    assert "   " in v, v  # triple-space run preserved
+    assert v not in observed  # verified novel
 
 
 def _mask(v: str) -> str:
-    return "".join(
-        "9" if c.isdigit() else "A" if c.isupper() else "a" if c.islower() else c
-        for c in v
-    )
+  return "".join(
+      "9" if c.isdigit() else "A" if c.isupper() else "a" if c.islower() else c
+      for c in v)
 
 
 def test_identifier_branch_reproduces_observed_masks():
-    import random as _r
+  import random as _r
 
-    rng = _r.Random(9)
-    values = tuple(
-        dict.fromkeys(
-            "C2E"
-            + "".join(rng.choice("0123456789ABCDEF") for _ in range(21))
-            for _ in range(120)
-        )
-    )
-    prof = ColumnProfile(
-        name="HEX_ID",
-        bq_type="STRING",
-        kind=ColumnKind.FREE_TEXT,
-        nullable=False,
-        null_fraction=0.0,
-        text_pool=values,
-        identifier_shape=detect_identifier_shape(values),
-        shape_mix=build_shape_mix(list(values)),
-    )
-    assert prof.identifier_shape is not None
+  rng = _r.Random(9)
+  values = tuple(
+      dict.fromkeys("C2E" +
+                    "".join(rng.choice("0123456789ABCDEF")
+                            for _ in range(21))
+                    for _ in range(120)))
+  prof = ColumnProfile(
+      name="HEX_ID",
+      bq_type="STRING",
+      kind=ColumnKind.FREE_TEXT,
+      nullable=False,
+      null_fraction=0.0,
+      text_pool=values,
+      identifier_shape=detect_identifier_shape(values),
+      shape_mix=build_shape_mix(list(values)),
+  )
+  assert prof.identifier_shape is not None
 
-    class _NeverCalled:
-        def generate_json(self, *a, **kw):  # pragma: no cover - guard
-            raise AssertionError("identifier route must not call the LLM")
+  class _NeverCalled:
 
-    hook = FreeTextHook(_NeverCalled())
-    out = hook.sample(prof, 300, GenerationConfig(seed=11), np.random.default_rng(11))
-    drawn = [v for v in out if v]
-    assert drawn
-    # Wave 4: near-unique-mask columns synthesize tail masks per position
-    # (the capped table alone collapsed mask entropy — COL_064/COL_001).
-    # Novel masks are correct here; alphabet, prefix and diversity must hold.
-    hex_chars = set("0123456789ABCDEF")
-    assert all(set(v) <= hex_chars for v in drawn)
-    assert all(v.startswith("C2E") for v in drawn)
-    assert len({_mask(v) for v in drawn}) > 8
+    def generate_json(self, *a, **kw):  # pragma: no cover - guard
+      raise AssertionError("identifier route must not call the LLM")
+
+  hook = FreeTextHook(_NeverCalled())
+  out = hook.sample(prof, 300, GenerationConfig(seed=11),
+                    np.random.default_rng(11))
+  drawn = [v for v in out if v]
+  assert drawn
+  # Wave 4: near-unique-mask columns synthesize tail masks per position
+  # (the capped table alone collapsed mask entropy — COL_064/COL_001).
+  # Novel masks are correct here; alphabet, prefix and diversity must hold.
+  hex_chars = set("0123456789ABCDEF")
+  assert all(set(v) <= hex_chars for v in drawn)
+  assert all(v.startswith("C2E") for v in drawn)
+  assert len({_mask(v) for v in drawn}) > 8

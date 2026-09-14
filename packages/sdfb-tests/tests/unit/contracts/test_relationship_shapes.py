@@ -17,23 +17,25 @@ from sdfb_core.contracts.relationships import RelationshipError, RelationshipReg
 
 
 def _registry(text: str) -> RelationshipRegistry:
-    return RelationshipRegistry.from_sources([("config/relationships/shape.yaml", text)])
+  return RelationshipRegistry.from_sources([("config/relationships/shape.yaml",
+                                             text)])
 
 
 def _roles(reg: RelationshipRegistry, table: str) -> dict[str, str]:
-    return {
-        f"({','.join(e.cols)})->{e.ref}": role
-        for e, role in reg.edge_roles(table).items()
-    }
+  return {
+      f"({','.join(e.cols)})->{e.ref}": role
+      for e, role in reg.edge_roles(table).items()
+  }
 
 
 def _tables(reg: RelationshipRegistry) -> tuple[str, ...]:
-    return tuple(t for m in reg.models for t in m.tables)
+  return tuple(t for m in reg.models for t in m.tables)
 
 
 class TestShapesTheRegistryResolves:
-    def test_star_hub_one_parent_many_children(self):
-        reg = _registry("""
+
+  def test_star_hub_one_parent_many_children(self):
+    reg = _registry("""
 model: s
 tables:
   hub: {pk: [H]}
@@ -41,12 +43,12 @@ tables:
   c2: {pk: [H, Y], fk: [{cols: [H], ref: hub, ref_cols: [H]}]}
   c3: {pk: [H], fk: [{cols: [H], ref: hub, ref_cols: [H]}]}
 """)
-        assert reg.generation_waves(_tables(reg)) == (("hub",), ("c1", "c2", "c3"))
-        for child in ("c1", "c2", "c3"):
-            assert _roles(reg, child) == {"(H)->hub": "driving"}
+    assert reg.generation_waves(_tables(reg)) == (("hub",), ("c1", "c2", "c3"))
+    for child in ("c1", "c2", "c3"):
+      assert _roles(reg, child) == {"(H)->hub": "driving"}
 
-    def test_chain_and_tree(self):
-        reg = _registry("""
+  def test_chain_and_tree(self):
+    reg = _registry("""
 model: t
 tables:
   root: {pk: [R]}
@@ -54,11 +56,12 @@ tables:
   leaf1: {pk: [R, M, L], fk: [{cols: [R, M], ref: mid, ref_cols: [R, M]}]}
   leaf2: {pk: [R, M, Q], fk: [{cols: [R, M], ref: mid, ref_cols: [R, M]}]}
 """)
-        assert reg.generation_waves(_tables(reg)) == (("root",), ("mid",), ("leaf1", "leaf2"))
-        assert _roles(reg, "leaf1") == {"(R,M)->mid": "driving"}
+    assert reg.generation_waves(_tables(reg)) == (("root",), ("mid",),
+                                                  ("leaf1", "leaf2"))
+    assert _roles(reg, "leaf1") == {"(R,M)->mid": "driving"}
 
-    def test_forest_of_components_with_a_one_to_one_chain(self):
-        reg = _registry("""
+  def test_forest_of_components_with_a_one_to_one_chain(self):
+    reg = _registry("""
 model: c
 tables:
   a: {pk: [A]}
@@ -66,14 +69,14 @@ tables:
   e: {pk: [E]}
   f: {pk: [E], fk: [{cols: [E], ref: e, ref_cols: [E]}]}
 """)
-        assert reg.component("a") == ("a", "b")
-        assert reg.component("e") == ("e", "f")
-        assert reg.generation_waves(_tables(reg)) == (("a", "e"), ("b", "f"))
-        # f's PK IS its driving edge: a true 1:1 child (E_TABLE, 2026-09-11).
-        assert _roles(reg, "f") == {"(E)->e": "driving"}
+    assert reg.component("a") == ("a", "b")
+    assert reg.component("e") == ("e", "f")
+    assert reg.generation_waves(_tables(reg)) == (("a", "e"), ("b", "f"))
+    # f's PK IS its driving edge: a true 1:1 child (E_TABLE, 2026-09-11).
+    assert _roles(reg, "f") == {"(E)->e": "driving"}
 
-    def test_grandparent_edge_next_to_the_parent_edge_is_implied(self):
-        reg = _registry("""
+  def test_grandparent_edge_next_to_the_parent_edge_is_implied(self):
+    reg = _registry("""
 model: g
 tables:
   gp: {pk: [G]}
@@ -84,39 +87,39 @@ tables:
       - {cols: [G, P], ref: p, ref_cols: [G, P]}
       - {cols: [G], ref: gp, ref_cols: [G]}
 """)
-        assert _roles(reg, "c") == {"(G,P)->p": "driving", "(G)->gp": "implied"}
+    assert _roles(reg, "c") == {"(G,P)->p": "driving", "(G)->gp": "implied"}
 
-    def test_disabling_the_hub_splits_a_star_into_roots(self):
-        reg = _registry("""
+  def test_disabling_the_hub_splits_a_star_into_roots(self):
+    reg = _registry("""
 model: s
 tables:
   hub: {pk: [H], enabled: false}
   c1: {pk: [H, X], fk: [{cols: [H], ref: hub, ref_cols: [H]}]}
   c2: {pk: [H, Y], fk: [{cols: [H], ref: hub, ref_cols: [H]}]}
 """)
-        assert reg.enforced_edges("c1") == ()
-        assert reg.generation_waves(("c1", "c2")) == (("c1", "c2"),)
+    assert reg.enforced_edges("c1") == ()
+    assert reg.generation_waves(("c1", "c2")) == (("c1", "c2"),)
 
-    def test_star_fact_dimensions_are_independent(self):
-        reg = _registry(_STAR_FACT)
-        _to_a, to_b = reg.enforced_edges("fact")
-        assert reg.edge_overlap("fact", to_b) == ()
-        assert reg.edge_rest("fact", to_b) == ("B_ID",)
-        assert reg.driving_choice("fact") == "first_declared"
-        assert reg.driving_choice("dim_a") is None
+  def test_star_fact_dimensions_are_independent(self):
+    reg = _registry(_STAR_FACT)
+    _to_a, to_b = reg.enforced_edges("fact")
+    assert reg.edge_overlap("fact", to_b) == ()
+    assert reg.edge_rest("fact", to_b) == ("B_ID",)
+    assert reg.driving_choice("fact") == "first_declared"
+    assert reg.driving_choice("dim_a") is None
 
-    def test_diamond_branch_overlap_and_rest(self):
-        reg = _registry(_DIAMOND)
-        _to_left, to_right = reg.enforced_edges("bottom")
-        assert reg.edge_overlap("bottom", to_right) == ("T",)
-        assert reg.edge_rest("bottom", to_right) == ("R",)
-        assert "conditional on (T)" in reg.card("bottom")
+  def test_diamond_branch_overlap_and_rest(self):
+    reg = _registry(_DIAMOND)
+    _to_left, to_right = reg.enforced_edges("bottom")
+    assert reg.edge_overlap("bottom", to_right) == ("T",)
+    assert reg.edge_rest("bottom", to_right) == ("R",)
+    assert "conditional on (T)" in reg.card("bottom")
 
-    def test_two_marked_edges_still_stop(self):
-        text = _STAR_FACT.replace("ref: dim_a, ref_cols: [A_ID]}", "ref: dim_a, ref_cols: [A_ID], drives: true}") \
-                         .replace("ref: dim_b, ref_cols: [B_ID]}", "ref: dim_b, ref_cols: [B_ID], drives: true}")
-        with pytest.raises(RelationshipError, match="2 marked"):
-            _registry(text).edge_roles("fact")
+  def test_two_marked_edges_still_stop(self):
+    text = _STAR_FACT.replace("ref: dim_a, ref_cols: [A_ID]}", "ref: dim_a, ref_cols: [A_ID], drives: true}") \
+                     .replace("ref: dim_b, ref_cols: [B_ID]}", "ref: dim_b, ref_cols: [B_ID], drives: true}")
+    with pytest.raises(RelationshipError, match="2 marked"):
+      _registry(text).edge_roles("fact")
 
 
 _STAR_FACT = """
@@ -146,21 +149,21 @@ tables:
 
 
 class TestShapesStillPending:
-    """A child with two in-set parents that are not on one ancestry line —
+  """A child with two in-set parents that are not on one ancestry line —
     the star-schema fact table and the true diamond. Resolved by the
     `independent` and `conditional` roles (ADR 0037)."""
 
-    def test_star_schema_fact_with_two_independent_dimensions(self):
-        reg = _registry(_STAR_FACT)
-        roles = _roles(reg, "fact")
-        assert roles["(A_ID)->dim_a"] == "driving"
-        assert roles["(B_ID)->dim_b"] == "independent"
+  def test_star_schema_fact_with_two_independent_dimensions(self):
+    reg = _registry(_STAR_FACT)
+    roles = _roles(reg, "fact")
+    assert roles["(A_ID)->dim_a"] == "driving"
+    assert roles["(B_ID)->dim_b"] == "independent"
 
-    def test_true_diamond_rejoining_at_the_bottom(self):
-        reg = _registry(_DIAMOND)
-        roles = _roles(reg, "bottom")
-        assert roles["(T,L)->left"] == "driving"
-        assert roles["(T,R)->right"] == "conditional"
+  def test_true_diamond_rejoining_at_the_bottom(self):
+    reg = _registry(_DIAMOND)
+    roles = _roles(reg, "bottom")
+    assert roles["(T,L)->left"] == "driving"
+    assert roles["(T,R)->right"] == "conditional"
 
 
 # Two INDEPENDENT edges that both claim the child column `X`: neither
@@ -210,7 +213,7 @@ tables:
 
 
 class TestCrossEdgeColumnOwnership:
-    """Two NON-DRIVING edges may not own the same child column.
+  """Two NON-DRIVING edges may not own the same child column.
 
     `edge_roles` gives each non-driving edge a role from its overlap with
     the DRIVING edge alone, so until ADR 0037's final review nothing
@@ -229,56 +232,58 @@ class TestCrossEdgeColumnOwnership:
     enabling the parent), not a stop.
     """
 
-    def test_two_independent_edges_cannot_share_a_column(self):
-        reg = _registry(_TWO_INDEPENDENT)
-        with pytest.raises(RelationshipError) as err:
-            reg.edge_roles("child")
-        message = str(err.value)
-        assert "child" in message
-        assert "(X,Y)->pa" in message and "(X,Z)->pb" in message
-        assert "X" in message
-        assert "drives: true" in message
+  def test_two_independent_edges_cannot_share_a_column(self):
+    reg = _registry(_TWO_INDEPENDENT)
+    with pytest.raises(RelationshipError) as err:
+      reg.edge_roles("child")
+    message = str(err.value)
+    assert "child" in message
+    assert "(X,Y)->pa" in message and "(X,Z)->pb" in message
+    assert "X" in message
+    assert "drives: true" in message
 
-    def test_two_conditional_edges_cannot_share_a_rest_column(self):
-        reg = _registry(_TWO_CONDITIONAL)
-        with pytest.raises(RelationshipError) as err:
-            reg.edge_roles("bottom")
-        message = str(err.value)
-        assert "bottom" in message
-        assert "(T,L)->left" in message and "(T,L,M)->mid" in message
-        assert "L" in message
+  def test_two_conditional_edges_cannot_share_a_rest_column(self):
+    reg = _registry(_TWO_CONDITIONAL)
+    with pytest.raises(RelationshipError) as err:
+      reg.edge_roles("bottom")
+    message = str(err.value)
+    assert "bottom" in message
+    assert "(T,L)->left" in message and "(T,L,M)->mid" in message
+    assert "L" in message
 
-    def test_the_stop_names_the_role_of_each_clashing_edge(self):
-        # The operator has to know WHICH mechanism claimed the column to
-        # pick a fix, so the roles ride in the message.
-        with pytest.raises(RelationshipError, match="independent"):
-            _registry(_TWO_INDEPENDENT).edge_roles("child")
-        with pytest.raises(RelationshipError, match="conditional"):
-            _registry(_TWO_CONDITIONAL).edge_roles("bottom")
+  def test_the_stop_names_the_role_of_each_clashing_edge(self):
+    # The operator has to know WHICH mechanism claimed the column to
+    # pick a fix, so the roles ride in the message.
+    with pytest.raises(RelationshipError, match="independent"):
+      _registry(_TWO_INDEPENDENT).edge_roles("child")
+    with pytest.raises(RelationshipError, match="conditional"):
+      _registry(_TWO_CONDITIONAL).edge_roles("bottom")
 
-    def test_the_card_still_renders_a_clashing_model(self):
-        # `card`/`mermaid` swallow a RelationshipError so an operator can
-        # still SEE the model that stopped the launch.
-        card = _registry(_TWO_INDEPENDENT).card("child")
-        assert "(X,Y) --> pa" in card
+  def test_the_card_still_renders_a_clashing_model(self):
+    # `card`/`mermaid` swallow a RelationshipError so an operator can
+    # still SEE the model that stopped the launch.
+    card = _registry(_TWO_INDEPENDENT).card("child")
+    assert "(X,Y) --> pa" in card
 
-    def test_shapes_with_disjoint_written_columns_still_resolve(self):
-        # Every shape ADR 0037 shipped: the star's dimensions write
-        # disjoint columns, the diamond's conditional branch writes only
-        # its `rest`, and an implied edge writes nothing at all.
-        assert _roles(_registry(_STAR_FACT), "fact") == {
-            "(A_ID)->dim_a": "driving", "(B_ID)->dim_b": "independent",
-        }
-        assert _roles(_registry(_DIAMOND), "bottom") == {
-            "(T,L)->left": "driving", "(T,R)->right": "conditional",
-        }
+  def test_shapes_with_disjoint_written_columns_still_resolve(self):
+    # Every shape ADR 0037 shipped: the star's dimensions write
+    # disjoint columns, the diamond's conditional branch writes only
+    # its `rest`, and an implied edge writes nothing at all.
+    assert _roles(_registry(_STAR_FACT), "fact") == {
+        "(A_ID)->dim_a": "driving",
+        "(B_ID)->dim_b": "independent",
+    }
+    assert _roles(_registry(_DIAMOND), "bottom") == {
+        "(T,L)->left": "driving",
+        "(T,R)->right": "conditional",
+    }
 
-    def test_two_conditional_edges_with_empty_rests_are_pure_filters(self):
-        # `(K)->P` drives; `(K)->Q` and `(K)->R` are existence filters —
-        # `rest` is empty on both, so neither WRITES anything and three
-        # edges on one column are legitimate (the cli `_TWO_PARENTS`
-        # shape).
-        reg = _registry("""
+  def test_two_conditional_edges_with_empty_rests_are_pure_filters(self):
+    # `(K)->P` drives; `(K)->Q` and `(K)->R` are existence filters —
+    # `rest` is empty on both, so neither WRITES anything and three
+    # edges on one column are legitimate (the cli `_TWO_PARENTS`
+    # shape).
+    reg = _registry("""
 model: f
 tables:
   P: {pk: [K]}
@@ -291,9 +296,11 @@ tables:
       - {cols: [K], ref: Q, ref_cols: [K]}
       - {cols: [K], ref: R, ref_cols: [K]}
 """)
-        assert _roles(reg, "CH") == {
-            "(K)->P": "driving", "(K)->Q": "conditional", "(K)->R": "conditional",
-        }
+    assert _roles(reg, "CH") == {
+        "(K)->P": "driving",
+        "(K)->Q": "conditional",
+        "(K)->R": "conditional",
+    }
 
 
 # An external parent is one the launch never generates: its rows are
@@ -325,14 +332,12 @@ tables:
 
 
 def _overlap_labels(reg: RelationshipRegistry, table: str):
-    return [
-        (f"({','.join(a.cols)})->{a.ref}", f"({','.join(b.cols)})->{b.ref}", cols)
-        for a, b, cols in reg.external_overlaps(table)
-    ]
+  return [(f"({','.join(a.cols)})->{a.ref}", f"({','.join(b.cols)})->{b.ref}",
+           cols) for a, b, cols in reg.external_overlaps(table)]
 
 
 class TestExternalEdgesWarnRatherThanStop:
-    """`external` edges are outside the ownership STOP (fix wave F3).
+  """`external` edges are outside the ownership STOP (fix wave F3).
 
     Commit 76cafa5 credited every edge with WRITING its columns, external
     ones included, and `edge_roles` assigns `external` BEFORE any
@@ -348,43 +353,44 @@ class TestExternalEdgesWarnRatherThanStop:
     REPORTED as an overlap, never fatal.
     """
 
-    def test_two_external_parents_on_one_ancestry_line_resolve(self):
-        assert _roles(_registry(_DENORM_EXTERNAL), "CH") == {
-            "(A_KEY)->ds.A_TABLE": "external",
-            "(A_KEY,B_KEY)->ds.B_TABLE": "external",
-        }
+  def test_two_external_parents_on_one_ancestry_line_resolve(self):
+    assert _roles(_registry(_DENORM_EXTERNAL), "CH") == {
+        "(A_KEY)->ds.A_TABLE": "external",
+        "(A_KEY,B_KEY)->ds.B_TABLE": "external",
+    }
 
-    def test_the_external_pair_is_reported_with_both_edges_and_the_columns(self):
-        assert _overlap_labels(_registry(_DENORM_EXTERNAL), "CH") == [
-            ("(A_KEY)->ds.A_TABLE", "(A_KEY,B_KEY)->ds.B_TABLE", ("A_KEY",)),
-        ]
+  def test_the_external_pair_is_reported_with_both_edges_and_the_columns(self):
+    assert _overlap_labels(_registry(_DENORM_EXTERNAL), "CH") == [
+        ("(A_KEY)->ds.A_TABLE", "(A_KEY,B_KEY)->ds.B_TABLE", ("A_KEY",)),
+    ]
 
-    def test_an_external_edge_over_in_model_edges_resolves_and_reports(self):
-        # The external edge overlaps BOTH the driving edge (on `K`) and
-        # the conditional edge's `rest` (on `X`); the second pair is the
-        # one 76cafa5 turned into a stop.
-        reg = _registry(_EXTERNAL_OVER_IN_MODEL)
-        assert _roles(reg, "CH") == {
-            "(K)->drv": "driving",
-            "(K,X)->pa": "conditional",
-            "(K,X)->ds.EXT_TABLE": "external",
-        }
-        assert _overlap_labels(reg, "CH") == [
-            ("(K,X)->ds.EXT_TABLE", "(K)->drv", ("K",)),
-            ("(K,X)->ds.EXT_TABLE", "(K,X)->pa", ("X",)),
-        ]
+  def test_an_external_edge_over_in_model_edges_resolves_and_reports(self):
+    # The external edge overlaps BOTH the driving edge (on `K`) and
+    # the conditional edge's `rest` (on `X`); the second pair is the
+    # one 76cafa5 turned into a stop.
+    reg = _registry(_EXTERNAL_OVER_IN_MODEL)
+    assert _roles(reg, "CH") == {
+        "(K)->drv": "driving",
+        "(K,X)->pa": "conditional",
+        "(K,X)->ds.EXT_TABLE": "external",
+    }
+    assert _overlap_labels(reg, "CH") == [
+        ("(K,X)->ds.EXT_TABLE", "(K)->drv", ("K",)),
+        ("(K,X)->ds.EXT_TABLE", "(K,X)->pa", ("X",)),
+    ]
 
-    def test_an_in_model_clash_still_raises(self):
-        # The stop is unchanged for a pair of IN-MODEL non-driving edges:
-        # both remedies it names can actually be applied there.
-        for text, table in ((_TWO_INDEPENDENT, "child"), (_TWO_CONDITIONAL, "bottom")):
-            with pytest.raises(RelationshipError):
-                _registry(text).edge_roles(table)
+  def test_an_in_model_clash_still_raises(self):
+    # The stop is unchanged for a pair of IN-MODEL non-driving edges:
+    # both remedies it names can actually be applied there.
+    for text, table in ((_TWO_INDEPENDENT, "child"), (_TWO_CONDITIONAL,
+                                                      "bottom")):
+      with pytest.raises(RelationshipError):
+        _registry(text).edge_roles(table)
 
-    def test_the_stop_names_documenting_an_edge_as_a_way_out(self):
-        # `enforced: false` keeps the relationship in the card and takes
-        # the edge out of every draw — a legitimate resolution the
-        # message omitted.
-        with pytest.raises(RelationshipError) as err:
-            _registry(_TWO_INDEPENDENT).edge_roles("child")
-        assert "enforced: false" in str(err.value)
+  def test_the_stop_names_documenting_an_edge_as_a_way_out(self):
+    # `enforced: false` keeps the relationship in the card and takes
+    # the edge out of every draw — a legitimate resolution the
+    # message omitted.
+    with pytest.raises(RelationshipError) as err:
+      _registry(_TWO_INDEPENDENT).edge_roles("child")
+    assert "enforced: false" in str(err.value)

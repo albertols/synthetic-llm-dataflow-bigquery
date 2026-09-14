@@ -22,134 +22,134 @@ _COMPOSER_DAG = _REPO_ROOT / "composer" / "synthetic_beam_bigquery.py"
 
 
 def _metadata_param(name: str) -> dict:
-    metadata = json.loads(_METADATA.read_text())
-    by_name = {p["name"]: p for p in metadata["parameters"]}
-    assert name in by_name, f"{name} missing from flex_template_metadata.json"
-    return by_name[name]
+  metadata = json.loads(_METADATA.read_text())
+  by_name = {p["name"]: p for p in metadata["parameters"]}
+  assert name in by_name, f"{name} missing from flex_template_metadata.json"
+  return by_name[name]
 
 
 def test_flex_template_exposes_prompt_debug():
-    param = _metadata_param("prompt_debug")
-    assert param["isOptional"] is True
-    assert param["regexes"] == ["^(off|redacted|full)?$"]
+  param = _metadata_param("prompt_debug")
+  assert param["isOptional"] is True
+  assert param["regexes"] == ["^(off|redacted|full)?$"]
 
 
 def test_flex_template_prompt_debug_matches_cli_choices():
-    """The metadata regex and the argparse choices must not drift."""
-    import re
+  """The metadata regex and the argparse choices must not drift."""
+  import re
 
-    (regex,) = _metadata_param("prompt_debug")["regexes"]
-    for choice in ("off", "redacted", "full", ""):
-        assert re.fullmatch(regex, choice), choice
-    assert not re.fullmatch(regex, "verbose")
+  (regex,) = _metadata_param("prompt_debug")["regexes"]
+  for choice in ("off", "redacted", "full", ""):
+    assert re.fullmatch(regex, choice), choice
+  assert not re.fullmatch(regex, "verbose")
 
 
 def test_composer_dag_declares_and_forwards_prompt_debug():
-    dag_text = _COMPOSER_DAG.read_text()
-    assert '"prompt_debug": Param(' in dag_text
-    assert '"prompt_debug": "{{ params.prompt_debug }}"' in dag_text
+  dag_text = _COMPOSER_DAG.read_text()
+  assert '"prompt_debug": Param(' in dag_text
+  assert '"prompt_debug": "{{ params.prompt_debug }}"' in dag_text
 
 
 def test_uniqueness_mode_surfaces_accept_every_cli_mode():
-    """ADR 0034 added `exact_chained`; the template regex, the Composer
+  """ADR 0034 added `exact_chained`; the template regex, the Composer
     enum and argparse choices must agree or the mode is unreachable."""
-    import re
+  import re
 
-    from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
+  from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 
-    (regex,) = _metadata_param("uniqueness_mode")["regexes"]
-    for mode in (*UNIQUENESS_MODES, ""):
-        assert re.fullmatch(regex, mode), mode
-    dag_text = _COMPOSER_DAG.read_text()
-    for mode in UNIQUENESS_MODES:
-        assert f'"{mode}"' in dag_text, mode
+  (regex,) = _metadata_param("uniqueness_mode")["regexes"]
+  for mode in (*UNIQUENESS_MODES, ""):
+    assert re.fullmatch(regex, mode), mode
+  dag_text = _COMPOSER_DAG.read_text()
+  for mode in UNIQUENESS_MODES:
+    assert f'"{mode}"' in dag_text, mode
 
 
 def test_flex_template_and_composer_expose_initial_workers():
-    """ADR 0034: the initial worker count is a per-trigger knob."""
-    import re
+  """ADR 0034: the initial worker count is a per-trigger knob."""
+  import re
 
-    param = _metadata_param("initial_workers")
-    assert param["isOptional"] is True
-    (regex,) = param["regexes"]
-    for ok in ("", "4", "16"):
-        assert re.fullmatch(regex, ok), ok
-    assert not re.fullmatch(regex, "four")
-    dag_text = _COMPOSER_DAG.read_text()
-    assert '"initial_workers": Param(' in dag_text
-    assert '"initial_workers": "{{ params.initial_workers }}"' in dag_text
+  param = _metadata_param("initial_workers")
+  assert param["isOptional"] is True
+  (regex,) = param["regexes"]
+  for ok in ("", "4", "16"):
+    assert re.fullmatch(regex, ok), ok
+  assert not re.fullmatch(regex, "four")
+  dag_text = _COMPOSER_DAG.read_text()
+  assert '"initial_workers": Param(' in dag_text
+  assert '"initial_workers": "{{ params.initial_workers }}"' in dag_text
 
 
 def test_composer_dag_exposes_sdk_containers_topology():
-    """ADR 0034: `sdk_containers=multi` lifts `no_use_multiple_sdk_containers`
+  """ADR 0034: `sdk_containers=multi` lifts `no_use_multiple_sdk_containers`
     for a vLLM launch; `single` (default) keeps the RUN_PLAYBOOK §3 pin."""
-    dag_text = _COMPOSER_DAG.read_text()
-    assert '"sdk_containers": Param(' in dag_text
-    assert "enum=[\"single\", \"multi\"]" in dag_text
-    assert "params.sdk_containers == 'single'" in dag_text
+  dag_text = _COMPOSER_DAG.read_text()
+  assert '"sdk_containers": Param(' in dag_text
+  assert "enum=[\"single\", \"multi\"]" in dag_text
+  assert "params.sdk_containers == 'single'" in dag_text
 
 
 def test_flex_template_and_composer_expose_autoscaling():
-    """ADR 0034 D9: auto (fixed when initial_workers is set) | throughput | fixed."""
-    import re
+  """ADR 0034 D9: auto (fixed when initial_workers is set) | throughput | fixed."""
+  import re
 
-    param = _metadata_param("autoscaling")
-    assert param["isOptional"] is True
-    (regex,) = param["regexes"]
-    for ok in ("", "auto", "throughput", "fixed"):
-        assert re.fullmatch(regex, ok), ok
-    assert not re.fullmatch(regex, "none")
-    dag_text = _COMPOSER_DAG.read_text()
-    assert '"autoscaling": Param(' in dag_text
-    assert '"autoscaling": "{{ params.autoscaling }}"' in dag_text
+  param = _metadata_param("autoscaling")
+  assert param["isOptional"] is True
+  (regex,) = param["regexes"]
+  for ok in ("", "auto", "throughput", "fixed"):
+    assert re.fullmatch(regex, ok), ok
+  assert not re.fullmatch(regex, "none")
+  dag_text = _COMPOSER_DAG.read_text()
+  assert '"autoscaling": Param(' in dag_text
+  assert '"autoscaling": "{{ params.autoscaling }}"' in dag_text
 
 
 def test_flex_template_exposes_fk_candidate_cap():
-    """ADR 0037: run_pipeline.py's `--fk_candidate_cap` (Top-M candidates
+  """ADR 0037: run_pipeline.py's `--fk_candidate_cap` (Top-M candidates
     per shared key on a conditional FK edge) had no flex-template metadata
     entry, so a UI/tiers.yaml launch could not discover or set it (the
     flag itself still passes through undeclared — ADR 0024 §3c
     precedent)."""
-    import re
+  import re
 
-    param = _metadata_param("fk_candidate_cap")
-    assert param["isOptional"] is True
-    (regex,) = param["regexes"]
-    for ok in ("", "1", "64", "1000"):
-        assert re.fullmatch(regex, ok), ok
-    assert not re.fullmatch(regex, "-1")
-    assert not re.fullmatch(regex, "sixty-four")
+  param = _metadata_param("fk_candidate_cap")
+  assert param["isOptional"] is True
+  (regex,) = param["regexes"]
+  for ok in ("", "1", "64", "1000"):
+    assert re.fullmatch(regex, ok), ok
+  assert not re.fullmatch(regex, "-1")
+  assert not re.fullmatch(regex, "sixty-four")
 
 
 def test_flex_template_exposes_fk_fanout_stats_table():
-    """ADR 0036 cache table for the fan-out histogram; optional and may
+  """ADR 0036 cache table for the fan-out histogram; optional and may
     be empty (measure every launch, never cache)."""
-    import re
+  import re
 
-    param = _metadata_param("fk_fanout_stats_table")
-    assert param["isOptional"] is True
-    (regex,) = param["regexes"]
-    assert re.fullmatch(regex, "")
-    assert re.fullmatch(regex, "proj.synthetic_data_quality.fk_fanout_stats")
-    assert not re.fullmatch(regex, "not-a-fqn")
+  param = _metadata_param("fk_fanout_stats_table")
+  assert param["isOptional"] is True
+  (regex,) = param["regexes"]
+  assert re.fullmatch(regex, "")
+  assert re.fullmatch(regex, "proj.synthetic_data_quality.fk_fanout_stats")
+  assert not re.fullmatch(regex, "not-a-fqn")
 
 
 def test_flex_template_driven_uniqueness_mode_matches_cli_modes():
-    """`--driven_uniqueness_mode` (ADR 0036) reuses the same UNIQUENESS_MODES
+  """`--driven_uniqueness_mode` (ADR 0036) reuses the same UNIQUENESS_MODES
     choices as `--uniqueness_mode`; the metadata regex must not drift from
     them, same guard as `test_uniqueness_mode_surfaces_accept_every_cli_mode`."""
-    import re
+  import re
 
-    from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
+  from sdfb_beam.dofns.uniqueness import UNIQUENESS_MODES
 
-    param = _metadata_param("driven_uniqueness_mode")
-    assert param["isOptional"] is True
-    (regex,) = param["regexes"]
-    for mode in (*UNIQUENESS_MODES, ""):
-        assert re.fullmatch(regex, mode), mode
-    assert not re.fullmatch(regex, "verbose")
+  param = _metadata_param("driven_uniqueness_mode")
+  assert param["isOptional"] is True
+  (regex,) = param["regexes"]
+  for mode in (*UNIQUENESS_MODES, ""):
+    assert re.fullmatch(regex, mode), mode
+  assert not re.fullmatch(regex, "verbose")
 
 
 def test_flex_template_exposes_thresholds_uri():
-    param = _metadata_param("thresholds_uri")
-    assert param["isOptional"] is True
+  param = _metadata_param("thresholds_uri")
+  assert param["isOptional"] is True

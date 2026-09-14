@@ -21,82 +21,95 @@ _COLS = ["col_a"]
 
 @pytest.fixture(autouse=True)
 def _fresh_cache():
-    clear_free_text_pool_cache()
-    yield
-    clear_free_text_pool_cache()
+  clear_free_text_pool_cache()
+  yield
+  clear_free_text_pool_cache()
 
 
 def _ctx(**overrides) -> GenerationContext:
-    defaults = dict(
-        table_schema=TableSchema.model_validate(
-            {
-                "table_info": {"table_id": "demo.t"},
-                "schema": [
-                    {"name": c, "type": "STRING", "mode": "REQUIRED"} for c in _COLS
-                ],
-            }
-        ),
-        reference_rows=[
-            {c: f"{c} reference prose value number {i}" for c in _COLS}
-            for i in range(60)
-        ],
-        reference_digest="digest-w1",
-        model_uri="gs://m/v1",
-        num_rows=1_000_000,
-    )
-    defaults.update(overrides)
-    return GenerationContext(**defaults)
+  defaults = dict(
+      table_schema=TableSchema.model_validate({
+          "table_info": {
+              "table_id": "demo.t"
+          },
+          "schema": [{
+              "name": c,
+              "type": "STRING",
+              "mode": "REQUIRED"
+          } for c in _COLS],
+      }),
+      reference_rows=[{
+          c: f"{c} reference prose value number {i}" for c in _COLS
+      } for i in range(60)],
+      reference_digest="digest-w1",
+      model_uri="gs://m/v1",
+      num_rows=1_000_000,
+  )
+  defaults.update(overrides)
+  return GenerationContext(**defaults)
 
 
 class _StubClient:
-    def generate_json(self, prompt, json_schema, *, max_tokens=2048,
-                      temperature=0.7, n=1, seed=None, top_p=None, top_k=None):
-        return [{"values": [f"gen-{c}-{i}" for i in range(32)]} for c in range(n)]
+
+  def generate_json(self,
+                    prompt,
+                    json_schema,
+                    *,
+                    max_tokens=2048,
+                    temperature=0.7,
+                    n=1,
+                    seed=None,
+                    top_p=None,
+                    top_k=None):
+    return [{"values": [f"gen-{c}-{i}" for i in range(32)]} for c in range(n)]
 
 
 def _names(caplog):
-    return [
-        m["name"]
-        for m in (parse_milestone(r.getMessage()) for r in caplog.records)
-        if m
-    ]
+  return [
+      m["name"] for m in (parse_milestone(r.getMessage())
+                          for r in caplog.records) if m
+  ]
 
 
 def test_absent_pool_store_is_announced(caplog):
-    with caplog.at_level("WARNING"):
-        B1RagEngine().setup(_StubClient(), _ctx())
-    assert "freetext_pool_store_absent" in _names(caplog)
+  with caplog.at_level("WARNING"):
+    B1RagEngine().setup(_StubClient(), _ctx())
+  assert "freetext_pool_store_absent" in _names(caplog)
 
 
 def test_the_warning_carries_the_row_count_that_makes_it_matter(caplog):
-    with caplog.at_level("WARNING"):
-        B1RagEngine().setup(_StubClient(), _ctx())
-    line = next(
-        r.getMessage() for r in caplog.records
-        if "freetext_pool_store_absent" in r.getMessage()
-    )
-    assert "num_rows=1000000" in line
+  with caplog.at_level("WARNING"):
+    B1RagEngine().setup(_StubClient(), _ctx())
+  line = next(r.getMessage()
+              for r in caplog.records
+              if "freetext_pool_store_absent" in r.getMessage())
+  assert "num_rows=1000000" in line
 
 
 def test_no_warning_when_a_store_is_attached(caplog):
-    with caplog.at_level("WARNING"):
-        B1RagEngine().setup(
-            _StubClient(), _ctx(pool_store=InMemoryFreeTextPoolStore())
-        )
-    assert "freetext_pool_store_absent" not in _names(caplog)
+  with caplog.at_level("WARNING"):
+    B1RagEngine().setup(_StubClient(),
+                        _ctx(pool_store=InMemoryFreeTextPoolStore()))
+  assert "freetext_pool_store_absent" not in _names(caplog)
 
 
 def test_no_warning_when_there_is_no_free_text_column_to_build(caplog):
-    """Nothing to rebuild ⇒ nothing to warn about."""
-    schema = TableSchema.model_validate(
-        {
-            "table_info": {"table_id": "demo.t"},
-            "schema": [{"name": "n", "type": "INT64", "mode": "REQUIRED"}],
-        }
+  """Nothing to rebuild ⇒ nothing to warn about."""
+  schema = TableSchema.model_validate({
+      "table_info": {
+          "table_id": "demo.t"
+      },
+      "schema": [{
+          "name": "n",
+          "type": "INT64",
+          "mode": "REQUIRED"
+      }],
+  })
+  with caplog.at_level("WARNING"):
+    B1RagEngine().setup(
+        _StubClient(),
+        _ctx(table_schema=schema, reference_rows=[{
+            "n": i
+        } for i in range(60)]),
     )
-    with caplog.at_level("WARNING"):
-        B1RagEngine().setup(
-            _StubClient(),
-            _ctx(table_schema=schema, reference_rows=[{"n": i} for i in range(60)]),
-        )
-    assert "freetext_pool_store_absent" not in _names(caplog)
+  assert "freetext_pool_store_absent" not in _names(caplog)

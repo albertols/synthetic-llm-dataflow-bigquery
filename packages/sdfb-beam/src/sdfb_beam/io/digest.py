@@ -17,17 +17,17 @@ from collections.abc import Iterable
 
 
 def compute_reference_digest(rows: Iterable[dict]) -> str:
-    """SHA-256 of canonical-encoded reference rows.
+  """SHA-256 of canonical-encoded reference rows.
 
     Sorting + per-row hashing makes the operation associative — so the
     same function can serve as a CombineFn `extract_output` if the
     reference set ever outgrows worker memory.
     """
-    sorted_rows = sorted(
-        rows,
-        key=lambda r: json.dumps(r, sort_keys=True, default=str),
-    )
-    h = hashlib.sha256()
-    for row in sorted_rows:
-        h.update(json.dumps(row, sort_keys=True, default=str).encode("utf-8"))
-    return h.hexdigest()
+  sorted_rows = sorted(
+      rows,
+      key=lambda r: json.dumps(r, sort_keys=True, default=str),
+  )
+  h = hashlib.sha256()
+  for row in sorted_rows:
+    h.update(json.dumps(row, sort_keys=True, default=str).encode("utf-8"))
+  return h.hexdigest()

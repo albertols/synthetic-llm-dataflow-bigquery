@@ -22,59 +22,61 @@ import pytest
 
 @pytest.fixture
 def fake_hf_stack(monkeypatch):
-    """Fake `transformers` + `torch` recording construction concurrency."""
+  """Fake `transformers` + `torch` recording construction concurrency."""
 
-    state = {"active": 0, "max_active": 0, "calls": 0}
-    gauge_lock = threading.Lock()
+  state = {"active": 0, "max_active": 0, "calls": 0}
+  gauge_lock = threading.Lock()
 
-    class _FakeModel:
-        def to(self, device):
-            return self
+  class _FakeModel:
 
-        def eval(self):
-            return self
+    def to(self, device):
+      return self
 
-    class _FromPretrained:
-        @staticmethod
-        def from_pretrained(path, **kwargs):
-            with gauge_lock:
-                state["active"] += 1
-                state["calls"] += 1
-                state["max_active"] = max(state["max_active"], state["active"])
-            time.sleep(0.02)  # widen the race window
-            with gauge_lock:
-                state["active"] -= 1
-            return _FakeModel()
+    def eval(self):
+      return self
 
-    transformers_mod = types.ModuleType("transformers")
-    transformers_mod.AutoModel = _FromPretrained
-    transformers_mod.AutoTokenizer = _FromPretrained
-    torch_mod = sys.modules.get("torch") or types.ModuleType("torch")
+  class _FromPretrained:
 
-    monkeypatch.setitem(sys.modules, "transformers", transformers_mod)
-    monkeypatch.setitem(sys.modules, "torch", torch_mod)
-    return state
+    @staticmethod
+    def from_pretrained(path, **kwargs):
+      with gauge_lock:
+        state["active"] += 1
+        state["calls"] += 1
+        state["max_active"] = max(state["max_active"], state["active"])
+      time.sleep(0.02)  # widen the race window
+      with gauge_lock:
+        state["active"] -= 1
+      return _FakeModel()
+
+  transformers_mod = types.ModuleType("transformers")
+  transformers_mod.AutoModel = _FromPretrained
+  transformers_mod.AutoTokenizer = _FromPretrained
+  torch_mod = sys.modules.get("torch") or types.ModuleType("torch")
+
+  monkeypatch.setitem(sys.modules, "transformers", transformers_mod)
+  monkeypatch.setitem(sys.modules, "torch", torch_mod)
+  return state
 
 
 def test_bge_embedder_constructions_never_overlap(fake_hf_stack, tmp_path):
-    from sdfb_core.rag.embedding import BgeEmbedder
+  from sdfb_core.rag.embedding import BgeEmbedder
 
-    errors: list[Exception] = []
+  errors: list[Exception] = []
 
-    def build():
-        try:
-            BgeEmbedder(str(tmp_path)).ensure_loaded()
-        except Exception as e:  # pragma: no cover - failure diagnostics
-            errors.append(e)
+  def build():
+    try:
+      BgeEmbedder(str(tmp_path)).ensure_loaded()
+    except Exception as e:  # pragma: no cover - failure diagnostics
+      errors.append(e)
 
-    threads = [threading.Thread(target=build) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+  threads = [threading.Thread(target=build) for _ in range(8)]
+  for t in threads:
+    t.start()
+  for t in threads:
+    t.join()
 
-    assert not errors
-    # 8 loads happened (2 from_pretrained calls each) …
-    assert fake_hf_stack["calls"] == 16
-    # … but never two loader calls in flight at once.
-    assert fake_hf_stack["max_active"] == 1
+  assert not errors
+  # 8 loads happened (2 from_pretrained calls each) …
+  assert fake_hf_stack["calls"] == 16
+  # … but never two loader calls in flight at once.
+  assert fake_hf_stack["max_active"] == 1

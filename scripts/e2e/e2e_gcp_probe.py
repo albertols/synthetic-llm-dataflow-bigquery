@@ -52,8 +52,10 @@ _DEFAULT_MILESTONES: list[tuple[str, str]] = [
     ("embedder_warm_pull_start", r"Warm-pulling .*(embedder|embeddings)"),
     ("embedder_pulled", r"Pulled \d+ files"),
     ("model_weights_loading", r"Loading weights"),
-    ("vllm_engine_init", r"(?i)vllm.*(engine|init)|LLM engine|EngineCore|Initializing a V\d"),
-    ("vllm_ready", r"(?i)vllm.*(ready|initialized)|model loaded|Loading weights took"),
+    ("vllm_engine_init",
+     r"(?i)vllm.*(engine|init)|LLM engine|EngineCore|Initializing a V\d"),
+    ("vllm_ready",
+     r"(?i)vllm.*(ready|initialized)|model loaded|Loading weights took"),
     ("sdgx_fit", r"(?i)Fitting|CTGAN.*epoch|sdgx.*synthesizer|Sampling \d+"),
     ("faiss_loaded", r"Loading faiss"),
     ("generation_stall", r"Bundle processor .* has been creating for at least"),
@@ -80,102 +82,97 @@ _FQN_PARTS = 3  # project.dataset.table
 # auth / preflight
 # --------------------------------------------------------------------------
 def preflight_adc(project: str) -> tuple[Any, str]:
-    """Resolve ADC or fail with an actionable hint. Returns (session, token)."""
-    try:
-        import google.auth
-        import google.auth.transport.requests as gtr
-        import requests
-    except ImportError as e:  # pragma: no cover - env-dependent
-        _die(
-            f"missing GCP client libs ({e}). Install: "
-            "pip install google-auth google-cloud-bigquery requests"
-        )
-    try:
-        creds, _ = google.auth.default(scopes=_SCOPES)
-        creds.refresh(gtr.Request())
-    except Exception as e:
-        _die(
-            "Application Default Credentials not usable "
-            f"({type(e).__name__}: {e}).\nRun:\n"
-            "  gcloud auth application-default login\n"
-            f"  gcloud auth application-default set-quota-project {project}"
-        )
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Authorization": f"Bearer {creds.token}",
-            # Route API quota to the target project (higher limits) instead of
-            # the default OAuth client, and set the billing/quota project.
-            "x-goog-user-project": project,
-        }
-    )
-    return session, creds.token
+  """Resolve ADC or fail with an actionable hint. Returns (session, token)."""
+  try:
+    import google.auth
+    import google.auth.transport.requests as gtr
+    import requests
+  except ImportError as e:  # pragma: no cover - env-dependent
+    _die(f"missing GCP client libs ({e}). Install: "
+         "pip install google-auth google-cloud-bigquery requests")
+  try:
+    creds, _ = google.auth.default(scopes=_SCOPES)
+    creds.refresh(gtr.Request())
+  except Exception as e:
+    _die("Application Default Credentials not usable "
+         f"({type(e).__name__}: {e}).\nRun:\n"
+         "  gcloud auth application-default login\n"
+         f"  gcloud auth application-default set-quota-project {project}")
+  session = requests.Session()
+  session.headers.update({
+      "Authorization": f"Bearer {creds.token}",
+      # Route API quota to the target project (higher limits) instead of
+      # the default OAuth client, and set the billing/quota project.
+      "x-goog-user-project": project,
+  })
+  return session, creds.token
 
 
 def _die(msg: str) -> None:
-    print(f"ERROR: {msg}", file=sys.stderr)
-    raise SystemExit(2)
+  print(f"ERROR: {msg}", file=sys.stderr)
+  raise SystemExit(2)
 
 
 # --------------------------------------------------------------------------
 # BigQuery cross-validation (schema-introspected, table-agnostic)
 # --------------------------------------------------------------------------
 def _bq_client(project: str):
-    from google.cloud import bigquery
+  from google.cloud import bigquery
 
-    return bigquery.Client(project=project)
+  return bigquery.Client(project=project)
 
 
 def _split_fqn(fqn: str) -> tuple[str, str, str]:
-    parts = fqn.split(".")
-    if len(parts) != _FQN_PARTS:
-        _die(f"expected project.dataset.table, got {fqn!r}")
-    return parts[0], parts[1], parts[2]
+  parts = fqn.split(".")
+  if len(parts) != _FQN_PARTS:
+    _die(f"expected project.dataset.table, got {fqn!r}")
+  return parts[0], parts[1], parts[2]
 
 
 def _columns(client, fqn: str) -> list[dict[str, str]]:
-    proj, ds, tbl = _split_fqn(fqn)
-    sql = f"""
+  proj, ds, tbl = _split_fqn(fqn)
+  sql = f"""
         SELECT column_name, data_type
         FROM `{proj}.{ds}.INFORMATION_SCHEMA.COLUMNS`
         WHERE table_name = @tbl
         ORDER BY ordinal_position
     """
-    from google.cloud import bigquery
+  from google.cloud import bigquery
 
-    job = client.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("tbl", "STRING", tbl)]
-        ),
-    )
-    return [{"name": r.column_name, "type": r.data_type} for r in job.result()]
+  job = client.query(
+      sql,
+      job_config=bigquery.QueryJobConfig(query_parameters=[
+          bigquery.ScalarQueryParameter("tbl", "STRING", tbl)
+      ]),
+  )
+  return [{"name": r.column_name, "type": r.data_type} for r in job.result()]
 
 
 def _quote(fqn: str) -> str:
-    return "`" + fqn + "`"
+  return "`" + fqn + "`"
 
 
-def bq_cross_validation(
-    client, source_fqn: str, landing_fqn: str, *, pk_columns: list[str]
-) -> dict[str, Any]:
-    """Per-column repetition / singularity / sparsity + memorization copy-ratio,
+def bq_cross_validation(client, source_fqn: str, landing_fqn: str, *,
+                        pk_columns: list[str]) -> dict[str, Any]:
+  """Per-column repetition / singularity / sparsity + memorization copy-ratio,
     computed in-warehouse (no row download) and generic across schemas."""
-    cols = _columns(client, landing_fqn)
-    src_cols = {c["name"] for c in _columns(client, source_fqn)}
-    src_n = _scalar(client, f"SELECT COUNT(*) FROM {_quote(source_fqn)}")
-    lnd_n = _scalar(client, f"SELECT COUNT(*) FROM {_quote(landing_fqn)}")
+  cols = _columns(client, landing_fqn)
+  src_cols = {c["name"] for c in _columns(client, source_fqn)}
+  src_n = _scalar(client, f"SELECT COUNT(*) FROM {_quote(source_fqn)}")
+  lnd_n = _scalar(client, f"SELECT COUNT(*) FROM {_quote(landing_fqn)}")
 
-    per_col: dict[str, Any] = {}
-    for c in cols:
-        name = c["name"]
-        col = f"`{name}`"
-        is_numeric = c["type"] in {"INT64", "INTEGER", "FLOAT64", "NUMERIC", "BIGNUMERIC"}
-        zero_expr = f"COUNTIF(SAFE_CAST({col} AS FLOAT64) = 0)" if is_numeric else "0"
-        # One pass over the landing table for the cheap marginals.
-        agg = _row(
-            client,
-            f"""
+  per_col: dict[str, Any] = {}
+  for c in cols:
+    name = c["name"]
+    col = f"`{name}`"
+    is_numeric = c["type"] in {
+        "INT64", "INTEGER", "FLOAT64", "NUMERIC", "BIGNUMERIC"
+    }
+    zero_expr = f"COUNTIF(SAFE_CAST({col} AS FLOAT64) = 0)" if is_numeric else "0"
+    # One pass over the landing table for the cheap marginals.
+    agg = _row(
+        client,
+        f"""
             SELECT
               COUNT(*) AS n,
               COUNT(DISTINCT {col}) AS distinct_n,
@@ -185,41 +182,39 @@ def bq_cross_validation(
               APPROX_TOP_COUNT({col}, 1)[SAFE_OFFSET(0)].count AS top_count
             FROM {_quote(landing_fqn)}
             """,
-        )
-        n = agg["n"] or 0
-        entry: dict[str, Any] = {
-            "type": c["type"],
-            "in_source_schema": name in src_cols,
-            "landing_rows": n,
-            "distinct": agg["distinct_n"],
-            "distinct_ratio": _ratio(agg["distinct_n"], n),
-            "null_fraction": _ratio(agg["null_n"], n),
-            # Trimmed-empty parity signal (2026-08-05 spec C4).
-            "empty_fraction": _ratio(agg["empty_n"], n),
-            "zero_fraction": _ratio(agg["zero_n"], n) if is_numeric else None,
-            "top_value_share": _ratio(agg["top_count"], n),  # repetition
-            "is_constant": (agg["distinct_n"] or 0) <= 1,     # singularity
-            "is_pk": name in pk_columns,
-        }
-        # Memorization: fraction of landing values that also exist in source.
-        # Sentinel-aware (2026-07-23 b1_rag run): "0001-01-01"/"9999-12-31"
-        # null-substitutes are re-injected at observed frequency BY DESIGN
-        # (engine sentinel parity) and always exist in source, so the raw
-        # copy_ratio conflates them with real copying — measure them apart.
-        # `day_shaped_n` detects day-granularity values (dates render as
-        # exactly `YYYY-MM-DD`) whose in-source collisions are a
-        # domain-size artifact, not per-row memorization (see
-        # `memorization_flags`). SAFE_CAST: BYTES columns must not kill the
-        # probe on invalid UTF-8.
-        if name in src_cols:
-            sentinel_re = r"'^(0001|9999)-'"
-            day_re = r"'^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
-            in_src = (
-                f"{col} IN (SELECT DISTINCT {col} FROM {_quote(source_fqn)})"
-            )
-            mem = _row(
-                client,
-                f"""
+    )
+    n = agg["n"] or 0
+    entry: dict[str, Any] = {
+        "type": c["type"],
+        "in_source_schema": name in src_cols,
+        "landing_rows": n,
+        "distinct": agg["distinct_n"],
+        "distinct_ratio": _ratio(agg["distinct_n"], n),
+        "null_fraction": _ratio(agg["null_n"], n),
+        # Trimmed-empty parity signal (2026-08-05 spec C4).
+        "empty_fraction": _ratio(agg["empty_n"], n),
+        "zero_fraction": _ratio(agg["zero_n"], n) if is_numeric else None,
+        "top_value_share": _ratio(agg["top_count"], n),  # repetition
+        "is_constant": (agg["distinct_n"] or 0) <= 1,  # singularity
+        "is_pk": name in pk_columns,
+    }
+    # Memorization: fraction of landing values that also exist in source.
+    # Sentinel-aware (2026-07-23 b1_rag run): "0001-01-01"/"9999-12-31"
+    # null-substitutes are re-injected at observed frequency BY DESIGN
+    # (engine sentinel parity) and always exist in source, so the raw
+    # copy_ratio conflates them with real copying — measure them apart.
+    # `day_shaped_n` detects day-granularity values (dates render as
+    # exactly `YYYY-MM-DD`) whose in-source collisions are a
+    # domain-size artifact, not per-row memorization (see
+    # `memorization_flags`). SAFE_CAST: BYTES columns must not kill the
+    # probe on invalid UTF-8.
+    if name in src_cols:
+      sentinel_re = r"'^(0001|9999)-'"
+      day_re = r"'^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
+      in_src = (f"{col} IN (SELECT DISTINCT {col} FROM {_quote(source_fqn)})")
+      mem = _row(
+          client,
+          f"""
                 SELECT
                   COUNTIF({in_src}) AS copied,
                   COUNTIF(REGEXP_CONTAINS(
@@ -231,54 +226,49 @@ def bq_cross_validation(
                       SAFE_CAST({col} AS STRING), {day_re})) AS day_shaped_n
                 FROM {_quote(landing_fqn)}
                 """,
-            )
-            src_agg = _row(
-                client,
-                f"""
+      )
+      src_agg = _row(
+          client,
+          f"""
                 SELECT
                   COUNT(DISTINCT {col}) AS distinct_n,
                   COUNTIF(TRIM(SAFE_CAST({col} AS STRING)) = '') AS empty_n
                 FROM {_quote(source_fqn)}
                 """,
-            )
-            src_distinct = src_agg["distinct_n"]
-            entry["source_empty_fraction"] = _ratio(src_agg["empty_n"], src_n)
-            entry["source_distinct_ratio"] = _ratio(src_distinct, src_n)
-            copied = mem["copied"]
-            sentinel_n = mem["sentinel_n"] or 0
-            non_null = n - (agg["null_n"] or 0)
-            entry["source_distinct"] = src_distinct
-            entry["copy_ratio"] = _ratio(copied, n)          # memorization
-            entry["novelty_ratio"] = _ratio((n - (copied or 0)), n)
-            entry["sentinel_fraction"] = _ratio(sentinel_n, n)
-            entry["copy_ratio_nonsentinel"] = _ratio(
-                mem["copied_nonsentinel"], n - sentinel_n
-            )
-            sub = _row(
-                client,
-                _substantive_copy_sql(
-                    _quote(landing_fqn), _quote(source_fqn), col
-                ),
-            )
-            entry["copy_ratio_substantive"] = _ratio(
-                sub["copied_substantive"], sub["substantive_n"]
-            )
-            entry["temporal_day_granularity"] = bool(
-                non_null > 0 and (mem["day_shaped_n"] or 0) >= 0.99 * non_null
-            )
-        per_col[name] = entry
+      )
+      src_distinct = src_agg["distinct_n"]
+      entry["source_empty_fraction"] = _ratio(src_agg["empty_n"], src_n)
+      entry["source_distinct_ratio"] = _ratio(src_distinct, src_n)
+      copied = mem["copied"]
+      sentinel_n = mem["sentinel_n"] or 0
+      non_null = n - (agg["null_n"] or 0)
+      entry["source_distinct"] = src_distinct
+      entry["copy_ratio"] = _ratio(copied, n)  # memorization
+      entry["novelty_ratio"] = _ratio((n - (copied or 0)), n)
+      entry["sentinel_fraction"] = _ratio(sentinel_n, n)
+      entry["copy_ratio_nonsentinel"] = _ratio(mem["copied_nonsentinel"],
+                                               n - sentinel_n)
+      sub = _row(
+          client,
+          _substantive_copy_sql(_quote(landing_fqn), _quote(source_fqn), col),
+      )
+      entry["copy_ratio_substantive"] = _ratio(sub["copied_substantive"],
+                                               sub["substantive_n"])
+      entry["temporal_day_granularity"] = bool(
+          non_null > 0 and (mem["day_shaped_n"] or 0) >= 0.99 * non_null)
+    per_col[name] = entry
 
-    return {
-        "source_fqn": source_fqn,
-        "landing_fqn": landing_fqn,
-        "source_rows": src_n,
-        "landing_rows": lnd_n,
-        "pk_columns": pk_columns,
-        "pk_analysis": _pk_analysis(client, landing_fqn, pk_columns),
-        "columns": per_col,
-        "memorization_flags": memorization_flags(per_col),
-        "freetext_rules": evaluate_freetext_rules(per_col),
-    }
+  return {
+      "source_fqn": source_fqn,
+      "landing_fqn": landing_fqn,
+      "source_rows": src_n,
+      "landing_rows": lnd_n,
+      "pk_columns": pk_columns,
+      "pk_analysis": _pk_analysis(client, landing_fqn, pk_columns),
+      "columns": per_col,
+      "memorization_flags": memorization_flags(per_col),
+      "freetext_rules": evaluate_freetext_rules(per_col),
+  }
 
 
 # --- post-run free-text fidelity rules (2026-08-05 spec C4) ---------------
@@ -287,7 +277,10 @@ def bq_cross_validation(
 # imports at runtime); pass a `rules` dict parsed from thresholds.yml to
 # override.
 _FREETEXT_RULE_DEFAULTS: dict[str, dict] = {
-    "freetext.empty_parity": {"severity": "MAJOR", "max_abs_delta": 0.10},
+    "freetext.empty_parity": {
+        "severity": "MAJOR",
+        "max_abs_delta": 0.10
+    },
     "freetext.distinct_floor": {
         "severity": "MAJOR",
         "applies_above_source_distinct_ratio": 0.5,
@@ -322,87 +315,86 @@ _FREETEXT_RULE_DEFAULTS: dict[str, dict] = {
 # BQ types on the numeric-domain exemption (matches the engine's
 # _NUMERIC_BQ_TYPES; the probe stores the landing schema type per column).
 _NUMERIC_BQ_TYPES = frozenset(
-    {"INTEGER", "INT64", "FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"}
-)
+    {"INTEGER", "INT64", "FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"})
 
 
-def evaluate_freetext_rules(
-    per_col: dict[str, dict], rules: dict[str, dict] | None = None
-) -> list[dict]:
-    """Evaluate the post_run freetext rules over per-column cross-validation
+def evaluate_freetext_rules(per_col: dict[str, dict],
+                            rules: dict[str, dict] | None = None) -> list[dict]:
+  """Evaluate the post_run freetext rules over per-column cross-validation
     entries. Pure + offline: returns one result dict per (rule, column)
     where the rule applies; a column absent from the source is skipped."""
-    cfg = {**_FREETEXT_RULE_DEFAULTS, **(rules or {})}
-    results: list[dict] = []
+  cfg = {**_FREETEXT_RULE_DEFAULTS, **(rules or {})}
+  results: list[dict] = []
 
-    def add(rule: str, column: str, value, passed: bool) -> None:
-        results.append(
-            {
-                "rule": rule,
-                "column": column,
-                "value": value,
-                "passed": passed,
-                "severity": cfg[rule].get(
-                    "severity", _FREETEXT_RULE_DEFAULTS[rule]["severity"]
-                ),
-            }
-        )
+  def add(rule: str, column: str, value, passed: bool) -> None:
+    results.append({
+        "rule":
+            rule,
+        "column":
+            column,
+        "value":
+            value,
+        "passed":
+            passed,
+        "severity":
+            cfg[rule].get("severity",
+                          _FREETEXT_RULE_DEFAULTS[rule]["severity"]),
+    })
 
-    for name, e in per_col.items():
-        if not e.get("in_source_schema"):
-            continue
-        ep = cfg["freetext.empty_parity"]
-        src_empty = e.get("source_empty_fraction")
-        lnd_empty = e.get("empty_fraction")
-        if src_empty is not None and lnd_empty is not None:
-            delta = round(abs(lnd_empty - src_empty), 4)
-            add(
-                "freetext.empty_parity", name, delta,
-                delta <= ep.get("max_abs_delta", 0.10),
-            )
-        df = cfg["freetext.distinct_floor"]
-        sdr = e.get("source_distinct_ratio")
-        src_distinct = e.get("source_distinct")
-        if (
-            sdr is not None
-            and src_distinct
-            and sdr > df.get("applies_above_source_distinct_ratio", 0.5)
-        ):
-            floor = min(
-                df.get("min_ratio_of_source", 0.5) * src_distinct,
-                df.get("floor_distinct", 5120),
-            )
-            add(
-                "freetext.distinct_floor", name, e.get("distinct"),
-                (e.get("distinct") or 0) >= floor,
-            )
-        cf = cfg["freetext.copy_fraction"]
-        copy = e.get("copy_ratio_substantive")
-        if copy is None:
-            copy = e.get("copy_ratio_nonsentinel")
-        if (
-            copy is not None
-            and (src_distinct or 0) > cf.get("applies_above_source_distinct", 100)
-        ):
-            day_exempt = bool(
-                cf.get("exempt_day_granularity", True)
-                and e.get("temporal_day_granularity")
-            )
-            numeric_exempt = bool(
-                cf.get("exempt_numeric_domains", True)
-                and e.get("type") in _NUMERIC_BQ_TYPES
-            )
-            # Unrounded: a few-in-a-million value rounded to 0.0 next to
-            # passed=false read as a contradiction (2026-08-09 R1 reports).
-            add(
-                "freetext.copy_fraction", name, copy,
-                day_exempt or numeric_exempt or copy <= cf.get("max", 0.0),
-            )
-            if day_exempt:
-                results[-1]["exempt"] = "temporal_day_granularity"
-            elif numeric_exempt:
-                results[-1]["exempt"] = "numeric_domain"
-    return results
+  for name, e in per_col.items():
+    if not e.get("in_source_schema"):
+      continue
+    ep = cfg["freetext.empty_parity"]
+    src_empty = e.get("source_empty_fraction")
+    lnd_empty = e.get("empty_fraction")
+    if src_empty is not None and lnd_empty is not None:
+      delta = round(abs(lnd_empty - src_empty), 4)
+      add(
+          "freetext.empty_parity",
+          name,
+          delta,
+          delta <= ep.get("max_abs_delta", 0.10),
+      )
+    df = cfg["freetext.distinct_floor"]
+    sdr = e.get("source_distinct_ratio")
+    src_distinct = e.get("source_distinct")
+    if (sdr is not None and src_distinct and
+        sdr > df.get("applies_above_source_distinct_ratio", 0.5)):
+      floor = min(
+          df.get("min_ratio_of_source", 0.5) * src_distinct,
+          df.get("floor_distinct", 5120),
+      )
+      add(
+          "freetext.distinct_floor",
+          name,
+          e.get("distinct"),
+          (e.get("distinct") or 0) >= floor,
+      )
+    cf = cfg["freetext.copy_fraction"]
+    copy = e.get("copy_ratio_substantive")
+    if copy is None:
+      copy = e.get("copy_ratio_nonsentinel")
+    if (copy is not None and
+        (src_distinct or 0) > cf.get("applies_above_source_distinct", 100)):
+      day_exempt = bool(
+          cf.get("exempt_day_granularity", True) and
+          e.get("temporal_day_granularity"))
+      numeric_exempt = bool(
+          cf.get("exempt_numeric_domains", True) and
+          e.get("type") in _NUMERIC_BQ_TYPES)
+      # Unrounded: a few-in-a-million value rounded to 0.0 next to
+      # passed=false read as a contradiction (2026-08-09 R1 reports).
+      add(
+          "freetext.copy_fraction",
+          name,
+          copy,
+          day_exempt or numeric_exempt or copy <= cf.get("max", 0.0),
+      )
+      if day_exempt:
+        results[-1]["exempt"] = "temporal_day_granularity"
+      elif numeric_exempt:
+        results[-1]["exempt"] = "numeric_domain"
+  return results
 
 
 # A non-constant column whose source support is genuinely large (> 100
@@ -421,7 +413,7 @@ _MEM_KANON_MIN_COUNT = 10
 
 
 def _substantive_copy_sql(landing_q: str, source_q: str, col: str) -> str:
-    """SQL for the substantive copy count: landing values that are non-NULL,
+  """SQL for the substantive copy count: landing values that are non-NULL,
     non-trimmed-empty, non-date-sentinel AND equal a RARE source value.
 
     Empty strings are re-emitted at observed frequency by design (empty
@@ -429,18 +421,14 @@ def _substantive_copy_sql(landing_q: str, source_q: str, col: str) -> str:
     column from exactly this artifact), and frequent source values are
     k-anonymous enum mass; neither is memorization.
     """
-    sentinel_re = r"'^(0001|9999)-'"
-    substantive = (
-        f"{col} IS NOT NULL "
-        f"AND TRIM(SAFE_CAST({col} AS STRING)) != '' "
-        f"AND NOT IFNULL(REGEXP_CONTAINS("
-        f"SAFE_CAST({col} AS STRING), {sentinel_re}), FALSE)"
-    )
-    in_rare_src = (
-        f"{col} IN (SELECT {col} FROM {source_q} "
-        f"GROUP BY {col} HAVING COUNT(*) < {_MEM_KANON_MIN_COUNT})"
-    )
-    return f"""
+  sentinel_re = r"'^(0001|9999)-'"
+  substantive = (f"{col} IS NOT NULL "
+                 f"AND TRIM(SAFE_CAST({col} AS STRING)) != '' "
+                 f"AND NOT IFNULL(REGEXP_CONTAINS("
+                 f"SAFE_CAST({col} AS STRING), {sentinel_re}), FALSE)")
+  in_rare_src = (f"{col} IN (SELECT {col} FROM {source_q} "
+                 f"GROUP BY {col} HAVING COUNT(*) < {_MEM_KANON_MIN_COUNT})")
+  return f"""
         SELECT
           COUNTIF({substantive} AND {in_rare_src}) AS copied_substantive,
           COUNTIF({substantive}) AS substantive_n
@@ -449,7 +437,7 @@ def _substantive_copy_sql(landing_q: str, source_q: str, col: str) -> str:
 
 
 def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
-    """Memorization findings from `bq_cross_validation` per-column entries:
+  """Memorization findings from `bq_cross_validation` per-column entries:
     non-constant, source_distinct > 100, scored ratio >= 0.3. Sorted
     worst-first (CRITICAL before INFO). Columns without a measured
     copy_ratio (not in the source schema, or an empty landing table →
@@ -463,64 +451,61 @@ def memorization_flags(columns: dict[str, Any]) -> list[dict[str, Any]]:
     day-granularity temporal columns downgrade to INFO: a calendar day
     drawn from the clamped ~3650-day window collides with a dense source
     by domain size, never identifying a source row."""
-    flags = []
-    for name, entry in columns.items():
-        copy_ratio = entry.get("copy_ratio")
-        # Substantive first (excludes empty-parity + k-anonymous enum mass,
-        # 2026-08-07 A_TABLE R1 false CRITICAL), then sentinel-adjusted,
-        # then raw.
-        scored = entry.get("copy_ratio_substantive")
-        if scored is None:
-            scored = entry.get("copy_ratio_nonsentinel")
-        if scored is None:
-            scored = copy_ratio
-        source_distinct = entry.get("source_distinct")
-        if scored is None or source_distinct is None:
-            continue
-        if entry.get("is_constant"):
-            continue
-        if (
-            source_distinct > _MEM_MIN_SOURCE_DISTINCT
-            and scored >= _MEM_COPY_RATIO_THRESHOLD
-        ):
-            day_granularity = bool(entry.get("temporal_day_granularity"))
-            base_rule = (
-                f"copy_ratio >= {_MEM_COPY_RATIO_THRESHOLD} AND "
-                f"source_distinct > {_MEM_MIN_SOURCE_DISTINCT}"
-            )
-            flags.append(
-                {
-                    "column": name,
-                    "type": entry.get("type"),
-                    "copy_ratio": copy_ratio,
-                    "copy_ratio_nonsentinel": entry.get("copy_ratio_nonsentinel"),
-                    "copy_ratio_substantive": entry.get("copy_ratio_substantive"),
-                    "source_distinct": source_distinct,
-                    "severity": "INFO" if day_granularity else "CRITICAL",
-                    "rule": (
-                        base_rule
-                        + " (day-granularity temporal domain: in-source "
-                        "collisions expected by domain size, not per-row "
-                        "memorization)"
-                        if day_granularity
-                        else base_rule
-                    ),
-                }
-            )
-    return sorted(
-        flags,
-        key=lambda f: (f["severity"] == "CRITICAL", f["copy_ratio"] or 0),
-        reverse=True,
-    )
+  flags = []
+  for name, entry in columns.items():
+    copy_ratio = entry.get("copy_ratio")
+    # Substantive first (excludes empty-parity + k-anonymous enum mass,
+    # 2026-08-07 A_TABLE R1 false CRITICAL), then sentinel-adjusted,
+    # then raw.
+    scored = entry.get("copy_ratio_substantive")
+    if scored is None:
+      scored = entry.get("copy_ratio_nonsentinel")
+    if scored is None:
+      scored = copy_ratio
+    source_distinct = entry.get("source_distinct")
+    if scored is None or source_distinct is None:
+      continue
+    if entry.get("is_constant"):
+      continue
+    if (source_distinct > _MEM_MIN_SOURCE_DISTINCT and
+        scored >= _MEM_COPY_RATIO_THRESHOLD):
+      day_granularity = bool(entry.get("temporal_day_granularity"))
+      base_rule = (f"copy_ratio >= {_MEM_COPY_RATIO_THRESHOLD} AND "
+                   f"source_distinct > {_MEM_MIN_SOURCE_DISTINCT}")
+      flags.append({
+          "column":
+              name,
+          "type":
+              entry.get("type"),
+          "copy_ratio":
+              copy_ratio,
+          "copy_ratio_nonsentinel":
+              entry.get("copy_ratio_nonsentinel"),
+          "copy_ratio_substantive":
+              entry.get("copy_ratio_substantive"),
+          "source_distinct":
+              source_distinct,
+          "severity":
+              "INFO" if day_granularity else "CRITICAL",
+          "rule": (base_rule + " (day-granularity temporal domain: in-source "
+                   "collisions expected by domain size, not per-row "
+                   "memorization)" if day_granularity else base_rule),
+      })
+  return sorted(
+      flags,
+      key=lambda f: (f["severity"] == "CRITICAL", f["copy_ratio"] or 0),
+      reverse=True,
+  )
 
 
-def _pk_analysis(client, landing_fqn: str, pk_columns: list[str]) -> dict[str, Any]:
-    if not pk_columns:
-        return {"declared": False}
-    key = ", ".join(f"`{c}`" for c in pk_columns)
-    row = _row(
-        client,
-        f"""
+def _pk_analysis(client, landing_fqn: str,
+                 pk_columns: list[str]) -> dict[str, Any]:
+  if not pk_columns:
+    return {"declared": False}
+  key = ", ".join(f"`{c}`" for c in pk_columns)
+  row = _row(
+      client,
+      f"""
         WITH g AS (
           SELECT {key} AS k, COUNT(*) AS c
           FROM {_quote(landing_fqn)} GROUP BY {key}
@@ -529,118 +514,128 @@ def _pk_analysis(client, landing_fqn: str, pk_columns: list[str]) -> dict[str, A
                MAX(c) AS max_repeat, COUNTIF(c > 1) AS dup_keys
         FROM g
         """,
-    )
-    total = row["total"] or 0
-    return {
-        "declared": True,
-        "columns": pk_columns,
-        "distinct_keys": row["distinct_keys"],
-        "total_rows": total,
-        "duplicate_keys": row["dup_keys"],
-        "max_repeat": row["max_repeat"],
-        "uniqueness_ratio": _ratio(row["distinct_keys"], total),
-    }
+  )
+  total = row["total"] or 0
+  return {
+      "declared": True,
+      "columns": pk_columns,
+      "distinct_keys": row["distinct_keys"],
+      "total_rows": total,
+      "duplicate_keys": row["dup_keys"],
+      "max_repeat": row["max_repeat"],
+      "uniqueness_ratio": _ratio(row["distinct_keys"], total),
+  }
 
 
-def bq_quality(client, quality_dataset: str, run_ids: list[str]) -> dict[str, Any]:
-    if not quality_dataset:
-        return {}
-    out: dict[str, Any] = {}
-    proj, ds, _ = _split_fqn(quality_dataset + ".x")
-    job_config = None
+def bq_quality(client, quality_dataset: str,
+               run_ids: list[str]) -> dict[str, Any]:
+  if not quality_dataset:
+    return {}
+  out: dict[str, Any] = {}
+  proj, ds, _ = _split_fqn(quality_dataset + ".x")
+  job_config = None
+  if run_ids:
+    from google.cloud import bigquery
+
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter("run_ids", "STRING", run_ids)
+    ])
+  for table in ("validation_runs", "dlq"):
+    fqn = f"{proj}.{ds}.{table}"
     if run_ids:
-        from google.cloud import bigquery
-
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ArrayQueryParameter("run_ids", "STRING", run_ids)]
-        )
-    for table in ("validation_runs", "dlq"):
-        fqn = f"{proj}.{ds}.{table}"
-        if run_ids:
-            sql = (
-                f"SELECT * FROM {_quote(fqn)} "
-                "WHERE run_id IN UNNEST(@run_ids) ORDER BY 1 DESC LIMIT 50"
-            )
-        else:
-            sql = f"SELECT * FROM {_quote(fqn)} ORDER BY 1 DESC LIMIT 50"
-        try:
-            rows = [dict(r) for r in client.query(sql, job_config=job_config).result()]
-            out[table] = _jsonable(rows)
-        except Exception as e:
-            out[table] = {"error": f"{type(e).__name__}: {e}"}
-    return out
+      sql = (f"SELECT * FROM {_quote(fqn)} "
+             "WHERE run_id IN UNNEST(@run_ids) ORDER BY 1 DESC LIMIT 50")
+    else:
+      sql = f"SELECT * FROM {_quote(fqn)} ORDER BY 1 DESC LIMIT 50"
+    try:
+      rows = [
+          dict(r) for r in client.query(sql, job_config=job_config).result()
+      ]
+      out[table] = _jsonable(rows)
+    except Exception as e:
+      out[table] = {"error": f"{type(e).__name__}: {e}"}
+  return out
 
 
 # --------------------------------------------------------------------------
 # Dataflow observability
 # --------------------------------------------------------------------------
-def dataflow_job(
-    session, project: str, region: str, job_id: str, milestones: list[tuple[str, str]]
-) -> dict[str, Any]:
-    base = f"{_DATAFLOW_BASE}/projects/{project}/locations/{region}/jobs/{job_id}"
-    j = session.get(base, params={"view": "JOB_VIEW_ALL"}).json()
-    if "error" in j:
-        return {"job_id": job_id, "error": j["error"]}
+def dataflow_job(session, project: str, region: str, job_id: str,
+                 milestones: list[tuple[str, str]]) -> dict[str, Any]:
+  base = f"{_DATAFLOW_BASE}/projects/{project}/locations/{region}/jobs/{job_id}"
+  j = session.get(base, params={"view": "JOB_VIEW_ALL"}).json()
+  if "error" in j:
+    return {"job_id": job_id, "error": j["error"]}
 
-    timing = _job_timing(j)
-    result = {
-        "job_id": job_id,
-        "name": j.get("name"),
-        "type": j.get("type"),
-        "state": j.get("currentState"),
-        "timing": timing,
-        "environment": _job_env(j),
-        "parameters": _job_params(j),
-        "step_count": len(j.get("steps", [])),
-        "job_phases": _job_messages(session, base),
-        "metrics": _job_metrics(session, base),
-        "engine_milestones": _worker_log_milestones(
-            session, project, job_id, milestones, timing
-        ),
-    }
-    return result
+  timing = _job_timing(j)
+  result = {
+      "job_id":
+          job_id,
+      "name":
+          j.get("name"),
+      "type":
+          j.get("type"),
+      "state":
+          j.get("currentState"),
+      "timing":
+          timing,
+      "environment":
+          _job_env(j),
+      "parameters":
+          _job_params(j),
+      "step_count":
+          len(j.get("steps", [])),
+      "job_phases":
+          _job_messages(session, base),
+      "metrics":
+          _job_metrics(session, base),
+      "engine_milestones":
+          _worker_log_milestones(session, project, job_id, milestones, timing),
+  }
+  return result
 
 
 def _job_timing(j: dict) -> dict[str, Any]:
-    create = j.get("createTime")
-    start = j.get("startTime") or create
-    end = j.get("currentStateTime")
-    return {
-        "create_time": create,
-        "start_time": start,
-        "end_time": end,
-        "execution_seconds": _duration(start, end),
-        "state": j.get("currentState"),
-    }
+  create = j.get("createTime")
+  start = j.get("startTime") or create
+  end = j.get("currentStateTime")
+  return {
+      "create_time": create,
+      "start_time": start,
+      "end_time": end,
+      "execution_seconds": _duration(start, end),
+      "state": j.get("currentState"),
+  }
 
 
 def _job_env(j: dict) -> dict[str, Any]:
-    env = j.get("environment", {})
-    pools = env.get("workerPools", [])
-    experiments = env.get("experiments", [])
-    accelerator = None
-    for e in experiments:
-        if isinstance(e, str) and e.startswith("worker_accelerator="):
-            accelerator = e.split("=", 1)[1]
-            break
-    return {
-        "machine_types": [p.get("machineType") for p in pools],
-        "num_workers": [p.get("numWorkers") for p in pools],
-        "max_workers": env.get("maxWorkers"),
-        "accelerator": accelerator,  # e.g. type:nvidia-tesla-t4;count:1;...
-        "worker_image": next(
-            (
-                e.split("=", 1)[1]
-                for e in experiments
-                if isinstance(e, str) and e.startswith("sdk_container_image=")
-            ),
-            None,
-        ),
-    }
+  env = j.get("environment", {})
+  pools = env.get("workerPools", [])
+  experiments = env.get("experiments", [])
+  accelerator = None
+  for e in experiments:
+    if isinstance(e, str) and e.startswith("worker_accelerator="):
+      accelerator = e.split("=", 1)[1]
+      break
+  return {
+      "machine_types": [p.get("machineType") for p in pools],
+      "num_workers": [p.get("numWorkers") for p in pools],
+      "max_workers":
+          env.get("maxWorkers"),
+      "accelerator":
+          accelerator,  # e.g. type:nvidia-tesla-t4;count:1;...
+      "worker_image":
+          next(
+              (e.split("=", 1)[1]
+               for e in experiments
+               if isinstance(e, str) and e.startswith("sdk_container_image=")),
+              None,
+          ),
+  }
 
 
 def _job_params(j: dict) -> dict[str, Any]:
-    """Launch/effective pipeline parameters from the job's display data.
+  """Launch/effective pipeline parameters from the job's display data.
 
     Custom flex-template options (`reference_rows_limit`, `pk_cols`,
     `identity_cols`, `seed`, ...) surface only here, under their options-class
@@ -650,68 +645,66 @@ def _job_params(j: dict) -> dict[str, Any]:
     `value`; `pipelineDescription.displayData` entries carry typed fields
     (`strValue` / `int64Value` / `boolValue` / ...). First occurrence of a
     key wins."""
-    entries: list = []
-    env = j.get("environment") or {}
-    sdk = env.get("sdkPipelineOptions") or {}
-    entries.extend(sdk.get("display_data") or [])
-    entries.extend((j.get("pipelineDescription") or {}).get("displayData") or [])
-    params: dict[str, Any] = {}
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        key = e.get("key")
-        if not key or key in params:
-            continue
-        for field in (
-            "value",
-            "strValue",
-            "int64Value",
-            "boolValue",
-            "floatValue",
-            "timestampValue",
-            "durationValue",
-            "javaClassValue",
-            "shortStrValue",
-        ):
-            if e.get(field) is not None:
-                params[str(key)] = _sanitize_param(str(key), e[field])
-                break
-    return params
+  entries: list = []
+  env = j.get("environment") or {}
+  sdk = env.get("sdkPipelineOptions") or {}
+  entries.extend(sdk.get("display_data") or [])
+  entries.extend((j.get("pipelineDescription") or {}).get("displayData") or [])
+  params: dict[str, Any] = {}
+  for e in entries:
+    if not isinstance(e, dict):
+      continue
+    key = e.get("key")
+    if not key or key in params:
+      continue
+    for field in (
+        "value",
+        "strValue",
+        "int64Value",
+        "boolValue",
+        "floatValue",
+        "timestampValue",
+        "durationValue",
+        "javaClassValue",
+        "shortStrValue",
+    ):
+      if e.get(field) is not None:
+        params[str(key)] = _sanitize_param(str(key), e[field])
+        break
+  return params
 
 
 # Params whose whole value is an infra identifier with zero analytical value
 # (the oss redaction mapping only knows tables/columns/callers, so these
 # leaked verbatim into every bundle until the 2026-08-21 four-run cycle).
-_PARAM_DROP_KEYS = frozenset(
-    {
-        "dataflow_kms_key",
-        "subnetwork",
-        "network",
-        "use_network_tags",
-        "use_network_tags_for_flex_templates",
-        "service_account_email",
-        "impersonate_service_account",
-    }
-)
+_PARAM_DROP_KEYS = frozenset({
+    "dataflow_kms_key",
+    "subnetwork",
+    "network",
+    "use_network_tags",
+    "use_network_tags_for_flex_templates",
+    "service_account_email",
+    "impersonate_service_account",
+})
 
 
 def _sanitize_param(key: str, value: Any) -> Any:
-    """Mask infra identifiers in a pipeline-option value at collection time.
+  """Mask infra identifiers in a pipeline-option value at collection time.
 
     Buckets keep their object path (`gs://REDACTED_BUCKET/…`), registry
     paths keep the image basename (the tag carries the build id), and the
     keys in `_PARAM_DROP_KEYS` are replaced wholesale. Everything else
     passes through untouched."""
-    if not isinstance(value, str):
-        return value
-    if key in _PARAM_DROP_KEYS:
-        return "REDACTED"
-    out = re.sub(r"gs://[^/\s]+", "gs://REDACTED_BUCKET", value)
-    out = re.sub(r"[\w.-]+\.pkg\.dev(?:/[\w.-]+)*/([\w.-]+:[\w.-]+)",
-                 r"ARTIFACT_REGISTRY/\1", out)
-    out = re.sub(r"[\w.+-]+@[\w.-]+\.iam\.gserviceaccount\.com",
-                 "REDACTED_SERVICE_ACCOUNT", out)
-    return out
+  if not isinstance(value, str):
+    return value
+  if key in _PARAM_DROP_KEYS:
+    return "REDACTED"
+  out = re.sub(r"gs://[^/\s]+", "gs://REDACTED_BUCKET", value)
+  out = re.sub(r"[\w.-]+\.pkg\.dev(?:/[\w.-]+)*/([\w.-]+:[\w.-]+)",
+               r"ARTIFACT_REGISTRY/\1", out)
+  out = re.sub(r"[\w.+-]+@[\w.-]+\.iam\.gserviceaccount\.com",
+               "REDACTED_SERVICE_ACCOUNT", out)
+  return out
 
 
 # Job-message text markers → milestone label. Applied to JOB_MESSAGE_BASIC text
@@ -727,104 +720,107 @@ _MSG_MARKERS: list[tuple[str, str]] = [
 
 
 def _job_messages(session, base: str) -> dict[str, Any]:
-    """Return derived phase milestones + the dominant (longest) fused stage."""
-    raw: list[dict[str, str]] = []
-    token = None
-    for _ in range(12):  # bounded paging
-        params = {"minimumImportance": "JOB_MESSAGE_BASIC", "pageSize": 100}
-        if token:
-            params["pageToken"] = token
-        r = session.get(base + "/messages", params=params).json()
-        for m in r.get("jobMessages", []):
-            raw.append({"time": m.get("time"), "text": m.get("messageText", "")})
-        token = r.get("nextPageToken")
-        if not token:
-            break
-    raw.sort(key=lambda m: m["time"] or "")
+  """Return derived phase milestones + the dominant (longest) fused stage."""
+  raw: list[dict[str, str]] = []
+  token = None
+  for _ in range(12):  # bounded paging
+    params = {"minimumImportance": "JOB_MESSAGE_BASIC", "pageSize": 100}
+    if token:
+      params["pageToken"] = token
+    r = session.get(base + "/messages", params=params).json()
+    for m in r.get("jobMessages", []):
+      raw.append({"time": m.get("time"), "text": m.get("messageText", "")})
+    token = r.get("nextPageToken")
+    if not token:
+      break
+  raw.sort(key=lambda m: m["time"] or "")
 
-    markers: dict[str, str] = {}
-    compiled = [(lbl, re.compile(pat)) for lbl, pat in _MSG_MARKERS]
-    exec_start: dict[str, str] = {}
-    stage_durations: list[tuple[float, str, str, str]] = []
-    for m in raw:
-        txt, ts = m["text"], m["time"]
-        for lbl, rx in compiled:
-            if lbl not in markers and rx.search(txt):
-                markers[lbl] = ts
-        em = re.match(r"Executing operation (.+)", txt)
-        fm = re.match(r"Finished operation (.+)", txt)
-        if em:
-            exec_start.setdefault(em.group(1), ts)
-        elif fm:
-            op = fm.group(1)
-            if op in exec_start:
-                d = _duration(exec_start[op], ts)
-                if d is not None:
-                    stage_durations.append((d, op[:80], exec_start[op], ts))
-    stage_durations.sort(reverse=True)
-    return {
-        "message_count": len(raw),
-        "phase_markers": markers,
-        "dominant_stages": [
-            {"seconds": d, "operation": op, "start": s, "end": e}
-            for d, op, s, e in stage_durations[:5]
-        ],
-    }
+  markers: dict[str, str] = {}
+  compiled = [(lbl, re.compile(pat)) for lbl, pat in _MSG_MARKERS]
+  exec_start: dict[str, str] = {}
+  stage_durations: list[tuple[float, str, str, str]] = []
+  for m in raw:
+    txt, ts = m["text"], m["time"]
+    for lbl, rx in compiled:
+      if lbl not in markers and rx.search(txt):
+        markers[lbl] = ts
+    em = re.match(r"Executing operation (.+)", txt)
+    fm = re.match(r"Finished operation (.+)", txt)
+    if em:
+      exec_start.setdefault(em.group(1), ts)
+    elif fm:
+      op = fm.group(1)
+      if op in exec_start:
+        d = _duration(exec_start[op], ts)
+        if d is not None:
+          stage_durations.append((d, op[:80], exec_start[op], ts))
+  stage_durations.sort(reverse=True)
+  return {
+      "message_count":
+          len(raw),
+      "phase_markers":
+          markers,
+      "dominant_stages": [{
+          "seconds": d,
+          "operation": op,
+          "start": s,
+          "end": e
+      } for d, op, s, e in stage_durations[:5]],
+  }
 
 
 # Dataflow metric names worth surfacing (resource + custom counters).
-_RESOURCE_METRICS = frozenset(
-    {
-        "TotalVcpuTime",
-        "TotalGpuTime",
-        "TotalMemoryUsage",
-        "TotalShuffleDataProcessed",
-        "TotalStreamingDataProcessed",
-        "TotalPdUsage",
-    }
-)
+_RESOURCE_METRICS = frozenset({
+    "TotalVcpuTime",
+    "TotalGpuTime",
+    "TotalMemoryUsage",
+    "TotalShuffleDataProcessed",
+    "TotalStreamingDataProcessed",
+    "TotalPdUsage",
+})
 # Custom user counters emitted by the pipeline DoFns / RunInference.
 _CUSTOM_COUNTERS = frozenset(
-    {"pydantic_valid", "pydantic_invalid", "yielded", "failed", "generated"}
-)
+    {"pydantic_valid", "pydantic_invalid", "yielded", "failed", "generated"})
 
 
 def _job_metrics(session, base: str) -> dict[str, Any]:
-    r = session.get(base + "/metrics").json()
-    resources: dict[str, Any] = {}
-    counters: dict[str, Any] = {}
-    element_counts: dict[str, Any] = {}
-    exec_time: dict[str, Any] = {}
-    for m in r.get("metrics", []):
-        name = m.get("name", {})
-        metric = name.get("name")
-        ctx = name.get("context", {})
-        if ctx.get("tentative") == "true":
-            continue
-        scalar = m.get("scalar")
-        if metric in _RESOURCE_METRICS:
-            resources[metric] = scalar
-        elif metric in _CUSTOM_COUNTERS:
-            key = f"{ctx.get('namespace', '')}.{metric}".strip(".")
-            counters[key] = scalar
-        elif metric == "ElementCount":
-            out = ctx.get("output_user_name")
-            if out and "/" not in out[8:]:  # keep top-level PCollections only
-                element_counts[out] = scalar
-        elif metric == "ExecutionTime_ProcessBundle":
-            step = ctx.get("step")
-            if step:
-                exec_time[step] = scalar
-    return {
-        "resource_totals": resources,
-        "custom_counters": counters,
-        "top_element_counts": dict(
-            sorted(element_counts.items(), key=lambda kv: -(kv[1] or 0))[:12]
-        ),
-        "process_bundle_msec_by_step": dict(
-            sorted(exec_time.items(), key=lambda kv: -(kv[1] or 0))[:12]
-        ),
-    }
+  r = session.get(base + "/metrics").json()
+  resources: dict[str, Any] = {}
+  counters: dict[str, Any] = {}
+  element_counts: dict[str, Any] = {}
+  exec_time: dict[str, Any] = {}
+  for m in r.get("metrics", []):
+    name = m.get("name", {})
+    metric = name.get("name")
+    ctx = name.get("context", {})
+    if ctx.get("tentative") == "true":
+      continue
+    scalar = m.get("scalar")
+    if metric in _RESOURCE_METRICS:
+      resources[metric] = scalar
+    elif metric in _CUSTOM_COUNTERS:
+      key = f"{ctx.get('namespace', '')}.{metric}".strip(".")
+      counters[key] = scalar
+    elif metric == "ElementCount":
+      out = ctx.get("output_user_name")
+      if out and "/" not in out[8:]:  # keep top-level PCollections only
+        element_counts[out] = scalar
+    elif metric == "ExecutionTime_ProcessBundle":
+      step = ctx.get("step")
+      if step:
+        exec_time[step] = scalar
+  return {
+      "resource_totals":
+          resources,
+      "custom_counters":
+          counters,
+      "top_element_counts":
+          dict(
+              sorted(element_counts.items(),
+                     key=lambda kv: -(kv[1] or 0))[:12]),
+      "process_bundle_msec_by_step":
+          dict(sorted(exec_time.items(), key=lambda kv: -(kv[1] or 0))[:12]),
+  }
 
 
 def _worker_log_milestones(
@@ -834,288 +830,300 @@ def _worker_log_milestones(
     milestones: list[tuple[str, str]],
     timing: dict[str, Any],
 ) -> dict[str, Any]:
-    """Cloud Logging: first timestamp per milestone regex + derived durations.
+  """Cloud Logging: first timestamp per milestone regex + derived durations.
 
     Filters on the Dataflow worker logName (the ``resource.type`` filter alone
     returns nothing under some projects' log routing) and constrains to the job's time
     window — without a timestamp bound, Cloud Logging returns empty first pages
     with a continuation token, so we also page past empties."""
-    lo = _shift(timing.get("create_time"), -120)
-    hi = _shift(timing.get("end_time"), 180)
-    time_clause = ""
-    if lo and hi:
-        time_clause = f' timestamp>="{lo}" timestamp<="{hi}"'
-    log_filter = (
-        f'logName="projects/{project}/logs/dataflow.googleapis.com%2Fworker" '
-        f'resource.labels.job_id="{job_id}"{time_clause}'
-    )
-    body = {
-        "resourceNames": [f"projects/{project}"],
-        "filter": log_filter,
-        "orderBy": "timestamp asc",
-        "pageSize": 1000,
-    }
-    found: dict[str, str] = {}
-    # Pool-ladder milestones per column (2026-08-20 B_TABLE R1: the
-    # first-occurrence-only map made a topup → stagnated → fallback
-    # sequence unattributable — the three lines belonged to different
-    # columns). First timestamp per (column, milestone).
-    pool_ladder: dict[str, dict[str, str]] = {}
-    pool_col_rx = re.compile(
-        r"SDFB_MILESTONE name=(?P<name>freetext_pool_[a-z0-9_]+)"
-        r".*?\bcolumn=(?P<column>\S+)"
-    )
-    compiled = [(label, re.compile(pat)) for label, pat in milestones]
-    stall_rx = re.compile(r"creating for at least ([\d.]+) seconds")
-    pkg_rx = re.compile(r"^(vllm|sdgx|torch|faiss[-\w]*|transformers)==([\w.]+)")
-    token = None
-    scanned = 0
-    stall_max = 0.0
-    packages: dict[str, str] = {}
-    for _ in range(15):  # bounded paging
-        if token:
-            body["pageToken"] = token
-        r = _post_with_retry(session, _LOGGING_URL, body)
-        if "error" in r:
-            return {"error": r["error"].get("message", "logging error")}
-        for e in r.get("entries", []):
-            scanned += 1
-            text = _entry_text(e)
-            ts = e.get("timestamp")
-            sm2 = _SDFB_MILESTONE_RE.search(text)
-            if sm2:
-                found.setdefault(f"sdfb.{sm2.group('name')}", ts)
-            _note_pool_ladder(pool_ladder, pool_col_rx, text, ts)
-            for label, rx in compiled:
-                if label not in found and rx.search(text):
-                    found[label] = ts
-            sm = stall_rx.search(text)
-            if sm:
-                stall_max = max(stall_max, float(sm.group(1)))
-            for line in text.splitlines():
-                pm = pkg_rx.match(line.strip())
-                if pm:
-                    packages[pm.group(1)] = pm.group(2)
-        token = r.get("nextPageToken")
-        if not token:
-            break
-    return {
-        "scanned_entries": scanned,
-        "timestamps": found,
-        "pool_ladder": pool_ladder,
-        "durations_seconds": _milestone_durations(found, [m[0] for m in milestones]),
-        "generation_stall_max_seconds": round(stall_max, 1) if stall_max else None,
-        "worker_packages": packages,
-    }
+  lo = _shift(timing.get("create_time"), -120)
+  hi = _shift(timing.get("end_time"), 180)
+  time_clause = ""
+  if lo and hi:
+    time_clause = f' timestamp>="{lo}" timestamp<="{hi}"'
+  log_filter = (
+      f'logName="projects/{project}/logs/dataflow.googleapis.com%2Fworker" '
+      f'resource.labels.job_id="{job_id}"{time_clause}')
+  body = {
+      "resourceNames": [f"projects/{project}"],
+      "filter": log_filter,
+      "orderBy": "timestamp asc",
+      "pageSize": 1000,
+  }
+  found: dict[str, str] = {}
+  # Pool-ladder milestones per column (2026-08-20 B_TABLE R1: the
+  # first-occurrence-only map made a topup → stagnated → fallback
+  # sequence unattributable — the three lines belonged to different
+  # columns). First timestamp per (column, milestone).
+  pool_ladder: dict[str, dict[str, str]] = {}
+  pool_col_rx = re.compile(
+      r"SDFB_MILESTONE name=(?P<name>freetext_pool_[a-z0-9_]+)"
+      r".*?\bcolumn=(?P<column>\S+)")
+  compiled = [(label, re.compile(pat)) for label, pat in milestones]
+  stall_rx = re.compile(r"creating for at least ([\d.]+) seconds")
+  pkg_rx = re.compile(r"^(vllm|sdgx|torch|faiss[-\w]*|transformers)==([\w.]+)")
+  token = None
+  scanned = 0
+  stall_max = 0.0
+  packages: dict[str, str] = {}
+  for _ in range(15):  # bounded paging
+    if token:
+      body["pageToken"] = token
+    r = _post_with_retry(session, _LOGGING_URL, body)
+    if "error" in r:
+      return {"error": r["error"].get("message", "logging error")}
+    for e in r.get("entries", []):
+      scanned += 1
+      text = _entry_text(e)
+      ts = e.get("timestamp")
+      sm2 = _SDFB_MILESTONE_RE.search(text)
+      if sm2:
+        found.setdefault(f"sdfb.{sm2.group('name')}", ts)
+      _note_pool_ladder(pool_ladder, pool_col_rx, text, ts)
+      for label, rx in compiled:
+        if label not in found and rx.search(text):
+          found[label] = ts
+      sm = stall_rx.search(text)
+      if sm:
+        stall_max = max(stall_max, float(sm.group(1)))
+      for line in text.splitlines():
+        pm = pkg_rx.match(line.strip())
+        if pm:
+          packages[pm.group(1)] = pm.group(2)
+    token = r.get("nextPageToken")
+    if not token:
+      break
+  return {
+      "scanned_entries":
+          scanned,
+      "timestamps":
+          found,
+      "pool_ladder":
+          pool_ladder,
+      "durations_seconds":
+          _milestone_durations(found, [m[0] for m in milestones]),
+      "generation_stall_max_seconds":
+          round(stall_max, 1) if stall_max else None,
+      "worker_packages":
+          packages,
+  }
 
 
-def _note_pool_ladder(
-    pool_ladder: dict, rx: re.Pattern[str], text: str, ts
-) -> None:
-    """First timestamp per (column, freetext_pool_* milestone)."""
-    pc = rx.search(text)
-    if pc:
-        pool_ladder.setdefault(pc.group("column"), {}).setdefault(
-            pc.group("name"), ts
-        )
+def _note_pool_ladder(pool_ladder: dict, rx: re.Pattern[str], text: str,
+                      ts) -> None:
+  """First timestamp per (column, freetext_pool_* milestone)."""
+  pc = rx.search(text)
+  if pc:
+    pool_ladder.setdefault(pc.group("column"),
+                           {}).setdefault(pc.group("name"), ts)
 
 
-def _post_with_retry(session, url: str, body: dict, *, attempts: int = 5) -> dict:
-    """POST that backs off on transient 429/5xx (Logging read-quota etc.)."""
-    import time
+def _post_with_retry(session,
+                     url: str,
+                     body: dict,
+                     *,
+                     attempts: int = 5) -> dict:
+  """POST that backs off on transient 429/5xx (Logging read-quota etc.)."""
+  import time
 
-    delay = 2.0
-    resp = None
-    for i in range(attempts):
-        resp = session.post(url, json=body)
-        if resp.status_code in (429, 500, 503) and i < attempts - 1:
-            time.sleep(delay)
-            delay *= 2
-            continue
-        break
-    return resp.json()
+  delay = 2.0
+  resp = None
+  for i in range(attempts):
+    resp = session.post(url, json=body)
+    if resp.status_code in (429, 500, 503) and i < attempts - 1:
+      time.sleep(delay)
+      delay *= 2
+      continue
+    break
+  return resp.json()
 
 
 def _entry_text(e: dict) -> str:
-    if "textPayload" in e:
-        return e["textPayload"]
-    jp = e.get("jsonPayload") or {}
-    return jp.get("message") or json.dumps(jp)[:500]
+  if "textPayload" in e:
+    return e["textPayload"]
+  jp = e.get("jsonPayload") or {}
+  return jp.get("message") or json.dumps(jp)[:500]
 
 
-def _milestone_durations(found: dict[str, str], order: list[str]) -> dict[str, float]:
-    from itertools import pairwise
+def _milestone_durations(found: dict[str, str],
+                         order: list[str]) -> dict[str, float]:
+  from itertools import pairwise
 
-    # Chronological ordering (not the regex order) so derived gaps are the
-    # real wall-clock deltas between successive observed milestones.
-    present = sorted(found.items(), key=lambda kv: kv[1])
-    out: dict[str, float] = {}
-    for (a_lbl, a_ts), (b_lbl, b_ts) in pairwise(present):
-        d = _duration(a_ts, b_ts)
-        if d is not None:
-            out[f"{a_lbl}->{b_lbl}"] = d
-    return out
+  # Chronological ordering (not the regex order) so derived gaps are the
+  # real wall-clock deltas between successive observed milestones.
+  present = sorted(found.items(), key=lambda kv: kv[1])
+  out: dict[str, float] = {}
+  for (a_lbl, a_ts), (b_lbl, b_ts) in pairwise(present):
+    d = _duration(a_ts, b_ts)
+    if d is not None:
+      out[f"{a_lbl}->{b_lbl}"] = d
+  return out
 
 
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
 def _scalar(client, sql: str):
-    return next(iter(client.query(sql).result()))[0]
+  return next(iter(client.query(sql).result()))[0]
 
 
 def _row(client, sql: str) -> dict[str, Any]:
-    r = next(iter(client.query(sql).result()))
-    return {k: r[k] for k in r.keys()}  # noqa: SIM118 - BQ Row.keys(), not a dict
+  r = next(iter(client.query(sql).result()))
+  return {k: r[k] for k in r.keys()}  # noqa: SIM118 - BQ Row.keys(), not a dict
 
 
 def _ratio(num, den) -> float | None:
-    if not den:
-        # An empty (or all-excluded) denominator means nothing was measured —
-        # returning 0.0 here would read as "measured and found to be zero"
-        # (e.g. copy_ratio=0.0 misreported as "no memorization" on an empty
-        # landing table). None means "not computable", not "computed as zero".
-        return None
-    if num is None:
-        return None
-    return round(num / den, 6)
+  if not den:
+    # An empty (or all-excluded) denominator means nothing was measured —
+    # returning 0.0 here would read as "measured and found to be zero"
+    # (e.g. copy_ratio=0.0 misreported as "no memorization" on an empty
+    # landing table). None means "not computable", not "computed as zero".
+    return None
+  if num is None:
+    return None
+  return round(num / den, 6)
 
 
 def _duration(start: str | None, end: str | None) -> float | None:
-    from datetime import datetime
+  from datetime import datetime
 
-    if not start or not end:
-        return None
-    try:
-        s = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        e = datetime.fromisoformat(end.replace("Z", "+00:00"))
-        return round((e - s).total_seconds(), 3)
-    except ValueError:
-        return None
+  if not start or not end:
+    return None
+  try:
+    s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    e = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    return round((e - s).total_seconds(), 3)
+  except ValueError:
+    return None
 
 
 def _shift(ts: str | None, seconds: int) -> str | None:
-    """Return an RFC3339 timestamp shifted by ``seconds`` (for log windows)."""
-    from datetime import datetime, timedelta
+  """Return an RFC3339 timestamp shifted by ``seconds`` (for log windows)."""
+  from datetime import datetime, timedelta
 
-    if not ts:
-        return None
-    try:
-        d = datetime.fromisoformat(ts.replace("Z", "+00:00")) + timedelta(
-            seconds=seconds
-        )
-        return d.strftime("%Y-%m-%dT%H:%M:%SZ")
-    except ValueError:
-        return None
-
+  if not ts:
+    return None
+  try:
+    d = datetime.fromisoformat(ts.replace(
+        "Z", "+00:00")) + timedelta(seconds=seconds)
+    return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+  except ValueError:
+    return None
 
 
 def _jsonable(obj):
-    return json.loads(json.dumps(obj, default=str))
+  return json.loads(json.dumps(obj, default=str))
 
 
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--project", required=True)
-    ap.add_argument("--source-fqn", required=True, help="project.dataset.table")
-    ap.add_argument("--landing-fqn", required=True, help="project.dataset.table")
-    ap.add_argument("--quality-dataset", default="", help="project.dataset")
-    ap.add_argument("--region", default="europe-west3")
-    ap.add_argument("--job-id", action="append", default=[], dest="job_ids")
-    ap.add_argument("--pk", default="", help="comma-separated PK columns")
-    ap.add_argument("--run-id", action="append", default=[], dest="run_ids")
-    ap.add_argument(
-        "--engine-label",
-        action="append",
-        default=[],
-        dest="engine_labels",
-        help="repeatable 'label=job_id' mapping stamped onto the matching dataflow result",
-    )
-    ap.add_argument(
-        "--milestones",
-        default="",
-        help="optional 'label=regex;label=regex' overrides for log mining",
-    )
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args(argv)
+  ap = argparse.ArgumentParser(description=__doc__)
+  ap.add_argument("--project", required=True)
+  ap.add_argument("--source-fqn", required=True, help="project.dataset.table")
+  ap.add_argument("--landing-fqn", required=True, help="project.dataset.table")
+  ap.add_argument("--quality-dataset", default="", help="project.dataset")
+  ap.add_argument("--region", default="europe-west3")
+  ap.add_argument("--job-id", action="append", default=[], dest="job_ids")
+  ap.add_argument("--pk", default="", help="comma-separated PK columns")
+  ap.add_argument("--run-id", action="append", default=[], dest="run_ids")
+  ap.add_argument(
+      "--engine-label",
+      action="append",
+      default=[],
+      dest="engine_labels",
+      help="repeatable 'label=job_id' mapping stamped onto the matching dataflow result",
+  )
+  ap.add_argument(
+      "--milestones",
+      default="",
+      help="optional 'label=regex;label=regex' overrides for log mining",
+  )
+  ap.add_argument("--out", required=True)
+  args = ap.parse_args(argv)
 
-    pk_columns = [c.strip() for c in args.pk.split(",") if c.strip()]
-    milestones = _parse_milestones(args.milestones) or _DEFAULT_MILESTONES
-    engine_labels = _parse_engine_labels(args.engine_labels)
+  pk_columns = [c.strip() for c in args.pk.split(",") if c.strip()]
+  milestones = _parse_milestones(args.milestones) or _DEFAULT_MILESTONES
+  engine_labels = _parse_engine_labels(args.engine_labels)
 
-    session, _ = preflight_adc(args.project)
-    identity = _whoami(session)
-    client = _bq_client(args.project)
+  session, _ = preflight_adc(args.project)
+  identity = _whoami(session)
+  client = _bq_client(args.project)
 
-    dataflow_results = [
-        dataflow_job(session, args.project, args.region, jid, milestones)
-        for jid in args.job_ids
-    ]
-    _annotate_engine_labels(dataflow_results, engine_labels)
+  dataflow_results = [
+      dataflow_job(session, args.project, args.region, jid, milestones)
+      for jid in args.job_ids
+  ]
+  _annotate_engine_labels(dataflow_results, engine_labels)
 
-    report: dict[str, Any] = {
-        "project": args.project,
-        "caller_identity": identity,
-        "bigquery": bq_cross_validation(
-            client, args.source_fqn, args.landing_fqn, pk_columns=pk_columns
-        ),
-        "quality": bq_quality(client, args.quality_dataset, args.run_ids),
-        "dataflow": dataflow_results,
-    }
+  report: dict[str, Any] = {
+      "project":
+          args.project,
+      "caller_identity":
+          identity,
+      "bigquery":
+          bq_cross_validation(
+              client, args.source_fqn, args.landing_fqn, pk_columns=pk_columns),
+      "quality":
+          bq_quality(client, args.quality_dataset, args.run_ids),
+      "dataflow":
+          dataflow_results,
+  }
 
-    from pathlib import Path
+  from pathlib import Path
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2, default=str))
-    print(f"wrote {out}  (caller={identity})")
-    return 0
+  out = Path(args.out)
+  out.parent.mkdir(parents=True, exist_ok=True)
+  out.write_text(json.dumps(report, indent=2, default=str))
+  print(f"wrote {out}  (caller={identity})")
+  return 0
 
 
 main_with_args = main
 
 
 def _whoami(session) -> str:
-    try:
-        # userinfo rejects the x-goog-user-project quota header — send bare.
-        r = session.get(
-            "https://openidconnect.googleapis.com/v1/userinfo",
-            headers={"x-goog-user-project": None},
-        ).json()
-        return r.get("email") or r.get("sub") or "unknown"
-    except Exception:
-        return "unknown"
+  try:
+    # userinfo rejects the x-goog-user-project quota header — send bare.
+    r = session.get(
+        "https://openidconnect.googleapis.com/v1/userinfo",
+        headers={
+            "x-goog-user-project": None
+        },
+    ).json()
+    return r.get("email") or r.get("sub") or "unknown"
+  except Exception:
+    return "unknown"
 
 
 def _parse_milestones(spec: str) -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
-    for part in spec.split(";"):
-        if "=" in part:
-            label, pat = part.split("=", 1)
-            out.append((label.strip(), pat.strip()))
-    return out
+  out: list[tuple[str, str]] = []
+  for part in spec.split(";"):
+    if "=" in part:
+      label, pat = part.split("=", 1)
+      out.append((label.strip(), pat.strip()))
+  return out
 
 
 def _parse_engine_labels(specs: list[str]) -> dict[str, str]:
-    """Repeatable --engine-label label=job_id → {job_id: label}."""
-    out: dict[str, str] = {}
-    for spec in specs:
-        if "=" in spec:
-            label, job_id = spec.split("=", 1)
-            out[job_id.strip()] = label.strip()
-    return out
+  """Repeatable --engine-label label=job_id → {job_id: label}."""
+  out: dict[str, str] = {}
+  for spec in specs:
+    if "=" in spec:
+      label, job_id = spec.split("=", 1)
+      out[job_id.strip()] = label.strip()
+  return out
 
 
-def _annotate_engine_labels(results: list[dict[str, Any]], labels: dict[str, str]) -> None:
-    """Stamp ``engine_label`` on each dataflow result whose job_id matches."""
-    for r in results:
-        job_id = r.get("job_id")
-        if job_id in labels:
-            r["engine_label"] = labels[job_id]
+def _annotate_engine_labels(results: list[dict[str, Any]],
+                            labels: dict[str, str]) -> None:
+  """Stamp ``engine_label`` on each dataflow result whose job_id matches."""
+  for r in results:
+    job_id = r.get("job_id")
+    if job_id in labels:
+      r["engine_label"] = labels[job_id]
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+  raise SystemExit(main())

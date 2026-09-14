@@ -25,14 +25,14 @@ from typing import TYPE_CHECKING
 from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from sdfb_core.contracts.relationships import FkEdge
+  from sdfb_core.contracts.relationships import FkEdge
 
 _DEFAULT_LIMIT = 100_000
 
 
 def parent_landing_fqn(ref: str, landing_dataset: str) -> str:
-    """``ds.parent`` + ``project.synthetic_data`` → ``project.synthetic_data.parent``."""
-    return f"{landing_dataset}.{ref.rsplit('.', 1)[-1]}"
+  """``ds.parent`` + ``project.synthetic_data`` → ``project.synthetic_data.parent``."""
+  return f"{landing_dataset}.{ref.rsplit('.', 1)[-1]}"
 
 
 def load_fk_key_pools(
@@ -41,52 +41,51 @@ def load_fk_key_pools(
     client=None,
     limit: int = _DEFAULT_LIMIT,
 ) -> list[dict]:
-    """``[{"cols": [child cols], "keys": [(v, …), …]}, …]`` per edge.
+  """``[{"cols": [child cols], "keys": [(v, …), …]}, …]`` per edge.
 
     ``client`` is a BigQuery client (injected for tests). NULL-bearing
     parent keys are excluded in SQL: SQL equality never matches NULL, so
     such a key is not referenceable.
     """
-    if not fks:
-        return []
-    if client is None:  # pragma: no cover - GCP-only path
-        from google.cloud import bigquery
+  if not fks:
+    return []
+  if client is None:  # pragma: no cover - GCP-only path
+    from google.cloud import bigquery
 
-        client = bigquery.Client()
+    client = bigquery.Client()
 
-    payloads: list[dict] = []
-    for fk in fks:
-        if not fk.enforced:  # documented-only edge (ADR 0032): no pool
-            continue
-        parent = parent_landing_fqn(fk.ref, landing_dataset)
-        cols_sql = ", ".join(f"`{c}`" for c in fk.ref_cols)
-        sql = (
-            # Identifiers come from a validated contract, not user input.
-            f"SELECT DISTINCT {cols_sql} FROM `{parent}` "
-            f"WHERE {' AND '.join(f'`{c}` IS NOT NULL' for c in fk.ref_cols)} "
-            f"LIMIT {int(limit)}"
-        )
-        rows = list(client.query(sql).result())
-        keys = [tuple(row[c] for c in fk.ref_cols) for row in rows]
-        payloads.append({"cols": list(fk.cols), "keys": keys})
-        log_milestone(
-            "fk_pool_loaded",
-            parent=parent,
-            child_cols=",".join(fk.cols),
-            values=len(keys),
-            capped=len(keys) >= int(limit),
-        )
-    return payloads
+  payloads: list[dict] = []
+  for fk in fks:
+    if not fk.enforced:  # documented-only edge (ADR 0032): no pool
+      continue
+    parent = parent_landing_fqn(fk.ref, landing_dataset)
+    cols_sql = ", ".join(f"`{c}`" for c in fk.ref_cols)
+    sql = (
+        # Identifiers come from a validated contract, not user input.
+        f"SELECT DISTINCT {cols_sql} FROM `{parent}` "
+        f"WHERE {' AND '.join(f'`{c}` IS NOT NULL' for c in fk.ref_cols)} "
+        f"LIMIT {int(limit)}")
+    rows = list(client.query(sql).result())
+    keys = [tuple(row[c] for c in fk.ref_cols) for row in rows]
+    payloads.append({"cols": list(fk.cols), "keys": keys})
+    log_milestone(
+        "fk_pool_loaded",
+        parent=parent,
+        child_cols=",".join(fk.cols),
+        values=len(keys),
+        capped=len(keys) >= int(limit),
+    )
+  return payloads
 
 
 def per_column_view(payloads: list[dict]) -> dict[str, tuple]:
-    """Per-column projection of joint keys — plan/preflight metadata only."""
-    out: dict[str, tuple] = {}
-    for payload in payloads:
-        keys = payload.get("keys") or ()
-        for i, col in enumerate(payload.get("cols") or ()):
-            out[col] = tuple(dict.fromkeys(k[i] for k in keys))
-    return out
+  """Per-column projection of joint keys — plan/preflight metadata only."""
+  out: dict[str, tuple] = {}
+  for payload in payloads:
+    keys = payload.get("keys") or ()
+    for i, col in enumerate(payload.get("cols") or ()):
+      out[col] = tuple(dict.fromkeys(k[i] for k in keys))
+  return out
 
 
 __all__ = ["load_fk_key_pools", "parent_landing_fqn", "per_column_view"]

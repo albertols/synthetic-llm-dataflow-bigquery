@@ -59,59 +59,59 @@ UNIQUENESS_MODES = (MODE_EXACT, MODE_EXACT_CHAINED, MODE_STREAMING)
 
 
 def _envelope(record: dict, rule_id: str) -> dict:
-    return {
-        "raw_request": record,
-        "error_type": "uniqueness",
-        "error_detail": f"{rule_id}: duplicate of an earlier record in this run",
-        "rule_id": rule_id,
-        "stage": "pre_write",
-    }
+  return {
+      "raw_request": record,
+      "error_type": "uniqueness",
+      "error_detail": f"{rule_id}: duplicate of an earlier record in this run",
+      "rule_id": rule_id,
+      "stage": "pre_write",
+  }
 
 
 @functools.lru_cache(maxsize=64)
 def _column_set(columns: tuple[str, ...]) -> frozenset[str]:
-    return frozenset(columns)
+  return frozenset(columns)
 
 
 def _pack_row(row: dict, columns: Sequence[str] | None):
-    """Row dict → value tuple in schema column order, for the shuffle.
+  """Row dict → value tuple in schema column order, for the shuffle.
 
     Beam's default coder spells every key name into every element; a
     67-column row shuffled as a dict is ~2x the bytes of its values. Rows
     whose key set is not exactly ``columns`` pass through untouched (an
     unknown shape is never truncated silently).
     """
-    if not columns:
-        return row
-    cols = tuple(columns)
-    if row.keys() != _column_set(cols):
-        return row
-    return tuple(row[c] for c in cols)
+  if not columns:
+    return row
+  cols = tuple(columns)
+  if row.keys() != _column_set(cols):
+    return row
+  return tuple(row[c] for c in cols)
 
 
 def _unpack_row(value, columns: Sequence[str] | None):
-    """Inverse of `_pack_row`; dicts (unpacked rows) pass through."""
-    if not columns or not isinstance(value, tuple):
-        return value
-    return dict(zip(tuple(columns), value, strict=True))
+  """Inverse of `_pack_row`; dicts (unpacked rows) pass through."""
+  if not columns or not isinstance(value, tuple):
+    return value
+  return dict(zip(tuple(columns), value, strict=True))
 
 
 def _key_of(row: dict, columns: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(str(row.get(c)) for c in columns)
+  return tuple(str(row.get(c)) for c in columns)
 
 
 def _pk_digest(row: dict, columns: tuple[str, ...]) -> str:
-    """Digest of a row's PK tuple, keyed exactly as the exact modes key it.
+  """Digest of a row's PK tuple, keyed exactly as the exact modes key it.
 
     The members are `_key_of`'s stringified values, so a PK collision is the
     same event in every mode; hashing them keeps the streaming branch's
     shuffle at a fixed 32 bytes per row regardless of how wide the PK is.
     """
-    return row_digest(dict(zip(columns, _key_of(row, columns), strict=True)))
+  return row_digest(dict(zip(columns, _key_of(row, columns), strict=True)))
 
 
 class _FirstWinsCombineFn(beam.CombineFn):
-    """Keep ONE survivor per key and count everything else.
+  """Keep ONE survivor per key and count everything else.
 
     `GroupByKey` materializes every value for a key on the reducer side, so
     the whole dataset crosses the shuffle (2026-07-26 1M run:
@@ -128,56 +128,53 @@ class _FirstWinsCombineFn(beam.CombineFn):
     `GroupByKey` (Beam does not order values within a group).
     """
 
-    def create_accumulator(self) -> tuple[object | None, int]:
-        return (None, 0)
+  def create_accumulator(self) -> tuple[object | None, int]:
+    return (None, 0)
 
-    def add_input(
-        self, accumulator: tuple[object | None, int], element
-    ) -> tuple[object | None, int]:
-        survivor, seen = accumulator
-        return (element if survivor is None else survivor, seen + 1)
+  def add_input(self, accumulator: tuple[object | None, int],
+                element) -> tuple[object | None, int]:
+    survivor, seen = accumulator
+    return (element if survivor is None else survivor, seen + 1)
 
-    def merge_accumulators(
-        self, accumulators
-    ) -> tuple[object | None, int]:
-        survivor: object | None = None
-        seen = 0
-        for acc_survivor, acc_seen in accumulators:
-            if survivor is None and acc_survivor is not None:
-                survivor = acc_survivor
-            seen += acc_seen
-        return (survivor, seen)
+  def merge_accumulators(self, accumulators) -> tuple[object | None, int]:
+    survivor: object | None = None
+    seen = 0
+    for acc_survivor, acc_seen in accumulators:
+      if survivor is None and acc_survivor is not None:
+        survivor = acc_survivor
+      seen += acc_seen
+    return (survivor, seen)
 
-    def extract_output(
-        self, accumulator: tuple[object | None, int]
-    ) -> tuple[object | None, int]:
-        return accumulator
+  def extract_output(
+      self, accumulator: tuple[object | None,
+                               int]) -> tuple[object | None, int]:
+    return accumulator
 
 
 class _DistinctDigestsFn(beam.CombineFn):
-    """`(key → sorted tuple of distinct row digests)` — the key-only group
+  """`(key → sorted tuple of distinct row digests)` — the key-only group
     the single-barrier path resolves PK/identity collisions from. A key
     seen by one digest only never leaves the map side as a collision."""
 
-    def create_accumulator(self) -> set:
-        return set()
+  def create_accumulator(self) -> set:
+    return set()
 
-    def add_input(self, accumulator: set, digest: str) -> set:
-        accumulator.add(digest)
-        return accumulator
+  def add_input(self, accumulator: set, digest: str) -> set:
+    accumulator.add(digest)
+    return accumulator
 
-    def merge_accumulators(self, accumulators) -> set:
-        out: set = set()
-        for acc in accumulators:
-            out |= acc
-        return out
+  def merge_accumulators(self, accumulators) -> set:
+    out: set = set()
+    for acc in accumulators:
+      out |= acc
+    return out
 
-    def extract_output(self, accumulator: set) -> tuple[str, ...]:
-        return tuple(sorted(accumulator))
+  def extract_output(self, accumulator: set) -> tuple[str, ...]:
+    return tuple(sorted(accumulator))
 
 
 class _ExpandCombined(beam.DoFn):
-    """Turn `(key, (survivor, seen))` back into one survivor + `seen - 1`
+  """Turn `(key, (survivor, seen))` back into one survivor + `seen - 1`
     DLQ envelopes (the `exact_chained` path).
 
     The envelopes carry the SURVIVOR's payload rather than each dropped
@@ -188,21 +185,21 @@ class _ExpandCombined(beam.DoFn):
     folds, are exact.
     """
 
-    def __init__(self, rule_id: str) -> None:
-        self.rule_id = rule_id
+  def __init__(self, rule_id: str) -> None:
+    self.rule_id = rule_id
 
-    def process(self, kv):
-        _key, (survivor, seen) = kv
-        if survivor is None:  # pragma: no cover - defensive
-            return
-        yield survivor
-        envelope = _envelope(survivor, self.rule_id)
-        for _ in range(seen - 1):
-            yield beam.pvalue.TaggedOutput("duplicates", envelope)
+  def process(self, kv):
+    _key, (survivor, seen) = kv
+    if survivor is None:  # pragma: no cover - defensive
+      return
+    yield survivor
+    envelope = _envelope(survivor, self.rule_id)
+    for _ in range(seen - 1):
+      yield beam.pvalue.TaggedOutput("duplicates", envelope)
 
 
 class _ResolveUniquenessDoFn(beam.DoFn):
-    """The single barrier's read side: one survivor per digest, then the
+  """The single barrier's read side: one survivor per digest, then the
     PK and identity rules from the key-only collision groups.
 
     ``pk_groups`` / ``identity_groups`` map a key tuple to the SORTED
@@ -212,62 +209,59 @@ class _ResolveUniquenessDoFn(beam.DoFn):
     survivors" order the chain applied, made deterministic.
     """
 
-    def __init__(
-        self,
-        pk_columns: tuple[str, ...],
-        identity_columns: tuple[str, ...],
-        columns: tuple[str, ...] | None,
-    ) -> None:
-        super().__init__()
-        self.pk_columns = pk_columns
-        self.identity_columns = identity_columns
-        self.columns = columns
-        self._losers_source: object | None = None
-        self._pk_losers: frozenset[str] = frozenset()
+  def __init__(
+      self,
+      pk_columns: tuple[str, ...],
+      identity_columns: tuple[str, ...],
+      columns: tuple[str, ...] | None,
+  ) -> None:
+    super().__init__()
+    self.pk_columns = pk_columns
+    self.identity_columns = identity_columns
+    self.columns = columns
+    self._losers_source: object | None = None
+    self._pk_losers: frozenset[str] = frozenset()
 
-    def _pk_loser_set(self, pk_groups) -> frozenset[str]:
-        # Derived once per side-input value (Dataflow hands the same cached
-        # dict to every bundle on a worker; a fresh dict recomputes).
-        if pk_groups is None:
-            return frozenset()
-        if self._losers_source is not pk_groups:
-            self._pk_losers = frozenset(
-                d for group in pk_groups.values() for d in group[1:]
-            )
-            self._losers_source = pk_groups
-        return self._pk_losers
+  def _pk_loser_set(self, pk_groups) -> frozenset[str]:
+    # Derived once per side-input value (Dataflow hands the same cached
+    # dict to every bundle on a worker; a fresh dict recomputes).
+    if pk_groups is None:
+      return frozenset()
+    if self._losers_source is not pk_groups:
+      self._pk_losers = frozenset(
+          d for group in pk_groups.values() for d in group[1:])
+      self._losers_source = pk_groups
+    return self._pk_losers
 
-    def process(self, kv, pk_groups=None, identity_groups=None):
-        digest, (survivor, seen) = kv
-        if survivor is None:  # pragma: no cover - defensive
-            return
-        row = _unpack_row(survivor, self.columns)
-        if seen > 1:
-            envelope = _envelope(row, RULE_ROW_DUPLICATE)
-            for _ in range(seen - 1):
-                yield beam.pvalue.TaggedOutput("duplicates", envelope)
-        if self.pk_columns and pk_groups:
-            group = pk_groups.get(_key_of(row, self.pk_columns))
-            if group and digest != group[0]:
-                yield beam.pvalue.TaggedOutput(
-                    "duplicates", _envelope(row, RULE_PK_DUPLICATE)
-                )
-                return
-        if self.identity_columns and identity_groups:
-            group = identity_groups.get(_key_of(row, self.identity_columns))
-            if group:
-                losers = self._pk_loser_set(pk_groups)
-                survivor_digest = min(d for d in group if d not in losers)
-                if digest != survivor_digest:
-                    yield beam.pvalue.TaggedOutput(
-                        "duplicates", _envelope(row, RULE_IDENTITY_UNIQUE)
-                    )
-                    return
-        yield row
+  def process(self, kv, pk_groups=None, identity_groups=None):
+    digest, (survivor, seen) = kv
+    if survivor is None:  # pragma: no cover - defensive
+      return
+    row = _unpack_row(survivor, self.columns)
+    if seen > 1:
+      envelope = _envelope(row, RULE_ROW_DUPLICATE)
+      for _ in range(seen - 1):
+        yield beam.pvalue.TaggedOutput("duplicates", envelope)
+    if self.pk_columns and pk_groups:
+      group = pk_groups.get(_key_of(row, self.pk_columns))
+      if group and digest != group[0]:
+        yield beam.pvalue.TaggedOutput("duplicates",
+                                       _envelope(row, RULE_PK_DUPLICATE))
+        return
+    if self.identity_columns and identity_groups:
+      group = identity_groups.get(_key_of(row, self.identity_columns))
+      if group:
+        losers = self._pk_loser_set(pk_groups)
+        survivor_digest = min(d for d in group if d not in losers)
+        if digest != survivor_digest:
+          yield beam.pvalue.TaggedOutput("duplicates",
+                                         _envelope(row, RULE_IDENTITY_UNIQUE))
+          return
+    yield row
 
 
 class EnforceUniqueness(beam.PTransform):
-    """Diverts full-row, PK and identity-column duplicates to the DLQ.
+  """Diverts full-row, PK and identity-column duplicates to the DLQ.
 
     Returns a ``dict`` with ``"unique"`` (main, deduplicated records) and
     ``"duplicates"`` (DLQ-envelope dicts) PCollections, plus the
@@ -290,139 +284,129 @@ class EnforceUniqueness(beam.PTransform):
     half the bytes; rows of any other shape pass through as dicts.
     """
 
-    def __init__(
-        self,
-        identity_columns: list[str] | None = None,
-        pk_columns: list[str] | None = None,
-        mode: str = MODE_EXACT,
-        columns: Sequence[str] | None = None,
-    ) -> None:
-        super().__init__()
-        if mode not in UNIQUENESS_MODES:
-            raise ValueError(
-                f"uniqueness_mode must be one of {UNIQUENESS_MODES}, got {mode!r}"
-            )
-        self.identity_columns = list(identity_columns or [])
-        self.pk_columns = list(pk_columns or [])
-        self.mode = mode
-        self.columns = list(columns) if columns else None
+  def __init__(
+      self,
+      identity_columns: list[str] | None = None,
+      pk_columns: list[str] | None = None,
+      mode: str = MODE_EXACT,
+      columns: Sequence[str] | None = None,
+  ) -> None:
+    super().__init__()
+    if mode not in UNIQUENESS_MODES:
+      raise ValueError(
+          f"uniqueness_mode must be one of {UNIQUENESS_MODES}, got {mode!r}")
+    self.identity_columns = list(identity_columns or [])
+    self.pk_columns = list(pk_columns or [])
+    self.mode = mode
+    self.columns = list(columns) if columns else None
 
-    def expand(self, records):
-        identity_set = set(self.identity_columns)
+  def expand(self, records):
+    identity_set = set(self.identity_columns)
 
-        def _row_key(r, ids=identity_set):
-            return row_digest({k: v for k, v in r.items() if k not in ids})
+    def _row_key(r, ids=identity_set):
+      return row_digest({k: v for k, v in r.items() if k not in ids})
 
-        if self.mode == MODE_STREAMING:
-            return self._expand_streaming(records, _row_key)
-        if self.mode == MODE_EXACT_CHAINED:
-            return self._expand_chained(records, _row_key)
-        return self._expand_single_barrier(records, _row_key)
+    if self.mode == MODE_STREAMING:
+      return self._expand_streaming(records, _row_key)
+    if self.mode == MODE_EXACT_CHAINED:
+      return self._expand_chained(records, _row_key)
+    return self._expand_single_barrier(records, _row_key)
 
-    # -- exact (ADR 0034): one full-row barrier ------------------------------
+  # -- exact (ADR 0034): one full-row barrier ------------------------------
 
-    def _expand_single_barrier(self, records, row_key):
-        columns = tuple(self.columns) if self.columns else None
-        pk_cols = tuple(self.pk_columns)
-        id_cols = tuple(self.identity_columns)
+  def _expand_single_barrier(self, records, row_key):
+    columns = tuple(self.columns) if self.columns else None
+    pk_cols = tuple(self.pk_columns)
+    id_cols = tuple(self.identity_columns)
 
-        # The digest is computed ONCE per row; the barrier keying and the
-        # key-only groups all read it from this fused stream.
-        digested = records | "DigestRows" >> beam.Map(
-            lambda r, rk=row_key: (rk(r), r)
-        )
-        combined = (
-            digested
-            | "KeyByRowDigest"
-            >> beam.Map(lambda kv, cols=columns: (kv[0], _pack_row(kv[1], cols)))
-            | "CombineByRowDigest" >> beam.CombinePerKey(_FirstWinsCombineFn())
-        )
-        side_inputs: dict[str, object] = {}
-        if pk_cols:
-            side_inputs["pk_groups"] = beam.pvalue.AsDict(
-                self._collision_groups(digested, pk_cols, "Pk")
-            )
-        if id_cols:
-            side_inputs["identity_groups"] = beam.pvalue.AsDict(
-                self._collision_groups(digested, id_cols, "Identity")
-            )
-        resolved = combined | "ResolveUniqueness" >> beam.ParDo(
-            _ResolveUniquenessDoFn(pk_cols, id_cols, columns), **side_inputs
-        ).with_outputs("duplicates", main="unique")
-        return self._exact_outputs(resolved.unique, resolved.duplicates)
+    # The digest is computed ONCE per row; the barrier keying and the
+    # key-only groups all read it from this fused stream.
+    digested = records | "DigestRows" >> beam.Map(lambda r, rk=row_key:
+                                                  (rk(r), r))
+    combined = (
+        digested
+        | "KeyByRowDigest" >> beam.Map(lambda kv, cols=columns:
+                                       (kv[0], _pack_row(kv[1], cols)))
+        | "CombineByRowDigest" >> beam.CombinePerKey(_FirstWinsCombineFn()))
+    side_inputs: dict[str, object] = {}
+    if pk_cols:
+      side_inputs["pk_groups"] = beam.pvalue.AsDict(
+          self._collision_groups(digested, pk_cols, "Pk"))
+    if id_cols:
+      side_inputs["identity_groups"] = beam.pvalue.AsDict(
+          self._collision_groups(digested, id_cols, "Identity"))
+    resolved = combined | "ResolveUniqueness" >> beam.ParDo(
+        _ResolveUniquenessDoFn(pk_cols, id_cols, columns), **
+        side_inputs).with_outputs(
+            "duplicates", main="unique")
+    return self._exact_outputs(resolved.unique, resolved.duplicates)
 
-    @staticmethod
-    def _collision_groups(digested, cols: tuple[str, ...], label: str):
-        """`(key tuple → sorted digests)` for keys shared by ≥ 2 distinct
+  @staticmethod
+  def _collision_groups(digested, cols: tuple[str, ...], label: str):
+    """`(key tuple → sorted digests)` for keys shared by ≥ 2 distinct
         rows. Map-side combined; the shuffle carries key + digest only."""
-        return (
-            digested
-            | f"{label}DigestPairs"
-            >> beam.Map(lambda kv, c=cols: (_key_of(kv[1], c), kv[0]))
+    return (digested
+            | f"{label}DigestPairs" >> beam.Map(lambda kv, c=cols:
+                                                (_key_of(kv[1], c), kv[0]))
             | f"{label}DigestGroups" >> beam.CombinePerKey(_DistinctDigestsFn())
-            | f"{label}Collisions" >> beam.Filter(lambda kv: len(kv[1]) > 1)
-        )
+            | f"{label}Collisions" >> beam.Filter(lambda kv: len(kv[1]) > 1))
 
-    @staticmethod
-    def _exact_outputs(unique, duplicates):
-        return {
-            "unique": unique,
-            "duplicates": duplicates,
-            # Exact modes report through diverted envelopes, so they have
-            # no separate counts to contribute.
-            "rule_counts": duplicates | "NoRuleCounts" >> beam.FlatMap(lambda _: []),
-            "distinct_count": unique | "NoDistinctCount" >> beam.FlatMap(lambda _: []),
-        }
+  @staticmethod
+  def _exact_outputs(unique, duplicates):
+    return {
+        "unique":
+            unique,
+        "duplicates":
+            duplicates,
+        # Exact modes report through diverted envelopes, so they have
+        # no separate counts to contribute.
+        "rule_counts":
+            duplicates | "NoRuleCounts" >> beam.FlatMap(lambda _: []),
+        "distinct_count":
+            unique | "NoDistinctCount" >> beam.FlatMap(lambda _: []),
+    }
 
-    # -- exact_chained (pre-ADR-0034): three full-row barriers ---------------
+  # -- exact_chained (pre-ADR-0034): three full-row barriers ---------------
 
-    def _expand_chained(self, records, row_key):
-        by_row = (
-            records
-            | "KeyByRowDigest" >> beam.Map(lambda r: (row_key(r), r))
-            | "CombineByRowDigest" >> beam.CombinePerKey(_FirstWinsCombineFn())
-            | "FirstRowWins"
-            >> beam.ParDo(_ExpandCombined(RULE_ROW_DUPLICATE)).with_outputs(
-                "duplicates", main="unique"
-            )
-        )
-        row_unique = by_row.unique
-        dup_streams = [by_row.duplicates]
-        if self.pk_columns:
-            pk_cols = self.pk_columns
-            by_pk = (
-                row_unique
-                | "KeyByPk"
-                >> beam.Map(lambda r, c=pk_cols: (tuple(str(r.get(x)) for x in c), r))
-                | "CombineByPk" >> beam.CombinePerKey(_FirstWinsCombineFn())
-                | "FirstPkWins"
-                >> beam.ParDo(_ExpandCombined(RULE_PK_DUPLICATE)).with_outputs(
-                    "duplicates", main="unique"
-                )
-            )
-            row_unique = by_pk.unique
-            dup_streams.append(by_pk.duplicates)
-        if self.identity_columns:
-            cols = self.identity_columns
-            by_id = (
-                row_unique
-                | "KeyByIdentity"
-                >> beam.Map(lambda r, c=cols: (tuple(str(r.get(x)) for x in c), r))
-                | "CombineByIdentity" >> beam.CombinePerKey(_FirstWinsCombineFn())
-                | "FirstIdentityWins"
-                >> beam.ParDo(_ExpandCombined(RULE_IDENTITY_UNIQUE)).with_outputs(
-                    "duplicates", main="unique"
-                )
-            )
-            row_unique = by_id.unique
-            dup_streams.append(by_id.duplicates)
-        duplicates = dup_streams | "FlattenDuplicates" >> beam.Flatten()
-        return self._exact_outputs(row_unique, duplicates)
+  def _expand_chained(self, records, row_key):
+    by_row = (
+        records
+        | "KeyByRowDigest" >> beam.Map(lambda r: (row_key(r), r))
+        | "CombineByRowDigest" >> beam.CombinePerKey(_FirstWinsCombineFn())
+        | "FirstRowWins" >> beam.ParDo(_ExpandCombined(
+            RULE_ROW_DUPLICATE)).with_outputs("duplicates", main="unique"))
+    row_unique = by_row.unique
+    dup_streams = [by_row.duplicates]
+    if self.pk_columns:
+      pk_cols = self.pk_columns
+      by_pk = (
+          row_unique
+          | "KeyByPk" >> beam.Map(lambda r, c=pk_cols:
+                                  (tuple(str(r.get(x)) for x in c), r))
+          | "CombineByPk" >> beam.CombinePerKey(_FirstWinsCombineFn())
+          | "FirstPkWins" >> beam.ParDo(_ExpandCombined(
+              RULE_PK_DUPLICATE)).with_outputs("duplicates", main="unique"))
+      row_unique = by_pk.unique
+      dup_streams.append(by_pk.duplicates)
+    if self.identity_columns:
+      cols = self.identity_columns
+      by_id = (
+          row_unique
+          | "KeyByIdentity" >> beam.Map(lambda r, c=cols:
+                                        (tuple(str(r.get(x)) for x in c), r))
+          | "CombineByIdentity" >> beam.CombinePerKey(_FirstWinsCombineFn())
+          | "FirstIdentityWins" >> beam.ParDo(
+              _ExpandCombined(RULE_IDENTITY_UNIQUE)).with_outputs(
+                  "duplicates", main="unique"))
+      row_unique = by_id.unique
+      dup_streams.append(by_id.duplicates)
+    duplicates = dup_streams | "FlattenDuplicates" >> beam.Flatten()
+    return self._exact_outputs(row_unique, duplicates)
 
-    # -- streaming (WS6 W3): no barrier --------------------------------------
+  # -- streaming (WS6 W3): no barrier --------------------------------------
 
-    def _expand_streaming(self, records, row_key):
-        """No barrier on the landing path.
+  def _expand_streaming(self, records, row_key):
+    """No barrier on the landing path.
 
         Rows pass straight through, so BigQuery sees them as they are
         generated. Duplicates are MEASURED on a parallel branch that
@@ -446,36 +430,37 @@ class EnforceUniqueness(beam.PTransform):
         distinct defective rows, which is the correct direction for a
         safety gate.
         """
-        per_digest = (
-            records
-            | "DigestOnly" >> beam.Map(row_key)
-            # Count.PerElement combines map-side, and the values crossing
-            # the shuffle are digests, not rows.
-            | "CountPerDigest" >> beam.combiners.Count.PerElement()
-        )
-        excess = (
-            per_digest
-            | "ExcessPerDigest" >> beam.Map(lambda kv: kv[1] - 1)
-            | "SumExcess" >> beam.CombineGlobally(sum)
-        )
-        rule_counts = excess | "AsRuleCount" >> beam.Map(
-            lambda n: (RULE_ROW_DUPLICATE, n)
-        )
-        if self.pk_columns:
-            pk_cols = tuple(self.pk_columns)
-            pk_counts = (
-                records
-                | "StreamingPkDigest"
-                >> beam.Map(lambda r, c=pk_cols: _pk_digest(r, c))
-                | "StreamingPkCount" >> beam.combiners.Count.PerElement()
-                | "StreamingPkExcess" >> beam.Map(lambda kv: max(0, kv[1] - 1))
-                | "StreamingSumPkExcess" >> beam.CombineGlobally(sum)
-                | "AsPkRuleCount" >> beam.Map(lambda n: (RULE_PK_DUPLICATE, n))
-            )
-            rule_counts = (rule_counts, pk_counts) | "FlattenRuleCounts" >> beam.Flatten()
-        return {
-            "unique": records,
-            "duplicates": records | "NoDuplicates" >> beam.FlatMap(lambda _: []),
-            "rule_counts": rule_counts,
-            "distinct_count": per_digest | "CountDistinct" >> beam.combiners.Count.Globally(),
-        }
+    per_digest = (
+        records
+        | "DigestOnly" >> beam.Map(row_key)
+        # Count.PerElement combines map-side, and the values crossing
+        # the shuffle are digests, not rows.
+        | "CountPerDigest" >> beam.combiners.Count.PerElement())
+    excess = (
+        per_digest
+        | "ExcessPerDigest" >> beam.Map(lambda kv: kv[1] - 1)
+        | "SumExcess" >> beam.CombineGlobally(sum))
+    rule_counts = excess | "AsRuleCount" >> beam.Map(lambda n:
+                                                     (RULE_ROW_DUPLICATE, n))
+    if self.pk_columns:
+      pk_cols = tuple(self.pk_columns)
+      pk_counts = (
+          records
+          |
+          "StreamingPkDigest" >> beam.Map(lambda r, c=pk_cols: _pk_digest(r, c))
+          | "StreamingPkCount" >> beam.combiners.Count.PerElement()
+          | "StreamingPkExcess" >> beam.Map(lambda kv: max(0, kv[1] - 1))
+          | "StreamingSumPkExcess" >> beam.CombineGlobally(sum)
+          | "AsPkRuleCount" >> beam.Map(lambda n: (RULE_PK_DUPLICATE, n)))
+      rule_counts = (rule_counts,
+                     pk_counts) | "FlattenRuleCounts" >> beam.Flatten()
+    return {
+        "unique":
+            records,
+        "duplicates":
+            records | "NoDuplicates" >> beam.FlatMap(lambda _: []),
+        "rule_counts":
+            rule_counts,
+        "distinct_count":
+            per_digest | "CountDistinct" >> beam.combiners.Count.Globally(),
+    }

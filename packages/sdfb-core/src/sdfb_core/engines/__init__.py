@@ -42,20 +42,18 @@ ENGINE_REGISTRY: dict[str, type[GenerationEngine]] = {}
 
 
 def register_engine(name: str, engine_class: type[GenerationEngine]) -> None:
-    """Register an engine class under a string name."""
-    ENGINE_REGISTRY[name] = engine_class
+  """Register an engine class under a string name."""
+  ENGINE_REGISTRY[name] = engine_class
 
 
 def get_engine(name: str) -> type[GenerationEngine]:
-    """Look up an engine class by name. Raises if not registered."""
-    if name not in ENGINE_REGISTRY:
-        available = sorted(ENGINE_REGISTRY)
-        raise ValueError(
-            f"Unknown engine {name!r}. Available: {available}. "
-            f"Ensure the engine's module has been imported (which "
-            f"triggers `register_engine` at module load time)."
-        )
-    return ENGINE_REGISTRY[name]
+  """Look up an engine class by name. Raises if not registered."""
+  if name not in ENGINE_REGISTRY:
+    available = sorted(ENGINE_REGISTRY)
+    raise ValueError(f"Unknown engine {name!r}. Available: {available}. "
+                     f"Ensure the engine's module has been imported (which "
+                     f"triggers `register_engine` at module load time).")
+  return ENGINE_REGISTRY[name]
 
 
 __all__ = [

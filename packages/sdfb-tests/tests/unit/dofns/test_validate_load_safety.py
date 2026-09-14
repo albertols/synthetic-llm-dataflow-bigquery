@@ -14,56 +14,64 @@ import math
 from sdfb_beam.dofns.validate_record import ValidateRecordDoFn
 from sdfb_core.contracts import TableSchema
 
-_SCHEMA = TableSchema.model_validate(
-    {
-        "table_info": {"table_id": "p.d.t"},
-        "schema": [
-            {"name": "CODE", "type": "STRING", "mode": "REQUIRED",
-             "max_length": 5},
-            {"name": "AMT", "type": "FLOAT64", "mode": "NULLABLE"},
-        ],
-    }
-)
+_SCHEMA = TableSchema.model_validate({
+    "table_info": {
+        "table_id": "p.d.t"
+    },
+    "schema": [
+        {
+            "name": "CODE",
+            "type": "STRING",
+            "mode": "REQUIRED",
+            "max_length": 5
+        },
+        {
+            "name": "AMT",
+            "type": "FLOAT64",
+            "mode": "NULLABLE"
+        },
+    ],
+})
 
 
 def _run(record):
-    dofn = ValidateRecordDoFn(table_schema=_SCHEMA)
-    dofn.setup()
-    return list(dofn.process(record))
+  dofn = ValidateRecordDoFn(table_schema=_SCHEMA)
+  dofn.setup()
+  return list(dofn.process(record))
 
 
 def _tags(outputs):
-    import apache_beam as beam
+  import apache_beam as beam
 
-    return [
-        o.value["rule_id"]
-        for o in outputs
-        if isinstance(o, beam.pvalue.TaggedOutput)
-    ]
+  return [
+      o.value["rule_id"]
+      for o in outputs
+      if isinstance(o, beam.pvalue.TaggedOutput)
+  ]
 
 
 def test_valid_record_passes():
-    out = _run({"CODE": "AB123", "AMT": 1.5})
-    assert out == [{"CODE": "AB123", "AMT": 1.5}]
+  out = _run({"CODE": "AB123", "AMT": 1.5})
+  assert out == [{"CODE": "AB123", "AMT": 1.5}]
 
 
 def test_overlong_string_already_caught_by_pydantic():
-    # The derived record model carries max_length (StringConstraints) —
-    # line 1 of defense owns this class; pinned so it never regresses.
-    out = _run({"CODE": "TOOLONG99", "AMT": 1.0})
-    assert _tags(out) == ["schema.types"]
+  # The derived record model carries max_length (StringConstraints) —
+  # line 1 of defense owns this class; pinned so it never regresses.
+  out = _run({"CODE": "TOOLONG99", "AMT": 1.0})
+  assert _tags(out) == ["schema.types"]
 
 
 def test_nan_float_diverts_to_dlq():
-    out = _run({"CODE": "OK123", "AMT": math.nan})
-    assert _tags(out) == ["schema.non_finite"]
+  out = _run({"CODE": "OK123", "AMT": math.nan})
+  assert _tags(out) == ["schema.non_finite"]
 
 
 def test_infinity_diverts_to_dlq():
-    out = _run({"CODE": "OK123", "AMT": math.inf})
-    assert _tags(out) == ["schema.non_finite"]
+  out = _run({"CODE": "OK123", "AMT": math.inf})
+  assert _tags(out) == ["schema.non_finite"]
 
 
 def test_none_and_short_values_untouched():
-    out = _run({"CODE": "A", "AMT": None})
-    assert out == [{"CODE": "A", "AMT": None}]
+  out = _run({"CODE": "A", "AMT": None})
+  assert out == [{"CODE": "A", "AMT": None}]
