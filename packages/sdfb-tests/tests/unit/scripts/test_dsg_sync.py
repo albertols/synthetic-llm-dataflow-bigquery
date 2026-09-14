@@ -1,0 +1,298 @@
+"""Unit tests for `scripts/dsg/sync.py` — golden source -> DSG replica.
+
+Everything the sync decides without a network or a subprocess is covered
+here: which files ship, where overlays land, how links to unshipped docs
+are pinned, that index rows are idempotent, that owned paths are replaced
+wholesale while the Terraform-generated env script survives, and that the
+PR body has no unrendered placeholder (ADR 0040).
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_SCRIPT = Path(__file__).parents[5] / "scripts" / "dsg" / "sync.py"
+_spec = importlib.util.spec_from_file_location("dsg_sync", _SCRIPT)
+sync = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = sync
+_spec.loader.exec_module(sync)
+
+_PIPE = "pipelines/demo"
+
+
+def _write(root: Path, rel: str, text: str = "x\n") -> Path:
+  path = root / rel
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(text, encoding="utf-8")
+  return path
+
+
+def _manifest(**overrides):
+  raw = {
+      "source_repo": "https://github.com/acme/demo",
+      "target_repo": "Org/guides",
+      "target_base": "main",
+      "branch_prefix": "sync/demo-",
+      "pipeline_dir": _PIPE,
+      "owned_paths": [_PIPE, "terraform/demo", "use_cases/Demo.md"],
+      "preserve": [f"{_PIPE}/scripts/00_set_variables.sh"],
+      "include": ["README.md", "pkg/**", "docs/adr/**", "scripts/tool.py"],
+      "exclude": ["**/__pycache__/**", "pkg/tests/test_unshipped_tool.py"],
+      "script_tests": {
+          "pkg/tests/test_tool.py": "scripts/tool.py",
+          "pkg/tests/test_unshipped_tool.py": "scripts/unshipped.py",
+      },
+      "overlays": {
+          "dsg/pipeline": _PIPE,
+          "dsg/terraform": "terraform/demo",
+          "dsg/use_cases": "use_cases",
+      },
+      "readme_header": "dsg/pipeline/README.header.md",
+      "pylintrc": {
+          "vendored": "dsg/pylintrc",
+          "target": "pipelines/pylintrc"
+      },
+      "precheck_config": "dsg/precheck.yaml",
+      "pr_template": "dsg/PR_TEMPLATE.md",
+      "index_rows": [],
+  }
+  raw.update(overrides)
+  return sync.Manifest.from_dict(raw)
+
+
+def _source(root: Path) -> Path:
+  _write(
+      root, "README.md", "# Demo\nSee [ADR](docs/adr/0001.md) and "
+      "[playbook](docs/PLAYBOOK.md#run) and [web](https://x.org).\n")
+  _write(root, "pkg/mod.py")
+  _write(root, "pkg/__pycache__/mod.cpython-312.pyc")
+  _write(root, "pkg/tests/test_tool.py")
+  _write(root, "pkg/tests/test_unshipped_tool.py")
+  _write(root, "docs/adr/0001.md", "Back to [readme](../../README.md).\n")
+  _write(root, "docs/PLAYBOOK.md")
+  _write(root, "scripts/tool.py")
+  _write(root, "scripts/unshipped.py")
+  _write(root, "dsg/pipeline/README.header.md", "> DSG quick start\n")
+  _write(root, "dsg/pipeline/setup.py")
+  _write(root, "dsg/pipeline/scripts/01_build.sh", "echo build\n")
+  _write(root, "dsg/terraform/main.tf", "# tf\n")
+  _write(root, "dsg/use_cases/Demo.md",
+         "[pipeline](../pipelines/demo/README.md)\n")
+  return root
+
+
+def test_select_files_applies_include_and_exclude(tmp_path):
+  src = _source(tmp_path / "src")
+  selected = sync.select_files(src, _manifest())
+  assert selected == [
+      "README.md", "docs/adr/0001.md", "pkg/mod.py", "pkg/tests/test_tool.py",
+      "scripts/tool.py"
+  ]
+
+
+def test_select_files_rejects_a_shipped_test_whose_script_is_not_shipped(
+    tmp_path):
+  src = _source(tmp_path / "src")
+  manifest = _manifest(exclude=["**/__pycache__/**"])
+  with pytest.raises(sync.SyncError, match=r"test_unshipped_tool\.py"):
+    sync.select_files(src, manifest)
+
+
+def test_stage_tree_maps_sources_overlays_header_and_provenance(tmp_path):
+  src = _source(tmp_path / "src")
+  staging = tmp_path / "staging"
+  sync.stage_tree(
+      src,
+      _manifest(),
+      staging,
+      sha="a" * 40,
+      ref="v1.2.3",
+      committed_at="2026-09-14T10:00:00Z")
+  pipe = staging / _PIPE
+  assert (pipe / "pkg/mod.py").exists()
+  assert (pipe / "setup.py").exists()
+  assert (pipe / "scripts/01_build.sh").exists()
+  assert not (pipe / "README.header.md").exists()
+  assert (staging / "terraform/demo/main.tf").exists()
+  assert (staging / "use_cases/Demo.md").exists()
+  readme = (pipe / "README.md").read_text(encoding="utf-8")
+  assert readme.startswith("> DSG quick start\n")
+  assert "# Demo" in readme
+  stamp = json.loads((pipe / ".sync-source.json").read_text(encoding="utf-8"))
+  assert stamp == {
+      "source_repo": "https://github.com/acme/demo",
+      "ref": "v1.2.3",
+      "sha": "a" * 40,
+      "committed_at": "2026-09-14T10:00:00Z",
+      "tool": "scripts/dsg/sync.py",
+  }
+
+
+def test_rewrite_links_pins_unshipped_targets_and_keeps_shipped_ones(tmp_path):
+  src = _source(tmp_path / "src")
+  staging = tmp_path / "staging"
+  dsg = tmp_path / "dsg"
+  _write(dsg, "pipelines/pylintrc")
+  manifest = _manifest()
+  sync.stage_tree(
+      src, manifest, staging, sha="b" * 40, ref="v1", committed_at="t")
+  broken = sync.rewrite_links(staging, dsg, manifest, sha="b" * 40)
+  assert not broken
+  readme = (staging / _PIPE / "README.md").read_text(encoding="utf-8")
+  assert "[ADR](docs/adr/0001.md)" in readme
+  assert ("[playbook](https://github.com/acme/demo/blob/" + "b" * 40 +
+          "/docs/PLAYBOOK.md#run)") in readme
+  assert "[web](https://x.org)" in readme
+  adr = (staging / _PIPE / "docs/adr/0001.md").read_text(encoding="utf-8")
+  assert "[readme](../../README.md)" in adr
+
+
+def test_rewrite_links_reports_links_broken_everywhere(tmp_path):
+  staging = tmp_path / "staging"
+  dsg = tmp_path / "dsg"
+  dsg.mkdir()
+  _write(staging, "use_cases/Demo.md", "[gone](../terraform/nope/README.md)\n")
+  broken = sync.rewrite_links(staging, dsg, _manifest(), sha="c" * 40)
+  assert broken == ["use_cases/Demo.md -> ../terraform/nope/README.md"]
+
+
+def test_index_rows_are_idempotent_and_update_in_place(tmp_path):
+  _write(tmp_path, "README.md", "| Guide |\n| :-: |\n| [A](./a.md) |\n")
+  rows = [
+      sync.IndexRow(
+          file="README.md",
+          anchor="[A](./a.md)",
+          marker="Demo.md",
+          text="| [Demo](./use_cases/Demo.md) v1 |")
+  ]
+  assert sync.apply_index_rows(tmp_path, rows) == ["README.md"]
+  assert sync.apply_index_rows(tmp_path, rows) == []
+  rows[0] = sync.IndexRow(
+      file="README.md",
+      anchor="[A](./a.md)",
+      marker="Demo.md",
+      text="| [Demo](./use_cases/Demo.md) v2 |")
+  assert sync.apply_index_rows(tmp_path, rows) == ["README.md"]
+  text = (tmp_path / "README.md").read_text(encoding="utf-8")
+  assert text.count("Demo.md") == 1
+  assert text.endswith("| [A](./a.md) |\n| [Demo](./use_cases/Demo.md) v2 |\n")
+
+
+def test_index_block_is_replaced_between_markers(tmp_path):
+  _write(tmp_path, "AGENTS.md", "# Agents\n")
+  block = [
+      sync.IndexRow(
+          file="AGENTS.md",
+          anchor=None,
+          marker="demo",
+          text="### Demo deployment\nv1")
+  ]
+  sync.apply_index_rows(tmp_path, block)
+  block[0] = sync.IndexRow(
+      file="AGENTS.md",
+      anchor=None,
+      marker="demo",
+      text="### Demo deployment\nv2")
+  sync.apply_index_rows(tmp_path, block)
+  text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+  assert text.count("### Demo deployment") == 1
+  assert "v2" in text and "v1" not in text
+
+
+def test_index_row_with_missing_anchor_fails_loudly(tmp_path):
+  _write(tmp_path, "README.md", "| other |\n")
+  rows = [
+      sync.IndexRow(
+          file="README.md",
+          anchor="[A](./a.md)",
+          marker="Demo.md",
+          text="| Demo |")
+  ]
+  with pytest.raises(sync.SyncError, match="anchor"):
+    sync.apply_index_rows(tmp_path, rows)
+
+
+def test_install_replaces_owned_paths_and_preserves_generated_env(tmp_path):
+  src = _source(tmp_path / "src")
+  staging = tmp_path / "staging"
+  manifest = _manifest()
+  sync.stage_tree(
+      src, manifest, staging, sha="d" * 40, ref="v1", committed_at="t")
+  dsg = tmp_path / "dsg"
+  _write(dsg, f"{_PIPE}/stale_file.py")
+  _write(dsg, f"{_PIPE}/scripts/00_set_variables.sh", "export PROJECT=p\n")
+  _write(dsg, "pipelines/other/keep.py")
+  sync.install_into(dsg, staging, manifest)
+  assert not (dsg / _PIPE / "stale_file.py").exists()
+  assert (dsg / _PIPE / "pkg/mod.py").exists()
+  assert (dsg / _PIPE / "scripts/00_set_variables.sh").read_text(
+      encoding="utf-8") == "export PROJECT=p\n"
+  assert (dsg / "pipelines/other/keep.py").exists()
+  assert (dsg / "use_cases/Demo.md").exists()
+
+
+def test_render_pr_body_fills_every_placeholder():
+  template = ("{ref} {short_sha} {compare_url} {cloud_status}\n"
+              "{changelog}\n{gates_table}\n")
+  gates = [
+      sync.GateResult("pylint", True, 1.5, ""),
+      sync.GateResult("terraform", False, 2.0, "boom")
+  ]
+  body = sync.render_pr_body(
+      template,
+      manifest=_manifest(),
+      ref="v1.2.3",
+      sha="e" * 40,
+      prev_sha="f" * 40,
+      gates=gates,
+      changelog="- added x",
+      cloud_run=None)
+  assert "{" not in body
+  assert "compare/" + "f" * 40 + "..." + "e" * 40 in body
+  assert "| pylint | ✅ |" in body and "| terraform | ❌ |" in body
+  assert "Not yet run in Google Cloud" in body
+
+
+def test_changelog_section_for_tag_and_unreleased():
+  text = ("# Changelog\n## [Unreleased]\n- next\n"
+          "## [1.2.3] - 2026-09-14\n- shipped\n## [1.2.2]\n- old\n")
+  assert sync.changelog_section(text, "v1.2.3") == "- shipped"
+  assert sync.changelog_section(text, "feature-branch") == "- next"
+
+
+def test_pylintrc_drift_is_detected(tmp_path):
+  src = tmp_path / "src"
+  dsg = tmp_path / "dsg"
+  _write(src, "dsg/pylintrc", "[MAIN]\n")
+  _write(dsg, "pipelines/pylintrc", "[MAIN]\njobs=4\n")
+  result = sync.check_pylintrc(src, dsg, _manifest())
+  assert not result.ok
+  _write(dsg, "pipelines/pylintrc", "[MAIN]\n")
+  assert sync.check_pylintrc(src, dsg, _manifest()).ok
+
+
+def test_export_ref_uses_git_archive_so_untracked_files_never_ship(tmp_path):
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  _write(repo, "tracked.txt")
+  _write(repo, ".gitignore", "ignored.txt\n")
+  subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+  subprocess.run([
+      "git", "-C",
+      str(repo), "-c", "user.email=t@example.com", "-c", "user.name=t",
+      "commit", "-qm", "init"
+  ],
+                 check=True)
+  _write(repo, "ignored.txt")
+  _write(repo, "untracked.txt")
+  dest = tmp_path / "export"
+  sha, committed_at = sync.export_ref(repo, "HEAD", dest)
+  assert len(sha) == 40 and committed_at.endswith("Z")
+  assert sorted(p.name for p in dest.iterdir()) == [".gitignore", "tracked.txt"]

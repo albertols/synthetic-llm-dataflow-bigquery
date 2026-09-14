@@ -10,6 +10,9 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 🚀 Added
 
+- Dataflow Solution Guides donation ([ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md)): `dsg/` overlay (launch scripts `01`–`05`, `setup.py`, Cloud Build, Terraform module, use-case page) and `scripts/dsg/sync.py`, which replicates a tagged release into the guide and opens the PR behind DSG-equivalent gates; `/dsg-sync` skill and command.
+- Public relational demo model `config/relationships/gcp_public/gcp-public-relationship.yaml` over `bigquery-public-data.thelook_ecommerce` (users → orders → order_items, products as an external catalog parent).
+
 ### 🔧 Changed
 
 ### ⚡ Performance

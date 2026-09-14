@@ -49,7 +49,17 @@ jobs:
         run: uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg
 
       - name: Pylint (dsg/pylintrc, vendored from the Dataflow Solution Guides)
-        run: uv run pylint --rcfile dsg/pylintrc --ignore=.venv,venv,.gradle,build,bin,third_party packages scripts composer public_cloud
+        run: uv run pylint --rcfile dsg/pylintrc --ignore=.venv,venv,.gradle,build,bin,third_party packages scripts composer public_cloud dsg
+
+      - name: DSG overlay shell syntax
+        run: for f in dsg/pipeline/scripts/*.sh; do bash -n "$f"; done
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: DSG Terraform format
+        # `terraform validate` needs the DSG layout (file() reads the pipeline's
+        # config/bq_schema); scripts/dsg/sync.py runs it on the staged tree.
+        run: terraform fmt -check -recursive dsg/terraform
 
       - name: Sensitive-content precheck
         # Forbidden paths (evidence bundles, run journals, credentials),

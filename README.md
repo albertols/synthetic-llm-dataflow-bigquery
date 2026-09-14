@@ -7,6 +7,13 @@
 [![Apache Beam](https://img.shields.io/badge/Apache%20Beam-Dataflow-ff6d00.svg)](https://beam.apache.org/)
 [![LLM](https://img.shields.io/badge/LLM-self--hosted%20vLLM-6f42c1.svg)](#cpugpu-split--vllm-serving)
 [![Beam Summit](https://img.shields.io/badge/Beam%20Summit-2025-4285f4.svg)](https://beamsummit.org)
+[![Dataflow Solution Guides](https://img.shields.io/badge/Google%20Cloud-Dataflow%20Solution%20Guides-4285f4.svg)](https://github.com/GoogleCloudPlatform/dataflow-solution-guides)
+
+> [!NOTE]
+> **Part of the [Google Cloud Dataflow Solution Guides](https://github.com/GoogleCloudPlatform/dataflow-solution-guides)**
+> as the *synthetic data generation* guide: Terraform infrastructure, launch scripts and a relational demo
+> on the public `thelook_ecommerce` dataset. This repository is the **golden source**; the guide's copy is
+> generated from a tagged release by `/dsg-sync` ([ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md)).
 
 **Synthetic BigQuery data with self-hosted LLMs on Apache Beam / Dataflow.**
 
