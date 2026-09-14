@@ -7,7 +7,7 @@
 
 The brief positions this project as an OSS-grade reference implementation that any company on Dataflow + BigQuery can adopt. The natural reach for "we need an LLM in a pipeline" is Vertex AI Model Garden / endpoints. Similarly, "we need data quality scans" naturally pulls in Dataplex DQ + Looker Studio dashboards.
 
-But many adopters (including the user's own GCP project at example.com) do not have those services provisioned, by policy or by cost. Building on top of them would lock the deliverable out of those organizations.
+But many adopters do not have those services provisioned — by policy (common in regulated industries such as banking) or by cost. Building on top of them would lock the deliverable out of those organizations.
 
 ## Decision
 
@@ -16,10 +16,9 @@ The LLM serving path runs **entirely inside Apache Beam DoFns** via `apache_beam
 ## Consequences
 
 - **Enables**: portability across GCP projects that lack managed AI / DQ services. Full ownership of the model serving stack — we control quantization, batch sizing, structured-output enforcement.
-- **Costs**: we must build and maintain the GPU container ([ADR 0003](0003-jfrog-image-registry.md)), pull weights ourselves (see `docs/MODEL_LAYOUT.md`), and design our own validation reporting schema (`synthetic_data_quality.*` tables).
+- **Costs**: we must build and maintain the GPU container ([ADR 0015](0015-worker-image-via-artifact-registry.md)), pull weights ourselves (see `docs/MODEL_LAYOUT.md`), and design our own validation reporting schema (`synthetic_data_quality.*` tables).
 - **Forbids**: future design proposals that route LLM calls through Vertex, push DQ checks to Dataplex, or visualize in Looker Studio. If those become genuinely required, this ADR must be superseded explicitly.
 
 ## Related
 
-- Memory: `feedback_no_managed_gcp_services.md`
 - [ADR 0006](0006-generation-engine-abc.md) on how the `ModelClient` Protocol formalizes this isolation.

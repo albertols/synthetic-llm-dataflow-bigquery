@@ -301,7 +301,7 @@ child is the one number certainly wrong.
   `setup()`**: its own 7.5 GB weight pull, its own vLLM server spawn into the
   single GPU (all but the first crash with CUDA OOM — `Free memory on device
   cuda:0 (0.66/14.56 GiB)`), and its own CPU embedding pass fighting the
-  other seven for the same 8 vCPUs. The 2026-07-16 corp T4 run
+  other seven for the same 8 vCPUs. An earlier 2026-07-16 T4 Dataflow run
   (`..._13_23_14-11053114042412770609`) paid 26–92 min *per bundle attempt*
   in `embedder.embed` because of exactly this contention; four Dataflow
   bundle retries — each landing on a *different* sibling and repeating the
@@ -375,15 +375,14 @@ gcloud compute reservations create sdfb-l4 \
 
 Two things to know before doing this:
 
-- **Prerequisite: platform-team allowlist.** GPU-targeted Dataflow
-  reservations require an allowlist grant from the platform team — this is
-  called out directly in the DAG comment next to the
-  `automatically_use_created_reservation` line
-  (`composer/synthetic_beam_bigquery.py`, the comment block at lines 175–182,
-  immediately above the experiment string on line 183). Request the allowlist
-  before assuming the reservation will actually
-  be consumed; without it, Dataflow will silently fall back to on-demand even
-  with a reservation sitting idle.
+- **Prerequisite: confirm the reservation is consumable.** The DAG requests
+  it through the `automatically_use_created_reservation` experiment
+  (`composer/synthetic_beam_bigquery.py`), but whether a GPU-targeted
+  Dataflow job may consume a reservation depends on your organization's
+  project policies. Confirm eligibility (and watch the reservation's in-use
+  count on the first run) before assuming it will actually be consumed;
+  otherwise Dataflow silently falls back to on-demand even with a
+  reservation sitting idle.
 - **Idle-billing caveat.** A Compute Engine reservation bills for the
   reserved capacity whether or not a job is using it. Create it right before
   a run campaign starts and **delete it as soon as the campaign is done** —
@@ -499,11 +498,16 @@ Only the `oss/` folder produced by step 3 is shareable outside the team; keep
 `real/` (and its `mapping.json` decode key) local.
 
 **Promotion.** When a release will cite the run, copy the finished bundle
-into the committed evidence layer the release Action discovers:
+into the evidence layout the release Action discovers:
 
 ```bash
 cp -R runs/<JOB_ID> docs/releases/<version>/evidence/<JOB_ID>
 ```
+
+Evidence bundles never reach the public repository: they carry
+source-derived values, and the sensitive-content gate
+(`scripts/dsg/precheck.py`) rejects any `**/evidence/**` path. Releases
+publish the aggregate report only.
 
 ---
 
@@ -824,15 +828,15 @@ gives the child a duplicate-free key pool:
 locals {
   a_table_contract = jsonencode({
     sdfb = 1
-    pk   = ["ACCOUNT_ID"]              # activates pk.duplicate gate + clean parent keys
+    pk   = ["ORDER_ID"]                # activates pk.duplicate gate + clean parent keys
   })
   b_table_contract = jsonencode({
     sdfb = 1
-    pk   = ["MOVEMENT_ID"]
+    pk   = ["LINE_ID"]
     fk = [{
-      cols     = ["ACCOUNT_ID"]
-      ref      = "core_banking.a_table"   # dataset-qualified, ALWAYS (P1 stops otherwise)
-      ref_cols = ["ACCOUNT_ID"]
+      cols     = ["ORDER_ID"]
+      ref      = "demo_shop.a_table"      # dataset-qualified, ALWAYS (P1 stops otherwise)
+      ref_cols = ["ORDER_ID"]
     }]
   })
 }
@@ -867,7 +871,7 @@ column silently keeps its profiled marginal.
 2. OPTIONAL: `extract_ddl.py` re-run against the LANDING table to refresh
    the `ddl_uri` offline-fallback pin (live overlay is authoritative).
 3. **Parent landed and non-empty**: `SELECT COUNT(*), COUNT(DISTINCT
-   ACCOUNT_ID) FROM ${PROJECT}.synthetic_data.a_table` — run the parent
+   ORDER_ID) FROM ${PROJECT}.synthetic_data.a_table` — run the parent
    first and do NOT truncate its landing table between the parent run and
    the child run. An empty parent = empty `fk_pools` = the FK override
    silently NOT applied (engine skips empty pools) → orphans.
@@ -878,7 +882,7 @@ column silently keeps its profiled marginal.
 5. Keep DAG defaults: `uniqueness_mode=exact`, `prompt_constraints=on`.
 
 **Milestones to grep (on top of §7):** `relational_contract_loaded
-pk=MOVEMENT_ID fk_count=1`, `fk_pool_loaded
+pk=LINE_ID fk_count=1`, `fk_pool_loaded
 parent=${PROJECT}.synthetic_data.a_table values=N` (N ≤ 100k),
 `preflight_pk_not_unique_in_sample` (WARNING-only — real sources may
 violate an undeclared PK).

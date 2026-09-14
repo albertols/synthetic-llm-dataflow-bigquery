@@ -24,7 +24,7 @@ description: Subagent that turns a `_ddl.json` (BigQuery DDL metadata) into the 
 
 - `.claude/skills/ddl-codegen.md`
 - `.claude/skills/engine-contract.md` (so the record shape matches what engines emit)
-- The locked decisions in `~/.claude/projects/-Users-serna-IdeaProjects-synthetic-dataflow-bigquery/memory/project_synthetic_dataflow_m1_stack.md`
+- The locked decisions in [`docs/adr/`](../../docs/adr/)
 
 ## Acceptance criteria
 

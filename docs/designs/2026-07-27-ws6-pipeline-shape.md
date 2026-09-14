@@ -9,7 +9,7 @@
 >
 > Every number is re-derived from
 > `runs/2026-07-26_17_10_37-5541097091204532225/worker_logs.jsonl`
-> (first GPU/CPU-separated 1M-row run on the GCP LZ) via
+> (first GPU/CPU-separated 1M-row Dataflow run) via
 > [`scripts/doc/make_ws6_figures.py`](../../scripts/doc/make_ws6_figures.py), which also
 > regenerates every figure (provenance in §7).
 >

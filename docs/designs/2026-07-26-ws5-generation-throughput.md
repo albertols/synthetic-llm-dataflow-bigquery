@@ -10,8 +10,7 @@
 > [`scripts/doc/make_ws5_figures.py`](../../scripts/doc/make_ws5_figures.py), which also
 > regenerates every figure (provenance in §7).
 >
-> **Implementation plan:** `docs/superpowers/plans/2026-07-26-ws5-generation-throughput.md` (retired 2026-08-31 with the plans/ layer; recoverable from git history)
-> — 10 tasks in 4 phases, TDD, one commit per task.
+> **Implementation plan:** 10 tasks in 4 phases, TDD, one commit per task (the plan file was retired with the planning layer; the decisions are in [ADR 0020](../adr/0020-freetext-pools-as-persisted-artifact.md)).
 > This document is written to the `visual-first-documentation` skill
 > (`.claude/skills/visual-first-documentation/SKILL.md`), which owns the
 > source-of-truth chain, the document contract, and the figure rules.

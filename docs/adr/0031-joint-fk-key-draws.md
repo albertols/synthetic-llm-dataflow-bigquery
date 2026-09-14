@@ -119,7 +119,7 @@ truncation.
   `DISTINCT` over exactly those columns. The 2026-08-23 edge (3 of the
   parent's 5 PK columns) is enforceable as declared, once the
   `informational` flag is removed.
-- **Operator action required for the next run**: the corp contract on
+- **Operator action required for the next run**: the real (non-example) contract on
   the child table must drop `"informational": true` from its FK entry.
   Until it does, the run behaves exactly as before — and now says so at
   launch, loudly.

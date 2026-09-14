@@ -14,7 +14,6 @@ sources:
   - docs/adr/0032-relationships-as-config.md
   - docs/adr/0033-pool-ladder-integrity-at-scale.md
 figures:
-  - docs/assets/beam-summit-2025-acceptance.png
   - docs/assets/architecture-overview.png
   - docs/articles/assets/validation-guardrails.png
   - docs/articles/assets/generation-plan-routing.png
@@ -29,11 +28,10 @@ synced_at_commit: 3512a33
 
 *Self-hosted LLM generation on Apache Beam / Dataflow / BigQuery — the series
 behind the Apache Beam Summit 2025 session "Building Banking Synthetic Data
-for a Lakehouse with Gemma".*
-![beam-summit-2025-acceptance.png](../assets/beam-summit-2025-acceptance.png)
+for a Lakehouse with Gemma" ([Beam Summit](https://beamsummit.org)).*
+
 A year of prototypes and experimentation later, the results were good
-enough to integrate into a corporate environment and open-source the repo —
-exciting times!
+enough to open-source the repo — exciting times!
 
 ## The problem nobody is allowed to solve the easy way
 
@@ -49,15 +47,15 @@ frontier-model tokens burned a day, hundreds of GenAI seats flushed with
 them, thousands of rows with no framework behind them, no data product, no
 mathematical rigor.
 
-The easy exits are all blocked in a regulated (banking) environment:
+The easy exits are all blocked in regulated industries such as banking:
 
 - **Masking** degrades the statistics you were trying to keep — masked joins
   stop joining, masked amounts stop being skewed the way real amounts are.
 - **Manual fixtures** don't scale past a demo, and they encode one
   engineer's guesses about what the data looks like.
 - **"Just ask ChatGPT for lookalike rows"** means sending real schema and
-  sample values to an external AI API. In a bank, that sentence ends the
-  meeting.
+  sample values to an external AI API. In a regulated industry, that
+  sentence ends the meeting.
 
 So the interesting version of the problem has hard constraints baked in:
 produce **fictitious-but-realistic rows for any BigQuery table**, driven only

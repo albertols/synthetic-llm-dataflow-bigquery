@@ -97,7 +97,7 @@
 - adds DEPLOYMENT_PREREQUISITES.md
 - gang of 5 for embedders: config.json, model.safetensors,tokenizer.json,tokenizer_config.json, special_tokens_map.json
 - fix for embders gs://uri with localize_gcs_prefix
-- Welcome synth for corp infra
+- Welcome synth infra
 
 
 ## Before / after
@@ -148,7 +148,7 @@ _Generated deterministically by `scripts/release/make_release_report.py` — ins
 \n
 ## Insights
 
-_Interpretation layer (`.claude/skills/release-report`), written 2026-08-29 on top of the generated tables above — none of the numbers or charts were edited. No ADC on the authoring machine: every statement below comes from the committed bundle and the run's worker logs; nothing was re-queried live. Parent columns are named by the generator's tokens; child columns are described, not named (their aliases share the token namespace)._
+_Interpretation layer (`.claude/skills/release-report`), written 2026-08-29 on top of the generated tables above — none of the numbers or charts were edited. No ADC on the authoring machine: every statement below comes from the run's evidence bundle and worker logs; nothing was re-queried live. That bundle (`docs/releases/v0.1.0/evidence/`) has since been withdrawn from the repository because it contained source-derived values; the aggregate numbers in this report stand. Parent columns are named by the generator's tokens; child columns are described, not named (their aliases share the token namespace)._
 
 **Scope.** First tagged release, so there is no base side and every delta reads "not measured". The head job is the 2026-08-26 R6 run: the parent table and its FK child generated at **10,000,000 rows each in one Dataflow job** (wave 0 → wave 1, ADR 0030), `n1-highmem-8` × 2→4 workers with one T4 each, image `oss-pk-ready-6ed7b93`, `qwen3/4b-instruct-2507`. The deterministic tables read the **parent** bundle (`real/*_metrics.json`); the child's twins (`real/*_metrics_a_table.json`) are cited by hand here — the generator discovers one artifact set per job (backlog item below).
 

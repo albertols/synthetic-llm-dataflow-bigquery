@@ -9,7 +9,7 @@ decision; this document is the argument and the contract.
 
 ## 1. Evidence — the shapes a model can declare and what the launch did
 
-The 2026-09-11 five-table expansion of the anonymised core-accounts model
+The 2026-09-11 five-table expansion of the anonymised production-shaped model
 (`A_TABLE`, `C_TABLE`, `E_TABLE`, `F_TABLE` enabled; hub `B_TABLE` and
 `D_TABLE` detached) stopped at preflight three times in one evening, each
 on a shape ADR 0036 never saw: a root whose FK member points at a

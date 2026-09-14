@@ -75,7 +75,7 @@ copy.
 
 | | Name | Role in this article | Primary source |
 |---|---|---|---|
-| 📰 series | Part 1 — the routing story | where the `generation_plan` and the "one route per column" idea come from | [Building banking synthetic data — intro](01-building-banking-synthetic-data-intro.md) |
+| 📰 series | Part 1 — the routing story | where the `generation_plan` and the "one route per column" idea come from | [LLM and statistical synthetic data with Dataflow — intro](01-building-banking-synthetic-data-intro.md) |
 | 📰 series | Parts 3 · 4 · 5 | serving runtime · B.1 retrieval geometry · `b2_library` deep dive | upcoming |
 | 🧠 GenAI | LLM tabular generation | why the LLM runs O(1) times per column, not per row | [GReaT, Borisov et al. 2023](https://arxiv.org/abs/2210.06280) · [FASTGEN, Nguyen et al. 2025](https://arxiv.org/abs/2507.15839) |
 | 🧠 GenAI | per-cell LLM sampling, and why not | the ~9,500× cost gap; distributions flattened toward uniform | [Yang et al. 2025](https://arxiv.org/abs/2507.19334) · [Sidorenko 2025](https://arxiv.org/abs/2505.02659) |
@@ -151,12 +151,12 @@ defaults, in the order they are applied:
 | free-text test | more than 50 distinct values, **or** unique ratio ≥ 0.9 and mean length ≥ 20 | a STRING is free-text unless it is a code list |
 | head values | share ≥ 5% of rows, at least 10 rows, at most 8 values | dominant literals (an `N/A`, a default label) are re-emitted at their exact share, not "generated" |
 | temporal-shaped string | parses as a date/time | leaves the string route for the temporal sampler |
-| identifier shape | fixed length ≥ 8, no whitespace, every position resolves to a literal or a narrow character class | account-number-shaped strings never reach the LLM: mask tables + per-position alphabets |
+| identifier shape | fixed length ≥ 8, no whitespace, every position resolves to a literal or a narrow character class | code- and ID-shaped strings never reach the LLM: mask tables + per-position alphabets |
 | free-text seeds | up to 64 distinct exemplars | what the LLM will be shown, later, as "values like these" |
 | otherwise | — | categorical: reproduce the frequency table |
 
 Two of those rows are privacy decisions dressed as type decisions. The
-identifier exit exists because the worst thing a synthetic account number
+identifier exit exists because the worst thing a synthetic identifier
 can do is collide with a real one — so identifiers are generated from the
 *shape* of the observed values and checked for novelty against the
 column's **full** source domain, not the 10k sample. And the head-values
@@ -432,7 +432,7 @@ A minimal clause, and the only line that changes a typed column's route:
 
 ```json
 {"llm_prompt_constraint": {
-  "format": "short merchant descriptor as printed on a card statement",
+  "format": "short store name as printed on a till receipt",
   "charset": "upper-case letters, digits, spaces and asterisks",
   "length": [8, 22],
   "examples": ["CAFE ARBOL*MADRID", "TFL TRAVEL CH"],
@@ -503,7 +503,7 @@ in the table derives from it:
   that column will read as a defect (the measured-state figure at the
   end shows exactly this: synthetic distinct pinned at ~512 against
   source cardinalities of 20k–146k). This is the intended trade: the LLM
-  supplies *semantics* — plausible merchant names, plausible remarks —
+  supplies *semantics* — plausible names, plausible remarks —
   and cardinality comes from somewhere else.
 - **It is fatal for keys, so keys are refused.** A primary key that
   reaches the pool route caps at 512 unique values, which is the PK

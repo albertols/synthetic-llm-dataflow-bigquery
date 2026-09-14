@@ -1,16 +1,16 @@
 # Deployment prerequisites — GCS & BigQuery
 
-What must exist **before** a pipeline run, and what to provision per environment. Aimed at both the current example.com deployment and a future generic/OSS adaptation.
+What must exist **before** a pipeline run, and what to provision per environment.
 
 The pipeline is **bring-your-own-infra**: every table and bucket is passed in by URI/FQN, and all BigQuery sinks are `CREATE_NEVER` (`sdfb_beam/cli/run_pipeline.py`). Nothing is auto-created at run time — a missing table or bucket fails the job.
 
 Companion docs (don't restate — link):
 - **Model weights** — GCS layout, download, file checklist → [`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)
-- **Build / deploy / run** — image, Flex Template, DAG import, secrets → [`CICD.md`](CICD.md)
+- **Build / deploy / run** — worker image registry → [ADR 0015](adr/0015-worker-image-via-artifact-registry.md); a runnable image + Flex Template build on your own project → [`public_cloud/deploy/gcp/README.md`](../public_cloud/deploy/gcp/README.md)
 - **Dev env setup** → [`M4_SETUP.md`](M4_SETUP.md)
 - **Run playbook** — GPU verdict, run matrix, Dataflow options, L4 capacity strategy, report recipe → [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md)
 
-Two layers below: **① the portable core** (needed anywhere) and **② the enterprise wrapper** (example.com-specific — strip for OSS).
+Two layers below: **① the portable core** (needed anywhere) and **② optional hardening** (what a locked-down or regulated project typically adds on top).
 
 ---
 
@@ -24,7 +24,7 @@ Two layers below: **① the portable core** (needed anywhere) and **② the ente
 | **Embedder weights** (B.1 RAG) | `gs://{bucket}/synthetic/models/embedders/{model}/{version}/` | B.1 DoFn `setup()` | Optional — empty `--embedder_uri` → dependency-free `HashingEmbedder`. |
 | **DDL JSON** | `gs://…/…_ddl.json` (`--ddl_uri`) | driver `load_ddl()` | Produced by `scripts/extract_ddl.py`; stage to GCS for the launcher. |
 | **Dataflow staging/temp** | `gs://…-dataflow-staging/{staging,temp}/` | Dataflow service | Can be one bucket with prefixes. |
-| **Flex Template spec** | `gs://…-dataflow-templates/synthetic/sdfb-<ver>-template.json` | Flex launch | Built by CI (`CICD.md` §4). |
+| **Flex Template spec** | `gs://…-dataflow-templates/synthetic/sdfb-<ver>-template.json` | Flex launch | Built by CI ([ADR 0008](adr/0008-ci-driven-builds.md), [ADR 0009](adr/0009-single-flex-template-image.md)) or by Cloud Build ([`public_cloud/deploy/gcp/`](../public_cloud/deploy/gcp/README.md)). |
 
 Minimum footprint: a **models** bucket + a **staging/temp** bucket (+ a **templates** bucket, or a prefix on staging for OSS).
 
@@ -158,15 +158,14 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 
 ---
 
-## ② Enterprise wrapper (strip for OSS)
+## ② Optional hardening
 
-example.com-specific; the bulk of what an OSS adaptation removes or genericizes:
+None of this is required for a run; it is what a locked-down project usually layers on top of ①:
 
-- **JFrog** base images + pip mirror (ADR 0003, `pyproject.toml [tool.uv.index]`) → Docker Hub / gcr.io + pypi.org. Runtime image pulls come from Artifact Registry regardless ([ADR 0015](adr/0015-worker-image-via-artifact-registry.md)).
-- **WIF + GSM secrets** for CI auth and worker image pulls (`CICD.md` §6) → SA key or ADC. Add `secretmanager.secretAccessor` to the worker SA only here.
-- **Composer Variables** `PROJECT_ID`, `REGION`, `DATAFLOW_SUBNET`, `SA_DATAFLOW`, `SDFB_MODEL_URI` (`composer/synthetic_beam_bigquery.py`) → pass as DAG params / env.
-- **Network tags, `WORKER_IP_PRIVATE` + Private Google Access, KMS keys, secure-boot** → removable for a public-IP OSS default.
-- **L4-in-`europe-west3` capacity / reservation logic** in the DAG (ADR 0004) → make region + accelerator plain params.
+- **Worker image** — runtime pulls come from Artifact Registry via the worker SA's IAM ([ADR 0015](adr/0015-worker-image-via-artifact-registry.md)); no registry credentials or Secret Manager entries are needed in the pull path.
+- **Composer Variables** `PROJECT_ID`, `REGION`, `DATAFLOW_SUBNET`, `SA_DATAFLOW`, `SDFB_MODEL_URI` (`composer/synthetic_beam_bigquery.py`) → or pass them as DAG params / env.
+- **Network tags, `WORKER_IP_PRIVATE` + Private Google Access, KMS keys, secure-boot** → for private-IP workers; a public-IP default works without them.
+- **L4-in-`europe-west3` capacity / reservation logic** in the DAG (ADR 0004) → make region + accelerator plain params when targeting another region.
 
 ---
 
@@ -195,7 +194,7 @@ uv run python scripts/deployment_prerequisites.py \
 | 3 | **Local weights** — required LLM (+ embedder) files under `./models/…` | verifies file checklist | download weights ([`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)) |
 | 4 | **BigQuery tables** — source, landing, dlq, validation_runs exist | verifies (read-only) | create them (① → tables) |
 | 5 | **Staging bucket** — `…-dataflow-staging` exists | verifies | create bucket |
-| 6 | **Templates bucket** — `…-dataflow-templates` exists | verifies | create bucket / deploy template ([`CICD.md`](CICD.md)) |
+| 6 | **Templates bucket** — `…-dataflow-templates` exists | verifies | create bucket / deploy template ([`public_cloud/deploy/gcp/`](../public_cloud/deploy/gcp/README.md)) |
 | 7 | **BigQuery datasets** — `synthetic_data`, `synthetic_data_quality` exist | verifies | create datasets (① → datasets) |
 | 8 | **Others** — weights staged in GCS · `_ddl.json` staged in GCS (*optional* at launch since WS4 §6b — empty `--ddl_uri` live-extracts from INFORMATION_SCHEMA; an explicit URI pins/air-gaps) · local config artifacts present | verifies | upload weights / `_ddl.json`; restore config |
 | 9 | **RAG chunk store** (WS2) — `synthetic_rag` dataset + `rag_chunks` table exist, multi-table contract columns + `created_at` DAY partition live, vector-index state | verifies (read-only; `--rag-chunks-table ''` skips) | create per ① → rag_chunks; index after first population |
@@ -203,4 +202,4 @@ uv run python scripts/deployment_prerequisites.py \
 | 11 | **Source stats store** (WS8, 2026-08-05 spec WS-B + [ADR 0022](adr/0022-stats-driven-generation.md)) — `source_table_stats` table contract incl. the provenance columns `sample_rows`/`stats_tier`/`profiler_version` (versioned skip key; `distinct` means sample-bound at `stats_tier=sample`, full-table HLL at `exact`) | verifies (missing table = SKIP by design — stats still land as milestone + JSON artifact; `--source-stats-table ''` omits) | `bq mk` with `config/bq_schema/synthetic_rag/source_table_stats.schema.json`; drifted table = ACTION (write_rows load job would fail mid-launch); pre-ADR-0022 tables need the three columns added (`bq update` with the schema file — additive NULLABLE, no data rewrite) |
 | 12 | **Relationship models** ([ADR 0032](adr/0032-relationships-as-config.md)) — `config/relationships/*.yaml` load, and every table they declare exists in the landing dataset | verifies (a broken model file = ACTION, since a launch reads the same loader and stops on it; a table that is absent but `enabled: false` is fine — it is detached on purpose; `--relationships-uri ''` omits) | fix the model file, or create the missing landing tables (`scripts/derive_landing_schema.py` + `bq mk`), or set `enabled: false` to detach them from the launch |
 
-Create-order note: because #4/#7 are read-only checks, provision the create-side in dependency order — datasets → tables, buckets, weights (local → GCS), then IAM — using the `bq mk`/Terraform recipes in ①. Enterprise deploy (image, Flex Template, Composer Variables, DAG) is ② → [`CICD.md`](CICD.md).
+Create-order note: because #4/#7 are read-only checks, provision the create-side in dependency order — datasets → tables, buckets, weights (local → GCS), then IAM — using the `bq mk`/Terraform recipes in ①. Image and Flex Template builds: [`public_cloud/deploy/gcp/README.md`](../public_cloud/deploy/gcp/README.md); Composer Variables and private networking: ②.

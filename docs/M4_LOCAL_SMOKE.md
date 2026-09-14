@@ -74,7 +74,7 @@ Validates: end-to-end DAG including generation DoFn, ValidateRecordDoFn, Pandera
 
 ## What this does NOT validate
 
-- The GPU image — only CI builds + the Dataflow probe can prove that.
+- The GPU image — only a CI-built image on a real Dataflow GPU run can prove that.
 - Throughput / cost — single-process MLX is much slower than batched vLLM.
 - Production fidelity — E4B (4.5B effective) is significantly smaller than the 26B-A4B MoE production target.
 - BigQuery sinks — `WriteToBigQuery` requires real credentials + a real table.
@@ -124,5 +124,5 @@ If this errors with `safetensors index missing`, the download didn't include `mo
 | Code change in `sdfb_core` (contracts, codegen, ABC) | L1 |
 | Prompt engineering changes | L2 |
 | End-to-end engine + validation chain | L3 |
-| GPU image / Dataflow / vLLM / L4 | CI workflow 1 + probe |
+| GPU image / Dataflow / vLLM / L4 | CI-built image + a Dataflow GPU run (`public_cloud/deploy/gcp/run_e2e.sh`) |
 | Production fidelity / throughput / cost | real Dataflow runs ([`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md)) |

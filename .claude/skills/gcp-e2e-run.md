@@ -17,7 +17,7 @@ cd public_cloud/deploy/gcp
 - T4 preset is baked in tiers.yaml: qwen3-4b + `vllm_dtype=float16` +
   `vllm_max_model_len=8192` + n1-standard-8 + `install-nvidia-driver:5xx`.
 
-## Campaign (spec §Run matrix)
+## Campaign (`docs/E2E_TEST_MATRIX.md`)
 
 S0 → R1p → R2p → R3p → N4 → P6 ×2 → P7 on citibike, then R1p on hacker_news.
 Stop the campaign at the first unexpected FAIL; hand the landed artifacts to

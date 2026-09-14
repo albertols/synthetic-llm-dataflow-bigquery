@@ -10,7 +10,7 @@
 
 ADR 0035 measured why a PK that contains an FK cannot be drawn at
 random: C_TABLE's PK `(D_COL_001, C_COL_002, D_COL_018)` is unique
-*inside* each B_TABLE account, not across the table, and two 10M-row
+*inside* each B_TABLE key, not across the table, and two 10M-row
 launches lost 87.9% then 56.5% of rows to `pk.duplicate` proving it.
 ADR 0035 D4 named the ceiling explicitly: even sampling the *whole*
 10M-key parent into the side input still leaves ~4% duplicates at 10M
@@ -293,7 +293,7 @@ set it from the tuple.
   — `source_table`, `edge_cols`, `model_sha`, `measured_at`, `payload`;
   no partition, appended by `LOAD`). Provisioned the same way as `dlq`
   and `validation_runs` (DEPLOYMENT_PREREQUISITES.md).
-- The corp model needs one edit before the M4 launch: widen C_TABLE's
+- The real (production-shaped) model needs one edit before the M4 launch: widen C_TABLE's
   edge to B_TABLE to carry the inherited columns A_TABLE needs
   (`D_COL_024, D_COL_025, C_COL_009` alongside `D_COL_001`), and mark
   A_TABLE's edge to C_TABLE `drives: true` (A_TABLE also has an

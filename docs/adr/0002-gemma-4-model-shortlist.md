@@ -26,4 +26,3 @@ Dropped from the shortlist: Gemma 2 family (superseded), Phi-3 Mini (superseded 
 
 - `docs/MODEL_LAYOUT.md` for storage layout and the Kaggle download procedure.
 - `config/models.yml` for the registry of models with their vLLM args.
-- Memory: `project_synthetic_dataflow_m1_stack.md`.

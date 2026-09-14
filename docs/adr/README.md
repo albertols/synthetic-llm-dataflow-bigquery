@@ -35,7 +35,7 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 
 - [0001 — No managed GCP services in the serving path](0001-no-managed-gcp-services.md)
 - [0002 — Gemma 4 family as the M1 model shortlist](0002-gemma-4-model-shortlist.md)
-- [0003 — Corporate JFrog as the container registry](0003-jfrog-image-registry.md)
+- [0003 — Private third-party container registry (withdrawn; superseded by 0015)](0003-jfrog-image-registry.md)
 - [0004 — europe-west3 as the Dataflow region](0004-europe-west3-region.md)
 - [0005 — Live BQ SELECT for reference rows, not cached parquet](0005-live-select-reference-data.md)
 - [0006 — `GenerationEngine` ABC + `ModelClient` Protocol shape](0006-generation-engine-abc.md)
@@ -44,7 +44,7 @@ Keep ADRs tight — half a page is plenty. Detail belongs in the code or in skil
 - [0009 — Single image for Flex Template launcher AND Dataflow workers](0009-single-flex-template-image.md)
 - [0010 — M4 local smoke test via MLX (no DirectRunner-with-Docker)](0010-m4-local-smoke-mlx.md)
 - [0011 — Adopt Beam's `VLLMCompletionsModelHandler` for §9](0011-adopt-beam-vllm-model-handler.md)
-- [0012 — Enterprise-network constraints for the GPU image build + Dataflow run](0012-enterprise-image-build.md)
+- [0012 — Network constraints for the GPU image build + Dataflow run (withdrawn)](0012-enterprise-image-build.md)
 - [0013 — Synthesis engines use an LLM-as-distribution-estimator spine](0013-distribution-estimator-spine.md)
 - [0014 — `VLLMModelClient` owns the vLLM OpenAI server (amends 0011)](0014-vllm-model-client-owns-server.md)
 - [0015 — Dataflow worker image served via Artifact Registry (amends 0003)](0015-worker-image-via-artifact-registry.md)

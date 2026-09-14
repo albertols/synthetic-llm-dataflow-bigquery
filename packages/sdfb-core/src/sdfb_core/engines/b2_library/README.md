@@ -6,7 +6,7 @@ the shared ABC (M1 §6). Library choice: **`sdgx`** (Apache-2.0). See
 (sdgx selected; SDV/GaussianCopula deferred pending BSL-1.1 sign-off) and the
 fit-time / RAM / sample-quality measurement plan.
 
-Design of record: ADR 0013 + `docs/superpowers/specs/2026-05-21-synthesis-engines-design.md` §2/§4.
+Design of record: [ADR 0013](../../../../../../docs/adr/0013-distribution-estimator-spine.md).
 
 ## The spine (fit-once, vectorized-sample, LLM-only-for-free-text)
 

@@ -1,6 +1,6 @@
 {
   "name": "synthetic-dataflow-bigquery",
-  "description": "Generate fictitious-but-realistic synthetic rows for a BigQuery table via Apache Beam + L4 GPU + Gemma 4. See docs/CICD.md.",
+  "description": "Generate fictitious-but-realistic synthetic rows for a BigQuery table via Apache Beam + L4 GPU + Gemma 4. See docs/DEPLOYMENT_PREREQUISITES.md.",
   "parameters": [
     {
       "name": "ddl_uri",

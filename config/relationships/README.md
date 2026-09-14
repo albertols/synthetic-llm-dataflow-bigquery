@@ -13,7 +13,7 @@ BigQuery are **not** read for relational structure (ADR 0032).
 --relationships_uri=gs://my-bucket/relationships
 
 # or one specific file
---relationships_uri=gs://my-bucket/relationships/corp_model.yaml
+--relationships_uri=gs://my-bucket/relationships/my_model.yaml
 
 # relationships off on purpose (every table generates alone)
 --relationships_uri=""
@@ -44,7 +44,7 @@ tables:
     pk:       [COL_A, COL_B]  # composite is fine; [] or omitted = no PK
     identity: [COL_C]         # unique-but-not-key columns
     enabled:  true            # default true — see "Detaching" below
-    note:     account master  # optional, for humans
+    note:     order header    # optional, for humans
     fk:
       - cols:     [COL_D, COL_E]      # this table's columns
         ref:      B_TABLE             # a table in THIS model…
@@ -109,7 +109,7 @@ parent whose keys it consumes. Everything else follows from `cols` and
   `B_TABLE` widens from `[D_COL_001] → B_TABLE` to `[D_COL_001,
   D_COL_024, D_COL_025, C_COL_009] → B_TABLE (same cols)`: the tuple
   already travels jointly, so grouping by the wide tuple equals
-  grouping by the account, and `A_TABLE` (driven by `C_TABLE`) copies
+  grouping by the parent key, and `A_TABLE` (driven by `C_TABLE`) copies
   the extra columns straight from the key instead of sampling them.
 - **One driving edge, the rest implied.** When a child has several
   enforced in-model edges, mark exactly one `drives: true`. An edge is

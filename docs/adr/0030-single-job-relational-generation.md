@@ -98,7 +98,7 @@ existing once-guard.
   are exact — the child samples only landed parent keys.
 - DirectRunner-proven end to end (child FK containment asserted against
   disjoint reference values); T4/L4 Dataflow evidence is the acceptance
-  gate before this becomes the recommended corp path.
+  gate before this becomes the recommended production path.
 - `runs` interpreters gain three new anchors:
   `launch_config`, `relational_single_job`, and `table=`-tagged
   milestones.

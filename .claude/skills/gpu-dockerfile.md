@@ -1,11 +1,11 @@
 ---
 name: gpu-dockerfile
-description: Recipe for the L4 GPU Dataflow custom container — CUDA base + Beam SDK overlay + Flex Template launcher + vLLM, with model warm-pull from GCS at worker startup (not container build). Load when working on `docker/Dockerfile` or the CI workflows that build it.
+description: Recipe for the L4 GPU Dataflow custom container — Beam SDK base + Flex Template launcher overlay + vLLM, with model warm-pull from GCS at worker startup (not container build). Load when working on `docker/Dockerfile` or the CI workflows that build it.
 ---
 
 # Skill — GPU Dockerfile
 
-> **Source of truth** for the actual image is **`docker/Dockerfile`** in this repo. The CI build/push pipeline is **`.github/workflows/1_build_python_beam.yaml`** and the operational runbook is **[`docs/CICD.md`](../../docs/CICD.md)**. This skill is a recipe for working on those files — not a copy of their content.
+> **Source of truth** for the actual image is **`docker/Dockerfile`** in this repo. The CI build/push pipeline is **`.github/workflows/1_build_python_beam.yaml`**; the personal-project Cloud Build path is **[`public_cloud/deploy/gcp/`](../../public_cloud/deploy/gcp/README.md)** ([ADR 0016](../../docs/adr/0016-personal-gcp-cloud-build.md)). This skill is a recipe for working on those files — not a copy of their content.
 
 ## The two-contract trick
 
@@ -26,20 +26,20 @@ Both binaries are copied into the final image via multi-stage `COPY --from`. See
 --dataflow_service_options="worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver:latest"
 --worker_machine_type="g2-standard-8"
 --experiments=use_runner_v2
---sdk_container_image="${ARTIFACTORY_HOSTNAME}/docker-local/${ARTIFACTORY_NAMESPACE}/sdfb-python:${VERSION}"
+--sdk_container_image="${REGION}-docker.pkg.dev/${PROJECT}/${AR_REPO}/sdfb-python:${VERSION}"
 --worker_disk_type=pd-ssd
 --worker_disk_size_gb=200
---image-repository-username-secret-id="projects/${PROJECT}/secrets/ARTIFACTORY_RELEASER_USERNAME"
---image-repository-password-secret-id="projects/${PROJECT}/secrets/ARTIFACTORY_RELEASER_PASSWORD"
 ```
+
+The worker image is pulled from **Artifact Registry** via the worker service account's IAM (`roles/artifactregistry.reader`) — no registry secrets ([ADR 0015](../../docs/adr/0015-worker-image-via-artifact-registry.md)).
 
 `g2-standard-8` = 1×L4 (24 GB VRAM), 8 vCPU, 32 GB RAM. Upgrade to `g2-standard-24` if NVIDIA MPS is needed for multi-process GPU sharing.
 
-**Base images come from JFrog**, not Docker Hub / gcr.io (ARC build runners are network-restricted). CUDA `com/example/cuda:12.2.2-cudnn-runtime-ubuntu22.04`, Beam SDK `docker-remote/apache/beam_python3.11_sdk:2.71.0` (→ `apache-beam==2.71.0` pin). Networking prereqs (Private Google Access, Secure Boot vs driver, JFrog egress) and the full rationale: [ADR 0012](../../docs/adr/0012-enterprise-image-build.md).
+**Base images are public**: Beam SDK `apache/beam_python3.11_sdk:2.74.0` on Docker Hub (→ `apache-beam[gcp]==2.74.0` pin — Runner v2 needs the boot binary and the wheel at the same version, so bump them in lockstep) and the launcher binary from `gcr.io/dataflow-templates-base/python311-template-launcher-base`. Both are `ARG`s (`BEAM_SDK_IMAGE`, `LAUNCHER_IMAGE`) so a mirror can be swapped in with `--build-arg`. No system CUDA base: vLLM/torch wheels bundle the CUDA runtime and Dataflow's `install-nvidia-driver` mounts the driver at `/usr/local/nvidia/`. uv is bootstrapped from PyPI and `uv sync --frozen` installs from `uv.lock`. Private-IP workers need **Private Google Access** on the subnet (GCS, BigQuery, Artifact Registry); if `enable_secure_boot` blocks the unsigned driver module, drop Secure Boot for the GPU job.
 
 ## Model warm-pull
 
-The image is intentionally weights-free. Model weights live in `gs://{bucket}/synthetic/models/{family}/{model}/{version}/` and are pulled once per worker lifetime inside the `ModelClient.setup()` method. We use the **`google-cloud-storage` Python client**, not `gsutil` — the CLI would force a `google-cloud-cli` apt install from `packages.cloud.google.com`, which ARC runners and private-IP workers can't reach. The client is already a transitive dep of `apache-beam[gcp]` and authenticates via ADC.
+The image is intentionally weights-free. Model weights live in `gs://{bucket}/synthetic/models/{family}/{model}/{version}/` and are pulled once per worker lifetime inside the `ModelClient.setup()` method. We use the **`google-cloud-storage` Python client**, not `gsutil` — the CLI would force a `google-cloud-cli` apt install from `packages.cloud.google.com` into the image for no benefit. The client is already a transitive dep of `apache-beam[gcp]` and authenticates via ADC.
 
 ```python
 # packages/sdfb-beam/src/sdfb_beam/handlers/vllm_client.py (real impl in M1 §9)
@@ -83,12 +83,11 @@ REF: https://docs.cloud.google.com/dataflow/docs/gpu/troubleshoot-gpus
 | Flex Template parameter schema | `docker/flex_template_metadata.json` | ✅ |
 | CI build + push workflow | `.github/workflows/1_build_python_beam.yaml` | ✅ |
 | CI flex-template deploy | `.github/workflows/2_deploy_flex_template_python_beam.yaml` | ✅ |
-| 1-row Dataflow probe (image already in JFrog) | `scripts/probe_gpu_dataflow.sh` | ✅ |
-| Operational runbook | [`docs/CICD.md`](../../docs/CICD.md) | ✅ |
+| Personal-project Cloud Build + E2E runs | [`public_cloud/deploy/gcp/`](../../public_cloud/deploy/gcp/README.md) | ✅ |
 
 Per [ADR 0008](../../docs/adr/0008-ci-driven-builds.md), developers do not build images locally. The retired local-build scripts have been removed.
 
-ADRs: [`0003`](../../docs/adr/0003-jfrog-image-registry.md), [`0004`](../../docs/adr/0004-europe-west3-region.md), [`0008`](../../docs/adr/0008-ci-driven-builds.md), [`0009`](../../docs/adr/0009-single-flex-template-image.md).
+ADRs: [`0004`](../../docs/adr/0004-europe-west3-region.md), [`0008`](../../docs/adr/0008-ci-driven-builds.md), [`0009`](../../docs/adr/0009-single-flex-template-image.md), [`0015`](../../docs/adr/0015-worker-image-via-artifact-registry.md), [`0016`](../../docs/adr/0016-personal-gcp-cloud-build.md).
 
 ## References
 

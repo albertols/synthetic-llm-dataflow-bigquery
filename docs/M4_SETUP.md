@@ -66,14 +66,10 @@ uv sync --group dev
 
 One-time ~2–3 min on first install, ~600 MB on disk. Installs `sdfb-core` + `sdfb-beam[gcp]` + `sdfb-tests` + dev tools (ruff, mypy, pytest, hypothesis). Creates `.venv/` at the repo root.
 
-> **JFrog index**: `pyproject.toml` pins the default index to
-> `https://artifactory.example.com/artifactory/api/pypi/pypi-all/simple`
-> ([`tool.uv.index`](../pyproject.toml)). On the corp network, direct
-> `pypi.org` / `files.pythonhosted.org` are blocked — uv reads through
-> the JFrog mirror instead. If the mirror requires auth, export
-> `UV_INDEX_JFROG_PYPI_ALL_USERNAME` and `UV_INDEX_JFROG_PYPI_ALL_PASSWORD`
-> before running `uv sync` (the standard Artifactory user + identity
-> token from the "Set Me Up" dialog).
+Packages resolve from PyPI (`uv.lock` pins `files.pythonhosted.org`). To use
+a private mirror instead, point uv at it for your shell only — e.g.
+`export UV_DEFAULT_INDEX=https://<your-mirror>/simple` — rather than editing
+`pyproject.toml`.
 
 If you ever see `ModuleNotFoundError: No module named 'sdfb_core'` after a sync, it means the workspace members weren't installed (e.g. someone removed `sdfb-tests` from the root `dev` group). Quick fix: `uv sync --all-packages --group dev`.
 
@@ -84,7 +80,7 @@ uv sync --group dev --extra embedding --extra library   # RAG (§7) / library (�
 uv sync --package sdfb-beam --extra mlx                  # real-LLM smoke (see M4_LOCAL_SMOKE.md)
 ```
 
-**Do NOT install `--extra gpu` on the M4.** vLLM is CUDA-only and the `[gpu]` extra is marked `sys_platform == 'linux'`, so it's a no-op here by design — vLLM only ever runs inside the Dataflow container ([ADR 0010](adr/0010-m4-local-smoke-mlx.md)). On the M4 you exercise the LLM path through MLX, never vLLM. The `[gpu]` extra is resolved only when the linux GPU image is built ([ADR 0012](adr/0012-enterprise-image-build.md)).
+**Do NOT install `--extra gpu` on the M4.** vLLM is CUDA-only and the `[gpu]` extra is marked `sys_platform == 'linux'`, so it's a no-op here by design — vLLM only ever runs inside the Dataflow container ([ADR 0010](adr/0010-m4-local-smoke-mlx.md)). On the M4 you exercise the LLM path through MLX, never vLLM. The `[gpu]` extra is resolved only when the linux GPU image is built (`docker/Dockerfile`).
 
 ### 4. Sanity check — the laptop test suite must pass on the M4
 
@@ -106,21 +102,18 @@ If any test fails: paste the last ~30 lines back — that's the fastest signal s
 
 ### 5b. Per-machine env vars via `direnv` (recommended)
 
-If your machine sits behind a corporate proxy or needs a custom CA bundle, encode the env vars in a repo-local `.envrc` so every shell + IDE that enters the directory picks them up automatically. The real `.envrc` is gitignored; commit only `.envrc.example`.
+Encode per-machine env vars (GCP project, BigQuery client timeout, and — if your network needs them — the standard `HTTPS_PROXY` / `REQUESTS_CA_BUNDLE` vars) in a repo-local `.envrc` so every shell + IDE that enters the directory picks them up automatically. The real `.envrc` is gitignored; commit only `.envrc.example`.
 
 ```bash
 brew install direnv
 echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc       # or your shell rc
 source ~/.zshrc
 cp .envrc.example .envrc
-# edit .envrc — uncomment + set HTTP_PROXY / HTTPS_PROXY / NO_PROXY for
-# YOUR machine. For example.com networks the working egress proxy for
-# googleapis.com is `the-proxy:8080`, NOT the general
-# browsing proxy.
+# edit .envrc — uncomment + set the values for YOUR machine
 direnv allow
 ```
 
-To verify direnv is active: `cd` out of the repo and back in — you should see `direnv: loading .envrc`. To verify the proxy actually reaches BigQuery:
+To verify direnv is active: `cd` out of the repo and back in — you should see `direnv: loading .envrc`. To verify BigQuery is reachable from this machine:
 
 ```bash
 uv run python -c "from google.cloud import bigquery; c = bigquery.Client(project='$(gcloud config get-value project)'); print(list(c.query('SELECT 1 AS x', timeout=30).result(timeout=30)))"
@@ -158,7 +151,7 @@ The M1 build-out this section used to sequence (DDL extraction → CI image →
 vLLM handler → first E2E) shipped in v0.1.0 — current scope lives in
 [`ROADMAP.md`](ROADMAP.md), and launching/validating runs is
 [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md)'s job. From the M4 you typically:
-trigger CI workflows (`gh workflow run …`, see [`CICD.md`](CICD.md)), stage
+trigger CI workflows (`gh workflow run …`, see [`.github/workflows/`](../.github/workflows/)), stage
 model weights ([`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)), iterate on real-LLM
 behaviour without Dataflow via the MLX loop
 ([`M4_LOCAL_SMOKE.md`](M4_LOCAL_SMOKE.md)), and launch/interpret Dataflow
@@ -185,7 +178,7 @@ Exit 0 = ready to launch; 1 = KO (see the `## Actions needed` section of the rep
 When you need information on a concern, go here — don't restate it elsewhere.
 
 - **Infra to provision beforehand** — GCS buckets, BigQuery datasets/tables, IAM (per env) → [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md)
-- **CI/CD pipeline** (image build, Flex Template deploy, DAG import); L4 quota; region flags → [`CICD.md`](CICD.md)
+- **CI/CD pipeline** (image build, Flex Template deploy, DAG import) → [`.github/workflows/`](../.github/workflows/) + [`docker/Dockerfile`](../docker/Dockerfile); personal-project Cloud Build path → [`public_cloud/deploy/gcp/`](../public_cloud/deploy/gcp/README.md); L4 quota + Dataflow flags → [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md)
 - **Local smoke test on M4 with a real model** (no Dataflow) → [`M4_LOCAL_SMOKE.md`](M4_LOCAL_SMOKE.md)
 - **Model weights** — GCS layout, Kaggle download, runtime load, Apple-Silicon caveat → [`MODEL_LAYOUT.md`](MODEL_LAYOUT.md)
 - **Locked architecture decisions**, package contract, hard constraints → [`../CLAUDE.md`](../CLAUDE.md)
@@ -199,10 +192,10 @@ packages/sdfb-core/               pure-Python contracts + ABC + codegen (laptop-
 packages/sdfb-beam/               Beam pipeline + DoFns + DDL extractor + handlers + CLI
 packages/sdfb-tests/              unit + integration tests
 docker/                           Dockerfile + .dockerignore + flex_template_metadata.json
-scripts/                          extract_ddl, probe_gpu_dataflow, hello_synthetic_mlx
+scripts/                          extract_ddl, hello_synthetic_mlx, e2e/, release/, doc/
 config/                           thresholds.yml + models.yml
 composer/                         synthetic_beam_bigquery.py (Airflow DAG template)
 .github/workflows/                ci.yml + 1_build / 2_deploy / 3_import_dag
 ```
 
-When in doubt: `CLAUDE.md` + `memory/MEMORY.md` in the project memory directory carry the locked decisions from planning. Re-read them if anything ever feels ambiguous.
+When in doubt: `CLAUDE.md` + [`adr/`](adr/) carry the locked decisions from planning. Re-read them if anything ever feels ambiguous.

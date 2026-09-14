@@ -3,8 +3,8 @@
 > **Status**: decided. `sdgx` is locked. This file is the spike record; once
 > the choice is fully validated on the M4 it folds into this package's
 > `README.md` (charter AC #2 / DRY policy). No bake-off was run — the
-> decision was made on license + maintenance + spine-fit grounds (see ADR
-> 0013 and `docs/superpowers/specs/2026-05-21-synthesis-engines-design.md` §4).
+> decision was made on license + maintenance + spine-fit grounds (see
+> [ADR 0013](../../../../../../docs/adr/0013-distribution-estimator-spine.md)).
 
 ## Decision
 
@@ -13,8 +13,8 @@ the `[library]` extra (`sdgx>=0.2.0`).**
 
 | Candidate | License | Verdict |
 |---|---|---|
-| **`sdgx`** (hitsz-ids) | **Apache-2.0** | **Selected** — license-clean for corporate/production use; active; ships CTGAN + statistical models; in-memory `DataFrameConnector` fits the no-disk Beam-worker path. |
-| SDV / `GaussianCopula` | BSL-1.1 | **Deferred upgrade path.** Technically stronger (richer constraint API, more deterministic sampling) but Business Source License needs corporate sign-off before adoption. Recorded here, not adopted now. |
+| **`sdgx`** (hitsz-ids) | **Apache-2.0** | **Selected** — license-clean for production use; active; ships CTGAN + statistical models; in-memory `DataFrameConnector` fits the no-disk Beam-worker path. |
+| SDV / `GaussianCopula` | BSL-1.1 | **Deferred upgrade path.** Technically stronger (richer constraint API, more deterministic sampling) but the Business Source License needs a legal review before production adoption. Recorded here, not adopted now. |
 | DataDreamer | Apache-2.0/MIT | **Not selected** for the tabular spine — it is an LLM-orchestration framework (prompt/workflow), not a statistical tabular fitter. Its niche overlaps the free-text hook, which we already cover via the `ModelClient` Protocol; pulling a second LLM stack inside the Beam DoFn is redundant. |
 
 Rationale in one line: of the candidates, `sdgx` is the only **license-clean,
@@ -28,7 +28,7 @@ constraints.
 Per ADR 0013: prompting the LLM per row is ~9,500× slower than statistical
 sampling and collapses distributions toward linguistic-token frequency. So
 the LLM is used **O(1)** (free-text columns only); `sdgx` provides the O(N)
-statistical bulk. See the design spec §1.
+statistical bulk.
 
 ## How `sdgx` is wired (this package)
 
@@ -45,14 +45,13 @@ statistical bulk. See the design spec §1.
 - `EmpiricalBackend` (pure NumPy) is the deterministic CPU baseline + the
   laptop/offline fallback when the `[library]` extra is not installed. The
   ABC reproducibility contract pins this backend (CTGAN RNG is not
-  bit-for-bit reproducible across machines — design §2).
+  bit-for-bit reproducible across machines).
 
 ## Measurements (charter AC #2 / #3)
 
 These require the `[library]` extra (`uv sync --group dev --extra library`)
-and are an **M4 task** — the laptop in this worktree is offline (the JFrog
-PyPI index is unreachable: DNS failure on `artifactory.example.com`),
-so `sdgx` could not be installed or fitted here. To record on the M4:
+and are an **M4 task** — the laptop in this worktree had no reachable package index at the
+time, so `sdgx` could not be installed or fitted here. To record on the M4:
 
 | Metric | How to measure | Threshold |
 |---|---|---|

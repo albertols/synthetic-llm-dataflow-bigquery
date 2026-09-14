@@ -2,16 +2,16 @@
 
 ## 1. What this is
 
-A third deployment wrapper alongside the corporate Composer/JFrog path and
-the M4-local path: a **personal GCP project**, T4-only, cost-capped, used to
-run the E2E test matrix (`docs/E2E_TEST_MATRIX.md`) without corporate LZ
-access or an M4. It makes **zero edits to mainline code** — same
+A deployment wrapper alongside the Composer/GitHub Actions path and the
+M4-local path: a **personal GCP project**, T4-only, cost-capped, used to run
+the E2E test matrix (`docs/E2E_TEST_MATRIX.md`) without a shared landing zone
+or an M4. It makes **zero edits to mainline code** — same
 `docker/Dockerfile`, same Flex Template metadata, same pipeline package. Only
 the build tool differs (Cloud Build instead of GitHub CI; see
 [ADR 0016](../../../docs/adr/0016-personal-gcp-cloud-build.md)).
 
-Design spec:
-[`docs/superpowers/specs/2026-07-14-personal-gcp-e2e-design.md`](../../../docs/superpowers/specs/2026-07-14-personal-gcp-e2e-design.md).
+Design decision:
+[`docs/adr/0016-personal-gcp-cloud-build.md`](../../../docs/adr/0016-personal-gcp-cloud-build.md).
 
 Everything here supports `--dry-run` (prints the commands it would run
 instead of running them) — use it to sanity-check before spending money.
@@ -230,8 +230,3 @@ Seeded from the build of this layer; append as discovered.
   `{output_base}/{table}_ddl.json` as the naming might suggest — a
   path-convention bug caught in review of `03_storage_bq.sh`, which now
   computes `ddl_local` explicitly to match.
-- **Cloud Build's sed retarget is fail-loud by design.** The pip-index
-  retarget in `cloudbuild/build_image.yaml` greps for its own result and
-  exits nonzero if nothing matched — if `docker/Dockerfile`'s uv-bootstrap
-  line changes upstream, the personal build fails immediately instead of
-  silently reaching for the corporate JFrog mirror it can't authenticate to.

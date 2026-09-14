@@ -7,7 +7,7 @@ description: Recipe for implementing a `GenerationEngine` subclass and the `Mode
 
 Both engines must satisfy `sdfb_core.engines.base.GenerationEngine`. The ABC is the single seam between the Beam pipeline and the synthesis logic — break it and both engines must adapt. Treat it as a contract.
 
-> **Synthesis spine ([ADR 0013](../../docs/adr/0013-distribution-estimator-spine.md))**: both engines are **LLM-as-distribution-estimator**, not per-row LLM generators. The LLM (B.1) or fitted library (B.2) models the distribution **once** in `setup()`; `generate_batch(n)` samples the bulk **vectorized** (NumPy baseline; cuDF optional). Guided-JSON LLM is used only for free-text columns. Per-row LLM generation does **not** scale to 1M+ rows and degrades fidelity. Full design + cost math + infra checklist: [`docs/superpowers/specs/2026-05-21-synthesis-engines-design.md`](../../docs/superpowers/specs/2026-05-21-synthesis-engines-design.md).
+> **Synthesis spine ([ADR 0013](../../docs/adr/0013-distribution-estimator-spine.md))**: both engines are **LLM-as-distribution-estimator**, not per-row LLM generators. The LLM (B.1) or fitted library (B.2) models the distribution **once** in `setup()`; `generate_batch(n)` samples the bulk **vectorized** (NumPy baseline; cuDF optional). Guided-JSON LLM is used only for free-text columns. Per-row LLM generation does **not** scale to 1M+ rows and degrades fidelity. Decision and cost rationale: [ADR 0013](../../docs/adr/0013-distribution-estimator-spine.md).
 
 ## Required surface
 

@@ -24,5 +24,4 @@ When duplication is unavoidable (a value must appear in both a Dockerfile and a 
 
 ## Related
 
-- Memory: `feedback_dry_documentation.md`.
-- Live example: `docs/M4_SETUP.md` Step B/C/D defer to `docs/GPU_CONTAINER.md` and `docs/MODEL_LAYOUT.md` instead of restating.
+- Live example: `docs/M4_SETUP.md` defers to `docs/MODEL_LAYOUT.md` and the ADRs instead of restating.

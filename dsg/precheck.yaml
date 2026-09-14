@@ -1,0 +1,39 @@
+# Sensitive-content gate (scripts/dsg/precheck.py). Runs on every PR and on
+# any exported tree before it is published elsewhere.
+
+# Paths that must never be committed, whatever they contain.
+forbidden_globs:
+  - "**/evidence/**"
+  - "runs/**"
+  - "integration_test*/**"
+  - "**/*.jsonl"
+  - "**/*.csv"
+  - "**/*.parquet"
+  - "**/*.avro"
+  - "**/.envrc"
+  - "**/*service-account*.json"
+  - "**/*.pem"
+  - "**/*.p12"
+  - "**/application_default_credentials.json"
+  - ".claude/settings.local.json"
+  - "docs/superpowers/**"
+  - "output/**"
+  - "models/**"
+
+# E-mail domains that are placeholders, not people.
+email_allow_domains:
+  - example.com
+  - example.org
+  - example.net
+  - x.com
+  - anthropic.com
+  - users.noreply.github.com
+  - corp-proj.iam.gserviceaccount.com
+
+# Salted SHA-256 of identifiers that are known to be sensitive (real table
+# and column names, real values, employer infrastructure). Add a line with:
+#   uv run python scripts/dsg/precheck.py --hash TOKEN
+token_hash_file: sensitive_token_hashes.txt
+
+# Reviewed false positives: {path glob, rule, optional line}.
+allow_findings: []

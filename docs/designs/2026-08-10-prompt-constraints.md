@@ -202,9 +202,9 @@ fictitious — never paste real rows into a description):
   "format": "fixed-width reference: 5 letters, 1 digit, exactly three spaces, then a 2-letter code and 20 digits and a final letter",
   "pattern": "^[A-Z]{5}[0-9] {3}[A-Z]{2}[0-9]{20}[A-Z]$"}}
 
-// 3. Segmented account code, positional semantics (image-archetype: CCC PP MM V PROD)
+// 3. Segmented code, positional semantics (archetype: CCC SS KK V SKUX)
 {"llm_prompt_constraint": {
-  "format": "3-digit account type + 2-digit contract counter + 2-digit modality + 1-digit closed counter + 4-char product code",
+  "format": "3-digit category + 2-digit size + 2-digit colour + 1-digit variant + 4-char SKU suffix",
   "pattern": "^[0-9]{8}[A-Z0-9]{4}$",
   "examples": ["00900000DEMO"]}}
 
@@ -216,8 +216,8 @@ fictitious — never paste real rows into a description):
 
 // 5. Closed enumeration with business meanings
 {"llm_prompt_constraint": {
-  "values": ["I", "O"],
-  "notes": "I=input account, O=output account"}}
+  "values": ["W", "S"],
+  "notes": "W=web order, S=in-store order"}}
 
 // 6. Amount in minor units (integer cents)
 {"llm_prompt_constraint": {
@@ -226,9 +226,9 @@ fictitious — never paste real rows into a description):
 
 // 7. Prose narrative, language-pinned
 {"llm_prompt_constraint": {
-  "format": "short payment concept phrase, uppercase",
+  "format": "short gift message phrase, uppercase",
   "locale": "es-ES",
-  "examples": ["PAGO CHEQUE 1234567"]}}
+  "examples": ["FELIZ CUMPLEAÑOS ANA"]}}
 ```
 
 ### 3a. Rendered prompt anatomy (per mode of `--prompt_constraints`)

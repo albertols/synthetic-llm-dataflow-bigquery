@@ -10,8 +10,9 @@
 > and reused here, never redrawn.
 
 - **Scope**: Phase A (this doc) is implemented. Phase B/C are deferred — see
-  §6 and `docs/superpowers/specs/2026-07-20-e2e-remediation-rag-eval-evolution-design.md` §4.
-- **Author context**: ACTION_4 from the M1→M2 planning pass (see project memory).
+  §6 and the retrieval roadmap in
+  [`2026-07-25-rag-retrieval-geometry-roadmap.md`](2026-07-25-rag-retrieval-geometry-roadmap.md).
+- **Author context**: ACTION_4 from the M1→M2 planning pass.
 
 ## 1. Goal & motivation
 

@@ -55,7 +55,7 @@ narrative into this 12-char legacy field). The synthetic re-emits it at
 ![numeric scrub](assets/wave4-numeric-scrub.png)
 
 *Claim (left, evidence): only COL_009 crosses the memorization CRITICAL
-threshold — 34,622 source-distinct account numbers, over half of 1M rows
+threshold — 34,622 source-distinct numeric identifiers, over half of 1M rows
 colliding with a RARE real value. Claim (right, concept): dense-band
 inverse-CDF interpolation lands ~42% of draws on rare real integers;
 redraw + nudge clears them to 0 while the multi-knot enum knot keeps its
