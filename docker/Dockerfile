@@ -20,26 +20,22 @@
 #   https://docs.vllm.ai/en/latest/getting_started/installation.html
 #
 # ADR-0009 (single image, two entrypoint paths), ADR-0008 (CI-driven build),
-# ADR-0012 (enterprise network constraints) carry the locked decisions.
+# ADR-0015 (Artifact Registry) carry the locked decisions.
 #
-# Architecture strategy:
-#   The JFrog CUDA images (com/example/cuda/*) are arm64-only → unusable for
-#   amd64 Dataflow workers. Instead we use the Beam SDK image (proven amd64)
-#   as the base. vLLM/torch wheels bundle their own CUDA runtime libs
-#   (libcudart, libnccl, etc.); the NVIDIA *driver* is provided at runtime
-#   by Dataflow's `install-nvidia-driver` experiment (mounted at
-#   /usr/local/nvidia/). No system CUDA install needed in the image.
-#
-# Base images:
-#   Beam SDK: docker-local/docker-remote/apache/beam_python3.11_sdk:2.74.0
+# Base images (both public; override with --build-arg to use a mirror):
+#   Beam SDK: apache/beam_python3.11_sdk:2.74.0 (Docker Hub)
 #     → amd64, Debian-based, Python 3.11, /opt/apache/beam/boot included
-#     → apache-beam pinned ==2.74.0 to match (see ADR 0012)
+#     → apache-beam pinned ==2.74.0 in packages/sdfb-beam to match (Runner v2
+#       needs the boot binary and the wheel at the same version)
 #   Launcher: gcr.io/dataflow-templates-base/python311-template-launcher-base
 #     → only /opt/google/dataflow/python_template_launcher is copied from it
+#
+# No system CUDA install: vLLM/torch wheels bundle their own CUDA runtime libs
+# (libcudart, libnccl, etc.); the NVIDIA *driver* is provided at runtime by
+# Dataflow's `install-nvidia-driver` experiment (mounted at /usr/local/nvidia/).
 # ---------------------------------------------------------------------------
 
-ARG ARTIFACTORY_HOSTNAME_ARG="artifactory.example.com"
-ARG BEAM_SDK_IMAGE="${ARTIFACTORY_HOSTNAME_ARG}/docker-local/docker-remote/apache/beam_python3.11_sdk:2.74.0"
+ARG BEAM_SDK_IMAGE="apache/beam_python3.11_sdk:2.74.0"
 ARG LAUNCHER_IMAGE="gcr.io/dataflow-templates-base/python311-template-launcher-base"
 
 # ---------------------------------------------------------------------------
@@ -52,10 +48,6 @@ FROM ${LAUNCHER_IMAGE} AS flex_launcher
 # ---------------------------------------------------------------------------
 FROM ${BEAM_SDK_IMAGE}
 
-ARG ENV_NAME_ARG="unset"
-ARG ARTIFACTORY_HOSTNAME_ARG="unset"
-ARG ARTIFACTORY_RELEASER_USERNAME_ARG="unset"
-ARG ARTIFACTORY_RELEASER_PWD_ARG="unset"
 # Git commit this image was built from — stamped into every launcher and
 # worker log as the `build_info` milestone (2026-08-21 four-run cycle:
 # same-day runs were indistinguishable by build from the logs alone).
@@ -68,20 +60,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_NO_CACHE=1 \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    BEAM_PYTHON_SDK_OPTIONS="--experiments=use_runner_v2" \
-    ENV=$ENV_NAME_ARG \
-    ARTIFACTORY_HOSTNAME=$ARTIFACTORY_HOSTNAME_ARG \
-    ARTIFACTORY_RELEASER_USERNAME=$ARTIFACTORY_RELEASER_USERNAME_ARG \
-    ARTIFACTORY_RELEASER_PASSWORD=$ARTIFACTORY_RELEASER_PWD_ARG
+    BEAM_PYTHON_SDK_OPTIONS="--experiments=use_runner_v2"
 
 # Overlay Flex Template launcher from GCR image.
 # /opt/apache/beam is already in the Beam SDK base — no need to copy it.
 COPY --from=flex_launcher /opt/google/dataflow/python_template_launcher /opt/google/dataflow/python_template_launcher
 
-# Bootstrap uv from the JFrog pypi mirror.
-RUN pip install --no-cache-dir \
-        --index-url "https://${ARTIFACTORY_HOSTNAME_ARG}/artifactory/api/pypi/pypi-all/simple" \
-        uv
+# Bootstrap uv from PyPI (pinned; uv.lock resolves against pypi.org).
+RUN pip install --no-cache-dir uv==0.11.15
 
 WORKDIR /workspace
 

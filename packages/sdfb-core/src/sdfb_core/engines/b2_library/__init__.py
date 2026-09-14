@@ -4,8 +4,7 @@ Importing this package registers ``B2LibraryEngine`` under the name
 ``"b2_library"`` in the engine registry, so the Beam DAG can resolve it from
 a CLI flag via ``sdfb_core.engines.get_engine("b2_library")``.
 
-Design: ``docs/superpowers/specs/2026-05-21-synthesis-engines-design.md`` §4
-and ADR 0013 (the LLM-as-distribution-estimator spine). The chosen library
+Design: ADR 0013 (the LLM-as-distribution-estimator spine). The chosen library
 is ``sdgx`` (Apache-2.0); rationale + the deferred SDV upgrade path are in
 this package's ``README.md`` (formerly ``SPIKE_LIBRARY_CHOICE.md``).
 """

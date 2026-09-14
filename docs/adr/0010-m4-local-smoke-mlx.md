@@ -26,7 +26,7 @@ The M4 local smoke loop uses **`MLXModelClient`** (`packages/sdfb-beam/src/sdfb_
 
 - **Enables**: ~30-second iteration loop on M4 with real LLM output, validates the engine + Pydantic + Pandera chain against actual model behavior (not just `FakeModelClient`'s deterministic stubs).
 - **Costs**: model output quality on M4 (E4B 4.5B) is lower than the production target (26B-A4B MoE) — schema conformance will be worse, throughput lower, fidelity weaker. Smoke results are directional, not authoritative.
-- **Forbids**: claiming production parity from M4 smoke results. The GPU image and vLLM behavior can only be validated by a Dataflow probe (workflow 1 build + `scripts/probe_gpu_dataflow.sh`).
+- **Forbids**: claiming production parity from M4 smoke results. The GPU image and vLLM behavior can only be validated on Dataflow (a CI-built image + a real GPU run, e.g. a `public_cloud/deploy/gcp/run_e2e.sh` tier).
 
 ## Related
 

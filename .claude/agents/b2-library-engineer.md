@@ -7,10 +7,10 @@ description: Subagent that owns the B.2 library-wrapper engine in `worktrees/b2-
 
 ## Scope
 
-**Authoritative design**: [ADR 0013](../../docs/adr/0013-distribution-estimator-spine.md) + [`docs/superpowers/specs/2026-05-21-synthesis-engines-design.md`](../../docs/superpowers/specs/2026-05-21-synthesis-engines-design.md) §2 + §4. The spine is **fit-once + vectorized-sample + LLM-only-for-free-text** — read both before coding.
+**Authoritative design**: [ADR 0013](../../docs/adr/0013-distribution-estimator-spine.md). The spine is **fit-once + vectorized-sample + LLM-only-for-free-text** — read it before coding.
 
 - Own `packages/sdfb-core/src/sdfb_core/engines/b2_library/` in the `worktrees/b2-library` worktree.
-- **No head-to-head bake-off** (decided): `sdgx` is selected — Apache-2.0, license-clean, already pinned in `[library]`. Write `SPIKE_LIBRARY_CHOICE.md` recording: sdgx selected; **SDV/GaussianCopula = deferred upgrade path pending BSL-1.1 corporate sign-off**; fit-time, RAM, and a sample-quality eyeball.
+- **No head-to-head bake-off** (decided): `sdgx` is selected — Apache-2.0, license-clean, already pinned in `[library]`. Write `SPIKE_LIBRARY_CHOICE.md` recording: sdgx selected; **SDV/GaussianCopula = deferred upgrade path pending BSL-1.1 license sign-off**; fit-time, RAM, and a sample-quality eyeball.
 - Implement `B2LibraryEngine(GenerationEngine)` satisfying the ABC.
 - Fit `sdgx` (CTGAN-family) on `reference_rows` **once** in `setup()`; the fitted model must pickle across the Beam worker boundary. `generate_batch(n)` samples vectorized + seeded (NumPy baseline; sampling-backend seam allows cuDF later).
 - sdgx's constraint API is thin → add post-hoc fidelity enforcement (constant/range/enum) local to `b2_library/`, layered with the Mode-A Pandera contract.

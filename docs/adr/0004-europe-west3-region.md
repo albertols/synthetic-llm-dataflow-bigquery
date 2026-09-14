@@ -4,11 +4,11 @@
 
 ## Context
 
-L4 GPUs and `g2-standard-*` machine types are not available in every region. The user's BigQuery data sits in EU; the corporate networking egress proxy (`the-proxy:8080`) is tuned for EU egress to googleapis.com. Frankfurt is the closest GCP region with broad L4 availability and matches example.com's data-residency posture.
+L4 GPUs and `g2-standard-*` machine types are not available in every region. The reference BigQuery data sits in the EU, so keeping workers in an EU region keeps reads and egress to googleapis.com in-region. Frankfurt is the closest GCP region with broad L4 availability and matches an EU data-residency posture.
 
 ## Decision
 
-M1 Dataflow jobs run in **`europe-west3`** with worker zone **`europe-west3-b`** by default. Both encoded in `.envrc` as `GCP_REGION` / `GCP_ZONE`; consumed by `scripts/probe_gpu_dataflow.sh` and (eventually) by the production pipeline launcher.
+M1 Dataflow jobs run in **`europe-west3`** with worker zone **`europe-west3-b`** by default. Both encoded in `.envrc` as `GCP_REGION` / `GCP_ZONE`; consumed by the launch tooling (the Composer DAG and the `public_cloud/deploy/gcp/` run driver).
 
 ## Consequences
 
@@ -18,5 +18,5 @@ M1 Dataflow jobs run in **`europe-west3`** with worker zone **`europe-west3-b`**
 
 ## Related
 
-- `docs/GPU_CONTAINER.md` — "Locked decisions" section.
+- [ADR 0015](0015-worker-image-via-artifact-registry.md) — worker image in a same-region Artifact Registry repo.
 - L4 quota check: `gcloud compute project-info describe --flatten='quotas[]' | grep NVIDIA_L4_GPUS`.

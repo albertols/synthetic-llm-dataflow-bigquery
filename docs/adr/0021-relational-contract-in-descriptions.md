@@ -2,11 +2,11 @@
 
 **Status:** SUPERSEDED (2026-08-24) by [ADR 0032](0032-relationships-as-config.md) — relationships moved to `config/relationships/*.yaml`; the `{"sdfb": 1, …}` table-description contract is no longer read by anything. Kept for the rationale: why the contract ever lived in descriptions (BQ constraints are unenforced, the Terraform module exposes no PK block).
 **Was:** ACCEPTED (2026-08-05)
-**Design:** `docs/superpowers/specs/2026-08-05-relational-metadata-stats-freetext-fidelity-design.md` (local) · plan `docs/superpowers/plans/2026-08-05-relational-stats-freetext-fidelity.md`
+**Design:** the original planning spec is not published; the superseding design is [`docs/designs/2026-08-24-relationships-as-config.md`](../designs/2026-08-24-relationships-as-config.md)
 
 ## Context
 
-The enterprise BigQuery Terraform module cannot declare real PK/FK
+The BigQuery Terraform module in use could not declare real PK/FK
 constraints, and multi-table synthetic generation (ROADMAP M2) needs exactly
 that metadata: which columns key a table, which reference which parents.
 The table `description` is the one metadata channel Terraform owns end to

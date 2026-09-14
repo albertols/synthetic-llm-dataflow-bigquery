@@ -12,7 +12,7 @@ root. Current scopes:
 
 Future scopes (`ddl/`, `gcp/`, `automation/`, `config/`, …) are created on
 first need. Root-level scripts (`extract_ddl.py`, `deployment_prerequisites.py`,
-`derive_landing_schema.py`, `probe_gpu_dataflow.sh`, `hello_synthetic_mlx.py`,
+`derive_landing_schema.py`, `hello_synthetic_mlx.py`,
 `run_tableset.py`) are grandfathered and move to a scope when next touched.
 
 Docs, prompts, agents and skills reference scripts by their scoped path.

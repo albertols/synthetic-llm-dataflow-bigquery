@@ -6,8 +6,8 @@ tests), index them with FAISS `IndexFlatIP`, profile columns, infer
 per-column distributions once via the `ModelClient`, then vectorized-sample
 the bulk and patch free-text from a bounded LLM pool.
 
-Design: `docs/superpowers/specs/2026-05-21-synthesis-engines-design.md` §3;
-ADR 0013 (distribution-estimator spine).
+Design: ADR 0013 (distribution-estimator spine) and
+`docs/designs/2026-07-07-rag-layer-design.md` (the retrieval layer).
 
 Importing this subpackage registers the engine under "b1_rag" so the Beam
 DAG can resolve it by string name (see `sdfb_core.engines.get_engine`).

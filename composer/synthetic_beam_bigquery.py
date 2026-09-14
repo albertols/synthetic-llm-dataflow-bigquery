@@ -1,16 +1,17 @@
 """Airflow DAG — submit the synthetic-dataflow-bigquery Flex Template.
 
-This file is the *template*. Workflow `3_db_import_dag.yaml` runs `sed` over
-it at deploy time to substitute build-time values. Runtime values
-(table_fqn, num_rows, run_id) come from Airflow DAG params and Composer
-Variables — operators don't need to re-import the DAG to change them.
+Runs in an Airflow/Cloud Composer environment. This file is the *template*:
+workflow `3_import_dag.yaml` runs `sed` over it at deploy time to substitute
+build-time values. Runtime values (table_fqn, num_rows, run_id) come from
+Airflow DAG params and Airflow Variables — operators don't need to re-import
+the DAG to change them.
 
 Substitution markers (workflow 3 seds these at import time):
   {{PROJECT_VERSION}}         project version of the sdfb-beam package being deployed
   {{DAG_VERSION}}             {{PROJECT_VERSION}}_<ISO timestamp> (unique DAG id)
   {{ENV}}                     dev | uat | prd
-  {{GCS_DATAFLOW_STAGING}}    corp-<env>-…-dataflow-staging bucket name
-  {{GCS_DATAFLOW_TEMPLATES}}  corp-<env>-…-dataflow-templates bucket name
+  {{GCS_DATAFLOW_STAGING}}    <env>-…-dataflow-staging bucket name
+  {{GCS_DATAFLOW_TEMPLATES}}  <env>-…-dataflow-templates bucket name
   {{GPU}}                     default of the `gpu` DAG param (l4 | t4; still runtime-overridable)
   {{SDFB_MODEL_URI}}          gs://<bucket>/synthetic/models/gemma4/…
   {{SDFB_EMBEDDER_URI}}       gs://<bucket>/synthetic/models/embedders/… (B.1; empty ⇒ HashingEmbedder)
@@ -25,9 +26,10 @@ Substitution markers (workflow 3 seds these at import time):
   {{SDFB_VALIDATION_RUNS_TABLE}} project.synthetic_data_quality.validation_runs
 
 Runtime values: Airflow DAG params ({{ params.* }}: table_fqn, num_rows,
-engine, batch_size, similarity, client_type) + Composer Variables for infra
-(PROJECT_ID, REGION, DATAFLOW_SUBNET, SA_DATAFLOW) — changeable without
-re-importing. client_type=fake selects a CPU smoke (no L4) — see below.
+engine, batch_size, similarity, client_type) + Airflow Variables for infra
+(PROJECT_ID, REGION, DATAFLOW_SUBNET, SA_DATAFLOW, and the optional
+DATAFLOW_NETWORK_TAGS) — changeable without re-importing. client_type=fake
+selects a CPU smoke (no L4) — see below.
 
 """
 
@@ -82,6 +84,9 @@ project_id = Variable.get("PROJECT_ID")
 region = Variable.get("REGION")
 subnetwork = Variable.get("DATAFLOW_SUBNET")
 service_account = Variable.get("SA_DATAFLOW")
+# Optional: semicolon-separated VPC network tags for the launcher VM and the
+# workers (firewall/egress rules keyed on tags). Empty ⇒ no tag experiments.
+network_tags = Variable.get("DATAFLOW_NETWORK_TAGS", default_var="").strip()
 
 # -----------------------------------------------------------------------------
 # Build-time substituted constants (replaced by sed in workflow 3).
@@ -120,14 +125,13 @@ job_name = f"{_base_job_name}-{_slug}"[:63].rstrip("-") if _slug else _base_job_
 flex_template = f"sdfb-{project_version}-template.json"
 dag_id = f"{app_domain}_{app_name}_{dag_version}"
 
-devnetproxy_tag = "dev-env-{{ENV}}-project-code-3-proxy"
-netseg_network_tag = "dev-env-{{ENV}}-project-code-3-net"
-artifactory_network_tag = "dev-env-{{ENV}}-project-code-2-artifactory"
-gke_network_tag = "int-{{ENV}}-project-code-x-gke"
-dataflow_network_tag = "int-{{ENV}}-project-code-x-dataflow"
-network_tags_chain = (
-    f"{dataflow_network_tag};{netseg_network_tag};{artifactory_network_tag};"
-    f"{gke_network_tag};{devnetproxy_tag}"
+network_tag_experiments = (
+    [
+        f"use_network_tags={network_tags}",
+        f"use_network_tags_for_flex_templates={network_tags}",
+    ]
+    if network_tags
+    else []
 )
 # -----------------------------------------------------------------------------
 # DAG params — runtime-overridable on every trigger.
@@ -448,14 +452,8 @@ with models.DAG(
                         # path run on abundant CPU capacity when L4s are stocked
                         # out.
                         "{{ ('worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver' if params.gpu == 'l4' else 'worker_accelerator=type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx') if params.client_type == 'vllm' else 'upload_graph' }}",
-                        # Capacity guarantee against the europe-west3 g2/L4
-                        # STOCKOUT: consume a matching L4 reservation if one
-                        # exists. ANY-reservation affinity → on-demand fallback
-                        # when none matches, so this is INERT until the platform
-                        # team creates the reservation (and an allowlist is
-                        # granted for GPU-targeted Dataflow reservations). Rides
-                        # additionalExperiments — the same proven channel as
-                        # worker_accelerator above. CPU smoke path: harmless dup.
+                        # Consumes a matching GPU reservation when one exists
+                        # (on-demand otherwise). CPU smoke path: harmless dup.
                         "{{ 'automatically_use_created_reservation' if params.client_type == 'vllm' else 'upload_graph' }}",
                         # ONE SDK process per GPU worker (RUN_PLAYBOOK §3).
                         # Runner v2's default spawns one sibling SDK process
@@ -475,8 +473,7 @@ with models.DAG(
                         # (port 8001) keeps one server per worker while
                         # every vCPU gets its own Python interpreter.
                         "{{ 'no_use_multiple_sdk_containers' if (params.client_type == 'vllm' and params.sdk_containers == 'single') else 'upload_graph' }}",
-                        f"use_network_tags={network_tags_chain}",
-                        f"use_network_tags_for_flex_templates={network_tags_chain}",
+                        *network_tag_experiments,
                     ],
                     "additionalUserLabels": {
                         "app": app_name,

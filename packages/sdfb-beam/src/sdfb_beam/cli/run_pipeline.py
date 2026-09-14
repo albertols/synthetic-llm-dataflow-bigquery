@@ -14,7 +14,7 @@ Runtime modes:
 
 REFs:
   - .claude/skills/beam-dofn.md
-  - docs/CICD.md
+  - docs/DEPLOYMENT_PREREQUISITES.md
   - docs/MODEL_LAYOUT.md
 """
 
@@ -1774,7 +1774,7 @@ def configure_pipeline_options(
     + Composer DAG never have to carry it. Without this, workers boot the stock
     Beam SDK container (no ``sdfb_core``/``sdfb_beam``) and DoFn unpickling dies
     with ``ModuleNotFoundError: No module named 'sdfb_core'``. An explicit
-    ``--sdk_container_image`` (e.g. ``scripts/probe_gpu_dataflow.sh``) wins.
+    ``--sdk_container_image`` on the launch wins.
 
     ``num_workers`` (ADR 0034) pins the INITIAL worker count the same way:
     a scale run starts at its ceiling instead of waiting on the

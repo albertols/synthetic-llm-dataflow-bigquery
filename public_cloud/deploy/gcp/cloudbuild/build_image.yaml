@@ -1,17 +1,8 @@
 # Personal-path image build (ADR 0016 carve-out from ADR 0008).
-# Reuses mainline docker/Dockerfile UNMODIFIED: the only corporate dependency
-# (pip-install-uv from the JFrog mirror, Dockerfile lines 77-79) is retargeted
-# to pypi.org by sed in this ephemeral workspace — never in the repo. uv.lock
-# is pinned to files.pythonhosted.org, so `uv sync --frozen` needs no changes.
+# Reuses mainline docker/Dockerfile UNMODIFIED: it builds from public base
+# images and bootstraps uv from PyPI, and uv.lock is pinned to
+# files.pythonhosted.org, so `uv sync --frozen` needs no changes here.
 steps:
-  - id: retarget-pip-index
-    name: bash
-    script: |
-      set -euo pipefail
-      sed -i 's|--index-url "https://.*artifactory/api/pypi/pypi-all/simple"|--index-url "https://pypi.org/simple"|' docker/Dockerfile
-      grep -q 'pypi.org/simple' docker/Dockerfile || {
-        echo "FATAL: pip-index retarget matched nothing — the Dockerfile uv-bootstrap line changed upstream; update this sed."; exit 1; }
-
   - id: build
     name: gcr.io/cloud-builders/docker
     args:
@@ -19,8 +10,6 @@ steps:
       - --platform=linux/amd64
       - -f=docker/Dockerfile
       - -t=${_IMAGE_URI}
-      - --build-arg=ENV_NAME_ARG=dev
-      - --build-arg=BEAM_SDK_IMAGE=docker.io/apache/beam_python3.11_sdk:2.74.0
       - --build-arg=SDFB_SDK_CONTAINER_IMAGE_ARG=${_IMAGE_URI}
       - --build-arg=GIT_COMMIT_ARG=${_GIT_COMMIT}
       - .

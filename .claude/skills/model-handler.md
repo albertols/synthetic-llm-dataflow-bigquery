@@ -74,7 +74,7 @@ REF: https://ai.google.dev/gemma/docs/core
 
 ## Model load — from GCS, not HF Hub
 
-Worker `setup()` does the GCS warm-pull via the **`google-cloud-storage` Python client** (not `gsutil` — see [ADR 0012](../../docs/adr/0012-enterprise-image-build.md): the CLI drags in a `packages.cloud.google.com` apt dependency the enterprise build can't reach), then constructs Beam's handler pointing at the local path:
+Worker `setup()` does the GCS warm-pull via the **`google-cloud-storage` Python client** (not `gsutil` — the CLI would drag a `packages.cloud.google.com` apt dependency into the image; the client is already a transitive dep of `apache-beam[gcp]`), then constructs Beam's handler pointing at the local path:
 
 ```python
 def setup(self):

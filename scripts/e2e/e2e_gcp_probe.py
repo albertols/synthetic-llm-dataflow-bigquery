@@ -837,7 +837,7 @@ def _worker_log_milestones(
     """Cloud Logging: first timestamp per milestone regex + derived durations.
 
     Filters on the Dataflow worker logName (the ``resource.type`` filter alone
-    returns nothing in this org's log routing) and constrains to the job's time
+    returns nothing under some projects' log routing) and constrains to the job's time
     window — without a timestamp bound, Cloud Logging returns empty first pages
     with a continuation token, so we also page past empties."""
     lo = _shift(timing.get("create_time"), -120)

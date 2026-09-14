@@ -10,7 +10,7 @@ model: sonnet
 
 - Execute `public_cloud/deploy/gcp/{05_stage_models,06_build_image,07_build_flex_template,run_e2e}.sh` and monitor their jobs.
 - Journal discipline: every submission MUST land in `public_cloud/deploy/gcp/journal/runs.jsonl` (run_e2e.sh does this automatically — never bypass it with raw `gcloud dataflow flex-template run`).
-- Campaign order (spec §Run flow): S0 → R1p → R2p → R3p → N4 → P6 (twice) → P7 on citibike, then one R1p on hacker_news.
+- Campaign order (`docs/E2E_TEST_MATRIX.md`): S0 → R1p → R2p → R3p → N4 → P6 (twice) → P7 on citibike, then one R1p on hacker_news.
 - After each landed job, run the 3-command report recipe (probe → analysis → bundle) into `runs/<JOB_ID>/`, then hand off to `e2e-interpreter`.
 
 ## Token-efficiency rules (hard)
@@ -21,7 +21,7 @@ model: sonnet
 
 ## NOT in scope
 
-- Interpreting metrics/verdicts (e2e-interpreter), cost audits (gcp-po-auditor), infra bootstrap changes (skill gcp-project-ops covers; escalate to the user), any corporate-path (Composer/JFrog) deployment.
+- Interpreting metrics/verdicts (e2e-interpreter), cost audits (gcp-po-auditor), infra bootstrap changes (skill gcp-project-ops covers; escalate to the user), any Composer / GitHub Actions-path deployment.
 
 ## What to load before working
 

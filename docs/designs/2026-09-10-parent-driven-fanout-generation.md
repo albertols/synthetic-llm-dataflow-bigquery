@@ -22,10 +22,10 @@ co-partitioned join would buy exactly that — coverage, not a key.*
 Two facts the runs made explicit:
 
 1. **A child's row count is not a free parameter.** C_TABLE's rows are
-   B_TABLE's accounts times the movements each account has. Asking for
+   B_TABLE's keys times the children each key has. Asking for
    10M of both is asking for a ratio the source does not have.
 2. **A PK that contains an FK is a per-parent key.** `(D_COL_001,
-   C_COL_002, D_COL_018)` is unique *inside* each account. The draw must
+   C_COL_002, D_COL_018)` is unique *inside* each parent key. The draw must
    be structured per parent key, not across the table.
 
 ## 2. The mechanism
@@ -73,7 +73,7 @@ Two additions, no new concepts.
 `cols: [D_COL_001, D_COL_024, D_COL_025, C_COL_009] → B_TABLE (same)`.
 The tuple already travels jointly (ADR 0031); the parent's PK inside it
 determines the rest, so grouping by the wide tuple equals grouping by
-the account. The engine copies inherited columns from the key tuple and
+the parent key. The engine copies inherited columns from the key tuple and
 keeps them out of the per-column samplers, exactly as FK columns are
 kept out today.
 
@@ -169,7 +169,7 @@ pass as today. The random-draw check stays for root tables.
 - **Input is the parent's valid rows**, after its uniqueness barrier,
   projected to the driving tuple plus inherited columns. A Distinct runs
   only when the tuple does not contain the parent's PK (A_TABLE driven
-  by C_TABLE's account tuple): a shuffle of three narrow columns.
+  by C_TABLE's parent-key tuple): a shuffle of three narrow columns.
 - **Reshuffle, then batch keys.** The Reshuffle breaks fusion with the
   parent's write path so child generation spreads across the fleet.
   Keys per batch = batch size / mean fan-out, so a batch carries about
@@ -261,7 +261,7 @@ pass as today. The random-draw check stays for root tables.
 ## 9. Rollout
 
 1. ADR 0036 + this doc; `make_fanout_figures.py` regenerates the figure.
-2. Corp model edit on the M4: widen C_TABLE's edge, mark A_TABLE's
+2. Real-model edit on the M4: widen C_TABLE's edge, mark A_TABLE's
    C_TABLE edge `drives: true`. Preflight prints the derived counts.
 3. The three-table launch above.
 4. ADR 0035's random-draw check and sized sample remain for root tables

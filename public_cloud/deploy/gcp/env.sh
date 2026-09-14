@@ -3,12 +3,12 @@
 # THE manifest for the personal GCP E2E project. Every resource name derives
 # from here — edit PROJECT_SUFFIX + BILLING_ACCOUNT_ID (or export them),
 # everything else is convention. Keep names Terraform-friendly (future port).
-# Spec: docs/superpowers/specs/2026-07-14-personal-gcp-e2e-design.md
+# Decision: docs/adr/0016-personal-gcp-cloud-build.md
 # ---------------------------------------------------------------------------
 _GCP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- user-provided (export or edit) ---------------------------------------
-PROJECT_SUFFIX="${PROJECT_SUFFIX:-}"           # e.g. "serna-01"
+PROJECT_SUFFIX="${PROJECT_SUFFIX:-}"           # e.g. "myname-01"
 BILLING_ACCOUNT_ID="${BILLING_ACCOUNT_ID:-}"   # gcloud billing accounts list
 BUDGET_AMOUNT="${BUDGET_AMOUNT:-25}"           # per month, billing-account currency
 

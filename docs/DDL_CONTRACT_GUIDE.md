@@ -21,8 +21,8 @@ below is copy-paste-ready and matches the parsers in
 
 BigQuery's PK/FK "constraints" are **metadata only — never enforced**
 ([BigQuery table constraints](https://cloud.google.com/bigquery/docs/primary-foreign-keys)),
-and the enterprise Terraform module for `google_bigquery_table` does **not
-expose** a primary-key block at all
+and a Terraform module that wraps `google_bigquery_table` often does **not
+expose** its `table_constraints` block at all
 ([registry: `google_bigquery_table`](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/bigquery_table)).
 So BigQuery cannot hold the relationships the generator must honor.
 
@@ -100,13 +100,13 @@ identically:
    {"llm_prompt_constraint": {"format": "24-char uppercase hex"}}
 
 2) Prose before:
-   Card token, PAN-derived. {"llm_prompt_constraint": {"format": "24-char uppercase hex"}}
+   Order reference, hex-prefixed. {"llm_prompt_constraint": {"format": "24-char uppercase hex"}}
 
 3) Prose after:
    {"llm_prompt_constraint": {"format": "24-char uppercase hex"}} Populated by the auth service.
 
 4) Prose both sides:
-   Card token, PAN-derived. {"llm_prompt_constraint": {"prefix": "C2E"}} Owned by team-core-banking.
+   Order reference, hex-prefixed. {"llm_prompt_constraint": {"prefix": "ABC"}} Owned by team-demo-shop.
 ```
 
 Two hard rules, both loud by design:
@@ -126,17 +126,17 @@ nowhere else ([ADR 0032](adr/0032-relationships-as-config.md); full schema
 and rules in [`config/relationships/README.md`](../config/relationships/README.md)):
 
 ```yaml
-model: core_banking
+model: demo_shop
 tables:
   a_table:
-    pk: [ACCOUNT_ID]
-    identity: [CARD_TOKEN]
+    pk: [ORDER_ID]
+    identity: [ORDER_REF]
   b_table:
-    pk: [MOVEMENT_ID]
+    pk: [LINE_ID]
     fk:
-      - cols:     [ACCOUNT_ID]
+      - cols:     [ORDER_ID]
         ref:      a_table           # bare name = same model
-        ref_cols: [ACCOUNT_ID]      # need NOT be the parent's full PK
+        ref_cols: [ORDER_ID]        # need NOT be the parent's full PK
 ```
 
 Two flags govern what a launch does with it — `enabled: false` on a table
@@ -164,13 +164,13 @@ prefix-cache-safe. All keys optional; combine freely.
 | `pattern` | anchored regex ≤ 200, must compile | **guarantee** the shape, not just request it | prompt clause **and** vLLM guided decoding (`items.pattern`) — overrides the derived regex |
 | `examples` | ≤ 8 strings, ≤ 64 ch each; **must sit in the column's observed length bucket / charset** | show fictitious canonical values | prompt clause; echoes are rejected from pools (never land as data); an off-format example logs `prompt_constraint_example_off_format` at plan time — the model echoes its length (ADR 0033: a 28-ch example on a 31-ch column rejected 98 % of a run's candidates) |
 | `values` | ≤ 64 strings | closed vocabulary | prompt clause `allowed values=[…]` |
-| `prefix` / `suffix` | str | literal affixes (`C2E…`) | prompt clauses |
+| `prefix` / `suffix` | str | literal affixes (`ABC…`) | prompt clauses |
 | `charset` | str | restrict the alphabet | prompt clause |
 | `length` | int or `[min, max]` | pin width | prompt clause; **suppresses** the measured length hint (no duplicate tokens) |
 | `units` | str | semantic scale ("EUR cents") | prompt clause |
 | `locale` | str | language of prose ("es-ES") | prompt clause |
 | `route` | `"auto"` \| `"llm"` | **force a typed column onto the LLM route** (constant/categorical/temporal/identifier STRING columns) | profiler override; non-STRING types warn `prompt_constraint_route_unsupported` and keep their typed route |
-| `families` | `{prefix: share}` (or pair list) | prefix-family mass targets (`{"C2E3": 0.57, "C2E1": 0.42, "7301": 0.007}`) — replaces prose percentages, which no sampler can parse | ADR 0028 Tier-P weighted sampling; shares normalized; **not** rendered into the prompt |
+| `families` | `{prefix: share}` (or pair list) | prefix-family mass targets (`{"ABC1": 0.60, "ABC2": 0.35, "9999": 0.05}`) — replaces prose percentages, which no sampler can parse | ADR 0028 Tier-P weighted sampling; shares normalized; **not** rendered into the prompt |
 | `notes` | str ≤ 500 | anything else, free prose | appended last (the legacy string form lands here) |
 
 **Routing (ADR 0028).** A constrained column no longer always means an
@@ -208,68 +208,68 @@ closing table of every field's description + constraint clause.
 
 ## 5. Worked example — `a_table_ddl.json` (parent)
 
-Fictitious core-banking accounts table. Every constraint style appears at
+Fictitious web-shop orders table. Every constraint style appears at
 least once; comments call out which §4 row each column exercises.
 
 ```jsonc
 {
   "table_info": {
-    "table_id": "demo_project.core_banking.a_table",
+    "table_id": "demo_project.demo_shop.a_table",
     // Table description = prose only. PK/identity live in
-    // config/relationships/core_banking.yaml (§3).
-    "description": "Customer accounts, one row per account. Owned by team-core-banking.",
+    // config/relationships/demo_shop.yaml (§3).
+    "description": "Customer orders, one row per order. Owned by team-demo-shop.",
     "data_location": "EU",
     "table_type": "TABLE"
   },
   "schema": [
-    {"name": "ACCOUNT_ID", "type": "STRING", "mode": "REQUIRED", "max_length": 10,
+    {"name": "ORDER_ID", "type": "STRING", "mode": "REQUIRED", "max_length": 10,
      // format + pattern + length: guaranteed 10-digit shape via guided decoding
-     "description": "{\"llm_prompt_constraint\": {\"format\": \"10-digit account number, bank code then office code\", \"pattern\": \"^[0-9]{10}$\", \"length\": 10}}"},
+     "description": "{\"llm_prompt_constraint\": {\"format\": \"10-digit order number, 3-digit store code then 7-digit sequence\", \"pattern\": \"^[0-9]{10}$\", \"length\": 10}}"},
 
-    {"name": "CARD_TOKEN", "type": "STRING", "mode": "REQUIRED", "max_length": 24,
-     // prefix + charset + examples: the COL_001-class hex identifier
-     "description": "PAN-derived token. {\"llm_prompt_constraint\": {\"format\": \"24-character uppercase hexadecimal identifier\", \"pattern\": \"^[0-9A-F]{24}$\", \"prefix\": \"C2E\", \"charset\": \"0-9A-F\", \"examples\": [\"C2E0AA11BB22CC33DD44EE55\"]}}"},
+    {"name": "ORDER_REF", "type": "STRING", "mode": "REQUIRED", "max_length": 24,
+     // prefix + charset + examples: a prefixed hex identifier
+     "description": "Order reference, hex-prefixed. {\"llm_prompt_constraint\": {\"format\": \"24-character uppercase hexadecimal identifier\", \"pattern\": \"^[0-9A-F]{24}$\", \"prefix\": \"ABC\", \"charset\": \"0-9A-F\", \"examples\": [\"ABC0AA11BB22CC33DD44EE55\"]}}"},
 
     {"name": "PRODUCT_CODE", "type": "STRING", "mode": "REQUIRED", "max_length": 12,
      // composite positional format spelled out in `format`, pinned by pattern
-     "description": "{\"llm_prompt_constraint\": {\"format\": \"3-digit account type + 2-digit contract counter + 2-digit modality + 1-digit closed-contract counter + 4-char product code\", \"pattern\": \"^[0-9]{8}[A-Z0-9]{4}$\", \"examples\": [\"00900000DEMO\"]}} Translated in table TX9001."},
+     "description": "{\"llm_prompt_constraint\": {\"format\": \"3-digit category + 2-digit size + 2-digit colour + 1-digit variant + 4-char SKU suffix\", \"pattern\": \"^[0-9]{8}[A-Z0-9]{4}$\", \"examples\": [\"00900000DEMO\"]}} Decoded in the product catalog table."},
 
-    {"name": "ACCOUNT_DIRECTION", "type": "STRING", "mode": "REQUIRED", "max_length": 1,
+    {"name": "ORDER_CHANNEL", "type": "STRING", "mode": "REQUIRED", "max_length": 1,
      // closed vocabulary with business meanings in notes
-     "description": "{\"llm_prompt_constraint\": {\"values\": [\"I\", \"O\"], \"notes\": \"I=account input, O=account output\"}}"},
+     "description": "{\"llm_prompt_constraint\": {\"values\": [\"W\", \"S\"], \"notes\": \"W=web order, S=in-store order\"}}"},
 
-    {"name": "HOLDER_REGIME", "type": "STRING", "mode": "NULLABLE", "max_length": 2,
+    {"name": "FULFILMENT_MODE", "type": "STRING", "mode": "NULLABLE", "max_length": 2,
      // route:llm — low-cardinality STRING that would classify CATEGORICAL;
      // forced onto the LLM route WITH its vocabulary
-     "description": "{\"llm_prompt_constraint\": {\"route\": \"llm\", \"values\": [\"1\", \"2\", \"3\", \"4\", \"99\"], \"notes\": \"1=individual 2=indistinct 3=joint 4=solidary 99=undefined\"}}"},
+     "description": "{\"llm_prompt_constraint\": {\"route\": \"llm\", \"values\": [\"1\", \"2\", \"3\", \"4\", \"99\"], \"notes\": \"1=home delivery 2=store pickup 3=parcel locker 4=courier 99=undefined\"}}"},
 
-    {"name": "OPEN_DATE_TXT", "type": "STRING", "mode": "NULLABLE", "max_length": 10,
+    {"name": "ORDER_DATE_TXT", "type": "STRING", "mode": "NULLABLE", "max_length": 10,
      // date-as-text: without a constraint this routes TEMPORAL automatically;
      // the constraint documents the rendering for humans AND the LLM fallback
      "description": "{\"llm_prompt_constraint\": {\"format\": \"calendar date as DD.MM.YYYY\", \"pattern\": \"^[0-3][0-9]\\\\.[0-1][0-9]\\\\.[1-2][0-9]{3}$\", \"examples\": [\"28.08.2019\"]}}"},
 
-    {"name": "BALANCE_CENTS", "type": "INT64", "mode": "REQUIRED",
+    {"name": "TOTAL_CENTS", "type": "INT64", "mode": "REQUIRED",
      // non-STRING: constraints render but route stays typed (numeric sampler);
      // a route:llm here would WARN and be ignored
      "description": "Amount in euro cents, no separators. {\"llm_prompt_constraint\": {\"units\": \"EUR cents\", \"charset\": \"0-9\"}}"},
 
-    {"name": "SETTLEMENT_REF", "type": "STRING", "mode": "NULLABLE", "max_length": 32,
-     // space-padded composite (COL_038-class): pattern pins the LITERAL
+    {"name": "SHIPMENT_REF", "type": "STRING", "mode": "NULLABLE", "max_length": 32,
+     // space-padded composite: pattern pins the LITERAL
      // three-space run the LLM otherwise normalizes
-     "description": "{\"llm_prompt_constraint\": {\"format\": \"5 letters, 1 digit, exactly three spaces, 2-letter code, 20 digits, final letter\", \"pattern\": \"^[A-Z]{5}[0-9] {3}[A-Z]{2}[0-9]{20}[A-Z]$\"}}"},
+     "description": "{\"llm_prompt_constraint\": {\"format\": \"5-letter carrier code, 1 digit, exactly three spaces, 2-letter country code, 20-digit tracking number, final check letter\", \"pattern\": \"^[A-Z]{5}[0-9] {3}[A-Z]{2}[0-9]{20}[A-Z]$\"}}"},
 
-    {"name": "CONCEPT_TEXT", "type": "STRING", "mode": "NULLABLE", "max_length": 35,
+    {"name": "GIFT_MESSAGE", "type": "STRING", "mode": "NULLABLE", "max_length": 35,
      // prose narrative, language-pinned
-     "description": "{\"llm_prompt_constraint\": {\"format\": \"short payment concept phrase, uppercase\", \"locale\": \"es-ES\", \"examples\": [\"PAGO CHEQUE 1234567\"]}}"},
+     "description": "{\"llm_prompt_constraint\": {\"format\": \"short gift message phrase, uppercase\", \"locale\": \"es-ES\", \"examples\": [\"FELIZ CUMPLEAÑOS ANA\"]}}"},
 
-    {"name": "BRANCH_NOTES", "type": "STRING", "mode": "NULLABLE", "max_length": 254,
+    {"name": "STORE_NOTES", "type": "STRING", "mode": "NULLABLE", "max_length": 254,
      // legacy STRING constraint — still fully supported, renders verbatim
-     "description": "{\"llm_prompt_constraint\": \"free-form Spanish branch annotation, may mention a department name\"}"},
+     "description": "{\"llm_prompt_constraint\": \"free-form Spanish store annotation, may mention a department name\"}"},
 
     {"name": "USER_STAMP", "type": "STRING", "mode": "REQUIRED", "max_length": 8}
     // no constraint at all — profiling alone drives generation (always valid)
   ],
-  "primary_keys": ["ACCOUNT_ID"],
+  "primary_keys": ["ORDER_ID"],
   "partitioning": {"type": "DAY", "field": "_PARTITIONTIME"},
   "clustering": {"fields": ["PRODUCT_CODE"]}
 }
@@ -277,40 +277,40 @@ least once; comments call out which §4 row each column exercises.
 
 ## 6. Worked example — `b_table_ddl.json` (child, FK → a_table)
 
-Its companion model file is §3's `core_banking.yaml`; the DDL below carries
+Its companion model file is §3's `demo_shop.yaml`; the DDL below carries
 column constraints only.
 
 ```jsonc
 {
   "table_info": {
-    "table_id": "demo_project.core_banking.b_table",
-    // Prose only. The FK edge (this table's ACCOUNT_ID samples a_table's
-    // LANDED keys) is declared in config/relationships/core_banking.yaml.
-    "description": "Account movements.",
+    "table_id": "demo_project.demo_shop.b_table",
+    // Prose only. The FK edge (this table's ORDER_ID samples a_table's
+    // LANDED keys) is declared in config/relationships/demo_shop.yaml.
+    "description": "Order line items.",
     "data_location": "EU",
     "table_type": "TABLE"
   },
   "schema": [
-    {"name": "MOVEMENT_ID", "type": "STRING", "mode": "REQUIRED", "max_length": 12,
-     "description": "{\"llm_prompt_constraint\": {\"format\": \"12-char uppercase hexadecimal movement id\", \"pattern\": \"^[0-9A-F]{12}$\"}}"},
+    {"name": "LINE_ID", "type": "STRING", "mode": "REQUIRED", "max_length": 12,
+     "description": "{\"llm_prompt_constraint\": {\"format\": \"12-char uppercase hexadecimal line id\", \"pattern\": \"^[0-9A-F]{12}$\"}}"},
 
-    {"name": "ACCOUNT_ID", "type": "STRING", "mode": "REQUIRED", "max_length": 10,
+    {"name": "ORDER_ID", "type": "STRING", "mode": "REQUIRED", "max_length": 10,
      // FK column: NO constraint needed — the joint key draw overrides
      // whatever the profiler would do (ADR 0031)
-     "description": "FK to a_table.ACCOUNT_ID (see config/relationships)."},
+     "description": "FK to a_table.ORDER_ID (see config/relationships)."},
 
-    {"name": "OPERATION_CODE", "type": "STRING", "mode": "REQUIRED", "max_length": 4,
-     "description": "{\"llm_prompt_constraint\": {\"values\": [\"ADTW\", \"DEPO\", \"XFER\", \"CHRG\"]}}"},
+    {"name": "LINE_STATUS", "type": "STRING", "mode": "REQUIRED", "max_length": 4,
+     "description": "{\"llm_prompt_constraint\": {\"values\": [\"NEWL\", \"PAID\", \"SHIP\", \"RETN\"]}}"},
 
     {"name": "AMOUNT_CENTS", "type": "INT64", "mode": "REQUIRED",
      "description": "{\"llm_prompt_constraint\": {\"units\": \"EUR cents\"}} Example: 1000 for 10 EUR."},
 
-    {"name": "VALUE_TS", "type": "TIMESTAMP", "mode": "REQUIRED"},
+    {"name": "EVENT_TS", "type": "TIMESTAMP", "mode": "REQUIRED"},
 
-    {"name": "OPERATOR_STAMP", "type": "STRING", "mode": "NULLABLE", "max_length": 8,
-     "description": "{\"llm_prompt_constraint\": {\"format\": \"U + 6 digits for users, letter-prefixed 7-char code for programs\", \"examples\": [\"U900003\", \"QQXA900\"]}}"}
+    {"name": "PICKER_STAMP", "type": "STRING", "mode": "NULLABLE", "max_length": 8,
+     "description": "{\"llm_prompt_constraint\": {\"format\": \"W + 6 digits for warehouse staff, letter-prefixed 7-char code for sorting robots\", \"examples\": [\"W900003\", \"QQXA900\"]}}"}
   ],
-  "primary_keys": ["MOVEMENT_ID"]
+  "primary_keys": ["LINE_ID"]
 }
 ```
 
@@ -323,24 +323,24 @@ a repo file (§3); a `terraform apply` never touches them.
 
 ```hcl
 resource "google_bigquery_table" "a_table" {
-  dataset_id  = google_bigquery_dataset.core_banking.dataset_id
+  dataset_id  = google_bigquery_dataset.demo_shop.dataset_id
   table_id    = "a_table"
   # Prose only — no relational JSON. PK/identity: config/relationships/.
-  description = "Customer accounts, one row per account. Owned by team-core-banking."
+  description = "Customer orders, one row per order. Owned by team-demo-shop."
 
   # Column array identical to the "schema" list of a_table_ddl.json §5 —
   # keep it in a versioned file so Terraform and the pipeline share one truth.
   schema = file("${path.module}/schemas/a_table.schema.json")
 
   # ⚠️ DO NOT reach for primary-key / table_constraints blocks here:
-  # BigQuery constraints are unenforced metadata and the enterprise module
-  # does not expose them. Declare keys in config/relationships (ADR 0032).
+  # BigQuery constraints are unenforced metadata (and wrapper modules often
+  # hide them). Declare keys in config/relationships (ADR 0032).
 }
 
 resource "google_bigquery_table" "b_table" {
-  dataset_id  = google_bigquery_dataset.core_banking.dataset_id
+  dataset_id  = google_bigquery_dataset.demo_shop.dataset_id
   table_id    = "b_table"
-  description = "Account movements."
+  description = "Order line items."
   schema      = file("${path.module}/schemas/b_table.schema.json")
 }
 ```
@@ -351,10 +351,10 @@ whole `_ddl.json`):
 
 ```json
 [
-  {"name": "ACCOUNT_ID", "type": "STRING", "mode": "REQUIRED", "maxLength": "10",
-   "description": "{\"llm_prompt_constraint\": {\"format\": \"10-digit account number, bank code then office code\", \"pattern\": \"^[0-9]{10}$\", \"length\": 10}}"},
-  {"name": "CARD_TOKEN", "type": "STRING", "mode": "REQUIRED", "maxLength": "24",
-   "description": "PAN-derived token. {\"llm_prompt_constraint\": {\"format\": \"24-character uppercase hexadecimal identifier\", \"pattern\": \"^[0-9A-F]{24}$\", \"prefix\": \"C2E\", \"charset\": \"0-9A-F\", \"examples\": [\"C2E0AA11BB22CC33DD44EE55\"]}}"}
+  {"name": "ORDER_ID", "type": "STRING", "mode": "REQUIRED", "maxLength": "10",
+   "description": "{\"llm_prompt_constraint\": {\"format\": \"10-digit order number, 3-digit store code then 7-digit sequence\", \"pattern\": \"^[0-9]{10}$\", \"length\": 10}}"},
+  {"name": "ORDER_REF", "type": "STRING", "mode": "REQUIRED", "maxLength": "24",
+   "description": "Order reference, hex-prefixed. {\"llm_prompt_constraint\": {\"format\": \"24-character uppercase hexadecimal identifier\", \"pattern\": \"^[0-9A-F]{24}$\", \"prefix\": \"ABC\", \"charset\": \"0-9A-F\", \"examples\": [\"ABC0AA11BB22CC33DD44EE55\"]}}"}
 ]
 ```
 
@@ -372,7 +372,7 @@ sequenceDiagram
     P->>BQ: read schema + column constraints (live)
     P->>BQ: land a_table (parent, wave 0)
     P->>BQ: b_table draws WHOLE key tuples from landed a_table
-    P->>BQ: land b_table — every ACCOUNT_ID exists in the parent
+    P->>BQ: land b_table — every ORDER_ID exists in the parent
 ```
 
 ```bash
@@ -383,7 +383,7 @@ python scripts/extract_ddl.py --project demo_project \
 # 1. ONE launch generates the whole model, parents first: the target's
 #    component comes from config/relationships, pk/identity with it.
 python -m sdfb_beam.cli.run_pipeline \
-  --reference_table demo_project.core_banking.b_table \
+  --reference_table demo_project.demo_shop.b_table \
   --landing_table demo_project.synthetic_data.b_table \
   --uniqueness_mode exact --prompt_constraints on
   # --generate_fk_relationships=true is the default
@@ -394,7 +394,7 @@ python -m sdfb_beam.cli.run_pipeline ... --generate_fk_relationships=false
 
 # 3. A different model for one launch, no rebuild, no metadata edit:
 python -m sdfb_beam.cli.run_pipeline ... \
-  --relationships_uri=gs://my-bucket/relationships/core_banking.yaml
+  --relationships_uri=gs://my-bucket/relationships/demo_shop.yaml
 ```
 
 ## 9. Functional ⇄ technical capability map

@@ -38,8 +38,9 @@ CMD=(gcloud dataflow flex-template run "${JOB_NAME}"
 [[ -n "${NUM_WORKERS:-}" ]] && CMD+=(--num-workers "${NUM_WORKERS}")
 # GPU tiers: exactly ONE SDK process per worker. Runner v2's default sibling
 # SDK processes each re-run DoFn setup (weight pull, vLLM spawn into the
-# occupied GPU → CUDA OOM, CPU-thrashed embedding) — the 2026-07-16 corp run
-# burned 5.4h across 4 bundle retries on that topology (RUN_PLAYBOOK §3).
+# occupied GPU → CUDA OOM, CPU-thrashed embedding) — a previous GPU run
+# (2026-07-16) burned 5.4h across 4 bundle retries on that topology
+# (RUN_PLAYBOOK §3).
 # ADR 0034: SDK_CONTAINERS=multi lifts the pin (one SDK process per vCPU) —
 # the vLLM client's cross-process spawn mutex keeps one server per worker.
 if [[ -n "${ACCELERATOR}" ]]; then

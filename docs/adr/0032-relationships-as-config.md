@@ -9,8 +9,8 @@
 ## Context
 
 ADR 0021 put the relational contract (`pk`, `fk`, `identity`) inside each
-BigQuery **table description**, because the enterprise Terraform module
-exposes no primary-key block and BigQuery constraints are unenforced
+BigQuery **table description**, because the Terraform module in use
+exposed no primary-key block and BigQuery constraints are unenforced
 metadata. It worked, and three runs exposed what it costs:
 
 - **The truth was scattered.** A model spanning N tables lived in N
@@ -88,7 +88,7 @@ launch, not the GPU); `deployment_prerequisites.py` step 12 reports model
 tables that do not exist yet.
 
 **D8 — committed models are alias-only.** `config/relationships/` is
-gitignored apart from `README.md` and `example_*.yaml`, so a real corp
+gitignored apart from `README.md` and `example_*.yaml`, so a real production
 model dropped in the folder ships in that clone's image build and can never
 be committed. The `gs://` override keeps real names off the filesystem
 entirely.

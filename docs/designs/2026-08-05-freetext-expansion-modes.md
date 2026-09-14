@@ -5,8 +5,7 @@
 > --freetext_expansion`, Composer DAG param `freetext_expansion`, Flex
 > metadata entry of the same name. Default: `identifiers`.
 > Companions: [ADR 0021](../adr/0021-relational-contract-in-descriptions.md) ·
-> [WS6 §11 five-run postmortem](2026-07-27-ws6-pipeline-shape.md) ·
-> plan `docs/superpowers/plans/2026-08-05-relational-stats-freetext-fidelity.md`.
+> [WS6 §11 five-run postmortem](2026-07-27-ws6-pipeline-shape.md).
 > Diagram icon/color classes follow the mermaid house style in
 > `.claude/skills/visual-first-documentation/SKILL.md` (🟠 Beam code,
 > 🔵 stores, 🟣 GPU/vLLM, 🟢 CPU engine work, ⚪ plain data).

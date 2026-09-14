@@ -27,21 +27,6 @@ package = false
 # moves to a stable betterproto.
 constraint-dependencies = ["betterproto==2.0.0b6"]
 
-# Corporate package index. Direct pypi.org / files.pythonhosted.org are
-# unreachable from the M4 (and from CI behind the corp network); JFrog
-# `pypi-all` is a virtual repo that proxies pypi through the company
-# network and is the same Artifactory that hosts our docker image
-# (ADR-0003).
-#
-# If `pypi-all` requires authentication, uv reads it from env vars:
-#   UV_INDEX_JFROG_PYPI_ALL_USERNAME
-#   UV_INDEX_JFROG_PYPI_ALL_PASSWORD
-# Setup guidance for the M4 lives in docs/M4_SETUP.md.
-[[tool.uv.index]]
-name = "jfrog-pypi-all"
-url = "https://artifactory.example.com/artifactory/api/pypi/pypi-all/simple"
-default = true
-
 [tool.uv.workspace]
 members = ["packages/sdfb-core", "packages/sdfb-beam", "packages/sdfb-tests"]
 

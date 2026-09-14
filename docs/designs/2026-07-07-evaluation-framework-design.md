@@ -14,7 +14,7 @@
   GX/Soda structural-DQ portion of that bullet is untouched by this design — Mode A
   already owns schema/null/range/enum checks pre-write; this design does not
   duplicate them).
-- **Author context**: ACTION_5 from the M1→M2 planning pass (see project memory).
+- **Author context**: ACTION_5 from the M1→M2 planning pass.
 
 ## 1. Goal
 

@@ -23,11 +23,11 @@ Both engines use the **FASTGEN-family spine** ([arXiv 2507.15839](https://arxiv.
 - **B.1 RAG**: distribution model = retrieval-conditioned (FAISS over `bge-small` embeddings) + LLM-inferred marginals/conditionals.
 - **B.2 library**: distribution model = fitted `sdgx` (Apache-2.0; SDV/GaussianCopula deferred pending BSL license sign-off) + LLM free-text patch.
 
-Full design, cost math, and infra checklist: [`docs/superpowers/specs/2026-05-21-synthesis-engines-design.md`](../superpowers/specs/2026-05-21-synthesis-engines-design.md).
+How the spine grew into each engine: the [RAG layer design](../designs/2026-07-07-rag-layer-design.md) (B.1) and the [B.2 library choice](../../packages/sdfb-core/src/sdfb_core/engines/b2_library/SPIKE_LIBRARY_CHOICE.md).
 
 ## Consequences
 
-- **Enables**: ~1M rows in minutes on a single L4 + CPU; fidelity preserved *by construction* (constants copied, numeric ranges clipped, categorical frequencies and simple joints sampled from the empirical/inferred distributions). GPU is used only on the small free-text path → far fewer GPU-hours. The O(N) sampling can optionally run **GPU-accelerated via cuDF/CuPy** (Apache-2.0) on the already-provisioned L4 (idle during the O(1) LLM phase) — the path to **billions** of rows; see the spec's NVIDIA review.
+- **Enables**: ~1M rows in minutes on a single L4 + CPU; fidelity preserved *by construction* (constants copied, numeric ranges clipped, categorical frequencies and simple joints sampled from the empirical/inferred distributions). GPU is used only on the small free-text path → far fewer GPU-hours. The O(N) sampling can optionally run **GPU-accelerated via cuDF/CuPy** (Apache-2.0) on the already-provisioned L4 (idle during the O(1) LLM phase) — a candidate path to **billions** of rows.
 - **Costs**: more engine-side machinery (column profiling, conditional sampling, a fidelity helper) than naive prompting; the LLM's role narrows to distribution inference + free-text.
 - **Forbids**: routing the bulk N rows through per-row LLM decoding. The vLLM guided-JSON path (ADR 0011) serves only the bounded free-text pool. The B.1/B.2 agent charters and the `engine-contract` / `reference-data` skills are updated to encode this spine (supersedes the earlier "prompt Gemma per row" framing in the B.1 charter).
 
@@ -35,5 +35,5 @@ Full design, cost math, and infra checklist: [`docs/superpowers/specs/2026-05-21
 
 - [ADR 0006](0006-generation-engine-abc.md) — the `GenerationEngine` ABC this spine implements (unchanged).
 - [ADR 0011](0011-adopt-beam-vllm-model-handler.md) — the vLLM handler the free-text path uses.
-- `docs/superpowers/specs/2026-05-21-synthesis-engines-design.md` — full design + literature.
+- [`docs/designs/2026-07-07-rag-layer-design.md`](../designs/2026-07-07-rag-layer-design.md) — the B.1 retrieval layer built on this spine.
 - `.claude/agents/b1-rag-engineer.md`, `.claude/agents/b2-library-engineer.md` — to be updated to this spine.

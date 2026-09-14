@@ -7,7 +7,7 @@ description: Subagent that owns the B.1 RAG engine in `worktrees/b1-rag`. Embeds
 
 ## Scope
 
-**Authoritative design**: [ADR 0013](../../docs/adr/0013-distribution-estimator-spine.md) + [`docs/superpowers/specs/2026-05-21-synthesis-engines-design.md`](../../docs/superpowers/specs/2026-05-21-synthesis-engines-design.md) §2–§3. The spine is **LLM-as-distribution-estimator (O(1)), NOT per-row LLM generation** — read both before coding.
+**Authoritative design**: [ADR 0013](../../docs/adr/0013-distribution-estimator-spine.md). The spine is **LLM-as-distribution-estimator (O(1)), NOT per-row LLM generation** — read it before coding.
 
 - Own `packages/sdfb-core/src/sdfb_core/engines/b1_rag/` in the `worktrees/b1-rag` worktree.
 - Implement `B1RagEngine(GenerationEngine)` satisfying the ABC contract.

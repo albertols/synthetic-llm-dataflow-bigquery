@@ -1,7 +1,7 @@
 # ADR 0022 — source_table_stats as a bounded generation input (tiered stats, inverse-CDF sampling, measured prompt hints)
 
 **Status:** ACCEPTED (2026-08-05)
-**Design:** [`docs/designs/2026-08-05-source-table-stats.md`](../designs/2026-08-05-source-table-stats.md) · plan `docs/superpowers/plans/2026-08-05-stats-driven-generation.md`
+**Design:** [`docs/designs/2026-08-05-source-table-stats.md`](../designs/2026-08-05-source-table-stats.md)
 **Figures:** concept set (entropy/skew, inverse-CDF, epoch deciles, null patterns) regenerable via `scripts/doc/make_source_stats_figures.py` — the design doc carries them with two-audience captions and code links.
 
 ## Context

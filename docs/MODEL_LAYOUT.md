@@ -108,7 +108,7 @@ The non-HuggingFace source for Gemma is **Kaggle** (Google-hosted, license-clean
    gsutil -m cp -r models/gemma4/e4b-it/v1/ gs://{bucket}/synthetic/models/gemma4/e4b-it/v1/
    ```
 
-For Qwen (not on Kaggle), download from ModelScope (works behind the corporate network): `modelscope download --model Qwen/Qwen3-4B-Instruct-2507 --local_dir models/qwen3/4b-instruct-2507/v1` (same for `Qwen/Qwen2.5-7B-Instruct` → `models/qwen2.5/7b-instruct/v1`). The local path MUST mirror the registry `gcs_uri` suffix — `scripts/deployment_prerequisites.py` step 3 checks `models/{family}/{model}/{version}` derived from that URI.
+For Qwen (not on Kaggle), download from ModelScope: `modelscope download --model Qwen/Qwen3-4B-Instruct-2507 --local_dir models/qwen3/4b-instruct-2507/v1` (same for `Qwen/Qwen2.5-7B-Instruct` → `models/qwen2.5/7b-instruct/v1`). The local path MUST mirror the registry `gcs_uri` suffix — `scripts/deployment_prerequisites.py` step 3 checks `models/{family}/{model}/{version}` derived from that URI.
 
 ## File-level checklist
 
@@ -176,7 +176,7 @@ Per [ADR 0011](adr/0011-adopt-beam-vllm-model-handler.md), the serving path uses
 def setup(self):
     # One-time per worker — copy from GCS to local SSD via the Python client
     # (NOT gsutil — the CLI would force a packages.cloud.google.com apt
-    # install the enterprise build can't reach; see ADR 0012).
+    # install into the image for no benefit).
     from google.cloud import storage
     bucket_name, prefix = _split_gs_uri(self.model_uri)
     client = storage.Client()                          # ADC on worker
@@ -203,13 +203,13 @@ def setup(self):
 
 ### vLLM acceptance — what the Dataflow probe must confirm
 
-GPU validation happens via the Dataflow probe (`scripts/probe_gpu_dataflow.sh`) once the image is built — there's no separate laptop test (vLLM is CUDA-only). The probe (1-row job) must confirm the vLLM serving path:
+GPU validation happens via a small Dataflow probe job once the image is built (e.g. a low-`num_rows` tier from [`public_cloud/deploy/gcp/run_e2e.sh`](../public_cloud/deploy/gcp/README.md), or a Composer trigger) — there's no separate laptop test (vLLM is CUDA-only). The probe must confirm the vLLM serving path:
 
 - **Server loads the model** — `Gemma4ForConditionalGeneration` accepted (needs vLLM ≥ 0.21; see version note below).
-- **Thinking channel suppressed** — pass `chat_template_kwargs={"enable_thinking": False}` via the **chat** endpoint (not raw completions); otherwise the model spends the token budget on chain-of-thought and truncates the JSON (see the Gemma 4 project memory).
+- **Thinking channel suppressed** — pass `chat_template_kwargs={"enable_thinking": False}` via the **chat** endpoint (not raw completions); otherwise the model spends the token budget on chain-of-thought and truncates the JSON.
 - **Guided JSON conforms** — `extra_body={"guided_json": schema}` yields schema-valid output ([ADR 0011](adr/0011-adopt-beam-vllm-model-handler.md)).
 
-> **Version requirement (resolved 2026-05-21):** Gemma 4 (`model_type=gemma4`) needs **transformers ≥ 5.5.0**, which vLLM only adopted in **v0.20.0** (v0.21.0 deprecates transformers v4). Older vLLM fails at config parse (`rope_scaling should have a 'rope_type' key`). The `[gpu]` extra pins `vllm>=0.21.0` and `[embedding]` `transformers>=5.5.0`. vLLM has full Gemma 4 support (MoE, multimodal, reasoning, tool-use) since v0.20 — no fallback model needed. Before the probe: `uv lock`, verify the JFrog mirror has these versions, and confirm the CUDA base (12.2.2) is recent enough for vLLM 0.21's torch.
+> **Version requirement (resolved 2026-05-21):** Gemma 4 (`model_type=gemma4`) needs **transformers ≥ 5.5.0**, which vLLM only adopted in **v0.20.0** (v0.21.0 deprecates transformers v4). Older vLLM fails at config parse (`rope_scaling should have a 'rope_type' key`). The `[gpu]` extra pins `vllm>=0.21.0` and `[embedding]` `transformers>=5.5.0`. vLLM has full Gemma 4 support (MoE, multimodal, reasoning, tool-use) since v0.20 — no fallback model needed. Before the probe: `uv lock`, and confirm the CUDA runtime bundled in the resolved torch wheels is supported by the Dataflow-installed NVIDIA driver.
 
 ## Runtime load — local M4 (stretch goal, MLX example)
 

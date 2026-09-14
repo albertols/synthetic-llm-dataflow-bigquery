@@ -135,10 +135,10 @@ def emit_trigger_configs(
     out_dir: Path,
     generate_fk_relationships: bool = True,
 ) -> list[Path]:
-    """Ordered Airflow trigger confs, one JSON per table (corp path).
+    """Ordered Airflow trigger confs, one JSON per table (Composer path).
 
     The Composer DAG (`composer/synthetic_beam_bigquery.py`) stays
-    single-table; multi-table on corp = triggering it once per file, in
+    single-table; multi-table on Composer = triggering it once per file, in
     filename order (waves flattened — the NN_ prefix IS the order)."""
     tables = list(config["tables"])
     waves_of_names = (

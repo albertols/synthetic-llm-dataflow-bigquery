@@ -8,13 +8,11 @@
 [![LLM](https://img.shields.io/badge/LLM-self--hosted%20vLLM-6f42c1.svg)](#cpugpu-split--vllm-serving)
 [![Beam Summit](https://img.shields.io/badge/Beam%20Summit-2025-4285f4.svg)](https://beamsummit.org)
 
-**Building Banking Synthetic Data for a Lakehouse with Gemma — self-hosted LLM generation on Apache Beam / Dataflow / BigQuery.**
+**Synthetic BigQuery data with self-hosted LLMs on Apache Beam / Dataflow.**
 
 Generate fictitious-but-realistic synthetic rows for any BigQuery table — driven by its DDL plus a bounded reference sample, with all LLM inference **self-hosted on GPU workers inside the Dataflow pipeline**. No data or prompts ever leave the project boundary, no external AI APIs, no model hubs at runtime.
 
-> **Beam Summit 2025** — this solution was accepted for presentation at [Apache Beam Summit 2025](https://beamsummit.org) as the session *"Building Banking Synthetic Data for a Lakehouse with Gemma"*: independent, external peer review of the approach by the Apache Beam community.
->
-> ![Beam Summit 2025 acceptance email](docs/assets/beam-summit-2025-acceptance.png)
+> **Beam Summit 2025** — the approach was accepted for presentation at [Apache Beam Summit 2025](https://beamsummit.org) as the session *"Building Banking Synthetic Data for a Lakehouse with Gemma"*.
 
 ## Table of contents
 
@@ -35,7 +33,7 @@ Generate fictitious-but-realistic synthetic rows for any BigQuery table — driv
 
 ## What this does — and why
 
-Teams need realistic tabular data for development, testing, and analytics prototyping, but production BigQuery tables cannot be used directly for privacy, regulatory, and residency reasons. Masking degrades statistical realism, manual fixtures do not scale, and sending real rows to external LLM APIs to produce "lookalike data" is prohibited in regulated (banking) environments.
+Teams need realistic tabular data for development, testing, and analytics prototyping, but production BigQuery tables cannot be used directly for privacy, regulatory, and residency reasons. Masking degrades statistical realism, manual fixtures do not scale, and sending real rows to external LLM APIs to produce "lookalike data" is prohibited in regulated industries such as banking.
 
 This pipeline reads a table's DDL and a bounded reference sample (≤10k rows, deterministic `FARM_FINGERPRINT` ordering), runs open-weight LLMs entirely inside your own cloud project, and writes validated synthetic rows back to BigQuery — with **memorization measured and gated on every run**. The fully self-hosted design (no data egress, open-weight models only, auditable per-run quality records) aligns directly with EU AI Act and data-sensitivity expectations.
 
@@ -163,7 +161,7 @@ A child with several foreign keys usually shows **one** incoming arrow in the Da
 - **Launch scenarios** ([ADR 0029](docs/adr/0029-fk-model-scenarios-and-history-mappings.md)): minimal-input launches (landing table + flag), derived FK activation, and closure expansion resolve which tables join a run.
 - **Orphan gate**: `fk.orphan` findings are BLOCKER-severity — a run that would land orphaned child rows fails. `fk.unmatched` (ADR 0037) is its deliberate opposite: a driving key whose conditional parent holds no candidate is an *input* fact, dropped before any GPU spend and counted, not a generator regression.
 
-Measured at scale ([ADR 0033](docs/adr/0033-pool-ladder-integrity-at-scale.md)): the R6 FK-enforced acceptance pair (1M + 10M rows/table) landed **0 orphans in 10,000,000 child rows** — evidence bundle: [`docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/`](docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/). That pair predates the fan-out path: ADRs 0036–0038 are laptop-proven (unit + DirectRunner) and their Dataflow acceptance is still open — the 2026-09-13 five-table launch generated three tables through the fan-out with the model adjustment live, then failed the BLOCKER gate on another table's declared key that nothing had measured yet — which is exactly the measurement ADR 0038 now makes at launch.
+Measured at scale ([ADR 0033](docs/adr/0033-pool-ladder-integrity-at-scale.md)): the R6 FK-enforced acceptance pair (1M + 10M rows/table) landed **0 orphans in 10,000,000 child rows** (Dataflow job `2026-08-26_05_01_16-3186876581127148459`; aggregates in the [v0.1.0 release report](docs/releases/v0.1.0/report.md) — the raw evidence bundle was withdrawn from the repo because it contained source-derived values). That pair predates the fan-out path: ADRs 0036–0038 are laptop-proven (unit + DirectRunner) and their Dataflow acceptance is still open — the 2026-09-13 five-table launch generated three tables through the fan-out with the model adjustment live, then failed the BLOCKER gate on another table's declared key that nothing had measured yet — which is exactly the measurement ADR 0038 now makes at launch.
 
 ![FK orphan rate — per-column vs joint draws](docs/designs/assets/fk-orphan-rate.png)
 
@@ -230,7 +228,7 @@ public_cloud/deploy/gcp/  personal-GCP E2E layer (bootstrap, cost caps, run driv
 
 ## CI/CD
 
-GitHub Actions owns every build: the GPU worker image and wheel (pushed to Artifact Registry), the Dataflow Flex Template, and the Composer DAG import — no local Docker builds ([ADR 0008](docs/adr/0008-ci-driven-builds.md), [ADR 0015](docs/adr/0015-worker-image-via-artifact-registry.md)). Every merge to master is tagged with SemVer derived from the squash-merge title, and the release Action regenerates [`docs/releases/`](docs/releases/README.md) — a deterministic before/after metrics report diffed from committed evidence bundles, no GCP access needed. Full pipeline reference: [`docs/CICD.md`](docs/CICD.md).
+Builds are CI-driven, never local Docker builds ([ADR 0008](docs/adr/0008-ci-driven-builds.md)). The public build path is Cloud Build: the one GPU image for launcher and workers goes to Artifact Registry, then the Flex Template is built from it. The GitHub Actions in this repository run the laptop suite and the release layer. Every merge to master is tagged with SemVer derived from the squash-merge title, and the release Action regenerates [`docs/releases/`](docs/releases/README.md) — a deterministic before/after metrics report diffed from committed evidence bundles, no GCP access needed. Worker-image registry decision: [ADR 0015](docs/adr/0015-worker-image-via-artifact-registry.md); a runnable build-and-deploy path on your own project: [`public_cloud/deploy/gcp/README.md`](public_cloud/deploy/gcp/README.md).
 
 ## Integration testing & validation reports
 
@@ -238,7 +236,7 @@ Real-run evidence flows through a fixed contract:
 
 - **Run** a tier from the run matrix ([`docs/E2E_TEST_MATRIX.md`](docs/E2E_TEST_MATRIX.md)) per the playbook ([`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md)) — GPU verdicts, Dataflow options, capacity strategy, pass criteria, launch recipes.
 - **Land** metrics + reports in the local, gitignored `runs/<JOB_ID>/` bundle (`real/` verbatim, `oss/` alias-redacted twins).
-- **Promote** bundles a release cites to `docs/releases/<version>/evidence/<JOB_ID>/` — committed, and what the release Action reads.
+- **Promote** bundles a release cites to `docs/releases/<version>/evidence/<JOB_ID>/` — the layout the release Action reads. Evidence bundles stay out of the public repo (the sensitive-content gate in `scripts/dsg/precheck.py` forbids that path); published releases carry the aggregate report only.
 - **Interpret** with the report generators in [`.github/prompts/`](.github/prompts/): the end-to-end validation report, the free-text crosscheck report, and the prompt-constraint recommender.
 
 ## Documentation map
@@ -247,10 +245,9 @@ Real-run evidence flows through a fixed contract:
 |---|---|---|
 | Decisions | [`docs/adr/`](docs/adr/README.md) | 38 ADRs — every locked decision with alternatives and primary-source citations |
 | Designs | [`docs/designs/`](docs/designs/) | visual-first design docs with regenerable figures ([`docs/designs/assets/`](docs/designs/assets/)) |
-| Guides | [`docs/`](docs/) | run playbook, CI/CD, deployment prerequisites, DDL contract guide, model layout, E2E matrix |
-| Releases | [`docs/releases/`](docs/releases/README.md) | per-version deterministic reports + promoted evidence bundles |
+| Guides | [`docs/`](docs/) | run playbook, deployment prerequisites, DDL contract guide, model layout, E2E matrix |
+| Releases | [`docs/releases/`](docs/releases/README.md) | per-version deterministic reports (aggregate metrics and charts) |
 | Articles | [`docs/articles/`](docs/articles/README.md) | the Medium series — VCS-tracked, kept in sync with the implementation |
-| Specs | `docs/superpowers/specs/` | historical point-in-time planning artifacts |
 
 ## Glossary
 
@@ -268,7 +265,7 @@ Synthetic-data concepts **as implemented here** — every term is backed by code
 - **DCR / NNDR** — distance-to-closest-record and nearest-neighbor distance ratio; low values mean synthetic rows sit suspiciously close to real ones (eval tier, branch-WIP).
 - **Freetext column** — high-cardinality text that statistical samplers can't produce; the only place the LLM generates values, always under schema-constrained decoding.
 - **Categories / categorical column** — a column with a small closed set of values; reproduced from its measured frequency table, never extended with invented values.
-- **Category proportions** — the share of each category measured in the reference sample (e.g. 40% "SEPA", 35% "SWIFT", 25% "INTERNAL") and reproduced within sampling noise.
+- **Category proportions** — the share of each category measured in the reference sample (e.g. 40% "WEB", 35% "STORE", 25% "PHONE") and reproduced within sampling noise.
 - **Clustering (exemplar selection)** — selecting *representative or diverse* rows in embedding space (centroid / greedy k-center) to condition the LLM; per-cluster generative models are a roadmap candidate.
 - **Numeric range** — observed `[min, max]` (plus null rate and decimal scale) per numeric column; synthesis stays inside it by construction.
 - **Constant** — a column with one distinct value; copied verbatim.
@@ -341,7 +338,7 @@ Apache-2.0.
 | Star / diamond / tree / chain / forest / grandparent all resolve to roles, and generate | [ADR 0037](docs/adr/0037-multi-parent-children.md) · `packages/sdfb-tests/tests/unit/contracts/test_relationship_shapes.py` (registry) · `packages/sdfb-tests/tests/unit/test_fanout_shapes.py` (DirectRunner, whole-tuple FK checks) |
 | A measured PK conflict adjusts the effective model instead of stopping the launch | [ADR 0038](docs/adr/0038-measured-conflicts-adjust-the-model.md) · `packages/sdfb-tests/tests/unit/cli/test_model_adjustment.py` · `packages/sdfb-tests/tests/unit/test_fanout_adjusted_pk.py` |
 | 87.9% then 56.5% `pk.duplicate` on random draws of an FK-bearing PK (10M rows/table) | [ADR 0035](docs/adr/0035-pk-capacity-fk-bound-members.md) — launches `2026-09-09_09_00_54-…`, `2026-09-09_16_44_42-…` |
-| 0 orphans / 10,000,000 child rows (R6 FK-enforced pair) | [`docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/`](docs/releases/v0.1.0/evidence/2026-08-26_05_01_16-3186876581127148459/) · [ADR 0033](docs/adr/0033-pool-ladder-integrity-at-scale.md) |
+| 0 orphans / 10,000,000 child rows (R6 FK-enforced pair) | job `2026-08-26_05_01_16-3186876581127148459` · [v0.1.0 release report](docs/releases/v0.1.0/report.md) (raw bundle withdrawn: it contained source-derived values) · [ADR 0033](docs/adr/0033-pool-ladder-integrity-at-scale.md) |
 | 19.1 GPU-hours of duplicated pool builds (1M-row run, 36 rebuilds) | [ADR 0020](docs/adr/0020-freetext-pools-as-persisted-artifact.md) |
 | ~7,257 CPU-s bulk generation for 1M rows; batched Pandera bounds | [`docs/designs/2026-07-27-ws6-pipeline-shape.md`](docs/designs/2026-07-27-ws6-pipeline-shape.md) |
 | Embedder bytes (133,466,304 B fp32), 512 MiB VRAM gate, CPU demotion | `packages/sdfb-core/src/sdfb_core/rag/embedding.py`, [ADR 0019](docs/adr/0019-rag-population-scoped-to-consumers.md) |
@@ -349,7 +346,7 @@ Apache-2.0.
 | Eval metrics + memorization-gate identifiers | branch `ws3-eval-framework`: `sdfb_core/evaluation/`, `config/thresholds.yml` (merge pending) |
 | Machine matrix, SDK-container and worker caps | [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md), `composer/synthetic_beam_bigquery.py`, `public_cloud/deploy/gcp/tiers.yaml` |
 | Engine-owned vLLM server (not Beam RunInference) | [ADR 0014](docs/adr/0014-vllm-model-client-owns-server.md) |
-| Beam Summit 2025 acceptance | [`docs/assets/beam-summit-2025-acceptance.png`](docs/assets/beam-summit-2025-acceptance.png) (email, 2025-05-10) |
+| Beam Summit 2025 acceptance | session *"Building Banking Synthetic Data for a Lakehouse with Gemma"* — [beamsummit.org](https://beamsummit.org) (accepted 2025-05-10) |
 | Stats glossary terms + primary-source citations (Shannon 1948, Devroye 1986, Heule et al. 2013) | [ADR 0022](docs/adr/0022-stats-driven-generation.md), [`docs/designs/2026-08-05-source-table-stats.md`](docs/designs/2026-08-05-source-table-stats.md) |
 | Architecture figure | [`docs/assets/architecture-overview.drawio`](docs/assets/architecture-overview.drawio) → `.png` (next-ai-drawio MCP export, 2026-08-31) |
 

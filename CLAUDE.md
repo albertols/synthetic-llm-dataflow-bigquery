@@ -1,6 +1,6 @@
 # synthetic-dataflow-bigquery — Claude Code project context
 
-> **Always-loaded.** Keep tight. Detailed recipes live in `.claude/skills/`; specialized work belongs to sub-agents in `.claude/agents/`. Locked decisions from planning live in the project memory directory.
+> **Always-loaded.** Keep tight. Detailed recipes live in `.claude/skills/`; specialized work belongs to sub-agents in `.claude/agents/`. Locked decisions live in [`docs/adr/`](docs/adr/README.md).
 
 ## Mission
 
@@ -14,7 +14,7 @@ Generate fictitious-but-realistic synthetic rows for a target BigQuery table, dr
 4. **No external LLM APIs.** GPT / Claude / Grok / Deepseek API calls violate the self-hosting contract. Off-pipeline benchmarking scripts are M2+ and out of M1 scope.
 5. **Relational generation is SHIPPED — this constraint is retired (v0.3.0).** A launch generates a whole connected component of `config/relationships/*.yaml` in ONE job: children are generated from their parent's landed keys, so ratio, PK uniqueness and referential integrity hold by construction (ADR 0036). A child may have several parents — star, diamond, tree, forest, 1:1 chain, arbitrary FK graph (ADR 0037). When measuring the source proves the declared model wrong, the launch adjusts the model, says so, and carries on (ADR 0038). The relationship model is the ONLY source of relational structure; table descriptions are never read for it.
 
-Locked rationale: `~/.claude/projects/-Users-serna-IdeaProjects-synthetic-dataflow-bigquery/memory/feedback_no_managed_gcp_services.md` and `…/project_synthetic_dataflow_m1_stack.md`.
+Locked rationale: [ADR 0001](docs/adr/0001-no-managed-gcp-services.md) (no managed GCP services) and [ADR 0011](docs/adr/0011-adopt-beam-vllm-model-handler.md) / [ADR 0014](docs/adr/0014-vllm-model-client-owns-server.md) (self-hosted vLLM inside the DAG).
 
 ## Hardware split
 
@@ -51,7 +51,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `packages/sdfb-core/src/sdfb_core/engines/base.py` — `GenerationEngine` ABC + `ModelClient` Protocol (the seam).
 - `packages/sdfb-beam/src/sdfb_beam/pipeline.py` — `build_pipeline()` composer.
 - `packages/sdfb-beam/src/sdfb_beam/ddl/cli.py` — DDL extractor CLI.
-- `scripts/extract_ddl.py`, `scripts/probe_gpu_dataflow.sh`, `scripts/hello_synthetic_mlx.py` — runnable entry shims (image build/push live in CI, see [ADR 0008](docs/adr/0008-ci-driven-builds.md)).
+- `scripts/extract_ddl.py`, `scripts/hello_synthetic_mlx.py` — runnable entry shims (image build/push live in CI, see [ADR 0008](docs/adr/0008-ci-driven-builds.md)).
 - Scripts follow a `scripts/<scope>/` layout (`doc/`, `e2e/`, `release/`) — convention in [`scripts/README.md`](scripts/README.md); new scripts never land at the root.
 
 ## What lives where in `.claude/`
@@ -103,7 +103,6 @@ M1 is complete end to end, laptop and Dataflow. The work since has been relation
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
 - **What changed in a release, and where to write it** (the `[Unreleased]` block the release Action promotes into the tag's GitHub Release) → [`CHANGELOG.md`](CHANGELOG.md).
 - **What's the current scope and what's deferred** → [`docs/ROADMAP.md`](docs/ROADMAP.md).
-- **Cross-session preferences and project context** → `~/.claude/projects/.../memory/MEMORY.md`.
 - **Personal-GCP E2E runs (T4, cost-capped)** → [`public_cloud/deploy/gcp/README.md`](public_cloud/deploy/gcp/README.md).
 
 ## Documentation convention — visual first

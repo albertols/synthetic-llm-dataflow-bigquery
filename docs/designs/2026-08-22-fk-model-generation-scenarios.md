@@ -4,7 +4,7 @@
 **Superseded in part by:** [`2026-08-23-referential-integrity-joint-fk-draws.md`](2026-08-23-referential-integrity-joint-fk-draws.md) / [ADR 0031](../adr/0031-joint-fk-key-draws.md) — FK columns now draw whole parent key TUPLES (composite edges were per-column here), and `fk_enforcement_summary` reports at launch what an informational edge costs.
 **Superseded in part by:** [`2026-08-24-relationships-as-config.md`](2026-08-24-relationships-as-config.md) / [ADR 0032](../adr/0032-relationships-as-config.md) — the scenarios are unchanged, but the model comes from `config/relationships/*.yaml` (not table descriptions), `--fk_contracts_json` is gone, and `informational: true` is now `enforced: false`.
 **Depends on:** [ADR 0021](../adr/0021-relational-contract-in-descriptions.md) (parent-first FK) · [ADR 0028](../adr/0028-constraint-router-relational-plan.md) (P6, relational logs)
-**Reference model:** `docs/assets/fk_relationship_example.{png,tf}` — the 6-table corp model (A→F, composite PK/FK, one out-of-DDL `JOIN_KEY`). **Local-only** (gitignored via `docs/assets/fk*`): kept off the public repo by choice; the §2 mermaid below carries the same shape for readers without the files.
+**Reference model:** `docs/assets/fk_relationship_example.{png,tf}` — the 6-table production-shaped model (A→F, composite PK/FK, one out-of-DDL `JOIN_KEY`). **Not published** (gitignored via `docs/assets/fk*`); the §2 mermaid below carries the same shape for readers without the files.
 
 Scope note: multi-table generation is M2 territory (CLAUDE.md constraint 5);
 this design opens it deliberately, on the owner's direction, staying on the
@@ -114,7 +114,7 @@ flowchart LR
 (parallel **within** a wave; waves stay sequential — children never run
 before parents landed; a failure aborts everything after the current
 chunk), and `--emit-trigger-configs DIR` which writes the **ordered
-Airflow trigger confs** instead of launching — the corp path: the
+Airflow trigger confs** instead of launching — the Composer path: the
 Composer DAG (`composer/synthetic_beam_bigquery.py`) stays single-table
 and simply gained the two params. The set's model lands as
 `runs/fk_models/<model_sha12>.mmd` for report recycling.

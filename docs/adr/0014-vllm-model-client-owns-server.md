@@ -9,8 +9,8 @@ ADR 0011 chose Beam's `apache_beam.ml.inference.vllm_inference.VLLMCompletionsMo
 But the engines (B.1/B.2, ADR 0013) do **not** call the LLM via RunInference. They call `model_client.generate_json(prompt, json_schema, …)` **synchronously**, inside `generate_batch()`, inside the DoFn — and only O(1) times (free-text pools / distribution inference), not per row. There is no PCollection of prompts to run inference over. So a RunInference handler is the wrong shape for the `ModelClient` Protocol.
 
 Two further constraints landed after ADR 0011:
-- Gemma 4 IT emits a chain-of-thought channel that must be suppressed via the **chat** template (`chat_template_kwargs={"enable_thinking": False}`) — the completions endpoint doesn't apply the chat template (see the project memory + ADR 0013).
-- Gemma 4 needs vLLM ≥ 0.21 + transformers ≥ 5.5.0 ([ADR 0012](0012-enterprise-image-build.md)); weights are pulled via the `google-cloud-storage` client, not gcloud.
+- Gemma 4 IT emits a chain-of-thought channel that must be suppressed via the **chat** template (`chat_template_kwargs={"enable_thinking": False}`) — the completions endpoint doesn't apply the chat template (see ADR 0013).
+- Gemma 4 needs vLLM ≥ 0.21 + transformers ≥ 5.5.0 (pinned in `packages/sdfb-beam/pyproject.toml`); weights are pulled via the `google-cloud-storage` client, not gcloud.
 
 ## Decision
 
@@ -30,5 +30,5 @@ This is the productionized form of the (now-deleted) `vllm_spike.py` logic, fitt
 - **Unchanged**: ADR 0013's distribution-estimator spine — the LLM is still O(1); this client serves only the free-text path.
 
 ## Related
-- [ADR 0011](0011-adopt-beam-vllm-model-handler.md) (amended), [ADR 0012](0012-enterprise-image-build.md) (vLLM 0.21 / transformers 5.5 / GCS pull), [ADR 0013](0013-distribution-estimator-spine.md) (spine).
-- `.claude/skills/model-handler.md`, `config/models.yml` (`vllm_server_kwargs`), project memory `project_gemma4_multimodal_checkpoint.md` (thinking suppression).
+- [ADR 0011](0011-adopt-beam-vllm-model-handler.md) (amended), [ADR 0013](0013-distribution-estimator-spine.md) (spine).
+- `.claude/skills/model-handler.md`, `config/models.yml` (`vllm_server_kwargs`).

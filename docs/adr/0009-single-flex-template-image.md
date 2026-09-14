@@ -29,5 +29,5 @@ Less-naive read: both roles can share one image because `/opt/apache/beam/boot` 
 ## Related
 
 - `docker/Dockerfile` — implementation.
-- `docs/CICD.md` — how this image is built/pushed/deployed.
+- [ADR 0015](0015-worker-image-via-artifact-registry.md) — where this image is pushed and pulled from; [`public_cloud/deploy/gcp/README.md`](../../public_cloud/deploy/gcp/README.md) — a runnable build/deploy path.
 - [ADR 0008](0008-ci-driven-builds.md) — where the build runs.

@@ -154,16 +154,16 @@ def test_stage_models_dry_run_submits_build():
     assert "_MODELS_BUCKET=sdfb-e2e-test123-models" in r.stdout
 
 
-def test_build_image_cloudbuild_yaml_retargets_pip_index_failloud():
+def test_build_image_cloudbuild_yaml_builds_mainline_dockerfile_unmodified():
     cfg = yaml.safe_load((GCP_DIR / "cloudbuild" / "build_image.yaml").read_text())
-    sed_step = cfg["steps"][0]
-    assert "artifactory/api/pypi/pypi-all/simple" in sed_step["script"]
-    assert "pypi.org/simple" in sed_step["script"]
-    assert "grep -q" in sed_step["script"]  # fail-loud if upstream line changes
-    build_args = " ".join(cfg["steps"][1]["args"])
-    assert "BEAM_SDK_IMAGE=docker.io/apache/beam_python3.11_sdk:2.74.0" in build_args
+    assert [s["id"] for s in cfg["steps"]] == ["build"]  # no workspace rewrites
+    build_args = " ".join(cfg["steps"][0]["args"])
+    assert "-f=docker/Dockerfile" in build_args
     assert "SDFB_SDK_CONTAINER_IMAGE_ARG=${_IMAGE_URI}" in build_args
     assert cfg["images"] == ["${_IMAGE_URI}"]
+    # The Dockerfile defaults already target public registries.
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+    assert 'ARG BEAM_SDK_IMAGE="apache/beam_python3.11_sdk:2.74.0"' in dockerfile
 
 
 def test_build_and_template_scripts_dry_run():

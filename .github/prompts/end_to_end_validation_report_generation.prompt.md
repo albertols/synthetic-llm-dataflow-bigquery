@@ -48,7 +48,7 @@ inputs.
 | Param | Example | Notes |
 |---|---|---|
 | `CSVS` | `b1_rag=runs/<JOB_ID>/b1_rag_sample.csv …` | `engine_label=path`, repeatable; sample CSVs live under `runs/<JOB_ID>/`; optional: when omitted (or a file is missing), Step 1.5 fetches the samples from `LANDING_FQN` via ADC |
-| `PROJECT` | `corp-<env>-…-lakehouse-es` | GCP project id |
+| `PROJECT` | `my-project-id` | GCP project id |
 | `SOURCE_FQN` | `<project>.<dataset>.<TABLE>` | live source table |
 | `LANDING_FQN` | `<project>.synthetic_data.<TABLE>` | synthetic landing table |
 | `QUALITY_DATASET` | `<project>.synthetic_data_quality` | validation_runs + dlq |
@@ -66,8 +66,8 @@ inputs.
 
 If a param is unknown, discover it: `SCHEMA`/columns via the schema JSON or
 `INFORMATION_SCHEMA`; `LANDING_FQN` via the `synthetic_data` dataset; `JOB_IDS`
-from the user; `BATCH_SIZE` from the pipeline launch params (composer /
-`3_import_dag.yaml`); `RUN_IDS` from `validation_runs` or the pipeline launch
+from the user; `BATCH_SIZE` from the pipeline launch params (composer DAG /
+`public_cloud/deploy/gcp/tiers.yaml`); `RUN_IDS` from `validation_runs` or the pipeline launch
 logs; `RUN_ID_COL` from the landing table schema or the pipeline launch params
 (the composer/DAG's `run_id` output column — usually named `run_id`);
 `FREETEXT_COLS` from the free-text subset discovered in Steps 2–3. If
@@ -104,7 +104,8 @@ parent-level `e2e_validation_metrics.json`, `e2e_gcp_metrics.json`,
 byte-identical to their `real/` twins; that duplication is retired). Only the
 report itself stays under `output/`. (Bundles land in the gitignored local
 `runs/` dir; a release-cited bundle is promoted to
-`docs/releases/<version>/evidence/<JOB_ID>/` — the layout is identical.)
+`docs/releases/<version>/evidence/<JOB_ID>/` — the layout is identical, and it
+stays out of the public repo: `scripts/dsg/precheck.py` rejects `**/evidence/**`.)
 
 ---
 
@@ -152,7 +153,7 @@ Read these and summarise what each engine is *designed* to do (ground
    the `_blend_pools` reference-copy mass, and the LLM-failure fallback to
    observed exemplars (the memorization path).
 5. `config/thresholds.yml` — BLOCKER/CRITICAL rules; whether a PK is registered.
-6. `.github/workflows/3_import_dag.yaml` + `composer/synthetic_beam_bigquery.py`
+6. `composer/synthetic_beam_bigquery.py` (+ `public_cloud/deploy/gcp/tiers.yaml` for personal-GCP runs)
    — the **actual default params** (`num_rows`, `batch_size`, `similarity`,
    `seed`, `client_type`, `gpu`) the runs used. Note the **`gpu` default**:
    a T4 cannot run Gemma 4, so an LLM run on T4 silently falls back to copying

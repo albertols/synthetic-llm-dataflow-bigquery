@@ -50,12 +50,12 @@ service-account-*.json
 application_default_credentials.json
 
 .github/workflows/*
-# The wildcard keeps the enterprise build/deploy workflows (ADR 0008: JFrog,
-# WIF, ARC runners) out of this personal repo — but the laptop CI gate is
-# infra-free and MUST be tracked, or no PR check ever runs.
+# Only the infra-free workflows are tracked; locally added deploy workflows
+# stay out of the repo, and CI must remain tracked or no PR check ever runs.
 !.github/workflows/ci.yml
 !.github/workflows/release_tag_report.yaml
-docs/superpowers/specs
+docs/superpowers/
+.claude/settings.local.json
 public_cloud/deploy/gcp/journal/*.jsonl
 public_cloud/deploy/gcp/journal/image_tag
 runs/
@@ -63,9 +63,13 @@ runs/
 docs/assets/fk*
 
 # Relationship models (ADR 0032): the committed ones are alias-only
-# examples; a real corp model dropped here ships in the image build and
-# must never reach git.
+# examples plus the public-dataset demo (ADR 0040); a real model dropped here
+# ships in the image build and must never reach git.
 config/relationships/*
 !config/relationships/README.md
 !config/relationships/*.example.yaml
 !config/relationships/example_*.yaml
+!config/relationships/gcp_public/
+
+# Local E2E bundles hold source-derived values (scripts/dsg/precheck.py).
+integration_tests/

@@ -117,7 +117,7 @@ k-anon floor). Mirrored in `config/thresholds.yml`.
   pool value for columns the mask machinery can now serve for free; the
   schema constraint stays as a belt-and-braces option, not the fix.
 - **Reject ALL numeric source collisions** (no multi-knot exemption):
-  destroys head fidelity on skewed columns (top account numbers ARE
+  destroys head fidelity on skewed columns (top numeric identifiers ARE
   re-emitted enum mass) and pushes `top1_delta`/entropy off their ADR 0025
   guarantees.
 - **Skip expandable pools without the constraint carve-out**: a `format`

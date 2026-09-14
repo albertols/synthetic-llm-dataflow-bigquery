@@ -66,10 +66,11 @@ and the figure `docs/designs/assets/throughput-evolution.png`; the
 operator reports the merged code's own cold and warm acceptance runs under
 50 minutes. To close the gap: export those two runs' bundles
 (`scripts/e2e/e2e_bundle_export.py`, `real/` layout) into
-`docs/releases/v0.2.0/evidence/<JOB_ID>/real/`, regenerate with
+`docs/releases/v0.2.0/evidence/<JOB_ID>/real/` locally, regenerate with
 `scripts/release/make_release_report.py --version v0.2.0 --base-ref v0.1.1
---head-ref <sha> --out-dir docs/releases`, and commit with the
-`[release-report]` marker.
+--head-ref <sha> --out-dir docs/releases`, and commit only the regenerated
+report with the `[release-report]` marker — evidence bundles carry
+source-derived values and stay out of the repository.
 
 **What this release changes on the same job shape** (10M rows per table,
 `table_1` parent + `table_2` FK child, T4 workers): wall time 93.8 min on

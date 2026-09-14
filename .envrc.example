@@ -13,22 +13,10 @@
 # real `.envrc` is gitignored.
 
 # -----------------------------------------------------------------------------
-# Corporate egress — needed when running outside GCP (laptop, M4, etc.) and
-# any outbound HTTPS hits an internal proxy. Set ONLY if your machine sits
-# behind a corp proxy; on a public network leave commented out.
+# GCP project used by the BigQuery clients (DDL extractor, reference SELECT).
+# Credentials come from `gcloud auth application-default login`.
 # -----------------------------------------------------------------------------
-# For example.com networks, the working egress proxy for googleapis.com is the
-# data-ops cluster — NOT the general browsing proxy (`browse-proxy-*`).
-# export HTTP_PROXY="http://the-proxy:8080"
-# export HTTPS_PROXY="http://the-proxy:8080"
-# export NO_PROXY="localhost,127.0.0.1,metadata.google.internal"
-
-# -----------------------------------------------------------------------------
-# Custom CA bundle — uncomment only if your proxy does TLS MITM and the
-# default `certifi` bundle isn't trusted. Path varies per machine.
-# -----------------------------------------------------------------------------
-# export REQUESTS_CA_BUNDLE="/etc/ssl/certs/corporate-ca-bundle.pem"
-# export SSL_CERT_FILE="$REQUESTS_CA_BUNDLE"
+# export GOOGLE_CLOUD_PROJECT="<your-project-id>"
 
 # -----------------------------------------------------------------------------
 # BigQuery client timeout (seconds). Default is 50; bump if you're on a slow
@@ -37,23 +25,14 @@
 # export BIGQUERY_TIMEOUT=120
 
 # -----------------------------------------------------------------------------
+# Model weights are read from local/GCS copies only — never the HF Hub at
+# runtime. Uncomment to mirror the GPU image's ENV so local runs fail the
+# same way on an accidental Hub lookup.
+# -----------------------------------------------------------------------------
+# export HF_HUB_OFFLINE=1
+# export TRANSFORMERS_OFFLINE=1
+
+# -----------------------------------------------------------------------------
 # Python — keep buffered output off so logs appear in real time.
 # -----------------------------------------------------------------------------
 export PYTHONUNBUFFERED=1
-
-# -----------------------------------------------------------------------------
-# Corporate JFrog / Artifactory — for the L4 GPU worker image (M1 §10).
-# Get exact values from the platform team or your prior SCIO build.yaml.
-# Leave RELEASER_* unset unless you're actually pushing — keeps creds out of
-# regular shells.
-# -----------------------------------------------------------------------------
-# export ARTIFACTORY_HOSTNAME="the-artifactory"
-# export ARTIFACTORY_NAMESPACE="serna"
-# export ARTIFACTORY_RELEASER_USER="<service-account>"
-# export ARTIFACTORY_RELEASER_PS="<token>"
-
-# -----------------------------------------------------------------------------
-# GCP target for Dataflow GPU jobs (M1 §10 / §11).
-# -----------------------------------------------------------------------------
-# export GCP_REGION="europe-west3"
-# export GCP_ZONE="europe-west3-b"

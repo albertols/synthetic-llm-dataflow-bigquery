@@ -8,8 +8,8 @@
 ## Context
 
 The first PK+FK run (ADR 0028 context) showed a declared FK silently
-inactive; the corp target is a 6-table relational model
-(`docs/assets/fk_relationship_example.{png,tf}`, local-only /
+inactive; the production-shaped target is a 6-table relational model
+(`docs/assets/fk_relationship_example.{png,tf}`, not published /
 gitignored: composite PK/FKs, one
 join key absent from every DDL) plus dozens of unrelated tables to
 follow. Three gaps: (1) no user-facing switch between relational and
@@ -73,7 +73,7 @@ and worker-side next to `relational_e2e`, under the once-per-plan guard.
 waves from the model; `--max-parallel` runs a wave's FK-independent
 tables concurrently (bounded by quota), waves stay sequential, first
 failure aborts the remainder. `--emit-trigger-configs` writes the
-ordered Airflow confs for the corp Composer path (the DAG itself stays
+ordered Airflow confs for the Composer path (the DAG itself stays
 single-table). The set's model lands as
 `runs/fk_models/<sha12>.mmd`.
 
@@ -111,7 +111,7 @@ redrawn.
 - Every run states its relational mode and shows its resolved model;
   "0 orphans" can no longer be misread when FK generation was off.
 - The 6-table model runs as 3 waves (`[A,C] → [B,D,E] → [F]`) with up
-  to 3 parallel jobs mid-wave; trigger-conf emission gives corp the
+  to 3 parallel jobs mid-wave; trigger-conf emission gives Composer launches the
   same order without new Composer machinery.
 - Report aliases become stable across all future runs; the exporter's
   role-based `PK_COL`/`ID_COL` naming is legacy (still used without the
