@@ -8,6 +8,9 @@ glance, with a per-table `enabled` flag that DETACHES a subgraph without
 deleting anything.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=invalid-name,missing-class-docstring,unbalanced-tuple-unpacking,unused-variable,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import pytest

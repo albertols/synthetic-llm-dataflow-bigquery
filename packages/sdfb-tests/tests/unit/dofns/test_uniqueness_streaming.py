@@ -11,6 +11,9 @@ of rows. The gate keeps working because the measured counts are fed into
 dlq_by_rule exactly as diverted envelopes were.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import apache_beam as beam

@@ -6,6 +6,9 @@ These tests pin the replacement: epoch round-trips per value type and a
 seeded uniform sampler that stays inside the observed [min, max].
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import logging

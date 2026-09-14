@@ -4,6 +4,9 @@ Loaded via importlib like the sibling e2e script tests. Exercises the pure
 shape-mining and diff functions with canned samples — no BQ, no network.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import importlib.util

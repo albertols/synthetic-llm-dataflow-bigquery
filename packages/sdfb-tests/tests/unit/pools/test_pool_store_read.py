@@ -9,6 +9,9 @@ an empty _POOL_CACHE and rebuilt all three pools. 108 rebuilds, 21 cache
 hits, all 21 inside a single two-minute window in one process.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring,protected-access,unused-argument
+
 from __future__ import annotations
 
 import pytest

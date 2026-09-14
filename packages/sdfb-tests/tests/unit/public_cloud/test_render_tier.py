@@ -1,4 +1,7 @@
 """Tests for the tier -> flex-template-parameters renderer."""
+
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=invalid-name,unused-variable
 from __future__ import annotations
 
 import importlib.util

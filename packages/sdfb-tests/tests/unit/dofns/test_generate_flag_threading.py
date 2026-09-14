@@ -1,5 +1,8 @@
 """--freetext_expansion / --prompt_constraints reach both engines (Task 8)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unused-argument
+
 from sdfb_core.contracts.schema import TableSchema
 from sdfb_core.engines.base import GenerationContext
 

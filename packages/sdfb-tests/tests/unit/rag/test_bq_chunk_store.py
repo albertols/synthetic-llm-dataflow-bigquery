@@ -2,6 +2,9 @@
 The DoFn attaches it worker-side — the pickled graph never carries a
 live client (same lifecycle rule as the vLLM subprocess)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,redefined-outer-name,reimported,unused-argument
+
 from __future__ import annotations
 
 from types import SimpleNamespace

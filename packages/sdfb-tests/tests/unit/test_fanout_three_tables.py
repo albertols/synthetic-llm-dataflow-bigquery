@@ -2,6 +2,9 @@
 A driven by C (B implied). Every FK tuple exists in its parent, every PK
 is unique, sizes follow the histograms, and A's implied edge holds."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=unnecessary-lambda-assignment
+
 from __future__ import annotations
 
 import json
@@ -117,8 +120,8 @@ def test_three_tables_by_construction(tmp_path):
           "cells": None,
           "exact_cells": False
       })
-  sinks = lambda name: dict(
-      landing_sink=WriteToJsonLines(str(tmp_path / name)),  # noqa: E731
+  sinks = lambda name: dict(  # noqa: E731
+      landing_sink=WriteToJsonLines(str(tmp_path / name)),
       dlq_sink=WriteToJsonLines(str(tmp_path / f"dlq_{name}")))
   specs = [
       TableSpec(config=b_cfg, reference_rows=b_ref, **sinks("B_TABLE")),

@@ -62,6 +62,9 @@ Usage:
         --rag-chunks-table my-proj.synthetic_rag.rag_chunks
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import argparse
@@ -235,7 +238,7 @@ def bq_client(project: str):
   try:
     from google.cloud import bigquery
     return bigquery.Client(project=project), None
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     return None, short(f"{type(e).__name__}: {e}")
 
 
@@ -243,7 +246,7 @@ def gcs_client():
   try:
     from google.cloud import storage
     return storage.Client(), None
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     return None, short(f"{type(e).__name__}: {e}")
 
 
@@ -347,7 +350,7 @@ def step4_bq_tables(ctx: Ctx) -> None:
     except NotFound:
       ctx.add(step, f"BQ table · {label}", ACTION,
               f"{bq_table_link(fqn)} — not found", _table_action(label, fqn))
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
       ctx.add(step, f"BQ table · {label}", SKIP,
               f"{bq_table_link(fqn)} — {short(f'{type(e).__name__}: {e}')}")
 
@@ -388,7 +391,7 @@ def step7_bq_datasets(ctx: Ctx) -> None:
       ctx.add(
           step, f"BQ dataset · {ds}", ACTION, f"{link} — not found",
           f"create dataset `{ds}` in the pipeline region before the tables")
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
       ctx.add(step, f"BQ dataset · {ds}", SKIP,
               f"{link} — {short(f'{type(e).__name__}: {e}')}")
 
@@ -477,7 +480,7 @@ def step9_rag_layer(ctx: Ctx) -> None:
         "9a", f"RAG dataset · {ds}", ACTION, f"{ds_link} — not found",
         f"create dataset `{ds}` in the pipeline region (one shared "
         "chunk store per project — serves every source dataset.table)")
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add("9a", f"RAG dataset · {ds}", SKIP,
             f"{ds_link} — {short(f'{type(e).__name__}: {e}')}")
 
@@ -506,7 +509,7 @@ def _rag_table_contract(ctx, client, not_found, fqn, t_link) -> bool:
     )
     ctx.add("9c", "RAG vector index", SKIP, f"{t_link} — table missing")
     return False
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add("9b", f"RAG table · {table}", SKIP,
             f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
     ctx.add("9c", "RAG vector index", SKIP, f"{t_link} — table not verified")
@@ -555,7 +558,7 @@ def _rag_vector_index(ctx, client, fqn, t_link) -> None:
           f"rag_chunks_embedding_idx ON `{fqn}`(embedding) "
           f"OPTIONS(index_type='IVF', distance_type='COSINE') — "
           "brute-force COSINE retrieval works meanwhile)")
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add("9c", "RAG vector index", SKIP,
             f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
 
@@ -598,7 +601,7 @@ def step10_freetext_pools(ctx: Ctx) -> None:
         f"`bq mk --table {proj}:{ds}.{table} "
         f"config/bq_schema/synthetic_rag/{table}.schema.json`")
     return
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add("10", "Free-text pool store", SKIP,
             f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
     return
@@ -656,7 +659,7 @@ def step11_source_stats(ctx: Ctx) -> None:
         f"`bq mk --table {proj}:{ds}.{table} "
         f"config/bq_schema/synthetic_rag/{table}.schema.json`")
     return
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add("11", "Source stats store", SKIP,
             f"{t_link} — {short(f'{type(e).__name__}: {e}')}")
     return
@@ -733,7 +736,7 @@ def _gcs_bucket(ctx, step, label, name, project):
         step, label, OK if exists else ACTION,
         link if exists else f"{link} — not found",
         "" if exists else f"create the {label.lower()} in the pipeline region")
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add(step, label, SKIP, f"{link} — {short(f'{type(e).__name__}: {e}')}")
 
 
@@ -753,7 +756,7 @@ def _gcs_prefix(ctx, step, label, uri, project, action):
                 bucket_of(uri), prefix=prefix_of(uri), max_results=1)), None)
     ctx.add(step, label, OK if blob else ACTION,
             link if blob else f"{link} — no objects", "" if blob else action)
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add(step, label, SKIP, f"{link} — {short(f'{type(e).__name__}: {e}')}")
 
 
@@ -767,7 +770,7 @@ def _gcs_object(ctx, step, label, uri, project, action):
     exists = client.bucket(bucket_of(uri)).blob(prefix_of(uri)).exists()
     ctx.add(step, label, OK if exists else ACTION,
             link if exists else f"{link} — not found", "" if exists else action)
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add(step, label, SKIP, f"{link} — {short(f'{type(e).__name__}: {e}')}")
 
 
@@ -965,7 +968,7 @@ def step12_relationships(ctx: Ctx) -> None:
     return
   try:
     registry = _load_registry(uri)
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     ctx.add(
         "12", "Relationship models", ACTION,
         f"`{uri}` — {short(f'{type(e).__name__}: {e}')}",
@@ -999,7 +1002,7 @@ def step12_relationships(ctx: Ctx) -> None:
         checked += 1
       except NotFound:
         (missing if relations.enabled else disabled_missing).append(fqn)
-      except Exception:
+      except Exception:  # pylint: disable=broad-exception-caught
         continue
   detail = f"{checked} of {checked + len(missing) + len(disabled_missing)} present"
   if disabled_missing:

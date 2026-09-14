@@ -1,4 +1,7 @@
 """Unit tests for scripts/e2e/e2e_fetch_samples.py (importlib idiom)."""
+
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
 from __future__ import annotations
 
 import importlib.util

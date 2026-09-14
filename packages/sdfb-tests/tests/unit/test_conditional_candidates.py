@@ -9,6 +9,9 @@ candidates per shared value with a seeded Top-M, and CoGroupByKeys them
 onto the driving keys before batching.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import ast

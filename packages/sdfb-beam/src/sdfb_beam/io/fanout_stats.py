@@ -9,6 +9,9 @@ re-launch pays nothing. A 5k-row sample cannot measure this: it almost
 never holds two rows of one parent (design §10).
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import json

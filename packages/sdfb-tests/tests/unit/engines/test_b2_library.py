@@ -11,6 +11,9 @@ used so no GPU/GCP/torch/sdgx is required. ``sdgx`` itself is only fitted on
 the M4 (the production path); its absence here is the intended fallback.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring,protected-access,redefined-outer-name,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import pickle

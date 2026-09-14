@@ -19,6 +19,9 @@ deferred into method bodies — that property is itself part of the contract
 (`test_import_does_not_require_heavy_deps`).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,protected-access,redefined-outer-name,reimported,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import json

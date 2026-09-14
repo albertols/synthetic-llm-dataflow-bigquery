@@ -2,6 +2,9 @@
 at the per-batch line of defense — specifically duplicate-PK detection
 which is structurally impossible to catch at the per-record stage."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import apache_beam as beam

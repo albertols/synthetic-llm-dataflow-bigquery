@@ -1,5 +1,8 @@
 """ADR 0036: the Generate DoFn drives the engine from parent keys."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import logging

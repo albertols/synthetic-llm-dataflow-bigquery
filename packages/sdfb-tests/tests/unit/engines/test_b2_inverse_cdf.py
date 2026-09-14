@@ -6,6 +6,9 @@ sampling over the profile's decile vector keeps the observed CDF shape
 while every draw stays novel and in-range.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 from datetime import date
 
 import numpy as np

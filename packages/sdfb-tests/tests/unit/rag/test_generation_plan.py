@@ -6,6 +6,9 @@ method), which are shaped identifiers routed off the LLM, which are
 constants / categoricals / numeric / temporal samplers.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,redefined-outer-name,reimported,unused-argument
+
 from __future__ import annotations
 
 import json

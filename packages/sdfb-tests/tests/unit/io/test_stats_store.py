@@ -1,5 +1,8 @@
 """BigQuerySourceStatsStore + driver stats emission (Task 15)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 import json
 import pickle
 from types import SimpleNamespace

@@ -9,6 +9,9 @@ sparsity categories keep their empirical mass, the blend applies only
 within the substantive remainder.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import random

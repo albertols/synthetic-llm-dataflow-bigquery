@@ -13,6 +13,9 @@ Exit code is non-zero when the models do not load, so it doubles as a
 pre-commit check on `config/relationships/`.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import argparse

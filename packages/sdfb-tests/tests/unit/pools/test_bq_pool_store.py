@@ -4,6 +4,9 @@ Mirrors tests/unit/rag/test_bq_chunk_store.py: a fake client stands in for
 google.cloud.bigquery so nothing here touches GCP.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,missing-class-docstring,protected-access,unused-variable,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 from sdfb_beam.pools.store import BigQueryFreeTextPoolStore, pool_to_row, row_to_pool

@@ -10,6 +10,9 @@ warm path free and keeps the cold path (bulk embed on CUDA, then demote)
 byte-identical.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,unused-argument
+
 from __future__ import annotations
 
 import sys

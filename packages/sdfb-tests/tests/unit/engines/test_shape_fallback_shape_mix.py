@@ -10,6 +10,9 @@ from the profile's shape mix when it is expandable, and only then fall
 back to the length-bucket relaxation.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring,protected-access
+
 from __future__ import annotations
 
 import pytest

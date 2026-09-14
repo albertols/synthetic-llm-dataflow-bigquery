@@ -13,6 +13,9 @@ Mirrors `sdfb_beam.pools.store.BigQueryFreeTextPoolStore` deliberately —
 lazy client, pickle-safe, injectable fake for laptop tests.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import logging
@@ -208,7 +211,7 @@ def _column_values(query_job, column: str) -> list[str]:
       try:
         table = to_arrow()
         return [v for v in table.column(column).to_pylist() if v is not None]
-      except Exception as exc:
+      except Exception as exc:  # pylint: disable=broad-exception-caught
         log_milestone(
             "source_values_arrow_fallback",
             level=logging.WARNING,

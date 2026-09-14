@@ -5,6 +5,9 @@ importlib the same way `test_deployment_prerequisites.py` loads
 `scripts/deployment_prerequisites.py` (see that file's docstring/idiom).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import importlib.util

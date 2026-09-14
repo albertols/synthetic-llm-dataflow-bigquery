@@ -11,6 +11,9 @@ it. The collapsed mask keeps whitespace runs literal while letting
 digit/letter run lengths vary.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring
+
 import random
 import re
 

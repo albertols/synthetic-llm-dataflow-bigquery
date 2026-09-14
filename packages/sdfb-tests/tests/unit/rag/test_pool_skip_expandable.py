@@ -11,6 +11,9 @@ columns keep their pool AND their draw path stops bypassing it — a silent
 `format` clause on an expandable column was previously decorative.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import logging

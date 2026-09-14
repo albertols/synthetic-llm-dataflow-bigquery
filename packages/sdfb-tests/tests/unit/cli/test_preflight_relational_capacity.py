@@ -6,6 +6,9 @@ silently inactive. Both become launcher-side stops. The PK itself now
 comes from `config/relationships/` (ADR 0032).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,protected-access,superfluous-parens,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import pytest

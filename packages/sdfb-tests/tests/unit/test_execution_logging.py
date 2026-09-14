@@ -4,6 +4,9 @@ reference is landing-table-qualified so `_full_report.md` +
 `worker_logs.jsonl` copy-paste straight into oss/ replacements.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring,unused-argument
+
 from __future__ import annotations
 
 import logging

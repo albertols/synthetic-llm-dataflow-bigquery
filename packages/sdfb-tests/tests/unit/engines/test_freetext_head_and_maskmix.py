@@ -16,6 +16,9 @@ Two crosscheck findings from the post-ADR-0023 cold baseline:
     diversity instead.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,protected-access
+
 from __future__ import annotations
 
 import collections

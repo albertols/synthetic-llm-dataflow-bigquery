@@ -32,6 +32,9 @@ forced to a parent — v1 collapses partial-NULL patterns to all-NULL,
 which is the dominant real shape.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from bisect import bisect_right

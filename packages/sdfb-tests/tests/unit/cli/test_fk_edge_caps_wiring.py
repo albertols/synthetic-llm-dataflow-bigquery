@@ -1,6 +1,9 @@
 """ADR 0035: the FK key-sample cap preflight sizes for a child's PK is
 what the composer broadcasts — per edge, in-set parents only."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from sdfb_beam.cli.run_pipeline import (

@@ -17,6 +17,9 @@ with-replacement *draw* in ``sample()`` (the ``rng`` argument), not from
 rebuilding the pool.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=broad-exception-caught,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import threading

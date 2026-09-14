@@ -5,6 +5,9 @@ directory is the default, a single file works, and a `gs://` override
 needs no image rebuild. Absence is legitimate; a broken file is not.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,missing-class-docstring,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import logging

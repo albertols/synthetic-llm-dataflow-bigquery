@@ -4,6 +4,9 @@ Full-row duplicates and repeated identity-column values divert to the
 DLQ (first occurrence lands) instead of failing the whole batch.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,redefined-outer-name,reimported
+
 from __future__ import annotations
 
 import apache_beam as beam

@@ -23,6 +23,9 @@ Plus the per-job bundle layout:
      `real/` holds the single canonical copy.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import importlib.util

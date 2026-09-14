@@ -14,6 +14,9 @@ All run on the laptop with a deterministic injected/ default embedder — no
 model download, no GPU, no GCP.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import logging

@@ -1,5 +1,8 @@
 """Tests for `derive_record_model` — the dynamic Pydantic class factory."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=invalid-name
+
 from __future__ import annotations
 
 from datetime import datetime

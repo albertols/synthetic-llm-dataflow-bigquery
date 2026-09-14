@@ -6,6 +6,9 @@ engine code. Old import paths stay alive as shims — the identity checks
 pin that both paths resolve to the SAME objects, not divergent copies.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 

@@ -123,7 +123,7 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
             rows=len(rows),
             seconds=round(time.monotonic() - t_write, 1),
         )
-      except Exception as e:
+      except Exception as e:  # pylint: disable=broad-exception-caught
         # Pools are an optimisation, never a dependency: emit the
         # rows anyway so the AwaitFreeTextPools gate opens and
         # Generate falls back to building pools itself.

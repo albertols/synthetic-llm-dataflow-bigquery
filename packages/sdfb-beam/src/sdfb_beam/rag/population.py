@@ -37,6 +37,9 @@ at most `_MAX_EMBED_ROWS` (1024) of the sample (see
 `sdfb_core.engines.b1_rag.engine`).
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import json

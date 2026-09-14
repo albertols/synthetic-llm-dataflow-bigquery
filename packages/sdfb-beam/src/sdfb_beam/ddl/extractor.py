@@ -299,7 +299,7 @@ def _get_storage_info(
         client.query(partition_query, timeout=timeout).result(timeout=timeout))
     if rows:
       storage_info["num_partitions"] = rows[0].num_partitions
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     logger.warning("Could not get partition count: %s: %s", type(e).__name__, e)
 
   return storage_info

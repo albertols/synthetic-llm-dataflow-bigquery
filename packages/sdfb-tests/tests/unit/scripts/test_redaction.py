@@ -4,6 +4,9 @@ Loaded via importlib the same way `test_e2e_bundle_export.py` loads
 `scripts/e2e/e2e_bundle_export.py` (see that file's docstring/idiom).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import importlib.util

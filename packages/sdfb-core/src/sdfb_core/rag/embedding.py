@@ -24,6 +24,9 @@ REFs:
   - GReaT row serialization (what we embed): arXiv 2210.06280
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import hashlib
@@ -55,7 +58,7 @@ def _resolve_auto_device(torch) -> str:
     return "cuda"
   try:
     free_bytes = mem_get_info()[0]
-  except Exception:
+  except Exception:  # pylint: disable=broad-exception-caught
     return "cuda"
   if free_bytes >= _MIN_FREE_VRAM_BYTES:
     return "cuda"
@@ -261,7 +264,7 @@ class BgeEmbedder:
       # 2026-07-26 run turned one OOM into 11 retries.
       try:
         self._model = model.to(device)
-      except Exception as exc:
+      except Exception as exc:  # pylint: disable=broad-exception-caught
         if device != "cuda" or not _is_cuda_oom(torch, exc):
           raise
         log_milestone(

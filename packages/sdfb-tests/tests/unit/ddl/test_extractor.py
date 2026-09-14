@@ -6,6 +6,9 @@ extractor's output deserializes cleanly into `TableSchema`, closing the
 loop with the codegen test suite.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock

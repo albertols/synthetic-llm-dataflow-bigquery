@@ -28,6 +28,9 @@ the worker. Never shells out to `gsutil`. The heavy import stays inside
 the function so importing this module on a bare laptop is dependency-free.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import logging

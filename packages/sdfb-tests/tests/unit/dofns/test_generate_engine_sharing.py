@@ -16,6 +16,9 @@ so the single-DoFn lifecycle (`engine_setup` → `engine_teardown` →
 `client_teardown`) is unchanged.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=broad-exception-caught,import-outside-toplevel,missing-class-docstring,protected-access,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import threading

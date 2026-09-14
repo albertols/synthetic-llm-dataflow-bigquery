@@ -19,6 +19,9 @@ entity: BLUE = source/reference, ORANGE = the degenerate case,
 AQUA = the fixed/derived quantity.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import math

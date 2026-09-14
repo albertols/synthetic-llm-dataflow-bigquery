@@ -11,6 +11,9 @@ novel-range behavior (b1_rag/profile.py `_profile_temporal`).
 Pure stdlib + the shared text_shapes detector. No Beam, no GCP, no torch.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
@@ -40,11 +43,8 @@ _MIN_QUANTILE_POINTS = 2
 _MAX_SECONDS_OF_DAY = 86_399.999_999
 
 
-def classify_temporal_values(
-    values: Sequence[object]
-) -> tuple[
-    str, str |
-    None] | None:  # noqa: PLR0911 — type classifier; sequential returns read clearer than nesting
+def classify_temporal_values(  # noqa: PLR0911 — type classifier; sequential returns read clearer than nesting
+    values: Sequence[object]) -> tuple[str, str | None] | None:
   """``(value_type, strftime_format)`` when EVERY value is uniformly
     temporal, else ``None`` (mixed types/formats stay on their existing
     route — same all-or-nothing contract as ``detect_temporal_format``)."""

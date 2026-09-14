@@ -11,6 +11,9 @@ columns (≤ `_REFERENCE_BLEND_MAX_DISTINCT` observed distinct values) —
 the same by-design category reuse the substantive copy metric exempts.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unused-argument
+
 from __future__ import annotations
 
 import logging

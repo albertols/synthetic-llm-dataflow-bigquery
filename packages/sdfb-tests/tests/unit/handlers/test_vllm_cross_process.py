@@ -14,6 +14,9 @@ bound loopback port is a mutex every process can see — and the same
 network is what makes the existing reuse probe work across them.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import io

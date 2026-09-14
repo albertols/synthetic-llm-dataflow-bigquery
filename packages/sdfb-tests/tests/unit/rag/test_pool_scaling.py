@@ -2,6 +2,9 @@
 multiple bounded calls. Closes the 28-619x oversampling of the 2026-07-19
 run (3 FREE_TEXT columns capped at 32 values over 1000 rows)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unused-argument
+
 from __future__ import annotations
 
 from sdfb_core.contracts import TableSchema

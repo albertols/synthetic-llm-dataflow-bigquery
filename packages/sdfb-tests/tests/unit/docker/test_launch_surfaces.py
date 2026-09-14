@@ -11,6 +11,9 @@ The composer check is textual (the DAG imports airflow, which is not a
 laptop dependency) — same trade-off the file's other referencers accept.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import json

@@ -45,8 +45,8 @@ STATUS_PASSED = "PASSED"
 STATUS_FAILED_BLOCKER = "FAILED_BLOCKER"
 
 
-class BlockerThresholdExceeded(
-    RuntimeError):  # noqa: N818 — name fixed by validation-mode-a skill
+class BlockerThresholdExceeded(  # noqa: N818 — name fixed by validation-mode-a skill
+    RuntimeError):
   """Raised to FAIL the Dataflow job when the BLOCKER gate trips."""
 
 

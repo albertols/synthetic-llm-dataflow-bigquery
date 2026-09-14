@@ -6,6 +6,9 @@ statistical backend (reported via `backend=`), and free-text pools build
 lazily per batch, so there is no `pool_sources` field at setup time.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,protected-access,redefined-outer-name,reimported,unused-argument
+
 from __future__ import annotations
 
 import json

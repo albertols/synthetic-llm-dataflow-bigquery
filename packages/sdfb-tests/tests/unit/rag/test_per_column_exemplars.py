@@ -2,6 +2,9 @@
 column C seeds from C's own values (store chunks when present, locally
 embedded values otherwise) — not from whole-row sentences that dilute C."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=unused-argument
+
 from __future__ import annotations
 
 from sdfb_core.contracts import TableSchema

@@ -6,6 +6,9 @@ Fixtures are the four clauses of the 2026-08-21 first PK+FK run
 opaque key whose binary fallback memorized 58 source values.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring
+
 from __future__ import annotations
 
 import random

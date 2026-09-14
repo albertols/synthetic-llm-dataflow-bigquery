@@ -5,6 +5,9 @@ These exercise only the static JSON-extraction helpers, which never import
 So they run on the laptop + CI without the `[mlx]` extra — no `@pytest.mark.gpu`.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import pytest

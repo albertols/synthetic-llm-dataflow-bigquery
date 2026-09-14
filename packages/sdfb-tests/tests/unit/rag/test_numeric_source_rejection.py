@@ -16,6 +16,9 @@ same seam:
     frequent codes keep their head fidelity.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access,unused-argument
+
 from __future__ import annotations
 
 import logging

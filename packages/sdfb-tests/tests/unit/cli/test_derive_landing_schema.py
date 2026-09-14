@@ -8,6 +8,9 @@ behaviour: writing the **bare array** (not `{"fields": …}`), and the
 Pure sdfb-core — no Beam, no GCP; runs on the laptop.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=redefined-outer-name
+
 from __future__ import annotations
 
 import importlib.util

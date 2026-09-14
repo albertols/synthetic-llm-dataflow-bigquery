@@ -14,6 +14,9 @@ Contract (from `.claude/skills/engine-contract.md`):
   5. `test_teardown_releases_state` — `generate_batch` after `teardown()` raises.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,redefined-outer-name,reimported
+
 from __future__ import annotations
 
 import pytest

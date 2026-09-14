@@ -5,6 +5,9 @@ the legacy string. One parse site, one deterministic renderer; the legacy
 string form must render byte-identically to its own text (compat pin).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring
+
 import pytest
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.prompt_constraint import (

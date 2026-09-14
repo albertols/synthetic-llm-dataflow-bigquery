@@ -1,5 +1,8 @@
 """llm_prompt_constraint: DDL description → profile → pool prompt (Task 10)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unused-argument
+
 import numpy as np
 from sdfb_core.contracts.schema import TableSchema
 from sdfb_core.engines.b1_rag.engine import _build_pool_prompt

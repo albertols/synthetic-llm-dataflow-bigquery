@@ -14,6 +14,9 @@ This module is pure stdlib (``logging``/``shlex``/``re``) — sdfb-core must
 stay Beam-free. Beam metric counterparts live in ``sdfb_beam``.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import contextlib

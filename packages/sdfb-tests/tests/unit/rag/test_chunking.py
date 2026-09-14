@@ -4,6 +4,9 @@ One `row_doc` chunk per row (chunk_index=0, byte-identical to the GReaT
 serialization B.1 embeds) plus one `free_text_col` chunk per non-null
 free-text column value (chunk_index 1..k in declared order)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unbalanced-tuple-unpacking,wrong-import-position
+
 from __future__ import annotations
 
 import hashlib

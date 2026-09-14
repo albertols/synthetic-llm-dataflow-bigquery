@@ -32,9 +32,8 @@ def _decimal_strategy(precision: int, scale: int) -> st.SearchStrategy[Decimal]:
   )
 
 
-def _scalar_strategy(
-    field: FieldSchema
-) -> st.SearchStrategy:  # noqa: PLR0911 — type dispatch; sequential returns read clearer than nesting
+def _scalar_strategy(  # noqa: PLR0911 — type dispatch; sequential returns read clearer than nesting
+    field: FieldSchema) -> st.SearchStrategy:
   """Strategy for a single non-repeated, non-struct field."""
   t = field.bq_type
   if t == "STRING":

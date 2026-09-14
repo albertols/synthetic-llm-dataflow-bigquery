@@ -5,6 +5,9 @@ else — which tables travel together, the order, fk_parent_landing, the
 sibling source tables — comes from `config/relationships/`.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 from sdfb_beam.cli.run_pipeline import (

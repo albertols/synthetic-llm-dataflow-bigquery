@@ -34,7 +34,7 @@ def test_bigquery_connection(project: str,
   try:
     client = bigquery.Client(project=project)
     client.query("SELECT 1", timeout=timeout).result(timeout=timeout)
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     elapsed = time.time() - start
     logger.error(
         "BigQuery connection FAILED after %.1fs: %s: %s",

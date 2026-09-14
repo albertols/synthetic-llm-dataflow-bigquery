@@ -7,6 +7,9 @@ A relaxed per-position template generates verified-novel in-format values
 without the LLM, exactly as b2_library/freetext.py already does.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access,unused-argument
+
 from __future__ import annotations
 
 import pytest

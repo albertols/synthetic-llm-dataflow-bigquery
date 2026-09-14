@@ -8,6 +8,9 @@ Both derive from the same `TableSchema` source-of-truth, so any divergence
 here means one side has a bug the other doesn't catch.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=invalid-name
+
 from __future__ import annotations
 
 from hypothesis import HealthCheck, given, settings

@@ -1,5 +1,8 @@
 """Unit tests for the pure-Python Mode-A validation core (M1 §12)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,redefined-outer-name,reimported
+
 from __future__ import annotations
 
 import json

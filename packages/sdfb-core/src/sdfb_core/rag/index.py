@@ -21,6 +21,9 @@ REFs:
   - spec §3 step 2: "Flat beats IVF below ~50k vectors, avoids IVF nondeterminism"
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import math

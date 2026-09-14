@@ -7,6 +7,9 @@ and bumps a Beam counter (committed only by the surviving bundle, which
 is exactly the invisible case).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import pytest

@@ -17,6 +17,9 @@ REF: .claude/skills/engine-contract.md
 REF: .claude/skills/beam-dofn.md
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import logging
@@ -600,7 +603,7 @@ class GenerateRecordsDoFn(beam.DoFn):
             seconds=round(time.monotonic() - t0, 1),
         )
       self._batch_seconds.update(int((time.monotonic() - t0) * 1000))
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
       self._failed.inc()
       yield beam.pvalue.TaggedOutput(
           "failed",

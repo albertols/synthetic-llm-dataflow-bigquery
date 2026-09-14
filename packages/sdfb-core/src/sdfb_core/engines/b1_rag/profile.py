@@ -20,6 +20,9 @@ where NumPy is used and deferred-imported.
 REF: spec §2 fidelity primitives; ADR 0013 distribution-estimator spine.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import logging

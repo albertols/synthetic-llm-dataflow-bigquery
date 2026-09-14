@@ -1,5 +1,8 @@
 """ADR 0036 launcher: roles -> measurement -> derived rows -> config."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,protected-access,redefined-outer-name,unused-argument,unused-variable
+
 from __future__ import annotations
 
 import pytest

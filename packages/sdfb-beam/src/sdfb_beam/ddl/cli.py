@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
   except KeyboardInterrupt:
     logger.warning("Pipeline interrupted by user (Ctrl+C).")
     return 130
-  except Exception:
+  except Exception:  # pylint: disable=broad-exception-caught
     logger.exception("DDL extraction pipeline failed.")
     return 1
 

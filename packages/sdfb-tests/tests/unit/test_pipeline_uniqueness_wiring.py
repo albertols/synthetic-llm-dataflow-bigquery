@@ -2,6 +2,9 @@
 `EnforceUniqueness` so the exact barrier shuffles rows as value tuples
 (ADR 0034) — graph-construction only, never executed."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=unbalanced-tuple-unpacking
+
 from __future__ import annotations
 
 import apache_beam as beam

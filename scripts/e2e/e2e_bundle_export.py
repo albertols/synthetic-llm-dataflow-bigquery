@@ -49,6 +49,9 @@ Usage:
         #                                keeps the single canonical copy)
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import argparse

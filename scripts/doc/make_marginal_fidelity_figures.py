@@ -25,6 +25,9 @@ BLUE = source truth, ORANGE = the defective R1 sampler, AQUA = the wave-3
 sampler. The OKLab separation check runs on every regeneration.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import math

@@ -1,6 +1,9 @@
 """WS2 §4b.1: the --build_rag_layer population branch, DirectRunner +
 HashingEmbedder + in-memory sink. Chunk → embed → BQ-row shape."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,redefined-outer-name,reimported,unbalanced-tuple-unpacking,unused-argument
+
 from __future__ import annotations
 
 import apache_beam as beam

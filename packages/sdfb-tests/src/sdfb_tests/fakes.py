@@ -7,6 +7,9 @@ engines (B.1 RAG, B.2 library-wrapper) live in their respective
 worktrees under `sdfb_core/engines/`.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=broad-exception-caught,wrong-import-position
+
 from __future__ import annotations
 
 import random

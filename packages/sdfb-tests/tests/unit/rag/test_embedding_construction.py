@@ -10,6 +10,9 @@ constructor fixes both; these tests pin that behavior with fake
 `transformers`/`torch` modules so they run on a bare laptop.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=broad-exception-caught,import-outside-toplevel,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import sys

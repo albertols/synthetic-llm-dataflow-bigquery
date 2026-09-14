@@ -8,6 +8,9 @@ column, target) — hands completed pools to the retry, like the module-level
 vLLM server reuse (_SERVER_REFS) already does for the server.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring,protected-access,unused-argument
+
 from __future__ import annotations
 
 import pytest

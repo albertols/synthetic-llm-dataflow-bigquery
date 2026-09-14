@@ -9,6 +9,9 @@ Copies `BigQueryFreeTextPoolStore`'s structure verbatim — including the
 0dfb1a3 pickle fix: the lazy client is a cache, never pickled state.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from typing import Any

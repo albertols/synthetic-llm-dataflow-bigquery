@@ -12,6 +12,9 @@ drawn tuple exists in the parent), marginal fidelity (the child's own
 value shares survive the restriction), and determinism.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring
+
 from __future__ import annotations
 
 import random

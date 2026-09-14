@@ -10,6 +10,9 @@ the DoFn's job. Loud-failure is preserved: a boot error raises out of the
 first LLM call instead of being swallowed.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=unused-argument
+
 from __future__ import annotations
 
 from types import SimpleNamespace

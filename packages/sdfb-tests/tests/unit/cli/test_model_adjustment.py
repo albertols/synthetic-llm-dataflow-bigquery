@@ -9,6 +9,9 @@ model, the fan-out histogram is left untouched, and the landing table
 reproduces the source's key-repeat distribution by construction.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,redefined-outer-name,reimported,unbalanced-tuple-unpacking,unspecified-encoding,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import logging

@@ -7,6 +7,9 @@ competes with a resident embedder. Fake torch modules keep this laptop-
 runnable and deterministic.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,redefined-outer-name,reimported,unused-argument
+
 from __future__ import annotations
 
 import sys

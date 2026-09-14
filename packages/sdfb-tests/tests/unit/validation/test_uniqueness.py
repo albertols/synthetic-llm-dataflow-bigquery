@@ -1,5 +1,8 @@
 """Unit tests for `row_digest` — the pure digest feeding the uniqueness gate."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from sdfb_core.validation.uniqueness import row_digest

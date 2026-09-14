@@ -4,6 +4,9 @@ The relational input is the table's entry in `config/relationships/`;
 the table description is never read for it.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 import pytest
 from sdfb_beam.cli.preflight import preflight
 from sdfb_core.contracts import TableSchema

@@ -6,6 +6,9 @@ class. `google.cloud.bigquery` is imported lazily so the module (and its
 tests, via an injected fake client) work on the laptop.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,5 @@
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-module-docstring
 from sdfb_core.seeding import derive_batch_seed, derive_key_seed
 
 

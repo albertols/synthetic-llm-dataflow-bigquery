@@ -92,7 +92,7 @@ def _collapsed_gate(profile: ColumnProfile):
   return gate
 
 
-def _pool_schema(column_name: str) -> dict:
+def _pool_schema(column_name: str) -> dict:  # pylint: disable=unused-argument
   """JSON schema for the bounded-pool guided-decoding call.
 
     Asks for an object with a ``values`` array of strings — the production
@@ -394,7 +394,7 @@ class FreeTextHook:
     values: frozenset[str] | None
     try:
       values = self._source_value_store.fetch_distinct(column)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone(
           "freetext_pool_source_filter_error",
           level=logging.WARNING,
@@ -530,7 +530,7 @@ class FreeTextHook:
             pool.append(v)
         if len(pool) >= self._pool_size:
           break
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
       if self._strict:
         raise
       # Per-call generation failure: exemplar fallback is allowed, but

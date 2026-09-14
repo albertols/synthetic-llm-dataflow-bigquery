@@ -9,6 +9,9 @@ now emit a WARNING milestone ``freetext_llm_fallback`` (Task 1's
 ``log_milestone``) before returning the exemplar fallback.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import logging

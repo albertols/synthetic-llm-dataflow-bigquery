@@ -9,6 +9,9 @@ digit/letter run lengths may vary (novelty stays possible), whitespace runs
 and punctuation must match an observed mask exactly.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,unused-argument
+
 from __future__ import annotations
 
 from sdfb_core.engines.b1_rag.engine import _pool_llm_yield

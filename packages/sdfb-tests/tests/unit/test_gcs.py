@@ -4,6 +4,9 @@ The `google.cloud.storage` client is mocked by injecting a fake module into
 `sys.modules`, so these run on a bare laptop with no GCP deps installed.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=broad-exception-caught,import-outside-toplevel,missing-class-docstring,redefined-outer-name
+
 from __future__ import annotations
 
 import sys

@@ -5,6 +5,9 @@ branch so steps 4-8 land on SKIP without touching the network. The local /
 derive steps (1, 2, 3, 8c) and the report/exit-code contract run for real.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import importlib.util

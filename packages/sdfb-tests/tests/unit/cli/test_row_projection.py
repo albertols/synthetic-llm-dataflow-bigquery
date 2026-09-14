@@ -23,6 +23,9 @@ and the 2.0099 mean that turns B_TABLE's 210,958 rows into E_TABLE's
 423,999.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,protected-access,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import pytest

@@ -33,6 +33,9 @@ selects a CPU smoke (no L4) — see below.
 
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from airflow import models

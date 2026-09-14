@@ -17,6 +17,9 @@ REFs:
   - https://beam.apache.org/documentation/programming-guide/#additional-outputs
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import functools
@@ -1371,7 +1374,7 @@ class _BlockerGateDoFn(beam.DoFn):
     which left zero trace in `synthetic_data_quality.validation_runs`.
     """
 
-  def process(self, row: dict, wait_on_write=None):
+  def process(self, row: dict, wait_on_write=None):  # pylint: disable=unused-argument
     if row.get("status") == STATUS_FAILED_BLOCKER:
       raise BlockerThresholdExceeded(
           f"run_id={row.get('run_id')} blocker_count={row.get('blocker_count')} "

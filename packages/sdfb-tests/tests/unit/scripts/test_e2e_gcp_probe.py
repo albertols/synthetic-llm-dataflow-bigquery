@@ -14,6 +14,9 @@ test's docstring for why the parameterized-query path is unit-testable
 without mocking `google.cloud.bigquery` itself.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,protected-access,redefined-outer-name,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import importlib.util

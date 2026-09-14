@@ -6,6 +6,9 @@ Acceptance #2 (DLQ populated on invalid records) is covered by the
 unit tests on `ValidateRecordDoFn` and `PanderaValidateBatchDoFn`.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=invalid-name
+
 from __future__ import annotations
 
 import json

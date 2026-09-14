@@ -13,6 +13,9 @@ and the shape fallback reject against it, so a persisted pool cannot
 contain a source value by construction.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import logging

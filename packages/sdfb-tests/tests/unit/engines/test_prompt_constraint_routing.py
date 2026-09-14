@@ -6,6 +6,9 @@ derived length hint suppression, guided-decoding pattern override, and the
 non-STRING unsupported warning.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,protected-access,unused-argument
+
 from __future__ import annotations
 
 import logging

@@ -34,6 +34,9 @@ Pure-Python module: NO `apache_beam` / `torch` / `vllm` / `faiss` / `numpy`
 imports at module scope. Heavy deps are deferred into the seams.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import functools
@@ -528,7 +531,7 @@ class B1RagEngine(GenerationEngine):
     if fetch_frequent is not None:
       try:
         frequent = fetch_frequent(name, _NUMERIC_KANON_MIN_COUNT)
-      except Exception as exc:
+      except Exception as exc:  # pylint: disable=broad-exception-caught
         log_milestone(
             "numeric_kanon_filter_error",
             level=logging.WARNING,
@@ -690,7 +693,7 @@ class B1RagEngine(GenerationEngine):
       raw = {name: columns[name][i] for name in self._column_order}
       try:
         yield self._record_model.model_validate(raw)
-      except Exception:
+      except Exception:  # pylint: disable=broad-exception-caught
         # Repair-loop budget / DLQ routing belong downstream in the
         # DoFn; the engine silently drops un-coercible candidates.
         continue
@@ -761,7 +764,7 @@ class B1RagEngine(GenerationEngine):
         raw = {name: columns[name][i] for name in self._column_order}
         try:
           yield self._record_model.model_validate(raw)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
           continue
 
   # -- internals ----------------------------------------------------------
@@ -1068,7 +1071,7 @@ class B1RagEngine(GenerationEngine):
       return {}
     try:
       fetched = store.fetch(ctx.reference_digest, ctx.model_uri)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone("freetext_pool_store_error", error=type(exc).__name__)
       return {}
     # An empty values array is not a usable pool — build instead of
@@ -1188,7 +1191,7 @@ class B1RagEngine(GenerationEngine):
           pools[job[0].name] = future.result()
         except ModelClientTransientError as e:
           not_ready.append((job, e))
-        except Exception as e:  # re-raised below, after all columns land
+        except Exception as e:  # re-raised below, after all columns land  # pylint: disable=broad-exception-caught
           if first_error is None:
             first_error = e
     first_error = self._retry_not_ready_ladders(not_ready, pools, first_error)
@@ -1220,7 +1223,7 @@ class B1RagEngine(GenerationEngine):
       )
       try:
         pools[prof.name] = self._infer_free_text_pool(*job)
-      except Exception as e:
+      except Exception as e:  # pylint: disable=broad-exception-caught
         if first_error is None:
           first_error = e
     return first_error
@@ -1520,7 +1523,7 @@ class B1RagEngine(GenerationEngine):
       return frozenset()
     try:
       values = store.fetch_distinct(column)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone(
           f"{milestone}_error",
           level=logging.WARNING,
@@ -1721,7 +1724,7 @@ class B1RagEngine(GenerationEngine):
       # Never the exemplar fallback (lax mode included): the caller
       # retries this column once its siblings land (ADR 0033).
       raise
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
       if self._ctx is not None and self._ctx.strict_freetext:
         raise
       # Per-call generation failure: exemplar fallback is allowed, but

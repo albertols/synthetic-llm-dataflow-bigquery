@@ -7,6 +7,9 @@ to ~1.2M, and 8 789 594 of 10M rows diverted as pk.duplicate — 3h16m
 after launch. These are the numbers preflight must do at second zero.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,redefined-outer-name,reimported
+
 from __future__ import annotations
 
 import math

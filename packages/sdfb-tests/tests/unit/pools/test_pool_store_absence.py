@@ -7,6 +7,9 @@ discoverable by noticing that freetext_pool_store_* milestones were
 missing, which is exactly the kind of silence a milestone exists to break.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring,unused-argument
+
 from __future__ import annotations
 
 import pytest

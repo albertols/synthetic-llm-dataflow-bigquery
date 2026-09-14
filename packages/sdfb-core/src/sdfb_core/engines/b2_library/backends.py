@@ -25,6 +25,9 @@ Free-text columns are **excluded** from both backends — they are produced
 by the ``ModelClient`` free-text hook (``freetext.py``), not sampled here.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import logging
@@ -97,8 +100,10 @@ class EmpiricalBackend:
   def __init__(self) -> None:
     self._profiles: dict[str, ColumnProfile] = {}
 
-  def fit(self, reference_rows: list[dict],
-          profiles: dict[str, ColumnProfile]) -> None:
+  def fit(
+      self,
+      reference_rows: list[dict],  # pylint: disable=unused-argument
+      profiles: dict[str, ColumnProfile]) -> None:
     # Profiling already happened in the engine; the empirical backend is
     # stateless beyond the profiles it samples from.
     self._profiles = _samplable_profiles(profiles)
@@ -293,7 +298,7 @@ class SdgxBackend:
     }
     try:
       self._fit_sdgx(reference_rows)
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
       self._synthesizer = None
       self._fallback = EmpiricalBackend()
       self._fallback.fit(reference_rows, profiles)
@@ -413,7 +418,7 @@ class SdgxBackend:
       import torch
 
       torch.manual_seed(seed)
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       pass
 
 

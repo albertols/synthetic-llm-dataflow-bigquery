@@ -10,6 +10,9 @@ the star-schema fact table and the true diamond — resolved by the
 `independent` and `conditional` roles (ADR 0037).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=invalid-name,missing-class-docstring,unused-variable,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import pytest

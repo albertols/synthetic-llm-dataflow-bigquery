@@ -8,6 +8,9 @@ and carry on (`test_model_adjustment.py`). The stop, and every word of
 its message, is still what the escape hatch produces.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import logging

@@ -4,6 +4,9 @@ referential integrity by construction (no BQ round-trip between
 tables).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=arguments-renamed,import-outside-toplevel,unused-argument
+
 from __future__ import annotations
 
 import json

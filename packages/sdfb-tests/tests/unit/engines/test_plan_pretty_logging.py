@@ -11,6 +11,9 @@ single-line `relational_fk_edge` per edge, and the pipe/arrow card
 without the mermaid fence.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring,unused-argument
+
 from __future__ import annotations
 
 import logging

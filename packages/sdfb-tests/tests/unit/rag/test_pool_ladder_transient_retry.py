@@ -17,6 +17,9 @@ in-process once the siblings have landed — never fail the bundle while
 the client is usable.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access,unused-argument
+
 from __future__ import annotations
 
 import logging

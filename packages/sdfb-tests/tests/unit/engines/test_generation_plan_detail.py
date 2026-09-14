@@ -1,5 +1,8 @@
 """build_plan_detail: per-column fidelity detail (Task 9)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,use-implicit-booleaness-not-comparison
+
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.b2_library.fidelity import profile_column

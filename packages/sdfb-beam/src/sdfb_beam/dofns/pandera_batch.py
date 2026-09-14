@@ -90,7 +90,7 @@ class PanderaValidateBatchDoFn(beam.DoFn):
         except (TypeError, ValueError):
           continue
       return out if out else set(range(batch_size))
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       return set(range(batch_size))
 
   @staticmethod
@@ -103,5 +103,5 @@ class PanderaValidateBatchDoFn(beam.DoFn):
           "failure_count": len(row_fc),
           "first_failures": row_fc.head(5).astype(str).to_dict("records"),
       }
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       return {"raw": str(errors)[:500]}

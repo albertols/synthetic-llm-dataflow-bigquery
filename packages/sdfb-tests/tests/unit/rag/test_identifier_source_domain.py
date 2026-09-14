@@ -13,6 +13,9 @@ identifier-shaped columns now use the same seam:
     the same guarantee pools already have).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import logging

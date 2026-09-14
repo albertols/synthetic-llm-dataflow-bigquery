@@ -280,7 +280,7 @@ class B2LibraryEngine(GenerationEngine):
       row = self._assemble_row(columns, col_order, i)
       try:
         yield self._record_model.model_validate(row)
-      except Exception:
+      except Exception:  # pylint: disable=broad-exception-caught
         continue
 
   def _assemble_row(
@@ -374,7 +374,7 @@ class B2LibraryEngine(GenerationEngine):
             columns, col_order, i, passthrough=plan.columns)
         try:
           yield self._record_model.model_validate(row)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
           continue
 
 

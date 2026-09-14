@@ -1,4 +1,7 @@
 """Contract tests for the SDFB_MILESTONE worker-log line format."""
+
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
 import logging
 
 import pytest

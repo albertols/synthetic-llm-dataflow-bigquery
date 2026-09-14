@@ -1,5 +1,8 @@
 """Unit tests for `sdfb_beam.cli.run_pipeline` — arg parsing and factory."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,redefined-outer-name,reimported,unused-argument,unused-variable,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import re

@@ -29,6 +29,9 @@ objects but touches no ref, branch, or working tree, exactly like the
 suggested `git hash-object -t tree /dev/null` empty-tree trick.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access,unused-argument
+
 from __future__ import annotations
 
 import importlib.util

@@ -6,6 +6,9 @@ run resolved must be readable at a glance in Cloud Logging — tables,
 PK, identity, every edge with its state (ADR 0029 flag, ADR 0032 card).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring
+
 from __future__ import annotations
 
 import logging

@@ -26,6 +26,9 @@ Usage:
         --out-dir runs
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import argparse
@@ -54,7 +57,7 @@ def preflight_adc(project: str) -> tuple[Any, str]:
   try:
     creds, _ = google.auth.default(scopes=_SCOPES)
     creds.refresh(gtr.Request())
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     _die("Application Default Credentials not usable "
          f"({type(e).__name__}: {e}).\nRun:\n"
          "  gcloud auth application-default login\n"

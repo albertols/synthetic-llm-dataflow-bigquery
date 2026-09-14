@@ -1,3 +1,5 @@
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-module-docstring
 from __future__ import annotations
 
 import importlib.util

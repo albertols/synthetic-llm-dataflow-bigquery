@@ -13,6 +13,9 @@ first page for small results. Nothing else changes: same SQL, same cap
 semantics, same process cache.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,missing-class-docstring,unbalanced-tuple-unpacking,unused-argument
+
 from __future__ import annotations
 
 import pyarrow as pa
@@ -112,8 +115,7 @@ def test_arrow_nulls_are_dropped_like_the_rest_path_would():
 # RowIterator, and a process that has seen PermissionDenied must stop
 # paying the doomed Storage attempt on every fetch.
 # ---------------------------------------------------------------------------
-class PermissionDenied(Exception
-                      ):  # noqa: N818 — mirrors google.api_core's class name
+class PermissionDenied(Exception):  # noqa: N818
   """Same class name as google.api_core.exceptions.PermissionDenied (the
     store detects the denial by class name, never by import)."""
 

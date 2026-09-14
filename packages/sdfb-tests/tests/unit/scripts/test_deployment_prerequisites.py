@@ -6,6 +6,9 @@ BigQuery surface is a fake injected through the module's `bq_client`
 indirection — no GCP credentials, no network.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,unused-argument
+
 from __future__ import annotations
 
 import argparse

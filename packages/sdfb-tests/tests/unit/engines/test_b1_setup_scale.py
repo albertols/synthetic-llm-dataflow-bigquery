@@ -12,6 +12,9 @@ SELECT is already `ORDER BY FARM_FINGERPRINT(...)` (deterministic spread),
 so a prefix is a representative sample.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import logging

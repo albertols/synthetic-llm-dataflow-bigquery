@@ -4,6 +4,9 @@ Runs the ladder once, in its own DAG branch, and writes rows that a later
 run reads back instead of re-inferring.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,protected-access,unused-argument
+
 from __future__ import annotations
 
 import apache_beam as beam

@@ -1,5 +1,8 @@
 """Tests for `sdfb_beam.handlers.fake_client.FakeModelClient`."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=unused-argument
+
 from __future__ import annotations
 
 import pytest

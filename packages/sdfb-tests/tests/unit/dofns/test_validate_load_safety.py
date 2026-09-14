@@ -7,6 +7,9 @@ max_length, non-finite floats (json.dumps emits bare NaN = invalid
 JSON) — must divert to the DLQ per row instead of killing the table.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import math

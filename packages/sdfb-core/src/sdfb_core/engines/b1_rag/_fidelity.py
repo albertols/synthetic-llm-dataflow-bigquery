@@ -21,6 +21,9 @@ REF: spec §2 sampling-backend seam; cuDF/CuPy is the M1-optional GPU backend
 (not implemented here — NumPy is the baseline).
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -185,8 +188,15 @@ class ColumnSampler:
     return self._from_pool_numpy(np, rng, p.text_examples or p.observed_values,
                                  n)
 
-  def _blend_floats_numpy(self, np, rng, obs, lo: float, hi: float, n: int,
-                          similarity: float) -> list:
+  def _blend_floats_numpy(
+      self,
+      np,
+      rng,
+      obs,
+      lo: float,
+      hi: float,
+      n: int,  # pylint: disable=unused-argument
+      similarity: float) -> list:
     """Anchored/uniform blend of n floats within [lo, hi].
 
         similarity→1: sample observed values + small jitter (tight).
@@ -211,7 +221,7 @@ class ColumnSampler:
       blended[oob] = rng.uniform(lo, hi, size=n_oob)
     return cast("list", blended.tolist())
 
-  def _numeric_numpy(self, np, rng, n: int, similarity: float) -> list:
+  def _numeric_numpy(self, np, rng, n: int, similarity: float) -> list:  # pylint: disable=unused-argument
     """Inverse transform sampling through the sorted observed sample.
 
         The anchored+uniform VALUE-AVERAGE this replaces was a convolution
@@ -264,7 +274,7 @@ class ColumnSampler:
       return cats, [0.0 for _ in cats]
     return cats, [cnt / total for cnt in counts]
 
-  def _categorical_numpy(self, np, rng, n: int, similarity: float) -> list:
+  def _categorical_numpy(self, np, rng, n: int, similarity: float) -> list:  # pylint: disable=unused-argument
     p = self.profile
     if not p.categories:
       return [None] * n
@@ -272,14 +282,14 @@ class ColumnSampler:
     idx = rng.choice(len(cats), size=n, p=np.asarray(probs))
     return [cats[int(i)] for i in idx]
 
-  def _from_pool_numpy(self, np, rng, pool: Sequence, n: int) -> list:
+  def _from_pool_numpy(self, np, rng, pool: Sequence, n: int) -> list:  # pylint: disable=unused-argument
     pool = list(pool)
     if not pool:
       return [None] * n
     idx = rng.integers(0, len(pool), size=n)
     return [pool[int(i)] for i in idx]
 
-  def _apply_nulls_numpy(self, np, rng, values: list, n: int) -> list:
+  def _apply_nulls_numpy(self, np, rng, values: list, n: int) -> list:  # pylint: disable=unused-argument
     p = self.profile
     if not p.nullable or p.null_fraction <= 0.0:
       return values
@@ -326,7 +336,7 @@ class ColumnSampler:
       out.append(v)
     return out
 
-  def _numeric_python(self, rng, n: int, similarity: float) -> list:
+  def _numeric_python(self, rng, n: int, similarity: float) -> list:  # pylint: disable=unused-argument
     """Pure-Python mirror of `_numeric_numpy` (same inverse-CDF
         semantics; seeded, not bit-identical across backends)."""
     p = self.profile
@@ -359,7 +369,7 @@ class ColumnSampler:
         lambda k: [rng.random() for _ in range(k)],
     )
 
-  def _categorical_python(self, rng, n: int, similarity: float) -> list:
+  def _categorical_python(self, rng, n: int, similarity: float) -> list:  # pylint: disable=unused-argument
     p = self.profile
     if not p.categories:
       return [None] * n
@@ -406,7 +416,7 @@ def _is_number(x: object) -> TypeGuard[int | float | Decimal | str]:
     try:
       Decimal(x)
       return True
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       return False
   return False
 

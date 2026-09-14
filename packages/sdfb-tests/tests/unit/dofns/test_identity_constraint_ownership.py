@@ -16,6 +16,9 @@ the identity contract is kept by giving it the same per-run uniqueness
 tracking a PK column gets.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring,superfluous-parens
+
 from __future__ import annotations
 
 import logging

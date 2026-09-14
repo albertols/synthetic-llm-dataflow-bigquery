@@ -1,5 +1,8 @@
 """DirectRunner tests for the §12 validation_runs subgraph + BLOCKER gate."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=arguments-renamed
+
 from __future__ import annotations
 
 import json
@@ -147,8 +150,8 @@ def test_blocker_gate_fails_pipeline():
   }
   options = PipelineOptions(["--runner=DirectRunner"])
   # DirectRunner wraps the DoFn raise, so match broadly (B017).
-  with pytest.raises(Exception), beam.Pipeline(
-      options=options) as p:  # noqa: B017
+  with pytest.raises(Exception), beam.Pipeline(  # noqa: B017
+      options=options) as p:
     _ = p | beam.Create([failed_row]) | beam.ParDo(_BlockerGateDoFn())
 
 
@@ -214,8 +217,8 @@ def test_blocker_gate_still_raises_with_write_result_sink(
 
   options = PipelineOptions(["--runner=DirectRunner"])
   # DirectRunner wraps the DoFn raise, so match broadly (B017).
-  with pytest.raises(Exception), beam.Pipeline(
-      options=options) as p:  # noqa: B017
+  with pytest.raises(Exception), beam.Pipeline(  # noqa: B017
+      options=options) as p:
     build_pipeline(
         p,
         reference_rows=customers_reference,

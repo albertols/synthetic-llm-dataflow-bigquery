@@ -6,6 +6,9 @@ that contains an FK is unique by construction (the 2026-09-09 runs lost
 87.9% then 56.5% of C_TABLE to random draws of exactly that PK).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,missing-class-docstring,protected-access,unused-variable,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import random

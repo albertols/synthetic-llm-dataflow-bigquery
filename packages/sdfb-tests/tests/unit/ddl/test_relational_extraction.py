@@ -6,6 +6,9 @@ that still carries a legacy `{"sdfb": 1, …}` object is inert: it must not
 be parsed, mirrored into `_ddl.json`, or silently applied to a run.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access
+
 from unittest.mock import MagicMock
 
 from sdfb_beam.ddl.extractor import extract_ddl_metadata

@@ -102,8 +102,8 @@ def main(argv: list[str] | None = None) -> int:
   logger.info("Loading DDL from %s", args.ddl_path)
   schema = TableSchema.model_validate(
       json.loads(Path(args.ddl_path).read_text()))
-  Record = derive_record_model(
-      schema)  # noqa: N806 — a dynamically derived class
+  Record = derive_record_model(  # noqa: N806 — a dynamically derived class
+      schema)
   record_schema = Record.model_json_schema()
   logger.info("Schema parsed: %s (%d columns)", schema.fqn, len(schema.columns))
 
@@ -154,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(validated.model_dump(mode="json"), default=str) + "\n")
         valid_count += 1
         logger.info("Row %d: ✓ valid (%.1fs)", i, row_secs)
-      except Exception as e:
+      except Exception as e:  # pylint: disable=broad-exception-caught
         validation_fail_count += 1
         logger.warning("Row %d: ✗ Pydantic rejected (%.1fs) — %s", i, row_secs,
                        e)

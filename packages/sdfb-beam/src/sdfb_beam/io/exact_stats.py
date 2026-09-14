@@ -19,6 +19,9 @@ via ``GenerationContext.source_distinct``. Non-scalar / exotic columns
 (STRUCT, REPEATED, JSON, GEOGRAPHY, BYTES) keep their Tier-1 entry.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import json

@@ -9,6 +9,9 @@ parse the profiler's known formats without ever reaching `strptime`,
 while agreeing with it bit-for-bit on both accepts and rejects.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from datetime import datetime

@@ -2,6 +2,9 @@
 cached by (source child, edge cols, model sha). ADR 0038 fix J adds the
 DECLARED PK's own measurement, cached in the same payload."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,redefined-outer-name,reimported,unbalanced-tuple-unpacking,unused-argument
+
 from __future__ import annotations
 
 import logging

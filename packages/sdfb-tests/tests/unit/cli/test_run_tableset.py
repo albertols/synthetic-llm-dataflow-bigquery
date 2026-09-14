@@ -5,6 +5,9 @@ reads the same `config/relationships/` models the pipeline reads, so a
 dry run on the laptop plans exactly what the launch will do.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,reimported
+
 import importlib.util
 import sys
 from pathlib import Path

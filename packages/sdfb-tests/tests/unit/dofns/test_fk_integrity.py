@@ -8,6 +8,9 @@ this gate is the independent check that says so, per run, instead of
 trusting the generator (three lines of defense).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring
+
 from __future__ import annotations
 
 from pathlib import Path

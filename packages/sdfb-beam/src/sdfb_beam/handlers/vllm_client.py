@@ -46,6 +46,9 @@ REFs:
   - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import json
@@ -584,12 +587,12 @@ class VLLMModelClient:
     server.terminate()
     try:
       server.wait(timeout=30)
-    except Exception:  # best-effort cleanup — terminate may hang
+    except Exception:  # best-effort cleanup — terminate may hang  # pylint: disable=broad-exception-caught
       logger.warning("vLLM server did not exit on SIGTERM; killing.")
       server.kill()
       try:
         server.wait(timeout=10)
-      except Exception:
+      except Exception:  # pylint: disable=broad-exception-caught
         logger.error("vLLM server did not exit on SIGKILL.")
 
   def _teardown_cross_process(self) -> None:
@@ -738,7 +741,7 @@ class VLLMModelClient:
         if resp.status != _HTTP_OK:
           return False
         payload = json.loads(resp.read().decode("utf-8"))
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       return False
     models = payload.get("data", []) if isinstance(payload, dict) else []
     return any(
@@ -842,7 +845,7 @@ class VLLMModelClient:
       if not torch.cuda.is_available():
         return None
       return torch.cuda.mem_get_info()
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       return None
 
   def _dynamic_gpu_memory_utilization(self) -> float | None:
@@ -1017,7 +1020,7 @@ class VLLMModelClient:
             return
       except URLError as e:  # not up yet — keep polling
         last_err = e
-      except Exception as e:  # connection refused / reset during boot
+      except Exception as e:  # connection refused / reset during boot  # pylint: disable=broad-exception-caught
         last_err = e
       time.sleep(self.poll_interval_s)
     raise TimeoutError(

@@ -7,6 +7,9 @@ sample their clause's value space directly — CPU, unbounded, source-
 rejecting — and the ladder never runs for them.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=invalid-name,missing-class-docstring,unused-argument,unused-variable,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import logging

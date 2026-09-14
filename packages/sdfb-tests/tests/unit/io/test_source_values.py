@@ -14,6 +14,9 @@ warm run then REPLAYED those tainted pools because the launcher's
 A fake client stands in for google.cloud.bigquery — nothing touches GCP.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,invalid-name,protected-access,unused-argument,unused-variable,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import pickle

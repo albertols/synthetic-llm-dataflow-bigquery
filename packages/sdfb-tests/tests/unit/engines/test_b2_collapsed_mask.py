@@ -6,6 +6,9 @@ identifier branch always used the collapsed template (COL_001-class mask
 scrambling). R5 is B.2's acceptance run — these must not regress there.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unused-argument
+
 from __future__ import annotations
 
 import numpy as np

@@ -1,5 +1,8 @@
 """B.2 FreeTextHook: empty mask + shape-mix expansion (Task 7)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=unused-argument
+
 import re
 
 import numpy as np

@@ -6,6 +6,9 @@ Making it a flag rather than two branches means the three E2E runs differ
 in exactly one variable.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,missing-class-docstring,unused-argument
+
 from __future__ import annotations
 
 import pytest

@@ -7,6 +7,9 @@ scale past Z (A..Z, AA, AB, …) for the dozens of unrelated tables to
 come.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=missing-class-docstring
+
 from __future__ import annotations
 
 import importlib.util

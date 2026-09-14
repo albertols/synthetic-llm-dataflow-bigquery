@@ -6,6 +6,9 @@ an explicit opt-in that logs verbatim prompts at WARNING; `off` (the
 production default) logs nothing.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,unused-argument
+
 from __future__ import annotations
 
 import logging

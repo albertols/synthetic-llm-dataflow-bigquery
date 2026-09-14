@@ -7,6 +7,9 @@ the engine, which handed it to `transformers.from_pretrained` — which cannot
 read gs:// and raised `OSError: Repo id must be in the form ...`.
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=import-outside-toplevel,protected-access,redefined-outer-name,unused-argument
+
 from __future__ import annotations
 
 import sys

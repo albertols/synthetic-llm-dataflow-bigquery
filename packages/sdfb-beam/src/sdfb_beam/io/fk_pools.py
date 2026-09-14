@@ -18,6 +18,9 @@ column-by-column lands combinations the parent never held (measured:
 81.8% orphans, 2026-08-23).
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

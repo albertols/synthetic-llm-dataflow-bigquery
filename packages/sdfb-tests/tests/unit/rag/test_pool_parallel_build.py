@@ -7,6 +7,9 @@ thread pool. Seed-example retrieval keeps using the embedder SEQUENTIALLY
 (HF fast tokenizers are not thread-safe — "Already borrowed").
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=protected-access,unused-argument
+
 from __future__ import annotations
 
 import threading

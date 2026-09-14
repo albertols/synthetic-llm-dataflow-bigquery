@@ -16,6 +16,9 @@
     distinctness).
 """
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=redefined-outer-name,unused-argument,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import random

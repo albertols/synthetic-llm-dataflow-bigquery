@@ -48,6 +48,9 @@ Usage:
         --out-md   output/freetext_crosscheck/report_YYYY_MM_DD_HH_mm.md
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import argparse
@@ -92,7 +95,7 @@ def preflight_adc(project: str):
   try:
     creds, _ = google.auth.default(scopes=_SCOPES)
     creds.refresh(gtr.Request())
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     _die(
         f"Application Default Credentials not usable ({type(e).__name__}: {e}).\n"
         "Run:\n  gcloud auth application-default login\n"
@@ -438,8 +441,12 @@ def _shape_tv(src_mass: dict, syn_mass: dict) -> tuple[float, float, set]:
   return raw, head, head_shapes
 
 
-def _diff_column(col: str, src_agg, syn_agg, src_prof,
-                 syn_prof) -> dict[str, Any]:
+def _diff_column(
+    col: str,
+    src_agg,
+    syn_agg,
+    src_prof,  # pylint: disable=unused-argument
+    syn_prof) -> dict[str, Any]:
   findings: list[dict[str, str]] = []
 
   src_null = _fraction(src_agg["null_n"], src_agg["n"])
@@ -669,9 +676,8 @@ def _shape_table(mass: dict[str, float], limit: int = 6) -> str:
   return "<br>".join(f"`{s}` ({m * 100:.1f}%)" for s, m in items)
 
 
-def render_markdown(
-    meta: dict[str, Any], columns: dict[str, Any]
-) -> str:  # noqa: PLR0915 — linear report assembly reads clearer unsplit
+def render_markdown(  # noqa: PLR0915 — linear report assembly reads clearer unsplit
+    meta: dict[str, Any], columns: dict[str, Any]) -> str:
   ranked = sorted(columns.items(), key=lambda kv: -kv[1]["score"])
   lines: list[str] = []
   a = lines.append
@@ -807,7 +813,7 @@ def run(args) -> dict[str, Any]:
   try:
     caller = next(iter(
         client.query("SELECT SESSION_USER() AS u").result())).u or "unknown"
-  except Exception:
+  except Exception:  # pylint: disable=broad-exception-caught
     caller = "unknown"
 
   requested = [c.strip() for c in args.columns.split(",") if c.strip()]

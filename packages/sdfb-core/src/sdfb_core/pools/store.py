@@ -10,6 +10,9 @@ A SIBLING of `ChunkStore`, not a `chunk_kind` of it — pools key on
 both without lying about one of them.
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable

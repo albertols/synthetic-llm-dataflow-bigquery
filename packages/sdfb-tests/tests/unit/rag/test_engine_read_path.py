@@ -2,6 +2,9 @@
 in the pinned vector space ⇒ zero embed calls; anything less ⇒ exactly
 today's embed path (never a partial mix of vector spaces)."""
 
+# Test module: pytest fixtures and white-box access are intentional.
+# pylint: disable=unused-argument
+
 from __future__ import annotations
 
 import dataclasses

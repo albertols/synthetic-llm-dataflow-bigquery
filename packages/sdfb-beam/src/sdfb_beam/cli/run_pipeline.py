@@ -18,6 +18,9 @@ REFs:
   - docs/MODEL_LAYOUT.md
 """
 
+# Heavy or optional dependencies are imported lazily, where they are used.
+# pylint: disable=import-outside-toplevel
+
 from __future__ import annotations
 
 import argparse
@@ -230,10 +233,8 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
   return max(DEFAULT_BATCH_SIZE, num_rows // _TARGET_ELEMENTS)
 
 
-def parse_args(
-    argv: list[str]
-) -> tuple[argparse.Namespace, list[
-    str]]:  # noqa: PLR0915 — one flat list of flags; splitting it hides the CLI surface
+def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides the CLI surface
+    argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
   p = argparse.ArgumentParser(
       description="Synthetic Dataflow BigQuery — pipeline launcher")
   p.add_argument(
@@ -595,7 +596,7 @@ def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
     with FileSystems.open(thresholds_uri) as f:
       data = yaml.safe_load(f.read())
     return Thresholds.from_mapping(data, env)
-  except Exception as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     logger.warning(
         "Could not load thresholds from %s (%s); using permissive gate",
         thresholds_uri,
@@ -617,7 +618,7 @@ def resolve_num_workers(value: str | int | None) -> int | None:
   return int(text)
 
 
-def resolve_rag_embed_device(model_client) -> str:
+def resolve_rag_embed_device(model_client) -> str:  # pylint: disable=unused-argument
   """Where the RAG population embeds run: the worker GPU, on every
     topology. The 2026-09-08 cold run moved them to CPU under `multi` and
     starved the model pull (177 s) and the vLLM engine init (598 s)
@@ -764,7 +765,7 @@ def resolve_schemas(
   if reference_table:
     try:
       schema = extract_table_schema(reference_table)
-    except Exception as exc:  # any live failure → offline fallback
+    except Exception as exc:  # any live failure → offline fallback  # pylint: disable=broad-exception-caught
       live_error = exc
     else:
       log_milestone(
@@ -829,7 +830,7 @@ def _overlay_target_metadata(
   if landing_table:
     try:
       target = extract_table_schema(landing_table)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone(
           "target_metadata_unavailable",
           level=logging.WARNING,
@@ -881,7 +882,7 @@ def _check_ddl_pin_staleness(live: TableSchema, ddl_uri: str) -> None:
     """
   try:
     pinned = load_ddl(ddl_uri)
-  except Exception as exc:
+  except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "ddl_pin_check_error",
         level=logging.WARNING,
@@ -922,7 +923,7 @@ def _constraint_clauses(schema: TableSchema) -> dict[str, str]:
   for col in schema.columns:
     try:
       clause = parse_llm_prompt_constraint(col.description, column=col.name)
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       clause = col.description or ""
     if clause:
       out[col.name] = clause
@@ -1089,7 +1090,7 @@ def _cache_read(stats_store, landing_table: str, source_table: str, cols,
     return None
   try:
     return stats_store.get(source_table, cols, sha)
-  except Exception as exc:  # any cache failure is non-fatal by design
+  except Exception as exc:  # any cache failure is non-fatal by design  # pylint: disable=broad-exception-caught
     _cache_unavailable(landing_table, "get", exc)
     return None
 
@@ -1100,7 +1101,7 @@ def _cache_write(stats_store, landing_table: str, source_table: str, cols,
     return
   try:
     stats_store.put(source_table, cols, sha, measured)
-  except Exception as exc:  # any cache failure is non-fatal by design
+  except Exception as exc:  # any cache failure is non-fatal by design  # pylint: disable=broad-exception-caught
     _cache_unavailable(landing_table, "put", exc)
 
 
@@ -1543,7 +1544,7 @@ def emit_effective_model(
       with FileSystems.create(uri, mime_type="text/plain") as handle:
         handle.write(text.encode("utf-8"))
       written.append(uri)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone(
           "model_adjustment_model_unwritten",
           level=logging.WARNING,
@@ -2183,7 +2184,7 @@ def _emit_source_stats(args, table_schema, reference_rows,
     # is still valid, just without exact pool sizing.
     try:
       stats = compute_exact_stats(args.reference_table, table_schema, stats)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone(
           "source_stats_exact_failed",
           level=logging.WARNING,
@@ -2250,7 +2251,7 @@ def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
   try:
     overlap = pool_source_overlap(pool_store, source_value_store,
                                   reference_digest, model_uri)
-  except Exception as exc:
+  except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "pool_taint_check_error",
         level=logging.WARNING,
@@ -2270,7 +2271,7 @@ def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
   )
   try:
     pool_store.delete(reference_digest, model_uri)
-  except Exception as exc:
+  except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "pool_taint_delete_error",
         level=logging.ERROR,
