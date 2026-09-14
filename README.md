@@ -1,5 +1,13 @@
 # synthetic-llm-dataflow-bigquery
 
+[![CI](https://github.com/albertols/synthetic-llm-dataflow-bigquery/actions/workflows/ci.yml/badge.svg)](https://github.com/albertols/synthetic-llm-dataflow-bigquery/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/albertols/synthetic-llm-dataflow-bigquery?label=release&color=0f9d58)](https://github.com/albertols/synthetic-llm-dataflow-bigquery/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](pyproject.toml)
+[![Apache Beam](https://img.shields.io/badge/Apache%20Beam-Dataflow-ff6d00.svg)](https://beam.apache.org/)
+[![LLM](https://img.shields.io/badge/LLM-self--hosted%20vLLM-6f42c1.svg)](#cpugpu-split--vllm-serving)
+[![Beam Summit](https://img.shields.io/badge/Beam%20Summit-2025-4285f4.svg)](https://beamsummit.org)
+
 **Building Banking Synthetic Data for a Lakehouse with Gemma — self-hosted LLM generation on Apache Beam / Dataflow / BigQuery.**
 
 Generate fictitious-but-realistic synthetic rows for any BigQuery table — driven by its DDL plus a bounded reference sample, with all LLM inference **self-hosted on GPU workers inside the Dataflow pipeline**. No data or prompts ever leave the project boundary, no external AI APIs, no model hubs at runtime.
@@ -31,7 +39,7 @@ Teams need realistic tabular data for development, testing, and analytics protot
 
 This pipeline reads a table's DDL and a bounded reference sample (≤10k rows, deterministic `FARM_FINGERPRINT` ordering), runs open-weight LLMs entirely inside your own cloud project, and writes validated synthetic rows back to BigQuery — with **memorization measured and gated on every run**. The fully self-hosted design (no data egress, open-weight models only, auditable per-run quality records) aligns directly with EU AI Act and data-sensitivity expectations.
 
-**Status:** v0.3.0 ([release history](docs/releases/README.md)) — both engines, relational PK/FK generation, stats-driven fidelity, and the full validation/DLQ/audit chain, measured on real Dataflow GPU runs at 1M and 10M rows per table. v0.3.0 adds **parent-driven fan-out** (children generated from their parent's landed keys), **multi-parent children**, and a launch that **adjusts a declared model the source disproves** — laptop-proven on DirectRunner, with the Dataflow acceptance launch for that path still pending (see [Relational generation](#relational-generation-pkfk)). 1,737 automated laptop tests; the standalone evaluation framework (Tier-1/2/3 metrics) remains branch-resident on `ws3-eval-framework`.
+**Status:** v0.3.0 ([changelog](CHANGELOG.md) · [releases](https://github.com/albertols/synthetic-llm-dataflow-bigquery/releases) · [measured release history](docs/releases/README.md)) — both engines, relational PK/FK generation, stats-driven fidelity, and the full validation/DLQ/audit chain, measured on real Dataflow GPU runs at 1M and 10M rows per table. v0.3.0 adds **parent-driven fan-out** (children generated from their parent's landed keys), **multi-parent children**, and a launch that **adjusts a declared model the source disproves** — laptop-proven on DirectRunner, with the Dataflow acceptance launch for that path still pending (see [Relational generation](#relational-generation-pkfk)). 1,737 automated laptop tests; the standalone evaluation framework (Tier-1/2/3 metrics) remains branch-resident on `ws3-eval-framework`.
 
 ## Architecture at a glance
 

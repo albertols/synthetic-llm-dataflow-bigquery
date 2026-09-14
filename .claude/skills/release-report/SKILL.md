@@ -18,6 +18,12 @@ This skill adds judgment. NEVER edit the generated numbers or charts.
    moved it), optimization candidates, follow-up backlog items.
 3. Where ADC exists locally, optionally enrich with live Dataflow/BQ detail
    (`scripts/e2e/e2e_gcp_probe.py`) — never required.
+
+Scope note: this skill owns the *measured* half only. The narrative half —
+what was added / changed / removed — is `CHANGELOG.md`'s `[Unreleased]`
+block, which the same Action promotes and publishes as the tag's GitHub
+Release via `scripts/release/make_release_notes.py`. Fill that block in as
+work lands, not at release time.
 4. Redaction rules are identical to the generator's: no FQNs, column names,
    or data values — `table_1`/`col_1` tokens only. `scripts/e2e/redaction.py`
    has no CLI of its own — after editing the `## Insights` section, re-run
