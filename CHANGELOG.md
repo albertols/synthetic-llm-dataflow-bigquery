@@ -9,6 +9,20 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ## [Unreleased]
 
 ### 🚀 Added
+
+### 🔧 Changed
+
+### ⚡ Performance
+
+### 🐛 Fixed
+
+### 🗑️ Removed
+
+### 📗 Docs
+
+## [v0.5.1] — 2026-09-15
+
+### 🚀 Added
 - DSG Terraform can launch the generation job (`launch_job = true`, `google_dataflow_flex_template_job`) with the same parameters as `scripts/04_run_dataflow.sh`; `terraform test` fails if the two drift apart.
 - DSG Terraform `gpu` variable: `l4` (G2 machines, `vllm_dtype=auto`, both models) or `t4` (N1 machines, `vllm_dtype=float16`, `qwen3-4b` only). It sets the machine type, the accelerator and the dtype for both launches, and plan fails on Gemma with a T4 or on a machine type from the other family. Replaces the `accelerator` variable.
 - Model staging downloads from Hugging Face (default) or its ModelScope mirror, with no credentials: Gemma 4 E4B-it, Qwen3-4B-Instruct-2507 and bge-small are public, ungated repositories. `config/models.yml` records each `hf_repo`.
@@ -17,8 +31,6 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 - Each DSG sync publishes on its own branch, `sync/synthetic-llm-dataflow-bigquery-<ref>`, and closes the older open sync PRs from the fork (with a "Superseded by" comment) and deletes their branches, so one PR stays under review. `dsg/manifest.yaml` takes `branch_prefix` instead of `branch`.
 - The public FK example is `config/relationships/gcp_public_fk_example.yaml`. Relationship files named `*_example.yaml` are samples, skipped by directory scans like `example_*.yaml`.
 - The DSG launch writes into existing tables (`create_if_not_exists=false`) and uses the RAG, free-text pool and source-stats stores.
-
-### ⚡ Performance
 
 ### 🐛 Fixed
 - DSG Terraform creates every table in `config/bq_schema` with its dataset, name and schema (the `synthetic_rag` tables were missing). The thelook source snapshots keep the public schemas, with GEOGRAPHY values nulled instead of the column dropped, and the landing tables in `synthetic_data` are created `LIKE` the public tables.
