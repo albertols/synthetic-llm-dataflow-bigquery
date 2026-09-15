@@ -572,4 +572,5 @@ if __name__ == "__main__":
   fig_kv_budget()
   for name in ("vllm-serving-engine-stats", "vllm-serving-ignition",
                "vllm-serving-gpu-minutes", "vllm-serving-kv-budget"):
-    print(f"wrote {ASSETS / (name + '.png')}")
+    png = ASSETS / f"{name}.png"
+    print(f"wrote {png}")
