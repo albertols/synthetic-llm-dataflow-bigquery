@@ -19,6 +19,7 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🗑️ Removed
 
 ### 📗 Docs
+- Article 3 of the Medium series (`docs/articles/03-common-runtime-cpu-gpu-vllm.md`, Draft): the common runtime — one worker pool split by stage, vLLM inside the DoFn lifecycle (lazy ignition, process + port mutex, VRAM-derived budget, unfittable wait, lost-race adoption, refcount), prefill/decode and the measured prefix-cache hit rate on a T4, the guardrails track, the GIL ceiling and `sdk_containers`, `initial_workers` + `autoscaling=fixed`, uniqueness modes / DLQ / `FILE_LOADS`, the accelerator–model–dtype matrix, and the optimizations assessed (LMCache, TurboQuant, MPS, AWQ, n-gram speculative decoding, FP8 KV). Five new drawio+PNG pairs in `docs/articles/assets/` and four generated figures from the new `scripts/doc/make_vllm_serving_figures.py` (vLLM engine stats from the 2026-08-22 run, ignition across five launches, GPU busy vs billed, the KV-budget sweep through `vllm_client._fit_max_model_len`).
 
 ## [v0.5.1] — 2026-09-15
 
