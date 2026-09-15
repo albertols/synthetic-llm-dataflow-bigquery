@@ -137,3 +137,17 @@ index_rows:
     anchor: null
     marker: synthetic-llm-dataflow-bigquery
     text: *deployment
+
+# Exact replacements in DSG files outside the owned paths, for fixes the guide
+# needs from DSG itself while the upstream change is under review. Each is a
+# no-op once `new` has landed upstream, and stops the sync if neither side is
+# found (the file changed; revisit the patch).
+patches:
+  - file: .github/workflows/pull_request.yml
+    old: 'HAS_PY=$(find "$pipeline_dir" -name "*.py" -not -path "*/.*" 2>/dev/null | head -n 1)'
+    new: 'HAS_PY=$(find "$pipeline_dir" -name "*.py" -not -path "*/.*" -print -quit 2>/dev/null)'
+    reason: "`.github/workflows/pull_request.yml`: Python pipeline detection uses `find … -print -quit` instead of `find … | head -n 1`, which fails with SIGPIPE under `pipefail` on a pipeline with this many files. Same change as #286; it drops out of the next sync once #286 is merged."
+  - file: .github/workflows/pull_request.yml
+    old: 'HAS_REQ=$(find "$pipeline_dir" -name "requirements*.txt" -not -path "*/.*" 2>/dev/null | head -n 1)'
+    new: 'HAS_REQ=$(find "$pipeline_dir" -name "requirements*.txt" -not -path "*/.*" -print -quit 2>/dev/null)'
+    reason: "`.github/workflows/pull_request.yml`: Python pipeline detection uses `find … -print -quit` instead of `find … | head -n 1`, which fails with SIGPIPE under `pipefail` on a pipeline with this many files. Same change as #286; it drops out of the next sync once #286 is merged."

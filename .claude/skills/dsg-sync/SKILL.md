@@ -78,7 +78,8 @@ ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + req
 
 - The precheck finds anything, in the source or in the staged tree.
 - `SyncError`: an inconsistent manifest (a shipped test loads an unshipped
-  script), a missing index anchor (the DSG index changed; update
+  script), a patch whose target and replacement are both missing (the DSG
+  file changed; revisit `patches`), a missing index anchor (the DSG index changed; update
   `index_rows`), broken links, or a dirty DSG checkout.
 - `pylintrc-parity` fails: DSG changed `pipelines/pylintrc`. Re-vendor it to
   `dsg/pylintrc`, re-lint the source, release, and re-sync.
@@ -89,7 +90,7 @@ ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + req
 
 | Concern | File |
 | :-- | :-- |
-| What ships, owned paths, index rows | `dsg/manifest.yaml` |
+| What ships, owned paths, index rows, patches to DSG files (e.g. its CI) | `dsg/manifest.yaml` |
 | DSG-only files (launch scripts, setup.py, Cloud Build) | `dsg/pipeline/` |
 | Terraform module | `dsg/terraform/` |
 | Solution guide page | `dsg/use_cases/Synthetic_Data_Generation.md` |
