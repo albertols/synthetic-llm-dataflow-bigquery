@@ -146,8 +146,8 @@ patches:
   - file: .github/workflows/pull_request.yml
     old: 'HAS_PY=$(find "$pipeline_dir" -name "*.py" -not -path "*/.*" 2>/dev/null | head -n 1)'
     new: 'HAS_PY=$(find "$pipeline_dir" -name "*.py" -not -path "*/.*" -print -quit 2>/dev/null)'
-    reason: "`.github/workflows/pull_request.yml`: Python pipeline detection uses `find … -print -quit` instead of `find … | head -n 1`, which fails with SIGPIPE under `pipefail` on a pipeline with this many files. Same change as #286; it drops out of the next sync once #286 is merged."
+    reason: "`.github/workflows/pull_request.yml`: pipeline detection in the Python build job uses `find … -print -quit` instead of `find … | head -n 1`. Under `pipefail`, the old form fails with SIGPIPE on a pipeline with this many files, before any build step runs."
   - file: .github/workflows/pull_request.yml
     old: 'HAS_REQ=$(find "$pipeline_dir" -name "requirements*.txt" -not -path "*/.*" 2>/dev/null | head -n 1)'
     new: 'HAS_REQ=$(find "$pipeline_dir" -name "requirements*.txt" -not -path "*/.*" -print -quit 2>/dev/null)'
-    reason: "`.github/workflows/pull_request.yml`: Python pipeline detection uses `find … -print -quit` instead of `find … | head -n 1`, which fails with SIGPIPE under `pipefail` on a pipeline with this many files. Same change as #286; it drops out of the next sync once #286 is merged."
+    reason: "`.github/workflows/pull_request.yml`: pipeline detection in the Python build job uses `find … -print -quit` instead of `find … | head -n 1`. Under `pipefail`, the old form fails with SIGPIPE on a pipeline with this many files, before any build step runs."
