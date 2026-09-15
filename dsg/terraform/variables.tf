@@ -59,12 +59,22 @@ variable "build_service_account_name" {
 }
 
 variable "model" {
-  description = "LLM staged by scripts/02_stage_models.sh and used by the job: gemma4-e4b-it (Kaggle, needs the Gemma license accepted) or qwen3-4b (ModelScope, no credentials)."
+  description = "LLM staged by scripts/02_stage_models.sh and used by the job: gemma4-e4b-it (google/gemma-4-E4B-it) or qwen3-4b (Qwen/Qwen3-4B-Instruct-2507). Both are Apache-2.0 open weights."
   type        = string
   default     = "gemma4-e4b-it"
   validation {
     condition     = contains(["gemma4-e4b-it", "qwen3-4b"], var.model)
     error_message = "model must be gemma4-e4b-it or qwen3-4b."
+  }
+}
+
+variable "model_source" {
+  description = "Where scripts/02_stage_models.sh downloads the weights from, once, before copying them to the bucket: huggingface (Hugging Face Hub) or modelscope (a mirror with the same repository ids). Workers only read GCS."
+  type        = string
+  default     = "huggingface"
+  validation {
+    condition     = contains(["huggingface", "modelscope"], var.model_source)
+    error_message = "model_source must be huggingface or modelscope."
   }
 }
 
@@ -84,6 +94,12 @@ variable "num_rows" {
   description = "Rows generated for the root table (users); orders and order_items follow from the measured source fan-out."
   type        = number
   default     = 1000
+}
+
+variable "launch_job" {
+  description = "Launch the generation job from Terraform (google_dataflow_flex_template_job) instead of scripts/04_run_dataflow.sh. Needs the image, the weights and the template spec first (scripts 01-03). A finished batch job is launched again on the next apply while this stays true."
+  type        = bool
+  default     = false
 }
 
 variable "destroy_all_resources" {

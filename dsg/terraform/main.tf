@@ -22,18 +22,24 @@ locals {
   source_ref = try(jsondecode(file("${local.pipeline_dir}/.sync-source.json")).ref, "dev")
   docker_tag = replace(local.source_ref, "/[^A-Za-z0-9_.-]/", "-")
 
+  template_path = "gs://${local.bucket_name}/templates/${local.pipeline_name}-${local.docker_tag}.json"
+
+  # GCS layout written by scripts/02_stage_models.sh (docs/MODEL_LAYOUT.md).
   model_paths = {
     "gemma4-e4b-it" = "gemma4/e4b-it/v1"
     "qwen3-4b"      = "qwen3/4b-instruct-2507/v1"
   }
   models_prefix = "gs://${local.bucket_name}/synthetic/models"
+  model_uri     = "${local.models_prefix}/${local.model_paths[var.model]}/"
+  embedder_uri  = "${local.models_prefix}/embedders/bge-small-en-v1.5/v1/"
 
   source_dataset  = "synthetic_source"
   landing_dataset = "synthetic_data"
   quality_dataset = "synthetic_data_quality"
+  rag_dataset     = "synthetic_rag"
 
+  relationships_uri    = "config/relationships/gcp_public_fk_example.yaml"
   max_dataflow_workers = 1
-  kaggle_secrets       = ["kaggle-username", "kaggle-key"]
 }
 
 data "google_project" "project" {
@@ -45,7 +51,7 @@ resource "google_project_service" "application" {
     "artifactregistry.googleapis.com", "bigquery.googleapis.com", "bigquerystorage.googleapis.com",
     "cloudbuild.googleapis.com", "compute.googleapis.com", "dataflow.googleapis.com",
     "iam.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com",
-    "secretmanager.googleapis.com", "storage.googleapis.com",
+    "storage.googleapis.com",
   ])
   project            = var.project_id
   service            = each.value
@@ -121,36 +127,6 @@ module "build_sa" {
   }
 }
 
-// Kaggle credentials for staging Gemma weights. Terraform only creates the
-// secrets with a placeholder version; add the real values with gcloud so
-// they never enter the Terraform state (see scripts/02_stage_models.sh).
-resource "google_secret_manager_secret" "kaggle" {
-  for_each   = toset(local.kaggle_secrets)
-  project    = var.project_id
-  secret_id  = each.value
-  depends_on = [google_project_service.application]
-  replication {
-    auto {}
-  }
-}
-
-resource "google_secret_manager_secret_version" "kaggle_placeholder" {
-  for_each    = google_secret_manager_secret.kaggle
-  secret      = each.value.id
-  secret_data = "unset"
-  lifecycle {
-    ignore_changes = [secret_data, enabled]
-  }
-}
-
-resource "google_secret_manager_secret_iam_member" "build_kaggle" {
-  for_each  = google_secret_manager_secret.kaggle
-  project   = var.project_id
-  secret_id = each.value.secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = module.build_sa.iam_email
-}
-
 // Additive permission on the existing local or Shared VPC subnet.
 resource "google_compute_subnetwork_iam_member" "dataflow_network_user" {
   count      = local.subnetwork != "" ? 1 : 0
@@ -185,16 +161,18 @@ export IMAGE_NAME=${local.pipeline_name}
 export DOCKER_TAG=${local.docker_tag}
 export DOCKER_IMAGE=$REGION-docker.pkg.dev/$PROJECT/$DOCKER_REPOSITORY/$IMAGE_NAME
 export CONTAINER_URI=$DOCKER_IMAGE:$DOCKER_TAG
-export TEMPLATE_PATH=gs://${local.bucket_name}/templates/${local.pipeline_name}-${local.docker_tag}.json
+export TEMPLATE_PATH=${local.template_path}
 
 export MODEL=${var.model}
-export MODEL_URI=${local.models_prefix}/${local.model_paths[var.model]}/
-export EMBEDDER_URI=${local.models_prefix}/embedders/bge-small-en-v1.5/v1/
+export MODEL_SOURCE=${var.model_source}
+export MODEL_URI=${local.model_uri}
+export EMBEDDER_URI=${local.embedder_uri}
 
 export SOURCE_DATASET=${local.source_dataset}
 export LANDING_DATASET=${local.landing_dataset}
 export QUALITY_DATASET=${local.quality_dataset}
-export RELATIONSHIPS_URI=config/relationships/gcp_public/gcp-public-relationship.yaml
+export RAG_DATASET=${local.rag_dataset}
+export RELATIONSHIPS_URI=${local.relationships_uri}
 export NUM_ROWS=${var.num_rows}
 
 export MAX_DATAFLOW_WORKERS=${local.max_dataflow_workers}

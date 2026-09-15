@@ -1,6 +1,6 @@
 """The public demo model shipped for the Dataflow Solution Guides launch.
 
-`config/relationships/gcp_public/gcp-public-relationship.yaml` is what the
+`config/relationships/gcp_public_fk_example.yaml` is what the
 DSG `04_run_dataflow.sh` passes as `--relationships_uri` (ADR 0040). These
 tests pin what that launch plans — waves and edge roles — and that the
 model stays out of a default directory scan.
@@ -17,8 +17,8 @@ from pathlib import Path
 from sdfb_beam.io.relationships import load_relationship_registry
 
 _MODEL = (
-    Path(__file__).parents[5] / "config" / "relationships" / "gcp_public" /
-    "gcp-public-relationship.yaml")
+    Path(__file__).parents[5] / "config" / "relationships" /
+    "gcp_public_fk_example.yaml")
 
 
 def _roles(registry, table):
@@ -58,9 +58,8 @@ def test_every_primary_key_is_synthesized_as_identity():
     assert relations.identity == relations.pk
 
 
-def test_a_directory_scan_does_not_recurse_into_the_demo_folder(tmp_path):
-  (tmp_path / "gcp_public").mkdir()
-  (tmp_path / "gcp_public" / _MODEL.name).write_text(
+def test_a_directory_scan_skips_the_example_model(tmp_path):
+  (tmp_path / _MODEL.name).write_text(
       _MODEL.read_text(encoding="utf-8"), encoding="utf-8")
   (tmp_path / "real.yaml").write_text(
       "model: real\ntables:\n  A_TABLE:\n    pk: [A_COL_001]\n",

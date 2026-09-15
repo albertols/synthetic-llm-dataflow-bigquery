@@ -41,7 +41,10 @@ flowchart LR
    to `validation_runs`.
 
 The sample deployment generates `users → orders → order_items` from the
-fictitious `bigquery-public-data.thelook_ecommerce` dataset.
+fictitious `bigquery-public-data.thelook_ecommerce` dataset, into tables with
+the same names and schemas in your project. The relationship model and the
+tables are described in the
+[Terraform README](../terraform/synthetic-llm-dataflow-bigquery/README.md).
 
 ## Technical benefits
 

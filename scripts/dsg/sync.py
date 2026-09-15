@@ -7,7 +7,8 @@ never ship), selects files by `dsg/manifest.yaml` from THAT ref, lays the
 `dsg/` overlays on top, generates the DSG build files from `uv.lock`, pins
 links to documents that are not shipped, replaces the owned DSG paths
 wholesale, runs the same gates DSG CI runs, and optionally commits, pushes
-the fork branch and opens or updates the PR.
+the fork branch for that ref, opens or updates its PR, and closes the older
+sync PRs it supersedes.
 
     uv run python scripts/dsg/sync.py --ref v0.4.0 \\
         --dsg ~/IdeaProjects/dataflow-solution-guides --open-pr
@@ -112,7 +113,8 @@ class Manifest:
   source_repo: str
   target_repo: str
   target_base: str
-  branch: str
+  # Every ref syncs to its own branch: branch_prefix + ref.
+  branch_prefix: str
   pipeline_dir: str
   owned_paths: Sequence[str]
   preserve: Sequence[str]
@@ -156,6 +158,15 @@ class Manifest:
   @property
   def pipeline_name(self) -> str:
     return posixpath.basename(self.pipeline_dir)
+
+  def branch_for(self, ref: str) -> str:
+    """`sync/<pipeline>-v0.5.1` for tag v0.5.1; other refs are sanitized."""
+    return self.branch_prefix + re.sub(r"[^A-Za-z0-9._-]+", "-", ref)
+
+  def is_sync_branch(self, branch: str) -> bool:
+    """A branch of this sync, including the unversioned one before v0.5.1."""
+    return branch.startswith(self.branch_prefix) or branch == (
+        self.branch_prefix.rstrip("-"))
 
 
 def _run(cmd: Sequence[str], cwd: Path | None = None, **kwargs) -> str:
@@ -625,15 +636,15 @@ def run_gates(export_root: Path, dsg_root: Path, manifest: Manifest, *,
 # --------------------------------------------------------------------------
 
 
-def prepare_branch(dsg_root: Path, manifest: Manifest) -> str:
-  """Reset the one sync branch onto the DSG base branch.
+def prepare_branch(dsg_root: Path, manifest: Manifest, ref: str) -> str:
+  """Reset the ref's sync branch onto the DSG base branch.
 
-  A single branch carries every sync: while its PR is open a re-sync updates
-  that PR; once it has merged, the next sync opens a new one.
+  Each ref gets its own branch, so the PR head names the version under
+  review; re-syncing the same ref updates its PR.
   """
   if _run(["git", "-C", str(dsg_root), "status", "--porcelain"]).strip():
     raise SyncError(f"{dsg_root} has uncommitted changes")
-  branch = manifest.branch
+  branch = manifest.branch_for(ref)
   _run(["git", "-C", str(dsg_root), "fetch", "upstream", manifest.target_base])
   _run([
       "git", "-C",
@@ -672,6 +683,51 @@ def commit(dsg_root: Path, manifest: Manifest, *, ref: str, sha: str,
   return True
 
 
+def superseded_prs(prs: Sequence[dict], manifest: Manifest, *, owner: str,
+                   branch: str) -> list[dict]:
+  """Open sync PRs from the owner's fork that the PR for `branch` replaces."""
+  return [
+      pr for pr in prs if pr["headRefName"] != branch and
+      manifest.is_sync_branch(pr["headRefName"]) and
+      (pr.get("headRepositoryOwner") or {}).get("login") == owner
+  ]
+
+
+def close_superseded(dsg_root: Path, manifest: Manifest, *, owner: str,
+                     branch: str, url: str) -> list[str]:
+  """Close older open sync PRs and delete their fork branches.
+
+  One sync PR stays open for review. `gh pr close --delete-branch` skips a
+  fork's branch, so the branch is deleted by pushing to the fork remote.
+  """
+  prs = json.loads(
+      _run([
+          "gh", "pr", "list", "-R", manifest.target_repo, "--author", owner,
+          "--state", "open", "--json",
+          "number,url,headRefName,headRepositoryOwner"
+      ]) or "[]")
+  closed = []
+  for pr in superseded_prs(prs, manifest, owner=owner, branch=branch):
+    _run([
+        "gh", "pr", "close",
+        str(pr["number"]), "-R", manifest.target_repo, "--comment",
+        f"Superseded by {url}."
+    ])
+    subprocess.run([
+        "git", "-C",
+        str(dsg_root), "push", "origin", "--delete", pr["headRefName"]
+    ],
+                   capture_output=True,
+                   check=False)
+    subprocess.run(
+        ["git", "-C",
+         str(dsg_root), "branch", "-D", pr["headRefName"]],
+        capture_output=True,
+        check=False)
+    closed.append(pr["url"])
+  return closed
+
+
 def push_and_open_pr(dsg_root: Path, manifest: Manifest, *, branch: str,
                      title: str, body: str) -> str:
   # Refresh the lease: the fork may still hold this branch from an earlier sync.
@@ -696,12 +752,17 @@ def push_and_open_pr(dsg_root: Path, manifest: Manifest, *, branch: str,
         "gh", "pr", "edit", existing, "-R", manifest.target_repo, "--title",
         title, "--body-file", fh.name
     ])
-    return existing
-  return _run([
-      "gh", "pr", "create", "-R", manifest.target_repo, "--base",
-      manifest.target_base, "--head", f"{owner}:{branch}", "--title", title,
-      "--body-file", fh.name
-  ]).strip()
+    url = existing
+  else:
+    url = _run([
+        "gh", "pr", "create", "-R", manifest.target_repo, "--base",
+        manifest.target_base, "--head", f"{owner}:{branch}", "--title", title,
+        "--body-file", fh.name
+    ]).strip()
+  for old in close_superseded(
+      dsg_root, manifest, owner=owner, branch=branch, url=url):
+    print(f"closed {old} (superseded)")
+  return url
 
 
 def missing_tools(*,
@@ -734,7 +795,8 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument(
       "--open-pr",
       action="store_true",
-      help="commit, push the fork branch, open/update the PR")
+      help="commit, push the ref's fork branch, open/update its PR and "
+      "close the older sync PRs")
   parser.add_argument("--cloud-run", help="URL/id of a verifying Dataflow job")
   args = parser.parse_args(argv)
   dsg_root = args.dsg.expanduser().resolve()
@@ -761,7 +823,8 @@ def main(argv: Sequence[str] | None = None) -> int:
       for f in findings:
         print(f"{f.path}:{f.line}: {f.rule}: {f.excerpt}")
       raise SyncError(f"precheck: {len(findings)} finding(s); nothing synced")
-    branch = None if args.no_branch else prepare_branch(dsg_root, manifest)
+    branch = None if args.no_branch else prepare_branch(dsg_root, manifest,
+                                                        args.ref)
     prev_sha = read_prev_sha(dsg_root, manifest)
     broken = rewrite_links(
         staging, dsg_root, manifest, sha=sha, export_root=export_root)

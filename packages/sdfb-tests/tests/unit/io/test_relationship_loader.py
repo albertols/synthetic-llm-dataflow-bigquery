@@ -174,4 +174,6 @@ class TestDocumentationSamplesAreSkipped:
         its own local-directory scan (same rule, one definition)."""
     assert is_sample_model("config/relationships/example_retail.yaml")
     assert is_sample_model("config/relationships/retail.example.yaml")
+    assert is_sample_model("config/relationships/gcp_public_fk_example.yaml")
+    assert not is_sample_model("config/relationships/examples_catalog.yaml")
     assert not is_sample_model("config/relationships/retail.yaml")

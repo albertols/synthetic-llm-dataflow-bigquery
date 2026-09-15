@@ -16,10 +16,13 @@
 # Launch one relational generation job from the Flex Template.
 #
 # Targeting the leaf table (order_items) expands the launch to its whole
-# connected component in config/relationships/gcp_public/: users are
-# generated first (NUM_ROWS rows), orders from the users' landed keys, then
-# order_items from the orders' landed keys, with product_id drawn from the
-# products catalog already present in the landing dataset (ADR 0036/0037).
+# connected component in config/relationships/gcp_public_fk_example.yaml:
+# users are generated first (NUM_ROWS rows), orders from the users' landed
+# keys, then order_items from the orders' landed keys, with product_id drawn
+# from the products catalog already in the landing dataset (ADR 0036/0037).
+# The landing, quality and RAG tables already exist (Terraform), so nothing
+# is created at launch. The Terraform launch (launch_job = true) passes the
+# same parameters, from terraform/synthetic-llm-dataflow-bigquery/dataflow.tf.
 #
 # Usage: ./scripts/04_run_dataflow.sh [NUM_ROWS]
 # Prints the RUN_ID; pass it to 05_verify_run.sh once the job is done.
@@ -45,6 +48,11 @@ PARAMS=(
   "dlq_table=${PROJECT}.${QUALITY_DATASET}.dlq"
   "validation_runs_table=${PROJECT}.${QUALITY_DATASET}.validation_runs"
   "fk_fanout_stats_table=${PROJECT}.${QUALITY_DATASET}.fk_fanout_stats"
+  "rag_chunks_table=${PROJECT}.${RAG_DATASET}.rag_chunks"
+  "build_rag_layer=true"
+  "freetext_pools_table=${PROJECT}.${RAG_DATASET}.freetext_pools"
+  "build_pool_layer=true"
+  "source_stats_table=${PROJECT}.${RAG_DATASET}.source_table_stats"
   "relationships_uri=${RELATIONSHIPS_URI}"
   "num_rows=${ROWS}"
   "run_id=${RUN_ID}"
@@ -54,7 +62,7 @@ PARAMS=(
   "embedder_uri=${EMBEDDER_URI}"
   "vllm_max_model_len=8192"
   "reference_rows_limit=10000"
-  "create_if_not_exists=true"
+  "create_if_not_exists=false"
   "write_disposition=overwrite"
   "env=dev"
 )

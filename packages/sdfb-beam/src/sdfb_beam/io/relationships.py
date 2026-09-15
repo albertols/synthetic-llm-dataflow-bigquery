@@ -43,14 +43,16 @@ def _patterns(uri: str) -> list[str]:
 
 
 def is_sample_model(path: str) -> bool:
-  """True for a documentation sample (`example_*.yaml`, `*.example.yaml`).
+  """True for a documentation sample (`example_*`, `*.example.*`, `*_example.*`).
 
     Public because the two places that walk a relationships directory —
     this loader's directory scan and `scripts/relationships/card.py`'s
     local-path scan — must agree on exactly which files are samples.
     """
   name = path.rsplit("/", 1)[-1]
-  return name.startswith("example_") or ".example." in name
+  stem = name.rsplit(".", 1)[0]
+  return (name.startswith("example_") or ".example." in name or
+          stem.endswith("_example"))
 
 
 def load_relationship_registry(uri: str) -> RelationshipRegistry:

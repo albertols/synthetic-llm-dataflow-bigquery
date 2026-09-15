@@ -62,11 +62,17 @@ parent's landed rows.
 
 ## Samples are never loaded from a directory scan
 
-`example_*.yaml` and `*.example.yaml` are documentation. The loader skips
-them when it scans a directory (`relationships_example_skipped` in the
-launcher log), so a real model that reuses the sample's anonymised aliases
-(`A_TABLE`, `B_TABLE`, …) never collides with it. To load a sample on
+`example_*.yaml`, `*.example.yaml` and `*_example.yaml` are documentation.
+The loader skips them when it scans a directory
+(`relationships_example_skipped` in the launcher log), so a real model that
+reuses a sample's table names never collides with it. To load a sample on
 purpose, point `--relationships_uri` at the file itself.
+
+`gcp_public_fk_example.yaml` is the one sample that describes real, public
+tables: `users`, `orders` and `order_items` from the fictitious
+`bigquery-public-data.thelook_ecommerce` dataset. The Dataflow Solution
+Guides deployment launches with it; its Terraform README shows how those
+tables are snapshotted and landed.
 
 ## Toggling tables: what the registry derives for you
 
@@ -548,8 +554,9 @@ missing folder is fine: it means "no relationships declared anywhere".
 ## Real names stay out of git
 
 Everything here is committed, so everything here uses aliases
-(`X_TABLE` / `COL_XXX`). The folder is gitignored apart from
-`*.example.yaml` and this README, so a real model file dropped next to
+(`X_TABLE` / `COL_XXX`), apart from the public `thelook_ecommerce` example.
+The folder is gitignored apart from the samples and this README, so a real
+model file dropped next to
 them ships in your image build and can never be committed by accident.
 The `gs://` override keeps real names off the filesystem entirely.
 

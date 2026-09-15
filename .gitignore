@@ -69,7 +69,7 @@ config/relationships/*
 !config/relationships/README.md
 !config/relationships/*.example.yaml
 !config/relationships/example_*.yaml
-!config/relationships/gcp_public/
+!config/relationships/*_example.yaml
 
 # Local E2E bundles hold source-derived values (scripts/dsg/precheck.py).
 integration_tests/

@@ -55,6 +55,9 @@ repository and replaced wholesale on every sync. `.sync-source.json` records
 the ref and sha. A change requested on the DSG side is made here, released,
 and synced. DSG commits and PRs carry only the maintainer's git identity: the DSG is
 Google-owned, so there are no co-author or tool-attribution trailers and no AI footers.
+Each ref is published on its own fork branch, `sync/<pipeline>-<ref>`, so the
+PR head names the version under review. Publishing closes the older open sync
+PRs from the fork, leaving one PR open.
 
 **D2 — The DSG contract lives here, as an overlay.** DSG-only files are
 versioned in `dsg/`: launch scripts `01`–`05`, `setup.py`, Cloud Build
@@ -97,14 +100,21 @@ Cloud" unless `--cloud-run` names a verifying job.
 **D7 — The demo is relational and public.** The DSG launch generates
 `users → orders → order_items` from the fictitious
 `bigquery-public-data.thelook_ecommerce` dataset, with
-`config/relationships/gcp_public/gcp-public-relationship.yaml`:
+`config/relationships/gcp_public_fk_example.yaml`:
 - orders is driven by users;
 - order_items is driven by orders, via an edge widened to carry `user_id`, which makes its users edge implied;
 - `product_id` comes from an external catalog parent.
 
 Terraform snapshots the sources with their parent filters applied, so the
-source has referential integrity. GEOGRAPHY columns are left out, because
-the generator would invent WKT that BigQuery rejects on load.
+source has referential integrity. The snapshots and the landing tables keep
+the public tables' names and schemas (landing tables are created `LIKE` the
+public ones, and the job never creates a table); GEOGRAPHY values are nulled
+in the snapshot, because the generator would invent WKT that BigQuery rejects
+on load, and an all-NULL column generates NULLs. Every other table is created
+from its `config/bq_schema` file. Model weights are staged once from public
+Hugging Face (or ModelScope) repositories by Cloud Build, never by Terraform
+and never at runtime. The job launches from gcloud or, optionally, from
+Terraform with the same parameters.
 
 ## Alternatives considered
 
