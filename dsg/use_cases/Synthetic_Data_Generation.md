@@ -52,7 +52,7 @@ tables are described in the
   Cloud Storage and served by vLLM on the workers, with no model hub at
   runtime. Reference rows and prompts stay inside the project.
 - **Batch GPU inference on Dataflow.** One image serves the Flex Template
-  launcher and NVIDIA L4 workers; Dataflow provisions the GPUs and drivers
+  launcher and NVIDIA L4 or T4 workers; Dataflow provisions the GPUs and drivers
   and releases them when the job ends.
 - **Relational integrity at scale.** A whole foreign-key component (chains,
   stars, diamonds) is generated in one job with measured parent-to-child

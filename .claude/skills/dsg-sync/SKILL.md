@@ -110,6 +110,7 @@ version: `albertols:sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
 | Public FK model the DSG launches generate | `config/relationships/gcp_public_fk_example.yaml` (a sample: directory scans skip `*_example.yaml`) |
 | Model staging (Hugging Face or ModelScope → GCS, no credentials) | `dsg/pipeline/cloudbuild_stage_models.yaml`, `dsg/pipeline/scripts/02_stage_models.sh` |
 | Solution guide page | `dsg/use_cases/Synthetic_Data_Generation.md` |
+| GPU → machine family, accelerator, `vllm_dtype` and allowed models (`l4`: G2, `auto`; `t4`: N1, `float16`, Qwen only) | `gpu_profiles` in `dsg/terraform/main.tf` |
 | Launch parameters (kept identical; `terraform test` fails on drift) | `dsg/pipeline/scripts/04_run_dataflow.sh`, `dsg/terraform/dataflow.tf` |
 | Sensitive-content rules and hashed tokens | `dsg/precheck.yaml`, `dsg/sensitive_token_hashes.txt` |
 | PR body | `dsg/PR_TEMPLATE.md` |

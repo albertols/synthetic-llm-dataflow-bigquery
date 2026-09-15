@@ -142,7 +142,7 @@ flowchart LR
   hf[(Hugging Face Hub<br/>model_source = huggingface)] -->|once| cb
   ms[(ModelScope mirror<br/>model_source = modelscope)] -.->|once| cb
   cb -->|check files · copy| gcs[(gs://BUCKET/synthetic/models/)]
-  gcs -->|worker setup copies to local disk| w[Dataflow L4 worker<br/>vLLM · HF_HUB_OFFLINE=1]
+  gcs -->|worker setup copies to local disk| w[Dataflow GPU worker<br/>vLLM · HF_HUB_OFFLINE=1]
 ```
 
 | `model` | Repository (same id on both hubs) | GCS prefix under `synthetic/models/` | License |
@@ -169,6 +169,47 @@ Alternatives:
   model size, every worker would pull it at startup, and a model change would
   need an image rebuild.
 
+## GPU, machine type and vLLM dtype
+
+Each worker has one GPU. The `gpu` variable picks the machine family, the
+accelerator and the dtype vLLM serves the model with, and it limits which
+models can run:
+
+```mermaid
+flowchart LR
+  gpu{gpu} -->|l4| l4["NVIDIA L4<br/>compute capability 8.9 · 24 GB"]
+  gpu -->|t4| t4["NVIDIA T4<br/>compute capability 7.5 · 16 GB"]
+  l4 --> g2["G2 machines<br/>g2-standard-8"] --> auto["vllm_dtype = auto<br/>bf16 checkpoint as shipped"]
+  t4 --> n1["N1 machines<br/>n1-standard-8"] --> fp16["vllm_dtype = float16<br/>explicit downcast"]
+  auto --> ok1["gemma4-e4b-it ✓<br/>qwen3-4b ✓"]
+  fp16 --> ok2["qwen3-4b ✓<br/>gemma4-e4b-it ✗"]
+```
+
+| `gpu` | GPU | Machine family (default) | `worker_accelerator` | Models | `vllm_dtype` |
+| :-- | :-- | :-- | :-- | :-- | :-- |
+| `l4` (default) | NVIDIA L4, compute capability 8.9, 24 GB | G2 only (`g2-standard-8`) | `type:nvidia-l4;count:1;install-nvidia-driver` | `gemma4-e4b-it`, `qwen3-4b` | `auto`: serves the bf16 checkpoint as is |
+| `t4` | NVIDIA T4, compute capability 7.5, 16 GB | N1 only (`n1-standard-8`) | `type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx` | `qwen3-4b` only | `float16`, required |
+
+Why the dtype depends on the GPU:
+
+* Both checkpoints ship in bf16, which needs compute capability 8.0 or
+  higher. An L4 runs them as they are.
+* A T4 cannot run bf16. Qwen is numerically safe in fp16, so the explicit
+  `float16` downcast is what makes it run there.
+* Gemma is not fp16-safe: its activations overflow and it silently emits
+  empty output. The worker refuses `float16` for a Gemma checkpoint, so there
+  is no Gemma-on-T4 configuration. Terraform stops at plan time if you ask for
+  one.
+* `vllm_max_model_len=8192` caps the KV cache. Without it, vLLM sizes it for
+  Qwen's native 262K context (about 36 GiB), which fits neither GPU.
+
+`machine_type` can be any size of the family (`g2-standard-4` to `-16` all
+carry one L4), and Terraform rejects a machine type from the other family.
+The T4 driver pin `:5xx` follows Dataflow's guidance for vLLM. Check that
+`region` offers the GPU and that you have quota for it. Terraform writes
+`GPU`, `MACHINE_TYPE`, `ACCELERATOR` and `VLLM_DTYPE` to
+`scripts/00_set_variables.sh`, and both launches use them.
+
 ## Bill of resources created by this script
 
 | Resource | Name | Description |
@@ -193,17 +234,17 @@ across locations.
 | Variable | Type | Description |
 | :-- | :-: | :-- |
 | `project_id` | `string` | Required. Existing project where resources are provisioned. |
-| `region` | `string` | Required. Region for Dataflow, Cloud Build, Artifact Registry and the bucket. It must offer NVIDIA L4 GPUs (for example `us-central1`). |
+| `region` | `string` | Required. Region for Dataflow, Cloud Build, Artifact Registry and the bucket. It must offer the chosen GPU (for example `us-central1`). |
 | `bq_location` | `string` | Optional. Default `US`, the location of `bigquery-public-data.thelook_ecommerce`. |
 | `subnetwork` | `string` | Optional. Subnetwork path or URI for the workers. It needs Private Google Access, because workers have no public IP. |
 | `bucket_name` | `string` | Optional. Defaults to `project_id`. |
 | `create_bucket` | `bool` | Optional. Default `false`. |
 | `service_account_name` | `string` | Optional. Default `synthetic-llm-dataflow-sa`. |
 | `build_service_account_name` | `string` | Optional. Default `synthetic-llm-build-sa`. |
-| `model` | `string` | Optional. `gemma4-e4b-it` (default) or `qwen3-4b`. |
+| `model` | `string` | Optional. `gemma4-e4b-it` (default, needs `gpu = "l4"`) or `qwen3-4b`. |
 | `model_source` | `string` | Optional. `huggingface` (default) or `modelscope`, where `02_stage_models.sh` downloads from. |
-| `machine_type` | `string` | Optional. Default `g2-standard-8`. |
-| `accelerator` | `string` | Optional. Default `type:nvidia-l4;count:1;install-nvidia-driver`. |
+| `gpu` | `string` | Optional. `l4` (default, G2, dtype `auto`) or `t4` (N1, dtype `float16`, `qwen3-4b` only). See [GPU, machine type and vLLM dtype](#gpu-machine-type-and-vllm-dtype). |
+| `machine_type` | `string` | Optional. A machine type of the GPU's family. Default `g2-standard-8` for `l4`, `n1-standard-8` for `t4`. |
 | `num_rows` | `number` | Optional. Rows for the root table `users`. Default `1000`. |
 | `launch_job` | `bool` | Optional. Default `false`. `true` launches the generation job from Terraform. |
 | `destroy_all_resources` | `bool` | Optional. Default `true`: `terraform destroy` also removes table contents and the bucket. Use `false` for anything you want to keep. |
@@ -243,7 +284,7 @@ across locations.
    duplicates, foreign-key orphans and the `validation_runs` verdicts.
 
 The account that runs the scripts needs permission to act as both service
-accounts (`roles/iam.serviceAccountUser`) and NVIDIA L4 quota in `region`.
+accounts (`roles/iam.serviceAccountUser`) and quota for the chosen GPU in `region`.
 
 ## Scripts generation
 

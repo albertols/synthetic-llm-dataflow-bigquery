@@ -39,7 +39,7 @@ if [[ -n "${SUBNETWORK:-}" ]]; then
 fi
 
 # One SDK process per GPU worker: every process would otherwise start its
-# own vLLM server on the single L4 (ADR 0034).
+# own vLLM server on the single GPU (ADR 0034).
 EXPERIMENTS="enable_portable_runner,worker_accelerator=${ACCELERATOR},no_use_multiple_sdk_containers"
 
 PARAMS=(
@@ -60,6 +60,7 @@ PARAMS=(
   "client_type=vllm"
   "model_uri=${MODEL_URI}"
   "embedder_uri=${EMBEDDER_URI}"
+  "vllm_dtype=${VLLM_DTYPE}"
   "vllm_max_model_len=8192"
   "reference_rows_limit=10000"
   "create_if_not_exists=false"

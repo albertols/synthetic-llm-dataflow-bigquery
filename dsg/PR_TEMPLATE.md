@@ -14,7 +14,7 @@ source at [`{ref}`]({compare_url}) (`{short_sha}`).
 ```
 bigquery-public-data.thelook_ecommerce ── terraform snapshot ──▶ synthetic_source
   └─ Flex Template launcher: relationship model → users ▸ orders ▸ order_items
-      └─ Dataflow NVIDIA L4 workers: reference sample → vLLM value pools (bounded) → vectorized rows
+      └─ Dataflow NVIDIA L4 (G2, dtype auto) or T4 (N1, float16, Qwen only) workers: reference sample → vLLM value pools (bounded) → vectorized rows
           ├─ BigQuery synthetic_data            (landing, FKs valid by construction)
           ├─ BigQuery synthetic_data_quality    (dlq, validation_runs, fk_fanout_stats)
           └─ BigQuery synthetic_rag             (rag_chunks, freetext_pools, source_table_stats)

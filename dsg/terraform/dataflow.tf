@@ -32,6 +32,7 @@ locals {
     client_type           = "vllm"
     model_uri             = local.model_uri
     embedder_uri          = local.embedder_uri
+    vllm_dtype            = local.gpu.vllm_dtype
     vllm_max_model_len    = "8192"
     reference_rows_limit  = "10000"
     create_if_not_exists  = "false"
@@ -48,6 +49,7 @@ resource "random_id" "launch" {
     template   = local.template_path
     num_rows   = var.num_rows
     model      = var.model
+    machine    = local.machine_type
     parameters = sha256(jsonencode(local.launch_parameters))
   }
 }
@@ -65,14 +67,14 @@ resource "google_dataflow_flex_template_job" "generation" {
   staging_location        = "gs://${local.bucket_name}/staging"
   subnetwork              = local.subnetwork != "" ? local.subnetwork : null
   ip_configuration        = "WORKER_IP_PRIVATE"
-  machine_type            = var.machine_type
+  machine_type            = local.machine_type
   num_workers             = 1
   max_workers             = local.max_dataflow_workers
   # One SDK process per GPU worker: every process would otherwise start its
-  # own vLLM server on the single L4 (ADR 0034).
+  # own vLLM server on the single GPU (ADR 0034).
   additional_experiments = [
     "enable_portable_runner",
-    "worker_accelerator=${var.accelerator}",
+    "worker_accelerator=${local.gpu.accelerator}",
     "no_use_multiple_sdk_containers",
   ]
   parameters = merge(local.launch_parameters, {

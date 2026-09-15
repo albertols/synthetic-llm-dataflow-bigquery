@@ -18,7 +18,7 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "The GCP region for Dataflow jobs, Cloud Build, Artifact Registry and the bucket. Needs NVIDIA L4 capacity (e.g. us-central1)."
+  description = "The GCP region for Dataflow jobs, Cloud Build, Artifact Registry and the bucket. Needs capacity for the chosen gpu (e.g. us-central1)."
   type        = string
 }
 
@@ -78,16 +78,20 @@ variable "model_source" {
   }
 }
 
-variable "machine_type" {
-  description = "Dataflow GPU worker machine type."
+variable "gpu" {
+  description = "One GPU per worker: l4 (NVIDIA L4 on G2 machines, vLLM dtype auto, both models) or t4 (NVIDIA T4 on N1 machines, vLLM dtype float16, qwen3-4b only)."
   type        = string
-  default     = "g2-standard-8"
+  default     = "l4"
+  validation {
+    condition     = contains(["l4", "t4"], var.gpu)
+    error_message = "gpu must be l4 or t4."
+  }
 }
 
-variable "accelerator" {
-  description = "Dataflow worker_accelerator experiment value (one NVIDIA L4 per worker)."
+variable "machine_type" {
+  description = "Dataflow GPU worker machine type, from the machine family of the gpu (g2-* for l4, n1-* for t4). Defaults to g2-standard-8 or n1-standard-8."
   type        = string
-  default     = "type:nvidia-l4;count:1;install-nvidia-driver"
+  default     = null
 }
 
 variable "num_rows" {

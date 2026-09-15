@@ -10,6 +10,7 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 🚀 Added
 - DSG Terraform can launch the generation job (`launch_job = true`, `google_dataflow_flex_template_job`) with the same parameters as `scripts/04_run_dataflow.sh`; `terraform test` fails if the two drift apart.
+- DSG Terraform `gpu` variable: `l4` (G2 machines, `vllm_dtype=auto`, both models) or `t4` (N1 machines, `vllm_dtype=float16`, `qwen3-4b` only). It sets the machine type, the accelerator and the dtype for both launches, and plan fails on Gemma with a T4 or on a machine type from the other family. Replaces the `accelerator` variable.
 - Model staging downloads from Hugging Face (default) or its ModelScope mirror, with no credentials: Gemma 4 E4B-it, Qwen3-4B-Instruct-2507 and bge-small are public, ungated repositories. `config/models.yml` records each `hf_repo`.
 
 ### 🔧 Changed

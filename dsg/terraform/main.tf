@@ -40,6 +40,30 @@ locals {
 
   relationships_uri    = "config/relationships/gcp_public_fk_example.yaml"
   max_dataflow_workers = 1
+
+  # The GPU fixes the machine family and the vLLM dtype. bf16 needs compute
+  # capability 8.0: an L4 (8.9, 24 GB) serves the bf16 checkpoints as they
+  # are, while a T4 (7.5, 16 GB) serves Qwen downcast to fp16 and cannot run
+  # Gemma, whose fp16 activations overflow (config/models.yml). The T4 driver
+  # pin follows Dataflow's vLLM guidance (docs/RUN_PLAYBOOK.md).
+  gpu_profiles = {
+    l4 = {
+      machine_family = "g2"
+      machine_type   = "g2-standard-8"
+      accelerator    = "type:nvidia-l4;count:1;install-nvidia-driver"
+      vllm_dtype     = "auto"
+      models         = ["gemma4-e4b-it", "qwen3-4b"]
+    }
+    t4 = {
+      machine_family = "n1"
+      machine_type   = "n1-standard-8"
+      accelerator    = "type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx"
+      vllm_dtype     = "float16"
+      models         = ["qwen3-4b"]
+    }
+  }
+  gpu          = local.gpu_profiles[var.gpu]
+  machine_type = coalesce(var.machine_type, local.gpu.machine_type)
 }
 
 data "google_project" "project" {
@@ -176,7 +200,20 @@ export RELATIONSHIPS_URI=${local.relationships_uri}
 export NUM_ROWS=${var.num_rows}
 
 export MAX_DATAFLOW_WORKERS=${local.max_dataflow_workers}
-export MACHINE_TYPE=${var.machine_type}
-export ACCELERATOR="${var.accelerator}"
+export GPU=${var.gpu}
+export MACHINE_TYPE=${local.machine_type}
+export ACCELERATOR="${local.gpu.accelerator}"
+export VLLM_DTYPE=${local.gpu.vllm_dtype}
 FILE
+
+  lifecycle {
+    precondition {
+      condition     = contains(local.gpu.models, var.model)
+      error_message = "model ${var.model} does not run on gpu ${var.gpu}: Gemma needs bf16 (compute capability 8.0+, an L4). Use gpu = \"l4\" or model = \"qwen3-4b\"."
+    }
+    precondition {
+      condition     = startswith(local.machine_type, "${local.gpu.machine_family}-")
+      error_message = "gpu ${var.gpu} attaches only to ${local.gpu.machine_family}-* machine types, not ${local.machine_type}."
+    }
+  }
 }

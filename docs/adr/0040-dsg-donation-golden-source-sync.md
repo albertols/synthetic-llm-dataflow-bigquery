@@ -114,7 +114,10 @@ on load, and an all-NULL column generates NULLs. Every other table is created
 from its `config/bq_schema` file. Model weights are staged once from public
 Hugging Face (or ModelScope) repositories by Cloud Build, never by Terraform
 and never at runtime. The job launches from gcloud or, optionally, from
-Terraform with the same parameters.
+Terraform with the same parameters. The `gpu` variable ties the GPU to its
+machine family and vLLM dtype: an L4 on G2 serves the bf16 checkpoints as
+shipped (`auto`), a T4 on N1 serves Qwen downcast to `float16` and never
+Gemma, which is not fp16-safe.
 
 ## Alternatives considered
 

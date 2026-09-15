@@ -11,7 +11,7 @@ This pipeline is part of the [Dataflow synthetic data generation solution guide]
 ## Deploy and run on Google Cloud
 
 The job reads the DDL and a bounded sample of each source table, runs an
-open-weight LLM with vLLM on NVIDIA L4 Dataflow workers, and writes validated
+open-weight LLM with vLLM on NVIDIA L4 (or T4) Dataflow workers, and writes validated
 synthetic rows to BigQuery. The demo generates three related tables from the
 fictitious [`thelook_ecommerce`](https://console.cloud.google.com/marketplace/product/bigquery-public-data/thelook-ecommerce)
 public dataset, keeping every foreign key valid.
@@ -23,7 +23,7 @@ flowchart LR
   hf[(Hugging Face<br/>open weights)] -->|02: once| gcs[(GCS models)]
   gcs --> job
   src --> job
-  subgraph job [Dataflow Flex Template job · L4 GPU workers]
+  subgraph job [Dataflow Flex Template job · one GPU per worker]
     direction TB
     u[users<br/>NUM_ROWS rows] --> o[orders<br/>from landed user keys] --> i[order_items<br/>from landed order keys]
   end
@@ -45,7 +45,9 @@ flowchart LR
 The model repositories are public, so step 2 needs no credentials. The
 [Terraform README](../../terraform/synthetic-llm-dataflow-bigquery/README.md)
 shows which tables come from `thelook_ecommerce`, the configuration files the
-job reads and how the weights reach the workers. Workers use private IPs only
+job reads, how the weights reach the workers, and which GPU, machine type and
+vLLM dtype go together: an L4 on G2 runs either model with `vllm_dtype=auto`;
+a T4 on N1 runs only `qwen3-4b`, with `vllm_dtype=float16`. Workers use private IPs only
 and run as the dedicated service account created by Terraform.
 
 Local checks, the same ones the repository CI runs:
