@@ -6,7 +6,7 @@ source at [`{ref}`]({compare_url}) (`{short_sha}`).
 | Path | Content |
 | :-- | :-- |
 | `{pipeline_dir}/` | Beam pipeline (uv workspace: `sdfb-core`, `sdfb-beam`, tests), Dockerfile, Flex Template metadata, launch scripts `01`–`05`, the decisions (`docs/adr/`) and designs the code cites |
-| `terraform/synthetic-llm-dataflow-bigquery/` | Service accounts, Artifact Registry, bucket, BigQuery datasets and quality tables, `thelook_ecommerce` snapshots, generated `scripts/00_set_variables.sh` |
+| `terraform/synthetic-llm-dataflow-bigquery/` | Service accounts, Artifact Registry, bucket, `thelook_ecommerce` snapshots, landing tables with the public schemas, one table per `config/bq_schema` file, optional Flex Template job, generated `scripts/00_set_variables.sh` |
 | `use_cases/Synthetic_Data_Generation.md` | Solution guide page, plus one row in each repository index |
 
 ### Pipeline
@@ -14,9 +14,10 @@ source at [`{ref}`]({compare_url}) (`{short_sha}`).
 ```
 bigquery-public-data.thelook_ecommerce ── terraform snapshot ──▶ synthetic_source
   └─ Flex Template launcher: relationship model → users ▸ orders ▸ order_items
-      └─ Dataflow NVIDIA L4 workers: reference sample → vLLM value pools (bounded) → vectorized rows
+      └─ Dataflow NVIDIA L4 (G2, dtype auto) or T4 (N1, float16, Qwen only) workers: reference sample → vLLM value pools (bounded) → vectorized rows
           ├─ BigQuery synthetic_data            (landing, FKs valid by construction)
-          └─ BigQuery synthetic_data_quality    (dlq, validation_runs)
+          ├─ BigQuery synthetic_data_quality    (dlq, validation_runs, fk_fanout_stats)
+          └─ BigQuery synthetic_rag             (rag_chunks, freetext_pools, source_table_stats)
 ```
 
 ### Security guardrails
@@ -24,7 +25,7 @@ bigquery-public-data.thelook_ecommerce ── terraform snapshot ──▶ synth
 * `--disable-public-ips`, with `--subnetwork` only when Terraform was given one (plus `roles/compute.networkUser` on it)
 * Dedicated launcher/worker and Cloud Build service accounts; no default compute account
 * Model weights staged once to GCS; no model hub or external LLM API at runtime (`HF_HUB_OFFLINE=1`)
-* Kaggle credentials only in Secret Manager, added outside Terraform state
+* Public, ungated model repositories staged by Cloud Build: no credentials in Terraform, scripts or state
 * `apache-beam[gcp]==2.74.0` matches the `apache/beam_python3.11_sdk:2.74.0` base image
 
 ### Also in this PR

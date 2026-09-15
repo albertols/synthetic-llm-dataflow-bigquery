@@ -1,6 +1,6 @@
 ---
 name: dsg-sync
-description: Use when replicating a tag or branch of this repository into GoogleCloudPlatform/dataflow-solution-guides (the DSG), refreshing the open DSG sync PR, or checking that a ref is safe and ready to sync — covers the pre-checks, scripts/dsg/sync.py, its gates and the PR.
+description: Use when replicating a tag or branch of this repository into GoogleCloudPlatform/dataflow-solution-guides (the DSG), refreshing or replacing the open DSG sync PR, or checking that a ref is safe and ready to sync — covers the pre-checks, scripts/dsg/sync.py, its gates, the versioned sync branch and the PR.
 ---
 
 # DSG sync — golden source → Dataflow Solution Guides
@@ -13,8 +13,12 @@ DSG reviewer asks for a change, make it here, release, and re-sync.
 ```
 ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + requirements from uv.lock
     ─▶ pin links to unshipped docs ─▶ replace owned DSG paths + index rows
-    ─▶ gates (= DSG CI) ─▶ commit ─▶ push fork branch ─▶ open / update PR
+    ─▶ gates (= DSG CI) ─▶ commit ─▶ push fork branch sync/<pipeline>-<ref>
+    ─▶ open / update its PR ─▶ close older open sync PRs + delete their branches
 ```
+
+One sync PR is under review at a time, and its head branch names the
+version: `albertols:sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
 
 ## Inputs
 
@@ -65,9 +69,17 @@ ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + req
    **Attribution:** the DSG is a Google-owned repository. Its commits and PR
    carry only the maintainer's git identity. Pass no `--trailer` (no AI
    co-author or session trailers) and never add an AI footer to the PR body.
-   Every sync uses the one branch `sync/synthetic-llm-dataflow-bigquery`. While its
-   PR is open, a re-sync (for example of a newer tag) updates that PR's commit, title
-   and body. Once the PR has merged, the next sync opens a new one.
+
+   **Branch and PR:** the sync publishes REF on `branch_prefix` + REF from
+   `dsg/manifest.yaml`, e.g. `sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
+   | Situation | What `--open-pr` does |
+   | :-- | :-- |
+   | No open PR for this branch | Opens one from `<you>:<branch>` |
+   | Re-sync of the same REF | Force-pushes the branch, updates the PR title and body |
+   | Older sync PRs still open (earlier versions, or the unversioned `sync/synthetic-llm-dataflow-bigquery`) | Comments "Superseded by <new PR>", closes them and deletes their fork branches |
+
+   Only PRs from your fork whose head matches the prefix are closed, never
+   anyone else's. Check the output for `closed … (superseded)` lines.
 5. **Watch DSG CI**: `gh pr checks <url> --watch`. Fix any red check **in the
    source**: add a gate to `sync.py` if CI caught something the gates missed,
    then release and re-sync. Never push a fix to the DSG branch by hand.
@@ -85,6 +97,8 @@ ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + req
   `dsg/pylintrc`, re-lint the source, release, and re-sync.
 - Any gate fails. Nothing is committed; the DSG checkout stays on the sync
   branch for inspection (`git -C … switch main` to discard).
+- `unknown manifest keys: ['branch']`: REF predates versioned branches
+  (before v0.5.1). Sync a newer tag instead.
 
 ## Where things live
 
@@ -92,8 +106,12 @@ ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + req
 | :-- | :-- |
 | What ships, owned paths, index rows, patches to DSG files (e.g. its CI) | `dsg/manifest.yaml` |
 | DSG-only files (launch scripts, setup.py, Cloud Build) | `dsg/pipeline/` |
-| Terraform module | `dsg/terraform/` |
+| Terraform module (tables from `config/bq_schema`, landing tables `LIKE` the public ones, optional Flex Template job) | `dsg/terraform/` |
+| Public FK model the DSG launches generate | `config/relationships/gcp_public_fk_example.yaml` (a sample: directory scans skip `*_example.yaml`) |
+| Model staging (Hugging Face or ModelScope → GCS, no credentials) | `dsg/pipeline/cloudbuild_stage_models.yaml`, `dsg/pipeline/scripts/02_stage_models.sh` |
 | Solution guide page | `dsg/use_cases/Synthetic_Data_Generation.md` |
+| GPU → machine family, accelerator, `vllm_dtype` and allowed models (`l4`: G2, `auto`; `t4`: N1, `float16`, Qwen only) | `gpu_profiles` in `dsg/terraform/main.tf` |
+| Launch parameters (kept identical; `terraform test` fails on drift) | `dsg/pipeline/scripts/04_run_dataflow.sh`, `dsg/terraform/dataflow.tf` |
 | Sensitive-content rules and hashed tokens | `dsg/precheck.yaml`, `dsg/sensitive_token_hashes.txt` |
 | PR body | `dsg/PR_TEMPLATE.md` |
 | Engine | `scripts/dsg/sync.py`, `scripts/dsg/precheck.py` (+ tests in `packages/sdfb-tests/tests/unit/scripts/test_dsg_*.py`) |

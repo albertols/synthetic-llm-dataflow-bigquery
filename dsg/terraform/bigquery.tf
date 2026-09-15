@@ -17,17 +17,50 @@ locals {
   source_fqn     = "${var.project_id}.${local.source_dataset}"
   landing_fqn    = "${var.project_id}.${local.landing_dataset}"
 
-  # One script, run once: the source snapshots the launch reads, filtered so
-  # every child row has its parent (referential integrity in the source),
-  # and the products catalog in the landing dataset as an already-landed
-  # parent. GEOGRAPHY columns are left out: the generator treats them as
-  # free text and BigQuery would reject the invented WKT on load.
-  snapshot_sql = <<-SQL
+  # Tables the pipeline writes besides the landing tables: one per schema file
+  # in the pipeline's config/bq_schema/<dataset>/<table>.schema.json, with the
+  # same dataset, name and schema.
+  schema_dir = "${local.pipeline_dir}/config/bq_schema"
+  pipeline_tables = {
+    for f in fileset(local.schema_dir, "*/*.schema.json") :
+    trimsuffix(f, ".schema.json") => {
+      dataset = dirname(f)
+      table   = trimsuffix(basename(f), ".schema.json")
+      schema  = file("${local.schema_dir}/${f}")
+    }
+  }
+  pipeline_datasets = toset([for t in local.pipeline_tables : t.dataset])
+
+  # DAY partitioning, as docs/DEPLOYMENT_PREREQUISITES.md specifies; every
+  # other pipeline table is unpartitioned.
+  partition_fields = {
+    "synthetic_data_quality/dlq"             = "dlq_inserted_at"
+    "synthetic_data_quality/validation_runs" = "created_at"
+    "synthetic_rag/rag_chunks"               = "created_at"
+  }
+
+  # The tables config/relationships/gcp_public_fk_example.yaml generates.
+  generated_tables = ["users", "orders", "order_items"]
+  landing_sql = join("\n", [for t in local.generated_tables :
+    "CREATE TABLE IF NOT EXISTS `${local.landing_fqn}.${t}`\nLIKE `${local.public_dataset}.${t}`;"
+  ])
+
+  # One script, run once at apply time:
+  #  - products: the catalog order_items.product_id draws from, copied into
+  #    the landing dataset where the launch reads already-landed parents;
+  #  - source snapshots with the exact public schemas, filtered so every
+  #    child row has its parent; GEOGRAPHY values are nulled because the
+  #    generator does not synthesize WKT, and an all-NULL column generates
+  #    NULLs;
+  #  - empty landing tables with the same names and schemas as the public
+  #    tables, which the job loads into (create_if_not_exists=false).
+  thelook_sql = <<-SQL
     CREATE OR REPLACE TABLE `${local.landing_fqn}.products` AS
     SELECT * FROM `${local.public_dataset}.products`;
 
     CREATE OR REPLACE TABLE `${local.source_fqn}.users` AS
-    SELECT * EXCEPT (user_geom) FROM `${local.public_dataset}.users`;
+    SELECT * REPLACE (CAST(NULL AS GEOGRAPHY) AS user_geom)
+    FROM `${local.public_dataset}.users`;
 
     CREATE OR REPLACE TABLE `${local.source_fqn}.orders` AS
     SELECT o.* FROM `${local.public_dataset}.orders` AS o
@@ -39,13 +72,9 @@ locals {
       SELECT 1 FROM `${local.source_fqn}.orders` AS o
       WHERE o.order_id = i.order_id AND o.user_id = i.user_id)
     AND i.product_id IN (SELECT id FROM `${local.landing_fqn}.products`);
-  SQL
 
-  quality_tables = {
-    dlq             = "dlq_inserted_at"
-    validation_runs = "created_at"
-    fk_fanout_stats = null
-  }
+    ${local.landing_sql}
+  SQL
 }
 
 module "source_dataset" {
@@ -66,26 +95,27 @@ module "landing_dataset" {
   options    = { delete_contents_on_destroy = var.destroy_all_resources }
 }
 
-module "quality_dataset" {
+// synthetic_data_quality and synthetic_rag, from the schema directory names
+module "pipeline_datasets" {
+  for_each   = local.pipeline_datasets
   depends_on = [google_project_service.application]
   source     = "github.com/GoogleCloudPlatform/cloud-foundation-fabric//modules/bigquery-dataset?ref=v58.0.0"
   project_id = var.project_id
-  id         = local.quality_dataset
+  id         = each.value
   location   = var.bq_location
   options    = { delete_contents_on_destroy = var.destroy_all_resources }
 }
 
-// Pipeline-written quality tables; schemas are the pipeline's own contracts.
-resource "google_bigquery_table" "quality" {
-  for_each            = local.quality_tables
+resource "google_bigquery_table" "pipeline" {
+  for_each            = local.pipeline_tables
   project             = var.project_id
-  dataset_id          = module.quality_dataset.dataset_id
-  table_id            = each.key
-  schema              = file("${local.pipeline_dir}/config/bq_schema/synthetic_data_quality/${each.key}.schema.json")
+  dataset_id          = module.pipeline_datasets[each.value.dataset].dataset_id
+  table_id            = each.value.table
+  schema              = each.value.schema
   deletion_protection = !var.destroy_all_resources
 
   dynamic "time_partitioning" {
-    for_each = each.value == null ? [] : [each.value]
+    for_each = contains(keys(local.partition_fields), each.key) ? [local.partition_fields[each.key]] : []
     content {
       type  = "DAY"
       field = time_partitioning.value
@@ -93,20 +123,20 @@ resource "google_bigquery_table" "quality" {
   }
 }
 
-resource "random_id" "snapshot" {
+resource "random_id" "thelook_tables" {
   byte_length = 4
   keepers = {
-    sql = sha256(local.snapshot_sql)
+    sql = sha256(local.thelook_sql)
   }
 }
 
-resource "google_bigquery_job" "thelook_snapshot" {
+resource "google_bigquery_job" "thelook_tables" {
   project  = var.project_id
   location = var.bq_location
-  job_id   = "sdfb-thelook-snapshot-${random_id.snapshot.hex}"
+  job_id   = "sdfb-thelook-tables-${random_id.thelook_tables.hex}"
 
   query {
-    query              = local.snapshot_sql
+    query              = local.thelook_sql
     use_legacy_sql     = false
     create_disposition = ""
     write_disposition  = ""

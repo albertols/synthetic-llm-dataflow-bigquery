@@ -38,7 +38,7 @@ def _manifest(**overrides):
       "source_repo": "https://github.com/acme/demo",
       "target_repo": "Org/guides",
       "target_base": "main",
-      "branch": "sync/demo",
+      "branch_prefix": "sync/demo-",
       "pipeline_dir": _PIPE,
       "owned_paths": [_PIPE, "terraform/demo", "use_cases/Demo.md"],
       "preserve": [f"{_PIPE}/scripts/00_set_variables.sh"],
@@ -394,3 +394,37 @@ def test_pr_body_lists_patches_in_effect():
       gates=[],
       changelog="",
       cloud_run=None) == "_None._"
+
+
+def test_each_ref_syncs_to_its_own_branch():
+  manifest = _manifest()
+  assert manifest.branch_for("v0.5.1") == "sync/demo-v0.5.1"
+  assert manifest.branch_for("feat/x y") == "sync/demo-feat-x-y"
+  assert manifest.is_sync_branch("sync/demo-v0.5.0")
+  assert manifest.is_sync_branch("sync/demo")
+  assert not manifest.is_sync_branch("sync/demolition")
+  assert not manifest.is_sync_branch("fix/demo-ci")
+
+
+def test_publishing_a_ref_supersedes_only_older_sync_prs_from_the_fork():
+
+  def pr(number, head, owner="me"):
+    return {
+        "number": number,
+        "url": f"https://github.com/Org/guides/pull/{number}",
+        "headRefName": head,
+        "headRepositoryOwner": {
+            "login": owner
+        },
+    }
+
+  prs = [
+      pr(1, "sync/demo"),
+      pr(2, "sync/demo-v0.5.0"),
+      pr(3, "sync/demo-v0.5.1"),
+      pr(4, "fix/demo-ci"),
+      pr(5, "sync/demo-v0.4.0", owner="someone-else"),
+  ]
+  old = sync.superseded_prs(
+      prs, _manifest(), owner="me", branch="sync/demo-v0.5.1")
+  assert [p["number"] for p in old] == [1, 2]

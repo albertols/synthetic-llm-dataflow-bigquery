@@ -30,7 +30,7 @@ _REL_DIR = "config/relationships"
 
 
 def _is_sample_model(path: str) -> bool:
-  """True for a documentation sample (`example_*.yaml`, `*.example.yaml`).
+  """True for a documentation sample (`example_*`, `*.example.*`, `*_example.*`).
 
     Inlined rather than imported: this script's local-directory path must
     stay pure-Python (no `apache_beam`), so it cannot import
@@ -39,7 +39,9 @@ def _is_sample_model(path: str) -> bool:
     together.
     """
   name = path.rsplit("/", 1)[-1]
-  return name.startswith("example_") or ".example." in name
+  stem = name.rsplit(".", 1)[0]
+  return (name.startswith("example_") or ".example." in name or
+          stem.endswith("_example"))
 
 
 def _load(uri: str) -> RelationshipRegistry:

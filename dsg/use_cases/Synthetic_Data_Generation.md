@@ -41,7 +41,10 @@ flowchart LR
    to `validation_runs`.
 
 The sample deployment generates `users → orders → order_items` from the
-fictitious `bigquery-public-data.thelook_ecommerce` dataset.
+fictitious `bigquery-public-data.thelook_ecommerce` dataset, into tables with
+the same names and schemas in your project. The relationship model and the
+tables are described in the
+[Terraform README](../terraform/synthetic-llm-dataflow-bigquery/README.md).
 
 ## Technical benefits
 
@@ -49,7 +52,7 @@ fictitious `bigquery-public-data.thelook_ecommerce` dataset.
   Cloud Storage and served by vLLM on the workers, with no model hub at
   runtime. Reference rows and prompts stay inside the project.
 - **Batch GPU inference on Dataflow.** One image serves the Flex Template
-  launcher and NVIDIA L4 workers; Dataflow provisions the GPUs and drivers
+  launcher and NVIDIA L4 or T4 workers; Dataflow provisions the GPUs and drivers
   and releases them when the job ends.
 - **Relational integrity at scale.** A whole foreign-key component (chains,
   stars, diamonds) is generated in one job with measured parent-to-child

@@ -18,7 +18,7 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "The GCP region for Dataflow jobs, Cloud Build, Artifact Registry and the bucket. Needs NVIDIA L4 capacity (e.g. us-central1)."
+  description = "The GCP region for Dataflow jobs, Cloud Build, Artifact Registry and the bucket. Needs capacity for the chosen gpu (e.g. us-central1)."
   type        = string
 }
 
@@ -59,7 +59,7 @@ variable "build_service_account_name" {
 }
 
 variable "model" {
-  description = "LLM staged by scripts/02_stage_models.sh and used by the job: gemma4-e4b-it (Kaggle, needs the Gemma license accepted) or qwen3-4b (ModelScope, no credentials)."
+  description = "LLM staged by scripts/02_stage_models.sh and used by the job: gemma4-e4b-it (google/gemma-4-E4B-it) or qwen3-4b (Qwen/Qwen3-4B-Instruct-2507). Both are Apache-2.0 open weights."
   type        = string
   default     = "gemma4-e4b-it"
   validation {
@@ -68,22 +68,42 @@ variable "model" {
   }
 }
 
-variable "machine_type" {
-  description = "Dataflow GPU worker machine type."
+variable "model_source" {
+  description = "Where scripts/02_stage_models.sh downloads the weights from, once, before copying them to the bucket: huggingface (Hugging Face Hub) or modelscope (a mirror with the same repository ids). Workers only read GCS."
   type        = string
-  default     = "g2-standard-8"
+  default     = "huggingface"
+  validation {
+    condition     = contains(["huggingface", "modelscope"], var.model_source)
+    error_message = "model_source must be huggingface or modelscope."
+  }
 }
 
-variable "accelerator" {
-  description = "Dataflow worker_accelerator experiment value (one NVIDIA L4 per worker)."
+variable "gpu" {
+  description = "One GPU per worker: l4 (NVIDIA L4 on G2 machines, vLLM dtype auto, both models) or t4 (NVIDIA T4 on N1 machines, vLLM dtype float16, qwen3-4b only)."
   type        = string
-  default     = "type:nvidia-l4;count:1;install-nvidia-driver"
+  default     = "l4"
+  validation {
+    condition     = contains(["l4", "t4"], var.gpu)
+    error_message = "gpu must be l4 or t4."
+  }
+}
+
+variable "machine_type" {
+  description = "Dataflow GPU worker machine type, from the machine family of the gpu (g2-* for l4, n1-* for t4). Defaults to g2-standard-8 or n1-standard-8."
+  type        = string
+  default     = null
 }
 
 variable "num_rows" {
   description = "Rows generated for the root table (users); orders and order_items follow from the measured source fan-out."
   type        = number
   default     = 1000
+}
+
+variable "launch_job" {
+  description = "Launch the generation job from Terraform (google_dataflow_flex_template_job) instead of scripts/04_run_dataflow.sh. Needs the image, the weights and the template spec first (scripts 01-03). A finished batch job is launched again on the next apply while this stays true."
+  type        = bool
+  default     = false
 }
 
 variable "destroy_all_resources" {
