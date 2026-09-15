@@ -323,8 +323,12 @@ completions. Three things to take from the three panels:
   workload.
 - **Cache hit ratio.** vLLM reports the cumulative fraction of prompt
   blocks served from the cache. 74% after round 1 already reflects the
-  shared static prefix across columns; 94% by the end says that rounds
-  2..k paid for almost nothing but their sampling parameters. The trap
+  shared static prefix across columns; 94% by the end says that every
+  round after the first — round 2 through the ladder's last round k —
+  found its column's prefix already in the cache and paid prefill only
+  for the handful of tokens that differ; the sampling parameters that
+  change between rounds (temperature, `top_p`, `top_k`) cost no prefill
+  at all. The trap
   the [ADR 0028](https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/docs/adr/0028-constraint-router-relational-plan.md) evidence found: the pool prompt used to interpolate the
   column name in its *first* sentence, so the cache was intra-column
   only — the layout is now static-prefix-first, and the preamble KV is
@@ -733,7 +737,7 @@ Throughput, latency and cost each have one owner here:
    column. The lifecycle (lazy, serialized, measured, refcounted,
    lost-race-tolerant) is where the engineering is.
 3. **The ladder is decode-bound and batched.** Prefix caching makes rounds
-   2..k cost decode only; concurrency is what makes decode affordable;
+   2 through k cost decode only; concurrency is what makes decode affordable;
    the KV budget is not the constraint at this concurrency.
 4. **Two rails, nine stations, no silent exit** — the grammar bounds what
    can be emitted, the rejection set bounds what can land.
