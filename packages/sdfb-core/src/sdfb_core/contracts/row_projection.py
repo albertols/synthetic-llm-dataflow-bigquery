@@ -17,6 +17,10 @@ nothing here re-measures: a projection that cannot be derived says so
 rather than printing a number.
 """
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence

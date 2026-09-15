@@ -13,6 +13,10 @@ the star-schema fact table and the true diamond — resolved by the
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=invalid-name,missing-class-docstring,unused-variable,use-implicit-booleaness-not-comparison
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 import pytest

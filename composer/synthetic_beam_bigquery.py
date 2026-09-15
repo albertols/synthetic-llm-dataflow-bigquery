@@ -42,6 +42,10 @@ selects a CPU smoke (no L4) — see below.
 # Heavy or optional dependencies are imported lazily, where they are used.
 # pylint: disable=import-outside-toplevel
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 from airflow import models

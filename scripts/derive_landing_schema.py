@@ -18,6 +18,10 @@ Usage:
     python scripts/derive_landing_schema.py DDL_JSON --print-bq project:synthetic_data.landing
 """
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 import argparse

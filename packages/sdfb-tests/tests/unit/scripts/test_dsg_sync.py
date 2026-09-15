@@ -266,6 +266,25 @@ def test_changelog_section_for_tag_and_unreleased():
   assert sync.changelog_section(text, "feature-branch") == "- next"
 
 
+def test_changelog_section_matches_v_prefixed_release_headings():
+  text = ("# Changelog\n## [Unreleased]\n\n## [v0.4.1] — 2026-09-15\n\n"
+          "### Fixed\n- a fix\n\n## [v0.4.0] — 2026-09-14\n- older\n")
+  assert sync.changelog_section(text, "v0.4.1") == "### Fixed\n- a fix"
+
+
+def test_missing_tools_depends_on_gates_and_publishing(monkeypatch):
+  monkeypatch.delenv("TERRAFORM_BIN", raising=False)
+  on_path = {"git", "uv", "bash", "terraform"}
+
+  def which(tool):
+    return tool if tool in on_path else None
+
+  assert not sync.missing_tools(gates="fast", publish=False, which=which)
+  assert sync.missing_tools(
+      gates="full", publish=True, which=which) == ["pipenv", "gh"]
+  assert not sync.missing_tools(gates="none", publish=False, which=which)
+
+
 def test_pylintrc_drift_is_detected(tmp_path):
   src = tmp_path / "src"
   dsg = tmp_path / "dsg"

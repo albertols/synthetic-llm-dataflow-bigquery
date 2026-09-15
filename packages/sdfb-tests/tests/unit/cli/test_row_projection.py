@@ -26,6 +26,10 @@ and the 2.0099 mean that turns B_TABLE's 210,958 rows into E_TABLE's
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,invalid-name,protected-access,unused-argument,use-implicit-booleaness-not-comparison
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 import pytest

@@ -24,6 +24,10 @@ It does not subclass anything from `sdfb_core.engines.base` — engines
 test interchangeability via `isinstance(client, ModelClient)`.
 """
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 import hashlib

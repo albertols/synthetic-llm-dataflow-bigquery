@@ -8,6 +8,10 @@ sibling source tables — comes from `config/relationships/`.
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,missing-class-docstring,unused-argument,use-implicit-booleaness-not-comparison
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 from sdfb_beam.cli.run_pipeline import (

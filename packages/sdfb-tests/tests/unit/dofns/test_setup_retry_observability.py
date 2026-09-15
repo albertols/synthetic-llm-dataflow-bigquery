@@ -8,7 +8,7 @@ is exactly the invisible case).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
-# pylint: disable=protected-access
+# pylint: disable=protected-access,unused-argument
 
 from __future__ import annotations
 
