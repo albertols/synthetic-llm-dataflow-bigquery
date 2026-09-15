@@ -61,7 +61,11 @@ versioned in `dsg/`: launch scripts `01`–`05`, `setup.py`, Cloud Build
 configs, the `tests/` wrapper, the Terraform module, the use-case page and
 the README header. `dsg/manifest.yaml` states what else ships, which DSG
 paths are owned, and the index rows (one row per DSG index table, applied
-idempotently). An old tag syncs with the manifest it shipped with.
+idempotently). It also lists `patches`: exact line replacements in DSG files
+outside the owned paths, each with a reason. They carry fixes the guide needs
+from DSG itself, such as its CI, while the upstream change is under review. A
+patch is a no-op once its replacement has landed upstream, and it stops the sync
+if neither side is found. An old tag syncs with the manifest it shipped with.
 
 **D3 — Derive, don't duplicate.**
 - `requirements*.txt` come from `uv export` of `uv.lock`, so pins cannot diverge.

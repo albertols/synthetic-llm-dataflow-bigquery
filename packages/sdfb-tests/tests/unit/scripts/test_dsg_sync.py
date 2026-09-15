@@ -347,3 +347,50 @@ def test_commit_uses_the_checkout_identity_and_no_trailers(tmp_path):
   assert body.strip() == ("feat(demo): sync from source v1.2.3 (" + "a" * 12 +
                           ")\n\nSource: https://github.com/acme/demo/tree/" +
                           "a" * 40)
+
+
+def test_patches_apply_once_then_no_op_once_upstream_has_the_fix(tmp_path):
+  wf = _write(tmp_path, ".github/workflows/ci.yml",
+              "run: |\n  X=$(find d | head -n 1)\n")
+  patches = [
+      sync.Patch(
+          file=".github/workflows/ci.yml",
+          old="X=$(find d | head -n 1)",
+          new="X=$(find d -print -quit)",
+          reason="CI fix under review upstream")
+  ]
+  assert sync.apply_patches(tmp_path,
+                            patches) == ([".github/workflows/ci.yml"],
+                                         ["CI fix under review upstream"])
+  assert "X=$(find d -print -quit)" in wf.read_text(encoding="utf-8")
+  assert sync.apply_patches(tmp_path, patches) == ([], [])
+
+
+def test_patch_with_neither_target_nor_replacement_stops_the_sync(tmp_path):
+  _write(tmp_path, "ci.yml", "something else\n")
+  patches = [sync.Patch(file="ci.yml", old="a", new="b", reason="r")]
+  with pytest.raises(sync.SyncError, match="neither"):
+    sync.apply_patches(tmp_path, patches)
+
+
+def test_pr_body_lists_patches_in_effect():
+  body = sync.render_pr_body(
+      "{patches}",
+      manifest=_manifest(),
+      ref="v1",
+      sha="a" * 40,
+      prev_sha=None,
+      gates=[],
+      changelog="",
+      cloud_run=None,
+      patches=["CI fix under review upstream"])
+  assert body == "- CI fix under review upstream"
+  assert sync.render_pr_body(
+      "{patches}",
+      manifest=_manifest(),
+      ref="v1",
+      sha="a" * 40,
+      prev_sha=None,
+      gates=[],
+      changelog="",
+      cloud_run=None) == "_None._"

@@ -27,6 +27,10 @@ bigquery-public-data.thelook_ecommerce ── terraform snapshot ──▶ synth
 * Kaggle credentials only in Secret Manager, added outside Terraform state
 * `apache-beam[gcp]==2.74.0` matches the `apache/beam_python3.11_sdk:2.74.0` base image
 
+### Also in this PR
+
+{patches}
+
 ### Changes in the golden source for this ref
 
 {changelog}

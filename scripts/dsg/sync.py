@@ -50,7 +50,7 @@ _LINK = re.compile(r"(!?\[[^\]]*\]\()([^)\s]+)(\))")
 _SCRIPT_REF = re.compile(r'"scripts"((?:\s*/\s*"[^"]+")+)')
 _PLACEHOLDER = re.compile(r"\{(ref|sha|short_sha|prev_sha|compare_url|"
                           r"changelog|gates_table|cloud_status|source_repo|"
-                          r"pipeline_dir)\}")
+                          r"pipeline_dir|patches)\}")
 _SEMVER_TAG = re.compile(r"v(\d+\.\d+\.\d+)")
 
 
@@ -82,6 +82,20 @@ class IndexRow:
   anchor: str | None
   marker: str
   text: str
+
+
+@dataclasses.dataclass(frozen=True)
+class Patch:
+  """An exact text replacement in a DSG file outside the owned paths.
+
+  For fixes the guide needs from DSG itself (e.g. its CI) while the upstream
+  change is under review: applied while `old` is present, a no-op once `new`
+  has landed upstream, and a stop when neither is found.
+  """
+  file: str
+  old: str
+  new: str
+  reason: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -117,6 +131,7 @@ class Manifest:
       "dev_group": "dev"
   })
   python_version_file: str = ".python-version"
+  patches: Sequence[Patch] = ()
   # The interpreter DSG CI's pylint job runs on; pylint's findings depend on it.
   lint_python: str = "3.14"
 
@@ -124,6 +139,7 @@ class Manifest:
   def from_dict(cls, raw: dict) -> Manifest:
     raw = dict(raw)
     raw["index_rows"] = [IndexRow(**row) for row in raw.get("index_rows", [])]
+    raw["patches"] = [Patch(**patch) for patch in raw.get("patches", [])]
     raw.setdefault("script_tests", {})
     raw.setdefault("preserve", [])
     raw.setdefault("readme_header", None)
@@ -354,6 +370,29 @@ def apply_index_rows(dsg_root: Path, rows: Sequence[IndexRow]) -> list[str]:
   return changed
 
 
+def apply_patches(dsg_root: Path,
+                  patches: Sequence[Patch]) -> tuple[list[str], list[str]]:
+  """Apply each patch still needed; return (changed files, their reasons)."""
+  changed: list[str] = []
+  reasons: list[str] = []
+  for patch in patches:
+    path = dsg_root / patch.file
+    text = path.read_text(encoding="utf-8")
+    if patch.old in text:
+      if text.count(patch.old) != 1:
+        raise SyncError(f"{patch.file}: patch target is not unique: "
+                        f"{patch.old!r}")
+      path.write_text(text.replace(patch.old, patch.new), encoding="utf-8")
+      if patch.file not in changed:
+        changed.append(patch.file)
+      if patch.reason not in reasons:
+        reasons.append(patch.reason)
+    elif patch.new not in text:
+      raise SyncError(f"{patch.file}: neither the patch target nor its "
+                      f"replacement is present — update dsg/manifest.yaml")
+  return changed, reasons
+
+
 def install_into(dsg_root: Path, staging: Path, manifest: Manifest) -> None:
   """Replace every owned path wholesale, keeping the preserved files."""
   kept = {
@@ -410,9 +449,16 @@ def changelog_section(text: str, ref: str) -> str:
   return "\n".join(out).strip()
 
 
-def render_pr_body(template: str, *, manifest: Manifest, ref: str, sha: str,
-                   prev_sha: str | None, gates: Sequence[GateResult],
-                   changelog: str, cloud_run: str | None) -> str:
+def render_pr_body(template: str,
+                   *,
+                   manifest: Manifest,
+                   ref: str,
+                   sha: str,
+                   prev_sha: str | None,
+                   gates: Sequence[GateResult],
+                   changelog: str,
+                   cloud_run: str | None,
+                   patches: Sequence[str] = ()) -> str:
   compare_url = (f"{manifest.source_repo}/compare/{prev_sha}...{sha}"
                  if prev_sha else f"{manifest.source_repo}/tree/{sha}")
   table = ["| Gate | Result | Seconds |", "| :-- | :-: | --: |"]
@@ -437,6 +483,7 @@ def render_pr_body(template: str, *, manifest: Manifest, ref: str, sha: str,
       "cloud_status": cloud_status,
       "source_repo": manifest.source_repo,
       "pipeline_dir": manifest.pipeline_dir,
+      "patches": "\n".join(f"- {reason}" for reason in patches) or "_None._",
   }
   return _PLACEHOLDER.sub(lambda m: values[m.group(1)], template)
 
@@ -722,6 +769,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       raise SyncError("broken links:\n  " + "\n  ".join(broken))
     install_into(dsg_root, staging, manifest)
     index_files = apply_index_rows(dsg_root, manifest.index_rows)
+    patch_files, patch_reasons = apply_patches(dsg_root, manifest.patches)
     gates = run_gates(
         export_root, dsg_root, manifest, sha=sha, level=args.gates)
     for gate in gates:
@@ -743,10 +791,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         prev_sha=prev_sha,
         gates=gates,
         changelog=changelog,
-        cloud_run=args.cloud_run)
+        cloud_run=args.cloud_run,
+        patches=patch_reasons)
     print(body)
     if args.commit or args.open_pr:
-      commit(dsg_root, manifest, ref=args.ref, sha=sha, extra_files=index_files)
+      commit(
+          dsg_root,
+          manifest,
+          ref=args.ref,
+          sha=sha,
+          extra_files=[*index_files, *patch_files])
     if args.open_pr:
       title = manifest.pr_title.format(
           pipeline_name=manifest.pipeline_name, ref=args.ref)
