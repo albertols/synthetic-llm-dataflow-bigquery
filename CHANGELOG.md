@@ -12,18 +12,22 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 🔧 Changed
 
-- CI and the DSG sync gate run pylint on Python 3.14, the interpreter the Dataflow Solution Guides CI uses; findings differ from Python 3.11.
-
 ### ⚡ Performance
 
 ### 🐛 Fixed
 
-- Pylint on Python 3.14 is clean. Modules whose f-strings keep single quotes for Python 3.11 compatibility disable `inconsistent-quotes`, with the reason; two unused-argument and one argument-name findings are fixed.
-- `scripts/dsg/sync.py` finds `## [vX.Y.Z]` changelog sections for the PR body, and stops before the long gates when `gh`, `terraform`, `pipenv` or `uv` is missing from PATH.
-
 ### 🗑️ Removed
 
 ### 📗 Docs
+
+## [v0.4.2] — 2026-09-15
+
+### 🔧 Changed
+- CI and the DSG sync gate run pylint on Python 3.14, the interpreter the Dataflow Solution Guides CI uses; findings differ from Python 3.11.
+
+### 🐛 Fixed
+- Pylint on Python 3.14 is clean. Modules whose f-strings keep single quotes for Python 3.11 compatibility disable `inconsistent-quotes`, with the reason; two unused-argument and one argument-name findings are fixed.
+- `scripts/dsg/sync.py` finds `## [vX.Y.Z]` changelog sections for the PR body, and stops before the long gates when `gh`, `terraform`, `pipenv` or `uv` is missing from PATH.
 
 ## [v0.4.1] — 2026-09-14
 
