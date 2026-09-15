@@ -10,8 +10,6 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 🚀 Added
 
-- `dsg/manifest.yaml` `patches`: exact line replacements in DSG files outside the owned paths, each with a reason, listed in the PR body under "Also in this PR". They are a no-op once the fix lands upstream. The first patch fixes pipeline detection in the DSG workflow, which fails with SIGPIPE on large pipelines.
-
 ### 🔧 Changed
 
 ### ⚡ Performance
@@ -21,6 +19,11 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🗑️ Removed
 
 ### 📗 Docs
+
+## [v0.5.0] — 2026-09-15
+
+### 🚀 Added
+- `dsg/manifest.yaml` `patches`: exact line replacements in DSG files outside the owned paths, each with a reason, listed in the PR body under "Also in this PR". They are a no-op once the fix lands upstream. The first patch fixes pipeline detection in the DSG workflow, which fails with SIGPIPE on large pipelines.
 
 ## [v0.4.2] — 2026-09-15
 
