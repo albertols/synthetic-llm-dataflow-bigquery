@@ -4,6 +4,11 @@
 Prints eval-able shell lines (PARAMS / MACHINE_TYPE / ACCELERATOR /
 MAX_WORKERS / NUM_WORKERS / SDK_CONTAINERS / EXPECT). Pure python + PyYAML; unit-tested laptop-side.
 """
+
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 import argparse

@@ -16,6 +16,10 @@ re-emits them at their exact observed share, so leaving them in the mix
 double-counts their mass.
 """
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 from sdfb_core.contracts import TableSchema

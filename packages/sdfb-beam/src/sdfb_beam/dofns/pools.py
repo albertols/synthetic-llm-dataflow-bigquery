@@ -89,7 +89,8 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
     return milestone_scope(prefix) if prefix else nullcontext()
 
   # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
-  def process(self, _element) -> Iterator[dict]:
+  def process(self, element) -> Iterator[dict]:
+    del element  # the single trigger element carries no data
     with self._scope():
       yield from self._process_scoped()
 

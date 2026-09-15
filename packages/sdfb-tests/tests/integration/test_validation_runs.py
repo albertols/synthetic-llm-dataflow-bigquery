@@ -1,7 +1,7 @@
 """DirectRunner tests for the §12 validation_runs subgraph + BLOCKER gate."""
 
 # Test module: pytest fixtures and white-box access are intentional.
-# pylint: disable=arguments-renamed
+# pylint: disable=arguments-renamed,unused-argument
 
 from __future__ import annotations
 

@@ -7,6 +7,10 @@ shape-mining and diff functions with canned samples — no BQ, no network.
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=protected-access
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 import importlib.util

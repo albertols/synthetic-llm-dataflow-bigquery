@@ -21,6 +21,10 @@ column-by-column lands combinations the parent never held (measured:
 # Heavy or optional dependencies are imported lazily, where they are used.
 # pylint: disable=import-outside-toplevel
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

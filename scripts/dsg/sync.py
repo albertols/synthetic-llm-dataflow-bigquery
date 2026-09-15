@@ -16,6 +16,10 @@ Nothing is committed when a gate fails; the gate report is printed and the
 DSG checkout is left on the sync branch for inspection.
 """
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 from __future__ import annotations
 
 import argparse
@@ -113,6 +117,8 @@ class Manifest:
       "dev_group": "dev"
   })
   python_version_file: str = ".python-version"
+  # The interpreter DSG CI's pylint job runs on; pylint's findings depend on it.
+  lint_python: str = "3.14"
 
   @classmethod
   def from_dict(cls, raw: dict) -> Manifest:
@@ -389,13 +395,15 @@ def check_pylintrc(export_root: Path, dsg_root: Path,
 def changelog_section(text: str, ref: str) -> str:
   """The CHANGELOG body for a `vX.Y.Z` tag, else the [Unreleased] block."""
   semver = _SEMVER_TAG.fullmatch(ref)
-  heading = f"## [{semver.group(1)}]" if semver else "## [Unreleased]"
+  # Released sections are headed `## [vX.Y.Z] — date`; accept `## [X.Y.Z]` too.
+  headings = ((f"## [v{semver.group(1)}]",
+               f"## [{semver.group(1)}]") if semver else ("## [Unreleased]",))
   out, capturing = [], False
   for line in text.splitlines():
     if line.startswith("## ["):
       if capturing:
         break
-      capturing = line.startswith(heading)
+      capturing = line.startswith(headings)
       continue
     if capturing:
       out.append(line)
@@ -490,8 +498,10 @@ def _gate_style(dsg_root: Path, manifest: Manifest):
               cwd=pipe)
   if diff.strip():
     raise SyncError("yapf would reformat:\n" + diff[-3000:])
+  # DSG CI installs the latest pylint on its own Python, not ours.
   return _run([
-      sys.executable, "-m", "pylint", "--rcfile", "../pylintrc",
+      "uv", "run", "--no-project", "--python", manifest.lint_python, "--with",
+      "pylint>=4,<5", "python", "-m", "pylint", "--rcfile", "../pylintrc",
       "--ignore=.venv,venv,.gradle,build,bin,third_party", "."
   ],
               cwd=pipe)[-300:]
@@ -647,6 +657,21 @@ def push_and_open_pr(dsg_root: Path, manifest: Manifest, *, branch: str,
   ]).strip()
 
 
+def missing_tools(*,
+                  gates: str,
+                  publish: bool,
+                  which=shutil.which) -> list[str]:
+  """Executables this run will need that are not on PATH."""
+  needed = ["git", "uv"]
+  if gates in ("fast", "full"):
+    needed += ["bash", os.environ.get("TERRAFORM_BIN", "terraform")]
+  if gates == "full":
+    needed.append("pipenv")
+  if publish:
+    needed.append("gh")
+  return [tool for tool in needed if which(tool) is None]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   parser.add_argument("--ref", required=True, help="tag, branch or sha")
@@ -666,6 +691,10 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--cloud-run", help="URL/id of a verifying Dataflow job")
   args = parser.parse_args(argv)
   dsg_root = args.dsg.expanduser().resolve()
+  missing = missing_tools(gates=args.gates, publish=args.open_pr)
+  if missing:
+    raise SyncError(
+        f"not on PATH: {', '.join(missing)} (see the dsg-sync skill)")
 
   with tempfile.TemporaryDirectory(prefix="dsg-sync-") as tmp:
     export_root, staging = Path(tmp, "export"), Path(tmp, "staging")

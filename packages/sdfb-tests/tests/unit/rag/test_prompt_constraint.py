@@ -3,6 +3,10 @@
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,protected-access,unused-argument
 
+# f-string fields keep single quotes while Python 3.11 is supported;
+# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# pylint: disable=inconsistent-quotes
+
 import numpy as np
 from sdfb_core.contracts.schema import TableSchema
 from sdfb_core.engines.b1_rag.engine import _build_pool_prompt
