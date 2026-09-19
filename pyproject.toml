@@ -27,7 +27,11 @@ description = "Synthetic data generation for BigQuery via Apache Beam on Dataflo
 requires-python = ">=3.11,<3.12"
 license = { text = "Apache-2.0" }
 readme = "README.md"
-authors = [{ name = "synthetic-dataflow-bigquery contributors" }]
+authors = [{ name = "Alberto López Serna" }]
+
+[project.urls]
+Author = "https://github.com/albertols"
+Repository = "https://github.com/albertols/synthetic-llm-dataflow-bigquery"
 
 [tool.uv]
 package = false
