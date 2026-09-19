@@ -8,17 +8,28 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ## [Unreleased]
 
+Addresses the first review of the Dataflow Solution Guides PR ([#289](https://github.com/GoogleCloudPlatform/dataflow-solution-guides/pull/289)); recorded as the amendment to [ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md).
+
 ### 🚀 Added
+- `scripts/dsg/sync.py --onto-branch BRANCH` publishes a ref onto a sync PR that is under review: it starts from the fork branch's tip, lands the ref as one commit on top, pushes without force, and updates that PR instead of superseding it. A reviewer's commits and review threads survive; a push that is not a fast-forward stops the sync.
+- `scripts/dsg/headers.py`: one Apache-2.0 licence header on every source file, checked in CI (`--fix` inserts it). The DSG sync rewrites only the holder line to `Google LLC`, so a file has the same line numbers in both repositories; the `headers` gate enforces it on the staged tree.
+- `python-version` sync gate, and a test over this repository: every Python pin (Beam SDK and launcher images, site-packages paths, Cloud Build images, ruff and mypy targets, the supported range) must agree with `.python-version`.
+- `docs/DESIGN.md`: the design in one visual document, with a map of every ADR the code cites. `scripts/doc/sync_design_refs.py` (in CI) keeps a `Design: docs/DESIGN.md §…` line in the docstring of each shipped module that cites an ADR, derived from that map.
 
 ### 🔧 Changed
-
-### ⚡ Performance
+- Python is 3.11 everywhere: `requires-python` is `>=3.11,<3.12` (the lock kept every package version and dropped the 3.12 forks), and the guide ships this repository's `.python-version` instead of a second copy in the `dsg/` overlay.
+- The DSG copy ships `docs/DESIGN.md` and the figures it embeds instead of `docs/adr/**` and `docs/designs/**` (121 files down to 13). Decision records stay here; links to them are pinned to this repository.
+- The guide's `setup.py` version and Terraform image tag are the static guide version, and the image build stamps the checkout's commit. The README header names the release and commit the copy corresponds to.
+- README, PR template and the DSG index block no longer describe an automated synchronization.
+- Project metadata names the author.
 
 ### 🐛 Fixed
+- The shipped `.python-version` said 3.12 while the container, the lock and the tooling were 3.11; the model-staging Cloud Build step had drifted to `python:3.12-slim`.
+- The sync's link gate could not see a link target behind a badge image (`[![License](…)](LICENSE)`), so an unshipped target went unreported.
+- Documentation and docstrings that still said the pipeline serves through Beam's `VLLMCompletionsModelHandler` / `RunInference`. It has not since ADR 0014: the engine's `ModelClient` owns the vLLM server. `docs/MODEL_LAYOUT.md` shows the real lifecycle, and the `model-handler` skill no longer teaches the `guided_json` request shape that vLLM ignores.
 
 ### 🗑️ Removed
-
-### 📗 Docs
+- `LICENSE` and `.sync-source.json` from the DSG copy. Without the latter, Terraform had silently tagged images `dev`; its five readers now have other sources.
 
 ## [v0.5.1] — 2026-09-15
 
