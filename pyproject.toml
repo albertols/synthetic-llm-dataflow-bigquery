@@ -24,7 +24,7 @@
 name = "synthetic-dataflow-bigquery"
 version = "0.1.0"
 description = "Synthetic data generation for BigQuery via Apache Beam on Dataflow, powered by self-hosted open-weight LLMs (Gemma 4 family) on L4 GPU workers."
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.12"
 license = { text = "Apache-2.0" }
 readme = "README.md"
 authors = [{ name = "synthetic-dataflow-bigquery contributors" }]

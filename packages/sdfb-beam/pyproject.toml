@@ -16,7 +16,7 @@
 name = "sdfb-beam"
 version = "0.1.0"
 description = "Apache Beam pipeline + DoFns for synthetic-dataflow-bigquery."
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.12"
 license = { text = "Apache-2.0" }
 readme = { content-type = "text/markdown", text = "Beam pipeline package. Imports sdfb-core; adds Beam + GCP + validation libs." }
 
