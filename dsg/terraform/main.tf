@@ -18,9 +18,8 @@ locals {
   bucket_name   = var.bucket_name != null ? var.bucket_name : var.project_id
   subnetwork    = var.subnetwork != null ? trimspace(var.subnetwork) : ""
 
-  # The image tag follows the synced golden-source ref (.sync-source.json).
-  source_ref = try(jsondecode(file("${local.pipeline_dir}/.sync-source.json")).ref, "dev")
-  docker_tag = replace(local.source_ref, "/[^A-Za-z0-9_.-]/", "-")
+  # The image tag is the guide version (setup.py, pyproject.toml).
+  docker_tag = "0.1.0"
 
   template_path = "gs://${local.bucket_name}/templates/${local.pipeline_name}-${local.docker_tag}.json"
 

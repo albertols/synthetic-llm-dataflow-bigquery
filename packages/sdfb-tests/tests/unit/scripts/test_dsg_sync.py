@@ -23,7 +23,6 @@ PR body has no unrendered placeholder (ADR 0040).
 from __future__ import annotations
 
 import importlib.util
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -91,7 +90,10 @@ def _source(root: Path) -> Path:
   _write(root, "docs/PLAYBOOK.md")
   _write(root, "scripts/tool.py")
   _write(root, "scripts/unshipped.py")
-  _write(root, "dsg/pipeline/README.header.md", "> DSG quick start\n")
+  _write(
+      root, "dsg/pipeline/README.header.md", "> DSG quick start\n"
+      "> release {ref} ([{short_sha}]({source_repo}/tree/{sha}))\n"
+      "flow{decision} --> run\n")
   _write(root, "dsg/pipeline/setup.py")
   _write(root, "dsg/pipeline/scripts/01_build.sh", "echo build\n")
   _write(root, "dsg/terraform/main.tf", "# tf\n")
@@ -117,16 +119,10 @@ def test_select_files_rejects_a_shipped_test_whose_script_is_not_shipped(
     sync.select_files(src, manifest)
 
 
-def test_stage_tree_maps_sources_overlays_header_and_provenance(tmp_path):
+def test_stage_tree_maps_sources_overlays_and_renders_the_header(tmp_path):
   src = _source(tmp_path / "src")
   staging = tmp_path / "staging"
-  sync.stage_tree(
-      src,
-      _manifest(),
-      staging,
-      sha="a" * 40,
-      ref="v1.2.3",
-      committed_at="2026-09-14T10:00:00Z")
+  sync.stage_tree(src, _manifest(), staging, sha="a" * 40, ref="v1.2.3")
   pipe = staging / _PIPE
   assert (pipe / "pkg/mod.py").exists()
   assert (pipe / "setup.py").exists()
@@ -137,14 +133,52 @@ def test_stage_tree_maps_sources_overlays_header_and_provenance(tmp_path):
   readme = (pipe / "README.md").read_text(encoding="utf-8")
   assert readme.startswith("> DSG quick start\n")
   assert "# Demo" in readme
-  stamp = json.loads((pipe / ".sync-source.json").read_text(encoding="utf-8"))
-  assert stamp == {
-      "source_repo": "https://github.com/acme/demo",
-      "ref": "v1.2.3",
-      "sha": "a" * 40,
-      "committed_at": "2026-09-14T10:00:00Z",
-      "tool": "scripts/dsg/sync.py",
-  }
+  # Provenance is a line people read, not a file the guide has to carry.
+  assert ("> release v1.2.3 ([" + "a" * 12 +
+          "](https://github.com/acme/demo/tree/" + "a" * 40 + "))\n") in readme
+  assert "flow{decision} --> run\n" in readme
+  assert not (pipe / ".sync-source.json").exists()
+
+
+def _git_repo(repo: Path) -> list[str]:
+  repo.mkdir(parents=True)
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  return [
+      "git", "-C",
+      str(repo), "-c", "user.email=me@example.com", "-c", "user.name=me"
+  ]
+
+
+def test_prev_sha_is_read_from_the_shipped_readme(tmp_path):
+  _write(tmp_path, f"{_PIPE}/README.md",
+         "release v1 (https://github.com/acme/demo/tree/" + "d" * 40 + ")\n")
+  assert sync.read_prev_sha(tmp_path, _manifest()) == "d" * 40
+
+
+def test_prev_sha_falls_back_to_the_last_sync_commit(tmp_path):
+  repo = tmp_path / "dsg"
+  git = _git_repo(repo)
+  _write(repo, f"{_PIPE}/README.md", "# a guide synced before v1\n")
+  subprocess.run([*git, "add", "."], check=True)
+  subprocess.run([
+      *git, "commit", "-qm", "feat(demo): sync from source v0.9\n\n"
+      "Source: https://github.com/acme/demo/tree/" + "e" * 40
+  ],
+                 check=True)
+  _write(repo, "README.md", "# guides\n")
+  subprocess.run([*git, "add", "."], check=True)
+  subprocess.run([*git, "commit", "-qm", "docs: unrelated"], check=True)
+  assert sync.read_prev_sha(repo, _manifest()) == "e" * 40
+
+
+def test_prev_sha_is_none_on_a_first_sync(tmp_path):
+  repo = tmp_path / "dsg"
+  git = _git_repo(repo)
+  _write(repo, "README.md", "# guides\n")
+  subprocess.run([*git, "add", "."], check=True)
+  subprocess.run([*git, "commit", "-qm", "init"], check=True)
+  assert sync.read_prev_sha(repo, _manifest()) is None
+  assert sync.read_prev_sha(tmp_path / "not-a-checkout", _manifest()) is None
 
 
 def test_rewrite_links_pins_unshipped_targets_and_keeps_shipped_ones(tmp_path):
@@ -153,8 +187,7 @@ def test_rewrite_links_pins_unshipped_targets_and_keeps_shipped_ones(tmp_path):
   dsg = tmp_path / "dsg"
   _write(dsg, "pipelines/pylintrc")
   manifest = _manifest()
-  sync.stage_tree(
-      src, manifest, staging, sha="b" * 40, ref="v1", committed_at="t")
+  sync.stage_tree(src, manifest, staging, sha="b" * 40, ref="v1")
   broken = sync.rewrite_links(staging, dsg, manifest, sha="b" * 40)
   assert not broken
   readme = (staging / _PIPE / "README.md").read_text(encoding="utf-8")
@@ -164,6 +197,29 @@ def test_rewrite_links_pins_unshipped_targets_and_keeps_shipped_ones(tmp_path):
   assert "[web](https://x.org)" in readme
   adr = (staging / _PIPE / "docs/adr/0001.md").read_text(encoding="utf-8")
   assert "[readme](../../README.md)" in adr
+
+
+def test_rewrite_links_sees_the_target_behind_a_badge_image(tmp_path):
+  src = tmp_path / "src"
+  _write(src, "LICENSE")
+  _write(src, "pyproject.toml")
+  staging = tmp_path / "staging"
+  dsg = tmp_path / "dsg"
+  dsg.mkdir()
+  _write(staging, f"{_PIPE}/pyproject.toml")
+  _write(
+      staging, f"{_PIPE}/README.md",
+      "[![License](https://img.shields.io/l.svg)](LICENSE)\n"
+      "[![Python](https://img.shields.io/p.svg)](pyproject.toml)\n"
+      "[![Gone](https://img.shields.io/g.svg)](NOTICE)\n")
+  broken = sync.rewrite_links(
+      staging, dsg, _manifest(), sha="f" * 40, export_root=src)
+  readme = (staging / _PIPE / "README.md").read_text(encoding="utf-8")
+  assert ("[![License](https://img.shields.io/l.svg)]"
+          "(https://github.com/acme/demo/blob/" + "f" * 40 +
+          "/LICENSE)") in readme
+  assert "[![Python](https://img.shields.io/p.svg)](pyproject.toml)" in readme
+  assert broken == [f"{_PIPE}/README.md -> NOTICE"]
 
 
 def test_rewrite_links_reports_links_broken_everywhere(tmp_path):
@@ -235,8 +291,7 @@ def test_install_replaces_owned_paths_and_preserves_generated_env(tmp_path):
   src = _source(tmp_path / "src")
   staging = tmp_path / "staging"
   manifest = _manifest()
-  sync.stage_tree(
-      src, manifest, staging, sha="d" * 40, ref="v1", committed_at="t")
+  sync.stage_tree(src, manifest, staging, sha="d" * 40, ref="v1")
   dsg = tmp_path / "dsg"
   _write(dsg, f"{_PIPE}/stale_file.py")
   _write(dsg, f"{_PIPE}/scripts/00_set_variables.sh", "export PROJECT=p\n")

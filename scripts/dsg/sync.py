@@ -60,7 +60,9 @@ import yaml
 _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parents[1]
 _TOOL = "scripts/dsg/sync.py"
-_LINK = re.compile(r"(!?\[[^\]]*\]\()([^)\s]+)(\))")
+# Anchored on `](` so the target behind a badge image is seen as well:
+# `[![License](https://img…)](LICENSE)` holds two targets.
+_LINK = re.compile(r"(\]\()([^)\s]+)(\))")
 _SCRIPT_REF = re.compile(r'"scripts"((?:\s*/\s*"[^"]+")+)')
 _PLACEHOLDER = re.compile(r"\{(ref|sha|short_sha|prev_sha|compare_url|"
                           r"changelog|gates_table|cloud_status|source_repo|"
@@ -253,8 +255,12 @@ def _copy(src: Path, dst: Path) -> None:
 
 
 def stage_tree(export_root: Path, manifest: Manifest, staging: Path, *,
-               sha: str, ref: str, committed_at: str) -> None:
-  """Build the exact DSG-relative tree this ref ships."""
+               sha: str, ref: str) -> None:
+  """Build the exact DSG-relative tree this ref ships.
+
+  The README header names the release and commit it was generated from; the
+  guide carries no provenance file of its own.
+  """
   pipe = staging / manifest.pipeline_dir
   for rel in select_files(export_root, manifest):
     _copy(export_root / rel, pipe / rel)
@@ -268,18 +274,18 @@ def stage_tree(export_root: Path, manifest: Manifest, staging: Path, *,
       _copy(base / rel, staging / dst_prefix / rel)
   if manifest.readme_header:
     readme = pipe / "README.md"
-    header = (export_root / manifest.readme_header).read_text(encoding="utf-8")
+    values = {
+        "ref": ref,
+        "sha": sha,
+        "short_sha": sha[:12],
+        "source_repo": manifest.source_repo,
+    }
+    # Only these keys are filled; any other brace (mermaid) is left as is.
+    header = _PLACEHOLDER.sub(
+        lambda m: values.get(m.group(1), m.group(0)),
+        (export_root / manifest.readme_header).read_text(encoding="utf-8"))
     readme.write_text(
         header + readme.read_text(encoding="utf-8"), encoding="utf-8")
-  stamp = {
-      "source_repo": manifest.source_repo,
-      "ref": ref,
-      "sha": sha,
-      "committed_at": committed_at,
-      "tool": _TOOL,
-  }
-  (pipe / ".sync-source.json").write_text(
-      json.dumps(stamp, indent=2) + "\n", encoding="utf-8")
 
 
 def generate_requirements(export_root: Path, manifest: Manifest, staging: Path,
@@ -667,10 +673,26 @@ def prepare_branch(dsg_root: Path, manifest: Manifest, ref: str) -> str:
 
 
 def read_prev_sha(dsg_root: Path, manifest: Manifest) -> str | None:
-  stamp = dsg_root / manifest.pipeline_dir / ".sync-source.json"
-  if not stamp.exists():
-    return None
-  return json.loads(stamp.read_text(encoding="utf-8")).get("sha")
+  """The source commit of the sync the DSG base already carries, if any.
+
+  The shipped README names it. A guide synced before that line existed is
+  found through the `Source:` trailer of its last sync commit.
+  """
+  pinned = re.compile(re.escape(manifest.source_repo) + r"/tree/([0-9a-f]{40})")
+  readme = dsg_root / manifest.pipeline_dir / "README.md"
+  if readme.exists():
+    found = pinned.search(readme.read_text(encoding="utf-8"))
+    if found:
+      return found.group(1)
+  log = subprocess.run([
+      "git", "-C",
+      str(dsg_root), "log", "-1", "--format=%B", "--", manifest.pipeline_dir
+  ],
+                       capture_output=True,
+                       text=True,
+                       check=False)
+  found = pinned.search(log.stdout)
+  return found.group(1) if found else None
 
 
 def commit(dsg_root: Path, manifest: Manifest, *, ref: str, sha: str,
@@ -820,15 +842,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
   with tempfile.TemporaryDirectory(prefix="dsg-sync-") as tmp:
     export_root, staging = Path(tmp, "export"), Path(tmp, "staging")
-    sha, committed_at = export_ref(args.source, args.ref, export_root)
+    sha, _ = export_ref(args.source, args.ref, export_root)
     manifest = Manifest.load(export_root / "dsg" / "manifest.yaml")
-    stage_tree(
-        export_root,
-        manifest,
-        staging,
-        sha=sha,
-        ref=args.ref,
-        committed_at=committed_at)
+    stage_tree(export_root, manifest, staging, sha=sha, ref=args.ref)
     generate_requirements(export_root, manifest, staging, sha)
     config = precheck.load_config(export_root / manifest.precheck_config)
     findings = precheck.scan_tree(staging, config)

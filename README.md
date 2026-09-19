@@ -12,8 +12,9 @@
 > [!NOTE]
 > **Part of the [Google Cloud Dataflow Solution Guides](https://github.com/GoogleCloudPlatform/dataflow-solution-guides)**
 > as the *synthetic data generation* guide: Terraform infrastructure, launch scripts and a relational demo
-> on the public `thelook_ecommerce` dataset. This repository is the **golden source**; the guide's copy is
-> generated from a tagged release by `/dsg-sync` ([ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md)).
+> on the public `thelook_ecommerce` dataset. Development happens in
+> [albertols/synthetic-llm-dataflow-bigquery](https://github.com/albertols/synthetic-llm-dataflow-bigquery); the guide's
+> copy is generated from a tagged release ([ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md)).
 
 **Synthetic BigQuery data with self-hosted LLMs on Apache Beam / Dataflow.**
 

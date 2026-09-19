@@ -3,10 +3,10 @@
 This pipeline is part of the [Dataflow synthetic data generation solution guide](../../use_cases/Synthetic_Data_Generation.md).
 
 > [!NOTE]
-> **This directory is a synchronized replica.** The golden source is
-> [albertols/synthetic-llm-dataflow-bigquery](https://github.com/albertols/synthetic-llm-dataflow-bigquery);
-> `.sync-source.json` records the exact commit. Open issues and pull requests
-> there: files here are replaced by the next sync.
+> Developed at [albertols/synthetic-llm-dataflow-bigquery]({source_repo}),
+> where the decision records and run reports live. This copy corresponds to
+> release `{ref}` ([`{short_sha}`]({source_repo}/tree/{sha})); updates arrive
+> here as ordinary pull requests.
 
 ## Deploy and run on Google Cloud
 
