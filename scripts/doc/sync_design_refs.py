@@ -93,8 +93,8 @@ def design_line(adrs: Sequence[str], adr_map: Mapping[str, str]) -> str:
   """The docstring paragraph for a module citing `adrs`."""
   missing = [adr for adr in adrs if adr not in adr_map]
   if missing:
-    raise DesignRefError(
-        f"ADR {', '.join(missing)} has no row in the {_DESIGN_DOC} map")
+    unmapped = ", ".join(missing)
+    raise DesignRefError(f"ADR {unmapped} has no row in the {_DESIGN_DOC} map")
   sections = sorted({adr_map[adr] for adr in adrs},
                     key=lambda label: int(label[1:].split()[0]))
   numbers = sorted(adrs)
