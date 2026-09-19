@@ -34,6 +34,7 @@ uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg   
 uv run pylint --rcfile dsg/pylintrc packages scripts composer public_cloud dsg  # expect 10.00/10
 uv run python scripts/dsg/precheck.py       # sensitive-content gate — expect 0 findings
 uv run python scripts/dsg/headers.py        # licence headers — expect no output (`--fix` inserts)
+uv run python scripts/doc/sync_design_refs.py   # `Design:` docstring lines vs docs/DESIGN.md — expect no output (`--fix` rewrites)
 ```
 
 Python is **Google style, 2-space indent** (yapf `--style yapf`, pylint with

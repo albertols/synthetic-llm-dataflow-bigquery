@@ -111,6 +111,19 @@ def test_select_files_applies_include_and_exclude(tmp_path):
   ]
 
 
+def test_select_files_can_take_the_tracked_file_list(tmp_path):
+  src = _source(tmp_path / "src")
+  _write(src, "pkg/scratch_never_committed.py")
+  tracked = [
+      "README.md", "pkg/mod.py", "pkg/tests/test_tool.py", "scripts/tool.py",
+      "docs/PLAYBOOK.md"
+  ]
+  assert sync.select_files(
+      src, _manifest(), files=tracked) == [
+          "README.md", "pkg/mod.py", "pkg/tests/test_tool.py", "scripts/tool.py"
+      ]
+
+
 def test_select_files_rejects_a_shipped_test_whose_script_is_not_shipped(
     tmp_path):
   src = _source(tmp_path / "src")

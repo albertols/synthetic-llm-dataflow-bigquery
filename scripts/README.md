@@ -5,7 +5,7 @@ root. Current scopes:
 
 | Scope | Owns |
 |---|---|
-| `doc/` | figure/report generators for documentation (`make_<topic>_figures.py`; see `.claude/skills/visual-first-documentation/SKILL.md`) |
+| `doc/` | figure/report generators for documentation (`make_<topic>_figures.py`; see `.claude/skills/visual-first-documentation/SKILL.md`) and `sync_design_refs.py` (the generated `Design:` docstring line that maps a module's ADR citations to `docs/DESIGN.md` sections, also in CI) |
 | `e2e/` | integration-test analysis, GCP probes, sample fetch, crosschecks, redaction |
 | `release/` | post-merge versioning + release reports (see `.github/workflows/release_tag_report.yaml`) |
 | `relationships/` | reading/rendering `config/relationships/` models offline (`card.py` prints exactly what a launch would plan — ADR 0032) |

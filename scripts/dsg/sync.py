@@ -236,14 +236,18 @@ def export_ref(repo: Path, ref: str, dest: Path) -> tuple[str, str]:
   return sha, committed_at
 
 
-def select_files(export_root: Path, manifest: Manifest) -> list[str]:
+def select_files(export_root: Path,
+                 manifest: Manifest,
+                 files: Sequence[str] | None = None) -> list[str]:
   """Source files that ship under the pipeline dir, checked for consistency.
 
   A shipped test that loads a script which does not ship would fail DSG CI,
-  so it stops the sync here instead.
+  so it stops the sync here instead. `files` names the candidates when the
+  root is a working tree rather than a `git archive` export.
   """
+  candidates = _walk(export_root) if files is None else sorted(files)
   selected = [
-      rel for rel in _walk(export_root) if _matches(rel, manifest.include) and
+      rel for rel in candidates if _matches(rel, manifest.include) and
       not _matches(rel, manifest.exclude)
   ]
   shipped = set(selected)
