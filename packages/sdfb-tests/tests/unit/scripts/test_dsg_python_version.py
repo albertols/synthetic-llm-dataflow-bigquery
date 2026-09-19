@@ -102,10 +102,12 @@ def test_this_repository_pins_one_python_version():
                            capture_output=True,
                            text=True,
                            check=True).stdout.split("\n")
+  # This file holds deliberately drifted fixtures; everything else is real.
+  this_file = Path(__file__).relative_to(_ROOT).as_posix()
   files = {
       rel: (_ROOT / rel).read_text(encoding="utf-8")
       for rel in tracked
-      if rel and (_ROOT / rel).is_file() and
+      if rel and rel != this_file and (_ROOT / rel).is_file() and
       (rel.endswith(_PINNED_SUFFIXES) or Path(rel).name in _PINNED_NAMES)
   }
   # The reference is the one the guide ships: there is no second copy.
