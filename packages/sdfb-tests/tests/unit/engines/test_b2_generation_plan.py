@@ -1,9 +1,25 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """B.2 mirror of the `generation_plan` milestone (2026-07-29).
 
 Same one-line-per-run contract as b1_rag's: every column mapped to its
 generation strategy. B.2 differences: the bulk sampler is the fitted
 statistical backend (reported via `backend=`), and free-text pools build
 lazily per batch, so there is no `pool_sources` field at setup time.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031, 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

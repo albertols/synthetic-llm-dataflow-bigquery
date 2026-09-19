@@ -1,4 +1,17 @@
 #!/usr/bin/env python
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Replicate a golden-source ref into the Dataflow Solution Guides repo.
 
 The source repo is the only place this solution is edited (ADR 0040). A
@@ -39,32 +52,47 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import yaml
 
 _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parents[1]
-_TOOL = "scripts/dsg/sync.py"
-_LINK = re.compile(r"(!?\[[^\]]*\]\()([^)\s]+)(\))")
+# Anchored on `](` so the target behind a badge image is seen as well:
+# `[![License](https://img…)](LICENSE)` holds two targets.
+_LINK = re.compile(r"(\]\()([^)\s]+)(\))")
 _SCRIPT_REF = re.compile(r'"scripts"((?:\s*/\s*"[^"]+")+)')
 _PLACEHOLDER = re.compile(r"\{(ref|sha|short_sha|prev_sha|compare_url|"
                           r"changelog|gates_table|cloud_status|source_repo|"
                           r"pipeline_dir|patches)\}")
 _SEMVER_TAG = re.compile(r"v(\d+\.\d+\.\d+)")
+# Every place a Python version is pinned; groups join into MAJOR.MINOR.
+_PYTHON_PINS = (
+    ("Beam SDK image", re.compile(r"beam_python(\d+\.\d+)_sdk")),
+    ("template launcher image",
+     re.compile(r"python(\d)(\d+)-template-launcher-base")),
+    ("site-packages path", re.compile(r"python(\d+\.\d+)/site-packages")),
+    ("container image", re.compile(r"\bpython:(\d+\.\d+)")),
+    ("ruff target-version", re.compile(r'target-version\s*=\s*"py(\d)(\d+)"')),
+    ("mypy python_version", re.compile(r'python_version\s*=\s*"(\d+\.\d+)"')),
+)
+_PYTHON_RANGE = re.compile(
+    r'(?:requires-python\s*=\s*|python_requires=)"(>=(\d+\.\d+),<(\d+\.\d+))"')
+_PYTHON_PIN_SUFFIXES = (".py", ".sh", ".yaml", ".yml", ".toml", ".tf")
 
 
-def _load_precheck():
-  spec = importlib.util.spec_from_file_location("dsg_precheck_for_sync",
-                                                _HERE / "precheck.py")
+def _load_sibling(name: str):
+  spec = importlib.util.spec_from_file_location(f"dsg_{name}_for_sync",
+                                                _HERE / f"{name}.py")
   module = importlib.util.module_from_spec(spec)
   sys.modules[spec.name] = module  # dataclasses resolve their module by name
   spec.loader.exec_module(module)
   return module
 
 
-precheck = _load_precheck()
+precheck = _load_sibling("precheck")
+headers = _load_sibling("headers")
 
 
 class SyncError(RuntimeError):
@@ -208,14 +236,18 @@ def export_ref(repo: Path, ref: str, dest: Path) -> tuple[str, str]:
   return sha, committed_at
 
 
-def select_files(export_root: Path, manifest: Manifest) -> list[str]:
+def select_files(export_root: Path,
+                 manifest: Manifest,
+                 files: Sequence[str] | None = None) -> list[str]:
   """Source files that ship under the pipeline dir, checked for consistency.
 
   A shipped test that loads a script which does not ship would fail DSG CI,
-  so it stops the sync here instead.
+  so it stops the sync here instead. `files` names the candidates when the
+  root is a working tree rather than a `git archive` export.
   """
+  candidates = _walk(export_root) if files is None else sorted(files)
   selected = [
-      rel for rel in _walk(export_root) if _matches(rel, manifest.include) and
+      rel for rel in candidates if _matches(rel, manifest.include) and
       not _matches(rel, manifest.exclude)
   ]
   shipped = set(selected)
@@ -240,8 +272,12 @@ def _copy(src: Path, dst: Path) -> None:
 
 
 def stage_tree(export_root: Path, manifest: Manifest, staging: Path, *,
-               sha: str, ref: str, committed_at: str) -> None:
-  """Build the exact DSG-relative tree this ref ships."""
+               sha: str, ref: str) -> None:
+  """Build the exact DSG-relative tree this ref ships.
+
+  The README header names the release and commit it was generated from; the
+  guide carries no provenance file of its own.
+  """
   pipe = staging / manifest.pipeline_dir
   for rel in select_files(export_root, manifest):
     _copy(export_root / rel, pipe / rel)
@@ -255,26 +291,37 @@ def stage_tree(export_root: Path, manifest: Manifest, staging: Path, *,
       _copy(base / rel, staging / dst_prefix / rel)
   if manifest.readme_header:
     readme = pipe / "README.md"
-    header = (export_root / manifest.readme_header).read_text(encoding="utf-8")
+    values = {
+        "ref": ref,
+        "sha": sha,
+        "short_sha": sha[:12],
+        "source_repo": manifest.source_repo,
+    }
+    # Only these keys are filled; any other brace (mermaid) is left as is.
+    header = _PLACEHOLDER.sub(
+        lambda m: values.get(m.group(1), m.group(0)),
+        (export_root / manifest.readme_header).read_text(encoding="utf-8"))
     readme.write_text(
         header + readme.read_text(encoding="utf-8"), encoding="utf-8")
-  stamp = {
-      "source_repo": manifest.source_repo,
-      "ref": ref,
-      "sha": sha,
-      "committed_at": committed_at,
-      "tool": _TOOL,
-  }
-  (pipe / ".sync-source.json").write_text(
-      json.dumps(stamp, indent=2) + "\n", encoding="utf-8")
+  # The guides carry one holder on every source file. Only that line differs
+  # from the source, so a traceback names the same line in both trees.
+  for rel in _walk(staging):
+    if headers.in_scope(rel):
+      path = staging / rel
+      text = path.read_text(encoding="utf-8")
+      path.write_text(
+          headers.retitle(text, headers.DSG_HOLDER), encoding="utf-8")
+
+
+def requirements_banner(manifest: Manifest, sha: str) -> str:
+  return f"# Generated from uv.lock at {manifest.source_repo}/tree/{sha}\n"
 
 
 def generate_requirements(export_root: Path, manifest: Manifest, staging: Path,
                           sha: str) -> None:
   """DSG CI installs `requirements*.txt` with pipenv; derive them from uv.lock."""
   pipe = staging / manifest.pipeline_dir
-  header = (f"# Generated by {_TOOL} from uv.lock at {sha[:12]}. Do not edit:\n"
-            "# change pyproject.toml in the golden source and re-sync.\n")
+  header = requirements_banner(manifest, sha)
   common = [
       "uv", "export", "--frozen", "--no-hashes", "--no-header", "--no-annotate"
   ]
@@ -300,9 +347,20 @@ def rewrite_links(root: Path,
   A link resolves when its target exists in `root` or already in the DSG
   checkout. Otherwise a target inside the pipeline dir becomes a URL to
   the golden source at `sha`; anything else is reported as broken.
+
+  Only the DSG's own files count in the checkout. Links are rewritten before
+  the owned paths are replaced, so whatever the previous sync shipped there
+  is still on disk and about to be deleted: `root` is the only witness of
+  what this sync ships.
   """
   broken: list[str] = []
   pipe_prefix = manifest.pipeline_dir + "/"
+
+  def in_dsg(resolved: str) -> bool:
+    owned = any(resolved == path or resolved.startswith(path + "/")
+                for path in manifest.owned_paths)
+    return not owned and (dsg_root / resolved).exists()
+
   for md in sorted(root.rglob("*.md")):
     rel_md = md.relative_to(root).as_posix()
     if scope is not None and not any(rel_md == s or rel_md.startswith(s + "/")
@@ -325,7 +383,7 @@ def rewrite_links(root: Path,
         resolved = posixpath.normpath(
             posixpath.join(posixpath.dirname(rel_md), path))
         if not resolved.startswith("../") and ((root / resolved).exists() or
-                                               (dsg_root / resolved).exists()):
+                                               in_dsg(resolved)):
           return m.group(0)
         source_rel = resolved[len(pipe_prefix):] if resolved.startswith(
             pipe_prefix) else None
@@ -440,6 +498,73 @@ def check_pylintrc(export_root: Path, dsg_root: Path,
                         f"{manifest.pylintrc['target']}: re-vendor it and "
                         "re-lint the source")
   return GateResult("pylintrc-parity", ok, 0.0, tail)
+
+
+def python_version_drift(files: Mapping[str, str],
+                         reference: str = ".python-version") -> list[str]:
+  """Pins in `files` (path -> text) that disagree with `reference`.
+
+  Beam pickles on the launcher and unpickles on the workers, so launcher,
+  workers, container, CI and tooling share one MAJOR.MINOR.
+  """
+  if reference not in files:
+    return [f"{reference} is missing"]
+  wanted = files[reference].strip()
+  if not re.fullmatch(r"\d+\.\d+", wanted):
+    return [f"{reference}: expected MAJOR.MINOR, found '{wanted}'"]
+  major, minor = wanted.split(".")
+  exact = f">={wanted},<{major}.{int(minor) + 1}"
+  drift: list[str] = []
+  for rel in sorted(files):
+    found = [(label, ".".join(m.groups()))
+             for label, pattern in _PYTHON_PINS
+             for m in pattern.finditer(files[rel])]
+    drift += [
+        f"{rel}: {label} is Python {version}, {reference} says {wanted}"
+        for label, version in dict.fromkeys(found)
+        if version != wanted
+    ]
+    drift += [
+        f"{rel}: supported range is {declared}, {reference} says exactly "
+        f"{wanted}"
+        for declared in dict.fromkeys(
+            m.group(1) for m in _PYTHON_RANGE.finditer(files[rel]))
+        if declared != exact
+    ]
+  return drift
+
+
+def check_python_version(dsg_root: Path, manifest: Manifest) -> GateResult:
+  pipe = dsg_root / manifest.pipeline_dir
+  files = {
+      path.relative_to(pipe).as_posix(): path.read_text(encoding="utf-8")
+      for path in sorted(pipe.rglob("*"))
+      if path.is_file() and (path.suffix in _PYTHON_PIN_SUFFIXES or path.name in
+                             ("Dockerfile", manifest.python_version_file))
+  }
+  drift = python_version_drift(files, manifest.python_version_file)
+  return GateResult("python-version", not drift, 0.0, "\n".join(drift))
+
+
+def check_headers(dsg_root: Path, manifest: Manifest) -> GateResult:
+  """Every shipped source file carries the DSG header, and only that holder."""
+  findings = []
+  for owned in manifest.owned_paths:
+    base = dsg_root / owned
+    rels = [owned
+           ] if base.is_file() else [f"{owned}/{rel}" for rel in _walk(base)
+                                    ] if base.is_dir() else []
+    for rel in rels:
+      if rel in manifest.preserve:
+        continue
+      text = (dsg_root / rel).read_text(encoding="utf-8", errors="ignore")
+      found = headers.problem(
+          text, holder=headers.DSG_HOLDER) if headers.in_scope(rel) else None
+      if found:
+        findings.append(f"{rel}: {found}")
+      elif headers.HOLDER in text:
+        findings.append(f"{rel}: names the source holder")
+  return GateResult("headers", not findings, 0.0, "\n".join(sorted(findings)))
 
 
 def changelog_section(text: str, ref: str) -> str:
@@ -619,6 +744,8 @@ def run_gates(export_root: Path, dsg_root: Path, manifest: Manifest, *,
       _timed("precheck",
              lambda: _gate_precheck(export_root, dsg_root, manifest)),
       check_pylintrc(export_root, dsg_root, manifest),
+      check_python_version(dsg_root, manifest),
+      check_headers(dsg_root, manifest),
       _timed("links", lambda: _gate_links(dsg_root, manifest, sha)),
       _timed("bash -n", lambda: _gate_shell(dsg_root, manifest)),
       _timed("yapf + pylint", lambda: _gate_style(dsg_root, manifest)),
@@ -636,14 +763,29 @@ def run_gates(export_root: Path, dsg_root: Path, manifest: Manifest, *,
 # --------------------------------------------------------------------------
 
 
-def prepare_branch(dsg_root: Path, manifest: Manifest, ref: str) -> str:
+def prepare_branch(dsg_root: Path,
+                   manifest: Manifest,
+                   ref: str,
+                   onto: str | None = None) -> str:
   """Reset the ref's sync branch onto the DSG base branch.
 
   Each ref gets its own branch, so the PR head names the version under
   review; re-syncing the same ref updates its PR.
+
+  `onto` names a fork branch whose PR is under review. The sync then starts
+  from that branch's tip, so the commits a reviewer pushed onto it and the
+  review threads survive, and the ref lands as one commit on top (ADR 0040,
+  amendment A1).
   """
   if _run(["git", "-C", str(dsg_root), "status", "--porcelain"]).strip():
     raise SyncError(f"{dsg_root} has uncommitted changes")
+  if onto is not None:
+    if not manifest.is_sync_branch(onto):
+      raise SyncError(f"{onto} is not a sync branch of this pipeline "
+                      f"({manifest.branch_prefix}…)")
+    _run(["git", "-C", str(dsg_root), "fetch", "origin", onto])
+    _run(["git", "-C", str(dsg_root), "switch", "-C", onto, f"origin/{onto}"])
+    return onto
   branch = manifest.branch_for(ref)
   _run(["git", "-C", str(dsg_root), "fetch", "upstream", manifest.target_base])
   _run([
@@ -654,10 +796,26 @@ def prepare_branch(dsg_root: Path, manifest: Manifest, ref: str) -> str:
 
 
 def read_prev_sha(dsg_root: Path, manifest: Manifest) -> str | None:
-  stamp = dsg_root / manifest.pipeline_dir / ".sync-source.json"
-  if not stamp.exists():
-    return None
-  return json.loads(stamp.read_text(encoding="utf-8")).get("sha")
+  """The source commit of the sync the DSG base already carries, if any.
+
+  The shipped README names it. A guide synced before that line existed is
+  found through the `Source:` trailer of its last sync commit.
+  """
+  pinned = re.compile(re.escape(manifest.source_repo) + r"/tree/([0-9a-f]{40})")
+  readme = dsg_root / manifest.pipeline_dir / "README.md"
+  if readme.exists():
+    found = pinned.search(readme.read_text(encoding="utf-8"))
+    if found:
+      return found.group(1)
+  log = subprocess.run([
+      "git", "-C",
+      str(dsg_root), "log", "-1", "--format=%B", "--", manifest.pipeline_dir
+  ],
+                       capture_output=True,
+                       text=True,
+                       check=False)
+  found = pinned.search(log.stdout)
+  return found.group(1) if found else None
 
 
 def commit(dsg_root: Path, manifest: Manifest, *, ref: str, sha: str,
@@ -728,8 +886,22 @@ def close_superseded(dsg_root: Path, manifest: Manifest, *, owner: str,
   return closed
 
 
-def push_and_open_pr(dsg_root: Path, manifest: Manifest, *, branch: str,
-                     title: str, body: str) -> str:
+def push_branch(dsg_root: Path, branch: str, *,
+                fast_forward_only: bool) -> None:
+  """Publish `branch` to the fork.
+
+  A branch the sync rebuilt from the DSG base replaces the fork's copy. A
+  branch under review is only ever fast-forwarded: if someone pushed to it
+  since the sync fetched, the push is refused and nothing is forced.
+  """
+  if fast_forward_only:
+    try:
+      _run(["git", "-C", str(dsg_root), "push", "-u", "origin", branch])
+    except SyncError as error:
+      raise SyncError(
+          f"origin/{branch} moved since the sync fetched it; nothing was "
+          f"forced. Discard this run and sync again.\n{error}") from error
+    return
   # Refresh the lease: the fork may still hold this branch from an earlier sync.
   subprocess.run(
       ["git", "-C", str(dsg_root), "fetch", "origin", branch],
@@ -739,6 +911,16 @@ def push_and_open_pr(dsg_root: Path, manifest: Manifest, *, branch: str,
       "git", "-C",
       str(dsg_root), "push", "--force-with-lease", "-u", "origin", branch
   ])
+
+
+def push_and_open_pr(dsg_root: Path,
+                     manifest: Manifest,
+                     *,
+                     branch: str,
+                     title: str,
+                     body: str,
+                     fast_forward_only: bool = False) -> str:
+  push_branch(dsg_root, branch, fast_forward_only=fast_forward_only)
   owner = _run(["gh", "api", "user", "--jq", ".login"]).strip()
   existing = _run([
       "gh", "pr", "list", "-R", manifest.target_repo, "--head", branch,
@@ -787,10 +969,17 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--source", type=Path, default=_REPO_ROOT)
   parser.add_argument(
       "--gates", choices=["none", "fast", "full"], default="full")
-  parser.add_argument(
+  branching = parser.add_mutually_exclusive_group()
+  branching.add_argument(
       "--no-branch",
       action="store_true",
       help="stage onto the current DSG branch")
+  branching.add_argument(
+      "--onto-branch",
+      metavar="BRANCH",
+      help="publish the ref as one new commit on top of this fork branch, "
+      "whose PR is under review: no rebuild from the DSG base, no force-push, "
+      "and its PR is updated rather than superseded")
   parser.add_argument("--commit", action="store_true")
   parser.add_argument(
       "--open-pr",
@@ -807,15 +996,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
   with tempfile.TemporaryDirectory(prefix="dsg-sync-") as tmp:
     export_root, staging = Path(tmp, "export"), Path(tmp, "staging")
-    sha, committed_at = export_ref(args.source, args.ref, export_root)
+    sha, _ = export_ref(args.source, args.ref, export_root)
     manifest = Manifest.load(export_root / "dsg" / "manifest.yaml")
-    stage_tree(
-        export_root,
-        manifest,
-        staging,
-        sha=sha,
-        ref=args.ref,
-        committed_at=committed_at)
+    stage_tree(export_root, manifest, staging, sha=sha, ref=args.ref)
     generate_requirements(export_root, manifest, staging, sha)
     config = precheck.load_config(export_root / manifest.precheck_config)
     findings = precheck.scan_tree(staging, config)
@@ -823,8 +1006,8 @@ def main(argv: Sequence[str] | None = None) -> int:
       for f in findings:
         print(f"{f.path}:{f.line}: {f.rule}: {f.excerpt}")
       raise SyncError(f"precheck: {len(findings)} finding(s); nothing synced")
-    branch = None if args.no_branch else prepare_branch(dsg_root, manifest,
-                                                        args.ref)
+    branch = None if args.no_branch else prepare_branch(
+        dsg_root, manifest, args.ref, onto=args.onto_branch)
     prev_sha = read_prev_sha(dsg_root, manifest)
     broken = rewrite_links(
         staging, dsg_root, manifest, sha=sha, export_root=export_root)
@@ -875,7 +1058,8 @@ def main(argv: Sequence[str] | None = None) -> int:
               _run(["git", "-C",
                     str(dsg_root), "branch", "--show-current"]).strip(),
               title=title,
-              body=body))
+              body=body,
+              fast_forward_only=bool(args.onto_branch)))
   return 0
 
 

@@ -1,9 +1,25 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """The public demo model shipped for the Dataflow Solution Guides launch.
 
 `config/relationships/gcp_public_fk_example.yaml` is what the
 DSG `04_run_dataflow.sh` passes as `--relationships_uri` (ADR 0040). These
 tests pin what that launch plans — waves and edge roles — and that the
 model stays out of a default directory scan.
+
+Design: docs/DESIGN.md §9 ADR reference map
+(ADR 0040).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

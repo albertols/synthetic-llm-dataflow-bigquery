@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """PK capacity under random draws + FK key-sample cap sizing (ADR 0035).
 
 The 2026-09-09 three-table launch (job …-16364509521974163594): C_TABLE's
@@ -5,6 +18,9 @@ PK is (FK to B_TABLE, two small categoricals). With B_TABLE enabled the
 FK member collapsed to the 100k side-input cap, the tuple capacity fell
 to ~1.2M, and 8 789 594 of 10M rows diverted as pk.duplicate — 3h16m
 after launch. These are the numbers preflight must do at second zero.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0035).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

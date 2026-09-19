@@ -33,7 +33,7 @@ class ModelClient(Protocol):
     def generate_json(self, prompt: str, json_schema: dict, **kwargs) -> list[dict]: ...
 ```
 
-Real implementation: `sdfb_beam.handlers.vllm_client.VLLMModelClient` — calls Beam's `RunInference` under the hood. Test implementation: `sdfb_beam.handlers.fake_client.FakeModelClient` — returns deterministic JSON from a fixture file. Engines never know which is in use.
+Real implementation: `sdfb_beam.handlers.vllm_client.VLLMModelClient` — owns a vLLM OpenAI-compatible server on the worker (ADR 0014; not `RunInference`). Test implementation: `sdfb_beam.handlers.fake_client.FakeModelClient` — returns deterministic JSON from a fixture file. Engines never know which is in use.
 
 REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.base.html
 

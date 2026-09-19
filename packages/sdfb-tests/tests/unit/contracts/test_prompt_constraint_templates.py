@@ -1,8 +1,24 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Structured prompt-constraint templates (ADR 0024, wave-2 design doc §3).
 
 The `llm_prompt_constraint` description marker accepts an object as well as
 the legacy string. One parse site, one deterministic renderer; the legacy
 string form must render byte-identically to its own text (compat pin).
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0024).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

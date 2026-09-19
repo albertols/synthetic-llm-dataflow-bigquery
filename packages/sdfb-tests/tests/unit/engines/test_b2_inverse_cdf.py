@@ -1,9 +1,25 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """B.2 inverse-CDF sampling over empirical deciles (ADR 0022).
 
 Uniform-in-range flattened every skewed marginal: a 90/10 heavy-tailed
 column landed ~99% of its draws above the true p90. Inverse transform
 sampling over the profile's decile vector keeps the observed CDF shape
 while every draw stays novel and in-range.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

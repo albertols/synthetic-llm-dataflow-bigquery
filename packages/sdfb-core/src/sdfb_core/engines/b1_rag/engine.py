@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """`B1RagEngine` — the B.1 retrieval-augmented synthesis engine.
 
 Implements the LLM-as-distribution-estimator spine (ADR 0013) with a
@@ -32,6 +45,11 @@ fidelity primitive (spec §2, NeMo dependency-aware ordering) — deferred.
 
 Pure-Python module: NO `apache_beam` / `torch` / `vllm` / `faiss` / `numpy`
 imports at module scope. Heavy deps are deferred into the seams.
+
+Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
+§6 Throughput
+(ADR 0013, 0018, 0019, 0020, 0022, 0023, 0024, 0028, 0030, 0031, 0033, 0034,
+0036, 0037).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

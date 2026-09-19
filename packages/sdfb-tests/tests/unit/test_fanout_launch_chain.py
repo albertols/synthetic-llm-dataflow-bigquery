@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Ruling 10 (ADR 0037 review): the LAUNCHER's own chain, on the laptop.
 
 `test_fanout_shapes.py` hand-builds its `FkEdgeSpec`s, so it proves the
@@ -25,6 +38,9 @@ candidates up by that key, so a mismatch is silent data loss).
 The measured facts a real launch reads from BigQuery — the fan-out
 histogram and the PK cell table — are the only hand-written part; there
 is no BigQuery here.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0037).
 """
 
 from __future__ import annotations

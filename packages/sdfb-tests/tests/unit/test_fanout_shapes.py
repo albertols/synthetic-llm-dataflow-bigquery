@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """ADR 0037 acceptance on the laptop: one DirectRunner run per multi-parent
 shape (design 2026-09-11 §10).
 
@@ -33,6 +46,9 @@ are synthesized per row (`apply_identity_columns`), so a root's landed keys
 are unique; a low-cardinality STRING column profiles as CATEGORICAL, so a
 root's landed values come from ITS OWN reference domain — which is how the
 existence filter's half-overlap is built.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030, 0031, 0036, 0037).
 """
 
 from __future__ import annotations

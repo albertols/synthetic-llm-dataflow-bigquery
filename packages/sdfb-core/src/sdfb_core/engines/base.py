@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """The `GenerationEngine` ABC and its supporting types.
 
 This is the single seam between the Beam pipeline and the synthesis
@@ -8,6 +21,11 @@ library-wrapper — both satisfy this interface.
 
 REF: https://beam.apache.org/documentation/ml/large-language-modeling/
 REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.base.html
+
+Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
+§8 Configuration
+(ADR 0011, 0014, 0018, 0021, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0033,
+0036, 0037).
 """
 
 from __future__ import annotations
@@ -113,12 +131,13 @@ class ModelClient(Protocol):
     use — they import only this Protocol.
 
     The contract is intentionally narrow: a JSON-schema-guided generation
-    call. The vLLM backend (via Beam's `VLLMCompletionsModelHandler`)
-    enforces the schema with vLLM's guided decoding; outlines /
-    lm-format-enforcer are fallback knobs. See ADR 0011.
+    call. The vLLM backend owns a vLLM OpenAI-compatible server on the
+    worker and enforces the schema with vLLM structured outputs
+    (`response_format` json_schema). It is not a Beam `RunInference`
+    handler: the engines call it O(1) times per run. See ADR 0014.
 
     REFs:
-      - docs/adr/0011-adopt-beam-vllm-model-handler.md
+      - docs/adr/0014-vllm-model-client-owns-server.md (amends ADR 0011)
       - https://docs.vllm.ai/en/latest/usage/structured_outputs.html
     """
 

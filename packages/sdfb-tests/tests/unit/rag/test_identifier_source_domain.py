@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Identifier columns draw against the FULL source domain (2026-08-11 R1).
 
 A_TABLE COL_001: 52,549 distinct source identifiers, but the mask table is
@@ -11,6 +24,9 @@ identifier-shaped columns now use the same seam:
     showed (recall lifts toward source coverage);
   - the rejection set covers the full domain (novelty by construction,
     the same guarantee pools already have).
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0023).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Shared plumbing for the once-per-run `generation_plan` milestone.
 
 Both engines answer the same question — which fields are LLM free-text
@@ -7,6 +20,9 @@ are distinct dataclasses but agree on the duck-typed surface this module
 needs: ``.kind`` (a StrEnum sharing the five values) and
 ``.identifier_shape``. One definition of the label mapping and the
 once-guard, every engine (the 2026-07-28 R1 lesson: inline copies drift).
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0024, 0028, 0031, 0032, 0035, 0037).
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@
 
 ## Mission
 
-Generate fictitious-but-realistic synthetic rows for a target BigQuery table, driven by its DDL plus a live reference sample. Pipeline runs on Apache Beam (Python SDK) on Google Cloud Dataflow with L4 GPU workers; LLM inference happens **inside** the DAG via `apache_beam.ml.inference.RunInference` with a custom `ModelHandler`. Two engines coexist behind one interface: B.1 (RAG) and B.2 (library-wrapper).
+Generate fictitious-but-realistic synthetic rows for a target BigQuery table, driven by its DDL plus a live reference sample. Pipeline runs on Apache Beam (Python SDK) on Google Cloud Dataflow with L4 GPU workers; LLM inference happens **inside** the DAG: the generation `DoFn`'s engine calls a `ModelClient` that owns a vLLM server on the worker — O(1) calls per run, so this is deliberately **not** `RunInference` with a `ModelHandler` (ADR 0014). Two engines coexist behind one interface: B.1 (RAG) and B.2 (library-wrapper).
 
 ## Hard constraints — do not violate without explicit user confirmation
 
@@ -33,6 +33,8 @@ uv run mypy packages/sdfb-core/src          # hard CI gate — expect 0 errors
 uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg   # expect no output
 uv run pylint --rcfile dsg/pylintrc packages scripts composer public_cloud dsg  # expect 10.00/10
 uv run python scripts/dsg/precheck.py       # sensitive-content gate — expect 0 findings
+uv run python scripts/dsg/headers.py        # licence headers — expect no output (`--fix` inserts)
+uv run python scripts/doc/sync_design_refs.py   # `Design:` docstring lines vs docs/DESIGN.md — expect no output (`--fix` rewrites)
 ```
 
 Python is **Google style, 2-space indent** (yapf `--style yapf`, pylint with
@@ -52,7 +54,7 @@ packages/sdfb-beam/    imports sdfb-core; adds apache-beam[gcp], pandera, whylog
 packages/sdfb-tests/   imports both; pytest + hypothesis + DirectRunner fixtures.
 ```
 
-Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the other way. Engines live in `sdfb-core` (pure-Python); only the DoFn wrappers and ModelHandler live in `sdfb-beam`.
+Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the other way. Engines live in `sdfb-core` (pure-Python); only the DoFn wrappers and the `ModelClient` implementations live in `sdfb-beam`.
 
 ## Entry points
 
@@ -67,7 +69,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 `.claude/skills/` — recipe cards for recurring tasks. Load on demand.
 - `engine-contract.md` — implementing the `GenerationEngine` ABC
 - `beam-dofn.md` — writing/testing Beam DoFns (lifecycle, tagged outputs, side inputs, metrics)
-- `model-handler.md` — RunInference + `ModelHandler` + the `ModelClient` Protocol
+- `model-handler.md` — the `ModelClient` Protocol + the engine-owned vLLM server (why not `RunInference`)
 - `ddl-codegen.md` — Pydantic ↔ Pandera ↔ BQ DDL derivation
 - `validation-mode-a.md` — three lines of defense, DLQ, whylogs merge
 - `reference-data.md` — live BQ SELECT + canonical provenance digest

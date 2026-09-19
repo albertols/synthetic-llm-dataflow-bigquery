@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Referential-integrity gate — `fk.orphan`, line 4 of defense (ADR 0031).
 
 The engine draws whole parent key tuples, so an orphan should be
@@ -14,6 +27,9 @@ per-run fact in `validation_runs` instead of an argument about the code.
 
 NULL FK tuples pass: SQL MATCH SIMPLE treats a NULL reference as "no
 parent", not as a broken one.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

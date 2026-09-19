@@ -1,9 +1,25 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Parent-driven fan-out math (design 2026-09-10, ADR 0036).
 
 A child's rows are its parent's keys x the SOURCE fan-out histogram; the
 PK-completing cells of one key are drawn WITHOUT replacement, so a PK
 that contains an FK is unique by construction (the 2026-09-09 runs lost
 87.9% then 56.5% of C_TABLE to random draws of exactly that PK).
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030, 0031, 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

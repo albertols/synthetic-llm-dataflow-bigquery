@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """BigQuery store for `source_table_stats` rows (2026-08-05 spec, WS-B).
 
 One row per (table_fqn, reference_digest, column), computed driver-side by
@@ -7,6 +20,9 @@ skipped (the pool-store `exists()` idiom).
 
 Copies `BigQueryFreeTextPoolStore`'s structure verbatim — including the
 0dfb1a3 pickle fix: the lazy client is a cache, never pickled state.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

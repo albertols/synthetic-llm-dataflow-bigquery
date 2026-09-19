@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Compact relational log entries (ADR 0028 follow-up, ADR 0035 rev).
 
 Operators inspecting a Dataflow run read the `generation_plan` milestone
@@ -9,6 +22,9 @@ three-table runs they were 40% of the worker log by bytes and buried
 every other line. They are gone: one single-line `relational_e2e`, one
 single-line `relational_fk_edge` per edge, and the pipe/arrow card
 without the mermaid fence.
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0028, 0031, 0032, 0035, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

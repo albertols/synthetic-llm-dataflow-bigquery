@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Column profiling for the distribution-estimator spine.
 
 Profiles each schema column from the reference rows into one of five kinds
@@ -18,6 +31,9 @@ computed without NumPy here; the vectorized *sampling* (in the engine) is
 where NumPy is used and deferred-imported.
 
 REF: spec §2 fidelity primitives; ADR 0013 distribution-estimator spine.
+
+Design: docs/DESIGN.md §2 Engines; §5 Fidelity
+(ADR 0013, 0022, 0023, 0024, 0028).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

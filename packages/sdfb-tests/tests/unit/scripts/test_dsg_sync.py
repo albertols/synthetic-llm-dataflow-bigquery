@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Unit tests for `scripts/dsg/sync.py` — golden source -> DSG replica.
 
 Everything the sync decides without a network or a subprocess is covered
@@ -10,7 +23,6 @@ PR body has no unrendered placeholder (ADR 0040).
 from __future__ import annotations
 
 import importlib.util
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -78,7 +90,10 @@ def _source(root: Path) -> Path:
   _write(root, "docs/PLAYBOOK.md")
   _write(root, "scripts/tool.py")
   _write(root, "scripts/unshipped.py")
-  _write(root, "dsg/pipeline/README.header.md", "> DSG quick start\n")
+  _write(
+      root, "dsg/pipeline/README.header.md", "> DSG quick start\n"
+      "> release {ref} ([{short_sha}]({source_repo}/tree/{sha}))\n"
+      "flow{decision} --> run\n")
   _write(root, "dsg/pipeline/setup.py")
   _write(root, "dsg/pipeline/scripts/01_build.sh", "echo build\n")
   _write(root, "dsg/terraform/main.tf", "# tf\n")
@@ -96,6 +111,19 @@ def test_select_files_applies_include_and_exclude(tmp_path):
   ]
 
 
+def test_select_files_can_take_the_tracked_file_list(tmp_path):
+  src = _source(tmp_path / "src")
+  _write(src, "pkg/scratch_never_committed.py")
+  tracked = [
+      "README.md", "pkg/mod.py", "pkg/tests/test_tool.py", "scripts/tool.py",
+      "docs/PLAYBOOK.md"
+  ]
+  assert sync.select_files(
+      src, _manifest(), files=tracked) == [
+          "README.md", "pkg/mod.py", "pkg/tests/test_tool.py", "scripts/tool.py"
+      ]
+
+
 def test_select_files_rejects_a_shipped_test_whose_script_is_not_shipped(
     tmp_path):
   src = _source(tmp_path / "src")
@@ -104,16 +132,10 @@ def test_select_files_rejects_a_shipped_test_whose_script_is_not_shipped(
     sync.select_files(src, manifest)
 
 
-def test_stage_tree_maps_sources_overlays_header_and_provenance(tmp_path):
+def test_stage_tree_maps_sources_overlays_and_renders_the_header(tmp_path):
   src = _source(tmp_path / "src")
   staging = tmp_path / "staging"
-  sync.stage_tree(
-      src,
-      _manifest(),
-      staging,
-      sha="a" * 40,
-      ref="v1.2.3",
-      committed_at="2026-09-14T10:00:00Z")
+  sync.stage_tree(src, _manifest(), staging, sha="a" * 40, ref="v1.2.3")
   pipe = staging / _PIPE
   assert (pipe / "pkg/mod.py").exists()
   assert (pipe / "setup.py").exists()
@@ -124,14 +146,107 @@ def test_stage_tree_maps_sources_overlays_header_and_provenance(tmp_path):
   readme = (pipe / "README.md").read_text(encoding="utf-8")
   assert readme.startswith("> DSG quick start\n")
   assert "# Demo" in readme
-  stamp = json.loads((pipe / ".sync-source.json").read_text(encoding="utf-8"))
-  assert stamp == {
-      "source_repo": "https://github.com/acme/demo",
-      "ref": "v1.2.3",
-      "sha": "a" * 40,
-      "committed_at": "2026-09-14T10:00:00Z",
-      "tool": "scripts/dsg/sync.py",
-  }
+  # Provenance is a line people read, not a file the guide has to carry.
+  assert ("> release v1.2.3 ([" + "a" * 12 +
+          "](https://github.com/acme/demo/tree/" + "a" * 40 + "))\n") in readme
+  assert "flow{decision} --> run\n" in readme
+  assert not (pipe / ".sync-source.json").exists()
+
+
+def _licensed(root: Path, rel: str, body: str = "x = 1\n") -> None:
+  _write(root, rel, sync.headers.apply(body, rel, year=2026))
+
+
+def test_stage_tree_ships_the_dsg_holder_on_the_same_lines(tmp_path):
+  src = _source(tmp_path / "src")
+  _licensed(src, "pkg/licensed.py", '"""Doc."""\n\nx = 1\n')
+  _licensed(src, "dsg/terraform/variables.tf", 'variable "x" {}\n')
+  staging = tmp_path / "staging"
+  sync.stage_tree(src, _manifest(), staging, sha="a" * 40, ref="v1.2.3")
+  for source, shipped in (("pkg/licensed.py", f"{_PIPE}/pkg/licensed.py"),
+                          ("dsg/terraform/variables.tf",
+                           "terraform/demo/variables.tf")):
+    before = (src / source).read_text(encoding="utf-8").splitlines()
+    after = (staging / shipped).read_text(encoding="utf-8").splitlines()
+    assert after[0] == "#  Copyright 2026 Google LLC"
+    assert before[0] == f"#  Copyright 2026 {sync.headers.HOLDER}"
+    assert after[1:] == before[1:]
+
+
+def test_headers_gate_wants_the_dsg_header_on_every_source_file(tmp_path):
+  dsg = tmp_path / "dsg"
+  shipped = sync.headers.retitle(
+      sync.headers.apply("x = 1\n", "a.py", year=2026), sync.headers.DSG_HOLDER)
+  _write(dsg, f"{_PIPE}/pkg/ok.py", shipped)
+  _write(dsg, f"{_PIPE}/README.md", "# no header wanted\n")
+  # Generated by Terraform on the operator's machine, never by the sync.
+  _write(dsg, f"{_PIPE}/scripts/00_set_variables.sh", "export PROJECT=p\n")
+  assert sync.check_headers(dsg, _manifest()).ok
+
+  _write(dsg, "terraform/demo/main.tf", "# tf\n")
+  _write(dsg, f"{_PIPE}/pkg/ours.py",
+         sync.headers.apply("y = 2\n", "ours.py", year=2026))
+  gate = sync.check_headers(dsg, _manifest())
+  assert not gate.ok
+  assert gate.tail.splitlines() == [
+      f"{_PIPE}/pkg/ours.py: unexpected holder: {sync.headers.HOLDER}",
+      "terraform/demo/main.tf: missing header",
+  ]
+
+
+def test_headers_gate_finds_the_source_holder_outside_a_header(tmp_path):
+  dsg = tmp_path / "dsg"
+  _write(dsg, f"{_PIPE}/NOTICE.md", f"Copyright {sync.headers.HOLDER}\n")
+  gate = sync.check_headers(dsg, _manifest())
+  assert not gate.ok
+  assert gate.tail == f"{_PIPE}/NOTICE.md: names the source holder"
+
+
+def test_requirements_banner_names_the_source_commit_and_no_sync_claim():
+  banner = sync.requirements_banner(_manifest(), "b" * 40)
+  assert banner == ("# Generated from uv.lock at "
+                    "https://github.com/acme/demo/tree/" + "b" * 40 + "\n")
+
+
+def _git_repo(repo: Path) -> list[str]:
+  repo.mkdir(parents=True)
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  return [
+      "git", "-C",
+      str(repo), "-c", "user.email=me@example.com", "-c", "user.name=me"
+  ]
+
+
+def test_prev_sha_is_read_from_the_shipped_readme(tmp_path):
+  _write(tmp_path, f"{_PIPE}/README.md",
+         "release v1 (https://github.com/acme/demo/tree/" + "d" * 40 + ")\n")
+  assert sync.read_prev_sha(tmp_path, _manifest()) == "d" * 40
+
+
+def test_prev_sha_falls_back_to_the_last_sync_commit(tmp_path):
+  repo = tmp_path / "dsg"
+  git = _git_repo(repo)
+  _write(repo, f"{_PIPE}/README.md", "# a guide synced before v1\n")
+  subprocess.run([*git, "add", "."], check=True)
+  subprocess.run([
+      *git, "commit", "-qm", "feat(demo): sync from source v0.9\n\n"
+      "Source: https://github.com/acme/demo/tree/" + "e" * 40
+  ],
+                 check=True)
+  _write(repo, "README.md", "# guides\n")
+  subprocess.run([*git, "add", "."], check=True)
+  subprocess.run([*git, "commit", "-qm", "docs: unrelated"], check=True)
+  assert sync.read_prev_sha(repo, _manifest()) == "e" * 40
+
+
+def test_prev_sha_is_none_on_a_first_sync(tmp_path):
+  repo = tmp_path / "dsg"
+  git = _git_repo(repo)
+  _write(repo, "README.md", "# guides\n")
+  subprocess.run([*git, "add", "."], check=True)
+  subprocess.run([*git, "commit", "-qm", "init"], check=True)
+  assert sync.read_prev_sha(repo, _manifest()) is None
+  assert sync.read_prev_sha(tmp_path / "not-a-checkout", _manifest()) is None
 
 
 def test_rewrite_links_pins_unshipped_targets_and_keeps_shipped_ones(tmp_path):
@@ -140,8 +255,7 @@ def test_rewrite_links_pins_unshipped_targets_and_keeps_shipped_ones(tmp_path):
   dsg = tmp_path / "dsg"
   _write(dsg, "pipelines/pylintrc")
   manifest = _manifest()
-  sync.stage_tree(
-      src, manifest, staging, sha="b" * 40, ref="v1", committed_at="t")
+  sync.stage_tree(src, manifest, staging, sha="b" * 40, ref="v1")
   broken = sync.rewrite_links(staging, dsg, manifest, sha="b" * 40)
   assert not broken
   readme = (staging / _PIPE / "README.md").read_text(encoding="utf-8")
@@ -151,6 +265,50 @@ def test_rewrite_links_pins_unshipped_targets_and_keeps_shipped_ones(tmp_path):
   assert "[web](https://x.org)" in readme
   adr = (staging / _PIPE / "docs/adr/0001.md").read_text(encoding="utf-8")
   assert "[readme](../../README.md)" in adr
+
+
+def test_rewrite_links_ignores_what_the_previous_sync_left_in_owned_paths(
+    tmp_path):
+  """Links are rewritten before the owned paths are replaced, so a file the
+  LAST sync shipped is still in the checkout. It is about to be deleted."""
+  src = tmp_path / "src"
+  _write(src, "docs/adr/0002.md")
+  staging = tmp_path / "staging"
+  _write(staging, f"{_PIPE}/docs/DESIGN.md",
+         "[ADR 0002](adr/0002.md) and [lint](../../pylintrc)\n")
+  dsg = tmp_path / "dsg"
+  _write(dsg, f"{_PIPE}/docs/adr/0002.md")  # shipped last time, not now
+  _write(dsg, "pipelines/pylintrc")  # the guides' own file, outside owned paths
+  broken = sync.rewrite_links(
+      staging, dsg, _manifest(), sha="a" * 40, export_root=src)
+  assert not broken
+  design = (staging / _PIPE / "docs/DESIGN.md").read_text(encoding="utf-8")
+  assert ("[ADR 0002](https://github.com/acme/demo/blob/" + "a" * 40 +
+          "/docs/adr/0002.md)") in design
+  assert "[lint](../../pylintrc)" in design
+
+
+def test_rewrite_links_sees_the_target_behind_a_badge_image(tmp_path):
+  src = tmp_path / "src"
+  _write(src, "LICENSE")
+  _write(src, "pyproject.toml")
+  staging = tmp_path / "staging"
+  dsg = tmp_path / "dsg"
+  dsg.mkdir()
+  _write(staging, f"{_PIPE}/pyproject.toml")
+  _write(
+      staging, f"{_PIPE}/README.md",
+      "[![License](https://img.shields.io/l.svg)](LICENSE)\n"
+      "[![Python](https://img.shields.io/p.svg)](pyproject.toml)\n"
+      "[![Gone](https://img.shields.io/g.svg)](NOTICE)\n")
+  broken = sync.rewrite_links(
+      staging, dsg, _manifest(), sha="f" * 40, export_root=src)
+  readme = (staging / _PIPE / "README.md").read_text(encoding="utf-8")
+  assert ("[![License](https://img.shields.io/l.svg)]"
+          "(https://github.com/acme/demo/blob/" + "f" * 40 +
+          "/LICENSE)") in readme
+  assert "[![Python](https://img.shields.io/p.svg)](pyproject.toml)" in readme
+  assert broken == [f"{_PIPE}/README.md -> NOTICE"]
 
 
 def test_rewrite_links_reports_links_broken_everywhere(tmp_path):
@@ -222,8 +380,7 @@ def test_install_replaces_owned_paths_and_preserves_generated_env(tmp_path):
   src = _source(tmp_path / "src")
   staging = tmp_path / "staging"
   manifest = _manifest()
-  sync.stage_tree(
-      src, manifest, staging, sha="d" * 40, ref="v1", committed_at="t")
+  sync.stage_tree(src, manifest, staging, sha="d" * 40, ref="v1")
   dsg = tmp_path / "dsg"
   _write(dsg, f"{_PIPE}/stale_file.py")
   _write(dsg, f"{_PIPE}/scripts/00_set_variables.sh", "export PROJECT=p\n")
@@ -347,6 +504,99 @@ def test_commit_uses_the_checkout_identity_and_no_trailers(tmp_path):
   assert body.strip() == ("feat(demo): sync from source v1.2.3 (" + "a" * 12 +
                           ")\n\nSource: https://github.com/acme/demo/tree/" +
                           "a" * 40)
+
+
+_IDENT = ["-c", "user.email=me@example.com", "-c", "user.name=me"]
+
+
+def _git(repo: Path, *args: str) -> str:
+  return subprocess.run(["git", "-C", str(repo), *_IDENT, *args],
+                        capture_output=True,
+                        text=True,
+                        check=True).stdout.strip()
+
+
+def _fork_under_review(tmp_path: Path) -> tuple[Path, Path]:
+  """A checkout whose fork branch `sync/demo-v1` holds a sync commit and a
+  commit a reviewer pushed after it. Returns (checkout, reviewer clone)."""
+  upstream, origin = tmp_path / "upstream.git", tmp_path / "origin.git"
+  for bare in (upstream, origin):
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main",
+                    str(bare)],
+                   check=True)
+  work = tmp_path / "work"
+  subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True)
+  _git(work, "config", "user.email", "me@example.com")
+  _git(work, "config", "user.name", "me")
+  _git(work, "remote", "add", "upstream", str(upstream))
+  _write(work, "README.md", "# guides\n")
+  _git(work, "add", ".")
+  _git(work, "commit", "-qm", "init")
+  _git(work, "push", "-q", "origin", "HEAD:main")
+  _git(work, "push", "-q", "upstream", "HEAD:main")
+  _git(work, "switch", "-qc", "sync/demo-v1")
+  _write(work, f"{_PIPE}/main.py", "v1\n")
+  _git(work, "add", ".")
+  _git(work, "commit", "-qm", "feat(demo): sync from source v1")
+  _git(work, "push", "-q", "-u", "origin", "sync/demo-v1")
+  reviewer = tmp_path / "reviewer"
+  subprocess.run(
+      ["git", "clone", "-q", "-b", "sync/demo-v1",
+       str(origin),
+       str(reviewer)],
+      check=True)
+  _write(reviewer, ".github/ci.yml", "reviewer fix\n")
+  _git(reviewer, "add", ".")
+  _git(reviewer, "commit", "-qm", "ci: reviewer fix")
+  _git(reviewer, "push", "-q", "origin", "sync/demo-v1")
+  return work, reviewer
+
+
+def test_onto_branch_adds_one_commit_on_top_of_the_reviewers(tmp_path):
+  work, reviewer = _fork_under_review(tmp_path)
+  tip = _git(reviewer, "rev-parse", "HEAD")
+  branch = sync.prepare_branch(work, _manifest(), "v2", onto="sync/demo-v1")
+  assert branch == "sync/demo-v1"
+  assert _git(work, "rev-parse", "HEAD") == tip
+  _write(work, f"{_PIPE}/main.py", "v2\n")
+  assert sync.commit(work, _manifest(), ref="v2", sha="b" * 40, extra_files=[])
+  sync.push_branch(work, branch, fast_forward_only=True)
+  subjects = _git(reviewer, "ls-remote", "origin", "sync/demo-v1").split()[0]
+  assert subjects == _git(work, "rev-parse", "HEAD")
+  assert _git(work, "log", "--format=%s", "origin/main..HEAD").split("\n") == [
+      "feat(demo): sync from source v2 (" + "b" * 12 + ")",
+      "ci: reviewer fix",
+      "feat(demo): sync from source v1",
+  ]
+
+
+def test_onto_branch_never_forces_over_a_push_it_has_not_seen(tmp_path):
+  work, reviewer = _fork_under_review(tmp_path)
+  branch = sync.prepare_branch(work, _manifest(), "v2", onto="sync/demo-v1")
+  _write(work, f"{_PIPE}/main.py", "v2\n")
+  sync.commit(work, _manifest(), ref="v2", sha="b" * 40, extra_files=[])
+  _write(reviewer, ".github/ci.yml", "second reviewer fix\n")
+  _git(reviewer, "commit", "-qam", "ci: second reviewer fix")
+  _git(reviewer, "push", "-q", "origin", "sync/demo-v1")
+  theirs = _git(reviewer, "rev-parse", "HEAD")
+  with pytest.raises(sync.SyncError, match="moved"):
+    sync.push_branch(work, branch, fast_forward_only=True)
+  assert _git(reviewer, "ls-remote", "origin",
+              "sync/demo-v1").split()[0] == theirs
+
+
+def test_onto_branch_must_be_a_sync_branch_of_this_pipeline(tmp_path):
+  work, _ = _fork_under_review(tmp_path)
+  with pytest.raises(sync.SyncError, match="not a sync branch"):
+    sync.prepare_branch(work, _manifest(), "v2", onto="main")
+
+
+def test_the_default_branch_still_starts_from_the_upstream_base(tmp_path):
+  work, _ = _fork_under_review(tmp_path)
+  branch = sync.prepare_branch(work, _manifest(), "v2")
+  assert branch == "sync/demo-v2"
+  assert _git(work, "rev-parse", "HEAD") == _git(work, "rev-parse",
+                                                 "upstream/main")
 
 
 def test_patches_apply_once_then_no_op_once_upstream_has_the_fix(tmp_path):

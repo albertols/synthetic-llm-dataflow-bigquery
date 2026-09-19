@@ -1,3 +1,17 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
 # What the Dataflow Solution Guides (DSG) replica contains, and how it is
 # built from this repository (ADR 0040). Read by scripts/dsg/sync.py from the
 # ref being synced, so an old tag syncs with the manifest it shipped with.
@@ -25,8 +39,9 @@ preserve:
 
 # Golden-source files copied under pipeline_dir, same relative paths.
 include:
-  - LICENSE
   - README.md
+  # The one Python version: DSG CI, the sync gate and the image all read it.
+  - .python-version
   - pyproject.toml
   - uv.lock
   - packages/sdfb-core/**
@@ -39,8 +54,17 @@ include:
   - config/models.yml
   - config/thresholds.yml
   - docker/**
-  - docs/adr/**
-  - docs/designs/**
+  # One design document ships. The decision records (docs/adr/) and the
+  # per-topic design docs stay in the source repository: links to them are
+  # pinned to it, and docs/DESIGN.md maps every ADR number the code cites.
+  - docs/DESIGN.md
+  - docs/designs/assets/fanout-generation.png
+  - docs/designs/assets/fk-orphan-rate.png
+  - docs/designs/assets/multi-parent-candidate-cap.png
+  - docs/designs/assets/relationships-flags.png
+  - docs/designs/assets/relationships-scenarios.png
+  - docs/designs/assets/stats-inverse-cdf.png
+  - docs/designs/assets/throughput-where-time-went.png
   - docs/assets/architecture-overview.*
   - docs/DDL_CONTRACT_GUIDE.md
   - docs/DEPLOYMENT_PREREQUISITES.md
@@ -57,8 +81,7 @@ exclude:
   # bundles, figure scripts, the personal-GCP layer, the Composer DAG, this
   # sync itself). The sync fails if a shipped test loads an unshipped script.
   - packages/sdfb-tests/tests/unit/scripts/test_build_full_report.py
-  - packages/sdfb-tests/tests/unit/scripts/test_dsg_precheck.py
-  - packages/sdfb-tests/tests/unit/scripts/test_dsg_sync.py
+  - packages/sdfb-tests/tests/unit/scripts/test_dsg_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_e2e_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_freetext_crosscheck.py
   - packages/sdfb-tests/tests/unit/scripts/test_history_mappings.py
@@ -130,7 +153,7 @@ index_rows:
     text: &deployment |-
       ### Synthetic data generation deployment
 
-      Batch, not streaming: `terraform apply` in `terraform/synthetic-llm-dataflow-bigquery` (US BigQuery, a region with the chosen GPU: `gpu = "l4"` on G2 with `vllm_dtype=auto`, or `gpu = "t4"` on N1 with `vllm_dtype=float16` and `qwen3-4b` only), then from `pipelines/synthetic-llm-dataflow-bigquery` run `scripts/01_build_and_push_container.sh`, `02_stage_models.sh` (Hugging Face, or `MODEL_SOURCE=modelscope`), `03_build_flex_template.sh`, `04_run_dataflow.sh` (or `terraform apply -var launch_job=true`) and `05_verify_run.sh RUN_ID`. Workers use private IPs and `synthetic-llm-dataflow-sa`; Cloud Build uses `synthetic-llm-build-sa`. The directory is a replica of the golden source recorded in `.sync-source.json`: change the golden source, never these files. Report live-cloud verification separately from local tests.
+      Batch, not streaming: `terraform apply` in `terraform/synthetic-llm-dataflow-bigquery` (US BigQuery, a region with the chosen GPU: `gpu = "l4"` on G2 with `vllm_dtype=auto`, or `gpu = "t4"` on N1 with `vllm_dtype=float16` and `qwen3-4b` only), then from `pipelines/synthetic-llm-dataflow-bigquery` run `scripts/01_build_and_push_container.sh`, `02_stage_models.sh` (Hugging Face, or `MODEL_SOURCE=modelscope`), `03_build_flex_template.sh`, `04_run_dataflow.sh` (or `terraform apply -var launch_job=true`) and `05_verify_run.sh RUN_ID`. Workers use private IPs and `synthetic-llm-dataflow-sa`; Cloud Build uses `synthetic-llm-build-sa`. The pipeline is developed at https://github.com/albertols/synthetic-llm-dataflow-bigquery, and its README names the release and commit this copy corresponds to. Report live-cloud verification separately from local tests.
   - file: pipelines/AGENTS.md
     anchor: null
     marker: synthetic-llm-dataflow-bigquery

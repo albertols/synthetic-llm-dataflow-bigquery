@@ -8,13 +8,17 @@ description: Use when replicating a tag or branch of this repository into Google
 This repository is the **golden source** ([ADR 0040](../../../docs/adr/0040-dsg-donation-golden-source-sync.md)).
 The DSG copy under `pipelines/`, `terraform/` and `use_cases/` is generated
 by `scripts/dsg/sync.py` from one ref, and is **never edited by hand**. If a
-DSG reviewer asks for a change, make it here, release, and re-sync.
+DSG reviewer asks for a change, make it here, release, and re-sync **onto the
+PR under review** (`--onto-branch`, step 4), so their threads and any commits
+they pushed survive.
 
 ```
 ref ─ git archive ─▶ precheck ─▶ manifest select + dsg/ overlays + requirements from uv.lock
-    ─▶ pin links to unshipped docs ─▶ replace owned DSG paths + index rows
-    ─▶ gates (= DSG CI) ─▶ commit ─▶ push fork branch sync/<pipeline>-<ref>
-    ─▶ open / update its PR ─▶ close older open sync PRs + delete their branches
+    ─▶ retitle the copyright line (Google LLC) ─▶ pin links to unshipped docs
+    ─▶ replace owned DSG paths + index rows ─▶ gates (= DSG CI) ─▶ commit
+    ─▶ push fork branch sync/<pipeline>-<ref> ─▶ open / update its PR
+    ─▶ close older open sync PRs + delete their branches
+    (--onto-branch: start from the PR branch's tip, one commit on top, plain push)
 ```
 
 One sync PR is under review at a time, and its head branch names the
@@ -40,6 +44,8 @@ version: `albertols:sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
    git fetch --tags && git status --porcelain            # clean tree, REF exists
    uv sync --group dev
    uv run python scripts/dsg/precheck.py                 # sensitive-content gate
+   uv run python scripts/dsg/headers.py                  # licence header on every source file
+   uv run python scripts/doc/sync_design_refs.py         # Design: docstring lines vs docs/DESIGN.md
    uv run pytest -m "not gpu and not gcp" -q
    uv run ruff check . && uv run mypy packages/sdfb-core/src
    uv run yapf --diff -r --style yapf packages scripts dsg composer public_cloud
@@ -76,10 +82,16 @@ version: `albertols:sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
    | :-- | :-- |
    | No open PR for this branch | Opens one from `<you>:<branch>` |
    | Re-sync of the same REF | Force-pushes the branch, updates the PR title and body |
+   | **A sync PR is under review** (comments, or commits a reviewer pushed to its branch) | Add `--onto-branch <that PR's head branch>`: the sync starts from the fork branch's tip, lands REF as **one commit on top**, pushes **without force**, and edits that PR's title and body. The PR keeps its number and threads; the branch keeps its old version in its name. Never combine with a rebuild: a force-push erases the reviewer's commits and detaches every thread |
    | Older sync PRs still open (earlier versions, or the unversioned `sync/synthetic-llm-dataflow-bigquery`) | Comments "Superseded by <new PR>", closes them and deletes their fork branches |
 
    Only PRs from your fork whose head matches the prefix are closed, never
    anyone else's. Check the output for `closed … (superseded)` lines.
+
+   With `--onto-branch`, discard a dry run with
+   `git -C … reset --hard origin/<branch> && git -C … clean -fd` (not
+   `switch -f main`), and read the diff against the PR's current tip: it is
+   exactly what the reviewer will see as "changes since last review".
 5. **Watch DSG CI**: `gh pr checks <url> --watch`. Fix any red check **in the
    source**: add a gate to `sync.py` if CI caught something the gates missed,
    then release and re-sync. Never push a fix to the DSG branch by hand.
@@ -95,6 +107,12 @@ version: `albertols:sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
   `index_rows`), broken links, or a dirty DSG checkout.
 - `pylintrc-parity` fails: DSG changed `pipelines/pylintrc`. Re-vendor it to
   `dsg/pylintrc`, re-lint the source, release, and re-sync.
+- `origin/<branch> moved since the sync fetched it`: someone pushed to the PR
+  branch during an `--onto-branch` run. Nothing was forced. Discard and re-run.
+- `python-version` fails: a pin disagrees with `.python-version` (the one
+  file DSG CI, the image and the tooling all follow). Fix the pin in the source.
+- `headers` fails: a shipped source file lacks the exact Apache block, or the
+  source holder is named in the staged tree. Run `headers.py --fix` in the source.
 - Any gate fails. Nothing is committed; the DSG checkout stays on the sync
   branch for inspection (`git -C … switch main` to discard).
 - `unknown manifest keys: ['branch']`: REF predates versioned branches
@@ -113,5 +131,8 @@ version: `albertols:sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
 | GPU → machine family, accelerator, `vllm_dtype` and allowed models (`l4`: G2, `auto`; `t4`: N1, `float16`, Qwen only) | `gpu_profiles` in `dsg/terraform/main.tf` |
 | Launch parameters (kept identical; `terraform test` fails on drift) | `dsg/pipeline/scripts/04_run_dataflow.sh`, `dsg/terraform/dataflow.tf` |
 | Sensitive-content rules and hashed tokens | `dsg/precheck.yaml`, `dsg/sensitive_token_hashes.txt` |
+| Licence header (this repository's holder here, `Google LLC` in the copy, same lines) | `scripts/dsg/headers.py`; staging calls `retitle` |
+| The one design document that ships, and its ADR map (decision records do not ship) | `docs/DESIGN.md`, `scripts/doc/sync_design_refs.py` |
+| The Python version (single source; the `python-version` gate compares every pin with it) | `.python-version` |
 | PR body | `dsg/PR_TEMPLATE.md` |
 | Engine | `scripts/dsg/sync.py`, `scripts/dsg/precheck.py` (+ tests in `packages/sdfb-tests/tests/unit/scripts/test_dsg_*.py`) |

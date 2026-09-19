@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """--uniqueness_mode=streaming: no barrier on the landing path (WS6 W3).
 
 2026-07-26_17_10_37: EnforceUniqueness chains up to three shuffles of the
@@ -9,6 +22,9 @@ Streaming mode passes rows straight through to the sink and MEASURES the
 duplicate rate on a parallel branch that shuffles 32-byte digests instead
 of rows. The gate keeps working because the measured counts are fed into
 dlq_by_rule exactly as diverted envelopes were.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

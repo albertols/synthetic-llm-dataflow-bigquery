@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """`--uniqueness_mode=exact` runs ONE full-row shuffle barrier (ADR 0034).
 
 The 2026-08-29 R6 pair (10M rows/table, cold + warm) spent ~26 of 94
@@ -14,6 +27,9 @@ Semantics preserved exactly (the gate folds `dlq_by_rule` counts):
   - pk.duplicate: among digest-unique rows, one survivor per PK tuple
     (the MIN digest — deterministic, where the chain was arbitrary);
   - identity.unique: among PK survivors, one survivor per identity tuple.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
 """
 
 from __future__ import annotations

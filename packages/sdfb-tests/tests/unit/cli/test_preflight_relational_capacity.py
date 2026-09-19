@@ -1,9 +1,25 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Preflight P4 (PK generation capacity) + FK activation — ADR 0028.
 
 The 2026-08-21 run discovered its PK/pool conflict 37 minutes and 1 586
 GPU-s after launch (999 488 pk.duplicate), and its declared FK was
 silently inactive. Both become launcher-side stops. The PK itself now
 comes from `config/relationships/` (ADR 0032).
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0024, 0028, 0029, 0032, 0035).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

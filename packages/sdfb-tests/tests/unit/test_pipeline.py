@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Unit tests for `sdfb_beam.pipeline.build_pipeline` config validation.
 
 Regression test for the misleading failure mode where a typo'd
@@ -7,6 +20,9 @@ every-row-but-one to the DLQ as `identity.unique` (every row keys on
 trips the BLOCKER gate with an error that never mentions the actual typo.
 Failing fast with a clear `ValueError` at graph-construction time is much
 cheaper to diagnose.
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity
+(ADR 0023, 0024, 0037).
 """
 
 from __future__ import annotations

@@ -33,12 +33,12 @@ Why uv-first:
 
 ```bash
 which git python3 gcloud   # all three should resolve
-python3 --version          # 3.11 or 3.12 (pyproject requires >=3.11,<3.13)
+python3 --version          # any: uv installs the pinned 3.11 (.python-version)
 ```
 
 Install missing tools:
 - `git` — should be there on macOS.
-- `python3` — `brew install python@3.12` if missing.
+- `python3` — `brew install python@3.11` if missing; `uv sync` provisions the pinned 3.11 for the workspace either way.
 - `gcloud` — https://cloud.google.com/sdk/docs/install-sdk
 
 ### 1. Clone (or pull)

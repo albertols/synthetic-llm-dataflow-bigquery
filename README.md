@@ -3,7 +3,7 @@
 [![CI](https://github.com/albertols/synthetic-llm-dataflow-bigquery/actions/workflows/ci.yml/badge.svg)](https://github.com/albertols/synthetic-llm-dataflow-bigquery/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/albertols/synthetic-llm-dataflow-bigquery?label=release&color=0f9d58)](https://github.com/albertols/synthetic-llm-dataflow-bigquery/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](pyproject.toml)
 [![Apache Beam](https://img.shields.io/badge/Apache%20Beam-Dataflow-ff6d00.svg)](https://beam.apache.org/)
 [![LLM](https://img.shields.io/badge/LLM-self--hosted%20vLLM-6f42c1.svg)](#cpugpu-split--vllm-serving)
 [![Beam Summit](https://img.shields.io/badge/Beam%20Summit-2025-4285f4.svg)](https://beamsummit.org)
@@ -12,8 +12,9 @@
 > [!NOTE]
 > **Part of the [Google Cloud Dataflow Solution Guides](https://github.com/GoogleCloudPlatform/dataflow-solution-guides)**
 > as the *synthetic data generation* guide: Terraform infrastructure, launch scripts and a relational demo
-> on the public `thelook_ecommerce` dataset. This repository is the **golden source**; the guide's copy is
-> generated from a tagged release by `/dsg-sync` ([ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md)).
+> on the public `thelook_ecommerce` dataset. Development happens in
+> [albertols/synthetic-llm-dataflow-bigquery](https://github.com/albertols/synthetic-llm-dataflow-bigquery); the guide's
+> copy is generated from a tagged release ([ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md)).
 
 **Synthetic BigQuery data with self-hosted LLMs on Apache Beam / Dataflow.**
 
@@ -58,6 +59,8 @@ The single-job relational shape (parents generated first, their landed keys reac
 
 ## Generation engines
 
+> Design rationale: [`docs/DESIGN.md` §2](docs/DESIGN.md#2-engines-and-the-llm-as-a-distribution-estimator).
+
 Two interchangeable engines behind one `GenerationEngine` interface ([`packages/sdfb-core/src/sdfb_core/engines/base.py`](packages/sdfb-core/src/sdfb_core/engines/base.py)); the LLM runs **O(1) times per run, never per row** ([ADR 0013](docs/adr/0013-distribution-estimator-spine.md)):
 
 - **`b1_rag` (RAG engine)** — serialize reference rows to text → embed → exact vector index → retrieve representative exemplars → LLM infers per-column value pools **once** → bulk rows sampled vectorized in NumPy on CPU.
@@ -87,6 +90,8 @@ Every run emits one structured `generation_plan` milestone log line (engine, per
 Per-column **prompt constraints** (operator-declared clauses, length bands, format masks) ride the DDL contract and are enforced by a tiered constraint router ([ADR 0024](docs/adr/0024-structured-prompt-constraint-templates.md), [ADR 0028](docs/adr/0028-constraint-router-relational-plan.md)); the worked Terraform ⇄ `_ddl.json` examples live in [`docs/DDL_CONTRACT_GUIDE.md`](docs/DDL_CONTRACT_GUIDE.md).
 
 ## Relational generation (PK/FK)
+
+> Design rationale: [`docs/DESIGN.md` §4](docs/DESIGN.md#4-relational-generation).
 
 Multi-table generation with **referential integrity by construction**, not post-hoc repair. One versioned model — [`config/relationships/*.yaml`](config/relationships/README.md), never a table description ([ADR 0032](docs/adr/0032-relationships-as-config.md)) — declares PK/FK/identity structure with `enabled` / `enforced` / `drives` flags, and every launcher and worker logs one **relationship card** so the enforced shape is auditable per run.
 
@@ -179,6 +184,8 @@ The chart comes from the two-table run that led to joint key draws. Enforcing ea
 
 ## Stats-driven fidelity
 
+> Design rationale: [`docs/DESIGN.md` §5](docs/DESIGN.md#5-fidelity-value-pools-and-constraints).
+
 Marginal fidelity is driven by a persisted per-column profile (`source_table_stats`: entropy, decile vectors, null/empty fractions, temporal mixes) measured once driver-side ([ADR 0022](docs/adr/0022-stats-driven-generation.md)). Numeric and temporal draws go through **inverse-CDF sampling over 11-point decile vectors** — draws land where the source is dense, instead of uniform-in-range sampling flattening skewed columns:
 
 ![Inverse-CDF sampling over decile vectors](docs/designs/assets/stats-inverse-cdf.png)
@@ -186,6 +193,8 @@ Marginal fidelity is driven by a persisted per-column profile (`source_table_sta
 Skew is tracked with **normalised entropy** and **`top1_share`** (a balanced enum and one with 85% of rows on a single value have the same distinct count but very different entropy); the entropy gap between source and landing profiles doubles as a free mode-collapse check. The optional `--source_stats=exact` tier adds ONE approximate-aggregate `SELECT` (BigQuery HLL++) over the live table for true cardinality, fixing sample-capped pool starvation. Full geometry and figures: [`docs/designs/2026-08-05-source-table-stats.md`](docs/designs/2026-08-05-source-table-stats.md).
 
 ## Validation & data quality
+
+> Design rationale: [`docs/DESIGN.md` §7](docs/DESIGN.md#7-validation-and-the-dead-letter-queue).
 
 **Three lines of defense, in-pipeline (Mode A):**
 
@@ -202,6 +211,8 @@ Skew is tracked with **normalised entropy** and **`top1_share`** (a balanced enu
 **Evaluation framework** (branch `ws3-eval-framework`, merge pending): Tier 1 statistical metrics (KS/Wasserstein, total variation, PSI/JSD, correlation & mutual-information drift, DCR/NNDR privacy distances), Tier 2 SDMetrics quality/diagnostic reports → a single 0–1 `fidelity_overall_score`, Tier 3 opt-in SynthEval/Evidently.
 
 ## CPU/GPU split & vLLM serving
+
+> Design rationale, including why this is not Beam's `vllm_inference` handler: [`docs/DESIGN.md` §3](docs/DESIGN.md#3-serving-a-vllm-server-owned-by-the-engine).
 
 - One homogeneous worker pool per job; the split is **by stage, not by machine**: bulk row synthesis, validation, and IO are pure CPU (vectorized NumPy); the GPU is touched O(1) — free-text pool building via vLLM, plus the optional embedding pass.
 - Machine matrix: **L4 → `g2-standard-8`** · **T4 → `n1-standard-8` + T4** (cost-capped experimentation) · **`e2-standard-8`, no GPU** for fake-client CI tiers.
@@ -255,8 +266,9 @@ Real-run evidence flows through a fixed contract:
 
 | Layer | Where | What |
 |---|---|---|
-| Decisions | [`docs/adr/`](docs/adr/README.md) | 38 ADRs — every locked decision with alternatives and primary-source citations |
-| Designs | [`docs/designs/`](docs/designs/) | visual-first design docs with regenerable figures ([`docs/designs/assets/`](docs/designs/assets/)) |
+| Design | [`docs/DESIGN.md`](docs/DESIGN.md) | the design in one document: architecture, engines, serving, relational generation, fidelity, throughput, validation, and a map of every ADR the code cites |
+| Decisions | [`docs/adr/`](docs/adr/README.md) | every locked decision with alternatives and primary-source citations |
+| Designs | [`docs/designs/`](docs/designs/) | per-topic visual-first design docs with regenerable figures ([`docs/designs/assets/`](docs/designs/assets/)) |
 | Guides | [`docs/`](docs/) | run playbook, deployment prerequisites, DDL contract guide, model layout, E2E matrix |
 | Releases | [`docs/releases/`](docs/releases/README.md) | per-version deterministic reports (aggregate metrics and charts) |
 | Articles | [`docs/articles/`](docs/articles/README.md) | the Medium series — VCS-tracked, kept in sync with the implementation |

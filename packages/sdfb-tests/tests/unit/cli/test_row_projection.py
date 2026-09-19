@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """ADR 0039 — the launch says how many rows it will generate BEFORE it
 generates any of them, and warns where a measurement makes that number
 untrustworthy.
@@ -21,6 +34,9 @@ key values, of which the source parent covers 52,545 — the 9% matched
 share, the 0.5025 repeat share that ADR 0038 adjusted E_TABLE's `pk:` on,
 and the 2.0099 mean that turns B_TABLE's 210,958 rows into E_TABLE's
 423,999.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0038, 0039).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

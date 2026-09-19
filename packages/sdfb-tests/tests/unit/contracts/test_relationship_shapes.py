@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Every relational SHAPE a model file can declare, through the registry
 (ADR 0032/0036/0037): what the launcher resolves — waves, driving/
 implied/independent/conditional roles — with no `drives:` marker and no
@@ -8,6 +21,9 @@ the model can legitimately declare. Each case here is one shape,
 including a child with two parents that are not on one ancestry line —
 the star-schema fact table and the true diamond — resolved by the
 `independent` and `conditional` roles (ADR 0037).
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0032, 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

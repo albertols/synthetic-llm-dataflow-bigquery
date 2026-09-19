@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """`VLLMModelClient` under Dataflow's default multi-SDK-container topology
 (ADR 0034): one vLLM server per WORKER, spawned by whichever SDK process
 wins a cross-process mutex, reused by every other.
@@ -12,6 +25,9 @@ the spawn window to be exclusive ACROSS processes, not just across
 threads. SDK containers on a Dataflow worker share the host network, so a
 bound loopback port is a mutex every process can see — and the same
 network is what makes the existing reuse probe work across them.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

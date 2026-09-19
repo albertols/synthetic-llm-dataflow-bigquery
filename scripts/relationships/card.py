@@ -1,4 +1,17 @@
 #!/usr/bin/env python
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Print the relationship card a launch would log — without launching.
 
 The model files decide what a run generates (ADR 0032), so the fastest
@@ -11,6 +24,9 @@ way to check an edit is to render exactly what `run_pipeline` will:
 
 Exit code is non-zero when the models do not load, so it doubles as a
 pre-commit check on `config/relationships/`.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

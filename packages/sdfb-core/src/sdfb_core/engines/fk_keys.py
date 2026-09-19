@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """Joint FK key pools — referential integrity by construction (ADR 0031).
 
 A child table's FK columns must land a tuple its parent actually holds.
@@ -30,6 +43,9 @@ NULL FK tuples are legitimate ("this child has no parent", SQL MATCH
 SIMPLE) and are preserved at the child's observed rate rather than
 forced to a parent — v1 collapses partial-NULL patterns to all-NULL,
 which is the dominant real shape.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0021, 0030, 0031).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

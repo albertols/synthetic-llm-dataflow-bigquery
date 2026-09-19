@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """BigQuery-backed `SourceValueStore` + persisted-pool taint preflight.
 
 Implements the seam `sdfb_core.pools.store.SourceValueStore` declares: the
@@ -11,6 +24,9 @@ source so a tainted warm store is rebuilt, never replayed (the 2026-08-07
 
 Mirrors `sdfb_beam.pools.store.BigQueryFreeTextPoolStore` deliberately —
 lazy client, pickle-safe, injectable fake for laptop tests.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

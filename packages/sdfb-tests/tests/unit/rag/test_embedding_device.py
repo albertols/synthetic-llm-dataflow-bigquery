@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """BgeEmbedder device selection + VRAM release (2026-07-25 E2E).
 
 Both T4s sat idle while 33,610 chunks embedded on CPU (1,506 s). "auto"
@@ -5,6 +18,9 @@ uses CUDA when available; demote_to_cpu() releases VRAM afterward so
 vLLM's ignition (which sizes its KV-cache budget from free memory) never
 competes with a resident embedder. Fake torch modules keep this laptop-
 runnable and deterministic.
+
+Design: docs/DESIGN.md §3 Serving
+(ADR 0014).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

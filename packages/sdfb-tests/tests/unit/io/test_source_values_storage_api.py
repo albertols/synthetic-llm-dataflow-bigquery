@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """`BigQuerySourceValueStore` pulls large domains through the BigQuery
 Storage Read API (Arrow), not the REST row iterator (ADR 0034).
 
@@ -11,6 +24,9 @@ result is large and the `google-cloud-bigquery-storage` client is
 installed (both true on the worker image), and falls back to the cached
 first page for small results. Nothing else changes: same SQL, same cap
 semantics, same process cache.
+
+Design: docs/DESIGN.md §5 Fidelity; §6 Throughput
+(ADR 0023, 0033, 0034).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

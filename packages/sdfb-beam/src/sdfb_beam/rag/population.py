@@ -1,3 +1,16 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 """`--build_rag_layer` population branch (WS2 §4b.1; 2026-07-07 design §3).
 
 Chunk reference rows → embed → `rag_chunks` BQ rows. The embed stage is a
@@ -35,6 +48,9 @@ table. Deliberate, for four reasons:
 The in-worker retrieval index narrows further still — B.1's setup embeds
 at most `_MAX_EMBED_ROWS` (1024) of the sample (see
 `sdfb_core.engines.b1_rag.engine`).
+
+Design: docs/DESIGN.md §2 Engines
+(ADR 0013, 0019).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

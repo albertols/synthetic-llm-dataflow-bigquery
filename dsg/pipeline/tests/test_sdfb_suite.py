@@ -15,7 +15,7 @@
 
 The suite lives in `packages/sdfb-tests/tests` and locates repository files
 relative to that location, so it cannot be moved or symlinked here. GPU and
-GCP tests are excluded exactly as in the golden source's own CI.
+GCP tests are excluded exactly as in the source repository's own CI.
 """
 
 import pathlib
