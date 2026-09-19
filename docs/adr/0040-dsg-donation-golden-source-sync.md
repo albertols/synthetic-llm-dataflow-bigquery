@@ -1,6 +1,6 @@
 # ADR 0040 — Donated to the Dataflow Solution Guides; this repository stays the golden source
 
-**Status:** ACCEPTED (2026-09-14). Laptop-proven: the sync, precheck and Terraform gates are green. The acceptance gates still outstanding are DSG CI on the first sync PR and a live Dataflow run of the DSG launch scripts.
+**Status:** ACCEPTED (2026-09-14) — **amended 2026-09-19** after the first DSG review ([Amendment](#amendment-2026-09-19--the-first-dsg-review-pr-289): what ships, headers, provenance, publishing onto a PR under review). Laptop-proven: the sync, precheck and Terraform gates are green. The acceptance gates still outstanding are DSG CI on the first sync PR and a live Dataflow run of the DSG launch scripts.
 **Target:** [GoogleCloudPlatform/dataflow-solution-guides](https://github.com/GoogleCloudPlatform/dataflow-solution-guides) (the DSG)
 **Runbook:** [`.claude/skills/dsg-sync/SKILL.md`](../../.claude/skills/dsg-sync/SKILL.md) · `/dsg-sync <ref>`
 **Relies on:** [ADR 0009](0009-single-flex-template-image.md) (one image, two entrypoints) · [ADR 0032](0032-relationships-as-config.md) (relationship models as config)
@@ -118,6 +118,83 @@ Terraform with the same parameters. The `gpu` variable ties the GPU to its
 machine family and vLLM dtype: an L4 on G2 serves the bf16 checkpoints as
 shipped (`auto`), a T4 on N1 serves Qwen downcast to `float16` and never
 Gemma, which is not fp16-safe.
+
+## Amendment (2026-09-19) — the first DSG review (PR #289)
+
+The first sync PR was reviewed by a DSG maintainer, who also pushed two
+commits onto the PR branch (DSG CI support for `docker/Dockerfile` and for
+this guide's Python version). The review changed five things. D1's direction
+(fix here, release, sync) is unchanged, and is how every one of them landed.
+
+```mermaid
+flowchart LR
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+
+  ref[("🗄️ source<br/>tag vX.Y.Z")]:::store
+  stage["⚙️ select + overlays<br/>render README header"]:::cpu
+  hdr["⚙️ retitle the<br/>copyright line"]:::cpu
+  gates["🛡️ gates<br/>+ python-version<br/>+ headers"]:::cpu
+  fresh[("🗄️ new branch<br/>from upstream main")]:::store
+  onto[("🗄️ PR under review<br/>one commit on top")]:::store
+
+  ref --> stage --> hdr --> gates
+  gates -->|"default"| fresh
+  gates -->|"--onto-branch"| onto
+```
+
+**A1 — A PR under review is updated in place (amends D1).** Rebuilding the
+branch from `upstream/main` and force-pushing would have erased the
+reviewer's commits and detached every review thread, and a new tag would
+have opened a second PR and closed the first. `--onto-branch BRANCH` fetches
+the fork's branch, bases on its tip, replaces the owned paths, and publishes
+**one new commit with a plain push**. A push that is not a fast-forward stops
+the sync; it never forces. The PR keeps its number, its threads and the
+reviewer's commits; only its title and body move to the new ref. The default
+path (a fresh versioned branch, older sync PRs superseded) is unchanged and
+is what a sync after the merge uses.
+
+**A2 — The guide ships one design document, not the decision records
+(amends D2).** `docs/adr/**` and `docs/designs/**` read as a development log
+to someone adopting the guide. They stay here. `docs/DESIGN.md` ships, with
+the figures it embeds, and its ADR reference map is the one place an ADR
+number is paired with a section. Code still cites decisions by number, so
+each shipped module that does names the section to read in its docstring
+(`scripts/doc/sync_design_refs.py` derives the line from the map, and CI
+fails when a cited ADR has no row). Links to the records are pinned to this
+repository by the link rewrite D3 already had.
+
+**A3 — One copyright header, two holders, the same lines (amends D4).** The
+DSG requires the identical `Copyright <year> Google LLC` Apache header on
+every source file. Every source file here carries the same block under this
+repository's holder (`scripts/dsg/headers.py`, gated in CI), and staging
+rewrites **only the holder line**. "Byte-for-byte" in D4 therefore becomes
+"line-for-line": a traceback names the same line in both trees. The `headers`
+gate fails the sync on a missing block, another holder, or the source holder
+named anywhere in the staged tree.
+
+**A4 — No provenance file, no licence copy (amends D1 and D3).**
+`.sync-source.json` and `LICENSE` do not belong in the DSG. The README header
+names the release and the commit instead, and the sync reads that line (or
+the `Source:` trailer of the last sync commit) to build the compare link. The
+`setup.py` version and the Terraform image tag are the static guide version,
+as in the other guides; D3's "come from the synced ref" no longer holds.
+Without the file, Terraform had silently tagged images `dev`. The guide's
+wording no longer claims an automated synchronization: it says where the
+pipeline is developed and which release the copy corresponds to.
+
+**A5 — One Python version, from one file (adds to D6).** The review found the
+container on 3.11 and the shipped `.python-version` on 3.12. The cause was a
+second `.python-version` in the `dsg/` overlay that replaced this
+repository's own. The overlay copy is gone, `requires-python` admits exactly
+one minor, and the `python-version` gate compares every pin (Beam SDK and
+launcher images, site-packages paths, Cloud Build images, ruff and mypy
+targets) with that file. The guide stays on 3.11 because every Dataflow run
+to date used the 3.11 image. The DSG's other guides run 3.13 and 3.14, which
+this stack cannot reach yet: `whylogs-sketching`, the compiled backend of the
+profiler, publishes wheels up to CPython 3.12
+([PyPI](https://pypi.org/project/whylogs-sketching/#files), checked
+2026-09-19).
 
 ## Alternatives considered
 

@@ -485,6 +485,99 @@ def test_commit_uses_the_checkout_identity_and_no_trailers(tmp_path):
                           "a" * 40)
 
 
+_IDENT = ["-c", "user.email=me@example.com", "-c", "user.name=me"]
+
+
+def _git(repo: Path, *args: str) -> str:
+  return subprocess.run(["git", "-C", str(repo), *_IDENT, *args],
+                        capture_output=True,
+                        text=True,
+                        check=True).stdout.strip()
+
+
+def _fork_under_review(tmp_path: Path) -> tuple[Path, Path]:
+  """A checkout whose fork branch `sync/demo-v1` holds a sync commit and a
+  commit a reviewer pushed after it. Returns (checkout, reviewer clone)."""
+  upstream, origin = tmp_path / "upstream.git", tmp_path / "origin.git"
+  for bare in (upstream, origin):
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main",
+                    str(bare)],
+                   check=True)
+  work = tmp_path / "work"
+  subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True)
+  _git(work, "config", "user.email", "me@example.com")
+  _git(work, "config", "user.name", "me")
+  _git(work, "remote", "add", "upstream", str(upstream))
+  _write(work, "README.md", "# guides\n")
+  _git(work, "add", ".")
+  _git(work, "commit", "-qm", "init")
+  _git(work, "push", "-q", "origin", "HEAD:main")
+  _git(work, "push", "-q", "upstream", "HEAD:main")
+  _git(work, "switch", "-qc", "sync/demo-v1")
+  _write(work, f"{_PIPE}/main.py", "v1\n")
+  _git(work, "add", ".")
+  _git(work, "commit", "-qm", "feat(demo): sync from source v1")
+  _git(work, "push", "-q", "-u", "origin", "sync/demo-v1")
+  reviewer = tmp_path / "reviewer"
+  subprocess.run(
+      ["git", "clone", "-q", "-b", "sync/demo-v1",
+       str(origin),
+       str(reviewer)],
+      check=True)
+  _write(reviewer, ".github/ci.yml", "reviewer fix\n")
+  _git(reviewer, "add", ".")
+  _git(reviewer, "commit", "-qm", "ci: reviewer fix")
+  _git(reviewer, "push", "-q", "origin", "sync/demo-v1")
+  return work, reviewer
+
+
+def test_onto_branch_adds_one_commit_on_top_of_the_reviewers(tmp_path):
+  work, reviewer = _fork_under_review(tmp_path)
+  tip = _git(reviewer, "rev-parse", "HEAD")
+  branch = sync.prepare_branch(work, _manifest(), "v2", onto="sync/demo-v1")
+  assert branch == "sync/demo-v1"
+  assert _git(work, "rev-parse", "HEAD") == tip
+  _write(work, f"{_PIPE}/main.py", "v2\n")
+  assert sync.commit(work, _manifest(), ref="v2", sha="b" * 40, extra_files=[])
+  sync.push_branch(work, branch, fast_forward_only=True)
+  subjects = _git(reviewer, "ls-remote", "origin", "sync/demo-v1").split()[0]
+  assert subjects == _git(work, "rev-parse", "HEAD")
+  assert _git(work, "log", "--format=%s", "origin/main..HEAD").split("\n") == [
+      "feat(demo): sync from source v2 (" + "b" * 12 + ")",
+      "ci: reviewer fix",
+      "feat(demo): sync from source v1",
+  ]
+
+
+def test_onto_branch_never_forces_over_a_push_it_has_not_seen(tmp_path):
+  work, reviewer = _fork_under_review(tmp_path)
+  branch = sync.prepare_branch(work, _manifest(), "v2", onto="sync/demo-v1")
+  _write(work, f"{_PIPE}/main.py", "v2\n")
+  sync.commit(work, _manifest(), ref="v2", sha="b" * 40, extra_files=[])
+  _write(reviewer, ".github/ci.yml", "second reviewer fix\n")
+  _git(reviewer, "commit", "-qam", "ci: second reviewer fix")
+  _git(reviewer, "push", "-q", "origin", "sync/demo-v1")
+  theirs = _git(reviewer, "rev-parse", "HEAD")
+  with pytest.raises(sync.SyncError, match="moved"):
+    sync.push_branch(work, branch, fast_forward_only=True)
+  assert _git(reviewer, "ls-remote", "origin",
+              "sync/demo-v1").split()[0] == theirs
+
+
+def test_onto_branch_must_be_a_sync_branch_of_this_pipeline(tmp_path):
+  work, _ = _fork_under_review(tmp_path)
+  with pytest.raises(sync.SyncError, match="not a sync branch"):
+    sync.prepare_branch(work, _manifest(), "v2", onto="main")
+
+
+def test_the_default_branch_still_starts_from_the_upstream_base(tmp_path):
+  work, _ = _fork_under_review(tmp_path)
+  branch = sync.prepare_branch(work, _manifest(), "v2")
+  assert branch == "sync/demo-v2"
+  assert _git(work, "rev-parse", "HEAD") == _git(work, "rev-parse",
+                                                 "upstream/main")
+
+
 def test_patches_apply_once_then_no_op_once_upstream_has_the_fix(tmp_path):
   wf = _write(tmp_path, ".github/workflows/ci.yml",
               "run: |\n  X=$(find d | head -n 1)\n")

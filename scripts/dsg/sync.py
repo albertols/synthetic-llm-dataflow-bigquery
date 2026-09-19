@@ -752,14 +752,29 @@ def run_gates(export_root: Path, dsg_root: Path, manifest: Manifest, *,
 # --------------------------------------------------------------------------
 
 
-def prepare_branch(dsg_root: Path, manifest: Manifest, ref: str) -> str:
+def prepare_branch(dsg_root: Path,
+                   manifest: Manifest,
+                   ref: str,
+                   onto: str | None = None) -> str:
   """Reset the ref's sync branch onto the DSG base branch.
 
   Each ref gets its own branch, so the PR head names the version under
   review; re-syncing the same ref updates its PR.
+
+  `onto` names a fork branch whose PR is under review. The sync then starts
+  from that branch's tip, so the commits a reviewer pushed onto it and the
+  review threads survive, and the ref lands as one commit on top (ADR 0040,
+  amendment A1).
   """
   if _run(["git", "-C", str(dsg_root), "status", "--porcelain"]).strip():
     raise SyncError(f"{dsg_root} has uncommitted changes")
+  if onto is not None:
+    if not manifest.is_sync_branch(onto):
+      raise SyncError(f"{onto} is not a sync branch of this pipeline "
+                      f"({manifest.branch_prefix}…)")
+    _run(["git", "-C", str(dsg_root), "fetch", "origin", onto])
+    _run(["git", "-C", str(dsg_root), "switch", "-C", onto, f"origin/{onto}"])
+    return onto
   branch = manifest.branch_for(ref)
   _run(["git", "-C", str(dsg_root), "fetch", "upstream", manifest.target_base])
   _run([
@@ -860,8 +875,22 @@ def close_superseded(dsg_root: Path, manifest: Manifest, *, owner: str,
   return closed
 
 
-def push_and_open_pr(dsg_root: Path, manifest: Manifest, *, branch: str,
-                     title: str, body: str) -> str:
+def push_branch(dsg_root: Path, branch: str, *,
+                fast_forward_only: bool) -> None:
+  """Publish `branch` to the fork.
+
+  A branch the sync rebuilt from the DSG base replaces the fork's copy. A
+  branch under review is only ever fast-forwarded: if someone pushed to it
+  since the sync fetched, the push is refused and nothing is forced.
+  """
+  if fast_forward_only:
+    try:
+      _run(["git", "-C", str(dsg_root), "push", "-u", "origin", branch])
+    except SyncError as error:
+      raise SyncError(
+          f"origin/{branch} moved since the sync fetched it; nothing was "
+          f"forced. Discard this run and sync again.\n{error}") from error
+    return
   # Refresh the lease: the fork may still hold this branch from an earlier sync.
   subprocess.run(
       ["git", "-C", str(dsg_root), "fetch", "origin", branch],
@@ -871,6 +900,16 @@ def push_and_open_pr(dsg_root: Path, manifest: Manifest, *, branch: str,
       "git", "-C",
       str(dsg_root), "push", "--force-with-lease", "-u", "origin", branch
   ])
+
+
+def push_and_open_pr(dsg_root: Path,
+                     manifest: Manifest,
+                     *,
+                     branch: str,
+                     title: str,
+                     body: str,
+                     fast_forward_only: bool = False) -> str:
+  push_branch(dsg_root, branch, fast_forward_only=fast_forward_only)
   owner = _run(["gh", "api", "user", "--jq", ".login"]).strip()
   existing = _run([
       "gh", "pr", "list", "-R", manifest.target_repo, "--head", branch,
@@ -919,10 +958,17 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--source", type=Path, default=_REPO_ROOT)
   parser.add_argument(
       "--gates", choices=["none", "fast", "full"], default="full")
-  parser.add_argument(
+  branching = parser.add_mutually_exclusive_group()
+  branching.add_argument(
       "--no-branch",
       action="store_true",
       help="stage onto the current DSG branch")
+  branching.add_argument(
+      "--onto-branch",
+      metavar="BRANCH",
+      help="publish the ref as one new commit on top of this fork branch, "
+      "whose PR is under review: no rebuild from the DSG base, no force-push, "
+      "and its PR is updated rather than superseded")
   parser.add_argument("--commit", action="store_true")
   parser.add_argument(
       "--open-pr",
@@ -949,8 +995,8 @@ def main(argv: Sequence[str] | None = None) -> int:
       for f in findings:
         print(f"{f.path}:{f.line}: {f.rule}: {f.excerpt}")
       raise SyncError(f"precheck: {len(findings)} finding(s); nothing synced")
-    branch = None if args.no_branch else prepare_branch(dsg_root, manifest,
-                                                        args.ref)
+    branch = None if args.no_branch else prepare_branch(
+        dsg_root, manifest, args.ref, onto=args.onto_branch)
     prev_sha = read_prev_sha(dsg_root, manifest)
     broken = rewrite_links(
         staging, dsg_root, manifest, sha=sha, export_root=export_root)
@@ -1001,7 +1047,8 @@ def main(argv: Sequence[str] | None = None) -> int:
               _run(["git", "-C",
                     str(dsg_root), "branch", "--show-current"]).strip(),
               title=title,
-              body=body))
+              body=body,
+              fast_forward_only=bool(args.onto_branch)))
   return 0
 
 
