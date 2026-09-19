@@ -149,37 +149,48 @@ later, before any code used them, once the engines' call pattern was fixed.
 the prompts are decided one at a time by a loop that reads the previous
 answer, and a Beam graph has no loop.**
 
+**Beam `vllm_inference` — prompts are the data.** Every prompt exists before
+inference starts, and one `inference_args` dict serves all of them.
+
 ```mermaid
-flowchart TB
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+
+  A1["🧺 PCollection<br/>of prompts"]:::beam
+  A2["🔀 RunInference<br/>vLLM ModelHandler"]:::beam
+  A3["🧠 vLLM server<br/>started in load_model"]:::gpu
+  A4["🧺 PCollection of<br/>PredictionResult"]:::beam
+  A1 --> A2
+  A2 -->|"same inference_args for every element"| A3
+  A3 --> A4
+```
+
+**This pipeline — rows are the data, prompts are a loop.** The answer to one
+call decides whether there is a next call and what it asks.
+
+```mermaid
+flowchart LR
   classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
   classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
   classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
 
-  subgraph A["Beam vllm_inference — prompts are the data"]
-    direction LR
-    A1["🧺 PCollection<br/>of prompts"]:::beam
-    A2["🔀 RunInference<br/>VLLM…ModelHandler"]:::beam
-    A3["🧠 vLLM server<br/>started in load_model"]:::gpu
-    A4["🧺 PCollection of<br/>PredictionResult"]:::beam
-    A1 --> A2 -->|"one inference_args<br/>for every element"| A3 --> A4
-  end
-
-  subgraph B["This pipeline — rows are the data, prompts are a loop"]
-    direction LR
-    B1["🔀 generation DoFn<br/>engine.generate_batch"]:::beam
-    B2["⚙️ build prompt<br/>for this round"]:::cpu
-    B3["🧠 generate_json<br/>schema of this column"]:::gpu
-    B4["🛡️ filter answer<br/>format, novelty"]:::cpu
-    B5{"pool at<br/>target?"}
-    B6["🎲 sample rows<br/>NumPy, no LLM"]:::cpu
-    B7[("🗄️ persisted pools<br/>reused next run")]:::store
-    B1 --> B2 --> B3 --> B4 --> B5
-    B5 -->|"no: re-seed, raise<br/>temperature"| B2
-    B5 -->|yes| B6
-    B5 -.-> B7
-    B7 -.->|"warm: no call,<br/>no server"| B6
-  end
+  B1["🔀 generation DoFn<br/>engine.generate_batch"]:::beam
+  B2["⚙️ build prompt<br/>for this round"]:::cpu
+  B3["🧠 generate_json<br/>this column's schema"]:::gpu
+  B4["🛡️ filter answer<br/>format and novelty"]:::cpu
+  B5["⚙️ pool at target?"]:::cpu
+  B6["🎲 sample rows<br/>NumPy, no LLM"]:::cpu
+  B7[("🗄️ persisted pools")]:::store
+  B1 --> B2
+  B2 --> B3
+  B3 --> B4
+  B4 --> B5
+  B5 -->|"no, ask again with new seeds and a higher temperature"| B2
+  B5 -->|"yes"| B6
+  B5 --> B7
+  B7 -->|"next run is warm, no call and no server"| B6
 ```
 
 | | Beam `vllm_inference` (2.74.0) | `VLLMModelClient` |
