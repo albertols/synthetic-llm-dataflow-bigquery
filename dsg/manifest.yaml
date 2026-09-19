@@ -71,8 +71,7 @@ exclude:
   # bundles, figure scripts, the personal-GCP layer, the Composer DAG, this
   # sync itself). The sync fails if a shipped test loads an unshipped script.
   - packages/sdfb-tests/tests/unit/scripts/test_build_full_report.py
-  - packages/sdfb-tests/tests/unit/scripts/test_dsg_precheck.py
-  - packages/sdfb-tests/tests/unit/scripts/test_dsg_sync.py
+  - packages/sdfb-tests/tests/unit/scripts/test_dsg_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_e2e_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_freetext_crosscheck.py
   - packages/sdfb-tests/tests/unit/scripts/test_history_mappings.py

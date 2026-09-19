@@ -82,6 +82,11 @@ jobs:
         # salted-hash matches of known sensitive identifiers.
         run: uv run python scripts/dsg/precheck.py
 
+      - name: Licence headers
+        # One Apache-2.0 header on every source file; the DSG sync rewrites
+        # only its holder line, so both trees keep the same line numbers.
+        run: uv run python scripts/dsg/headers.py
+
       - name: Mypy (sdfb-core only — strict surface)
         # Hard gate since 2026-08-05 — the type debt was paid down to zero.
         # A red mypy here is a regression, not legacy noise.

@@ -9,7 +9,7 @@ root. Current scopes:
 | `e2e/` | integration-test analysis, GCP probes, sample fetch, crosschecks, redaction |
 | `release/` | post-merge versioning + release reports (see `.github/workflows/release_tag_report.yaml`) |
 | `relationships/` | reading/rendering `config/relationships/` models offline (`card.py` prints exactly what a launch would plan — ADR 0032) |
-| `dsg/` | the Dataflow Solution Guides replica: `precheck.py` (sensitive-content gate, also in CI) and `sync.py` (golden source → DSG PR; ADR 0040, skill `.claude/skills/dsg-sync/`) |
+| `dsg/` | the Dataflow Solution Guides replica: `precheck.py` (sensitive-content gate, also in CI), `headers.py` (Apache-2.0 licence header on every source file, also in CI; the sync rewrites its holder line) and `sync.py` (golden source → DSG PR; ADR 0040, skill `.claude/skills/dsg-sync/`) |
 
 Future scopes (`ddl/`, `gcp/`, `automation/`, `config/`, …) are created on
 first need. Root-level scripts (`extract_ddl.py`, `deployment_prerequisites.py`,

@@ -40,6 +40,7 @@ version: `albertols:sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
    git fetch --tags && git status --porcelain            # clean tree, REF exists
    uv sync --group dev
    uv run python scripts/dsg/precheck.py                 # sensitive-content gate
+   uv run python scripts/dsg/headers.py                  # licence header on every source file
    uv run pytest -m "not gpu and not gcp" -q
    uv run ruff check . && uv run mypy packages/sdfb-core/src
    uv run yapf --diff -r --style yapf packages scripts dsg composer public_cloud
