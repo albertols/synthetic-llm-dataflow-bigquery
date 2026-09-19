@@ -8,6 +8,20 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ## [Unreleased]
 
+### 🚀 Added
+
+### 🔧 Changed
+
+### ⚡ Performance
+
+### 🐛 Fixed
+
+### 🗑️ Removed
+
+### 📗 Docs
+
+## [v0.5.2] — 2026-09-19
+
 Addresses the first review of the Dataflow Solution Guides PR ([#289](https://github.com/GoogleCloudPlatform/dataflow-solution-guides/pull/289)); recorded as the amendment to [ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md).
 
 ### 🚀 Added
