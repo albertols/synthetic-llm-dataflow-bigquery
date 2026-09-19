@@ -40,6 +40,8 @@ preserve:
 # Golden-source files copied under pipeline_dir, same relative paths.
 include:
   - README.md
+  # The one Python version: DSG CI, the sync gate and the image all read it.
+  - .python-version
   - pyproject.toml
   - uv.lock
   - packages/sdfb-core/**

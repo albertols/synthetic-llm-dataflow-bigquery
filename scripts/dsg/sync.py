@@ -52,7 +52,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import yaml
@@ -68,6 +68,19 @@ _PLACEHOLDER = re.compile(r"\{(ref|sha|short_sha|prev_sha|compare_url|"
                           r"changelog|gates_table|cloud_status|source_repo|"
                           r"pipeline_dir|patches)\}")
 _SEMVER_TAG = re.compile(r"v(\d+\.\d+\.\d+)")
+# Every place a Python version is pinned; groups join into MAJOR.MINOR.
+_PYTHON_PINS = (
+    ("Beam SDK image", re.compile(r"beam_python(\d+\.\d+)_sdk")),
+    ("template launcher image",
+     re.compile(r"python(\d)(\d+)-template-launcher-base")),
+    ("site-packages path", re.compile(r"python(\d+\.\d+)/site-packages")),
+    ("container image", re.compile(r"\bpython:(\d+\.\d+)")),
+    ("ruff target-version", re.compile(r'target-version\s*=\s*"py(\d)(\d+)"')),
+    ("mypy python_version", re.compile(r'python_version\s*=\s*"(\d+\.\d+)"')),
+)
+_PYTHON_RANGE = re.compile(
+    r'(?:requires-python\s*=\s*|python_requires=)"(>=(\d+\.\d+),<(\d+\.\d+))"')
+_PYTHON_PIN_SUFFIXES = (".py", ".sh", ".yaml", ".yml", ".toml", ".tf")
 
 
 def _load_precheck():
@@ -461,6 +474,52 @@ def check_pylintrc(export_root: Path, dsg_root: Path,
   return GateResult("pylintrc-parity", ok, 0.0, tail)
 
 
+def python_version_drift(files: Mapping[str, str],
+                         reference: str = ".python-version") -> list[str]:
+  """Pins in `files` (path -> text) that disagree with `reference`.
+
+  Beam pickles on the launcher and unpickles on the workers, so launcher,
+  workers, container, CI and tooling share one MAJOR.MINOR.
+  """
+  if reference not in files:
+    return [f"{reference} is missing"]
+  wanted = files[reference].strip()
+  if not re.fullmatch(r"\d+\.\d+", wanted):
+    return [f"{reference}: expected MAJOR.MINOR, found '{wanted}'"]
+  major, minor = wanted.split(".")
+  exact = f">={wanted},<{major}.{int(minor) + 1}"
+  drift: list[str] = []
+  for rel in sorted(files):
+    found = [(label, ".".join(m.groups()))
+             for label, pattern in _PYTHON_PINS
+             for m in pattern.finditer(files[rel])]
+    drift += [
+        f"{rel}: {label} is Python {version}, {reference} says {wanted}"
+        for label, version in dict.fromkeys(found)
+        if version != wanted
+    ]
+    drift += [
+        f"{rel}: supported range is {declared}, {reference} says exactly "
+        f"{wanted}"
+        for declared in dict.fromkeys(
+            m.group(1) for m in _PYTHON_RANGE.finditer(files[rel]))
+        if declared != exact
+    ]
+  return drift
+
+
+def check_python_version(dsg_root: Path, manifest: Manifest) -> GateResult:
+  pipe = dsg_root / manifest.pipeline_dir
+  files = {
+      path.relative_to(pipe).as_posix(): path.read_text(encoding="utf-8")
+      for path in sorted(pipe.rglob("*"))
+      if path.is_file() and (path.suffix in _PYTHON_PIN_SUFFIXES or path.name in
+                             ("Dockerfile", manifest.python_version_file))
+  }
+  drift = python_version_drift(files, manifest.python_version_file)
+  return GateResult("python-version", not drift, 0.0, "\n".join(drift))
+
+
 def changelog_section(text: str, ref: str) -> str:
   """The CHANGELOG body for a `vX.Y.Z` tag, else the [Unreleased] block."""
   semver = _SEMVER_TAG.fullmatch(ref)
@@ -638,6 +697,7 @@ def run_gates(export_root: Path, dsg_root: Path, manifest: Manifest, *,
       _timed("precheck",
              lambda: _gate_precheck(export_root, dsg_root, manifest)),
       check_pylintrc(export_root, dsg_root, manifest),
+      check_python_version(dsg_root, manifest),
       _timed("links", lambda: _gate_links(dsg_root, manifest, sha)),
       _timed("bash -n", lambda: _gate_shell(dsg_root, manifest)),
       _timed("yapf + pylint", lambda: _gate_style(dsg_root, manifest)),
