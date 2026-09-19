@@ -126,12 +126,13 @@ class ModelClient(Protocol):
     use — they import only this Protocol.
 
     The contract is intentionally narrow: a JSON-schema-guided generation
-    call. The vLLM backend (via Beam's `VLLMCompletionsModelHandler`)
-    enforces the schema with vLLM's guided decoding; outlines /
-    lm-format-enforcer are fallback knobs. See ADR 0011.
+    call. The vLLM backend owns a vLLM OpenAI-compatible server on the
+    worker and enforces the schema with vLLM structured outputs
+    (`response_format` json_schema). It is not a Beam `RunInference`
+    handler: the engines call it O(1) times per run. See ADR 0014.
 
     REFs:
-      - docs/adr/0011-adopt-beam-vllm-model-handler.md
+      - docs/adr/0014-vllm-model-client-owns-server.md (amends ADR 0011)
       - https://docs.vllm.ai/en/latest/usage/structured_outputs.html
     """
 

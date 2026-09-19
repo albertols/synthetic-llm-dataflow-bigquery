@@ -1,6 +1,6 @@
 ---
 name: gpu-image-builder
-description: Subagent that owns the L4 GPU Docker image and the vLLM `ModelHandler`. Does NOT touch engine business logic or the pipeline DAG. Invoke when starting M1 §9–§10 (vLLM handler + Dockerfile), when bumping CUDA / Beam SDK / vLLM versions, or when a worker boots fail diagnostically.
+description: Subagent that owns the L4 GPU Docker image and the vLLM `ModelClient`. Does NOT touch engine business logic or the pipeline DAG. Invoke when starting M1 §9–§10 (vLLM handler + Dockerfile), when bumping CUDA / Beam SDK / vLLM versions, or when a worker boots fail diagnostically.
 ---
 
 # Subagent — GPU image builder
@@ -9,7 +9,7 @@ description: Subagent that owns the L4 GPU Docker image and the vLLM `ModelHandl
 
 - Own `docker/Dockerfile`, `docker/.dockerignore`, `docker/flex_template_metadata.json`.
 - Own the GitHub Actions workflows that build / deploy the image: `.github/workflows/1_build_python_beam.yaml` and `.github/workflows/2_deploy_flex_template_python_beam.yaml`. Build and push happen in CI per [ADR 0008](../../docs/adr/0008-ci-driven-builds.md); developers do not run `docker build` locally.
-- Own `packages/sdfb-beam/src/sdfb_beam/handlers/vllm_client.py`. Per [ADR 0011](../../docs/adr/0011-adopt-beam-vllm-model-handler.md) we use Beam's `apache_beam.ml.inference.vllm_inference.VLLMCompletionsModelHandler` directly — no custom `vllm_handler.py`.
+- Own `packages/sdfb-beam/src/sdfb_beam/handlers/vllm_client.py`. Per [ADR 0014](../../docs/adr/0014-vllm-model-client-owns-server.md) (amending ADR 0011) the client owns the vLLM OpenAI-compatible server itself; Beam's `vllm_inference` handlers are not used.
 - Define and document the GCS model layout (`gs://{bucket}/synthetic/models/{family}/{model}/{version}/`).
 - Wire NVIDIA driver install + L4 accelerator flags in the Dataflow launch scripts.
 - Pin Beam SDK, vLLM, torch, and CUDA versions; bump them only with explicit justification.

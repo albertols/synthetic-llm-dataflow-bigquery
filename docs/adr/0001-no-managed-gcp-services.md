@@ -1,6 +1,6 @@
 # ADR 0001 — No managed GCP services in the serving path
 
-- **Status**: accepted (2026-05-18)
+- **Status**: accepted (2026-05-18) — **amended by [ADR 0014](0014-vllm-model-client-owns-server.md)** (2026-05-21): the serving path is still entirely inside Beam DoFns, through a `ModelClient` that owns the vLLM server, not `RunInference` with a custom `ModelHandler` as the Decision below first put it.
 - **Decider**: project owner
 
 ## Context

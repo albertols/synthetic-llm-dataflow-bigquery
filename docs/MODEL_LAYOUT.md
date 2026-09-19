@@ -168,36 +168,43 @@ loader. `vocab.txt` is optional (the fast tokenizer already embeds it).
 
 ## Runtime load — Dataflow / vLLM
 
-Per [ADR 0011](adr/0011-adopt-beam-vllm-model-handler.md), the serving path uses Beam's
-`apache_beam.ml.inference.vllm_inference.VLLMCompletionsModelHandler`. Inside
-`sdfb_beam/handlers/vllm_client.py`:
+`VLLMModelClient` (`sdfb_beam/handlers/vllm_client.py`) owns the vLLM server on
+each worker ([ADR 0014](adr/0014-vllm-model-client-owns-server.md), which amends
+[ADR 0011](adr/0011-adopt-beam-vllm-model-handler.md)). It does **not** use
+Beam's `RunInference` or `apache_beam.ml.inference.vllm_inference`: the engines
+call the model a bounded number of times per run, synchronously from inside the
+generation `DoFn`, so there is no `PCollection` of prompts for a `ModelHandler`
+to batch.
+
+```mermaid
+sequenceDiagram
+  participant D as generation DoFn (engine)
+  participant C as VLLMModelClient
+  participant G as GCS weights
+  participant V as vLLM server (subprocess)
+  D->>C: generate_json(prompt, json_schema)
+  Note over C: first call only — lazy ignition, lock-serialized
+  C->>G: list + download the model prefix → local_model_dir
+  C->>V: python -m vllm.entrypoints.openai.api_server --model <local_model_dir>
+  C->>V: poll /v1/models until ready
+  C->>V: chat.completions (response_format = json_schema)
+  V-->>C: choices
+  C-->>D: list[dict]
+  D->>C: teardown()
+```
 
 ```python
-def setup(self):
-    # One-time per worker — copy from GCS to local SSD via the Python client
-    # (NOT gsutil — the CLI would force a packages.cloud.google.com apt
-    # install into the image for no benefit).
-    from google.cloud import storage
-    bucket_name, prefix = _split_gs_uri(self.model_uri)
-    client = storage.Client()                          # ADC on worker
-    for blob in client.list_blobs(bucket_name, prefix=prefix):
-        rel = blob.name[len(prefix):]
-        if rel:
-            dest = Path("/local-ssd/model") / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            blob.download_to_filename(dest)
-    # Beam's handler spawns `python -m vllm.entrypoints.openai.api_server`
-    # under the hood. Pass server flags via vllm_server_kwargs.
-    self.handler = VLLMCompletionsModelHandler(
-        model_name="/local-ssd/model",
-        vllm_server_kwargs={
-            "quantization": "awq",
-            "max-model-len": "8192",
-            "gpu-memory-utilization": "0.85",
-        },
-        max_batch_size=16,
-    )
+client = VLLMModelClient(
+    model_uri="gs://<bucket>/synthetic/models/gemma4/e4b-it/v1/",
+    vllm_server_kwargs={"max-model-len": "8192"},  # per model: config/models.yml
+)
+rows = client.generate_json(prompt, json_schema)   # ignites the server on first use
+client.teardown()
 ```
+
+Weights are pulled with the `google-cloud-storage` Python client (not `gsutil`:
+the CLI would add an apt repository to the image). A bare local path as
+`model_uri` skips the pull.
 
 `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are set in `docker/Dockerfile` so any accidental Hub call fails loudly. The model directory must be self-contained.
 

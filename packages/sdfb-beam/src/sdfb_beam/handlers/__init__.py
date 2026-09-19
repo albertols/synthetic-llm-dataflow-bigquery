@@ -11,10 +11,10 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""`ModelClient` / `ModelHandler` implementations.
+"""`ModelClient` implementations.
 
 Production (Linux + L4 + CUDA):
-  - `vllm_client.py` — vLLM-backed (stub today; real impl in M1 §9).
+  - `vllm_client.py` — vLLM-backed; owns the vLLM server on the worker.
 
 M4 local smoke (Apple Silicon):
   - `mlx_client.py` — `mlx-lm`-backed (gated by `[mlx]` extra).
@@ -23,7 +23,7 @@ Test / development:
   - `fake_client.py` — deterministic `ModelClient` for CI and DirectRunner.
 
 All three satisfy the `ModelClient` Protocol; engines never know which one
-is in use. See ADR 0006 and ADR 0010.
+is in use. See ADR 0006, ADR 0010 and ADR 0014.
 """
 
 from sdfb_beam.handlers.fake_client import FakeModelClient
