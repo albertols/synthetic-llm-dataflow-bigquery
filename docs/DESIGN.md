@@ -177,7 +177,7 @@ flowchart LR
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
 
   B1["🔀 generation DoFn<br/>engine.generate_batch"]:::beam
-  B2["⚙️ build prompt<br/>for this round"]:::cpu
+  B2["⚙️ pool prompt<br/>same bytes every round"]:::cpu
   B3["🧠 generate_json<br/>this column's schema"]:::gpu
   B4["🛡️ filter answer<br/>format and novelty"]:::cpu
   B5["⚙️ pool at target?"]:::cpu
@@ -187,7 +187,7 @@ flowchart LR
   B2 --> B3
   B3 --> B4
   B4 --> B5
-  B5 -->|"no, ask again with new seeds and a higher temperature"| B2
+  B5 -->|"no, ask again at the next sampling level"| B2
   B5 -->|"yes"| B6
   B5 --> B7
   B7 -->|"next run is warm, no call and no server"| B6
@@ -196,8 +196,8 @@ flowchart LR
 | | Beam `vllm_inference` (2.74.0) | `VLLMModelClient` |
 | :-- | :-- | :-- |
 | **What flows through the LLM step** | Prompts: inference is a `PTransform` between two `PCollection`s | Nothing. The `PCollection` carries row batches; the model is called from inside `generate_batch()` and returns to the caller |
-| **Who decides the next prompt** | The graph: every prompt exists before inference starts | The engine: each round re-seeds the prompt, takes the next temperature level, filters the answer by format and by novelty against the source domain (§5), then decides whether to ask again |
-| **Request arguments** | One `inference_args` dict per transform, applied to every element | Per call: the JSON schema of that column, the temperature of that level, optional `seed` / `top_p` / `top_k` |
+| **Who decides the next prompt** | The graph: every prompt exists before inference starts | The engine: each round takes the next sampling level (`temperature`, `top_p`, `top_k`), filters the answer by format and by novelty against the source domain (§5), then decides whether to ask again |
+| **Request arguments** | One `inference_args` dict per transform, applied to every element | Per call: the JSON schema of that column, and the `temperature` / `top_p` / `top_k` of that round |
 | **How many calls** | One per element | A bounded number per free-text column, whatever the row count (§2) |
 | **When the server starts** | In `load_model()`, on every worker running the transform | On the first real call: a table with no free-text column, or a run whose pools are already persisted, never loads a model |
 | **Model location** | Passed to `--model` as given | A `gs://` prefix pulled to local disk once per worker |
@@ -209,6 +209,37 @@ What is **not** a difference: Beam's chat handler reaches the chat endpoint
 too, and `response_format` or `extra_body` pass through `inference_args`
 unchanged. Structured output is possible with Beam; varying it per call, or
 letting an answer choose the next question, is not.
+
+**vLLM's own optimizations are the server's, in both cases.** Continuous
+batching, PagedAttention and the prefix cache are implemented by the vLLM
+server that both approaches start, so this choice neither gains nor loses
+them. What a client controls is what it feeds them:
+
+```mermaid
+flowchart LR
+  classDef cpu fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+
+  C1["⚙️ column threads<br/>_build_free_text_pools"]:::cpu
+  C2["⚙️ n choices per request<br/>_pool_llm_yield"]:::cpu
+  C3["⚙️ same prompt bytes<br/>_build_pool_prompt"]:::cpu
+  C4["🛡️ KV budget fitted<br/>_fit_max_model_len"]:::cpu
+  S1["🧠 continuous batching<br/>vLLM scheduler"]:::gpu
+  S2["🧠 prefix cache<br/>reuses prompt KV"]:::gpu
+  S3["🧠 PagedAttention<br/>KV cache in blocks"]:::gpu
+  C1 --> S1
+  C2 --> S1
+  C3 --> S2
+  C4 --> S3
+  S1 --> S3
+  S2 --> S3
+```
+
+| Technique (server-side) | Beam `vllm_inference` | This pipeline |
+| :-- | :-- | :-- |
+| **Continuous batching**: the scheduler batches whatever is in flight | One Beam batch in flight: `asyncio.gather` over one request per prompt (`_async_run_inference`) | `n` independent completions per request (`_pool_llm_yield`) and several column ladders at once (`B1RagEngine._build_free_text_pools`), against one server per worker |
+| **PagedAttention / KV cache**: KV memory in blocks | Budget is the flags the caller passes | Fitted before spawn from the checkpoint's geometry and **free** VRAM (`_kv_bytes_per_token`, `_fit_max_model_len`, `_clamp_max_model_len`, `_dynamic_gpu_memory_utilization`); the embedder leaves the GPU first |
+| **Automatic prefix caching**: a shared prompt prefix reuses its KV blocks | Prompts are not shaped by the handler | A column's pool prompt is byte-identical across rounds and constraints are a constant suffix (`_build_pool_prompt`), so later rounds reuse the cached prompt; the opt-in `kcenter_rotate` strategy gives that up on purpose |
 
 Beam's handler is the right tool whenever prompts *are* the data (classify,
 summarize or extract from each element). If this pipeline ever generates a
