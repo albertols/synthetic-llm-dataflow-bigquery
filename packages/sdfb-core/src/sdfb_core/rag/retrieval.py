@@ -18,6 +18,9 @@ per-column variant (Phase A §4b.3) retrieves representative VALUES of one
 column so free-text exemplars are column-relevant instead of diluted
 whole-row sentences. Always exact, local, deterministic — never BQ
 VECTOR_SEARCH in the generation hot path.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0018).
 """
 
 from __future__ import annotations

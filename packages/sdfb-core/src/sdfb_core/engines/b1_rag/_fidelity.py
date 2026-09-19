@@ -32,6 +32,9 @@ fixed seed — which is what `test_seed_reproducibility` requires.
 
 REF: spec §2 sampling-backend seam; cuDF/CuPy is the M1-optional GPU backend
 (not implemented here — NumPy is the baseline).
+
+Design: docs/DESIGN.md §2 Engines; §5 Fidelity
+(ADR 0013, 0022).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

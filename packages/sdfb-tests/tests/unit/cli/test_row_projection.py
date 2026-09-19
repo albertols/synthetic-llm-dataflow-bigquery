@@ -34,6 +34,9 @@ key values, of which the source parent covers 52,545 — the 9% matched
 share, the 0.5025 repeat share that ADR 0038 adjusted E_TABLE's `pk:` on,
 and the 2.0099 mean that turns B_TABLE's 210,958 rows into E_TABLE's
 423,999.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0038, 0039).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

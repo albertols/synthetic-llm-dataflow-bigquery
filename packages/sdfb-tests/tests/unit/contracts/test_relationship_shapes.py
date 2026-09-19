@@ -21,6 +21,9 @@ the model can legitimately declare. Each case here is one shape,
 including a child with two parents that are not on one ancestry line —
 the star-schema fact table and the true diamond — resolved by the
 `independent` and `conditional` roles (ADR 0037).
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0032, 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

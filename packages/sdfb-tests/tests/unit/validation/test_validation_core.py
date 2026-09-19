@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Unit tests for the pure-Python Mode-A validation core (M1 §12)."""
+"""Unit tests for the pure-Python Mode-A validation core (M1 §12).
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031, 0037, 0038).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,missing-class-docstring,redefined-outer-name,reimported

@@ -17,6 +17,9 @@ The 2026-08-21 run discovered its PK/pool conflict 37 minutes and 1 586
 GPU-s after launch (999 488 pk.duplicate), and its declared FK was
 silently inactive. Both become launcher-side stops. The PK itself now
 comes from `config/relationships/` (ADR 0032).
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0024, 0028, 0029, 0032, 0035).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -20,6 +20,9 @@ come from a parent row that actually holds the shared value. The
 composer projects the co-parent to ``(join_key, rest_value)``, caps the
 candidates per shared value with a seeded Top-M, and CoGroupByKeys them
 onto the driving keys before batching.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

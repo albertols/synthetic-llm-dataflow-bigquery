@@ -35,6 +35,9 @@ depends only on the `Embedder` Protocol below. Two implementations:
 REFs:
   - bge-small-en-v1.5: BAAI, MIT license, mirrored per config/models.yml
   - GReaT row serialization (what we embed): arXiv 2210.06280
+
+Design: docs/DESIGN.md §2 Engines; §3 Serving; §6 Throughput
+(ADR 0014, 0019, 0034).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

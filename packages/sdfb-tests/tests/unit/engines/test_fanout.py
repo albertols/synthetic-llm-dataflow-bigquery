@@ -17,6 +17,9 @@ A child's rows are its parent's keys x the SOURCE fan-out histogram; the
 PK-completing cells of one key are drawn WITHOUT replacement, so a PK
 that contains an FK is unique by construction (the 2026-09-09 runs lost
 87.9% then 56.5% of C_TABLE to random draws of exactly that PK).
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030, 0031, 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -21,6 +21,11 @@ library-wrapper — both satisfy this interface.
 
 REF: https://beam.apache.org/documentation/ml/large-language-modeling/
 REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.base.html
+
+Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
+§8 Configuration
+(ADR 0011, 0014, 0018, 0021, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0033,
+0036, 0037).
 """
 
 from __future__ import annotations

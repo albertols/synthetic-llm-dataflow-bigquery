@@ -32,6 +32,9 @@ that prove the copy is faithful, the operator banner, and the effective
 model rendered back as YAML. The detection lives in
 `sdfb_beam.cli.preflight` (it needs the fan-out measurement); the
 announcement lives in `sdfb_beam.cli.run_pipeline`.
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0032, 0038).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

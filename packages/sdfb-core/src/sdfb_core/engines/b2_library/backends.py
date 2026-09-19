@@ -36,6 +36,9 @@ underlying torch model is picklable.
 
 Free-text columns are **excluded** from both backends — they are produced
 by the ``ModelClient`` free-text hook (``freetext.py``), not sampled here.
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity
+(ADR 0022, 0036).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

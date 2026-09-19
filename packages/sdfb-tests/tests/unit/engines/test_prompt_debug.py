@@ -17,6 +17,9 @@ Reference values are banned from logs, which is why prompts were previously
 unloggable. `redacted` (the debug default) elides seed exemplars; `full` is
 an explicit opt-in that logs verbatim prompts at WARNING; `off` (the
 production default) logs nothing.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0024).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

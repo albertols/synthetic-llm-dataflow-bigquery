@@ -30,6 +30,9 @@ column count:
 Driver-side only; workers never import this — exact results reach engines
 via ``GenerationContext.source_distinct``. Non-scalar / exotic columns
 (STRUCT, REPEATED, JSON, GEOGRAPHY, BYTES) keep their Tier-1 entry.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

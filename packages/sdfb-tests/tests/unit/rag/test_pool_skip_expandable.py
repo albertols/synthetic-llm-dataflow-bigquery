@@ -22,6 +22,9 @@ dead cost. The pool build now skips them, EXCEPT when the column carries an
 (and its guided `pattern`) is the enforcement vehicle, so constraint
 columns keep their pool AND their draw path stops bypassing it — a silent
 `format` clause on an expandable column was previously decorative.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0020).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

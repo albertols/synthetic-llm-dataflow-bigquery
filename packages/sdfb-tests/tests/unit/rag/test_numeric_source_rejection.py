@@ -27,6 +27,9 @@ same seam:
   - values the SAMPLE saw repeatedly (multi-knot: sample frequency >= 2)
     are enum mass under the probe's k-anonymity floor and stay exact —
     frequent codes keep their head fidelity.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0023).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

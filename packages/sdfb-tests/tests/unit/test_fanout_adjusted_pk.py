@@ -19,6 +19,9 @@ its OWN child still generates, once per distinct parent key.
 Three tables: P_TABLE (root) -> E_TABLE (driven, PK adjusted away) ->
 F_TABLE (driven by E_TABLE). The measured facts are hand-written, as in
 `test_fanout_three_tables.py`; there is no BigQuery here.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0038).
 """
 
 from __future__ import annotations

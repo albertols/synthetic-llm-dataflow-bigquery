@@ -21,6 +21,9 @@ test was novelty (v not in observed). For identifier-ish columns (a
 relaxed template exists), values must now also match an observed length
 bucket, stay within the observed charset, and never contain the column
 name. Prose columns (no template) skip the gate entirely.
+
+Design: docs/DESIGN.md §5 Fidelity; §6 Throughput
+(ADR 0033, 0034).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

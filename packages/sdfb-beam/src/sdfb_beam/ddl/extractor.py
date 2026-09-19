@@ -30,6 +30,9 @@ Differences from the original `bigquery_ddl_metadata.py`:
 REFs:
   - https://docs.cloud.google.com/bigquery/docs/schemas#creating_a_JSON_schema_file
   - https://docs.cloud.google.com/bigquery/docs/primary-foreign-keys
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 from __future__ import annotations

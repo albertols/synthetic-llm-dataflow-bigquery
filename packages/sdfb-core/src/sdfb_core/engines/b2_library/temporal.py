@@ -22,6 +22,9 @@ native value type / observed string format. Mirrors B.1's temporal
 novel-range behavior (b1_rag/profile.py `_profile_temporal`).
 
 Pure stdlib + the shared text_shapes detector. No Beam, no GCP, no torch.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

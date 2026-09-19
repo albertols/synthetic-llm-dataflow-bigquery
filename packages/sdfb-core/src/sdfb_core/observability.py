@@ -25,6 +25,9 @@ without updating the probe and the contract test together.
 
 This module is pure stdlib (``logging``/``shlex``/``re``) — sdfb-core must
 stay Beam-free. Beam metric counterparts live in ``sdfb_beam``.
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity
+(ADR 0024, 0030).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

@@ -24,6 +24,9 @@ Test / development:
 
 All three satisfy the `ModelClient` Protocol; engines never know which one
 is in use. See ADR 0006, ADR 0010 and ADR 0014.
+
+Design: docs/DESIGN.md §2 Engines; §3 Serving
+(ADR 0006, 0010, 0014).
 """
 
 from sdfb_beam.handlers.fake_client import FakeModelClient

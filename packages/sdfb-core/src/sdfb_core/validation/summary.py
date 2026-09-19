@@ -20,6 +20,9 @@ raises :class:`BlockerThresholdExceeded`, which fails the Dataflow job
 (skill: validation-mode-a §"Failing the job").
 
 REF: .claude/skills/validation-mode-a.md
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0038).
 """
 
 from __future__ import annotations

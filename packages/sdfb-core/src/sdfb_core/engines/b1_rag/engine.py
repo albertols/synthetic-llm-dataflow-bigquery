@@ -45,6 +45,11 @@ fidelity primitive (spec §2, NeMo dependency-aware ordering) — deferred.
 
 Pure-Python module: NO `apache_beam` / `torch` / `vllm` / `faiss` / `numpy`
 imports at module scope. Heavy deps are deferred into the seams.
+
+Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
+§6 Throughput
+(ADR 0013, 0018, 0019, 0020, 0022, 0023, 0024, 0028, 0030, 0031, 0033, 0034,
+0036, 0037).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

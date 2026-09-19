@@ -16,6 +16,9 @@
 The launcher must find the models with zero ceremony: the packaged
 directory is the default, a single file works, and a `gs://` override
 needs no image rebuild. Absence is legitimate; a broken file is not.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -22,6 +22,9 @@ three-table runs they were 40% of the worker log by bytes and buried
 every other line. They are gone: one single-line `relational_e2e`, one
 single-line `relational_fk_edge` per edge, and the pipe/arrow card
 without the mermaid fence.
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0028, 0031, 0032, 0035, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

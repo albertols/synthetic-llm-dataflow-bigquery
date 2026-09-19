@@ -24,6 +24,9 @@ result is large and the `google-cloud-bigquery-storage` client is
 installed (both true on the worker image), and falls back to the cached
 first page for small results. Nothing else changes: same SQL, same cap
 semantics, same process cache.
+
+Design: docs/DESIGN.md §5 Fidelity; §6 Throughput
+(ADR 0023, 0033, 0034).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

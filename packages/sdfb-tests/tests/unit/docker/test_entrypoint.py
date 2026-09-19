@@ -22,6 +22,9 @@ Getting this wrong sent FnAPI flags to the launcher binary and crash-looped the
 These run the REAL script under `sh`, swapping ONLY the two absolute exec targets
 for stubs that print a marker — so the dispatch logic (the for-loop + case
 discriminator) is exercised as committed, not a reimplementation of it.
+
+Design: docs/DESIGN.md §1 Architecture
+(ADR 0009).
 """
 
 from __future__ import annotations

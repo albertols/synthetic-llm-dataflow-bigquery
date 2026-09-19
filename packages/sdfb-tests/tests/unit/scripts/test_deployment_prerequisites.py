@@ -17,6 +17,9 @@ store, WS2) and the ddl-optional messaging.
 Loaded via importlib (the script is not a package module). Offline-only: the
 BigQuery surface is a fake injected through the module's `bq_client`
 indirection — no GCP credentials, no network.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0020).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

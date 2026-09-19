@@ -13,7 +13,11 @@
 #  limitations under the License.
 """`build_pipeline` hands the landing schema's column order to
 `EnforceUniqueness` so the exact barrier shuffles rows as value tuples
-(ADR 0034) — graph-construction only, never executed."""
+(ADR 0034) — graph-construction only, never executed.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=unbalanced-tuple-unpacking

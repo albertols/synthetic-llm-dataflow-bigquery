@@ -17,6 +17,9 @@ Same one-line-per-run contract as b1_rag's: every column mapped to its
 generation strategy. B.2 differences: the bulk sampler is the fitted
 statistical backend (reported via `backend=`), and free-text pools build
 lazily per batch, so there is no `pool_sources` field at setup time.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031, 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

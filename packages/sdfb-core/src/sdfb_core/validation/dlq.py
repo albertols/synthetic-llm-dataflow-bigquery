@@ -25,6 +25,9 @@ JSON-ish payloads are serialized to strings so the columns stay plain
 STRING and survive FILE_LOADS without nested-type surprises.
 
 REF: .claude/skills/validation-mode-a.md
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031, 0037).
 """
 
 from __future__ import annotations

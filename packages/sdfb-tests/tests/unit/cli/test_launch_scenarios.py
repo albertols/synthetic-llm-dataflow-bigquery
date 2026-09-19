@@ -16,6 +16,9 @@
 Users give landing_table (one FQN or a CSV list) + the flag; everything
 else — which tables travel together, the order, fk_parent_landing, the
 sibling source tables — comes from `config/relationships/`.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

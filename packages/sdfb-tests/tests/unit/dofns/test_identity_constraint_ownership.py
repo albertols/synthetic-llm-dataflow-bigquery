@@ -27,6 +27,9 @@ every source value (`_routed_forbidden`, ADR 0023/0028). So when a
 column has a constraint-driven generator, that generator owns it — and
 the identity contract is kept by giving it the same per-run uniqueness
 tracking a PK column gets.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0023, 0028).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

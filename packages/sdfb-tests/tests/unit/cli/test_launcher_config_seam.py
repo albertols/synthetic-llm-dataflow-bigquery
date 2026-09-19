@@ -23,6 +23,9 @@ after a 7-minute image pull (2026-08-25, job …-11031703962997027597).
 These two tests close that hole structurally: every kwarg the launcher
 passes must be a real field, and a field that exists must actually reach
 the workers. Both would have failed before that launch.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 from __future__ import annotations

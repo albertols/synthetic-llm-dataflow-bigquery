@@ -25,6 +25,9 @@ Covers the spine pieces that the shared contract suite does not:
 
 All run on the laptop with a deterministic injected/ default embedder — no
 model download, no GPU, no GCP.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""source_table_stats pure profiler (Task 4)."""
+"""source_table_stats pure profiler (Task 4).
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
+"""
 
 import json
 from pathlib import Path

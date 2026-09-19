@@ -20,6 +20,9 @@ scan of the FK + cell columns; cached in ``synthetic_data_quality
 .fk_fanout_stats`` by (source child, edge cols, model sha) so a
 re-launch pays nothing. A 5k-row sample cannot measure this: it almost
 never holds two rows of one parent (design §10).
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036, 0038, 0039).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

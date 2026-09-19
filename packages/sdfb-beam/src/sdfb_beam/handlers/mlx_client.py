@@ -26,6 +26,9 @@ on Linux. The `--package sdfb-beam` selector is required because the
 REFs:
   - mlx-lm: https://github.com/ml-explore/mlx-examples/tree/main/llms
   - docs/M4_LOCAL_SMOKE.md
+
+Design: docs/DESIGN.md §2 Engines
+(ADR 0010).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

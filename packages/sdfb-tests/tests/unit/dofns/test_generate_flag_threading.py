@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""--freetext_expansion / --prompt_constraints reach both engines (Task 8)."""
+"""--freetext_expansion / --prompt_constraints reach both engines (Task 8).
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0023).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,protected-access,unused-argument

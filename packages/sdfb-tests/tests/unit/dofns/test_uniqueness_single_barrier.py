@@ -27,6 +27,9 @@ Semantics preserved exactly (the gate folds `dlq_by_rule` counts):
   - pk.duplicate: among digest-unique rows, one survivor per PK tuple
     (the MIN digest — deterministic, where the chain was arbitrary);
   - identity.unique: among PK survivors, one survivor per identity tuple.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
 """
 
 from __future__ import annotations

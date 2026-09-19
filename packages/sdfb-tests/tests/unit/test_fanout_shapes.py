@@ -46,6 +46,9 @@ are synthesized per row (`apply_identity_columns`), so a root's landed keys
 are unique; a low-cardinality STRING column profiles as CATEGORICAL, so a
 root's landed values come from ITS OWN reference domain — which is how the
 existence filter's half-overlap is built.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030, 0031, 0036, 0037).
 """
 
 from __future__ import annotations

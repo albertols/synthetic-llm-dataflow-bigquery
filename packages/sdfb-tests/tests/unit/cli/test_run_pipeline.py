@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Unit tests for `sdfb_beam.cli.run_pipeline` — arg parsing and factory."""
+"""Unit tests for `sdfb_beam.cli.run_pipeline` — arg parsing and factory.
+
+Design: docs/DESIGN.md §5 Fidelity; §6 Throughput
+(ADR 0027, 0034).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,invalid-name,redefined-outer-name,reimported,unused-argument,unused-variable,use-implicit-booleaness-not-comparison

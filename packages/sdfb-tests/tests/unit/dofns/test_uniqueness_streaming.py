@@ -22,6 +22,9 @@ Streaming mode passes rows straight through to the sink and MEASURES the
 duplicate rate on a parallel branch that shuffles 32-byte digests instead
 of rows. The gate keeps working because the measured counts are fed into
 dlq_by_rule exactly as diverted envelopes were.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

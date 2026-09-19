@@ -18,6 +18,9 @@ and every batch replays an identical draw (the 97.6 %-duplicate defect from
 the 2026-07 E2E report). Deriving from ``(run_id, batch_id)`` keeps runs
 reproducible — re-running the same run_id reproduces the exact output — while
 guaranteeing no two batches share an RNG stream.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0037).
 """
 
 from __future__ import annotations

@@ -47,6 +47,9 @@ COUNTS are exact in every mode, which is what the gate folds. Row-duplicate
 envelopes carry the survivor's payload (identical non-identity content by
 construction); PK/identity envelopes in ``exact`` carry the dropped row's
 own payload.
+
+Design: docs/DESIGN.md §4 Relational generation; §6 Throughput
+(ADR 0034, 0036).
 """
 
 from __future__ import annotations

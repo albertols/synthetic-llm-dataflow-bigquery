@@ -20,6 +20,9 @@ source repeats that value (median 2 rows, up to 13). The source is the
 authority for what the data IS, so the PK is dropped from the effective
 model, the fan-out histogram is left untouched, and the landing table
 reproduces the source's key-repeat distribution by construction.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0038).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

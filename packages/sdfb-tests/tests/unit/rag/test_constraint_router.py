@@ -18,6 +18,9 @@ The 2026-08-21 run: the declared PK drew from a 512-cap constrained pool
 verbatim source values against its own privacy note. Routed columns
 sample their clause's value space directly — CPU, unbounded, source-
 rejecting — and the ladder never runs for them.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0026, 0028).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

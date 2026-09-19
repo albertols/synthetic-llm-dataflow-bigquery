@@ -20,6 +20,9 @@ are distinct dataclasses but agree on the duck-typed surface this module
 needs: ``.kind`` (a StrEnum sharing the five values) and
 ``.identifier_shape``. One definition of the label mapping and the
 once-guard, every engine (the 2026-07-28 R1 lesson: inline copies drift).
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0024, 0028, 0031, 0032, 0035, 0037).
 """
 
 from __future__ import annotations

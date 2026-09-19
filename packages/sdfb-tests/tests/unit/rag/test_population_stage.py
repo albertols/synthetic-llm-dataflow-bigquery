@@ -12,7 +12,11 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """WS2 §4b.1: the --build_rag_layer population branch, DirectRunner +
-HashingEmbedder + in-memory sink. Chunk → embed → BQ-row shape."""
+HashingEmbedder + in-memory sink. Chunk → embed → BQ-row shape.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,protected-access,redefined-outer-name,reimported,unbalanced-tuple-unpacking,unused-argument

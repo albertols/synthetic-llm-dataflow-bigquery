@@ -28,6 +28,9 @@ repair-loop concern.
 
 REF: .claude/skills/engine-contract.md
 REF: .claude/skills/beam-dofn.md
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §6 Throughput
+(ADR 0023, 0030, 0034, 0037).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

@@ -25,6 +25,9 @@ a shared-file merge conflict with B.1; consolidate to a shared
 
 Pure Python + NumPy only — no Beam, no GCP, no torch, no sdgx. Importing
 this module must succeed with only ``sdfb-core``'s base deps present.
+
+Design: docs/DESIGN.md §2 Engines; §5 Fidelity
+(ADR 0013, 0022, 0024, 0025).
 """
 
 from __future__ import annotations

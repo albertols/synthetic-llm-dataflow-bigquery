@@ -17,6 +17,9 @@ Covers: `route: "llm"` forcing STRING columns onto the LLM free-text route,
 the rendered clause + pattern/length/examples landing on the profile, the
 derived length hint suppression, guided-decoding pattern override, and the
 non-STRING unsupported warning.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0024).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -25,6 +25,9 @@ the spawn window to be exclusive ACROSS processes, not just across
 threads. SDK containers on a Dataflow worker share the host network, so a
 bound loopback port is a mutex every process can see — and the same
 network is what makes the existing reuse probe work across them.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -21,6 +21,9 @@ imported transformers, loaded 130 MB of weights and opened a CUDA context
 per instance (~600 MiB VRAM held next to vLLM). Lazy loading makes the
 warm path free and keeps the cold path (bulk embed on CUDA, then demote)
 byte-identical.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

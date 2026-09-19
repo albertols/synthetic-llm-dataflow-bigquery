@@ -17,6 +17,9 @@ Uniform-in-range flattened every skewed marginal: a 90/10 heavy-tailed
 column landed ~99% of its draws above the true p90. Inverse transform
 sampling over the profile's decile vector keeps the observed CDF shape
 while every draw stays novel and in-range.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

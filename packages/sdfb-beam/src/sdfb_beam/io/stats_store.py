@@ -20,6 +20,9 @@ skipped (the pool-store `exists()` idiom).
 
 Copies `BigQueryFreeTextPoolStore`'s structure verbatim — including the
 0dfb1a3 pickle fix: the lazy client is a cache, never pickled state.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

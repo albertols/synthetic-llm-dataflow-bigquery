@@ -15,6 +15,9 @@
 
 The relational input is the table's entry in `config/relationships/`;
 the table description is never read for it.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

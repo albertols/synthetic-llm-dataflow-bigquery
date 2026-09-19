@@ -12,7 +12,11 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """ADR 0035: the FK key-sample cap preflight sizes for a child's PK is
-what the composer broadcasts — per edge, in-set parents only."""
+what the composer broadcasts — per edge, in-set parents only.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030, 0035, 0037).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel

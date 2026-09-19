@@ -30,6 +30,9 @@ columns re-route to the engines' range samplers; identifier-shaped columns
 generate format-preserving values from a per-position character template.
 
 Shared between B.1 and B.2 (like `engines/identity.py`). Pure stdlib.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0018, 0023, 0033).
 """
 
 from __future__ import annotations

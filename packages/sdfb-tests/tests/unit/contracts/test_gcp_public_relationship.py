@@ -17,6 +17,9 @@
 DSG `04_run_dataflow.sh` passes as `--relationships_uri` (ADR 0040). These
 tests pin what that launch plans — waves and edge roles — and that the
 model stays out of a default directory scan.
+
+Design: docs/DESIGN.md §9 ADR reference map
+(ADR 0040).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

@@ -23,6 +23,9 @@ their privacy notes forbid.
 
 Engine-agnostic and dependency-free: both engines may import this;
 nothing here touches Beam, profiles, or the LLM client.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0028).
 """
 
 from __future__ import annotations

@@ -17,6 +17,9 @@ Fixtures are the four clauses of the 2026-08-21 first PK+FK run
 (`runs/2026-08-21_14_54_30-1966084111444777604`): the C2E
 24-hex PK pattern, the UUIDv4 pattern, and the S1-prefixed 12-byte
 opaque key whose binary fallback memorized 58 source values.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0028).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

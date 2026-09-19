@@ -20,6 +20,9 @@ a CLI flag via ``sdfb_core.engines.get_engine("b2_library")``.
 Design: ADR 0013 (the LLM-as-distribution-estimator spine). The chosen library
 is ``sdgx`` (Apache-2.0); rationale + the deferred SDV upgrade path are in
 this package's ``README.md`` (formerly ``SPIKE_LIBRARY_CHOICE.md``).
+
+Design: docs/DESIGN.md §2 Engines
+(ADR 0013).
 """
 
 from __future__ import annotations

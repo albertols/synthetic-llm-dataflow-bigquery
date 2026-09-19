@@ -31,6 +31,9 @@ bulk N never hits the GPU.
     similarity).
 
 Engines import only the ``ModelClient`` Protocol — never ``vllm``.
+
+Design: docs/DESIGN.md §2 Engines; §5 Fidelity
+(ADR 0013, 0023, 0024).
 """
 
 from __future__ import annotations

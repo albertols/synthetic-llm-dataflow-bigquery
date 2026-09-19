@@ -24,6 +24,9 @@ source so a tainted warm store is rebuilt, never replayed (the 2026-08-07
 
 Mirrors `sdfb_beam.pools.store.BigQueryFreeTextPoolStore` deliberately —
 lazy client, pickle-safe, injectable fake for laptop tests.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

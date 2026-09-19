@@ -19,6 +19,9 @@ the truth was scattered across N tables. It now lives in versioned model
 files the repo owns: one file per relational model, readable at a
 glance, with a per-table `enabled` flag that DETACHES a subgraph without
 deleting anything.
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0032, 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

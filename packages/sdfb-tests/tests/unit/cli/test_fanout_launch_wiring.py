@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""ADR 0036 launcher: roles -> measurement -> derived rows -> config."""
+"""ADR 0036 launcher: roles -> measurement -> derived rows -> config.
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0032, 0035, 0036, 0037, 0038).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,invalid-name,protected-access,redefined-outer-name,unused-argument,unused-variable

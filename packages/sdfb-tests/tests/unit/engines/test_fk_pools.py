@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""FK columns sample from parent pools — both engines + loader (Task 14)."""
+"""FK columns sample from parent pools — both engines + loader (Task 14).
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031).
+"""
 
 from unittest.mock import MagicMock
 

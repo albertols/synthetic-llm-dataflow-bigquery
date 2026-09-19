@@ -13,7 +13,11 @@
 #  limitations under the License.
 """WS2 §4b.2: pool target = min(num_rows, column_distinct, 512), filled by
 multiple bounded calls. Closes the 28-619x oversampling of the 2026-07-19
-run (3 FREE_TEXT columns capped at 32 values over 1000 rows)."""
+run (3 FREE_TEXT columns capped at 32 values over 1000 rows).
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel,protected-access,unused-argument

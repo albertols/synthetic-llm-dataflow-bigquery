@@ -19,6 +19,9 @@ scored referential integrity, so the gate could not see it. The engine
 now draws whole parent key tuples, which makes orphans impossible — and
 this gate is the independent check that says so, per run, instead of
 trusting the generator (three lines of defense).
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -16,6 +16,9 @@
 The `llm_prompt_constraint` description marker accepts an object as well as
 the legacy string. One parse site, one deterministic renderer; the legacy
 string form must render byte-identically to its own text (compat pin).
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0024).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

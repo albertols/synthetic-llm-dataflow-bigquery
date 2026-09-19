@@ -48,6 +48,9 @@ table. Deliberate, for four reasons:
 The in-worker retrieval index narrows further still — B.1's setup embeds
 at most `_MAX_EMBED_ROWS` (1024) of the sample (see
 `sdfb_core.engines.b1_rag.engine`).
+
+Design: docs/DESIGN.md §2 Engines
+(ADR 0013, 0019).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

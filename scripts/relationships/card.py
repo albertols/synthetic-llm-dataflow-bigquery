@@ -24,6 +24,9 @@ way to check an edit is to render exactly what `run_pipeline` will:
 
 Exit code is non-zero when the models do not load, so it doubles as a
 pre-commit check on `config/relationships/`.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

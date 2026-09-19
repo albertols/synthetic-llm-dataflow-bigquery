@@ -13,7 +13,11 @@
 #  limitations under the License.
 """ADR 0036 acceptance on the laptop: B -> C -> A with C driven by B and
 A driven by C (B implied). Every FK tuple exists in its parent, every PK
-is unique, sizes follow the histograms, and A's implied edge holds."""
+is unique, sizes follow the histograms, and A's implied edge holds.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=unnecessary-lambda-assignment

@@ -17,6 +17,9 @@ Retrieval runs 3x per worker setup and its whole job is picking 8 prompt
 seeds, so this is the cheapest available lever on novel-yield-per-call.
 Making it a flag rather than two branches means the three E2E runs differ
 in exactly one variable.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0018).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

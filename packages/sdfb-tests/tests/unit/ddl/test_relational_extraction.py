@@ -17,6 +17,9 @@ contract from the table description (ADR 0032).
 PK/FK/identity of RECORD live in `config/relationships/`. A description
 that still carries a legacy `{"sdfb": 1, …}` object is inert: it must not
 be parsed, mirrored into `_ddl.json`, or silently applied to a run.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

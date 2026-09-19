@@ -30,6 +30,9 @@ sizes it from ``num_rows`` and the sibling members, between a floor
 (the historic cap) and a ceiling (side-input memory).
 
 Pure Python; no Beam, no GCP.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030, 0031, 0035).
 """
 
 from __future__ import annotations

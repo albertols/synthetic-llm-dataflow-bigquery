@@ -73,6 +73,9 @@ Usage:
         --templates-bucket my-proj-dataflow-templates \\
         --ddl-uri gs://my-proj-dataflow/ddl/customers_ddl.json \\
         --rag-chunks-table my-proj.synthetic_rag.rag_chunks
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0020, 0021, 0032).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

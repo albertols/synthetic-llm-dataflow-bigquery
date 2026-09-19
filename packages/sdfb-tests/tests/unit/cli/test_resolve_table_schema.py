@@ -25,6 +25,9 @@ Two rules, both from the 2026-08-21 four-run cycle:
    team owns and Terraforms; the SOURCE (lake) table's descriptions are
    another team's prose and must NEVER steer generation. Structure
    (columns/types/modes) still mirrors the source.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0027).
 """
 
 from __future__ import annotations

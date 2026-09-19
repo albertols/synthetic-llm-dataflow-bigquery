@@ -30,6 +30,9 @@ share the sort), temporal values parse ONCE (v1 parsed twice via
 ``_day_granularity``), and the null-pattern mix is a single extra pass over
 the rows. Everything is stdlib — this module stays importable without
 numpy/Beam/GCP.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 from __future__ import annotations

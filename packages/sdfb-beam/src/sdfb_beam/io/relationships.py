@@ -22,6 +22,9 @@ image rebuild and not a production metadata edit.
 Parsing and every graph question live in
 :mod:`sdfb_core.contracts.relationships` (pure Python, no Beam); this
 module only turns a URI into ``(source, text)`` pairs.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0032).
 """
 
 from __future__ import annotations

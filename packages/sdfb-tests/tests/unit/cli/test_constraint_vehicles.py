@@ -18,6 +18,9 @@ whether each clause actually drives generation (freetext pool / RAG /
 Tier-P sampler) or only steers prompts if the column happens to be
 free-text. `prompt_constraints_pretty` answers it per TABLE.COL, at
 preflight — before any worker exists.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030).
 """
 
 from __future__ import annotations

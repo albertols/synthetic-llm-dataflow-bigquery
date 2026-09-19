@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Pytest config + shared fixtures."""
+"""Pytest config + shared fixtures.
+
+Design: docs/DESIGN.md §6 Throughput
+(ADR 0034).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel

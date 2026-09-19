@@ -28,6 +28,9 @@ DAG can resolve it by string name (see `sdfb_core.engines.get_engine`).
 Pure-Python: `transformers` / `torch` / `faiss` / `numpy` are imported
 lazily inside the seams, so `import sdfb_core.engines.b1_rag` works on a
 laptop with no extras and with `HF_HUB_OFFLINE=1` set.
+
+Design: docs/DESIGN.md §2 Engines
+(ADR 0013).
 """
 
 from sdfb_core.engines import register_engine

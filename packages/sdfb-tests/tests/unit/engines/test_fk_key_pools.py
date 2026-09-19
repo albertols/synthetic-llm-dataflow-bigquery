@@ -23,6 +23,9 @@ The fix is to draw the whole key TUPLE as one unit. These tests pin the
 three properties that makes it usable in production: integrity (every
 drawn tuple exists in the parent), marginal fidelity (the child's own
 value shares survive the restriction), and determinism.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

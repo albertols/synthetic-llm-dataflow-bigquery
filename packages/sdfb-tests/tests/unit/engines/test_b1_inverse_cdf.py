@@ -24,6 +24,9 @@ Fix: inverse transform sampling through the FULL sorted observed sample
 (Devroye 1986, ch. II — same primitive as B.2's decile vector, ADR 0022,
 at sample resolution instead of 11 points). `similarity` no longer shapes
 numeric draws — fidelity to the reference marginal is not a dial.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 import random

@@ -17,6 +17,9 @@ The flag is the user-facing switch between relational and isolated
 generation; its state must be one greppable milestone, and the model the
 run resolved must be readable at a glance in Cloud Logging — tables,
 PK, identity, every edge with its state (ADR 0029 flag, ADR 0032 card).
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0029, 0032).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

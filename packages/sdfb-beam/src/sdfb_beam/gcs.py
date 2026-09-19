@@ -39,6 +39,9 @@ DoFn setup() used to re-download the prefix onto its final paths —
 Uses the `google-cloud-storage` Python client, authenticated via ADC on
 the worker. Never shells out to `gsutil`. The heavy import stays inside
 the function so importing this module on a bare laptop is dependency-free.
+
+Design: docs/DESIGN.md §1 Architecture
+(ADR 0012).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

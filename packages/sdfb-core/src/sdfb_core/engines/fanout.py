@@ -27,6 +27,9 @@ balls into bins (`1 - C/k (1 - e^(-k/C))`, the 2026-09-09 runs); the
 source PK guarantees k <= C, so drawing k distinct cells reproduces it.
 
 Pure Python; no Beam, no GCP.
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0031, 0032, 0036, 0037).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

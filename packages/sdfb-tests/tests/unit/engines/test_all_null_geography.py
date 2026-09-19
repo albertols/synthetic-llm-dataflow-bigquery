@@ -17,6 +17,9 @@ The Dataflow Solution Guides deployment keeps each `thelook_ecommerce`
 table's exact schema in its source snapshot and nulls the GEOGRAPHY column
 (`users.user_geom`), because BigQuery rejects free-text values that are not
 valid WKT on load (ADR 0040). This pins the behaviour that makes that safe.
+
+Design: docs/DESIGN.md §9 ADR reference map
+(ADR 0040).
 """
 
 from __future__ import annotations

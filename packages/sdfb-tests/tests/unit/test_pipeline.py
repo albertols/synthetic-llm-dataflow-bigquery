@@ -20,6 +20,9 @@ every-row-but-one to the DLQ as `identity.unique` (every row keys on
 trips the BLOCKER gate with an error that never mentions the actual typo.
 Failing fast with a clear `ValueError` at graph-construction time is much
 cheaper to diagnose.
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity
+(ADR 0023, 0024, 0037).
 """
 
 from __future__ import annotations

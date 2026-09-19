@@ -25,6 +25,9 @@ Contract (from `.claude/skills/engine-contract.md`):
   3. `test_schema_conformance`      — yielded records are `GeneratedRecord`s.
   4. `test_seed_reproducibility`    — same `seed` + same `ctx` ⇒ same output.
   5. `test_teardown_releases_state` — `generate_batch` after `teardown()` raises.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

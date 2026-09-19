@@ -38,6 +38,9 @@ candidates up by that key, so a mismatch is silent data loss).
 The measured facts a real launch reads from BigQuery — the fan-out
 histogram and the PK cell table — are the only hand-written part; there
 is no BigQuery here.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0037).
 """
 
 from __future__ import annotations

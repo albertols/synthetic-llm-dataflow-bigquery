@@ -22,6 +22,9 @@ would measure the missing filter, not the engine.
 The reference blend is untouched: it is already confined to enum-like
 columns (≤ `_REFERENCE_BLEND_MAX_DISTINCT` observed distinct values) —
 the same by-design category reuse the substantive copy metric exempts.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0023).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

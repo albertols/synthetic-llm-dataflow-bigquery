@@ -33,6 +33,9 @@ sampling is CPU/NumPy — only the bounded free-text pool touches the GPU.
 PURE sdfb-core: no ``apache_beam``, no ``vllm``, no GCP. ``sdgx`` (and
 torch) are imported lazily inside the backend's ``fit()`` so importing this
 module works on a laptop with only base deps installed.
+
+Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity
+(ADR 0013, 0023, 0030, 0031, 0036, 0037).
 """
 
 from __future__ import annotations

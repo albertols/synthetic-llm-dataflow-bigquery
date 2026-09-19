@@ -27,6 +27,9 @@ Two crosscheck findings from the post-ADR-0023 cold baseline:
     must draw from the mix; random-mask columns (36-hex ids) must keep
     the collapsed template — a top-8 mask mix would collapse THEIR
     diversity instead.
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0023).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

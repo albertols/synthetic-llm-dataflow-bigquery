@@ -15,6 +15,9 @@
 config is one human-readable block; in multi-table runs every column
 reference is landing-table-qualified so `_full_report.md` +
 `worker_logs.jsonl` copy-paste straight into oss/ replacements.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030, 0035).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

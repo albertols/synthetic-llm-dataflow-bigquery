@@ -43,6 +43,9 @@ NULL FK tuples are legitimate ("this child has no parent", SQL MATCH
 SIMPLE) and are preserved at the child's observed rate rather than
 forced to a parent — v1 collapses partial-NULL patterns to all-NULL,
 which is the dominant real shape.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0021, 0030, 0031).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

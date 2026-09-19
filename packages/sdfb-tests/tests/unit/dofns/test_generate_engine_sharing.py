@@ -27,6 +27,9 @@ The registry hands the FIRST DoFn's engine to every sibling with the same
 holders, and tears the engine down only when the last one releases it —
 so the single-DoFn lifecycle (`engine_setup` → `engine_teardown` →
 `client_teardown`) is unchanged.
+
+Design: docs/DESIGN.md §4 Relational generation; §6 Throughput
+(ADR 0030, 0034).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

@@ -24,6 +24,9 @@ identifier-shaped columns now use the same seam:
     showed (recall lifts toward source coverage);
   - the rejection set covers the full domain (novelty by construction,
     the same guarantee pools already have).
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0023).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

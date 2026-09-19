@@ -28,6 +28,11 @@ REFs:
   - .claude/skills/validation-mode-a.md
   - .claude/skills/reference-data.md
   - https://beam.apache.org/documentation/programming-guide/#additional-outputs
+
+Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
+§6 Throughput; §8 Configuration
+(ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0035, 0036, 0037,
+0038).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

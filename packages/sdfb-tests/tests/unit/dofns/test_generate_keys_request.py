@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""ADR 0036: the Generate DoFn drives the engine from parent keys."""
+"""ADR 0036: the Generate DoFn drives the engine from parent keys.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036, 0037).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=protected-access,unused-argument,use-implicit-booleaness-not-comparison

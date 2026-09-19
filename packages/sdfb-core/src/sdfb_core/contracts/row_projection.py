@@ -28,6 +28,9 @@ holds (the resolved row counts, the fan-out histograms, the source parent
 tuple count, the ADR 0038 repeat shares). Nothing here reads BigQuery and
 nothing here re-measures: a projection that cannot be derived says so
 rather than printing a number.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036, 0038, 0039).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

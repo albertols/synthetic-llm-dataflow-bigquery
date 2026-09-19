@@ -20,6 +20,9 @@ at similarity 0.5, a 95%-empty category emits at ~72%. FREE_TEXT columns
 pin sparsity at observed rates (`_sparsity_or`); CATEGORICAL must too:
 sparsity categories keep their empirical mass, the blend applies only
 within the substantive remainder.
+
+Design: docs/DESIGN.md §2 Engines
+(ADR 0013).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

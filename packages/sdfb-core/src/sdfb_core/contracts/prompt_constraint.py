@@ -26,6 +26,9 @@ Compatibility contract:
   * a marked object with invalid known keys raises loudly — a half-parsed
     constraint silently steering a prompt is worse than a stop (ADR 0021
     parsing rule).
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0018, 0021, 0024, 0028, 0032).
 """
 
 from __future__ import annotations

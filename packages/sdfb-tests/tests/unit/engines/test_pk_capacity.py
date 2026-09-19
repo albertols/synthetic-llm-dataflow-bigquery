@@ -18,6 +18,9 @@ PK is (FK to B_TABLE, two small categoricals). With B_TABLE enabled the
 FK member collapsed to the 100k side-input cap, the tuple capacity fell
 to ~1.2M, and 8 789 594 of 10M rows diverted as pk.duplicate — 3h16m
 after launch. These are the numbers preflight must do at second zero.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0035).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

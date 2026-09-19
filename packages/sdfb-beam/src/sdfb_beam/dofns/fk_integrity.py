@@ -27,6 +27,9 @@ per-run fact in `validation_runs` instead of an argument about the code.
 
 NULL FK tuples pass: SQL MATCH SIMPLE treats a NULL reference as "no
 parent", not as a broken one.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0031).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

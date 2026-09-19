@@ -57,6 +57,10 @@ REFs:
   - .claude/skills/model-handler.md (recipe)
   - https://docs.vllm.ai/en/latest/usage/structured_outputs.html
   - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+
+Design: docs/DESIGN.md §1 Architecture; §2 Engines; §3 Serving;
+§4 Relational generation; §5 Fidelity; §6 Throughput
+(ADR 0001, 0011, 0012, 0013, 0014, 0030, 0033, 0034).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

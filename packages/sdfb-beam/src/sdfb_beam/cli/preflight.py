@@ -29,6 +29,9 @@ The relational input is this table's entry in `config/relationships/`
 win and a conflicting ``--pk_cols`` is loudly IGNORED. Tables no model
 declares fall back to the CLI flags, which is how a one-off table with
 no relationships generates with zero config.
+
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
+(ADR 0024, 0026, 0028, 0029, 0030, 0031, 0032, 0035, 0036, 0037, 0038).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

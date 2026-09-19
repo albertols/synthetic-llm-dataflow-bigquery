@@ -15,6 +15,9 @@
 child as an in-DAG side input — one Dataflow job, one vLLM ignition,
 referential integrity by construction (no BQ round-trip between
 tables).
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0030, 0031, 0035, 0036, 0037).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

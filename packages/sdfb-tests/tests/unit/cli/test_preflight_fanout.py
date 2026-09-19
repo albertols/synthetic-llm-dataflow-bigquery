@@ -19,6 +19,9 @@ The P4 verdicts are unchanged — the source still disproves the declared
 PK in exactly these cases — but the default is now to ADJUST the model
 and carry on (`test_model_adjustment.py`). The stop, and every word of
 its message, is still what the escape hatch produces.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036, 0037, 0038).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

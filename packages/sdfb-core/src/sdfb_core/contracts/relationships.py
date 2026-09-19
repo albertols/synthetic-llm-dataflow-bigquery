@@ -64,6 +64,9 @@ Column-level ``llm_prompt_constraint`` stays in COLUMN descriptions
 (:mod:`sdfb_core.contracts.prompt_constraint`) — that is per-column
 generation steering, not relational structure, and it belongs next to
 the column it steers.
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0032, 0036, 0037).
 """
 
 # f-string fields keep single quotes while Python 3.11 is supported;

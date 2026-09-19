@@ -18,6 +18,9 @@ uses CUDA when available; demote_to_cpu() releases VRAM afterward so
 vLLM's ignition (which sizes its KV-cache budget from free memory) never
 competes with a resident embedder. Fake torch modules keep this laptop-
 runnable and deterministic.
+
+Design: docs/DESIGN.md §3 Serving
+(ADR 0014).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

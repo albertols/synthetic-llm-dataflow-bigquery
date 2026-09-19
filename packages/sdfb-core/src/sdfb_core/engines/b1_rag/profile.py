@@ -31,6 +31,9 @@ computed without NumPy here; the vectorized *sampling* (in the engine) is
 where NumPy is used and deferred-imported.
 
 REF: spec §2 fidelity primitives; ADR 0013 distribution-estimator spine.
+
+Design: docs/DESIGN.md §2 Engines; §5 Fidelity
+(ADR 0013, 0022, 0023, 0024, 0028).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
