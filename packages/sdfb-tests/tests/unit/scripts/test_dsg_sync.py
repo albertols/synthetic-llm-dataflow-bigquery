@@ -267,6 +267,27 @@ def test_rewrite_links_pins_unshipped_targets_and_keeps_shipped_ones(tmp_path):
   assert "[readme](../../README.md)" in adr
 
 
+def test_rewrite_links_ignores_what_the_previous_sync_left_in_owned_paths(
+    tmp_path):
+  """Links are rewritten before the owned paths are replaced, so a file the
+  LAST sync shipped is still in the checkout. It is about to be deleted."""
+  src = tmp_path / "src"
+  _write(src, "docs/adr/0002.md")
+  staging = tmp_path / "staging"
+  _write(staging, f"{_PIPE}/docs/DESIGN.md",
+         "[ADR 0002](adr/0002.md) and [lint](../../pylintrc)\n")
+  dsg = tmp_path / "dsg"
+  _write(dsg, f"{_PIPE}/docs/adr/0002.md")  # shipped last time, not now
+  _write(dsg, "pipelines/pylintrc")  # the guides' own file, outside owned paths
+  broken = sync.rewrite_links(
+      staging, dsg, _manifest(), sha="a" * 40, export_root=src)
+  assert not broken
+  design = (staging / _PIPE / "docs/DESIGN.md").read_text(encoding="utf-8")
+  assert ("[ADR 0002](https://github.com/acme/demo/blob/" + "a" * 40 +
+          "/docs/adr/0002.md)") in design
+  assert "[lint](../../pylintrc)" in design
+
+
 def test_rewrite_links_sees_the_target_behind_a_badge_image(tmp_path):
   src = tmp_path / "src"
   _write(src, "LICENSE")

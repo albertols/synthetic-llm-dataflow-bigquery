@@ -347,9 +347,20 @@ def rewrite_links(root: Path,
   A link resolves when its target exists in `root` or already in the DSG
   checkout. Otherwise a target inside the pipeline dir becomes a URL to
   the golden source at `sha`; anything else is reported as broken.
+
+  Only the DSG's own files count in the checkout. Links are rewritten before
+  the owned paths are replaced, so whatever the previous sync shipped there
+  is still on disk and about to be deleted: `root` is the only witness of
+  what this sync ships.
   """
   broken: list[str] = []
   pipe_prefix = manifest.pipeline_dir + "/"
+
+  def in_dsg(resolved: str) -> bool:
+    owned = any(resolved == path or resolved.startswith(path + "/")
+                for path in manifest.owned_paths)
+    return not owned and (dsg_root / resolved).exists()
+
   for md in sorted(root.rglob("*.md")):
     rel_md = md.relative_to(root).as_posix()
     if scope is not None and not any(rel_md == s or rel_md.startswith(s + "/")
@@ -372,7 +383,7 @@ def rewrite_links(root: Path,
         resolved = posixpath.normpath(
             posixpath.join(posixpath.dirname(rel_md), path))
         if not resolved.startswith("../") and ((root / resolved).exists() or
-                                               (dsg_root / resolved).exists()):
+                                               in_dsg(resolved)):
           return m.group(0)
         source_rel = resolved[len(pipe_prefix):] if resolved.startswith(
             pipe_prefix) else None
