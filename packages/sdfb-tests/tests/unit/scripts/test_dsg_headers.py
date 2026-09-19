@@ -164,6 +164,10 @@ def test_check_reports_and_fix_repairs_only_a_missing_header(tmp_path):
   assert (tmp_path / "pkg/foreign.py").read_text(encoding="utf-8") == foreign
 
 
+def test_every_source_file_in_this_repository_carries_the_header():
+  assert headers.check(_SCRIPT.parents[2]) == []
+
+
 def test_main_exit_code(tmp_path, capsys):
   _write(tmp_path, "pkg/bare.py", "x = 1\n")
   assert headers.main(["--root", str(tmp_path)]) == 1
