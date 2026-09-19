@@ -54,8 +54,17 @@ include:
   - config/models.yml
   - config/thresholds.yml
   - docker/**
-  - docs/adr/**
-  - docs/designs/**
+  # One design document ships. The decision records (docs/adr/) and the
+  # per-topic design docs stay in the source repository: links to them are
+  # pinned to it, and docs/DESIGN.md maps every ADR number the code cites.
+  - docs/DESIGN.md
+  - docs/designs/assets/fanout-generation.png
+  - docs/designs/assets/fk-orphan-rate.png
+  - docs/designs/assets/multi-parent-candidate-cap.png
+  - docs/designs/assets/relationships-flags.png
+  - docs/designs/assets/relationships-scenarios.png
+  - docs/designs/assets/stats-inverse-cdf.png
+  - docs/designs/assets/throughput-where-time-went.png
   - docs/assets/architecture-overview.*
   - docs/DDL_CONTRACT_GUIDE.md
   - docs/DEPLOYMENT_PREREQUISITES.md

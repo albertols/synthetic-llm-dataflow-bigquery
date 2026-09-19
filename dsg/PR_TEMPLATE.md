@@ -5,7 +5,7 @@ The synthetic data generation solution guide, generated from release
 
 | Path | Content |
 | :-- | :-- |
-| `{pipeline_dir}/` | Beam pipeline (uv workspace: `sdfb-core`, `sdfb-beam`, tests), Dockerfile, Flex Template metadata, launch scripts `01`–`05`, the decisions (`docs/adr/`) and designs the code cites |
+| `{pipeline_dir}/` | Beam pipeline (uv workspace: `sdfb-core`, `sdfb-beam`, tests), Dockerfile, Flex Template metadata, launch scripts `01`–`05`, one design document (`docs/DESIGN.md`) that maps every decision the code cites |
 | `terraform/synthetic-llm-dataflow-bigquery/` | Service accounts, Artifact Registry, bucket, `thelook_ecommerce` snapshots, landing tables with the public schemas, one table per `config/bq_schema` file, optional Flex Template job, generated `scripts/00_set_variables.sh` |
 | `use_cases/Synthetic_Data_Generation.md` | Solution guide page, plus one row in each repository index |
 
