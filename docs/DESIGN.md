@@ -140,23 +140,73 @@ sequenceDiagram
 ### Why not `apache_beam.ml.inference.vllm_inference`
 
 Beam ships [`VLLMCompletionsModelHandler` and
-`VLLMChatModelHandler`](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.vllm_inference.html),
-which spawn the same server. ADR 0011 adopted them; ADR 0014 moved off them
-for one structural reason and several practical ones.
+`VLLMChatModelHandler`](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.vllm_inference.html).
+They start the same server from the `vllm` package in the worker image; what
+differs is who drives it. ADR 0011 chose them; ADR 0014 reversed that a day
+later, before any code used them, once the engines' call pattern was fixed.
 
-| Concern | Beam's `vllm_inference` handlers | `VLLMModelClient` |
+**Claim: Beam's handlers run inference over a `PCollection` of prompts; here
+the prompts are decided one at a time by a loop that reads the previous
+answer, and a Beam graph has no loop.**
+
+```mermaid
+flowchart TB
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  subgraph A["Beam vllm_inference — prompts are the data"]
+    direction LR
+    A1["🧺 PCollection<br/>of prompts"]:::beam
+    A2["🔀 RunInference<br/>VLLM…ModelHandler"]:::beam
+    A3["🧠 vLLM server<br/>started in load_model"]:::gpu
+    A4["🧺 PCollection of<br/>PredictionResult"]:::beam
+    A1 --> A2 -->|"one inference_args<br/>for every element"| A3 --> A4
+  end
+
+  subgraph B["This pipeline — rows are the data, prompts are a loop"]
+    direction LR
+    B1["🔀 generation DoFn<br/>engine.generate_batch"]:::beam
+    B2["⚙️ build prompt<br/>for this round"]:::cpu
+    B3["🧠 generate_json<br/>schema of this column"]:::gpu
+    B4["🛡️ filter answer<br/>format, novelty"]:::cpu
+    B5{"pool at<br/>target?"}
+    B6["🎲 sample rows<br/>NumPy, no LLM"]:::cpu
+    B7[("🗄️ persisted pools<br/>reused next run")]:::store
+    B1 --> B2 --> B3 --> B4 --> B5
+    B5 -->|"no: re-seed, raise<br/>temperature"| B2
+    B5 -->|yes| B6
+    B5 -.-> B7
+    B7 -.->|"warm: no call,<br/>no server"| B6
+  end
+```
+
+| | Beam `vllm_inference` (2.74.0) | `VLLMModelClient` |
 | :-- | :-- | :-- |
-| **Call shape** | A `ModelHandler` inside `RunInference`: inference over a `PCollection` of prompts, batched across bundles | A handful of synchronous calls per run from inside `generate_batch()`. There is no `PCollection` of prompts: rows are sampled, not inferred (§2) |
-| Per-call JSON schema | `inference_args` are fixed for the transform | The schema changes with every call (one per column pool) |
-| Chat template control | A chat handler exists; the template is a file given at construction | `chat_template_kwargs` sent per request |
-| Model location | A local path is accepted; nothing pulls it | Pulls the `gs://` prefix once per worker, with a marker and a file lock |
-| dtype vs the GPU | Not checked | Refuses bfloat16 below compute capability 8.0, and refuses a float16 downcast for a model family that emits empty output in float16 |
-| GPU memory | `--gpu-memory-utilization` is whatever the caller passes | Derived from **free** VRAM at spawn; `max-model-len` is clamped to what the KV cache can hold, and an unfittable length is a retryable error |
-| One server per worker | Beam's shared-model machinery | A port mutex and reference-counted teardown across sibling SDK processes, adopting a healthy server after a lost spawn race |
-| Start | Eager, when the model loads | Lazy, on the first real call: a table with no free-text column never starts a server |
+| **What flows through the LLM step** | Prompts: inference is a `PTransform` between two `PCollection`s | Nothing. The `PCollection` carries row batches; the model is called from inside `generate_batch()` and returns to the caller |
+| **Who decides the next prompt** | The graph: every prompt exists before inference starts | The engine: each round re-seeds the prompt, takes the next temperature level, filters the answer by format and by novelty against the source domain (§5), then decides whether to ask again |
+| **Request arguments** | One `inference_args` dict per transform, applied to every element | Per call: the JSON schema of that column, the temperature of that level, optional `seed` / `top_p` / `top_k` |
+| **How many calls** | One per element | A bounded number per free-text column, whatever the row count (§2) |
+| **When the server starts** | In `load_model()`, on every worker running the transform | On the first real call: a table with no free-text column, or a run whose pools are already persisted, never loads a model |
+| **Model location** | Passed to `--model` as given | A `gs://` prefix pulled to local disk once per worker |
+| **dtype against the GPU** | Not checked | Refuses bfloat16 below compute capability 8.0, and a float16 downcast for a family that emits empty output in float16 |
+| **GPU memory** | The flags the caller passes | Utilization from **free** VRAM at spawn (the embedder shares the GPU); `max-model-len` clamped to what the KV cache can hold |
+| **Where the engine can run** | Needs Beam and a runner to reach the model | The engines import no Beam: the same code runs against a fake client on a laptop and vLLM on Dataflow |
 
-Each practical row records a failed run at its code site. Code:
-[`sdfb_beam/handlers/vllm_client.py`](../packages/sdfb-beam/src/sdfb_beam/handlers/vllm_client.py).
+What is **not** a difference: Beam's chat handler reaches the chat endpoint
+too, and `response_format` or `extra_body` pass through `inference_args`
+unchanged. Structured output is possible with Beam; varying it per call, or
+letting an answer choose the next question, is not.
+
+Beam's handler is the right tool whenever prompts *are* the data (classify,
+summarize or extract from each element). If this pipeline ever generates a
+free-text value per row with the model, that stage should be `RunInference`,
+and the `ModelClient` seam lets it be added without touching the engines.
+The price of owning the server is about a thousand lines of lifecycle code
+and no `RunInference` metrics. Code:
+[`sdfb_beam/handlers/vllm_client.py`](../packages/sdfb-beam/src/sdfb_beam/handlers/vllm_client.py),
+[`engines/b1_rag/engine.py::_pool_llm_yield`](../packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py).
 
 ## 4. Relational generation
 
