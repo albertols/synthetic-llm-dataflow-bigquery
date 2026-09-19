@@ -45,14 +45,14 @@ flowchart LR
   job. Row synthesis, validation and IO are CPU work; the GPU builds free-text
   value pools and, optionally, embeddings. That is what makes the LLM cost
   independent of the row count (§2).
-- **No managed AI or data-quality service** is in the serving path (ADR 0001):
+- **No managed AI or data-quality service** is in the serving path ([ADR 0001](adr/0001-no-managed-gcp-services.md)):
   inference runs inside the pipeline's own `DoFn`s, and validation lands in
   BigQuery tables and GCS artifacts.
 - **Reference rows are a live, bounded `SELECT`** with a deterministic order
-  (ADR 0005), so a run is reproducible from its inputs.
-- **One image serves the Flex Template launcher and the workers** (ADR 0009). It
-  is built in CI, never on a laptop (ADR 0008), and pulled from Artifact
-  Registry (ADR 0015). Launcher and workers therefore share one Python version,
+  ([ADR 0005](adr/0005-live-select-reference-data.md)), so a run is reproducible from its inputs.
+- **One image serves the Flex Template launcher and the workers** ([ADR 0009](adr/0009-single-flex-template-image.md)). It
+  is built in CI, never on a laptop ([ADR 0008](adr/0008-ci-driven-builds.md)), and pulled from Artifact
+  Registry ([ADR 0015](adr/0015-worker-image-via-artifact-registry.md)). Launcher and workers therefore share one Python version,
   pinned once in `.python-version`.
 - All sinks use BigQuery `FILE_LOADS`: the job is batch-shaped.
 
@@ -62,7 +62,7 @@ Code: [`sdfb_beam/pipeline.py::build_pipeline`](../packages/sdfb-beam/src/sdfb_b
 
 **Claim: the LLM is asked what values a column can take, once, and rows are
 then sampled without it.** Calling a model per row would make cost grow with
-the table; here it grows with the number of free-text columns (ADR 0013).
+the table; here it grows with the number of free-text columns ([ADR 0013](adr/0013-distribution-estimator-spine.md)).
 
 ```mermaid
 flowchart TB
@@ -87,14 +87,14 @@ flowchart TB
 ```
 
 - Both engines implement one `GenerationEngine` ABC and reach the model only
-  through the `ModelClient` Protocol (ADR 0006), so an engine is testable with
+  through the `ModelClient` Protocol ([ADR 0006](adr/0006-generation-engine-abc.md)), so an engine is testable with
   no Beam, no GPU and no network. A fake client and an Apple-Silicon client
-  (ADR 0010) satisfy the same Protocol.
+  ([ADR 0010](adr/0010-m4-local-smoke-mlx.md)) satisfy the same Protocol.
 - **`b1_rag`** retrieves representative exemplars from an exact vector index
   to condition the model. The retrieval layer is this repository's own rather
-  than `apache_beam.ml.rag` (ADR 0017): it needs deterministic search and a
+  than `apache_beam.ml.rag` ([ADR 0017](adr/0017-custom-rag-layer-over-beam-ml-rag.md)): it needs deterministic search and a
   persisted chunk text that is byte-identical to what was embedded. The
-  embedding population is scoped to the columns that consume it (ADR 0019).
+  embedding population is scoped to the columns that consume it ([ADR 0019](adr/0019-rag-population-scoped-to-consumers.md)).
 - **`b2_library`** wraps an open-source tabular synthesizer fitted once per
   worker; the model only fills free-text columns.
 - Each run logs one `generation_plan` line naming the strategy chosen for every
@@ -107,7 +107,7 @@ Code: [`sdfb_core/engines/base.py`](../packages/sdfb-core/src/sdfb_core/engines/
 ## 3. Serving: a vLLM server owned by the engine
 
 **Claim: each worker runs one vLLM OpenAI-compatible server, started by the
-first model call and sized to the GPU it finds** (ADR 0014, amending ADR 0011).
+first model call and sized to the GPU it finds** ([ADR 0014](adr/0014-vllm-model-client-owns-server.md), amending [ADR 0011](adr/0011-adopt-beam-vllm-model-handler.md)).
 
 ```mermaid
 sequenceDiagram
@@ -127,7 +127,7 @@ sequenceDiagram
 ```
 
 - **Weights come from GCS, never a model hub** at run time; the image sets
-  `HF_HUB_OFFLINE=1`. The shortlist of open-weight models is ADR 0002; their
+  `HF_HUB_OFFLINE=1`. The shortlist of open-weight models is [ADR 0002](adr/0002-gemma-4-model-shortlist.md); their
   GCS layout is [`MODEL_LAYOUT.md`](MODEL_LAYOUT.md).
 - **The schema travels in `response_format`** ([vLLM structured
   outputs](https://docs.vllm.ai/en/latest/usage/structured_outputs.html)), on the
@@ -142,7 +142,7 @@ sequenceDiagram
 Beam ships [`VLLMCompletionsModelHandler` and
 `VLLMChatModelHandler`](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.vllm_inference.html).
 They start the same server from the `vllm` package in the worker image; what
-differs is who drives it. ADR 0011 chose them; ADR 0014 reversed that a day
+differs is who drives it. [ADR 0011](adr/0011-adopt-beam-vllm-model-handler.md) chose them; [ADR 0014](adr/0014-vllm-model-client-owns-server.md) reversed that a day
 later, before any code used them, once the engines' call pattern was fixed.
 
 **Claim: Beam's handlers run inference over a `PCollection` of prompts; here
@@ -257,10 +257,10 @@ parent/child ratio, the child's key uniqueness and referential integrity hold
 by construction rather than by rejection.**
 
 One Dataflow job generates a whole connected component of the relationship
-model, parents first, with one vLLM server and table-tagged logs (ADR 0030).
+model, parents first, with one vLLM server and table-tagged logs ([ADR 0030](adr/0030-single-job-relational-generation.md)).
 Which tables join a launch follows from two inputs, the landing table and one
-flag (ADR 0029, §8). The structure is declared once in versioned YAML and never
-read from a table description (ADR 0032, which supersedes ADR 0021).
+flag ([ADR 0029](adr/0029-fk-model-scenarios-and-history-mappings.md), §8). The structure is declared once in versioned YAML and never
+read from a table description ([ADR 0032](adr/0032-relationships-as-config.md), which supersedes [ADR 0021](adr/0021-relational-contract-in-descriptions.md)).
 
 ### 4.1 Children from parent keys
 
@@ -271,9 +271,9 @@ children-per-parent histogram, zero bucket included, so it is derived and not
 requested. Right: inside one parent key, drawing the key-completing cells at
 random collides; drawing them without replacement never does.* Formally, a
 primary key that contains a foreign key is unique **within** each parent key,
-so the draw is structured per parent key (ADR 0036). A preflight counts the
+so the draw is structured per parent key ([ADR 0036](adr/0036-parent-driven-fanout-generation.md)). A preflight counts the
 distinct keys a model can produce against the rows asked for, including the
-members bound by a foreign key (ADR 0035). Code:
+members bound by a foreign key ([ADR 0035](adr/0035-pk-capacity-fk-bound-members.md)). Code:
 [`engines/fanout.py::FanoutPlan`](../packages/sdfb-core/src/sdfb_core/engines/fanout.py).
 
 ### 4.2 Several parents: every edge gets a role
@@ -306,7 +306,7 @@ flowchart TB
 ```
 
 Stars, diamonds, trees, forests, 1:1 chains and a child that reaches both its
-parent and its grandparent all generate from one declared model (ADR 0037).
+parent and its grandparent all generate from one declared model ([ADR 0037](adr/0037-multi-parent-children.md)).
 The roles are derived from the declared columns and the model's own graph;
 nothing new is declared. The driving edge is the one marked `drives: true`,
 else the first declared, and the launcher says which. An `external` parent is
@@ -328,7 +328,7 @@ and cap `M`, so the source's tail decides and the cap is a flag. Code:
 enforcing the key at all; drawing whole observed tuples orphans none.* Where a
 child draws from a key pool (an `independent` or `external` edge), it draws
 **joint tuples from observed parent combinations**, weighted by iteratively
-fitted marginals (ADR 0031). An orphaned child row is a blocker: the run fails.
+fitted marginals ([ADR 0031](adr/0031-joint-fk-key-draws.md)). An orphaned child row is a blocker: the run fails.
 Code: [`engines/fk_keys.py::FkKeyPool`](../packages/sdfb-core/src/sdfb_core/engines/fk_keys.py),
 [`dofns/fk_integrity.py`](../packages/sdfb-beam/src/sdfb_beam/dofns/fk_integrity.py).
 
@@ -338,9 +338,9 @@ A full-source measurement can show that a declared primary key is not a key of
 the source. The launch then drops it from the **effective** model for that run,
 prints a `MODEL ADJUSTED` banner with the YAML to paste back, and carries on;
 `--on_model_conflict=stop` restores the refusal, and a model that contradicts
-itself always stops (ADR 0038). A launch also states how many rows each table
+itself always stops ([ADR 0038](adr/0038-measured-conflicts-adjust-the-model.md)). A launch also states how many rows each table
 will receive and where each number came from, before the graph is built
-(ADR 0039, proposed). Code:
+([ADR 0039](adr/0039-row-projection-before-the-graph.md), proposed). Code:
 [`contracts/model_adjustment.py`](../packages/sdfb-core/src/sdfb_core/contracts/model_adjustment.py),
 [`contracts/row_projection.py`](../packages/sdfb-core/src/sdfb_core/contracts/row_projection.py).
 
@@ -354,23 +354,23 @@ uniformly across its range.**
 *Uniform-in-range sampling flattens a skewed column; sampling through its
 deciles preserves the shape.* Formally this is inverse transform sampling over
 a piecewise-linear CDF built from an 11-point decile vector, part of a
-per-column profile measured once and persisted (ADR 0022). Code:
+per-column profile measured once and persisted ([ADR 0022](adr/0022-stats-driven-generation.md)). Code:
 [`engines/b1_rag/_fidelity.py::ColumnSampler`](../packages/sdfb-core/src/sdfb_core/engines/b1_rag/_fidelity.py),
 [`stats/source_stats.py`](../packages/sdfb-core/src/sdfb_core/stats/source_stats.py).
 
 - **Categoricals** use the empirical frequency table and never invent an unseen
   category; identifiers are shaped deterministically and never reach the model;
   marginal fidelity holds by construction rather than by a post-hoc fix
-  (ADR 0025, refined by ADR 0026 and verified in ADR 0027).
+  ([ADR 0025](adr/0025-marginal-fidelity-by-construction.md), refined by [ADR 0026](adr/0026-measurement-first-mask-integrity.md) and verified in [ADR 0027](adr/0027-verified-wave4-operational-integrity.md)).
 - **Free-text pools** are the only model output. They are built in parallel
-  batches (ADR 0018), persisted and reused across runs keyed by the reference
-  digest and model (ADR 0020), and every candidate is rejected against the
+  batches ([ADR 0018](adr/0018-parallel-batched-freetext-pools.md)), persisted and reused across runs keyed by the reference
+  digest and model ([ADR 0020](adr/0020-freetext-pools-as-persisted-artifact.md)), and every candidate is rejected against the
   **full** source domain, not only the sample, so a pool cannot memorize
-  (ADR 0023). A retry ladder keeps pools honest at scale (ADR 0033).
+  ([ADR 0023](adr/0023-source-domain-pool-rejection.md)). A retry ladder keeps pools honest at scale ([ADR 0033](adr/0033-pool-ladder-integrity-at-scale.md)).
 - **Per-column prompt constraints** (clauses, length bands, format masks) ride
-  the DDL contract as structured templates (ADR 0024). A constraint router
+  the DDL contract as structured templates ([ADR 0024](adr/0024-structured-prompt-constraint-templates.md)). A constraint router
   decides per column whether a constraint is satisfied by construction or must
-  reach the model (ADR 0028). Worked examples:
+  reach the model ([ADR 0028](adr/0028-constraint-router-relational-plan.md)). Worked examples:
   [`DDL_CONTRACT_GUIDE.md`](DDL_CONTRACT_GUIDE.md).
 
 ## 6. Throughput
@@ -382,7 +382,7 @@ generation and shuffle, not the GPU.**
 
 *Warming the pools removes only the pool branch; CPU generation and the
 uniqueness shuffle dominate both the cold and the warm job.* That measurement
-set the throughput decisions (ADR 0034): exact uniqueness runs **one** full-row
+set the throughput decisions ([ADR 0034](adr/0034-generation-throughput-single-barrier-shared-engines.md)): exact uniqueness runs **one** full-row
 barrier; a worker process builds one engine per table and every `DoFn`
 instance shares it; and a fleet sized by hand stays that size, because
 autoscaling is pinned off when the launch names its worker count. Multiple SDK
@@ -433,7 +433,7 @@ on any identical real/synthetic row. Code:
 ## 8. Configuration
 
 Relational structure is configuration, in
-[`config/relationships/*.yaml`](../config/relationships/README.md) (ADR 0032).
+[`config/relationships/*.yaml`](../config/relationships/README.md) ([ADR 0032](adr/0032-relationships-as-config.md)).
 
 ![What each scenario generates](designs/assets/relationships-scenarios.png)
 

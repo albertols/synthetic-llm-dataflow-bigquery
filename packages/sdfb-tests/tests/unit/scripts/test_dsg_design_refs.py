@@ -140,5 +140,31 @@ def test_a_citing_module_needs_a_docstring():
     refs.apply("X = 1  # ADR 0036\n", _MAP)
 
 
+def test_every_adr_mention_in_the_design_document_becomes_a_link():
+  design = (
+      _DESIGN +
+      "\nChildren come from parent keys (ADR 0036, amending ADR 0030).\n"
+      "Code says `ADR 0034` in a comment.\n"
+      "[ADR 0034](adr/0034-y.md) is already linked.\n"
+      "```text\nADR 0036 inside a fence\n```\n")
+  out = refs.linkify_design(design)
+  assert (
+      "(["
+      "ADR 0036](adr/0036-z.md), amending [ADR 0030](adr/0030-x.md)).") in out
+  # A code span shows what a comment looks like; a fence is not prose.
+  assert "Code says `ADR 0034` in a comment." in out
+  assert "ADR 0036 inside a fence" in out
+  assert out.count("[ADR 0034](adr/0034-y.md)") == 1
+  # The map is the source of the links and is left exactly as typed.
+  assert out[:out.index("<!-- adr-map:end -->"
+                       )] == design[:design.index("<!-- adr-map:end -->")]
+  assert refs.linkify_design(out) == out
+
+
+def test_a_mention_of_an_unmapped_adr_is_an_error():
+  with pytest.raises(refs.DesignRefError, match="ADR 0099"):
+    refs.linkify_design(_DESIGN + "\nSee ADR 0099.\n")
+
+
 def test_this_repository_is_in_sync_with_its_design_document():
   assert refs.check(_ROOT) == []

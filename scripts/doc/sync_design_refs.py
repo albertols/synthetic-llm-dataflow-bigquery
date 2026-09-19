@@ -54,6 +54,8 @@ _MAP_ROW = re.compile(
 _DESIGN_PARAGRAPH = re.compile(r"\n\nDesign: docs/DESIGN\.md.*?\)\.\n\Z",
                                re.DOTALL)
 _DOCSTRING_OPEN = re.compile(r"[rRuU]?(\"\"\"|''')")
+# An ADR mention that is not already the text of a link.
+_BARE_ADR = re.compile(r"(?<!\[)ADR (\d{4})(?!\]\()")
 
 
 class DesignRefError(Exception):
@@ -151,6 +153,43 @@ def apply(source: str, adr_map: Mapping[str, str]) -> str:
   return source[:opening.end()] + text + source[end - len(quote):]
 
 
+def linkify_design(design: str) -> str:
+  """`design` with every prose mention of an ADR linked to its record.
+
+  The decision records do not ship to the Dataflow Solution Guides, and the
+  sync points a link whose target does not ship at this repository. A bare
+  `ADR 0036` would leave a reader there with nowhere to go. Links come from
+  the document's own map; code spans, fences and the map are left as typed.
+  """
+  block = _MAP_BLOCK.search(design)
+  if not block:
+    raise DesignRefError(f"{_DESIGN_DOC} has no adr-map block")
+  links = {row[0]: row[3] for row in _MAP_ROW.findall(block.group(1))}
+
+  def link(match: re.Match) -> str:
+    number = match.group(1)
+    if number not in links:
+      raise DesignRefError(
+          f"ADR {number} is mentioned but has no row in the {_DESIGN_DOC} map")
+    return f"[ADR {number}]({links[number]})"
+
+  out, in_fence, in_map = [], False, False
+  for line in design.split("\n"):
+    prose = not in_fence and not in_map
+    if line.lstrip().startswith("```"):
+      in_fence, prose = not in_fence, False
+    elif "adr-map:start" in line:
+      in_map, prose = True, False
+    elif "adr-map:end" in line:
+      in_map = False
+    # Odd segments are code spans: `ADR 0036` there shows a code comment.
+    out.append("".join(
+        segment if i % 2 else _BARE_ADR.sub(link, segment)
+        for i, segment in enumerate(re.split(r"(`[^`]*`)", line)
+                                   )) if prose else line)
+  return "\n".join(out)
+
+
 def _slug(heading: str) -> str:
   return re.sub(r"[^a-z0-9 -]", "", heading.lower()).replace(" ", "-")
 
@@ -177,13 +216,23 @@ def _is_text(path: Path) -> bool:
   return path.suffix not in {".png", ".drawio", ".lock", ".json"}
 
 
-def _reconcile(root: Path, *, write: bool) -> list[str]:
+def _reconcile_design(root: Path, *, write: bool) -> tuple[str, list[str]]:
+  """The design document's own consistency; returns its text and findings."""
   design_path = root / _DESIGN_DOC
   design = design_path.read_text(encoding="utf-8")
-  adr_map = parse_adr_map(design)
   findings = []
-  block = _MAP_BLOCK.search(design)
+  try:
+    linked = linkify_design(design)
+    if linked != design and write:
+      design_path.write_text(linked, encoding="utf-8")
+      design = linked
+    elif linked != design:
+      findings.append(f"{_DESIGN_DOC}: an ADR is mentioned without a link "
+                      "to its record (run --fix)")
+  except DesignRefError as error:
+    findings.append(f"{_DESIGN_DOC}: {error}")
   anchors = {_slug(h) for h in re.findall(r"^#{2,6} (.+)$", design, re.M)}
+  block = _MAP_BLOCK.search(design)
   for number, _, anchor, link in _MAP_ROW.findall(block.group(1)):
     if anchor not in anchors:
       findings.append(f"{_DESIGN_DOC}: ADR {number} points at #{anchor}, "
@@ -191,6 +240,12 @@ def _reconcile(root: Path, *, write: bool) -> list[str]:
     if not (design_path.parent / link).is_file():
       findings.append(f"{_DESIGN_DOC}: ADR {number} links {link}, "
                       "which does not exist")
+  return design, findings
+
+
+def _reconcile(root: Path, *, write: bool) -> list[str]:
+  design, findings = _reconcile_design(root, write=write)
+  adr_map = parse_adr_map(design)
   for rel in _shipped(root):
     path = root / rel
     if rel == _DESIGN_DOC or not _is_text(path):
@@ -218,7 +273,8 @@ def check(root: Path) -> list[str]:
 
 
 def fix(root: Path) -> list[str]:
-  """Rewrite stale `Design:` lines; return what a person still has to fix."""
+  """Rewrite stale `Design:` lines and link bare ADR mentions in the design
+  document; return what a person still has to fix."""
   return _reconcile(root, write=True)
 
 
