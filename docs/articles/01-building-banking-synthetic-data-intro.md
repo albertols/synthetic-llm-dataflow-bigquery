@@ -101,9 +101,10 @@ series answers them in full:
   dtype map entry away — no re-architecture, no serving layer to rebuild.
 - **So RAG retrieval methods are really in there?** Yes — retrieval grounds
   the prompts: FAISS search over the embedded sample selects representative
-  exemplars (k-center seeding, not just nearest-neighbour lookalikes) so the
-  model sees what a column's values look like without shipping the whole
-  sample into the prompt.
+  exemplars (the most typical values by default, a k-center spread as an
+  option — never nearest-neighbour lookalikes of a query) so the model sees
+  what a column's values look like without shipping the whole sample into
+  the prompt. Part 4 is the deep dive.
 - **Can you steer one specific column?** Yes — a JSON
   `llm_prompt_constraint` in the column's DDL description (format, regex
   pattern, allowed values, prefix, examples); add `route: "llm"` and even a
