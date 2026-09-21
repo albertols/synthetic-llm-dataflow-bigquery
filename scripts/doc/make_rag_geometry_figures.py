@@ -33,6 +33,10 @@ Writes into docs/designs/assets/:
                                              space: seeds per strategy, where
                                              scripted candidates land, and
                                              what a vector looks like
+  rag-names-pes-3d.gif            concept  — the same names on a rotating
+                                             sphere, step by step: chunk,
+                                             embed, retrieve (both
+                                             strategies), generate, gate, pool
   rag-setup-cost.png              evidence — where one worker's setup went
   prefix-vs-kcenter-coverage.png  concept  — which 1,024 rows get indexed
                                              (owned by the 2026-07-25 design;
@@ -61,6 +65,7 @@ WS5 `MEASURED` block (`make_ws5_figures.py`, run
 from __future__ import annotations
 
 import io
+import itertools
 import textwrap
 
 import matplotlib
@@ -68,6 +73,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.transforms import Bbox
+from mpl_toolkits.mplot3d import proj3d
 from PIL import Image
 
 import b1_rag_walkthrough as walkthrough
@@ -178,8 +185,14 @@ def _flatten(pts: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------
-def _sphere(ax, elev: float, azim: float) -> None:
-  u, v = np.mgrid[0:2 * np.pi:40j, 0:np.pi:20j]
+def _sphere(ax,
+            elev: float,
+            azim: float,
+            *,
+            zoom: float = 1.32,
+            density: tuple[int, int] = (40, 20)) -> None:
+  u, v = np.mgrid[0:2 * np.pi:complex(0, density[0]),
+                  0:np.pi:complex(0, density[1])]
   ax.plot_wireframe(
       np.cos(u) * np.sin(v),
       np.sin(u) * np.sin(v),
@@ -189,7 +202,7 @@ def _sphere(ax, elev: float, azim: float) -> None:
       alpha=0.7)
   # Depth-sorting would bury the eight picks under the dense mode's dots.
   ax.computed_zorder = False
-  ax.set_box_aspect((1, 1, 1), zoom=1.32)
+  ax.set_box_aspect((1, 1, 1), zoom=zoom)
   ax.set_xlim(-1, 1)
   ax.set_ylim(-1, 1)
   ax.set_zlim(-1, 1)
@@ -946,35 +959,91 @@ def _draw_seed_panel(ax, xy_squad, squad, seeds) -> None:
       "seeds by select_seed_examples()")
 
 
-def _candidate_verdict(cand: str, squad: list[str], in_format) -> str:
-  """Same order as `_pool_llm_yield`: format gate first, then novelty."""
-  if not in_format(cand):
-    return "off-format — rejected"
-  if cand in squad:
-    return "copy — rejected by the wall"
-  if cand in walkthrough._RENAMES:
-    return "one-letter rename — POOLED"
-  return "Brazilian-Irish invention — pooled"
+# verdict printed by the walkthrough -> (legend label, colour, 2-D marker)
+VERDICT_STYLE = {
+    "COPY - rejected": ("copy — rejected by the wall", ORANGE, "X"),
+    "off-format": ("off-format — rejected", SLATE, "s"),
+    "pooled (rename!)": ("one-letter rename — POOLED", PURPLE, "D"),
+    "pooled": ("Brazilian-Irish blend — pooled", AQUA, "o"),
+    "pooled (off-style)":
+        ("fully Irish — POOLED: no gate checks style", BLUE, "^"),
+}
+
+
+def _squad_gate():
+  prof = profile_columns(
+      walkthrough.squad_schema(walkthrough.SQUAD_CLAUSE),
+      walkthrough.SQUAD_ROWS)["player_name"]
+  return b1._format_gate(prof)
+
+
+# Where a label may sit around its point, in points: (dx, dy, ha, va).
+_LABEL_SLOTS = ((0, 8, "center", "bottom"), (0, -8, "center", "top"),
+                (9, 0, "left", "center"), (-9, 0, "right", "center"),
+                (8, 7, "left", "bottom"), (-8, 7, "right", "bottom"),
+                (8, -7, "left", "top"), (-8, -7, "right",
+                                         "top"), (0, 19, "center", "bottom"),
+                (0, -19, "center",
+                 "top"), (22, 0, "left", "center"), (-22, 0, "right", "center"),
+                (0, 30, "center", "bottom"), (0, -30, "center", "top"))
+
+
+def _place_labels(ax, requests, obstacles) -> None:
+  """Write each (x, y, text, below, style) in the first slot whose box
+    touches neither a marker in `obstacles` nor a label already placed.
+    Requests come in priority order; call once the axes limits are final."""
+  renderer = ax.figure.canvas.get_renderer()
+  taken = [
+      Bbox.from_bounds(px - 11, py - 11, 22, 22)
+      for px, py in ax.transData.transform(obstacles)
+  ]
+  for x, y, text, below, style in requests:
+    slots = sorted(
+        _LABEL_SLOTS, key=lambda slot, below=below: (slot[1] > 0) == below)
+    boxes = []
+    for dx, dy, ha, va in slots:  # measure every slot, keep none
+      probe = ax.annotate(
+          text, (x, y),
+          xytext=(dx, dy),
+          textcoords="offset points",
+          ha=ha,
+          va=va,
+          **style)
+      boxes.append(probe.get_window_extent(renderer).expanded(1.03, 1.12))
+      probe.remove()
+    # A label's own marker is an obstacle too — every slot clears it. The
+    # first slot that touches nothing wins; failing that, the one that
+    # covers the least.
+    covered = [
+        sum(
+            max(0.0,
+                min(box.x1, other.x1) - max(box.x0, other.x0)) *
+            max(0.0,
+                min(box.y1, other.y1) - max(box.y0, other.y0))
+            for other in taken)
+        for box in boxes
+    ]
+    free = int(np.argmin(covered))
+    dx, dy, ha, va = slots[free]
+    ax.annotate(
+        text, (x, y),
+        xytext=(dx, dy),
+        textcoords="offset points",
+        ha=ha,
+        va=va,
+        **style)
+    taken.append(boxes[free])
 
 
 def _draw_candidate_panel(ax, xy_squad, xy_cands, squad, cands) -> None:
   """Where the scripted candidates land, tied to their nearest real name."""
-  prof = profile_columns(
-      walkthrough.squad_schema(walkthrough.SQUAD_CLAUSE),
-      walkthrough.SQUAD_ROWS)["player_name"]
-  in_format = b1._format_gate(prof)
-  styles = {
-      "copy — rejected by the wall": (ORANGE, "X"),
-      "one-letter rename — POOLED": (PURPLE, "D"),
-      "Brazilian-Irish invention — pooled": (AQUA, "o"),
-      "off-format — rejected": (SLATE, "s"),
-  }
+  in_format = _squad_gate()
   ax.scatter(
       xy_squad[:, 0], xy_squad[:, 1], s=14, color=DOT, linewidths=0, zorder=1)
   seen, named = set(), set()
   for (x, y), cand in zip(xy_cands, cands, strict=True):
-    verdict = _candidate_verdict(cand, squad, in_format)
-    color, marker = styles[verdict]
+    label, color, marker = VERDICT_STYLE[walkthrough.squad_verdict(
+        cand, in_format)]
     nearest, _ = walkthrough.nearest_real_name(cand)
     nx, ny = xy_squad[squad.index(nearest)]
     named.add(nearest)
@@ -988,33 +1057,29 @@ def _draw_candidate_panel(ax, xy_squad, xy_cands, squad, cands) -> None:
         edgecolors=SURFACE,
         linewidths=1.3,
         zorder=4,
-        label=None if verdict in seen else verdict)
-    seen.add(verdict)
-    ax.text(
-        x,
-        y + 0.032,
-        cand,
-        fontsize=8.6,
-        color=INK,
-        ha="center",
-        fontweight="600",
-        zorder=5)
-  for (x, y), label in zip(xy_squad, squad, strict=True):
-    if label in named:
-      ax.text(
-          x, y - 0.05, label, fontsize=7.2, color=MUTED, ha="center", zorder=3)
+        label=None if label in seen else label)
+    seen.add(label)
   ax.legend(
       frameon=True,
       facecolor=SURFACE,
       edgecolor=GRID,
       framealpha=1.0,
-      fontsize=9,
+      fontsize=8.6,
       loc="lower left",
       labelcolor=INK)
   _map_axes(
-      ax, "where do 14 scripted candidates land?",
+      ax, f"where do {len(cands)} scripted candidates land?",
       "each tied to its nearest real name (grey label) — only an EXACT "
       "match hits the wall")
+  ax.autoscale_view()  # the labels below are placed in display space
+  bold = {"fontsize": 8.4, "color": INK, "fontweight": "600", "zorder": 5}
+  grey = {"fontsize": 7.2, "color": MUTED, "zorder": 3}
+  requests = [(x, y, cand, False, bold)
+              for (x, y), cand in zip(xy_cands, cands, strict=True)]
+  requests += [(x, y, name, True, grey)
+               for (x, y), name in zip(xy_squad, squad, strict=True)
+               if name in named]
+  _place_labels(ax, requests, xy_cands)
 
 
 def _draw_vector_strip(ax) -> None:
@@ -1064,9 +1129,12 @@ def fig_names_pes_map() -> None:
       for s in ("centroid", "kcenter")
   }
 
-  fig = plt.figure(figsize=(16.5, 11.6), facecolor=SURFACE)
+  fig = plt.figure(figsize=(16.5, 11.6), facecolor=SURFACE, dpi=160)
   grid = fig.add_gridspec(
       2, 2, height_ratios=[4.4, 1.0], hspace=0.13, wspace=0.04)
+  # Before any panel is drawn: the candidate labels are de-overlapped in
+  # display space, so the axes must already have their final size.
+  fig.subplots_adjust(left=0.085, right=0.992, bottom=0.035, top=0.915)
   ax = fig.add_subplot(grid[0, 0])
   _draw_links(ax, xy, edges, len(squad))
   _draw_seed_panel(ax, xy_squad, squad, seeds)
@@ -1084,9 +1152,700 @@ def fig_names_pes_map() -> None:
       x=0.012,
       ha="left",
       y=0.995)
-  fig.subplots_adjust(left=0.085, right=0.992, bottom=0.035, top=0.915)
   fig.savefig(ASSETS / "rag-names-pes-map.png", dpi=160, facecolor=SURFACE)
   plt.close(fig)
+
+
+def _neighbour_sphere(vectors: np.ndarray, k: int = 3, iters: int = 900):
+  """The spring layout of `_neighbour_map`, constrained to the unit sphere —
+    where L2-normalized embeddings actually live. Every step moves a point
+    along the sphere and re-normalizes it, so neighbours in 384-d end up
+    neighbours on the globe. Returns (unit vectors of shape (n, 3), edges)."""
+  sims = vectors @ vectors.T
+  np.fill_diagonal(sims, -1.0)
+  n = len(sims)
+  edges = sorted({(min(i, int(j)), max(i, int(j)))
+                  for i in range(n)
+                  for j in np.argsort(sims[i])[::-1][:k]})
+  dist = np.sqrt(np.clip(2.0 - 2.0 * (vectors @ vectors.T), 0.0, None))
+  centering = np.eye(n) - np.ones((n, n)) / n
+  vals, vecs = np.linalg.eigh(-0.5 * centering @ (dist**2) @ centering)
+  top = np.argsort(vals)[::-1][:3]
+  pos = vecs[:, top] * np.sqrt(np.clip(vals[top], 0.0, None))
+  pos = _unit(pos * np.sign(pos[0]) + 1e-6)
+  ideal = np.sqrt(4.0 * np.pi / n)
+  src = np.array([e[0] for e in edges])
+  dst = np.array([e[1] for e in edges])
+  weight = 0.4 + 1.6 * np.clip(np.array([sims[i, j] for i, j in edges]), 0, 1)
+  for step in range(iters):
+    delta = pos[:, None, :] - pos[None, :, :]
+    gap = np.linalg.norm(delta, axis=2) + 1e-6
+    move = ((delta / gap[..., None]) * (ideal**2 / gap)[..., None]).sum(axis=1)
+    pull = pos[src] - pos[dst]
+    length = np.linalg.norm(pull, axis=1, keepdims=True) + 1e-6
+    force = pull * (length / ideal) * weight[:, None]
+    np.add.at(move, src, -force)
+    np.add.at(move, dst, force)
+    move -= (move * pos).sum(axis=1, keepdims=True) * pos  # tangent part only
+    temp = 0.12 * (1.0 - step / iters) + 0.003
+    norm = np.linalg.norm(move, axis=1, keepdims=True) + 1e-9
+    pos = _unit(pos + move / norm * np.minimum(norm, temp))
+  return pos, edges
+
+
+# GIF storyboard — (frames in the phase, step lit in the header, caption).
+# A frame lasts PES_FRAME_MS; the last frame of every phase is held. Counts in
+# the captions are filled from the scene, never typed.
+PES_FRAME_MS, PES_HOLD_MS, PES_END_MS = 100, 1300, 4000
+PES_STEPS = ("chunk", "embed", "retrieve", "generate", "gate", "pool", "draw")
+PES_PHASES = (
+    (12, 0, "1 · CHUNK — {squad} distinct values of player_name become "
+     "{squad} chunks;\nthe chunk text is the name itself"),
+    (16, 1, "2 · EMBED — each chunk is now a unit vector: 384 numbers, a "
+     "point on a sphere.\nThe globe keeps who sits next to whom: arcs join "
+     "names that share spelling"),
+    (18, 2, "3 · RETRIEVE, centroid — query with the mean of all {squad} "
+     "vectors:\nthe {k} most typical spellings become the prompt's seeds"),
+    (26, 2, "3 · RETRIEVE, kcenter — or walk to whatever is farthest from "
+     "everything picked:\n{k} seeds that span the squad"),
+    (26, 3, "4 · AUGMENT + GENERATE — {k} seeds + the clause (“an Irish "
+     "twist”) go to the LLM;\n{cands} candidates come back, each landing "
+     "beside its nearest real name"),
+    (30, 4, "5 · GATE — off-format lines and exact copies of real names are "
+     "thrown out;\neverything else is pooled"),
+    (16, 5, "6 · POOL — {pool} of {cands} survive. Look who is still here: "
+     "renames of real men,\nand Ciaran Kelly — no gate checks style"),
+    (30, 6, "7 · DRAW — every generated row takes its name from the pool, "
+     "uniformly, with replacement.\nNo real name can come out"),
+)
+PES_STARTS = tuple(
+    int(s) for s in np.cumsum([0] + [n for n, _, _ in PES_PHASES[:-1]]))
+PES_FRAMES = sum(n for n, _, _ in PES_PHASES)
+PES_LANDMARKS = ("Pele", "Ronaldo", "Zico", "Socrates", "Garrincha", "Cafu",
+                 "Romario", "Kaka", "Rivaldo", "Dunga", "Bebeto", "Didi")
+PES_FIGSIZE, PES_DPI = (10.4, 6.6), 86
+PES_SPHERE_BOX = (0.0, 0.115, 0.60, 0.83)  # the globe's share of the frame
+# PES_PHASES by name: both retrieval strategies share header step 3.
+(P_CHUNK, P_EMBED, P_CENTROID, P_KCENTER, P_GENERATE, P_GATE, P_POOL,
+ P_DRAW) = range(len(PES_PHASES))
+PES_FLY_FRAMES = 7  # how long a rejected candidate takes to leave
+PES_LABEL_FRAMES = 7  # how long a fresh candidate keeps its name on the globe
+PES_POP_FRAMES = 2  # ... and how long it is drawn oversized
+PES_BLINK = 4  # frames per on/off cycle of a pulsing marker
+_FACING = 0.1  # min cos(point, camera) for a point to count as in front
+_ARC_EPS = 1e-6
+PES_SWEEP = 400.0  # degrees of azimuth over the whole film
+# The layout pushes Ciaran Kelly — who shares a trigram with nobody — onto
+# the south pole, under the camera's horizon. A layout has no preferred
+# orientation, so tilt it about x until he can be seen.
+PES_TILT = 65.0
+_REJECTED = ("COPY - rejected", "off-format")
+_PANEL_TAG = {
+    "COPY - rejected": "copy ✗",
+    "off-format": "off-format ✗",
+    "pooled (rename!)": "rename → pool",
+    "pooled": "→ pool",
+    "pooled (off-style)": "fully Irish → pool",
+}
+
+
+def _arc(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+  """Great-circle arc from `a` to `b`, just above the sphere's surface."""
+  omega = np.arccos(np.clip(a @ b, -1.0, 1.0))
+  if omega < _ARC_EPS:
+    return np.vstack([a, b]) * 1.01
+  t = np.linspace(0.0, 1.0, max(8, int(np.ceil(omega * 12))))[:, None]
+  return (np.sin(
+      (1 - t) * omega) * a + np.sin(t * omega) * b) / np.sin(omega) * 1.01
+
+
+def _blink(since: int) -> bool:
+  return since % PES_BLINK < PES_BLINK // 2
+
+
+def _pes_phase(frame: int) -> int:
+  return max(i for i, start in enumerate(PES_STARTS) if frame >= start)
+
+
+class _PesView:
+  """One frame's camera: knows which points face the viewer, and keeps the
+    labels inside the globe's share of the frame and off each other."""
+
+  def __init__(self, fig, ax, azim: float) -> None:
+    self.fig, self.ax = fig, ax
+    self.azim = azim
+    self.elev = 20.0
+    elev, azim = np.radians(self.elev), np.radians(self.azim)
+    self.cam = np.array([
+        np.cos(elev) * np.cos(azim),
+        np.cos(elev) * np.sin(azim),
+        np.sin(elev)
+    ])
+    self._boxes: list[tuple[float, float, float, float]] = []
+
+  def front(self, point) -> bool:
+    return float(_unit(np.asarray(point)) @ self.cam) > _FACING
+
+  def arc(self, a, b, *, color, width=0.9, alpha=0.85) -> None:
+    """A great-circle arc, dimmed wherever it passes behind the globe."""
+    pts = _arc(a, b)
+    facing = (pts @ self.cam) > _FACING
+    cuts = [0, *(np.flatnonzero(np.diff(facing)) + 1), len(pts)]
+    for lo, hi in itertools.pairwise(cuts):
+      self.ax.plot(
+          *pts[lo:hi + 1].T,
+          color=color,
+          linewidth=width,
+          alpha=alpha * (1.0 if facing[lo] else 0.2),
+          zorder=3)
+
+  def dot(self,
+          point,
+          *,
+          color,
+          marker="o",
+          size=60,
+          edge=SURFACE,
+          alpha=1.0) -> None:
+    if not self.front(point):
+      alpha *= 0.22
+    self.ax.scatter(
+        *point,
+        s=size,
+        color=color,
+        marker=marker,
+        edgecolors=edge,
+        linewidths=1.1,
+        depthshade=False,
+        alpha=alpha,
+        zorder=5)
+
+  def ring(self, point, *, color=INK, size=300) -> None:
+    self.ax.scatter(
+        *point,
+        s=size,
+        facecolors="none",
+        edgecolors=color,
+        linewidths=1.8,
+        depthshade=False,
+        alpha=1.0 if self.front(point) else 0.3,
+        zorder=6)
+
+  def label(self, point, text, *, color=INK, weight="600", size=8.4) -> None:
+    """`text` just above `point` — skipped on the far side, and when it
+        would sit on a label this frame already placed (call in priority
+        order)."""
+    if not self.front(point):
+      return
+    x, y, _ = proj3d.proj_transform(*np.asarray(point), self.ax.get_proj())
+    fx, fy = self.fig.transFigure.inverted().transform(
+        self.ax.transData.transform((x, y)))
+    px = size * PES_DPI / 72.0
+    half_w = 0.31 * len(text) * px / (PES_FIGSIZE[0] * PES_DPI)
+    half_h = 0.62 * px / (PES_FIGSIZE[1] * PES_DPI)
+    fx = float(np.clip(fx, 0.006 + half_w, PES_SPHERE_BOX[2] - half_w))
+    fy = float(fy) + 0.03
+    box = (fx - half_w, fy - half_h, fx + half_w, fy + half_h)
+    if any(box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3]
+           for b in self._boxes):
+      return
+    self._boxes.append(box)
+    self.fig.text(
+        fx,
+        fy,
+        text,
+        color=color,
+        fontsize=size,
+        fontweight=weight,
+        ha="center",
+        va="center")
+
+
+class _PesPanel:
+  """The right-hand column: what the DATA looks like at this step."""
+  LEFT, RIGHT, TOP, PITCH = 0.628, 0.985, 0.885, 0.0272
+
+  def __init__(self, fig) -> None:
+    self.fig = fig
+    self.y = self.TOP
+    # A transparent overlay in figure coordinates: the panel's markers are
+    # the globe's own scatter markers, not look-alike glyphs.
+    self.ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+    self.ax.set_xlim(0.0, 1.0)
+    self.ax.set_ylim(0.0, 1.0)
+    self.ax.patch.set_alpha(0.0)
+    self.ax.axis("off")
+
+  def head(self, text: str, color=INK) -> None:
+    self.fig.text(
+        self.LEFT,
+        self.y,
+        text,
+        color=color,
+        fontsize=10.2,
+        fontweight="700",
+        va="center")
+    self.y -= self.PITCH * 1.25
+
+  def note(self, text: str, color=MUTED) -> None:
+    self.fig.text(
+        self.LEFT, self.y, text, color=color, fontsize=8.6, va="center")
+    self.y -= self.PITCH
+
+  def gap(self, lines: float = 0.5) -> None:
+    self.y -= self.PITCH * lines
+
+  def row(self,
+          text: str,
+          *,
+          color=INK,
+          weight="normal",
+          tag: str = "",
+          tag_color=MUTED,
+          marker=None,
+          marker_color=INK,
+          hollow: bool = False) -> None:
+    if marker is not None:
+      self.ax.scatter(
+          self.LEFT + 0.008,
+          self.y,
+          s=30,
+          marker=marker,
+          color=SURFACE if hollow else marker_color,
+          edgecolors=marker_color if hollow else SURFACE,
+          linewidths=0.9,
+          zorder=5)
+    self.fig.text(
+        self.LEFT + 0.024,
+        self.y,
+        text,
+        color=color,
+        fontsize=8.4,
+        fontweight=weight,
+        family="monospace",
+        va="center")
+    if tag:
+      self.fig.text(
+          self.RIGHT,
+          self.y,
+          tag,
+          color=tag_color,
+          fontsize=7.8,
+          ha="right",
+          va="center")
+    self.y -= self.PITCH
+
+  def bar(self, fraction: float, color) -> None:
+    """A thin bar under the previous row's right edge (draw counts)."""
+    y = self.y + self.PITCH
+    self.ax.plot([self.RIGHT - 0.10, self.RIGHT - 0.10 + 0.10 * fraction],
+                 [y, y],
+                 color=color,
+                 linewidth=4.0,
+                 solid_capstyle="butt")
+
+
+def _pes_header(fig, panel: _PesPanel, step: int) -> None:
+  for i, name in enumerate(PES_STEPS):
+    x = 0.03 + i * 0.137
+    color = INK if i == step else (MUTED if i < step else DOT)
+    fig.text(
+        x,
+        0.958,
+        f"{i + 1} {name}",
+        color=color,
+        fontsize=10.5,
+        fontweight="700" if i == step else "normal",
+        va="center")
+    panel.ax.plot([x, x + 0.118], [0.928, 0.928],
+                  color=ORANGE if i == step else (MUTED if i < step else GRID),
+                  linewidth=2.6 if i == step else 1.2,
+                  solid_capstyle="butt")
+
+
+def _pes_squad(view: _PesView, scene: dict, phase: int, since: int) -> None:
+  squad, pos = scene["squad"], scene["pos_squad"]
+  if phase >= P_EMBED:
+    links = [
+        (i, j) for i, j in scene["edges"] if i < len(squad) and j < len(squad)
+    ]
+    shown = len(links) if phase > P_EMBED else min(len(links), 12 * (since + 1))
+    for i, j in links[:shown]:
+      view.arc(pos[i], pos[j], color=GRID, width=0.7)
+  shown = len(squad) if phase > P_CHUNK else min(len(squad), 5 * (since + 1))
+  for point in pos[:shown]:
+    view.dot(point, color=DOT, size=13, edge=DOT)
+  if phase == P_CHUNK:
+    for k in range(shown - 1, max(-1, shown - 6), -1):
+      view.label(pos[k], squad[k], weight="normal")
+  if phase == P_EMBED:
+    for name in PES_LANDMARKS:
+      view.label(pos[squad.index(name)], name, color=MUTED, weight="normal")
+
+
+def _pes_seeds(view: _PesView, scene: dict, phase: int, since: int) -> None:
+  squad, pos = scene["squad"], scene["pos_squad"]
+  if phase < P_CENTROID:
+    return
+  if phase == P_KCENTER:
+    names = scene["kcenter"][:min(K, 1 + since // 3)]
+    color, marker = BLUE, "s"
+    walk = [pos[squad.index(name)] for name in names]
+    for a, b in itertools.pairwise(walk):
+      view.arc(a, b, color=BLUE, width=1.3)
+    for name in scene["centroid"]:  # the other strategy, for contrast
+      view.dot(pos[squad.index(name)], color=ORANGE, size=22, alpha=0.55)
+  else:
+    names = scene["centroid"]
+    if phase == P_CENTROID:
+      names = names[:min(K, 1 + since // 2)]
+    color, marker = ORANGE, "o"
+  staged = phase in (P_CENTROID, P_KCENTER)
+  # While the prompt is being answered the seeds pulse: they are its input.
+  pulse = 26 + (30 * _blink(since) if phase == P_GENERATE else 0)
+  for order, name in reversed(list(enumerate(names, start=1))):
+    point = pos[squad.index(name)]
+    view.dot(point, color=color, marker=marker, size=80 if staged else pulse)
+    if staged:
+      view.label(point, f"{order}. {name}")
+
+
+def _pes_candidates(view: _PesView, scene: dict, phase: int,
+                    since: int) -> None:
+  if phase < P_GENERATE:
+    return
+  cands, pos = scene["cands"], scene["pos_cands"]
+  arrived = len(cands) if phase > P_GENERATE else min(len(cands), 1 + since)
+  decided = {
+      P_GENERATE: 0,
+      P_GATE: min(len(cands), 1 + since)
+  }.get(phase, len(cands))
+  highlights = []
+  for k in reversed(range(arrived)):
+    verdict = scene["verdicts"][k]
+    _, color, marker = VERDICT_STYLE[verdict]
+    judged = k < decided
+    age = since - k  # frames since this candidate arrived / was judged
+    point, alpha = pos[k], 1.0
+    if judged and verdict in _REJECTED:
+      if phase > P_GATE or age >= PES_FLY_FRAMES:
+        continue
+      point = pos[k] * (1.0 + 0.085 * age)  # thrown off the sphere
+      alpha = 1.0 - age / PES_FLY_FRAMES
+    else:
+      near = scene["pos_squad"][scene["squad"].index(scene["nearest"][k])]
+      view.arc(pos[k], near, color=color if judged else MUTED)
+    recent = phase in (P_GENERATE, P_GATE) and 0 <= age < PES_LABEL_FRAMES
+    view.dot(
+        point,
+        color=color if judged else SURFACE,
+        marker=marker if judged else "o",
+        edge=SURFACE if judged else INK,
+        size=120 if (recent and age < PES_POP_FRAMES) else 60,
+        alpha=alpha)
+    if recent:
+      view.label(
+          point,
+          cands[k],
+          color=MUTED if (judged and verdict in _REJECTED) else INK)
+    elif phase == P_POOL:
+      highlights.append((verdict == "pooled", k))
+      if verdict == "pooled (off-style)" and _blink(since):
+        view.ring(pos[k], color=color, size=260)
+  for _, k in sorted(highlights):  # renames and the Irish first
+    view.label(pos[k], cands[k])
+
+
+def _pes_draws(view: _PesView, scene: dict, phase: int, since: int) -> None:
+  """Step 7: rows take their name from the pool — seeded, with replacement,
+    the way `B1RagEngine._sample_free_text` does."""
+  if phase < P_DRAW:
+    return
+  drawn = scene["draws"][:1 + since // 2]
+  latest = scene["cands"].index(drawn[-1])
+  view.ring(scene["pos_cands"][latest])
+  view.label(scene["pos_cands"][latest], drawn[-1])
+
+
+def _panel_chunks(panel: _PesPanel, scene: dict, since: int) -> None:
+  squad = scene["squad"]
+  shown = min(len(squad), 5 * (since + 1))
+  panel.head("chunks")
+  panel.note(f"{walkthrough.SQUAD_FQN} · player_name")
+  panel.note(f"{shown} of {len(squad)} distinct values chunked")
+  panel.gap()
+  first = max(0, shown - 22)
+  for k in range(first, shown):
+    new = k >= shown - 5
+    panel.row(
+        f"chunk {k + 1:02d}  “{squad[k]}”",
+        color=INK if new else MUTED,
+        weight="700" if new else "normal",
+        marker="o",
+        marker_color=DOT)
+
+
+def _panel_vectors(panel: _PesPanel, scene: dict) -> None:
+  panel.head("vectors")
+  panel.note("chunk text → 384 numbers, length 1")
+  panel.note("nearest neighbour = most shared spelling")
+  panel.gap()
+  panel.row("name         nearest       cosine", color=MUTED)
+  for name in PES_LANDMARKS:
+    other, cosine = scene["neighbour"][name]
+    panel.row(
+        f"{name:12s} {other:13s} {cosine:5.2f}", marker="o", marker_color=DOT)
+  panel.gap()
+  panel.note("every name gets an arc to its 3 nearest")
+
+
+def _panel_seeds(panel: _PesPanel, scene: dict, phase: int, since: int) -> None:
+  panel.head(f"seeds — k = {K}")
+  n_centroid = K if phase == P_KCENTER else min(K, 1 + since // 2)
+  n_kcenter = min(K, 1 + since // 3) if phase == P_KCENTER else 0
+  panel.note("--pool_seed_strategy=centroid", color=ORANGE)
+  panel.row("   name            cos to centroid", color=MUTED)
+  for order, name in enumerate(scene["centroid"][:n_centroid], start=1):
+    panel.row(
+        f"{order}. {name}",
+        marker="o",
+        marker_color=ORANGE,
+        tag=f"{scene['to_centroid'][name]:.2f}")
+  panel.gap(K - n_centroid + 0.8)
+  panel.note(
+      "--pool_seed_strategy=kcenter", color=BLUE if phase == P_KCENTER else DOT)
+  if n_kcenter:
+    panel.row("   name         cos to nearest pick", color=MUTED)
+  for order, name in enumerate(scene["kcenter"][:n_kcenter], start=1):
+    panel.row(
+        f"{order}. {name}",
+        marker="s",
+        marker_color=BLUE,
+        tag="start" if order == 1 else f"{scene['to_picked'][name]:.2f}")
+
+
+def _panel_candidates(panel: _PesPanel, scene: dict, phase: int,
+                      since: int) -> None:
+  cands, verdicts = scene["cands"], scene["verdicts"]
+  arrived = len(cands) if phase > P_GENERATE else min(len(cands), 1 + since)
+  decided = 0 if phase == P_GENERATE else min(len(cands), 1 + since)
+  if phase == P_GENERATE:
+    panel.head("prompt → LLM → candidates")
+    panel.note(f"seeds: {', '.join(scene['centroid'][:2])}, … ({K})")
+    panel.note(f"clause: “… with an Irish twist”  ·  {arrived} back")
+  else:
+    pooled = sum(v not in _REJECTED for v in verdicts[:decided])
+    panel.head("gates: format, then the wall")
+    panel.note(f"judged {decided} of {len(cands)}")
+    panel.note(f"pooled {pooled}   ·   discarded {decided - pooled}", color=INK)
+  panel.gap()
+  for k in range(arrived):
+    label, color, marker = VERDICT_STYLE[verdicts[k]]
+    del label
+    if k >= decided:
+      panel.row(cands[k], marker="o", hollow=True)
+    else:
+      out = verdicts[k] in _REJECTED
+      panel.row(
+          cands[k],
+          color=MUTED if out else INK,
+          marker=marker,
+          marker_color=color,
+          tag=_PANEL_TAG[verdicts[k]],
+          tag_color=color,
+          weight="700" if k == decided - 1 else "normal")
+
+
+def _panel_pool(panel: _PesPanel, scene: dict, drawn: list[str]) -> None:
+  cands, verdicts = scene["cands"], scene["verdicts"]
+  pool = [k for k, v in enumerate(verdicts) if v not in _REJECTED]
+  out = [k for k, v in enumerate(verdicts) if v in _REJECTED]
+  if drawn:
+    panel.head(f"rows draw from the pool ({len(pool)})")
+  else:
+    panel.head(f"pool {len(pool)}  ·  discarded {len(out)}")
+  for k in pool:
+    _, color, marker = VERDICT_STYLE[verdicts[k]]
+    hits = drawn.count(cands[k])
+    latest = bool(drawn) and drawn[-1] == cands[k]
+    tag = _PANEL_TAG[verdicts[k]].replace(" → pool", "").replace("→ pool", "")
+    panel.row(
+        cands[k],
+        marker=marker,
+        marker_color=color,
+        weight="700" if latest else "normal",
+        tag=(f"x{hits}" if hits else "") if drawn else tag,
+        tag_color=INK if drawn else color)
+  panel.gap()
+  if drawn:
+    panel.note("generated rows", color=INK)
+    rows = list(enumerate(drawn, start=1))[-7:]
+    for i, name in rows:
+      panel.row(
+          f"row {i:02d}  {name}",
+          color=INK if i == len(drawn) else MUTED,
+          weight="700" if i == len(drawn) else "normal")
+  else:
+    panel.note("discarded — never reaches a row")
+    for k in out:
+      _, color, marker = VERDICT_STYLE[verdicts[k]]
+      panel.row(
+          cands[k],
+          color=MUTED,
+          marker=marker,
+          marker_color=color,
+          tag=_PANEL_TAG[verdicts[k]],
+          tag_color=color)
+
+
+def _pes_panel(panel: _PesPanel, scene: dict, phase: int, since: int) -> None:
+  if phase == P_CHUNK:
+    _panel_chunks(panel, scene, since)
+  elif phase == P_EMBED:
+    _panel_vectors(panel, scene)
+  elif phase in (P_CENTROID, P_KCENTER):
+    _panel_seeds(panel, scene, phase, since)
+  elif phase in (P_GENERATE, P_GATE):
+    _panel_candidates(panel, scene, phase, since)
+  else:
+    drawn = scene["draws"][:1 + since // 2] if phase == P_DRAW else []
+    _panel_pool(panel, scene, drawn)
+
+
+def _pes_frame(fig, frame: int, scene: dict) -> None:
+  """Draw one frame of the PES-mode animation."""
+  phase = _pes_phase(frame)
+  since = frame - PES_STARTS[phase]
+  _, step, caption = PES_PHASES[phase]
+  ax = fig.add_axes(PES_SPHERE_BOX, projection="3d")
+  view = _PesView(fig, ax,
+                  scene["azim0"] + PES_SWEEP * frame / (PES_FRAMES - 1))
+  _sphere(ax, view.elev, view.azim, zoom=1.42, density=(24, 12))
+  ax.apply_aspect()  # labels are placed from the projection, before the draw
+  panel = _PesPanel(fig)
+  _pes_squad(view, scene, phase, since)
+  _pes_seeds(view, scene, phase, since)
+  _pes_candidates(view, scene, phase, since)
+  _pes_draws(view, scene, phase, since)
+  _pes_header(fig, panel, step)
+  _pes_panel(panel, scene, phase, since)
+  fig.text(
+      0.5,
+      0.05,
+      caption.format(**scene["counts"]),
+      ha="center",
+      va="center",
+      color=INK,
+      fontsize=10.2)
+
+
+def _pes_scene() -> dict:
+  squad = list(walkthrough.SQUAD)
+  cands = list(walkthrough.SQUAD_CANDIDATES)
+  vec_squad = np.array(walkthrough.squad_vectors(squad))
+  pos, edges = _neighbour_sphere(
+      np.vstack([vec_squad,
+                 np.array(walkthrough.squad_vectors(cands))]))
+  tilt = np.radians(PES_TILT)
+  pos = pos @ np.array([[1.0, 0.0, 0.0], [0.0, np.cos(tilt), -np.sin(tilt)],
+                        [0.0, np.sin(tilt), np.cos(tilt)]]).T
+  in_format = _squad_gate()
+  verdicts = [walkthrough.squad_verdict(c, in_format) for c in cands]
+  pool = [c for c, v in zip(cands, verdicts, strict=True) if v not in _REJECTED]
+  # Aim the camera so the pool step, half-way through, faces the names the
+  # reader was told to look for: the ones with nothing Brazilian left.
+  focus = pos[len(squad):][[v == "pooled (off-style)" for v in verdicts
+                           ]].mean(axis=0)
+  pool_mid = PES_STARTS[P_POOL] + PES_PHASES[P_POOL][0] // 2
+  seeds = {
+      strategy:
+          select_seed_examples(vec_squad.tolist(), squad, K, strategy=strategy)
+      for strategy in ("centroid", "kcenter")
+  }
+  sims = vec_squad @ vec_squad.T
+  np.fill_diagonal(sims, -1.0)
+  mean = _unit(np.array(centroid(vec_squad.tolist())))
+  picked = [squad.index(name) for name in seeds["kcenter"]]
+  rng = np.random.default_rng(SEED)
+  return {
+      "squad":
+          squad,
+      "cands":
+          cands,
+      "pos_squad":
+          pos[:len(squad)],
+      "pos_cands":
+          pos[len(squad):],
+      "edges":
+          edges,
+      "azim0":
+          float(np.degrees(np.arctan2(focus[1], focus[0]))) -
+          PES_SWEEP * pool_mid / (PES_FRAMES - 1),
+      "centroid":
+          seeds["centroid"],
+      "kcenter":
+          seeds["kcenter"],
+      "to_centroid": {
+          name: float(vec_squad[squad.index(name)] @ mean)
+          for name in seeds["centroid"]
+      },
+      "to_picked": {
+          squad[i]: float(sims[i, picked[:n]].max())
+          for n, i in enumerate(picked)
+          if n
+      },
+      "neighbour": {
+          name: (squad[int(np.argmax(sims[squad.index(name)]))],
+                 float(sims[squad.index(name)].max())) for name in PES_LANDMARKS
+      },
+      "verdicts":
+          verdicts,
+      "nearest": [walkthrough.nearest_real_name(c)[0] for c in cands],
+      "draws": [pool[i] for i in rng.integers(0, len(pool), size=15)],
+      "counts": {
+          "squad": len(squad),
+          "cands": len(cands),
+          "pool": len(pool),
+          "k": K,
+      },
+  }
+
+
+def fig_names_pes_gif() -> None:
+  scene = _pes_scene()
+  frames: list[Image.Image] = []
+  for frame in range(PES_FRAMES):
+    fig = plt.figure(figsize=PES_FIGSIZE, facecolor=SURFACE)
+    _pes_frame(fig, frame, scene)
+    buf = io.BytesIO()
+    fig.savefig(buf, dpi=PES_DPI, facecolor=SURFACE, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    frames.append(Image.open(buf).convert("RGB"))
+  # One palette for the whole film, learnt from a frame late in every phase
+  # (all the hues are on stage by then): no per-frame palette flicker.
+  keys = [
+      start + n - 2
+      for start, (n, _, _) in zip(PES_STARTS, PES_PHASES, strict=True)
+  ]
+  strip = Image.new("RGB", (frames[0].width * len(keys), frames[0].height))
+  for i, f in enumerate(keys):
+    strip.paste(frames[f], (frames[0].width * i, 0))
+  palette = strip.quantize(colors=64, method=Image.Quantize.FASTOCTREE)
+  frames = [
+      f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames
+  ]
+  durations = [PES_FRAME_MS] * PES_FRAMES
+  for start in PES_STARTS[1:]:
+    durations[start - 1] = PES_HOLD_MS  # breathe at the end of every step
+  durations[-1] = PES_END_MS
+  frames[0].save(
+      ASSETS / "rag-names-pes-3d.gif",
+      save_all=True,
+      append_images=frames[1:],
+      duration=durations,
+      loop=0,
+      optimize=True)
 
 
 def _map_axes(ax, name: str, sub: str) -> None:
@@ -1248,6 +2007,7 @@ if __name__ == "__main__":
   fig_fidelity_originality()
   fig_great_serialization()
   fig_names_pes_map()
+  fig_names_pes_gif()
   fig_setup_cost()
   fig_prefix_vs_kcenter()
-  print(f"\nwrote 8 figures + 1 GIF to {ASSETS}")
+  print(f"\nwrote 8 figures + 2 GIFs to {ASSETS}")

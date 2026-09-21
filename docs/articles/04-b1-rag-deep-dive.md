@@ -38,6 +38,7 @@ figures:
   - docs/articles/assets/freetext-pool-ladder.png
   - docs/designs/assets/rag-fidelity-originality.png
   - docs/designs/assets/rag-names-pes-map.png
+  - docs/designs/assets/rag-names-pes-3d.gif
   - docs/designs/assets/centroid-vs-perquery.png
   - docs/articles/assets/rag-chunk-identity.png
   - docs/articles/assets/engine-attach-detach.png
@@ -739,23 +740,31 @@ row_doc text   : player_name is Roberto Carlos, shirt is 8
     Roberto Carlos, Branco, Garrincha, Zagallo, Dunga, Taffarel, Jorginho, Leonardo
 
 prompt tail    : Examples: ['Roberto Carlos', 'Ronaldinho', 'Robinho', 'Edilson', 'Gerson', 'Carlos Alberto Torres', 'Emerson', 'Ricardinho']. Return JSON {"values": [...]}. Column constraint: format=fictional Brazilian footballer name with an Irish twist, as an unlicensed early-2000s football game would print it; charset=letters and spaces.
-gate outcome   : parsed 14 | format_rejected 2 | copies 2 | seed echoes 2
+gate outcome   : parsed 22 | format_rejected 4 | copies 3 | seed echoes 2
 
-candidate            verdict           nearest real name    cosine
-Ronaldinho           COPY - rejected   Ronaldinho             1.00
-Roberto Carlos       COPY - rejected   Roberto Carlos         1.00
-Roberto Larcos       pooled (rename!)  Roberto Carlos         0.60
-Ronarid              pooled (rename!)  Ronaldo                0.50
-Naldorinho           pooled (rename!)  Ronaldinho             0.55
-Facu                 pooled (rename!)  Falcao                 0.34
-Fergalinho           pooled            Robinho                0.32
-Oisinaldo            pooled            Ronaldo                0.45
-Eoinilson            pooled            Edilson                0.56
-Seamus da Silva      pooled            Leonidas da Silva      0.47
-Cormac dos Santos    pooled            Djalma Santos          0.51
-Padraig Peixoto      pooled            Pele                   0.22
-Paddy O'Rivaldo      off-format        Rivaldo                0.53
-player_name: Pele    off-format        Pele                   0.53
+candidate            verdict            nearest real name    cosine
+Ronaldinho           COPY - rejected    Ronaldinho             1.00
+Roberto Carlos       COPY - rejected    Roberto Carlos         1.00
+Cafu                 COPY - rejected    Cafu                   1.00
+Roberto Larcos       pooled (rename!)   Roberto Carlos         0.60
+Ronarid              pooled (rename!)   Ronaldo                0.50
+Naldorinho           pooled (rename!)   Ronaldinho             0.55
+Facu                 pooled (rename!)   Falcao                 0.34
+Fergalinho           pooled             Robinho                0.32
+Oisinaldo            pooled             Ronaldo                0.45
+Eoinilson            pooled             Edilson                0.56
+Seamus da Silva      pooled             Leonidas da Silva      0.47
+Cormac dos Santos    pooled             Djalma Santos          0.51
+Padraig Peixoto      pooled             Pele                   0.22
+Raphinha Keane       pooled             Robinho                0.27
+Rivaldinho Doyle     pooled             Rivaldo                0.51
+Thiago Gallagher     pooled             Zagallo                0.28
+Ciaran Kelly         pooled (off-style) Cafu                   0.12
+Declan Murphy        pooled (off-style) Denilson               0.27
+Paddy O'Rivaldo      off-format         Rivaldo                0.53
+Neymar O'Shea        off-format         Romario                0.19
+RONALDO 9            off-format         Ronaldo                0.89
+player_name: Pele    off-format         Pele                   0.53
 ```
 
 *Fifty real names in embedding space: `centroid` shows the prompt the
@@ -774,7 +783,26 @@ distances. The seeds are picked by `select_seed_examples()`, the
 verdicts are the real gates', and the bottom strip is the literal
 vector: 384 numbers per name, the same cells lit for the same letters.
 
-Four things this column teaches that the merchant column could not:
+*The same fifty names on a globe, one step at a time — chunk, embed,
+retrieve (both strategies), generate, gate, pool, draw — with the data
+each step produces listed beside it:*
+
+![PES mode, animated](../designs/assets/rag-names-pes-3d.gif)
+
+💡 **Concept, not a run.** *Intuition:* follow one name. It becomes a
+chunk, then a point; eight points are picked as seeds; twenty-two
+candidates land beside their nearest real name; the gate throws seven
+off the sphere and keeps fifteen; every generated row then draws from
+those fifteen and from nothing else. *Formally:* the globe is the same
+3-nearest-neighbour spring layout as the map above, constrained to the
+unit sphere where L2-normalised vectors live, so it keeps
+neighbourhoods and not distances; the seeds are
+`select_seed_examples(strategy="centroid" | "kcenter")`, the verdicts
+are `_format_gate` then the exact-match wall in `_pool_llm_yield`'s
+order, and the last step is a seeded uniform draw with replacement, as
+`B1RagEngine._sample_free_text` does it. Watch the blue triangles.
+
+Five things this column teaches that the merchant column could not:
 
 - **A small column of names is an enum, and enums are copied.** Fifty
   distinct strings is under the profiler's free-text threshold, so left
@@ -791,13 +819,16 @@ Four things this column teaches that the merchant column could not:
   for — and *Fergalinho*, *Oisinaldo* and *Eoinilson* are what the two
   produce together.
 - **The format gate is strict about punctuation, and it is right.**
-  *Paddy O'Rivaldo* is rejected: no value in the source carries an
-  apostrophe, so none may land. *Seamus da Silva* passes only because
+  *Paddy O'Rivaldo* and *Neymar O'Shea* are rejected: no value in the
+  source carries an apostrophe, so none may land. *RONALDO 9* — 0.89
+  from the real man, the closest non-copy in the reply — goes the same
+  way: the source has no all-capitals word and no digit. *Seamus da Silva* passes only because
   Leônidas da Silva played in 1938 and gave the column a lower-case
   particle. Sorry, Paddy.
-- **A rename is not a synthesis.** The wall rejects `Ronaldinho` and
-  `Roberto Carlos` — exact copies, one of them a seed the prompt showed.
-  It pools `Roberto Larcos`, `Ronarid`, `Naldorinho` and `Facu`, because
+- **A rename is not a synthesis.** The wall rejects `Ronaldinho`,
+  `Roberto Carlos` and `Cafu` — exact copies, two of them seeds the
+  prompt showed, the third a name it never saw (the wall checks the
+  source, not the prompt). It pools `Roberto Larcos`, `Ronarid`, `Naldorinho` and `Facu`, because
   none of them *is* a real value. Every football fan re-identifies all
   four in under a second. Worse, no single distance sees the problem:
   `Roberto Larcos` sits at 0.60 from one man, `Eoinilson` at 0.56 from a
@@ -809,6 +840,15 @@ Four things this column teaches that the merchant column could not:
   against a holdout rather than one threshold (Part 10), and why the
   cheapest defence is upstream: a prompt that asks for an Irish twist
   stops the model orbiting the seeds in the first place.
+- **No gate checks style.** *Raphinha Keane* is what the clause asked
+  for. *Ciaran Kelly* is not — there is nothing Brazilian left in him —
+  and he is pooled all the same, at 0.12 from his nearest real name: the
+  *safest* value in the pool by the privacy yardstick, and the least
+  faithful. The gates know two things: the column's character mask and
+  the set of real values. "Does this still sound like the column?" is a
+  fidelity question, and fidelity is measured *after* the run, on
+  distributions (Part 10), not enforced per value. A model that drifts
+  off-style is a prompt problem, and the prompt is where it is fixed.
 
 PES eventually fixed its naming problem with licences. Synthetic data
 cannot; it has to be *Fergalinho* from the start.
@@ -1197,7 +1237,8 @@ the output of `scripts/doc/b1_rag_walkthrough.py` at that commit (toy
 table, `HashingEmbedder`, pure-Python index, scripted model reply — the
 pipeline functions are the real ones). The PES-mode section uses the
 public names of famous footballers as a stand-in for PII, feeds the
-hashing embedder character trigrams, and draws its map with a seeded
+hashing embedder character trigrams, and draws its map (and the globe
+of its GIF, the same layout constrained to the unit sphere) with a seeded
 spring layout of the 3-nearest-neighbour cosine graph; the "PES-style"
 renames are written for this article in the spirit of the game's
 unlicensed squads (Pro Evolution Soccer is a trademark of Konami). Figures: `rag-end-to-end-flow`,
@@ -1208,7 +1249,7 @@ numbers; `engine-attach-detach` is shared with Part 5);
 `rag-dense-vectors-3d.png`, `rag-retrieval-sphere.gif`,
 `rag-seed-pickers.png`, `rag-seed-budget.png`,
 `rag-fidelity-originality.png`, `rag-great-serialization.png`,
-`rag-names-pes-map.png`, `rag-setup-cost.png` and
+`rag-names-pes-map.png`, `rag-names-pes-3d.gif`, `rag-setup-cost.png` and
 `prefix-vs-kcenter-coverage.png` are generated by
 `scripts/doc/make_rag_geometry_figures.py` — `CONCEPT` block seeded, all
 selections computed by `sdfb_core.rag.retrieval`; the one evidence figure

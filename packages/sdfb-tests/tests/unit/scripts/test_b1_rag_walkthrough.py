@@ -106,20 +106,27 @@ def test_pes_mode_names_are_categorical_until_routed_and_renames_pass_the_wall(
   assert "no clause      -> kind = categorical" in out
   assert 'route: "llm"   -> kind = free_text' in out
   assert "row_doc text   : player_name is Roberto Carlos, shirt is 8" in out
-  assert ("gate outcome   : parsed 14 | format_rejected 2 | copies 2 | "
+  assert ("gate outcome   : parsed 22 | format_rejected 4 | copies 3 | "
           "seed echoes 2") in out
   verdicts = {
-      line[:20].strip(): line[21:38].strip()
+      line[:20].strip(): line[21:39].strip()
       for line in out.splitlines()
-      if line[21:38].strip() in ("COPY - rejected", "pooled (rename!)",
-                                 "pooled", "off-format")
+      if line[21:39].strip() in ("COPY - rejected", "pooled (rename!)",
+                                 "pooled", "pooled (off-style)", "off-format")
   }
   assert verdicts["Roberto Carlos"] == "COPY - rejected"
+  assert verdicts["Cafu"] == "COPY - rejected"  # never shown as a seed
   assert verdicts["Roberto Larcos"] == "pooled (rename!)"
   assert verdicts["Fergalinho"] == "pooled"
+  assert verdicts["Raphinha Keane"] == "pooled"
   assert verdicts["Seamus da Silva"] == "pooled"
   assert verdicts["Paddy O'Rivaldo"] == "off-format"
+  assert verdicts["RONALDO 9"] == "off-format"
+  # No gate checks style: a name with nothing Brazilian left is pooled.
+  assert verdicts["Ciaran Kelly"] == "pooled (off-style)"
   pool_line = next(
       line for line in out.splitlines() if line.startswith("pool "))
   assert "'Roberto Carlos'" not in pool_line
   assert "'Ronaldinho'" not in pool_line
+  assert "'Ciaran Kelly'" in pool_line
+  assert len(verdicts) == len(walkthrough.SQUAD_CANDIDATES)

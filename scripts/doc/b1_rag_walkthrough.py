@@ -196,11 +196,13 @@ SQUAD_CLAUSE = {
         "route": "llm",
     }
 }
-# A scripted reply in four flavours: verbatim copies, one-letter renames in
-# the PES tradition, Brazilian-Irish inventions, and two off-format lines.
+# A scripted reply in five flavours: verbatim copies, one-letter renames in
+# the PES tradition, Brazilian-Irish blends, names with nothing Brazilian
+# left in them, and off-format lines.
 SQUAD_CANDIDATES = (
     "Ronaldinho",  # copy — and a seed the prompt showed
     "Roberto Carlos",  # copy — and a seed the prompt showed
+    "Cafu",  # copy the prompt never showed
     "Roberto Larcos",  # the free-kick specialist, unlicensed
     "Ronarid",
     "Naldorinho",
@@ -211,10 +213,34 @@ SQUAD_CANDIDATES = (
     "Seamus da Silva",
     "Cormac dos Santos",
     "Padraig Peixoto",
+    "Raphinha Keane",
+    "Rivaldinho Doyle",
+    "Thiago Gallagher",
+    "Ciaran Kelly",  # nothing Brazilian left — and nothing stops it
+    "Declan Murphy",
     "Paddy O'Rivaldo",  # no apostrophe anywhere in the source
+    "Neymar O'Shea",
+    "RONALDO 9",  # shirt-print style: capitals and a digit
     "player_name: Pele",  # echoes the column name
 )
 _RENAMES = frozenset({"Roberto Larcos", "Ronarid", "Naldorinho", "Facu"})
+_FULLY_IRISH = frozenset({"Ciaran Kelly", "Declan Murphy"})
+
+
+def squad_verdict(candidate: str, in_format) -> str:
+  """What the REAL gates do with `candidate`, in `_pool_llm_yield`'s order
+    (format first, then novelty) — plus two labels no gate knows about: we
+    can call a rename a rename, and an Irish name Irish, only because we
+    wrote the reply."""
+  if not in_format(candidate):
+    return "off-format"
+  if candidate in SQUAD:
+    return "COPY - rejected"
+  if candidate in _RENAMES:
+    return "pooled (rename!)"
+  if candidate in _FULLY_IRISH:
+    return "pooled (off-style)"
+  return "pooled"
 
 
 def char_trigrams(text: str) -> str:
@@ -580,7 +606,7 @@ def step_pes_mode() -> None:
       {"type": "object"},
       routed,
       seeds["centroid"],
-      target=10,
+      target=15,
       source_values=frozenset(SQUAD),
   )
   print("gate outcome   : parsed", y.parsed, "| format_rejected",
@@ -588,18 +614,11 @@ def step_pes_mode() -> None:
         y.prompt_echoes)
 
   in_format = b1._format_gate(routed)
-  print("\ncandidate            verdict           nearest real name    cosine")
+  print("\ncandidate            verdict            nearest real name    cosine")
   for cand in SQUAD_CANDIDATES:
     name, cosine = nearest_real_name(cand)
-    if not in_format(cand):
-      verdict = "off-format"
-    elif cand in SQUAD:
-      verdict = "COPY - rejected"
-    elif cand in _RENAMES:
-      verdict = "pooled (rename!)"
-    else:
-      verdict = "pooled"
-    print(f"{cand:20s} {verdict:17s} {name:20s} {cosine:6.2f}")
+    verdict = squad_verdict(cand, in_format)
+    print(f"{cand:20s} {verdict:18s} {name:20s} {cosine:6.2f}")
   print("pool           :", y.pool)
 
 
