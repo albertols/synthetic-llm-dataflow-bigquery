@@ -26,6 +26,13 @@ Writes into docs/designs/assets/:
   rag-fidelity-originality.png    concept  — scripted candidates on the
                                              nearest-source-similarity axis,
                                              coloured by the REAL gates
+  rag-great-serialization.png     concept  — a table row as a GReaT sentence,
+                                             clause by clause (real
+                                             `serialize_row` output)
+  rag-names-pes-map.png           concept  — a column of names in embedding
+                                             space: seeds per strategy, where
+                                             scripted candidates land, and
+                                             what a vector looks like
   rag-setup-cost.png              evidence — where one worker's setup went
   prefix-vs-kcenter-coverage.png  concept  — which 1,024 rows get indexed
                                              (owned by the 2026-07-25 design;
@@ -54,6 +61,7 @@ WS5 `MEASURED` block (`make_ws5_figures.py`, run
 from __future__ import annotations
 
 import io
+import textwrap
 
 import matplotlib
 
@@ -76,11 +84,15 @@ from sdfb_core.rag.retrieval import (
     retrieve_kcenter_k,
     select_seed_examples,
 )
+from sdfb_core.rag.serialize import serialize_row
 
 ASSETS = ws5.ASSETS
 BLUE, ORANGE, AQUA = ws5.BLUE, ws5.ORANGE, ws5.AQUA
 INK, MUTED, GRID, SURFACE = ws5.INK, ws5.MUTED, ws5.GRID, ws5.SURFACE
 DOT = "#c3cad3"  # recessive data points (darker than GRID: they are data)
+# The drawio/mermaid house classes lend two more hues when five columns of a
+# table each need their own (identity is also carried by the printed name).
+PURPLE, SLATE = "#7a3fd1", "#6b7280"
 K = b1._DEFAULT_TOP_K  # 8 — the engine's own constant
 # What article 4 prints for (seeds per column, indexed rows): a change to
 # either constant must fail here, so the article is re-synced on purpose.
@@ -619,6 +631,490 @@ def fig_fidelity_originality() -> None:
 
 
 # --------------------------------------------------------------------------
+def _clause_boxes(ax, clauses, colors, x0, y, *, width, line_h, size=9.2):
+  """Lay monospace clause boxes left to right, wrapping at `width`, using
+    each box's MEASURED extent; returns the y of the last line."""
+  renderer = ax.figure.canvas.get_renderer()
+  to_axes = ax.transAxes.inverted()
+  x, gap = x0, 0.008
+  for text, color in zip(clauses, colors, strict=True):
+    box = ax.text(
+        x,
+        y,
+        text,
+        family="monospace",
+        fontsize=size,
+        color=INK,
+        va="center",
+        ha="left",
+        bbox={
+            "boxstyle": "round,pad=0.32",
+            "facecolor": color + "26",
+            "edgecolor": color,
+            "linewidth": 1.1
+        })
+    # The text extent is final at creation; the bbox patch is not (it is
+    # sized at draw time), so add its padding — 0.32 em per side — by hand.
+    ext = box.get_window_extent(renderer)
+    pad_px = 2 * 0.32 * size * ax.figure.dpi / 72.0
+    w = (
+        to_axes.transform((ext.x1 + pad_px, 0))[0] - to_axes.transform(
+            (ext.x0, 0))[0])
+    if x + w > x0 + width and x > x0:
+      x, y = x0, y - line_h
+      box.set_position((x, y))
+    x += w + gap
+  return y
+
+
+def fig_great_serialization() -> None:
+  columns = walkthrough.COLUMNS
+  colors = [BLUE, AQUA, ORANGE, SLATE, PURPLE]
+  rows = [dict(walkthrough.ROWS[0]), dict(walkthrough.ROWS[72])]
+  rows.append({**walkthrough.ROWS[5], "merchant_name": None})
+
+  fig, ax = plt.subplots(figsize=(14.5, 8.0), facecolor=SURFACE)
+  fig.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=0.95)
+  ax.set_axis_off()
+  ax.set_xlim(0, 1)
+  ax.set_ylim(0, 1)
+  fig.canvas.draw()  # a renderer must exist before extents are measured
+
+  # -- the table ------------------------------------------------------------
+  col_x = [0.015, 0.085, 0.150, 0.215, 0.290]
+  col_w = [0.066, 0.061, 0.061, 0.071, 0.170]
+  top, cell_h = 0.855, 0.052
+  for cx, cw, name, color in zip(col_x, col_w, columns, colors, strict=True):
+    ax.add_patch(
+        plt.Rectangle((cx, top), cw, cell_h, facecolor=color,
+                      edgecolor=SURFACE))
+    ax.text(
+        cx + cw / 2,
+        top + cell_h / 2,
+        name,
+        color=SURFACE,
+        fontsize=8.6,
+        fontweight="600",
+        ha="center",
+        va="center",
+        family="monospace")
+  for r, row in enumerate(rows):
+    y = top - (cell_h + 0.002) * (r + 1)
+    for cx, cw, name in zip(col_x, col_w, columns, strict=True):
+      ax.add_patch(
+          plt.Rectangle((cx, y), cw, cell_h, facecolor=SURFACE, edgecolor=GRID))
+      value = row[name]
+      ax.text(
+          cx + cw / 2,
+          y + cell_h / 2,
+          "NULL" if value is None else str(value),
+          color=MUTED if value is None else INK,
+          fontsize=8.2,
+          ha="center",
+          va="center",
+          family="monospace")
+  ax.text(
+      0.015,
+      0.935,
+      "a BigQuery table — rows and cells",
+      color=INK,
+      fontsize=11,
+      fontweight="600")
+  ax.text(
+      0.015,
+      0.60, "what the embedder receives for row 1 — one string, "
+      "clauses joined by “, ”:",
+      color=INK,
+      fontsize=9.6,
+      fontweight="600")
+  ax.text(
+      0.015,
+      0.545,
+      textwrap.fill(serialize_row(rows[0], columns), width=64),
+      color=INK,
+      fontsize=9.2,
+      family="monospace",
+      va="top",
+      bbox={
+          "boxstyle": "round,pad=0.5",
+          "facecolor": "#f1f3f4",
+          "edgecolor": SLATE,
+          "linewidth": 1.0
+      })
+
+  # -- the sentences ----------------------------------------------------------
+  ax.text(
+      0.50,
+      0.935, "serialize_row()  →  one sentence per row: "
+      "“column is value”, in schema order",
+      color=INK,
+      fontsize=11,
+      fontweight="600")
+  y = 0.88
+  for r, row in enumerate(rows):
+    clauses = serialize_row(row, columns).split(", ")
+    ax.annotate(
+        "",
+        xy=(0.495, y),
+        xytext=(0.465, top - (cell_h + 0.002) * (r + 1) + cell_h / 2),
+        arrowprops={
+            "arrowstyle": "-|>",
+            "color": MUTED,
+            "linewidth": 1.1
+        })
+    y = _clause_boxes(
+        ax, clauses, colors, 0.50, y, width=0.49, line_h=0.054) - 0.082
+  ax.text(
+      0.50,
+      y + 0.03, "a missing value is written down (“is null”), so two rows that "
+      "differ only in what is absent still differ",
+      color=MUTED,
+      fontsize=9.2,
+      style="italic")
+
+  # -- order: the paper vs the pipeline ------------------------------------------
+  base = serialize_row(rows[0], columns).split(", ")
+  order = np.random.default_rng(SEED).permutation(len(base))
+  ax.plot([0.015, 0.985], [0.405, 0.405], color=GRID, linewidth=1.0)
+  ax.text(
+      0.015,
+      0.36, "GReaT, the paper — fine-tunes an LLM on these "
+      "sentences, so it SHUFFLES the clauses on every pass: the model "
+      "must not learn a column order",
+      color=INK,
+      fontsize=10.2,
+      fontweight="600")
+  _clause_boxes(
+      ax, [base[i] for i in order], [colors[i] for i in order],
+      0.015,
+      0.305,
+      width=0.97,
+      line_h=0.054)
+  ax.text(
+      0.015,
+      0.235, "this pipeline — EMBEDS them, so the order is the "
+      "schema's, always: same row → same bytes → same vector → same "
+      "row_digest, on any worker, on any run",
+      color=INK,
+      fontsize=10.2,
+      fontweight="600")
+  _clause_boxes(ax, base, colors, 0.015, 0.18, width=0.97, line_h=0.054)
+
+  # -- the other chunk kind ---------------------------------------------------------
+  ax.text(
+      0.015,
+      0.105, "the second chunk kind needs no sentence at all — "
+      "one DISTINCT cell of a free-text column is its own chunk text:",
+      color=INK,
+      fontsize=10.2,
+      fontweight="600")
+  _clause_boxes(
+      ax, [
+          "CAFE ARBOL*MADRID", "METRO NORTE TRAVEL CH",
+          "PAYLINK *BLUE FERN YOGA", "WWW.NUBEBOOKS.EXAMPLE"
+      ], [PURPLE] * 4,
+      0.015,
+      0.05,
+      width=0.97,
+      line_h=0.054)
+  fig.suptitle(
+      "GReaT serialization: a row becomes a sentence an embedder can read — "
+      "every clause keeps the colour of its column",
+      color=INK,
+      fontsize=12.5,
+      fontweight="600",
+      x=0.012,
+      ha="left",
+      y=0.995)
+  fig.savefig(
+      ASSETS / "rag-great-serialization.png", dpi=160, facecolor=SURFACE)
+  plt.close(fig)
+
+
+# --------------------------------------------------------------------------
+def _mds_2d(vectors: np.ndarray) -> np.ndarray:
+  """Classical MDS of cosine distances — deterministic, NumPy only."""
+  dist = np.sqrt(np.clip(2.0 - 2.0 * (vectors @ vectors.T), 0.0, None))
+  n = len(dist)
+  centering = np.eye(n) - np.ones((n, n)) / n
+  gram = -0.5 * centering @ (dist**2) @ centering
+  vals, vecs = np.linalg.eigh(gram)
+  top = np.argsort(vals)[::-1][:2]
+  coords = vecs[:, top] * np.sqrt(np.clip(vals[top], 0.0, None))
+  # eigh leaves the sign of each axis free: pin it so the figure is stable.
+  return coords * np.sign(coords[0])
+
+
+def _neighbour_map(vectors: np.ndarray, k: int = 3, iters: int = 600):
+  """2-D layout that keeps NEIGHBOURS together: a Fruchterman-Reingold
+    spring layout of the k-nearest-neighbour cosine graph, started from the
+    MDS coordinates so it is deterministic. 384 dimensions cannot be drawn
+    faithfully in two; what this preserves is who sits next to whom — page
+    distances are not cosines. Returns (coords, edges)."""
+  sims = vectors @ vectors.T
+  np.fill_diagonal(sims, -1.0)
+  n = len(sims)
+  edges = sorted({(min(i, int(j)), max(i, int(j)))
+                  for i in range(n)
+                  for j in np.argsort(sims[i])[::-1][:k]})
+  pos = _mds_2d(vectors)
+  pos = 0.5 * pos / np.abs(pos).max()
+  ideal = 1.0 / np.sqrt(n)
+  src = np.array([e[0] for e in edges])
+  dst = np.array([e[1] for e in edges])
+  # Stronger springs between more similar names: a rename hugs its original.
+  weight = 0.4 + 1.6 * np.clip(np.array([sims[i, j] for i, j in edges]), 0, 1)
+  for step in range(iters):
+    delta = pos[:, None, :] - pos[None, :, :]
+    dist = np.linalg.norm(delta, axis=2) + 1e-6
+    move = ((delta / dist[..., None]) *
+            (ideal**2 / dist)[..., None]).sum(axis=1)
+    pull = pos[src] - pos[dst]
+    length = np.linalg.norm(pull, axis=1, keepdims=True) + 1e-6
+    force = pull * (length / ideal) * weight[:, None]
+    np.add.at(move, src, -force)
+    np.add.at(move, dst, force)
+    move -= 0.6 * pos  # weak gravity keeps loose names on the page
+    temp = 0.08 * (1.0 - step / iters) + 0.002
+    norm = np.linalg.norm(move, axis=1, keepdims=True) + 1e-9
+    pos = pos + move / norm * np.minimum(norm, temp)
+  pos -= pos.mean(axis=0)
+  return pos / np.abs(pos).max(), edges
+
+
+def _draw_links(ax, xy, edges, n_squad: int) -> None:
+  for i, j in edges:
+    if i < n_squad and j < n_squad:
+      ax.plot(
+          *zip(xy[i], xy[j], strict=True), color=GRID, linewidth=0.7, zorder=0)
+
+
+def _draw_seed_panel(ax, xy_squad, squad, seeds) -> None:
+  """Which eight real names the prompt shows, per strategy."""
+  for (x, y), label in zip(xy_squad, squad, strict=True):
+    in_c, in_k = label in seeds["centroid"], label in seeds["kcenter"]
+    if in_c:
+      ax.scatter(
+          x,
+          y,
+          s=150,
+          color=ORANGE,
+          edgecolors=SURFACE,
+          linewidths=1.4,
+          zorder=3)
+    if in_k:
+      ax.scatter(
+          x,
+          y,
+          s=46 if in_c else 150,
+          color=BLUE,
+          marker="s",
+          edgecolors=SURFACE,
+          linewidths=1.4,
+          zorder=4)
+    if not (in_c or in_k):
+      ax.scatter(x, y, s=14, color=DOT, linewidths=0, zorder=1)
+    ax.text(
+        x,
+        y + 0.03,
+        label,
+        fontsize=8.6 if (in_c or in_k) else 7.0,
+        color=INK if (in_c or in_k) else MUTED,
+        ha="center",
+        fontweight="600" if (in_c or in_k) else "normal",
+        zorder=5)
+  ax.scatter([], [],
+             s=90,
+             color=ORANGE,
+             label="centroid — the 8 most typical spellings")
+  ax.scatter([], [],
+             s=90,
+             color=BLUE,
+             marker="s",
+             label="kcenter — the 8 farthest from each other")
+  ax.legend(
+      frameon=True,
+      facecolor=SURFACE,
+      edgecolor=GRID,
+      framealpha=1.0,
+      fontsize=9,
+      loc="lower left",
+      labelcolor=INK)
+  _map_axes(
+      ax, "which eight real names does the prompt show?",
+      "fifty names, linked to their 3 nearest neighbours in 384-d; "
+      "seeds by select_seed_examples()")
+
+
+def _candidate_verdict(cand: str, squad: list[str], in_format) -> str:
+  """Same order as `_pool_llm_yield`: format gate first, then novelty."""
+  if not in_format(cand):
+    return "off-format — rejected"
+  if cand in squad:
+    return "copy — rejected by the wall"
+  if cand in walkthrough._RENAMES:
+    return "one-letter rename — POOLED"
+  return "Brazilian-Irish invention — pooled"
+
+
+def _draw_candidate_panel(ax, xy_squad, xy_cands, squad, cands) -> None:
+  """Where the scripted candidates land, tied to their nearest real name."""
+  prof = profile_columns(
+      walkthrough.squad_schema(walkthrough.SQUAD_CLAUSE),
+      walkthrough.SQUAD_ROWS)["player_name"]
+  in_format = b1._format_gate(prof)
+  styles = {
+      "copy — rejected by the wall": (ORANGE, "X"),
+      "one-letter rename — POOLED": (PURPLE, "D"),
+      "Brazilian-Irish invention — pooled": (AQUA, "o"),
+      "off-format — rejected": (SLATE, "s"),
+  }
+  ax.scatter(
+      xy_squad[:, 0], xy_squad[:, 1], s=14, color=DOT, linewidths=0, zorder=1)
+  seen, named = set(), set()
+  for (x, y), cand in zip(xy_cands, cands, strict=True):
+    verdict = _candidate_verdict(cand, squad, in_format)
+    color, marker = styles[verdict]
+    nearest, _ = walkthrough.nearest_real_name(cand)
+    nx, ny = xy_squad[squad.index(nearest)]
+    named.add(nearest)
+    ax.plot([x, nx], [y, ny], color=color, linewidth=1.3, alpha=0.85, zorder=2)
+    ax.scatter(
+        x,
+        y,
+        s=95,
+        color=color,
+        marker=marker,
+        edgecolors=SURFACE,
+        linewidths=1.3,
+        zorder=4,
+        label=None if verdict in seen else verdict)
+    seen.add(verdict)
+    ax.text(
+        x,
+        y + 0.032,
+        cand,
+        fontsize=8.6,
+        color=INK,
+        ha="center",
+        fontweight="600",
+        zorder=5)
+  for (x, y), label in zip(xy_squad, squad, strict=True):
+    if label in named:
+      ax.text(
+          x, y - 0.05, label, fontsize=7.2, color=MUTED, ha="center", zorder=3)
+  ax.legend(
+      frameon=True,
+      facecolor=SURFACE,
+      edgecolor=GRID,
+      framealpha=1.0,
+      fontsize=9,
+      loc="lower left",
+      labelcolor=INK)
+  _map_axes(
+      ax, "where do 14 scripted candidates land?",
+      "each tied to its nearest real name (grey label) — only an EXACT "
+      "match hits the wall")
+
+
+def _draw_vector_strip(ax) -> None:
+  """What a vector IS: the 384 numbers of six names, as lit cells."""
+  shown = [
+      "Ronaldo", "Ronaldinho", "Ronarid", "Roberto Carlos", "Roberto Larcos",
+      "Fergalinho"
+  ]
+  mat = np.abs(np.array(walkthrough.squad_vectors(shown)))
+  ax.imshow(
+      mat,
+      aspect="auto",
+      cmap="Blues",
+      vmin=0,
+      vmax=mat.max(),
+      interpolation="nearest")
+  ax.set_yticks(range(len(shown)))
+  ax.set_yticklabels(shown, fontsize=9, color=INK, family="monospace")
+  ax.set_xticks([0, 95, 191, 287, 383])
+  ax.set_xticklabels(["dim 1", "96", "192", "288", "384"],
+                     fontsize=8.5,
+                     color=MUTED)
+  ax.tick_params(length=0)
+  for side in ax.spines.values():
+    side.set_color(GRID)
+  ax.set_title(
+      "what a vector IS: 384 numbers per name (|value| shown). Spellings "
+      "that share letters light the same cells — on the workers bge-small "
+      "fills every cell; the geometry is the same",
+      color=INK,
+      fontsize=10.2,
+      fontweight="600",
+      loc="left",
+      pad=8)
+
+
+def fig_names_pes_map() -> None:
+  squad = list(walkthrough.SQUAD)
+  cands = list(walkthrough.SQUAD_CANDIDATES)
+  vec_squad = np.array(walkthrough.squad_vectors(squad))
+  xy, edges = _neighbour_map(
+      np.vstack([vec_squad,
+                 np.array(walkthrough.squad_vectors(cands))]))
+  xy_squad, xy_cands = xy[:len(squad)], xy[len(squad):]
+  seeds = {
+      s: set(select_seed_examples(vec_squad.tolist(), squad, K, strategy=s))
+      for s in ("centroid", "kcenter")
+  }
+
+  fig = plt.figure(figsize=(16.5, 11.6), facecolor=SURFACE)
+  grid = fig.add_gridspec(
+      2, 2, height_ratios=[4.4, 1.0], hspace=0.13, wspace=0.04)
+  ax = fig.add_subplot(grid[0, 0])
+  _draw_links(ax, xy, edges, len(squad))
+  _draw_seed_panel(ax, xy_squad, squad, seeds)
+  ax = fig.add_subplot(grid[0, 1])
+  _draw_links(ax, xy, edges, len(squad))
+  _draw_candidate_panel(ax, xy_squad, xy_cands, squad, cands)
+  _draw_vector_strip(fig.add_subplot(grid[1, :]))
+
+  fig.suptitle(
+      "PES mode: fifty real names in embedding space — which eight the "
+      "prompt shows, and where copies, renames and inventions land",
+      color=INK,
+      fontsize=13,
+      fontweight="600",
+      x=0.012,
+      ha="left",
+      y=0.995)
+  fig.subplots_adjust(left=0.085, right=0.992, bottom=0.035, top=0.915)
+  fig.savefig(ASSETS / "rag-names-pes-map.png", dpi=160, facecolor=SURFACE)
+  plt.close(fig)
+
+
+def _map_axes(ax, name: str, sub: str) -> None:
+  ax.set_title(
+      name,
+      color=INK,
+      fontsize=10.5,
+      fontweight="600",
+      loc="left",
+      pad=24,
+      family="monospace")
+  ax.text(
+      0,
+      1.02,
+      sub,
+      transform=ax.transAxes,
+      color=MUTED,
+      fontsize=9,
+      va="bottom")
+  ax.set_xticks([])
+  ax.set_yticks([])
+  ax.set_facecolor(SURFACE)
+  ax.margins(0.09)
+  for side in ax.spines.values():
+    side.set_color(GRID)
+
+
+# --------------------------------------------------------------------------
 def fig_setup_cost() -> None:
   """EVIDENCE — WS5 MEASURED block (1M-row run 2026-07-26_06_54_25)."""
   n = ws5.N_SETUPS
@@ -750,6 +1246,8 @@ if __name__ == "__main__":
   fig_seed_pickers(points, labels)
   fig_seed_budget(points, labels)
   fig_fidelity_originality()
+  fig_great_serialization()
+  fig_names_pes_map()
   fig_setup_cost()
   fig_prefix_vs_kcenter()
-  print(f"\nwrote 6 figures + 1 GIF to {ASSETS}")
+  print(f"\nwrote 8 figures + 1 GIF to {ASSETS}")

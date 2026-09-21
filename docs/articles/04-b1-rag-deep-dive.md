@@ -25,6 +25,7 @@ sources:
   - scripts/doc/b1_rag_walkthrough.py
 figures:
   - docs/articles/assets/rag-end-to-end-flow.png
+  - docs/designs/assets/rag-great-serialization.png
   - docs/designs/assets/embed-cost-evolution.png
   - docs/designs/assets/embedding-geometry-topk.png
   - docs/designs/assets/rag-dense-vectors-3d.png
@@ -36,6 +37,7 @@ figures:
   - docs/designs/assets/prefix-vs-kcenter-coverage.png
   - docs/articles/assets/freetext-pool-ladder.png
   - docs/designs/assets/rag-fidelity-originality.png
+  - docs/designs/assets/rag-names-pes-map.png
   - docs/designs/assets/centroid-vs-perquery.png
   - docs/articles/assets/rag-chunk-identity.png
   - docs/articles/assets/engine-attach-detach.png
@@ -110,7 +112,8 @@ usually does.** Every data example below is the printed output of
 which re-implements nothing: it calls `serialize_row`,
 `compute_row_digest`, `build_index`, `select_seed_examples`,
 `_build_pool_prompt`, `_pool_llm_yield` and `B1RagEngine` on a fictitious
-96-row table (`demo.card_transactions`, till-receipt merchant names). It
+96-row table (`demo.card_transactions`, till-receipt merchant names) —
+and, for one section in extra time, on fifty footballers' names. It
 runs on a laptop in seconds — no GPU, no GCP:
 
 ```bash
@@ -202,6 +205,36 @@ A document RAG chunks by token window. A table has better units: the
   1,024 rows of the (fingerprint-ordered, hence mode-agnostic) sample.
 - **`free_text_col`** — one *distinct* value of one free-text column,
   ≤ 1,024 per column. The value is the chunk text.
+
+An embedder reads text, and a table row is not text. GReaT's answer —
+the one this pipeline borrows — is almost embarrassingly simple: say the
+row out loud. Every cell becomes a three-word clause, *column is value*,
+and the clauses are joined with commas:
+
+*A row becomes a sentence an embedder can read — every clause keeps the
+colour of its column, a missing value is written down, and the order is
+the schema's:*
+
+![GReaT serialization](../designs/assets/rag-great-serialization.png)
+
+💡 **Concept, not a run.** The sentences are `serialize_row()`'s real
+output for three rows of the toy table. Three things to take from it.
+The **column name travels with the value**, so `amount is 4.5` and
+`shirt is 4` are different sentences even though the cell is a small
+number in both — the embedder gets the schema for free. **Nothing is
+left out**: a `NULL` becomes `is null`, a boolean becomes `true` or
+`false`, so the sentence always has one clause per column. And the
+bottom half is the one place this pipeline departs from the paper —
+GReaT shuffles the clauses because it *trains* a model on them; this
+pipeline *embeds* them, and a shuffled sentence would be a different
+vector for the same row.
+
+The same function runs in two places, and they must agree to the byte:
+the `RagChunkRows` transform that writes `rag_chunks`, and
+`B1RagEngine.setup()` when it embeds rows itself (both are marked
+*GReaT* in the flow diagram above). That agreement is the whole reuse
+story of the next paragraphs: the stored vector is this row's vector
+only if the stored sentence is this row's sentence.
 
 ```text
 row            : {"txn_id": "T00104", "channel": "pos", "amount": 4.5, "currency": "EUR", "merchant_name": "CAFE ARBOL*MADRID"}
@@ -678,6 +711,112 @@ score a landed table rather than veto a candidate.
 `::_infer_free_text_pool`, `::_pool_llm_yield`, `::_absorb_round`,
 `::_format_gate`, `::_fetch_source_values`.
 
+## Extra time — PES mode: the same path on a column of names
+
+Merchant names are a polite example. The column a privacy officer
+actually loses sleep over is a column of **names** — so here is the same
+path, on the most recognisable names available, in a format anyone who
+owned a PlayStation around 2002 will recognise. Pro Evolution Soccer had
+no licence for most of its players, so the greatest left-back of his
+generation took his free kicks as *Roberto Larcos*. That is, precisely,
+a synthetic-data system: real values in, plausible fictional values out.
+It is also, as we are about to see, a *bad* one.
+
+The toy table is `demo.squad_list`: fifty famous Brazilian footballers
+(accents dropped, as a PS2 memory card would), standing in for the PII a
+real table holds. The clause asks for something PES never tried — a
+*fictional Brazilian footballer name with an Irish twist*:
+
+```text
+row_doc text   : player_name is Roberto Carlos, shirt is 8
+50 distinct names, no clause      -> kind = categorical (re-emitted VERBATIM at source frequency)
+50 distinct names, route: "llm"   -> kind = free_text (generated; every real name is rejected)
+
+--pool_seed_strategy=centroid
+    Roberto Carlos, Ronaldinho, Robinho, Edilson, Gerson, Carlos Alberto Torres, Emerson, Ricardinho
+
+--pool_seed_strategy=kcenter
+    Roberto Carlos, Branco, Garrincha, Zagallo, Dunga, Taffarel, Jorginho, Leonardo
+
+prompt tail    : Examples: ['Roberto Carlos', 'Ronaldinho', 'Robinho', 'Edilson', 'Gerson', 'Carlos Alberto Torres', 'Emerson', 'Ricardinho']. Return JSON {"values": [...]}. Column constraint: format=fictional Brazilian footballer name with an Irish twist, as an unlicensed early-2000s football game would print it; charset=letters and spaces.
+gate outcome   : parsed 14 | format_rejected 2 | copies 2 | seed echoes 2
+
+candidate            verdict           nearest real name    cosine
+Ronaldinho           COPY - rejected   Ronaldinho             1.00
+Roberto Carlos       COPY - rejected   Roberto Carlos         1.00
+Roberto Larcos       pooled (rename!)  Roberto Carlos         0.60
+Ronarid              pooled (rename!)  Ronaldo                0.50
+Naldorinho           pooled (rename!)  Ronaldinho             0.55
+Facu                 pooled (rename!)  Falcao                 0.34
+Fergalinho           pooled            Robinho                0.32
+Oisinaldo            pooled            Ronaldo                0.45
+Eoinilson            pooled            Edilson                0.56
+Seamus da Silva      pooled            Leonidas da Silva      0.47
+Cormac dos Santos    pooled            Djalma Santos          0.51
+Padraig Peixoto      pooled            Pele                   0.22
+Paddy O'Rivaldo      off-format        Rivaldo                0.53
+player_name: Pele    off-format        Pele                   0.53
+```
+
+*Fifty real names in embedding space: `centroid` shows the prompt the
+two big spelling families, `kcenter` shows it the odd ones out — and a
+copy lands on a real name, a rename lands beside one, an invention lands
+in a family:*
+
+![PES mode](../designs/assets/rag-names-pes-map.png)
+
+💡 **Concept, not a run.** Laptop stand-ins, stated plainly: the
+`HashingEmbedder` is fed character trigrams so that spelling overlap
+shows (a subword model like `bge-small` sees that natively), the
+candidates are scripted, and the map is a spring layout of each name's
+three nearest neighbours — it keeps *who sits next to whom*, not the
+distances. The seeds are picked by `select_seed_examples()`, the
+verdicts are the real gates', and the bottom strip is the literal
+vector: 384 numbers per name, the same cells lit for the same letters.
+
+Four things this column teaches that the merchant column could not:
+
+- **A small column of names is an enum, and enums are copied.** Fifty
+  distinct strings is under the profiler's free-text threshold, so left
+  alone this column is typed *categorical* and re-emitted verbatim at
+  its source frequency — perfect fidelity, zero privacy. This is the one
+  place where `route: "llm"` earns its keep: it re-types the column as
+  free text. A real names column clears fifty distinct values on its
+  own; a short list of branch managers does not, and needs the clause.
+- **The seeds set the style; the clause sets the twist.** `centroid`
+  hands the model the `-inho` and `-son` families — a very clear picture
+  of what a Brazilian footballer is called. `kcenter` hands it
+  Garrincha, Zagallo and Taffarel, which is a better picture of how
+  *varied* they are. Neither can say "Irish". That is what the clause is
+  for — and *Fergalinho*, *Oisinaldo* and *Eoinilson* are what the two
+  produce together.
+- **The format gate is strict about punctuation, and it is right.**
+  *Paddy O'Rivaldo* is rejected: no value in the source carries an
+  apostrophe, so none may land. *Seamus da Silva* passes only because
+  Leônidas da Silva played in 1938 and gave the column a lower-case
+  particle. Sorry, Paddy.
+- **A rename is not a synthesis.** The wall rejects `Ronaldinho` and
+  `Roberto Carlos` — exact copies, one of them a seed the prompt showed.
+  It pools `Roberto Larcos`, `Ronarid`, `Naldorinho` and `Facu`, because
+  none of them *is* a real value. Every football fan re-identifies all
+  four in under a second. Worse, no single distance sees the problem:
+  `Roberto Larcos` sits at 0.60 from one man, `Eoinilson` at 0.56 from a
+  whole family of `-ilson`s, and the trigram embedder files `Facu` next
+  to Falcão when any fan can see whose shirt that is.
+  Re-identification is a human act; a gate can only approximate it. That
+  is why the exact-match wall is the *floor* of the privacy story and
+  not its ceiling, why the evaluation looks at distance *distributions*
+  against a holdout rather than one threshold (Part 10), and why the
+  cheapest defence is upstream: a prompt that asks for an Irish twist
+  stops the model orbiting the seeds in the first place.
+
+PES eventually fixed its naming problem with licences. Synthetic data
+cannot; it has to be *Fergalinho* from the start.
+
+🔬 **In the code.** `profile.py::_profile_string` (the `force_llm`
+re-typing), `engine.py::_format_gate` (the collapsed-mask gate),
+`::_absorb_round`; `scripts/doc/b1_rag_walkthrough.py::step_pes_mode`.
+
 ## What lands: skew, cardinality, and which values travel together
 
 The whole engine, end to end, on the laptop — `B1RagEngine.setup()` then
@@ -957,6 +1096,9 @@ next launch.
 9. **Bytes all the way down.** Same rows → same digest → same vectors →
    same seeds → same prompt → same KV prefix. Approximate anything and
    the chain breaks.
+10. **A rename is not a synthesis.** *Roberto Larcos* passes an
+    exact-match wall and fools nobody. The wall is the floor; the prompt
+    and the evaluation are the rest of the house.
 
 ## Where this goes next
 
@@ -1053,14 +1195,20 @@ per-cluster pools. The comment section is part of the project.
 claims verified at repo commit `4cba0b6` (v0.5.2). Every data example is
 the output of `scripts/doc/b1_rag_walkthrough.py` at that commit (toy
 table, `HashingEmbedder`, pure-Python index, scripted model reply — the
-pipeline functions are the real ones). Figures: `rag-end-to-end-flow`,
+pipeline functions are the real ones). The PES-mode section uses the
+public names of famous footballers as a stand-in for PII, feeds the
+hashing embedder character trigrams, and draws its map with a seeded
+spring layout of the 3-nearest-neighbour cosine graph; the "PES-style"
+renames are written for this article in the spirit of the game's
+unlicensed squads (Pro Evolution Soccer is a trademark of Konami). Figures: `rag-end-to-end-flow`,
 `rag-faiss-data-path`, `rag-chunk-identity`, `engine-attach-detach`
 (drawio sources committed side-by-side in `docs/articles/assets/`,
 exported with the next-ai-drawio MCP plugin; they carry no measured
 numbers; `engine-attach-detach` is shared with Part 5);
 `rag-dense-vectors-3d.png`, `rag-retrieval-sphere.gif`,
 `rag-seed-pickers.png`, `rag-seed-budget.png`,
-`rag-fidelity-originality.png`, `rag-setup-cost.png` and
+`rag-fidelity-originality.png`, `rag-great-serialization.png`,
+`rag-names-pes-map.png`, `rag-setup-cost.png` and
 `prefix-vs-kcenter-coverage.png` are generated by
 `scripts/doc/make_rag_geometry_figures.py` — `CONCEPT` block seeded, all
 selections computed by `sdfb_core.rag.retrieval`; the one evidence figure

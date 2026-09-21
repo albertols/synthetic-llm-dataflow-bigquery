@@ -46,7 +46,7 @@ def _section(out: str, number: int) -> str:
 def test_the_walkthrough_runs_end_to_end_on_a_bare_laptop(capsys):
   walkthrough.main()
   out = capsys.readouterr().out
-  for number in range(1, 7):
+  for number in range(1, 8):
     assert f"\n{number}. " in out
 
 
@@ -95,3 +95,31 @@ def test_no_generated_row_is_a_copy_and_the_head_literal_is_re_emitted(capsys):
   assert "COPY" not in rows
   assert "<- novel" in rows
   assert "<- head literal" in rows
+
+
+def test_pes_mode_names_are_categorical_until_routed_and_renames_pass_the_wall(
+    capsys):
+  """The claims of article 4's "PES mode" section, against the real
+    profiler, picker and gates."""
+  walkthrough.step_pes_mode()
+  out = capsys.readouterr().out
+  assert "no clause      -> kind = categorical" in out
+  assert 'route: "llm"   -> kind = free_text' in out
+  assert "row_doc text   : player_name is Roberto Carlos, shirt is 8" in out
+  assert ("gate outcome   : parsed 14 | format_rejected 2 | copies 2 | "
+          "seed echoes 2") in out
+  verdicts = {
+      line[:20].strip(): line[21:38].strip()
+      for line in out.splitlines()
+      if line[21:38].strip() in ("COPY - rejected", "pooled (rename!)",
+                                 "pooled", "off-format")
+  }
+  assert verdicts["Roberto Carlos"] == "COPY - rejected"
+  assert verdicts["Roberto Larcos"] == "pooled (rename!)"
+  assert verdicts["Fergalinho"] == "pooled"
+  assert verdicts["Seamus da Silva"] == "pooled"
+  assert verdicts["Paddy O'Rivaldo"] == "off-format"
+  pool_line = next(
+      line for line in out.splitlines() if line.startswith("pool "))
+  assert "'Roberto Carlos'" not in pool_line
+  assert "'Ronaldinho'" not in pool_line

@@ -20,7 +20,7 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 
 ### 📗 Docs
 - Article 4 of the Medium series, [`b1_rag` — retrieval that seeds the prompt and never touches a row](docs/articles/04-b1-rag-deep-dive.md): chunking, the embedder, the exact FAISS index, the three `--pool_seed_strategy` values, the clause/retrieval interplay, why the layer is not `apache_beam.ml.rag`, and the engine seam (a figure shared with Part 5). Every data example is the output of [`scripts/doc/b1_rag_walkthrough.py`](scripts/doc/b1_rag_walkthrough.py), which calls the pipeline's own functions on a toy table and is pinned by unit tests.
-- [`scripts/doc/make_rag_geometry_figures.py`](scripts/doc/make_rag_geometry_figures.py) generates the article's concept figures (every selection drawn is computed by `sdfb_core.rag.retrieval`), one evidence figure from the WS5 `MEASURED` block, and takes over `prefix-vs-kcenter-coverage.png`, which had no committed generator and a clipped title.
+- [`scripts/doc/make_rag_geometry_figures.py`](scripts/doc/make_rag_geometry_figures.py) generates the article's concept figures — the GReaT row-to-sentence drawing, the 3-D sphere and its GIF, the seed pickers, and a labelled map of fifty names with seeds, candidates and their vectors (every selection drawn is computed by `sdfb_core.rag.retrieval`) — one evidence figure from the WS5 `MEASURED` block, and takes over `prefix-vs-kcenter-coverage.png`, which had no committed generator and a clipped title.
 
 ## [v0.5.2] — 2026-09-19
 

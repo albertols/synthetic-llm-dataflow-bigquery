@@ -30,9 +30,18 @@ pure-Python exact fallback — the same two seams production fills with
 returns a fixed candidate list, so the GATES are real and the candidates
 are not a model's output.
 
-The table is fictitious: `demo.card_transactions`, 24 rows, one free-text
+The table is fictitious: `demo.card_transactions`, 96 rows, one free-text
 column (`merchant_name`, till-receipt store names) with one dominant format
 and three rare ones.
+
+Step 7 ("PES mode") repeats the path on a column of NAMES — the public names
+of famous Brazilian footballers standing in for the PII a real table holds —
+and asks for fictional Brazilian names with an Irish twist, in the spirit of
+the unlicensed squads of early-2000s football games. It exists to show three
+things the merchant column cannot: a small names column is typed CATEGORICAL
+(re-emitted verbatim) unless `route: "llm"` re-types it; the format gate
+keeps punctuation exact; and a one-letter rename passes an exact-match wall
+while sitting next to exactly one real name.
 """
 
 from __future__ import annotations
@@ -119,16 +128,148 @@ _SCRIPTED_CANDIDATES = [
     "QUESERIA PRADO*OVIEDO",
 ]
 
+# --- PES mode ---------------------------------------------------------------
+# Public names of famous Brazilian footballers, accents dropped (as a PS2
+# memory card would). They stand in for PII: values that identify a person.
+SQUAD_FQN = "demo.squad_list"
+SQUAD = (
+    "Pele",
+    "Garrincha",
+    "Didi",
+    "Vava",
+    "Zagallo",
+    "Nilton Santos",
+    "Djalma Santos",
+    "Leonidas da Silva",
+    "Jairzinho",
+    "Rivellino",
+    "Tostao",
+    "Gerson",
+    "Carlos Alberto Torres",
+    "Zico",
+    "Socrates",
+    "Falcao",
+    "Careca",
+    "Junior",
+    "Romario",
+    "Bebeto",
+    "Dunga",
+    "Taffarel",
+    "Aldair",
+    "Branco",
+    "Jorginho",
+    "Mauro Silva",
+    "Leonardo",
+    "Ronaldo",
+    "Rivaldo",
+    "Ronaldinho",
+    "Roberto Carlos",
+    "Cafu",
+    "Dida",
+    "Lucio",
+    "Kaka",
+    "Gilberto Silva",
+    "Juninho Paulista",
+    "Denilson",
+    "Edmilson",
+    "Kleberson",
+    "Roque Junior",
+    "Ze Roberto",
+    "Emerson",
+    "Marcos",
+    "Belletti",
+    "Vampeta",
+    "Edilson",
+    "Ricardinho",
+    "Rogerio Ceni",
+    "Robinho",
+)
+SQUAD_ROWS = [{
+    "player_name": name,
+    "shirt": (i % 23) + 1
+} for i, name in enumerate(SQUAD)]
+SQUAD_CLAUSE = {
+    "llm_prompt_constraint": {
+        "format": ("fictional Brazilian footballer name with an Irish twist, "
+                   "as an unlicensed early-2000s football game would print it"),
+        "charset": "letters and spaces",
+        "route": "llm",
+    }
+}
+# A scripted reply in four flavours: verbatim copies, one-letter renames in
+# the PES tradition, Brazilian-Irish inventions, and two off-format lines.
+SQUAD_CANDIDATES = (
+    "Ronaldinho",  # copy — and a seed the prompt showed
+    "Roberto Carlos",  # copy — and a seed the prompt showed
+    "Roberto Larcos",  # the free-kick specialist, unlicensed
+    "Ronarid",
+    "Naldorinho",
+    "Facu",
+    "Fergalinho",
+    "Oisinaldo",
+    "Eoinilson",
+    "Seamus da Silva",
+    "Cormac dos Santos",
+    "Padraig Peixoto",
+    "Paddy O'Rivaldo",  # no apostrophe anywhere in the source
+    "player_name: Pele",  # echoes the column name
+)
+_RENAMES = frozenset({"Roberto Larcos", "Ronarid", "Naldorinho", "Facu"})
+
+
+def char_trigrams(text: str) -> str:
+  """`text` as space-separated character trigrams.
+
+    The laptop's `HashingEmbedder` hashes whitespace TOKENS, so two spellings
+    of one name share nothing. Feeding it trigrams makes spelling overlap
+    visible — a stand-in for what a subword model like bge sees natively."""
+  padded = f"  {text.lower()} "
+  return " ".join(
+      padded[i:i + 3].replace(" ", "_") for i in range(len(padded) - 2))
+
+
+def squad_schema(clause: dict | None = None) -> TableSchema:
+  return TableSchema.model_validate({
+      "table_info": {
+          "table_id": SQUAD_FQN
+      },
+      "schema": [{
+          "name": "player_name",
+          "type": "STRING",
+          "mode": "NULLABLE",
+          "description": json.dumps(clause) if clause else "",
+      }, {
+          "name": "shirt",
+          "type": "INT64",
+          "mode": "NULLABLE",
+      }],
+  })
+
+
+def squad_vectors(names: tuple[str, ...] | list[str]) -> list[list[float]]:
+  return HashingEmbedder(dim=384).embed([char_trigrams(n) for n in names])
+
+
+def nearest_real_name(candidate: str) -> tuple[str, float]:
+  """(nearest real name, cosine) — the laptop's distance-to-closest-record."""
+  vec = squad_vectors([candidate])[0]
+  return max(((sum(a * b
+                   for a, b in zip(vec, ref, strict=True)), name)
+              for ref, name in zip(squad_vectors(SQUAD), SQUAD, strict=True)),
+             key=lambda t: t[0])[::-1]
+
 
 class _ScriptedClient:
-  """`ModelClient` stand-in: returns the scripted candidates once."""
+  """`ModelClient` stand-in: returns one scripted reply per call."""
 
-  def __init__(self) -> None:
+  def __init__(self, candidates=None) -> None:
     self.calls: list[dict] = []
+    self._candidates = list(_SCRIPTED_CANDIDATES if candidates is
+                            None else candidates)
 
   def generate_json(self, **kwargs) -> list[dict]:
     self.calls.append(kwargs)
-    return [{"values": list(_SCRIPTED_CANDIDATES)}]
+    return [{"values": list(self._candidates)}]
 
 
 def _h(title: str) -> None:
@@ -409,6 +550,59 @@ def step_end_to_end() -> None:
   engine.teardown()
 
 
+def step_pes_mode() -> None:
+  _h("7. PES MODE — the same path on a column of names")
+  row = SQUAD_ROWS[30]
+  print("row_doc text   :", serialize_row(row, ["player_name", "shirt"]))
+  plain = profile_columns(squad_schema(), SQUAD_ROWS)["player_name"]
+  routed = profile_columns(squad_schema(SQUAD_CLAUSE),
+                           SQUAD_ROWS)["player_name"]
+  print(f"{len(SQUAD)} distinct names, no clause      -> kind =",
+        plain.kind.value, "(re-emitted VERBATIM at source frequency)")
+  print(f"{len(SQUAD)} distinct names, route: \"llm\"   -> kind =",
+        routed.kind.value, "(generated; every real name is rejected)")
+
+  vectors = squad_vectors(SQUAD)
+  seeds = {}
+  for strategy in ("centroid", "kcenter"):
+    seeds[strategy] = select_seed_examples(
+        vectors, list(SQUAD), 8, strategy=strategy)
+    print(f"\n--pool_seed_strategy={strategy}")
+    print("   ", ", ".join(seeds[strategy]))
+
+  constraint = routed.llm_prompt_constraint
+  prompt = b1._build_pool_prompt(
+      "player_name", 32, seeds["centroid"], constraint=constraint)
+  print("\nprompt tail    :", prompt[prompt.index("Examples:"):])
+  y = b1._pool_llm_yield(
+      _ScriptedClient(SQUAD_CANDIDATES),
+      prompt,
+      {"type": "object"},
+      routed,
+      seeds["centroid"],
+      target=10,
+      source_values=frozenset(SQUAD),
+  )
+  print("gate outcome   : parsed", y.parsed, "| format_rejected",
+        y.format_rejected, "| copies", y.copies, "| seed echoes",
+        y.prompt_echoes)
+
+  in_format = b1._format_gate(routed)
+  print("\ncandidate            verdict           nearest real name    cosine")
+  for cand in SQUAD_CANDIDATES:
+    name, cosine = nearest_real_name(cand)
+    if not in_format(cand):
+      verdict = "off-format"
+    elif cand in SQUAD:
+      verdict = "COPY - rejected"
+    elif cand in _RENAMES:
+      verdict = "pooled (rename!)"
+    else:
+      verdict = "pooled"
+    print(f"{cand:20s} {verdict:17s} {name:20s} {cosine:6.2f}")
+  print("pool           :", y.pool)
+
+
 def main() -> None:
   step_chunking()
   vectors, values = step_embedding()
@@ -416,6 +610,7 @@ def main() -> None:
   seeds = step_strategies(vectors, values)
   step_prompt_and_gates(seeds)
   step_end_to_end()
+  step_pes_mode()
 
 
 if __name__ == "__main__":
