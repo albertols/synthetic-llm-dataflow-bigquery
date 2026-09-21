@@ -132,7 +132,8 @@ class _ScriptedClient:
 
 
 def _h(title: str) -> None:
-  print(f"\n{'=' * 78}\n{title}\n{'=' * 78}")
+  rule = "=" * 78
+  print(f"\n{rule}\n{title}\n{rule}")
 
 
 def step_chunking() -> None:
@@ -181,7 +182,8 @@ def step_chunking() -> None:
   print("  source_pk  :", value_chunk.source_pk, " metadata:",
         value_chunk.metadata)
   distinct = distinct_free_text_values(ROWS, ["merchant_name"])
-  print(f"  {len(ROWS)} rows -> {len(distinct['merchant_name'])} distinct "
+  n_distinct = len(distinct["merchant_name"])
+  print(f"  {len(ROWS)} rows -> {n_distinct} distinct "
         "values to embed (the head literal repeats 16 times)")
   print(
       "embedder_identity('gs://b/synthetic/models/embedders/"
@@ -242,7 +244,8 @@ def step_embedding() -> tuple[list[list[float]], list[str]]:
       embedder_version="v1",
   )
   bq_row = chunk_to_bq_row(chunk, v0, "2026-09-21T00:00:00+00:00")
-  bq_row["embedding"] = f"[… {len(bq_row['embedding'])} floats, L2 norm 1.0 …]"
+  n_floats = len(bq_row["embedding"])
+  bq_row["embedding"] = f"[… {n_floats} floats, L2 norm 1.0 …]"
   bq_row["reference_digest"] = bq_row["reference_digest"][:16] + "…"
   bq_row["chunk_id"] = bq_row["chunk_id"][:16] + "…"
   bq_row["row_digest"] = bq_row["row_digest"][:16] + "…"
@@ -399,8 +402,10 @@ def step_end_to_end() -> None:
     tag = ("head literal, re-emitted at its source share"
            if name == _HEAD else "COPY" if name in source else "novel")
     id_tag = "COPY" if r["txn_id"] in source_ids else "novel id"
-    print(f"  {r['txn_id'] or '':7s}({id_tag}) {r['channel']:5s} "
-          f"{r['amount']:7.2f} {r['currency']} {name!s:25s} <- {tag}")
+    txn_id, channel = r["txn_id"] or "", r["channel"]
+    amount, currency = r["amount"], r["currency"]
+    print(f"  {txn_id:7s}({id_tag}) {channel:5s} "
+          f"{amount:7.2f} {currency} {name!s:25s} <- {tag}")
   engine.teardown()
 
 

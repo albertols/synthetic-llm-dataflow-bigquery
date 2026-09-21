@@ -80,6 +80,7 @@ exclude:
   # Tests of tooling that stays in the golden source (release reports, E2E
   # bundles, figure scripts, the personal-GCP layer, the Composer DAG, this
   # sync itself). The sync fails if a shipped test loads an unshipped script.
+  - packages/sdfb-tests/tests/unit/scripts/test_b1_rag_walkthrough.py
   - packages/sdfb-tests/tests/unit/scripts/test_build_full_report.py
   - packages/sdfb-tests/tests/unit/scripts/test_dsg_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_e2e_*.py
