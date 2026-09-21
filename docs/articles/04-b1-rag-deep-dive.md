@@ -74,21 +74,66 @@ what the LLM writes.
 
 ### What this article leans on
 
-| | Name | Role in this article | Primary source |
-|---|---|---|---|
-| 📰 series | Parts 1–3 | architecture · the free-text route and its ladder · the runtime this engine lives in | [intro](01-building-banking-synthetic-data-intro.md) · [type system & freetext](02-type-system-freetext-resolution.md) · common runtime (Part 3) |
-| 🧠 GenAI | Retrieval-augmented generation | the pattern: retrieve, augment the prompt, generate | [Lewis et al., NeurIPS 2020](https://arxiv.org/abs/2005.11401) |
-| 🧠 GenAI | Dense retrieval · sentence embeddings | why text becomes a vector and "similar" becomes "small angle" | [Karpukhin et al., EMNLP 2020 (DPR)](https://arxiv.org/abs/2004.04906) · [Reimers & Gurevych, EMNLP 2019 (SBERT)](https://arxiv.org/abs/1908.10084) |
-| 🧠 GenAI | Rows as sentences | the `col is value, …` serialization every row chunk uses | [GReaT, Borisov et al., ICLR 2023](https://arxiv.org/abs/2210.06280) · counterpoint on column order: [Xu et al. 2024](https://arxiv.org/abs/2406.14541) |
-| 🧠 GenAI | Which examples you show matters | the reason retrieval is worth having at all | [TabGen-ICL, Fang et al. 2025](https://arxiv.org/abs/2502.16414) · [EPIC, Kim et al., NeurIPS 2024](https://arxiv.org/abs/2404.12404) · [CLLM, Seedat et al., ICML 2024](https://arxiv.org/abs/2312.12112) |
-| 🧠 GenAI | The LLM runs O(1) times | why retrieval is per column, not per row | [FASTGEN, Nguyen et al. 2025](https://arxiv.org/abs/2507.15839) · [Yang et al. 2025](https://arxiv.org/abs/2507.19334) · [Sidorenko 2025](https://arxiv.org/abs/2505.02659) |
-| 🧠 GenAI | The embedder | 384 dimensions, 33.4M parameters, 512 tokens, MIT | [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) · [C-Pack, Xiao et al., SIGIR 2024](https://arxiv.org/abs/2309.07597) |
-| 🧠 GenAI | Exact vector search | what `IndexFlatIP` is, and when the library's own authors say to use it | [Johnson, Douze, Jégou 2017](https://arxiv.org/abs/1702.08734) · [Douze et al. 2024](https://arxiv.org/abs/2401.08281) · [FAISS: choosing an index](https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index) |
-| 🧠 GenAI | Coverage instead of relevance | greedy k-center, and the classic diversity re-ranker it is not | [Gonzalez, TCS 1985](https://doi.org/10.1016/0304-3975(85)90224-5) · [Sener & Savarese, ICLR 2018](https://arxiv.org/abs/1708.00489) · [MMR, Carbonell & Goldstein, SIGIR 1998](https://doi.org/10.1145/290941.291025) |
-| 🛡️ privacy | Echoes are leaks | why a shown example must never land, and how closeness is scored | [Carlini et al., USENIX Security 2021](https://arxiv.org/abs/2012.07805) · [DCR, Park et al., VLDB 2018](https://arxiv.org/abs/1806.03384) · [k-anonymity, Sweeney 2002](https://doi.org/10.1142/S0218488502001648) |
-| 🔀 Beam | The first-party RAG package | what it is built for, and why this pipeline built something smaller | [`apache_beam.ml.rag`](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.rag.html) · [LLMs in Beam pipelines](https://beam.apache.org/documentation/ml/large-language-modeling/) · [Enrichment transform](https://beam.apache.org/documentation/transforms/python/elementwise/enrichment/) |
-| ☁️ GCP | Vector search in the warehouse | the managed alternative, and what it does with a table this small | [`VECTOR_SEARCH`](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#vector_search) · [vector indexes](https://docs.cloud.google.com/bigquery/docs/vector-index) |
-| 🧠 GenAI | KV prefix caching | the last link of the byte chain | [vLLM automatic prefix caching](https://docs.vllm.ai/en/stable/design/prefix_caching/) |
+📰 the series · 🧠 GenAI · 🛡️ privacy · 🔀 Beam · ☁️ GCP — each entry
+is *name — its role in this article*, then the primary source.
+
+- 📰 **Parts 1–3** — architecture · the free-text route and its ladder ·
+  the runtime this engine lives in. *Source:*
+  [intro](01-building-banking-synthetic-data-intro.md) ·
+  [type system & freetext](02-type-system-freetext-resolution.md) ·
+  common runtime (Part 3).
+- 🧠 **Retrieval-augmented generation** — the pattern: retrieve, augment
+  the prompt, generate. *Source:*
+  [Lewis et al., NeurIPS 2020](https://arxiv.org/abs/2005.11401).
+- 🧠 **Dense retrieval · sentence embeddings** — why text becomes a
+  vector and "similar" becomes "small angle". *Source:*
+  [Karpukhin et al., EMNLP 2020 (DPR)](https://arxiv.org/abs/2004.04906) ·
+  [Reimers & Gurevych, EMNLP 2019 (SBERT)](https://arxiv.org/abs/1908.10084).
+- 🧠 **Rows as sentences** — the `col is value, …` serialization every
+  row chunk uses. *Source:*
+  [GReaT, Borisov et al., ICLR 2023](https://arxiv.org/abs/2210.06280) ·
+  counterpoint on column order:
+  [Xu et al. 2024](https://arxiv.org/abs/2406.14541).
+- 🧠 **Which examples you show matters** — the reason retrieval is worth
+  having at all. *Source:*
+  [TabGen-ICL, Fang et al. 2025](https://arxiv.org/abs/2502.16414) ·
+  [EPIC, Kim et al., NeurIPS 2024](https://arxiv.org/abs/2404.12404) ·
+  [CLLM, Seedat et al., ICML 2024](https://arxiv.org/abs/2312.12112).
+- 🧠 **The LLM runs O(1) times** — why retrieval is per column, not per
+  row. *Source:*
+  [FASTGEN, Nguyen et al. 2025](https://arxiv.org/abs/2507.15839) ·
+  [Yang et al. 2025](https://arxiv.org/abs/2507.19334) ·
+  [Sidorenko 2025](https://arxiv.org/abs/2505.02659).
+- 🧠 **The embedder** — 384 dimensions, 33.4M parameters, 512 tokens,
+  MIT. *Source:*
+  [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) ·
+  [C-Pack, Xiao et al., SIGIR 2024](https://arxiv.org/abs/2309.07597).
+- 🧠 **Exact vector search** — what `IndexFlatIP` is, and when the
+  library's own authors say to use it. *Source:*
+  [Johnson, Douze, Jégou 2017](https://arxiv.org/abs/1702.08734) ·
+  [Douze et al. 2024](https://arxiv.org/abs/2401.08281) ·
+  [FAISS: choosing an index](https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index).
+- 🧠 **Coverage instead of relevance** — greedy k-center, and the classic
+  diversity re-ranker it is not. *Source:*
+  [Gonzalez, TCS 1985](https://doi.org/10.1016/0304-3975(85)90224-5) ·
+  [Sener & Savarese, ICLR 2018](https://arxiv.org/abs/1708.00489) ·
+  [MMR, Carbonell & Goldstein, SIGIR 1998](https://doi.org/10.1145/290941.291025).
+- 🛡️ **Echoes are leaks** — why a shown example must never land, and how
+  closeness is scored. *Source:*
+  [Carlini et al., USENIX Security 2021](https://arxiv.org/abs/2012.07805) ·
+  [DCR, Park et al., VLDB 2018](https://arxiv.org/abs/1806.03384) ·
+  [k-anonymity, Sweeney 2002](https://doi.org/10.1142/S0218488502001648).
+- 🔀 **The first-party RAG package** — what it is built for, and why
+  this pipeline built something smaller. *Source:*
+  [`apache_beam.ml.rag`](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.rag.html) ·
+  [LLMs in Beam pipelines](https://beam.apache.org/documentation/ml/large-language-modeling/) ·
+  [Enrichment transform](https://beam.apache.org/documentation/transforms/python/elementwise/enrichment/).
+- ☁️ **Vector search in the warehouse** — the managed alternative, and
+  what it does with a table this small. *Source:*
+  [`VECTOR_SEARCH`](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#vector_search) ·
+  [vector indexes](https://docs.cloud.google.com/bigquery/docs/vector-index).
+- 🧠 **KV prefix caching** — the last link of the byte chain. *Source:*
+  [vLLM automatic prefix caching](https://docs.vllm.ai/en/stable/design/prefix_caching/).
 
 ### How to read this article
 
@@ -138,14 +183,26 @@ a single token from a model. What statistics cannot do is *invent a
 plausible merchant name*. For that column there are four options, and
 three of them are bad:
 
-| Option | What the model is shown | What lands | Verdict |
-|---|---|---|---|
-| resample the observed values | — | real values, at the right frequency | perfect fidelity, zero originality — a leak with good statistics |
-| ask an LLM, zero-shot | the column name | plausible prose in nobody's format | the model cannot know a till receipt reads `CAFE ARBOL*MADRID` |
-| ask an LLM, per row | the row so far | something, nearly four orders of magnitude slower | cost (≈ 9,500×: a row-generating LLM against a non-LLM sampler, [Yang et al. 2025](https://arxiv.org/abs/2507.19334)) and over-smoothed, uniform-looking distributions when cells are generated one by one ([Sidorenko 2025](https://arxiv.org/abs/2505.02659), a short note) — rejected in [ADR 0013](https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/docs/adr/0013-distribution-estimator-spine.md) |
-| **ask an LLM once per column, with a few well-chosen real examples, then check everything it says** | eight seeds | ≤ 512 novel values, drawn with replacement | `b1_rag` |
+- **Resample the observed values.** *The model is shown:* nothing.
+  *What lands:* real values, at the right frequency. *Verdict:* perfect
+  fidelity, zero originality — a leak with good statistics.
+- **Ask an LLM, zero-shot.** *The model is shown:* the column name.
+  *What lands:* plausible prose in nobody's format. *Verdict:* the model
+  cannot know a till receipt reads `CAFE ARBOL*MADRID`.
+- **Ask an LLM, per row.** *The model is shown:* the row so far. *What
+  lands:* something, nearly four orders of magnitude slower. *Verdict:*
+  cost (≈ 9,500×: a row-generating LLM against a non-LLM sampler,
+  [Yang et al. 2025](https://arxiv.org/abs/2507.19334)) and
+  over-smoothed, uniform-looking distributions when cells are generated
+  one by one ([Sidorenko 2025](https://arxiv.org/abs/2505.02659), a
+  short note) — rejected in
+  [ADR 0013](https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/docs/adr/0013-distribution-estimator-spine.md).
+- **Ask an LLM once per column, with a few well-chosen real examples,
+  then check everything it says.** *The model is shown:* eight seeds.
+  *What lands:* ≤ 512 novel values, drawn with replacement. *Verdict:*
+  `b1_rag`.
 
-💡 The table is the argument, not a measurement. The last row is
+💡 The list is the argument, not a measurement. The last option is
 few-shot prompting with two disciplines added. **Retrieval** decides
 which few examples — and the tabular-generation literature is blunt that
 this choice is not cosmetic: randomly selected in-context examples hamper
@@ -480,15 +537,34 @@ artifact today, [ADR 0020](https://github.com/albertols/synthetic-llm-dataflow-b
 **Why not something else?** Every alternative is a good tool for a
 workload this is not:
 
-| Alternative | What it is | When it wins | Here |
-|---|---|---|---|
-| [HNSW](https://arxiv.org/abs/1603.09320) ([hnswlib](https://github.com/nmslib/hnswlib)) | graph index, sublinear search | many queries, RAM to spare, approximate is fine | a handful of queries; build cost never amortizes |
-| IVF / [product quantization](https://doi.org/10.1109/TPAMI.2010.57) | cluster, then compress | vectors do not fit in RAM, n ≫ 1M | 1.5 MB fits in a CPU cache |
-| [ScaNN](https://arxiv.org/abs/1908.10396) | anisotropic quantization for inner-product search | very large scale MIPS | same |
-| [Annoy](https://github.com/spotify/annoy) | random-projection trees, memory-mapped files | one static index shared by many processes | the index is cheaper to rebuild than to map |
-| [BigQuery `VECTOR_SEARCH`](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#vector_search) | search where the vectors already live | per-element lookups against a large, growing table | a [vector index is not populated below 10 MB](https://docs.cloud.google.com/bigquery/docs/vector-index) (≈ 3,200 chunks of 384 FLOAT64), which a single table's chunks often are — so BigQuery would brute-force too, behind a network round trip, for one single-vector query per column |
-| Milvus · pgvector / AlloyDB · Vector Search | a vector *service* | streaming ingestion, many readers, per-request retrieval | a second system to operate, for 1,024 vectors |
-| TurboQuant-style online quantized ANN | compressed, fast, approximate | 50k+ vectors *per query* | evaluated in Part 3: adopt-later, behind a flag, because approximate breaks the byte chain below |
+- **[HNSW](https://arxiv.org/abs/1603.09320)
+  ([hnswlib](https://github.com/nmslib/hnswlib))** — a graph index with
+  sublinear search. *Wins when:* many queries, RAM to spare, approximate
+  is fine. *Here:* a handful of queries; the build cost never amortizes.
+- **IVF /
+  [product quantization](https://doi.org/10.1109/TPAMI.2010.57)** —
+  cluster, then compress. *Wins when:* the vectors do not fit in RAM,
+  n ≫ 1M. *Here:* 1.5 MB fits in a CPU cache.
+- **[ScaNN](https://arxiv.org/abs/1908.10396)** — anisotropic
+  quantization for inner-product search. *Wins when:* very large scale
+  MIPS. *Here:* the same — 1.5 MB fits in a CPU cache.
+- **[Annoy](https://github.com/spotify/annoy)** — random-projection
+  trees in memory-mapped files. *Wins when:* one static index is shared
+  by many processes. *Here:* the index is cheaper to rebuild than to map.
+- **[BigQuery `VECTOR_SEARCH`](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#vector_search)**
+  — search where the vectors already live. *Wins when:* per-element
+  lookups against a large, growing table. *Here:* a
+  [vector index is not populated below 10 MB](https://docs.cloud.google.com/bigquery/docs/vector-index)
+  (≈ 3,200 chunks of 384 FLOAT64), which a single table's chunks often
+  are — so BigQuery would brute-force too, behind a network round trip,
+  for one single-vector query per column.
+- **Milvus · pgvector / AlloyDB · Vector Search** — a vector *service*.
+  *Wins when:* streaming ingestion, many readers, per-request retrieval.
+  *Here:* a second system to operate, for 1,024 vectors.
+- **TurboQuant-style online quantized ANN** — compressed, fast,
+  approximate. *Wins when:* 50k+ vectors *per query*. *Here:* evaluated
+  in Part 3: adopt-later, behind a flag, because approximate breaks the
+  byte chain below.
 
 The swap point is one function — `rag/index.py::build_index` returns an
 `ExactIPIndex`, and anything with `search()` and `release()` would fit
