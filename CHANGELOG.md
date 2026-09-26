@@ -11,14 +11,19 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🚀 Added
 
 ### 🔧 Changed
+- Python 3.14 and Apache Beam 2.76, the baseline of the Dataflow Solution Guides ([PR #289 review](https://github.com/GoogleCloudPlatform/dataflow-solution-guides/pull/289#issuecomment-5837875462)): `.python-version`, `requires-python` (`>=3.14,<3.15`), ruff and mypy targets, CI, the Beam SDK image (`apache/beam_python3.14_sdk:2.76.0`) with `apache-beam[gcp]==2.76.0` in lockstep, the Flex Template launcher base (`python314-template-launcher-base`), the image's site-packages bridge, and both model-staging Cloud Build steps (`python:3.14-slim`). The rebuilt image needs a Dataflow run before the next DSG sync ([ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md) A6).
+- The `inconsistent-quotes` pragma in 47 modules now gives its real reason: yapf 0.43, the latest release and the DSG's pin, cannot parse f-strings that reuse their own quotes ([PEP 701](https://peps.python.org/pep-0701/)), so the fields keep single quotes on 3.14 too.
 
 ### ⚡ Performance
 
 ### 🐛 Fixed
 
 ### 🗑️ Removed
+- `whylogs` from `sdfb-beam`'s dependencies. Nothing imported it, and its compiled backend `whylogs-sketching` has no wheel past CPython 3.12.
+- The `betterproto==2.0.0b6` uv constraint: Beam 2.76 no longer depends on `envoy-data-plane`.
 
 ### 📗 Docs
+- [ADR 0040](docs/adr/0040-dsg-donation-golden-source-sync.md) amendment A6: why the guide can now run 3.14, and what replaces A5's choice of 3.11.
 
 ## [v0.5.3] — 2026-09-21
 

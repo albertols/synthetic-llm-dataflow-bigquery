@@ -24,7 +24,7 @@
 name = "synthetic-dataflow-bigquery"
 version = "0.1.0"
 description = "Synthetic data generation for BigQuery via Apache Beam on Dataflow, powered by self-hosted open-weight LLMs (Gemma 4 family) on L4 GPU workers."
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.14,<3.15"
 license = { text = "Apache-2.0" }
 readme = "README.md"
 authors = [{ name = "Alberto López Serna" }]
@@ -35,15 +35,6 @@ Repository = "https://github.com/albertols/synthetic-llm-dataflow-bigquery"
 
 [tool.uv]
 package = false
-
-# apache-beam 2.74.0 → envoy-data-plane >=1.0.3 → betterproto==2.0.0b6, a
-# PRE-RELEASE. uv's default strategy (if-necessary-or-explicit) only accepts
-# pre-releases pinned explicitly in first-party requirements or constraints —
-# a transitive pin does not qualify and resolution fails with "no version of
-# betterproto==2.0.0b6". Surfacing the pin here is the canonical uv pattern
-# for transitive pre-release deps. Drop when beam's envoy-data-plane chain
-# moves to a stable betterproto.
-constraint-dependencies = ["betterproto==2.0.0b6"]
 
 [tool.uv.workspace]
 members = ["packages/sdfb-core", "packages/sdfb-beam", "packages/sdfb-tests"]
@@ -76,7 +67,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py314"
 extend-exclude = ["packages/sdfb-tests/fixtures"]
 
 [tool.ruff.lint]
@@ -101,7 +92,7 @@ based_on_style = "yapf"
 ignore_patterns = [".venv/**", "packages/sdfb-tests/fixtures/**"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 warn_unused_ignores = true

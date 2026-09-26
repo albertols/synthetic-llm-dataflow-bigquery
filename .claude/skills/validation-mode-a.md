@@ -1,6 +1,6 @@
 ---
 name: validation-mode-a
-description: Recipe for the in-pipeline (Mode A) validation stack — three lines of defense (Pydantic per-record, Pandera per-batch, BQ FailedRows), whylogs profile merge, DLQ schema, fail-fast thresholds. Load when working on `sdfb_beam/dofns/validate_*`, `pandera_*`, `whylogs_*`, or the DLQ write.
+description: Recipe for the in-pipeline (Mode A) validation stack — three lines of defense (Pydantic per-record, Pandera per-batch, BQ FailedRows), DLQ schema, fail-fast thresholds. Load when working on `sdfb_beam/dofns/validate_*`, `pandera_*`, or the DLQ write.
 ---
 
 # Skill — Mode A in-pipeline validation
@@ -33,24 +33,9 @@ Flatten line-3 failures into the same DLQ table — `error_type="bq_load"`, `rul
 
 REF: https://beam.apache.org/documentation/patterns/bigqueryio/
 
-## Profile (parallel, non-blocking)
+## Profile — dropped
 
-`WhylogsProfileDoFn` builds a mergeable profile per worker. `CombineGlobally(MergeProfilesFn())` merges them at the end of the job.
-
-The CombineFn **MUST** be commutative & associative (§12 of the user spec). Use `whylogs.ResultSet.merge()` which guarantees both:
-
-```python
-class MergeProfilesFn(beam.CombineFn):
-    def create_accumulator(self): return why.log({}).profile()
-    def add_input(self, acc, x):  return acc.merge(why.log(x).profile())
-    def merge_accumulators(self, accs):
-        out = self.create_accumulator()
-        for a in accs: out = out.merge(a)
-        return out
-    def extract_output(self, acc): return acc
-```
-
-REF: https://whylogs.readthedocs.io/en/latest/examples/integrations/Apache_Beam.html
+A whylogs profile merge was planned for M1 §11 and never built. `whylogs` left the dependencies with the move to Python 3.14: its compiled backend `whylogs-sketching` has no wheel past CPython 3.12 ([ADR 0040](../../docs/adr/0040-dsg-donation-golden-source-sync.md) A6). Distribution checks live in `source_table_stats` and the `validation_runs` writer instead.
 
 ## DLQ table schema (`{project}.synthetic_data_quality.dead_letter`)
 
@@ -83,7 +68,7 @@ Anything GX / Soda / SDMetrics / Evidently is M2. Do not add it to Mode A files.
 |---|---|---|---|
 | Per-record Pydantic | `packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py` | `tests/unit/dofns/test_validate_record.py` | ✅ |
 | Per-batch Pandera | `packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py` | `tests/unit/dofns/test_pandera_batch.py` | ✅ |
-| `WhylogsProfileDoFn` + `MergeProfilesFn` | — | — | 🔒 M1 §11 |
+| `WhylogsProfileDoFn` + `MergeProfilesFn` | — | — | ✂️ dropped (ADR 0040 A6) |
 | BigQueryIO `FailedRows` safety net | `packages/sdfb-beam/src/sdfb_beam/pipeline.py` | (DirectRunner uses JSONL sinks; real BQ wiring in M1 §11) | 🟡 partial |
 
 Thresholds — env-scoped severity gates per rule_id: `config/thresholds.yml`. Loaded at job start by `pipeline.build_pipeline()` (wiring in M1 §12).
@@ -93,7 +78,5 @@ Thresholds — env-scoped severity gates per rule_id: `config/thresholds.yml`. L
 - Pydantic v2: https://docs.pydantic.dev/latest/
 - Pandera: https://pandera.readthedocs.io/en/stable/
 - Pandera lazy validation: https://pandera.readthedocs.io/en/stable/lazy_validation.html
-- whylogs Beam integration: https://whylogs.readthedocs.io/en/latest/examples/integrations/Apache_Beam.html
-- whylogs core (mergeable profiles): https://github.com/whylabs/whylogs
 - Beam DLQ pattern: https://beam.apache.org/documentation/patterns/bigqueryio/
 - Beam metrics: https://beam.apache.org/documentation/programming-guide/#metrics

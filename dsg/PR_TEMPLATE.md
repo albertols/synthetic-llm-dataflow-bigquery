@@ -26,7 +26,7 @@ bigquery-public-data.thelook_ecommerce ── terraform snapshot ──▶ synth
 * Dedicated launcher/worker and Cloud Build service accounts; no default compute account
 * Model weights staged once to GCS; no model hub or external LLM API at runtime (`HF_HUB_OFFLINE=1`)
 * Public, ungated model repositories staged by Cloud Build: no credentials in Terraform, scripts or state
-* `apache-beam[gcp]==2.74.0` matches the `apache/beam_python3.11_sdk:2.74.0` base image
+* `apache-beam[gcp]==2.76.0` matches the `apache/beam_python3.14_sdk:2.76.0` base image
 
 ### Also in this PR
 
