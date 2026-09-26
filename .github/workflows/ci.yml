@@ -51,7 +51,7 @@ jobs:
           cache-dependency-glob: |
             **/uv.lock
             **/pyproject.toml
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Sync workspace
         run: uv sync --group dev
@@ -63,7 +63,7 @@ jobs:
         run: uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg
 
       - name: Pylint (dsg/pylintrc, vendored from the Dataflow Solution Guides)
-        # On the Python DSG CI uses: pylint's findings differ between 3.11 and 3.14.
+        # The Python DSG CI uses (and the workspace now pins): 3.14.
         run: uv run --no-project --python 3.14 --with "pylint>=4,<5" python -m pylint --rcfile dsg/pylintrc --ignore=.venv,venv,.gradle,build,bin,third_party packages scripts composer public_cloud dsg
 
       - name: DSG overlay shell syntax

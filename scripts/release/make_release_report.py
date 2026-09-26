@@ -66,8 +66,8 @@ metric must render as `None` ("not measured"), never raise.
 # matplotlib.use("Agg") and the sibling sys.path insert must precede these imports.
 # pylint: disable=wrong-import-position
 
-# f-string fields keep single quotes while Python 3.11 is supported;
-# pylint on Python >= 3.12 reads those quotes as inconsistent.
+# f-string fields keep single quotes: yapf 0.43 cannot parse PEP 701
+# quote reuse, and pylint reads those quotes as inconsistent.
 # pylint: disable=inconsistent-quotes
 
 from __future__ import annotations

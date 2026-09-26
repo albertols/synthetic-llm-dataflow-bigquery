@@ -48,7 +48,7 @@ Full machine setup: [`docs/M4_SETUP.md`](docs/M4_SETUP.md).
 
 ```
 packages/sdfb-core/    no Beam, no GCP, no torch. Pydantic, codegen, ABC, prompt templates.
-packages/sdfb-beam/    imports sdfb-core; adds apache-beam[gcp], pandera, whylogs, pandas.
+packages/sdfb-beam/    imports sdfb-core; adds apache-beam[gcp], pandera, pandas.
                        Optional extras: [gpu] (vllm+torch), [embedding] (faiss+transformers),
                                         [library] (sdgx — B.2 candidate).
 packages/sdfb-tests/   imports both; pytest + hypothesis + DirectRunner fixtures.
@@ -71,7 +71,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `beam-dofn.md` — writing/testing Beam DoFns (lifecycle, tagged outputs, side inputs, metrics)
 - `model-handler.md` — the `ModelClient` Protocol + the engine-owned vLLM server (why not `RunInference`)
 - `ddl-codegen.md` — Pydantic ↔ Pandera ↔ BQ DDL derivation
-- `validation-mode-a.md` — three lines of defense, DLQ, whylogs merge
+- `validation-mode-a.md` — three lines of defense, DLQ
 - `reference-data.md` — live BQ SELECT + canonical provenance digest
 - `gpu-dockerfile.md` — L4 + vLLM custom-container recipe
 - `gcp-project-ops.md` / `gcp-e2e-run.md` / `gcp-cost-audit.md` — personal-GCP E2E layer (bootstrap/run/cost; see `public_cloud/deploy/gcp/`)
