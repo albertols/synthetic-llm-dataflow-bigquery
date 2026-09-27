@@ -27,6 +27,7 @@ import pytest
 import yaml
 
 from sdfb_evaluation import catalogue
+from sdfb_evaluation import schemas
 
 _REQUIRED_V1_IDS = (
     "field.category_adherence",
@@ -135,6 +136,8 @@ _N_DEPENDENT = {
     "row.coverage",
     "table.detection_auc",
     "table.pmse_ratio",
+    # Ruling R13: duplicate shares grow with n, so both sides use matched m.
+    "row.internal_duplicate_excess",
 }
 
 # Integrity by construction: FAIL iff value > 0.
@@ -155,16 +158,27 @@ _INFO_ONLY = {
 # unseen mass), carried per row as `source_value` instead of in the YAML.
 _RUNTIME_TARGET = {"column.novelty_mass"}
 
+# Ruling R12: informational targets on non-target metrics whose perfect value
+# is not 0; they are the D5 noise reference.
+_INFORMATIONAL_TARGETS = {
+    "table.detection_auc": 0.5,
+    "field.category_adherence": 1.0,
+    "field.range_adherence": 1.0,
+    "field.shape_adherence": 1.0,
+    "relationship.cardinality_adherence": 1.0,
+}
+
 # Standard KaTeX macros the formulas may use (the GUI renders them with
 # stock KaTeX: no custom macros). Extend it only with macros from the KaTeX
 # support table: https://katex.org/docs/supported.html
 _KATEX_MACROS = {
     "\\#", "\\,", "\\{", "\\}", "\\Delta", "\\Pr", "\\alpha", "\\bar", "\\cap",
-    "\\cup", "\\delta", "\\dots", "\\ell", "\\exists", "\\frac", "\\ge",
-    "\\hat", "\\in", "\\infty", "\\int", "\\le", "\\left", "\\ln", "\\log",
-    "\\lvert", "\\mathbf", "\\mathcal", "\\max", "\\min", "\\mu", "\\notin",
-    "\\nu", "\\operatorname", "\\pi", "\\quad", "\\rho", "\\right", "\\rvert",
-    "\\sigma", "\\sqrt", "\\sum", "\\text", "\\tilde", "\\to", "\\varphi"
+    "\\cup", "\\delta", "\\dots", "\\ell", "\\chi", "\\exists", "\\frac",
+    "\\ge", "\\hat", "\\in", "\\infty", "\\int", "\\le", "\\left", "\\ln",
+    "\\log", "\\lvert", "\\mathbf", "\\mathcal", "\\max", "\\min", "\\mu",
+    "\\notin", "\\nu", "\\operatorname", "\\pi", "\\quad", "\\rho", "\\right",
+    "\\rvert", "\\sigma", "\\sqrt", "\\sum", "\\text", "\\tilde", "\\to",
+    "\\varphi"
 }
 # A control word (\frac) or a control symbol (\{, \, or \#).
 _MACRO = re.compile(r"\\(?:[A-Za-z]+|[^A-Za-z])")
@@ -323,6 +337,61 @@ def test_ci_bound_metrics_follow_ruling_r1(cat):
     assert m.target == target, metric_id
     assert m.warn is not None and m.fail is not None
     assert target < m.warn < m.fail, metric_id
+
+
+def test_ratio_to_one_scores_the_distance_band(cat):
+  # Ruling R10: ratio_to_one scores d = |value - target|, 1 at or under warn
+  # and 0 at or over fail, so every such metric needs both thresholds.
+  for m in cat.metrics:
+    if m.score_fn == "ratio_to_one":
+      assert m.direction == "target", m.id
+      assert m.warn is not None and m.fail is not None, m.id
+  assert {
+      m.id for m in cat.metrics if m.direction == "target" and m.target is None
+  } == _RUNTIME_TARGET
+
+
+def test_novelty_mass_takes_its_target_from_the_row(cat):
+  # Ruling R9: the target is the source's Good-Turing unseen mass, carried
+  # as the row's source_value; t = 0 is legal (d is then the value).
+  m = cat.get("column.novelty_mass")
+  assert (m.direction, m.target, m.score_fn) == ("target", None, "ratio_to_one")
+  assert (m.warn, m.fail) == (0.10, 0.25)
+  assert m.range == (0.0, 1.0)
+
+
+def test_informational_targets_follow_ruling_r12(cat):
+  for metric_id, target in _INFORMATIONAL_TARGETS.items():
+    m = cat.get(metric_id)
+    assert m.direction != "target" and m.target == target, metric_id
+
+
+def test_noise_reference_defined_for_every_noise_gated_metric(cat):
+  # D5 gates a FAIL on the distance from a reference: the target when set,
+  # else 0 (lower_better) or the top of the range (higher_better).
+  for m in cat.metrics:
+    if m.noise_floor is None or m.target is not None:
+      continue
+    assert m.direction == "lower_better", m.id
+  for m in cat.metrics:
+    if m.direction == "higher_better" and m.noise_floor is not None:
+      assert m.target is not None and m.range[1] == m.target, m.id
+
+
+def test_metrics_schema_descriptions_list_catalogue_vocabularies(cat):
+  described = {
+      f["name"]: f["description"]
+      for f in schemas.load_schema("evaluation_metrics")
+  }
+  for field, vocabulary in (("level", cat.levels), ("family", cat.families),
+                            ("column_kind", catalogue.KINDS),
+                            ("value_kind", catalogue.VALUE_KINDS),
+                            ("method", catalogue.ESTIMATORS)):
+    for word in vocabulary:
+      assert re.search(rf"\b{word}\b", described[field]), (field, word)
+  for method in catalogue.NOISE_METHODS:
+    if method != "none":
+      assert method in described["noise_floor_method"], method
 
 
 def test_integrity_zero_tolerance_and_info_rows(cat):

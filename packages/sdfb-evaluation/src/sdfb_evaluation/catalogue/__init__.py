@@ -21,7 +21,12 @@ computes. Three readers consume it:
   and `version` to label, score and assign a status to each metric row;
 - the design doc, whose catalogue table is rendered from the YAML;
 - the GUI, whose info popovers show `title`, `purpose`, `formula` (KaTeX),
-  `interpretation`, `pitfalls` and `references`, synced from `to_json()`.
+  `interpretation`, `pitfalls` and `references`. The GUI build has no
+  Python: it reads the raw YAML (keys as written there, e.g. `score` and
+  `thresholds.warn`), never this module.
+
+`to_json()` serves the Python side: the `sdfb-eval catalogue` CLI and the
+docs tooling. It flattens each entry into `Metric`'s field names.
 
 The YAML's header comment documents each key's semantics. This module
 parses it strictly: a missing or unknown key, an unknown vocabulary value,
@@ -156,8 +161,9 @@ class Catalogue:
   def to_json(self) -> str:
     """The catalogue as canonical JSON: sorted keys, 2-space indent, `\\n`-terminated.
 
-    Byte-stable for a given YAML, so a checked-in copy (the GUI's
-    contracts) can be diffed against it to detect drift.
+    For the Python CLI and docs tooling (the GUI reads the raw YAML).
+    Byte-stable for a given YAML, so a saved copy can be diffed against it
+    to detect drift.
     """
     payload = {
         "catalogue_version": self.version,
