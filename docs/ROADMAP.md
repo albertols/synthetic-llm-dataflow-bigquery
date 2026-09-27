@@ -43,6 +43,7 @@ History note: the 2026-07 engine-fix/E2E-tooling cycle and the 2026-08 fidelity/
 **Remaining themes**:
 - **Relational follow-through** — the M4 Dataflow acceptance launch for ADRs 0036–0038; transcribe the full production-shaped model into `config/relationships/`; level-parallel scheduling; ADR 0033's next cold-launch gate; CPU/GPU worker split for the generate stage (10M: ~9 busy GPU-minutes of 272 billed). The co-partitioned join for parents beyond the 100k key cap is no longer the plan for a **driven** child — the fan-out keys it instead (ADR 0036), and ADR 0037 uses a co-partitioned `CoGroupByKey` for conditional edges; the join survives only as the documented escape hatch for a shape the fan-out cannot key.
 - **Evaluation framework merge** — Tier 1/2/3 metrics (`ws3-eval-framework` branch): KS/Wasserstein, TV, PSI/JSD, DCR/NNDR, SDMetrics reports, memorization identifiers — into the run contract.
+- **Synthetic Platform GUI ([ADR 0042](adr/0042-self-hosted-platform-gui.md))** — a local-first TypeScript app under `gui/` (Cloud Run behind IAP optional) that reads evaluation, validation, source-stats and RAG data through named, read-only, bytes-capped BigQuery queries, with a complete mock mode. Its types are generated from the Python-side schemas; it is not part of the DSG donation.
 - **Mode B validation pipeline** — GX 1.x Checkpoint + Soda Core scan + SDMetrics fidelity + Evidently drift report; results to `synthetic_data_quality.*`, artifacts to GCS.
 - **Constrained-decoding fallback chain** — `outlines` / `lm-format-enforcer` for schema edge cases that beat vLLM's guided JSON.
 - **Reference snapshot pattern** — cached parquet under `gs://{project}-dataflow/reference/{table}/sample.parquet` as a deterministic alternative to live SELECT.
@@ -52,7 +53,7 @@ History note: the 2026-07 engine-fix/E2E-tooling cycle and the 2026-08 fidelity/
 - **CI gating** — Mode B checkpoint blocks PR merges; thresholds.yml is the source of truth.
 
 **Explicit non-goals for M2**:
-- Dataplex / Looker dashboards (ADR-0001 still applies).
+- Managed dashboard and data-quality services — Looker, Looker Studio / Data Studio, Dataplex ([ADR 0001](adr/0001-no-managed-gcp-services.md), narrowed by [ADR 0042](adr/0042-self-hosted-platform-gui.md): a self-hosted GUI that reads the project's BigQuery tables read-only is allowed).
 - OpenLineage / Marquez / Dagster.
 - External LLM APIs.
 

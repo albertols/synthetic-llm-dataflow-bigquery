@@ -503,6 +503,7 @@ record; the section is where this document summarizes it.
 | 0038 | [§4 Relational generation](#4-relational-generation) | [Measured conflicts adjust the model](adr/0038-measured-conflicts-adjust-the-model.md) |
 | 0039 | [§4 Relational generation](#4-relational-generation) | [Row projection before the graph (proposed)](adr/0039-row-projection-before-the-graph.md) |
 | 0040 | [§9 ADR reference map](#9-adr-reference-map) | [Publishing this design to the Dataflow Solution Guides](adr/0040-dsg-donation-golden-source-sync.md) |
+| 0042 | [§12 Platform GUI](#12-platform-gui) | [A self-hosted GUI; managed dashboards stay out](adr/0042-self-hosted-platform-gui.md) |
 <!-- adr-map:end -->
 
 ## 10. Figure provenance
@@ -523,3 +524,77 @@ measured number of its own. Regenerate with
 | `designs/assets/throughput-where-time-went.png` | `scripts/doc/make_throughput_figures.py` | evidence (`MEASURED` block) |
 | `designs/assets/relationships-scenarios.png` | `scripts/doc/make_relationships_figures.py` | concept |
 | `designs/assets/relationships-flags.png` | `scripts/doc/make_relationships_figures.py` | concept, one panel per mode |
+
+## 12. Platform GUI
+
+**Claim: a self-hosted app reads this project's BigQuery tables through named,
+read-only, bytes-capped queries; it writes nothing, and the pipeline does not
+depend on it.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  JOB["🔀 Dataflow job<br/>generate + validate"]:::beam
+  BQ[("🗄️ project tables<br/>quality, evaluation,<br/>source stats")]:::store
+  WEB["⚙️ browser app<br/>holds no credentials"]:::cpu
+  BFF["⚙️ local BFF<br/>named queries only"]:::cpu
+  CAP["🛡️ dry run<br/>+ bytes cap"]:::cpu
+  MOCK[("📄 seeded mock<br/>fixtures")]:::store
+
+  JOB -->|"FILE_LOADS"| BQ
+  WEB -->|"query name<br/>+ parameters"| BFF
+  BFF -->|"DATA_SOURCE=bigquery"| CAP
+  CAP -->|"read-only SELECT"| BQ
+  BFF -->|"DATA_SOURCE=mock"| MOCK
+```
+
+*Nothing points back from the GUI to the job: the pipeline writes its tables
+as before, and the GUI only reads them.*
+
+- **The browser never sends SQL.** It names a query and passes its
+  parameters. The backend-for-frontend (BFF) holds the SQL, binds the
+  parameters, dry-runs the query and caps the bytes billed (10 GB by default).
+  The UI shows the estimate. Fetched rows are cached in memory and never
+  written anywhere.
+- **Two data sources, one contract.** `DATA_SOURCE=bigquery` reads the
+  tables. `DATA_SOURCE=mock` serves seeded fixtures that parse against the
+  same types, so the app runs with no GCP access. The types are generated from
+  the Python-side schemas and the metric catalogue, and CI fails when they
+  drift.
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  subgraph local["💻 default: local"]
+    DEV["⚙️ BFF on<br/>127.0.0.1"]:::cpu
+  end
+  subgraph cloud["☁️ optional: Cloud Run"]
+    IAP["🛡️ IAP<br/>who may open it"]:::cpu
+    SVC["⚙️ same container<br/>read-only account"]:::cpu
+    IAP --> SVC
+  end
+  BQ[("🗄️ project tables")]:::store
+
+  DEV -->|"your ADC<br/>named SELECTs"| BQ
+  SVC -->|"Data Viewer<br/>+ Job User"| BQ
+```
+
+*One panel per deployment mode. Locally, the BFF listens on `127.0.0.1` and
+queries with the Application Default Credentials of whoever runs it; those may
+carry more than read access, so read-only rests on the BFF running named
+`SELECT`s only. On Cloud Run, Identity-Aware Proxy decides who may open the
+app, and the container queries as a service account that holds only BigQuery
+Data Viewer and Job User, so IAM enforces read-only as well.*
+
+The GUI stays in the source repository. The pipeline does not depend on it,
+and it is not part of the Dataflow Solution Guides copy
+([ADR 0040](adr/0040-dsg-donation-golden-source-sync.md)). Managed dashboard
+services (Looker, Looker Studio, Dataplex) stay out
+([ADR 0001](adr/0001-no-managed-gcp-services.md)); the rule that allows this
+GUI and keeps them out is [ADR 0042](adr/0042-self-hosted-platform-gui.md).
+Code: [`gui/apps/web/src/router.tsx`](../gui/apps/web/src/router.tsx).
