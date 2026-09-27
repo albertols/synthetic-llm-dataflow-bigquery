@@ -141,3 +141,25 @@ jobs:
       - name: Pytest summary
         if: always()
         run: echo "Test job complete. See above for pass/fail and counts."
+
+  evaluation:
+    # sdfb-evaluation is a standalone uv project (own lock, Python 3.11); it
+    # must install and pass alone — none of sdfb-core/beam/tests present (ADR 0041).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          enable-cache: true
+          cache-dependency-glob: packages/sdfb-evaluation/uv.lock
+          python-version: "3.11"
+      - name: Sync (frozen)
+        run: uv sync --project packages/sdfb-evaluation --frozen
+      - name: Stands alone
+        run: uv run --project packages/sdfb-evaluation python -c "import importlib.util as u; assert not (u.find_spec('sdfb_core') or u.find_spec('sdfb_beam') or u.find_spec('sdfb_tests'))"
+      - name: Mypy (hard gate)
+        run: uv run --project packages/sdfb-evaluation mypy packages/sdfb-evaluation/src
+      - name: Pytest
+        run: uv run --project packages/sdfb-evaluation pytest packages/sdfb-evaluation/tests -q -m "not gcp"
