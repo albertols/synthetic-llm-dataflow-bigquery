@@ -24,9 +24,13 @@ FROM `{project}.{dataset}.evaluation_data_history`
 QUALIFY ROW_NUMBER() OVER (PARTITION BY evaluation_id ORDER BY recorded_at DESC) = 1;
 
 -- The latest FINAL row per generation_job_id — one row per generation run,
--- once its evaluation has completed.
+-- once its evaluation has completed. generation_job_id is NULL for
+-- cli/agent/manual evaluations with no Dataflow job behind them; without
+-- excluding NULL, ROW_NUMBER() would fold every one of those FINAL rows
+-- into a single partition and drop all but the most recent. They stay
+-- visible in evaluation_latest instead.
 CREATE OR REPLACE VIEW `{project}.{dataset}.evaluation_latest_per_job` AS
 SELECT *
 FROM `{project}.{dataset}.evaluation_data_history`
-WHERE event = 'FINAL'
+WHERE event = 'FINAL' AND generation_job_id IS NOT NULL
 QUALIFY ROW_NUMBER() OVER (PARTITION BY generation_job_id ORDER BY recorded_at DESC) = 1;

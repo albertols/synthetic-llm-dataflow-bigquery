@@ -70,3 +70,14 @@ def test_bq_mk_and_views():
   views = schemas.view_sql("proj", "synthetic_data_quality")
   assert any(
       "evaluation_latest" in v and "QUALIFY ROW_NUMBER()" in v for v in views)
+
+
+def test_latest_per_job_excludes_null_generation_job_id():
+  # A NULL generation_job_id (cli/agent/manual evaluations with no
+  # Dataflow job behind them) must not be folded into one ROW_NUMBER()
+  # partition, which would silently drop all but one such evaluation from
+  # this view. Those evaluations stay visible in evaluation_latest.
+  views = schemas.view_sql("proj", "synthetic_data_quality")
+  per_job = next(v for v in views if "evaluation_latest_per_job" in v)
+  assert "event = 'FINAL'" in per_job
+  assert "generation_job_id IS NOT NULL" in per_job
