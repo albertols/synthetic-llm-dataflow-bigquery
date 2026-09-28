@@ -54,6 +54,7 @@ application_default_credentials.json
 # stay out of the repo, and CI must remain tracked or no PR check ever runs.
 !.github/workflows/ci.yml
 !.github/workflows/release_tag_report.yaml
+!.github/workflows/gui.yml
 docs/superpowers/
 .claude/settings.local.json
 public_cloud/deploy/gcp/journal/*.jsonl
@@ -73,3 +74,10 @@ config/relationships/*
 
 # Local E2E bundles hold source-derived values (scripts/dsg/precheck.py).
 integration_tests/
+
+# Platform GUI (ADR 0042): npm installs and build output stay local.
+gui/**/node_modules/
+gui/**/dist/
+gui/**/.vite/
+gui/playwright-report/
+gui/test-results/
