@@ -1,6 +1,8 @@
 /**
  * `GET /api/rag/chunks` — chunk metadata + Float32 embeddings in one binary
- * envelope (contracts/src/vectors.ts; `application/octet-stream`, ≤ 5,000 chunks);
+ * envelope (contracts/src/vectors.ts; `application/octet-stream`, ≤ 3,000 chunks =
+ * RAG_CHUNKS_MAX: 3,000 × 384-d Float32 is 4.6 MB, inside the 5 MB vector budget; no
+ * source_pk, see ChunkMeta);
  * `GET /api/rag/pools?digest=…` — the free-text pools of a reference digest.
  */
 import {

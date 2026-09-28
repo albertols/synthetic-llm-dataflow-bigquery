@@ -9,11 +9,15 @@
 //   config/bq_schema/<dataset>/*.schema.json
 //   packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml
 //   generated/knobs.json            (scripts/gui/export_knobs.py)
+//   generated/relationships.json    (scripts/gui/export_knobs.py: committed sample relationship models)
+//   generated/dlq_rules.json        (scripts/gui/export_knobs.py: DLQ rule → error_type/step/severity)
 //   generated/golden/*.json         (scripts/gui/export_golden_fixtures.py)
 // Outputs:
 //   generated/schemas.ts    zod per BigQuery table + field metadata + vocabularies parsed from descriptions
 //   generated/catalogue.ts  the typed metric catalogue + one "metric:<id>" concept per metric
 //   generated/knobs.ts      knobs.json, typed (KnobId / ChannelId unions)
+//   generated/relationships.ts  relationships.json, typed (RelationshipModelId union)
+//   generated/dlqRules.ts   dlq_rules.json, typed (DlqRuleId union) + dlqRuleById
 //   generated/manifest.json sha256 of every input, so a hand edit of knobs.json or a golden file is drift too
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
@@ -380,6 +384,49 @@ export const knobs: KnobsFile = ${JSON.stringify(knobs, null, 2)};
 `;
 }
 
+function requireExport(doc, name, arrays) {
+  if (doc.generated_by !== "scripts/gui/export_knobs.py")
+    throw new Error(`${name}: not written by scripts/gui/export_knobs.py`);
+  for (const key of arrays) if (!Array.isArray(doc[key])) throw new Error(`${name}: "${key}" must be an array`);
+  const from = doc.exported_from;
+  if (!from || !("commit" in from) || !Array.isArray(from.dirty)) throw new Error(`${name}: lacks "exported_from"`);
+}
+
+function renderRelationships(doc) {
+  requireExport(doc, "relationships.json", ["models"]);
+  for (const model of doc.models)
+    for (const table of model.tables)
+      for (const edge of table.fk)
+        for (const key of ["cols", "ref", "ref_cols", "enforced", "role", "drawn_cols"])
+          if (!(key in edge)) throw new Error(`relationships.json: ${model.model}.${table.name} edge lacks "${key}"`);
+  return `${HEADER}/** scripts/gui/export_knobs.py → generated/relationships.json, typed: the committed sample models. */
+import type { RelationshipsFile } from "../src/relational";
+
+export type RelationshipModelId =
+${doc.models.map((m) => `  | ${tsString(m.model)}`).join("\n")};
+
+export const relationships: RelationshipsFile = ${JSON.stringify(doc, null, 2)};
+`;
+}
+
+function renderDlqRules(doc) {
+  requireExport(doc, "dlq_rules.json", ["rules"]);
+  for (const rule of doc.rules)
+    for (const key of ["rule_id", "emitted", "error_type", "pipeline_step", "severity", "counted_in_blocker_gate"])
+      if (!(key in rule)) throw new Error(`dlq_rules.json: rule ${rule.rule_id ?? "?"} lacks "${key}"`);
+  return `${HEADER}/** scripts/gui/export_knobs.py → generated/dlq_rules.json, typed: every DLQ rule as the code emits it. */
+import type { DlqRule, DlqRulesFile } from "../src/relational";
+
+export type DlqRuleId =
+${doc.rules.map((r) => `  | ${tsString(r.rule_id)}`).join("\n")};
+
+export const dlqRules: DlqRulesFile = ${JSON.stringify(doc, null, 2)};
+
+/** rule_id → rule; unknown ids (a newer pipeline) are simply absent. */
+export const dlqRuleById: ReadonlyMap<string, DlqRule> = new Map(dlqRules.rules.map((rule) => [rule.rule_id, rule]));
+`;
+}
+
 function goldenFiles(outDir) {
   const dir = join(outDir, "golden");
   if (!existsSync(dir)) return [];
@@ -389,7 +436,7 @@ function goldenFiles(outDir) {
 }
 
 /**
- * Generates every output in memory. `inputsDir` holds knobs.json and golden/ (the
+ * Generates every output in memory. `inputsDir` holds the exporters' JSON and golden/ (the
  * Python-owned inputs, which live beside the outputs).
  */
 export function generate({ repo, inputsDir }) {
@@ -399,12 +446,16 @@ export function generate({ repo, inputsDir }) {
   const catalogue = YAML.parse(catalogueText);
   const knobsText = readFileSync(join(inputsDir, "knobs.json"), "utf8");
   const knobs = JSON.parse(knobsText);
+  const relationshipsText = readFileSync(join(inputsDir, "relationships.json"), "utf8");
+  const dlqRulesText = readFileSync(join(inputsDir, "dlq_rules.json"), "utf8");
 
   const inputs = {};
   for (const t of tables) inputs[t.source] = sha256(readFileSync(join(repo, t.source), "utf8"));
   inputs[`${EVAL_SCHEMAS}/views.sql`] = sha256(readFileSync(join(repo, EVAL_SCHEMAS, "views.sql"), "utf8"));
   inputs[CATALOGUE] = sha256(catalogueText);
   inputs["gui/packages/contracts/generated/knobs.json"] = sha256(knobsText);
+  inputs["gui/packages/contracts/generated/relationships.json"] = sha256(relationshipsText);
+  inputs["gui/packages/contracts/generated/dlq_rules.json"] = sha256(dlqRulesText);
   for (const file of goldenFiles(inputsDir)) {
     const text = readFileSync(join(inputsDir, "golden", file), "utf8");
     const doc = JSON.parse(text);
@@ -417,6 +468,8 @@ export function generate({ repo, inputsDir }) {
   files.set("schemas.ts", renderSchemas(tables, views, catalogue));
   files.set("catalogue.ts", renderCatalogue(catalogue));
   files.set("knobs.ts", renderKnobs(knobs));
+  files.set("relationships.ts", renderRelationships(JSON.parse(relationshipsText)));
+  files.set("dlqRules.ts", renderDlqRules(JSON.parse(dlqRulesText)));
   files.set(
     "manifest.json",
     JSON.stringify(
@@ -424,7 +477,7 @@ export function generate({ repo, inputsDir }) {
         generator: "gui/packages/contracts/gen.mjs",
         note: "sha256 of every input; contracts:check fails when an input changed without a re-sync.",
         inputs,
-        outputs: ["schemas.ts", "catalogue.ts", "knobs.ts"],
+        outputs: ["schemas.ts", "catalogue.ts", "knobs.ts", "relationships.ts", "dlqRules.ts"],
       },
       null,
       2,
@@ -474,7 +527,7 @@ export function main(argv = process.argv.slice(2)) {
     console.error(
       `contracts:check: ${drift.length} generated file(s) out of date: ${drift.join(", ")}.\n` +
         `A fresh copy is in ${tmp} (diff it against ${opts.out}).\n` +
-        "Run `npm run contracts:sync` (and the Python exporters when knobs.json or golden/ changed).",
+        "Run `npm run contracts:sync` (and the Python exporters when knobs.json, relationships.json, dlq_rules.json or golden/ changed).",
     );
     return 1;
   }

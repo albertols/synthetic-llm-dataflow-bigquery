@@ -1730,6 +1730,25 @@
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
+    },
+    {
+      "id": "eval_allow_contaminated",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Allow contaminated scopes",
+      "value": false,
+      "unit": null,
+      "settable_via": [
+        "cli"
+      ],
+      "cli_flag": "--allow_contaminated",
+      "help": "Evaluate a table whose scope check found rows from other runs instead of refusing it (the registry still records scope_status=contaminated).",
+      "source": "planned",
+      "source_token": null,
+      "related_adrs": [],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
     }
   ],
   "annotations": [
@@ -2940,5 +2959,9 @@
       "comment": "",
       "source": "scripts/doc/make_ws5_figures.py:86"
     }
-  ]
+  ],
+  "exported_from": {
+    "commit": "dbda23845fb06082daa58722b9492fc72bfb1c02",
+    "dirty": []
+  }
 }

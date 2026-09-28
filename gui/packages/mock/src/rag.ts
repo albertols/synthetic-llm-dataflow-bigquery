@@ -150,23 +150,27 @@ function chunkSet(
   return { ...base, dim: EMBEDDING_DIM, chunks, vectors };
 }
 
-/** Which (table, sample size, tier, embedder) sets exist: the ones the storyline's launches populate. */
-const SETS: [string, number, "sample" | "exact", "hashing-384" | "bge-small-en-v1.5", string][] = [
-  ["users", 10_000, "sample", "hashing-384", "2026-08-03T04:50:00Z"],
-  ["users", 10_000, "sample", "bge-small-en-v1.5", "2026-08-04T07:20:00Z"],
-  ["orders", 10_000, "sample", "hashing-384", "2026-08-03T04:55:00Z"],
-  ["order_items", 10_000, "sample", "hashing-384", "2026-08-03T05:00:00Z"],
-  ["users", 10_000, "exact", "hashing-384", "2026-08-31T05:40:00Z"],
-  ["users", 10_000, "exact", "bge-small-en-v1.5", "2026-09-01T08:20:00Z"],
-  ["orders", 10_000, "exact", "hashing-384", "2026-08-31T05:45:00Z"],
-  ["orders", 10_000, "exact", "bge-small-en-v1.5", "2026-09-01T08:25:00Z"],
-  ["order_items", 10_000, "exact", "hashing-384", "2026-08-31T05:50:00Z"],
-  ["order_items", 10_000, "exact", "bge-small-en-v1.5", "2026-09-01T08:30:00Z"],
+/**
+ * Which (table, sample size, source snapshot, embedder) sets exist: the ones the storyline's
+ * launches populate. The RAG layer is keyed by reference digest (not the stats tier), so the
+ * 2026-08-31 exact-tier launch reuses the August sets.
+ */
+const SETS: [string, number, "2026-08" | "2026-09", "hashing-384" | "bge-small-en-v1.5", string][] = [
+  ["users", 10_000, "2026-08", "hashing-384", "2026-08-03T04:50:00.114000Z"],
+  ["users", 10_000, "2026-08", "bge-small-en-v1.5", "2026-08-04T07:20:00.201000Z"],
+  ["orders", 10_000, "2026-08", "hashing-384", "2026-08-03T04:55:00.086000Z"],
+  ["order_items", 10_000, "2026-08", "hashing-384", "2026-08-03T05:00:00.009000Z"],
+  ["users", 10_000, "2026-09", "hashing-384", "2026-09-02T11:10:00.313000Z"],
+  ["users", 10_000, "2026-09", "bge-small-en-v1.5", "2026-09-01T08:20:00.042000Z"],
+  ["orders", 10_000, "2026-09", "hashing-384", "2026-09-02T11:15:00.515000Z"],
+  ["orders", 10_000, "2026-09", "bge-small-en-v1.5", "2026-09-01T08:25:00.777000Z"],
+  ["order_items", 10_000, "2026-09", "hashing-384", "2026-09-02T11:20:00.630000Z"],
+  ["order_items", 10_000, "2026-09", "bge-small-en-v1.5", "2026-09-01T08:30:00.908000Z"],
 ];
 
 export function buildRagSets(samples: Record<string, { source: Row[] }>): RagSet[] {
-  return SETS.map(([name, limit, tier, embedder, createdAt]) =>
-    chunkSet(TABLES[name]!, samples[name]!.source, referenceDigest(name, limit, tier), embedder, createdAt),
+  return SETS.map(([name, limit, era, embedder, createdAt]) =>
+    chunkSet(TABLES[name]!, samples[name]!.source, referenceDigest(name, limit, era), embedder, createdAt),
   );
 }
 

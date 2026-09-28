@@ -4,6 +4,7 @@
  * `generated/knobs.ts` embeds the file typed as `KnobsFile`; the zod twin used
  * by tests and the BFF is `knobsFileSchema` in `knobs.schema.ts`.
  */
+import type { ExportedFrom } from "./relational";
 
 /** How a knob can be changed: a launcher flag, a Composer DAG param, a flex-template param, or not at all. */
 export type SettableVia = "cli" | "composer" | "flex" | "constant" | "derived";
@@ -91,6 +92,8 @@ export interface MeasuredSource {
 export interface KnobsFile {
   generated_by: string;
   note: string;
+  /** The commit the `source` links resolve at (see `ExportedFrom`). */
+  exported_from: ExportedFrom;
   channels: KnobChannel[];
   knobs: Knob[];
   annotations: KnobAnnotation[];

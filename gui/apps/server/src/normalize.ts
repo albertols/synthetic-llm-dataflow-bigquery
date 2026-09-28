@@ -1,29 +1,34 @@
 /**
  * BigQuery client values → the wire format the generated zod describes.
  *
- * `@google-cloud/bigquery` returns TIMESTAMP as `BigQueryTimestamp { value }`,
+ * `@google-cloud/bigquery` returns TIMESTAMP as `BigQueryTimestamp { value }`
+ * (ISO text with 3 or 9 fraction digits), normalized to six (microseconds),
  * DATE/DATETIME as objects with `value`, INT64 as number (or string / BigInt /
  * `BigQueryInt` when wrapped), JSON as a parsed value or a string, NUMERIC as
  * `Big`. The field tree (from the generated `bqTables` metadata or a query's
  * own projection) says which conversion applies, recursively through RECORD
  * and REPEATED fields. Non-finite floats become null (JSON cannot carry them).
  */
-import type { BqField } from "@synthetic-platform/contracts";
+import { canonicalTimestamp, timestampFromEpochSeconds, type BqField } from "@synthetic-platform/contracts";
 
 function unwrap(value: unknown): unknown {
   if (value && typeof value === "object" && "value" in value) return value.value;
   return value;
 }
 
+/**
+ * TIMESTAMP → `YYYY-MM-DDTHH:MM:SS.ffffffZ` (contracts/timestamps.ts). Never through
+ * `Date` alone: BigQuery stores microseconds, and a registry `evaluated_at` sent back
+ * as `TIMESTAMP(@evaluated_at)` must match to the microsecond.
+ */
 function toIsoTimestamp(value: unknown): unknown {
   const v = unwrap(value);
-  if (v instanceof Date) return v.toISOString();
-  if (typeof v === "number") return new Date(v * 1000).toISOString();
+  // PreciseDate (a Date subclass) prints nanoseconds; a plain Date prints milliseconds.
+  if (v instanceof Date) return canonicalTimestamp(v.toISOString()) ?? v;
+  if (typeof v === "number") return timestampFromEpochSeconds(v) ?? v;
   if (typeof v !== "string") return v;
-  // BigQuery text timestamps: "2026-09-01 10:00:00 UTC", "2026-09-01T10:00:00.123Z", "…+00:00".
-  const text = v.replace(" UTC", "Z").replace(" ", "T");
-  const parsed = Date.parse(text);
-  return Number.isNaN(parsed) ? v : new Date(parsed).toISOString();
+  if (/^-?\d+(\.\d+)?$/.test(v)) return timestampFromEpochSeconds(Number(v)) ?? v;
+  return canonicalTimestamp(v) ?? v;
 }
 
 function toNumber(value: unknown, integer: boolean): unknown {

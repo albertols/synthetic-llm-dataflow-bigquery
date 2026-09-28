@@ -82,7 +82,8 @@ describe("mock rows validate against the generated contracts", { timeout: 60_000
   it("source-table stats and their profiler entries", () => {
     expectAll("source_table_stats", data.sourceStats, (r) => sourceTableStatsRowSchema.safeParse(r));
     expectAll("stats", data.sourceStats, (r) => profilerStatsSchema.safeParse(JSON.parse(r.stats ?? "null")));
-    expect(new Set(data.sourceStats.map((r) => r.stats_tier))).toEqual(new Set(["sample", "exact"]));
+    // NULL = the legacy profiler-"1" snapshot (read as sample).
+    expect(new Set(data.sourceStats.map((r) => r.stats_tier))).toEqual(new Set(["sample", "exact", null]));
   });
 
   it("pools and RAG chunks (Float32 unit vectors, ≤ 1,024 row docs per set)", () => {

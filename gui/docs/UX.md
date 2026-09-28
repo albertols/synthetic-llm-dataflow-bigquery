@@ -91,6 +91,21 @@ Follow the dataviz method: pick the form first, colour last.
   <project>**. Views that show a BigQuery bytes estimate (from the BFF's
   response header) put it next to the data it cost.
 
+## Data on screen
+
+- **Source text.** RAG chunk text (`chunk_text`) and pool values are the
+  operator's own governed reference data, shown to that operator by a
+  loopback-only server; show them where they explain a view (a hovered point,
+  a nearest-neighbour list). Source row keys (`source_pk`) never reach the
+  browser, and flagged rows show hashed keys unless the evaluator stored
+  literals under D6. Nothing on screen is written back or exported by the GUI.
+- **Values newer than the contract.** A status, level, kind or side the
+  contract does not list yet arrives as plain text (the response lists it in
+  `warnings`): render it neutral (`StatusPill` falls back to a neutral pill
+  with the raw text), never blank, never an error.
+- **Timestamps** carry microseconds; display them rounded (seconds or
+  minutes), but pass the exact string back when it identifies a row.
+
 ## Motion
 
 - Respect `prefers-reduced-motion`: CSS animations collapse globally,

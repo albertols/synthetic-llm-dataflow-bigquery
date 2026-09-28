@@ -476,7 +476,8 @@ export const STORYLINE: EvalSpec[] = ROWS.map((row, i): EvalSpec => {
   return {
     index: i + 1,
     id: `eval-${String(i + 1).padStart(4, "0")}`,
-    evaluatedAt: `${day}T${at}:00Z`,
+    // Microseconds, as BigQuery stores them: every consumer must keep all six digits.
+    evaluatedAt: `${day}T${at}:00.${String(((i + 1) * 104_729) % 1_000_000).padStart(6, "0")}Z`,
     durationMinutes: 38 + ((i * 17) % 31),
     trigger: "composer",
     runner: "DataflowRunner",

@@ -5,11 +5,13 @@
  * Per query: parameters only (never client text in SQL), a dry run first (its
  * `totalBytesProcessed` is added to the request's `x-bq-bytes-estimate` and
  * refused above MAX_BYTES_BILLED), then the job with `maximumBytesBilled` set
- * as well. Rows are normalized to the wire format (TIMESTAMP → ISO string,
- * INT64 → number, JSON → parsed) and validated against the generated zod; a
- * mismatch is a ContractError (HTTP 502), never a silent pass. Results are
- * cached in memory (LRU, TTL) and never persisted. The runner's ADC stays in
- * this process.
+ * as well. Rows are normalized to the wire format (TIMESTAMP → ISO string with
+ * microseconds, INT64 → number, JSON → parsed) and validated against the
+ * generated zod; a mismatch is a ContractError (HTTP 502), never a silent pass —
+ * except a vocabulary value newer than the contract, which passes through as a
+ * string with a warning (`x-contract-warnings`), so one new status never blanks a
+ * whole list. Results are cached in memory (LRU keyed by the full SQL text and
+ * parameters, TTL) and never persisted. The runner's ADC stays in this process.
  */
 import {
   chunkMetaSchema,
@@ -21,6 +23,7 @@ import {
   freetextPoolsRowSchema,
   ragChunksRowSchema,
   sourceTableStatsRowSchema,
+  type EvaluationFilterParsed as Filters,
   trendPointSchema,
   validationRunsRowSchema,
   type ChunkMeta,
@@ -36,6 +39,7 @@ import {
   type Page,
   type ProfileRow,
   type RagSet,
+  type RelationshipModel,
   type RunFilterParsed,
   type SourceStats,
   type SourceTableStatsRow,
@@ -77,6 +81,7 @@ import {
   type QueryContext,
   type RagChunks,
   type RagChunksFilter,
+  type SourceStatsFilter,
 } from "./types";
 
 /** The slice of `@google-cloud/bigquery` the provider uses (a stub implements it in tests). */
@@ -89,6 +94,61 @@ export interface BigQueryClient {
 }
 
 type Params = Record<string, unknown>;
+
+interface ZodIssueLike {
+  code: string;
+  path: PropertyKey[];
+  values?: unknown[];
+}
+
+function getPath(root: unknown, path: readonly PropertyKey[]): unknown {
+  let node = root;
+  for (const key of path) {
+    if (node === null || typeof node !== "object") return undefined;
+    node = (node as Record<PropertyKey, unknown>)[key];
+  }
+  return node;
+}
+
+function setPath(root: unknown, path: readonly PropertyKey[], value: unknown) {
+  const parent = getPath(root, path.slice(0, -1));
+  if (parent !== null && typeof parent === "object") (parent as Record<PropertyKey, unknown>)[path.at(-1)!] = value;
+}
+
+/**
+ * When every issue is a vocabulary miss (a string outside a generated z.enum), validate
+ * a copy with a known member in each spot, then put the live strings back: the rows pass
+ * as they are and each distinct (field, value) becomes a warning. Null otherwise.
+ */
+export function tolerateVocabulary<T>(
+  name: string,
+  schema: z.ZodType<T[]>,
+  rows: readonly Record<string, unknown>[],
+  issues: readonly ZodIssueLike[],
+): { data: T[]; warnings: string[] } | null {
+  const vocabulary = issues.filter(
+    (i) =>
+      i.code === "invalid_value" &&
+      Array.isArray(i.values) &&
+      i.values.length > 0 &&
+      i.values.every((v) => typeof v === "string") &&
+      typeof getPath(rows, i.path) === "string",
+  );
+  if (!vocabulary.length || vocabulary.length !== issues.length) return null;
+  const patched = structuredClone(rows) as Record<string, unknown>[];
+  for (const issue of vocabulary) setPath(patched, issue.path, issue.values![0]);
+  const again = schema.safeParse(patched);
+  if (!again.success) return null;
+  const seen = new Map<string, number>();
+  for (const issue of vocabulary) {
+    const value = getPath(rows, issue.path) as string;
+    setPath(again.data, issue.path, value);
+    const field = issue.path.filter((k) => typeof k !== "number").join(".");
+    const key = `${name}: ${field}=${JSON.stringify(value)} not in the contract vocabulary`;
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+  return { data: again.data, warnings: [...seen].map(([key, n]) => (n > 1 ? `${key} (${n} rows)` : key)) };
+}
 
 interface Cached {
   rows: Record<string, unknown>[];
@@ -140,6 +200,10 @@ export class BigQueryProvider implements DataProvider {
     return Promise.resolve();
   }
 
+  relationshipModels(): Promise<RelationshipModel[]> {
+    return Promise.resolve([]);
+  }
+
   private client(): Promise<BigQueryClient> {
     this.clientPromise ??= this.clientFactory();
     return this.clientPromise;
@@ -161,7 +225,8 @@ export class BigQueryProvider implements DataProvider {
     const bound: Params = {};
     for (const key of Object.keys(query.types))
       bound[key] = params[key] ?? (Array.isArray(query.types[key]) ? [] : null);
-    const cacheKey = `${name}|${sql.length}|${JSON.stringify(bound)}`;
+    // The full SQL text, not its length: two sorts can differ only in an ORDER BY column.
+    const cacheKey = `${name}\n${sql}\n${JSON.stringify(bound)}`;
     ctx.queries += 1;
     let hit = this.cache.get(cacheKey);
     if (hit) ctx.cacheHits += 1;
@@ -189,23 +254,43 @@ export class BigQueryProvider implements DataProvider {
       ctx.bytesEstimate += estimate;
     }
     const parsed = schema.safeParse(hit.rows);
-    if (!parsed.success)
-      throw new ContractError(
-        name,
-        parsed.error.issues.slice(0, 10).map((i) => `${i.path.join(".")}: ${i.message}`),
-      );
-    return parsed.data;
+    if (parsed.success) return parsed.data;
+    const tolerated = tolerateVocabulary(name, schema, hit.rows, parsed.error.issues as ZodIssueLike[]);
+    if (tolerated) {
+      ctx.warnings.push(...tolerated.warnings);
+      return tolerated.data;
+    }
+    throw new ContractError(
+      name,
+      parsed.error.issues.slice(0, 10).map((i) => `${i.path.join(".")}: ${i.message}`),
+    );
   }
 
   async listEvaluations(q: EvaluationFilterParsed, ctx = newContext()): Promise<Page<EvaluationSummary>> {
     const { sort, order, offset, limit, ...filters } = q;
     const rows = await this.run("evaluations.list", { ...filters, limit, offset }, summaryPage, ctx, { sort, order });
+    let total = rows[0]?.total_rows ?? 0;
+    // Past the end the page has no row to carry COUNT(*) OVER (): count separately.
+    if (!rows.length && offset > 0) total = await this.countEvaluations(filters, ctx);
     return {
       items: rows.map(({ total_rows: _t, ...row }) => row),
-      total: rows[0]?.total_rows ?? 0,
+      total,
       offset,
       limit,
     };
+  }
+
+  private async countEvaluations(
+    filters: Omit<Filters, "sort" | "order" | "offset" | "limit">,
+    ctx: QueryContext,
+  ): Promise<number> {
+    const [row] = await this.run(
+      "evaluations.count",
+      { ...filters },
+      z.array(z.object({ total_rows: z.int().nonnegative() })),
+      ctx,
+    );
+    return row?.total_rows ?? 0;
   }
 
   async getEvaluation(
@@ -238,8 +323,10 @@ export class BigQueryProvider implements DataProvider {
     );
   }
 
-  metricTrend(q: TrendQueryParsed, ctx = newContext()): Promise<TrendPoint[]> {
-    return this.run("trend", { ...q }, z.array(trendPointSchema), ctx);
+  /** The newest `limit` points (the query orders newest first), returned oldest first. */
+  async metricTrend(q: TrendQueryParsed, ctx = newContext()): Promise<TrendPoint[]> {
+    const newestFirst = await this.run("trend", { ...q }, z.array(trendPointSchema), ctx);
+    return newestFirst.reverse();
   }
 
   async compare(ids: string[], ctx = newContext()): Promise<Comparison> {
@@ -279,10 +366,7 @@ export class BigQueryProvider implements DataProvider {
     );
   }
 
-  async sourceStats(
-    q: { table: string; tier?: "sample" | "exact" | undefined; digest?: string | undefined },
-    ctx = newContext(),
-  ): Promise<SourceStats | null> {
+  async sourceStats(q: SourceStatsFilter, ctx = newContext()): Promise<SourceStats | null> {
     const tables = await this.run("sourceStats.tables", {}, z.array(z.object({ table_fqn: z.string() }).loose()), ctx);
     const fqn = resolveTable(
       tables.map((t) => t.table_fqn),
@@ -303,7 +387,7 @@ export class BigQueryProvider implements DataProvider {
     const rows = await this.run(
       "rag.chunks",
       { digest: q.digest, kind: q.kind, embedder, version, source_fqn: q.source_fqn, column: q.column, limit: q.limit },
-      z.array(ragChunksRowSchema),
+      z.array(ragChunksRowSchema.omit({ source_pk: true })),
       ctx,
     );
     const dim = rows[0]?.embedding.length ?? 0;
@@ -324,7 +408,6 @@ export class BigQueryProvider implements DataProvider {
         chunk_text: r.chunk_text,
         column: typeof column === "string" ? column : null,
         row_digest: r.row_digest,
-        source_pk: r.source_pk,
         embedder_id: r.embedder_id,
         embedder_version: r.embedder_version,
       });
@@ -383,7 +466,14 @@ export class BigQueryProvider implements DataProvider {
       this.run(
         "rag.poolSets",
         {},
-        z.array(z.object({ reference_digest: z.string(), model_uri: z.string(), columns: z.array(z.string()) })),
+        z.array(
+          z.object({
+            reference_digest: z.string(),
+            table_fqn: z.string().nullable(),
+            model_uri: z.string(),
+            columns: z.array(z.string()),
+          }),
+        ),
         ctx,
       ),
     ]);

@@ -164,6 +164,15 @@ WHERE ${evaluationWhere("e")}
 ORDER BY ${SORT_COLUMNS[o.sort ?? "evaluated_at"]} ${o.order === "asc" ? "ASC" : "DESC"} NULLS LAST, evaluation_id
 LIMIT @limit OFFSET @offset`,
   },
+  "evaluations.count": {
+    name: "evaluations.count",
+    description: "How many evaluation_latest rows match the filters (the total of a page past the end).",
+    types: { ...EVALUATION_FILTER_TYPES },
+    fields: [field("total_rows", "INT64", "REQUIRED")],
+    sql: (d) => `SELECT COUNT(*) AS total_rows
+FROM \`${d.quality}.evaluation_latest\` AS e
+WHERE ${evaluationWhere("e")}`,
+  },
   "evaluations.events": {
     name: "evaluations.events",
     description: "Every registry event of one evaluation, oldest first.",
@@ -245,7 +254,8 @@ ORDER BY table_name, \`check\`, rank`,
   trend: {
     name: "trend",
     description:
-      "One metric across evaluations (optionally one table / column / pair / edge), with the parameters to colour by.",
+      "One metric across evaluations (optionally one table / column / pair / edge), with the parameters to colour by: " +
+      "the NEWEST @limit rows, newest first (the provider reverses them to oldest first).",
     types: {
       ...EVALUATION_FILTER_TYPES,
       metric_id: "STRING",
@@ -262,14 +272,16 @@ ORDER BY table_name, \`check\`, rank`,
   e.engine, e.llm_model_uri, e.embedder_id, e.retrieval_method, e.seed, e.similarity,
   e.reference_rows_limit, e.num_rows_requested, e.source_stats_tier
 FROM \`${d.quality}.evaluation_metrics\` AS m
-JOIN \`${d.quality}.evaluation_latest\` AS e ON e.evaluation_id = m.evaluation_id
+JOIN \`${d.quality}.evaluation_latest\` AS e
+  ON e.evaluation_id = m.evaluation_id AND m.evaluated_at = e.evaluated_at
 WHERE m.metric_id = @metric_id
   AND (@table IS NULL OR m.table_name = @table)
   AND (@column IS NULL OR m.column_name = @column)
   AND (@column_2 IS NULL OR m.column_name_2 = @column_2)
   AND (@edge IS NULL OR m.edge = @edge)
   AND ${evaluationWhere("e")}
-ORDER BY e.evaluated_at, m.table_name
+ORDER BY e.evaluated_at DESC, e.evaluation_id DESC, m.table_name DESC, m.column_name DESC,
+  m.column_name_2 DESC, m.edge DESC
 LIMIT @limit`,
   },
   "runs.list": {
@@ -289,7 +301,9 @@ LIMIT @limit`,
     fields: fields("validation_runs"),
     sql: (d) => `SELECT * FROM \`${d.quality}.validation_runs\`
 WHERE (ARRAY_LENGTH(@run_ids) = 0 OR run_id IN UNNEST(@run_ids))
-  AND (@base_run_id IS NULL OR STARTS_WITH(run_id, CONCAT(@base_run_id, '-')))
+  AND (@base_run_id IS NULL OR run_id = @base_run_id
+    OR (STARTS_WITH(run_id, CONCAT(@base_run_id, '-'))
+      AND REGEXP_CONTAINS(SUBSTR(run_id, LENGTH(@base_run_id) + 2), r'^[0-9]{2}-.+$')))
   AND (ARRAY_LENGTH(@landing_table) = 0 OR landing_table IN UNNEST(@landing_table))
   AND (ARRAY_LENGTH(@engine) = 0 OR engine IN UNNEST(@engine))
   AND (ARRAY_LENGTH(@status) = 0 OR status IN UNNEST(@status))
@@ -377,7 +391,8 @@ GROUP BY source_fqn, reference_digest, embedder_id, embedder_version`,
   },
   "rag.chunks": {
     name: "rag.chunks",
-    description: "Chunks of one set and kind (deduplicated by chunk_id), with their embeddings.",
+    description:
+      "Chunks of one set and kind (deduplicated by chunk_id), with their embeddings; source_pk is never read.",
     types: {
       digest: "STRING",
       kind: "STRING",
@@ -387,8 +402,8 @@ GROUP BY source_fqn, reference_digest, embedder_id, embedder_version`,
       column: "STRING",
       limit: "INT64",
     },
-    fields: fields("rag_chunks"),
-    sql: (d) => `SELECT * FROM \`${d.rag}.rag_chunks\`
+    fields: omit("rag_chunks", ["source_pk"]),
+    sql: (d) => `SELECT * EXCEPT (source_pk) FROM \`${d.rag}.rag_chunks\`
 WHERE reference_digest = @digest AND chunk_kind = @kind AND embedder_id = @embedder
   AND (@version IS NULL OR embedder_version = @version)
   AND (@source_fqn IS NULL OR source_fqn = @source_fqn)
@@ -411,16 +426,27 @@ ORDER BY model_uri, \`column\``,
   },
   "rag.poolSets": {
     name: "rag.poolSets",
-    description: "Which (reference digest, model) pairs have pools, and for which columns (facets).",
+    description:
+      "Which (reference digest, model) pairs have pools, for which columns, and the source table the digest was " +
+      "sampled from (validation_runs.reference_table, else source_table_stats.table_fqn) — facets.",
     types: {},
     fields: [
       field("reference_digest", "STRING", "REQUIRED"),
+      field("table_fqn", "STRING"),
       field("model_uri", "STRING", "REQUIRED"),
       { name: "columns", type: "STRING", mode: "REPEATED" },
     ],
-    sql: (d) => `SELECT reference_digest, model_uri, ARRAY_AGG(DISTINCT \`column\` ORDER BY \`column\`) AS columns
-FROM \`${d.rag}.freetext_pools\`
-GROUP BY reference_digest, model_uri`,
+    sql: (d) => `SELECT p.reference_digest, COALESCE(ANY_VALUE(r.table_fqn), ANY_VALUE(s.table_fqn)) AS table_fqn,
+  p.model_uri, ARRAY_AGG(DISTINCT p.\`column\` ORDER BY p.\`column\`) AS columns
+FROM \`${d.rag}.freetext_pools\` AS p
+LEFT JOIN (
+  SELECT reference_digest, MIN(reference_table) AS table_fqn FROM \`${d.quality}.validation_runs\`
+  WHERE reference_digest IS NOT NULL AND reference_table IS NOT NULL GROUP BY reference_digest
+) AS r USING (reference_digest)
+LEFT JOIN (
+  SELECT reference_digest, MIN(table_fqn) AS table_fqn FROM \`${d.rag}.source_table_stats\` GROUP BY reference_digest
+) AS s USING (reference_digest)
+GROUP BY p.reference_digest, p.model_uri`,
   },
 } satisfies Record<string, NamedQuery>;
 

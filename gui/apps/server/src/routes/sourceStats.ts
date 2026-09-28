@@ -1,4 +1,8 @@
-/** `GET /api/source-stats?table=…[&tier=sample|exact][&digest=…]` — the profiler's rows for one source table. */
+/**
+ * `GET /api/source-stats?table=…[&tier=sample|exact][&digest=…][&snapshot=key,key]` — the
+ * profiler's rows for one source table, grouped into snapshots keyed by (digest, tier,
+ * profiler_version, run_id); NULL stats_tier reads as sample.
+ */
 import { sourceStatsQuerySchema } from "@synthetic-platform/contracts";
 import type { FastifyPluginAsync } from "fastify";
 

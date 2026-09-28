@@ -11,10 +11,10 @@ flowchart LR
 
   S["sdfb_evaluation/schemas/*.schema.json<br/>config/bq_schema/**"]:::py
   C["sdfb_evaluation/catalogue/metrics.yaml"]:::py
-  K["scripts/gui/export_knobs.py<br/>→ knobs.json"]:::py
+  K["scripts/gui/export_knobs.py<br/>→ knobs.json · relationships.json · dlq_rules.json"]:::py
   G["scripts/gui/export_golden_fixtures.py<br/>→ golden/*.json"]:::py
   GEN["packages/contracts/gen.mjs<br/>contracts:sync"]:::gen
-  OUT["packages/contracts/generated/**<br/>zod · catalogue · knobs · golden"]:::gen
+  OUT["packages/contracts/generated/**<br/>zod · catalogue · knobs · relationships · dlqRules · golden"]:::gen
   WEB["apps/web"]:::use
   SRV["apps/server"]:::use
 
@@ -34,6 +34,8 @@ difference fails CI. `generated/**` is never edited by hand._
 | Generated zod from BigQuery JSON schemas                      | G0b   | **done** — `generated/schemas.ts`: 10 tables, `vocabularies`, `bqTables` field metadata, `bqViews`       |
 | Catalogue → typed catalogue + `metric:<id>` concepts          | G0b   | **done** — `generated/catalogue.ts` (79 metrics); `src/concepts/catalogue.ts` hands them to the registry |
 | `knobs.json` (values from code, `source: path:line`)          | G0b   | **done** — `scripts/gui/export_knobs.py`; typed as `generated/knobs.ts`                                  |
+| `relationships.json` (the committed sample models)            | G0b   | **done** — `export_knobs.py`; typed as `generated/relationships.ts`; `parseEdge` in `src/relational.ts`  |
+| `dlq_rules.json` (rule → error_type, step, stage, severity)   | G0b   | **done** — `export_knobs.py`; typed as `generated/dlqRules.ts` (`dlqRuleById`)                           |
 | Golden fixtures (hashing embedder, GReaT, retrieval)          | G0b   | **done** — `scripts/gui/export_golden_fixtures.py` → `generated/golden/*.json`                           |
 | API contract (`src/api.ts`), payloads, profiler entry         | G0b   | **done** — hand-written zod on top of the generated rows                                                 |
 | API client + TanStack Query hooks (`apps/web/src/lib/api.ts`) | G0b   | **done**                                                                                                 |
@@ -45,11 +47,19 @@ difference fails CI. `generated/**` is never edited by hand._
 | a column, type, mode or vocabulary in a `*.schema.json`        | `npm run contracts:check` (gui CI) — `schemas.ts` and `manifest.json` differ |
 | a vocabulary description that no longer parses (`a \| b \| c`) | `contracts:sync` fails, naming the field                                     |
 | `metrics.yaml`                                                 | `contracts:check` — `catalogue.ts` differs                                   |
-| a knob's default, constant or `path:line`                      | `export_knobs.py --check` (root pytest `test_gui_exporters.py`)              |
+| a knob's default, constant, anchor token or source path        | `export_knobs.py --check` — the gui CI `exports` job                         |
+| a sample relationship model, or a DoFn's DLQ envelope / step   | `export_knobs.py --check` (`relationships.json`, `dlq_rules.json`)           |
+| only a line moved (`path:LINE`)                                | nothing: `--check` ignores line numbers (`--check-strict` does not)          |
 | a "Docs differ" anchor that moved or vanished                  | `export_knobs.py` fails (the annotation is re-verified every run)            |
 | `HashingEmbedder`, `serialize_row`, retrieval                  | `export_golden_fixtures.py --check`, then the TS golden tests                |
-| a hand edit of `knobs.json` or a golden file                   | `contracts:check` — the input sha256 in `manifest.json`                      |
-| live BigQuery rows that no longer match                        | the BigQuery provider (502 `Contract Mismatch`, with the failing paths)      |
+| a hand edit of an exported JSON or a golden file               | `contracts:check` — the input sha256 in `manifest.json`                      |
+| a live vocabulary value the contract does not know             | passes as a string, `x-contract-warnings` on the response                    |
+| live BigQuery rows that no longer match otherwise              | the BigQuery provider (502 `Contract Mismatch`, with the failing paths)      |
+
+The exporters' checks run in `.github/workflows/gui.yml` (job `exports`,
+triggered by the Python paths they read), not in the root pytest gate: an
+unrelated Python change that shifts a line must not fail the Python suite,
+and the tolerant check means it does not fail the GUI either.
 
 Refresh everything after a Python change:
 
@@ -72,6 +82,41 @@ constant), `source` = `path:LINE` or `planned`, `related_adrs`, `docs`),
 figure scripts' MEASURED constants with their block header). The EVALUATION
 channel is `source: "planned"` until `sdfb_evaluation/cli/main.py` exists
 (Ruling G2): its values then come from that file's argparse by AST.
+
+Every exported file carries `exported_from: { commit, dirty }` — the commit
+its `path:LINE` links resolve at (link to the source at that ref, not at
+`master`), and any referenced file that had uncommitted edits at export time.
+
+## relationships.json
+
+The committed sample models only (`config/relationships/example_*.yaml`,
+`*_example.yaml`; real models are gitignored and never exported), parsed by
+`sdfb_core.contracts.relationships.RelationshipRegistry`: per model its
+`sha12`, `generation_order` and tables (`pk`, `identity`, `enabled`), and per
+FK edge `cols → ref.ref_cols`, `enforced`, `drives`, `external`, the
+registry's `role` (driving / implied / conditional / independent / external,
+or `documented` for `enforced: false`, `disabled` on a disabled table) and
+the `drawn_cols` a widened driving edge draws. `src/relational.ts` types it
+and owns the edge-label helpers (`parseEdge`, `formatEdge`, `findEdge`).
+
+## dlq_rules.json
+
+Every DLQ `rule_id`, from the code: the `error_type` and `stage` each DoFn's
+envelope sets (AST scan of `sdfb_beam/dofns`), the `pipeline_step`
+`dlq.normalize_dlq_record` assigns, the `severity` / `dimension` / `scope`
+`config/thresholds.yml` declares, and whether `BLOCKER_RULE_IDS` counts it.
+What it shows today:
+
+| rule_id                                              | error_type              | pipeline_step              | stage          | note                                                                                             |
+| :--------------------------------------------------- | :---------------------- | :------------------------- | :------------- | :----------------------------------------------------------------------------------------------- |
+| `schema.types`                                       | `pydantic`              | `ValidateRecordDoFn`       | `pre_write`    | BLOCKER, counted                                                                                 |
+| `schema.non_finite`                                  | `load_safety`           | — (no mapping in dlq.py)   | `pre_write`    | not declared in thresholds.yml                                                                   |
+| `schema.batch`                                       | `pandera`               | `PanderaValidateBatchDoFn` | `pre_write`    | CRITICAL                                                                                         |
+| `row.duplicate` / `pk.duplicate` / `identity.unique` | `uniqueness`            | `EnforceUniqueness`        | `pre_write`    | BLOCKER, counted                                                                                 |
+| `fk.orphan`                                          | `referential_integrity` | `EnforceFkIntegrityDoFn`   | `pre_write`    | BLOCKER in thresholds.yml, **not counted** by the gate                                           |
+| `fk.unmatched`                                       | `referential_integrity` | `GenerateRecordsDoFn`      | `pre_generate` | not declared in thresholds.yml                                                                   |
+| `engine_failure`                                     | `engine`                | `GenerateRecordsDoFn`      | `pre_write`    | BLOCKER, counted (weighted by the lost batch)                                                    |
+| `null.required`                                      | —                       | —                          | —              | declared BLOCKER and counted, but **no DoFn emits it** (Pandera failures land as `schema.batch`) |
 
 ## Golden fixtures
 
@@ -134,10 +179,27 @@ Fetched rows are cached in memory (LRU) and never persisted.
 
 ### The mock world (`packages/mock`)
 
-- **Model:** `users ──< orders ──< order_items >── products` (products external),
-  as `config/relationships/gcp_public_fk_example.yaml`, in project
-  `demo-project`: sources in `synthetic_source`, landings in `synthetic_data`.
-  Plus `user_features`, an isolated 200-column table.
+- **Model:** `thelook_demo` — `users ──< orders ──< order_items >── products`
+  (products external, `synthetic_data.products`), which is
+  `config/relationships/gcp_public_fk_example.yaml` with one change:
+  `order_items.user_id → users.id` is **documented** (`enforced: false`), so
+  its `relationship.orphan_rate` is `info` (score null) next to a non-zero
+  `relationship.orphan_rate_source`. Invented, so not in
+  `relationships.json`: the BFF serves it from `/api/relationships` in mock
+  mode. Project `demo-project`: sources in `synthetic_source`, landings in
+  `synthetic_data`. Plus `user_features`, an isolated 200-column table.
+- **Identifiers as the pipeline writes them:** per-table run ids
+  `<base>-00-users`, `<base>-01-orders`, `<base>-02-order_items`
+  (`run_pipeline.plan_launch`; the one-table launch keeps `<base>`); reference
+  digests per (table, sample size, source snapshot) — the tier is not in the
+  digest, so the August digests are profiled on the sample tier by the first
+  August launch and on the exact tier by `eval-0021` (2026-08-31); `users` also
+  keeps a legacy profiler-"1" snapshot with a NULL `stats_tier`. Every
+  TIMESTAMP has six fraction digits, and `evaluated_at` carries real
+  microseconds. DLQ rows take `error_type` / `pipeline_step` / `stage` from
+  `dlq_rules.json` (fk.orphan, fk.unmatched, schema.types, schema.batch,
+  row/pk duplicates, engine_failure; never `null.required`). Every
+  `not_evaluated` metric has `detail.reason`.
 - **Storyline** (`storyline.ts`): 40 evaluations, 2026-08-03 … 2026-09-27.
   Weeks 1–4: b1 on the sample tier, the 512-value pool collapses on
   `users.city` (`column.distinct_ceiling_hit` = 1) and e-mails leak from the
@@ -150,8 +212,10 @@ Fetched rows are cached in memory (LRU) and never persisted.
   `expired` (`eval-0007`, users) and `contaminated` (`eval-0030`,
   order_items) come with warnings (SUCCEEDED_WITH_WARNINGS). b2 runs keep
   joint structure (pair metrics pass more often) but interpolate through 11
-  deciles. Evaluator 0.1.0 → 0.2.0 at `eval-0021` changes
-  `encoding_plan_digest`, so comparisons across it are flagged not comparable.
+  deciles. The catalogue moves 0.9.0 → 1.0.0 at `eval-0011` and the
+  evaluator 0.1.0 → 0.2.0 at `eval-0021` (which changes
+  `encoding_plan_digest`), so comparisons across either are flagged not
+  comparable, with the reason.
 - **Computation** (`evaluate.ts`): profiles are counts drawn at the stated n
   from the generated rows' distributions; every metric is a `packages/stats`
   function of those profiles (KS bracket, PIT-W1, TVD, JSD, PSI, rate-ratio

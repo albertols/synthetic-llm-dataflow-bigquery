@@ -6,6 +6,13 @@
  * fractions, `distinct`, `deciles`, `mean`/`stddev` and `top_values` with
  * full-table values. The `__table__` pseudo-column carries only the null-pattern
  * mix. Unknown keys are kept (`loose`) so a newer profiler never breaks the GUI.
+ *
+ * Snapshots: the profiler skips a write only when (table, reference_digest,
+ * profiler_version, stats_tier) already exists (`stats_store.exists`), so one
+ * digest can carry a sample AND an exact snapshot, and several profiler
+ * versions. A snapshot is therefore keyed by (digest, tier, profiler_version,
+ * run_id) — `snapshotKey` — never by the digest alone. A NULL `stats_tier`
+ * (rows written before the column existed) is the sample tier, everywhere.
  */
 import { z } from "zod";
 
@@ -53,8 +60,9 @@ export const profilerStatsSchema = z
     month_mix: z.array(fraction).optional(),
     future_fraction: fraction.nullable().optional(),
     generation_plan: z.string(),
-    stats_tier: z.enum(["sample", "exact"]),
-    profiler_version: z.string(),
+    /** Absent in entries written before the exact tier existed: those are sample-tier (see `effectiveTier`). */
+    stats_tier: z.enum(["sample", "exact"]).optional(),
+    profiler_version: z.string().optional(),
     /** Exact tier only: the full-table row count. */
     source_rows: z.int().nonnegative().optional(),
     /** `__table__` only. */
@@ -67,3 +75,20 @@ export type ProfilerStats = z.infer<typeof profilerStatsSchema>;
 
 /** The `__table__` pseudo-column name (`TABLE_PSEUDO_COLUMN`). */
 export const TABLE_PSEUDO_COLUMN = "__table__";
+
+export type StatsTier = "sample" | "exact";
+
+/** A NULL / absent `stats_tier` is a legacy sample-tier row. */
+export function effectiveTier(tier: string | null | undefined): StatsTier {
+  return tier === "exact" ? "exact" : "sample";
+}
+
+/** One profiler snapshot: `<reference_digest>|<tier>|<profiler_version or "">|<run_id>`. */
+export function snapshotKey(row: {
+  reference_digest: string;
+  stats_tier: string | null | undefined;
+  profiler_version: string | null | undefined;
+  run_id: string;
+}): string {
+  return [row.reference_digest, effectiveTier(row.stats_tier), row.profiler_version ?? "", row.run_id].join("|");
+}

@@ -66,15 +66,25 @@ export function psi(countsSource: readonly number[], countsSynthetic: readonly n
   return sum;
 }
 
-/** Cohen's w over the source support (p > 0): √Σ (q − p)²/p. */
-export function cohensW(p: readonly number[], q: readonly number[]): number | null {
+export interface CohensW {
+  /** √Σ_{p>0} (q − p)²/p; null when either side is empty. */
+  value: number | null;
+  /** Synthetic mass on categories the source never shows (excluded from `value`; the catalogue's `detail.q_mass_on_p0`). */
+  qMassOnP0: number | null;
+}
+
+/** Cohen's w over the source support (p > 0), with the synthetic mass it leaves out. */
+export function cohensW(p: readonly number[], q: readonly number[]): CohensW {
   check(p, q);
-  if (!p.some((v) => v > 0) || !q.some((v) => v > 0)) return null;
+  if (!p.some((v) => v > 0) || !q.some((v) => v > 0)) return { value: null, qMassOnP0: null };
   const a = normalize(p);
   const b = normalize(q);
   let sum = 0;
-  for (let i = 0; i < a.length; i += 1) if (a[i]! > 0) sum += (b[i]! - a[i]!) ** 2 / a[i]!;
-  return Math.sqrt(sum);
+  let outside = 0;
+  for (let i = 0; i < a.length; i += 1)
+    if (a[i]! > 0) sum += (b[i]! - a[i]!) ** 2 / a[i]!;
+    else outside += b[i]!;
+  return { value: Math.sqrt(sum), qMassOnP0: outside };
 }
 
 /** Hellinger distance ∈ [0, 1]. */

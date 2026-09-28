@@ -23,7 +23,22 @@ import {
   tvd,
 } from "@synthetic-platform/stats";
 
-import { createMockDataset, type MockDataset } from "./index";
+import {
+  canonicalTimestamp,
+  dlqRuleById,
+  isCanonicalTimestamp,
+  parseEdge,
+  snapshotKey,
+} from "@synthetic-platform/contracts";
+
+import {
+  catalogueVersionOf,
+  createMockDataset,
+  EDGES,
+  edgeLabel,
+  MOCK_RELATIONSHIP_MODEL,
+  type MockDataset,
+} from "./index";
 
 let data: MockDataset;
 let latest: Map<string, EvaluationDataHistoryRow>;
@@ -239,6 +254,14 @@ describe("metrics recompute from the profiles with packages/stats", { timeout: 6
         noiseFloor: m.noise_floor,
         sourceValue: m.source_value,
       };
+      const detail = m.detail as { enforced?: boolean } | null;
+      const documented = m.metric_id === "relationship.orphan_rate" && detail?.enforced === false;
+      if (documented) {
+        // A documented edge's orphan rate is context (catalogue: "reported as INFO").
+        expect(m.status).toBe("info");
+        expect(m.score).toBeNull();
+        continue;
+      }
       expect(m.status, `${m.evaluation_id} ${m.metric_id}`).toBe(statusFor(metric, reading));
       const score = scoreValue(metric, reading);
       if (score === null) expect(m.score).toBeNull();
@@ -261,5 +284,114 @@ describe("metrics recompute from the profiles with packages/stats", { timeout: 6
       expect(row.metrics_total).toBe(rows.length);
       expect(row.metrics_fail).toBe(rows.filter((m) => m.status === "fail").length);
     }
+  });
+});
+
+describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () => {
+  it("every relational model has a documented edge with an INFO orphan metric and a source baseline", () => {
+    const documented = EDGES.filter((e) => !e.enforced);
+    expect(documented.length).toBeGreaterThan(0);
+    const modelEdges = MOCK_RELATIONSHIP_MODEL.tables.flatMap((t) => t.fk);
+    expect(modelEdges.filter((e) => e.role === "documented" && !e.enforced)).toHaveLength(documented.length);
+    for (const row of finals().filter((r) => r.relationship_model)) {
+      for (const edge of documented) {
+        const label = edgeLabel(edge);
+        const rows = metricsOf(row.evaluation_id).filter((m) => m.edge === label);
+        const orphan = rows.find((m) => m.metric_id === "relationship.orphan_rate");
+        const source = rows.find((m) => m.metric_id === "relationship.orphan_rate_source");
+        expect(orphan?.status, `${row.evaluation_id} ${label}`).toBe("info");
+        expect(orphan?.detail).toMatchObject({ enforced: false, role: "documented" });
+        expect(source?.value).toBeGreaterThan(0);
+      }
+    }
+    // Labels are the evaluator's form; an external parent keeps its dataset.
+    for (const edge of EDGES) expect(parseEdge(edgeLabel(edge))?.child).toBe(edge.child);
+    expect(EDGES.filter((e) => e.external).map(edgeLabel)).toEqual([
+      "order_items.product_id->synthetic_data.products.id",
+    ]);
+  });
+
+  it("every not_evaluated metric says why", () => {
+    const missing = data.metrics.filter(
+      (m) =>
+        m.status === "not_evaluated" &&
+        !(m.detail && typeof m.detail === "object" && typeof (m.detail as { reason?: unknown }).reason === "string"),
+    );
+    expect(missing.map((m) => `${m.evaluation_id} ${m.metric_id}`).slice(0, 5)).toEqual([]);
+    expect(data.metrics.filter((m) => m.metric_id.startsWith("pair.") && m.status === "not_evaluated").length).toBe(72);
+  });
+
+  it("DLQ rows carry the rule's error_type, step and stage exactly as the code writes them", () => {
+    const rules = new Set(data.dlq.map((d) => d.rule_id));
+    for (const rule of ["fk.orphan", "fk.unmatched", "schema.types", "schema.batch", "row.duplicate", "pk.duplicate"])
+      expect(rules.has(rule), rule).toBe(true);
+    expect(rules.has("null.required")).toBe(false);
+    for (const row of data.dlq) {
+      const rule = dlqRuleById.get(row.rule_id ?? "")!;
+      expect(rule.emitted, row.rule_id!).toBe(true);
+      expect([row.error_type, row.pipeline_step, row.stage], row.rule_id!).toEqual([
+        rule.error_type,
+        rule.pipeline_step,
+        rule.stage,
+      ]);
+    }
+    const orphan = data.dlq.find((d) => d.rule_id === "fk.orphan")!;
+    expect([orphan.error_type, orphan.pipeline_step]).toEqual(["referential_integrity", "EnforceFkIntegrityDoFn"]);
+    expect(data.dlq.find((d) => d.rule_id === "fk.unmatched")!.stage).toBe("pre_generate");
+  });
+
+  it("per-table run ids are <base>-NN-<table> in generation order; one table keeps the base", () => {
+    for (const row of [...latest.values()]) {
+      const base = row.base_run_id!;
+      if (row.relationship_model)
+        expect(row.run_ids).toEqual([`${base}-00-users`, `${base}-01-orders`, `${base}-02-order_items`]);
+      else expect(row.run_ids).toEqual([base]);
+      for (const t of row.tables) if (t.role !== "external") expect(row.run_ids).toContain(t.run_id);
+    }
+    const runIds = new Set(data.validationRuns.map((r) => r.run_id));
+    for (const row of [...latest.values()]) for (const id of row.run_ids) expect(runIds.has(id), id).toBe(true);
+  });
+
+  it("the catalogue version changes once across the storyline", () => {
+    const versions = [...latest.values()].map((r) => [idx(r.evaluation_id), r.catalogue_version] as const);
+    expect(new Set(versions.map(([, v]) => v))).toEqual(new Set(["0.9.0", "1.0.0"]));
+    for (const [i, v] of versions) expect(v).toBe(catalogueVersionOf({ index: i }));
+  });
+
+  it("one reference digest is profiled on both tiers; a legacy snapshot has a NULL tier", () => {
+    const tiersByDigest = new Map<string, Set<string>>();
+    for (const r of data.sourceStats) {
+      const tiers = tiersByDigest.get(`${r.table_fqn}|${r.reference_digest}`) ?? new Set<string>();
+      tiers.add(r.stats_tier ?? "NULL");
+      tiersByDigest.set(`${r.table_fqn}|${r.reference_digest}`, tiers);
+    }
+    const both = [...tiersByDigest.entries()].filter(([, t]) => t.has("sample") && t.has("exact"));
+    expect(both.map(([k]) => k.split("|")[0]!.split(".").at(-1))).toEqual(
+      expect.arrayContaining(["users", "orders", "order_items"]),
+    );
+    const legacy = data.sourceStats.filter((r) => r.stats_tier === null);
+    expect(legacy.length).toBeGreaterThan(5);
+    expect(new Set(legacy.map(snapshotKey)).size).toBe(1);
+    expect(JSON.parse(legacy[0]!.stats!)).not.toHaveProperty("stats_tier");
+    // Keys never collide across tiers of one digest.
+    const keys = new Set(data.sourceStats.map(snapshotKey));
+    const pairs = new Set(data.sourceStats.map((r) => `${r.reference_digest}|${r.stats_tier}|${r.run_id}`));
+    expect(keys.size).toBe(pairs.size);
+  });
+
+  it("every TIMESTAMP is canonical (six fraction digits), and evaluated_at keeps its microseconds", () => {
+    const stamps = [
+      ...data.registry.flatMap((r) => [r.recorded_at, r.evaluated_at, r.finished_at]),
+      ...data.metrics.slice(0, 2000).map((m) => m.evaluated_at),
+      ...data.validationRuns.map((r) => r.created_at),
+      ...data.dlq.map((d) => d.dlq_inserted_at),
+      ...data.sourceStats.map((r) => r.computed_at),
+      ...data.fanoutStats.map((r) => r.measured_at),
+      ...data.rag.flatMap((s) => s.chunks.slice(0, 3).map((c) => c.created_at)),
+    ].filter((t): t is string => t !== null);
+    expect(stamps.filter((t) => !isCanonicalTimestamp(t)).slice(0, 3)).toEqual([]);
+    const evaluated = [...latest.values()].map((r) => r.evaluated_at);
+    expect(evaluated.every((t) => !t.endsWith("000Z"))).toBe(true);
+    expect(canonicalTimestamp(evaluated[0]!)).toBe(evaluated[0]);
   });
 });

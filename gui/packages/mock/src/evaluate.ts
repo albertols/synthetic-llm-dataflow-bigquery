@@ -131,6 +131,16 @@ function memo<T>(owner: object, key: string, compute: () => T): T {
   return map.get(key) as T;
 }
 
+const NO_COPIES = "no copies on either side (m_R = m_H = 0): the rate ratio is undefined";
+
+/** detail.reason for a pair statistic that is undefined on a side (a constant column there). */
+function undefinedOn(statistic: string, source: number | null, synthetic: number | null) {
+  if (source !== null && synthetic !== null) return null;
+  const side =
+    source === null && synthetic === null ? "both sides" : source === null ? "the source" : "the synthetic side";
+  return { reason: `${statistic} is undefined on ${side}: a column of the pair has one observed level there` };
+}
+
 const round = (v: number | null | undefined, digits = 12) =>
   v === null || v === undefined || !Number.isFinite(v) ? null : Number(v.toPrecision(digits));
 
@@ -597,7 +607,13 @@ export class TableEvaluator {
       baseline: jsdBits(cs, cr),
       noiseFloor: jsdNullExpectationBits(categories.length, nSource, nSynthetic),
     });
-    this.metric("column.cohens_w", { column, value: cohensW(cs, cy), baseline: cohensW(cs, cr) });
+    const w = cohensW(cs, cy);
+    this.metric("column.cohens_w", {
+      column,
+      value: w.value,
+      baseline: cohensW(cs, cr).value,
+      detail: { q_mass_on_p0: w.qMassOnP0 },
+    });
     const top = cs.indexOf(Math.max(...cs));
     const topSrc = cs[top]! / nSource;
     const topSyn = cy[top]! / totalSyn;
@@ -938,6 +954,8 @@ export class TableEvaluator {
     if (commonValues && m1 + m2 === 0)
       return this.notEvaluated(id, "no rare source values: every value is shared by ≥ 10 source rows", { column });
     const lift = rateRatio(m1, nReference, m2, nReference, 0.05, { zeroCorrection: true });
+    if (lift.ratio === null)
+      return this.notEvaluated(id, NO_COPIES, { column, detail: { reason: NO_COPIES, copies_r: m1, copies_h: m2 } });
     return this.metric(id, {
       column,
       value: lift.ratio,
@@ -1082,6 +1100,7 @@ export class TableEvaluator {
         column: colA,
         column2: b,
         value: vs === null || vy === null ? null : Math.abs(vs - vy),
+        detail: undefinedOn("Cramér's V", vs, vy),
         sourceValue: vs,
         syntheticValue: vy,
         baseline: 0,
@@ -1095,6 +1114,7 @@ export class TableEvaluator {
         column: colA,
         column2: b,
         value: ns === null || ny === null ? null : Math.abs(ns - ny),
+        detail: undefinedOn("NMI", ns, ny),
         sourceValue: ns,
         syntheticValue: ny,
         baseline: 0,
@@ -1232,6 +1252,11 @@ export class TableEvaluator {
       const m1 = rng.poisson(nPrivacy * (rateR + CHANCE_MATCH * 10));
       const m2 = rng.poisson(nPrivacy * CHANCE_MATCH * 10);
       const r = rateRatio(m1, sizeR, m2, sizeR, 0.05, { zeroCorrection: true });
+      if (r.ratio === null)
+        return this.notEvaluated(id, NO_COPIES, {
+          detail: { reason: NO_COPIES, copies_r: m1, copies_h: m2 },
+          nSynthetic: nPrivacy,
+        });
       return this.metric(id, {
         value: r.ratio,
         ciLow: r.lo,

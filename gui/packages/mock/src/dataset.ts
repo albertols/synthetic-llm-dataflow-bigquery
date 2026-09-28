@@ -5,8 +5,12 @@
  * embeddings) and free-text pools — one seeded, self-consistent world.
  */
 import {
+  bqTables,
+  canonicalTimestamp,
   catalogueById,
   knobs,
+  type BqField,
+  type BqTableName,
   type EvaluationDataHistoryRow,
   type EvaluationMetricsRow,
   type EvaluationProfilesRow,
@@ -32,7 +36,16 @@ import {
 } from "@synthetic-platform/stats";
 
 import { fanoutCounts, sum, TableEvaluator, type TableContext } from "./evaluate";
-import { baseRunId, dataflowJobId, isoSeconds, referenceDigest, rowsFor } from "./ids";
+import {
+  baseRunId,
+  dataflowJobId,
+  isoMicros,
+  launchDigest,
+  referenceDigest,
+  rowsFor,
+  snapshotEra,
+  tableRunIds,
+} from "./ids";
 import { buildRagSets, type RagSet } from "./rag";
 import { buildRuns } from "./runs";
 import { buildSourceStats } from "./sourceStats";
@@ -41,6 +54,8 @@ import { buildPool, drawTextValues, synthesize, textUniverse, type Pool } from "
 import {
   EDGES,
   edgeLabel,
+  MOCK_RELATIONSHIP_MODEL,
+  edgeRole,
   landingFqn,
   PROJECT,
   RELATIONSHIP_MODEL,
@@ -54,7 +69,29 @@ import {
 export const SAMPLE_ROWS = 1500;
 export const WIDE_SAMPLE_ROWS = 400;
 const EVALUATOR_VERSIONS = ["0.1.0", "0.2.0"];
-const CATALOGUE_VERSION = "1.0.0";
+/** The catalogue moved 0.9.0 → 1.0.0 after the first ten evaluations (not_comparable across it). */
+export const catalogueVersionOf = (spec: Pick<EvalSpec, "index">) => (spec.index <= 10 ? "0.9.0" : "1.0.0");
+const RELATIONSHIPS_URI = `gs://synthetic-platform-demo/synthetic/relationships/${RELATIONSHIP_MODEL}.yaml`;
+
+/** Every TIMESTAMP (recursively through RECORD / REPEATED) in the canonical wire form. */
+function canonicalize<T extends object>(rows: T[], table: BqTableName): T[] {
+  const walk = (value: unknown, fields: readonly BqField[]) => {
+    const row = value as Record<string, unknown>;
+    for (const field of fields) {
+      const v = row[field.name];
+      if (v === null || v === undefined) continue;
+      const items: unknown[] = field.mode === "REPEATED" && Array.isArray(v) ? (v as unknown[]) : [v];
+      if (field.type === "TIMESTAMP") {
+        const fixed = items.map((x): unknown => (typeof x === "string" ? (canonicalTimestamp(x) ?? x) : x));
+        row[field.name] = field.mode === "REPEATED" ? fixed : fixed[0];
+      } else if (field.type === "RECORD" || field.type === "STRUCT")
+        for (const item of items) if (item && typeof item === "object") walk(item, field.fields ?? []);
+    }
+  };
+  const fields: readonly BqField[] = bqTables[table].fields;
+  for (const row of rows) walk(row, fields);
+  return rows;
+}
 
 export interface MockDataset {
   generatedWith: { seed: number; evaluations: number };
@@ -110,14 +147,31 @@ function relationship(ev: TableEvaluator, edge: EdgeDef, spec: EvalSpec, rng: Ra
       { edge: label, n },
     );
   const children = hy.reduce((acc, c, i) => acc + c * i, 0);
+  const sourceChildren = sum(hs.map((c, i) => c * i));
+  // Enforced edges orphan only when the external key pool lags (quality.orphanShare); the
+  // documented edge copies user_id from the order, so it has none — while the source,
+  // with deleted users, has a few: the INFO comparison the catalogue describes.
   const orphans = edge.external ? rng.binomial(children, spec.quality.orphanShare) : 0;
-  ev.metric("relationship.orphan_rate", {
+  const sourceOrphans = edge.enforced ? 0 : rng.binomial(sourceChildren, 0.0021);
+  const orphanRow = ev.metric("relationship.orphan_rate", {
     edge: label,
     value: orphans / Math.max(children, 1),
+    sourceValue: sourceOrphans / Math.max(sourceChildren, 1),
+    nSource: sourceChildren,
     nSynthetic: children,
-    detail: { orphans, enforced: true },
+    detail: { orphans, enforced: edge.enforced, role: edgeRole(edge) },
   });
-  ev.metric("relationship.orphan_rate_source", { edge: label, value: 0, nSource: sum(hs.map((c, i) => c * i)) });
+  if (!edge.enforced) {
+    // A documented edge is context, not a verdict: INFO, no score, out of the roll-ups.
+    orphanRow.status = "info";
+    orphanRow.score = null;
+  }
+  ev.metric("relationship.orphan_rate_source", {
+    edge: label,
+    value: sourceOrphans / Math.max(sourceChildren, 1),
+    nSource: sourceChildren,
+    detail: { orphans: sourceOrphans, enforced: edge.enforced, role: edgeRole(edge) },
+  });
   ev.metric("relationship.fanout_tvd", {
     edge: label,
     value: tvd(hs, hy),
@@ -181,11 +235,12 @@ function sourceSamples(): Record<string, Samples> {
   return out;
 }
 
-const minutes = (iso: string, delta: number) => isoSeconds(Date.parse(iso) + delta * 60_000);
+const minutes = (iso: string, delta: number) => isoMicros(Date.parse(iso) + delta * 60_000);
 
 function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
   const jobRng = new Random(seedFrom("generation-job", spec.id));
   const evaluatorVersion = spec.index <= 20 ? EVALUATOR_VERSIONS[0]! : EVALUATOR_VERSIONS[1]!;
+  const catalogueVersion = catalogueVersionOf(spec);
   const eval_ = Object.fromEntries(
     knobs.knobs.filter((k) => k.channel === "evaluation").map((k) => [k.id.replace(/^eval_/, ""), k.value]),
   ) as Record<string, unknown>;
@@ -205,12 +260,12 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
     event: "RUNNING",
     status: "RUNNING",
     status_reason: null,
-    evaluation_key: sha256Hex(`${spec.id}|${evaluatorVersion}|${CATALOGUE_VERSION}`).slice(0, 32),
+    evaluation_key: sha256Hex(`${spec.id}|${evaluatorVersion}|${catalogueVersion}`).slice(0, 32),
     trigger: spec.trigger,
     runner: spec.runner,
     mode: spec.mode,
     evaluator_version: evaluatorVersion,
-    catalogue_version: CATALOGUE_VERSION,
+    catalogue_version: catalogueVersion,
     evaluation_job_id:
       spec.runner === "DataflowRunner"
         ? dataflowJobId(Date.parse(spec.evaluatedAt), (lo, hi) => rng.int(lo, hi))
@@ -222,15 +277,11 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
     generation_started_at: minutes(spec.evaluatedAt, -150),
     generation_finished_at: minutes(spec.evaluatedAt, -30),
     base_run_id: base,
-    run_ids: tables.map((t) => `${base}-${t}`),
+    run_ids: [...tableRunIds(base, tables).values()],
     params_source: "jobs_labels+logs",
     relationship_model: spec.relational ? RELATIONSHIP_MODEL : null,
-    relationship_model_sha: spec.relational
-      ? sha256Hex(`config/relationships/gcp_public_fk_example.yaml@${RELATIONSHIP_MODEL}`).slice(0, 12)
-      : null,
-    relationship_model_uri: spec.relational
-      ? "gs://synthetic-platform-demo/synthetic/relationships/gcp_public_fk_example.yaml"
-      : null,
+    relationship_model_sha: spec.relational ? MOCK_RELATIONSHIP_MODEL.sha12 : null,
+    relationship_model_uri: spec.relational ? RELATIONSHIPS_URI : null,
     model_adjusted: spec.relational ? spec.index === 29 : null,
     tables: [],
     engine: spec.engine,
@@ -269,9 +320,7 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
       multi_table_mode: "single_job",
       landing_table: tables.map((t) => landingFqn(t)).join(","),
       reference_table: sourceFqn(tables[tables.length - 1]!),
-      relationships_uri: spec.relational
-        ? "gs://synthetic-platform-demo/synthetic/relationships/gcp_public_fk_example.yaml"
-        : "",
+      relationships_uri: spec.relational ? RELATIONSHIPS_URI : "",
       build_rag_layer: "true",
       build_pool_layer: "true",
     },
@@ -295,7 +344,7 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
 
 type TableEntry = EvaluationDataHistoryRow["tables"][number];
 
-function tableEntry(spec: EvalSpec, table: TableDef, base: string): TableEntry {
+function tableEntry(spec: EvalSpec, table: TableDef, runIds: Map<string, string>): TableEntry {
   const rowsExpected = rowsFor(spec, table);
   const mismatch = spec.scopeStatus === "count_mismatch" && table.name === "orders";
   const empty = spec.scopeStatus === "empty";
@@ -308,7 +357,7 @@ function tableEntry(spec: EvalSpec, table: TableDef, base: string): TableEntry {
     name: table.name,
     landing_table: table.role === "external" ? landingFqn(table.name) : landingFqn(table.name),
     source_table: sourceFqn(table.name),
-    run_id: table.role === "external" ? null : `${base}-${table.name}`,
+    run_id: runIds.get(table.name) ?? null,
     role: table.role,
     scope_mode: empty ? "appends" : "table",
     scope_status: empty ? "empty" : mismatch ? "count_mismatch" : (note?.status ?? "ok"),
@@ -318,8 +367,7 @@ function tableEntry(spec: EvalSpec, table: TableDef, base: string): TableEntry {
     window_end: empty ? spec.evaluatedAt : null,
     source_snapshot_ts: minutes(spec.evaluatedAt, -150),
     source_drifted: !verified,
-    reference_digest:
-      table.role === "external" ? null : referenceDigest(table.name, spec.referenceRowsLimit, spec.sourceStatsTier),
+    reference_digest: table.role === "external" ? null : launchDigest(spec, table.name),
     reference_verified: table.role === "external" ? null : verified,
     reference_n: table.role === "external" ? null : spec.referenceRowsLimit,
     exposure_n: table.role === "external" ? null : 1024,
@@ -333,7 +381,7 @@ function tableEntry(spec: EvalSpec, table: TableDef, base: string): TableEntry {
     encoding_plan_digest:
       table.role === "external"
         ? null
-        : sha256Hex(`${table.name}|${spec.index <= 20 ? "0.1.0" : "0.2.0"}|${CATALOGUE_VERSION}`).slice(0, 16),
+        : sha256Hex(`${table.name}|${spec.index <= 20 ? "0.1.0" : "0.2.0"}|${catalogueVersionOf(spec)}`).slice(0, 16),
     table_score: null,
   };
 }
@@ -366,7 +414,7 @@ export function createMockDataset(seed = 20260928): MockDataset {
   const sourceStats = buildSourceStats(samples);
   const profiled = new Map<string, Map<string, number>>();
   for (const row of sourceStats) {
-    const key = `${row.table_fqn}|${row.reference_digest}`;
+    const key = `${row.table_fqn}|${row.reference_digest}|${row.stats_tier ?? "sample"}`;
     const map = profiled.get(key) ?? new Map<string, number>();
     if (row.null_fraction !== null) map.set(row.column, row.null_fraction);
     profiled.set(key, map);
@@ -385,7 +433,11 @@ export function createMockDataset(seed = 20260928): MockDataset {
     const tableDefs = (spec.relational ? ["users", "orders", "order_items", "products"] : spec.tables).map(
       (t) => TABLES[t]!,
     );
-    running.tables = tableDefs.map((t) => tableEntry(spec, t, base));
+    const runIds = tableRunIds(
+      base,
+      tableDefs.filter((t) => t.role !== "external").map((t) => t.name),
+    );
+    running.tables = tableDefs.map((t) => tableEntry(spec, t, runIds));
     registry.push(structuredClone(running));
     if (spec.outcome === "RUNNING") continue;
 
@@ -472,7 +524,7 @@ export function createMockDataset(seed = 20260928): MockDataset {
         encodingPlanDigest: entry.encoding_plan_digest!,
         referenceVerified: entry.reference_verified ?? true,
         textDraws,
-        profiledNullFraction: profiled.get(`${entry.source_table}|${digest}`) ?? new Map(),
+        profiledNullFraction: profiled.get(`${entry.source_table}|${digest}|${spec.sourceStatsTier}`) ?? new Map(),
         rng: new Random(seedFrom(seed, spec.id, table.name)),
       };
       const ev = new TableEvaluator(ctx);
@@ -596,14 +648,14 @@ export function createMockDataset(seed = 20260928): MockDataset {
   let rag: RagSet[] | null = null;
   return {
     generatedWith: { seed, evaluations: STORYLINE.length },
-    registry,
-    metrics,
-    profiles,
-    flags,
-    validationRuns,
-    dlq,
-    fanoutStats,
-    sourceStats,
+    registry: canonicalize(registry, "evaluation_data_history"),
+    metrics: canonicalize(metrics, "evaluation_metrics"),
+    profiles: canonicalize(profiles, "evaluation_profiles"),
+    flags: canonicalize(flags, "evaluation_row_flags"),
+    validationRuns: canonicalize(validationRuns, "validation_runs"),
+    dlq: canonicalize(dlq, "dlq"),
+    fanoutStats: canonicalize(fanoutStats, "fk_fanout_stats"),
+    sourceStats: canonicalize(sourceStats, "source_table_stats"),
     /** Built on first access (the embeddings are the slowest part). */
     get rag() {
       rag ??= buildRagSets(samples);
@@ -622,4 +674,4 @@ export function getMockDataset(): MockDataset {
   return cached;
 }
 
-export { referenceDigest, baseRunId, rowsFor };
+export { referenceDigest, baseRunId, rowsFor, snapshotEra, launchDigest, tableRunIds };

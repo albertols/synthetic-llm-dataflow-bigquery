@@ -36,7 +36,26 @@ Three more sections:
   (never imported) when that file exists; until then the plan-documented
   knob list with `source: "planned"` (GUI Ruling G2).
 
-`--check` exits 1 when the committed file differs from a fresh export.
+Two sibling files, same run:
+
+- `relationships.json`: the committed sample relationship models
+  (`config/relationships/example_*.yaml`, `*_example.yaml`) parsed by
+  `sdfb_core`'s own registry, every edge with its role (driving, implied,
+  conditional, independent, external, documented). Real models are
+  gitignored and never exported.
+- `dlq_rules.json`: every DLQ rule_id with the error_type and stage the
+  DoFn envelopes emit (AST scan of `sdfb_beam/dofns`), the pipeline_step
+  `dlq.normalize_dlq_record` assigns, and the severity thresholds.yml
+  declares.
+
+Each file records `exported_from` (the commit its `path:line` links resolve
+at, and any referenced file that had uncommitted edits).
+
+`--check` exits 1 when a fresh export differs from a committed file in a
+value, id, anchor token or path; a line number or the export commit may
+move, so an unrelated Python edit that shifts a line passes. `--check-strict`
+compares line numbers too. The check runs in `.github/workflows/gui.yml`,
+not in the Python test suite.
 
 Design: docs/DESIGN.md §12 Platform GUI
 (ADR 0042).
@@ -54,6 +73,7 @@ import importlib.util
 import json
 import math
 import re
+import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -63,7 +83,11 @@ from unittest import mock
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-OUT = REPO / "gui" / "packages" / "contracts" / "generated" / "knobs.json"
+OUT_DIR = REPO / "gui" / "packages" / "contracts" / "generated"
+_RELATIONSHIPS = REPO / "config" / "relationships"
+_DOFNS = REPO / "packages" / "sdfb-beam" / "src" / "sdfb_beam" / "dofns"
+# `path:LINE` anywhere in an export: the tolerant check compares paths only.
+_SOURCE_REF = re.compile(r"^(?P<path>[\w./-]+\.(?:py|yml|yaml|json|md)):\d+$")
 EVAL_CLI = (
     REPO / "packages" / "sdfb-evaluation" / "src" / "sdfb_evaluation" / "cli" /
     "main.py")
@@ -147,6 +171,9 @@ _PLANNED_EVAL = (
                        "manual"], None, "Evaluation scope",
      "Which synthetic rows count: the whole table, a snapshot, the rows the "
      "run appended, or a manual window."),
+    ("allow_contaminated", False, None, None, "Allow contaminated scopes",
+     "Evaluate a table whose scope check found rows from other runs instead "
+     "of refusing it (the registry still records scope_status=contaminated)."),
 )
 
 # ---------------------------------------------------------------- helpers --
@@ -1234,7 +1261,221 @@ def _measured() -> list[dict[str, Any]]:
   return out
 
 
+# ------------------------------------------------------ relationships --
+
+
+def build_relationships() -> dict[str, Any]:
+  """The committed sample models (`example_*.yaml`, `*_example.yaml`), parsed
+  by `sdfb_core`'s own registry: tables, keys, every edge with its role."""
+  from sdfb_core.contracts.relationships import RelationshipRegistry
+
+  models = []
+  paths = sorted(
+      p for p in _RELATIONSHIPS.glob("*.yaml")
+      if p.name.startswith("example_") or p.stem.endswith("_example"))
+  for path in paths:
+    registry = RelationshipRegistry.from_sources([
+        (_rel(path), path.read_text(encoding="utf-8"))
+    ])
+    model = registry.models[0]
+    tables = []
+    for name, relations in model.tables.items():
+      roles = registry.edge_roles(name) if relations.enabled else {}
+      edges = []
+      for edge in relations.fk:
+        drawn = registry.widened(name, edge)
+        role = "documented" if not edge.enforced else roles.get(drawn, "")
+        edges.append({
+            "cols": list(edge.cols),
+            "ref": edge.ref,
+            "ref_cols": list(edge.ref_cols),
+            "enforced": edge.enforced,
+            "drives": edge.drives,
+            "external": edge.external,
+            "role": role or ("external" if edge.external else "disabled"),
+            "drawn_cols": list(drawn.cols),
+            "note": edge.note,
+        })
+      tables.append({
+          "name": name,
+          "pk": list(relations.pk),
+          "identity": list(relations.identity),
+          "enabled": relations.enabled,
+          "note": relations.note,
+          "fk": edges,
+      })
+    order: list[str] = []
+    for name in model.tables:
+      for table in registry.generation_order(registry.component(name)):
+        if table not in order:
+          order.append(table)
+    models.append({
+        "model": model.model,
+        "description": model.description,
+        "source": _rel(path),
+        "sha12": registry.sha12(),
+        "generation_order": order,
+        "tables": tables,
+    })
+  return {
+      "generated_by": "scripts/gui/export_knobs.py",
+      "note": "The committed sample relationship models, parsed by "
+              "sdfb_core.contracts.relationships. Real models are gitignored "
+              "and never exported.",
+      "models": models,
+  }
+
+
+# -------------------------------------------------------------- DLQ rules --
+
+
+def _module_constants(tree: ast.Module) -> dict[str, Any]:
+  out: dict[str, Any] = {}
+  for node in tree.body:
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(
+        node.targets[0], ast.Name):
+      try:
+        out[node.targets[0].id] = ast.literal_eval(node.value)
+      except ValueError:
+        continue
+  return out
+
+
+def _dict_entry(node: ast.Dict, key: str) -> ast.expr | None:
+  for k, v in zip(node.keys, node.values, strict=True):
+    if isinstance(k, ast.Constant) and k.value == key:
+      return v
+  return None
+
+
+def _emitted_rules() -> dict[str, dict[str, Any]]:
+  """rule_id → (error_type, stage, path:line) from the DLQ envelopes the
+  DoFns build (AST; no Beam import). An envelope that spreads a nested
+  dict (`**safety`) lends its error_type to the rule_id inside it."""
+  found: dict[str, dict[str, Any]] = {}
+  for path in sorted(_DOFNS.glob("*.py")):
+    tree = _tree(path)
+    constants = _module_constants(tree)
+    dicts = [n for n in ast.walk(tree) if isinstance(n, ast.Dict)]
+    spreads = [
+        d for d in dicts if None in d.keys and _dict_entry(d, "error_type")
+    ]
+    for node in dicts:
+      rule = _dict_entry(node, "rule_id")
+      if rule is None:
+        continue
+      if isinstance(rule, ast.Constant) and isinstance(rule.value, str):
+        rules = [rule.value]
+      else:
+        rules = [v for k, v in constants.items() if k.startswith("RULE_")]
+      error_node = _dict_entry(node, "error_type")
+      stage_node = _dict_entry(node, "stage")
+      host = node if error_node is not None else (
+          spreads[0] if spreads else None)
+      if host is not None:
+        error_node = _dict_entry(host, "error_type")
+        stage_node = stage_node or _dict_entry(host, "stage")
+      for rule_id in rules:
+        found.setdefault(
+            rule_id, {
+                "error_type": getattr(error_node, "value", None),
+                "stage": getattr(stage_node, "value", None),
+                "emitted_by": _source(path, node.lineno),
+            })
+  return found
+
+
+def build_dlq_rules() -> dict[str, Any]:
+  """Every DLQ rule: what the code emits (error_type, stage, the step
+  `normalize_dlq_record` assigns) and what thresholds.yml declares
+  (severity, scope), and whether the BLOCKER gate counts it."""
+  from sdfb_core.validation import dlq, summary
+
+  declared = yaml.safe_load(_THRESHOLDS.read_text(encoding="utf-8"))["rules"]
+  emitted = _emitted_rules()
+  rules = []
+  for rule_id in sorted(set(declared) | set(emitted)):
+    spec = declared.get(rule_id) or {}
+    code = emitted.get(rule_id)
+    step = None
+    if code:
+      step = dlq.normalize_dlq_record(
+          {
+              "error_type": code["error_type"],
+              "rule_id": rule_id
+          },
+          run_id="export")["pipeline_step"] or None
+    rules.append({
+        "rule_id": rule_id,
+        "emitted": code is not None,
+        "error_type": code["error_type"] if code else None,
+        "pipeline_step": step,
+        "stage": code["stage"] if code else None,
+        "emitted_by": code["emitted_by"] if code else None,
+        "declared": rule_id in declared,
+        "severity": spec.get("severity"),
+        "dimension": spec.get("dimension"),
+        "scope": spec.get("scope", "in_dag") if rule_id in declared else None,
+        "counted_in_blocker_gate": rule_id in summary.BLOCKER_RULE_IDS,
+    })
+  return {
+      "generated_by": "scripts/gui/export_knobs.py",
+      "note": "rule_id → what the pipeline code emits (sdfb_beam/dofns, "
+              "sdfb_core/validation/dlq.py) and what config/thresholds.yml "
+              "declares. post_run rules are scored offline, never DLQ'd.",
+      "rules": rules,
+  }
+
+
 # ------------------------------------------------------------------ main --
+
+
+def _exported_from(docs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+  """The commit the `path:LINE` references resolve at, and any referenced
+  file with uncommitted changes (links then point one edit behind)."""
+  paths = sorted({
+      m.group("path") for doc in docs for m in (_SOURCE_REF.match(v)
+                                                for v in _strings(doc)) if m
+  })
+  try:
+    commit = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True).stdout.strip()
+    status = subprocess.run(
+        ["git", "-C",
+         str(REPO), "status", "--porcelain", "--", *paths],
+        capture_output=True,
+        text=True,
+        check=True).stdout
+    dirty = sorted(line[3:] for line in status.splitlines() if line.strip())
+  except (OSError, subprocess.CalledProcessError):
+    commit, dirty = None, []
+  return {"commit": commit, "dirty": dirty}
+
+
+def _strings(value: Any):
+  if isinstance(value, str):
+    yield value
+  elif isinstance(value, dict):
+    for v in value.values():
+      yield from _strings(v)
+  elif isinstance(value, list):
+    for v in value:
+      yield from _strings(v)
+
+
+def _tolerant(value: Any) -> Any:
+  """The export without line numbers and provenance: what `--check` compares."""
+  if isinstance(value, str):
+    match = _SOURCE_REF.match(value)
+    return match.group("path") if match else value
+  if isinstance(value, dict):
+    return {k: _tolerant(v) for k, v in value.items() if k != "exported_from"}
+  if isinstance(value, list):
+    return [_tolerant(v) for v in value]
+  return value
 
 
 def build() -> dict[str, Any]:
@@ -1269,35 +1510,67 @@ def build() -> dict[str, Any]:
   }
 
 
+def build_all() -> dict[str, dict[str, Any]]:
+  """Every file this exporter owns, keyed by name; `exported_from` stamped."""
+  docs = {
+      "knobs.json": build(),
+      "relationships.json": build_relationships(),
+      "dlq_rules.json": build_dlq_rules(),
+  }
+  provenance = _exported_from(list(docs.values()))
+  for doc in docs.values():
+    doc["exported_from"] = provenance
+  return docs
+
+
 def render(doc: dict[str, Any]) -> str:
   return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-  parser.add_argument(
+  mode = parser.add_mutually_exclusive_group()
+  mode.add_argument(
       "--check",
       action="store_true",
-      help="exit 1 when the file differs from a fresh export")
-  parser.add_argument("--out", type=Path, default=OUT)
+      help="exit 1 when a value, id, anchor token or path differs from a "
+      "fresh export (line numbers and the export commit may move)")
+  mode.add_argument(
+      "--check-strict",
+      action="store_true",
+      help="exit 1 on any difference, line numbers included")
+  parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
   args = parser.parse_args(argv)
-  text = render(build())
-  if CARD_LIKE.search(text):
-    print(
-        "knobs.json would carry a card-number-shaped digit run",
-        file=sys.stderr)
-    return 1
-  if args.check:
-    current = args.out.read_text(encoding="utf-8") if args.out.is_file() else ""
-    if current != text:
+  drift = []
+  for name, doc in build_all().items():
+    text = render(doc)
+    if CARD_LIKE.search(text):
       print(
-          f"{args.out}: drift — re-run scripts/gui/export_knobs.py",
-          file=sys.stderr)
+          f"{name} would carry a card-number-shaped digit run", file=sys.stderr)
       return 1
-    return 0
-  args.out.parent.mkdir(parents=True, exist_ok=True)
-  args.out.write_text(text, encoding="utf-8")
-  return 0
+    path = args.out_dir / name
+    if args.check or args.check_strict:
+      current = (
+          json.loads(path.read_text(
+              encoding="utf-8")) if path.is_file() else None)
+      fresh = json.loads(text)
+      if args.check_strict:
+        same = current is not None and {
+            k: v for k, v in current.items() if k != "exported_from"
+        } == {
+            k: v for k, v in fresh.items() if k != "exported_from"
+        }
+      else:
+        same = current is not None and _tolerant(current) == _tolerant(fresh)
+      if not same:
+        drift.append(path)
+      continue
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+  for path in drift:
+    print(
+        f"{path}: drift — re-run scripts/gui/export_knobs.py", file=sys.stderr)
+  return 1 if drift else 0
 
 
 if __name__ == "__main__":

@@ -4,10 +4,16 @@
  *
  * Routes: /api/health, /api/facets, /api/evaluations, /api/evaluations/:id,
  * /api/evaluations/:id/profiles, /api/compare, /api/trend, /api/runs, /api/dlq,
- * /api/source-stats, /api/rag/chunks (binary), /api/rag/pools, /api/knobs,
- * /api/catalogue. A tab may add read-only routes in `routes/<tab>.extra.ts`
+ * /api/source-stats, /api/rag/chunks (binary), /api/rag/pools, /api/relationships,
+ * /api/knobs, /api/catalogue. A tab may add read-only routes in `routes/<tab>.extra.ts`
  * (evaluation, rag, config): a default-exported Fastify plugin, registered
  * under `/api/x/<tab>` with the same RouteOptions.
+ *
+ * Request guard (onRequest, before any route): the `Host` header must be one of
+ * `allowedHosts(config)` — a DNS-rebinding page reaches 127.0.0.1 under its own
+ * name and is refused — and on `/api/*` a cross-site browser request
+ * (`Sec-Fetch-Site: cross-site`, or an `Origin` that is not an allowed host) is
+ * refused, so a foreign page can never make the BFF spend BigQuery bytes.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -17,7 +23,7 @@ import { HEADER_DATA_SOURCE } from "@synthetic-platform/contracts";
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from "fastify";
 import { LRUCache } from "lru-cache";
 
-import type { ServerConfig } from "./config";
+import { allowedHosts, type ServerConfig } from "./config";
 import { BytesCapError, ContractError, type DataProvider } from "./providers/types";
 import { compareRoutes } from "./routes/compare";
 import { BadRequest, type RouteOptions } from "./routes/context";
@@ -26,6 +32,7 @@ import { evaluationsRoutes } from "./routes/evaluations";
 import { healthRoutes } from "./routes/health";
 import { knobsRoutes } from "./routes/knobs";
 import { ragRoutes } from "./routes/rag";
+import { relationshipsRoutes } from "./routes/relationships";
 import { runsRoutes } from "./routes/runs";
 import { sourceStatsRoutes } from "./routes/sourceStats";
 import { trendRoutes } from "./routes/trend";
@@ -43,6 +50,28 @@ export async function buildApp({ config, provider, serveStatic = true }: AppOpti
   const app = Fastify({
     logger: config.LOG_LEVEL === "silent" ? false : { level: config.LOG_LEVEL },
     bodyLimit: 64 * 1024,
+  });
+
+  const hosts = allowedHosts(config);
+  const origins = new Set([...hosts].map((h) => `http://${h}`));
+  const forbidden = (message: string) => ({ statusCode: 403, error: "Forbidden", message });
+  app.addHook("onRequest", (request, reply, done) => {
+    const host = (request.headers.host ?? "").toLowerCase();
+    if (!hosts.has(host)) {
+      request.log.warn({ host }, "refused: Host is not an allowed name");
+      void reply.code(403).send(forbidden(`Host "${host}" is not served here (see ALLOWED_HOSTS)`));
+      return;
+    }
+    if (request.url.startsWith("/api/")) {
+      const site = request.headers["sec-fetch-site"];
+      const origin = request.headers.origin;
+      if (site === "cross-site" || (origin !== undefined && !origins.has(origin.toLowerCase()))) {
+        request.log.warn({ site, origin }, "refused: cross-site API request");
+        void reply.code(403).send(forbidden("cross-site requests to /api are refused"));
+        return;
+      }
+    }
+    done();
   });
 
   app.addHook("onSend", (request, reply, payload, done) => {
@@ -100,6 +129,7 @@ export async function buildApp({ config, provider, serveStatic = true }: AppOpti
     runsRoutes,
     sourceStatsRoutes,
     ragRoutes,
+    relationshipsRoutes,
     knobsRoutes,
   ])
     await app.register(plugin, options);

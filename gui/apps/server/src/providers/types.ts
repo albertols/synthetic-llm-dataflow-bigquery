@@ -14,6 +14,7 @@ import type {
   FreetextPool,
   Page,
   ProfileRow,
+  RelationshipModel,
   RunFilterParsed,
   SourceStats,
   TrendPoint,
@@ -21,14 +22,27 @@ import type {
   ValidationRun,
 } from "@synthetic-platform/contracts";
 
-/** Per-request accounting: the BigQuery bytes the route's queries would scan (dry run), and cache use. */
+/**
+ * Per-request accounting: the BigQuery bytes the route's queries would scan (dry run),
+ * cache use, and contract warnings (vocabulary values newer than the contract, which
+ * pass through as strings; routes send them as `x-contract-warnings`).
+ */
 export interface QueryContext {
   bytesEstimate: number;
   queries: number;
   cacheHits: number;
+  warnings: string[];
 }
 
-export const newContext = (): QueryContext => ({ bytesEstimate: 0, queries: 0, cacheHits: 0 });
+export const newContext = (): QueryContext => ({ bytesEstimate: 0, queries: 0, cacheHits: 0, warnings: [] });
+
+export interface SourceStatsFilter {
+  table: string;
+  tier?: "sample" | "exact" | undefined;
+  digest?: string | undefined;
+  /** Snapshot keys; win over tier / digest. */
+  snapshot?: string[] | undefined;
+}
 
 export interface ProfileFilter {
   table?: string | undefined;
@@ -74,16 +88,15 @@ export interface DataProvider {
   runs(q: RunFilterParsed, ctx?: QueryContext): Promise<ValidationRun[]>;
   dlqSummary(runIds: string[], ctx?: QueryContext): Promise<DlqSummary[]>;
   /** null when no stats exist for the table. */
-  sourceStats(
-    q: { table: string; tier?: "sample" | "exact" | undefined; digest?: string | undefined },
-    ctx?: QueryContext,
-  ): Promise<SourceStats | null>;
+  sourceStats(q: SourceStatsFilter, ctx?: QueryContext): Promise<SourceStats | null>;
   ragChunks(q: RagChunksFilter, ctx?: QueryContext): Promise<RagChunks>;
   freetextPools(
     q: { digest: string; modelUri?: string | undefined; column?: string | undefined },
     ctx?: QueryContext,
   ): Promise<FreetextPool[]>;
   facets(ctx?: QueryContext): Promise<Facets>;
+  /** Relationship models beyond the committed examples: the mock's own; none live (never read from GCS). */
+  relationshipModels(): Promise<RelationshipModel[]>;
 }
 
 /** A named query failed its row contract: the live table no longer matches the generated zod. */

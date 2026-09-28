@@ -4,11 +4,25 @@
  * table and reference digest, on the sample tier (fractions and distinct from
  * the reference sample) and the exact tier (the full table; distinct from the
  * whole source). Computed from the mock's source rows with packages/stats.
+ *
+ * Snapshots are what the pipeline writes: the profiler skips (table, digest,
+ * profiler_version, tier) only, so the August digests carry a sample snapshot
+ * (the first August launch) AND an exact one (the 2026-08-31 launch, the first
+ * on the exact tier); and `users` keeps one legacy snapshot from profiler
+ * version "1", written before `stats_tier` existed (NULL tier = sample).
  */
 import type { SourceTableStatsRow } from "@synthetic-platform/contracts";
-import { entropyBits, expectedDistinct, normalize, profilerDeciles, seedFrom, Random } from "@synthetic-platform/stats";
+import {
+  entropyBits,
+  expectedDistinct,
+  normalize,
+  profilerDeciles,
+  seedFrom,
+  sha256Hex,
+  Random,
+} from "@synthetic-platform/stats";
 
-import { baseRunId, referenceDigest } from "./ids";
+import { baseRunId, isoMicros, launchDigest, tableRunIds } from "./ids";
 import { STORYLINE } from "./storyline";
 import { epoch, textUniverse } from "./synth";
 import { sourceFqn, TABLES, type ColumnDef, type Row, type TableDef } from "./thelook";
@@ -159,25 +173,31 @@ function tableEntry(table: TableDef, rows: readonly Row[], tier: "sample" | "exa
   };
 }
 
+/** The legacy snapshot: profiler "1", before the exact tier (no stats_tier / profiler_version keys). */
+const LEGACY = { table: "users", limit: 10_000, era: "2026-07", at: isoMicros(Date.UTC(2026, 6, 28, 9, 12), 734) };
+
 export function buildSourceStats(samples: Record<string, { source: Row[] }>): SourceTableStatsRow[] {
   const out: SourceTableStatsRow[] = [];
   const seen = new Set<string>();
   const firstRun = new Map<string, { run: string; at: string }>();
   for (const spec of STORYLINE) {
-    const tables = spec.relational ? ["users", "orders", "order_items", "products"] : spec.tables;
+    const generated = spec.relational ? ["users", "orders", "order_items"] : spec.tables;
+    const runIds = tableRunIds(baseRunId(spec), generated);
+    // The external catalog is profiled by the launch of the child that draws from it.
+    const tables = spec.relational ? [...generated, "products"] : generated;
     for (const name of tables) {
-      const digest = referenceDigest(name, spec.referenceRowsLimit, spec.sourceStatsTier);
-      const key = `${name}|${digest}`;
+      const digest = launchDigest(spec, name);
+      const tier = spec.sourceStatsTier;
+      const key = `${name}|${digest}|${tier}`;
       if (!firstRun.has(key))
         firstRun.set(key, {
-          run: `${baseRunId(spec)}-${name}`,
-          at: new Date(Date.parse(spec.evaluatedAt) - 140 * 60_000).toISOString().replace(".000Z", "Z"),
+          run: runIds.get(name) ?? runIds.get("order_items")!,
+          at: isoMicros(Date.parse(spec.evaluatedAt) - 140 * 60_000, 318),
         });
       if (seen.has(key)) continue;
       seen.add(key);
       const table = TABLES[name]!;
       const rows = samples[name]!.source;
-      const tier = spec.sourceStatsTier;
       // The sample tier profiles the reference sample; a bootstrap of the mock rows stands in for it.
       const rng = new Random(seedFrom("stats", key));
       const profiled =
@@ -206,6 +226,33 @@ export function buildSourceStats(samples: Record<string, { source: Row[] }>): So
         push(column.name, entry(table, column, profiled, tier, spec.referenceRowsLimit));
       if (table.columns.length <= 64) push("__table__", tableEntry(table, profiled, tier, spec.referenceRowsLimit));
     }
+  }
+  // Profiler "1" wrote no tier: the row's stats_tier is NULL and the entry lacks both keys.
+  const table = TABLES[LEGACY.table]!;
+  const digest = sha256Hex(`${sourceFqn(LEGACY.table)}|${LEGACY.limit}|${LEGACY.era}-snapshot`);
+  const rng = new Random(seedFrom("stats", "legacy", LEGACY.table));
+  const rows = samples[LEGACY.table]!.source;
+  const profiled = Array.from({ length: rows.length }, () => rows[rng.int(0, rows.length - 1)]!);
+  for (const column of table.columns) {
+    const { stats_tier: _t, profiler_version: _v, ...stats } = entry(table, column, profiled, "sample", LEGACY.limit);
+    out.push({
+      table_fqn: sourceFqn(LEGACY.table),
+      reference_digest: digest,
+      run_id: "sdfb-20260728-0905-legacy",
+      column: column.name,
+      generation_plan: (stats.generation_plan as string) || null,
+      null_fraction: stats.null_fraction as number,
+      empty_fraction: stats.empty_fraction as number,
+      distinct: stats.distinct as number,
+      distinct_ratio: stats.distinct_ratio as number,
+      is_pk: stats.is_pk as boolean,
+      is_fk: stats.is_fk as boolean,
+      stats: JSON.stringify(stats, Object.keys(stats).sort()),
+      sample_rows: LEGACY.limit,
+      stats_tier: null,
+      profiler_version: null,
+      computed_at: LEGACY.at,
+    });
   }
   return out;
 }

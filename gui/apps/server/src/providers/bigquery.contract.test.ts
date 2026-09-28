@@ -29,6 +29,15 @@ const config = loadConfig({
   LOG_LEVEL: "silent",
 });
 
+/**
+ * `BigQueryTimestamp.value` as @google-cloud/bigquery builds it: `Date#toJSON` (three
+ * digits) when the microseconds are whole milliseconds, else PreciseDate's nine digits.
+ */
+function clientTimestamp(canonical: string): string {
+  const [, head, frac] = /^(.*)\.(\d{6})Z$/.exec(canonical)!;
+  return frac!.endsWith("000") ? `${head}.${frac!.slice(0, 3)}Z` : `${head}.${frac}000Z`;
+}
+
 /** A value as the Node client returns it: TIMESTAMP objects, INT64 text, JSON text. */
 function recorded(value: unknown, field: BqField): unknown {
   if (value === null || value === undefined) return null;
@@ -36,7 +45,7 @@ function recorded(value: unknown, field: BqField): unknown {
     return value.map((v) => recorded(v, { ...field, mode: "NULLABLE" }));
   switch (field.type) {
     case "TIMESTAMP":
-      return { value: (value as string).replace("Z", ".000Z") };
+      return { value: clientTimestamp(value as string) };
     case "INT64":
     case "INTEGER":
       return typeof value === "number" ? value.toFixed(0) : value;
@@ -152,7 +161,7 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
       again,
     );
     expect(calls).toHaveLength(2);
-    expect(again).toEqual({ bytesEstimate: 0, queries: 1, cacheHits: 1 });
+    expect(again).toEqual({ bytesEstimate: 0, queries: 1, cacheHits: 1, warnings: [] });
   });
 
   it("refuses a query the dry run prices above MAX_BYTES_BILLED, before running it", async () => {
@@ -219,12 +228,108 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
   });
 
   it("fails loudly when live rows drift from the generated contract", async () => {
-    const drifted = data.validationRuns.slice(0, 2).map((r) => ({ ...r, status: "SOMETHING_NEW" }));
+    const drifted = data.validationRuns.slice(0, 2).map((r) => ({ ...r, valid_count: "many" }));
     const { client } = stubClient({ "runs.list": () => tableRows("validation_runs", drifted) });
     const provider = new BigQueryProvider(config, () => Promise.resolve(client));
     const error = await provider.runs({ limit: 5 }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ContractError);
-    expect((error as ContractError).details.join(" ")).toContain("status");
+    expect((error as ContractError).details.join(" ")).toContain("valid_count");
+  });
+
+  it("passes a vocabulary value newer than the contract through, with a warning", async () => {
+    const drifted = data.validationRuns
+      .slice(0, 3)
+      .map((r, i) => ({ ...r, status: i < 2 ? "PASSED_WITH_NOTES" : r.status }));
+    const { client } = stubClient({ "runs.list": () => tableRows("validation_runs", drifted) });
+    const provider = new BigQueryProvider(config, () => Promise.resolve(client));
+    const ctx = newContext();
+    const runs = await provider.runs({ limit: 5 }, ctx);
+    expect(runs.map((r) => r.status)).toEqual(["PASSED_WITH_NOTES", "PASSED_WITH_NOTES", drifted[2]!.status]);
+    expect(ctx.warnings).toEqual(['runs.list: status="PASSED_WITH_NOTES" not in the contract vocabulary (2 rows)']);
+    // A new value next to a real type error is still a 502.
+    const broken = drifted.map((r) => ({ ...r, valid_count: "many" }));
+    const { client: bad } = stubClient({ "runs.list": () => tableRows("validation_runs", broken) });
+    const strict = new BigQueryProvider(config, () => Promise.resolve(bad));
+    expect(await strict.runs({ limit: 5 }).catch((e: unknown) => e)).toBeInstanceOf(ContractError);
+    // Through a route: the list answers, and says what it did not recognize.
+    const app = await buildApp({ config, provider, serveStatic: false });
+    const res = await app.inject({ url: "/api/runs?limit=5", headers: { host: "127.0.0.1:8787" } });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["x-contract-warnings"]).toBe(
+      '1; runs.list: status="PASSED_WITH_NOTES" not in the contract vocabulary (2 rows)',
+    );
+    await app.close();
+  });
+
+  it("round-trips evaluated_at with microseconds into the metric/profile/flag filters", async () => {
+    const id = evalRow.evaluation_id;
+    const events = data.registry.filter((r) => r.evaluation_id === id);
+    const at = events.at(-1)!.evaluated_at;
+    expect(at).toMatch(/\.\d{6}Z$/);
+    expect(at.endsWith("000Z")).toBe(false);
+    const { client, calls } = stubClient({
+      "evaluations.events": () => tableRows("evaluation_data_history", events),
+    });
+    const provider = new BigQueryProvider(config, () => Promise.resolve(client));
+    const detail = await provider.getEvaluation(id, { profiles: "all" });
+    // The client handed back nine digits (PreciseDate); the wire has six, all kept.
+    expect(detail!.evaluation.evaluated_at).toBe(at);
+    const scoped = calls.filter((c) => /metrics|profiles|flags/.test((c.options.labels as { query: string }).query));
+    expect(scoped.length).toBe(6);
+    for (const call of scoped) expect((call.options.params as { evaluated_at: string }).evaluated_at).toBe(at);
+  });
+
+  it("caches by the full SQL: two sorts with equally long column names never share an entry", async () => {
+    expect("overall_score".length).toBe("privacy_score".length);
+    const { client, calls } = stubClient({ "evaluations.list": () => [] });
+    const provider = new BigQueryProvider(config, () => Promise.resolve(client));
+    const q = { sort: "overall_score", order: "desc", offset: 0, limit: 10 } as const;
+    await provider.listEvaluations(q);
+    await provider.listEvaluations({ ...q, sort: "privacy_score" });
+    await provider.listEvaluations({ ...q, sort: "privacy_score" });
+    const sqls = calls.filter((c) => !c.options.dryRun).map((c) => c.options.query as string);
+    expect(sqls).toHaveLength(2);
+    expect(sqls[0]).toContain("ORDER BY overall_score DESC");
+    expect(sqls[1]).toContain("ORDER BY privacy_score DESC");
+  });
+
+  it("counts the total separately for a page past the end", async () => {
+    const { client, calls } = stubClient({
+      "evaluations.list": () => [],
+      "evaluations.count": () => [{ total_rows: "40" }],
+    });
+    const provider = new BigQueryProvider(config, () => Promise.resolve(client));
+    const page = await provider.listEvaluations({
+      engine: ["b1_rag"],
+      sort: "evaluated_at",
+      order: "desc",
+      offset: 100,
+      limit: 10,
+    });
+    expect(page).toMatchObject({ items: [], total: 40, offset: 100 });
+    const count = calls.find((c) => (c.options.labels as { query: string }).query === "evaluations_count")!;
+    expect((count.options.params as { engine: string[] }).engine).toEqual(["b1_rag"]);
+  });
+
+  it("trend: the query keeps the newest points, the provider returns them oldest first", async () => {
+    const points = [3, 2, 1].map((i) => ({
+      ...Object.fromEntries(QUERIES.trend.fields.map((f) => [f.name, null])),
+      evaluation_id: `eval-000${i}`,
+      evaluated_at: { value: `2026-09-0${i}T10:00:00.123456000Z` },
+      evaluation_status: "SUCCEEDED",
+      catalogue_version: "1.0.0",
+      metric_id: "column.ks",
+      table_name: "orders",
+      status: "pass",
+    }));
+    const { client, calls } = stubClient({ trend: () => points });
+    const provider = new BigQueryProvider(config, () => Promise.resolve(client));
+    const trend = await provider.metricTrend({ metric_id: "column.ks", limit: 3 });
+    expect(trend.map((p) => p.evaluation_id)).toEqual(["eval-0001", "eval-0002", "eval-0003"]);
+    expect(trend[0]!.evaluated_at).toBe("2026-09-01T10:00:00.123456Z");
+    const sql = calls[1]!.options.query as string;
+    expect(sql).toContain("ORDER BY e.evaluated_at DESC");
+    expect(sql).toMatch(/ON e\.evaluation_id = m\.evaluation_id AND m\.evaluated_at = e\.evaluated_at/);
   });
 
   it("builds facets from aggregate queries and stamps x-bq-bytes-estimate on routes", async () => {
@@ -249,13 +354,13 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     });
     const provider = new BigQueryProvider(config, () => Promise.resolve(client));
     const app = await buildApp({ config, provider, serveStatic: false });
-    const res = await app.inject("/api/facets");
+    const res = await app.inject({ url: "/api/facets", headers: { host: "127.0.0.1:8787" } });
     expect(res.statusCode).toBe(200);
     expect(res.headers["x-data-source"]).toBe("bigquery");
     expect(Number(res.headers["x-bq-bytes-estimate"])).toBe(6 * 12_345_678);
     const facets = facetsSchema.parse(res.json());
     expect(facets.counts).toMatchObject({ evaluations: 40, runs: 215, metrics: 900 });
-    const health = await app.inject("/api/health");
+    const health = await app.inject({ url: "/api/health", headers: { host: "127.0.0.1:8787" } });
     expect(health.json()).toMatchObject({ mode: "bigquery", project: "demo-project" });
     await app.close();
   });

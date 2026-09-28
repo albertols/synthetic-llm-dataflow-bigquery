@@ -4,26 +4,71 @@
  * follows the code, not the docs: only the rule ids in the knob
  * `blocker_rule_ids` (BLOCKER_RULE_IDS) count toward observed_blocker_ratio,
  * so fk.orphan diverts rows without moving the gate (see the knob annotations).
+ *
+ * Every DLQ row's error_type, pipeline_step and stage come from the generated rule
+ * map (`dlqRuleById`, exported from the DoFns and `dlq.normalize_dlq_record`), and
+ * its error_detail / raw_record follow the envelope each DoFn builds. `null.required`
+ * is declared in thresholds.yml but no DoFn emits it, so the mock never writes it.
  */
-import { knobs, type DlqRow, type FkFanoutStatsRow, type ValidationRunsRow } from "@synthetic-platform/contracts";
+import {
+  dlqRuleById,
+  knobs,
+  type DlqRow,
+  type FkFanoutStatsRow,
+  type ValidationRunsRow,
+} from "@synthetic-platform/contracts";
 import { Random, seedFrom, sha256Hex } from "@synthetic-platform/stats";
 
-import { baseRunId, referenceDigest, rowsFor } from "./ids";
+import { baseRunId, isoMicros, launchDigest, rowsFor, tableRunIds } from "./ids";
 import { MODEL_URIS, type EvalSpec } from "./storyline";
-import { EDGES, landingFqn, sourceFqn, TABLES } from "./thelook";
+import { EDGES, landingFqn, MOCK_RELATIONSHIP_MODEL, sourceFqn, TABLES } from "./thelook";
 
 const knobValue = (id: string) => knobs.knobs.find((k) => k.id === id)?.value;
 const BLOCKER_COUNTED = new Set((knobValue("blocker_rule_ids") as string[] | undefined) ?? []);
 
-const STEPS: Record<string, [string, string]> = {
-  "row.duplicate": ["uniqueness", "DedupRowsDoFn"],
-  "pk.duplicate": ["uniqueness", "DedupRowsDoFn"],
-  "identity.unique": ["uniqueness", "DedupRowsDoFn"],
-  "schema.types": ["pydantic", "ValidateRecordsDoFn"],
-  "null.required": ["pandera", "ValidateBatchDoFn"],
-  "fk.orphan": ["engine", "CheckForeignKeysDoFn"],
-  engine_failure: ["engine", "GenerateRecordsDoFn"],
-};
+/** error_type / pipeline_step / stage exactly as the pipeline writes them (generated/dlq_rules.json). */
+function ruleShape(rule: string): { errorType: string; step: string; stage: string } {
+  const known = dlqRuleById.get(rule);
+  if (!known?.emitted || !known.error_type) throw new Error(`the pipeline never emits DLQ rule "${rule}"`);
+  return { errorType: known.error_type, step: known.pipeline_step ?? "", stage: known.stage ?? "pre_write" };
+}
+
+/** The DoFn envelope's (raw_record, error_detail) for one DLQ row of `rule`. */
+function envelope(rule: string, table: string, record: Record<string, unknown>, i: number) {
+  switch (rule) {
+    case "fk.orphan":
+      return {
+        raw: record,
+        detail: `product_id=(${9_000_000 + i},) is not a landed parent key — the row references a parent that does not exist`,
+      };
+    case "fk.unmatched":
+      return {
+        raw: { batch_id: 40 + i, keys: [[record.order_id, record.user_id]], n: 1 },
+        detail: `no (order_id,user_id)->orders candidate for key (${String(record.order_id)}, ${String(record.user_id)})`,
+      };
+    case "schema.types":
+      return {
+        raw: { ...record, age: "N/A" },
+        detail: [
+          {
+            type: "int_parsing",
+            loc: ["age"],
+            msg: "Input should be a valid integer, unable to parse string as an integer",
+            input: "N/A",
+          },
+        ],
+      };
+    case "schema.batch":
+      return { raw: record, detail: { column: "num_of_item", check: "greater_than_or_equal_to(1)", failure_case: 0 } };
+    case "engine_failure":
+      return {
+        raw: { batch_id: 7 + i, n: 10_000, table },
+        detail: "TimeoutError: vLLM did not answer within 600 s (batch requeued once)",
+      };
+    default:
+      return { raw: record, detail: `${rule}: duplicate of an earlier record in this run` };
+  }
+}
 
 interface Launch {
   spec: Pick<
@@ -74,7 +119,7 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
   const launches: Launch[] = storyline.map((spec) => ({
     spec,
     base: baseRunId(spec),
-    createdAt: new Date(Date.parse(spec.evaluatedAt) - 30 * 60_000).toISOString().replace(".000Z", "Z"),
+    createdAt: isoMicros(Date.parse(spec.evaluatedAt) - 30 * 60_000, 412),
   }));
   EXTRA_LAUNCHES.forEach((extra, i) => {
     const template = storyline[0]!;
@@ -89,7 +134,7 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
     launches.push({
       spec,
       base: `sdfb-${extra.day.slice(0, 16).replace(/[-:]/g, "").replace("T", "-")}-${sha256Hex(spec.id).slice(0, 4)}`,
-      createdAt: extra.day,
+      createdAt: isoMicros(Date.parse(extra.day), 250),
       ...(extra.blocker ? { forceBlocker: extra.blocker } : {}),
     });
   });
@@ -100,6 +145,7 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
     const { spec } = launch;
     const rng = new Random(seedFrom(seed, "runs", spec.id));
     const tables = spec.relational ? ["users", "orders", "order_items"] : spec.tables;
+    const runIds = tableRunIds(launch.base, tables);
     for (const name of tables) {
       const table = TABLES[name]!;
       const rows = rowsFor(spec, table);
@@ -111,6 +157,10 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
       if (spec.uniquenessMode === "streaming") add("pk.duplicate", rng.poisson(rows * 2e-7));
       if (name === "users") add("schema.types", rng.binomial(rows, spec.quality.invalidShare));
       if (name === "order_items") add("fk.orphan", rng.binomial(rows, spec.quality.orphanShare));
+      // A driving key with no candidate parent (pre_generate): rare, only on early b1 launches.
+      if (name === "order_items" && spec.engine === "b1_rag" && spec.quality.temporalBlend)
+        add("fk.unmatched", rng.poisson(3));
+      if (name === "orders" && spec.engine === "b2_library") add("schema.batch", rng.poisson(rows * 4e-7));
       if (spec.quality.drift >= 0.05 && name === "orders") add("engine_failure", 10_000);
       if (launch.forceBlocker?.table === name)
         add(launch.forceBlocker.rule, Math.round(rows * launch.forceBlocker.share));
@@ -125,10 +175,10 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
       const driven = name !== "users" && name !== "user_features";
       const repeatSource = driven ? (name === "orders" ? 0.358 : 0.412) : null;
       const repeatLanding = repeatSource === null ? null : repeatSource + rng.normal(0, 0.004);
-      const runId = `${launch.base}-${name}`;
+      const runId = runIds.get(name)!;
       validationRuns.push({
         run_id: runId,
-        reference_digest: referenceDigest(name, spec.referenceRowsLimit, spec.sourceStatsTier),
+        reference_digest: launchDigest(spec, name),
         reference_table: sourceFqn(name),
         landing_table: landingFqn(name),
         engine: spec.engine,
@@ -151,26 +201,18 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
         created_at: launch.createdAt,
       });
       for (const [rule, count] of Object.entries(byRule)) {
-        const [errorType, step] = STEPS[rule] ?? ["engine", "GenerateRecordsDoFn"];
+        const { errorType, step, stage } = ruleShape(rule);
         for (let i = 0; i < Math.min(3, count); i += 1) {
-          const record = sampleRecord(name, rng);
+          const { raw, detail } = envelope(rule, name, sampleRecord(name, rng), i);
           dlq.push({
-            dlq_inserted_at: new Date(Date.parse(launch.createdAt) - (i + 1) * 47_000)
-              .toISOString()
-              .replace(".000Z", "Z"),
+            dlq_inserted_at: isoMicros(Date.parse(launch.createdAt) - (i + 1) * 47_000, 100 + i),
             run_id: runId,
-            raw_record: JSON.stringify(record),
+            raw_record: JSON.stringify(raw, Object.keys(raw).sort()),
             error_type: errorType,
-            error_detail: JSON.stringify(
-              rule === "fk.orphan"
-                ? { rule, edge: "order_items.product_id->products.id", missing_key: [9_000_000 + i] }
-                : rule === "schema.types"
-                  ? { rule, column: "age", expected: "INT64", got: "N/A" }
-                  : { rule, key: Object.values(record).slice(0, 1), occurrences: 2 },
-            ),
+            error_detail: JSON.stringify(detail),
             rule_id: rule,
             pipeline_step: step,
-            stage: "pre_write",
+            stage,
           });
         }
       }
@@ -183,8 +225,8 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
     return {
       source_table: sourceFqn(edge.child),
       edge_cols: edge.cols.join(","),
-      model_sha: sha256Hex(`config/relationships/gcp_public_fk_example.yaml@gcp_public_thelook`).slice(0, 12),
-      measured_at: new Date(Date.UTC(2026, 7, 3, 6, 50 + i)).toISOString().replace(".000Z", "Z"),
+      model_sha: MOCK_RELATIONSHIP_MODEL.sha12,
+      measured_at: isoMicros(Date.UTC(2026, 7, 3, 6, 50 + i), 500),
       payload: JSON.stringify({
         histogram,
         mean: edge.fanout.reduce((acc, s, k) => acc + s * k, 0),

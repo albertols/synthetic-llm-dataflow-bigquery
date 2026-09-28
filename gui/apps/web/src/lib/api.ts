@@ -7,8 +7,11 @@
  *
  * Every hook's `data` is an `ApiResult<T>`: the payload plus the BigQuery
  * bytes the route's queries would scan (`bytesEstimate`, from the dry run;
- * null in mock mode) — show it next to the data it cost. Lists in query
- * params are sent comma-separated; `undefined`, `null` and `""` are dropped.
+ * null in mock mode) — show it next to the data it cost — and `warnings`:
+ * vocabulary values newer than the contract that live rows carried through
+ * as plain strings (render unknown values as text; see `@contracts/api`).
+ * Lists in query params are sent comma-separated; `undefined`, `null` and
+ * `""` are dropped. Timestamps are ISO strings with six fraction digits.
  *
  *   const { data, isPending, error } = useEvaluations({ engine: ["b1_rag"], limit: 50 });
  *   data?.data.items; data?.bytesEstimate;
@@ -30,6 +33,7 @@ import type {
   ProfileQuery,
   ProfileRow,
   RagChunksQuery,
+  RelationshipsResponse,
   RunFilter,
   SourceStats,
   SourceStatsQuery,
@@ -46,6 +50,8 @@ export interface ApiResult<T> {
   /** Bytes the route's BigQuery queries would scan (dry run); null in mock mode. */
   bytesEstimate: number | null;
   dataSource: "mock" | "bigquery" | null;
+  /** `x-contract-warnings`: "<n>; <finding>; …" split into findings (empty when the rows matched the contract). */
+  warnings: string[];
 }
 
 /** A non-2xx answer; `details` carries validation issues or a contract mismatch. */
@@ -97,9 +103,11 @@ async function send(path: string, params?: object, signal?: AbortSignal): Promis
 function meta(response: Response): Omit<ApiResult<unknown>, "data"> {
   const bytes = response.headers.get("x-bq-bytes-estimate");
   const source = response.headers.get("x-data-source");
+  const warnings = response.headers.get("x-contract-warnings");
   return {
     bytesEstimate: bytes === null ? null : Number(bytes),
     dataSource: source === "mock" || source === "bigquery" ? source : null,
+    warnings: warnings ? warnings.split("; ").slice(1) : [],
   };
 }
 
@@ -116,6 +124,7 @@ export const api = {
   facets: (signal?: AbortSignal) => getJson<Facets>("/facets", undefined, signal),
   evaluations: (filter: EvaluationFilter = {}, signal?: AbortSignal) =>
     getJson<Page<EvaluationSummary>>("/evaluations", filter, signal),
+  /** Profiles are not embedded unless `profiles: "all"`; load them per drawer with `profiles()`. */
   evaluation: (id: string, options: { profiles?: "all" | "none" } = {}, signal?: AbortSignal) =>
     getJson<EvaluationDetail>(`/evaluations/${encodeURIComponent(id)}`, options, signal),
   profiles: (id: string, query: ProfileQuery = {}, signal?: AbortSignal) =>
@@ -125,12 +134,14 @@ export const api = {
   runs: (filter: RunFilter = {}, signal?: AbortSignal) => getJson<ValidationRun[]>("/runs", filter, signal),
   dlq: (runIds: readonly string[], signal?: AbortSignal) => getJson<DlqSummary[]>("/dlq", { run_ids: runIds }, signal),
   sourceStats: (query: SourceStatsQuery, signal?: AbortSignal) => getJson<SourceStats>("/source-stats", query, signal),
-  /** Binary: chunk metadata + Float32 vectors (≤ 5,000 chunks, ≤ 5 MB). */
+  /** Binary: chunk metadata + Float32 vectors (≤ 3,000 chunks = RAG_CHUNKS_MAX: 4.6 MB of vectors at 384-d). */
   ragChunks: async (query: RagChunksQuery, signal?: AbortSignal): Promise<ApiResult<RagChunks>> => {
     const response = await send("/rag/chunks", query, signal);
     return { data: decodeVectorEnvelope<ChunkMeta>(await response.arrayBuffer()), ...meta(response) };
   },
   pools: (query: FreetextPoolsQuery, signal?: AbortSignal) => getJson<FreetextPool[]>("/rag/pools", query, signal),
+  /** Committed sample models + (mock mode) the mock's model; resolve a registry row's `relationship_model` here. */
+  relationships: (signal?: AbortSignal) => getJson<RelationshipsResponse>("/relationships", undefined, signal),
   knobs: (signal?: AbortSignal) => getJson<KnobsFile>("/knobs", undefined, signal),
   catalogue: (signal?: AbortSignal) => getJson<CatalogueResponse>("/catalogue", undefined, signal),
 };
@@ -156,6 +167,7 @@ export const queryKeys = {
   sourceStats: (query: SourceStatsQuery) => ["api", "source-stats", query] as const,
   ragChunks: (query: RagChunksQuery) => ["api", "rag-chunks", query] as const,
   pools: (query: FreetextPoolsQuery) => ["api", "pools", query] as const,
+  relationships: ["api", "relationships"] as const,
   knobs: ["api", "knobs"] as const,
   catalogue: ["api", "catalogue"] as const,
 };
@@ -185,8 +197,9 @@ export function useEvaluations(filter: EvaluationFilter = {}) {
   });
 }
 
+/** Registry events, metrics and flags; profiles only with `{ profiles: "all" }` (default "none": use `useProfiles`). */
 export function useEvaluation(id: string | undefined, options: { profiles?: "all" | "none" } = {}) {
-  const profiles = options.profiles ?? "all";
+  const profiles = options.profiles ?? "none";
   return useQuery({
     queryKey: queryKeys.evaluation(id ?? "", profiles),
     queryFn: ({ signal }) => api.evaluation(id!, { profiles }, signal),
@@ -254,6 +267,14 @@ export function usePools(query: FreetextPoolsQuery | undefined) {
     queryKey: queryKeys.pools(query ?? { digest: "" }),
     queryFn: ({ signal }) => api.pools(query!, signal),
     enabled: !!query?.digest,
+  });
+}
+
+export function useRelationships() {
+  return useQuery({
+    queryKey: queryKeys.relationships,
+    queryFn: ({ signal }) => api.relationships(signal),
+    staleTime: Infinity,
   });
 }
 

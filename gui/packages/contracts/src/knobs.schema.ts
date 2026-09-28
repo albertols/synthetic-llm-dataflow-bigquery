@@ -41,6 +41,13 @@ export const knobSchema = z.object({
 export const knobsFileSchema = z.object({
   generated_by: z.literal("scripts/gui/export_knobs.py"),
   note: z.string(),
+  exported_from: z.object({
+    commit: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .nullable(),
+    dirty: z.array(z.string()),
+  }),
   channels: z.array(z.object({ id: z.string(), label: z.string(), description: z.string() })).min(1),
   knobs: z.array(knobSchema).min(1),
   annotations: z.array(

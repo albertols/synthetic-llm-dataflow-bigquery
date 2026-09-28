@@ -39,7 +39,28 @@ describe("the API client", () => {
       data: { items: [], total: 0, offset: 0, limit: 50 },
       bytesEstimate: 1234,
       dataSource: "bigquery",
+      warnings: [],
     });
+  });
+
+  it("surfaces contract warnings and asks for profiles only on request", async () => {
+    const fetch = vi.fn(() =>
+      Promise.resolve(
+        respond(JSON.stringify([]), {
+          headers: {
+            "x-data-source": "bigquery",
+            "x-contract-warnings": '2; runs.list: status="NEW" not in the contract vocabulary; dlq.summary: x',
+          },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const runs = await api.runs({ limit: 5 });
+    expect(runs.warnings).toEqual(['runs.list: status="NEW" not in the contract vocabulary', "dlq.summary: x"]);
+    await api.evaluation("eval-0001");
+    expect(fetch).toHaveBeenLastCalledWith("/api/evaluations/eval-0001", expect.anything());
+    await api.evaluation("eval-0001", { profiles: "all" });
+    expect(fetch).toHaveBeenLastCalledWith("/api/evaluations/eval-0001?profiles=all", expect.anything());
   });
 
   it("raises ApiError with the server's message and details", async () => {

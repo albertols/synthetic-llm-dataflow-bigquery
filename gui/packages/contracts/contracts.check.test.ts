@@ -10,10 +10,15 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { catalogue, concepts } from "./generated/catalogue";
+import { dlqRuleById, dlqRules } from "./generated/dlqRules";
 import { knobs } from "./generated/knobs";
+import { relationships } from "./generated/relationships";
 import { bqTables, evaluationMetricsRowSchema, rowSchemas, vocabularies } from "./generated/schemas";
 import { diffGenerated, generate, main } from "./gen.mjs";
 import { knobsFileSchema } from "./src/knobs.schema";
+import { findEdge, formatEdge, parseEdge } from "./src/relational";
+import { effectiveTier, snapshotKey } from "./src/sourceStats";
+import { canonicalTimestamp, isCanonicalTimestamp, timestampFromEpochSeconds } from "./src/timestamps";
 
 const HERE = import.meta.dirname;
 const REPO = resolve(HERE, "../../..");
@@ -93,6 +98,10 @@ describe("contracts:check", () => {
     const golden = join(out2, "golden", "retrieval.json");
     writeFileSync(golden, readFileSync(golden, "utf8") + " ");
     expect(diffGenerated(generate({ repo: repo2, inputsDir: out2 }), out2)).toEqual(["manifest.json"]);
+    const { repo: repo3, out: out3 } = copyInputs();
+    const rules = join(out3, "dlq_rules.json");
+    writeFileSync(rules, readFileSync(rules, "utf8").replace('"severity": "BLOCKER"', '"severity": "INFO"'));
+    expect(diffGenerated(generate({ repo: repo3, inputsDir: out3 }), out3)).toEqual(["dlqRules.ts", "manifest.json"]);
   });
 
   it("a catalogue edit is drift", () => {
@@ -177,5 +186,108 @@ describe("generated contracts", () => {
   it("knobs.json validates against its schema", () => {
     const parsed = knobsFileSchema.safeParse(knobs);
     expect(parsed.success, parsed.success ? "" : JSON.stringify(parsed.error.issues.slice(0, 3))).toBe(true);
+    expect(knobs.exported_from.commit).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("the relationship model carries the thelook example with its edge roles", () => {
+    const thelook = relationships.models.find((m) => m.model === "gcp_public_thelook");
+    expect(thelook?.source).toBe("config/relationships/gcp_public_fk_example.yaml");
+    expect(thelook?.generation_order).toEqual(["users", "orders", "order_items"]);
+    const items = thelook?.tables.find((t) => t.name === "order_items");
+    expect(items?.fk.map((e) => [formatEdge("order_items", e), e.role])).toEqual([
+      ["order_items.order_id+user_id->orders.order_id+user_id", "driving"],
+      ["order_items.user_id->users.id", "implied"],
+      ["order_items.product_id->synthetic_data.products.id", "external"],
+    ]);
+  });
+
+  it("the DLQ rule map names the step each DoFn's rule lands under", () => {
+    const step = (id: string) => dlqRuleById.get(id)?.pipeline_step ?? null;
+    expect(step("fk.orphan")).toBe("EnforceFkIntegrityDoFn");
+    expect(step("fk.unmatched")).toBe("GenerateRecordsDoFn");
+    expect(step("schema.types")).toBe("ValidateRecordDoFn");
+    expect(step("schema.batch")).toBe("PanderaValidateBatchDoFn");
+    expect(step("pk.duplicate")).toBe("EnforceUniqueness");
+    expect(dlqRuleById.get("fk.orphan")?.error_type).toBe("referential_integrity");
+    expect(dlqRuleById.get("null.required")).toMatchObject({ emitted: false, declared: true, severity: "BLOCKER" });
+    expect(dlqRules.rules.every((r) => r.emitted || r.declared)).toBe(true);
+  });
+});
+
+describe("edge labels", () => {
+  it("round-trip the evaluator form, composite and external parents included", () => {
+    for (const label of [
+      "orders.user_id->users.id",
+      "order_items.order_id+user_id->orders.order_id+user_id",
+      "order_items.product_id->synthetic_data.products.id",
+    ]) {
+      const ref = parseEdge(label);
+      expect(ref).not.toBeNull();
+      if (!ref?.child || !ref.parentCols) throw new Error(label);
+      expect(formatEdge(ref.child, { cols: ref.cols, ref: ref.parent, ref_cols: ref.parentCols })).toBe(label);
+    }
+    expect(parseEdge("order_items.product_id->synthetic_data.products.id")).toEqual({
+      child: "order_items",
+      cols: ["product_id"],
+      parent: "synthetic_data.products",
+      parentCols: ["id"],
+    });
+  });
+
+  it("parse the launcher form and reject malformed labels", () => {
+    expect(parseEdge("(order_id,user_id)->orders")).toEqual({
+      child: null,
+      cols: ["order_id", "user_id"],
+      parent: "orders",
+      parentCols: null,
+    });
+    for (const bad of ["", "users", "a.b->c", "a.x+y->b.z", "a.b->c.d->e.f", "a.b -> ", "(a b)->c"])
+      expect(parseEdge(bad), bad).toBeNull();
+  });
+
+  it("resolve against the model, a widened driving edge included", () => {
+    const thelook = relationships.models.find((m) => m.model === "gcp_public_thelook");
+    if (!thelook) throw new Error("no thelook model");
+    expect(findEdge(thelook, "order_items.user_id->users.id")?.edge.role).toBe("implied");
+    expect(findEdge(thelook, "(order_id,user_id)->orders")?.table.name).toBe("order_items");
+    expect(findEdge(thelook, "orders.user_id->users.id")?.edge.role).toBe("driving");
+    expect(findEdge(thelook, "orders.user_id->customers.id")).toBeNull();
+  });
+});
+
+describe("canonical timestamps", () => {
+  it("keep BigQuery's microseconds from every form the client returns", () => {
+    const at = "2026-09-01T10:00:00.123456Z";
+    for (const text of [
+      at,
+      "2026-09-01T10:00:00.123456000Z", // PreciseDate#toISOString
+      "2026-09-01 10:00:00.123456 UTC", // BigQuery text output
+      "2026-09-01T12:00:00.123456+02:00",
+      "2026-09-01T09:30:00.123456-00:30",
+    ])
+      expect(canonicalTimestamp(text), text).toBe(at);
+    expect(canonicalTimestamp("2026-09-01T10:00:00.123Z")).toBe("2026-09-01T10:00:00.123000Z");
+    expect(canonicalTimestamp("2026-09-01T10:00:00Z")).toBe("2026-09-01T10:00:00.000000Z");
+    expect(canonicalTimestamp("2026-09-01")).toBe("2026-09-01T00:00:00.000000Z");
+    expect(canonicalTimestamp("yesterday")).toBeNull();
+    expect(timestampFromEpochSeconds(1_788_256_800.123456)).toBe("2026-09-01T10:00:00.123456Z");
+    expect(isCanonicalTimestamp(at)).toBe(true);
+    expect(isCanonicalTimestamp("2026-09-01T10:00:00.123Z")).toBe(false);
+  });
+
+  it("sort as strings in time order (the providers compare them that way)", () => {
+    const texts = ["2026-09-01T10:00:00.000001Z", "2026-09-01T10:00:00Z", "2026-09-01T09:59:59.999999Z"];
+    const canonical = texts.map((t) => canonicalTimestamp(t)!);
+    expect([...canonical].sort()).toEqual([canonical[2], canonical[1], canonical[0]]);
+  });
+});
+
+describe("source-stats snapshots", () => {
+  it("are keyed by digest, tier, profiler version and run; NULL tier is sample", () => {
+    const row = { reference_digest: "d", stats_tier: null, profiler_version: null, run_id: "r" };
+    expect(effectiveTier(null)).toBe("sample");
+    expect(snapshotKey(row)).toBe("d|sample||r");
+    expect(snapshotKey({ ...row, stats_tier: "sample" })).toBe(snapshotKey(row));
+    expect(snapshotKey({ ...row, stats_tier: "exact", profiler_version: "2" })).toBe("d|exact|2|r");
   });
 });

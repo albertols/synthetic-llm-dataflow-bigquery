@@ -1,11 +1,16 @@
 /**
  * The mock's source model: an invented, thelook-shaped e-commerce dataset
- * (`config/relationships/gcp_public_fk_example.yaml`: users ──< orders ──<
- * order_items >── products, products external), plus one invented 200-column
- * table for the wide-table case. Every name and value is generated from
+ * (users ──< orders ──< order_items >── products, products external), plus one
+ * invented 200-column table for the wide-table case. Its relationship model,
+ * `thelook_demo`, is `config/relationships/gcp_public_fk_example.yaml` with one
+ * change: `order_items.user_id → users.id` is DOCUMENTED (`enforced: false`)
+ * instead of implied, so the mock carries a documented edge and its INFO orphan
+ * metric. It is invented, so it is not in generated/relationships.json; the BFF
+ * serves it from `/api/relationships` in mock mode. Every name and value is generated from
  * syllables here; e-mails are @example.com; ids stay far below 15 digits.
  */
-import { cumulative, type Random } from "@synthetic-platform/stats";
+import { formatEdge, type RelationEdge, type RelationshipModel } from "@synthetic-platform/contracts";
+import { cumulative, sha256Hex, type Random } from "@synthetic-platform/stats";
 
 export type ColumnKind = "numeric" | "temporal" | "categorical" | "boolean" | "text" | "identifier";
 export type BqType = "INT64" | "FLOAT64" | "STRING" | "TIMESTAMP" | "BOOL";
@@ -34,10 +39,13 @@ export interface TableDef {
 export interface EdgeDef {
   child: string;
   cols: string[];
+  /** The generated (or external) table's mock name, a key of TABLES. */
   parent: string;
   parentCols: string[];
   drives: boolean;
   external: boolean;
+  /** false = documented only: no keys drawn from it, orphans reported as INFO. */
+  enforced: boolean;
   /** Children per parent in the source: fanout[k] = share of parents with k children (the last bucket is "≥"). */
   fanout: number[];
 }
@@ -45,7 +53,7 @@ export interface EdgeDef {
 export const PROJECT = "demo-project";
 export const SOURCE_DATASET = "synthetic_source";
 export const LANDING_DATASET = "synthetic_data";
-export const RELATIONSHIP_MODEL = "gcp_public_thelook";
+export const RELATIONSHIP_MODEL = "thelook_demo";
 
 export const sourceFqn = (table: string) => `${PROJECT}.${SOURCE_DATASET}.${table}`;
 export const landingFqn = (table: string) => `${PROJECT}.${LANDING_DATASET}.${table}`;
@@ -467,6 +475,7 @@ export const EDGES: EdgeDef[] = [
     parentCols: ["id"],
     drives: true,
     external: false,
+    enforced: true,
     fanout: [0.32, 0.33, 0.19, 0.1, 0.06],
   },
   {
@@ -476,6 +485,7 @@ export const EDGES: EdgeDef[] = [
     parentCols: ["order_id", "user_id"],
     drives: true,
     external: false,
+    enforced: true,
     fanout: [0, 0.69, 0.2, 0.07, 0.04],
   },
   {
@@ -485,6 +495,8 @@ export const EDGES: EdgeDef[] = [
     parentCols: ["id"],
     drives: false,
     external: false,
+    // Documented: the driving edge already copies user_id from the order.
+    enforced: false,
     fanout: [0.4, 0.22, 0.15, 0.1, 0.13],
   },
   {
@@ -494,8 +506,45 @@ export const EDGES: EdgeDef[] = [
     parentCols: ["id"],
     drives: false,
     external: true,
+    enforced: true,
     fanout: [0.05, 0.2, 0.3, 0.25, 0.2],
   },
 ];
 
-export const edgeLabel = (e: EdgeDef) => `${e.child}.${e.cols.join("+")}->${e.parent}.${e.parentCols.join("+")}`;
+/** The model's `ref`: an external parent keeps its landing dataset. */
+export const edgeRef = (e: EdgeDef) => (e.external ? `${LANDING_DATASET}.${e.parent}` : e.parent);
+
+/** The evaluator's edge label (contracts `formatEdge`): `child.col+col->parent.col+col`. */
+export const edgeLabel = (e: EdgeDef) => formatEdge(e.child, { cols: e.cols, ref: edgeRef(e), ref_cols: e.parentCols });
+
+/** The registry's edge role (RelationshipRegistry.edge_roles), plus `documented` for enforced: false. */
+export const edgeRole = (e: EdgeDef): RelationEdge["role"] =>
+  !e.enforced ? "documented" : e.external ? "external" : e.drives ? "driving" : "implied";
+
+/** `thelook_demo` in the generated relationships.json shape. */
+export const MOCK_RELATIONSHIP_MODEL: RelationshipModel = {
+  model: RELATIONSHIP_MODEL,
+  description: "invented thelook-shaped model: users -> orders -> order_items, products external; one documented edge",
+  source: "gui/packages/mock/src/thelook.ts",
+  sha12: "",
+  generation_order: ["users", "orders", "order_items"],
+  tables: THELOOK_TABLES.filter((t) => t.role !== "external").map((t) => ({
+    name: t.name,
+    pk: t.columns.filter((c) => c.role === "pk").map((c) => c.name),
+    identity: t.columns.filter((c) => c.role === "pk").map((c) => c.name),
+    enabled: true,
+    note: t.role === "root" ? "root, generated with num_rows rows" : "",
+    fk: EDGES.filter((e) => e.child === t.name).map((e) => ({
+      cols: e.cols,
+      ref: edgeRef(e),
+      ref_cols: e.parentCols,
+      enforced: e.enforced,
+      drives: e.drives,
+      external: e.external,
+      role: edgeRole(e),
+      drawn_cols: e.cols,
+      note: e.enforced ? "" : "documented: the driving edge already copies user_id from the order",
+    })),
+  })),
+};
+MOCK_RELATIONSHIP_MODEL.sha12 = sha256Hex(JSON.stringify(MOCK_RELATIONSHIP_MODEL.tables)).slice(0, 12);

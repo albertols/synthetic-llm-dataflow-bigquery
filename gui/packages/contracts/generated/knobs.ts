@@ -94,7 +94,8 @@ export type KnobId =
   | "eval_row_flags_source_keys"
   | "eval_max_bytes_billed"
   | "eval_max_shuffle_gb"
-  | "eval_scope";
+  | "eval_scope"
+  | "eval_allow_contaminated";
 
 export const knobs: KnobsFile = {
   "generated_by": "scripts/gui/export_knobs.py",
@@ -1828,6 +1829,25 @@ export const knobs: KnobsFile = {
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
+    },
+    {
+      "id": "eval_allow_contaminated",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Allow contaminated scopes",
+      "value": false,
+      "unit": null,
+      "settable_via": [
+        "cli"
+      ],
+      "cli_flag": "--allow_contaminated",
+      "help": "Evaluate a table whose scope check found rows from other runs instead of refusing it (the registry still records scope_status=contaminated).",
+      "source": "planned",
+      "source_token": null,
+      "related_adrs": [],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
     }
   ],
   "annotations": [
@@ -3038,5 +3058,9 @@ export const knobs: KnobsFile = {
       "comment": "",
       "source": "scripts/doc/make_ws5_figures.py:86"
     }
-  ]
+  ],
+  "exported_from": {
+    "commit": "dbda23845fb06082daa58722b9492fc72bfb1c02",
+    "dirty": []
+  }
 };

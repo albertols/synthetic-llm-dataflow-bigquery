@@ -10,6 +10,15 @@
  * List parameters in query strings are comma-separated (`engine=b1_rag,b2_library`).
  * Every response from a BigQuery-backed route carries `x-data-source` and, in
  * bigquery mode, `x-bq-bytes-estimate` (the dry-run bytes of the queries it ran).
+ *
+ * Timestamps are `YYYY-MM-DDTHH:MM:SS.ffffffZ` (timestamps.ts): UTC, six fraction
+ * digits, so string order is time order and a value sent back keeps its microseconds.
+ *
+ * Vocabulary fields (the generated `z.enum`s parsed from BigQuery column
+ * descriptions) are tolerant on live data: a value the contract does not know yet
+ * passes through as a plain string and the response carries `x-contract-warnings`
+ * (count, then the first findings). Render an unknown vocabulary value as text; never
+ * switch over a vocabulary without a default branch. Any other drift is a 502.
  */
 import { z } from "zod";
 
@@ -23,6 +32,7 @@ import {
   sourceTableStatsRowSchema,
   validationRunsRowSchema,
 } from "../generated/schemas";
+import type { RelationshipModel } from "./relational";
 import { profilerStatsSchema } from "./sourceStats";
 
 // ---------------------------------------------------------------- helpers --
@@ -39,6 +49,9 @@ const csv = <T extends z.ZodType>(item: T) =>
     return trimmed.length ? trimmed : undefined;
   }, z.array(item).optional());
 
+/** A filter bound: an ISO timestamp with offset, or a date (midnight UTC). */
+const timeBound = z.union([isoTimestamp, z.iso.date()]).optional();
+
 const optionalNumber = z.preprocess(
   (value) => (value === undefined || value === "" ? undefined : Number(value)),
   z.number().optional(),
@@ -48,6 +61,8 @@ export const HEADER_DATA_SOURCE = "x-data-source";
 export const HEADER_BYTES_ESTIMATE = "x-bq-bytes-estimate";
 export const HEADER_VECTOR_DIM = "x-vector-dim";
 export const HEADER_VECTOR_COUNT = "x-vector-count";
+/** "<n>; <finding>; <finding>…" — vocabulary values newer than the contract (live data only). */
+export const HEADER_CONTRACT_WARNINGS = "x-contract-warnings";
 
 export const dataSourceModeSchema = z.enum(["mock", "bigquery"]);
 export type DataSourceMode = z.infer<typeof dataSourceModeSchema>;
@@ -131,10 +146,10 @@ export const evaluationFilterSchema = z.object({
   evaluator_version: csv(z.string()),
   catalogue_version: csv(z.string()),
   relationship_model: csv(z.string()),
-  /** evaluated_at ≥ from (ISO timestamp or date). */
-  from: z.string().optional(),
+  /** evaluated_at ≥ from (ISO timestamp with offset, or a date = midnight UTC). */
+  from: timeBound,
   /** evaluated_at < to. */
-  to: z.string().optional(),
+  to: timeBound,
   /** Substring match on evaluation_id, run_ids, base_run_id, generation_job_id / _name. */
   q: z.string().max(200).optional(),
   sort: z.enum(evaluationSortKeys).default("evaluated_at"),
@@ -164,7 +179,7 @@ export interface EvaluationFilter {
   evaluator_version?: string[];
   catalogue_version?: string[];
   relationship_model?: string[];
-  /** ISO timestamp or date: evaluated_at ≥ from. */
+  /** ISO timestamp with offset (`…Z`, `…+02:00`) or a date: evaluated_at ≥ from. Anything else is a 400. */
   from?: string;
   /** evaluated_at < to. */
   to?: string;
@@ -186,14 +201,18 @@ export const evaluationDetailSchema = z.object({
   /** Every registry event for this id, oldest first (RUNNING, then FINAL). */
   events: z.array(evaluationDataHistoryRowSchema),
   metrics: z.array(evaluationMetricsRowSchema),
-  /** All profiles unless `?profiles=none` (then empty; fetch `/profiles` per table or column). */
+  /**
+   * Empty by default (`?profiles=none`): an evaluation carries hundreds of profile
+   * payloads, so a detail page fetches `/api/evaluations/:id/profiles` per table,
+   * column or kind when a drawer opens. `?profiles=all` embeds every one.
+   */
   profiles: z.array(evaluationProfilesRowSchema),
   flags: z.array(evaluationRowFlagsRowSchema),
 });
 export type EvaluationDetail = z.infer<typeof evaluationDetailSchema>;
 
 export const evaluationDetailQuerySchema = z.object({
-  profiles: z.enum(["all", "none"]).default("all"),
+  profiles: z.enum(["all", "none"]).default("none"),
 });
 
 /** `GET /api/evaluations/:id/profiles` — lazy profile loading for a drawer. */
@@ -226,12 +245,15 @@ export type TrendQuery = Omit<EvaluationFilter, "sort" | "order" | "offset" | "l
   column?: string;
   column_2?: string;
   edge?: string;
-  /** 1–2,000, default 500. */
+  /** 1–2,000, default 500: the newest points win. */
   limit?: number;
 };
 export type TrendQueryParsed = z.output<typeof trendQuerySchema>;
 
-/** One metric row of one evaluation, with the generation parameters to colour it by. Oldest first. */
+/**
+ * One metric row of one evaluation, with the generation parameters to colour it by.
+ * `/api/trend` returns the NEWEST `limit` points, ordered oldest first (ready to plot).
+ */
 export const trendPointSchema = z.object({
   evaluation_id: z.string(),
   evaluated_at: isoTimestamp,
@@ -335,13 +357,15 @@ export type Comparison = z.infer<typeof comparisonSchema>;
 
 export const runFilterSchema = z.object({
   run_ids: csv(z.string()),
+  /** A launch: its per-table rows are `<base>-NN-<table>` (a one-table launch writes `<base>` itself). */
   base_run_id: z.string().optional(),
   landing_table: csv(z.string()),
   engine: csv(z.string()),
   status: csv(z.string()),
   env: csv(z.string()),
-  from: z.string().optional(),
-  to: z.string().optional(),
+  /** created_at ≥ from (ISO timestamp with offset, or a date). */
+  from: timeBound,
+  to: timeBound,
   limit: z.coerce.number().int().min(1).max(1000).default(200),
 });
 export interface RunFilter {
@@ -389,45 +413,65 @@ export type DlqSummary = z.infer<typeof dlqSummarySchema>;
 
 // ----------------------------------------------------------- source stats --
 
+/**
+ * Which snapshots to return. `snapshot` (keys from `snapshots[].key`) wins; else
+ * `digest` and/or `tier` narrow the candidates and the newest match per tier is
+ * returned; with neither, the newest snapshot of each tier (sample vs exact).
+ */
 export const sourceStatsQuerySchema = z.object({
   /** table_fqn, or the bare table name when it is unambiguous. */
   table: z.string().min(1),
   tier: z.enum(["sample", "exact"]).optional(),
   digest: z.string().optional(),
+  snapshot: csv(z.string()).pipe(z.array(z.string()).max(8).optional()),
 });
 export interface SourceStatsQuery {
   /** table_fqn, or the bare table name when unambiguous. */
   table: string;
   tier?: "sample" | "exact";
   digest?: string;
+  /** Snapshot keys (`snapshots[].key`), at most 8. */
+  snapshot?: string[];
 }
 
 export const sourceStatsColumnSchema = sourceTableStatsRowSchema.extend({
+  /** The snapshot this row belongs to (`snapshots[].key`). */
+  snapshot_key: z.string(),
+  /** `stats_tier` with NULL read as "sample" (legacy rows). */
+  tier: z.enum(["sample", "exact"]),
   /** `stats` parsed; null when the string is not a profiler entry. */
   stats_parsed: profilerStatsSchema.nullable(),
 });
 export type SourceStatsColumn = z.infer<typeof sourceStatsColumnSchema>;
 
+/** One profiler snapshot: every row sharing (reference_digest, tier, profiler_version, run_id). */
 export const sourceStatsSnapshotSchema = z.object({
+  /** `<reference_digest>|<tier>|<profiler_version>|<run_id>` (sourceStats.ts `snapshotKey`). */
+  key: z.string(),
   reference_digest: z.string(),
   run_id: z.string(),
-  stats_tier: z.string().nullable(),
+  /** NULL in the table reads as "sample". */
+  tier: z.enum(["sample", "exact"]),
+  /** The row had NULL `stats_tier` (written before the exact tier existed). */
+  legacy_tier: z.boolean(),
   profiler_version: z.string().nullable(),
   sample_rows: z.int().nullable(),
   computed_at: isoTimestamp,
   columns: z.int().nonnegative(),
 });
+export type SourceStatsSnapshot = z.infer<typeof sourceStatsSnapshotSchema>;
 
 /**
- * One table's stats. Without `tier`/`digest`: the latest snapshot of each tier
- * (compare sample vs exact); `columns` then holds rows of both, told apart by `stats_tier`.
+ * One table's stats. A reference digest can carry both tiers and several profiler
+ * versions, so snapshots are keyed by (digest, tier, profiler_version, run_id);
+ * `columns` holds the rows of the `selected` snapshots, told apart by `snapshot_key`.
  */
 export const sourceStatsSchema = z.object({
   table_fqn: z.string(),
   tiers_available: z.array(z.enum(["sample", "exact"])),
   /** Every snapshot of this table, newest first. */
   snapshots: z.array(sourceStatsSnapshotSchema),
-  /** The snapshots whose rows are in `columns`. */
+  /** Keys of the snapshots whose rows are in `columns`. */
   selected: z.array(z.string()),
   columns: z.array(sourceStatsColumnSchema),
 });
@@ -435,12 +479,20 @@ export type SourceStats = z.infer<typeof sourceStatsSchema>;
 
 // -------------------------------------------------------------------- RAG --
 
+/**
+ * At most 3,000 chunks per response: 3,000 × 384-d Float32 is 4.6 MB of vectors,
+ * inside the 5 MB budget for the vector payload (chunk text and metadata come on
+ * top; a wider embedder needs a smaller `limit`). Narrow by `source_fqn` /
+ * `column` beyond that.
+ */
+export const RAG_CHUNKS_MAX = 3000;
+
 export const ragChunksQuerySchema = z.object({
   digest: z.string().min(1),
   kind: ragChunksRowSchema.shape.chunk_kind,
   /** embedder_id, optionally "<id>/<version>". */
   embedder: z.string().min(1),
-  limit: z.coerce.number().int().min(1).max(5000).default(1024),
+  limit: z.coerce.number().int().min(1).max(RAG_CHUNKS_MAX).default(1024),
   source_fqn: z.string().optional(),
   /** free_text_col only: the column (metadata.column). */
   column: z.string().optional(),
@@ -450,13 +502,17 @@ export interface RagChunksQuery {
   kind: "row_doc" | "free_text_col";
   /** embedder_id, optionally "<id>/<version>". */
   embedder: string;
-  /** 1–5,000, default 1,024. */
+  /** 1–3,000 (`RAG_CHUNKS_MAX`), default 1,024. */
   limit?: number;
   source_fqn?: string;
   column?: string;
 }
 
-/** Per-chunk metadata in the binary envelope (see vectors.ts); `embedding` travels as Float32. */
+/**
+ * Per-chunk metadata in the binary envelope (see vectors.ts); `embedding` travels as
+ * Float32. `chunk_text` is the operator's own governed reference data, shown to the
+ * operator on a loopback-only server; `source_pk` (a source row's key) is never sent.
+ */
 export const chunkMetaSchema = z.object({
   chunk_id: z.string(),
   source_fqn: z.string(),
@@ -466,7 +522,6 @@ export const chunkMetaSchema = z.object({
   /** metadata.column for free_text_col chunks. */
   column: z.string().nullable(),
   row_digest: z.string(),
-  source_pk: z.json().nullable(),
   embedder_id: z.string(),
   embedder_version: z.string(),
 });
@@ -553,9 +608,62 @@ export const facetsSchema = z.object({
     }),
   ),
   rag: z.array(ragSetSchema),
-  pools: z.array(z.object({ reference_digest: z.string(), model_uri: z.string(), columns: z.array(z.string()) })),
+  /** Free-text pool sets; `table_fqn` is the source table the digest was sampled from (null if no run or stats row names it). */
+  pools: z.array(
+    z.object({
+      reference_digest: z.string(),
+      table_fqn: z.string().nullable(),
+      model_uri: z.string(),
+      columns: z.array(z.string()),
+    }),
+  ),
 });
 export type Facets = z.infer<typeof facetsSchema>;
+
+// ---------------------------------------------------------- relationships --
+
+const relationEdgeSchema = z.object({
+  cols: z.array(z.string()),
+  ref: z.string(),
+  ref_cols: z.array(z.string()),
+  enforced: z.boolean(),
+  drives: z.boolean(),
+  external: z.boolean(),
+  role: z.enum(["driving", "implied", "conditional", "independent", "external", "documented", "disabled"]),
+  drawn_cols: z.array(z.string()),
+  note: z.string(),
+});
+
+export const relationshipModelSchema = z.object({
+  model: z.string(),
+  description: z.string(),
+  source: z.string(),
+  sha12: z.string(),
+  generation_order: z.array(z.string()),
+  tables: z.array(
+    z.object({
+      name: z.string(),
+      pk: z.array(z.string()),
+      identity: z.array(z.string()),
+      enabled: z.boolean(),
+      note: z.string(),
+      fk: z.array(relationEdgeSchema),
+    }),
+  ),
+}) satisfies z.ZodType<RelationshipModel>;
+
+/**
+ * `GET /api/relationships` — the relationship models a registry row's
+ * `relationship_model` can resolve to: the committed sample models
+ * (generated/relationships.json, `origin: "committed_example"`) and, in mock mode,
+ * the mock's invented `thelook_demo` (`origin: "mock"`). Real models are gitignored
+ * or on GCS and never served; when a row's model is not listed, rebuild the graph
+ * from the metric rows' `edge` labels (`parseEdge`).
+ */
+export const relationshipsResponseSchema = z.object({
+  models: z.array(relationshipModelSchema.extend({ origin: z.enum(["committed_example", "mock"]) })),
+});
+export type RelationshipsResponse = z.infer<typeof relationshipsResponseSchema>;
 
 // ------------------------------------------------------- knobs, catalogue --
 

@@ -14,7 +14,9 @@
     "config/bq_schema/synthetic_rag/source_table_stats.schema.json": "9ad24ef739e151fc54353d41f8fd1772fb077c0860c40b03cc08e451c23b5864",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/views.sql": "a66589e18f037ecdd397b91b3500dfb893fc2ba37befc1d5a9cf18b0281ef29c",
     "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml": "e4fe972b114305e6b76504bac57ea0a9e1a8c9fce84d6a98ab8c47dc38308642",
-    "gui/packages/contracts/generated/knobs.json": "155e26330b5713acb7feb8c125f44034c2963b4d91a8dabcce2953aa7e9eef93",
+    "gui/packages/contracts/generated/knobs.json": "5072ea7f41bdc3d7f38268d144f2c2a5563179c8c1bda3e55475f38d61f3b6bb",
+    "gui/packages/contracts/generated/relationships.json": "8449e24e6782a1135a1bffa45b687536cdc98007974868b168ecba5c798ca258",
+    "gui/packages/contracts/generated/dlq_rules.json": "c6d4da3925d3d6253f6bd1d8eb099c7c1b6f22a62281c9f11a32bfcd07526bdb",
     "gui/packages/contracts/generated/golden/great_serialize.json": "72dae74592f7e1e61442eefb82ecef5724a3f49bfe1e7f8e00c7cff27853a324",
     "gui/packages/contracts/generated/golden/hashing_embedder.json": "295094807dbc93a649bb63dcc1dcccf6d702a9f4294be2f8c0ba30d6179dd6da",
     "gui/packages/contracts/generated/golden/retrieval.json": "0c91e8c07bccf3f7c5fb3d046ccc7fddb3a66fdd3ea43975ee6f3f15b85769f2"
@@ -22,6 +24,8 @@
   "outputs": [
     "schemas.ts",
     "catalogue.ts",
-    "knobs.ts"
+    "knobs.ts",
+    "relationships.ts",
+    "dlqRules.ts"
   ]
 }

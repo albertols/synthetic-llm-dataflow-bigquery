@@ -4,8 +4,11 @@
  * comparisons, trend points, DLQ summaries and source-stats assembly.
  */
 import {
+  canonicalTimestamp,
+  effectiveTier,
   knobs,
   profilerStatsSchema,
+  snapshotKey,
   type ComparedMetric,
   type Comparison,
   type DlqSummary,
@@ -18,6 +21,7 @@ import {
   type ParamDiff,
   type RagSet,
   type SourceStats,
+  type SourceStatsSnapshot,
   type SourceTableStatsRow,
   type TrendPoint,
 } from "@synthetic-platform/contracts";
@@ -39,6 +43,18 @@ export function toSummary(row: EvaluationRecord): EvaluationSummary {
 
 const anyOf = <T>(list: readonly T[] | undefined, value: T | null | undefined) =>
   !list?.length || (value !== null && value !== undefined && list.includes(value));
+
+/**
+ * `from ≤ at < to` on canonical timestamps (six fraction digits, UTC), compared as
+ * strings — the in-memory twin of `TIMESTAMP(@from)` / `TIMESTAMP(@to)`, microseconds kept.
+ */
+export function withinWindow(at: string, from: string | undefined, to: string | undefined): boolean {
+  if (!from && !to) return true;
+  const t = canonicalTimestamp(at) ?? at;
+  if (from && t < (canonicalTimestamp(from) ?? from)) return false;
+  if (to && t >= (canonicalTimestamp(to) ?? to)) return false;
+  return true;
+}
 
 /** The in-memory twin of the `evaluations.list` WHERE clause. */
 export function matchesFilter(row: EvaluationSummary, f: EvaluationFilterParsed): boolean {
@@ -62,8 +78,7 @@ export function matchesFilter(row: EvaluationSummary, f: EvaluationFilterParsed)
   if (!anyOf(f.evaluator_version, row.evaluator_version)) return false;
   if (!anyOf(f.catalogue_version, row.catalogue_version)) return false;
   if (!anyOf(f.relationship_model, row.relationship_model)) return false;
-  if (f.from && Date.parse(row.evaluated_at) < Date.parse(f.from)) return false;
-  if (f.to && Date.parse(row.evaluated_at) >= Date.parse(f.to)) return false;
+  if (!withinWindow(row.evaluated_at, f.from, f.to)) return false;
   if (f.q) {
     const q = f.q.toLowerCase();
     const haystack = [
@@ -267,7 +282,16 @@ export function buildComparison(
   const catalogueSame = new Set(ordered.map((e) => e.catalogue_version)).size <= 1;
   const evaluatorSame = new Set(ordered.map((e) => e.evaluator_version)).size <= 1;
   const notComparable: string[] = [];
-  if (!catalogueSame) notComparable.push("catalogue_version differs: metric definitions may differ");
+  if (!catalogueSame)
+    notComparable.push(
+      `catalogue_version differs (${[...new Set(ordered.map((e) => e.catalogue_version))].join(" vs ")}): ` +
+        "metric definitions, thresholds or scoring may differ",
+    );
+  if (!evaluatorSame)
+    notComparable.push(
+      `evaluator_version differs (${[...new Set(ordered.map((e) => e.evaluator_version))].join(" vs ")}): ` +
+        "the same metric may be computed differently",
+    );
   for (const plan of encodingPlans)
     if (!plan.same)
       notComparable.push(`${plan.table_name}: encoding_plan_digest differs (bins, dictionaries or pairs changed)`);
@@ -365,20 +389,32 @@ export function resolveTable(fqns: readonly string[], table: string): string | n
   return matches.length === 1 ? matches[0]! : null;
 }
 
+/**
+ * Groups one table's stats rows into snapshots keyed by (digest, tier, profiler_version,
+ * run_id) — one digest can carry a sample AND an exact snapshot, and several profiler
+ * versions — and returns the rows of the selected ones. NULL `stats_tier` is sample.
+ */
 export function assembleSourceStats(
   tableFqn: string,
   rows: readonly SourceTableStatsRow[],
-  q: { tier?: "sample" | "exact" | undefined; digest?: string | undefined },
+  q: {
+    tier?: "sample" | "exact" | undefined;
+    digest?: string | undefined;
+    snapshot?: readonly string[] | undefined;
+  },
 ): SourceStats {
-  const snapshots = new Map<string, SourceStats["snapshots"][number]>();
-  for (const row of rows) {
-    const key = row.reference_digest;
+  const snapshots = new Map<string, SourceStatsSnapshot>();
+  const keys = rows.map(snapshotKey);
+  rows.forEach((row, i) => {
+    const key = keys[i]!;
     const s = snapshots.get(key);
     if (!s)
       snapshots.set(key, {
-        reference_digest: key,
+        key,
+        reference_digest: row.reference_digest,
         run_id: row.run_id,
-        stats_tier: row.stats_tier,
+        tier: effectiveTier(row.stats_tier),
+        legacy_tier: row.stats_tier === null,
         profiler_version: row.profiler_version,
         sample_rows: row.sample_rows,
         computed_at: row.computed_at,
@@ -387,34 +423,41 @@ export function assembleSourceStats(
     else {
       s.columns += 1;
       if (row.computed_at > s.computed_at) s.computed_at = row.computed_at;
+      if (row.stats_tier === null) s.legacy_tier = true;
     }
-  }
-  const ordered = [...snapshots.values()].sort((a, b) => b.computed_at.localeCompare(a.computed_at));
-  let selected: string[];
-  if (q.digest) selected = ordered.filter((s) => s.reference_digest === q.digest).map((s) => s.reference_digest);
-  else if (q.tier)
-    selected = ordered
-      .filter((s) => s.stats_tier === q.tier)
-      .slice(0, 1)
-      .map((s) => s.reference_digest);
-  else
-    selected = (["exact", "sample"] as const)
-      .map((tier) => ordered.find((s) => s.stats_tier === tier)?.reference_digest)
-      .filter((d): d is string => !!d);
-  const tiers = [...new Set(ordered.map((s) => s.stats_tier))].filter(
-    (t): t is "sample" | "exact" => t === "sample" || t === "exact",
+  });
+  const ordered = [...snapshots.values()].sort(
+    (a, b) => b.computed_at.localeCompare(a.computed_at) || a.key.localeCompare(b.key),
   );
+  let selected: string[];
+  if (q.snapshot?.length) selected = ordered.filter((s) => q.snapshot!.includes(s.key)).map((s) => s.key);
+  else {
+    const candidates = ordered.filter(
+      (s) => (!q.digest || s.reference_digest === q.digest) && (!q.tier || s.tier === q.tier),
+    );
+    selected = (["exact", "sample"] as const)
+      .map((tier) => candidates.find((s) => s.tier === tier)?.key)
+      .filter((k): k is string => !!k);
+  }
+  const rank = new Map(selected.map((key, i) => [key, i]));
+  const tiers = [...new Set(ordered.map((s) => s.tier))].sort();
   return {
     table_fqn: tableFqn,
-    tiers_available: tiers.sort(),
+    tiers_available: tiers,
     snapshots: ordered,
     selected,
     columns: rows
-      .filter((r) => selected.includes(r.reference_digest))
-      .map((r) => {
-        const parsed = profilerStatsSchema.safeParse(parseJsonText(r.stats));
-        return { ...r, stats_parsed: parsed.success ? parsed.data : null };
+      .map((r, i) => ({ row: r, key: keys[i]! }))
+      .filter(({ key }) => rank.has(key))
+      .map(({ row, key }) => {
+        const parsed = profilerStatsSchema.safeParse(parseJsonText(row.stats));
+        return {
+          ...row,
+          snapshot_key: key,
+          tier: effectiveTier(row.stats_tier),
+          stats_parsed: parsed.success ? parsed.data : null,
+        };
       })
-      .sort((a, b) => a.reference_digest.localeCompare(b.reference_digest) || a.column.localeCompare(b.column)),
+      .sort((a, b) => rank.get(a.snapshot_key)! - rank.get(b.snapshot_key)! || a.column.localeCompare(b.column)),
   };
 }

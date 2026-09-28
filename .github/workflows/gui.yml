@@ -19,6 +19,13 @@ name: GUI
 # the tab-ownership gate on feat/gui-<tab> branches, then Playwright + axe on
 # Playwright's bundled Chromium. Runs only when the GUI, the Python files it
 # generates contracts from, or the figures it copies (assets:check) change.
+#
+# The `exports` job re-runs the Python exporters (scripts/gui/) in `--check`
+# mode: knobs.json, relationships.json, dlq_rules.json and the golden
+# fixtures must match the code in values, ids, anchor tokens and paths. Line
+# numbers may move (the default Python gate does not run this check, so an
+# unrelated Python PR that shifts a line never fails; this job catches a
+# value or anchor drift whenever the code the GUI imports changes).
 
 on:
   push:
@@ -29,6 +36,16 @@ on:
       - "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/**"
       - "config/bq_schema/**"
       - "scripts/gui/**"
+      # What the exporters import or parse (value + anchor drift).
+      - "packages/sdfb-core/src/**"
+      - "packages/sdfb-beam/src/**"
+      - "composer/**"
+      - "docker/flex_template_metadata.json"
+      - "config/thresholds.yml"
+      - "config/relationships/**"
+      - "scripts/doc/make_throughput_figures.py"
+      - "scripts/doc/make_ws5_figures.py"
+      - "docs/designs/*.md"
       - "docs/assets/**"
       - "docs/designs/assets/**"
       - "docs/articles/assets/**"
@@ -44,6 +61,34 @@ permissions:
   contents: read
 
 jobs:
+  exports:
+    # Python truth → gui/packages/contracts/generated (value + anchor drift).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          enable-cache: true
+          cache-dependency-glob: |
+            **/uv.lock
+            **/pyproject.toml
+          python-version: "3.11"
+
+      - name: Sync workspace
+        run: uv sync --group dev
+
+      - name: Knobs, relationship model and DLQ rules match the code
+        run: uv run python scripts/gui/export_knobs.py --check
+
+      - name: Golden fixtures match the Python embedder, serializer, retrieval
+        run: uv run python scripts/gui/export_golden_fixtures.py --check
+
+      - name: Exporter unit tests
+        run: uv run pytest -q packages/sdfb-tests/tests/unit/scripts/test_gui_exporters.py
+
   gui:
     runs-on: ubuntu-latest
     timeout-minutes: 25

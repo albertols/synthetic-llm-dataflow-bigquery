@@ -303,7 +303,7 @@ one worktree's e2e must never test another worktree's build.
 | Variable          | Used by                                                                                                | Default |
 | :---------------- | :----------------------------------------------------------------------------------------------------- | ------: |
 | `GUI_E2E_PORT`    | the BFF Playwright starts (`npm start`, mock data, serving the built SPA); also `vite preview`         |    4173 |
-| `GUI_WEB_PORT`    | `vite` dev server (`npm run dev`)                                                                      |    5173 |
+| `GUI_WEB_PORT`    | `vite` dev server (`npm run dev`); the BFF's Host guard also accepts this port (the proxy's Host)      |    5173 |
 | `GUI_SERVER_PORT` | the BFF: the dev proxy targets `127.0.0.1:$GUI_SERVER_PORT` for `/api`, and G0b's server listens on it |    8787 |
 
 Suggested assignment (export them in the worktree's shell before `npm run dev` / `npm run e2e`):
@@ -348,8 +348,8 @@ flowchart LR
   classDef bff  fill:#1baf7a,color:#fff,stroke:#127a55
   classDef bq   fill:#2a78d6,color:#fff,stroke:#1d5599
 
-  EXP["scripts/gui/export_*.py<br/>knobs.json · golden/*.json"]:::py
-  GEN["contracts/gen.mjs<br/>schemas.ts · catalogue.ts · knobs.ts"]:::pkg
+  EXP["scripts/gui/export_*.py<br/>knobs.json · relationships.json · dlq_rules.json · golden/*.json"]:::py
+  GEN["contracts/gen.mjs<br/>schemas.ts · catalogue.ts · knobs.ts · relationships.ts · dlqRules.ts"]:::pkg
   STATS["packages/stats"]:::pkg
   MOCK["packages/mock<br/>40 evaluations, computed"]:::pkg
   MP["MockProvider"]:::bff
@@ -369,37 +369,73 @@ BigQuery mode._
 
 ### Routes (all GET; types in `packages/contracts/src/api.ts`; hooks in `@/lib/api`)
 
-| Route                                                                         | Response (`@contracts/api` type)                                                                                    | Hook                              |
-| :---------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------ | :-------------------------------- |
-| `/api/health`                                                                 | `Health` — mode, project, datasets, `max_bytes_billed`, catalogue version, contracts digest                         | `useHealth()`                     |
-| `/api/facets`                                                                 | `Facets` — counts, latest evaluation, every filter's options, source tables, RAG sets, pool sets                    | `useFacets()`                     |
-| `/api/evaluations?…EvaluationFilter`                                          | `Page<EvaluationSummary>` (latest registry row per evaluation, no JSON snapshots)                                   | `useEvaluations(filter)`          |
-| `/api/evaluations/:id[?profiles=none]`                                        | `EvaluationDetail` — `evaluation` (latest event), `events` (RUNNING→FINAL), `metrics`, `profiles`, `flags`          | `useEvaluation(id, { profiles })` |
-| `/api/evaluations/:id/profiles?table&column&kind&side`                        | `ProfileRow[]` (lazy drawers)                                                                                       | `useProfiles(id, query)`          |
-| `/api/compare?ids=a,b`                                                        | `Comparison` — aligned `metrics[].cells[i]` (null = absent), `params` diffs, `comparability.not_comparable`         | `useCompare(ids)`                 |
-| `/api/trend?metric_id&table&column&column_2&edge&…filters`                    | `TrendPoint[]` oldest first, with the generation parameters to colour by                                            | `useTrend(query)`                 |
-| `/api/runs?run_ids&base_run_id&landing_table&engine&status&env&from&to&limit` | `ValidationRun[]` (+ `dlq_by_rule_map`)                                                                             | `useRuns(filter)`                 |
-| `/api/dlq?run_ids=…`                                                          | `DlqSummary[]` grouped by rule, with one example, `blocker_declared` / `blocker_counted` (the fk.orphan gap)        | `useDlq(runIds)`                  |
-| `/api/source-stats?table&tier&digest`                                         | `SourceStats` — snapshots, the selected ones (latest per tier by default), rows with `stats_parsed: ProfilerStats`  | `useSourceStats(query)`           |
-| `/api/rag/chunks?digest&kind&embedder[/version]&limit&source_fqn&column`      | binary envelope (`@contracts/vectors`): `ChunkMeta[]` + Float32 `n × dim`; headers `x-vector-dim`, `x-vector-count` | `useRagChunks(query)`             |
-| `/api/rag/pools?digest&model_uri&column`                                      | `FreetextPool[]` (+ `distinct`)                                                                                     | `usePools(query)`                 |
-| `/api/knobs`                                                                  | `KnobsFile` (also importable statically: `@contracts/generated/knobs`)                                              | `useKnobs()`                      |
-| `/api/catalogue`                                                              | `{ version, levels, families, metrics: CatalogueMetric[] }` (also `@contracts/generated/catalogue`)                 | `useCatalogue()`                  |
+| Route                                                                         | Response (`@contracts/api` type)                                                                                                                                 | Hook                              |
+| :---------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------- |
+| `/api/health`                                                                 | `Health` — mode, project, datasets, `max_bytes_billed`, catalogue version, contracts digest                                                                      | `useHealth()`                     |
+| `/api/facets`                                                                 | `Facets` — counts, latest evaluation, every filter's options, source tables, RAG sets, pool sets (each with the `table_fqn` its digest was sampled from)         | `useFacets()`                     |
+| `/api/evaluations?…EvaluationFilter`                                          | `Page<EvaluationSummary>` (latest registry row per evaluation, no JSON snapshots); `total` is right past the last page too                                       | `useEvaluations(filter)`          |
+| `/api/evaluations/:id[?profiles=all]`                                         | `EvaluationDetail` — `evaluation` (latest event), `events` (RUNNING→FINAL), `metrics`, `flags`; `profiles` **empty by default** (`?profiles=all` embeds them)    | `useEvaluation(id, { profiles })` |
+| `/api/evaluations/:id/profiles?table&column&kind&side`                        | `ProfileRow[]` — how a detail page loads profiles: per drawer, table, column or kind                                                                             | `useProfiles(id, query)`          |
+| `/api/compare?ids=a,b`                                                        | `Comparison` — aligned `metrics[].cells[i]` (null = absent), `params` diffs, `comparability.not_comparable` (catalogue, evaluator and encoding-plan differences) | `useCompare(ids)`                 |
+| `/api/trend?metric_id&table&column&column_2&edge&…filters&limit`              | `TrendPoint[]` — the **newest** `limit` points (default 500), ordered oldest first, with the generation parameters to colour by                                  | `useTrend(query)`                 |
+| `/api/runs?run_ids&base_run_id&landing_table&engine&status&env&from&to&limit` | `ValidationRun[]` (+ `dlq_by_rule_map`); `base_run_id` matches a launch's `<base>-NN-<table>` rows (a one-table launch's row is `<base>`)                        | `useRuns(filter)`                 |
+| `/api/dlq?run_ids=…`                                                          | `DlqSummary[]` grouped by rule, with one example, `blocker_declared` / `blocker_counted` (the fk.orphan gap); rule → step map: `@contracts/generated/dlqRules`   | `useDlq(runIds)`                  |
+| `/api/source-stats?table&tier&digest&snapshot`                                | `SourceStats` — snapshots keyed by (digest, tier, profiler_version, run_id), the selected keys (newest per tier by default), rows with `stats_parsed`            | `useSourceStats(query)`           |
+| `/api/rag/chunks?digest&kind&embedder[/version]&limit&source_fqn&column`      | binary envelope (`@contracts/vectors`): `ChunkMeta[]` + Float32 `n × dim`, ≤ 3,000 chunks (`RAG_CHUNKS_MAX`); headers `x-vector-dim`, `x-vector-count`           | `useRagChunks(query)`             |
+| `/api/rag/pools?digest&model_uri&column`                                      | `FreetextPool[]` (+ `distinct`)                                                                                                                                  | `usePools(query)`                 |
+| `/api/relationships`                                                          | `RelationshipsResponse` — the committed sample models (`generated/relationships.json`) and, in mock mode, the mock's `thelook_demo`                              | `useRelationships()`              |
+| `/api/knobs`                                                                  | `KnobsFile` (also importable statically: `@contracts/generated/knobs`)                                                                                           | `useKnobs()`                      |
+| `/api/catalogue`                                                              | `{ version, levels, families, metrics: CatalogueMetric[] }` (also `@contracts/generated/catalogue`)                                                              | `useCatalogue()`                  |
 
-Lists in query strings are comma-separated. Every hook's `data` is an
-`ApiResult<T>`: `{ data, bytesEstimate, dataSource }` — `bytesEstimate` is the
-dry-run bytes of the BigQuery queries the route ran (null in mock mode); show
-it next to the data it cost. Errors are `ApiError { status, message, details }`
-(400 invalid params, 404 unknown id, 422 over the bytes cap, 502 live rows no
-longer match the generated contract).
+Lists in query strings are comma-separated; `from` / `to` are ISO timestamps
+with an offset (`…Z`, `…+02:00`) or dates. Every hook's `data` is an
+`ApiResult<T>`: `{ data, bytesEstimate, dataSource, warnings }` —
+`bytesEstimate` is the dry-run bytes of the BigQuery queries the route ran
+(null in mock mode); show it next to the data it cost. `warnings` lists the
+vocabulary values live rows carried that the contract does not know yet
+(`x-contract-warnings`). Errors are `ApiError { status, message, details }`
+(400 invalid params, 403 refused by the Host / Origin guard, 404 unknown id,
+422 over the bytes cap, 502 live rows no longer match the generated contract).
+
+**Relational views.** A registry row names its model (`relationship_model`);
+resolve it through `/api/relationships`. Real models are gitignored or on GCS
+and never served, so when the name is not listed, rebuild the graph from the
+metric rows' `edge` labels with `parseEdge` (`@contracts/relational`; it reads
+the evaluator's `child.col+col->parent.col+col` and the launcher's
+`(col,col)->parent`). `formatEdge` / `findEdge` go the other way. Edge roles:
+driving, implied, conditional, independent, external, **documented**
+(`enforced: false` — its `relationship.orphan_rate` is `info`, compared with
+`relationship.orphan_rate_source`), disabled.
+
+**Source stats.** One reference digest can be profiled on the sample tier by
+one launch and on the exact tier by a later one, and by several profiler
+versions (the profiler skips only an existing (table, digest, version, tier)),
+so snapshots are keyed by all four plus the run and `selected` holds those
+keys. `?digest=` returns the newest snapshot of each tier of that digest (the
+tier compare of one reference sample); `?snapshot=key,key` picks exactly. A
+NULL `stats_tier` (written before the exact tier existed) is the sample tier
+everywhere (`effectiveTier`, `snapshotKey` in `@contracts/sourceStats`).
+
+**RAG chunks.** At most 3,000 per response (`RAG_CHUNKS_MAX`): 3,000 × 384-d
+Float32 is 4.6 MB of vectors, inside the 5 MB vector budget (text and
+metadata come on top; a wider embedder needs a smaller `limit`).
+`chunk_text` is the operator's own governed reference data,
+shown to the operator on a loopback-only server; `source_pk` (a source row's
+key) is never selected nor sent.
 
 ### Reading the rows
 
 - Row types are the generated BigQuery schemas (`@contracts/generated/schemas`):
-  TIMESTAMP → ISO string, INT64 → number, JSON → parsed value, NULLABLE → `null`
-  (keys always present), REPEATED → array. Vocabularies (`status`, `level`,
-  `family`, `profile_kind`, `side`, `check`, `scope_status` …) are `z.enum`s
-  parsed from the column descriptions: `vocabularies["evaluation_metrics.status"]`.
+  TIMESTAMP → `YYYY-MM-DDTHH:MM:SS.ffffffZ` (UTC, **six** fraction digits:
+  BigQuery keeps microseconds, a `Date` keeps milliseconds — never round-trip
+  a timestamp through `Date` before sending it back; compare them as strings),
+  INT64 → number, JSON → parsed value, NULLABLE → `null` (keys always present),
+  REPEATED → array. Vocabularies (`status`, `level`, `family`, `profile_kind`,
+  `side`, `check`, `scope_status` …) are `z.enum`s parsed from the column
+  descriptions: `vocabularies["evaluation_metrics.status"]`. On live data a
+  value newer than the contract passes through as a plain string (with a
+  warning), so render unknown values as text and give every `switch` over a
+  vocabulary a default branch.
 - `evaluation_profiles.payload` is JSON the evaluator owns; read it with
   `parseProfile(kind, payload)` (`@contracts/payloads`), which returns `null`
   (show "profile unavailable") instead of throwing. Shapes: histogram
@@ -436,11 +472,22 @@ calls; they never run SQL of their own.
 ### BFF safety
 
 - Binds `127.0.0.1` by default (`HOST`); port `PORT` → `GUI_SERVER_PORT` → 8787.
+  A non-loopback `HOST` with `DATA_SOURCE=bigquery` logs a loud warning at
+  startup (in a container: publish only on loopback, `-p 127.0.0.1:8787:8787`).
+- **Host / Origin guard** (an `onRequest` hook, before any route): the `Host`
+  header must be `127.0.0.1`, `localhost` or `[::1]` on `PORT` or on
+  `GUI_WEB_PORT` (the Vite dev proxy forwards the browser's Host), or one of
+  `ALLOWED_HOSTS` (comma-separated `host:port`) — a DNS-rebinding page reaches
+  127.0.0.1 under its own name and gets a 403. On `/api/*`, a browser request
+  with `Sec-Fetch-Site: cross-site` or an `Origin` that is not an allowed host
+  is refused too, so a foreign page cannot make the BFF spend BigQuery bytes.
 - Only the named, parameterized, read-only queries of
   `apps/server/src/queries/registry.ts`; client values are parameters, never
   SQL text; `assertReadOnly` guards every statement.
 - Each query dry-runs first; above `MAX_BYTES_BILLED` (10 GiB default) it is
   refused (422); the job itself also carries `maximumBytesBilled`.
 - Live rows are validated against the generated zod (a mismatch is a 502, not a
-  silent pass); results are cached in an LRU (TTL 5 min) and never persisted;
-  the runner's ADC never leaves the server.
+  silent pass — except an unknown vocabulary value, which passes as a string
+  with `x-contract-warnings`); results are cached in an LRU keyed by the full
+  SQL text and parameters (TTL 5 min) and never persisted; the runner's ADC
+  never leaves the server.

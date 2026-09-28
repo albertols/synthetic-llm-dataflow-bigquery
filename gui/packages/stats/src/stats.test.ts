@@ -121,7 +121,12 @@ describe("distances and entropy", () => {
   it("PSI, Cohen's w and Hellinger", () => {
     expect(psi([100, 100], [100, 100])).toBeCloseTo(0, 12);
     expect(psi([1000, 0], [0, 1000])!).toBeGreaterThan(5);
-    expect(cohensW([0.5, 0.5], [0.5, 0.5])).toBe(0);
+    expect(cohensW([0.5, 0.5], [0.5, 0.5])).toEqual({ value: 0, qMassOnP0: 0 });
+    // Synthetic mass on a category the source never shows is reported, not scored.
+    const w = cohensW([2, 2, 0], [1, 1, 2]);
+    expect(w.value!).toBeCloseTo(Math.sqrt((2 * (0.25 - 0.5) ** 2) / 0.5), 12);
+    expect(w.qMassOnP0).toBeCloseTo(0.5, 12);
+    expect(cohensW([0, 0], [1, 1])).toEqual({ value: null, qMassOnP0: null });
     expect(hellinger([1, 0], [0, 1])).toBeCloseTo(1, 12);
   });
 

@@ -1,6 +1,7 @@
 /**
- * `GET /api/evaluations/:id` — the registry row (latest event), every event, metrics,
- * profiles (`?profiles=none` skips them) and flags; `GET /api/evaluations/:id/profiles`
+ * `GET /api/evaluations/:id` — the registry row (latest event), every event, metrics
+ * and flags; profiles only with `?profiles=all` (the default is `none`: a detail page
+ * loads them per drawer from `/profiles`, never hundreds of payloads up front); `GET /api/evaluations/:id/profiles`
  * — profiles of one table / column / kind / side, for lazy drawers.
  */
 import { evaluationDetailQuerySchema, profileQuerySchema } from "@synthetic-platform/contracts";

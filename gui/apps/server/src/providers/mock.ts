@@ -14,13 +14,14 @@ import type {
   FreetextPool,
   Page,
   ProfileRow,
+  RelationshipModel,
   RunFilterParsed,
   SourceStats,
   TrendPoint,
   TrendQueryParsed,
   ValidationRun,
 } from "@synthetic-platform/contracts";
-import { getMockDataset, type MockDataset } from "@synthetic-platform/mock";
+import { getMockDataset, MOCK_RELATIONSHIP_MODEL, type MockDataset } from "@synthetic-platform/mock";
 
 import {
   assembleSourceStats,
@@ -36,8 +37,18 @@ import {
   sortEvaluations,
   toSummary,
   toTrendPoint,
+  withinWindow,
 } from "./shared";
-import type { DataProvider, ProfileFilter, RagChunks, RagChunksFilter } from "./types";
+import type { DataProvider, ProfileFilter, RagChunks, RagChunksFilter, SourceStatsFilter } from "./types";
+
+/** Ascending with NULLs first: the reverse of BigQuery's `DESC` (NULLS LAST). */
+const nullsFirst = (a: string | null, b: string | null) =>
+  a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : a > b ? 1 : 0;
+
+/** `run_id` belongs to launch `base`: the one-table id itself, or a per-table `<base>-NN-<table>`. */
+export function belongsToLaunch(runId: string, base: string): boolean {
+  return runId === base || (runId.startsWith(`${base}-`) && /^\d{2}-.+$/.test(runId.slice(base.length + 1)));
+}
 
 type JsonValue = NonNullable<DlqSummary["sample"]>["raw_record"];
 
@@ -57,6 +68,10 @@ export class MockProvider implements DataProvider {
   ready(): Promise<void> {
     void this.dataset;
     return Promise.resolve();
+  }
+
+  relationshipModels(): Promise<RelationshipModel[]> {
+    return Promise.resolve([MOCK_RELATIONSHIP_MODEL]);
   }
 
   private latest() {
@@ -124,9 +139,19 @@ export class MockProvider implements DataProvider {
           (!q.column_2 || m.column_name_2 === q.column_2) &&
           (!q.edge || m.edge === q.edge),
       )
+      .filter((m) => m.evaluated_at === evaluations.get(m.evaluation_id)!.evaluated_at)
       .map((m) => toTrendPoint(m, evaluations.get(m.evaluation_id)!))
-      .sort((a, b) => a.evaluated_at.localeCompare(b.evaluated_at) || a.table_name.localeCompare(b.table_name));
-    return Promise.resolve(points.slice(0, q.limit));
+      // The SQL's newest-first order, reversed: oldest first, the newest `limit` kept.
+      .sort(
+        (a, b) =>
+          nullsFirst(a.evaluated_at, b.evaluated_at) ||
+          nullsFirst(a.evaluation_id, b.evaluation_id) ||
+          nullsFirst(a.table_name, b.table_name) ||
+          nullsFirst(a.column_name, b.column_name) ||
+          nullsFirst(a.column_name_2, b.column_name_2) ||
+          nullsFirst(a.edge, b.edge),
+      );
+    return Promise.resolve(points.slice(-q.limit));
   }
 
   compare(ids: string[]): Promise<Comparison> {
@@ -141,13 +166,12 @@ export class MockProvider implements DataProvider {
       .filter(
         (r) =>
           (!q.run_ids?.length || q.run_ids.includes(r.run_id)) &&
-          (!q.base_run_id || r.run_id.startsWith(`${q.base_run_id}-`)) &&
+          (!q.base_run_id || belongsToLaunch(r.run_id, q.base_run_id)) &&
           (!q.landing_table?.length || (r.landing_table !== null && q.landing_table.includes(r.landing_table))) &&
           (!q.engine?.length || (r.engine !== null && q.engine.includes(r.engine))) &&
           (!q.status?.length || (r.status !== null && q.status.includes(r.status))) &&
           (!q.env?.length || (r.env !== null && q.env.includes(r.env))) &&
-          (!q.from || Date.parse(r.created_at) >= Date.parse(q.from)) &&
-          (!q.to || Date.parse(r.created_at) < Date.parse(q.to)),
+          withinWindow(r.created_at, q.from, q.to),
       )
       .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.run_id.localeCompare(b.run_id))
       .slice(0, q.limit);
@@ -183,11 +207,7 @@ export class MockProvider implements DataProvider {
     return Promise.resolve(sortDlq(out));
   }
 
-  sourceStats(q: {
-    table: string;
-    tier?: "sample" | "exact" | undefined;
-    digest?: string | undefined;
-  }): Promise<SourceStats | null> {
+  sourceStats(q: SourceStatsFilter): Promise<SourceStats | null> {
     const fqns = [...new Set(this.dataset.sourceStats.map((r) => r.table_fqn))];
     const fqn = resolveTable(fqns, q.table);
     if (!fqn) return Promise.resolve(null);
@@ -226,7 +246,6 @@ export class MockProvider implements DataProvider {
           chunk_text: chunk.chunk_text,
           column,
           row_digest: chunk.row_digest,
-          source_pk: (chunk.source_pk ?? null) as ChunkMeta["source_pk"],
           embedder_id: chunk.embedder_id,
           embedder_version: chunk.embedder_version,
         });
@@ -265,15 +284,28 @@ export class MockProvider implements DataProvider {
         latest: r.computed_at,
         columns: new Set<string>(),
       };
-      if (r.stats_tier) s.tiers.add(r.stats_tier);
+      s.tiers.add(r.stats_tier ?? "sample"); // as sourceStats.tables: NULL tier = sample
       if (r.computed_at > s.latest) s.latest = r.computed_at;
       s.columns.add(r.column);
       stats.set(r.table_fqn, s);
     }
+    // As rag.poolSets: the digest's source table from validation_runs, else source_table_stats.
+    const digestTable = new Map<string, string>();
+    for (const r of [...d.sourceStats].sort((a, b) => b.table_fqn.localeCompare(a.table_fqn)))
+      digestTable.set(r.reference_digest, r.table_fqn);
+    for (const r of [...d.validationRuns].sort((a, b) =>
+      (b.reference_table ?? "").localeCompare(a.reference_table ?? ""),
+    ))
+      if (r.reference_digest && r.reference_table) digestTable.set(r.reference_digest, r.reference_table);
     const pools = new Map<string, Facets["pools"][number]>();
     for (const p of d.pools) {
       const key = `${p.reference_digest}|${p.model_uri}`;
-      const entry = pools.get(key) ?? { reference_digest: p.reference_digest, model_uri: p.model_uri, columns: [] };
+      const entry = pools.get(key) ?? {
+        reference_digest: p.reference_digest,
+        table_fqn: digestTable.get(p.reference_digest) ?? null,
+        model_uri: p.model_uri,
+        columns: [] as string[],
+      };
       entry.columns.push(p.column);
       pools.set(key, entry);
     }

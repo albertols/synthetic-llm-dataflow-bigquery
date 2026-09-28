@@ -166,7 +166,8 @@ def test_evaluation_channel_is_planned_until_the_cli_exists(
       "eval_mode", "eval_sample_rows", "eval_privacy_sample_rows",
       "eval_detection_sample_rows", "eval_pair_max_columns",
       "eval_topk_profile", "eval_row_flags_top_k", "eval_row_flags_source_keys",
-      "eval_max_bytes_billed", "eval_max_shuffle_gb", "eval_scope"
+      "eval_max_bytes_billed", "eval_max_shuffle_gb", "eval_scope",
+      "eval_allow_contaminated"
   } == ids
   by_id = _by_id(knobs)
   assert by_id["eval_max_bytes_billed"]["value"] == 1_099_511_627_776
@@ -226,17 +227,112 @@ def test_measured_values_come_from_the_figure_scripts(knobs):
       "value"] == 10_500
 
 
-def test_the_committed_knobs_file_is_current(knobs_module):
-  assert knobs_module.main(["--check"]) == 0
+# The committed files are checked by .github/workflows/gui.yml (`--check`,
+# tolerant of line shifts), not here: an unrelated Python PR that moves a
+# line must not fail this suite.
 
 
-def test_check_fails_on_drift(knobs_module, tmp_path):
-  out = tmp_path / "knobs.json"
-  assert knobs_module.main(["--out", str(out)]) == 0
-  doc = json.loads(out.read_text(encoding="utf-8"))
-  doc["knobs"][0]["value"] = "tampered"
-  out.write_text(json.dumps(doc), encoding="utf-8")
-  assert knobs_module.main(["--check", "--out", str(out)]) == 1
+def test_check_ignores_line_shifts_but_not_values(knobs_module, tmp_path):
+  assert knobs_module.main(["--out-dir", str(tmp_path)]) == 0
+  assert knobs_module.main(["--check", "--out-dir", str(tmp_path)]) == 0
+  path = tmp_path / "knobs.json"
+  doc = json.loads(path.read_text(encoding="utf-8"))
+  knob = next(k for k in doc["knobs"] if k["source"] != "planned")
+  file, line = knob["source"].rsplit(":", 1)
+  knob["source"] = f"{file}:{int(line) + 7}"
+  doc["exported_from"] = {"commit": "0" * 40, "dirty": []}
+  path.write_text(json.dumps(doc), encoding="utf-8")
+  assert knobs_module.main(["--check", "--out-dir", str(tmp_path)]) == 0
+  assert knobs_module.main(["--check-strict", "--out-dir", str(tmp_path)]) == 1
+  knob["source_token"] = "moved elsewhere"
+  path.write_text(json.dumps(doc), encoding="utf-8")
+  assert knobs_module.main(["--check", "--out-dir", str(tmp_path)]) == 1
+
+
+def test_check_fails_on_value_drift_in_every_file(knobs_module, tmp_path):
+  for name, tamper in (
+      ("knobs.json", lambda d: d["knobs"][0].update(value="tampered")),
+      ("relationships.json",
+       lambda d: d["models"][0]["tables"][0].update(pk=["tampered"])),
+      ("dlq_rules.json", lambda d: d["rules"][0].update(severity="INFO")),
+  ):
+    assert knobs_module.main(["--out-dir", str(tmp_path)]) == 0
+    path = tmp_path / name
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    tamper(doc)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert knobs_module.main(["--check", "--out-dir", str(tmp_path)]) == 1, name
+
+
+def test_exports_record_the_commit_their_links_resolve_at(knobs_module):
+  docs = knobs_module.build_all()
+  stamps = {json.dumps(doc["exported_from"]) for doc in docs.values()}
+  assert len(stamps) == 1
+  stamp = docs["knobs.json"]["exported_from"]
+  assert stamp["commit"] is None or len(stamp["commit"]) == 40
+  assert isinstance(stamp["dirty"], list)
+
+
+def test_relationship_export_is_the_registry_view(knobs_module):
+  from sdfb_core.contracts.relationships import RelationshipRegistry
+
+  doc = knobs_module.build_relationships()
+  by_model = {m["model"]: m for m in doc["models"]}
+  thelook = by_model["gcp_public_thelook"]
+  assert thelook["source"] == "config/relationships/gcp_public_fk_example.yaml"
+  assert thelook["generation_order"] == ["users", "orders", "order_items"]
+  path = _REPO / thelook["source"]
+  registry = RelationshipRegistry.from_sources([
+      (thelook["source"], path.read_text(encoding="utf-8"))
+  ])
+  assert thelook["sha12"] == registry.sha12()
+  items = {t["name"]: t for t in thelook["tables"]}["order_items"]
+  roles = {(tuple(e["cols"]), e["ref"]): e["role"] for e in items["fk"]}
+  assert roles == {
+      (("order_id", "user_id"), "orders"): "driving",
+      (("user_id",), "users"): "implied",
+      (("product_id",), "synthetic_data.products"): "external",
+  }
+  # Only committed sample models: real ones are gitignored.
+  assert all("example" in Path(m["source"]).stem for m in doc["models"])
+
+
+def test_dlq_rule_export_matches_the_code(knobs_module):
+  from sdfb_core.validation import dlq
+  from sdfb_core.validation.summary import BLOCKER_RULE_IDS
+
+  rules = {r["rule_id"]: r for r in knobs_module.build_dlq_rules()["rules"]}
+  expected = {
+      "schema.types": ("pydantic", "ValidateRecordDoFn"),
+      "schema.batch": ("pandera", "PanderaValidateBatchDoFn"),
+      "schema.non_finite": ("load_safety", None),
+      "row.duplicate": ("uniqueness", "EnforceUniqueness"),
+      "pk.duplicate": ("uniqueness", "EnforceUniqueness"),
+      "identity.unique": ("uniqueness", "EnforceUniqueness"),
+      "fk.orphan": ("referential_integrity", "EnforceFkIntegrityDoFn"),
+      "fk.unmatched": ("referential_integrity", "GenerateRecordsDoFn"),
+      "engine_failure": ("engine", "GenerateRecordsDoFn"),
+  }
+  emitted = {
+      k: (r["error_type"], r["pipeline_step"])
+      for k, r in rules.items()
+      if r["emitted"]
+  }
+  assert emitted == expected
+  for rule_id, (error_type, step) in expected.items():
+    normalized = dlq.normalize_dlq_record(
+        {
+            "error_type": error_type,
+            "rule_id": rule_id
+        }, run_id="r")
+    assert (normalized["pipeline_step"] or None) == step, rule_id
+    assert _line_of(rules[rule_id]["emitted_by"]).strip(), rule_id
+  assert rules["fk.unmatched"]["stage"] == "pre_generate"
+  # Declared as a BLOCKER, counted by the gate, never emitted by a DoFn.
+  assert rules["null.required"]["declared"]
+  assert not rules["null.required"]["emitted"]
+  assert {r for r, v in rules.items() if v["counted_in_blocker_gate"]
+         } == set(BLOCKER_RULE_IDS)
 
 
 def test_no_float_in_the_file_can_trip_the_card_number_gate(knobs_module):
