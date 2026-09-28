@@ -98,6 +98,8 @@ _NNDR_K = 2
 
 _P5 = 0.05
 _P50 = 0.5
+# Two-sided 95 % normal quantile, as `noise.wilson_interval` uses.
+_Z = 1.959964
 # Fixed profile bins over [0, 1] for DCR and NNDR histograms: 49 interior
 # edges 0.02, ..., 0.98, counted like `binned.bin_counts` (the GUI's
 # `distanceHistPayloadSchema`: `counts` has `len(edges) + 1` entries).
@@ -322,8 +324,9 @@ class _Reference:
 
 
 def _pair_sums(q_num: np.ndarray, q_cat: np.ndarray, ref: _Reference,
-               acc: np.ndarray, scratch: np.ndarray, mismatch: np.ndarray,
-               neq: np.ndarray) -> np.ndarray:
+               acc: np.ndarray, scratch: np.ndarray,
+               mismatch: np.ndarray | None,
+               neq: np.ndarray | None) -> np.ndarray:
   """The `(c, |R|)` float32 Gower SUMS (not yet divided by `d`) into `acc`.
 
   Numeric features are accumulated first, in feature order, then the
@@ -331,25 +334,37 @@ def _pair_sums(q_num: np.ndarray, q_cat: np.ndarray, ref: _Reference,
   pair's sum depends only on its own two rows: identical whatever the chunk.
   A NULL cell is patched after the subtraction (its `NaN` differences are
   overwritten by exactly 0 or 1), so non-NULL pairs see the plain `|u - v|`.
+  `mismatch`/`neq` are `None` exactly when there are no categorical features.
+  The first feature of each kind is written straight into its accumulator
+  (`0 + x == x`, so the sums are unchanged), saving two full passes each.
   """
-  acc.fill(0.0)
   for j, rcol in enumerate(ref.num_cols):
     qcol = q_num[:, j]
-    np.subtract(qcol[:, np.newaxis], rcol[np.newaxis, :], out=scratch)
-    np.abs(scratch, out=scratch)
+    term = acc if j == 0 else scratch
+    np.subtract(qcol[:, np.newaxis], rcol[np.newaxis, :], out=term)
+    np.abs(term, out=term)
     q_null = np.isnan(qcol)
     if q_null.any():
-      scratch[q_null, :] = ref.num_present[j]
+      term[q_null, :] = ref.num_present[j]
     r_null = ref.num_null_idx[j]
     if r_null.size:
-      scratch[:, r_null] = (~q_null).astype(np.float32)[:, np.newaxis]
-    np.add(acc, scratch, out=acc)
-  if ref.cat_cols:
-    mismatch.fill(0)
+      term[:, r_null] = (~q_null).astype(np.float32)[:, np.newaxis]
+    if j:
+      np.add(acc, scratch, out=acc)
+  if mismatch is not None and neq is not None:
+    first = mismatch.view(bool) if mismatch.dtype == np.uint8 else None
+    if first is None:
+      mismatch.fill(0)
     for j, rcol in enumerate(ref.cat_cols):
+      if j == 0 and first is not None:
+        np.not_equal(q_cat[:, 0, np.newaxis], rcol[np.newaxis, :], out=first)
+        continue
       np.not_equal(q_cat[:, j, np.newaxis], rcol[np.newaxis, :], out=neq)
       np.add(mismatch, neq, out=mismatch)
-    np.add(acc, mismatch, out=acc)
+    if ref.num_cols:
+      np.add(acc, mismatch, out=acc)
+    else:
+      np.copyto(acc, mismatch)
   return acc
 
 
@@ -358,30 +373,65 @@ def _iter_pair_sums(q_num: np.ndarray, q_cat: np.ndarray, ref: _Reference,
   """`(start, sums)` per query chunk; `sums` is reused by the next chunk."""
   step = max(1,
              min(effective_chunk(ref.n, ref.n_features, chunk), q_num.shape[0]))
-  n_cat = len(ref.cat_cols)
-  count_dtype = np.uint8 if n_cat <= np.iinfo(np.uint8).max else np.uint32
   acc = np.empty((step, ref.n), dtype=np.float32)
   scratch = np.empty((step, ref.n), dtype=np.float32)
-  mismatch = np.empty((step, ref.n), dtype=count_dtype)
-  neq = np.empty((step, ref.n), dtype=bool)
+  mismatch: np.ndarray | None = None
+  neq: np.ndarray | None = None
+  if ref.cat_cols:
+    n_cat = len(ref.cat_cols)
+    count_dtype = np.uint8 if n_cat <= np.iinfo(np.uint8).max else np.uint32
+    mismatch = np.empty((step, ref.n), dtype=count_dtype)
+    neq = np.empty((step, ref.n), dtype=bool)
   for start in range(0, q_num.shape[0], step):
     stop = min(start + step, q_num.shape[0])
     c = stop - start
     yield start, _pair_sums(q_num[start:stop], q_cat[start:stop], ref, acc[:c],
-                            scratch[:c], mismatch[:c], neq[:c])
+                            scratch[:c],
+                            None if mismatch is None else mismatch[:c],
+                            None if neq is None else neq[:c])
 
 
-def _k_smallest(sums: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-  """The `k` smallest per row, ascending, ties broken by the lower index.
+def _k_smallest_argmin(
+    sums: np.ndarray, k: int,
+    count_le: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+  """`_k_smallest` for small `k`: `k` rounds of `argmin`, CONSUMING `sums`.
+
+  `np.argmin` returns the first (lowest-index) minimum; each selected entry
+  is then overwritten with `inf`, so round `m` picks the next pair in
+  (value, index) order — the same selection and order as the partition
+  path, at a fraction of its cost for the k = 1, 2 and 6 that the privacy
+  metrics use.
+  """
+  rows = np.arange(sums.shape[0])
+  vals = np.empty((sums.shape[0], k), dtype=sums.dtype)
+  idx = np.empty((sums.shape[0], k), dtype=np.int64)
+  for m in range(k):
+    col = np.argmin(sums, axis=1)
+    idx[:, m] = col
+    vals[:, m] = sums[rows, col]
+    sums[rows, col] = np.inf
+  n_le = None
+  if count_le:
+    # The k selected entries are all <= t (and now inf); count the rest.
+    n_le = k + np.count_nonzero(sums <= vals[:, k - 1:k], axis=1)
+  return vals, idx, n_le
+
+
+def _k_smallest_partition(
+    sums: np.ndarray, k: int,
+    count_le: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+  """`_k_smallest` via `np.partition`, for larger `k`; `sums` is untouched.
 
   `np.partition` finds each row's k-th smallest value `t`; the rows with
   exactly `k` values `<= t` are then unambiguous. Rows with ties AT `t`
   keep every value below `t` plus the lowest-index values equal to it.
   """
   c = sums.shape[0]
-  kth = np.partition(sums, k - 1, axis=1)[:, k - 1]
+  # `.copy()` so the partitioned (c, |R|) buffer is released right away.
+  kth = np.partition(sums, k - 1, axis=1)[:, k - 1].copy()
   keep = sums <= kth[:, np.newaxis]
-  tied = np.flatnonzero(np.count_nonzero(keep, axis=1) > k)
+  n_le = np.count_nonzero(keep, axis=1)
+  tied = np.flatnonzero(n_le > k)
   if tied.size:
     sub = sums[tied]
     t = kth[tied, np.newaxis]
@@ -393,22 +443,51 @@ def _k_smallest(sums: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
   idx = np.nonzero(keep)[1].reshape(c, k)
   vals = np.take_along_axis(sums, idx, axis=1)
   order = np.lexsort((idx, vals), axis=1)
-  return (np.take_along_axis(vals, order,
-                             axis=1), np.take_along_axis(idx, order, axis=1))
+  return (np.take_along_axis(vals, order, axis=1),
+          np.take_along_axis(idx, order, axis=1), n_le if count_le else None)
 
 
-def _knn_sums(q_num: np.ndarray, q_cat: np.ndarray, ref: _Reference, k: int,
-              chunk: int) -> tuple[np.ndarray, np.ndarray]:
-  """The k-NN float32 Gower SUMS and int64 reference indices per query row."""
+# Up to this k, k rounds of argmin beat one partition + selection mask.
+_ARGMIN_MAX_K = 8
+
+
+def _k_smallest(
+    sums: np.ndarray,
+    k: int,
+    count_le: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+  """The `k` smallest per row, ascending, ties broken by the lower index.
+
+  Returns `(values, indices, n_le)`; `n_le` (only when `count_le`) is each
+  row's count of entries `<=` its k-th smallest value, ties included — what
+  the tie-corrected density needs. MAY overwrite `sums` (small `k`).
+  """
+  if k <= _ARGMIN_MAX_K:
+    return _k_smallest_argmin(sums, k, count_le)
+  return _k_smallest_partition(sums, k, count_le)
+
+
+def _knn_sums(
+    q_num: np.ndarray,
+    q_cat: np.ndarray,
+    ref: _Reference,
+    k: int,
+    chunk: int,
+    count_le: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+  """The k-NN float32 Gower SUMS and int64 reference indices per query row,
+  plus (with `count_le`) each row's count of reference rows `<=` its k-th."""
   if not 1 <= k <= ref.n:
     raise ValueError(f"k must be in [1, {ref.n}] (the reference rows), got {k}")
   n_q = q_num.shape[0]
   sums = np.empty((n_q, k), dtype=np.float32)
   idx = np.empty((n_q, k), dtype=np.int64)
+  n_le = np.empty(n_q, dtype=np.int64) if count_le else None
   for start, block in _iter_pair_sums(q_num, q_cat, ref, chunk):
     stop = start + block.shape[0]
-    sums[start:stop], idx[start:stop] = _k_smallest(block, k)
-  return sums, idx
+    vals, sel, le = _k_smallest(block, k, count_le)
+    sums[start:stop], idx[start:stop] = vals, sel
+    if n_le is not None and le is not None:
+      n_le[start:stop] = le
+  return sums, idx, n_le
 
 
 def _prepare(q_num: Any, q_cat: Any, r_num: Any,
@@ -440,11 +519,13 @@ def gower_knn(q_num: Any,
   Returns `(distances, indices)`, both `(n_q, k)`: float64 Gower distances
   ascending, and int64 reference row indices, ties broken by the lower
   index. Queries are processed `effective_chunk(|R|, d, chunk)` rows at a
-  time, so the working set stays within `chunk * |R| * d * 4` bytes and
-  64 MB. Deterministic, and bit-identical for a query row whatever `chunk`.
+  time: the working set is charged `4 * max(d, 8)` bytes per (query,
+  reference) pair against a 64 MB budget, so it stays within 64 MB for any
+  `d` (and within `chunk * |R| * d * 4` bytes once `d >= 8`).
+  Deterministic, and bit-identical for a query row whatever `chunk`.
   """
   qn, qc, ref = _prepare(q_num, q_cat, r_num, r_cat)
-  sums, idx = _knn_sums(qn, qc, ref, k, chunk)
+  sums, idx, _ = _knn_sums(qn, qc, ref, k, chunk)
   return sums.astype(np.float64) / ref.n_features, idx
 
 
@@ -455,18 +536,25 @@ def density_coverage(real_num: Any,
                      *,
                      k: int = 5,
                      chunk: int = 64) -> tuple[float, float]:
-  """Naeem et al. (2020) density and coverage of `fake` rows around `real` rows.
+  """Tie-corrected Naeem et al. (2020) density, and coverage, of `fake` rows
+  around `real` rows (Ruling R28).
 
   Each real row `X_i` gets the closed ball `B(X_i, r_i)` whose radius is its
   k-th nearest-neighbour distance among the OTHER real rows (the `(k+1)`-th
-  smallest distance with itself included, since its own distance is 0):
+  smallest distance with itself included, since its own distance is 0), and
+  `K_i >= k` is the number of other real rows inside that ball:
 
-    density  = (1 / (k M)) sum_j sum_i 1[d(Y_j, X_i) <= r_i]
+    density  = (1 / (k M)) sum_j sum_i 1[d(Y_j, X_i) <= r_i] * k / K_i
     coverage = (1 / N) sum_i 1[exists j: d(Y_j, X_i) <= r_i]
 
-  The catalogue metrics (`row.density`, `row.coverage`) need `N == M`;
-  `nn_privacy` guarantees it. Raises `ValueError` unless `N > k` and
-  `M >= 1`.
+  Without distance ties `K_i = k` and density is exactly Naeem's. On a
+  lattice (categorical-only spaces: many zero radii, balls holding far more
+  than k real rows) the plain closed-ball count inflates density several
+  fold for a perfect generator; weighting each ball by `k / K_i` divides out
+  the real rows the ball holds beyond k. Coverage keeps the plain closed
+  balls. The catalogue metrics (`row.density`, `row.coverage`) need
+  `N == M`; `nn_privacy` guarantees it. Raises `ValueError` unless `N > k`
+  and `M >= 1`.
   """
   fn, fc, ref = _prepare(fake_num, fake_cat, real_num, real_cat)
   if k < 1 or ref.n <= k:
@@ -475,14 +563,58 @@ def density_coverage(real_num: Any,
         f"{ref.n}")
   if fn.shape[0] < 1:
     raise ValueError("density/coverage need at least 1 fake row")
-  radii = _knn_sums(ref.num, ref.cat, ref, k + 1, chunk)[0][:, k]
-  in_balls = 0
-  covered = np.zeros(ref.n, dtype=bool)
+  radii_sums, _, n_le = _knn_sums(ref.num, ref.cat, ref, k + 1, chunk, True)
+  radii = radii_sums[:, k]
+  # n_le counts the ball's real rows with X_i itself; K_i excludes it.
+  others = cast(np.ndarray, n_le) - 1
+  ball_hits = np.zeros(ref.n, dtype=np.int64)
   for _, block in _iter_pair_sums(fn, fc, ref, chunk):
-    inside = block <= radii[np.newaxis, :]
-    in_balls += int(np.count_nonzero(inside))
-    covered |= inside.any(axis=0)
-  return in_balls / (k * fn.shape[0]), float(np.count_nonzero(covered) / ref.n)
+    ball_hits += np.count_nonzero(block <= radii[np.newaxis, :], axis=0)
+  # k / K_i is exactly 1.0 without ties, so the sum is Naeem's integer count.
+  density = float(np.sum(ball_hits * (k / others))) / (k * fn.shape[0])
+  return density, float(np.count_nonzero(ball_hits) / ref.n)
+
+
+def holdout_mass(d_r: np.ndarray, i_r: np.ndarray, d_h: np.ndarray,
+                 i_h: np.ndarray, *, n_r: int,
+                 n_h: int) -> tuple[float, np.ndarray]:
+  """The closer-to-R count and the pooled nearest-neighbour mass of a batch.
+
+  Inputs are, per synthetic row, the nearest distance and index in R
+  (`d_r`, `i_r`) and in H (`d_h`, `i_h`), as `gower_knn` returns them (the
+  lowest index among equally near rows of one side). Returns:
+
+    - `closer = #[d_R < d_H] + 0.5 * #[d_R == d_H]`, the share's numerator;
+    - `nn_mass`, float64 of length `n_r + n_h` (R rows first, then H): the
+      synthetic mass whose POOLED nearest neighbour over R u H is each row.
+      A decisive synthetic row adds 1 to its winning neighbour (its nearest
+      R row when `d_R < d_H`, its nearest H row when `d_H < d_R`); a tie adds
+      1/2 to its nearest R row and 1/2 to its nearest H row. So `nn_mass[:n_r]
+      .sum() == closer` and `nn_mass.sum()` is the batch size.
+
+  Both are sums over synthetic rows (half-integers, exact in float64), so
+  the batches of a chunked run merge by plain addition. Raises `ValueError`
+  on misaligned inputs or an index outside its side.
+  """
+  if not d_r.shape == i_r.shape == d_h.shape == i_h.shape or d_r.ndim != 1:
+    raise ValueError("holdout_mass needs four aligned 1-D arrays, got shapes "
+                     f"{d_r.shape}, {i_r.shape}, {d_h.shape}, {i_h.shape}")
+  in_range = (i_r.min() >= 0 and i_r.max() < n_r and i_h.min() >= 0 and
+              i_h.max() < n_h) if i_r.size else True
+  if not in_range:
+    raise ValueError(f"holdout_mass indices must lie in [0, {n_r}) for R and "
+                     f"[0, {n_h}) for H")
+  closer_r = d_r < d_h
+  tie = d_r == d_h
+  closer_h = d_h < d_r
+  w_r = np.where(closer_r, 1.0, 0.0) + np.where(tie, 0.5, 0.0)
+  w_h = np.where(closer_h, 1.0, 0.0) + np.where(tie, 0.5, 0.0)
+  nn_mass = np.concatenate([
+      np.bincount(i_r, weights=w_r, minlength=n_r),
+      np.bincount(i_h, weights=w_h, minlength=n_h),
+  ])
+  closer = np.count_nonzero(closer_r) + 0.5 * np.count_nonzero(tie)
+  return float(closer), nn_mass
 
 
 def _nndr(dist: np.ndarray) -> np.ndarray:
@@ -499,19 +631,37 @@ class NNPrivacyResult:
 
   `dcr_syn_r`/`dcr_syn_h`/`dcr_h_r` are each row's nearest Gower distance
   (synthetic to R, synthetic to H, holdout to R); `nndr_syn`/`nndr_h` the
-  nearest over second-nearest distance to R. `closer_to_r` is the holdout
-  share (ties one half) over `n_syn` synthetic rows. `density`/`coverage`
-  are `None` when fewer than `k + 1` rows are available at equal n.
+  nearest over second-nearest distance to R. `nn_mass` (length |R| + |H|,
+  R first) is the synthetic mass per pooled nearest neighbour
+  (`holdout_mass`); it merges across synthetic chunks by elementwise sum.
+  `closer_to_r` is the holdout share (ties one half) over `n_syn` synthetic
+  rows. `density`/`coverage` are `None` when fewer than `k + 1` rows are
+  available at equal n.
   """
   dcr_syn_r: np.ndarray
   dcr_syn_h: np.ndarray
   dcr_h_r: np.ndarray
   nndr_syn: np.ndarray
   nndr_h: np.ndarray
+  nn_mass: np.ndarray
   closer_to_r: float
   n_syn: int
   density: float | None
   coverage: float | None
+
+
+def _check_sets(n_r: int, n_h: int, n_syn: int, k: int) -> None:
+  """Raise `ValueError` for set sizes the metrics cannot be computed on."""
+  if n_r < _MIN_SET_ROWS:
+    raise ValueError("nearest-neighbour privacy needs at least 2 reference "
+                     f"rows (R), got {n_r}")
+  if n_h < _MIN_SET_ROWS:
+    raise ValueError("nearest-neighbour privacy needs at least 2 holdout rows "
+                     f"(H), got {n_h}")
+  if n_syn < 1:
+    raise ValueError("nearest-neighbour privacy needs at least 1 synthetic row")
+  if k < 1:
+    raise ValueError(f"density/coverage k must be >= 1, got {k}")
 
 
 def nn_privacy(space: GowerSpace,
@@ -522,39 +672,52 @@ def nn_privacy(space: GowerSpace,
                k: int = 5) -> NNPrivacyResult:
   """The holdout DCR test, NNDR and density/coverage for one table.
 
+  Encodes the rows through `space` (R and H trimmed to their first
+  `min(|R|, |H|)` rows first) and runs `nn_privacy_encoded`. Raises
+  `ValueError` when R or H has fewer than 2 rows, the synthetic side is
+  empty, or `k < 1` (the caller records the metrics as not evaluated).
+  """
+  _check_sets(len(r_rows), len(h_rows), len(syn_rows), k)
+  n_set = min(len(r_rows), len(h_rows))
+  return nn_privacy_encoded(
+      space.encode(r_rows[:n_set]),
+      space.encode(h_rows[:n_set]),
+      space.encode(syn_rows),
+      k=k)
+
+
+def nn_privacy_encoded(r: tuple[np.ndarray, np.ndarray],
+                       h: tuple[np.ndarray, np.ndarray],
+                       syn: tuple[np.ndarray, np.ndarray],
+                       *,
+                       k: int = 5) -> NNPrivacyResult:
+  """`nn_privacy` on `(num, cat)` blocks already encoded by one `GowerSpace`.
+
   R and H are trimmed to the same size (their first `min(|R|, |H|)` rows;
   D3 makes both exchangeable ranks of the same source ordering). Distances:
-  synthetic to R and to H (nearest) and H to R (nearest two; H and R are
-  disjoint, so nothing is excluded). `closer_to_r = (#[d_R < d_H] + 0.5
-  #[d_R == d_H]) / n_syn`. Density/coverage use `k` with real = R and
-  fake = the first rows of the synthetic sample at equal n (`min(|R|,
-  n_syn)`, R trimmed alike if the synthetic side is smaller); both are
-  `None` when that n is `<= k`.
-
-  Raises `ValueError` when R or H has fewer than 2 rows, the synthetic side
-  is empty, or `k < 1` (the caller records the metrics as not evaluated).
+  synthetic to R (nearest two) and to H (nearest), and H to R (nearest two;
+  H and R are disjoint, so nothing is excluded). `closer_to_r = (#[d_R <
+  d_H] + 0.5 #[d_R == d_H]) / n_syn`, with `nn_mass` from `holdout_mass`.
+  Density/coverage use `k` with real = R and fake = the first rows of the
+  synthetic sample at equal n (`min(|R|, n_syn)`, R trimmed alike if the
+  synthetic side is smaller); both are `None` when that n is `<= k`.
   """
-  if len(r_rows) < _MIN_SET_ROWS:
-    raise ValueError("nearest-neighbour privacy needs at least 2 reference "
-                     f"rows (R), got {len(r_rows)}")
-  if len(h_rows) < _MIN_SET_ROWS:
-    raise ValueError("nearest-neighbour privacy needs at least 2 holdout rows "
-                     f"(H), got {len(h_rows)}")
-  if not syn_rows:
-    raise ValueError("nearest-neighbour privacy needs at least 1 synthetic row")
-  if k < 1:
-    raise ValueError(f"density/coverage k must be >= 1, got {k}")
-  n_set = min(len(r_rows), len(h_rows))
-  r_num, r_cat = space.encode(r_rows[:n_set])
-  h_num, h_cat = space.encode(h_rows[:n_set])
-  s_num, s_cat = space.encode(syn_rows)
-
-  syn_r = gower_knn(s_num, s_cat, r_num, r_cat, k=_NNDR_K)[0]
-  syn_h = gower_knn(s_num, s_cat, h_num, h_cat, k=1)[0][:, 0]
+  (r_num, r_cat), (h_num, h_cat), (s_num, s_cat) = r, h, syn
+  _check_sets(len(r_num), len(h_num), len(s_num), k)
+  n_set = min(len(r_num), len(h_num))
+  r_num, r_cat, h_num, h_cat = (r_num[:n_set], r_cat[:n_set], h_num[:n_set],
+                                h_cat[:n_set])
+  syn_r, syn_r_idx = gower_knn(s_num, s_cat, r_num, r_cat, k=_NNDR_K)
+  syn_h, syn_h_idx = gower_knn(s_num, s_cat, h_num, h_cat, k=1)
   h_r = gower_knn(h_num, h_cat, r_num, r_cat, k=_NNDR_K)[0]
-  n_syn = s_num.shape[0]
-  closer = (np.count_nonzero(syn_r[:, 0] < syn_h) +
-            0.5 * np.count_nonzero(syn_r[:, 0] == syn_h)) / n_syn
+  n_syn = len(s_num)
+  closer, nn_mass = holdout_mass(
+      syn_r[:, 0],
+      syn_r_idx[:, 0],
+      syn_h[:, 0],
+      syn_h_idx[:, 0],
+      n_r=n_set,
+      n_h=n_set)
 
   n_eq = min(n_set, n_syn)
   density: float | None = None
@@ -564,15 +727,41 @@ def nn_privacy(space: GowerSpace,
         r_num[:n_eq], r_cat[:n_eq], s_num[:n_eq], s_cat[:n_eq], k=k)
   return NNPrivacyResult(
       dcr_syn_r=syn_r[:, 0],
-      dcr_syn_h=syn_h,
+      dcr_syn_h=syn_h[:, 0],
       dcr_h_r=h_r[:, 0],
       nndr_syn=_nndr(syn_r),
       nndr_h=_nndr(h_r),
-      closer_to_r=float(closer),
+      nn_mass=nn_mass,
+      closer_to_r=closer / n_syn,
       n_syn=n_syn,
       density=density,
       coverage=coverage,
   )
+
+
+def permutation_se(nn_mass: np.ndarray, n_syn: int) -> float:
+  """The standard error of the holdout share under random balanced R/H splits
+  (Ruling R29).
+
+  With the pooled rows `x` of R u H (`2n` of them, `n = |R| = |H|`) and
+  `w_x` the synthetic mass whose pooled nearest neighbour is `x`
+  (`holdout_mass`), the share is `sum_{x in R} w_x / n_syn`. Drawing which
+  `n` pooled rows form R uniformly without replacement gives
+
+    Var(share) = (2n / (2n - 1)) sum_x (w_x - n_syn / (2n))^2 / (4 n_syn^2),
+
+  the finite-population variance of a half-sample total. It carries the
+  R/H split noise a binomial interval over synthetic rows ignores: many
+  synthetic rows sharing one nearest source row move together. `0.0` when
+  there is nothing to measure.
+  """
+  pooled = nn_mass.size
+  if n_syn <= 0 or pooled < _MIN_SET_ROWS:
+    return 0.0
+  centered = nn_mass - n_syn / pooled
+  variance = (pooled / (pooled - 1)) * float(np.dot(
+      centered, centered)) / (4.0 * n_syn * n_syn)
+  return math.sqrt(variance)
 
 
 def _quantile(values: np.ndarray, q: float) -> float | None:
@@ -603,12 +792,16 @@ def summarize_nn(res: NNPrivacyResult) -> dict[str, Any]:
   """Catalogue-ready values from one `NNPrivacyResult`.
 
   Keys named for their metric (`row.<key>`):
-    - `dcr_train_holdout_share` with its Wilson (1927) interval
-      `..._ci_low`/`..._ci_high` at `n_synthetic` (D5 gates on `ci_low`).
-      Ties add one half, so the count `share * n` may be a half-integer;
-      `wilson_interval` reads it only through `p = k / n`, and a score in
-      {0, 1/2, 1} has variance at most `p (1 - p)`, so the interval stays
-      conservative.
+    - `dcr_train_holdout_share` with `..._se_wilson`, `..._se_perm` and the
+      interval `..._ci_low`/`..._ci_high` = share -/+ z * max(se_wilson,
+      se_perm), clipped to [0, 1] (Ruling R29; D5 gates on `ci_low`).
+      `se_wilson` is the Wilson (1927) 95 % interval's half-width over z at
+      `n_synthetic`: the synthetic-sampling noise alone. Ties add one half,
+      so the count `share * n` may be a half-integer; `wilson_interval` reads
+      it only through `p = k / n`, and a score in {0, 1/2, 1} has variance
+      at most `p (1 - p)`. `se_perm` (`permutation_se`) adds the R/H split
+      noise that Wilson ignores, which dominates once the synthetic sample
+      outnumbers the source rows.
     - `dcr_p5_ratio = Q.05(dcr_syn_r) / Q.05(dcr_h_r)` and `nndr_p5_ratio =
       Q.05(nndr_syn) / Q.05(nndr_h)`, `None` when the holdout quantile is 0.
     - `density`, `coverage` (`None` when not computable).
@@ -618,14 +811,20 @@ def summarize_nn(res: NNPrivacyResult) -> dict[str, Any]:
   side (`synthetic` = syn to R, `holdout` = H to R).
   """
   n_syn = res.n_syn
+  share = res.closer_to_r
   # See the docstring: the half-integer count is exact through p = k / n.
-  ci_low, ci_high = wilson_interval(cast(int, res.closer_to_r * n_syn), n_syn)
+  w_low, w_high = wilson_interval(cast(int, share * n_syn), n_syn, z=_Z)
+  se_wilson = (w_high - w_low) / (2.0 * _Z)
+  se_perm = permutation_se(res.nn_mass, n_syn)
+  se = max(se_wilson, se_perm)
   summary: dict[str, Any] = {
       "n_synthetic": n_syn,
       "n_reference": int(res.dcr_h_r.size),
-      "dcr_train_holdout_share": res.closer_to_r,
-      "dcr_train_holdout_share_ci_low": ci_low,
-      "dcr_train_holdout_share_ci_high": ci_high,
+      "dcr_train_holdout_share": share,
+      "dcr_train_holdout_share_se_wilson": se_wilson,
+      "dcr_train_holdout_share_se_perm": se_perm,
+      "dcr_train_holdout_share_ci_low": max(0.0, share - _Z * se),
+      "dcr_train_holdout_share_ci_high": min(1.0, share + _Z * se),
   }
   dists = {
       "dcr_syn_r": res.dcr_syn_r,

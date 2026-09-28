@@ -33,8 +33,12 @@ from sdfb_evaluation.stats.privacy import GowerSpace
 from sdfb_evaluation.stats.privacy import NNPrivacyResult
 from sdfb_evaluation.stats.privacy import density_coverage
 from sdfb_evaluation.stats.privacy import effective_chunk
+from sdfb_evaluation.stats.noise import wilson_interval
 from sdfb_evaluation.stats.privacy import gower_knn
+from sdfb_evaluation.stats.privacy import holdout_mass
 from sdfb_evaluation.stats.privacy import nn_privacy
+from sdfb_evaluation.stats.privacy import nn_privacy_encoded
+from sdfb_evaluation.stats.privacy import permutation_se
 from sdfb_evaluation.stats.privacy import summarize_nn
 
 _EPOCH_2020 = datetime(2020, 1, 1, tzinfo=UTC).timestamp()
@@ -132,16 +136,28 @@ def _mixed_blocks(rng: np.random.Generator, n: int, *,
 # ---------------------------------------------------------------------------
 
 
-def test_gower_knn_equals_naive_double_loop_exactly_on_dyadic_values():
+@pytest.mark.parametrize("k", [1, 5, 12, 40])
+def test_gower_knn_equals_naive_double_loop_exactly_on_dyadic_values(k):
   # Multiples of 1/8 with d = 7 features: every float32 sum is exact, so
   # distances, the many ties and their index tie-breaks must match exactly.
+  # k <= 8 runs the argmin selection, larger k the partition selection.
   rng = np.random.default_rng(1)
   q_num, q_cat = _mixed_blocks(rng, 30, dyadic=True)
   r_num, r_cat = _mixed_blocks(rng, 40, dyadic=True)
-  dist, idx = gower_knn(q_num, q_cat, r_num, r_cat, k=5)
-  want_dist, want_idx = _naive_knn(_naive_gower(q_num, q_cat, r_num, r_cat), 5)
+  dist, idx = gower_knn(q_num, q_cat, r_num, r_cat, k=k)
+  want_dist, want_idx = _naive_knn(_naive_gower(q_num, q_cat, r_num, r_cat), k)
   np.testing.assert_array_equal(idx, want_idx)
   np.testing.assert_array_equal(dist, want_dist)
+
+
+def test_argmin_and_partition_selections_agree():
+  rng = np.random.default_rng(21)
+  q_num, q_cat = _mixed_blocks(rng, 200, dyadic=True)
+  r_num, r_cat = _mixed_blocks(rng, 300, dyadic=True)
+  small = gower_knn(q_num, q_cat, r_num, r_cat, k=8)
+  large = gower_knn(q_num, q_cat, r_num, r_cat, k=9)
+  np.testing.assert_array_equal(large[0][:, :8], small[0])
+  np.testing.assert_array_equal(large[1][:, :8], small[1])
 
 
 def test_gower_knn_equals_naive_double_loop_on_encoded_rows(space):
@@ -458,6 +474,46 @@ def test_ties_count_one_half():
   assert res.n_syn == 4
 
 
+def test_nn_mass_follows_the_tie_rule():
+  space = GowerSpace((), (), ("c",))
+  r_rows = [{"c": "a"}, {"c": "b"}]
+  h_rows = [{"c": "c"}, {"c": "d"}]
+  syn_rows = [{"c": "a"}, {"c": "a"}, {"c": "b"}, {"c": "c"}, {"c": "x"}]
+  res = nn_privacy(space, r_rows, h_rows, syn_rows)
+  # a, a -> R0 (decisive, 1 each); b -> R1; c -> H0; x is 1 from everything:
+  # a tie between the lowest-index nearest rows R0 and H0, 1/2 each.
+  np.testing.assert_array_equal(res.nn_mass, [2.5, 1.0, 1.5, 0.0])
+  assert res.closer_to_r == 3.5 / 5
+  assert res.nn_mass[:2].sum() == res.closer_to_r * res.n_syn
+  assert res.nn_mass.sum() == res.n_syn
+
+
+def test_holdout_mass_merges_by_sum_across_synthetic_chunks():
+  rng = np.random.default_rng(22)
+  r, h, syn = (_mixed_blocks(rng, n, dyadic=True) for n in (60, 60, 500))
+  whole = nn_privacy_encoded(r, h, syn)
+  parts = [
+      nn_privacy_encoded(r, h, (syn[0][s], syn[1][s]))
+      for s in (slice(0, 170), slice(170, 500))
+  ]
+  np.testing.assert_array_equal(parts[0].nn_mass + parts[1].nn_mass,
+                                whole.nn_mass)
+  # The closer counts are half-integers: exact, and they add up too.
+  counts = [part.nn_mass[:60].sum() for part in (*parts, whole)]
+  assert counts[0] + counts[1] == counts[2]
+  assert counts[2] == pytest.approx(whole.closer_to_r * 500, abs=1e-9)
+  d_r, i_r = gower_knn(*syn, *r, k=1)
+  d_h, i_h = gower_knn(*syn, *h, k=1)
+  closer, mass = holdout_mass(
+      d_r[:, 0], i_r[:, 0], d_h[:, 0], i_h[:, 0], n_r=60, n_h=60)
+  np.testing.assert_array_equal(mass, whole.nn_mass)
+  assert closer == counts[2]
+  with pytest.raises(ValueError, match="indices"):
+    holdout_mass(d_r[:, 0], i_r[:, 0], d_h[:, 0], i_h[:, 0], n_r=60, n_h=10)
+  with pytest.raises(ValueError, match="aligned"):
+    holdout_mass(d_r[:, 0], i_r[:5, 0], d_h[:, 0], i_h[:, 0], n_r=60, n_h=60)
+
+
 def test_reference_and_holdout_are_trimmed_to_equal_size(space):
   rng = np.random.default_rng(10)
   r_rows, h_rows = _draw_rows(rng, 50), _draw_rows(rng, 30)
@@ -506,7 +562,8 @@ def test_nn_privacy_is_deterministic(space):
   rows = [_draw_rows(np.random.default_rng(12), 400) for _ in range(3)]
   first = nn_privacy(space, *rows)
   second = nn_privacy(space, *rows)
-  for name in ("dcr_syn_r", "dcr_syn_h", "dcr_h_r", "nndr_syn", "nndr_h"):
+  for name in ("dcr_syn_r", "dcr_syn_h", "dcr_h_r", "nndr_syn", "nndr_h",
+               "nn_mass"):
     np.testing.assert_array_equal(getattr(first, name), getattr(second, name))
   assert first.closer_to_r == second.closer_to_r
   assert (first.density, first.coverage) == (second.density, second.coverage)
@@ -540,15 +597,88 @@ def test_density_and_coverage_on_a_collapsed_synthetic_side():
 
 def test_density_coverage_hand_example():
   # Real points on a line at 0, 1/8, 2/8, 3/8 (one numeric feature), k = 1:
-  # every radius is 1/8. The fake at 1/16 falls in the balls of 0 and 1/8
-  # (closed balls); the fake at 7/8 in none. density = 2 / (1 * 2) = 1,
-  # coverage = 2 / 4.
+  # every radius is 1/8; the end points have K = 1 other row in their ball,
+  # the middle ones K = 2 (both neighbours at exactly 1/8). The fake at 1/16
+  # falls in the balls of 0 and 1/8 (closed balls); the fake at 7/8 in none.
+  # density = (1 / (1 * 2)) * (1 * 1/1 + 1 * 1/2) = 3/4, coverage = 2/4.
   real = np.array([[0.0], [0.125], [0.25], [0.375]], dtype=np.float32)
   fake = np.array([[0.0625], [0.875]], dtype=np.float32)
   empty = np.zeros((4, 0), dtype=np.uint64)
   density, coverage = density_coverage(real, empty, fake, empty[:2], k=1)
-  assert density == 1.0
+  assert density == 0.75
   assert coverage == 0.5
+
+
+def test_density_tie_correction_hand_example():
+  # One categorical feature, k = 1. Real a, a, a, b: each a has radius 0 and
+  # K = 2 other rows in its ball; b has radius 1 and K = 3. Fake a lands in
+  # all four balls, fake c only in b's. Tie-corrected density
+  # = (1/(k M)) sum_i hits_i * k / K_i = (1/2)(1/2 + 1/2 + 1/2 + 2/3) = 13/12
+  # (plain closed-ball counting would give 5/2); coverage = 4/4.
+  real = np.array([[1], [1], [1], [2]], dtype=np.uint64)
+  fake = np.array([[1], [3]], dtype=np.uint64)
+  empty = np.zeros((4, 0), dtype=np.float32)
+  density, coverage = density_coverage(empty, real, empty[:2], fake, k=1)
+  assert density == pytest.approx(13 / 12, abs=1e-15)
+  assert coverage == 1.0
+
+
+def _naive_density_coverage(real: tuple[np.ndarray, np.ndarray],
+                            fake: tuple[np.ndarray, np.ndarray],
+                            k: int) -> tuple[float, float]:
+  """R28 by definition, on a full naive distance matrix."""
+  d_rr = _naive_gower(*real, *real)
+  d_fr = _naive_gower(*fake, *real)
+  n = d_rr.shape[0]
+  others = [np.delete(d_rr[i], i) for i in range(n)]
+  radii = np.array([np.sort(o)[k - 1] for o in others])
+  big_k = np.array(
+      [np.count_nonzero(o <= r) for o, r in zip(others, radii, strict=True)])
+  inside = d_fr <= radii[np.newaxis, :]
+  density = float(np.sum(inside.sum(axis=0) * k / big_k)) / (k * len(d_fr))
+  return density, float(inside.any(axis=0).mean())
+
+
+@pytest.mark.parametrize("k", [1, 5, 9])
+def test_density_matches_the_tie_corrected_definition(k):
+  # Dyadic values: exact sums, many ties at every radius. k + 1 = 10 runs
+  # the partition selection for the radii, smaller k the argmin one.
+  rng = np.random.default_rng(23)
+  real = _mixed_blocks(rng, 40, dyadic=True)
+  fake = _mixed_blocks(rng, 30, dyadic=True)
+  got = density_coverage(*real, *fake, k=k)
+  want = _naive_density_coverage(real, fake, k)
+  assert got[0] == pytest.approx(want[0], rel=1e-12)
+  assert got[1] == want[1]
+
+
+def test_density_without_ties_is_exactly_naeem():
+  rng = np.random.default_rng(24)
+  real = (rng.random((300, 3)).astype(np.float32), np.zeros((300, 0),
+                                                            np.uint64))
+  fake = (rng.random((300, 3)).astype(np.float32), np.zeros((300, 0),
+                                                            np.uint64))
+  k = 5
+  radii = gower_knn(*real, *real, k=k + 1)[0][:, k]
+  dist, idx = gower_knn(*fake, *real, k=300)
+  naeem = np.count_nonzero(dist <= radii[idx]) / (k * 300)
+  density, _ = density_coverage(*real, *fake, k=k)
+  assert density == naeem
+
+
+@pytest.mark.parametrize("cards", [(2, 3, 5), (5, 26, 2)])
+def test_density_is_one_for_identical_categorical_only_distributions(cards):
+  # A lattice: most radii are 0 and each ball holds many more than k real
+  # rows. Plain closed-ball density reads several times 1 here.
+  rng = np.random.default_rng(25)
+
+  def draw(n: int) -> tuple[np.ndarray, np.ndarray]:
+    codes = np.stack([rng.integers(0, c, n) for c in cards], axis=1)
+    return np.zeros((n, 0), np.float32), codes.astype(np.uint64)
+
+  density, coverage = density_coverage(*draw(2000), *draw(2000), k=5)
+  assert 0.85 <= density <= 1.15
+  assert coverage >= 0.9
 
 
 def test_density_and_coverage_are_none_when_too_few_rows_for_k(space):
@@ -597,6 +727,8 @@ def _result(**overrides: Any) -> NNPrivacyResult:
       "dcr_h_r": np.array([0.2, 0.2, 0.4, 0.4]),
       "nndr_syn": np.array([0.0, 0.5, 1.0, 1.0]),
       "nndr_h": np.array([0.5, 0.5, 1.0, 1.0]),
+      # R rows first: 1.5 of the 4 synthetic rows sit nearest R (= 0.375).
+      "nn_mass": np.array([1.0, 0.5, 0.0, 0.0, 1.0, 0.5, 1.0, 0.0]),
       "closer_to_r": 0.375,
       "n_syn": 4,
       "density": 1.02,
@@ -611,9 +743,19 @@ def test_summarize_nn_values_and_wilson_interval():
   assert summary["n_synthetic"] == 4
   assert summary["n_reference"] == 4
   assert summary["dcr_train_holdout_share"] == 0.375
-  lo, hi = summary["dcr_train_holdout_share_ci_low"], summary[
-      "dcr_train_holdout_share_ci_high"]
-  assert 0.0 < lo < 0.375 < hi < 1.0
+  z = 1.959964
+  w_lo, w_hi = wilson_interval(1.5, 4)  # type: ignore[arg-type]
+  se_wilson = (w_hi - w_lo) / (2 * z)
+  # sum_x (w_x - 4/8)^2 = 1.5 over 2n = 8 pooled rows.
+  se_perm = math.sqrt((8 / 7) * 1.5 / (4 * 4 * 4))
+  assert summary["dcr_train_holdout_share_se_wilson"] == pytest.approx(
+      se_wilson)
+  assert summary["dcr_train_holdout_share_se_perm"] == pytest.approx(se_perm)
+  se = max(se_wilson, se_perm)
+  assert summary["dcr_train_holdout_share_ci_low"] == pytest.approx(
+      max(0.0, 0.375 - z * se))
+  assert summary["dcr_train_holdout_share_ci_high"] == pytest.approx(
+      min(1.0, 0.375 + z * se))
   assert summary["dcr_syn_r_p5"] == pytest.approx(0.015)
   assert summary["dcr_syn_r_p50"] == pytest.approx(0.15)
   assert summary["dcr_h_r_p5"] == pytest.approx(0.2)
@@ -649,3 +791,66 @@ def test_summarize_nn_histogram_payloads_match_the_profile_contract():
   # 0.0 -> bin 0; 0.1 -> (0.08, 0.10] = bin 4; 0.2 -> bin 9; 0.3 -> bin 14.
   assert [i for i, c in enumerate(syn_dcr["counts"]) if c] == [0, 4, 9, 14]
   assert profiles["nndr_hist"]["holdout"]["p50"] == pytest.approx(0.75)
+
+
+def test_share_interval_uses_the_larger_of_wilson_and_permutation_se():
+  # Synthetic mass spread evenly over every pooled row: any split gives
+  # exactly one half, se_perm = 0, and the Wilson se sets the interval.
+  spread = summarize_nn(_result(nn_mass=np.full(8, 0.5), closer_to_r=0.5))
+  assert spread["dcr_train_holdout_share_se_perm"] == 0.0
+  se_wilson = spread["dcr_train_holdout_share_se_wilson"]
+  assert se_wilson > 0.0
+  assert spread["dcr_train_holdout_share_ci_low"] == pytest.approx(0.5 -
+                                                                   1.959964 *
+                                                                   se_wilson)
+  # All synthetic mass on one R row: clumped, the permutation se dominates.
+  clumped = summarize_nn(
+      _result(
+          nn_mass=np.array([4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+          closer_to_r=1.0))
+  assert clumped["dcr_train_holdout_share_se_perm"] > clumped[
+      "dcr_train_holdout_share_se_wilson"]
+  assert clumped["dcr_train_holdout_share_ci_high"] == 1.0
+  z = 1.959964
+  assert clumped["dcr_train_holdout_share_ci_low"] == pytest.approx(
+      max(0.0, 1.0 - z * clumped["dcr_train_holdout_share_se_perm"]))
+  assert permutation_se(np.zeros(8), 0) == 0.0
+
+
+def _null_blocks(rng: np.random.Generator,
+                 n: int) -> tuple[np.ndarray, np.ndarray]:
+  """A mixed generator on encoded blocks: continuous and atomic PIT values,
+  a skewed and a long-tailed categorical, 5 % NULLs everywhere."""
+  num = np.empty((n, 2), np.float32)
+  num[:, 0] = rng.random(n)
+  levels = np.array([0.1, 0.35, 0.6, 0.85], np.float32)
+  num[:, 1] = levels[rng.choice(4, size=n, p=[0.2, 0.3, 0.3, 0.2])]
+  num[rng.random((n, 2)) < 0.05] = np.nan
+  cat = np.stack(
+      [rng.choice(3, size=n, p=[0.6, 0.3, 0.1]),
+       rng.zipf(1.6, n) % 20], axis=1).astype(np.uint64)
+  cat[rng.random((n, 2)) < 0.05] = NULL_CODE
+  return num, cat
+
+
+@pytest.mark.slow
+def test_share_se_matches_the_null_spread_of_the_share():
+  # Under the null (R, H and synthetic from one generator), with 10 synthetic
+  # rows per source row: the share's replicate SD is what se_perm reports
+  # (120 replicates measured SD / mean se_perm = 0.92), while the Wilson
+  # binomial se is about half of it (a gate on it fires far too often).
+  shares, se_perm, se_wilson = [], [], []
+  for seed in range(40):
+    rng = np.random.default_rng(31_000 + seed)
+    res = nn_privacy_encoded(
+        _null_blocks(rng, 2000), _null_blocks(rng, 2000),
+        _null_blocks(rng, 20_000))
+    summary = summarize_nn(res)
+    shares.append(summary["dcr_train_holdout_share"])
+    se_perm.append(summary["dcr_train_holdout_share_se_perm"])
+    se_wilson.append(summary["dcr_train_holdout_share_se_wilson"])
+  empirical_sd = float(np.std(shares, ddof=1))
+  reported_se = float(np.mean(np.maximum(se_perm, se_wilson)))
+  assert 0.65 * reported_se <= empirical_sd <= 1.35 * reported_se
+  assert all(p > w for p, w in zip(se_perm, se_wilson, strict=True))
+  assert abs(float(np.mean(shares)) - 0.5) < 3 * reported_se / math.sqrt(40)
