@@ -17,7 +17,7 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import type { EvaluationSummary, Facets } from "@contracts/api";
 
@@ -339,7 +339,7 @@ function EvaluationsTable({
   onSort: (sort: NonNullable<EvaluationListSearch["sort"]>) => void;
 }) {
   return (
-    <TableContainer aria-label="Evaluations" className="hidden max-h-[75vh] md:block">
+    <TableContainer aria-label="Evaluations" className="max-h-[75vh]">
       <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
@@ -470,7 +470,7 @@ function EvaluationCards({
   onPick: (id: string) => void;
 }) {
   return (
-    <ul className="grid gap-3 md:hidden" aria-label="Evaluations">
+    <ul className="grid gap-3" aria-label="Evaluations">
       {items.map((e) => (
         <li
           key={e.evaluation_id}
@@ -620,8 +620,26 @@ function SavedViews({
   );
 }
 
+const WIDE_QUERY = "(min-width: 768px)";
+
+function subscribeWide(onChange: () => void) {
+  const query = window.matchMedia(WIDE_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+}
+
+/** Table from md up, cards below: only one of the two is in the DOM (half the nodes for axe and React). */
+function useWide(): boolean {
+  return useSyncExternalStore(
+    subscribeWide,
+    () => window.matchMedia(WIDE_QUERY).matches,
+    () => true,
+  );
+}
+
 export function EvaluationListPage() {
   const search = route.useSearch();
+  const wide = useWide();
   const navigate = route.useNavigate();
   const facets = useFacets();
   const filter = useMemo(() => toFilter(search), [search]);
@@ -865,8 +883,11 @@ export function EvaluationListPage() {
           <EmptyState title="Evaluations could not be loaded" description={list.error.message} />
         ) : items.length ? (
           <>
-            <EvaluationsTable items={items} search={search} picked={picked} onPick={onPick} onSort={onSort} />
-            <EvaluationCards items={items} picked={picked} onPick={onPick} />
+            {wide ? (
+              <EvaluationsTable items={items} search={search} picked={picked} onPick={onPick} onSort={onSort} />
+            ) : (
+              <EvaluationCards items={items} picked={picked} onPick={onPick} />
+            )}
             <nav aria-label="Pages" className="flex items-center gap-2 text-sm text-text-2">
               <Button
                 variant="secondary"
