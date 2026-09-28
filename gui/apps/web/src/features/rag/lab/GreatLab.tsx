@@ -102,12 +102,17 @@ export function GreatLab({ model }: { model: RagModel }) {
   const dim = docs?.dim ?? 384;
 
   // Every row doc re-embedded here (hashing-384), for the cosine step and the parity check.
-  const deferredTexts = useDeferredValue(texts);
+  // A hashing-384 set's stored vectors are the embedder's output (the parity badge checks one); a bge set's
+  // rows are re-embedded here with the hashing port, off the urgent render.
+  const storedHashing = set?.embedder_id === "hashing-384" && docs?.dim === 384 ? docs.vectors : null;
+  const deferredTexts = useDeferredValue(storedHashing ? null : texts);
   const allHashing = useMemo(() => {
-    const out = new Float32Array(deferredTexts.length * 384);
-    deferredTexts.forEach((t, i) => out.set(hashingEmbed(t), i * 384));
+    if (storedHashing) return rowsOf(storedHashing, 384);
+    const list = deferredTexts ?? [];
+    const out = new Float32Array(list.length * 384);
+    list.forEach((t, i) => out.set(hashingEmbed(t), i * 384));
     return rowsOf(out, 384);
-  }, [deferredTexts]);
+  }, [storedHashing, deferredTexts]);
   const parity = useMemo(() => {
     if (!docs || !set || set.embedder_id !== "hashing-384" || docs.dim !== 384 || !meta) return null;
     const stored = docs.vectors.subarray(index * 384, (index + 1) * 384);

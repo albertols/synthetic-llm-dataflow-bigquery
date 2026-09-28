@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 export function LazyMount({
   children,
   minHeight = 480,
-  margin = "600px",
+  margin = "250px",
   label,
 }: {
   children: ReactNode;
