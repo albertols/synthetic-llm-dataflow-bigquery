@@ -438,7 +438,7 @@ function RouteBadge({ route }: { route: PoolRoute }) {
         <Icon aria-hidden="true" />
         {ROUTE_LABELS[route]}
       </Badge>
-      <span className="sr-only">: the FREE TEXT knobs in Config</span>
+      <span className="sr-only"> (the FREE TEXT knobs in Config)</span>
     </Link>
   );
 }

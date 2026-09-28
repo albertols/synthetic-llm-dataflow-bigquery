@@ -182,7 +182,7 @@ test("every section mounts, reads without horizontal scroll, and passes axe in b
   await expect(
     page
       .getByRole("region", { name: "Pools per column" })
-      .getByRole("link", { name: /LLM ladder: the FREE TEXT knobs/ })
+      .getByRole("link", { name: /LLM ladder\s*\(the FREE TEXT knobs in Config\)/ })
       .first(),
   ).toHaveAttribute("href", "/config?section=amp&channel=free_text");
   const overflow = await page.evaluate(
