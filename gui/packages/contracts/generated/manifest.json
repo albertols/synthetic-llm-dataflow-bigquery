@@ -1,0 +1,27 @@
+{
+  "generator": "gui/packages/contracts/gen.mjs",
+  "note": "sha256 of every input; contracts:check fails when an input changed without a re-sync.",
+  "inputs": {
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json": "46ead916058a5c6cc5186c9eb4e94936b9366aff7cde57710849c37aff14a68d",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_metrics.schema.json": "d447c144f2dafc85b7cc9bdd321d1008bcb9388bc5f989749ebe73f0321aadac",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_profiles.schema.json": "a5d9644a964093944664f071ec1c3d230db5c8fc00a563891388ed883d16318f",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_row_flags.schema.json": "9b093f11ba5bf75727444ce4afe09ca0a2fec774dbfd1ad176dfec379d3b154c",
+    "config/bq_schema/synthetic_data_quality/dlq.schema.json": "bd91c9c7c54bb5671767d7ee8ceab4f7f2e7cae7c40518899bdc5d91f8f11f72",
+    "config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json": "faa5264c2d223ec4f769ce56d039999a88ccdec4c875196790709e35c9f08c70",
+    "config/bq_schema/synthetic_data_quality/validation_runs.schema.json": "03d4571c29aea5e49f4e03c71cf1242e804ae42605d651db41ac1d68a7cdc36d",
+    "config/bq_schema/synthetic_rag/freetext_pools.schema.json": "86a12014279460293f4a0ab6da5d36c7e312bef1e4b64dab49f5f2d9ea31a8fa",
+    "config/bq_schema/synthetic_rag/rag_chunks.schema.json": "2c2bcc99d0ae79e01217f0f04631fd1e01f5421764172474ac4560691a96b1a8",
+    "config/bq_schema/synthetic_rag/source_table_stats.schema.json": "9ad24ef739e151fc54353d41f8fd1772fb077c0860c40b03cc08e451c23b5864",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/views.sql": "a66589e18f037ecdd397b91b3500dfb893fc2ba37befc1d5a9cf18b0281ef29c",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml": "e4fe972b114305e6b76504bac57ea0a9e1a8c9fce84d6a98ab8c47dc38308642",
+    "gui/packages/contracts/generated/knobs.json": "155e26330b5713acb7feb8c125f44034c2963b4d91a8dabcce2953aa7e9eef93",
+    "gui/packages/contracts/generated/golden/great_serialize.json": "72dae74592f7e1e61442eefb82ecef5724a3f49bfe1e7f8e00c7cff27853a324",
+    "gui/packages/contracts/generated/golden/hashing_embedder.json": "295094807dbc93a649bb63dcc1dcccf6d702a9f4294be2f8c0ba30d6179dd6da",
+    "gui/packages/contracts/generated/golden/retrieval.json": "0c91e8c07bccf3f7c5fb3d046ccc7fddb3a66fdd3ea43975ee6f3f15b85769f2"
+  },
+  "outputs": [
+    "schemas.ts",
+    "catalogue.ts",
+    "knobs.ts"
+  ]
+}
