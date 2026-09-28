@@ -124,6 +124,20 @@ test("deep links and malformed search params recover; unknown paths show the not
   expect(errors).toEqual([]);
 });
 
+test("the BFF answers /api/* in mock mode and serves client routes", async ({ request }) => {
+  const health = await request.get("/api/health");
+  expect(health.ok()).toBe(true);
+  expect(health.headers()["x-data-source"]).toBe("mock");
+  expect(await health.json()).toMatchObject({ status: "ok", mode: "mock", project: null });
+  const page = (await (await request.get("/api/evaluations?limit=2")).json()) as { total: number; items: unknown[] };
+  expect(page.total).toBe(40);
+  expect(page.items).toHaveLength(2);
+  const spa = await request.get("/evaluation/eval-0001");
+  expect(spa.ok()).toBe(true);
+  expect(spa.headers()["content-type"]).toContain("text/html");
+  expect((await request.get("/api/does-not-exist")).status()).toBe(404);
+});
+
 test("the shell shows the data source and both GitHub links", async ({ page }, testInfo) => {
   const errors = watchErrors(page);
   await page.goto("/kit");

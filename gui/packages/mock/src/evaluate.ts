@@ -59,7 +59,8 @@ import { epoch, FREE_TEXT_POOL_MAX, textUniverse, type Pool } from "./synth";
 import type { ColumnDef, Row, TableDef, Value } from "./thelook";
 
 export const HIST_BINS = 20;
-const PROBS = [0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1];
+/** Every decile plus the quartiles and the 1 / 5 / 95 / 99 % tails (QQ plots, decile tables). */
+const PROBS = [0, 0.01, 0.05, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 0.95, 0.99, 1];
 /** The D6 literal policy: literal only with ≤ 50 source-distinct values and a source count ≥ 10. */
 const LITERAL_MAX_DISTINCT = 50;
 const K_ANON = 10;
@@ -281,7 +282,7 @@ export class TableEvaluator {
         : column.bqType === "BOOL"
           ? typeof v === "boolean"
           : column.bqType === "TIMESTAMP"
-            ? typeof v === "string" && !Number.isNaN(Date.parse(v))
+            ? typeof v === "number" || (typeof v === "string" && !Number.isNaN(Date.parse(v)))
             : typeof v === "number";
     const share = syn.filter(valid).length / Math.max(syn.length, 1);
     const k = this.ctx.rng.binomial(this.ctx.nSynthetic, share);
@@ -311,7 +312,7 @@ export class TableEvaluator {
   numeric(column: ColumnDef, isTime: boolean) {
     const { nSource, nSynthetic, nReference, rng } = this.ctx;
     const toNumber = (v: Value) =>
-      v === null || typeof v === "boolean" ? null : isTime ? epoch(String(v)) : typeof v === "number" ? v : null;
+      v === null || typeof v === "boolean" ? null : isTime ? epoch(v) : typeof v === "number" ? v : null;
     const srcAll = memo(this.ctx.source, `num:${column.name}`, () =>
       this.values(this.ctx.source, column.name).map(toNumber),
     );
@@ -494,7 +495,7 @@ export class TableEvaluator {
       }
       return { dow, month, hour };
     };
-    const ms = mix(src);
+    const ms = memo(src, "temporal-mix", () => mix(src));
     const my = mix(syn);
     const cs = {
       dow: this.countsAt(ms.dow, nSource),
@@ -952,7 +953,7 @@ export class TableEvaluator {
   pairs(numericColumns: ColumnDef[], categoricalPairs: [string, string][]) {
     const { source, synthetic } = this.ctx;
     const asNumber = (column: ColumnDef, v: Value) =>
-      v === null || typeof v === "boolean" ? Number.NaN : column.kind === "temporal" ? epoch(String(v)) : Number(v);
+      v === null || typeof v === "boolean" ? Number.NaN : column.kind === "temporal" ? epoch(v) : Number(v);
     const numbers = (rows: readonly Row[], column: ColumnDef) =>
       memo(rows, `asnum:${column.name}`, () => rows.map((r) => asNumber(column, r[column.name] ?? null)));
     const matrix = (rows: readonly Row[]) =>
@@ -1175,7 +1176,7 @@ export class TableEvaluator {
         const v = row[column.name] ?? null;
         if (v === null) return null;
         if (column.kind === "numeric" || column.kind === "temporal") {
-          const n = column.kind === "temporal" ? epoch(String(v)) : Number(v);
+          const n = column.kind === "temporal" ? epoch(v as string | number) : Number(v);
           return Number.isFinite(n) ? n / (ranges.get(column.name) || 1) : String(v);
         }
         return String(v);
@@ -1208,7 +1209,7 @@ export class TableEvaluator {
         const vs = this.ctx.source
           .map((r) => r[c.name] ?? null)
           .filter((v) => v !== null)
-          .map((v) => (c.kind === "temporal" ? epoch(String(v)) : Number(v)));
+          .map((v) => (c.kind === "temporal" ? epoch(v as string | number) : Number(v)));
         out.set(c.name, Math.max(...vs) - Math.min(...vs));
       }
       return out;

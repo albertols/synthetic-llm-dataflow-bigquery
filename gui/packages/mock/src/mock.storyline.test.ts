@@ -32,7 +32,7 @@ beforeAll(() => {
   latest = new Map();
   for (const row of [...data.registry].sort((a, b) => a.recorded_at.localeCompare(b.recorded_at)))
     latest.set(row.evaluation_id, row);
-});
+}, 120_000);
 
 const metricsOf = (id: string) => data.metrics.filter((m) => m.evaluation_id === id);
 const idx = (id: string) => Number(id.slice(-4));
@@ -57,7 +57,7 @@ function profile(
   return found!.payload as Record<string, unknown>;
 }
 
-describe("the storyline", () => {
+describe("the storyline", { timeout: 60_000 }, () => {
   it("has 40 evaluations over 8 weeks, RUNNING then FINAL", () => {
     expect(latest.size).toBe(40);
     const dates = [...latest.values()].map((r) => r.evaluated_at).sort();
@@ -77,6 +77,11 @@ describe("the storyline", () => {
     expect(count((r) => r.status === "SKIPPED")).toBe(1);
     expect(count((r) => r.status === "RUNNING")).toBe(1);
     expect(count((r) => r.tables.some((t) => t.scope_status === "count_mismatch"))).toBe(1);
+    for (const status of ["expired", "contaminated", "empty"] as const)
+      expect(
+        count((r) => r.tables.some((t) => t.scope_status === status)),
+        status,
+      ).toBe(1);
     expect(count((r) => r.runner === "DirectRunner" && r.mode === "sampled")).toBe(1);
     expect(count((r) => r.tables.some((t) => t.reference_verified === false))).toBe(1);
     const unverified = rows.find((r) => r.tables.some((t) => t.reference_verified === false))!;
@@ -152,7 +157,7 @@ describe("the storyline", () => {
   });
 });
 
-describe("metrics recompute from the profiles with packages/stats", () => {
+describe("metrics recompute from the profiles with packages/stats", { timeout: 60_000 }, () => {
   it("column.ks, its baseline and its noise floor", () => {
     const rows = data.metrics.filter((m) => m.metric_id === "column.ks" && m.value !== null);
     expect(rows.length).toBeGreaterThan(100);

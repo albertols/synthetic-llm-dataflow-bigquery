@@ -41,6 +41,7 @@ _Arrows are imports (and the one generation step from Python). Nothing in
 | `packages/stats`     | Pure TS maths shared by web and mock (DKW, Wilson, TVD, hashing embedder …)                       | G0b                               |
 | `packages/mock`      | Seeded, self-consistent mock data                                                                 | G0b                               |
 | `scripts/`           | `check-owned-paths.mjs`, `assets-sync.mjs`                                                        | G0a                               |
+| `../scripts/gui/`    | Python exporters: `export_knobs.py` (knobs.json), `export_golden_fixtures.py` (golden/*.json)     | G0b                               |
 
 ## The web app
 
@@ -116,7 +117,8 @@ title and the navigation announcement).
 | `@/lib/motion`                                | `useReducedMotion()`, `prefersReducedMotion()`                                                                                                                                                      | Wrap Motion code in `<MotionConfig reducedMotion="user">`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `@/lib/links`                                 | `REPO_URL`, `DSG_URL`, `repoBlobUrl`, `parseSource`                                                                                                                                                 |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `@/lib/webgl`                                 | `isWebGL2Available()`                                                                                                                                                                               |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `@/lib/dataSource`                            | `useDataSource()` → `{ mode: "mock" } \| { mode: "bigquery"; project }`                                                                                                                             | G0b wires it to `/api/health`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `@/lib/dataSource`                            | `useDataSource()` → `{ mode: "mock" } \| { mode: "bigquery"; project; maxBytesBilled? } \| { mode: "connecting" } \| { mode: "offline" }`                                                           | Reads `/api/health` (TanStack Query); the badge shows MOCK, BIGQUERY <project>, CONNECTING or OFFLINE                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `@/lib/api`                                   | `api.*` fetchers, `use*` hooks, `queryKeys`, `toQuery`, `ApiError`, `ApiResult<T>`                                                                                                                  | The BFF client (see "Data layer" below). Types only from `@contracts/api`: no zod in the browser                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 **Route stamp.** `<main>` carries `data-route-id` (the matched route id)
 and `data-route-search` (its validated search params as JSON). e2e specs
@@ -300,7 +302,7 @@ one worktree's e2e must never test another worktree's build.
 
 | Variable          | Used by                                                                                                | Default |
 | :---------------- | :----------------------------------------------------------------------------------------------------- | ------: |
-| `GUI_E2E_PORT`    | `vite preview` for Playwright (`playwright.config.ts`, `preview`, `preview:e2e`)                       |    4173 |
+| `GUI_E2E_PORT`    | the BFF Playwright starts (`npm start`, mock data, serving the built SPA); also `vite preview`         |    4173 |
 | `GUI_WEB_PORT`    | `vite` dev server (`npm run dev`)                                                                      |    5173 |
 | `GUI_SERVER_PORT` | the BFF: the dev proxy targets `127.0.0.1:$GUI_SERVER_PORT` for `/api`, and G0b's server listens on it |    8787 |
 
@@ -319,15 +321,126 @@ export GUI_E2E_PORT=4176 GUI_WEB_PORT=5176 GUI_SERVER_PORT=8790   # gui-rag
 npm run e2e
 ```
 
-`GUI_E2E_SKIP_BUILD=1` makes Playwright preview the existing `apps/web/dist`
-instead of building again (CI sets it after `npm run check`).
+`GUI_E2E_SKIP_BUILD=1` makes Playwright serve the existing `apps/web/dist`
+instead of building again (CI sets it after `npm run check`). Playwright's
+web server is the real BFF (`npm start` with `PORT=$GUI_E2E_PORT`,
+`DATA_SOURCE=mock`), so e2e specs can call `/api/*` with `request.get(...)`.
 
 ## Commands
 
-| Command                                | Does                                                                           |
-| :------------------------------------- | :----------------------------------------------------------------------------- |
-| `npm run dev`                          | server (G0b) + Vite on `127.0.0.1:5173` (proxies `/api` to `127.0.0.1:8787`)   |
-| `npm run check`                        | typecheck → lint (ESLint + Prettier) → test → build → size → `contracts:check` |
-| `npm run e2e`                          | Playwright + axe over the built app (desktop 1440 px and mobile 390 px)        |
-| `npm run assets:sync` / `assets:check` | copy / verify repo figures in `apps/web/public/assets` (+ `provenance.json`)   |
-| `npm run owned-paths -- feat/gui-rag`  | the ownership gate for a tab branch                                            |
+| Command                                      | Does                                                                                   |
+| :------------------------------------------- | :------------------------------------------------------------------------------------- |
+| `npm run dev`                                | BFF (`tsx watch`, port `GUI_SERVER_PORT`) + Vite on `127.0.0.1:5173` (proxies `/api`)  |
+| `npm start`                                  | the BFF alone (mock by default) serving `apps/web/dist` on `127.0.0.1:8787`            |
+| `npm run check`                              | typecheck → lint (ESLint + Prettier) → test → build → size → `contracts:check`         |
+| `npm run e2e`                                | Playwright + axe over the built app (desktop 1440 px and mobile 390 px)                |
+| `npm run assets:sync` / `assets:check`       | copy / verify repo figures in `apps/web/public/assets` (+ `provenance.json`)           |
+| `npm run owned-paths -- feat/gui-rag`        | the ownership gate for a tab branch                                                    |
+| `npm run contracts:sync` / `contracts:check` | regenerate / verify `packages/contracts/generated/**`                                  |
+| `docker build -f gui/Dockerfile gui`         | a private image of the BFF + SPA (multi-stage, `node:22-slim`, non-root; not deployed) |
+
+## Data layer (G0b) — what the tabs build on
+
+```mermaid
+flowchart LR
+  classDef py   fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef pkg  fill:#6b7280,color:#fff,stroke:#4b5563
+  classDef bff  fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef bq   fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  EXP["scripts/gui/export_*.py<br/>knobs.json · golden/*.json"]:::py
+  GEN["contracts/gen.mjs<br/>schemas.ts · catalogue.ts · knobs.ts"]:::pkg
+  STATS["packages/stats"]:::pkg
+  MOCK["packages/mock<br/>40 evaluations, computed"]:::pkg
+  MP["MockProvider"]:::bff
+  BP["BigQueryProvider<br/>named queries · dry run · bytes cap · LRU"]:::bff
+  BQ["synthetic_data_quality.*<br/>synthetic_rag.*"]:::bq
+  ROUTES["/api/* routes<br/>(zod-validated shapes)"]:::bff
+
+  EXP --> GEN --> STATS & MOCK & ROUTES
+  STATS --> MOCK --> MP --> ROUTES
+  BQ --> BP --> ROUTES
+```
+
+_Both providers implement one `DataProvider` interface
+(`apps/server/src/providers/types.ts`) and share the assembly logic
+(`providers/shared.ts`), so every route answers the same shapes in mock and
+BigQuery mode._
+
+### Routes (all GET; types in `packages/contracts/src/api.ts`; hooks in `@/lib/api`)
+
+| Route                                                                         | Response (`@contracts/api` type)                                                                                    | Hook                              |
+| :---------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------ | :-------------------------------- |
+| `/api/health`                                                                 | `Health` — mode, project, datasets, `max_bytes_billed`, catalogue version, contracts digest                         | `useHealth()`                     |
+| `/api/facets`                                                                 | `Facets` — counts, latest evaluation, every filter's options, source tables, RAG sets, pool sets                    | `useFacets()`                     |
+| `/api/evaluations?…EvaluationFilter`                                          | `Page<EvaluationSummary>` (latest registry row per evaluation, no JSON snapshots)                                   | `useEvaluations(filter)`          |
+| `/api/evaluations/:id[?profiles=none]`                                        | `EvaluationDetail` — `evaluation` (latest event), `events` (RUNNING→FINAL), `metrics`, `profiles`, `flags`          | `useEvaluation(id, { profiles })` |
+| `/api/evaluations/:id/profiles?table&column&kind&side`                        | `ProfileRow[]` (lazy drawers)                                                                                       | `useProfiles(id, query)`          |
+| `/api/compare?ids=a,b`                                                        | `Comparison` — aligned `metrics[].cells[i]` (null = absent), `params` diffs, `comparability.not_comparable`         | `useCompare(ids)`                 |
+| `/api/trend?metric_id&table&column&column_2&edge&…filters`                    | `TrendPoint[]` oldest first, with the generation parameters to colour by                                            | `useTrend(query)`                 |
+| `/api/runs?run_ids&base_run_id&landing_table&engine&status&env&from&to&limit` | `ValidationRun[]` (+ `dlq_by_rule_map`)                                                                             | `useRuns(filter)`                 |
+| `/api/dlq?run_ids=…`                                                          | `DlqSummary[]` grouped by rule, with one example, `blocker_declared` / `blocker_counted` (the fk.orphan gap)        | `useDlq(runIds)`                  |
+| `/api/source-stats?table&tier&digest`                                         | `SourceStats` — snapshots, the selected ones (latest per tier by default), rows with `stats_parsed: ProfilerStats`  | `useSourceStats(query)`           |
+| `/api/rag/chunks?digest&kind&embedder[/version]&limit&source_fqn&column`      | binary envelope (`@contracts/vectors`): `ChunkMeta[]` + Float32 `n × dim`; headers `x-vector-dim`, `x-vector-count` | `useRagChunks(query)`             |
+| `/api/rag/pools?digest&model_uri&column`                                      | `FreetextPool[]` (+ `distinct`)                                                                                     | `usePools(query)`                 |
+| `/api/knobs`                                                                  | `KnobsFile` (also importable statically: `@contracts/generated/knobs`)                                              | `useKnobs()`                      |
+| `/api/catalogue`                                                              | `{ version, levels, families, metrics: CatalogueMetric[] }` (also `@contracts/generated/catalogue`)                 | `useCatalogue()`                  |
+
+Lists in query strings are comma-separated. Every hook's `data` is an
+`ApiResult<T>`: `{ data, bytesEstimate, dataSource }` — `bytesEstimate` is the
+dry-run bytes of the BigQuery queries the route ran (null in mock mode); show
+it next to the data it cost. Errors are `ApiError { status, message, details }`
+(400 invalid params, 404 unknown id, 422 over the bytes cap, 502 live rows no
+longer match the generated contract).
+
+### Reading the rows
+
+- Row types are the generated BigQuery schemas (`@contracts/generated/schemas`):
+  TIMESTAMP → ISO string, INT64 → number, JSON → parsed value, NULLABLE → `null`
+  (keys always present), REPEATED → array. Vocabularies (`status`, `level`,
+  `family`, `profile_kind`, `side`, `check`, `scope_status` …) are `z.enum`s
+  parsed from the column descriptions: `vocabularies["evaluation_metrics.status"]`.
+- `evaluation_profiles.payload` is JSON the evaluator owns; read it with
+  `parseProfile(kind, payload)` (`@contracts/payloads`), which returns `null`
+  (show "profile unavailable") instead of throwing. Shapes: histogram
+  (interior `edges`, `counts.length = edges.length + 1`), quantiles, topk
+  (labels `h:<8 hex>` unless literal under D6), length_hist, shape_mix,
+  char_classes, temporal_mix, null_patterns, corr_matrix, contingency,
+  fanout_hist, dcr_hist / nndr_hist (side `synthetic` = syn→R, `holdout` = H→R),
+  roc_curve, moments.
+- Metric maths for views (noise floors, KS bracket, PIT-W1, scores, statuses,
+  DKW, rarefaction, collision odds …) come from `@synthetic-platform/stats`;
+  never re-derive them in a tab.
+
+### Extra routes for a tab
+
+A tab that needs a derived server-side result (e.g. a cached UMAP projection)
+writes `apps/server/src/routes/<tab>.extra.ts` (`evaluation`, `rag`, `config`):
+
+```ts
+import type { FastifyPluginAsync } from "fastify";
+import type { RouteOptions } from "./context";
+
+const plugin: FastifyPluginAsync<RouteOptions> = async (app, { provider, cache }) => {
+  app.get("/umap", async (request) => {
+    /* compose provider calls; cache.get/set */
+  });
+};
+export default plugin;
+```
+
+It is registered under `/api/x/<tab>` (e.g. `/api/x/rag/umap`) with the same
+provider, config and a small in-memory LRU. Extra routes compose provider
+calls; they never run SQL of their own.
+
+### BFF safety
+
+- Binds `127.0.0.1` by default (`HOST`); port `PORT` → `GUI_SERVER_PORT` → 8787.
+- Only the named, parameterized, read-only queries of
+  `apps/server/src/queries/registry.ts`; client values are parameters, never
+  SQL text; `assertReadOnly` guards every statement.
+- Each query dry-runs first; above `MAX_BYTES_BILLED` (10 GiB default) it is
+  refused (422); the job itself also carries `maximumBytesBilled`.
+- Live rows are validated against the generated zod (a mismatch is a 502, not a
+  silent pass); results are cached in an LRU (TTL 5 min) and never persisted;
+  the runner's ADC never leaves the server.

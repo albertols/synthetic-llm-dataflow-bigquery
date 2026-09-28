@@ -20,7 +20,6 @@ import {
   email,
   FIRST_NAMES,
   FIRST_WEIGHTS,
-  isoFromEpoch,
   LAST_NAMES,
   LAST_WEIGHTS,
   NOVEL_CITIES,
@@ -36,7 +35,12 @@ export const FREE_TEXT_POOL_MAX = 512;
 /** Identifier ids of synthetic rows start here, far from the source's 1..N. */
 export const SYNTHETIC_ID_BASE = 5_000_000;
 
-export const epoch = (iso: string) => Date.parse(iso) / 1000;
+/**
+ * Epoch seconds of a temporal value. Source rows carry ISO strings (what the
+ * profiler and the RAG text see); synthetic rows keep epoch seconds internally
+ * (they are never served), so no value is formatted and parsed back.
+ */
+export const epoch = (value: string | number) => (typeof value === "number" ? value : Date.parse(value) / 1000);
 
 /** The universe (value → probability) a free-text column's values come from, when finite. */
 export function textUniverse(table: string, column: string): { values: string[]; weights: number[] } | null {
@@ -127,7 +131,7 @@ function nullRate(values: readonly Value[]): number {
 }
 
 function numericSampler(column: ColumnDef, values: Value[], spec: EvalSpec, isTime: boolean): ColumnSampler {
-  const nums = values.filter((v) => v !== null).map((v) => (isTime ? epoch(v as string) : (v as number)));
+  const nums = values.filter((v) => v !== null).map((v) => (isTime ? epoch(v as string | number) : (v as number)));
   const sorted = [...nums].sort((a, b) => a - b);
   const knots = spec.engine === "b2_library" ? profilerDeciles(sorted) : sorted;
   const lo = sorted[0] ?? 0;
@@ -159,10 +163,10 @@ function numericSampler(column: ColumnDef, values: Value[], spec: EvalSpec, isTi
       // b2 keeps joint structure through ranks (a copula), never by copying the base value.
       if (spec.quality.corrKeep > 0 && rng.bernoulli(spec.quality.corrKeep)) {
         if (baseValue === null || baseValue === undefined) return null;
-        const x = isTime ? epoch(String(baseValue)) : Number(baseValue);
+        const x = isTime ? epoch(baseValue as string | number) : Number(baseValue);
         const u = Math.min(1, Math.max(0, rankOf(x) + rng.normal(0, 0.06)));
         const w = interp(u) + shift;
-        if (isTime) return isoFromEpoch(w);
+        if (isTime) return w;
         return column.bqType === "INT64" ? Math.round(w) : Math.round(w * 100) / 100;
       }
       if (rng.bernoulli(nulls)) return null;
@@ -174,7 +178,7 @@ function numericSampler(column: ColumnDef, values: Value[], spec: EvalSpec, isTi
         v = s * (anchored + jitter) + (1 - s) * rng.between(lo, hi);
       } else v = interp(rng.uniform());
       v += shift;
-      if (isTime) return isoFromEpoch(v);
+      if (isTime) return v;
       if (column.bqType === "INT64") return Math.round(v);
       return Math.round(v * 100) / 100;
     },

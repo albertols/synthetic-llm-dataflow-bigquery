@@ -42,7 +42,21 @@ export function hashingTokens(text: string): string[] {
 
 const encoder = new TextEncoder();
 
+/** Token → bucket is pure; row texts repeat tokens ("is", column names), so a bounded memo pays off. */
+const BUCKETS = new Map<string, { bucket: number; sign: 1 | -1 }>();
+const BUCKET_MEMO_MAX = 50_000;
+
 export function hashingBucket(token: string, dim = 384, seed = 0): { bucket: number; sign: 1 | -1 } {
+  const key = `${seed}\u0000${dim}\u0000${token}`;
+  const known = BUCKETS.get(key);
+  if (known) return known;
+  const result = computeBucket(token, dim, seed);
+  if (BUCKETS.size >= BUCKET_MEMO_MAX) BUCKETS.clear();
+  BUCKETS.set(key, result);
+  return result;
+}
+
+function computeBucket(token: string, dim: number, seed: number): { bucket: number; sign: 1 | -1 } {
   const prefix = encoder.encode(String(seed));
   const body = encoder.encode(token);
   const message = new Uint8Array(prefix.length + 1 + body.length);

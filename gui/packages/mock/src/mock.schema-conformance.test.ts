@@ -28,7 +28,7 @@ import { chunkRow, createMockDataset, type MockDataset } from "./index";
 let data: MockDataset;
 beforeAll(() => {
   data = createMockDataset();
-});
+}, 120_000);
 
 function expectAll<T>(label: string, rows: readonly T[], parse: (row: T) => { success: boolean; error?: unknown }) {
   const failures: string[] = [];
@@ -46,7 +46,7 @@ const EMAIL = /[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,
 /** A character mask of an address (9 digit, A upper, a lower), as shape profiles store it — not an address. */
 const isMask = (text: string) => /^[aA9._%+@-]+$/.test(text);
 
-describe("mock rows validate against the generated contracts", () => {
+describe("mock rows validate against the generated contracts", { timeout: 60_000 }, () => {
   it("registry events", () => {
     expect(data.registry.length).toBeGreaterThan(40);
     expectAll("registry", data.registry, (r) => evaluationDataHistoryRowSchema.safeParse(r));

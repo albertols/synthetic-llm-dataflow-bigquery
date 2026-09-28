@@ -71,6 +71,8 @@ export interface EvalSpec {
   outcome?: "FAILED" | "SKIPPED" | "RUNNING";
   statusReason?: string;
   scopeStatus?: "count_mismatch" | "empty";
+  /** A table whose scope check flagged something the evaluation still measured (a warning, not PARTIAL). */
+  scopeNote?: { table: string; status: "contaminated" | "expired"; reason: string };
   referenceVerified?: boolean;
   warnings?: string[];
 }
@@ -153,6 +155,12 @@ const ROWS: Row[] = [
   },
   {
     day: "2026-08-11",
+    scopeNote: {
+      table: "users",
+      status: "expired",
+      reason:
+        "the source snapshot is older than the 7-day time-travel window; fidelity measured against the current table",
+    },
     at: "10:10",
     similarity: 0.3,
     quality: { valueLeak: 0.22, rowLeak: 0.007, exposureLeak: 0.01, nearLeak: 0.006, poolCollapse: true, drift: 0.05 },
@@ -341,6 +349,11 @@ const ROWS: Row[] = [
   },
   {
     day: "2026-09-11",
+    scopeNote: {
+      table: "order_items",
+      status: "contaminated",
+      reason: "rows from another run_id share the landing table; the scope kept only this run's rows",
+    },
     at: "12:55",
     sourceStatsTier: "exact",
     freetextExpansion: "identifiers",

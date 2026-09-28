@@ -4,12 +4,21 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "description": "Fastify BFF (named read-only BigQuery queries or the mock provider). Implemented in task G0b.",
+  "description": "Fastify BFF for the Synthetic Platform GUI: named read-only BigQuery queries (dry run + maximumBytesBilled) or the seeded mock provider, plus the built SPA.",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
   "dependencies": {
     "@fastify/static": "10.1.5",
     "@google-cloud/bigquery": "9.1.0",
+    "@synthetic-platform/contracts": "0.1.0",
+    "@synthetic-platform/mock": "0.1.0",
+    "@synthetic-platform/stats": "0.1.0",
     "fastify": "5.12.5",
     "lru-cache": "11.5.3",
+    "tsx": "4.23.15",
     "yaml": "2.9.1",
     "zod": "4.6.5"
   }

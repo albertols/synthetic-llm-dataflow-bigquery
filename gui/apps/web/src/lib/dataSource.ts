@@ -1,12 +1,22 @@
 /**
- * Where the data comes from. The BFF reports it on `/api/health`
- * (task G0b wires `useDataSource` to that endpoint with TanStack Query);
- * until then the app runs in mock mode.
+ * Where the data comes from, as the BFF reports it on `/api/health`
+ * (never BigQuery-backed, so it answers at once). While the first health
+ * check is in flight the source is "connecting"; if it fails, "offline".
  */
-export type DataSource = { mode: "mock" } | { mode: "bigquery"; project: string };
+import { useHealth } from "./api";
 
-const MOCK: DataSource = { mode: "mock" };
+export type DataSource =
+  | { mode: "mock" }
+  | { mode: "bigquery"; project: string; maxBytesBilled?: number }
+  | { mode: "connecting" }
+  | { mode: "offline" };
 
 export function useDataSource(): DataSource {
-  return MOCK;
+  const { data, isError } = useHealth();
+  if (isError) return { mode: "offline" };
+  if (!data) return { mode: "connecting" };
+  const health = data.data;
+  return health.mode === "bigquery"
+    ? { mode: "bigquery", project: health.project ?? "?", maxBytesBilled: health.max_bytes_billed }
+    : { mode: "mock" };
 }

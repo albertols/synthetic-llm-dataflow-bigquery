@@ -299,6 +299,7 @@ function tableEntry(spec: EvalSpec, table: TableDef, base: string): TableEntry {
   const rowsExpected = rowsFor(spec, table);
   const mismatch = spec.scopeStatus === "count_mismatch" && table.name === "orders";
   const empty = spec.scopeStatus === "empty";
+  const note = spec.scopeNote?.table === table.name ? spec.scopeNote : null;
   const rowsSynthetic = empty ? 0 : mismatch ? Math.round(rowsExpected * 0.969635) : rowsExpected;
   const sampled = spec.mode === "sampled";
   const sampleRows = Number(knobs.knobs.find((k) => k.id === "eval_sample_rows")?.value ?? 200_000);
@@ -310,9 +311,9 @@ function tableEntry(spec: EvalSpec, table: TableDef, base: string): TableEntry {
     run_id: table.role === "external" ? null : `${base}-${table.name}`,
     role: table.role,
     scope_mode: empty ? "appends" : "table",
-    scope_status: empty ? "empty" : mismatch ? "count_mismatch" : "ok",
-    scope_ok: !empty && !mismatch,
-    scope_reason: empty || mismatch ? (spec.statusReason ?? null) : null,
+    scope_status: empty ? "empty" : mismatch ? "count_mismatch" : (note?.status ?? "ok"),
+    scope_ok: !empty && !mismatch && !note,
+    scope_reason: empty || mismatch ? (spec.statusReason ?? null) : (note?.reason ?? null),
     window_start: empty ? minutes(spec.evaluatedAt, -24 * 60) : null,
     window_end: empty ? spec.evaluatedAt : null,
     source_snapshot_ts: minutes(spec.evaluatedAt, -150),
@@ -578,6 +579,8 @@ export function createMockDataset(seed = 20260928): MockDataset {
     if (spec.referenceVerified === false)
       warnings.push("reference digest not verified: privacy lifts and DCR not evaluated");
     if (spec.scopeStatus === "count_mismatch") warnings.push("orders: rows in scope differ from rows_expected");
+    if (spec.scopeNote)
+      warnings.push(`${spec.scopeNote.table}: scope ${spec.scopeNote.status}: ${spec.scopeNote.reason}`);
     if (final.model_adjusted)
       warnings.push("relationship model adjusted at launch (ADR 0038): a declared pk the source disproved was dropped");
     if (spec.index === 9) warnings.push("2 BigQuery queries retried after slot contention");

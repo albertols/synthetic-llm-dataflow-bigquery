@@ -150,4 +150,41 @@ export const concepts = defineConcepts([
     diagram: "core:levels",
     links: [levelLink],
   },
+  {
+    id: "core:bytes-estimate",
+    title: "BigQuery bytes estimate",
+    purpose:
+      "The bytes the queries behind this view scan, from a dry run before they run. The BFF refuses any query above its cap (10 GiB by default).",
+    interpretation: {
+      tip: "Cached answers cost nothing and report 0. In mock mode there is no estimate.",
+    },
+    links: [
+      {
+        label: "BigQuery — dry runs",
+        url: "https://cloud.google.com/bigquery/docs/running-queries#dry-run",
+        kind: "docs",
+      },
+      { label: "ADR 0042 — self-hosted platform GUI", url: ADR_0042, kind: "adr" },
+    ],
+  },
+  {
+    id: "core:literal-policy",
+    title: "Literal policy (hashed labels)",
+    purpose:
+      "A profile shows a value literally only when its column has at most 50 source-distinct values and the value appears in at least 10 source rows. Anything rarer is shown as h:<8 hex>, a hash that still lines up source and synthetic.",
+    pitfalls: "Hashed labels compare fine across sides and runs, but never reveal the value: that is the point.",
+    links: [{ label: "Metric catalogue", url: CATALOGUE, kind: "code" }],
+  },
+  {
+    id: "core:evaluation-sets",
+    title: "Reference, holdout and exposed rows",
+    purpose:
+      "R is the reference sample the generator read, H an equally sized holdout of source rows it never saw, and E the 1,024 rows its prompts exposed. Privacy lifts compare how often synthetic rows match R (or E) against H.",
+    formula: "\\text{lift} = \\frac{m_R / |R|}{m_H / |H|}",
+    interpretation: {
+      good: "A lift whose confidence interval covers 1: matches happen as often with rows the generator never saw.",
+      bad: "A lower confidence bound above the threshold: the generator copies what it read.",
+    },
+    links: [{ label: "Metric catalogue — row level", url: CATALOGUE, kind: "code" }],
+  },
 ]);

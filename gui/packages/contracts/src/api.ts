@@ -142,7 +142,40 @@ export const evaluationFilterSchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   limit: z.coerce.number().int().min(1).max(500).default(50),
 });
-export type EvaluationFilter = z.input<typeof evaluationFilterSchema>;
+/** What a client sends (lists become comma-separated query params); the server parses it with `evaluationFilterSchema`. */
+export interface EvaluationFilter {
+  tables?: string[];
+  engine?: string[];
+  llm_model?: string[];
+  embedder?: string[];
+  retrieval?: string[];
+  seed?: string[];
+  similarity_min?: number;
+  similarity_max?: number;
+  reference_rows_limit?: number[];
+  num_rows?: number[];
+  source_stats_tier?: string[];
+  profiler_version?: string[];
+  env?: string[];
+  status?: string[];
+  trigger?: string[];
+  runner?: string[];
+  mode?: string[];
+  evaluator_version?: string[];
+  catalogue_version?: string[];
+  relationship_model?: string[];
+  /** ISO timestamp or date: evaluated_at ≥ from. */
+  from?: string;
+  /** evaluated_at < to. */
+  to?: string;
+  q?: string;
+  sort?: EvaluationSortKey;
+  order?: "asc" | "desc";
+  offset?: number;
+  /** 1–500, default 50. */
+  limit?: number;
+}
+export type EvaluationSortKey = (typeof evaluationSortKeys)[number];
 export type EvaluationFilterParsed = z.output<typeof evaluationFilterSchema>;
 
 export const evaluationPageSchema = pageSchema(evaluationSummarySchema);
@@ -170,7 +203,12 @@ export const profileQuerySchema = z.object({
   kind: csv(z.string()),
   side: csv(z.string()),
 });
-export type ProfileQuery = z.input<typeof profileQuerySchema>;
+export interface ProfileQuery {
+  table?: string;
+  column?: string;
+  kind?: string[];
+  side?: string[];
+}
 
 // ------------------------------------------------------------------ trend --
 
@@ -182,7 +220,15 @@ export const trendQuerySchema = evaluationFilterSchema.omit({ sort: true, order:
   edge: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(2000).default(500),
 });
-export type TrendQuery = z.input<typeof trendQuerySchema>;
+export type TrendQuery = Omit<EvaluationFilter, "sort" | "order" | "offset" | "limit"> & {
+  metric_id: string;
+  table?: string;
+  column?: string;
+  column_2?: string;
+  edge?: string;
+  /** 1–2,000, default 500. */
+  limit?: number;
+};
 export type TrendQueryParsed = z.output<typeof trendQuerySchema>;
 
 /** One metric row of one evaluation, with the generation parameters to colour it by. Oldest first. */
@@ -298,7 +344,18 @@ export const runFilterSchema = z.object({
   to: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(1000).default(200),
 });
-export type RunFilter = z.input<typeof runFilterSchema>;
+export interface RunFilter {
+  run_ids?: string[];
+  base_run_id?: string;
+  landing_table?: string[];
+  engine?: string[];
+  status?: string[];
+  env?: string[];
+  from?: string;
+  to?: string;
+  /** 1–1,000, default 200. */
+  limit?: number;
+}
 export type RunFilterParsed = z.output<typeof runFilterSchema>;
 
 /** A validation_runs row plus `dlq_by_rule` parsed (the column is a JSON string). Newest first. */
@@ -338,7 +395,12 @@ export const sourceStatsQuerySchema = z.object({
   tier: z.enum(["sample", "exact"]).optional(),
   digest: z.string().optional(),
 });
-export type SourceStatsQuery = z.input<typeof sourceStatsQuerySchema>;
+export interface SourceStatsQuery {
+  /** table_fqn, or the bare table name when unambiguous. */
+  table: string;
+  tier?: "sample" | "exact";
+  digest?: string;
+}
 
 export const sourceStatsColumnSchema = sourceTableStatsRowSchema.extend({
   /** `stats` parsed; null when the string is not a profiler entry. */
@@ -383,7 +445,16 @@ export const ragChunksQuerySchema = z.object({
   /** free_text_col only: the column (metadata.column). */
   column: z.string().optional(),
 });
-export type RagChunksQuery = z.input<typeof ragChunksQuerySchema>;
+export interface RagChunksQuery {
+  digest: string;
+  kind: "row_doc" | "free_text_col";
+  /** embedder_id, optionally "<id>/<version>". */
+  embedder: string;
+  /** 1–5,000, default 1,024. */
+  limit?: number;
+  source_fqn?: string;
+  column?: string;
+}
 
 /** Per-chunk metadata in the binary envelope (see vectors.ts); `embedding` travels as Float32. */
 export const chunkMetaSchema = z.object({
@@ -406,7 +477,11 @@ export const freetextPoolsQuerySchema = z.object({
   model_uri: z.string().optional(),
   column: z.string().optional(),
 });
-export type FreetextPoolsQuery = z.input<typeof freetextPoolsQuerySchema>;
+export interface FreetextPoolsQuery {
+  digest: string;
+  model_uri?: string;
+  column?: string;
+}
 
 export const freetextPoolSchema = freetextPoolsRowSchema.extend({
   /** values.length (the pool is deduped). */
@@ -490,3 +565,15 @@ export const catalogueResponseSchema = z.object({
   families: z.array(z.string()),
   metrics: z.array(z.looseObject({ id: z.string(), title: z.string(), level: z.string(), family: z.string() })),
 });
+
+// Compile-time guard: each client interface names exactly the keys its zod schema parses.
+type SameKeys<A, B> = [Exclude<keyof A, keyof B>, Exclude<keyof B, keyof A>] extends [never, never] ? true : false;
+export const clientTypesMatchSchemas: [
+  SameKeys<EvaluationFilter, z.output<typeof evaluationFilterSchema>>,
+  SameKeys<ProfileQuery, z.output<typeof profileQuerySchema>>,
+  SameKeys<TrendQuery, z.output<typeof trendQuerySchema>>,
+  SameKeys<RunFilter, z.output<typeof runFilterSchema>>,
+  SameKeys<SourceStatsQuery, z.output<typeof sourceStatsQuerySchema>>,
+  SameKeys<RagChunksQuery, z.output<typeof ragChunksQuerySchema>>,
+  SameKeys<FreetextPoolsQuery, z.output<typeof freetextPoolsQuerySchema>>,
+] = [true, true, true, true, true, true, true];
