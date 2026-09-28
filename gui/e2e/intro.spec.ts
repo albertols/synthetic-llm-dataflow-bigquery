@@ -83,8 +83,9 @@ test("the hero walks nine stages and each one deep-links to its tab", async ({ p
   await expect(stages(page).locator("li[data-stage]")).toHaveCount(9);
 
   const cases = [
-    { link: "Reference sample", routeId: "/config", search: { knob: "reference_rows_limit" } },
+    { link: "Reference sample", routeId: "/config", search: { section: "sources" } },
     { link: "RAG retrieval", routeId: "/rag", search: {} },
+    { link: "Generation on L4", routeId: "/config", search: { section: "amp", channel: "generation" } },
     { link: "Mode A guardrails", routeId: "/config", search: { knob: "uniqueness_mode" } },
     { link: "Evaluation", routeId: "/evaluation", search: {} },
   ];

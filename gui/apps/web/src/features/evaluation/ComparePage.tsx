@@ -53,6 +53,7 @@ import { fmtDelta, fmtMetric, fmtScore, shortModel } from "./lib/format";
 import { statusRank } from "./lib/model";
 import { useChartTokens } from "./lib/tokens";
 import type { EvaluationCompareSearch } from "./route";
+import { RelatedKnobsProvider } from "./components/RelatedKnobs";
 
 const route = getRouteApi("/evaluation/compare");
 
@@ -637,7 +638,16 @@ function ParamsDiff({ comparison }: { comparison: Comparison }) {
   );
 }
 
+/** The page, with its metric (i) popovers linking to the CONFIG knobs that drive them. */
 export function EvaluationComparePage() {
+  return (
+    <RelatedKnobsProvider>
+      <ComparePageContent />
+    </RelatedKnobsProvider>
+  );
+}
+
+function ComparePageContent() {
   const search = route.useSearch();
   const navigate = route.useNavigate();
   const ids = useMemo(() => [...new Set(search.ids)], [search.ids]);

@@ -178,6 +178,13 @@ test("every section mounts, reads without horizontal scroll, and passes axe in b
     "href",
     /\/config\?knob=free_text_pool_max/,
   );
+  // Each pool's route badge opens the FREE TEXT channel of the amp.
+  await expect(
+    page
+      .getByRole("region", { name: "Pools per column" })
+      .getByRole("link", { name: /LLM ladder: the FREE TEXT knobs/ })
+      .first(),
+  ).toHaveAttribute("href", "/config?section=amp&channel=free_text");
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );

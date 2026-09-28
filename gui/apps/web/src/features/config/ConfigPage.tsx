@@ -77,7 +77,11 @@ export function ConfigPage() {
             ))}
           </TabsList>
           <TabsContent value="amp">
-            <AmpPanel onOpenKnob={openKnob} />
+            <AmpPanel
+              onOpenKnob={openKnob}
+              initialChannel={search.channel}
+              onChannelChange={(channel) => patchSearch({ channel: channel === "all" ? undefined : channel }, true)}
+            />
           </TabsContent>
           <TabsContent value="scenario">
             <ScenarioCalculator onOpenKnob={openKnob} />

@@ -11,7 +11,9 @@
  *   Esc, a click outside, or another click on the trigger; focus moves into
  *   the popover and returns to the trigger on close;
  * - shows title, level, purpose, formula (KaTeX, lazy), mini diagram,
- *   interpretation, pitfalls and links (new tab, rel="noopener noreferrer").
+ *   interpretation, pitfalls and links (new tab, rel="noopener noreferrer"),
+ *   then whatever a surrounding ConceptExtrasContext adds for the concept
+ *   (EVALUATION's "Related knob" links, `@/lib/conceptExtras`).
  * An unknown concept id (after every concept file has loaded) logs
  * `console.error` in development and renders a neutral, non-interactive
  * icon — add the concept to `gui/packages/contracts/src/concepts/<owner>.ts`.
@@ -34,6 +36,7 @@ import { useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEv
 
 import { cn } from "@/lib/cn";
 import { useConcept, type Concept, type ConceptLinkKind } from "@/lib/concepts";
+import { useConceptExtras } from "@/lib/conceptExtras";
 import { LEVELS, levelChipClass } from "@/lib/levels";
 
 import { Formula } from "./Formula";
@@ -219,6 +222,7 @@ function LevelTag({ level }: { level: NonNullable<Concept["level"]> }) {
 
 function ConceptBody({ concept, titleId }: { concept: Concept; titleId: string }) {
   const { interpretation } = concept;
+  const extras = useConceptExtras(concept.id);
   const rows: Array<{ key: string; label: string; icon: LucideIcon; tone: string; text: string }> = [];
   if (interpretation?.good)
     rows.push({
@@ -301,6 +305,7 @@ function ConceptBody({ concept, titleId }: { concept: Concept; titleId: string }
           })}
         </ul>
       ) : null}
+      {extras}
     </>
   );
 }

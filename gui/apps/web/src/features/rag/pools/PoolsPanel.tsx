@@ -421,13 +421,25 @@ const ROUTE_ICON: Record<PoolRoute, typeof CircleCheck> = {
   no_pool: ArrowRight,
 };
 
+/** The pool's route, linking to the knobs that shape free-text pools: CONFIG's FREE TEXT channel. */
 function RouteBadge({ route }: { route: PoolRoute }) {
   const Icon = ROUTE_ICON[route];
   return (
-    <Badge variant={route === "llm_ladder" ? "gpu" : route === "no_pool" ? "outline" : "neutral"}>
-      <Icon aria-hidden="true" />
-      {ROUTE_LABELS[route]}
-    </Badge>
+    <Link
+      to="/config"
+      search={{ section: "amp", channel: "free_text" }}
+      title="The FREE TEXT knobs in Config"
+      className="inline-flex rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring"
+    >
+      <Badge
+        variant={route === "llm_ladder" ? "gpu" : route === "no_pool" ? "outline" : "neutral"}
+        className="hover:brightness-125"
+      >
+        <Icon aria-hidden="true" />
+        {ROUTE_LABELS[route]}
+      </Badge>
+      <span className="sr-only">: the FREE TEXT knobs in Config</span>
+    </Link>
   );
 }
 

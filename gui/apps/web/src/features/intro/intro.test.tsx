@@ -215,7 +215,7 @@ describe("INTRO pipeline hero", { timeout: 90_000 }, () => {
     await user.click(within(stages).getByRole("link", { name: "Reference sample" }));
     await screen.findByText("Config tab", {}, WAIT);
     expect(router.state.location.pathname).toBe("/config");
-    expect(router.state.location.search).toEqual({ knob: "reference_rows_limit" });
+    expect(router.state.location.search).toEqual({ section: "sources" });
 
     await act(() => router.navigate({ to: "/" }));
     await user.click(

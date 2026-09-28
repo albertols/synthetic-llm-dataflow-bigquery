@@ -5,7 +5,7 @@
  * the dials turn. Not a reproduction of any amplifier maker's trade dress:
  * no coloured tolex, no crest, wordmark or slogan, no pictogram-only legends.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { InfoHint } from "@/components/InfoHint";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -28,14 +28,32 @@ function defaultChannel(): string {
 export function AmpPanel({
   onOpenKnob,
   initialChannel,
+  onChannelChange,
 }: {
   onOpenKnob: (id: string) => void;
-  /** A channel id to show first: "all" on wide screens, the first channel on phones. */
+  /**
+   * A channel id to show first (a deep link: `/config?section=amp&channel=free_text`);
+   * an unknown id falls back to "all" on wide screens, the first channel on phones.
+   */
   initialChannel?: string;
+  /** The channel the reader picks (the page keeps it in the URL). */
+  onChannelChange?: (channel: string) => void;
 }) {
   const { settings, setSetting } = useScenario();
-  const [channel, setChannel] = useState<string>(() => initialChannel ?? defaultChannel());
+  const linked =
+    initialChannel !== undefined && (initialChannel === ALL || CHANNELS.some((c) => c.id === initialChannel));
+  const [channel, setChannel] = useState<string>(() => (linked ? initialChannel : defaultChannel()));
   const shown = channel === ALL ? CHANNELS : CHANNELS.filter((c) => c.id === channel);
+  // A link to one channel lands on it: scroll its strip into view after the page lays out,
+  // once (the channel the page opened with, not every later pick).
+  const [landing] = useState(() => (linked && initialChannel !== ALL ? initialChannel : null));
+  useEffect(() => {
+    if (!landing) return;
+    const frame = requestAnimationFrame(() =>
+      document.getElementById(`amp-ch-${landing}`)?.scrollIntoView({ block: "start" }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [landing]);
   const counts = {
     turnable: KNOBS.filter((k) => ["dial", "selector"].includes(kindOf(k))).length,
     screws: KNOBS.filter((k) => kindOf(k) === "screw").length,
@@ -76,7 +94,11 @@ export function AmpPanel({
           <ToggleGroup
             type="single"
             value={channel}
-            onValueChange={(v) => v && setChannel(v)}
+            onValueChange={(v) => {
+              if (!v) return;
+              setChannel(v);
+              onChannelChange?.(v);
+            }}
             aria-labelledby="amp-channel-label"
             className="flex-wrap"
           >

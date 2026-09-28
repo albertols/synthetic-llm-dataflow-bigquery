@@ -6,13 +6,24 @@
 import { Link } from "@tanstack/react-router";
 import type { ComponentPropsWithRef, ReactNode } from "react";
 
-import type { KnobId } from "@contracts/generated/knobs";
+import type { ChannelId, KnobId } from "@contracts/generated/knobs";
+
+import type { ConfigSection } from "../../config/route";
+
+/** A CONFIG deep link: a section (Amp, Source stats …), an amp channel, a knob's sheet. */
+export type ConfigTarget = { tab: "config"; section?: ConfigSection; channel?: ChannelId; knob?: KnobId };
 
 export type IntroTarget =
-  | { tab: "rag" }
-  | { tab: "evaluation" }
-  | { tab: "evaluation-run"; evaluationId: string }
-  | { tab: "config"; knob: KnobId };
+  { tab: "rag" } | { tab: "evaluation" } | { tab: "evaluation-run"; evaluationId: string } | ConfigTarget;
+
+/** CONFIG's search params for a target, in the order the URL prints them. */
+export function configSearch({ section, channel, knob }: ConfigTarget) {
+  return {
+    ...(section ? { section } : {}),
+    ...(channel ? { channel } : {}),
+    ...(knob ? { knob } : {}),
+  };
+}
 
 /** The tab's name as the top nav prints it. */
 export function targetTabName(target: IntroTarget): string {
@@ -36,8 +47,10 @@ export function targetHref(target: IntroTarget): string {
       return "/evaluation";
     case "evaluation-run":
       return `/evaluation/${encodeURIComponent(target.evaluationId)}`;
-    case "config":
-      return `/config?knob=${encodeURIComponent(target.knob)}`;
+    case "config": {
+      const query = new URLSearchParams(configSearch(target)).toString();
+      return query ? `/config?${query}` : "/config";
+    }
   }
 }
 
@@ -66,7 +79,7 @@ export function TargetLink({ to: target, children, ...props }: AnchorProps) {
       );
     case "config":
       return (
-        <Link to="/config" search={{ knob: target.knob }} {...props}>
+        <Link to="/config" search={configSearch(target)} {...props}>
           {children}
         </Link>
       );

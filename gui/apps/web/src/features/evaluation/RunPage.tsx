@@ -42,6 +42,7 @@ import { RelationalPanel } from "./panels/RelationalPanel";
 import { RunHeader } from "./panels/RunHeader";
 import { Scorecards, type OpenTarget } from "./panels/Scorecards";
 import type { EvaluationRunSearch, RunTabId } from "./route";
+import { RelatedKnobsProvider } from "./components/RelatedKnobs";
 
 const route = getRouteApi("/evaluation/$evaluationId");
 
@@ -91,7 +92,16 @@ function usePrevious(detail: EvaluationDetail | undefined) {
     : undefined;
 }
 
+/** The page, with its metric (i) popovers linking to the CONFIG knobs that drive them. */
 export function EvaluationRunPage() {
+  return (
+    <RelatedKnobsProvider>
+      <RunPageContent />
+    </RelatedKnobsProvider>
+  );
+}
+
+function RunPageContent() {
   const { evaluationId } = route.useParams();
   const search = route.useSearch();
   const navigate = route.useNavigate();

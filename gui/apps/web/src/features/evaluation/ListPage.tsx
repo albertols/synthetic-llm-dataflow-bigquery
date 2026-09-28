@@ -55,6 +55,7 @@ import {
 import { fmtScore, fmtSig, shortModel } from "./lib/format";
 import { useChartTokens } from "./lib/tokens";
 import type { EvaluationListSearch } from "./route";
+import { RelatedKnobsProvider } from "./components/RelatedKnobs";
 
 const route = getRouteApi("/evaluation");
 
@@ -648,7 +649,16 @@ function useWide(): boolean {
   );
 }
 
+/** The page, with its metric (i) popovers linking to the CONFIG knobs that drive them. */
 export function EvaluationListPage() {
+  return (
+    <RelatedKnobsProvider>
+      <ListPageContent />
+    </RelatedKnobsProvider>
+  );
+}
+
+function ListPageContent() {
   const search = route.useSearch();
   const wide = useWide();
   const navigate = route.useNavigate();

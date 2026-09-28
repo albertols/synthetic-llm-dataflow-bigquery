@@ -97,7 +97,7 @@ export const STAGES: readonly Stage[] = [
     concept: "intro:source-table",
     chips: ({ facets }) =>
       present(["DDL + sample", facets ? count(facets.source_tables.length, "profiled tables") : null]),
-    target: () => ({ tab: "config", knob: "source_stats" }),
+    target: () => ({ tab: "config", section: "sources" }),
   },
   {
     id: "reference",
@@ -116,7 +116,7 @@ export const STAGES: readonly Stage[] = [
       const eps = referenceDkw();
       return present([count(facts.referenceRows, "rows"), eps === null ? null : `DKW ε ≈ ${formatFixed(eps, 4)}`]);
     },
-    target: () => ({ tab: "config", knob: "reference_rows_limit" }),
+    target: () => ({ tab: "config", section: "sources" }),
   },
   {
     id: "stats",
@@ -136,7 +136,7 @@ export const STAGES: readonly Stage[] = [
         facts.statsTiers.length ? `tiers: ${facts.statsTiers.join(" · ")}` : null,
         facts.profilerVersion === null ? null : `profiler v${facts.profilerVersion}`,
       ]),
-    target: () => ({ tab: "config", knob: "profiler_version" }),
+    target: () => ({ tab: "config", section: "sources" }),
   },
   {
     id: "rag",
@@ -173,7 +173,7 @@ export const STAGES: readonly Stage[] = [
     },
     concept: "intro:generation-l4",
     chips: () => present(["vLLM · O(1) calls", facts.poolMax === null ? null : `pool ≤ ${formatCount(facts.poolMax)}`]),
-    target: () => ({ tab: "config", knob: "engine" }),
+    target: () => ({ tab: "config", section: "amp", channel: "generation" }),
   },
   {
     id: "mode-a",

@@ -110,6 +110,19 @@ test("amp: a deep link opens a sheet with its Docs differ note", async ({ page }
   );
 });
 
+test("amp: a channel deep link (RAG's pool badges, INTRO's generation stage) shows that channel", async ({ page }) => {
+  const errors = watchErrors(page);
+  await page.goto("/config?section=amp&channel=free_text");
+  await expect(page.locator("[data-channel]")).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "FREE TEXT", level: 3 })).toBeInViewport();
+  // Picking ALL keeps the URL in step (the channel param goes away).
+  await page.getByRole("radio", { name: "ALL", exact: true }).click();
+  await expect.poll(async () => (await search(page)).channel).toBeUndefined();
+  await expect(page.locator("[data-channel]").first()).toBeVisible();
+  expect(await page.locator("[data-channel]").count()).toBeGreaterThan(1);
+  expect(errors).toEqual([]);
+});
+
 test("scenario: the 90M-from-1M-with-a-10k-seed preset and its outputs", async ({ page }) => {
   const errors = watchErrors(page);
   await page.goto("/config?section=scenario&scenario=90m-from-1m");

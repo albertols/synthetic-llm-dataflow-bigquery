@@ -4,6 +4,7 @@
  * params with `getRouteApi("/config").useSearch()`.
  *
  *   section   amp | scenario | sources | guardrails (in-page tab)
+ *   channel   knobs.json channel the amp shows first (e.g. "free_text")
  *   knob      knobs.json id whose sheet is open
  *   scenario  calculator preset id (e.g. "90m-from-1m")
  *   table     source-stats table (fqn or bare name)
@@ -27,6 +28,8 @@ export type ConfigSection = (typeof CONFIG_SECTIONS)[number];
 
 export const searchSchema = searchParams({
   section: oneOf(CONFIG_SECTIONS),
+  /** The amp channel shown (a knobs.json channel id; the amp ignores one it does not know). */
+  channel: text({ max: 40, pattern: /^[a-z][a-z_]*$/ }),
   /** Knob id whose sheet is open (a knobs.json id). */
   knob: optionalString,
   /** Scenario preset id for the calculator. */
