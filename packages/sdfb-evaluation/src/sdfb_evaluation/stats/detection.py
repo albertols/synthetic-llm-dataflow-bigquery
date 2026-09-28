@@ -47,16 +47,21 @@ Clarke-Pearson 1988), computed from midranks in O(N log N) (Sun & Xu 2014),
 with a normal interval clipped to `[0, 1]`.
 
 `pmse_ratio` is the propensity-score mean squared error of Woo et al.
-(2009), in the null-standardised form of Snoke et al. (2018): a logistic
-regression on all rows estimates each row's propensity `p_i` of being
-synthetic; `pMSE = mean((p_i - c)^2)` with `c = n_syn / N`, divided by
-`E0 = (k - 1)(1 - c)^2 c / N` for a model with `k` parameters. `E0` is
-Snoke et al.'s null expectation when the synthetic rows are drawn from the
-distribution of the source sample itself: there the ratio averages 1. When
-source and synthetic are two independent draws from one distribution, the
-source sample's own noise adds to the propensities' spread and the ratio
-averages `1 / (1 - c)`, i.e. 2 at the equal n `featurize` builds
-(`test_pmse_null_calibration` pins both). The design matrix:
+(2009), standardised by its null expectation as Snoke et al. (2018) do: a
+logistic regression on all rows estimates each row's propensity `p_i` of
+being synthetic; `pMSE = mean((p_i - c)^2)` with `c = n_syn / N`, divided
+by `E0 = (k - 1) c (1 - c) / N` for a model with `k` parameters (Ruling
+R31). That `E0` is the null for our sampling regime, where the source
+sample and the synthetic rows are two independent draws from one
+distribution: the fitted propensities' spread `sum_i (p_i - c)^2` is the
+explained sum of squares of a `k`-parameter model of a label with variance
+`c (1 - c)`, which averages `(k - 1) c (1 - c)` under the null. Snoke et
+al.'s `(k - 1)(1 - c)^2 c / N` is the null when the synthetic rows are
+drawn from the source sample itself (only the synthetic side is random);
+here it would put a perfect generator at `1 / (1 - c)`, i.e. 2 at the
+equal n `featurize` builds. `test_pmse_null_calibration` pins both
+regimes: the ratio averages 1 for independent draws and `1 - c` for
+synthetic rows resampled from the source rows. The design matrix:
 
   - a numeric feature (every column not in `cat_idx`) is standardised, with
     a NULL imputed at the column mean (0 after standardising), plus a 0/1
@@ -465,11 +470,12 @@ def pmse_ratio(x: np.ndarray, y: np.ndarray, cat_idx: Sequence[int], *,
                seed: int) -> tuple[float, float]:
   """`(pMSE, pMSE / E0)` of a logistic propensity model fitted on all rows.
 
-  `c = n_syn / N`, `pMSE = mean((p_i - c)^2)` and `E0 = (k - 1)(1 - c)^2 c
-  / N` (Snoke et al. 2018), where `k` counts the intercept plus every design
-  column; the module docstring details the design and the null regimes
-  (about 1 for synthetic drawn from the source sample's own distribution,
-  about `1 / (1 - c)` for two independent draws). `cat_idx` marks the
+  `c = n_syn / N`, `pMSE = mean((p_i - c)^2)` and `E0 = (k - 1) c (1 - c)
+  / N`, the null expectation for independent source and synthetic samples
+  (Ruling R31; not Snoke et al.'s (2018) `(k - 1)(1 - c)^2 c / N`, which
+  holds only for synthetic rows drawn from the source sample itself), where
+  `k` counts the intercept plus every design column; the module docstring
+  details the design and both null regimes. A perfect generator averages 1. `cat_idx` marks the
   categorical codes (one-hot coded; every other feature is standardised,
   NULLs mean-imputed with a missing indicator). The fit is lbfgs, which is
   deterministic; `seed` is passed as the model's `random_state` for
@@ -492,7 +498,7 @@ def pmse_ratio(x: np.ndarray, y: np.ndarray, cat_idx: Sequence[int], *,
   c = n_pos / n
   pmse = float(np.mean((propensity - c)**2))
   k = columns.width + 1
-  e0 = (k - 1) * (1.0 - c)**2 * c / n
+  e0 = (k - 1) * c * (1.0 - c) / n
   return pmse, pmse / e0
 
 

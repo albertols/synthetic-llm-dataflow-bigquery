@@ -1605,12 +1605,12 @@ metrics:
     n_dependent: true
     baseline: true
     uses_ci_bound: false
-    formula: '\frac{\operatorname{pMSE}}{E_0}, \quad \operatorname{pMSE} = \frac{1}{N} \sum_{i=1}^{N} (\hat{\pi}_i - c)^2, \quad E_0 = \frac{(k-1)(1-c)^2 c}{N}'
-    purpose: "Propensity mean squared error of a logistic model separating synthetic from source rows, divided by its expected value when both come from the same distribution. A perfect generator scores about 1."
+    formula: '\frac{\operatorname{pMSE}}{E_0}, \quad \operatorname{pMSE} = \frac{1}{N} \sum_{i=1}^{N} (\hat{\pi}_i - c)^2, \quad E_0 = \frac{(k-1)\, c\, (1-c)}{N}'
+    purpose: "Propensity mean squared error of a logistic model separating synthetic from source rows, divided by its expected value when the two are independent samples of one distribution. A perfect generator scores about 1."
     interpretation:
       good: "Under 3: the logistic model finds little beyond chance."
       bad: "At or above 10: even a linear model separates the two tables well."
-    pitfalls: "The null expectation assumes a logistic model with k parameters; with many one-hot features k is large and the ratio loses sensitivity."
+    pitfalls: "E0 assumes independent source and synthetic samples: Snoke et al.'s (k-1)(1-c)^2 c/N holds only for synthetic rows drawn from the source sample itself and would put a perfect generator at 1/(1-c), about 2 here. With many one-hot features k is large and the ratio loses sensitivity."
     references:
       - {label: "Snoke et al. 2018 — general and specific utility measures", url: "https://doi.org/10.1111/rssa.12358"}
       - {label: "Woo et al. 2009 — global measures of data utility", url: "https://doi.org/10.29012/jpc.v1i1.568"}

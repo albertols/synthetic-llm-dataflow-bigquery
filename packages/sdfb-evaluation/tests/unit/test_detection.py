@@ -133,11 +133,16 @@ def test_identical_distributions_are_not_detected(
   assert lo <= 0.5 <= hi
   assert oof.shape == y.shape
   assert np.all((oof >= 0.0) & (oof <= 1.0))
-  # One draw, as the brief asks. Two independent samples put the ratio's null
-  # mean at 1 / (1 - c) = 2 with k - 1 = 6 (test_pmse_null_calibration), so
-  # [0.3, 3] holds for about 80 % of seeds, not all.
-  _, ratio = pmse_ratio(x, y, cat_idx, seed=3)
-  assert 0.3 <= ratio <= 3.0
+  # One null draw's pMSE ratio is chi^2_{k-1} / (k - 1) with k - 1 = 6 here
+  # (sd 0.58), too wide for a fixed band; the mean of 8 independent null
+  # pairs has sd ~0.2 around 1 (R31 E0), well inside [0.5, 1.6].
+  ratios = [pmse_ratio(x, y, cat_idx, seed=3)[1]]
+  for pair in range(7):
+    src = _orders(np.random.default_rng(201 + 2 * pair), 1000)
+    syn = _orders(np.random.default_rng(202 + 2 * pair), 1000)
+    xp, yp, cp = featurize(src, syn, _order_columns(src))
+    ratios.append(pmse_ratio(xp, yp, cp, seed=3)[1])
+  assert 0.5 <= float(np.mean(ratios)) <= 1.6
 
 
 def test_two_sd_shift_is_detected() -> None:
@@ -460,10 +465,10 @@ def test_missingness_shift_is_detected() -> None:
 
 
 def _implied_k(pmse: float, ratio: float, y: np.ndarray) -> float:
-  """Invert E0 = (k - 1)(1 - c)^2 c / N for k."""
+  """Invert E0 = (k - 1) c (1 - c) / N for k."""
   n = y.size
   c = y.sum() / n
-  return 1.0 + (pmse / ratio) * n / ((1.0 - c)**2 * c)
+  return 1.0 + (pmse / ratio) * n / (c * (1.0 - c))
 
 
 def test_pmse_parameter_count() -> None:
@@ -519,13 +524,13 @@ def _null_ratios(regime: str, reps: int = 60) -> np.ndarray:
 
 
 def test_pmse_null_calibration() -> None:
-  # Snoke et al.'s E0 is the null expectation when the synthetic rows are
-  # drawn from the source sample's own distribution (the resampled regime):
-  # the ratio averages 1. Two independent draws from one distribution add
-  # the source sample's own noise, so it averages 1 / (1 - c) = 2 at equal n.
-  # (k - 1 = 10; each mean is within about 3.4 standard errors.)
-  assert 0.8 <= _null_ratios("resampled").mean() <= 1.2
-  assert 1.6 <= _null_ratios("independent").mean() <= 2.4
+  # E0 = (k - 1) c (1 - c) / N is the null for two independent draws from
+  # one distribution: the ratio averages 1 (Ruling R31). Synthetic rows
+  # resampled from the source rows themselves (only the synthetic side
+  # random, Snoke et al.'s regime) average 1 - c = 0.5 instead.
+  # (k - 1 = 10; each band spans about +-3.4 standard errors of its mean.)
+  assert 0.8 <= _null_ratios("independent").mean() <= 1.2
+  assert 0.4 <= _null_ratios("resampled").mean() <= 0.6
 
 
 def test_pmse_needs_an_informative_feature() -> None:
