@@ -2,7 +2,7 @@
  * The scenario calculator ("amplifier"): inputs on top, then article 8's order
  * — the fidelity math (entropy, deciles, DKW, rare categories, tails, HLL++,
  * null patterns), stress at scale (pool reuse, collisions, PK capacity), the
- * performance anatomy (time from measured runs, warm vs cold, pool economics),
+ * performance anatomy (time from measured runs, pool economics, warm vs cold),
  * rule-based recommendations, and article 2's honest tables on the 10k sample.
  */
 import { AlertTriangle, Info } from "lucide-react";
@@ -26,14 +26,8 @@ import { ScaleCards } from "./ScaleCards";
 const P_CHOICES = [0.01, 0.001, 0.0001, 0.00001];
 const Q_CHOICES = [0.9, 0.99, 0.999, 0.9999];
 
-export function ScenarioCalculator({
-  onOpenKnob,
-  onPreset,
-}: {
-  onOpenKnob: (id: string) => void;
-  onPreset: (id: string) => void;
-}) {
-  const { presetId, inputs, outputs, data, setData, setSetting, applyPreset, recommendations } = useScenario();
+export function ScenarioCalculator({ onOpenKnob }: { onOpenKnob: (id: string) => void }) {
+  const { presetId, custom, inputs, outputs, data, setData, setSetting, applyPreset, recommendations } = useScenario();
 
   return (
     <div className="grid gap-10">
@@ -55,11 +49,7 @@ export function ScenarioCalculator({
             <ToggleGroup
               type="single"
               value={presetId}
-              onValueChange={(id) => {
-                if (!id) return;
-                applyPreset(id);
-                onPreset(id);
-              }}
+              onValueChange={(id) => id && applyPreset(id)}
               aria-labelledby="preset-label"
               className="flex-wrap justify-start"
             >
@@ -69,7 +59,11 @@ export function ScenarioCalculator({
                 </ToggleGroupItem>
               ))}
             </ToggleGroup>
-            {presetId === "custom" ? <p className="text-xs text-text-3">Custom: edited after a preset.</p> : null}
+            {custom ? (
+              <p className="text-xs text-text-3" data-testid="preset-edited">
+                Edited after the preset: the URL carries every change, and a knob's reset returns to this preset.
+              </p>
+            ) : null}
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -91,7 +85,7 @@ export function ScenarioCalculator({
               value={inputs.n}
               concept="knob:reference_rows_limit"
               onCommit={(n) => setSetting("reference_rows_limit", n)}
-              help="--reference_rows_limit (default 10,000)"
+              help={`--reference_rows_limit (default ${formatCount(CONSTANTS.defaultN)})`}
             />
             <div className="grid content-start gap-1">
               <span className="text-xs font-medium text-text-2">Fixed by the code</span>
@@ -167,14 +161,14 @@ export function ScenarioCalculator({
           label="DKW band ε(n), α = 0.05"
           value={outputs.census ? "0 (census)" : formatFixed(outputs.epsilon, 4)}
           concept="stats:dkw"
-          footnote={`n = ${formatCount(outputs.nEff)}: every marginal within ±${formatPercent(outputs.epsilon, 2)} of mass`}
+          footnote={`n = ${formatCount(outputs.nEff)}: each column's CDF within ±${formatPercent(outputs.epsilon, 2)} of mass (per column, 95 %)`}
         />
         <StatTile
-          label="Rows per pool value (M/512)"
+          label={`Rows per pool value (M / ${formatCount(outputs.poolTarget)})`}
           value={Math.round(outputs.poolReuse)}
           format={formatCount}
           concept="stats:pool-reuse"
-          footnote={`${CONSTANTS.poolCap} values at most per free-text column`}
+          footnote={`Pool target min(M, D, ${formatCount(CONSTANTS.poolCap)}) = ${formatCount(outputs.poolTarget)}, D from the ${outputs.poolDistinctVia}`}
         />
         <StatTile
           label="Estimated wall time"
@@ -206,7 +200,7 @@ export function ScenarioCalculator({
         id="scn-perf"
         number="3"
         title="Performance anatomy"
-        lead="How long the run takes, from measured runs (typed once, in the figure scripts), what warming saves, and what persisting pools is worth."
+        lead="How long the run takes, from measured runs (typed once, in the figure scripts); what persisting pools is worth; and what warming saves — article 8's order."
       >
         <PerformanceCards data={data} setData={setData} />
       </Part>

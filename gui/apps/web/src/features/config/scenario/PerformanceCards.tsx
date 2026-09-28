@@ -1,7 +1,7 @@
 /**
  * Part 3 of the calculator — the performance anatomy, from measured runs only:
- * a time estimate extrapolated from the R6/R7 phases, where the minutes of a
- * cold and a warm 10M-row pair went, and what persisting pools is worth.
+ * a time estimate extrapolated from the R6/R7 phases, what persisting pools is
+ * worth, and where the minutes of a cold and a warm pair went (article 8's order).
  * Every number is read from knobs.json `measured` and cites its MEASURED block.
  */
 import type { EChartsOption } from "echarts";
@@ -32,8 +32,8 @@ export function PerformanceCards({ data, setData }: Props) {
   return (
     <div className="grid gap-4">
       <TimeCard data={data} setData={setData} />
-      <WarmColdCard warm={data.warm} />
       <PoolEconomicsCard />
+      <WarmColdCard warm={data.warm} />
     </div>
   );
 }
@@ -149,14 +149,26 @@ function TimeCard({ data, setData }: Props) {
                 "make_throughput_figures.ACCEPT_RUNS",
                 "make_throughput_figures.ROWS_PER_TABLE",
                 "make_throughput_figures.TABLES",
+                "make_throughput_figures.ACCEPT_WORKERS_AT_4_MIN",
               ]}
             />
           }
         />
         <Callout tone="warn" title="An extrapolation, not a promise">
-          Measured on a two-table relational pair on {workers} workers × {vcpus} vCPUs; the estimate assumes the same
-          fleet and a table as wide. A {formatFixed(t.scale, 1)}× extrapolation inherits every assumption.
-          {inputs.uniqueness === "streaming" ? " streaming has no measured barrier, so dedup + load is left out." : ""}
+          <p>
+            Measured on a two-table relational pair on up to {workers} workers × {vcpus} vCPUs, and the fleet was not
+            full from the start: <code className="font-mono">initial_workers</code> was left empty, so the{" "}
+            {t.basis.label} run ramped <span data-testid="fleet-ramp">{t.basis.fleetRamp}</span>. The linear estimate
+            scales that ramp with the rows, so for a fleet pinned full (
+            <code className="font-mono">--initial_workers</code> = max workers,{" "}
+            <code className="font-mono">--autoscaling fixed</code>, the recommendation below) it is an overestimate.
+          </p>
+          <p className="mt-1">
+            A {formatFixed(t.scale, 1)}× extrapolation also assumes tables as wide as the measured ones.
+            {inputs.uniqueness === "streaming"
+              ? " streaming has no measured barrier, so dedup + load is left out."
+              : ""}
+          </p>
         </Callout>
       </CardContent>
     </Card>

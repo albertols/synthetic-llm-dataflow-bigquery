@@ -10,11 +10,16 @@
  *   digest    reference digest to compare across tiers
  *   snapshot  one snapshot key (digest|tier|profiler_version|run_id)
  *   column    source-stats column whose detail is open
+ *   N M n p q tier uniq env K D s sdk warm filter
+ *             scenario inputs that differ from the preset (model/state.tsx),
+ *             so a deep link reproduces the calculator
  */
 import { lazyRouteComponent } from "@tanstack/react-router";
 import { z } from "zod/mini";
 
 const optionalString = z.catch(z.optional(z.string().check(z.maxLength(400))), undefined);
+const optionalNumber = z.catch(z.optional(z.number()), undefined);
+const optionalBoolean = z.catch(z.optional(z.boolean()), undefined);
 
 export const CONFIG_SECTIONS = ["amp", "scenario", "sources", "guardrails"] as const;
 export type ConfigSection = (typeof CONFIG_SECTIONS)[number];
@@ -29,6 +34,20 @@ export const searchSchema = z.object({
   digest: optionalString,
   snapshot: optionalString,
   column: optionalString,
+  N: optionalNumber,
+  M: optionalNumber,
+  n: optionalNumber,
+  p: optionalNumber,
+  q: optionalNumber,
+  tier: optionalString,
+  uniq: optionalString,
+  env: optionalString,
+  K: optionalNumber,
+  D: optionalNumber,
+  s: optionalNumber,
+  sdk: optionalString,
+  warm: optionalBoolean,
+  filter: optionalBoolean,
 });
 export type ConfigSearch = z.infer<typeof searchSchema>;
 

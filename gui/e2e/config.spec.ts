@@ -5,7 +5,7 @@
  * and the guardrails — each checked with axe (WCAG 2.2 AA, serious and
  * critical fail) and for horizontal overflow at 390 px.
  *
- * Screenshots: GUI_SHOTS_DIR=/private/tmp/claude-501/gui-shots/config npx playwright test config -g screenshots
+ * Screenshots: GUI_SHOTS_DIR=/private/tmp/claude-501/gui-shots/config [GUI_SHOTS_SUFFIX=-r1] npx playwright test config -g screenshots
  */
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
@@ -57,6 +57,12 @@ test("amp: dials turn with the keyboard, constants do not, and a knob opens its 
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Knobs, scenarios and source statistics");
   await expect(page.getByRole("heading", { name: "Pipeline amp" })).toBeVisible();
   await expectAxeClean(page, "amp");
+  // Meter labels wrap, never truncate (390 px included).
+  const clipped = await page
+    .getByTestId("meter-bridge")
+    .locator("dt > span")
+    .evaluateAll((spans) => spans.filter((s) => s.scrollWidth > s.clientWidth + 1).map((s) => s.textContent));
+  expect(clipped).toEqual([]);
 
   const dial = page.getByRole("slider", { name: "Reference rows (n)" });
   await expect(dial).toHaveAttribute("aria-valuetext", "10,000 rows");
@@ -116,6 +122,9 @@ test("scenario: the 90M-from-1M-with-a-10k-seed preset and its outputs", async (
   await expect(page.getByTestId("rare-capture")).toHaveText("99.995%");
   await expect(page.getByTestId("tail-points")).toHaveText("10.0");
   await expect(page.getByTestId("distinct-sample")).toHaveText("≤ 470");
+  // ADR 0033 D2: the source filter sizes the pool at the cap without the exact tier.
+  await expect(page.getByTestId("pool-target")).toHaveText("512");
+  await expect(page.getByTestId("fleet-ramp")).toHaveText("1 → 4 @ +26 min");
   await expect(page.getByTestId("pk-pool-dlq")).toHaveText("89,999,488");
   await expect(page.getByTestId("collision-prob")).toHaveText("100%");
   await expect(page.locator('[data-rec="exact-tier"]')).toBeVisible();
@@ -123,13 +132,20 @@ test("scenario: the 90M-from-1M-with-a-10k-seed preset and its outputs", async (
   await expectAxeClean(page, "scenario");
   await expectNoHorizontalScroll(page);
 
-  // The exact tier drops the tier warning; typing M re-computes everything.
+  // The exact tier drops the tier recommendation; typing M re-computes everything.
   await page.getByTestId("preset-exact-tier").click();
   await expect(page.locator('[data-rec="exact-tier"]')).toHaveCount(0);
   const m = page.getByLabel("Target rows M");
   await m.fill("1M");
   await m.blur();
   await expect(page.getByTestId("pk-pool-dlq")).toHaveText("999,488");
+
+  // The scenario lives in the URL: a reload (a deep link) reproduces it.
+  await expect.poll(async () => (await search(page)).M).toBe(1_000_000);
+  expect((await search(page)).scenario).toBe("exact-tier");
+  await page.reload();
+  await expect(page.getByTestId("pk-pool-dlq")).toHaveText("999,488");
+  await expect(page.getByTestId("preset-edited")).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -149,6 +165,9 @@ test("source stats: tiers, the tier compare of one digest and the legacy NULL ti
   const digests = await cards.locator("text=/digest [0-9a-f]{12}/").allTextContents();
   expect(new Set(digests).size).toBe(1);
   await expect(compare.getByRole("row", { name: /email/ })).toContainText("×");
+  await expect(page.getByTestId("tier-compare-lead")).toContainText(
+    /\d+ of \d+ columns agree within the sample's DKW band/,
+  );
   expect(typeof (await search(page)).digest).toBe("string");
   await expectAxeClean(page, "tier compare");
   await expectNoHorizontalScroll(page);
@@ -170,6 +189,7 @@ test("guardrails: lines of defence, DLQ rules as emitted, uniqueness and the env
   await expect(rules.locator('[data-rule="fk.orphan"]')).toContainText("not counted");
   await expect(page.getByText(/Docs differ: fk\.orphan is BLOCKER/)).toBeVisible();
   await expect(page.getByText("Docs differ: what line 3 is")).toBeVisible();
+  await expect(page.getByTestId("dedup-minutes-exact")).toHaveText(/14\.3 min \(single\) · 6\.4 min \(multi\)/);
   const ratios = page.getByTestId("blocker-ratios");
   await expect(ratios).toContainText("20%");
   await expect(ratios).toContainText("5%");
@@ -185,6 +205,7 @@ test("screenshots of the config tab (set GUI_SHOTS_DIR to capture)", async ({ pa
   test.skip(!dir, "GUI_SHOTS_DIR not set");
   test.setTimeout(240_000);
   const width = testInfo.project.name === "mobile" ? 390 : 1440;
+  const suffix = process.env.GUI_SHOTS_SUFFIX ?? "";
   const settle = async () => {
     for (let y = 0; y < 30_000; y += 700) {
       await page.evaluate((top) => window.scrollTo(0, top), y);
@@ -206,17 +227,17 @@ test("screenshots of the config tab (set GUI_SHOTS_DIR to capture)", async ({ pa
     await expect(page.getByTestId(ready)).toBeVisible({ timeout: 60_000 });
     if (name === "guardrails") await expect(page.getByTestId("dlq-rules")).not.toContainText("…", { timeout: 60_000 });
     await settle();
-    await page.screenshot({ path: `${dir}/config-${name}-${width}.png`, fullPage: true });
+    await page.screenshot({ path: `${dir}/config-${name}-${width}${suffix}.png`, fullPage: true });
   }
   await page.goto(`/config?section=sources&table=${USERS}`);
   await expect(page.getByTestId("snapshot-card").first()).toBeVisible({ timeout: 60_000 });
   await page.getByRole("radio", { name: "Tier compare" }).click();
   await expect(page.getByTestId("tier-compare")).toBeVisible({ timeout: 60_000 });
   await settle();
-  await page.screenshot({ path: `${dir}/config-sources-tier-compare-${width}.png`, fullPage: true });
+  await page.screenshot({ path: `${dir}/config-sources-tier-compare-${width}${suffix}.png`, fullPage: true });
 
   await page.goto("/config?knob=reference_rows_limit");
   await expect(page.getByRole("dialog", { name: "Reference rows (n)" })).toBeVisible();
   await page.waitForTimeout(2000);
-  await page.screenshot({ path: `${dir}/config-knob-sheet-${width}.png` });
+  await page.screenshot({ path: `${dir}/config-knob-sheet-${width}${suffix}.png` });
 });

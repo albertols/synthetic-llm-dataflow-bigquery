@@ -9,7 +9,8 @@ import type { ReactNode } from "react";
 
 import { Table, TableBody, TableCell, TableContainer, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
-import { DOCS, docUrl } from "../model/links";
+import { CITES } from "../citations";
+import { sourceUrl } from "../model/links";
 
 /** `code` spans → <code>. */
 function md(text: string): ReactNode {
@@ -162,7 +163,12 @@ export function Article2Tables() {
       <p className="text-sm text-text-2">
         The rule of thumb that falls out of this: do not raise the sample to fix cardinality or privacy — those are
         answered against the table. Raise it when a tail or a rare category matters, and expect a cold run.{" "}
-        <a href={docUrl(DOCS.article2, 262)} target="_blank" rel="noopener noreferrer" className="text-link underline">
+        <a
+          href={sourceUrl(CITES.article2Honest.source)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-link underline"
+        >
           Article 2, the reference sample
           <span className="sr-only"> (opens in a new tab)</span>
         </a>

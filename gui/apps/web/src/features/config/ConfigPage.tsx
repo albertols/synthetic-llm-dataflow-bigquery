@@ -20,7 +20,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AmpPanel } from "./amp/AmpPanel";
 import { KnobSheet } from "./amp/KnobSheet";
 import { Guardrails } from "./guardrails/Guardrails";
-import { ScenarioProvider } from "./model/state";
+import { SCENARIO_PARAM_KEYS, ScenarioProvider, type ScenarioParams } from "./model/state";
 import type { ConfigSearch, ConfigSection } from "./route";
 import { ScenarioCalculator } from "./scenario/ScenarioCalculator";
 import { SourceStatsExplorer } from "./sources/SourceStatsExplorer";
@@ -53,8 +53,13 @@ export function ConfigPage() {
     [patchSearch],
   );
 
+  const onParamsChange = useCallback((params: ScenarioParams) => patchSearch(params, true), [patchSearch]);
+  const initialParams = Object.fromEntries(
+    ["scenario", ...SCENARIO_PARAM_KEYS].map((key) => [key, search[key as keyof ConfigSearch]]),
+  ) as ScenarioParams;
+
   return (
-    <ScenarioProvider initialPreset={search.scenario}>
+    <ScenarioProvider initialParams={initialParams} onParamsChange={onParamsChange}>
       <div className="flex flex-col gap-6">
         <PageHeader
           eyebrow="Config"
@@ -75,7 +80,7 @@ export function ConfigPage() {
             <AmpPanel onOpenKnob={openKnob} />
           </TabsContent>
           <TabsContent value="scenario">
-            <ScenarioCalculator onOpenKnob={openKnob} onPreset={(scenario) => patchSearch({ scenario }, true)} />
+            <ScenarioCalculator onOpenKnob={openKnob} />
           </TabsContent>
           <TabsContent value="sources">
             <SourceStatsExplorer search={search} onSearch={(patch) => patchSearch(patch, true)} />

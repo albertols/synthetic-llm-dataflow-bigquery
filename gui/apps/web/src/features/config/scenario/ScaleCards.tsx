@@ -1,5 +1,5 @@
 /**
- * Part 2 of the calculator — stress at scale: pool reuse (M/512), identifier
+ * Part 2 of the calculator — stress at scale: pool reuse (M / pool target), identifier
  * collisions (the birthday bound) and PK capacity. None of it is a sampling
  * question: M, not n, drives every number here.
  */
@@ -46,8 +46,8 @@ function PoolReuseCard() {
           Pool reuse <InfoHint concept="stats:pool-reuse" />
         </CardTitle>
         <p className="text-sm text-text-2">
-          A free-text pool holds at most {CONSTANTS.poolCap} values, built once per column and digest; every generated
-          row draws from it.
+          A free-text pool holds min(M, D, {formatCount(CONSTANTS.poolCap)}) values, built once per column and digest;
+          every generated row draws from it.
         </p>
       </CardHeader>
       <CardContent className="grid gap-3">
@@ -57,7 +57,7 @@ function PoolReuseCard() {
             value={formatCount(Math.round(outputs.poolReuse))}
             concept="stats:pool-reuse"
             testId="pool-reuse"
-            note={`${formatCount(inputs.M)} rows / ${CONSTANTS.poolCap} values`}
+            note={`${formatCount(inputs.M)} rows / a ${formatCount(outputs.poolTarget)}-value pool (min(M, D, ${formatCount(CONSTANTS.poolCap)}), D from the ${outputs.poolDistinctVia})`}
           />
           <Output
             label="Row documents embedded"
@@ -69,8 +69,8 @@ function PoolReuseCard() {
         <Callout tone="info" title="Memorization and diversity">
           <p>
             Reuse is not memorization: pool values are LLM-written and rejected against the source domain. It caps
-            diversity — a pool column has at most {CONSTANTS.poolCap} distinct values, so identifiers never come from a
-            pool. With --freetext_expansion <code className="font-mono">{expansion}</code>
+            diversity — a pool column has at most {formatCount(CONSTANTS.poolCap)} distinct values, so identifiers never
+            come from a pool. With --freetext_expansion <code className="font-mono">{expansion}</code>
             {expansion === "off"
               ? ", free-text distinct counts stop at the pool size."
               : ", code-like columns expand from their shape mix instead."}
@@ -98,7 +98,7 @@ function PkCapacityCard() {
           <Output
             label="PK routed to a pool: rows lost"
             value={formatCount(outputs.pkPoolDlq)}
-            note={`Only ${CONSTANTS.poolCap} distinct values survive (the pool cap's code comment tells the run that learned it).`}
+            note={`Only ${formatCount(CONSTANTS.poolCap)} distinct values survive (the pool cap's code comment tells the run that learned it).`}
             testId="pk-pool-dlq"
           />
           <Output

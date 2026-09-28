@@ -10,6 +10,7 @@ import {
   estimateTime,
   expectedDistinctUniform,
   poolTarget,
+  poolDistinct,
   PRESETS,
   presetById,
   recommend,
@@ -27,7 +28,7 @@ describe("scenario formulas", () => {
     expect(Math.log(40) / (2 * 0.01 ** 2)).toBeCloseTo(18_444, 0);
   });
 
-  it("rows to see a share-p category ≈ 3/p, to estimate it 100/p", () => {
+  it("rows to see a share-p category ≈ 3/p, for a 10 % relative SE 100/p", () => {
     expect(rowsToSee(0.001)).toBe(2_995);
     expect(rowsToSee(0.01)).toBe(299);
     expect(rowsForTail(0.999)).toBe(20_000);
@@ -95,11 +96,38 @@ describe("the 90M / 1M / 10k preset", () => {
     expect(out.rowDocShare).toBeCloseTo(1_024 / 10_000, 12);
   });
 
-  it("truncates the sparse column's distinct count on the sample tier", () => {
+  it("truncates the sparse column's distinct count in the sample-tier statistics", () => {
     expect(out.distinctSample).toBeCloseTo(470.2, 0);
     expect(out.distinctExact).toBe(4_022);
-    expect(out.poolTargetSample).toBe(470);
-    expect(out.poolTargetExact).toBe(512);
+  });
+
+  it("sizes the pool as the code does: exact stats → source filter → sample (ADR 0033 D2)", () => {
+    // The pool layer attaches a source-value store: the filter's cardinality sizes the pool, no exact tier needed.
+    expect(out.poolDistinctVia).toBe("source filter");
+    expect(out.poolTarget).toBe(512);
+    expect(out.poolTargetSampleOnly).toBe(470);
+    // No store: the sample distinct sizes it.
+    const noStore = computeScenario({ ...preset90m, sourceFilter: false });
+    expect(noStore.poolDistinctVia).toBe("sample");
+    expect(noStore.poolTarget).toBe(470);
+    expect(noStore.poolReuse).toBeCloseTo(90_000_000 / 470, 6);
+    // Above the store's cap the filter reports unavailable.
+    const huge = computeScenario({ ...preset90m, columnDistinct: CONSTANTS.sourceDomainCap + 1 });
+    expect(huge.poolDistinctVia).toBe("sample");
+    // The exact tier comes first.
+    expect(computeScenario({ ...preset90m, tier: "exact", sourceFilter: false }).poolDistinctVia).toBe("exact stats");
+    expect(poolDistinct({ tier: "exact", sourceFilter: false, columnDistinct: 94 }, 10)).toEqual({
+      distinct: 94,
+      via: "exact stats",
+    });
+  });
+
+  it("the exact-tier recommendation is informational when the source filter sizes the pool, a warning when the sample does", () => {
+    const rec = recommend(preset90m, out).find((r) => r.id === "exact-tier")!;
+    expect(rec.tone).toBe("info");
+    expect(rec.cite).toMatchObject({ path: "docs/adr/0033-pool-ladder-integrity-at-scale.md", line: 58 });
+    const noStore = { ...preset90m, sourceFilter: false };
+    expect(recommend(noStore, computeScenario(noStore)).find((r) => r.id === "exact-tier")?.tone).toBe("warn");
   });
 
   it("collides almost surely in a 10^12 keyspace; K must exceed M²/2", () => {
@@ -129,6 +157,10 @@ describe("the 90M / 1M / 10k preset", () => {
     const multi = estimateTime({ ...preset90m, sdkContainers: "multi" });
     expect(multi.basis.label).toContain("R7 multi");
     expect(multi.totalMin).toBeCloseTo(12.4 + 12.9 + 17.1 * 4.5 + 6.4 * 4.5, 9);
+    // The basis runs did not start full (ACCEPT_WORKERS_AT_4_MIN): the estimate says so.
+    expect(t.basis.fleetRamp).toBe("1 → 4 @ +26 min");
+    expect(multi.basis.fleetRamp).toBe("1 → 2 @ +29, 4 @ +37 min");
+    expect(recommend(preset90m, out).find((r) => r.id === "fleet")?.why).toContain("1 → 4 @ +26 min");
   });
 
   it("warm runs drop the pool branch; streaming has no measured barrier", () => {

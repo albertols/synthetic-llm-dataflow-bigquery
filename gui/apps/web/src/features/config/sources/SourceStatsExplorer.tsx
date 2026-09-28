@@ -296,7 +296,7 @@ function SnapshotCard({ snapshot: s }: { snapshot: SourceStatsSnapshot }) {
           {s.tier === "sample" && s.sample_rows ? (
             <>
               <dt className="flex items-center gap-1 text-text-3">
-                DKW band <InfoHint concept="stats:dkw" />
+                DKW band (fractions) <InfoHint concept="stats:dkw" />
               </dt>
               <dd className="font-mono text-text-1">± {formatFixed(dkwEpsilon(s.sample_rows), 4)}</dd>
             </>
@@ -356,16 +356,19 @@ function TierCompare({
 }) {
   const eps = sampleRows > 0 ? dkwEpsilon(sampleRows) : null;
   const truncated = rows.filter((r) => (r.truncation ?? 1) > 1.5);
+  const compared = rows.filter((r) => r.nullWithinBand !== null);
+  const within = compared.filter((r) => r.nullWithinBand).length;
   return (
     <section aria-labelledby="src-compare" className="grid gap-3" data-testid="tier-compare">
       <h2 id="src-compare" className="flex items-center gap-1 text-lg font-semibold text-text-1">
         One digest, both tiers <InfoHint concept="stats:distinct-truncation" />
       </h2>
-      <p className="max-w-3xl text-sm text-text-2">
-        The same reference sample profiled twice: fractions agree within the DKW band (±
-        {eps === null ? MISSING : formatFixed(eps, 4)} at n = {formatCount(sampleRows)}), distinct counts do not —{" "}
-        {truncated.length} of {rows.length} columns saw fewer than two thirds of their true distinct values in the
-        sample.
+      <p className="max-w-3xl text-sm text-text-2" data-testid="tier-compare-lead">
+        One reference digest, two profiles: the sample tier profiled the {formatCount(sampleRows)}-row reference sample;
+        the exact tier merged one aggregate scan of the whole table into it. Null fractions: {within} of{" "}
+        {compared.length} columns agree within the sample's DKW band (±{eps === null ? MISSING : formatFixed(eps, 4)})
+        {compared.length - within ? `, ${compared.length - within} do not` : ""}. Distinct counts: {truncated.length} of{" "}
+        {rows.length} columns saw fewer than two thirds of their whole-table distinct values in the sample.
       </p>
       <TableContainer aria-label="Sample tier vs exact tier, per column">
         <Table>

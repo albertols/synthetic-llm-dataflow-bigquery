@@ -13,10 +13,10 @@ vi.mock("@/components/EChartCanvas", () => ({
   default: ({ ariaLabel }: { ariaLabel: string }) => <div data-testid="echart-canvas" aria-label={ariaLabel} />,
 }));
 
-function Harness({ channel = "all" }: { channel?: string }) {
+function Harness({ channel = "all", preset = "90m-from-1m" }: { channel?: string; preset?: string }) {
   const [knob, setKnob] = useState<string | undefined>();
   return (
-    <ScenarioProvider initialPreset="90m-from-1m">
+    <ScenarioProvider initialParams={{ scenario: preset }}>
       <AmpPanel onOpenKnob={setKnob} initialChannel={channel} />
       <KnobSheet knobId={knob} onClose={() => setKnob(undefined)} />
     </ScenarioProvider>
@@ -126,5 +126,18 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
 
     const planned = screen.getByRole("button", { name: /^Evaluation mode: exact$/ });
     expect(planned).toHaveAccessibleDescription(/Planned: the evaluator CLI is not shipped yet/);
+  });
+
+  it("a reset returns to the ACTIVE preset, not the default one", async () => {
+    const user = userEvent.setup();
+    render(<Harness channel="generation" preset="census" />);
+    const dial = screen.getByRole("slider", { name: "Rows to generate (M)" });
+    expect(dial).toHaveAttribute("aria-valuetext", "1,000,000 rows");
+    dial.focus();
+    await user.keyboard("{ArrowUp}{Enter}");
+    const sheet = await screen.findByRole("dialog", { name: "Rows to generate (M)" });
+    expect(within(sheet).getByTestId("knob-sheet-value")).toHaveTextContent("2,000,000 rows");
+    await user.click(within(sheet).getByRole("button", { name: /Reset to the Small source \(census zone\) preset/ }));
+    expect(within(sheet).getByTestId("knob-sheet-value")).toHaveTextContent("1,000,000 rows");
   });
 });

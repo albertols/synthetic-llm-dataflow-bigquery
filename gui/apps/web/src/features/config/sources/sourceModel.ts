@@ -32,6 +32,22 @@ export function shortDigest(digest: string): string {
   return digest.slice(0, 12);
 }
 
+/**
+ * The values a column's deciles are computed over: the substantive rows,
+ * n·(1 − null − empty) (source_stats.py `_add_numeric` sorts only non-null,
+ * non-empty values). The DKW band of the deciles uses this n; the null-rate
+ * Wilson interval keeps all rows.
+ */
+export function decileValueCount(row: {
+  sample_rows: number | null;
+  null_fraction: number | null;
+  empty_fraction: number | null;
+}): number {
+  const rows = row.sample_rows ?? 0;
+  const share = 1 - (row.null_fraction ?? 0) - (row.empty_fraction ?? 0);
+  return Math.max(0, Math.round(rows * Math.min(1, Math.max(0, share))));
+}
+
 /** Linear interpolation through an ascending 11-point decile vector at rank p ∈ [0, 1]. */
 export function quantileAt(deciles: readonly number[], p: number): number | null {
   if (deciles.length < 2 || deciles.some((d) => !Number.isFinite(d))) return null;

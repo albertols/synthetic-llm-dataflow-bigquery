@@ -20,7 +20,8 @@ import { useTheme } from "@/lib/theme";
 import { CodeLink } from "../CodeLink";
 import { compact, lineOption, logSpace, pctFormat, pctLogFormat } from "../charts";
 import { ANNOTATIONS, knobNumber } from "../model/knobs";
-import { DOCS } from "../model/links";
+import { CITES } from "../citations";
+import { DOCS, sourceUrl } from "../model/links";
 import { ALPHA, CONSTANTS, TAIL_POINTS_WANTED, expectedDistinctUniform } from "../model/scenario";
 import { useScenario, type ScenarioData } from "../model/state";
 import { CountField, DocFigure, Output } from "../ui";
@@ -211,8 +212,11 @@ function DecilesCard() {
         <CardTitleWithHint title="Deciles and the inverse CDF" concept="stats:deciles" />
         <p className="text-sm text-text-2">
           Draw u uniformly, read x = F⁻¹(u): dense regions catch most draws, so a skewed marginal survives where
-          uniform-in-range would flatten it. On the sample tier every decile's mass is within ±
-          {outputs.census ? "0" : formatFixed(outputs.epsilon, 4)} (the DKW band at n = {formatCount(outputs.nEff)}).
+          uniform-in-range would flatten it. On the sample tier each decile's mass is within ±ε(n<sub>v</sub>), where n
+          <sub>v</sub> = n·(1 − null − empty) counts only the values the deciles are computed over: ±
+          {outputs.census ? "0" : formatFixed(outputs.epsilon, 4)} with no nulls at n = {formatCount(outputs.nEff)}, ±
+          {outputs.census ? "0" : formatFixed(dkwEpsilon(outputs.nEff * 0.5, ALPHA), 4)} if half the rows are null or
+          empty.
         </p>
       </CardHeader>
       <CardContent className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
@@ -403,7 +407,11 @@ function RareCard() {
           />
           <Output label="Expected rows in sample" value={formatFixed(outputs.rareExpectedRows, 1)} />
           <Output label="n to see it (95 %)" value={formatCount(outputs.rowsToSee)} note="≈ 3/p" />
-          <Output label="n to estimate ±10 %" value={formatCount(outputs.rowsToEstimate)} note="≈ 100/p" />
+          <Output
+            label="n for a 10 % relative SE"
+            value={formatCount(outputs.rowsToEstimate)}
+            note="≈ 100/p (one SE ≈ 68 %, not 95 %)"
+          />
         </dl>
         <DocFigure
           file="rare-category-coverage.png"
@@ -491,7 +499,7 @@ const SHARES = [1, 0.5, 0.05, 0.01];
 
 function DistinctCard({ data, setData }: Props) {
   const { resolved } = useTheme();
-  const { inputs, outputs } = useScenario();
+  const { outputs } = useScenario();
   const n = outputs.nEff;
   const s = data.nonEmptyShare;
   const rows = useMemo(
@@ -514,7 +522,7 @@ function DistinctCard({ data, setData }: Props) {
           yName: "distinct reported",
           series: [
             { name: "exact tier (HLL++)", y: "exact" },
-            { name: "sample tier", y: "sample" },
+            { name: "sample tier (upper bound)", y: "sample" },
           ],
           markers: [{ x: data.columnDistinct, label: `D = ${compact(data.columnDistinct)}` }],
           xFormatter: compact,
@@ -524,21 +532,35 @@ function DistinctCard({ data, setData }: Props) {
       ),
     [data.columnDistinct, resolved],
   );
+  const adr = (
+    <a
+      href={sourceUrl(CITES.adr0033D2.source)}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-link underline"
+    >
+      ADR 0033 D2<span className="sr-only"> (opens in a new tab)</span>
+    </a>
+  );
+  const cap = formatCount(CONSTANTS.sourceDomainCap);
   return (
     <Card>
       <CardHeader>
-        <CardTitleWithHint title="Cardinality: why --source_stats exact" concept="stats:distinct-truncation" />
+        <CardTitleWithHint title="Cardinality: what the sample tier cannot count" concept="stats:distinct-truncation" />
         <p className="text-sm text-text-2">
-          Fractions and deciles are DKW-bounded; a distinct count has no such bound. The sample tier reports at most the
-          non-empty rows it saw, and the b1 pool target is min(M, distinct, {CONSTANTS.poolCap}).
+          Fractions and deciles are DKW-bounded; a distinct count has no such bound. The sample tier's statistics report
+          at most the non-empty rows the sample saw — only the exact tier (one HLL++ scan) records the true count. Pool
+          sizing is a separate question: <code className="font-mono">_pool_target</code> takes its distinct count from
+          the exact stats, else the source filter's cardinality, else the sample ({adr}), then caps it at min(M, D,{" "}
+          {formatCount(CONSTANTS.poolCap)}).
         </p>
       </CardHeader>
       <CardContent className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div className="grid gap-3">
           <ChartFrame
-            title="Distinct values each tier reports"
+            title="Distinct values each tier's statistics report"
             concept="stats:hll"
-            description={`Sample tier: expected distinct in n·s = ${formatCount(Math.round(n * s))} uniform draws (an upper bound; skew lowers it).`}
+            description={`Sample tier: expected distinct in n·s = ${formatCount(Math.round(n * s))} uniform draws — a uniform model, so an upper bound; skew lowers it.`}
             option={option}
             data={rows}
             height={240}
@@ -567,28 +589,64 @@ function DistinctCard({ data, setData }: Props) {
                 ))}
               </ToggleGroup>
             </div>
+            <div className="grid content-start gap-1.5 sm:col-span-2">
+              <span id="filter-label" className="text-xs font-medium text-text-2">
+                Source-value store attached (the pool layer, or a source-values table)
+              </span>
+              <ToggleGroup
+                type="single"
+                value={data.sourceFilter ? "yes" : "no"}
+                onValueChange={(v) => v && setData({ sourceFilter: v === "yes" })}
+                aria-labelledby="filter-label"
+                className="justify-start"
+              >
+                <ToggleGroupItem value="yes">attached</ToggleGroupItem>
+                <ToggleGroupItem value="no">none</ToggleGroupItem>
+              </ToggleGroup>
+            </div>
           </div>
         </div>
         <div className="grid content-start gap-3">
           <dl className="grid grid-cols-2 gap-3" data-testid="distinct-outputs">
             <Output
-              label="Sample tier sees"
+              label="Sample-tier statistics see"
               value={`≤ ${formatCount(Math.round(outputs.distinctSample))}`}
               concept="stats:distinct-truncation"
               testId="distinct-sample"
             />
             <Output label="Exact tier counts" value={formatCount(outputs.distinctExact)} concept="stats:hll" />
-            <Output label="Pool target (sample)" value={formatCount(outputs.poolTargetSample)} />
-            <Output label="Pool target (exact)" value={formatCount(outputs.poolTargetExact)} />
+            <Output
+              label="Pool target"
+              value={formatCount(outputs.poolTarget)}
+              note={`D from the ${outputs.poolDistinctVia}`}
+              testId="pool-target"
+            />
+            <Output
+              label="From the sample alone"
+              value={formatCount(outputs.poolTargetSampleOnly)}
+              note={`no store, or D above its ${cap} cap`}
+            />
           </dl>
-          {inputs.tier === "exact" ? (
+          {outputs.poolDistinctVia === "exact stats" ? (
             <Callout tone="info" title="Exact tier on">
-              One aggregate scan counts distinct with HLL++ (about 0.5 % typical error) and lifts the pool target.
+              One aggregate scan counts distinct with HLL++ (about 0.5 % typical error): the statistics carry the true
+              count, and it sizes the pool first.
+            </Callout>
+          ) : outputs.poolDistinctVia === "source filter" ? (
+            <Callout tone="info" title="The pool is sized from the source filter">
+              The source-value store holds this column's full distinct set ({formatCount(outputs.distinctExact)} values,
+              under its {cap} cap), so the pool target is {formatCount(outputs.poolTarget)} without the exact tier (
+              {adr}; the R6 column went 94 → 512 this way). The sample tier's statistics still report ≤{" "}
+              {formatCount(Math.round(outputs.distinctSample))}: --source_stats exact fixes the statistics.
             </Callout>
           ) : (
-            <Callout tone="warn" title={`Tier: ${inputs.tier}`}>
-              The pool target is sized from the sample: the R6 pair sized a pool at 94 while the source held 4,022 (ADR
-              0033, before the source-filter fallback). Turn the amp's source_stats to exact.
+            <Callout tone="warn" title="This pool is sized from the sample">
+              {data.sourceFilter
+                ? `The column's ${formatCount(outputs.distinctExact)} distinct values exceed the store's ${cap} cap, so the filter reports unavailable`
+                : "No source-value store is attached"}{" "}
+              and <code className="font-mono">_pool_target</code> falls back to the sample distinct:{" "}
+              {formatCount(outputs.poolTargetSampleOnly)} (the R6 pair's 94-of-4,022 case before {adr}). --source_stats
+              exact sizes it from the HLL++ count.
             </Callout>
           )}
         </div>

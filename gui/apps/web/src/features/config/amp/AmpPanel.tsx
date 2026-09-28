@@ -192,8 +192,8 @@ export function MeterBridge({ className }: { className?: string }) {
     >
       {meters.map((m) => (
         <div key={m.label} className="flex min-w-0 flex-col gap-0.5 bg-bg px-3 py-2">
-          <dt className="flex items-center gap-0.5 font-mono text-[10px] tracking-widest text-text-3 uppercase">
-            <span className="truncate">{m.label}</span>
+          <dt className="flex items-start gap-0.5 font-mono text-[10px] leading-tight tracking-wider text-text-3 uppercase">
+            <span className="min-w-0 pt-1.5 [overflow-wrap:anywhere]">{m.label}</span>
             {m.concept ? <InfoHint concept={m.concept} /> : null}
           </dt>
           <dd className="truncate font-mono text-base text-accent-text">{m.value}</dd>
@@ -210,6 +210,7 @@ function Legend() {
     { label: "fixed screw", d: <ScrewGlyph /> },
     { label: "readout", d: <ReadoutGlyph /> },
     { label: "jack", d: <JackGlyph /> },
+    { label: "planned", d: <PlannedGlyph /> },
   ];
   return (
     <ul className="flex flex-wrap items-center gap-x-3 gap-y-1" aria-label="Panel parts">
@@ -253,6 +254,13 @@ function ReadoutGlyph() {
     <svg viewBox="0 0 16 16" className={glyph} aria-hidden="true">
       <rect x="1" y="4.5" width="14" height="7" rx="1.5" fill="var(--bg)" stroke="var(--border-strong)" />
       <line x1="4" y1="8" x2="12" y2="8" stroke="var(--accent-text)" strokeWidth="1.5" />
+    </svg>
+  );
+}
+function PlannedGlyph() {
+  return (
+    <svg viewBox="0 0 16 16" className={glyph} aria-hidden="true">
+      <circle cx="8" cy="8" r="6.5" fill="var(--surface-2)" stroke="var(--control-border)" strokeDasharray="2 2" />
     </svg>
   );
 }

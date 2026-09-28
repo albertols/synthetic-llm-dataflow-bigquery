@@ -32,6 +32,7 @@ import {
   SCENARIO_KNOBS,
   SETTABLE_LABEL,
 } from "../model/knobs";
+import { presetById } from "../model/scenario";
 import { useScenario } from "../model/state";
 import { settableText } from "./KnobControl";
 import { KnobChart } from "./knobCharts";
@@ -79,13 +80,16 @@ function Section({ title, concept, children }: { title: string; concept?: string
 }
 
 function KnobSheetBody({ knob: k }: { knob: Knob }) {
-  const { settings, inputs, setSetting, resetSetting } = useScenario();
+  const { settings, inputs, setSetting, resetSetting, presetValue, presetId } = useScenario();
   const guide = knobGuides[k.id as KnobId];
   const kind = kindOf(k);
   const value = settings[k.id] ?? k.value;
   const channel = CHANNELS.find((c) => c.id === k.channel);
   const annotations = annotationsFor(k.id);
-  const changed = JSON.stringify(value) !== JSON.stringify(k.value);
+  // A reset returns to the ACTIVE preset's value (the code default for knobs no preset sets).
+  const resetTo = presetValue(k.id);
+  const changed = JSON.stringify(value) !== JSON.stringify(resetTo);
+  const presetSets = JSON.stringify(resetTo) !== JSON.stringify(k.value);
   const live = (SCENARIO_KNOBS as readonly string[]).includes(k.id);
 
   return (
@@ -137,7 +141,8 @@ function KnobSheetBody({ knob: k }: { knob: Knob }) {
         {changed ? (
           <Button size="sm" variant="ghost" className="justify-self-start" onClick={() => resetSetting(k.id)}>
             <RotateCcw aria-hidden="true" />
-            Reset to {k.id === "num_rows" ? "the preset" : "the code default"}
+            Reset to {presetSets ? `the ${presetById(presetId).label} preset` : "the code default"} (
+            {formatKnobValue(k, resetTo)})
           </Button>
         ) : null}
       </Section>

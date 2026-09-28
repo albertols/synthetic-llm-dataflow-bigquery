@@ -72,6 +72,25 @@ const code = (label: string, path: string, line?: number): ConceptLink => ({
 const paper = (label: string, url: string): ConceptLink => ({ label, url, kind: "paper" });
 const adr = (number: string): ConceptLink => adrLink(number)!;
 
+/** Code constants the copy quotes, read from knobs.json (never retyped). */
+function knobNumber(id: KnobId): number {
+  const value = knobsFile.knobs.find((k) => k.id === id)?.value;
+  if (typeof value !== "number") throw new Error(`knobs.json: ${id} is not numeric`);
+  return value;
+}
+const fmt = (v: number) => v.toLocaleString("en-US");
+const POOL_CAP = knobNumber("free_text_pool_max");
+const ROW_DOCS = knobNumber("max_row_doc_rows");
+const TOP_K = knobNumber("rag_top_k");
+const N_DEFAULT = knobNumber("reference_rows_limit");
+const MARGIN = knobNumber("fk_key_sample_margin");
+const SOURCE_CAP = knobNumber("source_domain_cap");
+/** DKW ε at the default n, α = 0.05. */
+const EPS_DEFAULT = Math.sqrt(Math.log(40) / (2 * N_DEFAULT)).toFixed(4);
+/** Duplicate share of M uniform draws from K = MARGIN·M: 1 − MARGIN·(1 − e^(−1/MARGIN)). */
+const DUP_AT_MARGIN = `${((1 - MARGIN * -Math.expm1(-1 / MARGIN)) * 100).toFixed(1)} %`;
+const TEX_POOL_CAP = fmt(POOL_CAP).replace(/,/g, "{,}");
+
 const P = {
   dkw: paper("Dvoretzky, Kiefer & Wolfowitz 1956 — the DKW inequality", "https://doi.org/10.1214/aoms/1177728174"),
   massart: paper("Massart 1990 — the tight DKW constant", "https://doi.org/10.1214/aop/1176990746"),
@@ -143,7 +162,7 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
     up: "A smaller DKW band (four times the rows per halving), better tails and rare categories. A new digest makes the run cold: every pool and chunk rebuilds, and driver memory and profiling time grow linearly.",
     down: "A cheaper sample query and a smaller leak surface, but rare categories and tails vanish first. Cardinality stays truncated at n either way.",
     tip: "Raise it when a tail or a rare category matters and expect a cold run; answer cardinality with --source_stats exact, never with a bigger sample.",
-    formula: "\\varepsilon(n) = \\sqrt{\\frac{\\ln(2/\\alpha)}{2n}},\\quad \\varepsilon(10^4) \\approx 0.0136",
+    formula: `\\varepsilon(n) = \\sqrt{\\frac{\\ln(2/\\alpha)}{2n}},\\quad \\varepsilon(${fmt(N_DEFAULT).replace(/,/g, "{,}")}) \\approx ${EPS_DEFAULT}`,
     refs: [
       P.dkw,
       P.massart,
@@ -221,7 +240,7 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
     up: "More rows reuse each pool value more often and tighten identifier keyspaces; time grows linearly.",
     down: "Faster runs; the fidelity per row does not change, because the sample, not M, sets the error.",
     tip: "M never enters the sampling-error formula: it only raises the cost of being wrong.",
-    formula: "r_{\\text{pool}} = \\frac{M}{512},\\qquad P_{\\text{collision}} \\approx 1 - e^{-M(M-1)/2K}",
+    formula: `r_{\\text{pool}} = \\frac{M}{\\min(M,\\ D,\\ ${TEX_POOL_CAP})},\\qquad P_{\\text{collision}} \\approx 1 - e^{-M(M-1)/2K}`,
   },
   similarity: {
     purpose:
@@ -287,7 +306,7 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
     up: "More diversity per column, at LLM cost linear in the pool size.",
     down: "Cheaper pools; M rows reuse each value M/cap times.",
     tip: "Identifiers never come from pools: shape expansion and keyspace generation carry them.",
-    formula: "r = \\frac{M}{512}\\ \\text{rows per value}",
+    formula: `r = \\frac{M}{\\min(M,\\ D,\\ ${TEX_POOL_CAP})}\\ \\text{rows per value}`,
   },
   pool_values_per_call: {
     purpose: "Values requested per LLM call: one JSON-array completion.",
@@ -360,11 +379,10 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
       "The shape-preserving expander after pool draws: off (pool draws only), identifiers (code-like columns expand from their shape mix) or all.",
     up: "all also mutates digit runs inside texty draws: more distinct values, never an LLM call.",
     down: "off caps every free-text column's distinct count at the pool size.",
-    tip: "The default, identifiers, is what keeps a 90M-row run from repeating 512 codes.",
+    tip: `The default, identifiers, is what keeps a 90M-row run from repeating ${fmt(POOL_CAP)} codes.`,
   },
   pool_seed_strategy: {
-    purpose:
-      "How the 8 prompt seeds are chosen: centroid (densest region), kcenter (spans the column's modes) or kcenter_rotate (re-seeded per attempt).",
+    purpose: `How the ${TOP_K} prompt seeds are chosen: centroid (densest region), kcenter (spans the column's modes) or kcenter_rotate (re-seeded per attempt).`,
     up: "kcenter and kcenter_rotate widen coverage of rare modes; rotate forfeits vLLM prefix caching by design.",
     down: "centroid (control) keeps a byte-identical prefix and conditions on the densest region.",
     refs: [P.vllmApc],
@@ -403,7 +421,7 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
   },
   max_free_text_values_per_column: {
     purpose: "Distinct (column, value) chunks embedded per free-text column; a near-unique column stays bounded here.",
-    up: "More candidates for the top-8 exemplar pick, more embedding work.",
+    up: `More candidates for the top-${TOP_K} exemplar pick, more embedding work.`,
     down: "Fewer candidates; rare values are less likely to be seeds.",
     tip: CODE_EDIT,
   },
@@ -449,7 +467,7 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
     purpose:
       "Populate synthetic_rag.rag_chunks from this run's reference sample (skipped when the digest is already present for this embedder).",
     up: "true: chunks and vectors persist, and later runs read them instead of re-embedding.",
-    down: "empty: the engine embeds its 1,024 rows in setup on every fresh digest.",
+    down: `empty: the engine embeds its ${fmt(ROW_DOCS)} rows in setup on every fresh digest.`,
     tip: "The Composer DAG defaults it to true.",
   },
   // -------------------------------------------------------------- GUARDRAILS
@@ -558,11 +576,10 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
     tip: CODE_EDIT,
   },
   fk_key_sample_margin: {
-    purpose:
-      "The capacity target over num_rows when PK members are drawn at random: at 10×, expected duplicates are about 4.8 %.",
+    purpose: `The capacity target over num_rows when PK members are drawn at random: at ${MARGIN}×, expected duplicates are about ${DUP_AT_MARGIN}.`,
     up: "Fewer duplicate draws, larger side inputs.",
     down: "More pk.duplicate rows diverted to the DLQ.",
-    formula: "\\text{dup share} = 1 - \\frac{K}{M}\\left(1 - e^{-M/K}\\right),\\quad K = 10M \\Rightarrow 4.8\\%",
+    formula: `\\text{dup share} = 1 - \\frac{K}{M}\\left(1 - e^{-M/K}\\right),\\quad K = ${MARGIN} \\cdot M \\Rightarrow ${DUP_AT_MARGIN.replace(" %", "\\%")}`,
   },
   max_conditional_values_per_request: {
     purpose:
@@ -710,9 +727,9 @@ const statsConcepts: Concept[] = [
     formula:
       "P\\left(\\sup_x |\\hat F_n(x) - F(x)| > \\varepsilon\\right) \\le 2e^{-2n\\varepsilon^2} \\;\\Rightarrow\\; \\varepsilon = \\sqrt{\\frac{\\ln(2/\\alpha)}{2n}}",
     interpretation: {
-      good: "n = 10,000 pins every marginal to ±0.0136 of mass at 95 % confidence, whatever the source size.",
+      good: `n = ${fmt(N_DEFAULT)} pins each column's marginal to ±${EPS_DEFAULT} of mass at 95 % confidence, whatever the source size.`,
       bad: "Halving the band costs four times the rows, forever.",
-      tip: "Fidelity thresholds tighter than about 2ε test sampling noise, not the generator.",
+      tip: "The 95 % holds per column: across many columns at once, some column misses its band more often. Thresholds tighter than about 2ε test sampling noise, not the generator.",
     },
     diagram: "config:dkw-band",
     links: [P.dkw, P.massart, doc("Reference-sample scaling §3.1", SCALING)],
@@ -734,11 +751,12 @@ const statsConcepts: Concept[] = [
     title: "Rare-category capture",
     purpose:
       "The probability that a category with share p appears at least once in n rows. A category absent from the sample is absent from all generated output.",
-    formula: "P(\\text{seen}) = 1 - (1 - p)^n,\\qquad n_{95\\%} \\approx 3/p,\\qquad n_{\\pm10\\%} \\approx 100/p",
+    formula:
+      "P(\\text{seen}) = 1 - (1 - p)^n,\\qquad n_{95\\%} \\approx 3/p,\\qquad \\frac{\\mathrm{SE}(\\hat p)}{p} \\approx \\frac{1}{\\sqrt{np}} = 10\\% \\iff n \\approx 100/p",
     interpretation: {
       good: "At n = 10k a 1 % category is well estimated.",
       bad: "A 0.01 % category is a coin flip to exist in the sample.",
-      tip: "Good–Turing: the unseen mass is about singletons/n, a per-column diagnostic.",
+      tip: "100/p buys a 10 % relative standard error — about 68 % confidence, not 95 %. Good–Turing: the unseen mass is about singletons/n, a per-column diagnostic.",
     },
     diagram: "config:rare-capture",
     links: [P.good, doc("Reference-sample scaling §3.2", SCALING)],
@@ -759,12 +777,11 @@ const statsConcepts: Concept[] = [
   },
   {
     id: "stats:pool-reuse",
-    title: "Pool reuse M/512",
-    purpose:
-      "A free-text pool holds at most 512 distinct values, so M generated rows reuse each value about M/512 times. It bounds a column's diversity, not its fidelity.",
-    formula: "r = \\frac{M}{\\min(M,\\ D,\\ 512)}",
+    title: "Pool reuse",
+    purpose: `A free-text pool holds min(M, D, ${fmt(POOL_CAP)}) values (the code's pool target), so M generated rows reuse each value M divided by that many times. It bounds a column's diversity, not its fidelity.`,
+    formula: `r = \\frac{M}{\\min(M,\\ D,\\ ${TEX_POOL_CAP})}`,
     interpretation: {
-      bad: "At 90M rows each value repeats about 175,781 times: a pool column can never carry identifiers.",
+      bad: `At 90M rows and a full pool each value repeats about ${fmt(Math.round(90_000_000 / POOL_CAP))} times: a pool column can never carry identifiers.`,
       tip: "Shape expansion (--freetext_expansion) and keyspace generation carry high-cardinality columns.",
     },
     links: [adr("0018"), adr("0020"), doc("Reference-sample scaling §6.1", SCALING)],
@@ -785,13 +802,24 @@ const statsConcepts: Concept[] = [
     id: "stats:distinct-truncation",
     title: "Sample-tier distinct truncation",
     purpose:
-      "A sample of n rows can never report more than n distinct values, and a sparse column far fewer. No inequality bounds the gap: only the whole table does.",
-    formula: "\\hat D_{\\text{sample}} \\le \\min(D,\\ n\\,s),\\qquad E[\\hat D] = D\\left(1 - (1 - 1/D)^{ns}\\right)",
+      "A sample of n rows can never report more than n distinct values, and a sparse column far fewer; no inequality bounds the gap. The sample tier's statistics keep that truncated count, and only the exact tier (the whole table) records the true one.",
+    formula:
+      "\\hat D_{\\text{sample}} \\le \\min(D,\\ n\\,s),\\qquad E[\\hat D] \\le D\\left(1 - (1 - 1/D)^{ns}\\right)\\ \\text{(uniform model: an upper bound)}",
     interpretation: {
       bad: "The R6 pair sized a pool from the sample: 94 distinct seen, 4,022 in the source (ADR 0033).",
-      tip: "--source_stats exact counts distinct with HLL++ in one scan and lifts the pool target.",
+      tip: `Pools no longer starve on it: _pool_target takes exact stats, else the source filter's cardinality, else the sample distinct (ADR 0033 D2). The sample sizes a pool only with no source-value store attached, or above the store's ${fmt(SOURCE_CAP)}-value cap.`,
     },
-    links: [adr("0022"), adr("0033"), P.hurlbert, doc("Source-table stats — why two tiers", STATS_DOC)],
+    links: [
+      adr("0022"),
+      {
+        label: "ADR 0033 D2 — the pool target's distinct count",
+        url: blob("docs/adr/0033-pool-ladder-integrity-at-scale.md", 58),
+        kind: "adr",
+      },
+      code("_pool_target (b1 engine)", "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py", 1569),
+      P.hurlbert,
+      doc("Source-table stats — why two tiers", STATS_DOC),
+    ],
   },
   {
     id: "stats:hll",
@@ -837,7 +865,7 @@ const statsConcepts: Concept[] = [
       "The profiler stores 11 quantile points p0…p100; drawing u ~ U(0, 1) and reading x = F⁻¹(u) reproduces a skewed marginal that uniform-in-range would flatten.",
     formula: "X = F^{-1}(U),\\quad U \\sim \\mathrm{Uniform}(0, 1)",
     interpretation: {
-      tip: "On the sample tier each decile is DKW-bounded: its mass is within ±ε of the truth.",
+      tip: "On the sample tier each decile's mass is within ±ε(n_v) of the truth, where n_v = n·(1 − null − empty): the deciles are computed over non-null, non-empty values only, so a sparse column has a wider band than its null rate.",
       bad: "Between two knots the draw is linear: 11 points cannot reproduce a shape inside a decile.",
     },
     links: [P.devroye, adr("0022"), adr("0025"), doc("Source-table stats §2", STATS_DOC)],
@@ -888,7 +916,7 @@ const statsConcepts: Concept[] = [
       "The share of M uniform draws from a capacity K that repeat an earlier draw — the PK-capacity check for keys drawn at random.",
     formula: "1 - \\frac{K}{M}\\left(1 - e^{-M/K}\\right)",
     interpretation: {
-      tip: "At K = 10M it is 4.8 %; driven children draw without replacement and never collide (ADR 0036).",
+      tip: `At K = ${MARGIN}·M it is ${DUP_AT_MARGIN}; driven children draw without replacement and never collide (ADR 0036).`,
     },
     links: [adr("0035"), adr("0036")],
   },
@@ -948,7 +976,7 @@ const configConcepts: Concept[] = [
     formula:
       "T(M) = T_{\\text{start}} + T_{\\text{pools}} + \\left(T_{\\text{gen}} + T_{\\text{dedup}}\\right)\\frac{M}{2\\times10^7}",
     interpretation: {
-      bad: "Measured on two 10M-row tables and 4 workers; fleet size, table width and the load path change it.",
+      bad: "The measured runs left initial_workers empty, so their fleets ramped to full size mid-run; the linear estimate inherits that ramp and overestimates a fleet pinned full. Table width and the load path change it too.",
       tip: "The measured numbers are typed once, in the figure script's MEASURED block (knobs.json measured).",
     },
     links: [adr("0034"), code("scripts/doc/make_throughput_figures.py", "scripts/doc/make_throughput_figures.py")],

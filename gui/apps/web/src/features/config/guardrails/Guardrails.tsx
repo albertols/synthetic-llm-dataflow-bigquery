@@ -23,16 +23,15 @@ import { useRuns } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatCount, formatFixed, formatPercent, MISSING } from "@/lib/format";
 
+import { CITES } from "../citations";
 import { CodeLink } from "../CodeLink";
 import { MeasuredNote } from "../MeasuredNote";
 import { ANNOTATIONS, asText, choicesOf, knob, knobNumber, measured } from "../model/knobs";
-import { DOCS } from "../model/links";
 import { MEASURED_PAIR_LABEL } from "../model/scenario";
 import { useScenario } from "../model/state";
 import { Part } from "../ui";
 
 const RULES: readonly DlqRule[] = dlqRules.rules;
-const PIPELINE = "packages/sdfb-beam/src/sdfb_beam/pipeline.py";
 
 /** The DAG's validation chain in code order (pipeline.py, `_table_branch`). */
 const STAGES: Array<{
@@ -52,26 +51,26 @@ const STAGES: Array<{
     step: "EnforceFkIntegrityDoFn",
     line: "FK integrity",
     what: "Referential integrity, measured per run: a child row whose parent key was not landed is an orphan.",
-    where: `${PIPELINE}:362`,
+    where: CITES.fkIntegrityLine.source,
     optional: "Only on tables with enforced FK edges; the code comment calls it line 4 (ADR 0031).",
   },
   {
     step: "ValidateRecordDoFn",
     line: "Line 1 · per record",
     what: "Pydantic, per record, against the model derived from the BigQuery DDL — plus a load-safety check for non-finite floats.",
-    where: "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:50",
+    where: CITES.loadSafety.source,
   },
   {
     step: "PanderaValidateBatchDoFn",
     line: "Line 2 · per batch",
     what: "Pandera over batches of 1,000–10,000 rows, lazy (all failures collected); the schema is derived from the same contract.",
-    where: `${PIPELINE}:382`,
+    where: CITES.panderaBatch.source,
   },
   {
     step: "EnforceUniqueness",
     line: "Line 3 · uniqueness",
     what: "Full-row, primary-key and identity duplicates divert to the DLQ; the first survivor per key lands.",
-    where: `${PIPELINE}:390`,
+    where: CITES.uniquenessLine.source,
   },
 ];
 
@@ -159,7 +158,7 @@ function LinesOfDefence() {
                 Valid, unique rows load into the landing table; the gate runs after the load jobs commit, so a failed
                 run still writes its validation_runs row.
               </p>
-              <CodeLink source={`${PIPELINE}:459`} />
+              <CodeLink source={CITES.gateAfterLoad.source} />
             </div>
           </li>
         </ol>
@@ -181,19 +180,19 @@ function LinesOfDefence() {
             </p>
             <ul className="mt-2 grid gap-1">
               <li>
-                <CodeLink source={`${PIPELINE}:390`} />
+                <CodeLink source={CITES.uniquenessLine.source} />
               </li>
               <li>
-                <CodeLink source="packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:50" />
+                <CodeLink source={CITES.loadSafety.source} />
               </li>
               <li>
-                <CodeLink source={`${DOCS.article1}:154`} />
+                <CodeLink source={CITES.article1LineThree.source} />
               </li>
               <li>
-                <CodeLink source=".claude/skills/validation-mode-a.md:28" />
+                <CodeLink source={CITES.skillLineThree.source} />
               </li>
               <li>
-                <CodeLink source={`${DOCS.readme}:203`} />
+                <CodeLink source={CITES.readmeUniqueness.source} />
               </li>
             </ul>
           </Callout>
@@ -373,10 +372,12 @@ function UniquenessModes({ onOpenKnob }: { onOpenKnob: (id: string) => void }) {
   const current = asText(settings.uniqueness_mode);
   const phases = measured("make_throughput_figures.ACCEPT_PHASES_MIN").value as Record<string, number[]>;
   const dedup = phases["dedup + load C + A"] ?? [];
-  const minutes: Record<string, number | null> = {
-    exact_chained: dedup[0] ?? null,
-    exact: dedup[1] ?? null,
-    streaming: null,
+  const runs = (measured("make_throughput_figures.ACCEPT_RUNS").value as string[]).map((r) => r.split("\n")[0] ?? r);
+  // exact_chained: the R6 cold run; exact: the R7 pair, one and several SDK processes per worker.
+  const minutes: Record<string, Array<{ run: string; value: number }>> = {
+    exact_chained: dedup[0] === undefined ? [] : [{ run: runs[0] ?? "R6", value: dedup[0] }],
+    exact: [1, 2].flatMap((i) => (dedup[i] === undefined ? [] : [{ run: runs[i] ?? `run ${i}`, value: dedup[i] }])),
+    streaming: [],
   };
   return (
     <Part
@@ -426,10 +427,14 @@ function UniquenessModes({ onOpenKnob }: { onOpenKnob: (id: string) => void }) {
                 <Row label="What lands">{text?.lands ?? MISSING}</Row>
                 <Row label="Cost">{text?.cost ?? MISSING}</Row>
                 <Row label={`Dedup + load, ${MEASURED_PAIR_LABEL}`}>
-                  {minutes[m] === null || minutes[m] === undefined ? (
-                    <span className="text-text-3">not measured</span>
+                  {minutes[m]?.length ? (
+                    <span data-testid={`dedup-minutes-${m}`}>
+                      {minutes[m]
+                        .map((x) => `${formatFixed(x.value, 1)} min (${x.run.replace(/^R\d+ /, "")})`)
+                        .join(" · ")}
+                    </span>
                   ) : (
-                    `${formatFixed(minutes[m], 1)} min`
+                    <span className="text-text-3">not measured</span>
                   )}
                 </Row>
               </CardContent>
@@ -528,7 +533,7 @@ function BlockerGate({ onOpenKnob }: { onOpenKnob: (id: string) => void }) {
               from both sides.
             </span>
           </p>
-          <CodeLink source="packages/sdfb-core/src/sdfb_core/validation/summary.py:182" />
+          <CodeLink source={CITES.gateRatio.source} />
         </CardContent>
       </Card>
     </Part>

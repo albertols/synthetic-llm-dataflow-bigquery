@@ -22,10 +22,13 @@ import {
   effectiveBatchSize,
   expectedDistinctUniform,
   MEASURED_PAIR_LABEL,
+  poolDistinct,
+  poolTarget,
+  sampleDistinctFor,
   type ScenarioInputs,
 } from "../model/scenario";
 
-type ChartSpec = {
+export type ChartSpec = {
   title: string;
   concept?: string;
   description: ReactNode;
@@ -56,8 +59,8 @@ function dkwChart(n: number, label: string): ChartSpec {
   };
 }
 
-/** The chart spec for a knob, or null when the knob has no maths worth drawing. */
-function specFor(id: string, settings: Record<string, KnobValue>, inputs: ScenarioInputs): ChartSpec | null {
+/** The chart spec for a knob, or null when the knob has no maths worth drawing (exported for the sheet tests). */
+export function specFor(id: string, settings: Record<string, KnobValue>, inputs: ScenarioInputs): ChartSpec | null {
   const M = inputs.M;
   const n = inputs.n;
   switch (id) {
@@ -97,15 +100,17 @@ function specFor(id: string, settings: Record<string, KnobValue>, inputs: Scenar
       };
     }
     case "num_rows":
-    case "free_text_pool_max":
+    case "free_text_pool_max": {
+      const D = poolDistinct(inputs, sampleDistinctFor(inputs));
+      const target = poolTarget(M, D.distinct);
       return {
-        title: "Rows per pool value, M / 512",
+        title: `Rows per pool value, M / min(M, D, ${formatCount(CONSTANTS.poolCap)})`,
         concept: "stats:pool-reuse",
-        description: `At M = ${compact(M)} each of the ${CONSTANTS.poolCap} values repeats ≈ ${formatCount(Math.round(poolReuse(M, CONSTANTS.poolCap)))} times.`,
+        description: `The calculator's column: D = ${formatCount(D.distinct)} from the ${D.via}, so the pool holds ${formatCount(target)} values and at M = ${compact(M)} each repeats ≈ ${formatCount(Math.round(poolReuse(M, target)))} times.`,
         build: () => ({
           data: logSpace(1_000, 1_000_000_000, 28).map((m) => ({
             M: Math.round(m),
-            reuse: poolReuse(m, Math.min(m, CONSTANTS.poolCap)),
+            reuse: poolReuse(m, poolTarget(m, D.distinct)),
           })),
           option: lineOption({
             x: "M",
@@ -120,6 +125,7 @@ function specFor(id: string, settings: Record<string, KnobValue>, inputs: Scenar
           }),
         }),
       };
+    }
     case "similarity": {
       const s = num(settings.similarity ?? null, 0.5);
       return {
@@ -173,7 +179,7 @@ function specFor(id: string, settings: Record<string, KnobValue>, inputs: Scenar
       return {
         title: "Duplicate share of random key draws",
         concept: "stats:duplicate-share",
-        description: `Drawing M keys uniformly from K = margin × M; at the ${CONSTANTS.keyMargin}× margin ≈ ${pctFormat(duplicateShare(1, CONSTANTS.keyMargin))}.`,
+        description: `Drawing M keys uniformly from K = margin × M; at the ${CONSTANTS.keyMargin}× margin ≈ ${pctFormat(duplicateShare(1_000_000, CONSTANTS.keyMargin * 1_000_000))} of draws repeat.`,
         build: () => ({
           data: logSpace(1, 1_000, 31).map((margin) => ({
             margin,
@@ -301,11 +307,35 @@ function specFor(id: string, settings: Record<string, KnobValue>, inputs: Scenar
         }),
       };
     }
+    case "max_free_text_values_per_column": {
+      const cap = CONSTANTS.valueChunkCap;
+      const sampleD = Math.round(sampleDistinctFor(inputs));
+      return {
+        title: "Value chunks embedded per free-text column",
+        description: `Distinct (column, value) pairs in the reference sample, capped at ${formatCount(cap)}: the calculator's column shows ≈ ${formatCount(sampleD)} distinct in the sample, so ${formatCount(Math.min(sampleD, cap))} chunks; top-${CONSTANTS.topK} seeds are picked from them.`,
+        build: () => ({
+          data: logSpace(1, 1_000_000, 31).map((d) => ({
+            distinct: Math.round(d),
+            chunks: Math.min(Math.round(d), cap),
+          })),
+          option: lineOption({
+            x: "distinct",
+            xType: "log",
+            yType: "log",
+            xName: "distinct values in the sample",
+            yName: "value chunks embedded",
+            series: [{ name: "value chunks", y: "chunks" }],
+            markers: [{ x: Math.max(1, sampleD), label: `sample D ≈ ${compact(sampleD)}` }],
+            xFormatter: compact,
+            yFormatter: compact,
+          }),
+        }),
+      };
+    }
     case "max_row_doc_rows":
-    case "max_free_text_values_per_column":
       return {
         title: "Share of the reference sample embedded as row documents",
-        description: `${CONSTANTS.rowDocCap} of n rows (fingerprint order): ${pctFormat(Math.min(1, CONSTANTS.rowDocCap / n))} at n = ${compact(n)}.`,
+        description: `${formatCount(CONSTANTS.rowDocCap)} of n rows (fingerprint order): ${pctFormat(Math.min(1, CONSTANTS.rowDocCap / n))} at n = ${compact(n)}.`,
         build: () => ({
           data: logSpace(1_000, 1_000_000, 31).map((x) => ({
             n: Math.round(x),

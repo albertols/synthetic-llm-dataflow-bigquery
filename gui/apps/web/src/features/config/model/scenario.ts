@@ -19,6 +19,7 @@ import {
   tailPoints,
 } from "@synthetic-platform/stats";
 
+import { CITES, splitCitation } from "../citations";
 import { knob, knobNumber, measured } from "./knobs";
 
 export type StatsTier = "off" | "sample" | "exact";
@@ -47,6 +48,11 @@ export interface ScenarioInputs {
   columnDistinct: number;
   /** Share of that column's rows that are non-empty. */
   nonEmptyShare: number;
+  /**
+   * A source-value store is attached (the pool layer or `source_values_table`):
+   * `_pool_target` then sizes from the filter's cardinality (ADR 0033 D2).
+   */
+  sourceFilter: boolean;
   /** Time estimate basis: SDK processes per worker (`sdk_containers`). */
   sdkContainers: "single" | "multi";
   /** Time estimate: pools already persisted (warm) or built this run (cold). */
@@ -71,6 +77,7 @@ export const CONSTANTS = {
   keyFloor: knobNumber("fk_key_sample_floor"),
   keyCeiling: knobNumber("fk_key_sample_ceiling"),
   defaultN: knobNumber("reference_rows_limit"),
+  sourceDomainCap: knobNumber("source_domain_cap"),
 } as const;
 
 /** The measured relational pair every performance number stands on (MEASURED "shuffle" block). */
@@ -101,6 +108,8 @@ const BASE: ScenarioInputs = {
   // ADR 0033 context §2: a 95 %-empty column with 4,022 source-distinct values.
   columnDistinct: 4_022,
   nonEmptyShare: 0.05,
+  // The pool layer attaches a source-value store (run_pipeline.resolve_pool_layer).
+  sourceFilter: true,
   // The code default (Composer `sdk_containers`); the time card can switch it.
   sdkContainers: knob("sdk_containers").value === "multi" ? "multi" : "single",
   warm: false,
@@ -117,7 +126,8 @@ export const PRESETS: readonly ScenarioPreset[] = [
   {
     id: "exact-tier",
     label: "Same run, exact stats tier",
-    description: "The 90M run with --source_stats exact: one aggregate scan sizes pools by the true distinct count.",
+    description:
+      "The 90M run with --source_stats exact: one aggregate scan gives the statistics true distinct counts (and sizes pools first).",
     inputs: { ...BASE, tier: "exact" },
   },
   {
@@ -149,7 +159,11 @@ export function rowsToSee(p: number, confidence = 0.95): number {
   return Math.ceil(Math.log(1 - confidence) / Math.log1p(-p));
 }
 
-/** Rows to estimate a share-p category within ~10 % relative error (design §3.2 rule: 100/p). */
+/**
+ * Rows for a share-p category's estimate to reach a 10 % relative standard
+ * error, 1/√(np) = 0.1 → n ≈ 100/p (design §3.2). One standard error is
+ * ≈ 68 % confidence, not 95 %.
+ */
 export function rowsToEstimate(p: number): number {
   return p > 0 ? Math.ceil(100 / p) : Infinity;
 }
@@ -169,6 +183,24 @@ export function expectedDistinctUniform(D: number, m: number): number {
 export function duplicateShare(M: number, K: number): number {
   if (M <= 0 || K <= 0) return 0;
   return 1 - expectedDistinctUniform(K, M) / M;
+}
+
+/**
+ * Where `_pool_target` takes the column's distinct count from, at the exported
+ * commit (engine.py `_pool_target`, ADR 0033 D2): the Tier-2 exact count, else
+ * the source filter's cardinality (a source-value store is attached and the
+ * column is under the store's cap), else the sample distinct.
+ */
+export type PoolDistinctSource = "exact stats" | "source filter" | "sample";
+
+export function poolDistinct(
+  inputs: Pick<ScenarioInputs, "tier" | "sourceFilter" | "columnDistinct">,
+  sampleDistinct: number,
+): { distinct: number; via: PoolDistinctSource } {
+  if (inputs.tier === "exact") return { distinct: inputs.columnDistinct, via: "exact stats" };
+  if (inputs.sourceFilter && inputs.columnDistinct <= CONSTANTS.sourceDomainCap)
+    return { distinct: inputs.columnDistinct, via: "source filter" };
+  return { distinct: Math.round(sampleDistinct), via: "sample" };
 }
 
 /** The b1 pool target: min(num_rows, column distinct, pool cap) (engine.py `_pool_target`). */
@@ -207,6 +239,8 @@ export interface TimeBasis {
   dedupLoadMin: number;
   /** Rows the measured phases covered: ROWS_PER_TABLE × TABLES. */
   rows: number;
+  /** How the basis run's fleet ramped (ACCEPT_WORKERS_AT_4_MIN): none of them started full. */
+  fleetRamp: string;
 }
 
 function acceptRun(index: number): TimeBasis {
@@ -228,6 +262,7 @@ function acceptRun(index: number): TimeBasis {
     generationMin: at("generation C + A"),
     dedupLoadMin: at("dedup + load C + A"),
     rows,
+    fleetRamp: (measured("make_throughput_figures.ACCEPT_WORKERS_AT_4_MIN").value as string[])[index] ?? "",
   };
 }
 
@@ -294,13 +329,19 @@ export interface ScenarioOutputs {
   rowsToEstimate: number;
   tailPoints: number;
   rowsForTail: number;
+  /** Rows per pool value: M / pool target, the target being min(M, D, cap) (code-true). */
   poolReuse: number;
   rowDocShare: number;
-  /** Sample-tier distinct for the column (upper bound, uniform model) vs the exact tier. */
+  /** Distinct (column, value) chunks embedded from the sample: min(sample distinct, cap). */
+  valueChunks: number;
+  /** Sample-tier distinct for the column (uniform model: an upper bound) vs the true (exact-tier) count. */
   distinctSample: number;
   distinctExact: number;
-  poolTargetSample: number;
-  poolTargetExact: number;
+  /** The pool target the code resolves, and where its distinct count came from (ADR 0033 D2). */
+  poolTarget: number;
+  poolDistinctVia: PoolDistinctSource;
+  /** What the target would be if only the sample distinct were known (no store, or above its cap). */
+  poolTargetSampleOnly: number;
   keyspace: number;
   collisionProb: number;
   expectedCollidingPairs: number;
@@ -318,14 +359,23 @@ export interface ScenarioOutputs {
   time: TimeEstimate;
 }
 
+/** The sample tier's distinct for the calculator's column (uniform model: an upper bound, never above n·s). */
+export function sampleDistinctFor(
+  inputs: Pick<ScenarioInputs, "n" | "N" | "nonEmptyShare" | "columnDistinct">,
+): number {
+  const nonEmptySample = effectiveSample(inputs.n, inputs.N).nEff * inputs.nonEmptyShare;
+  return Math.min(expectedDistinctUniform(inputs.columnDistinct, nonEmptySample), nonEmptySample);
+}
+
 export function computeScenario(inputs: ScenarioInputs): ScenarioOutputs {
   const { N, M, n, p, q } = inputs;
   const { nEff, census } = effectiveSample(n, N);
   const epsilon = census ? 0 : dkwEpsilon(nEff, ALPHA);
   const keyspace = 10 ** inputs.keyspaceLog10;
-  const nonEmptySample = nEff * inputs.nonEmptyShare;
-  const distinctSample = Math.min(expectedDistinctUniform(inputs.columnDistinct, nonEmptySample), nonEmptySample);
+  const distinctSample = sampleDistinctFor(inputs);
   const distinctExact = inputs.columnDistinct;
+  const resolved = poolDistinct(inputs, distinctSample);
+  const target = poolTarget(M, resolved.distinct);
   const ratio = blockerRatio(inputs.env);
   const batchSize = effectiveBatchSize(knobNumber("batch_size"), M);
   return {
@@ -342,12 +392,14 @@ export function computeScenario(inputs: ScenarioInputs): ScenarioOutputs {
     rowsToEstimate: rowsToEstimate(p),
     tailPoints: tailPoints(nEff, q),
     rowsForTail: rowsForTail(q),
-    poolReuse: poolReuse(M, CONSTANTS.poolCap),
+    poolReuse: poolReuse(M, target),
     rowDocShare: nEff > 0 ? Math.min(1, CONSTANTS.rowDocCap / nEff) : 0,
+    valueChunks: Math.min(Math.round(distinctSample), CONSTANTS.valueChunkCap),
     distinctSample,
     distinctExact,
-    poolTargetSample: poolTarget(M, Math.round(distinctSample)),
-    poolTargetExact: poolTarget(M, distinctExact),
+    poolTarget: target,
+    poolDistinctVia: resolved.via,
+    poolTargetSampleOnly: poolTarget(M, Math.round(distinctSample)),
     keyspace,
     collisionProb: birthdayCollisionProb(M, keyspace),
     expectedCollidingPairs: expectedCollisions(M, keyspace),
@@ -405,19 +457,28 @@ export function recommend(inputs: ScenarioInputs, out: ScenarioOutputs): Recomme
       id: "tail",
       tone: "warn",
       title: `The q = ${inputs.q} tail rests on ${fmt(out.tailPoints)} points`,
-      why: `Want ≥ ${TAIL_POINTS_WANTED} points past the deepest quantile you care about: n ≥ ${fmt(out.rowsForTail)} — or keep 10k and profile that column over the full table.`,
+      why: `Want ≥ ${TAIL_POINTS_WANTED} points past the deepest quantile you care about: n ≥ ${fmt(out.rowsForTail)} — or keep n = ${fmt(inputs.n)} and profile that column over the full table.`,
       knob: "reference_rows_limit",
       cite: { label: "Reference-sample scaling §3.3 and §9", path: SCALING },
     });
   }
   if (inputs.tier !== "exact") {
+    const starved =
+      out.poolDistinctVia === "sample" && out.poolTargetSampleOnly < poolTarget(inputs.M, out.distinctExact);
     recs.push({
       id: "exact-tier",
-      tone: "warn",
-      title: "Use --source_stats exact for free-text and identifier columns",
-      why: `The sample tier caps any distinct count at the rows it saw (here ≈ ${fmt(out.distinctSample)} of ${fmt(out.distinctExact)}), so a pool target sized from it starves (${fmt(out.poolTargetSample)} vs ${fmt(out.poolTargetExact)}). One HLL++ scan fixes the count.`,
+      tone: starved ? "warn" : "info",
+      title: starved
+        ? "Use --source_stats exact: this pool is sized from the sample"
+        : "Use --source_stats exact for true distinct counts in the statistics",
+      why: starved
+        ? `No source-value store sizes this column (${inputs.sourceFilter ? `its ${fmt(out.distinctExact)} distinct values exceed the store's ${fmt(CONSTANTS.sourceDomainCap)} cap` : "none is attached"}), so _pool_target falls back to the sample distinct: ${fmt(out.poolTargetSampleOnly)} instead of ${fmt(poolTarget(inputs.M, out.distinctExact))}. The exact tier's HLL++ count comes first.`
+        : `Pools are already sized from the source filter's cardinality (${fmt(out.poolTarget)}; ADR 0033 D2), but source_table_stats keeps the sample's truncated distinct (≈ ${fmt(out.distinctSample)} of ${fmt(out.distinctExact)}). One HLL++ scan gives the statistics the true count.`,
       knob: "source_stats",
-      cite: { label: "ADR 0022 (tiered stats)", path: "docs/adr/0022-stats-driven-generation.md" },
+      cite: {
+        label: "ADR 0033 D2 (pool target: exact → source filter → sample)",
+        ...splitCitation(CITES.adr0033D2.source),
+      },
     });
   }
   if (out.poolReuse > 1) {
@@ -474,7 +535,7 @@ export function recommend(inputs: ScenarioInputs, out: ScenarioOutputs): Recomme
     id: "fleet",
     tone: "info",
     title: "Start the fleet full: --initial_workers = max workers, --autoscaling fixed",
-    why: "With initial_workers empty the R6 pair started on 2 workers and C_TABLE ran 8 min at a quarter of its steady rate; throughput autoscaling lost ~4 min per job to scale-downs.",
+    why: `With initial_workers empty the R6 pair started on 2 workers and C_TABLE ran 8 min at a quarter of its steady rate; the time estimate's own basis (${out.time.basis.label}) ramped ${out.time.basis.fleetRamp}, so a full fleet should beat it. Throughput autoscaling lost ~4 min per job to scale-downs.`,
     knob: "initial_workers",
     cite: { label: "--initial_workers / --autoscaling help, ADR 0034", path: sourcePath("initial_workers") },
   });

@@ -9,6 +9,7 @@ import { useMemo, type ReactNode } from "react";
 
 import type { SourceStatsColumn, SourceStatsSnapshot } from "@contracts/api";
 import type { ProfilerStats } from "@contracts/sourceStats";
+import { dkwEpsilon } from "@synthetic-platform/stats";
 
 import { Callout } from "@/components/Callout";
 import { ChartFrame } from "@/components/ChartFrame";
@@ -20,7 +21,16 @@ import { useTheme } from "@/lib/theme";
 import { lineOption, pctFormat, themed } from "../charts";
 import { knobNumber } from "../model/knobs";
 import { TierBadge } from "./TierBadge";
-import { decodeNullPattern, DOW, isHashedLabel, isTableRow, MONTHS, quantileRows, type Tier } from "./sourceModel";
+import {
+  decileValueCount,
+  decodeNullPattern,
+  DOW,
+  isHashedLabel,
+  isTableRow,
+  MONTHS,
+  quantileRows,
+  type Tier,
+} from "./sourceModel";
 
 type TierRow = { tier: Tier; stats: ProfilerStats | null; row: SourceStatsColumn; snapshot?: SourceStatsSnapshot };
 
@@ -104,13 +114,15 @@ function Quantiles({ tiers }: { tiers: TierRow[] }) {
   const { resolved } = useTheme();
   const sample = tiers.find((t) => t.tier === "sample" && t.stats?.deciles?.length);
   const exact = tiers.find((t) => t.tier === "exact" && t.stats?.deciles?.length);
+  // The deciles are computed over the substantive (non-null, non-empty) values only (source_stats.py `_add_numeric`).
+  const valueRows = sample ? decileValueCount(sample.row) : 0;
   const rows = useMemo(
     () =>
       quantileRows(
-        sample ? { deciles: sample.stats!.deciles!, rows: sample.row.sample_rows ?? 0 } : null,
+        sample ? { deciles: sample.stats!.deciles!, rows: valueRows } : null,
         exact ? { deciles: exact.stats!.deciles! } : null,
       ),
-    [sample, exact],
+    [sample, exact, valueRows],
   );
   const option = useMemo(
     () =>
@@ -137,7 +149,7 @@ function Quantiles({ tiers }: { tiers: TierRow[] }) {
       concept="stats:deciles"
       description={
         sample
-          ? "Shaded: where the true quantile lies at 95 % (DKW band in rank space, interpolated between the stored points)."
+          ? `Shaded: where the true quantile lies at 95 % — the DKW band in rank space over the n = ${formatCount(valueRows)} non-null, non-empty values the deciles are computed from (ε = ${formatFixed(valueRows > 0 ? dkwEpsilon(valueRows) : null, 4)}).`
           : "Exact tier: full-table deciles, no sampling band."
       }
       option={option}
