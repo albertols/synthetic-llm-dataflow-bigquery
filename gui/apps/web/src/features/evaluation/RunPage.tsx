@@ -261,7 +261,7 @@ export function EvaluationRunPage() {
         <TabsContent value="overview" className="flex flex-col gap-6">
           {hasMetrics ? (
             <>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
                 <StatTile
                   label="Overall score"
                   value={derived.cards[0]?.score ?? null}

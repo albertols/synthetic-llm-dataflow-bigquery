@@ -45,8 +45,9 @@ async function noHorizontalScroll(page: Page) {
   expect(overflow).toBeLessThanOrEqual(0);
 }
 
+// Generous timeouts: four worktrees share this machine's CPU during e2e; CI runs one project at a time.
 test("filter the list, open a run, open a column drawer, then compare two runs", async ({ page }, testInfo) => {
-  test.setTimeout(120_000);
+  test.setTimeout(300_000);
   const errors = watchErrors(page);
   const mobile = isMobile(testInfo.project.name);
 
@@ -121,9 +122,10 @@ test("filter the list, open a run, open a column drawer, then compare two runs",
 });
 
 test("a comparison across catalogue and evaluator versions is flagged not comparable", async ({ page }) => {
+  test.setTimeout(180_000);
   const errors = watchErrors(page);
   await page.goto(`/evaluation/compare?ids=${encodeURIComponent(JSON.stringify(["eval-0005", "eval-0035"]))}`);
-  await expect(page.getByText("Not directly comparable")).toBeVisible();
+  await expect(page.getByText("Not directly comparable")).toBeVisible({ timeout: 45_000 });
   const reasons = page.getByTestId("not-comparable-reasons");
   await expect(reasons).toContainText("catalogue_version differs");
   await expect(reasons).toContainText("evaluator_version differs");
@@ -135,7 +137,7 @@ test("a comparison across catalogue and evaluator versions is flagged not compar
 });
 
 test("the 200-column evaluation renders 50 rows at a time and stays responsive", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const errors = watchErrors(page);
   const started = Date.now();
   await page.goto("/evaluation/eval-0032?tab=columns");
@@ -154,7 +156,7 @@ test("the 200-column evaluation renders 50 rows at a time and stays responsive",
 });
 
 test("degenerate registry states render labelled empty states, never a crash", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const errors = watchErrors(page);
 
   await page.goto("/evaluation/eval-0040");
@@ -189,7 +191,7 @@ test("degenerate registry states render labelled empty states, never a crash", a
 test("screenshots of the evaluation tab (set GUI_SHOTS_DIR to capture)", async ({ page }, testInfo) => {
   const dir = process.env.GUI_SHOTS_DIR;
   test.skip(!dir, "GUI_SHOTS_DIR not set");
-  test.setTimeout(240_000);
+  test.setTimeout(420_000);
   const width = isMobile(testInfo.project.name) ? 390 : 1440;
   /** Full page with the docked legend at the real bottom: grow the viewport to the page first. */
   const shoot = async (name: string) => {

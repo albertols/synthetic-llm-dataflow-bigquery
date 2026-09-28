@@ -289,6 +289,25 @@ interface DiffRow {
   diff: DiffResult;
 }
 
+/** Worse, better, a status change, then the rest; INFO metrics (no thresholds) last. */
+function diffPriority(r: DiffRow): number {
+  const { a, b, verdict } = r.diff;
+  const gated = (a?.threshold_warn ?? b?.threshold_warn ?? null) !== null;
+  if (!gated) return 9;
+  if (verdict === "worse") return 0;
+  if (verdict === "better") return 1;
+  if (a && b && a.status !== b.status) return 2;
+  return verdict === "unjudged" ? 3 : 4;
+}
+
+/** |Δ| in units of the larger of the noise floor and the warn threshold, so metrics of different scales rank together. */
+function relativeChange(r: DiffRow): number {
+  const { a, b, delta, floor } = r.diff;
+  if (delta === null) return 0;
+  const scale = Math.max(floor ?? 0, Math.abs(a?.threshold_warn ?? b?.threshold_warn ?? 0), 1e-9);
+  return Math.abs(delta) / scale;
+}
+
 function ABDiff({
   comparison,
   a,
@@ -341,11 +360,7 @@ function ABDiff({
             r.diff.verdict === "unjudged" ||
             (r.diff.verdict !== "approx" && r.diff.verdict !== "same" && r.diff.a?.status !== r.diff.b?.status),
     )
-    .sort((x, y) => {
-      const rank = (r: DiffRow) =>
-        r.diff.verdict === "worse" ? 0 : r.diff.verdict === "better" ? 1 : r.diff.verdict === "unjudged" ? 2 : 3;
-      return rank(x) - rank(y) || Math.abs(y.diff.delta ?? 0) - Math.abs(x.diff.delta ?? 0);
-    });
+    .sort((x, y) => diffPriority(x) - diffPriority(y) || relativeChange(y) - relativeChange(x));
   const ids = comparison.evaluations.map((e) => e.evaluation_id);
   return (
     <section aria-labelledby="ab-title" className="grid gap-3">
@@ -558,7 +573,7 @@ function ParamsDiff({ comparison }: { comparison: Comparison }) {
           {all ? "Only differences" : "Show all parameters"}
         </Button>
       </div>
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid gap-4">
         {groups.map((g) => (
           <TableContainer key={g.id} aria-label={`${g.title} diff`} className="max-h-[26rem]">
             <Table>

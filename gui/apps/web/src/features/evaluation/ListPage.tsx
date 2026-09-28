@@ -124,7 +124,7 @@ function FacetBox({
       value={(value ?? []).map(String)}
       onValueChange={(next) => onChange(next.length ? (def.numeric ? next.map(Number) : next) : undefined)}
       placeholder={def.label}
-      className="w-full sm:w-44"
+      className="w-[calc(50%-0.25rem)] min-w-0 sm:w-44"
     />
   );
 }
@@ -687,7 +687,7 @@ export function EvaluationListPage() {
         }
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <StatTile
           label="Latest evaluation"
           value={latest?.overall_score ?? null}
