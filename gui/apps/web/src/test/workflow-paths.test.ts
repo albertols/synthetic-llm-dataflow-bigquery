@@ -5,7 +5,7 @@
  * of those files must match GUI_PATHS (and the workflow's `paths` trigger), or
  * a change to it would skip the job that would have failed.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -68,6 +68,44 @@ function filesTheTestsRead(): string[] {
   return [...files].filter((file) => !file.startsWith("gui/"));
 }
 
+/** A repo path, optionally with ":LINE", at the start of a string or inside prose ("… embedding.py (HashingEmbedder)"). */
+const REPO_PATH =
+  /(?:^|[\s"'(])((?:packages|scripts|config|composer|docker|docs)\/[\w./-]+\.(?:py|ya?ml|json|md|sql))(?::\d+)?/g;
+
+function pathsIn(value: unknown, out: Set<string>): void {
+  if (typeof value === "string") for (const m of value.matchAll(REPO_PATH)) out.add(m[1]!);
+  else if (Array.isArray(value)) for (const item of value) pathsIn(item, out);
+  else if (value && typeof value === "object") for (const item of Object.values(value)) pathsIn(item, out);
+}
+
+/**
+ * What the Python exporters (scripts/gui/*.py) read or cite: the `REPO / "a" / "b"` paths in
+ * their code (a directory stands for a file inside it), and every repo path their outputs
+ * (knobs.json, relationships.json, dlq_rules.json, golden/*.json) cite — e.g. the docs/**.md
+ * `_doc_paths` emits once it has checked the file exists.
+ */
+function filesTheExportersRead(): string[] {
+  const files = new Set<string>();
+  const scripts = readdirSync(join(REPO, "scripts/gui")).filter((f) => f.endsWith(".py"));
+  for (const script of scripts) {
+    files.add(`scripts/gui/${script}`);
+    const code = readFileSync(join(REPO, "scripts/gui", script), "utf8");
+    for (const m of code.matchAll(/REPO((?:\s*\/\s*"[^"]+")+)/g)) {
+      const path = [...m[1]!.matchAll(/"([^"]+)"/g)].map((p) => p[1]).join("/");
+      if (path.startsWith("gui/")) continue;
+      const full = join(REPO, path);
+      if (existsSync(full) && statSync(full).isDirectory()) files.add(`${path}/any.file`);
+      else files.add(path);
+    }
+  }
+  const generated = join(REPO, "gui/packages/contracts/generated");
+  for (const file of ["knobs.json", "relationships.json", "dlq_rules.json"])
+    pathsIn(JSON.parse(readFileSync(join(generated, file), "utf8")), files);
+  for (const file of readdirSync(join(generated, "golden")).filter((f) => f.endsWith(".json")))
+    pathsIn(JSON.parse(readFileSync(join(generated, "golden", file), "utf8")), files);
+  return [...files].filter((file) => !file.startsWith("gui/"));
+}
+
 describe("gui.yml path filters", () => {
   const files = filesTheTestsRead();
 
@@ -85,6 +123,21 @@ describe("gui.yml path filters", () => {
     const globs = triggerGlobs();
     expect(globs.length).toBeGreaterThan(10);
     expect(files.filter((file) => !globs.some((glob) => glob.test(file)))).toEqual([]);
+  });
+
+  it("EXPORTS_PATHS and the paths trigger cover every file the exporters read or cite", () => {
+    const exporters = filesTheExportersRead();
+    // The article the bge-pooling "docs differ" note quotes, and the scorer the scoring golden runs.
+    expect(exporters).toContain("docs/articles/04-b1-rag-deep-dive.md");
+    expect(exporters).toContain("packages/sdfb-evaluation/src/sdfb_evaluation/scoring/__init__.py");
+    expect(exporters.some((f) => f.startsWith("docs/designs/"))).toBe(true);
+    const exports = envRegex("EXPORTS_PATHS");
+    expect(exporters.filter((file) => !exports.test(file))).toEqual([]);
+    const globs = triggerGlobs();
+    expect(exporters.filter((file) => !globs.some((glob) => glob.test(file)))).toEqual([]);
+    // _doc_paths emits any cited docs/**.md: an ADR or article edit re-runs the exporter check.
+    expect(exports.test("docs/adr/0042-self-hosted-platform-gui.md")).toBe(true);
+    expect(exports.test("docs/articles/03-common-runtime.md")).toBe(true);
   });
 
   it("a Python change outside the cited files runs the exporter check, not the GUI job", () => {

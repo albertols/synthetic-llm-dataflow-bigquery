@@ -25,8 +25,10 @@ name: GUI
 #
 #   exports  the Python exporters (scripts/gui/) in `--check` mode:
 #            knobs.json, relationships.json, dlq_rules.json and the golden
-#            fixtures must match the code in values, ids, anchor tokens and
-#            paths. Line numbers may move (the default Python gate does not
+#            fixtures (incl. the evaluator's scorer) must match the code in
+#            values, ids, anchor tokens and paths; workflow-paths.test.ts
+#            keeps EXPORTS_PATHS covering every file the exporters read or
+#            cite (docs/designs, docs/articles, docs/adr included). Line numbers may move (the default Python gate does not
 #            run this check, so an unrelated Python PR that shifts a line never
 #            fails; this job catches a value or anchor drift whenever the code
 #            the GUI imports changes).
@@ -91,7 +93,7 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           GUI_PATHS: '^(gui/|packages/sdfb-evaluation/(README\.md$|pyproject\.toml$|src/sdfb_evaluation/(schemas|catalogue)/)|config/bq_schema/|README\.md$|docs/(DESIGN\.md$|adr/|articles/|designs/|assets/)|\.claude/skills/validation-mode-a\.md$|packages/sdfb-beam/src/sdfb_beam/(pipeline\.py|dofns/validate_record\.py)$|packages/sdfb-core/src/sdfb_core/(engines/b1_rag/engine\.py|validation/summary\.py)$|\.github/workflows/gui\.yml$)'
-          EXPORTS_PATHS: '^(scripts/gui/|packages/sdfb-(core|beam|evaluation)/src/|packages/sdfb-tests/tests/unit/scripts/test_gui_exporters\.py$|gui/packages/contracts/generated/|composer/|docker/flex_template_metadata\.json$|config/(thresholds\.yml$|relationships/)|scripts/doc/make_(throughput|ws5)_figures\.py$|docs/designs/[^/]+\.md$|\.github/workflows/gui\.yml$)'
+          EXPORTS_PATHS: '^(scripts/gui/|packages/sdfb-(core|beam|evaluation)/src/|packages/sdfb-tests/tests/unit/scripts/test_gui_exporters\.py$|gui/packages/contracts/generated/|composer/|docker/flex_template_metadata\.json$|config/(thresholds\.yml$|relationships/)|scripts/doc/make_(throughput|ws5)_figures\.py$|docs/(designs|articles|adr)/[^/]+\.md$|\.github/workflows/gui\.yml$)'
         run: |
           # No usable base (a new branch, a force-push): run every job.
           if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
@@ -134,7 +136,7 @@ jobs:
       - name: Knobs, relationship model and DLQ rules match the code
         run: uv run python scripts/gui/export_knobs.py --check
 
-      - name: Golden fixtures match the Python embedder, serializer, retrieval
+      - name: Golden fixtures match the Python embedder, serializer, retrieval and scorer
         run: uv run python scripts/gui/export_golden_fixtures.py --check
 
       - name: Exporter unit tests
