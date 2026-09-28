@@ -17,8 +17,8 @@ name: GUI
 # Synthetic Platform (gui/, ADR 0042): typecheck, lint, unit tests, build,
 # bundle budgets, contract drift against the Python side, repo-figure drift,
 # the tab-ownership gate on feat/gui-<tab> branches, then Playwright + axe on
-# Playwright's bundled Chromium. Runs only when the GUI or the Python files
-# it generates contracts from change.
+# Playwright's bundled Chromium. Runs only when the GUI, the Python files it
+# generates contracts from, or the figures it copies (assets:check) change.
 
 on:
   push:
@@ -29,6 +29,9 @@ on:
       - "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/**"
       - "config/bq_schema/**"
       - "scripts/gui/**"
+      - "docs/assets/**"
+      - "docs/designs/assets/**"
+      - "docs/articles/assets/**"
       - ".github/workflows/gui.yml"
   pull_request:
     paths: *gui_paths
@@ -79,6 +82,9 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: End-to-end (Playwright + axe)
+        env:
+          # Preview the build `npm run check` just made instead of building again.
+          GUI_E2E_SKIP_BUILD: "1"
         run: npm run e2e
 
       - name: Upload the Playwright report

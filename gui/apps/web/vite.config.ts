@@ -7,22 +7,41 @@ import { defineConfig } from "vite";
 
 const TAB_CHUNK = /\/src\/features\/(intro|evaluation|rag|config)\//;
 
+/**
+ * Ports come from the environment so parallel worktrees never collide
+ * (docs/ARCHITECTURE.md, "Ports"): GUI_WEB_PORT (dev, 5173),
+ * GUI_E2E_PORT (preview for Playwright, 4173), GUI_SERVER_PORT (the BFF
+ * the dev proxy targets, 8787).
+ */
+function port(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+const WEB_PORT = port("GUI_WEB_PORT", 5173);
+const E2E_PORT = port("GUI_E2E_PORT", 4173);
+const SERVER_PORT = port("GUI_SERVER_PORT", 8787);
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: {
-      "@": fileURLToPath(new URL("./src", import.meta.url)),
-      "@contracts": fileURLToPath(new URL("../../packages/contracts/src", import.meta.url)),
-    },
+    // Most specific first: "@contracts/generated/*" must not fall into "@contracts/*".
+    alias: [
+      {
+        find: "@contracts/generated",
+        replacement: fileURLToPath(new URL("../../packages/contracts/generated", import.meta.url)),
+      },
+      { find: "@contracts", replacement: fileURLToPath(new URL("../../packages/contracts/src", import.meta.url)) },
+      { find: "@", replacement: fileURLToPath(new URL("./src", import.meta.url)) },
+    ],
   },
   server: {
     host: "127.0.0.1",
-    port: 5173,
+    port: WEB_PORT,
     strictPort: true,
-    // The BFF (apps/server, task G0b) listens on 127.0.0.1:8787.
-    proxy: { "/api": "http://127.0.0.1:8787" },
+    // The BFF (apps/server, task G0b) listens on 127.0.0.1:GUI_SERVER_PORT.
+    proxy: { "/api": `http://127.0.0.1:${SERVER_PORT}` },
   },
-  preview: { host: "127.0.0.1", port: 4173, strictPort: true },
+  preview: { host: "127.0.0.1", port: E2E_PORT, strictPort: true },
   build: {
     target: "es2023",
     sourcemap: true,

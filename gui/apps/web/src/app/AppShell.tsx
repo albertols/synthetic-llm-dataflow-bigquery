@@ -41,8 +41,20 @@ function usePrefetchConcepts() {
   }, []);
 }
 
+/**
+ * The matched route and its validated search params, stamped on <main> as
+ * data-route-id / data-route-search. A foundation-owned surface for e2e
+ * specs (smoke checks deep links without reading any tab's copy).
+ */
+function useRouteStamp() {
+  const routeId = useRouterState({ select: (state) => state.matches.at(-1)?.routeId ?? "" });
+  const search = useRouterState({ select: (state) => JSON.stringify(state.matches.at(-1)?.search ?? {}) });
+  return { routeId, search };
+}
+
 export function AppShell() {
   usePrefetchConcepts();
+  const route = useRouteStamp();
   return (
     <TooltipProvider>
       <a
@@ -56,6 +68,8 @@ export function AppShell() {
         <main
           id="main"
           tabIndex={-1}
+          data-route-id={route.routeId}
+          data-route-search={route.search}
           className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 outline-none md:px-6 md:py-8"
         >
           <Outlet />

@@ -38,6 +38,10 @@ npm run check      # typecheck, lint, unit tests, build, size budgets, contract 
 npm run e2e        # Playwright + axe (local: installed Google Chrome)
 ```
 
+Several worktrees on one machine? Give each its own ports first
+(`GUI_E2E_PORT`, `GUI_WEB_PORT`, `GUI_SERVER_PORT`; table in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#ports--each-worktree-sets-its-own)).
+
 `/kit` shows the design system (tokens, components, chart and 3-D frames)
 live, in both themes.
 
