@@ -5,6 +5,7 @@ import { dkwEpsilon } from "@synthetic-platform/stats";
 
 import {
   compareTiers,
+  decileValueCount,
   decodeNullPattern,
   digestsWithBothTiers,
   isHashedLabel,
@@ -116,5 +117,12 @@ describe("source-stats helpers", () => {
     expect(rows[0]!.nullWithinBand).toBe(false);
     expect(rows[1]!.nullWithinBand).toBe(true);
     expect(rows[2]).toMatchObject({ sampleDistinct: null, truncation: null, nullWithinBand: null });
+  });
+
+  it("sizes a decile band by the values the deciles are computed over, not all rows", () => {
+    expect(decileValueCount({ sample_rows: 10_000, null_fraction: 0.3, empty_fraction: 0.1 })).toBe(6_000);
+    expect(decileValueCount({ sample_rows: 10_000, null_fraction: null, empty_fraction: null })).toBe(10_000);
+    expect(decileValueCount({ sample_rows: null, null_fraction: 0, empty_fraction: 0 })).toBe(0);
+    expect(decileValueCount({ sample_rows: 100, null_fraction: 0.8, empty_fraction: 0.5 })).toBe(0);
   });
 });
