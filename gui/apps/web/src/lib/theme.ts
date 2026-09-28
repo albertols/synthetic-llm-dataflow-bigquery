@@ -9,8 +9,10 @@ export type ThemeState = {
   setPreference: (preference: ThemePreference) => void;
 };
 
-const STORAGE_KEY = "synthetic-platform.theme";
-const THEME_COLOR: Record<ResolvedTheme, string> = { dark: "#0b0d12", light: "#f4f5f7" };
+/** Also read by public/theme-init.js before the first paint (theme.test.ts keeps the two in step). */
+export const THEME_STORAGE_KEY = "synthetic-platform.theme";
+/** The browser UI colour per theme (`<meta name="theme-color">`); also in public/theme-init.js. */
+export const THEME_COLOR: Record<ResolvedTheme, string> = { dark: "#0b0d12", light: "#f4f5f7" };
 
 /** Dark by default; the toggle keeps light (and "system") for readers who need it. */
 export const ThemeContext = createContext<ThemeState>({
@@ -26,7 +28,7 @@ export function useTheme(): ThemeState {
 
 export function readStoredPreference(): ThemePreference {
   try {
-    const value = window.localStorage.getItem(STORAGE_KEY);
+    const value = window.localStorage.getItem(THEME_STORAGE_KEY);
     return value === "light" || value === "system" || value === "dark" ? value : "dark";
   } catch {
     return "dark";
@@ -35,7 +37,7 @@ export function readStoredPreference(): ThemePreference {
 
 export function storePreference(preference: ThemePreference): void {
   try {
-    window.localStorage.setItem(STORAGE_KEY, preference);
+    window.localStorage.setItem(THEME_STORAGE_KEY, preference);
   } catch {
     // Private mode or blocked storage: the choice lasts for this page only.
   }

@@ -36,17 +36,17 @@ Brand hues: Beam orange `#eb6834`, GCP blue `#2a78d6`, aqua `#1baf7a`
 | `--surface-1/2/3`           | `#12151b` / `#181c24` / `#20252f` |                                 — | cards / popovers / hover                         |
 | `--text-1`                  | `#f2f4f7`                         |                              16.6 | primary text                                     |
 | `--text-2`                  | `#b8bfcc`                         |                               9.9 | secondary text                                   |
-| `--text-3`                  | `#939aa7`                         |            6.1 (5.4 on surface-3) | muted text, axis labels                          |
+| `--text-3`                  | `#939aa7`                         |            6.5 (5.4 on surface-3) | muted text, axis labels                          |
 | `--accent`                  | `#eb6834`                         |                               5.7 | primary action, focus, active tab (fills, rings) |
 | `--accent-text`             | `#f07a4a`                         |                               6.6 | orange text; 5.1 on its 14 % tint over surface-2 |
 | `--accent-fg` on `--accent` | `#0b0d12`                         |                               6.1 | text on orange buttons                           |
 | `--link`                    | `#6da7ec`                         |                               7.3 | links                                            |
-| `--control-border`          | `#737b8d`                         |            3.8 (4.0 on surface-2) | input boundaries (WCAG 1.4.11)                   |
+| `--control-border`          | `#737b8d`                         |            4.3 (4.0 on surface-2) | input boundaries (WCAG 1.4.11)                   |
 | `--gpu-text`                | `#a37ae6`                         |                               5.6 | GPU labels (`--gpu` `#7a3fd1` is for marks, 3.0) |
 | `--status-good`             | `#1baf7a`                         |                               6.5 | good (icon + label)                              |
 | `--status-warn`             | `#fab219`                         |                              10.0 | warning                                          |
 | `--status-serious`          | `#ec835a`                         |                               6.9 | serious                                          |
-| `--status-critical-text`    | `#f07373`                         |                               6.5 | critical text (`#d03b3b` for marks, 3.8)         |
+| `--status-critical-text`    | `#f07373`                         |                               6.4 | critical text (`#d03b3b` for marks, 3.8)         |
 
 ### Light (accessibility toggle)
 
@@ -55,7 +55,7 @@ Brand hues: Beam orange `#eb6834`, GCP blue `#2a78d6`, aqua `#1baf7a`
 | `--text-1/2/3`                               | `#0b0d12` / `#454b57` / `#5d6470`             |                  18.9 / 8.5 / 5.8 |
 | `--accent-text`                              | `#9c3d18`                                     |                               6.6 |
 | `--link`                                     | `#1c5cab`                                     |                               6.5 |
-| `--control-border`                           | `#7d8492`                                     |                               3.8 |
+| `--control-border`                           | `#7d8492`                                     |                               3.7 |
 | status text good / warn / serious / critical | `#0d6e4b` / `#8a5a00` / `#a3401a` / `#b42b2b` |             6.1 / 5.8 / 6.2 / 6.2 |
 
 Status and tone text also clears **4.6 : 1 (AA) on its own 10–14 % tint** (status
@@ -64,7 +64,9 @@ both themes — the tinted pill background, not the plain surface, is what the
 text sits on.
 
 Contrast ratios are WCAG 2.x relative-luminance ratios, computed with the
-dataviz skill's `contrast()` (2026-09-28).
+dataviz skill's `contrast()` (2026-09-28). This table is their one home:
+`apps/web/src/styles/branding.contrast.test.ts` recomputes each ratio from
+`tokens.css` and fails when a colour change leaves a number stale.
 
 ### Chart palette
 

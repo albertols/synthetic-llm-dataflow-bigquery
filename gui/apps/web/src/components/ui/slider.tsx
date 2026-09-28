@@ -1,5 +1,5 @@
 import { Slider as SliderPrimitive } from "radix-ui";
-import type { ComponentPropsWithRef } from "react";
+import { useState, type ComponentPropsWithRef } from "react";
 
 import { cn } from "@/lib/cn";
 
@@ -12,7 +12,9 @@ export type SliderProps = ComponentPropsWithRef<typeof SliderPrimitive.Root> & {
 
 /** Single or range slider. Keyboard: arrows step, PageUp/PageDown step ×10, Home/End jump. */
 export function Slider({ className, thumbLabels, formatValue, value, defaultValue, ...props }: SliderProps) {
-  const values = value ?? defaultValue ?? [props.min ?? 0];
+  // Uncontrolled sliders keep their own copy so each thumb's aria-valuetext follows the drag.
+  const [uncontrolled, setUncontrolled] = useState(() => defaultValue ?? [props.min ?? 0]);
+  const values = value ?? uncontrolled;
   return (
     <SliderPrimitive.Root
       value={value}
@@ -22,6 +24,10 @@ export function Slider({ className, thumbLabels, formatValue, value, defaultValu
         className,
       )}
       {...props}
+      onValueChange={(next) => {
+        if (value === undefined) setUncontrolled(next);
+        props.onValueChange?.(next);
+      }}
     >
       <SliderPrimitive.Track className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-surface-3 data-[orientation=vertical]:h-full data-[orientation=vertical]:w-1.5">
         <SliderPrimitive.Range className="absolute h-full bg-accent data-[orientation=vertical]:w-full" />

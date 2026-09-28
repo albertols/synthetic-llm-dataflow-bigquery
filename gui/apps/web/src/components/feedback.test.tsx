@@ -63,6 +63,17 @@ describe("StatusPill", () => {
 
   it("takes a tone override for statuses it does not know", () => {
     render(<StatusPill status="stale_reference" tone="warn" label="Stale reference" />);
-    expect(screen.getByText("Stale reference").closest("[data-tone]")).toHaveAttribute("data-tone", "warn");
+    const pill = screen.getByText("Stale reference").closest("[data-tone]");
+    expect(pill).toHaveAttribute("data-tone", "warn");
+    // An unknown status borrows the tone's icon.
+    expect(pill?.querySelector("svg.lucide-triangle-alert")).not.toBeNull();
+  });
+
+  it("keeps a known status's icon under a tone override, whatever its case", () => {
+    render(<StatusPill status="Unknown" tone="warn" />);
+    const pill = screen.getByText("Unknown").closest("[data-tone]");
+    expect(pill).toHaveAttribute("data-tone", "warn");
+    expect(pill?.querySelector("svg.lucide-circle-help")).not.toBeNull();
+    expect(pill?.querySelector("svg.lucide-triangle-alert")).toBeNull();
   });
 });

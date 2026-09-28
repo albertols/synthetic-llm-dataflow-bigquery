@@ -6,18 +6,10 @@
  * <html>; tokens.css never reads prefers-color-scheme itself, so the stamp
  * always wins.
  *
- * Contrast (WCAG 2.2, measured with the dataviz skill's `contrast()`):
- *   dark   text-1 16.6:1, text-2 9.9:1, text-3 6.1:1 on surface-1; >= 5.4:1 on surface-3
- *          accent-text 6.6:1, link 7.3:1, control-border 3.8:1 (1.4.11)
- *   light  text-1 18.9:1, text-2 8.5:1, text-3 5.8:1 on surface-1
- *          accent-text 6.6:1, link 6.5:1, control-border 3.8:1
- *   status/tone text on its own 10–14 % tint (pills, callouts): >= 4.6:1 on
- *   surface-1, surface-2 and bg in both themes
- *   accent button: ink #0b0d12 on #eb6834 = 6.1:1 (both themes)
- * Chart categorical palettes pass the six checks (validate_palette.js):
- *   dark  on #12151b: band, chroma, adjacent CVD ΔE ≥ 9.3, normal-vision ΔE ≥ 19.3, contrast ≥ 3:1
- *   light on #fcfcfb: all pass; aqua/yellow/magenta < 3:1 → relief = "View data" table (ChartFrame)
- * See gui/BRANDING.md for the full table and the reasoning.
+ * Contrast (WCAG 2.2) and the chart palette checks are recorded once, in
+ * gui/BRANDING.md; styles/branding.contrast.test.ts recomputes every ratio in
+ * its tables from the values below, so change a colour and the test names the
+ * row to update.
  */
 
 :root,
@@ -44,7 +36,7 @@
   --accent: #eb6834; /* Beam orange: primary actions, focus, active tab */
   --accent-hover: #f07a4a;
   --accent-fg: #0b0d12;
-  --accent-text: #f07a4a; /* ≥ 5.1:1 on accent-soft over surface-2 */
+  --accent-text: #f07a4a; /* orange text (ratios: BRANDING.md) */
   --accent-soft: rgb(235 104 52 / 0.14);
   --brand-blue: #2a78d6; /* GCP blue */
   --link: #6da7ec;

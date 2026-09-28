@@ -12,7 +12,7 @@ import DeckGL, { type DeckGLRef } from "@deck.gl/react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useReducedMotion } from "@/lib/motion";
-import { readToken } from "@/lib/theme";
+import { readToken, useTheme } from "@/lib/theme";
 
 export type DeckCanvasProps = {
   layers: Layer[];
@@ -48,6 +48,7 @@ export default function DeckCanvas({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const onLost = useRef(onContextLost);
   const reducedMotion = useReducedMotion();
+  const { resolved: theme } = useTheme();
 
   useEffect(() => {
     onLost.current = onContextLost;
@@ -64,8 +65,10 @@ export default function DeckCanvas({
   const defaultController = useMemo(() => ({ keyboard: true, inertia: reducedMotion ? false : 250 }), [reducedMotion]);
   const controller = controllerOverride ?? defaultController;
 
+  // Re-read the tokens when the theme flips: the tooltip is styled inline, outside the CSS cascade.
   const tooltip = useMemo(() => {
     if (!getTooltip) return undefined;
+    void theme;
     const style = {
       background: readToken("--surface-2"),
       color: readToken("--text-1"),
@@ -81,7 +84,7 @@ export default function DeckCanvas({
       const text = getTooltip(info);
       return text ? { text, style } : null;
     };
-  }, [getTooltip]);
+  }, [getTooltip, theme]);
 
   // Context loss → hand over to the fallback. On unmount, drop the listener
   // first, let DeckGL finalise, then release the GL context explicitly.
@@ -108,14 +111,17 @@ export default function DeckCanvas({
     if (!canvas) return;
     canvasRef.current = canvas;
     canvas.setAttribute("role", "application");
-    canvas.setAttribute("aria-roledescription", view === "orbit" ? "3-D view" : "2-D view");
-    canvas.setAttribute("aria-label", ariaLabel);
-    canvas.setAttribute("aria-describedby", hintId);
+    labelCanvas(canvas, view, ariaLabel, hintId);
     canvas.tabIndex = 0;
     canvas.addEventListener("webglcontextlost", handleLost);
     const deck = deckRef.current?.deck;
     if (deck) onDeckReady?.(deck);
   };
+
+  // deck.gl owns the canvas, so its accessible name follows the props here, not in JSX.
+  useEffect(() => {
+    if (canvasRef.current) labelCanvas(canvasRef.current, view, ariaLabel, hintId);
+  }, [view, ariaLabel, hintId]);
 
   return (
     <DeckGL
@@ -130,4 +136,10 @@ export default function DeckCanvas({
       style={{ position: "absolute", inset: "0" }}
     />
   );
+}
+
+function labelCanvas(canvas: HTMLCanvasElement, view: DeckCanvasProps["view"], ariaLabel: string, hintId: string) {
+  canvas.setAttribute("aria-roledescription", view === "orbit" ? "3-D view" : "2-D view");
+  canvas.setAttribute("aria-label", ariaLabel);
+  canvas.setAttribute("aria-describedby", hintId);
 }

@@ -106,12 +106,26 @@ export function conceptsComplete(): boolean {
   return state === "complete";
 }
 
+const warnedEarly = new Set<string>();
+
 /**
  * The concept for `id` if it is loaded (core concepts always are), else
- * undefined. Components should prefer `useConcept`, which also loads.
+ * undefined. A synchronous read cannot wait for the lazy files: a miss before
+ * they merged starts loading them (so a later call finds the concept) and, in
+ * development, warns once per id. Components should prefer `useConcept`,
+ * which re-renders when the files arrive; other code can `await loadConcepts()`.
  */
 export function getConcept(id: string): Concept | undefined {
-  return registry.get(id);
+  const concept = registry.get(id);
+  if (concept || state === "complete") return concept;
+  void loadConcepts();
+  if (import.meta.env.DEV && !warnedEarly.has(id)) {
+    warnedEarly.add(id);
+    console.warn(
+      `[concepts] getConcept("${id}") ran before the concept files loaded and returned undefined; use useConcept(id) or await loadConcepts() first`,
+    );
+  }
+  return undefined;
 }
 
 /** Every loaded concept, sorted by id. Call `loadConcepts()` first for the full list. */

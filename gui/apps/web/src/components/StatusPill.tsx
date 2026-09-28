@@ -78,6 +78,11 @@ const TONE_CLASS: Record<StatusTone, string> = {
   neutral: "border-status-neutral/50 bg-status-neutral/14 text-status-neutral-text",
 };
 
+/** Whether the status map knows this value (any case). */
+function isKnownStatus(status: string): boolean {
+  return Object.hasOwn(STATUS, status.trim().toLowerCase());
+}
+
 /** Tone and default label for a status string; unknown values fall back to neutral with the raw text. */
 export function describeStatus(status: string): { tone: StatusTone; label: string; icon: LucideIcon } {
   return STATUS[status.trim().toLowerCase()] ?? { tone: "neutral", label: status, icon: CircleHelp };
@@ -96,8 +101,7 @@ export type StatusPillProps = {
 /** Status as icon + label + tone: never colour alone. Tones are the reserved status palette. */
 export function StatusPill({ status, label, tone, size = "md", className }: StatusPillProps) {
   const known = describeStatus(status);
-  const unknownStatus = known.icon === CircleHelp && known.label === status;
-  const meta = tone ? { ...known, tone, icon: unknownStatus ? TONE_ICON[tone] : known.icon } : known;
+  const meta = tone ? { ...known, tone, icon: isKnownStatus(status) ? known.icon : TONE_ICON[tone] } : known;
   const Icon = meta.icon;
   const spinning = meta.icon === LoaderCircle;
   return (
