@@ -1,6 +1,6 @@
 /** Small building blocks shared by the INTRO sections. */
 import { ExternalLink } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 
 import { InfoHint } from "@/components/InfoHint";
 import { cn } from "@/lib/cn";
@@ -53,11 +53,14 @@ export function IntroSection({
               {eyebrow}
             </p>
           ) : null}
-          <div className="flex items-center gap-1">
-            <h2 id={headingId} className="text-xl font-semibold tracking-tight text-balance text-text-1 md:text-2xl">
+          <div>
+            <h2
+              id={headingId}
+              className="inline text-xl font-semibold tracking-tight text-balance text-text-1 md:text-2xl"
+            >
               {title}
             </h2>
-            {concept ? <InfoHint concept={concept} size="md" /> : null}
+            {concept ? <InfoHint concept={concept} size="md" className="ml-1" /> : null}
           </div>
           {lead ? <div className="text-sm leading-relaxed text-text-2 md:text-[15px]">{lead}</div> : null}
         </div>
@@ -119,4 +122,27 @@ export function useInViewOnce<T extends Element>(margin = "600px"): [RefObject<T
     return () => observer.disconnect();
   }, [seen, margin]);
   return [ref, seen];
+}
+
+const NARROW = "(max-width: 767px)";
+
+function subscribeNarrow(onChange: () => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  const media = window.matchMedia(NARROW);
+  media.addEventListener("change", onChange);
+  return () => media.removeEventListener("change", onChange);
+}
+
+/** True below the md breakpoint (phones): left-to-right diagrams turn top-to-bottom there. */
+export function useIsNarrow(): boolean {
+  return useSyncExternalStore(
+    subscribeNarrow,
+    () => typeof window !== "undefined" && !!window.matchMedia && window.matchMedia(NARROW).matches,
+    () => false,
+  );
+}
+
+/** A left-to-right mermaid flowchart laid out top-to-bottom (same nodes and edges) for narrow screens. */
+export function verticalFlowchart(chart: string): string {
+  return chart.replace(/^flowchart LR\b/, "flowchart TB");
 }

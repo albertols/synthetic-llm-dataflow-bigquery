@@ -33,7 +33,7 @@ import {
 } from "../content/designSections";
 import { assetUrl, useProvenance, type ProvenanceEntry } from "../content/provenance";
 import { TargetLink } from "../content/targets";
-import { ExternalAnchor, InlineCode, IntroSection, useInViewOnce } from "./primitives";
+import { ExternalAnchor, InlineCode, IntroSection, useInViewOnce, useIsNarrow, verticalFlowchart } from "./primitives";
 
 export function HowItWorks() {
   return (
@@ -320,12 +320,20 @@ function ProvenanceDetails({
 
 function MermaidSlot({ chart, ariaLabel }: { chart: string; ariaLabel: string }) {
   const [ref, seen] = useInViewOnce<HTMLDivElement>();
+  const narrow = useIsNarrow();
   return (
-    <div ref={ref} className={cn(SLOT, "flex items-center justify-center overflow-hidden bg-surface-2 p-2")}>
+    <div
+      ref={ref}
+      className="flex min-h-48 w-full items-center justify-center border-b border-border bg-surface-2 p-2 md:aspect-[16/10] md:overflow-hidden"
+    >
       {seen ? (
-        <Mermaid chart={chart} ariaLabel={ariaLabel} className="w-full border-0 bg-transparent p-0" />
+        <Mermaid
+          chart={narrow ? verticalFlowchart(chart) : chart}
+          ariaLabel={ariaLabel}
+          className="w-full border-0 bg-transparent p-0"
+        />
       ) : (
-        <Skeleton className="size-full" />
+        <Skeleton className="h-44 w-full" />
       )}
     </div>
   );

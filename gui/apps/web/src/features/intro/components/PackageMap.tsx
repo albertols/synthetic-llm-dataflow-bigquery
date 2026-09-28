@@ -7,10 +7,11 @@ import { repoBlobUrl } from "@/lib/links";
 
 import { PACKAGE_CHART, PACKAGE_CHART_LABEL, PACKAGES } from "../content/packages";
 import { AdrChips } from "./HowItWorks";
-import { ExternalAnchor, IntroSection, useInViewOnce } from "./primitives";
+import { ExternalAnchor, IntroSection, useInViewOnce, useIsNarrow, verticalFlowchart } from "./primitives";
 
 export function PackageMap() {
   const [ref, seen] = useInViewOnce<HTMLDivElement>();
+  const narrow = useIsNarrow();
   return (
     <IntroSection
       id="packages"
@@ -23,7 +24,10 @@ export function PackageMap() {
         <figure className="grid content-start gap-2">
           <div ref={ref} className="min-h-72">
             {seen ? (
-              <Mermaid chart={PACKAGE_CHART} ariaLabel={PACKAGE_CHART_LABEL} />
+              <Mermaid
+                chart={narrow ? verticalFlowchart(PACKAGE_CHART) : PACKAGE_CHART}
+                ariaLabel={PACKAGE_CHART_LABEL}
+              />
             ) : (
               <Skeleton className="h-72 w-full rounded-lg" />
             )}
