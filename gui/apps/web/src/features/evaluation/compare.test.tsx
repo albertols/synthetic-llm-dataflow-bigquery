@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MetricCell } from "@contracts/api";
 
 import { diffMetric, encodingDiffers, paretoFrontier, pairReasons, slotMap } from "./lib/compare";
-import { radarSpec, scoreAxisFloor, topMovers } from "./lib/compareCharts";
+import { radarSpec, scoreAxisFloor, topMovers, trendSpec } from "./lib/compareCharts";
 import { FALLBACK_TOKENS } from "./lib/tokens";
 import { comparison } from "./test/fixtures";
 import { EMPTY_PAGE, renderAt, stubApi } from "./test/harness";
@@ -158,6 +158,60 @@ describe("noise-aware diff", () => {
   it("picks the metrics that moved beyond noise, status changes first", () => {
     const c = comparison({ sameVersions: true });
     expect(topMovers(c).map((m) => m.metric_id)).toEqual(["column.tvd"]);
+  });
+});
+
+describe("trend small multiples (browser QA, 2026-09-29)", () => {
+  const two = comparison().evaluations;
+  const trend = (metric_id: string, value_kind: string, values: (number | null)[], thresholds = { w: 0.85, f: 0.7 }) =>
+    trendSpec(
+      {
+        metric_id,
+        table_name: "users",
+        level: "model",
+        value_kind,
+        column_name: null,
+        column_name_2: null,
+        edge: null,
+        cells: values.map((v) => cell(v, { threshold_warn: thresholds.w, threshold_fail: thresholds.f })),
+      } as Parameters<typeof trendSpec>[0],
+      two,
+      "engine",
+      FALLBACK_TOKENS,
+    )!;
+  const yAxisOf = (spec: ReturnType<typeof trend>) =>
+    spec.option.yAxis as {
+      type: string;
+      min: number;
+      max: number;
+      interval?: number;
+      axisLabel: { formatter: (v: number) => string };
+    };
+
+  it("keeps a score axis on [floor, 1]: an all-1.0 integrity score no longer draws on 0.40–1.60", () => {
+    const axis = yAxisOf(trend("model.integrity_score", "score", [1, 1]));
+    expect(axis).toMatchObject({ type: "value", min: 0.5, max: 1 });
+  });
+
+  it("labels close fidelity scores without repeating a tick", () => {
+    const axis = yAxisOf(trend("model.fidelity_score", "score", [0.897, 0.903]));
+    const ticks: string[] = [];
+    for (let v = axis.min; v <= axis.max + 1e-9; v += axis.interval!) ticks.push(axis.axisLabel.formatter(v));
+    expect(ticks.every((t, i) => i === 0 || t !== ticks[i - 1])).toBe(true);
+    expect(axis.max).toBeLessThanOrEqual(1);
+  });
+
+  it("draws a lift on a log axis, 0 at its floor, with one merged threshold label", () => {
+    const spec = trend("field.value_memorization_lift", "ratio", [0, 100_000], { w: 2, f: 5 });
+    const axis = yAxisOf(spec);
+    expect(axis.type).toBe("log");
+    expect(axis.min).toBe(0.1);
+    expect(axis.max).toBe(100_000);
+    const series = spec.option.series as { markLine?: { data: { label: { show: boolean; formatter?: string } }[] } }[];
+    const labels = series[0]!.markLine!.data.filter((d) => d.label.show).map((d) => d.label.formatter);
+    expect(labels).toEqual(["warn 2× · fail 5×"]);
+    // The table twin says where 0 was drawn.
+    expect(spec.data[0]).toMatchObject({ value: 0, drawn_at: "axis floor 0.1× (log scale)" });
   });
 });
 

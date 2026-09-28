@@ -9,6 +9,17 @@ import type { EChartsOption } from "echarts";
 
 import type { ComparedMetric, Comparison, EvaluationSummary } from "@contracts/api";
 
+import {
+  echartsValueAxis,
+  linearAxis,
+  logAxis,
+  scoreAxis,
+  scoreAxisFloor,
+  thresholdMarkLines,
+  type AxisUnit,
+  type ThresholdLine,
+  type ValueAxis,
+} from "@/lib/chartAxis";
 import { formatDateTime } from "@/lib/format";
 
 import { metricMeta, metricShort } from "./catalogue";
@@ -34,6 +45,36 @@ export function timeOrder(evaluations: readonly EvaluationSummary[]): number[] {
     .sort((a, b) => evaluations[a]!.evaluated_at.localeCompare(evaluations[b]!.evaluated_at));
 }
 
+/** The axis unit a metric's value_kind prints in (the shared axis helper formats the ticks). */
+function axisUnit(kind: string | null | undefined): AxisUnit {
+  switch (kind) {
+    case "share":
+    case "ratio":
+    case "bits":
+    case "count":
+    case "score":
+    case "auc":
+      return kind;
+    default:
+      return "plain";
+  }
+}
+
+/**
+ * The trend's value axis, from the shared helper (@/lib/chartAxis): a score on [floor, 1]
+ * (the radar's floor, never past 1), a lift — a ratio ≥ 0 spanning decades — on a log axis
+ * with 0 at its floor, anything else linear on a nice step whose labels never repeat.
+ */
+export function trendAxis(
+  metric: Pick<ComparedMetric, "metric_id" | "value_kind">,
+  values: readonly number[],
+): ValueAxis {
+  const meta = metricMeta(metric.metric_id);
+  if (metric.value_kind === "score") return scoreAxis(values);
+  if (meta?.uses_ci_bound && metric.value_kind === "ratio") return logAxis(values, { unit: "ratio", include: [1] });
+  return linearAxis(values, { unit: axisUnit(metric.value_kind) });
+}
+
 /** One small multiple: the metric's value per run in time order, thresholds as lines, the noise band as an area. */
 export function trendSpec(
   metric: ComparedMetric,
@@ -44,49 +85,51 @@ export function trendSpec(
   const order = timeOrder(evaluations);
   const points = order
     .map((i) => ({ i, e: evaluations[i]!, cell: metric.cells[i] ?? null }))
-    .filter((p) => p.cell && p.cell.value !== null);
+    .filter((p) => p.cell && p.cell.value !== null && Number.isFinite(p.cell.value));
   if (!points.length) return null;
   const slots = slotMap(evaluations.map((e) => colorKey(e, by)));
   const labels = order.map((i) => evaluations[i]!.evaluation_id);
   const kind = metric.value_kind;
   const first = points[0]!.cell!;
   const meta = metricMeta(metric.metric_id);
+  const axis = trendAxis(
+    metric,
+    points.map((p) => p.cell!.value!),
+  );
+  // Where a value is drawn: on a log axis 0 sits at the floor (the tooltip and table say so).
+  const y = (v: number) => (axis.kind === "log" ? axis.place(v) : v);
   const floor = Math.max(0, ...points.map((p) => p.cell!.noise_floor ?? 0));
   const ref = meta?.direction === "target" ? (meta.target ?? null) : meta?.direction === "higher_better" ? null : 0;
-  const markLines: object[] = [];
+  const lineAt = (t: number) => (meta?.direction === "target" && meta.target !== null ? meta.target + t : t);
+  const thresholds: ThresholdLine[] = [];
   if (first.threshold_warn !== null && first.threshold_warn !== 0)
-    markLines.push({
-      yAxis:
-        meta?.direction === "target" && meta.target !== null
-          ? meta.target + first.threshold_warn
-          : first.threshold_warn,
-      lineStyle: { color: tokens.warn, width: 1, type: "solid" },
-      label: { formatter: "warn", color: tokens.text3, position: "insideEndTop" },
+    thresholds.push({
+      value: lineAt(first.threshold_warn),
+      label: `warn ${fmtMetric(first.threshold_warn, kind)}`,
+      color: tokens.warn,
     });
   if (first.threshold_fail !== null && first.threshold_fail !== 0)
-    markLines.push({
-      yAxis:
-        meta?.direction === "target" && meta.target !== null
-          ? meta.target + first.threshold_fail
-          : first.threshold_fail,
-      lineStyle: { color: tokens.critical, width: 1, type: "solid" },
-      label: { formatter: "fail", color: tokens.text3, position: "insideEndTop" },
+    thresholds.push({
+      value: lineAt(first.threshold_fail),
+      label: `fail ${fmtMetric(first.threshold_fail, kind)}`,
+      color: tokens.critical,
     });
+  const markLines = thresholdMarkLines(thresholds, axis, { labelColor: tokens.text3 });
   const series: NonNullable<EChartsOption["series"]> = [
     {
       type: "line",
       name: "trend",
-      data: points.map((p) => [labels.indexOf(p.e.evaluation_id), p.cell!.value]),
+      data: points.map((p) => [labels.indexOf(p.e.evaluation_id), y(p.cell!.value!)]),
       symbol: "none",
       lineStyle: { color: tokens.slate, width: 2 },
       silent: true,
       markLine: markLines.length ? { symbol: "none", silent: true, data: markLines } : undefined,
       markArea:
-        floor > 0 && ref !== null
+        floor > 0 && ref !== null && axis.kind === "linear"
           ? {
               silent: true,
               itemStyle: { color: tokens.slate, opacity: 0.22 },
-              data: [[{ yAxis: Math.max(0, ref - floor) }, { yAxis: ref + floor }]] as never,
+              data: [[{ yAxis: Math.max(axis.min, ref - floor) }, { yAxis: Math.min(axis.max, ref + floor) }]] as never,
             }
           : undefined,
     },
@@ -95,11 +138,12 @@ export function trendSpec(
       name: key,
       data: points
         .filter((p) => colorKey(p.e, by) === key)
-        .map((p) => [labels.indexOf(p.e.evaluation_id), p.cell!.value, p.e.evaluation_id]),
+        .map((p) => [labels.indexOf(p.e.evaluation_id), y(p.cell!.value!), p.e.evaluation_id, p.cell!.value]),
       symbolSize: 9,
       itemStyle: { color: colorOf(slots, key, tokens), borderColor: tokens.surface, borderWidth: 2 },
     })),
   ];
+  const atFloor = (v: number) => axis.kind === "log" && v <= axis.min;
   return {
     data: points.map((p) => ({
       evaluation: p.e.evaluation_id,
@@ -108,6 +152,7 @@ export function trendSpec(
       value: p.cell!.value,
       noise_floor: p.cell!.noise_floor,
       status: p.cell!.status,
+      ...(atFloor(p.cell!.value!) ? { drawn_at: `axis floor ${axis.format(axis.min)} (log scale)` } : {}),
     })),
     option: {
       dataset: [],
@@ -116,12 +161,14 @@ export function trendSpec(
       tooltip: {
         trigger: "item",
         formatter: (params: unknown) => {
-          const { data, seriesName } = params as { data?: [number, number, string]; seriesName?: string };
-          return data && data[2] ? `${data[2]} · ${seriesName ?? ""}<br/>${fmtMetric(data[1], kind)}` : "";
+          const { data, seriesName } = params as { data?: [number, number, string, number]; seriesName?: string };
+          if (!data || !data[2]) return "";
+          const note = atFloor(data[3]) ? " (drawn at the axis floor: log scale)" : "";
+          return `${data[2]} · ${seriesName ?? ""}<br/>${fmtMetric(data[3], kind)}${note}`;
         },
       },
       xAxis: { type: "category", data: labels, axisLabel: { hideOverlap: true, fontSize: 10 } },
-      yAxis: { type: "value", scale: true, axisLabel: { formatter: (v: number) => fmtMetric(v, kind), fontSize: 10 } },
+      yAxis: echartsValueAxis(axis),
       series,
     },
   };
@@ -150,16 +197,8 @@ export function familyScore(
   return e[key] ?? null;
 }
 
-/**
- * The low end of a 0–1 score axis: 0.5, or lower when a score is below it —
- * floor(min × 10) / 10 — so 0.2 and 0.5 never draw at the same radius. The
- * table twin stays the exact carrier of every value.
- */
-export function scoreAxisFloor(scores: readonly (number | null | undefined)[]): number {
-  const finite = scores.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-  if (!finite.length) return 0.5;
-  return Math.max(0, Math.min(0.5, Math.floor(Math.min(...finite) * 10) / 10));
-}
+/** The low end of a 0–1 score axis (the radar, parallel coordinates and score trends share it). */
+export { scoreAxisFloor };
 
 /** The radar of family scores for up to three runs (a fourth polygon is unreadable; the table carries all). */
 export function radarSpec(
