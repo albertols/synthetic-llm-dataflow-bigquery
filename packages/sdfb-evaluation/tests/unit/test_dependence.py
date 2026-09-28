@@ -19,6 +19,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 import pytest
@@ -65,9 +66,34 @@ def test_negative_pair_index_raises():
     BivariateAccumulator(pairs=((-1, 0),))
 
 
+def test_add_batch_and_merge_on_a_no_pairs_accumulator_does_not_crash():
+  acc = BivariateAccumulator(pairs=())
+  z = np.zeros((5, 3))
+  codes = np.zeros((5, 3), dtype=np.int64)
+  acc.add_batch(z, z, codes)
+  merged = acc.merge(BivariateAccumulator(pairs=()))
+  assert merged.counts2d.shape == (0, 11, 11)
+  assert merged.com_std.shape == (0, 6)
+
+
 # ---------------------------------------------------------------------------
-# add_batch — co-moments, pairwise-complete
+# add_batch — centered co-moments, pairwise-complete
 # ---------------------------------------------------------------------------
+
+
+def _manual_centered_comoments(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+  """`[n, mean_x, mean_y, M2_x, M2_y, C_xy]` computed directly (no shift
+  trick), for cross-checking `add_batch` on small, well-scaled examples.
+  """
+  mean_x, mean_y = x.mean(), y.mean()
+  return np.array([
+      x.size,
+      mean_x,
+      mean_y,
+      ((x - mean_x)**2).sum(),
+      ((y - mean_y)**2).sum(),
+      ((x - mean_x) * (y - mean_y)).sum(),
+  ])
 
 
 def test_add_batch_comoments_match_manual_pairwise_complete_sums():
@@ -85,17 +111,9 @@ def test_add_batch_comoments_match_manual_pairwise_complete_sums():
   acc.add_batch(z, z, codes)
 
   complete = z[~np.isnan(z).any(axis=1)]
-  x, y = complete[:, 0], complete[:, 1]
-  expected = np.array([
-      x.size,
-      x.sum(),
-      y.sum(),
-      (x**2).sum(),
-      (y**2).sum(),
-      (x * y).sum(),
-  ])
-  np.testing.assert_allclose(acc.com_std[0], expected)
-  np.testing.assert_allclose(acc.com_pit[0], expected)
+  expected = _manual_centered_comoments(complete[:, 0], complete[:, 1])
+  np.testing.assert_allclose(acc.com_std[0], expected, atol=1e-9)
+  np.testing.assert_allclose(acc.com_pit[0], expected, atol=1e-9)
 
 
 def test_add_batch_vectorizes_correctly_over_multiple_pairs():
@@ -114,11 +132,7 @@ def test_add_batch_vectorizes_correctly_over_multiple_pairs():
 
   for p_idx, (i, j) in enumerate(pairs):
     mask = ~np.isnan(z[:, i]) & ~np.isnan(z[:, j])
-    x, y = z[mask, i], z[mask, j]
-    expected = np.array(
-        [x.size,
-         x.sum(),
-         y.sum(), (x**2).sum(), (y**2).sum(), (x * y).sum()])
+    expected = _manual_centered_comoments(z[mask, i], z[mask, j])
     np.testing.assert_allclose(acc.com_std[p_idx], expected, atol=1e-9)
 
 
@@ -151,6 +165,42 @@ def test_add_batch_codes_out_of_range_raises():
   bad_codes = np.array([[0, 1], [3, 0]], dtype=np.int64)  # 3 > bins (=2)
   with pytest.raises(ValueError, match="codes must be"):
     acc.add_batch(z, z, bad_codes)
+
+
+def test_add_batch_rejects_non_integer_codes_dtype():
+  acc = BivariateAccumulator(pairs=((0, 1),))
+  z = np.zeros((2, 2))
+  float_codes = np.array([[0.0, 1.0], [1.0, 0.0]])
+  with pytest.raises(ValueError, match="integer dtype"):
+    acc.add_batch(z, z, float_codes)
+
+
+def test_add_batch_rejects_bool_codes_dtype():
+  # bool is not treated as an integer dtype here, even though numpy allows
+  # arithmetic on it — a caller must send real bin/dictionary slot ints.
+  acc = BivariateAccumulator(pairs=((0, 1),))
+  z = np.zeros((2, 2))
+  bool_codes = np.array([[False, True], [True, False]])
+  with pytest.raises(ValueError, match="integer dtype"):
+    acc.add_batch(z, z, bool_codes)
+
+
+def test_add_batch_rejects_positive_infinity_in_z_std():
+  acc = BivariateAccumulator(pairs=((0, 1),))
+  z_std = np.array([[1.0, 2.0], [np.inf, 3.0]])
+  z_pit = np.zeros((2, 2))
+  codes = np.zeros((2, 2), dtype=np.int64)
+  with pytest.raises(ValueError, match="inf"):
+    acc.add_batch(z_std, z_pit, codes)
+
+
+def test_add_batch_rejects_negative_infinity_in_z_pit():
+  acc = BivariateAccumulator(pairs=((0, 1),))
+  z_std = np.zeros((2, 2))
+  z_pit = np.array([[1.0, 2.0], [3.0, -np.inf]])
+  codes = np.zeros((2, 2), dtype=np.int64)
+  with pytest.raises(ValueError, match="inf"):
+    acc.add_batch(z_std, z_pit, codes)
 
 
 def test_add_batch_empty_batch_is_a_no_op():
@@ -209,9 +259,11 @@ def test_merge_is_pure():
   a = _random_accumulator(pairs, bins=4, seed=1)
   b = _random_accumulator(pairs, bins=4, seed=2)
   a_counts_before = a.counts2d.copy()
+  a_com_std_before = a.com_std.copy()
   b_counts_before = b.counts2d.copy()
   merged = a.merge(b)
   np.testing.assert_array_equal(a.counts2d, a_counts_before)
+  np.testing.assert_array_equal(a.com_std, a_com_std_before)
   np.testing.assert_array_equal(b.counts2d, b_counts_before)
   np.testing.assert_array_equal(merged.counts2d, a.counts2d + b.counts2d)
 
@@ -223,8 +275,8 @@ def test_merge_commutes():
   left = a.merge(b)
   right = b.merge(a)
   np.testing.assert_array_equal(left.counts2d, right.counts2d)
-  np.testing.assert_allclose(left.com_std, right.com_std)
-  np.testing.assert_allclose(left.com_pit, right.com_pit)
+  np.testing.assert_allclose(left.com_std, right.com_std, atol=1e-9)
+  np.testing.assert_allclose(left.com_pit, right.com_pit, atol=1e-9)
 
 
 def test_merge_equals_single_pass():
@@ -245,8 +297,8 @@ def test_merge_equals_single_pass():
   merged = split_a.merge(split_b)
 
   np.testing.assert_array_equal(whole.counts2d, merged.counts2d)
-  np.testing.assert_allclose(whole.com_std, merged.com_std)
-  np.testing.assert_allclose(whole.com_pit, merged.com_pit)
+  np.testing.assert_allclose(whole.com_std, merged.com_std, atol=1e-8)
+  np.testing.assert_allclose(whole.com_pit, merged.com_pit, atol=1e-8)
 
 
 @settings(max_examples=25)
@@ -310,87 +362,163 @@ def test_pearson_matches_corrcoef_on_complete_rows():
 
 
 def test_pearson_none_below_min_n():
-  c = np.array([[2, 1.0, 1.0, 1.0, 1.0, 1.0]])  # n=2 < 3
+  # n=2 < 3 forces NaN regardless of the other (arbitrary, non-degenerate)
+  # co-moment values.
+  c = np.array([[2, 1.0, 1.0, 3.0, 4.0, 1.5]])
   result = pearson_from_comoments(c)
   assert math.isnan(result[0])
 
 
 def test_pearson_none_for_zero_variance():
-  # x constant (all 5.0): Sxx = n * 25, Sx = n * 5 -> n*Sxx - Sx**2 == 0.
-  n = 10.0
-  c = np.array([[n, n * 5.0, n * 3.0, n * 25.0, n * 9.0 + 10, n * 15.0]])
+  c = np.array([[10.0, 5.0, 3.0, 0.0, 9.0, 2.0]])  # M2_x == 0
   result = pearson_from_comoments(c)
   assert math.isnan(result[0])
 
 
-def test_pearson_vectorizes_over_multiple_rows():
-  # Two independent pairs stacked: perfect positive and perfect negative.
-  x = np.arange(5, dtype=np.float64)
-  y_pos = x.copy()
-  y_neg = -x
-  rows = []
-  for y in (y_pos, y_neg):
-    rows.append(
-        [x.size,
-         x.sum(),
-         y.sum(), (x**2).sum(), (y**2).sum(), (x * y).sum()])
-  c = np.array(rows)
+def test_pearson_none_for_relatively_tiny_variance_at_a_large_mean():
+  # M2_x is absolutely tiny but also tiny RELATIVE to n * mean_x**2 -- the
+  # relative guard must still catch this as "constant", the way a badly
+  # offset plan-z column's float64 shift residue would look.
+  c = np.array([[1000.0, 1.0e6, 0.0, 1e-5, 5.0, 0.1]])
   result = pearson_from_comoments(c)
+  assert math.isnan(result[0])
+
+
+def test_pearson_small_variance_near_zero_mean_is_not_flagged():
+  # The same absolute M2_x as above, but with mean_x == 0: the `max(1,
+  # mean**2)` floor keeps this from being wrongly treated as degenerate.
+  c = np.array([[1000.0, 0.0, 0.0, 50.0, 50.0, 25.0]])
+  result = pearson_from_comoments(c)
+  assert not math.isnan(result[0])
+
+
+def test_pearson_vectorizes_over_multiple_rows():
+  # Two independent pairs in one accumulator: perfect positive and perfect
+  # negative correlation.
+  x = np.arange(5, dtype=np.float64)
+  z = np.stack([x, x.copy(), x, -x], axis=1)  # columns: x, x, x, -x
+  codes = np.zeros((5, 4), dtype=np.int64)
+  acc = BivariateAccumulator(pairs=((0, 1), (2, 3)))
+  acc.add_batch(z, z, codes)
+  result = pearson_from_comoments(acc.com_std)
   np.testing.assert_allclose(result, [1.0, -1.0], atol=1e-9)
 
 
-def test_epoch_microsecond_values_are_stable():
-  """Standardizing epoch-microsecond timestamps before summing co-moments
-  keeps `pearson_from_comoments` exact; applying the same sum-form formula
-  directly to the raw ~1.7e15 values loses almost all precision instead
-  (`n * Sxx - Sx**2`, computed from numbers around `2.9e33`, tries to
-  recover a true value around `3e11` — far below float64's ~16 significant
-  digits of resolution), which is the failure mode standardizing first
-  avoids (see the module docstring; Chan, Golub & LeVeque, 1983).
-  """
-  rng = np.random.default_rng(0)
-  n = 2000
-  base = 1.7e15
-  x = base + np.arange(n, dtype=np.float64)
-  noise = rng.normal(scale=1e-4, size=n)
-  y = 2.0 * x + noise
+# ---------------------------------------------------------------------------
+# numerical stability (Ruling R23)
+# ---------------------------------------------------------------------------
 
-  mean_x, std_x = x.mean(), x.std()
-  mean_y, std_y = y.mean(), y.std()
-  z = np.stack([(x - mean_x) / std_x, (y - mean_y) / std_y], axis=1)
+
+def test_epoch_microsecond_raw_sum_form_loses_precision():
+  """Documents the pathology `add_batch`'s shifted-data algorithm exists to
+  avoid: the naive sum-form variance numerator `n * Sxx - Sx**2`, applied
+  directly to unshifted epoch-microsecond-scale values (~1.7e15), differs
+  two ~1e21-magnitude terms to recover a true value around ~1e11 — far
+  below float64's ~16 significant digits — so the result is off by many
+  orders of magnitude. This is a deterministic assertion (no tautological
+  branch): `numpy.ndarray.var` computes the true variance via its own
+  stable two-pass (shift-by-mean) algorithm, independent of the formula
+  under test.
+  """
+  n = 2000
+  x = 1.7e15 + np.arange(n, dtype=np.float64)
+  true_var = x.var()
+  sx = float(x.sum())
+  sxx = float((x * x).sum())
+  raw_numerator = n * sxx - sx * sx
+  true_numerator = n**2 * true_var
+  assert abs(raw_numerator - true_numerator) > 1e6 * abs(true_numerator)
+
+
+def test_offset_plan_z_is_stable_across_many_batches():
+  """A `z_std` column offset far from zero (a stale or imperfect plan
+  mean/std, `mean/std` around 1e6) with its own tiny spread, split across
+  many 8192-row batches, must still give `pearson_from_comoments` within
+  1e-9 of `np.corrcoef` on the raw data — the shifted-data-per-batch plus
+  Chan-Golub-LeVeque/Pébay pairwise merge never sums a large raw value
+  directly, so this holds regardless of the offset or how many batches the
+  input is split across (Ruling R23).
+  """
+  rng = np.random.default_rng(21)
+  n_total = 8192 * 6
+  raw_x = rng.normal(size=n_total)
+  raw_y = 0.7 * raw_x + 0.3 * rng.normal(size=n_total)
+  # A badly-offset "standardization": mean 1.0e6, std 1.0 -- mean/std of
+  # 1e6, the same order of pathology as the raw epoch-microsecond case.
+  offset = 1.0e6
+  z_std = np.stack([raw_x + offset, raw_y + offset], axis=1)
+  codes = np.zeros((n_total, 2), dtype=np.int64)
 
   acc = BivariateAccumulator(pairs=((0, 1),))
-  acc.add_batch(z, z, np.zeros((n, 2), dtype=np.int64))
-  rho_std = pearson_from_comoments(acc.com_std)[0]
-  assert abs(rho_std - 1.0) < 1e-9
+  batch_size = 8192
+  for start in range(0, n_total, batch_size):
+    end = min(start + batch_size, n_total)
+    acc.add_batch(z_std[start:end], z_std[start:end], codes[start:end])
 
-  # Document the cancellation: the same sum-form formula, applied directly
-  # to the unstandardized epoch-microsecond values.
-  n_f = float(n)
-  sx, sy = float(x.sum()), float(y.sum())
-  sxx = float((x * x).sum())
-  syy = float((y * y).sum())
-  sxy = float((x * y).sum())
-  varx_raw = n_f * sxx - sx * sx
-  vary_raw = n_f * syy - sy * sy
-  with np.errstate(invalid="ignore", divide="ignore"):
-    rho_raw = float((n_f * sxy - sx * sy) / np.sqrt(varx_raw * vary_raw))
-  raw_ok = math.isfinite(rho_raw) and -1.0 <= rho_raw <= 1.0
-  if raw_ok:
-    raw_error = abs(rho_raw - 1.0)
-    if raw_error <= 1e-6:
-      # This platform's float64 rounding happened to keep enough precision
-      # for the raw formula to still look right; the standardized result
-      # above is what the accumulator actually relies on either way.
-      return
-    assert raw_error > 1e-6
-  else:
-    assert not raw_ok  # NaN or out of [-1, 1]: the cancellation is total.
+  rho = pearson_from_comoments(acc.com_std)[0]
+  expected = np.corrcoef(raw_x, raw_y)[0, 1]
+  assert abs(rho - expected) < 1e-9
+
+
+def test_constant_column_is_nan_after_merging_many_batches():
+  """A genuinely constant column, split across several `add_batch` calls
+  and accumulator merges, must still read as zero-variance (NaN) — the
+  relative guard must not be fooled by floating-point residue that
+  accumulates differently across many folds.
+  """
+  rng = np.random.default_rng(23)
+  pairs = ((0, 1),)
+  acc_a = BivariateAccumulator(pairs=pairs)
+  acc_b = BivariateAccumulator(pairs=pairs)
+  for acc in (acc_a, acc_b):
+    for _ in range(5):
+      n = 400
+      x = np.full(n, 42.0)  # constant
+      y = rng.normal(size=n)
+      z = np.stack([x, y], axis=1)
+      codes = np.zeros((n, 2), dtype=np.int64)
+      acc.add_batch(z, z, codes)
+  merged = acc_a.merge(acc_b)
+  rho = pearson_from_comoments(merged.com_std)[0]
+  assert math.isnan(rho)
+
+
+def test_add_batch_perf_smoke_dense_pairs():
+  """A densely-paired plan (`P` close to `d choose 2`) at the scale this
+  module targets — `d=64` columns, ~2000 pairs, `b=8192` rows — must
+  complete `add_batch` well inside the 0.5s budget: measured ~0.1-0.2s on
+  a laptop CPU (one-hot/Gram-matrix `counts2d` plus the shifted-data
+  co-moment matrix products, both BLAS-backed; see the module docstring
+  and `_pairwise_counts`'s docstring for the ~10x speedup over a per-pair
+  gather-and-bincount at this pair count). Not marked `slow` (that marker
+  means ">5s" repo-wide) — this test is fast by design.
+  """
+  rng = np.random.default_rng(99)
+  d = 64
+  pairs = tuple((i, j) for i in range(d) for j in range(i + 1, d))
+  b = 8192
+  z_std = rng.normal(size=(b, d))
+  z_pit = rng.uniform(size=(b, d))
+  codes = rng.integers(0, 11, size=(b, d)).astype(np.int64)
+
+  acc = BivariateAccumulator(pairs=pairs)
+  start = time.perf_counter()
+  acc.add_batch(z_std, z_pit, codes)
+  elapsed = time.perf_counter() - start
+  assert elapsed < 0.5, f"add_batch took {elapsed:.3f}s for P={len(pairs)}, d={d}, b={b}"
 
 
 # ---------------------------------------------------------------------------
-# PIT Spearman (Pearson of each side's own PIT rank)
+# PIT Spearman — mid-CDF contract (Ruling R24)
 # ---------------------------------------------------------------------------
+
+
+def _mid_rank_pit(x: np.ndarray) -> np.ndarray:
+  """`(mid rank - 0.5) / n`, ties at their average rank — the mid-CDF PIT
+  `add_batch`/`com_pit` require (Ruling R24).
+  """
+  n = x.size
+  return (stats.rankdata(x, method="average") - 0.5) / n
 
 
 def test_pit_spearman_matches_scipy_within_tolerance():
@@ -398,9 +526,7 @@ def test_pit_spearman_matches_scipy_within_tolerance():
   n = 500
   x = rng.normal(size=n)
   y = 2.0 * x + rng.normal(scale=0.5, size=n)
-  pit_x = stats.rankdata(x) / n
-  pit_y = stats.rankdata(y) / n
-  z_pit = np.stack([pit_x, pit_y], axis=1)
+  z_pit = np.stack([_mid_rank_pit(x), _mid_rank_pit(y)], axis=1)
   codes = np.zeros((n, 2), dtype=np.int64)
 
   acc = BivariateAccumulator(pairs=((0, 1),))
@@ -409,6 +535,30 @@ def test_pit_spearman_matches_scipy_within_tolerance():
 
   expected_rho, _ = stats.spearmanr(x, y)
   assert abs(rho_pit - expected_rho) < 0.01
+
+
+@pytest.mark.parametrize("n_levels", [10, 50])
+def test_pit_spearman_with_ties_matches_scipy_tightly(n_levels):
+  """Mid-rank PIT (average rank for ties, per Ruling R24) makes `pearson_
+  from_comoments(com_pit)` agree with `scipy.stats.spearmanr`'s own
+  tie-corrected rank correlation to near machine precision, because
+  `spearmanr` computes Pearson correlation of the SAME average ranks
+  internally (an affine transform of the mid-CDF PIT, which Pearson
+  correlation is invariant to per side).
+  """
+  rng = np.random.default_rng(29)
+  n = 2000
+  x = rng.integers(0, n_levels, size=n).astype(np.float64)
+  y = rng.integers(0, n_levels, size=n).astype(np.float64)  # also heavily tied
+  z_pit = np.stack([_mid_rank_pit(x), _mid_rank_pit(y)], axis=1)
+  codes = np.zeros((n, 2), dtype=np.int64)
+
+  acc = BivariateAccumulator(pairs=((0, 1),))
+  acc.add_batch(z_pit, z_pit, codes)
+  rho_pit = pearson_from_comoments(acc.com_pit)[0]
+
+  expected_rho, _ = stats.spearmanr(x, y)
+  assert abs(rho_pit - expected_rho) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +591,16 @@ def test_cramers_v_le_scipy_uncorrected_association():
   v_scipy = contingency.association(table, method="cramer")
   assert v is not None
   assert v <= v_scipy + 1e-9
+
+
+def test_cramers_v_never_exceeds_one():
+  rng = np.random.default_rng(31)
+  for _ in range(20):
+    r, k = rng.integers(2, 6, size=2)
+    table = rng.integers(0, 30, size=(r, k)).astype(np.int64)
+    v = cramers_v_bias_corrected(table)
+    if v is not None:
+      assert v <= 1.0
 
 
 def test_cramers_v_none_for_degenerate_table():
@@ -497,13 +657,43 @@ def test_nmi_min_is_one_for_perfect_diagonal_association():
   assert nmi_min(table) == pytest.approx(1.0, abs=1e-9)
 
 
+def test_nmi_min_never_exceeds_one():
+  rng = np.random.default_rng(37)
+  for _ in range(20):
+    r, k = rng.integers(2, 6, size=2)
+    table = rng.integers(0, 30, size=(r, k)).astype(np.float64)
+    v = nmi_min(table)
+    if v is not None:
+      assert 0.0 <= v <= 1.0
+
+
 def test_nmi_min_none_for_zero_mass():
   assert nmi_min(np.zeros((2, 2))) is None
 
 
 def test_nmi_min_none_when_one_side_is_constant():
-  # Every row lands in category 0 of X: H_X == 0.
+  # Every row lands in category 0 of X: only 1 non-empty row.
   table = np.array([[5, 5], [0, 0]], dtype=np.float64)
+  assert nmi_min(table) is None
+
+
+def test_nmi_min_none_for_near_constant_marginal_regression():
+  """Regression for the CRITICAL review-round-1 bug: with float marginals
+  that are `1 - epsilon` away from constant (rather than exactly constant),
+  the OLD `min_h <= 0` floating check missed it (`H` rounds to ~1e-16, not
+  exactly 0), producing a wildly inflated ratio like ~1.9999999999999998.
+  The fix decides on integer-like COUNTS instead: fewer than 2 non-empty
+  rows (or columns) is always `None`, regardless of any floating entropy
+  computation.
+  """
+  # All mass in row 0; row 1 is entirely empty -- only 1 non-empty row.
+  table = np.array([[1, 4, 1], [0, 0, 0]], dtype=np.float64)
+  assert nmi_min(table) is None
+
+
+def test_nmi_min_none_for_near_constant_marginal_11x11():
+  table = np.zeros((11, 11), dtype=np.float64)
+  table[0, :] = np.arange(1, 12)  # all mass in row 0
   assert nmi_min(table) is None
 
 
@@ -557,9 +747,21 @@ def test_corr_rms_max_skips_nan():
   assert max_abs == pytest.approx(0.5)
 
 
+def test_corr_rms_max_skips_infinity():
+  delta = np.array([0.1, np.inf, -0.5, -np.inf])
+  rms, max_abs = corr_rms_max(delta)
+  assert rms == pytest.approx(math.sqrt((0.1**2 + 0.5**2) / 2))
+  assert max_abs == pytest.approx(0.5)
+
+
 def test_corr_rms_max_none_when_no_finite_value():
   assert corr_rms_max(np.array([np.nan, np.nan])) == (None, None)
 
 
 def test_corr_rms_max_none_for_empty_array():
   assert corr_rms_max(np.array([])) == (None, None)
+
+
+def test_corr_rms_max_raises_for_non_1d_array():
+  with pytest.raises(ValueError, match="1-D"):
+    corr_rms_max(np.zeros((2, 2)))
