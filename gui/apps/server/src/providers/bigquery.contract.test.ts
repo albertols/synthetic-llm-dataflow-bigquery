@@ -123,6 +123,19 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     );
     expect(page.total).toBe(40);
     expect(page.items).toHaveLength(3);
+    // The registry's metrics_info (Ruling R37) reaches the list: the identity the list cell reads.
+    for (const item of page.items) {
+      expect(item.metrics_info, item.evaluation_id).not.toBeUndefined();
+      if (item.metrics_total !== null)
+        expect(
+          (item.metrics_pass ?? 0) +
+            (item.metrics_warn ?? 0) +
+            (item.metrics_fail ?? 0) +
+            (item.metrics_info ?? 0) +
+            (item.metrics_not_evaluated ?? 0),
+          item.evaluation_id,
+        ).toBe(item.metrics_total);
+    }
     expect(calls).toHaveLength(2);
     const [dry, run] = calls.map((c) => c.options);
     expect(dry!.dryRun).toBe(true);
@@ -162,6 +175,17 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     );
     expect(calls).toHaveLength(2);
     expect(again).toEqual({ bytesEstimate: 0, queries: 1, cacheHits: 1, warnings: [] });
+  });
+
+  it("selects metrics_info in every registry query (Ruling R37)", () => {
+    for (const name of ["evaluations.list", "evaluations.events", "evaluations.latestByIds", "evaluations.slim"] as const) {
+      const query = QUERIES[name];
+      expect(
+        query.fields.map((f) => f.name),
+        name,
+      ).toContain("metrics_info");
+      expect(query.sql({ quality: "p.q", rag: "p.r" })).not.toMatch(/EXCEPT \([^)]*metrics_info/);
+    }
   });
 
   it("refuses a query the dry run prices above MAX_BYTES_BILLED, before running it", async () => {

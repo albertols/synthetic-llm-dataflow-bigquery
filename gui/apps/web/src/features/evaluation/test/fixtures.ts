@@ -101,6 +101,7 @@ export function evaluation(overrides: Partial<EvaluationRecord> = {}): Evaluatio
     metrics_warn: 0,
     metrics_fail: 0,
     metrics_not_evaluated: 0,
+    metrics_info: 0,
     bq_bytes_processed: 1_000_000,
     predicted_shuffle_gb: 1,
     warnings: [],

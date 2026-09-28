@@ -335,6 +335,7 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
     metrics_warn: null,
     metrics_fail: null,
     metrics_not_evaluated: null,
+    metrics_info: null,
     bq_bytes_processed: null,
     predicted_shuffle_gb: null,
     warnings: [],
@@ -454,6 +455,7 @@ export function createMockDataset(seed = 20260928): MockDataset {
       final.metrics_warn = 0;
       final.metrics_fail = 0;
       final.metrics_not_evaluated = 0;
+      final.metrics_info = 0;
       final.bq_bytes_processed = spec.outcome === "FAILED" ? 0 : 1_048_576;
       final.warnings = spec.outcome === "SKIPPED" ? ["scope: appends window is empty"] : [];
       registry.push(final);
@@ -619,6 +621,7 @@ export function createMockDataset(seed = 20260928): MockDataset {
     final.metrics_warn = count("warn");
     final.metrics_fail = count("fail");
     final.metrics_not_evaluated = count("not_evaluated");
+    final.metrics_info = count("info");
     const rows = final.tables.reduce((acc, t) => acc + (t.rows_source ?? 0) + (t.rows_synthetic ?? 0), 0);
     final.bq_bytes_processed = Math.round(rows * (spec.mode === "sampled" ? 36 : 164));
     final.predicted_shuffle_gb = Math.round((rows * 96) / 1e7) / 100;

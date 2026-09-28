@@ -2631,13 +2631,13 @@ export const catalogue: readonly CatalogueMetric[] = [
     "n_dependent": true,
     "baseline": true,
     "uses_ci_bound": false,
-    "formula": "\\frac{\\operatorname{pMSE}}{E_0}, \\quad \\operatorname{pMSE} = \\frac{1}{N} \\sum_{i=1}^{N} (\\hat{\\pi}_i - c)^2, \\quad E_0 = \\frac{(k-1)(1-c)^2 c}{N}",
-    "purpose": "Propensity mean squared error of a logistic model separating synthetic from source rows, divided by its expected value when both come from the same distribution. A perfect generator scores about 1.",
+    "formula": "\\frac{\\operatorname{pMSE}}{E_0}, \\quad \\operatorname{pMSE} = \\frac{1}{N} \\sum_{i=1}^{N} (\\hat{\\pi}_i - c)^2, \\quad E_0 = \\frac{(k-1)\\, c\\, (1-c)}{N}",
+    "purpose": "Propensity mean squared error of a logistic model separating synthetic from source rows, divided by its expected value when the two are independent samples of one distribution. A perfect generator scores about 1.",
     "interpretation": {
       "good": "Under 3: the logistic model finds little beyond chance.",
       "bad": "At or above 10: even a linear model separates the two tables well."
     },
-    "pitfalls": "The null expectation assumes a logistic model with k parameters; with many one-hot features k is large and the ratio loses sensitivity.",
+    "pitfalls": "E0 assumes independent source and synthetic samples: Snoke et al.'s (k-1)(1-c)^2 c/N holds only for synthetic rows drawn from the source sample itself and would put a perfect generator at 1/(1-c), about 2 here. The ratio can never exceed N/(k-1), since pMSE is at most c(1-c): with many one-hot features k is large and even a perfectly separable table can read low, so levels with fewer than max(20, N/1000) rows are pooled and the metric is not evaluated when N/(k-1) is below the fail threshold.",
     "references": [
       {
         "label": "Snoke et al. 2018 — general and specific utility measures",
@@ -3176,13 +3176,13 @@ export const catalogue: readonly CatalogueMetric[] = [
     "n_dependent": false,
     "baseline": false,
     "uses_ci_bound": false,
-    "formula": "W_1^{fan} = \\sum_{c=0}^{49} \\lvert F^{fan}_{src}(c) - F^{fan}_{syn}(c) \\rvert",
+    "formula": "W_1^{fan} = \\sum_i (x_{i+1} - x_i) \\lvert F^{fan}_{src}(x_i) - F^{fan}_{syn}(x_i) \\rvert, \\quad \\{x_i\\} = \\{0, \\dots, 49\\} \\cup \\{\\bar c_{src}, \\bar c_{syn}\\}",
     "purpose": "Wasserstein-1 distance between the fan-out distributions, in children per parent: roughly how many children each parent is off by on average. Informational.",
     "interpretation": {
       "good": "Well under 1: per-parent child counts are almost right.",
       "bad": "Several children per parent: the generator systematically over- or under-produces children."
     },
-    "pitfalls": "Computed on the capped histogram, where 50 or more counts as 50, so the distance in heavy tails is understated.",
+    "pitfalls": "Each side's >= 50 bin sits at its own atom c-bar: that side's observed mean fan-out among its overflowing parents when known, else 50. The two sides' overflow atoms can therefore land at different points (one heavy tail understated relative to the other, not just both understated alike), and without an observed mean at all, that side's tail still collapses to the single point 50, understating it the way the whole capped histogram always does.",
     "references": [
       {
         "label": "Ramdas et al. 2017 — Wasserstein two-sample testing",

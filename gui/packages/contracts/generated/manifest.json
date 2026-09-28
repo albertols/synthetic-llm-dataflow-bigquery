@@ -2,7 +2,7 @@
   "generator": "gui/packages/contracts/gen.mjs",
   "note": "sha256 of every input; contracts:check fails when an input changed without a re-sync.",
   "inputs": {
-    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json": "46ead916058a5c6cc5186c9eb4e94936b9366aff7cde57710849c37aff14a68d",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json": "c260093fe51da970bf14adfe7e6d23356f12e4ef0962b0754f1ca34efd88c686",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_metrics.schema.json": "d447c144f2dafc85b7cc9bdd321d1008bcb9388bc5f989749ebe73f0321aadac",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_profiles.schema.json": "a5d9644a964093944664f071ec1c3d230db5c8fc00a563891388ed883d16318f",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_row_flags.schema.json": "9b093f11ba5bf75727444ce4afe09ca0a2fec774dbfd1ad176dfec379d3b154c",
@@ -13,10 +13,10 @@
     "config/bq_schema/synthetic_rag/rag_chunks.schema.json": "2c2bcc99d0ae79e01217f0f04631fd1e01f5421764172474ac4560691a96b1a8",
     "config/bq_schema/synthetic_rag/source_table_stats.schema.json": "9ad24ef739e151fc54353d41f8fd1772fb077c0860c40b03cc08e451c23b5864",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/views.sql": "a66589e18f037ecdd397b91b3500dfb893fc2ba37befc1d5a9cf18b0281ef29c",
-    "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml": "e4fe972b114305e6b76504bac57ea0a9e1a8c9fce84d6a98ab8c47dc38308642",
-    "gui/packages/contracts/generated/knobs.json": "5072ea7f41bdc3d7f38268d144f2c2a5563179c8c1bda3e55475f38d61f3b6bb",
-    "gui/packages/contracts/generated/relationships.json": "8449e24e6782a1135a1bffa45b687536cdc98007974868b168ecba5c798ca258",
-    "gui/packages/contracts/generated/dlq_rules.json": "c6d4da3925d3d6253f6bd1d8eb099c7c1b6f22a62281c9f11a32bfcd07526bdb",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml": "a1b48b5260e38ece6d2e80cf84b59054f16f14b2a675e066262ae5aed5100d4f",
+    "gui/packages/contracts/generated/knobs.json": "6172235e2ae927bccefc054f90a8f20e6424320d4d15bcf1b1154973433c4353",
+    "gui/packages/contracts/generated/relationships.json": "604a2f91343e5cce0d57f5748723d48ff7ade7e83d2b83a2453e885f59622377",
+    "gui/packages/contracts/generated/dlq_rules.json": "49c2c3e1b88fb61cc51db718babc4480fd9def51bde53aee50025931e8b7b248",
     "gui/packages/contracts/generated/golden/great_serialize.json": "72dae74592f7e1e61442eefb82ecef5724a3f49bfe1e7f8e00c7cff27853a324",
     "gui/packages/contracts/generated/golden/hashing_embedder.json": "295094807dbc93a649bb63dcc1dcccf6d702a9f4294be2f8c0ba30d6179dd6da",
     "gui/packages/contracts/generated/golden/retrieval.json": "0c91e8c07bccf3f7c5fb3d046ccc7fddb3a66fdd3ea43975ee6f3f15b85769f2"

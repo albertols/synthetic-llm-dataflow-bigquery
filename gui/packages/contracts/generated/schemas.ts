@@ -166,7 +166,7 @@ export const evaluationDataHistoryRowSchema = z.object({
   integrity_score: z.number().nullable(),
   /** Diversity pillar score. */
   diversity_score: z.number().nullable(),
-  /** Total metrics evaluated across every table. */
+  /** Measured metric rows across every table (aggregate *_score rows excluded); equals metrics_pass + metrics_warn + metrics_fail + metrics_info + metrics_not_evaluated. */
   metrics_total: z.int().nullable(),
   /** Metrics with status = pass. */
   metrics_pass: z.int().nullable(),
@@ -176,6 +176,8 @@ export const evaluationDataHistoryRowSchema = z.object({
   metrics_fail: z.int().nullable(),
   /** Metrics with status = not_evaluated. */
   metrics_not_evaluated: z.int().nullable(),
+  /** Metrics with status = info (measured, not gated). */
+  metrics_info: z.int().nullable(),
   /** Total bytes processed by the BigQuery queries this evaluation issued. */
   bq_bytes_processed: z.int().nullable(),
   /** Predicted Beam shuffle volume in GB for this evaluation job. */
@@ -921,6 +923,11 @@ export const bqTables = {
       },
       {
         "name": "metrics_not_evaluated",
+        "type": "INT64",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "metrics_info",
         "type": "INT64",
         "mode": "NULLABLE"
       },

@@ -314,24 +314,43 @@ function SortHead({
 
 /**
  * The list's "fail · warn · n/e" cell. Its screen-reader text is the full
- * breakdown, and the registry row has no info/other column, so "info or other"
- * is the remainder: metrics_total minus the counted statuses (list-page.test).
+ * breakdown, fail + warn + pass + info + not evaluated = metrics_total (the
+ * registry's own identity, Ruling R37). Rows written before metrics_info
+ * existed (NULL) show "info or other" as the remainder instead. Counts that
+ * do not add up to the total are inconsistent data: the cell says so in
+ * words, never as a hidden negative remainder (list-page.test).
  */
 export function MetricsCell({ e }: { e: EvaluationSummary }) {
   if (e.metrics_total === null) return <span className="text-text-3">{MISSING}</span>;
-  const gated = (e.metrics_pass ?? 0) + (e.metrics_warn ?? 0) + (e.metrics_fail ?? 0) + (e.metrics_not_evaluated ?? 0);
-  const rest = e.metrics_total - gated;
-  const full = `${e.metrics_fail ?? 0} fail · ${e.metrics_warn ?? 0} warn · ${e.metrics_pass ?? 0} pass${rest > 0 ? ` · ${rest} info or other` : ""}${e.metrics_not_evaluated ? ` · ${e.metrics_not_evaluated} not evaluated` : ""} = ${e.metrics_total} metrics`;
+  const fail = e.metrics_fail ?? 0;
+  const warn = e.metrics_warn ?? 0;
+  const pass = e.metrics_pass ?? 0;
+  const notEvaluated = e.metrics_not_evaluated ?? 0;
+  const info = e.metrics_info;
+  const counted = fail + warn + pass + notEvaluated + (info ?? 0);
+  const gap = e.metrics_total - counted;
+  const parts = [`${fail} fail`, `${warn} warn`, `${pass} pass`];
+  if (info !== null) {
+    if (info > 0) parts.push(`${info} info`);
+  } else if (gap > 0) parts.push(`${gap} info or other`);
+  if (notEvaluated) parts.push(`${notEvaluated} not evaluated`);
+  // Inconsistent rows: more counted than the total, or (metrics_info known) fewer.
+  const note =
+    gap < 0
+      ? `counts exceed total (${counted} counted)`
+      : info !== null && gap > 0
+        ? `counts fall short of total (${counted} counted)`
+        : null;
+  const full = `${parts.join(" · ")} = ${e.metrics_total} metrics${note ? `; ${note}` : ""}`;
   return (
     <span className="text-xs whitespace-nowrap tabular-nums" title={full}>
       <span className="sr-only">{full}</span>
       <span aria-hidden="true">
-        <span className={cn(e.metrics_fail ? "font-semibold text-status-critical-text" : "text-text-2")}>
-          {e.metrics_fail ?? 0} fail
-        </span>
+        <span className={cn(fail ? "font-semibold text-status-critical-text" : "text-text-2")}>{fail} fail</span>
         <span className="text-text-3"> · </span>
-        <span className="text-text-2">{e.metrics_warn ?? 0} warn</span>
-        {e.metrics_not_evaluated ? <span className="text-text-3"> · {e.metrics_not_evaluated} n/e</span> : null}
+        <span className="text-text-2">{warn} warn</span>
+        {notEvaluated ? <span className="text-text-3"> · {notEvaluated} n/e</span> : null}
+        {note ? <span className="block text-status-warn-text">⚠ {note}</span> : null}
       </span>
     </span>
   );
