@@ -46,7 +46,8 @@ beforeAll(async () => {
   const config = loadConfig({ LOG_LEVEL: "silent", STATIC_DIR: staticDir });
   app = await buildApp({ config, provider: new MockProvider() });
   facets = facetsSchema.parse((await inject("/api/facets")).json());
-}, 120_000);
+  // Building the seeded mock dataset is CPU-bound: 120 s ran out once at load average ~450.
+}, 300_000);
 
 /** Requests arrive with the Host a browser on this machine sends (the guard refuses others). */
 function inject(url: string, headers: Record<string, string> = {}, method: "GET" | "POST" = "GET") {

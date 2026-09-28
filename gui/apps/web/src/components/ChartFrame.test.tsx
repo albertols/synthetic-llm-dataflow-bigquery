@@ -21,12 +21,15 @@ const option = {
   series: [{ type: "bar" as const }],
 };
 
-describe("ChartFrame", () => {
+// The chart canvas is a lazy import; on a loaded machine the first one can take seconds.
+const LAZY = { timeout: 10_000 };
+
+describe("ChartFrame", { timeout: 15_000 }, () => {
   it("renders a titled figure with the chart", async () => {
     render(<ChartFrame title="Histogram of order totals" option={option} data={rows} />);
 
     const figure = screen.getByRole("figure", { name: "Histogram of order totals" });
-    expect(await within(figure).findByTestId("echart-canvas")).toBeInTheDocument();
+    expect(await within(figure).findByTestId("echart-canvas", {}, LAZY)).toBeInTheDocument();
   });
 
   it("toggles to a table with every data row and back", async () => {
@@ -49,7 +52,7 @@ describe("ChartFrame", () => {
 
     await user.click(screen.getByRole("button", { name: "View chart" }));
     expect(screen.queryByRole("table")).toBeNull();
-    expect(await screen.findByTestId("echart-canvas")).toBeInTheDocument();
+    expect(await screen.findByTestId("echart-canvas", {}, LAZY)).toBeInTheDocument();
   });
 
   it("renders the empty-state message instead of the chart", () => {

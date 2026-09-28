@@ -9,7 +9,10 @@ import { InfoHint } from "./InfoHint";
 const ID = "core:noise-floor";
 const sleep = (ms: number) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
 
-describe("InfoHint", () => {
+// KaTeX and the tab concept files are lazy imports; on a loaded machine they can take seconds.
+const LAZY = { timeout: 10_000 };
+
+describe("InfoHint", { timeout: 15_000 }, () => {
   it("uses a registered concept as its test fixture", () => {
     const concept = getConcept(ID);
     expect(concept?.title).toBe("Noise floor");
@@ -27,7 +30,7 @@ describe("InfoHint", () => {
 
     expect(within(dialog).getByRole("heading", { name: "Noise floor" })).toBeInTheDocument();
     // KaTeX loads lazily; the rendered formula carries MathML for screen readers.
-    await waitFor(() => expect(dialog.querySelector(".katex")).not.toBeNull());
+    await waitFor(() => expect(dialog.querySelector(".katex")).not.toBeNull(), LAZY);
     expect(dialog.querySelector("math")).not.toBeNull();
   });
 
@@ -96,7 +99,7 @@ describe("InfoHint", () => {
     render(<InfoHint concept="core:not-a-concept" />);
 
     // Unknown only once every lazy concept file has been merged.
-    expect(await screen.findByRole("img", { name: "No explanation available" })).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "No explanation available" }, LAZY)).toBeInTheDocument();
     expect(error).toHaveBeenCalledWith(expect.stringContaining('"core:not-a-concept"'));
     expect(screen.queryByRole("button")).toBeNull();
   });

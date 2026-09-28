@@ -75,6 +75,8 @@ function tabLink(page: Page, name: string) {
 }
 
 test("the four tabs are navigable from the top nav, accessible, and error-free", async ({ page }) => {
+  // Four page-level axe passes (INTRO alone is ~2.3k nodes): 45 s ran out on a loaded machine.
+  test.setTimeout(90_000);
   const errors = watchErrors(page);
   await page.goto("/");
   await expectOnePageHeading(page);
@@ -178,6 +180,8 @@ test("the header stays on one row above the tabs and nothing scrolls sideways", 
 });
 
 test("InfoHint opens on click and Enter, renders KaTeX, and closes on Escape", async ({ page }) => {
+  // /kit is the heaviest page after INTRO, and this test runs an axe pass on it.
+  test.setTimeout(90_000);
   const errors = watchErrors(page);
   await page.goto("/kit");
   const trigger = page.getByRole("button", { name: "About: Noise floor" }).first();
