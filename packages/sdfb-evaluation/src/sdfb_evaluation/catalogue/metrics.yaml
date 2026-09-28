@@ -55,8 +55,9 @@
 #                 warn 0 / fail 0: integrity by construction, FAIL iff
 #                 value > 0 (PASS at exactly 0);
 #                 null / null: INFO only.
-#                 A FAIL also needs the value to clear its noise floor
-#                 relative to the noise reference (see target, D5).
+#                 A WARN or FAIL also needs the value to clear sampling
+#                 noise relative to the noise reference (see target and
+#                 noise_floor, D5); otherwise it is PASS.
 #                 source: literature | repo-continuity | heuristic, or none
 #                 when there are no thresholds.
 #   score         maps the value to [0, 1], higher = better (Ruling R10):
@@ -70,9 +71,18 @@
 #                 auc          = 1 - 2 max(0, v - 0.5);
 #                 none         = v when 0 <= v <= 1, else null (a roll-up
 #                                score is its own score).
+#                 A row whose WARN or FAIL D5 attributes to sampling noise
+#                 is scored at its noise reference (normally 1, Ruling
+#                 R40); every other row keeps the function's score.
 #   noise_floor   the method sizing sampling noise: ks_two_sample | wilson |
 #                 newcombe | tvd_null | jsd_null | fisher_z | mi_bias |
-#                 rate_ratio | delong | none (D5).
+#                 rate_ratio | delong | none (D5, Ruling R41). The scalar
+#                 methods (ks_two_sample, tvd_null, jsd_null, fisher_z,
+#                 mi_bias) call a difference noise when |value - reference|
+#                 <= the row's noise_floor; the interval methods (wilson,
+#                 newcombe, delong) when [ci_low, ci_high] covers the
+#                 reference; rate_ratio metrics gate on their CI bound
+#                 with no further check.
 #   n_dependent   the raw value moves with sample size, so it is computed at
 #                 matched n (D5).
 #   baseline      the row also stores baseline_value = metric(R, source): the
@@ -1605,12 +1615,12 @@ metrics:
     n_dependent: true
     baseline: true
     uses_ci_bound: false
-    formula: '\frac{\operatorname{pMSE}}{E_0}, \quad \operatorname{pMSE} = \frac{1}{N} \sum_{i=1}^{N} (\hat{\pi}_i - c)^2, \quad E_0 = \frac{(k-1)(1-c)^2 c}{N}'
-    purpose: "Propensity mean squared error of a logistic model separating synthetic from source rows, divided by its expected value when both come from the same distribution. A perfect generator scores about 1."
+    formula: '\frac{\operatorname{pMSE}}{E_0}, \quad \operatorname{pMSE} = \frac{1}{N} \sum_{i=1}^{N} (\hat{\pi}_i - c)^2, \quad E_0 = \frac{(k-1)\, c\, (1-c)}{N}'
+    purpose: "Propensity mean squared error of a logistic model separating synthetic from source rows, divided by its expected value when the two are independent samples of one distribution. A perfect generator scores about 1."
     interpretation:
       good: "Under 3: the logistic model finds little beyond chance."
       bad: "At or above 10: even a linear model separates the two tables well."
-    pitfalls: "The null expectation assumes a logistic model with k parameters; with many one-hot features k is large and the ratio loses sensitivity."
+    pitfalls: "E0 assumes independent source and synthetic samples: Snoke et al.'s (k-1)(1-c)^2 c/N holds only for synthetic rows drawn from the source sample itself and would put a perfect generator at 1/(1-c), about 2 here. The ratio can never exceed N/(k-1), since pMSE is at most c(1-c): with many one-hot features k is large and even a perfectly separable table can read low, so levels with fewer than max(20, N/1000) rows are pooled and the metric is not evaluated when N/(k-1) is below the fail threshold."
     references:
       - {label: "Snoke et al. 2018 — general and specific utility measures", url: "https://doi.org/10.1111/rssa.12358"}
       - {label: "Woo et al. 2009 — global measures of data utility", url: "https://doi.org/10.29012/jpc.v1i1.568"}
@@ -1950,12 +1960,12 @@ metrics:
     n_dependent: false
     baseline: false
     uses_ci_bound: false
-    formula: 'W_1^{fan} = \sum_{c=0}^{49} \lvert F^{fan}_{src}(c) - F^{fan}_{syn}(c) \rvert'
+    formula: 'W_1^{fan} = \sum_i (x_{i+1} - x_i) \lvert F^{fan}_{src}(x_i) - F^{fan}_{syn}(x_i) \rvert, \quad \{x_i\} = \{0, \dots, 49\} \cup \{\bar c_{src}, \bar c_{syn}\}'
     purpose: "Wasserstein-1 distance between the fan-out distributions, in children per parent: roughly how many children each parent is off by on average. Informational."
     interpretation:
       good: "Well under 1: per-parent child counts are almost right."
       bad: "Several children per parent: the generator systematically over- or under-produces children."
-    pitfalls: "Computed on the capped histogram, where 50 or more counts as 50, so the distance in heavy tails is understated."
+    pitfalls: "Each side's >= 50 bin sits at its own atom c-bar: that side's observed mean fan-out among its overflowing parents when known, else 50. The two sides' overflow atoms can therefore land at different points (one heavy tail understated relative to the other, not just both understated alike), and without an observed mean at all, that side's tail still collapses to the single point 50, understating it the way the whole capped histogram always does."
     references:
       - {label: "Ramdas et al. 2017 — Wasserstein two-sample testing", url: "https://doi.org/10.3390/e19020047"}
 
