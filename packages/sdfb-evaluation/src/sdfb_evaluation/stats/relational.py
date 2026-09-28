@@ -41,13 +41,22 @@ References:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from typing import Any
 
 import numpy as np
 
 from sdfb_evaluation.stats import distances
-from sdfb_evaluation.stats.noise import newcombe_diff_interval
+from sdfb_evaluation.stats.noise import newcombe_diff_interval, wilson_interval
+
+
+def _validate_cap(cap: int) -> None:
+  """Raise `ValueError` unless `cap >= 1` (a histogram needs at least one
+  exact-count bin, `0`, below its open-ended overflow bin).
+  """
+  if cap < 1:
+    raise ValueError(f"cap must be >= 1, got {cap}")
 
 
 def fanout_histogram(children_per_parent: Iterable[int],
@@ -61,10 +70,17 @@ def fanout_histogram(children_per_parent: Iterable[int],
   (which `fanout_metrics` reads as `z_src`/`z_syn`) would be empty by
   construction instead of measuring anything. An empty `children_per_parent`
   returns an all-zero histogram rather than raising.
+
+  Raises `ValueError` if `cap < 1`, or if any count in `children_per_parent`
+  is negative (a fan-out count, a number of children, can never be).
   """
+  _validate_cap(cap)
   values = np.fromiter(children_per_parent, dtype=np.int64)
   if values.size == 0:
     return np.zeros(cap + 1, dtype=np.int64)
+  if values.min() < 0:
+    raise ValueError(
+        f"children_per_parent must be non-negative, got {int(values.min())}")
   clipped = np.minimum(values, cap)
   return np.bincount(clipped, minlength=cap + 1)[:cap + 1]
 
@@ -81,13 +97,24 @@ def _fanout_atoms(
   exactly `c` children IS the value `c`). The open-ended `>= cap` bin has no
   single exactly-known value, so it is placed at `overflow_mean` — that
   side's own observed mean fan-out among its `>= cap` parents, when the
-  caller has it — or, failing that, at `cap` itself (the same convention
-  the catalogue's `fanout_w1` formula assumes implicitly by treating
-  `>= cap` as exactly `cap`).
+  caller has it — or, failing that, at `cap` itself (the catalogue's
+  `fanout_w1` formula, Ruling R36).
+
+  `overflow_mean` is used only when the `>= cap` bin actually holds mass
+  (`counts[cap] > 0`); when it is empty, `overflow_mean` is ignored
+  entirely, even if the caller passed one (e.g. a stale or undefined value
+  from a side with no overflowing parents at all) — a mean of zero parents
+  has no meaning, and placing a bogus or non-finite atom there would (with
+  zero weight or not) corrupt `_atoms_w1`'s sorted locations and could turn
+  its result into `nan`.
   """
-  centre = float(overflow_mean) if overflow_mean is not None else float(cap)
+  overflow_count = counts[cap]
+  if overflow_count > 0.0 and overflow_mean is not None:
+    centre = float(overflow_mean)
+  else:
+    centre = float(cap)
   atoms: dict[float, float] = {float(c): counts[c] / total for c in range(cap)}
-  atoms[centre] = atoms.get(centre, 0.0) + counts[cap] / total
+  atoms[centre] = atoms.get(centre, 0.0) + overflow_count / total
   return atoms
 
 
@@ -131,6 +158,79 @@ def _folded_abs_interval(lo: float, hi: float) -> tuple[float, float]:
   return (min(abs(lo), abs(hi)), max(abs(lo), abs(hi)))
 
 
+def _validate_histogram_counts(counts: np.ndarray, name: str) -> None:
+  """Raise `ValueError` unless every bin of `counts` is a finite,
+  non-negative, whole-number count.
+
+  A float array with integral VALUES is accepted (`fanout_histogram`
+  itself returns integer dtype, but a caller reconstructing a histogram
+  from a BigQuery aggregation query typically has floats) — only a
+  fractional, negative, `nan` or `inf` bin is a caller bug.
+  """
+  if not np.all(np.isfinite(counts)):
+    raise ValueError(f"{name} must be finite, got {counts.tolist()}")
+  if np.any(counts < 0.0):
+    raise ValueError(f"{name} must be non-negative, got {counts.tolist()}")
+  if not np.all(counts == np.round(counts)):
+    raise ValueError(
+        f"{name} must hold whole-number counts, got {counts.tolist()}")
+
+
+def _validate_overflow_mean(value: float | None, overflow_count: float,
+                            cap: int, name: str) -> None:
+  """Raise `ValueError` unless a supplied overflow mean is a finite number
+  `>= cap` — but only when that side's `>= cap` bin actually has parents in
+  it.
+
+  `value is None` (never supplied) and `overflow_count <= 0` (the bin is
+  empty, so the mean is meaningless and `_fanout_atoms` ignores it anyway)
+  both skip validation entirely: there is nothing to check.
+  """
+  if value is None or overflow_count <= 0.0:
+    return
+  if not math.isfinite(value) or value < cap:
+    raise ValueError(
+        f"{name} must be finite and >= cap ({cap}) when the >= cap bin is "
+        f"non-empty, got {value}")
+
+
+def _validate_extremes(h_src_arr: np.ndarray, cap: int, min_src: int,
+                       max_src: int) -> None:
+  """Raise `ValueError` unless `min_src`/`max_src` are consistent with
+  `h_src_arr`'s own lowest/highest non-empty bin.
+
+  Below `cap` a histogram bin IS the exact count, so if the lowest (or
+  highest) non-empty bin sits there, `min_src` (`max_src`) must equal it
+  exactly. If the lowest (or highest) non-empty bin is instead the
+  `>= cap` overflow bin, the true extreme is unknown beyond "at least
+  `cap`", so only `min_src >= cap` (`max_src >= cap`) can be checked. Does
+  nothing when `h_src_arr` is entirely empty (`fanout_metrics` already
+  returns `None` for that case before this ever runs).
+  """
+  nonzero = np.flatnonzero(h_src_arr)
+  if nonzero.size == 0:
+    return
+  lowest, highest = int(nonzero[0]), int(nonzero[-1])
+  if lowest < cap:
+    if min_src != lowest:
+      raise ValueError(
+          f"min_src ({min_src}) must equal h_src's lowest non-empty bin "
+          f"({lowest})")
+  elif min_src < cap:
+    raise ValueError(
+        f"min_src ({min_src}) must be >= cap ({cap}): h_src's lowest "
+        "non-empty bin is the >= cap overflow bin")
+  if highest < cap:
+    if max_src != highest:
+      raise ValueError(
+          f"max_src ({max_src}) must equal h_src's highest non-empty bin "
+          f"({highest})")
+  elif max_src < cap:
+    raise ValueError(
+        f"max_src ({max_src}) must be >= cap ({cap}): h_src's highest "
+        "non-empty bin is the >= cap overflow bin")
+
+
 def fanout_metrics(
     h_src: Sequence[float],
     h_syn: Sequence[float],
@@ -171,37 +271,64 @@ def fanout_metrics(
       `zero_child_share_delta_ci_low`/`_ci_high` (`_folded_abs_interval`
       over `newcombe_diff_interval`).
     - `cardinality_adherence`: `relationship.cardinality_adherence` — the
-      share of synthetic parents with a fan-out in `[min_src, max_src]`.
-      Exact when `max_src < cap` (every count that matters is an exact
-      histogram bin). When `max_src >= cap`, the whole `>= cap` bin is
-      approximated as inside the range (a synthetic parent counted there
-      could in truth exceed `max_src`, but the histogram cannot tell) —
-      `cardinality_adherence_exact` records which case applied.
+      share of synthetic parents with a fan-out in `[min_src, max_src]`,
+      plus `cardinality_adherence_count` (the raw adherent count Task 25
+      needs) and `cardinality_adherence_ci_low`/`_ci_high`
+      (`wilson_interval(count, n_syn)` — the catalogue declares
+      `noise_floor: wilson` for this metric). Exact when `max_src < cap`
+      (every count that matters is an exact histogram bin). When
+      `max_src >= cap`, the whole `>= cap` bin is approximated as inside
+      the range — `cardinality_adherence_exact` records which case
+      applied. That approximation can be wrong in EITHER direction once
+      `max_src >= cap`: a synthetic parent counted there could in truth
+      exceed `max_src` (over-counted), and if `min_src > cap` too, an
+      overflow parent could equally be genuinely below `min_src`
+      (under-counted) — the histogram alone cannot distinguish any of
+      these from one another.
     - `parent_coverage`: `relationship.parent_coverage`, `Pr_syn[c >= 1] /
       Pr_src[c >= 1]`; `None` when the source has no parent with a child
       (an undefined ratio).
 
-  Raises `ValueError` if `h_src`/`h_syn` are not both exactly `cap + 1`
-  long — they must come from `fanout_histogram(..., cap=cap)`.
+  Raises `ValueError` if `cap < 1`; if `h_src`/`h_syn` are not both
+  exactly `cap + 1` long (they must come from
+  `fanout_histogram(..., cap=cap)`), or hold a negative, non-finite or
+  non-integral count; if `min_src`/`max_src` are inconsistent with
+  `h_src`'s own non-empty bins (`_validate_extremes`); or if a supplied
+  `mean_overflow_src`/`mean_overflow_syn` is non-finite or `< cap` while
+  that side's `>= cap` bin is non-empty (`_validate_overflow_mean` — see
+  `_fanout_atoms` for why an empty bin's overflow mean is never
+  validated, only ignored).
   """
+  _validate_cap(cap)
   h_src_arr = np.asarray(h_src, dtype=np.float64)
   h_syn_arr = np.asarray(h_syn, dtype=np.float64)
   if h_src_arr.shape != (cap + 1,) or h_syn_arr.shape != (cap + 1,):
     raise ValueError(
         f"h_src and h_syn must each have cap + 1 = {cap + 1} bins, got "
         f"shapes {h_src_arr.shape} and {h_syn_arr.shape}")
+  _validate_histogram_counts(h_src_arr, "h_src")
+  _validate_histogram_counts(h_syn_arr, "h_syn")
+
   n_src = float(h_src_arr.sum())
   n_syn = float(h_syn_arr.sum())
   if n_src <= 0.0 or n_syn <= 0.0:
     return None
 
+  _validate_extremes(h_src_arr, cap, min_src, max_src)
+  _validate_overflow_mean(mean_overflow_src, float(h_src_arr[cap]), cap,
+                          "mean_overflow_src")
+  _validate_overflow_mean(mean_overflow_syn, float(h_syn_arr[cap]), cap,
+                          "mean_overflow_syn")
+
   # distances.tvd takes Sequence[float]; .tolist() also satisfies mypy,
   # which does not treat ndarray as a Sequence[float].
   tvd_value = distances.tvd(h_src_arr.tolist(), h_syn_arr.tolist())
-  # n_src, n_syn > 0 above guarantee stats.distances.tvd finds nonzero mass
-  # on both sides, so this is never actually None; the fallback just keeps
-  # the return type a plain float for the dict below.
-  tvd_value = 0.0 if tvd_value is None else tvd_value
+  # Type narrowing only, not a runtime safety check: n_src, n_syn > 0 above
+  # already guarantee stats.distances.tvd finds nonzero mass on both sides,
+  # so this can never actually fire.
+  assert tvd_value is not None, (
+      "unreachable: n_src, n_syn > 0 above guarantee stats.distances.tvd "
+      "finds nonzero mass on both sides")
 
   atoms_src = _fanout_atoms(h_src_arr, n_src, cap, mean_overflow_src)
   atoms_syn = _fanout_atoms(h_syn_arr, n_syn, cap, mean_overflow_syn)
@@ -224,7 +351,9 @@ def fanout_metrics(
                                1].sum()) if hi_idx >= lo_idx else 0.0
   else:
     adherent = float(h_syn_arr[lo_idx:cap].sum()) + float(h_syn_arr[cap])
+  adherent_count = round(adherent)
   adherence = adherent / n_syn
+  adherence_ci_lo, adherence_ci_hi = wilson_interval(adherent_count, int(n_syn))
 
   src_share_with_child = 1.0 - z_src
   syn_share_with_child = 1.0 - z_syn
@@ -242,6 +371,9 @@ def fanout_metrics(
       "zero_child_share_delta_ci_low": ci_lo,
       "zero_child_share_delta_ci_high": ci_hi,
       "cardinality_adherence": adherence,
+      "cardinality_adherence_count": adherent_count,
+      "cardinality_adherence_ci_low": adherence_ci_lo,
+      "cardinality_adherence_ci_high": adherence_ci_hi,
       "cardinality_adherence_exact": exact,
       "parent_coverage": parent_coverage,
   }
