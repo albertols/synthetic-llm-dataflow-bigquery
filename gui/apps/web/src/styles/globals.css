@@ -1,0 +1,151 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+@import "./tokens.css";
+
+/* `dark:` follows the ThemeProvider stamp, not the OS. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+ * Tailwind utilities read the tokens: bg-surface-1, text-text-2, border-border,
+ * text-status-good-text, bg-chart-3 … `inline` keeps them as var() references
+ * so the theme toggle re-colours everything without a rebuild.
+ */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-control-border: var(--control-border);
+  --color-overlay: var(--overlay);
+  --color-text-1: var(--text-1);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-text: var(--accent-text);
+  --color-accent-soft: var(--accent-soft);
+  --color-brand-blue: var(--brand-blue);
+  --color-link: var(--link);
+  --color-info-soft: var(--info-soft);
+  --color-cpu: var(--cpu);
+  --color-cpu-text: var(--cpu-text);
+  --color-gpu: var(--gpu);
+  --color-gpu-text: var(--gpu-text);
+  --color-slate: var(--slate);
+  --color-focus-ring: var(--focus-ring);
+  --color-status-good: var(--status-good);
+  --color-status-good-text: var(--status-good-text);
+  --color-status-warn: var(--status-warn);
+  --color-status-warn-text: var(--status-warn-text);
+  --color-status-serious: var(--status-serious);
+  --color-status-serious-text: var(--status-serious-text);
+  --color-status-critical: var(--status-critical);
+  --color-status-critical-text: var(--status-critical-text);
+  --color-status-info: var(--status-info);
+  --color-status-info-text: var(--status-info-text);
+  --color-status-neutral: var(--status-neutral);
+  --color-status-neutral-text: var(--status-neutral-text);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+  --color-chart-8: var(--chart-8);
+  --color-chart-other: var(--chart-other);
+
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-code);
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --shadow-popover: var(--shadow-pop);
+  --ease-emphasized: var(--ease-emph);
+
+  --animate-fade-in: fade-in var(--duration-base) var(--ease-emph);
+  --animate-pop-in: pop-in var(--duration-base) var(--ease-emph);
+  --animate-slide-in-right: slide-in-right var(--duration-base) var(--ease-emph);
+  --animate-skeleton: skeleton 1.4s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+}
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+}
+@keyframes skeleton {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@layer base {
+  html {
+    background: var(--bg);
+    color: var(--text-1);
+    font-family: var(--font-ui);
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    min-height: 100dvh;
+    background: var(--bg);
+  }
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--text-1);
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-code);
+  }
+  /* Numbers in columns align; standalone numbers keep proportional figures. */
+  table {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+}
