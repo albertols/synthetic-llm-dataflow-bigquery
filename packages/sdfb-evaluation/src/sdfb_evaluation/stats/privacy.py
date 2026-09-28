@@ -188,6 +188,26 @@ def _mid_cdf_pit(x: np.ndarray, grid: np.ndarray) -> np.ndarray:
   return out
 
 
+def pit_mid_cdf(values: Sequence[Any],
+                grid: Any,
+                *,
+                column: str = "values") -> np.ndarray:
+  """Public entry to this module's numeric encoding, for `stats.detection`.
+
+  `values` are raw numeric/temporal cells, read exactly as `GowerSpace.encode`
+  reads them (`None`/non-finite -> `NaN`, temporal -> epoch seconds, numeric
+  strings parsed back; no numeric reading raises), and mapped through
+  `grid`'s mid-CDF PIT (`_mid_cdf_pit`), after `grid` passes the same
+  validation as a `GowerSpace` grid. Returns float64 (`encode` stores the
+  same values as float32). `column` only names the column in error messages.
+  """
+  checked = _validated_grid(column, grid)
+  x = np.fromiter((_numeric_reading(column, v) for v in values),
+                  dtype=np.float64,
+                  count=len(values))
+  return _mid_cdf_pit(x, checked)
+
+
 @dataclass(frozen=True, eq=False)
 class GowerSpace:
   """The plan's Gower feature space: numeric grids and categorical columns.
