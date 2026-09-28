@@ -10,7 +10,8 @@
  *   centroidTopK / kcenter / kcenterRotate / selectSeedExamples (retrieval)
  * - teaching only (never in the pipeline): mmr, randomPick
  * - scale: rarefaction, birthdayCollisionProb, rareCaptureProb, tailPoints, poolReuse
- * - scoring: scoreValue, statusFor, tableFamilyScores, modelFamilyScores
+ * - scoring (the evaluator's rules, golden-pinned): assess, statusFor, scoreValue, scoreRow,
+ *   aggregateScores, headlineCounts, tableFamilyScores, modelFamilyScores
  * - rng: mulberry32, Random, seedFrom
  */
 export * from "./correlation";

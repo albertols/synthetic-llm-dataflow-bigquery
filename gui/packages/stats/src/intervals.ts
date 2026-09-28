@@ -26,7 +26,11 @@ export function ksCritical(n: number, m: number, alpha = 0.05): number {
   return Math.sqrt(-Math.log(alpha / 2) / 2) * Math.sqrt((n + m) / (n * m));
 }
 
-/** Wilson score interval for k successes in n (Wilson 1927, https://doi.org/10.1080/01621459.1927.10502953). */
+/**
+ * Wilson score interval for k successes in n (Wilson 1927, https://doi.org/10.1080/01621459.1927.10502953).
+ * k = 0 and k = n return the exact bounds 0 and 1, as the evaluator's `wilson_interval` does, so
+ * an interval metric at its edge reference (a share of 1, a rate of 0) reads as covering it exactly.
+ */
 export function wilson(k: number, n: number, z = Z95): [number, number] {
   if (n <= 0) return [0, 1];
   const p = k / n;
@@ -34,7 +38,17 @@ export function wilson(k: number, n: number, z = Z95): [number, number] {
   const denom = 1 + z2 / n;
   const center = (p + z2 / (2 * n)) / denom;
   const half = (z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / denom;
-  return [Math.max(0, center - half), Math.min(1, center + half)];
+  return [k <= 0 ? 0 : Math.max(0, center - half), k >= n ? 1 : Math.min(1, center + half)];
+}
+
+/**
+ * The interval for |X| from a two-sided interval (lo, hi) for a signed X (the evaluator's
+ * `_folded_abs_interval`): (0, max(|lo|, |hi|)) when it straddles 0, else (min, max) of the
+ * absolute ends. How an absolute-difference metric carries its Newcombe CI (Ruling R41).
+ */
+export function foldedAbsInterval(lo: number, hi: number): [number, number] {
+  if (lo <= 0 && 0 <= hi) return [0, Math.max(Math.abs(lo), Math.abs(hi))];
+  return [Math.min(Math.abs(lo), Math.abs(hi)), Math.max(Math.abs(lo), Math.abs(hi))];
 }
 
 /**

@@ -18,9 +18,10 @@
     UV_PROJECT_ENVIRONMENT=.venv-gui uv run python scripts/gui/export_golden_fixtures.py --check
 
 The Synthetic Platform GUI (ADR 0042) re-implements three small pieces of
-`sdfb_core.rag` in TypeScript so the RAG tab can run them in the browser.
-This script runs the Python originals and writes what they return into
-`gui/packages/contracts/generated/golden/`:
+`sdfb_core.rag` in TypeScript so the RAG tab can run them in the browser,
+and mirrors the evaluator's scoring rules for the mock and the EVALUATION
+tab's explanations. This script runs the Python originals and writes what
+they return into `gui/packages/contracts/generated/golden/`:
 
 - `hashing_embedder.json`: `HashingEmbedder` over 40 strings chosen to hit
   the whitespace set `str.split()` uses (`\\x1c`-`\\x1f`, `\\x85`, NBSP,
@@ -35,6 +36,10 @@ This script runs the Python originals and writes what they return into
   k-center and k-center-rotate picks on a mulberry32-seeded 64x384 matrix
   (with duplicate rows, for tie-breaks) and on a collapsed 12x8 matrix
   (few distinct vectors, for the "never re-pick" rule).
+- `scoring.json`: the evaluator's `sdfb_evaluation.scoring` (status, score,
+  detail notes, JSON-safe row numbers, roll-ups and headline counts) over
+  the hand-picked cases in `export_scoring_golden.py`, which also explains
+  how the evaluator imports into this env (its `src` on `sys.path`).
 
 Floats are rounded to 12 decimals: the TS tests compare vectors to 1e-6 and
 the integer parts (buckets, counts, picks) exactly. `--check` exits 1 when a
@@ -58,6 +63,10 @@ from typing import Any
 
 from sdfb_core.rag import embedding, retrieval, serialize
 from sdfb_core.rag.index import _PyExactIPIndex  # pylint: disable=protected-access  # the goldens pin the pure-Python index, never FAISS float32
+
+# The sibling `export_scoring_golden` import needs its sys.path entry first.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import export_scoring_golden  # sibling import; path must be set up first  # pylint: disable=wrong-import-position
 
 REPO = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO / "gui" / "packages" / "contracts" / "generated" / "golden"
@@ -509,6 +518,7 @@ def build() -> dict[str, dict[str, Any]]:
       "hashing_embedder": _hashing(),
       "great_serialize": _great(),
       "retrieval": _retrieval(),
+      "scoring": export_scoring_golden.scoring_golden(),
   }
 
 

@@ -1,0 +1,2443 @@
+{
+ "generated_by": "scripts/gui/export_golden_fixtures.py",
+ "cases_from": "scripts/gui/export_scoring_golden.py",
+ "python": "3.11.15",
+ "source": "packages/sdfb-evaluation/src/sdfb_evaluation/scoring/__init__.py (to_metric_row, status_for, score_value, aggregate_scores, headline_counts)",
+ "encoding": "non-finite inputs are the strings '+inf', '-inf', 'nan'; row numbers are JSON-safe (non-finite -> null)",
+ "cases": [
+  {
+   "id": "s01",
+   "rule": "R9",
+   "note": "lower_better under warn: PASS, complement score",
+   "input": {
+    "metric_id": "column.ks",
+    "value": 0.05,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.02,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 0.95,
+    "value": 0.05,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.02,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s02",
+   "rule": "R9",
+   "note": "exactly at warn is WARN (inclusive)",
+   "input": {
+    "metric_id": "column.ks",
+    "value": 0.1,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.01,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.9,
+    "value": 0.1,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.01,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s03",
+   "rule": "R9",
+   "note": "past fail, clear of the floor: FAIL",
+   "input": {
+    "metric_id": "column.ks",
+    "value": 0.25,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.02,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.75,
+    "value": 0.25,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.02,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s04",
+   "rule": "R9",
+   "note": "|0.9 - 1| = 0.0999… reaches warn 0.1 by the 1e-9 tolerance",
+   "input": {
+    "metric_id": "column.std_ratio",
+    "value": 0.9,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 1.0,
+    "value": 0.9,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s05",
+   "rule": "R9",
+   "note": "target metric past fail on the high side",
+   "input": {
+    "metric_id": "column.std_ratio",
+    "value": 1.3,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 1.3,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s06",
+   "rule": "R9",
+   "note": "target metric inside warn",
+   "input": {
+    "metric_id": "column.std_ratio",
+    "value": 1.05,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 1.05,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s07",
+   "rule": "R9",
+   "note": "higher_better above warn: PASS",
+   "input": {
+    "metric_id": "field.type_validity",
+    "value": 0.99995,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.99995,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s08",
+   "rule": "R9",
+   "note": "higher_better between warn and fail: WARN",
+   "input": {
+    "metric_id": "field.type_validity",
+    "value": 0.9995,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.555555555556,
+    "value": 0.9995,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s09",
+   "rule": "R9",
+   "note": "higher_better exactly at fail: FAIL (inclusive)",
+   "input": {
+    "metric_id": "field.type_validity",
+    "value": 0.999,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.999,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s10",
+   "rule": "R9",
+   "note": "higher_better linear score between thresholds",
+   "input": {
+    "metric_id": "column.range_coverage",
+    "value": 0.8,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.333333333333,
+    "value": 0.8,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s11",
+   "rule": "R43",
+   "note": "no value, the producer's reason is kept",
+   "input": {
+    "metric_id": "column.ks",
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "constant column on both sides"
+    },
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "constant column on both sides"
+    }
+   }
+  },
+  {
+   "id": "s12",
+   "rule": "R43",
+   "note": "no value, no reason: the scorer names it",
+   "input": {
+    "metric_id": "column.ks",
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "no value computed"
+    }
+   }
+  },
+  {
+   "id": "s13",
+   "rule": "R43",
+   "note": "NaN value: not evaluated",
+   "input": {
+    "metric_id": "column.ks",
+    "value": "nan",
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "value is NaN"
+    }
+   }
+  },
+  {
+   "id": "s14",
+   "rule": "R9",
+   "note": "no thresholds: INFO, no score",
+   "input": {
+    "metric_id": "column.wasserstein",
+    "value": 3.2,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "info",
+    "score": null,
+    "value": 3.2,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s15",
+   "rule": "R9",
+   "note": "the source's own orphan rate is INFO",
+   "input": {
+    "metric_id": "relationship.orphan_rate_source",
+    "value": 0.002,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "info",
+    "score": null,
+    "value": 0.002,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s16",
+   "rule": "R26",
+   "note": "score: none on a measured metric: graded, never scored",
+   "input": {
+    "metric_id": "column.distinct_ceiling_hit",
+    "value": 0.2,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": null,
+    "value": 0.2,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s17",
+   "rule": "R26",
+   "note": "score: none at its fail threshold: FAIL, no score",
+   "input": {
+    "metric_id": "column.distinct_ceiling_hit",
+    "value": 1.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": null,
+    "value": 1.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s18",
+   "rule": "R43",
+   "note": "+inf on lower_better: FAIL, nonfinite +inf, score 0",
+   "input": {
+    "metric_id": "column.psi",
+    "value": "+inf",
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "nonfinite": "+inf"
+    }
+   }
+  },
+  {
+   "id": "s19",
+   "rule": "R43",
+   "note": "-inf on lower_better is the good side: not evaluated",
+   "input": {
+    "metric_id": "column.psi",
+    "value": "-inf",
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "value is -inf, on the good side"
+    }
+   }
+  },
+  {
+   "id": "s20",
+   "rule": "R43",
+   "note": "-inf on higher_better: FAIL, nonfinite -inf",
+   "input": {
+    "metric_id": "row.dcr_p5_ratio",
+    "value": "-inf",
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "nonfinite": "-inf"
+    }
+   }
+  },
+  {
+   "id": "s21",
+   "rule": "R43",
+   "note": "+inf on higher_better is the good side: not evaluated",
+   "input": {
+    "metric_id": "row.dcr_p5_ratio",
+    "value": "+inf",
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "value is +inf, on the good side"
+    }
+   }
+  },
+  {
+   "id": "s22",
+   "rule": "R43",
+   "note": "+inf on a target metric: FAIL",
+   "input": {
+    "metric_id": "column.std_ratio",
+    "value": "+inf",
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "nonfinite": "+inf"
+    }
+   }
+  },
+  {
+   "id": "s23",
+   "rule": "R43",
+   "note": "-inf on a target metric: FAIL (both sides are bad)",
+   "input": {
+    "metric_id": "column.std_ratio",
+    "value": "-inf",
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "nonfinite": "-inf"
+    }
+   }
+  },
+  {
+   "id": "s24",
+   "rule": "R43",
+   "note": "+inf on a complement metric scores 0",
+   "input": {
+    "metric_id": "column.tvd",
+    "value": "+inf",
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "nonfinite": "+inf"
+    }
+   }
+  },
+  {
+   "id": "s25",
+   "rule": "R43",
+   "note": "pMSE with a ceiling above fail: graded",
+   "input": {
+    "metric_id": "table.pmse_ratio",
+    "value": 2.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "ceiling": 50.0
+    },
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 2.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "ceiling": 50.0
+    }
+   }
+  },
+  {
+   "id": "s26",
+   "rule": "R43",
+   "note": "pMSE without a ceiling: not evaluated",
+   "input": {
+    "metric_id": "table.pmse_ratio",
+    "value": 12.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": 12.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "pmse ceiling missing"
+    }
+   }
+  },
+  {
+   "id": "s27",
+   "rule": "R43",
+   "note": "pMSE whose ceiling is below fail: not evaluated",
+   "input": {
+    "metric_id": "table.pmse_ratio",
+    "value": 5.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "ceiling": 8.0
+    },
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": 5.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "ceiling": 8.0,
+     "reason": "ceiling below fail threshold"
+    }
+   }
+  },
+  {
+   "id": "s28",
+   "rule": "R43",
+   "note": "pMSE past fail with a high ceiling: FAIL",
+   "input": {
+    "metric_id": "table.pmse_ratio",
+    "value": 12.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "ceiling": 400.0
+    },
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 12.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "ceiling": 400.0
+    }
+   }
+  },
+  {
+   "id": "s29",
+   "rule": "R39",
+   "note": "zero duplicate keys: PASS",
+   "input": {
+    "metric_id": "table.pk_duplicate_rate",
+    "value": 0.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s30",
+   "rule": "R39",
+   "note": "any duplicate key fails",
+   "input": {
+    "metric_id": "table.pk_duplicate_rate",
+    "value": 1e-09,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 1e-09,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s31",
+   "rule": "R39",
+   "note": "zero tolerance ignores a noise floor",
+   "input": {
+    "metric_id": "table.pk_duplicate_rate",
+    "value": 0.3,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.5,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.3,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.5,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s32",
+   "rule": "R42",
+   "note": "orphans on an enforced edge: FAIL",
+   "input": {
+    "metric_id": "relationship.orphan_rate",
+    "value": 0.01,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.01,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s33",
+   "rule": "R42",
+   "note": "orphans on a documented edge: INFO, never FAIL",
+   "input": {
+    "metric_id": "relationship.orphan_rate",
+    "value": 0.01,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": false
+   },
+   "row": {
+    "status": "info",
+    "score": null,
+    "value": 0.01,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "documented edge (enforced: false): reported, not gated"
+    }
+   }
+  },
+  {
+   "id": "s34",
+   "rule": "R42",
+   "note": "a documented edge with no orphans is still INFO",
+   "input": {
+    "metric_id": "relationship.orphan_rate",
+    "value": 0.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": false
+   },
+   "row": {
+    "status": "info",
+    "score": null,
+    "value": 0.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "documented edge (enforced: false): reported, not gated"
+    }
+   }
+  },
+  {
+   "id": "s35",
+   "rule": "R42",
+   "note": "fan-out stays graded on a documented edge",
+   "input": {
+    "metric_id": "relationship.fanout_tvd",
+    "value": 0.25,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.01,
+    "source_value": null,
+    "detail": {},
+    "enforced": false
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.75,
+    "value": 0.25,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.01,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s36",
+   "rule": "R38",
+   "note": "no copies either side: value None, ci_low 0 -> PASS 1.0",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": null,
+    "ci_low": 0.0,
+    "ci_high": "+inf",
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": null,
+    "ci_low": 0.0,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s37",
+   "rule": "R38",
+   "note": "copies only in R: value +inf, ci_low 1.2 -> PASS",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": "+inf",
+    "ci_low": 1.2,
+    "ci_high": "+inf",
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": null,
+    "ci_low": 1.2,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s38",
+   "rule": "R38",
+   "note": "ci_low between warn and fail: WARN, score on the bound",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": 8.0,
+    "ci_low": 3.5,
+    "ci_high": 20.0,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.5,
+    "value": 8.0,
+    "ci_low": 3.5,
+    "ci_high": 20.0,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s39",
+   "rule": "R38",
+   "note": "ci_low past fail: FAIL",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": 8.0,
+    "ci_low": 5.5,
+    "ci_high": 12.0,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 8.0,
+    "ci_low": 5.5,
+    "ci_high": 12.0,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s40",
+   "rule": "R38",
+   "note": "a point value without its bound: not evaluated",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": 3.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": 3.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "ci_low missing: row.memorization_lift gates on its confidence bound"
+    }
+   }
+  },
+  {
+   "id": "s41",
+   "rule": "R38",
+   "note": "neither value nor bound: not evaluated",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "ci_low missing: row.memorization_lift gates on its confidence bound"
+    }
+   }
+  },
+  {
+   "id": "s42",
+   "rule": "R38",
+   "note": "no finite value or bound: not evaluated",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": null,
+    "ci_low": "+inf",
+    "ci_high": "+inf",
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "neither the value nor ci_low is finite"
+    }
+   }
+  },
+  {
+   "id": "s43",
+   "rule": "R43",
+   "note": "finite point, infinite ci_low: FAIL on the bound",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": 4.0,
+    "ci_low": "+inf",
+    "ci_high": "+inf",
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 4.0,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "nonfinite": "+inf"
+    }
+   }
+  },
+  {
+   "id": "s44",
+   "rule": "R38",
+   "note": "field-level lift, clean run: PASS 1.0",
+   "input": {
+    "metric_id": "field.value_memorization_lift",
+    "value": null,
+    "ci_low": 0.0,
+    "ci_high": "+inf",
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": null,
+    "ci_low": 0.0,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s45",
+   "rule": "R41",
+   "note": "rate_ratio has no noise check beyond the bound",
+   "input": {
+    "metric_id": "row.exposure_lift",
+    "value": 3.0,
+    "ci_low": 2.2,
+    "ci_high": 4.1,
+    "noise_floor": 5.0,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.933333333333,
+    "value": 3.0,
+    "ci_low": 2.2,
+    "ci_high": 4.1,
+    "noise_floor": 5.0,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s46",
+   "rule": "R45",
+   "note": "DCR share: ci_low under warn -> PASS",
+   "input": {
+    "metric_id": "row.dcr_train_holdout_share",
+    "value": 0.52,
+    "ci_low": 0.5,
+    "ci_high": 0.54,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.52,
+    "ci_low": 0.5,
+    "ci_high": 0.54,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s47",
+   "rule": "R45",
+   "note": "DCR share: CI excludes 0.5 -> WARN stays",
+   "input": {
+    "metric_id": "row.dcr_train_holdout_share",
+    "value": 0.62,
+    "ci_low": 0.58,
+    "ci_high": 0.66,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.4,
+    "value": 0.62,
+    "ci_low": 0.58,
+    "ci_high": 0.66,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s48",
+   "rule": "R41",
+   "note": "an interval metric without ci_high: noise unavailable",
+   "input": {
+    "metric_id": "row.dcr_train_holdout_share",
+    "value": 0.64,
+    "ci_low": 0.61,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.64,
+    "ci_low": 0.61,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_check": "unavailable"
+    }
+   }
+  },
+  {
+   "id": "s49",
+   "rule": "R40",
+   "note": "FAIL within the KS floor: PASS, was fail, score 1",
+   "input": {
+    "metric_id": "column.ks",
+    "value": 0.25,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.3,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.25,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.3,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "fail"
+    }
+   }
+  },
+  {
+   "id": "s50",
+   "rule": "R40",
+   "note": "WARN within the KS floor: PASS, was warn",
+   "input": {
+    "metric_id": "column.ks",
+    "value": 0.12,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.15,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.12,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.15,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "warn"
+    }
+   }
+  },
+  {
+   "id": "s51",
+   "rule": "R41",
+   "note": "no floor: the WARN stays, noise unavailable",
+   "input": {
+    "metric_id": "column.ks",
+    "value": 0.12,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.88,
+    "value": 0.12,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_check": "unavailable"
+    }
+   }
+  },
+  {
+   "id": "s52",
+   "rule": "R41",
+   "note": "a NaN floor is no floor",
+   "input": {
+    "metric_id": "column.ks",
+    "value": 0.12,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": "nan",
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.88,
+    "value": 0.12,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_check": "unavailable"
+    }
+   }
+  },
+  {
+   "id": "s53",
+   "rule": "R40",
+   "note": "fisher_z floor explains a Pearson WARN",
+   "input": {
+    "metric_id": "pair.pearson_delta",
+    "value": 0.15,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.2,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.15,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.2,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "warn"
+    }
+   }
+  },
+  {
+   "id": "s54",
+   "rule": "R41",
+   "note": "mi_bias floor too small: FAIL stays",
+   "input": {
+    "metric_id": "pair.nmi_delta",
+    "value": 0.2,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.1,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.2,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.1,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s55",
+   "rule": "R40",
+   "note": "at exactly the jsd floor: downgraded (<=)",
+   "input": {
+    "metric_id": "column.jsd",
+    "value": 0.06,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.06,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.06,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.06,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "warn"
+    }
+   }
+  },
+  {
+   "id": "s56",
+   "rule": "R40",
+   "note": "tvd_null on a fan-out histogram",
+   "input": {
+    "metric_id": "relationship.fanout_tvd",
+    "value": 0.15,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.2,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.15,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.2,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "warn"
+    }
+   }
+  },
+  {
+   "id": "s57",
+   "rule": "R9",
+   "note": "novelty target from source_value: FAIL",
+   "input": {
+    "metric_id": "column.novelty_mass",
+    "value": 0.5,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": 0.1,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.5,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": 0.1,
+    "detail": null
+   }
+  },
+  {
+   "id": "s58",
+   "rule": "R9",
+   "note": "novelty target from source_value: PASS",
+   "input": {
+    "metric_id": "column.novelty_mass",
+    "value": 0.15,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": 0.1,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.15,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": 0.1,
+    "detail": null
+   }
+  },
+  {
+   "id": "s59",
+   "rule": "R9",
+   "note": "novelty without a source_value: not evaluated",
+   "input": {
+    "metric_id": "column.novelty_mass",
+    "value": 0.3,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": 0.3,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "no target: source_value missing or non-finite"
+    }
+   }
+  },
+  {
+   "id": "s60",
+   "rule": "R9",
+   "note": "novelty with an infinite source_value: not evaluated",
+   "input": {
+    "metric_id": "column.novelty_mass",
+    "value": 0.3,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": "+inf",
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": 0.3,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "no target: source_value missing or non-finite"
+    }
+   }
+  },
+  {
+   "id": "s61",
+   "rule": "R41",
+   "note": "Newcombe CI covers 0: WARN -> PASS",
+   "input": {
+    "metric_id": "column.null_rate_delta",
+    "value": 0.03,
+    "ci_low": 0.0,
+    "ci_high": 0.06,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.03,
+    "ci_low": 0.0,
+    "ci_high": 0.06,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "warn"
+    }
+   }
+  },
+  {
+   "id": "s62",
+   "rule": "R41",
+   "note": "Newcombe CI excludes 0: FAIL stays",
+   "input": {
+    "metric_id": "column.null_rate_delta",
+    "value": 0.06,
+    "ci_low": 0.04,
+    "ci_high": 0.08,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.06,
+    "ci_low": 0.04,
+    "ci_high": 0.08,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s63",
+   "rule": "R41",
+   "note": "a scalar floor does not count for an interval method",
+   "input": {
+    "metric_id": "column.null_rate_delta",
+    "value": 0.06,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.1,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.06,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": 0.1,
+    "source_value": null,
+    "detail": {
+     "noise_check": "unavailable"
+    }
+   }
+  },
+  {
+   "id": "s64",
+   "rule": "R41",
+   "note": "DeLong CI covers 0.5: WARN -> PASS at auc(0.5)",
+   "input": {
+    "metric_id": "table.detection_auc",
+    "value": 0.75,
+    "ci_low": 0.45,
+    "ci_high": 0.9,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.75,
+    "ci_low": 0.45,
+    "ci_high": 0.9,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "warn"
+    }
+   }
+  },
+  {
+   "id": "s65",
+   "rule": "R41",
+   "note": "DeLong CI excludes 0.5: FAIL",
+   "input": {
+    "metric_id": "table.detection_auc",
+    "value": 0.9,
+    "ci_low": 0.86,
+    "ci_high": 0.94,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.2,
+    "value": 0.9,
+    "ci_low": 0.86,
+    "ci_high": 0.94,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s66",
+   "rule": "R41",
+   "note": "AUC under warn: PASS, auc score",
+   "input": {
+    "metric_id": "table.detection_auc",
+    "value": 0.6,
+    "ci_low": 0.55,
+    "ci_high": 0.65,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 0.8,
+    "value": 0.6,
+    "ci_low": 0.55,
+    "ci_high": 0.65,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s67",
+   "rule": "R45",
+   "note": "adherence 970/1000, Wilson CI below 1: WARN stays",
+   "input": {
+    "metric_id": "relationship.cardinality_adherence",
+    "value": 0.97,
+    "ci_low": 0.957497,
+    "ci_high": 0.978906,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.5,
+    "value": 0.97,
+    "ci_low": 0.957497,
+    "ci_high": 0.978906,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s68",
+   "rule": "R45",
+   "note": "full adherence: PASS",
+   "input": {
+    "metric_id": "field.category_adherence",
+    "value": 1.0,
+    "ci_low": 0.996173,
+    "ci_high": 1.0,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 1.0,
+    "ci_low": 0.996173,
+    "ci_high": 1.0,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s69",
+   "rule": "R41",
+   "note": "synthetic CI reaching 1 downgrades a higher_better FAIL",
+   "input": {
+    "metric_id": "field.category_adherence",
+    "value": 0.9,
+    "ci_low": 0.85,
+    "ci_high": 1.0,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.9,
+    "ci_low": 0.85,
+    "ci_high": 1.0,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "fail"
+    }
+   }
+  },
+  {
+   "id": "s70",
+   "rule": "R45",
+   "note": "20 copies in 10k, Wilson CI above 0: FAIL stays",
+   "input": {
+    "metric_id": "field.substantive_copy_rate",
+    "value": 0.002,
+    "ci_low": 0.001295,
+    "ci_high": 0.003087,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": 0.002,
+    "ci_low": 0.001295,
+    "ci_high": 0.003087,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s71",
+   "rule": "R45",
+   "note": "no exact matches in 100k: PASS",
+   "input": {
+    "metric_id": "row.exact_match_rate",
+    "value": 0.0,
+    "ci_low": 0.0,
+    "ci_high": 3.84e-05,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.0,
+    "ci_low": 0.0,
+    "ci_high": 3.84e-05,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s72",
+   "rule": "R41",
+   "note": "a Wilson metric without a CI: noise unavailable",
+   "input": {
+    "metric_id": "row.near_match_rate",
+    "value": 0.002,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.888888888889,
+    "value": 0.002,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_check": "unavailable"
+    }
+   }
+  },
+  {
+   "id": "s73",
+   "rule": "R41",
+   "note": "synthetic CI reaching 0 downgrades a copy-rate WARN",
+   "input": {
+    "metric_id": "row.exact_match_rate_nonkey",
+    "value": 0.002,
+    "ci_low": 0.0,
+    "ci_high": 0.004,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 1.0,
+    "value": 0.002,
+    "ci_low": 0.0,
+    "ci_high": 0.004,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_downgraded_from": "warn"
+    }
+   }
+  },
+  {
+   "id": "s74",
+   "rule": "R11",
+   "note": "table family score over warn: PASS, score = value",
+   "input": {
+    "metric_id": "table.fidelity_score",
+    "value": 0.9,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": 0.9,
+    "value": 0.9,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s75",
+   "rule": "R11",
+   "note": "model overall between thresholds: WARN",
+   "input": {
+    "metric_id": "model.overall_score",
+    "value": 0.75,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.75,
+    "value": 0.75,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s76",
+   "rule": "R11",
+   "note": "model overall at fail: FAIL (inclusive)",
+   "input": {
+    "metric_id": "model.overall_score",
+    "value": 0.7,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.7,
+    "value": 0.7,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s77",
+   "rule": "R26",
+   "note": "an aggregate outside [0, 1] scores None",
+   "input": {
+    "metric_id": "table.fidelity_score",
+    "value": 1.2,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "pass",
+    "score": null,
+    "value": 1.2,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
+  },
+  {
+   "id": "s78",
+   "rule": "R43",
+   "note": "an aggregate with no value: not evaluated",
+   "input": {
+    "metric_id": "table.column_shape_score",
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "not_evaluated",
+    "score": null,
+    "value": null,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "no value computed"
+    }
+   }
+  }
+ ],
+ "score_values": [
+  {
+   "metric_id": "column.ks",
+   "value": 0.0,
+   "target": null,
+   "score": 1.0
+  },
+  {
+   "metric_id": "column.ks",
+   "value": 0.37,
+   "target": null,
+   "score": 0.63
+  },
+  {
+   "metric_id": "column.ks",
+   "value": 1.5,
+   "target": null,
+   "score": 0.0
+  },
+  {
+   "metric_id": "column.char_class_l1",
+   "value": 0.15,
+   "target": null,
+   "score": 0.5
+  },
+  {
+   "metric_id": "column.char_class_l1",
+   "value": 0.1,
+   "target": null,
+   "score": 1.0
+  },
+  {
+   "metric_id": "column.char_class_l1",
+   "value": 0.2,
+   "target": null,
+   "score": 0.0
+  },
+  {
+   "metric_id": "field.type_validity",
+   "value": 0.9995,
+   "target": null,
+   "score": 0.555555555556
+  },
+  {
+   "metric_id": "field.type_validity",
+   "value": 1.0,
+   "target": null,
+   "score": 1.0
+  },
+  {
+   "metric_id": "field.type_validity",
+   "value": 0.5,
+   "target": null,
+   "score": 0.0
+  },
+  {
+   "metric_id": "column.std_ratio",
+   "value": 0.8,
+   "target": null,
+   "score": 0.333333333333
+  },
+  {
+   "metric_id": "column.std_ratio",
+   "value": 1.2,
+   "target": null,
+   "score": 0.333333333333
+  },
+  {
+   "metric_id": "column.novelty_mass",
+   "value": 0.3,
+   "target": 0.1,
+   "score": 0.333333333333
+  },
+  {
+   "metric_id": "column.novelty_mass",
+   "value": 0.3,
+   "target": null,
+   "score": null
+  },
+  {
+   "metric_id": "table.detection_auc",
+   "value": 0.4,
+   "target": null,
+   "score": 1.0
+  },
+  {
+   "metric_id": "table.detection_auc",
+   "value": 0.8,
+   "target": null,
+   "score": 0.4
+  },
+  {
+   "metric_id": "table.pk_duplicate_rate",
+   "value": 0.0,
+   "target": null,
+   "score": 1.0
+  },
+  {
+   "metric_id": "table.pk_duplicate_rate",
+   "value": 0.01,
+   "target": null,
+   "score": 0.0
+  },
+  {
+   "metric_id": "table.fidelity_score",
+   "value": 0.42,
+   "target": null,
+   "score": 0.42
+  },
+  {
+   "metric_id": "column.distinct_ceiling_hit",
+   "value": 0.42,
+   "target": null,
+   "score": null
+  },
+  {
+   "metric_id": "column.psi",
+   "value": "+inf",
+   "target": null,
+   "score": 0.0
+  },
+  {
+   "metric_id": "row.dcr_p5_ratio",
+   "value": "-inf",
+   "target": null,
+   "score": 0.0
+  },
+  {
+   "metric_id": "row.dcr_p5_ratio",
+   "value": "+inf",
+   "target": null,
+   "score": 1.0
+  },
+  {
+   "metric_id": "column.ks",
+   "value": "nan",
+   "target": null,
+   "score": null
+  },
+  {
+   "metric_id": "column.ks",
+   "value": null,
+   "target": null,
+   "score": null
+  },
+  {
+   "metric_id": "column.wasserstein",
+   "value": 3.0,
+   "target": null,
+   "score": null
+  }
+ ],
+ "rollup": {
+  "rows": [
+   {
+    "table_name": "users",
+    "level": "column",
+    "family": "fidelity",
+    "metric_id": "column.ks",
+    "column_name": "email",
+    "edge": null,
+    "status": "pass",
+    "score": 0.95
+   },
+   {
+    "table_name": "users",
+    "level": "column",
+    "family": "fidelity",
+    "metric_id": "column.null_rate_delta",
+    "column_name": "email",
+    "edge": null,
+    "status": "pass",
+    "score": 1.0
+   },
+   {
+    "table_name": "users",
+    "level": "field",
+    "family": "integrity",
+    "metric_id": "field.type_validity",
+    "column_name": "email",
+    "edge": null,
+    "status": "pass",
+    "score": 1.0
+   },
+   {
+    "table_name": "users",
+    "level": "column",
+    "family": "fidelity",
+    "metric_id": "column.tvd",
+    "column_name": "email",
+    "edge": null,
+    "status": "pass",
+    "score": 1.0
+   },
+   {
+    "table_name": "users",
+    "level": "pair",
+    "family": "fidelity",
+    "metric_id": "pair.pearson_delta",
+    "column_name": null,
+    "edge": null,
+    "status": "warn",
+    "score": 0.5
+   },
+   {
+    "table_name": "users",
+    "level": "row",
+    "family": "privacy",
+    "metric_id": "row.memorization_lift",
+    "column_name": null,
+    "edge": null,
+    "status": "pass",
+    "score": 1.0
+   },
+   {
+    "table_name": "users",
+    "level": "table",
+    "family": "integrity",
+    "metric_id": "table.pk_duplicate_rate",
+    "column_name": null,
+    "edge": null,
+    "status": "fail",
+    "score": 0.0
+   },
+   {
+    "table_name": "users",
+    "level": "table",
+    "family": "integrity",
+    "metric_id": "table.row_count_ratio",
+    "column_name": null,
+    "edge": null,
+    "status": "warn",
+    "score": 0.75
+   },
+   {
+    "table_name": "users",
+    "level": "column",
+    "family": "fidelity",
+    "metric_id": "column.wasserstein",
+    "column_name": "email",
+    "edge": null,
+    "status": "info",
+    "score": null
+   },
+   {
+    "table_name": "users",
+    "level": "column",
+    "family": "diversity",
+    "metric_id": "column.distinct_ceiling_hit",
+    "column_name": "email",
+    "edge": null,
+    "status": "pass",
+    "score": null
+   },
+   {
+    "table_name": "users",
+    "level": "table",
+    "family": "fidelity",
+    "metric_id": "table.fidelity_score",
+    "column_name": null,
+    "edge": null,
+    "status": "warn",
+    "score": 0.8
+   },
+   {
+    "table_name": "users",
+    "level": "table",
+    "family": "overall",
+    "metric_id": "table.overall_score",
+    "column_name": null,
+    "edge": null,
+    "status": "warn",
+    "score": 0.8
+   },
+   {
+    "table_name": "orders",
+    "level": "relationship",
+    "family": "integrity",
+    "metric_id": "relationship.orphan_rate",
+    "column_name": null,
+    "edge": "orders.user_id->users.id",
+    "status": "fail",
+    "score": 0.0
+   },
+   {
+    "table_name": "orders",
+    "level": "relationship",
+    "family": "integrity",
+    "metric_id": "relationship.orphan_rate",
+    "column_name": null,
+    "edge": "orders.user_id->users.id",
+    "status": "info",
+    "score": null
+   },
+   {
+    "table_name": "orders",
+    "level": "relationship",
+    "family": "fidelity",
+    "metric_id": "relationship.fanout_tvd",
+    "column_name": null,
+    "edge": "orders.user_id->users.id",
+    "status": "fail",
+    "score": 0.7
+   },
+   {
+    "table_name": "orders",
+    "level": "table",
+    "family": "integrity",
+    "metric_id": "table.identity_duplicate_rate",
+    "column_name": null,
+    "edge": null,
+    "status": "pass",
+    "score": 1.0
+   },
+   {
+    "table_name": "orders",
+    "level": "field",
+    "family": "integrity",
+    "metric_id": "field.type_validity",
+    "column_name": "email",
+    "edge": null,
+    "status": "fail",
+    "score": 0.0
+   },
+   {
+    "table_name": "orders",
+    "level": "column",
+    "family": "fidelity",
+    "metric_id": "column.ks",
+    "column_name": "email",
+    "edge": null,
+    "status": "not_evaluated",
+    "score": null
+   },
+   {
+    "table_name": "orders",
+    "level": "table",
+    "family": "fidelity",
+    "metric_id": "table.detection_auc",
+    "column_name": null,
+    "edge": null,
+    "status": "warn",
+    "score": 0.56
+   },
+   {
+    "table_name": "orders",
+    "level": "table",
+    "family": "privacy",
+    "metric_id": "table.privacy_score",
+    "column_name": null,
+    "edge": null,
+    "status": "pass",
+    "score": 0.9
+   },
+   {
+    "table_name": "users",
+    "level": "model",
+    "family": "overall",
+    "metric_id": "model.overall_score",
+    "column_name": null,
+    "edge": null,
+    "status": "warn",
+    "score": 0.8
+   }
+  ],
+  "model_key": "__model__",
+  "aggregate_scores": {
+   "orders": {
+    "fidelity": 0.63,
+    "privacy": null,
+    "integrity": 0.333333333333,
+    "diversity": null,
+    "overall": 0.481666666667,
+    "integrity_fail": 1
+   },
+   "users": {
+    "fidelity": 0.741666666667,
+    "privacy": 1.0,
+    "integrity": 0.583333333333,
+    "diversity": null,
+    "overall": 0.775,
+    "integrity_fail": 1
+   },
+   "__model__": {
+    "fidelity": 0.685833333333,
+    "privacy": 1.0,
+    "integrity": 0.458333333333,
+    "diversity": null,
+    "overall": 0.714722222222,
+    "integrity_fail": 2
+   }
+  },
+  "headline_counts": {
+   "pass": 7,
+   "warn": 3,
+   "fail": 4,
+   "info": 2,
+   "not_evaluated": 1,
+   "total": 17
+  }
+ }
+}

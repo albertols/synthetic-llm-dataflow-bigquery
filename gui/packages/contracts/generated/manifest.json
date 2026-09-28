@@ -19,7 +19,8 @@
     "gui/packages/contracts/generated/dlq_rules.json": "49c2c3e1b88fb61cc51db718babc4480fd9def51bde53aee50025931e8b7b248",
     "gui/packages/contracts/generated/golden/great_serialize.json": "72dae74592f7e1e61442eefb82ecef5724a3f49bfe1e7f8e00c7cff27853a324",
     "gui/packages/contracts/generated/golden/hashing_embedder.json": "295094807dbc93a649bb63dcc1dcccf6d702a9f4294be2f8c0ba30d6179dd6da",
-    "gui/packages/contracts/generated/golden/retrieval.json": "0c91e8c07bccf3f7c5fb3d046ccc7fddb3a66fdd3ea43975ee6f3f15b85769f2"
+    "gui/packages/contracts/generated/golden/retrieval.json": "0c91e8c07bccf3f7c5fb3d046ccc7fddb3a66fdd3ea43975ee6f3f15b85769f2",
+    "gui/packages/contracts/generated/golden/scoring.json": "acd9f607331a954a17716cc81b8c75bb3efc54ae2dee1a7514ffbd6db32347fb"
   },
   "outputs": [
     "schemas.ts",

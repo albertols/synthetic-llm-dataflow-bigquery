@@ -5,8 +5,11 @@
  * Nothing here is typed as a result. Profiles are counts drawn at the stated n
  * from the rows' distributions, every metric value is a `packages/stats`
  * function of those profiles (or of the rows), noise floors come from the same
- * package, and score / status apply the catalogue's rules (`scoreValue`,
- * `statusFor`). `mock.storyline.test.ts` recomputes metrics from the profiles.
+ * package, and status, score and the detail notes are what the evaluator's
+ * `to_metric_row` would write (`scoreRow`, the golden-pinned port of
+ * `sdfb_evaluation.scoring`). Interval-method metrics carry their CI (Wilson,
+ * a folded Newcombe, DeLong) and no scalar floor, as the evaluator's producers
+ * do (Ruling R41). `mock.storyline.test.ts` recomputes metrics from the profiles.
  */
 import {
   catalogueById,
@@ -27,6 +30,7 @@ import {
   equiprobableEdges,
   expectedDistinct,
   fisherZDeltaFloor,
+  foldedAbsInterval,
   histogram,
   jsdBits,
   jsdNullExpectationBits,
@@ -35,7 +39,6 @@ import {
   miBiasNats,
   newcombe,
   nmi,
-  noiseFloor,
   normalize,
   pearson,
   pitW1,
@@ -44,10 +47,9 @@ import {
   quantiles,
   type Random,
   rateRatio,
-  scoreValue,
+  scoreRow,
   sha256Hex,
   spearman,
-  statusFor,
   tvd,
   tvdNullExpectation,
   w1FromBins,
@@ -120,6 +122,20 @@ interface Reading {
   sampleRate?: number | null;
   detail?: Record<string, unknown> | null;
   featureSetDigest?: string | null;
+  /** false on a documented foreign-key edge: its orphan rate is INFO (Ruling R42). */
+  enforced?: boolean;
+}
+
+/** A Wilson interval as a reading's CI (the producer contract of the `wilson` noise method). */
+export function wilsonCi(k: number, n: number): { ciLow: number; ciHigh: number } {
+  const [ciLow, ciHigh] = wilson(k, n);
+  return { ciLow, ciHigh };
+}
+
+/** |p1 − p2|'s CI: Newcombe's interval for p1 − p2, folded (the `newcombe` noise method). */
+export function foldedNewcombeCi(k1: number, n1: number, k2: number, n2: number): { ciLow: number; ciHigh: number } {
+  const [ciLow, ciHigh] = foldedAbsInterval(...newcombe(k1, n1, k2, n2));
+  return { ciLow, ciHigh };
 }
 
 const MEMO = new WeakMap<object, Map<string, unknown>>();
@@ -131,7 +147,16 @@ function memo<T>(owner: object, key: string, compute: () => T): T {
   return map.get(key) as T;
 }
 
-const NO_COPIES = "no copies on either side (m_R = m_H = 0): the rate ratio is undefined";
+/**
+ * A lift's row when neither side has a copy: the rate ratio is undefined (value null) but its
+ * interval is (0, ∞), so status gates on ci_low 0 and a clean run PASSes at score 1 (Ruling R38).
+ */
+const noCopies = (m1: number, m2: number) => ({
+  value: null,
+  ciLow: 0,
+  ciHigh: Number.POSITIVE_INFINITY,
+  detail: { copies_r: m1, copies_h: m2 },
+});
 
 /** detail.reason for a pair statistic that is undefined on a side (a constant column there). */
 function undefinedOn(statistic: string, source: number | null, synthetic: number | null) {
@@ -143,6 +168,9 @@ function undefinedOn(statistic: string, source: number | null, synthetic: number
 
 const round = (v: number | null | undefined, digits = 12) =>
   v === null || v === undefined || !Number.isFinite(v) ? null : Number(v.toPrecision(digits));
+/** Twelve significant digits for a finite number; ±Infinity and NaN pass through (the scorer grades them). */
+const roundKeep = (v: number | null | undefined) =>
+  v === null || v === undefined ? null : Number.isFinite(v) ? Number(v.toPrecision(12)) : v;
 
 export class TableEvaluator {
   readonly result: TableResult = { metrics: [], profiles: [], flags: [], columnDistances: [] };
@@ -151,14 +179,19 @@ export class TableEvaluator {
 
   metric(id: MetricId, reading: Reading): EvaluationMetricsRow {
     const catalogue: CatalogueMetric = catalogueById[id];
-    const value = round(reading.value);
-    const scoring = {
-      value,
-      ciLow: reading.ciLow ?? null,
-      ciHigh: reading.ciHigh ?? null,
-      noiseFloor: reading.noiseFloor ?? null,
-      sourceValue: reading.sourceValue ?? null,
-    };
+    // The producer's MetricValue (twelve significant digits), scored as to_metric_row does.
+    const scored = scoreRow(
+      catalogue,
+      {
+        value: roundKeep(reading.value),
+        ciLow: roundKeep(reading.ciLow),
+        ciHigh: roundKeep(reading.ciHigh),
+        noiseFloor: roundKeep(reading.noiseFloor),
+        sourceValue: roundKeep(reading.sourceValue),
+        detail: reading.detail ?? null,
+      },
+      { enforced: reading.enforced ?? true },
+    );
     const row: EvaluationMetricsRow = {
       evaluation_id: this.ctx.spec.id,
       evaluated_at: this.ctx.evaluatedAt,
@@ -174,26 +207,26 @@ export class TableEvaluator {
       column_name_2: reading.column2 ?? null,
       column_kind: reading.column?.kind ?? null,
       edge: reading.edge ?? null,
-      value,
-      source_value: round(reading.sourceValue),
+      value: scored.value,
+      source_value: scored.source_value,
       synthetic_value: round(reading.syntheticValue),
       baseline_value: catalogue.baseline ? round(reading.baseline) : null,
-      score: round(scoreValue(catalogue, scoring)),
-      status: statusFor(catalogue, scoring),
+      score: scored.score,
+      status: scored.status,
       threshold_warn: catalogue.thresholds.warn,
       threshold_fail: catalogue.thresholds.fail,
-      noise_floor: round(reading.noiseFloor),
+      noise_floor: scored.noise_floor,
       noise_floor_method:
         catalogue.noise_floor === "none" ? null : (catalogue.noise_floor as EvaluationMetricsRow["noise_floor_method"]),
-      ci_low: round(reading.ciLow),
-      ci_high: round(reading.ciHigh === Infinity ? null : reading.ciHigh),
+      ci_low: scored.ci_low,
+      ci_high: scored.ci_high,
       n_source: reading.nSource === undefined ? this.ctx.nSource : reading.nSource,
       n_synthetic: reading.nSynthetic === undefined ? this.ctx.nSynthetic : reading.nSynthetic,
       method: reading.method ?? (catalogue.estimator.split("/")[0] as EvaluationMetricsRow["method"]),
       sample_rate: reading.sampleRate === undefined ? this.ctx.sampleRate : reading.sampleRate,
       encoding_plan_digest: this.ctx.encodingPlanDigest,
       feature_set_digest: reading.featureSetDigest ?? null,
-      detail: (reading.detail ?? null) as EvaluationMetricsRow["detail"],
+      detail: scored.detail as EvaluationMetricsRow["detail"],
     };
     this.result.metrics.push(row);
     return row;
@@ -254,14 +287,13 @@ export class TableEvaluator {
       nSynthetic,
       shareOf(syn, (v) => v === null),
     );
-    const [lo, hi] = newcombe(kSyn, nSynthetic, kSrc, nSource);
     this.metric("column.null_rate_delta", {
       column,
       value: Math.abs(kSyn / nSynthetic - kSrc / nSource),
       sourceValue: kSrc / nSource,
       syntheticValue: kSyn / nSynthetic,
       baseline: Math.abs(rng.binomial(this.ctx.nReference, kSrc / nSource) / this.ctx.nReference - kSrc / nSource),
-      noiseFloor: (hi - lo) / 2,
+      ...foldedNewcombeCi(kSyn, nSynthetic, kSrc, nSource),
     });
     if (column.bqType === "STRING" && column.kind !== "identifier" && column.role === undefined) {
       const eSrc = rng.binomial(
@@ -272,14 +304,13 @@ export class TableEvaluator {
         nSynthetic,
         shareOf(syn, (v) => v === ""),
       );
-      const [elo, ehi] = newcombe(eSyn, nSynthetic, eSrc, nSource);
       this.metric("column.empty_rate_delta", {
         column,
         value: Math.abs(eSyn / nSynthetic - eSrc / nSource),
         sourceValue: eSrc / nSource,
         syntheticValue: eSyn / nSynthetic,
         baseline: Math.abs(rng.binomial(this.ctx.nReference, eSrc / nSource) / this.ctx.nReference - eSrc / nSource),
-        noiseFloor: (ehi - elo) / 2,
+        ...foldedNewcombeCi(eSyn, nSynthetic, eSrc, nSource),
       });
     }
   }
@@ -296,11 +327,8 @@ export class TableEvaluator {
             : typeof v === "number";
     const share = syn.filter(valid).length / Math.max(syn.length, 1);
     const k = this.ctx.rng.binomial(this.ctx.nSynthetic, share);
-    this.metric("field.type_validity", {
-      column,
-      value: k / this.ctx.nSynthetic,
-      noiseFloor: noiseFloor("wilson", { n: this.ctx.nSynthetic }),
-    });
+    // The catalogue names no noise method for type validity: no floor, no CI (like the evaluator).
+    this.metric("field.type_validity", { column, value: k / this.ctx.nSynthetic });
   }
 
   sourceStatsDrift(column: ColumnDef) {
@@ -465,12 +493,11 @@ export class TableEvaluator {
     if (!isTime) {
       const zs = rng.binomial(nSource, src.filter((v) => v === 0).length / src.length);
       const zy = rng.binomial(nSynthetic, syn.filter((v) => v === 0).length / syn.length);
-      const [lo, hi] = newcombe(zy, nSynthetic, zs, nSource);
       this.metric("column.zero_rate_delta", {
         column,
         value: Math.abs(zy / nSynthetic - zs / nSource),
         baseline: Math.abs(rng.binomial(nReference, zs / nSource) / nReference - zs / nSource),
-        noiseFloor: (hi - lo) / 2,
+        ...foldedNewcombeCi(zy, nSynthetic, zs, nSource),
       });
     }
     const occupied = histogram(syn, edges).filter((c) => c > 0).length;
@@ -486,7 +513,7 @@ export class TableEvaluator {
     this.metric("field.range_adherence", {
       column,
       value: k / nSynthetic,
-      noiseFloor: noiseFloor("wilson", { n: nSynthetic }),
+      ...wilsonCi(k, nSynthetic),
     });
     if (isTime) this.temporalMix(column, src, syn);
   }
@@ -591,7 +618,7 @@ export class TableEvaluator {
     this.metric("field.category_adherence", {
       column,
       value: inVocabulary / totalSyn,
-      noiseFloor: noiseFloor("wilson", { n: nSynthetic }),
+      ...wilsonCi(inVocabulary, totalSyn),
     });
     const tvdValue = tvd(cs, cy);
     this.result.columnDistances.push(tvdValue ?? 0);
@@ -617,14 +644,13 @@ export class TableEvaluator {
     const top = cs.indexOf(Math.max(...cs));
     const topSrc = cs[top]! / nSource;
     const topSyn = cy[top]! / totalSyn;
-    const [lo, hi] = newcombe(cy[top]!, totalSyn, cs[top]!, nSource);
     this.metric("column.top1_share_delta", {
       column,
       value: Math.abs(topSyn - topSrc),
       sourceValue: topSrc,
       syntheticValue: topSyn,
       baseline: Math.abs(cr[top]! / nReference - topSrc),
-      noiseFloor: (hi - lo) / 2,
+      ...foldedNewcombeCi(cy[top]!, totalSyn, cs[top]!, nSource),
     });
     const coverage = (counts: number[]) =>
       categories.reduce((acc, c, i) => acc + ((counts[i] ?? 0) > 0 && sourceSet.has(c) ? ps[i]! : 0), 0) /
@@ -788,7 +814,7 @@ export class TableEvaluator {
     this.metric("field.substantive_copy_rate", {
       column,
       value: kCopy / nSynthetic,
-      noiseFloor: noiseFloor("wilson", { n: nSynthetic }),
+      ...wilsonCi(kCopy, nSynthetic),
       method: "exact",
     });
     this.privacyLift("field.value_memorization_lift", column, copiesR, copiesH, universe !== null);
@@ -834,11 +860,12 @@ export class TableEvaluator {
     this.profile("shape_mix", "source", mixPayload(ms, nSource), { column: column.name, n: nSource });
     this.profile("shape_mix", "synthetic", mixPayload(my, nSynthetic), { column: column.name, n: nSynthetic });
     const shareIn = [...my.entries()].reduce((acc, [k, c]) => acc + (ms.has(k) ? c : 0), 0) / total(my);
+    const kShape = rng.binomial(nSynthetic, shareIn);
     this.metric("field.shape_adherence", {
       column,
-      value: rng.binomial(nSynthetic, shareIn) / nSynthetic,
+      value: kShape / nSynthetic,
       baseline: 1,
-      noiseFloor: noiseFloor("wilson", { n: nSynthetic }),
+      ...wilsonCi(kShape, nSynthetic),
     });
     const headShares = (x: Map<string, number>) =>
       [...head, "__tail__"].map((k) =>
@@ -954,8 +981,7 @@ export class TableEvaluator {
     if (commonValues && m1 + m2 === 0)
       return this.notEvaluated(id, "no rare source values: every value is shared by ≥ 10 source rows", { column });
     const lift = rateRatio(m1, nReference, m2, nReference, 0.05, { zeroCorrection: true });
-    if (lift.ratio === null)
-      return this.notEvaluated(id, NO_COPIES, { column, detail: { reason: NO_COPIES, copies_r: m1, copies_h: m2 } });
+    if (lift.ratio === null) return this.metric(id, { column, ...noCopies(m1, m2), nSynthetic: n });
     return this.metric(id, {
       column,
       value: lift.ratio,
@@ -1236,14 +1262,15 @@ export class TableEvaluator {
     });
     // Exact copies and near copies, counted over the privacy sample (m1: R, m2: H).
     const exactNonKey = rng.binomial(nPrivacy, q.rowLeak + q.exposureLeak + CHANCE_MATCH * 10);
+    const exact = rng.binomial(nPrivacy, CHANCE_MATCH);
     this.metric("row.exact_match_rate", {
-      value: rng.binomial(nPrivacy, CHANCE_MATCH) / nPrivacy,
-      noiseFloor: noiseFloor("wilson", { n: nPrivacy }),
+      value: exact / nPrivacy,
+      ...wilsonCi(exact, nPrivacy),
       nSynthetic: nPrivacy,
     });
     this.metric("row.exact_match_rate_nonkey", {
       value: exactNonKey / nPrivacy,
-      noiseFloor: noiseFloor("wilson", { n: nPrivacy }),
+      ...wilsonCi(exactNonKey, nPrivacy),
       nSynthetic: nPrivacy,
     });
     const lift = (id: MetricId, rateR: number, sizeR: number) => {
@@ -1252,11 +1279,7 @@ export class TableEvaluator {
       const m1 = rng.poisson(nPrivacy * (rateR + CHANCE_MATCH * 10));
       const m2 = rng.poisson(nPrivacy * CHANCE_MATCH * 10);
       const r = rateRatio(m1, sizeR, m2, sizeR, 0.05, { zeroCorrection: true });
-      if (r.ratio === null)
-        return this.notEvaluated(id, NO_COPIES, {
-          detail: { reason: NO_COPIES, copies_r: m1, copies_h: m2 },
-          nSynthetic: nPrivacy,
-        });
+      if (r.ratio === null) return this.metric(id, { ...noCopies(m1, m2), nSynthetic: nPrivacy });
       return this.metric(id, {
         value: r.ratio,
         ciLow: r.lo,
@@ -1270,7 +1293,7 @@ export class TableEvaluator {
     const near = rng.binomial(nPrivacy, q.nearLeak + CHANCE_MATCH * 20);
     this.metric("row.near_match_rate", {
       value: near / nPrivacy,
-      noiseFloor: noiseFloor("wilson", { n: nPrivacy }),
+      ...wilsonCi(near, nPrivacy),
       nSynthetic: nPrivacy,
     });
     lift("row.near_match_lift", q.nearLeak, nReference);
@@ -1458,7 +1481,6 @@ export class TableEvaluator {
       ciLow: lo,
       ciHigh: hi,
       baseline: 0.5,
-      noiseFloor: noiseFloor("delong", { ciLow: lo, ciHigh: hi }),
       nSource: nDetect,
       nSynthetic: nDetect,
       method: "sample",
@@ -1469,9 +1491,13 @@ export class TableEvaluator {
       { points: binormalRoc(auc, 21), auc, ci_low: lo, ci_high: hi, n_source: nDetect, n_synthetic: nDetect },
       { n: 2 * nDetect },
     );
+    // The ratio's ceiling N / (k − 1) (pMSE ≤ c(1 − c)); below the fail threshold the design
+    // could never FAIL, and the evaluator does not grade it (Rulings R33, R43).
+    const features = this.ctx.table.columns.filter((c) => !c.role).length;
     this.metric("table.pmse_ratio", {
       value: 1 + 100 * (auc - 0.5) ** 2,
       baseline: 1,
+      detail: { ceiling: (2 * nDetect) / Math.max(features, 1), k: features + 1 },
       nSource: nDetect,
       nSynthetic: nDetect,
       method: "sample",

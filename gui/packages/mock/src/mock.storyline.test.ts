@@ -6,6 +6,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 
 import {
+  catalogue,
   catalogueById,
   type EvaluationDataHistoryRow,
   type EvaluationMetricsRow,
@@ -13,14 +14,16 @@ import {
   type MetricId,
 } from "@synthetic-platform/contracts";
 import {
+  aggregateScores,
+  headlineCounts,
+  isAggregateMetric,
   ksBracket,
   ksCritical,
-  modelFamilyScores,
+  MODEL_KEY,
   pitW1,
-  scoreValue,
-  statusFor,
-  tableFamilyScores,
+  scoreRow,
   tvd,
+  zeroToleranceIds,
 } from "@synthetic-platform/stats";
 
 import {
@@ -244,45 +247,48 @@ describe("metrics recompute from the profiles with packages/stats", { timeout: 6
     }
   });
 
-  it("score and status follow the catalogue; table and model scores roll up the rows", () => {
+  it("status, score and detail are what the evaluator's to_metric_row writes; scores roll up the rows", () => {
     for (const m of data.metrics) {
       const metric = catalogueById[m.metric_id as MetricId];
+      const detail = (m.detail ?? {}) as Record<string, unknown>;
+      // What the producer handed the scorer: the stored numbers, its own detail (the scorer's
+      // notes are re-derived) and, for an edge, whether the launch enforced it.
+      const { reason: _r, noise_downgraded_from: _d, noise_check: _c, nonfinite: _n, ...producer } = detail;
       const reading = {
         value: m.value,
         ciLow: m.ci_low,
         ciHigh: m.ci_high,
         noiseFloor: m.noise_floor,
         sourceValue: m.source_value,
+        detail: m.status === "not_evaluated" && typeof detail.reason === "string" ? detail : producer,
       };
-      const detail = m.detail as { enforced?: boolean } | null;
-      const documented = m.metric_id === "relationship.orphan_rate" && detail?.enforced === false;
-      if (documented) {
-        // A documented edge's orphan rate is context (catalogue: "reported as INFO").
-        expect(m.status).toBe("info");
-        expect(m.score).toBeNull();
-        continue;
-      }
-      expect(m.status, `${m.evaluation_id} ${m.metric_id}`).toBe(statusFor(metric, reading));
-      const score = scoreValue(metric, reading);
-      if (score === null) expect(m.score).toBeNull();
-      else expect(m.score!).toBeCloseTo(score, 9);
+      const scored = scoreRow(metric, reading, { enforced: detail.enforced !== false });
+      const where = `${m.evaluation_id} ${m.metric_id} ${m.table_name}.${m.column_name ?? m.edge ?? ""}`;
+      expect(m.status, where).toBe(scored.status);
+      expect(m.score, where).toBe(scored.score);
+      expect(m.detail ?? null, where).toEqual(scored.detail);
     }
-    const exclude = (id: string) => catalogueById[id as MetricId].score === "none";
+    const zeroTolerance = zeroToleranceIds(catalogue);
     for (const row of finals()) {
       const rows = metricsOf(row.evaluation_id);
-      const tables = [...new Set(rows.filter((m) => m.level !== "model").map((m) => m.table_name))];
-      const perTable = tables.map((t) => {
-        const scores = tableFamilyScores(
-          rows.filter((m) => m.table_name === t),
-          { exclude },
-        );
-        const stored = rows.find((m) => m.table_name === t && m.metric_id === "table.fidelity_score")!;
-        expect(stored.value ?? null).toBeCloseTo(scores.fidelity ?? Number.NaN, 9);
-        return scores;
-      });
-      expect(row.overall_score!).toBeCloseTo(modelFamilyScores(perTable).overall!, 9);
-      expect(row.metrics_total).toBe(rows.length);
-      expect(row.metrics_fail).toBe(rows.filter((m) => m.status === "fail").length);
+      const measured = rows.filter((m) => !isAggregateMetric(m.metric_id));
+      const aggregates = aggregateScores(measured, zeroTolerance);
+      for (const table of Object.keys(aggregates).filter((t) => t !== MODEL_KEY)) {
+        const stored = rows.find((m) => m.table_name === table && m.metric_id === "table.fidelity_score")!;
+        expect(stored.value ?? null).toBeCloseTo(aggregates[table]!.fidelity ?? Number.NaN, 12);
+      }
+      expect(row.overall_score!).toBeCloseTo(aggregates[MODEL_KEY]!.overall!, 12);
+      // headline_counts: aggregate ids excluded, and the five buckets reconcile (R37, R43).
+      const counts = headlineCounts(rows);
+      expect(row.metrics_total).toBe(measured.length);
+      expect(row.metrics_total).toBe(counts.total);
+      expect([
+        row.metrics_fail,
+        row.metrics_warn,
+        row.metrics_pass,
+        row.metrics_info,
+        row.metrics_not_evaluated,
+      ]).toEqual([counts.fail, counts.warn, counts.pass, counts.info, counts.not_evaluated]);
     }
   });
 });
@@ -319,6 +325,49 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
     );
     expect(missing.map((m) => `${m.evaluation_id} ${m.metric_id}`).slice(0, 5)).toEqual([]);
     expect(data.metrics.filter((m) => m.metric_id.startsWith("pair.") && m.status === "not_evaluated").length).toBe(72);
+  });
+
+  it("interval-method rows carry their CI, never a scalar floor, as the producers do (Ruling R41)", () => {
+    const interval = new Set(["wilson", "newcombe", "delong"]);
+    const scalar = new Set(["ks_two_sample", "tvd_null", "jsd_null", "fisher_z", "mi_bias"]);
+    for (const m of data.metrics) {
+      const where = `${m.evaluation_id} ${m.metric_id}`;
+      if (m.noise_floor_method && interval.has(m.noise_floor_method)) expect(m.noise_floor, where).toBeNull();
+      if (m.noise_floor_method === null || m.noise_floor_method === "rate_ratio")
+        expect(m.noise_floor, where).toBeNull();
+      // Every graded crossing had the input its noise check needs.
+      if (m.status === "warn" || m.status === "fail") {
+        if (m.noise_floor_method && interval.has(m.noise_floor_method)) {
+          expect(m.ci_low, where).not.toBeNull();
+          expect(m.ci_high, where).not.toBeNull();
+        }
+        if (m.noise_floor_method && scalar.has(m.noise_floor_method)) expect(m.noise_floor, where).not.toBeNull();
+      }
+      expect((m.detail as { noise_check?: string } | null)?.noise_check, where).toBeUndefined();
+    }
+  });
+
+  it("shows every scorer state the EVALUATION tab explains", () => {
+    const detailOf = (m: EvaluationMetricsRow) => (m.detail ?? {}) as Record<string, unknown>;
+    // R40: a crossing within sampling noise is PASS, says what it was, and scores at the reference.
+    const downgraded = data.metrics.filter((m) => detailOf(m).noise_downgraded_from);
+    expect(downgraded.length).toBeGreaterThan(0);
+    for (const m of downgraded) {
+      expect(m.status).toBe("pass");
+      expect(["warn", "fail"]).toContain(detailOf(m).noise_downgraded_from);
+      expect(m.score).toBe(1);
+    }
+    // R38: a lift with no copies on either side has no value but PASSes on ci_low 0 at score 1.
+    const clean = data.metrics.filter((m) => m.metric_id.endsWith("_lift") && m.value === null && m.status === "pass");
+    expect(clean.length).toBeGreaterThan(0);
+    for (const m of clean) {
+      expect(m.ci_low).toBe(0);
+      expect(m.score).toBe(1);
+    }
+    // R42: documented edges' orphan rates are INFO; R39: zero-tolerance FAILs exist to badge.
+    expect(data.metrics.some((m) => m.metric_id === "relationship.orphan_rate" && m.status === "info")).toBe(true);
+    const zeroTolerance = zeroToleranceIds(catalogue);
+    expect(data.metrics.some((m) => zeroTolerance.has(m.metric_id) && m.status === "fail")).toBe(true);
   });
 
   it("DLQ rows carry the rule's error_type, step and stage exactly as the code writes them", () => {

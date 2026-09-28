@@ -34,7 +34,7 @@ import {
 import { cosine, knnPreservation, pca3 } from "./linalg";
 import { Random } from "./rng";
 import { birthdayCollisionProb, expectedDistinct, poolReuse, rarefaction, rareCaptureProb, tailPoints } from "./scale";
-import { modelFamilyScores, scoreValue, statusFor, tableFamilyScores } from "./scoring";
+import { modelFamilyScores, scoreRow, scoreValue, statusFor, tableFamilyScores } from "./scoring";
 import { betaQuantile, incompleteBeta, normalCdf, normalQuantile } from "./special";
 import { mmr, randomPick, TEACHING_ONLY } from "./teaching";
 
@@ -284,11 +284,13 @@ describe("scoring mirrors the catalogue rules", () => {
   const novelty = catalogueById["column.novelty_mass"];
 
   it("scores with each function", () => {
-    expect(scoreValue(ks, { value: 0.05 })).toBeCloseTo(0.95, 12);
-    expect(scoreValue(adherence, { value: 0.97 })).toBeCloseTo(0.5, 12);
-    expect(scoreValue(catalogueById["table.detection_auc"], { value: 0.75 })).toBeCloseTo(0.5, 12);
-    expect(scoreValue(catalogueById["column.std_ratio"], { value: 1.05 })).toBe(1);
-    expect(scoreValue(lift, { value: 8, ciLow: 3.5 })).toBeCloseTo(0.5, 12);
+    expect(scoreValue(ks, 0.05)).toBeCloseTo(0.95, 12);
+    expect(scoreValue(adherence, 0.97)).toBeCloseTo(0.5, 12);
+    expect(scoreValue(catalogueById["table.detection_auc"], 0.75)).toBeCloseTo(0.5, 12);
+    expect(scoreValue(catalogueById["column.std_ratio"], 1.05)).toBe(1);
+    // A lift scores the CI bound its status gates on (scoreRow passes it).
+    expect(scoreValue(lift, 3.5)).toBeCloseTo(0.5, 12);
+    expect(scoreRow(lift, { value: 8, ciLow: 3.5 }).score).toBeCloseTo(0.5, 12);
   });
 
   it("applies the D5 status rule: past fail but inside the noise floor is PASS", () => {
@@ -302,6 +304,8 @@ describe("scoring mirrors the catalogue rules", () => {
     expect(statusFor(pk, { value: 1e-9 })).toBe("fail");
     expect(statusFor(pk, { value: 0 })).toBe("pass");
     expect(statusFor(adherence, { value: 0.95 })).toBe("fail");
+    // A lift with no copies on either side gates on ci_low 0: PASS (R38).
+    expect(statusFor(lift, { value: null, ciLow: 0, ciHigh: Infinity })).toBe("pass");
     expect(statusFor(novelty, { value: 0.5, sourceValue: 0.1 })).toBe("fail");
   });
 
@@ -314,6 +318,7 @@ describe("scoring mirrors the catalogue rules", () => {
         level: "column",
         column_name: "a",
         edge: null,
+        status: "pass",
         score: 1,
       },
       {
@@ -323,6 +328,7 @@ describe("scoring mirrors the catalogue rules", () => {
         level: "column",
         column_name: "a",
         edge: null,
+        status: "fail",
         score: 0,
       },
       {
@@ -332,6 +338,7 @@ describe("scoring mirrors the catalogue rules", () => {
         level: "column",
         column_name: "b",
         edge: null,
+        status: "pass",
         score: 1,
       },
       {
@@ -341,6 +348,7 @@ describe("scoring mirrors the catalogue rules", () => {
         level: "table",
         column_name: null,
         edge: null,
+        status: "fail",
         score: 0,
       },
       {
@@ -350,6 +358,7 @@ describe("scoring mirrors the catalogue rules", () => {
         level: "row",
         column_name: null,
         edge: null,
+        status: "warn",
         score: 0.5,
       },
     ]);

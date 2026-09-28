@@ -7,7 +7,6 @@
 import {
   bqTables,
   canonicalTimestamp,
-  catalogueById,
   knobs,
   type BqField,
   type BqTableName,
@@ -22,9 +21,8 @@ import {
   type DlqRow,
 } from "@synthetic-platform/contracts";
 import {
+  headlineCounts,
   modelFamilyScores,
-  newcombe,
-  noiseFloor,
   Random,
   seedFrom,
   sha256Hex,
@@ -35,7 +33,7 @@ import {
   type FamilyScores,
 } from "@synthetic-platform/stats";
 
-import { fanoutCounts, sum, TableEvaluator, type TableContext } from "./evaluate";
+import { fanoutCounts, foldedNewcombeCi, sum, TableEvaluator, wilsonCi, type TableContext } from "./evaluate";
 import {
   baseRunId,
   dataflowJobId,
@@ -153,19 +151,17 @@ function relationship(ev: TableEvaluator, edge: EdgeDef, spec: EvalSpec, rng: Ra
   // with deleted users, has a few: the INFO comparison the catalogue describes.
   const orphans = edge.external ? rng.binomial(children, spec.quality.orphanShare) : 0;
   const sourceOrphans = edge.enforced ? 0 : rng.binomial(sourceChildren, 0.0021);
-  const orphanRow = ev.metric("relationship.orphan_rate", {
+  // A documented edge (enforced: false) is context, not a verdict: the scorer writes its orphan
+  // rate as INFO, unscored and out of the roll-ups (Ruling R42).
+  ev.metric("relationship.orphan_rate", {
     edge: label,
     value: orphans / Math.max(children, 1),
     sourceValue: sourceOrphans / Math.max(sourceChildren, 1),
     nSource: sourceChildren,
     nSynthetic: children,
     detail: { orphans, enforced: edge.enforced, role: edgeRole(edge) },
+    enforced: edge.enforced,
   });
-  if (!edge.enforced) {
-    // A documented edge is context, not a verdict: INFO, no score, out of the roll-ups.
-    orphanRow.status = "info";
-    orphanRow.score = null;
-  }
   ev.metric("relationship.orphan_rate_source", {
     edge: label,
     value: sourceOrphans / Math.max(sourceChildren, 1),
@@ -174,6 +170,7 @@ function relationship(ev: TableEvaluator, edge: EdgeDef, spec: EvalSpec, rng: Ra
   });
   ev.metric("relationship.fanout_tvd", {
     edge: label,
+    enforced: edge.enforced,
     value: tvd(hs, hy),
     noiseFloor: tvdNullExpectation(hs, parentsSource, parentsSynthetic),
     nSource: parentsSource,
@@ -193,18 +190,17 @@ function relationship(ev: TableEvaluator, edge: EdgeDef, spec: EvalSpec, rng: Ra
     nSource: parentsSource,
     nSynthetic: parentsSynthetic,
   });
-  const [lo, hi] = newcombe(hy[0]!, parentsSynthetic, hs[0]!, parentsSource);
   ev.metric("relationship.zero_child_share_delta", {
     edge: label,
     value: Math.abs(hy[0]! / parentsSynthetic - hs[0]! / parentsSource),
-    noiseFloor: (hi - lo) / 2,
+    ...foldedNewcombeCi(hy[0]!, parentsSynthetic, hs[0]!, parentsSource),
     nSource: parentsSource,
     nSynthetic: parentsSynthetic,
   });
   ev.metric("relationship.cardinality_adherence", {
     edge: label,
     value: 1 - orphans / Math.max(children, 1),
-    noiseFloor: noiseFloor("wilson", { n: children }),
+    ...(children > 0 ? wilsonCi(children - orphans, children) : {}),
     nSynthetic: children,
   });
   const covered = (h: number[]) => 1 - h[0]! / Math.max(sum(h), 1);
@@ -392,7 +388,6 @@ function tableEntry(spec: EvalSpec, table: TableDef, runIds: Map<string, string>
  * roll-up's own score). On a measured metric that reads backwards (a drift of
  * 0.01 would score 0.01), so the mock keeps them out of the family means.
  */
-const excludeFromRollup = (metricId: string) => catalogueById[metricId as keyof typeof catalogueById]?.score === "none";
 
 const NUMERIC_PAIRS: Record<string, string[]> = {
   users: ["age", "created_at"],
@@ -555,7 +550,8 @@ export function createMockDataset(seed = 20260928): MockDataset {
         for (const edge of EDGES.filter((e) => e.child === table.name)) relationship(ev, edge, spec, ctx.rng);
 
       // Roll-ups (Ruling R11) and the SDMetrics-style shape/trend scores.
-      const scores = tableFamilyScores(ev.result.metrics, { exclude: excludeFromRollup });
+      // The evaluator's roll-up (aggregate_scores): score: none measured rows score null (R26).
+      const scores = tableFamilyScores(ev.result.metrics);
       const columnFidelity = ev.result.metrics.filter(
         (m) => m.family === "fidelity" && m.level === "column" && m.score !== null,
       );
@@ -610,18 +606,19 @@ export function createMockDataset(seed = 20260928): MockDataset {
     evaluatedRows.push(...modelEvaluator.result.metrics);
     metrics.push(...evaluatedRows);
 
-    const count = (status: string) => evaluatedRows.filter((m) => m.status === status).length;
+    // headline_counts: aggregate rows restate the measured ones and are not counted (R37, R43).
+    const counts = headlineCounts(evaluatedRows);
     final.overall_score = model.overall;
     final.fidelity_score = model.fidelity;
     final.privacy_score = model.privacy;
     final.integrity_score = model.integrity;
     final.diversity_score = model.diversity;
-    final.metrics_total = evaluatedRows.length;
-    final.metrics_pass = count("pass");
-    final.metrics_warn = count("warn");
-    final.metrics_fail = count("fail");
-    final.metrics_not_evaluated = count("not_evaluated");
-    final.metrics_info = count("info");
+    final.metrics_total = counts.total;
+    final.metrics_pass = counts.pass;
+    final.metrics_warn = counts.warn;
+    final.metrics_fail = counts.fail;
+    final.metrics_not_evaluated = counts.not_evaluated;
+    final.metrics_info = counts.info;
     const rows = final.tables.reduce((acc, t) => acc + (t.rows_source ?? 0) + (t.rows_synthetic ?? 0), 0);
     final.bq_bytes_processed = Math.round(rows * (spec.mode === "sampled" ? 36 : 164));
     final.predicted_shuffle_gb = Math.round((rows * 96) / 1e7) / 100;

@@ -96,6 +96,7 @@ function scoringMetric(row: MetricRow): ScoringMetric {
     thresholds: { warn: row.threshold_warn, fail: row.threshold_fail },
     score: meta?.score ?? "none",
     uses_ci_bound: usesCiBound(row),
+    noise_floor: row.noise_floor_method,
   };
 }
 
