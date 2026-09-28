@@ -1191,13 +1191,21 @@ def _blocks(path: Path) -> list[tuple[str, int, int]]:
   return blocks
 
 
+def _measured_sources() -> list[dict[str, str]]:
+  """Each figure script with its docstring's provenance paragraph."""
+  out = []
+  for path in _MEASURED_SCRIPTS:
+    doc = (ast.get_docstring(_tree(path)) or "").strip().split("\n\n")
+    provenance = " ".join((doc[1] if len(doc) > 1 else doc[0]).split())
+    out.append({"script": _rel(path), "provenance": provenance})
+  return out
+
+
 def _measured() -> list[dict[str, Any]]:
   out = []
   for path in _MEASURED_SCRIPTS:
     module = _load_script(path)
     blocks = _blocks(path)
-    doc = (module.__doc__ or "").strip().split("\n\n")
-    provenance = " ".join((doc[1] if len(doc) > 1 else doc[0]).split())
     for node in _tree(path).body:
       if not isinstance(node, ast.Assign):
         continue
@@ -1222,7 +1230,6 @@ def _measured() -> list[dict[str, Any]]:
             "block": header or "MEASURED (named)",
             "comment": inline or _comment_above(path, node.lineno),
             "source": _source(path, node.lineno),
-            "provenance": provenance,
         })
   return out
 
@@ -1255,6 +1262,8 @@ def build() -> dict[str, Any]:
           knobs,
       "annotations":
           _annotations(),
+      "measured_sources":
+          _measured_sources(),
       "measured":
           _measured(),
   }
