@@ -7,6 +7,7 @@
 import { ArrowRight, CircleDashed, Maximize2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import { InfoHint } from "@/components/InfoHint";
 import { Mermaid } from "@/components/Mermaid";
 import { StatusPill } from "@/components/StatusPill";
 import {
@@ -347,8 +348,9 @@ function AdrMapVisual() {
   const most = Math.max(...sections.map((s) => s.adrs.length));
   return (
     <div className={cn(SLOT, "flex flex-col justify-center gap-1.5 bg-surface-2 px-4 py-3")}>
-      <p className="text-xs text-text-2">
+      <p className="flex items-center gap-1 text-xs text-text-2">
         {ADRS.length} decision records, mapped to {sections.length} sections
+        <InfoHint concept="intro:adr" />
       </p>
       <ul className="grid gap-1" aria-label="Decision records per section">
         {sections.map((s) => (
@@ -394,8 +396,9 @@ function FigureMosaic() {
               </li>
             ))}
           </ul>
-          <p className="text-[11px] text-text-3">
+          <p className="flex items-center gap-1 text-[11px] text-text-3">
             {figures.length} figures in DESIGN.md, each with its generating script and SHA-256.
+            <InfoHint concept="intro:figure-provenance" />
           </p>
         </>
       )}

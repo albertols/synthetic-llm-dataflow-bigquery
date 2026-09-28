@@ -43,7 +43,7 @@ export function IntroPage() {
   return (
     <MotionConfig reducedMotion="user">
       <LazyMotion features={domAnimation}>
-        <div className="flex flex-col gap-12 md:gap-16">
+        <div className="flex flex-col gap-10 md:gap-14">
           <div className="grid gap-6">
             <PageHeader
               eyebrow="Intro"

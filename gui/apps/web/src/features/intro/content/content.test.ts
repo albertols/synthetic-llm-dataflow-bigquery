@@ -183,6 +183,8 @@ describe("concept references", () => {
         (role) => `intro:role-${role}`,
       ),
       "intro:claim",
+      "intro:adr",
+      "intro:figure-provenance",
       "intro:import-direction",
       "intro:relationship-model",
       "intro:counter-runs",

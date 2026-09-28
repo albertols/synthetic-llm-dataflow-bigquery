@@ -86,8 +86,7 @@ export function PipelineHero({ facets }: { facets?: Facets | undefined }) {
             From a source table to an evaluated synthetic table, in nine steps
           </h2>
           <p className="text-sm leading-relaxed text-text-2 md:text-[15px]">
-            Point at a step to read it; open it to explore that step in its tab. Two jobs share the rail: the generation
-            job lands validated rows, and a separate evaluation job scores what landed.
+            Point at a step to read it, or open it in the tab that explores it.
           </p>
         </div>
         <PipelineControls
@@ -100,8 +99,6 @@ export function PipelineHero({ facets }: { facets?: Facets | undefined }) {
           onStep={step}
         />
       </div>
-
-      <KindLegend />
 
       <div className="grid gap-2">
         <JobBands />
@@ -123,6 +120,7 @@ export function PipelineHero({ facets }: { facets?: Facets | undefined }) {
         </ol>
       </div>
 
+      <KindLegend />
       <StageDetail stage={stage} index={active} context={context} />
     </section>
   );
