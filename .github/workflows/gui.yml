@@ -1,0 +1,92 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+name: GUI
+
+# Synthetic Platform (gui/, ADR 0042): typecheck, lint, unit tests, build,
+# bundle budgets, contract drift against the Python side, repo-figure drift,
+# the tab-ownership gate on feat/gui-<tab> branches, then Playwright + axe on
+# Playwright's bundled Chromium. Runs only when the GUI or the Python files
+# it generates contracts from change.
+
+on:
+  push:
+    branches: [master]
+    paths: &gui_paths
+      - "gui/**"
+      - "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/**"
+      - "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/**"
+      - "config/bq_schema/**"
+      - "scripts/gui/**"
+      - ".github/workflows/gui.yml"
+  pull_request:
+    paths: *gui_paths
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: gui
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The ownership gate diffs the branch against its base.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Tab ownership (feat/gui-<tab> branches only)
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          BASE: ${{ github.base_ref || 'master' }}
+        run: node scripts/check-owned-paths.mjs "$BRANCH" --base "origin/$BASE"
+
+      - name: Check (typecheck, lint, test, build, size, contracts)
+        run: npm run check
+
+      - name: Repo figures match their sources
+        run: npm run assets:check
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end (Playwright + axe)
+        run: npm run e2e
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            gui/playwright-report/
+            gui/test-results/
+          retention-days: 14
