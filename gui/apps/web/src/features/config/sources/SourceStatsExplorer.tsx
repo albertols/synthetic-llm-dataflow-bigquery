@@ -413,7 +413,16 @@ function TierCompare({
                     (r.truncation ?? 1) > 1.5 && "font-semibold text-status-warn-text",
                   )}
                 >
-                  {r.truncation === null ? MISSING : `${formatFixed(r.truncation, 1)}×`}
+                  {r.truncation === null ? (
+                    MISSING
+                  ) : (r.truncation ?? 1) > 1.5 ? (
+                    <span className="inline-flex items-center gap-1">
+                      <AlertTriangle className="size-3.5" aria-hidden="true" />
+                      {formatFixed(r.truncation, 1)}×<span className="sr-only"> (sample truncated the count)</span>
+                    </span>
+                  ) : (
+                    `${formatFixed(r.truncation, 1)}×`
+                  )}
                 </TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{formatPercent(r.sampleNull, 2)}</TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{formatPercent(r.exactNull, 2)}</TableCell>

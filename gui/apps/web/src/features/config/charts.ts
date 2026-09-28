@@ -54,6 +54,7 @@ export function lineOption(
         encode: { x: spec.x, y: spec.band.base },
         stack: "band",
         lineStyle: { opacity: 0 },
+        itemStyle: { color: band },
         showSymbol: false,
         silent: true,
         tooltip: { show: false },
@@ -64,6 +65,7 @@ export function lineOption(
         encode: { x: spec.x, y: spec.band.span },
         stack: "band",
         lineStyle: { opacity: 0 },
+        itemStyle: { color: band },
         areaStyle: { color: band, opacity: 0.16 },
         showSymbol: false,
         silent: true,
@@ -71,10 +73,14 @@ export function lineOption(
     );
   }
   spec.series.forEach((s, i) => {
+    // Fixed slot order for the plotted series, whatever the band series before them took.
+    const color = readToken(`--chart-${(i % 8) + 1}`);
     series.push({
       type: "line",
       name: s.name,
       encode: { x: spec.x, y: s.y },
+      itemStyle: { color },
+      lineStyle: { color, width: 2 },
       showSymbol: s.symbols ?? false,
       ...(s.step ? { step: "end" as const } : {}),
       ...(s.area ? { areaStyle: { opacity: 0.1 } } : {}),
