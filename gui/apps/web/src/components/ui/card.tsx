@@ -7,7 +7,7 @@ export function Card({ className, ...props }: ComponentPropsWithRef<"div">) {
   return (
     <div
       data-slot="card"
-      className={cn("rounded-lg border border-border bg-surface-1 text-text-1 shadow-sm", className)}
+      className={cn("min-w-0 rounded-lg border border-border bg-surface-1 text-text-1 shadow-sm", className)}
       {...props}
     />
   );

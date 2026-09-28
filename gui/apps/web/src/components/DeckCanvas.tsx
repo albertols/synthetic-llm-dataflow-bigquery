@@ -1,5 +1,13 @@
 /** Lazy chunk: deck.gl core + React binding. Rendered only by DeckFrame. */
-import { OrbitView, OrthographicView, type Layer, type PickingInfo } from "@deck.gl/core";
+import {
+  OrbitView,
+  OrthographicView,
+  type Deck,
+  type DeckProps,
+  type Layer,
+  type PickingInfo,
+  type ViewStateChangeParameters,
+} from "@deck.gl/core";
 import DeckGL, { type DeckGLRef } from "@deck.gl/react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
@@ -14,7 +22,14 @@ export type DeckCanvasProps = {
   ariaLabel: string;
   hintId: string;
   onContextLost: () => void;
+  viewState?: object;
+  onViewStateChange?: (params: DeckViewStateChange) => void;
+  controller?: DeckProps["controller"];
+  onDeckReady?: (deck: Deck) => void;
 };
+
+/** A camera change: the next view state (a plain object), the view id and what moved it. */
+export type DeckViewStateChange = ViewStateChangeParameters<Record<string, unknown>>;
 
 export default function DeckCanvas({
   layers,
@@ -24,6 +39,10 @@ export default function DeckCanvas({
   ariaLabel,
   hintId,
   onContextLost,
+  viewState,
+  onViewStateChange,
+  controller: controllerOverride,
+  onDeckReady,
 }: DeckCanvasProps) {
   const deckRef = useRef<DeckGLRef>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -42,7 +61,8 @@ export default function DeckCanvas({
     [view],
   );
 
-  const controller = useMemo(() => ({ keyboard: true, inertia: reducedMotion ? false : 250 }), [reducedMotion]);
+  const defaultController = useMemo(() => ({ keyboard: true, inertia: reducedMotion ? false : 250 }), [reducedMotion]);
+  const controller = controllerOverride ?? defaultController;
 
   const tooltip = useMemo(() => {
     if (!getTooltip) return undefined;
@@ -93,6 +113,8 @@ export default function DeckCanvas({
     canvas.setAttribute("aria-describedby", hintId);
     canvas.tabIndex = 0;
     canvas.addEventListener("webglcontextlost", handleLost);
+    const deck = deckRef.current?.deck;
+    if (deck) onDeckReady?.(deck);
   };
 
   return (
@@ -100,7 +122,8 @@ export default function DeckCanvas({
       ref={deckRef}
       views={views}
       layers={layers}
-      initialViewState={initialViewState}
+      {...(viewState ? { viewState } : { initialViewState })}
+      onViewStateChange={onViewStateChange}
       controller={controller}
       getTooltip={tooltip}
       onLoad={onLoad}

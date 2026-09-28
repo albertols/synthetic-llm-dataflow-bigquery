@@ -26,12 +26,13 @@ export function SourceLink({ source, path, line, gitRef, children, className }: 
       target="_blank"
       rel="noopener noreferrer"
       className={cn(
-        "inline-flex max-w-full items-center gap-1 rounded-sm text-link hover:underline",
-        !children && "font-mono text-xs",
+        "inline-flex max-w-full min-w-0 items-center gap-1 rounded-sm text-link hover:underline",
+        // A long path wraps anywhere instead of widening the page at 390 px.
+        !children && "font-mono text-xs [overflow-wrap:anywhere]",
         className,
       )}
     >
-      <span className="truncate">{children ?? label}</span>
+      <span className="min-w-0">{children ?? label}</span>
       <ExternalLink className="size-3 shrink-0" aria-hidden="true" />
       <span className="sr-only"> (source on GitHub, opens in a new tab)</span>
     </a>

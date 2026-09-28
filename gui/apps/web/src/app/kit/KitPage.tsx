@@ -3,10 +3,14 @@
  * frames, rendered live in both themes. Tab agents build from these pieces;
  * the e2e smoke runs axe over this page.
  */
+import type { Deck } from "@deck.gl/core";
 import { ScatterplotLayer } from "@deck.gl/layers";
-import type { EChartsOption } from "echarts";
-import { Bell, Download, Palette, Plus } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import type { EChartsOption, EChartsType } from "echarts";
+import { Bell, Crosshair, Download, Lock, Palette, Plus, RotateCcw } from "lucide-react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
+
+import { Banner, Callout } from "@/components/Callout";
+import { StatTile } from "@/components/StatTile";
 
 import { ChartFrame } from "@/components/ChartFrame";
 import { DataTableFallback } from "@/components/DataTableFallback";
@@ -41,7 +45,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "@/components/ui/toast";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { tokenRgba } from "@/lib/color";
-import { formatNumber } from "@/lib/format";
+import { formatCount, formatFixed, formatNumber } from "@/lib/format";
 import { useTheme } from "@/lib/theme";
 
 function Section({
@@ -205,9 +209,15 @@ function spherePoints(count: number): Point[] {
   });
 }
 
+const INITIAL_VIEW = { target: [0, 0, 0], rotationX: 20, rotationOrbit: 30, zoom: 7 };
+
 function DeckDemo() {
   const { resolved } = useTheme();
   const points = useMemo(() => spherePoints(600), []);
+  const [viewState, setViewState] = useState<object>(INITIAL_VIEW);
+  const [locked, setLocked] = useState(false);
+  const [picked, setPicked] = useState<string>("—");
+  const deckRef = useRef<Deck | null>(null);
   const layers = useMemo(() => {
     const colors = [tokenRgba("--chart-1"), tokenRgba("--chart-2"), tokenRgba("--chart-3")];
     return [
@@ -222,14 +232,100 @@ function DeckDemo() {
       }),
     ];
   }, [points, resolved]);
+  const pickCentre = () => {
+    const deck = deckRef.current;
+    const canvas = deck?.getCanvas();
+    if (!deck || !canvas) return;
+    const size = 120;
+    const hits = deck.pickObjects({
+      x: canvas.clientWidth / 2 - size / 2,
+      y: canvas.clientHeight / 2 - size / 2,
+      width: size,
+      height: size,
+    });
+    setPicked(`${hits.length} point${hits.length === 1 ? "" : "s"}`);
+  };
   return (
-    <DeckFrame
-      ariaLabel="Demo: 600 unit vectors on a sphere in three clusters"
-      view="orbit"
-      initialViewState={{ target: [0, 0, 0], rotationX: 20, rotationOrbit: 30, zoom: 7 }}
-      layers={layers}
-      height={320}
-      getTooltip={(info) => (info.object ? (info.object as Point).label : null)}
+    <div className="grid gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" onClick={() => setViewState(INITIAL_VIEW)}>
+          <RotateCcw aria-hidden="true" />
+          Reset view
+        </Button>
+        <div className="flex items-center gap-2">
+          <Switch id="kit-lock-camera" checked={locked} onCheckedChange={setLocked} />
+          <label htmlFor="kit-lock-camera" className="flex items-center gap-1 text-sm text-text-2">
+            <Lock className="size-3.5" aria-hidden="true" />
+            Lock camera (controller off, e.g. while lassoing)
+          </label>
+        </div>
+        <Button size="sm" onClick={pickCentre}>
+          <Crosshair aria-hidden="true" />
+          pickObjects in the centre
+        </Button>
+        <span className="text-sm text-text-2" aria-live="polite">
+          Picked: {picked}
+        </span>
+      </div>
+      <DeckFrame
+        ariaLabel="Demo: 600 unit vectors on a sphere in three clusters"
+        view="orbit"
+        initialViewState={INITIAL_VIEW}
+        viewState={viewState}
+        onViewStateChange={({ viewState: next }) => setViewState(next)}
+        controller={locked ? false : undefined}
+        onDeckReady={(deck) => {
+          deckRef.current = deck;
+        }}
+        layers={layers}
+        height={320}
+        getTooltip={(info) => (info.object ? (info.object as Point).label : null)}
+      />
+    </div>
+  );
+}
+
+function ChartEventsDemo() {
+  const chartRef = useRef<EChartsType | null>(null);
+  const [event, setEvent] = useState("none yet — click a bar, or use the button");
+  const onEvents = useMemo(
+    () => ({
+      click: (params: unknown) => {
+        const { name, seriesName } = params as { name?: string; seriesName?: string };
+        setEvent(`click · ${name ?? "?"} · ${seriesName ?? "?"}`);
+      },
+      highlight: (params: unknown) => {
+        const { dataIndex } = params as { dataIndex?: number };
+        setEvent(`highlight · ${HIST_ROWS[dataIndex ?? -1]?.bucket ?? "?"}`);
+      },
+    }),
+    [],
+  );
+  return (
+    <ChartFrame
+      title="Order totals: source vs synthetic"
+      description="Share of rows per bucket (demo values). onEvents + onReady."
+      option={HIST_OPTION}
+      data={HIST_ROWS}
+      onEvents={onEvents}
+      onReady={(chart) => {
+        chartRef.current = chart;
+      }}
+      actions={
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => chartRef.current?.dispatchAction({ type: "highlight", seriesIndex: 0, dataIndex: 1 })}
+        >
+          Highlight 25–50
+        </Button>
+      }
+      columns={[{ key: "bucket" }, { key: "source", align: "right" }, { key: "synthetic", align: "right" }]}
+      footer={
+        <p data-testid="kit-chart-event" aria-live="polite" className="text-xs text-text-3">
+          Last chart event: <span className="font-mono text-text-2">{event}</span>
+        </p>
+      }
     />
   );
 }
@@ -245,6 +341,68 @@ const ENGINES = [
   { value: "b2", label: "b2 — library", description: "sdgx library wrapper" },
 ];
 const TABLES = ["users", "orders", "order_items", "products"].map((t) => ({ value: t, label: t }));
+
+function FeedbackComponents() {
+  const [bannerOpen, setBannerOpen] = useState(true);
+  return (
+    <div className="grid gap-4">
+      {bannerOpen ? (
+        <Banner tone="info" title="Mock data" onDismiss={() => setBannerOpen(false)}>
+          Every number on this page is a demo value. Banners are live regions and can be dismissed.
+        </Banner>
+      ) : null}
+      <div className="grid gap-3 md:grid-cols-2">
+        <Callout tone="info">Metrics below the noise floor read as “≈” in comparisons.</Callout>
+        <Callout tone="warn" title="Sampled evaluation">
+          Row-level metrics ran on a 10% sample; their intervals are wider.
+        </Callout>
+        <Callout tone="danger" title="Scope contaminated">
+          The landing table changed while the evaluation ran; results are not comparable.
+        </Callout>
+        <Callout tone="docs-differ">
+          DESIGN.md describes 11-point deciles; the b1 engine interpolates the full sample. This view shows what the
+          code does.
+        </Callout>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatTile
+          label="Evaluations"
+          value={40}
+          concept="core:status"
+          format={formatCount}
+          footnote="Mock mode, 8 weeks"
+        />
+        <StatTile
+          label="DKW band at n = 10,000"
+          value={Math.sqrt(Math.log(2 / 0.05) / 20_000)}
+          format={(v) => formatFixed(v, 4)}
+          unit="ε"
+          concept="core:noise-floor"
+        />
+        <StatTile
+          label="Overall score"
+          value={0.87}
+          format={(v) => formatFixed(v, 2)}
+          delta={{ value: 0.04, vs: "the previous run", goodWhen: "up", format: (v) => formatFixed(v, 2) }}
+          trend={[0.71, 0.74, 0.73, 0.8, 0.83, 0.87]}
+          concept="core:score"
+        />
+        <StatTile
+          label="Rows generated"
+          value={90_000_000}
+          delta={{ value: -1_000_000, vs: "requested", format: (v) => formatCount(v) }}
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {["ok", "count_mismatch", "contaminated", "expired", "empty", "unknown"].map((status) => (
+          <StatusPill key={status} status={status} />
+        ))}
+        <StatusPill status="stale_reference" tone="warn" label="Stale reference" />
+        <StatusPill status="reference_unverified" tone="critical" label="Reference unverified" />
+      </div>
+    </div>
+  );
+}
 
 function Controls() {
   const [engine, setEngine] = useState<string | null>("b1");
@@ -469,6 +627,14 @@ export function KitPage() {
         </Card>
       </Section>
 
+      <Section
+        id="kit-feedback"
+        title="Callouts, stat tiles and scope statuses"
+        description="Callout and Banner (info, warn, danger, docs-differ), StatTile with delta and sparkline, StatusPill scope statuses and the tone override."
+      >
+        <FeedbackComponents />
+      </Section>
+
       <Section id="kit-controls" title="Controls">
         <Controls />
       </Section>
@@ -486,12 +652,7 @@ export function KitPage() {
             option={DKW_OPTION}
             data={DKW_ROWS}
           />
-          <ChartFrame
-            title="Order totals: source vs synthetic"
-            description="Share of rows per bucket (demo values)."
-            option={HIST_OPTION}
-            data={HIST_ROWS}
-          />
+          <ChartEventsDemo />
           <ChartFrame
             title="Null rate by column"
             option={HIST_OPTION}

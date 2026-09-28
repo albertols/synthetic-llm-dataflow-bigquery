@@ -113,7 +113,8 @@ Canvas renderers read tokens with `readToken()` and re-read them when
 Sentence case. Short sentences, active voice, concrete numbers with units
 (`10,000 rows`, `1.5 MB`, `ε ≈ 0.0136`). Say what the reader can do next in
 every empty and error state. Where docs and code disagree, show what the code
-does and add a "Docs differ" note.
+does and add `<Callout tone="docs-differ">` next to it. Single numbers go in a
+`StatTile`, never a one-bar chart.
 
 ## Accessibility checklist (WCAG 2.2 AA)
 

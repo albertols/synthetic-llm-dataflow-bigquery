@@ -13,8 +13,17 @@ import {
 
 import { cn } from "@/lib/cn";
 
-/** Metric statuses (evaluation_metrics.status) and run statuses (evaluation_data_history.status), any case. */
+/**
+ * Metric statuses (evaluation_metrics.status), run statuses and scope
+ * statuses (evaluation_data_history.status / scope_status), any case.
+ */
 export type StatusValue =
+  | "ok"
+  | "count_mismatch"
+  | "contaminated"
+  | "expired"
+  | "empty"
+  | "unknown"
   | "pass"
   | "warn"
   | "fail"
@@ -41,6 +50,23 @@ const STATUS: Record<string, { tone: StatusTone; label: string; icon: LucideIcon
   partial: { tone: "serious", label: "Partial", icon: OctagonAlert },
   skipped: { tone: "neutral", label: "Skipped", icon: CircleSlash },
   failed: { tone: "critical", label: "Failed", icon: CircleX },
+  // Scope statuses (evaluation_data_history.scope_status).
+  ok: { tone: "good", label: "Scope OK", icon: CircleCheck },
+  count_mismatch: { tone: "warn", label: "Count mismatch", icon: TriangleAlert },
+  contaminated: { tone: "critical", label: "Contaminated", icon: OctagonAlert },
+  expired: { tone: "warn", label: "Expired", icon: CircleSlash },
+  empty: { tone: "serious", label: "Empty", icon: CircleDashed },
+  unknown: { tone: "neutral", label: "Unknown", icon: CircleHelp },
+};
+
+/** The icon a tone uses when the status itself is unknown to the map. */
+const TONE_ICON: Record<StatusTone, LucideIcon> = {
+  good: CircleCheck,
+  warn: TriangleAlert,
+  serious: OctagonAlert,
+  critical: CircleX,
+  info: Info,
+  neutral: CircleHelp,
 };
 
 const TONE_CLASS: Record<StatusTone, string> = {
@@ -61,13 +87,17 @@ export type StatusPillProps = {
   status: StatusValue | (string & {});
   /** Overrides the default label ("Pass", "Succeeded with warnings" …). */
   label?: string;
+  /** Overrides the tone (and, for statuses the map does not know, the icon). */
+  tone?: StatusTone;
   size?: "sm" | "md";
   className?: string;
 };
 
 /** Status as icon + label + tone: never colour alone. Tones are the reserved status palette. */
-export function StatusPill({ status, label, size = "md", className }: StatusPillProps) {
-  const meta = describeStatus(status);
+export function StatusPill({ status, label, tone, size = "md", className }: StatusPillProps) {
+  const known = describeStatus(status);
+  const unknownStatus = known.icon === CircleHelp && known.label === status;
+  const meta = tone ? { ...known, tone, icon: unknownStatus ? TONE_ICON[tone] : known.icon } : known;
   const Icon = meta.icon;
   const spinning = meta.icon === LoaderCircle;
   return (

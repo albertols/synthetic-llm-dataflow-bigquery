@@ -20,8 +20,15 @@
  * - `empty.when`, or `data.length === 0`, renders a labelled empty state
  *   instead of blank axes.
  * - Animation is off under prefers-reduced-motion.
+ * - Interaction: `onEvents` maps ECharts event names ("click", "legendselectchanged",
+ *   "brushselected", "datazoom" …) to handlers, bound with chart.on/off and
+ *   rebound when the map's identity changes; `onReady` hands over the chart
+ *   instance once, after the first render (dispatchAction, getDataURL …).
+ * - Memoise `option`, `data` and `onEvents` (useMemo/useCallback): every
+ *   render with a new `option` re-renders the chart from scratch (notMerge).
+ *   An option that is a new object with the same top-level parts is skipped.
  */
-import type { EChartsOption } from "echarts";
+import type { EChartsOption, EChartsType } from "echarts";
 import { ChartColumn, ChartNoAxesColumn, Table2 } from "lucide-react";
 import { lazy, Suspense, useId, useState, type ReactNode } from "react";
 
@@ -34,6 +41,9 @@ import { Button } from "./ui/button";
 import { Skeleton } from "./ui/skeleton";
 
 const EChartCanvas = lazy(() => import("./EChartCanvas"));
+
+/** ECharts event name → handler. `params` is ECharts' event payload (e.g. { dataIndex, seriesName, value } on "click"). */
+export type ChartEventHandlers = Record<string, (params: unknown) => void>;
 
 export type ChartFrameProps = {
   title: string;
@@ -52,6 +62,12 @@ export type ChartFrameProps = {
   actions?: ReactNode;
   /** Column order/format for the table view. */
   columns?: readonly DataColumn[];
+  /** ECharts events → handlers ("click", "legendselectchanged" …). Memoise the map. */
+  onEvents?: ChartEventHandlers;
+  /** Called once with the chart instance after its first render. */
+  onReady?: (chart: EChartsType) => void;
+  /** Under the chart (and the table): a note, a legend for bands, a Callout ("Docs differ"). */
+  footer?: ReactNode;
   className?: string;
 };
 
@@ -65,6 +81,9 @@ export function ChartFrame({
   description,
   actions,
   columns,
+  onEvents,
+  onReady,
+  footer,
   className,
 }: ChartFrameProps) {
   const [showTable, setShowTable] = useState(false);
@@ -109,10 +128,13 @@ export function ChartFrame({
               data={data}
               height={height}
               ariaLabel={`${title}. Chart; choose View data for the values.`}
+              onEvents={onEvents}
+              onReady={onReady}
             />
           </Suspense>
         )}
       </div>
+      {footer}
     </figure>
   );
 }

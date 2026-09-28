@@ -8,9 +8,11 @@
  *
  * Contrast (WCAG 2.2, measured with the dataviz skill's `contrast()`):
  *   dark   text-1 16.6:1, text-2 9.9:1, text-3 6.1:1 on surface-1; >= 5.4:1 on surface-3
- *          accent-text 5.7:1, link 7.3:1, control-border 3.8:1 (1.4.11)
+ *          accent-text 6.6:1, link 7.3:1, control-border 3.8:1 (1.4.11)
  *   light  text-1 18.9:1, text-2 8.5:1, text-3 5.8:1 on surface-1
- *          accent-text 5.1:1, link 6.5:1, control-border 3.8:1
+ *          accent-text 6.6:1, link 6.5:1, control-border 3.8:1
+ *   status/tone text on its own 10–14 % tint (pills, callouts): >= 4.6:1 on
+ *   surface-1, surface-2 and bg in both themes
  *   accent button: ink #0b0d12 on #eb6834 = 6.1:1 (both themes)
  * Chart categorical palettes pass the six checks (validate_palette.js):
  *   dark  on #12151b: band, chroma, adjacent CVD ΔE ≥ 9.3, normal-vision ΔE ≥ 19.3, contrast ≥ 3:1
@@ -42,7 +44,7 @@
   --accent: #eb6834; /* Beam orange: primary actions, focus, active tab */
   --accent-hover: #f07a4a;
   --accent-fg: #0b0d12;
-  --accent-text: #eb6834;
+  --accent-text: #f07a4a; /* ≥ 5.1:1 on accent-soft over surface-2 */
   --accent-soft: rgb(235 104 52 / 0.14);
   --brand-blue: #2a78d6; /* GCP blue */
   --link: #6da7ec;
@@ -115,24 +117,24 @@
   --accent: #eb6834;
   --accent-hover: #f07a4a;
   --accent-fg: #0b0d12;
-  --accent-text: #b8481c;
+  --accent-text: #9c3d18;
   --accent-soft: rgb(235 104 52 / 0.12);
   --brand-blue: #2a78d6;
   --link: #1c5cab;
   --info-soft: rgb(42 120 214 / 0.1);
   --cpu: #1baf7a;
-  --cpu-text: #0f7a54;
+  --cpu-text: #0d6e4b;
   --gpu: #7a3fd1;
   --gpu-text: #6a33bd;
   --slate: #6b7280;
   --focus-ring: #c4501f;
 
   --status-good: #1baf7a;
-  --status-good-text: #0f7a54;
+  --status-good-text: #0d6e4b;
   --status-warn: #fab219;
   --status-warn-text: #8a5a00;
   --status-serious: #ec835a;
-  --status-serious-text: #b8481c;
+  --status-serious-text: #a3401a;
   --status-critical: #d03b3b;
   --status-critical-text: #b42b2b;
   --status-info: #2a78d6;
