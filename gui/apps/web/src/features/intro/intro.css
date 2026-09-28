@@ -1,0 +1,16 @@
+/*
+ * INTRO-only styles.
+ *
+ * Workaround (reported as NEEDS_FOUNDATION): under prefers-reduced-motion the
+ * global rule in styles/globals.css gives every element a 0.01ms transition,
+ * and mermaid then measures its labels mid-transition — the layout comes out
+ * several times too large, with tiny, scattered nodes (also on /kit). Mermaid's
+ * own elements keep their initial (zero) transition, so nothing moves either way.
+ */
+@media (prefers-reduced-motion: reduce) {
+  svg[id^="mermaid"] *,
+  svg[id^="mermaid"] *::before,
+  svg[id^="mermaid"] *::after {
+    transition-duration: initial !important;
+  }
+}
