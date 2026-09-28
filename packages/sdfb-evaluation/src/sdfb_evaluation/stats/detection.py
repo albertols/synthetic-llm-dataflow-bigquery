@@ -67,8 +67,10 @@ synthetic rows resampled from the source rows. The design matrix:
     a NULL imputed at the column mean (0 after standardising), plus a 0/1
     missing indicator when some but not all of its values are NULL;
   - a categorical feature is one-hot coded over its present codes, NULL a
-    level of its own, with the lowest present non-NULL code as the
-    reference level the intercept absorbs;
+    level of its own; codes with fewer than `max(20, ceil(N / 1000))` rows
+    (both sides together) share one pooled "rare" level (Ruling R33); the
+    lowest remaining code (else the rare level) is the reference level the
+    intercept absorbs;
   - constant columns and columns identical to an earlier one are dropped
     (a text column's seven features share one NULL pattern, so its missing
     indicators and the mask's NULL level collapse onto one column).
@@ -76,7 +78,13 @@ synthetic rows resampled from the source rows. The design matrix:
 `k` is the intercept plus the design's columns, exactly the number of
 parameters the model fits. Collinearity beyond exact duplicates (one
 column a function of another) is not detected; it overstates `k`, which
-lowers the ratio, the safe direction for a lower-better gate. A light
+lowers the ratio, the safe direction for a lower-better gate. The ratio
+has a hard ceiling: `pMSE <= c (1 - c)` (every propensity at 0 or 1), so
+`pMSE / E0 <= N / (k - 1)`, and a wide design can make even a perfectly
+separable table read below the fail threshold. Pooling rare levels caps
+`k`, and `pmse_ratio` returns `k` and the ceiling so the scorer can mark
+the metric not evaluated when the ceiling sits below the fail threshold
+(Ruling R33). A light
 ridge (scikit-learn's default `C = 1`) keeps quasi-separated codes (a value
 only one table has) finite; against the Fisher information of the
 thousands of rows the evaluation samples its shrinkage is negligible.
@@ -86,6 +94,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -125,6 +134,13 @@ _ALPHA = 0.05
 # DeLong's sample variances of the placement values need two of each.
 _MIN_DELONG_ROWS = 2
 _PMSE_MAX_ITER = 1000
+# A categorical/head-mask level keeps its own pMSE parameter only with at
+# least max(20, ceil(N / 1000)) rows over both sides; rarer levels share one
+# pooled "rare" level (Ruling R33), which caps k. NULL keeps its own level.
+_MIN_LEVEL_ROWS = 20
+_ROWS_PER_LEVEL_ROW = 1000
+_NULL_LEVEL = -1.0
+_RARE_LEVEL = -2.0
 _MIN_ROC_POINTS = 2
 _MATRIX_NDIM = 2
 
@@ -233,6 +249,20 @@ class DetectionColumn:
     return out
 
 
+def _check_dictionary_hits(column: DetectionColumn,
+                           source_codes: np.ndarray) -> None:
+  """`ValueError` when a categorical column's non-empty dictionary matches
+  none of its non-NULL source values (a plan/`hash64` mismatch)."""
+  if column.kind not in _CATEGORICAL_KINDS or not column.dictionary:
+    return
+  present = source_codes[~np.isnan(source_codes)]
+  if present.size and np.all(present == _OTHER_CODE):
+    raise ValueError(
+        f"detection column {column.name!r}: none of its {present.size} "
+        "non-NULL source values is in its dictionary; the plan's hashes do "
+        "not match hash64(column, value)")
+
+
 def featurize(
     rows_src: Sequence[Mapping[str, Any]],
     rows_syn: Sequence[Mapping[str, Any]],
@@ -242,9 +272,18 @@ def featurize(
   categorical feature indices, over the first `min(len(rows_src),
   len(rows_syn))` rows of each side (source rows first).
 
+  Trimming keeps the FIRST rows of the larger side, so callers must pass
+  rows in an order unrelated to their content (e.g. Task 24's BottomK hash
+  order), never sorted by a column. Every key column must be flagged
+  `is_key`, foreign keys included: a synthetic foreign key points at
+  synthetic parent keys and a source one at source keys, so either would
+  detect the tables trivially.
+
   Key and nested columns are skipped; a column absent from a row reads as
   NULL; a numeric cell with no numeric reading raises `ValueError` (see
-  `privacy.pit_mid_cdf`), as does an invalid grid.
+  `privacy.pit_mid_cdf`), as does an invalid grid. So does a categorical
+  column whose non-empty dictionary no non-NULL source value hits: the
+  plan's hashes do not match `hash64(column, value)`.
   """
   n = min(len(rows_src), len(rows_syn))
   rows = [*rows_src[:n], *rows_syn[:n]]
@@ -255,6 +294,7 @@ def featurize(
     if not column.is_feature:
       continue
     block = column.encode([row.get(column.name) for row in rows])
+    _check_dictionary_hits(column, block[:n, 0])
     cat_idx.extend(width + offset for offset in column.categorical_offsets)
     blocks.append(block)
     width += block.shape[1]
@@ -369,6 +409,13 @@ def c2st_auc(x: np.ndarray,
   gives identical output. Raises `ValueError` for fewer than 2 folds, a
   single class, fewer than `max(2 * folds, 20)` rows in either class, no
   features, or a categorical feature not holding codes 0..254.
+
+  The AUC pools the scores of `folds` separately fitted models, so
+  calibration differences between them can depress it slightly below the
+  per-fold AUCs: the lenient direction for this lower-better gate, and a
+  small effect in simulation. The DeLong interval treats the pooled scores
+  as one classifier's, ignoring the variance between fold models; its null
+  coverage stays close to nominal in simulation.
   """
   features, labels = _checked_xy(x, y)
   if folds < _MIN_FOLDS:
@@ -410,7 +457,7 @@ class _DesignColumns:
     self._seen: set[tuple[str, bytes]] = set()
 
   def _new(self, tag: str, data: np.ndarray) -> bool:
-    key = (tag, data.tobytes())
+    key = (tag, hashlib.blake2b(data.tobytes(), digest_size=16).digest())
     if key in self._seen:
       return False
     self._seen.add(key)
@@ -445,14 +492,18 @@ def _propensity_design(x: np.ndarray,
                        categorical: Sequence[int]) -> _DesignColumns:
   """The pMSE design matrix (see the module docstring for its columns)."""
   design = _DesignColumns(x.shape[0])
+  floor = max(_MIN_LEVEL_ROWS, math.ceil(x.shape[0] / _ROWS_PER_LEVEL_ROW))
   for j in range(x.shape[1]):
     column = x[:, j]
     missing = np.isnan(column)
     if j in categorical:
-      keys = np.where(missing, -1.0, column)
+      keys = np.where(missing, _NULL_LEVEL, column)
+      levels, counts = np.unique(keys, return_counts=True)
+      rare = levels[(counts < floor) & (levels != _NULL_LEVEL)]
+      keys = np.where(np.isin(keys, rare), _RARE_LEVEL, keys)
       levels = np.unique(keys)
-      present = levels[levels >= 0]
-      reference = present[0] if present.size else None
+      named = levels[levels >= 0]
+      reference = named[0] if named.size else _RARE_LEVEL
       for level in levels:
         if level != reference:
           design.add_binary(np.flatnonzero(keys == level))
@@ -467,20 +518,23 @@ def _propensity_design(x: np.ndarray,
 
 
 def pmse_ratio(x: np.ndarray, y: np.ndarray, cat_idx: Sequence[int], *,
-               seed: int) -> tuple[float, float]:
-  """`(pMSE, pMSE / E0)` of a logistic propensity model fitted on all rows.
+               seed: int) -> tuple[float, float, int, float]:
+  """`(pMSE, pMSE / E0, k, ceiling)` of a logistic propensity model fitted on
+  all rows, with `ceiling = N / (k - 1)` the largest ratio this design can
+  read (Ruling R33: the scorer marks the metric not evaluated when the
+  ceiling sits below the fail threshold).
 
   `c = n_syn / N`, `pMSE = mean((p_i - c)^2)` and `E0 = (k - 1) c (1 - c)
   / N`, the null expectation for independent source and synthetic samples
   (Ruling R31; not Snoke et al.'s (2018) `(k - 1)(1 - c)^2 c / N`, which
   holds only for synthetic rows drawn from the source sample itself), where
   `k` counts the intercept plus every design column; the module docstring
-  details the design and both null regimes. A perfect generator averages 1. `cat_idx` marks the
-  categorical codes (one-hot coded; every other feature is standardised,
-  NULLs mean-imputed with a missing indicator). The fit is lbfgs, which is
-  deterministic; `seed` is passed as the model's `random_state` for
-  symmetry with `c2st_auc`. Raises `ValueError` for a single class or when
-  no feature varies.
+  details the design and both null regimes. A perfect generator averages
+  1. `cat_idx` marks the categorical codes (one-hot coded, rare levels
+  pooled; every other feature is standardised, NULLs mean-imputed with a
+  missing indicator). The fit is lbfgs, which is deterministic; `seed` is
+  passed as the model's `random_state` for symmetry with `c2st_auc`.
+  Raises `ValueError` for a single class or when no feature varies.
   """
   features, labels = _checked_xy(x, y)
   n_neg, n_pos = _class_counts(labels)
@@ -499,7 +553,7 @@ def pmse_ratio(x: np.ndarray, y: np.ndarray, cat_idx: Sequence[int], *,
   pmse = float(np.mean((propensity - c)**2))
   k = columns.width + 1
   e0 = (k - 1) * c * (1.0 - c) / n
-  return pmse, pmse / e0
+  return pmse, pmse / e0, k, n / (k - 1)
 
 
 def roc_points(y: np.ndarray,

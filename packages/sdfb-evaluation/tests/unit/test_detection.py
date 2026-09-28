@@ -154,7 +154,7 @@ def test_two_sd_shift_is_detected() -> None:
   auc, lo, hi, _ = c2st_auc(x, y, cat_idx, seed=3)
   assert auc > 0.85
   assert lo < auc < hi
-  _, ratio = pmse_ratio(x, y, cat_idx, seed=3)
+  ratio = pmse_ratio(x, y, cat_idx, seed=3)[1]
   assert ratio > 10.0
 
 
@@ -357,6 +357,28 @@ def test_categorical_only_table_uses_dictionary_codes() -> None:
   assert y.tolist() == [0, 0, 1, 1]
 
 
+def test_dictionary_that_no_source_value_hits_raises() -> None:
+  # Hashed under the wrong column name: a plan/hash64 mismatch.
+  wrong = DetectionColumn(
+      "status",
+      ColumnKind.CATEGORICAL,
+      is_key=False,
+      dictionary=tuple(hash64("state", s) for s in _STATUSES))
+  src = [{"status": "new"}, {"status": "paid"}, {"status": None}]
+  syn = [{"status": "new"}, {"status": "paid"}, {"status": "lost"}]
+  with pytest.raises(ValueError, match=r"'status'.*dictionary"):
+    featurize(src, syn, [wrong])
+  # No evidence either way: an all-NULL source side, or an empty dictionary.
+  nulls = [{"status": None}] * 3
+  x, _, _ = featurize(nulls, syn, [wrong])
+  assert np.isnan(x[:3, 0]).all()
+  empty = DetectionColumn(
+      "status", ColumnKind.CATEGORICAL, is_key=False, dictionary=())
+  x, _, _ = featurize(src, syn, [empty])
+  np.testing.assert_array_equal(x[:, 0],
+                                [_OTHER, _OTHER, math.nan] + [_OTHER] * 3)
+
+
 def test_categorical_only_c2st_separates_a_mix_shift() -> None:
   status_dict = tuple(hash64("status", s) for s in _STATUSES)
   cols = [
@@ -464,11 +486,15 @@ def test_missingness_shift_is_detected() -> None:
   assert c2st_auc(x, y, cat_idx, seed=1)[0] > 0.6
 
 
-def _implied_k(pmse: float, ratio: float, y: np.ndarray) -> float:
-  """Invert E0 = (k - 1) c (1 - c) / N for k."""
+def _check_ratio_and_ceiling(result: tuple[float, float, int, float],
+                             y: np.ndarray) -> None:
+  """ratio = pMSE / E0, E0 = (k - 1) c (1 - c) / N, ceiling = N / (k - 1)."""
+  pmse, ratio, k, ceiling = result
   n = y.size
   c = y.sum() / n
-  return 1.0 + (pmse / ratio) * n / (c * (1.0 - c))
+  assert ratio == pytest.approx(pmse / ((k - 1) * c * (1.0 - c) / n), rel=1e-12)
+  assert ceiling == pytest.approx(n / (k - 1), rel=1e-12)
+  assert ratio <= ceiling
 
 
 def test_pmse_parameter_count() -> None:
@@ -481,11 +507,12 @@ def test_pmse_parameter_count() -> None:
   const = np.full(n, 7.0)
   x = np.c_[num1, num2, cat, const]
   y = np.r_[np.zeros(300, dtype=int), np.ones(100, dtype=int)]
-  pmse, ratio = pmse_ratio(x, y, [2], seed=1)
+  result = pmse_ratio(x, y, [2], seed=1)
   # intercept + num1 + num2 + num2's missing indicator + (3 - 1) cat levels;
   # the constant column carries no parameter.
-  assert _implied_k(pmse, ratio, y) == pytest.approx(6.0, rel=1e-9)
-  assert pmse == pytest.approx(pmse_ratio(x[:, :3], y, [2], seed=1)[0])
+  assert result[2] == 6
+  _check_ratio_and_ceiling(result, y)
+  assert result[0] == pytest.approx(pmse_ratio(x[:, :3], y, [2], seed=1)[0])
 
 
 def test_pmse_shared_null_pattern_counts_once() -> None:
@@ -501,10 +528,73 @@ def test_pmse_shared_null_pattern_counts_once() -> None:
     col[null] = np.nan
   x = np.c_[length, mask, flag]
   y = np.r_[np.zeros(200, dtype=int), np.ones(200, dtype=int)]
-  pmse, ratio = pmse_ratio(x, y, [1], seed=1)
+  result = pmse_ratio(x, y, [1], seed=1)
   # intercept + length + flag + ONE missing indicator + mask level 1 (level 0
   # is the reference; the NULL level duplicates the indicator).
-  assert _implied_k(pmse, ratio, y) == pytest.approx(5.0, rel=1e-9)
+  assert result[2] == 5
+  _check_ratio_and_ceiling(result, y)
+
+
+def test_pmse_pools_rare_levels() -> None:
+  # N = 400, so a level needs max(20, ceil(400 / 1000)) = 20 rows: codes
+  # 0..2 keep their own level (120 rows each), the 35 single-row codes share
+  # one "rare" level, and NULL keeps its own level even though it is rare.
+  rng = np.random.default_rng(63)
+  codes = np.r_[np.repeat([0.0, 1.0, 2.0], 120),
+                np.arange(3.0, 38.0),
+                np.full(5, np.nan)]
+  x = np.c_[rng.permutation(codes), rng.normal(size=400)]
+  y = np.r_[np.zeros(200, dtype=int), np.ones(200, dtype=int)]
+  result = pmse_ratio(x, y, [0], seed=1)
+  # intercept + codes 1, 2 (0 is the reference) + rare + NULL + the numeric;
+  # without pooling it would be 1 + 37 + 1 + 1 = 40.
+  assert result[2] == 6
+  _check_ratio_and_ceiling(result, y)
+
+
+def test_pmse_rare_floor_scales_with_n() -> None:
+  # Two 25-row codes keep their own levels at N = 2,000 (floor 20) and are
+  # pooled into one at N = 30,000 (floor ceil(30,000 / 1,000) = 30).
+  for n, expected_k in ((2000, 4), (30_000, 3)):
+    rng = np.random.default_rng(64)
+    half = (n - 50) // 2
+    codes = np.r_[np.zeros(half),
+                  np.ones(n - 50 - half),
+                  np.full(25, 2.0),
+                  np.full(25, 3.0)]
+    y = np.r_[np.zeros(n // 2, dtype=int), np.ones(n - n // 2, dtype=int)]
+    result = pmse_ratio(rng.permutation(codes)[:, np.newaxis], y, [0], seed=1)
+    assert result[2] == expected_k, n
+    _check_ratio_and_ceiling(result, y)
+
+
+def _separable_probe(levels: int) -> tuple[np.ndarray, np.ndarray, list[int]]:
+  """1,000 rows a side separated by a 10-sd shift in one numeric feature,
+  plus 20 categoricals drawn uniformly from `levels` codes on both sides."""
+  rng = np.random.default_rng(65)
+  numeric = np.r_[rng.normal(0.0, 1.0, 1000), rng.normal(10.0, 1.0, 1000)]
+  cats = rng.integers(0, levels, (2000, 20)).astype(float)
+  y = np.r_[np.zeros(1000, dtype=int), np.ones(1000, dtype=int)]
+  return np.c_[numeric, cats], y, list(range(1, 21))
+
+
+def test_pmse_ceiling_on_a_separable_table() -> None:
+  # 20 x 255 levels would be k - 1 = 5,081 > N and a ceiling of 0.39: the
+  # separable table would read "pass". Every level has ~8 rows, below the
+  # floor of 20, so pooling leaves k tiny and the ratio fails loudly.
+  x, y, cat_idx = _separable_probe(255)
+  result = pmse_ratio(x, y, cat_idx, seed=1)
+  assert result[2] <= 10
+  assert result[1] >= 10.0 and result[3] >= 10.0
+  _check_ratio_and_ceiling(result, y)
+  # 50 levels of ~40 rows each survive pooling: k - 1 = 1 + 20 * 49 = 981
+  # and the ceiling N / (k - 1) = 2.04 is below the fail threshold of 10,
+  # which the scorer turns into "not evaluated" (Ruling R33).
+  x, y, cat_idx = _separable_probe(50)
+  result = pmse_ratio(x, y, cat_idx, seed=1)
+  assert result[2] == 982
+  assert result[3] < 10.0
+  _check_ratio_and_ceiling(result, y)
 
 
 def _null_ratios(regime: str, reps: int = 60) -> np.ndarray:

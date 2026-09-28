@@ -1610,7 +1610,7 @@ metrics:
     interpretation:
       good: "Under 3: the logistic model finds little beyond chance."
       bad: "At or above 10: even a linear model separates the two tables well."
-    pitfalls: "E0 assumes independent source and synthetic samples: Snoke et al.'s (k-1)(1-c)^2 c/N holds only for synthetic rows drawn from the source sample itself and would put a perfect generator at 1/(1-c), about 2 here. With many one-hot features k is large and the ratio loses sensitivity."
+    pitfalls: "E0 assumes independent source and synthetic samples: Snoke et al.'s (k-1)(1-c)^2 c/N holds only for synthetic rows drawn from the source sample itself and would put a perfect generator at 1/(1-c), about 2 here. The ratio can never exceed N/(k-1), since pMSE is at most c(1-c): with many one-hot features k is large and even a perfectly separable table can read low, so levels with fewer than max(20, N/1000) rows are pooled and the metric is not evaluated when N/(k-1) is below the fail threshold."
     references:
       - {label: "Snoke et al. 2018 — general and specific utility measures", url: "https://doi.org/10.1111/rssa.12358"}
       - {label: "Woo et al. 2009 — global measures of data utility", url: "https://doi.org/10.29012/jpc.v1i1.568"}
