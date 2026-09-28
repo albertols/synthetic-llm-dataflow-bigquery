@@ -11,6 +11,8 @@ import type { ReactNode } from "react";
 import { StatusPill } from "@/components/StatusPill";
 import { cn } from "@/lib/cn";
 
+import { NoiseDowngrade } from "./NoiseDowngrade";
+
 export interface IntervalRow {
   key: string;
   label: ReactNode;
@@ -20,6 +22,8 @@ export interface IntervalRow {
   /** null with a non-null `lo`: unbounded above. */
   hi: number | null;
   status: string;
+  /** The status sampling noise explained away (Ruling R40): shown as "≈ within noise, was …". */
+  downgradedFrom?: "warn" | "fail" | null;
   /** Text next to the status (e.g. "3.0× · ci_low 0.03"). */
   detail: string;
 }
@@ -131,6 +135,7 @@ export function IntervalPlot({
             </div>
             <div className="col-span-2 flex min-w-0 items-center gap-2 sm:col-span-1">
               <StatusPill status={row.status} size="sm" />
+              {row.downgradedFrom ? <NoiseDowngrade from={row.downgradedFrom} /> : null}
               <span className="truncate font-mono text-[11px] text-text-2">{row.detail}</span>
             </div>
           </div>

@@ -116,7 +116,15 @@ describe("noise-aware diff", () => {
 
   it("says missing and not evaluated instead of inventing a delta", () => {
     expect(diffMetric(ks(cell(0.1), null), 0, 1)).toMatchObject({ verdict: "missing", delta: null });
-    expect(diffMetric(ks(cell(0.1), cell(null)), 0, 1)).toMatchObject({ verdict: "not_evaluated", delta: null });
+    expect(diffMetric(ks(cell(0.1), cell(null, { status: "not_evaluated", score: null })), 0, 1)).toMatchObject({
+      verdict: "not_evaluated",
+      delta: null,
+    });
+    // Evaluated without a point value (a clean lift gated on ci_low, Ruling R38): no delta, but not "not evaluated".
+    expect(diffMetric(ks(cell(0.1), cell(null, { ci_low: 0 })), 0, 1)).toMatchObject({
+      verdict: "unjudged",
+      delta: null,
+    });
   });
 
   it("keeps colour slots by first appearance and finds the Pareto frontier", () => {

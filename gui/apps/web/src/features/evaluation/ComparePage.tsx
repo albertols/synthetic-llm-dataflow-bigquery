@@ -264,7 +264,11 @@ function RunMetricHeatmap({ comparison, family }: { comparison: Comparison; fami
                           {glyph[c.status] ?? "?"}
                         </span>
                         <span className="sr-only">{c.status}, </span>
-                        {c.value === null ? "n/e" : fmtMetric(c.value, m.value_kind)}
+                        {c.value !== null
+                          ? fmtMetric(c.value, m.value_kind)
+                          : c.status === "not_evaluated"
+                            ? "n/e"
+                            : "undefined"}
                       </>
                     ) : (
                       <span className="text-text-3">absent</span>

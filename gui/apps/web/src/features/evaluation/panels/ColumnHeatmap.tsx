@@ -71,7 +71,12 @@ const HeatRow = memo(function HeatRow({
         }
         const status = isDocumentedEdge(row) ? "info" : row.status;
         const cell = CELL[status] ?? { glyph: "?", word: status, className: "" };
-        const value = row.value === null ? "n/e" : fmtMetric(row.value, row.value_kind);
+        const value =
+          row.value !== null
+            ? fmtMetric(row.value, row.value_kind)
+            : row.status === "not_evaluated"
+              ? "n/e"
+              : "undefined (gated on its CI bound)";
         return (
           <td
             key={id}

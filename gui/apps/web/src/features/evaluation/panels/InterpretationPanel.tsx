@@ -11,6 +11,7 @@ import { LevelChip } from "@/components/LevelChip";
 import { StatusPill } from "@/components/StatusPill";
 import { Button } from "@/components/ui/button";
 
+import { NoiseDowngrade } from "../components/NoiseDowngrade";
 import { isLevel } from "../lib/catalogue";
 import type { Finding } from "../lib/interpret";
 import type { OpenTarget } from "./Scorecards";
@@ -68,6 +69,7 @@ export function InterpretationPanel({
               >
                 <div className="flex items-center gap-1.5">
                   <StatusPill status={finding.severity === "info" ? "info" : finding.severity} size="sm" />
+                  {finding.downgradedFrom ? <NoiseDowngrade from={finding.downgradedFrom} /> : null}
                   {isLevel(finding.level) ? <LevelChip level={finding.level} size="sm" /> : null}
                 </div>
                 <p className="text-sm leading-relaxed text-text-2">{finding.text}</p>

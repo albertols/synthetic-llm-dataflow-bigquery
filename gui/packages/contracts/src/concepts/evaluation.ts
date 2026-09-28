@@ -75,12 +75,14 @@ export const concepts = defineConcepts([
     id: "eval:status-rule",
     title: "How a status is decided",
     purpose:
-      "Thresholds are effect sizes and crossing them is inclusive (lower-is-better: WARN at value ≥ warn, FAIL at value ≥ fail). A crossing that stays within the noise floor of the reference is still PASS.",
+      "Thresholds are effect sizes and crossing them is inclusive (lower-is-better: WARN at g ≥ warn, FAIL at g ≥ fail). A WARN or FAIL that sampling noise explains becomes PASS, marked “≈ within noise, was FAIL” and scored at the reference, so small tables raise no false alarm.",
     formula:
-      "\\text{status} = \\begin{cases} \\text{PASS} & |g - r| \\le \\varepsilon \\\\ \\text{FAIL} & g \\ge f \\\\ \\text{WARN} & g \\ge w \\\\ \\text{PASS} & \\text{otherwise} \\end{cases}",
+      "\\text{status} = \\begin{cases} \\text{FAIL} & g \\ge f \\\\ \\text{WARN} & g \\ge w \\\\ \\text{PASS} & \\text{otherwise} \\end{cases} \\quad\\text{then}\\quad \\text{WARN/FAIL} \\to \\text{PASS}\\ (\\approx) \\text{ if } |g - r| \\le \\varepsilon \\text{ or } r \\in [\\mathrm{ci}_{\\mathrm{low}}, \\mathrm{ci}_{\\mathrm{high}}]",
     interpretation: {
-      tip: "g is the gate value (the value, or ci_low for metrics that gate on their CI), r the noise reference (target, 0 or the top of the range), ε the noise floor, w and f the thresholds. Higher-is-better metrics mirror the inequalities; warn 0 / fail 0 means FAIL iff g > 0.",
+      tip: "Whether noise explains a crossing depends on the metric's noise method: a scalar floor (KS, TVD, JSD, Fisher z, MI bias) must cover |g − r|; an interval method (Wilson, Newcombe, DeLong) must have its 95 % CI cover r. g is the gate value (the value, or its 95 % CI bound for lifts and the DCR share — ci_low when lower is better — even when the point value is undefined), r the noise reference (the target, else 0, or 1 when higher is better), ε the noise floor, w and f the thresholds. Higher-is-better metrics mirror the inequalities; warn 0 / fail 0 means FAIL iff g > 0, with no noise check. An infinite g past the bad side is a FAIL; a missing noise floor or CI means no downgrade (“noise check unavailable”).",
     },
+    pitfalls:
+      "An observed copy or invented category is an event, not an estimate: its Wilson interval never reaches the edge reference (0 or 1), so adherence shares and copy rates are never downgraded, at any n.",
     diagram: "evaluation:metric-bar",
     links: [catalogueLink],
   },
@@ -88,10 +90,10 @@ export const concepts = defineConcepts([
     id: "eval:metric-bar",
     title: "Reading a metric bar",
     purpose:
-      "One axis per metric: the grey band is the noise floor around the reference, the amber and red ticks are the warn and fail thresholds, the diamond is the reference baseline and the dot the value, with its CI whisker when there is one.",
+      "One axis per metric: the grey band is the scalar noise floor around the reference, the amber and red ticks are the warn and fail thresholds, the diamond is the reference baseline and the dot the value, with its 95 % CI whisker when there is one. Interval-method metrics (Wilson, Newcombe, DeLong) have no band: their whisker reaching the reference is what noise looks like.",
     interpretation: {
-      good: "Dot inside the grey band: indistinguishable from sampling noise.",
-      bad: "Dot past the red tick and outside the band: a real FAIL.",
+      good: "Dot inside the grey band, or a whisker that reaches the reference: indistinguishable from sampling noise.",
+      bad: "Dot past the red tick, outside the band and with a whisker short of the reference: a real FAIL.",
       tip: "Near the diamond means generation kept what the reference sample carried; far from it means fidelity was lost in generation.",
     },
     diagram: "evaluation:metric-bar",
@@ -106,6 +108,7 @@ export const concepts = defineConcepts([
     interpretation: {
       good: "ci_low under the warn threshold: the data do not show a lift at 95 %.",
       bad: "ci_low at or above the threshold: even the most favourable reading shows the lift.",
+      tip: "With no copies on either side the lift itself is undefined, but its interval is (0, ∞): the gate reads ci_low 0 and a clean run passes with score 1.",
     },
     links: [
       {
@@ -125,7 +128,7 @@ export const concepts = defineConcepts([
     interpretation: {
       good: "ci_low below 2: no evidence that the generator copies what it read.",
       bad: "ci_low at or above 5: the generator reproduces its reference rows or values.",
-      tip: "When m_H = 0 the point estimate is infinite; the interval (Clopper–Pearson on m_R | m_R + m_H) still bounds it.",
+      tip: "When m_H = 0 the point estimate is infinite, and with m_R = m_H = 0 it is undefined; the interval (Clopper–Pearson on m_R | m_R + m_H) still bounds it, and the status reads that bound.",
     },
     pitfalls:
       "A lift is a risk indicator, not a privacy guarantee: a lift of 1 says nothing about attacks that do not need exact copies.",
@@ -376,7 +379,7 @@ export const concepts = defineConcepts([
     id: "eval:info-status",
     title: "INFO and other statuses",
     purpose:
-      "An INFO row is measured but not scored against a threshold: the metric has none (catalogue score: none — Wasserstein in column units, fan-out W1, the source's own orphan rate) or the foreign key is documented (enforced: false). INFO rows count in every total and never pass or fail.",
+      "An INFO row is measured but not graded: the metric has no thresholds (Wasserstein in column units, fan-out W1, the source's own orphan rate), or it is the orphan rate of a documented foreign key (enforced: false). INFO rows count in every total, never pass or fail, and carry no score.",
     interpretation: {
       tip: "“Other status” counts rows whose status is newer than this GUI's vocabulary; they are shown as plain text wherever they appear. Every breakdown here adds up to its total.",
     },

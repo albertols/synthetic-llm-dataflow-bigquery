@@ -178,7 +178,12 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
   });
 
   it("selects metrics_info in every registry query (Ruling R37)", () => {
-    for (const name of ["evaluations.list", "evaluations.events", "evaluations.latestByIds", "evaluations.slim"] as const) {
+    for (const name of [
+      "evaluations.list",
+      "evaluations.events",
+      "evaluations.latestByIds",
+      "evaluations.slim",
+    ] as const) {
       const query = QUERIES[name];
       expect(
         query.fields.map((f) => f.name),

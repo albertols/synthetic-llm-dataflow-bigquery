@@ -28,7 +28,7 @@ import { metricShort } from "../lib/catalogue";
 import { pairedHistogram } from "../lib/charts";
 import { fmtMetric, fmtShare, fmtSig, scopeLabel } from "../lib/format";
 import { LIFT_METRICS, PRIVACY_RATE_METRICS, statusRank } from "../lib/model";
-import { readingOf, reasonOf } from "../lib/reading";
+import { downgradedFrom, readingOf, reasonOf } from "../lib/reading";
 import { useChartTokens } from "../lib/tokens";
 
 const LOG_TICKS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500];
@@ -44,18 +44,21 @@ export function liftRows(metrics: readonly MetricRow[], table?: string): Interva
         detail.copies_r !== undefined && detail.copies_h !== undefined
           ? ` · m_R/m_H ${formatCount(detail.copies_r)}/${formatCount(detail.copies_h)}`
           : "";
-      const text =
-        m.value === null
-          ? `not evaluated — ${reasonOf(m) ?? "no reason recorded"}`
-          : `${fmtSig(m.value)}× · ci_low ${fmtSig(m.ci_low)}${m.ci_high === null && m.ci_low !== null ? " · open above" : ""}${counts}`;
+      const skipped = m.status === "not_evaluated";
+      // No copies on either side: the ratio is undefined but the gate still reads ci_low (Ruling R38).
+      const point = m.value === null ? "undefined" : `${fmtSig(m.value)}×`;
+      const text = skipped
+        ? `not evaluated — ${reasonOf(m) ?? "no reason recorded"}`
+        : `${point} · ci_low ${fmtSig(m.ci_low)}${m.ci_high === null && m.ci_low !== null ? " · open above" : ""}${counts}`;
       return {
         key: `${m.metric_id}|${scopeLabel(m)}`,
         label: metricShort(m.metric_id),
         sublabel: scopeLabel(m),
         value: m.value,
-        lo: m.value === null ? null : m.ci_low,
-        hi: m.value === null ? null : m.ci_high,
+        lo: skipped ? null : m.ci_low,
+        hi: skipped ? null : m.ci_high,
         status: m.status,
+        downgradedFrom: downgradedFrom(m),
         detail: text,
       };
     });
@@ -144,8 +147,9 @@ function HoldoutShare({ metrics, table }: { metrics: MetricRow[]; table?: string
     lo: m.ci_low,
     hi: m.ci_high,
     status: m.status,
+    downgradedFrom: downgradedFrom(m),
     detail:
-      m.value === null
+      m.status === "not_evaluated" || m.value === null
         ? `not evaluated — ${reasonOf(m) ?? "no reason"}`
         : `${fmtShare(m.value)} · Wilson ${fmtShare(m.ci_low)}–${fmtShare(m.ci_high)} · gate ${fmtShare(readingOf(m).gate)}`,
   }));

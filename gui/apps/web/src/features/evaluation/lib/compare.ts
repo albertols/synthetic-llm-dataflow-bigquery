@@ -81,8 +81,11 @@ export function diffMetric(
   }
   const base = { a, b, notComparable: [...new Set(notComparable)] };
   if (!a || !b) return { ...base, delta: null, floor: null, verdict: "missing", basis: "none" };
-  if (a.value === null || b.value === null)
+  if (a.status === "not_evaluated" || b.status === "not_evaluated")
     return { ...base, delta: null, floor: null, verdict: "not_evaluated", basis: "none" };
+  // Evaluated without a point value (a lift with no events gates on its CI bound, Ruling R38): no delta to judge.
+  if (a.value === null || b.value === null)
+    return { ...base, delta: null, floor: null, verdict: "unjudged", basis: "none" };
   const delta = b.value - a.value;
   const floors = [a.noise_floor, b.noise_floor].filter((f): f is number => f !== null && Number.isFinite(f));
   const floor = floors.length ? Math.max(...floors) : null;

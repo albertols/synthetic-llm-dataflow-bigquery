@@ -16,6 +16,7 @@ import { isLevel, metricConcept, metricShort, metricTitle } from "../lib/catalog
 import { fmtMetric, fmtScore, scopeLabel } from "../lib/format";
 import { explainStatus, readingOf } from "../lib/reading";
 import { MetricBar } from "./MetricBar";
+import { NoiseDowngrade } from "./NoiseDowngrade";
 
 function Figure({ label, value, emphasis }: { label: string; value: string; emphasis?: boolean }) {
   return (
@@ -58,7 +59,8 @@ export function MetricReadout({ row, showScope = true, headingLevel = 4, classNa
     reading.ciLow === null && reading.ciHigh === null
       ? MISSING
       : `${fmtMetric(reading.ciLow, k)} – ${reading.ciHigh === null ? "∞" : fmtMetric(reading.ciHigh, k)}`;
-  const notEvaluated = row.status === "not_evaluated" || row.value === null;
+  // A lift with no events has no value but is evaluated on its CI bound (Ruling R38).
+  const notEvaluated = row.status === "not_evaluated" || (row.value === null && reading.gate === null);
   return (
     <article
       data-metric={row.metric_id}
@@ -74,11 +76,12 @@ export function MetricReadout({ row, showScope = true, headingLevel = 4, classNa
           {concept ? <InfoHint concept={concept} /> : null}
         </div>
         <StatusPill status={reading.documented && row.status !== "not_evaluated" ? "info" : row.status} size="sm" />
+        {reading.downgradedFrom ? <NoiseDowngrade from={reading.downgradedFrom} /> : null}
       </header>
       {showScope ? <p className="-mt-1 truncate font-mono text-[11px] text-text-3">{scopeLabel(row)}</p> : null}
       {notEvaluated ? null : <MetricBar reading={reading} />}
       <dl className="grid grid-cols-3 gap-x-3 gap-y-1.5 sm:grid-cols-4">
-        <Figure label="Value" value={fmtMetric(reading.value, k)} emphasis />
+        <Figure label="Value" value={reading.valueUndefined ? "undefined" : fmtMetric(reading.value, k)} emphasis />
         <Figure label="Score" value={fmtScore(reading.score)} />
         <Figure label="Baseline" value={fmtMetric(reading.baseline, k)} />
         <Figure label="Noise floor" value={fmtMetric(reading.noiseFloor, k)} />

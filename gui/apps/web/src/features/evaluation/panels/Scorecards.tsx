@@ -17,7 +17,9 @@ import { fmtMetric, fmtScore, scopeLabel } from "../lib/format";
 import type { RunTab } from "../lib/interpret";
 import { tabFor } from "../lib/interpret";
 import type { FamilyCard } from "../lib/model";
+import { NoiseDowngrade } from "../components/NoiseDowngrade";
 import { StatusCounts } from "../components/StatusCounts";
+import { downgradedFrom } from "../lib/reading";
 
 export type OpenTarget = { tab: RunTab; column?: string; table?: string };
 
@@ -44,6 +46,7 @@ function WorstRow({ row, onOpen }: { row: MetricRow; onOpen: (target: OpenTarget
     <li className="grid min-w-0 gap-0.5 border-t border-border pt-2">
       <div className="flex min-w-0 items-center gap-1.5">
         <StatusPill status={row.status} size="sm" />
+        {downgradedFrom(row) ? <NoiseDowngrade from={downgradedFrom(row)!} /> : null}
         <button
           type="button"
           onClick={() =>
@@ -60,8 +63,13 @@ function WorstRow({ row, onOpen }: { row: MetricRow; onOpen: (target: OpenTarget
         {concept ? <InfoHint concept={concept} /> : null}
       </div>
       <p className="font-mono text-[11px] break-words text-text-2 tabular-nums">
-        {row.value === null ? (
+        {row.status === "not_evaluated" ? (
           <span>not evaluated</span>
+        ) : row.value === null ? (
+          // A lift with no events: no point value, graded on its CI bound (Ruling R38).
+          <>
+            value undefined · gate {fmtMetric(row.ci_low, k)} · score {fmtScore(row.score)}
+          </>
         ) : (
           <>
             value {fmtMetric(row.value, k)} · score {fmtScore(row.score)} · baseline {fmtMetric(row.baseline_value, k)}{" "}
@@ -102,7 +110,19 @@ function Card({
           </h3>
           <p className="text-xs text-text-3">{FAMILY_QUESTION[card.family]}</p>
         </div>
-        {card.status ? <StatusPill status={card.status} size="sm" /> : null}
+        <div className="flex flex-col items-end gap-1">
+          {card.status ? <StatusPill status={card.status} size="sm" /> : null}
+          {card.keyFailures ? (
+            <span title="Duplicate keys or orphans on enforced edges: integrity holds by construction, so these FAIL whatever the averages say (Ruling R39).">
+              <StatusPill
+                status="fail"
+                tone="critical"
+                label={`${card.keyFailures} key ${card.keyFailures === 1 ? "failure" : "failures"}`}
+                size="sm"
+              />
+            </span>
+          ) : null}
+        </div>
       </header>
       <div className="flex items-end gap-3">
         <p className="text-4xl leading-none font-semibold tracking-tight text-text-1">{fmtScore(card.score)}</p>

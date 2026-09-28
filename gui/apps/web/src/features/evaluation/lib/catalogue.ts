@@ -4,7 +4,8 @@
  * their own thresholds and noise floors, which always win over it (a row may
  * come from another catalogue version).
  */
-import { catalogueById, catalogueVersion, type CatalogueMetric } from "@contracts/generated/catalogue";
+import { catalogue, catalogueById, catalogueVersion, type CatalogueMetric } from "@contracts/generated/catalogue";
+import { isAggregateMetric, zeroToleranceIds } from "@synthetic-platform/stats/scoring";
 
 import type { ConceptLevel } from "@/lib/concepts";
 
@@ -139,15 +140,17 @@ export function metricTitle(id: string): string {
   return metricMeta(id)?.title ?? id;
 }
 
-/** Aggregates never feed a roll-up (Ruling R11) and never appear as a column in the heatmap. */
+/**
+ * Aggregates (`table.*_score`, every `model.*` id) never feed a roll-up (Ruling R11), are left
+ * out of the headline counts (R43) and never appear as a column in the heatmap — the evaluator's
+ * `is_aggregate`.
+ */
 export function isRollup(id: string): boolean {
-  return (
-    id.startsWith("model.") ||
-    /^table\.(fidelity|privacy|integrity|diversity|overall)_score$/.test(id) ||
-    id === "table.column_shape_score" ||
-    id === "table.pair_trend_score"
-  );
+  return isAggregateMetric(id);
 }
+
+/** The zero-tolerance integrity metrics (warn = fail = 0): what the key-failure badge counts (R39). */
+export const ZERO_TOLERANCE_IDS: ReadonlySet<string> = zeroToleranceIds(catalogue);
 
 /** The model-level roll-up id for a family ("overall" included). */
 export function modelScoreId(family: string): string {

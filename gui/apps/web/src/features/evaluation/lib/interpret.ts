@@ -5,15 +5,16 @@
  *   "KS 0.04 on orders.amount is below the noise floor 0.05 and near the
  *    10k-sample baseline 0.03 — indistinguishable at this n."
  *
- * Findings are ranked (FAIL, WARN, NOT EVALUATED, documented INFO) and point
- * at the view that holds the evidence.
+ * Findings are ranked (FAIL, WARN, NOT EVALUATED, documented INFO, then the
+ * PASS rows the evaluator downgraded as sampling noise — "≈ within noise, was
+ * FAIL", Ruling R40) and point at the view that holds the evidence.
  */
 import type { EvaluationDetail, MetricRow } from "@contracts/api";
 
 import { FAMILY_LABEL, isRollup, metricMeta, metricShort } from "./catalogue";
 import { fmtMetric, fmtSampleSize, fmtScore, fmtSig, scopeLabel } from "./format";
 import { countsPhrase, countStatuses, countsTotal, metricKey, statusRank } from "./model";
-import { readingOf, type Reading } from "./reading";
+import { downgradeLabel, readingOf, type Reading } from "./reading";
 
 export type RunTab = "overview" | "columns" | "pairs" | "privacy" | "detection" | "relational" | "params";
 
@@ -24,6 +25,8 @@ export interface Finding {
   family: string;
   metricId: string;
   text: string;
+  /** The status sampling noise explained away (a PASS finding), else null. */
+  downgradedFrom: "warn" | "fail" | null;
   /** Where the evidence lives. */
   target: { tab: RunTab; column?: string; table?: string };
 }
@@ -46,10 +49,15 @@ function firstSentence(text: string | undefined): string {
   return (match?.[1] ?? text).trim();
 }
 
+/** The noise check in the metric's own terms: a scalar floor, or a CI against the reference (Ruling R41). */
 function noisePhrase(reading: Reading): string | null {
-  if (reading.noiseFloor === null || reading.gate === null) return null;
-  const floor = fmtMetric(reading.noiseFloor, reading.kind);
+  if (reading.withinNoise === null) return null;
+  if (reading.noiseKind === "interval") {
+    const ref = fmtMetric(reading.noiseRef, reading.kind);
+    return reading.withinNoise ? `with a 95% CI that covers ${ref}` : `with a 95% CI that excludes ${ref}`;
+  }
   if (reading.gateSource !== "value") return null;
+  const floor = fmtMetric(reading.noiseFloor, reading.kind);
   return reading.withinNoise ? `below the noise floor ${floor}` : `above the noise floor ${floor}`;
 }
 
@@ -73,10 +81,10 @@ function baselinePhrase(reading: Reading, referenceN: number | null | undefined)
 }
 
 function ciPhrase(reading: Reading): string | null {
-  if (!reading.usesCi || reading.ciLow === null) return null;
-  const lo = fmtMetric(reading.ciLow, reading.kind);
+  if (!reading.usesCi || reading.gate === null) return null;
+  const lo = reading.ciLow === null ? "—" : fmtMetric(reading.ciLow, reading.kind);
   const hi = reading.ciHigh === null ? "∞" : fmtMetric(reading.ciHigh, reading.kind);
-  return `95% CI ${lo}–${hi}; the gate reads ci_low ${lo}`;
+  return `95% CI ${lo}–${hi}; the gate reads ${reading.gateSource} ${fmtMetric(reading.gate, reading.kind)}`;
 }
 
 /** The crossed threshold in the metric's own terms: "≥ 0.2", "≤ 70%", "|v − 1| ≥ 0.4". */
@@ -100,10 +108,11 @@ export function interpretRow(row: MetricRow, referenceN?: number | null, orphanS
   const name = metricShort(row.metric_id);
   const scope = scopeLabel(row);
   const meta = metricMeta(row.metric_id);
-  if (row.status === "not_evaluated" || reading.value === null) {
+  if (row.status === "not_evaluated") {
     return `${name} on ${scope} was not evaluated: ${reading.reason ?? "no reason recorded"}. Not evaluated is not a pass.`;
   }
-  const value = fmtMetric(reading.value, reading.kind);
+  // A lift with no events has no value but still gates on its CI bound (Ruling R38).
+  const value = reading.valueUndefined ? "(undefined: no copies to compare)" : fmtMetric(reading.value, reading.kind);
   if (reading.documented) {
     const source =
       orphanSource === null || orphanSource === undefined
@@ -119,16 +128,22 @@ export function interpretRow(row: MetricRow, referenceN?: number | null, orphanS
   const status: string = row.status;
   switch (status) {
     case "pass":
-      verdict = reading.withinNoise
-        ? "indistinguishable at this n."
-        : firstSentence(meta?.interpretation.good) || "within the warn threshold.";
+      verdict = reading.downgradedFrom
+        ? `${downgradeLabel(reading.downgradedFrom)}: indistinguishable at this n, scored as no effect.`
+        : reading.withinNoise
+          ? "indistinguishable at this n."
+          : firstSentence(meta?.interpretation.good) || "within the warn threshold.";
       break;
     case "warn":
-      verdict = `WARN (${thresholdText(reading, "warn")}). ${firstSentence(meta?.interpretation.bad)}`.trim();
+    case "fail": {
+      const word = status === "warn" ? "WARN" : "FAIL";
+      const why = reading.nonfinite
+        ? `${reading.gateSource === "value" ? "value" : reading.gateSource} ${reading.nonfinite === "+inf" ? "+∞" : "−∞"}, past the bad side`
+        : thresholdText(reading, status);
+      const unavailable = reading.noiseUnavailable ? " No noise check: its floor or CI is missing." : "";
+      verdict = `${word} (${why}).${unavailable} ${firstSentence(meta?.interpretation.bad)}`.trim();
       break;
-    case "fail":
-      verdict = `FAIL (${thresholdText(reading, "fail")}). ${firstSentence(meta?.interpretation.bad)}`.trim();
-      break;
+    }
     case "info":
       verdict = "informational (no thresholds).";
       break;
@@ -156,6 +171,7 @@ export function findings(detail: Pick<EvaluationDetail, "evaluation" | "metrics"
       row.status === "warn" ||
       row.status === "not_evaluated" ||
       (row.metric_id === "relationship.orphan_rate" && reading.documented) ||
+      reading.downgradedFrom !== null ||
       statusRank(row.status) === 2.5;
     if (!notable) continue;
     const tab = tabFor(row);
@@ -166,6 +182,7 @@ export function findings(detail: Pick<EvaluationDetail, "evaluation" | "metrics"
       family: row.family,
       metricId: row.metric_id,
       text: interpretRow(row, referenceNFor(detail, row.table_name), row.edge ? orphanSource.get(row.edge) : null),
+      downgradedFrom: reading.downgradedFrom,
       target: {
         tab,
         table: row.level === "model" ? undefined : row.table_name,
@@ -212,6 +229,11 @@ export function headline(detail: Pick<EvaluationDetail, "evaluation" | "metrics"
       `Failures concentrate in ${FAMILY_LABEL[family]?.toLowerCase() ?? family} (${nf} of ${failing.length}), mostly at the ${level} level.`,
     );
   }
+  const downgraded = measured.filter((m) => readingOf(m).downgradedFrom !== null).length;
+  if (downgraded)
+    parts.push(
+      `${downgraded} ${downgraded === 1 ? "pass is" : "passes are"} ≈ within noise: ${downgraded === 1 ? "a crossing" : "crossings"} that sampling noise explains at this n.`,
+    );
   const privacyNotEvaluated = measured.filter((m) => m.family === "privacy" && m.status === "not_evaluated").length;
   if (privacyNotEvaluated)
     parts.push(`${privacyNotEvaluated} privacy metrics did not run — privacy is unproven here, not passed.`);

@@ -29,6 +29,7 @@ import { formatCount, formatDate, MISSING } from "@/lib/format";
 
 import { IntervalPlot, type IntervalRow } from "../components/IntervalPlot";
 import { MetricReadout } from "../components/MetricReadout";
+import { NoiseDowngrade } from "../components/NoiseDowngrade";
 import { NoiseLegend } from "../components/NoiseLegend";
 import { VisualFrame } from "../components/VisualFrame";
 import { metricShort } from "../lib/catalogue";
@@ -36,6 +37,7 @@ import { ecdfChart, histogramOverlay, pairedBars, qqChart, topkItems } from "../
 import { fmtMetric, fmtShare, fmtSig } from "../lib/format";
 import { interpretRow } from "../lib/interpret";
 import { countsPhrase, countsTotal, statusRank, type ColumnSummary } from "../lib/model";
+import { downgradedFrom } from "../lib/reading";
 import { niceTicks } from "../lib/scale";
 import { useChartTokens } from "../lib/tokens";
 
@@ -482,7 +484,10 @@ export function ColumnDrawer({
       ),
     [summary],
   );
-  const problems = sorted.filter((m) => m.status === "fail" || m.status === "warn" || m.status === "not_evaluated");
+  // Problems first, then the passes the evaluator downgraded as sampling noise (Ruling R40).
+  const problems = sorted.filter(
+    (m) => m.status === "fail" || m.status === "warn" || m.status === "not_evaluated" || downgradedFrom(m) !== null,
+  );
   const numeric = summary?.kind === "numeric" || summary?.kind === "temporal" || has(profiles, "histogram");
   const drawerId = "column-drawer";
   return (
@@ -506,12 +511,18 @@ export function ColumnDrawer({
             {problems.length ? (
               <Section id={`${drawerId}-verdict`} title="What to look at" concept="eval:interpretation">
                 <ul className="grid gap-1.5 text-sm text-text-2">
-                  {problems.map((m) => (
-                    <li key={m.metric_id} className="flex items-start gap-2">
-                      <StatusPill status={m.status} size="sm" />
-                      <span>{interpretRow(m)}</span>
-                    </li>
-                  ))}
+                  {problems.map((m) => {
+                    const from = downgradedFrom(m);
+                    return (
+                      <li key={m.metric_id} className="flex items-start gap-2">
+                        <span className="flex shrink-0 flex-col items-start gap-1">
+                          <StatusPill status={m.status} size="sm" />
+                          {from ? <NoiseDowngrade from={from} /> : null}
+                        </span>
+                        <span>{interpretRow(m)}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               </Section>
             ) : (

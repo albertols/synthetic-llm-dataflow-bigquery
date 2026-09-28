@@ -23,7 +23,7 @@ import { metricConcept, metricShort } from "../lib/catalogue";
 import { alignCorr, corrHeatmap } from "../lib/charts";
 import { fmtMetric } from "../lib/format";
 import { pairRows, statusRank } from "../lib/model";
-import { reasonOf } from "../lib/reading";
+import { downgradedFrom, downgradeLabel, reasonOf } from "../lib/reading";
 import { useChartTokens, type ChartTokens } from "../lib/tokens";
 
 const PAIR_ORDER = [
@@ -290,7 +290,12 @@ function PairTable({ pairs }: { pairs: MetricRow[] }) {
                     </span>
                     <span className="sr-only">{m.status}, </span>
                     {m.value === null ? "n/e" : fmtMetric(m.value, m.value_kind)}
-                    {m.noise_floor !== null && m.value !== null && m.value <= m.noise_floor ? (
+                    {downgradedFrom(m) ? (
+                      // The evaluator downgraded this crossing as sampling noise (Ruling R40).
+                      <span className="ml-1 text-text-3" title={downgradeLabel(downgradedFrom(m)!)}>
+                        ≈<span className="sr-only"> within noise, was {downgradedFrom(m)!.toUpperCase()}</span>
+                      </span>
+                    ) : m.noise_floor !== null && m.value !== null && m.value <= m.noise_floor ? (
                       <span className="ml-1 text-text-3">≈</span>
                     ) : null}
                     {reason ? <span className="sr-only"> ({reason})</span> : null}

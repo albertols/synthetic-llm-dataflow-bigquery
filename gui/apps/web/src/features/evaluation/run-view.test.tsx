@@ -35,12 +35,78 @@ function stubRun(detail = richDetail(), extra: Record<string, unknown> = {}) {
 }
 
 describe("reading a metric row", () => {
-  it("explains a PASS inside the noise floor and says it is indistinguishable", () => {
+  it("explains a PASS under warn by the threshold, and says it is indistinguishable at this n", () => {
     const row = richDetail().metrics.find((m) => m.metric_id === "column.ks")!;
-    expect(explainStatus(row)).toMatch(/within the noise floor 0\.005 of 0 → PASS/);
+    // The noise check applies to WARN/FAIL crossings only (Ruling R40): under warn is a plain PASS.
+    expect(explainStatus(row)).toBe("value 0.004 < warn 0.1 → PASS.");
     expect(interpretRow(row, 10_000)).toBe(
       "KS 0.004 on users.age is below the noise floor 0.005 and near the 10k-sample baseline 0.003 — indistinguishable at this n.",
     );
+  });
+
+  it("shows a noise-downgraded crossing as ≈ within noise, was FAIL (scalar floor, Ruling R40)", () => {
+    const row = metric("column.ks", {
+      column_name: "age",
+      value: 0.25,
+      noise_floor: 0.3,
+      noise_floor_method: "ks_two_sample",
+      score: 1,
+      detail: { noise_downgraded_from: "fail" },
+    });
+    const reading = readingOf(row);
+    expect(reading.downgradedFrom).toBe("fail");
+    expect(explainStatus(row)).toBe(
+      "value 0.25 ≥ fail 0.2 (inclusive) would be FAIL, but it is within the noise floor 0.3 of 0 → PASS (≈ within noise, was FAIL): indistinguishable from sampling noise at this n, so it is scored at the reference 0.",
+    );
+    expect(interpretRow(row)).toMatch(
+      /— ≈ within noise, was FAIL: indistinguishable at this n, scored as no effect\.$/,
+    );
+    const list = findings({ ...richDetail(), metrics: [row] });
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ severity: "pass", downgradedFrom: "fail" });
+    expect(headline({ ...richDetail(), metrics: [row] })).toMatch(/1 pass is ≈ within noise/);
+  });
+
+  it("downgrades an interval metric when its CI covers the reference, and says why not when it does not (R41, R45)", () => {
+    const covered = metric("column.null_rate_delta", {
+      column_name: "age",
+      value: 0.03,
+      ci_low: 0,
+      ci_high: 0.06,
+      noise_floor_method: "newcombe",
+      detail: { noise_downgraded_from: "warn" },
+    });
+    expect(explainStatus(covered)).toMatch(
+      /^value 0\.03 ≥ warn 0\.02 \(inclusive\) would be WARN, but its 95% CI 0–0\.06 covers the reference 0 → PASS \(≈ within noise, was WARN\)/,
+    );
+    const copies = metric("field.substantive_copy_rate", {
+      column_name: "email",
+      value: 0.002,
+      ci_low: 0.001295,
+      ci_high: 0.003087,
+      noise_floor_method: "wilson",
+      status: "fail",
+      score: 0,
+    });
+    expect(explainStatus(copies)).toMatch(
+      /→ FAIL\. Its 95% CI 0\.13%–0\.309% excludes the reference 0%\. An observed copy .* never downgraded as noise\.$/,
+    );
+    const noCi = metric("row.near_match_rate", {
+      value: 0.002,
+      noise_floor_method: "wilson",
+      status: "warn",
+      score: 0.89,
+      detail: { noise_check: "unavailable" },
+    });
+    expect(explainStatus(noCi)).toMatch(
+      /→ WARN\. The noise check had no confidence interval, so nothing was downgraded\.$/,
+    );
+  });
+
+  it("explains an infinite value past the bad side as FAIL (R43)", () => {
+    const row = metric("column.psi", { value: null, status: "fail", score: 0, detail: { nonfinite: "+inf" } });
+    expect(explainStatus(row)).toBe("value +∞ lies past the bad side of every threshold → FAIL.");
+    expect(interpretRow(row)).toMatch(/FAIL \(value \+∞, past the bad side\)/);
   });
 
   it("explains a FAIL by the inclusive threshold and the cleared noise floor", () => {
@@ -57,7 +123,20 @@ describe("reading a metric row", () => {
     expect(reading.gateSource).toBe("ci_low");
     expect(reading.gate).toBe(0.03);
     expect(explainStatus(row)).toMatch(
-      /^ci_low 0\.03× \(the gate reads the 95% CI bound, not the value 3×\) < warn 2× → PASS\./,
+      /^ci_low 0\.03× \(the gate reads the 95% CI bound; not the value 3×\) < warn 2× → PASS\./,
+    );
+  });
+
+  it("passes a lift with no copies on either side on ci_low 0, never 'not evaluated' (Ruling R38)", () => {
+    const row = richDetail().metrics.find((m) => m.metric_id === "row.exposure_lift")!;
+    const reading = readingOf(row);
+    expect(reading.valueUndefined).toBe(true);
+    expect(reading.gate).toBe(0);
+    expect(explainStatus(row)).toBe(
+      "ci_low 0× (the gate reads the 95% CI bound; the value is undefined: no copies on either side) < warn 2× → PASS.",
+    );
+    expect(interpretRow(row)).toMatch(
+      /^Exposure lift \(undefined: no copies to compare\) on users \(95% CI 0×–∞; the gate reads ci_low 0×\) — /,
     );
   });
 
@@ -73,7 +152,9 @@ describe("reading a metric row", () => {
     )!;
     expect(explainStatus(documented)).toMatch(/Documented edge \(enforced: false\).*INFO, never as a FAIL/);
     const skipped = detail.metrics.find((m) => m.metric_id === "row.memorization_lift")!;
-    expect(explainStatus(skipped)).toBe("Not evaluated: no copies on either side (m_R = m_H = 0).");
+    expect(explainStatus(skipped)).toBe(
+      "Not evaluated: reference not verified: R and H are not the generator's sample.",
+    );
     const edge = buildGraph(detail).edges.find((e) => e.label === "orders.buyer_id->users.id")!;
     expect(edge.documented).toBe(true);
     expect(edge.status).toBe("info");
@@ -85,6 +166,18 @@ describe("reading a metric row", () => {
     expect(list[0]!.severity).toBe("fail");
     expect(list.map((f) => f.severity)).toContain("not_evaluated");
     expect(headline(detail)).toMatch(/privacy metrics did not run — privacy is unproven here, not passed\./);
+  });
+
+  it("badges zero-tolerance integrity FAILs only: duplicate keys and enforced orphans (Ruling R39)", () => {
+    const detail = richDetail();
+    detail.metrics.push(
+      metric("table.pk_duplicate_rate", { value: 0.001, status: "fail", score: 0 }),
+      // An integrity FAIL that is not zero-tolerance: graded, but not a key failure.
+      metric("field.type_validity", { column_name: "age", value: 0.99, status: "fail", score: 0 }),
+    );
+    const cards = familyCards(detail);
+    expect(cards.find((c) => c.family === "integrity")!.keyFailures).toBe(1);
+    expect(cards.find((c) => c.family === "fidelity")!.keyFailures).toBe(0);
   });
 
   it("builds family cards from the model roll-ups with level counts", () => {
@@ -153,7 +246,9 @@ describe("the run view", () => {
     expect(await screen.findByText("Risk indicators, not guarantees")).toBeInTheDocument();
     const lifts = screen.getByRole("figure", { name: /Memorization lifts/ });
     expect(within(lifts).getByText(/3× · ci_low 0\.03 · open above/)).toBeInTheDocument();
-    expect(within(lifts).getByText(/not evaluated — no copies on either side/)).toBeInTheDocument();
+    // No copies on either side: undefined point, still gated (and passed) on ci_low 0 (Ruling R38).
+    expect(within(lifts).getByText(/undefined · ci_low 0 · open above · m_R\/m_H 0\/0/)).toBeInTheDocument();
+    expect(within(lifts).getByText(/not evaluated — reference not verified/)).toBeInTheDocument();
     const flags = screen.getAllByRole("region", { name: /^Flagged rows/ }).at(-1)!;
     expect(within(flags).getAllByText("0123456789ab…")).toHaveLength(2);
     expect(within(flags).queryByText("0123456789abcdef0123456789abcdef")).toBeNull();

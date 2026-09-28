@@ -14,6 +14,7 @@ import {
   metricMeta,
   modelScoreId,
   tableScoreId,
+  ZERO_TOLERANCE_IDS,
 } from "./catalogue";
 
 export const STATUSES = ["fail", "warn", "not_evaluated", "info", "pass"] as const;
@@ -223,6 +224,11 @@ export function levelCounts(metrics: readonly MetricRow[]): LevelCount[] {
 
 export interface FamilyCard {
   family: string;
+  /**
+   * FAILed zero-tolerance integrity rows (duplicate keys, orphans on enforced edges): the
+   * evaluator's integrity_fail (Ruling R39), a FAIL badge whatever the averages say.
+   */
+  keyFailures: number;
   /** The model roll-up row, when the evaluator wrote one. */
   rollup: MetricRow | null;
   score: number | null;
@@ -300,6 +306,7 @@ export function familyCards(detail: Pick<EvaluationDetail, "evaluation" | "metri
     const measured = scoped.filter((m) => !isRollup(m.metric_id));
     return {
       family,
+      keyFailures: measured.filter((m) => ZERO_TOLERANCE_IDS.has(m.metric_id) && m.status === "fail").length,
       rollup,
       score: rollup?.value ?? registryScore ?? null,
       status: rollup?.status ?? null,

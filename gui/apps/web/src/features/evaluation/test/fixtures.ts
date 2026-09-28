@@ -235,12 +235,20 @@ export function richDetail(): EvaluationDetail {
       noise_floor_method: "rate_ratio",
       detail: { copies_r: 1, copies_h: 0 },
     }),
+    // No copies on either side: the lift is undefined, but its CI (0, ∞) gates on ci_low 0 → PASS (R38).
+    metric("row.exposure_lift", {
+      value: null,
+      ci_low: 0,
+      ci_high: null,
+      noise_floor_method: "rate_ratio",
+      detail: { copies_r: 0, copies_h: 0 },
+    }),
     metric("row.memorization_lift", {
       value: null,
       score: null,
       status: "not_evaluated",
       noise_floor_method: "rate_ratio",
-      detail: { reason: "no copies on either side (m_R = m_H = 0)" },
+      detail: { reason: "reference not verified: R and H are not the generator's sample" },
     }),
     metric("pair.cramers_v_delta", {
       column_name: "gender",
