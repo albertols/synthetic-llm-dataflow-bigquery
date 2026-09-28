@@ -30,23 +30,23 @@ Brand hues: Beam orange `#eb6834`, GCP blue `#2a78d6`, aqua `#1baf7a`
 
 ### Dark (default)
 
-| Token                       | Hex                               | Contrast (on surface-1 `#12151b`) | Use                                              |
-| :-------------------------- | :-------------------------------- | --------------------------------: | :----------------------------------------------- |
-| `--bg`                      | `#0b0d12`                         |                                 — | page                                             |
-| `--surface-1/2/3`           | `#12151b` / `#181c24` / `#20252f` |                                 — | cards / popovers / hover                         |
-| `--text-1`                  | `#f2f4f7`                         |                              16.6 | primary text                                     |
-| `--text-2`                  | `#b8bfcc`                         |                               9.9 | secondary text                                   |
-| `--text-3`                  | `#939aa7`                         |            6.5 (5.4 on surface-3) | muted text, axis labels                          |
-| `--accent`                  | `#eb6834`                         |                               5.7 | primary action, focus, active tab (fills, rings) |
-| `--accent-text`             | `#f07a4a`                         |                               6.6 | orange text; 5.1 on its 14 % tint over surface-2 |
-| `--accent-fg` on `--accent` | `#0b0d12`                         |                               6.1 | text on orange buttons                           |
-| `--link`                    | `#6da7ec`                         |                               7.3 | links                                            |
-| `--control-border`          | `#737b8d`                         |            4.3 (4.0 on surface-2) | input boundaries (WCAG 1.4.11)                   |
-| `--gpu-text`                | `#a37ae6`                         |                               5.6 | GPU labels (`--gpu` `#7a3fd1` is for marks, 3.0) |
-| `--status-good`             | `#1baf7a`                         |                               6.5 | good (icon + label)                              |
-| `--status-warn`             | `#fab219`                         |                              10.0 | warning                                          |
-| `--status-serious`          | `#ec835a`                         |                               6.9 | serious                                          |
-| `--status-critical-text`    | `#f07373`                         |                               6.4 | critical text (`#d03b3b` for marks, 3.8)         |
+| Token                       | Hex                               | Contrast (on surface-1 `#12151b`) | Use                                                                |
+| :-------------------------- | :-------------------------------- | --------------------------------: | :----------------------------------------------------------------- |
+| `--bg`                      | `#0b0d12`                         |                                 — | page                                                               |
+| `--surface-1/2/3`           | `#12151b` / `#181c24` / `#20252f` |                                 — | cards / popovers / hover                                           |
+| `--text-1`                  | `#f2f4f7`                         |                              16.6 | primary text                                                       |
+| `--text-2`                  | `#b8bfcc`                         |                               9.9 | secondary text                                                     |
+| `--text-3`                  | `#939aa7`                         |            6.5 (5.4 on surface-3) | muted text, axis labels                                            |
+| `--accent`                  | `#eb6834`                         |                               5.7 | primary action, focus, active tab (fills, rings)                   |
+| `--accent-text`             | `#f07a4a`                         |                               6.6 | orange text; 5.1 on `--accent-soft` (its 14 % tint) over surface-2 |
+| `--accent-fg` on `--accent` | `#0b0d12`                         |                               6.1 | text on orange buttons                                             |
+| `--link`                    | `#6da7ec`                         |                               7.3 | links                                                              |
+| `--control-border`          | `#737b8d`                         |            4.3 (4.0 on surface-2) | input boundaries (WCAG 1.4.11)                                     |
+| `--gpu-text`                | `#a37ae6`                         |                               5.6 | GPU labels (`--gpu` `#7a3fd1` is for marks, 3.0)                   |
+| `--status-good`             | `#1baf7a`                         |                               6.5 | good (icon + label)                                                |
+| `--status-warn`             | `#fab219`                         |                              10.0 | warning                                                            |
+| `--status-serious`          | `#ec835a`                         |                               6.9 | serious                                                            |
+| `--status-critical-text`    | `#f07373`                         |                               6.4 | critical text (`--status-critical` `#d03b3b` for marks, 3.8)       |
 
 ### Light (accessibility toggle)
 
