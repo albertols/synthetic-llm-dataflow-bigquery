@@ -1,0 +1,194 @@
+/**
+ * The run view end to end in jsdom: the real routes, a stubbed BFF. Pins the
+ * honesty rules — status explained with inclusive thresholds and the noise
+ * floor, lifts gated on ci_low, documented edges INFO, not_evaluated with its
+ * reason — and that profiles load only when a drawer opens.
+ */
+import { configure, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+
+import { buildGraph } from "./lib/graph";
+import { findings, headline, interpretRow } from "./lib/interpret";
+import { columnSummaries, familyCards } from "./lib/model";
+import { explainStatus, readingOf } from "./lib/reading";
+import { evaluation, metric, profile, richDetail, tableEntry } from "./test/fixtures";
+import { pageOf, renderAt, stubApi } from "./test/harness";
+
+// The first render lazy-loads the route chunk and the concept batch: give async queries room.
+configure({ asyncUtilTimeout: 15_000 });
+vi.setConfig({ testTimeout: 60_000 });
+
+vi.mock("@/components/EChartCanvas", () => ({
+  default: ({ ariaLabel }: { ariaLabel: string }) => <div data-testid="echart" aria-label={ariaLabel} />,
+}));
+
+function stubRun(detail = richDetail(), extra: Record<string, unknown> = {}) {
+  return stubApi({
+    [`/api/evaluations/${detail.evaluation.evaluation_id}`]: detail,
+    "/api/evaluations": pageOf(detail.evaluation),
+    "/api/relationships": { models: [] },
+    [`/api/evaluations/${detail.evaluation.evaluation_id}/profiles`]: [],
+    ...extra,
+  });
+}
+
+describe("reading a metric row", () => {
+  it("explains a PASS inside the noise floor and says it is indistinguishable", () => {
+    const row = richDetail().metrics.find((m) => m.metric_id === "column.ks")!;
+    expect(explainStatus(row)).toMatch(/within the noise floor 0\.005 of 0 → PASS/);
+    expect(interpretRow(row, 10_000)).toBe(
+      "KS 0.004 on users.age is below the noise floor 0.005 and near the 10k-sample baseline 0.003 — indistinguishable at this n.",
+    );
+  });
+
+  it("explains a FAIL by the inclusive threshold and the cleared noise floor", () => {
+    const row = richDetail().metrics.find((m) => m.metric_id === "column.hour_tvd")!;
+    expect(explainStatus(row)).toBe("value 0.25 ≥ fail 0.2 (inclusive) → FAIL. It clears the noise floor 0.006.");
+    expect(interpretRow(row, 10_000)).toMatch(
+      /^Hour 0\.25 on users\.created_at is above the noise floor 0\.006 and 25× the 10k-sample baseline 0\.01 — FAIL \(value ≥ fail 0\.2\)\./,
+    );
+  });
+
+  it("gates a lift on its CI lower bound, not on the point estimate", () => {
+    const row = richDetail().metrics.find((m) => m.metric_id === "row.near_match_lift")!;
+    const reading = readingOf(row);
+    expect(reading.gateSource).toBe("ci_low");
+    expect(reading.gate).toBe(0.03);
+    expect(explainStatus(row)).toMatch(
+      /^ci_low 0\.03× \(the gate reads the 95% CI bound, not the value 3×\) < warn 2× → PASS\./,
+    );
+  });
+
+  it("treats a crossing exactly at the threshold as crossed (inclusive)", () => {
+    const row = metric("column.tvd", { value: 0.1, status: "warn", noise_floor: 0.01 });
+    expect(explainStatus(row)).toMatch(/value 0\.1 ≥ warn 0\.1 \(inclusive\) → WARN/);
+  });
+
+  it("reports a documented edge as INFO, never FAIL, and not_evaluated with its reason", () => {
+    const detail = richDetail();
+    const documented = detail.metrics.find(
+      (m) => m.edge === "orders.buyer_id->users.id" && m.metric_id === "relationship.orphan_rate",
+    )!;
+    expect(explainStatus(documented)).toMatch(/Documented edge \(enforced: false\).*INFO, never as a FAIL/);
+    const skipped = detail.metrics.find((m) => m.metric_id === "row.memorization_lift")!;
+    expect(explainStatus(skipped)).toBe("Not evaluated: no copies on either side (m_R = m_H = 0).");
+    const edge = buildGraph(detail).edges.find((e) => e.label === "orders.buyer_id->users.id")!;
+    expect(edge.documented).toBe(true);
+    expect(edge.status).toBe("info");
+  });
+
+  it("ranks findings FAIL first and says privacy that did not run is unproven", () => {
+    const detail = richDetail();
+    const list = findings(detail);
+    expect(list[0]!.severity).toBe("fail");
+    expect(list.map((f) => f.severity)).toContain("not_evaluated");
+    expect(headline(detail)).toMatch(/privacy metrics did not run — privacy is unproven here, not passed\./);
+  });
+
+  it("builds family cards from the model roll-ups with level counts", () => {
+    const cards = familyCards(richDetail());
+    expect(cards.map((c) => c.family)).toEqual(["overall", "fidelity", "privacy", "integrity", "diversity"]);
+    const privacy = cards.find((c) => c.family === "privacy")!;
+    expect(privacy.score).toBe(0.9);
+    expect(privacy.levels.map((l) => l.level)).toEqual(["row"]);
+    expect(privacy.worst[0]!.status).toBe("not_evaluated");
+  });
+});
+
+describe("the run view", () => {
+  it("shows the header, scope, scorecards with level chips and the interpretation", async () => {
+    stubRun();
+    renderAt("/evaluation/eval-t001");
+    expect(await screen.findByRole("heading", { level: 1, name: "eval-t001" })).toBeInTheDocument();
+    const header = await screen.findByRole("region", { name: "Tables in scope" });
+    expect(within(header).getAllByText("Scope OK")).toHaveLength(2);
+    expect(within(header).getAllByText("Verified")).toHaveLength(2);
+    const privacy = await screen.findByRole("region", { name: /Privacy/ });
+    expect(within(privacy).getAllByText("0.90").length).toBeGreaterThan(0);
+    expect(within(privacy).getByText("ROW")).toBeInTheDocument();
+    expect(screen.getByTestId("run-headline")).toHaveTextContent(/Overall score 0\.90/);
+    expect(screen.getAllByText(/indistinguishable at this n|FAIL \(value ≥ fail 0\.2\)/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("note", { name: "Legend: how metric bars read" })).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN/);
+  });
+
+  it("loads a column's profiles only when its drawer opens", async () => {
+    const detail = richDetail();
+    const histogram = { edges: [20, 40, 60], counts: [10, 40, 40, 10], min: 12, max: 80, nulls: 0, unit: "value" };
+    const { calls } = stubRun(detail, {
+      "/api/evaluations/eval-t001/profiles": [
+        profile({ column_name: "age", profile_kind: "histogram", side: "source", payload: histogram }),
+        profile({
+          column_name: "age",
+          profile_kind: "histogram",
+          side: "synthetic",
+          payload: { ...histogram, counts: [11, 39, 41, 9] },
+        }),
+      ],
+    });
+    const user = userEvent.setup();
+    renderAt("/evaluation/eval-t001?tab=columns");
+    const heatmap = await screen.findByRole("table", { name: /Columns by metric/ });
+    const rows = within(heatmap).getAllByRole("rowheader");
+    expect(rows[0]).toHaveTextContent("users.created_at");
+    expect(calls.some((u) => u.pathname.endsWith("/profiles"))).toBe(false);
+
+    await user.click(within(heatmap).getByRole("button", { name: /Open users\.age/ }));
+    const drawer = await screen.findByRole("dialog", { name: /users\.age/ });
+    await waitFor(() =>
+      expect(calls.some((u) => u.pathname.endsWith("/profiles") && u.searchParams.get("column") === "age")).toBe(true),
+    );
+    expect(await within(drawer).findByRole("figure", { name: /ECDF with the KS gap/ })).toBeInTheDocument();
+    expect(within(drawer).getByText(/bracket 0\.004–0\.02/)).toBeInTheDocument();
+    expect(
+      within(drawer).getByRole("figure", { name: /Null, empty and zero rates with Wilson intervals/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("puts the privacy disclaimer first and gates lifts on ci_low", async () => {
+    stubRun();
+    renderAt("/evaluation/eval-t001?tab=privacy");
+    expect(await screen.findByText("Risk indicators, not guarantees")).toBeInTheDocument();
+    const lifts = screen.getByRole("figure", { name: /Memorization lifts/ });
+    expect(within(lifts).getByText(/3× · ci_low 0\.03 · open above/)).toBeInTheDocument();
+    expect(within(lifts).getByText(/not evaluated — no copies on either side/)).toBeInTheDocument();
+    const flags = screen.getAllByRole("region", { name: /^Flagged rows/ }).at(-1)!;
+    expect(within(flags).getAllByText("0123456789ab…")).toHaveLength(2);
+    expect(within(flags).queryByText("0123456789abcdef0123456789abcdef")).toBeNull();
+  });
+
+  it("shows documented edges as INFO next to the source orphan rate", async () => {
+    stubRun();
+    renderAt("/evaluation/eval-t001?tab=relational");
+    const table = await screen.findByRole("region", { name: "Orphan rate per foreign key" });
+    const documented = within(table).getByText("orders.buyer_id->users.id").closest("tr")!;
+    expect(within(documented as HTMLElement).getByText("Info · documented")).toBeInTheDocument();
+    expect(within(documented as HTMLElement).getByText("1.5%")).toBeInTheDocument();
+    expect(within(table).queryByText("Fail")).toBeNull();
+  });
+
+  it("surfaces scope problems and an unverified reference", async () => {
+    const detail = richDetail();
+    detail.evaluation = evaluation({
+      status: "PARTIAL",
+      status_reason: "reference digest did not match",
+      tables: [
+        tableEntry("users", { reference_verified: false }),
+        tableEntry("orders", { scope_status: "contaminated", scope_ok: false, scope_reason: "rows from another run" }),
+      ],
+    });
+    stubRun(detail);
+    renderAt("/evaluation/eval-t001");
+    expect(await screen.findByText("Scope needs attention")).toBeInTheDocument();
+    expect(screen.getByText(/rows from another run/)).toBeInTheDocument();
+    expect(screen.getByText("Reference not verified")).toBeInTheDocument();
+    expect(screen.getAllByText("Contaminated").length).toBeGreaterThan(0);
+  });
+
+  it("summarises columns worst first", () => {
+    const summaries = columnSummaries(richDetail().metrics);
+    expect(summaries.map((s) => s.key)).toEqual(["users.created_at", "users.age"]);
+    expect(summaries[1]!.worst).toBe("pass");
+  });
+});
