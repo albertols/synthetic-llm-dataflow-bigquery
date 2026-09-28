@@ -45,6 +45,29 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     }
   });
 
+  it("follows the channel in the URL after mount (back / forward), not only on mount", () => {
+    const shown = () => [...document.querySelectorAll("[data-channel]")].map((el) => el.getAttribute("data-channel"));
+    // The page passes search.channel straight through: undefined when the URL has none.
+    const Url = ({ channel }: { channel: string | undefined }) => (
+      <ScenarioProvider initialParams={{ scenario: "90m-from-1m" }}>
+        <AmpPanel onOpenKnob={() => undefined} initialChannel={channel} />
+      </ScenarioProvider>
+    );
+    const { rerender } = render(<Url channel="sampling" />);
+    expect(shown()).toEqual(["sampling"]);
+    // Back to an entry with another channel: the panel follows it.
+    rerender(<Url channel="free_text" />);
+    expect(shown()).toEqual(["free_text"]);
+    // An entry without a channel is ALL (the page never writes "all" into the URL).
+    rerender(<Url channel={undefined} />);
+    expect(shown().length).toBeGreaterThan(1);
+    rerender(<Url channel="free_text" />);
+    expect(shown()).toEqual(["free_text"]);
+    // An id this build does not know leaves the current pick alone.
+    rerender(<Url channel="no_such_channel" />);
+    expect(shown()).toEqual(["free_text"]);
+  });
+
   it("announces a constant as a fixed screw that does not turn", async () => {
     const user = userEvent.setup();
     render(<Harness channel="free_text" />);

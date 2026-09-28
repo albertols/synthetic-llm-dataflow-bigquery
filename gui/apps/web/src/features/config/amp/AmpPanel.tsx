@@ -36,13 +36,23 @@ export function AmpPanel({
    * an unknown id falls back to "all" on wide screens, the first channel on phones.
    */
   initialChannel?: string;
-  /** The channel the reader picks (the page keeps it in the URL). */
+  /** The channel the reader picks (the page keeps it in the URL, and the panel follows the URL back). */
   onChannelChange?: (channel: string) => void;
 }) {
   const { settings, setSetting } = useScenario();
-  const linked =
-    initialChannel !== undefined && (initialChannel === ALL || CHANNELS.some((c) => c.id === initialChannel));
+  const known = (id: string | undefined): id is string =>
+    id !== undefined && (id === ALL || CHANNELS.some((c) => c.id === id));
+  const linked = known(initialChannel);
   const [channel, setChannel] = useState<string>(() => (linked ? initialChannel : defaultChannel()));
+  // Follow the URL after mount too: back/forward (or a cross-tab link while the page is open)
+  // changes `initialChannel` without remounting. The page writes no channel for ALL, so a URL
+  // that loses its channel means ALL; an id this build does not know leaves the pick alone.
+  const [followed, setFollowed] = useState(initialChannel);
+  if (initialChannel !== followed) {
+    setFollowed(initialChannel);
+    if (initialChannel === undefined) setChannel(ALL);
+    else if (known(initialChannel)) setChannel(initialChannel);
+  }
   const shown = channel === ALL ? CHANNELS : CHANNELS.filter((c) => c.id === channel);
   // A link to one channel lands on it: scroll its strip into view after the page lays out,
   // once (the channel the page opened with, not every later pick).
