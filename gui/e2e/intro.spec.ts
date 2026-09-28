@@ -165,7 +165,7 @@ test("reduced motion gets the rail at rest, fully lit; otherwise it plays and pa
     .locator("li[data-stage]")
     .evaluateAll((items) => items.map((li) => li.getAttribute("data-lit")));
   expect(lit).toEqual(Array(9).fill("true"));
-  // Mermaid lays out at its natural size under reduced motion too (the intro.css workaround).
+  // Mermaid lays out at its natural size under reduced motion too (globals.css exempts mermaid's SVG).
   await page.locator("#packages figure").scrollIntoViewIfNeeded();
   const diagram = page.locator("#packages svg[id^='mermaid']");
   await expect(diagram).toHaveCount(1, { timeout: 30_000 });

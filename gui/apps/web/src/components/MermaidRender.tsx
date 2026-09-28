@@ -33,7 +33,17 @@ function initialise(theme: ResolvedTheme) {
   initialisedFor = theme;
 }
 
-export default function MermaidRender({ chart }: { chart: string }) {
+export default function MermaidRender({
+  chart,
+  ariaLabel,
+  onError,
+}: {
+  chart: string;
+  /** What the diagram shows; repeated in the error text so a failed render still says it. */
+  ariaLabel: string;
+  /** The render error (null once a render succeeds), so the frame can stop being an image. */
+  onError?: (message: string | null) => void;
+}) {
   const { resolved } = useTheme();
   const reactId = useId();
   const hostRef = useRef<HTMLDivElement>(null);
@@ -51,20 +61,30 @@ export default function MermaidRender({ chart }: { chart: string }) {
         // securityLevel "strict": mermaid sanitises labels and disables click handlers.
         hostRef.current.innerHTML = svg;
         setError(null);
+        onError?.(null);
       })
       .catch((reason: unknown) => {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+        if (cancelled) return;
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setError(message);
+        onError?.(message);
       });
     return () => {
       cancelled = true;
     };
-  }, [chart, resolved, reactId]);
+  }, [chart, resolved, reactId, onError]);
 
   if (error) {
+    // Not inside role="img" any more (Mermaid drops the role on error): screen readers read this.
     return (
-      <pre className="overflow-x-auto rounded-md border border-status-critical/50 bg-surface-1 p-3 text-xs text-status-critical-text">
-        Diagram failed to render: {error}
-      </pre>
+      <div className="grid gap-1 rounded-md border border-status-critical/50 bg-surface-1 p-3 text-xs">
+        <p className="text-text-2">
+          Diagram not shown: <span className="text-text-1">{ariaLabel}</span>
+        </p>
+        <pre className="overflow-x-auto whitespace-pre-wrap text-status-critical-text">
+          Diagram failed to render: {error}
+        </pre>
+      </div>
     );
   }
   return <div ref={hostRef} className="flex justify-center [&_svg]:h-auto [&_svg]:max-w-full" />;

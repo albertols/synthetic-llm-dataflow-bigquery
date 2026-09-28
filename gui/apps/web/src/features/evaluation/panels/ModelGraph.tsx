@@ -249,7 +249,7 @@ export function ModelGraph({
           <span className="inline-flex items-center gap-1.5">
             <span
               aria-hidden="true"
-              className="inline-block h-1.5 w-10 rounded-full bg-gradient-to-r from-(--seq-2) to-(--seq-7)"
+              className="inline-block h-1.5 w-10 rounded-full bg-gradient-to-r from-seq-2 to-seq-7"
             />
             table score, low → high
           </span>

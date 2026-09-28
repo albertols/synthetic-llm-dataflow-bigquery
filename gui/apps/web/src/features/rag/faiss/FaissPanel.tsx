@@ -37,14 +37,8 @@ export function FaissPanel({ model }: { model: RagModel }) {
             <h3 className="text-sm font-semibold text-text-1">Inner product = cosine, on the unit sphere</h3>
             <InfoHint concept="rag:faiss-flatip" />
           </div>
-          <Formula
-            className="relative"
-            tex="\begin{aligned} \langle u, v\rangle &= \lVert u\rVert\,\lVert v\rVert\cos\theta \\ &= \cos\theta \quad \text{when } \lVert u\rVert = \lVert v\rVert = 1 \end{aligned}"
-          />
-          <Formula
-            className="relative"
-            tex="\text{search}(q) = \operatorname{top}_k\left(Xq\right),\quad X \in \mathbb{R}^{n \times d}"
-          />
+          <Formula tex="\begin{aligned} \langle u, v\rangle &= \lVert u\rVert\,\lVert v\rVert\cos\theta \\ &= \cos\theta \quad \text{when } \lVert u\rVert = \lVert v\rVert = 1 \end{aligned}" />
+          <Formula tex="\text{search}(q) = \operatorname{top}_k\left(Xq\right),\quad X \in \mathbb{R}^{n \times d}" />
           <p className="text-sm text-text-2">
             Every stored vector is L2-normalised, so the inner-product index ranks by cosine with no approximation.
             {norms ? (

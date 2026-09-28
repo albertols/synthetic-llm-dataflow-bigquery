@@ -26,7 +26,7 @@ function ScoreBar({ score, warn, fail }: { score: number | null; warn: number; f
     <span aria-hidden="true" className="relative h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
       {score !== null ? (
         <span
-          className="absolute inset-y-0 left-0 rounded-full bg-(--seq-4)"
+          className="absolute inset-y-0 left-0 rounded-full bg-seq-4"
           style={{ width: `${Math.max(0, Math.min(1, score)) * 100}%` }}
         />
       ) : null}

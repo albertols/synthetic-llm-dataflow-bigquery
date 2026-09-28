@@ -23,6 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/cn";
 import { formatBytes } from "@/lib/format";
 import { repoBlobUrl } from "@/lib/links";
+import { useInViewOnce } from "@/lib/useInViewOnce";
 
 import { ADRS, adrUrl, adrsForSection, findAdr, plainTitle } from "../content/adrs";
 import {
@@ -34,7 +35,7 @@ import {
 } from "../content/designSections";
 import { assetUrl, useProvenance, type ProvenanceEntry } from "../content/provenance";
 import { TargetLink } from "../content/targets";
-import { ExternalAnchor, InlineCode, IntroSection, useInViewOnce, useIsNarrow, verticalFlowchart } from "./primitives";
+import { ExternalAnchor, InlineCode, IntroSection } from "./primitives";
 
 export function HowItWorks() {
   return (
@@ -321,7 +322,6 @@ function ProvenanceDetails({
 
 function MermaidSlot({ chart, ariaLabel }: { chart: string; ariaLabel: string }) {
   const [ref, seen] = useInViewOnce<HTMLDivElement>();
-  const narrow = useIsNarrow();
   return (
     <div
       ref={ref}
@@ -329,7 +329,8 @@ function MermaidSlot({ chart, ariaLabel }: { chart: string; ariaLabel: string })
     >
       {seen ? (
         <Mermaid
-          chart={narrow ? verticalFlowchart(chart) : chart}
+          chart={chart}
+          narrowDirection="TB"
           ariaLabel={ariaLabel}
           className="w-full border-0 bg-transparent p-0"
         />

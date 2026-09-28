@@ -20,7 +20,6 @@ import { LiveCounters } from "./components/LiveCounters";
 import { PackageMap } from "./components/PackageMap";
 import { PipelineHero } from "./components/PipelineHero";
 import { ShapeGallery } from "./components/ShapeGallery";
-import "./intro.css";
 
 const ON_THIS_PAGE = [
   { href: "#pipeline", label: "Pipeline" },

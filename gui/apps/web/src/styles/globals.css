@@ -8,7 +8,8 @@
 
 /*
  * Tailwind utilities read the tokens: bg-surface-1, text-text-2, border-border,
- * text-status-good-text, bg-chart-3 … `inline` keeps them as var() references
+ * text-status-good-text, bg-chart-3, bg-chart-axis, bg-seq-4, from-seq-2,
+ * bg-div-neg … `inline` keeps them as var() references
  * so the theme toggle re-colours everything without a rebuild.
  */
 @theme inline {
@@ -58,6 +59,18 @@
   --color-chart-7: var(--chart-7);
   --color-chart-8: var(--chart-8);
   --color-chart-other: var(--chart-other);
+  --color-chart-axis: var(--chart-axis);
+  --color-chart-grid: var(--chart-grid);
+  --color-seq-1: var(--seq-1);
+  --color-seq-2: var(--seq-2);
+  --color-seq-3: var(--seq-3);
+  --color-seq-4: var(--seq-4);
+  --color-seq-5: var(--seq-5);
+  --color-seq-6: var(--seq-6);
+  --color-seq-7: var(--seq-7);
+  --color-div-neg: var(--div-neg);
+  --color-div-mid: var(--div-mid);
+  --color-div-pos: var(--div-pos);
 
   --font-sans: var(--font-ui);
   --font-mono: var(--font-code);
@@ -141,6 +154,18 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+  /*
+   * Mermaid is exempt: it measures its labels right after inserting them, and
+   * a 0.01ms transition makes it read them mid-transition, so the layout came
+   * out 3–4× too large with tiny, scattered nodes. Mermaid's own elements keep
+   * their initial (zero) transition, so nothing moves either way.
+   */
+  svg[id^="mermaid"],
+  svg[id^="mermaid"] *,
+  svg[id^="mermaid"] *::before,
+  svg[id^="mermaid"] *::after {
+    transition-duration: initial !important;
   }
 }
 

@@ -111,7 +111,7 @@ export function IntervalPlot({
               {row.sublabel ? <div className="truncate font-mono text-[10px] text-text-3">{row.sublabel}</div> : null}
             </div>
             <div aria-hidden="true" className="relative h-6">
-              <span className="absolute inset-x-0 top-1/2 h-px bg-(--chart-grid)" />
+              <span className="absolute inset-x-0 top-1/2 h-px bg-chart-grid" />
               <Lines scale={scale} lines={lines} />
               {from !== null && to !== null ? (
                 <span
@@ -141,7 +141,7 @@ export function IntervalPlot({
         className="grid grid-cols-[minmax(0,7.5rem)_1fr] gap-3 sm:grid-cols-[minmax(0,12rem)_1fr_minmax(0,17rem)]"
       >
         <span />
-        <div className="relative h-4 border-t border-(--chart-axis)">
+        <div className="relative h-4 border-t border-chart-axis">
           {ticks.map((t) => (
             <span
               key={t}

@@ -52,7 +52,7 @@ export function MetricBar({
       data-slot="metric-bar"
       className={cn("relative w-full min-w-24", size === "sm" ? "h-5" : "h-7", className)}
     >
-      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-(--chart-axis)" />
+      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-chart-axis" />
       {band && band.to - band.from > 0 ? (
         <span
           className="absolute top-1 bottom-1 rounded-sm bg-slate/35"

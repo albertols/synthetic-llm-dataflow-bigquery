@@ -83,7 +83,7 @@ function ScoreCell({ score, label }: { score: number | null; label: string }) {
       >
         {score !== null ? (
           <span
-            className="absolute inset-y-0 left-0 bg-(--seq-4)"
+            className="absolute inset-y-0 left-0 bg-seq-4"
             style={{ width: `${Math.max(0, Math.min(1, score)) * 100}%` }}
           />
         ) : null}
@@ -395,7 +395,7 @@ function EvaluationsTable({
                     checked={isPicked}
                     onChange={() => onPick(e.evaluation_id)}
                     aria-label={`Pick ${e.evaluation_id} for compare`}
-                    className="size-4 cursor-pointer accent-(--accent)"
+                    className="size-4 cursor-pointer accent-accent"
                   />
                 </TableCell>
                 <th scope="row" className="sticky left-10 z-[1] bg-surface-1 px-3 py-2 text-left font-normal">
@@ -489,7 +489,7 @@ function EvaluationCards({
               checked={picked.has(e.evaluation_id)}
               onChange={() => onPick(e.evaluation_id)}
               aria-label={`Pick ${e.evaluation_id} for compare`}
-              className="size-5 cursor-pointer accent-(--accent)"
+              className="size-5 cursor-pointer accent-accent"
             />
             <Link
               to="/evaluation/$evaluationId"

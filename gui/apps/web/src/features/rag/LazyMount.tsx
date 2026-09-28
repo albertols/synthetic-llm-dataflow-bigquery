@@ -7,9 +7,10 @@
  * heading, which is outside this wrapper). Without IntersectionObserver
  * (tests, old browsers) the children mount at once.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
+import { useInViewOnce } from "@/lib/useInViewOnce";
 
 export function LazyMount({
   children,
@@ -24,20 +25,7 @@ export function LazyMount({
   /** What is loading, for screen readers. */
   label: string;
 }) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");
-  useEffect(() => {
-    const element = ref.current;
-    if (visible || !element) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) setVisible(true);
-      },
-      { rootMargin: margin },
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [visible, margin]);
+  const [ref, visible] = useInViewOnce<HTMLDivElement>(margin);
   if (visible) return <>{children}</>;
   return (
     <div ref={ref} style={{ minHeight }} className="grid content-start gap-3" aria-busy="true">
