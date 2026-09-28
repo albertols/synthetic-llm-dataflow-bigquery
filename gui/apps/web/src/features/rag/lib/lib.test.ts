@@ -1,7 +1,7 @@
 /**
  * The RAG tab's own maths and data plumbing: selection fallbacks and payload
  * caps, GReaT parsing, pool arithmetic from the code, seed metrics, the fast
- * PCA against the stats package's reference, k-NN preservation, colour slots
+ * PCA against the stats package's reference, k-NN overlap, colour slots
  * and screen-space picking.
  */
 import { describe, expect, it } from "vitest";
@@ -258,7 +258,7 @@ describe("projection", () => {
     expect(Math.max(...Array.from(coords).map(Math.abs))).toBeCloseTo(1, 6);
   });
 
-  it("measures k-NN preservation like the stats reference", () => {
+  it("measures k-NN overlap like the stats package's knnPreservation", () => {
     const { coords } = runPca(data, dim);
     const mine = knnKept(data, dim, coords, 10, 60)!;
     const ref = knnPreservation(data, dim, coords, 3, 10, 60);

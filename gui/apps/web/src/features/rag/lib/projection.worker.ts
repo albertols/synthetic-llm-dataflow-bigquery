@@ -1,6 +1,6 @@
 /**
- * The RAG tab's worker: PCA (then clusters and k-NN preservation), UMAP
- * (then k-NN preservation) and the retrieval simulator's strategies, off the
+ * The RAG tab's worker: PCA (then clusters and k-NN overlap), UMAP
+ * (then k-NN overlap) and the retrieval simulator's strategies, off the
  * main thread so the cloud keeps orbiting on a laptop. umap-js is imported
  * here only, so it never lands in a page chunk.
  */

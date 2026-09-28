@@ -16,7 +16,7 @@ const LOW: [number, number][] = [
 ];
 
 /** A point's neighbours before and after projection: kept ones stay close, a lost one drifts away. */
-export default function KnnPreservationDiagram({ className }: DiagramProps) {
+export default function KnnOverlapDiagram({ className }: DiagramProps) {
   const titleId = useId();
   return (
     <svg viewBox="0 0 320 96" role="img" aria-labelledby={titleId} className={className} width="100%">

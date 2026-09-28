@@ -81,7 +81,7 @@ const PEARSON: ConceptLink = {
   kind: "paper",
 };
 const VENNA: ConceptLink = {
-  label: "Venna & Kaski 2001 — neighbourhood preservation in projections",
+  label: "See also: Venna & Kaski 2001 — trustworthiness (rank-penalised, a related measure)",
   url: "https://doi.org/10.1007/3-540-44668-0_68",
   kind: "paper",
 };
@@ -118,7 +118,7 @@ export const concepts = defineConcepts([
     purpose:
       "The loaded 384-d vectors drawn in three dimensions, so clusters, outliers and the seeds' spread become visible. The picture is a projection; every number beside it is measured in the full space.",
     interpretation: {
-      tip: "Judge the picture by its k-NN preservation: low means neighbours in the drawing are often not neighbours in the data.",
+      tip: "Judge the picture by its k-NN overlap: low means neighbours in the drawing are often not neighbours in the data.",
     },
     pitfalls:
       "Distances in a projection lie, UMAP's more than PCA's. Read cosines in the inspector, not gaps on screen.",
@@ -149,17 +149,19 @@ export const concepts = defineConcepts([
     links: [UMAP],
   },
   {
-    id: "rag:trustworthiness",
-    title: "k-NN kept by the projection",
+    id: "rag:knn-overlap",
+    title: "k-NN overlap",
     purpose:
-      "The share of each point's 10 nearest neighbours in the full space that stay among its 10 nearest in the 3-D picture, averaged over 200 sampled points. It says how far to trust what looks close on screen.",
-    formula: "T = \\frac{1}{m}\\sum_{i=1}^{m} \\frac{\\lvert N_{10}^{\\,384}(i) \\cap N_{10}^{\\,3}(i)\\rvert}{10}",
+      "The share of each point's k nearest neighbours in 384-d that remain among its k nearest in the projection (k = 10, averaged over 150 evenly spaced points). It says how far to trust what looks close on screen.",
+    formula: "O = \\frac{1}{m}\\sum_{i=1}^{m} \\frac{\\lvert N_{10}^{\\,384}(i) \\cap N_{10}^{\\,3}(i)\\rvert}{10}",
     interpretation: {
       good: "High (a rough guide: above half): neighbourhoods on screen are mostly real.",
       bad: "Low (a rough guide: below a fifth): the picture scrambles neighbourhoods; rely on the inspector's cosines.",
       tip: "For unit vectors Euclidean and cosine neighbours are the same, so either metric gives this number.",
     },
-    diagram: "rag:knn-preservation",
+    pitfalls:
+      "A plain set overlap: it counts how many neighbours survive, not how far they moved. Trustworthiness (Venna & Kaski) additionally penalises intruders by their rank; it is not what is shown here.",
+    diagram: "rag:knn-overlap",
     links: [VENNA],
   },
   {

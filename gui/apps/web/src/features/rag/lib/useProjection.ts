@@ -1,8 +1,8 @@
 /**
  * The cloud's off-main-thread work, in one module worker (projection.worker.ts):
  *
- * - PCA → the layout first, then the 384-d clusters and k-NN preservation;
- * - UMAP → the layout, then k-NN preservation; a finished UMAP layout is
+ * - PCA → the layout first, then the 384-d clusters and k-NN overlap;
+ * - UMAP → the layout, then k-NN overlap; a finished UMAP layout is
  *   cached by the BFF (`/api/x/rag/projection`, in memory) so the next visit
  *   skips the fit;
  * - strategies → every strategy's seeds and metrics, and the k-center walk.
@@ -14,7 +14,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Cloud } from "./useCloud";
-import { knnKept, runPca, sphericalKMeans, UMAP_PARAMS, type ProjectionResult } from "./projection";
+import { projectionUrl, readCache, writeCache } from "./layoutCache";
+import { knnKept, runPca, sphericalKMeans, type ProjectionResult } from "./projection";
 import type { WorkerRequest, WorkerResponse } from "./projectionProtocol";
 import { computeStrategies, type StrategyJobResult } from "./strategyJob";
 
@@ -25,7 +26,7 @@ export type LayoutEntry =
   | {
       status: "done";
       result: ProjectionResult;
-      /** k-NN preservation; undefined while it is being computed. */
+      /** k-NN overlap; undefined while it is being computed. */
       trust?: number | null;
       /** Spherical k-means labels (PCA job only); undefined while computing. */
       clusters?: Int32Array;
@@ -39,72 +40,11 @@ export type LayoutEntry =
 export type StrategiesEntry =
   { status: "running" } | { status: "done"; data: StrategyJobResult } | { status: "error"; message: string };
 
-export const UMAP_PARAM_KEY = `umap-js 1.4.0; nNeighbors=${UMAP_PARAMS.nNeighbors}; minDist=${UMAP_PARAMS.minDist}; seed=${UMAP_PARAMS.seed}`;
-
 /** A request without its id (distributes over the union). */
 type Job = WorkerRequest extends infer R ? (R extends WorkerRequest ? Omit<R, "id"> : never) : never;
 type Listener = (message: WorkerResponse) => void;
 
 const TERMINAL = new Set<WorkerResponse["type"]>(["pca-extras", "umap-extras", "strategies", "error"]);
-
-function projectionUrl(cloud: Cloud, digest: string, embedder: string): string {
-  const params = new URLSearchParams({
-    digest,
-    embedder,
-    space: cloud.space,
-    ids: cloud.idsHash,
-    params: UMAP_PARAM_KEY,
-  });
-  return `/api/x/rag/projection?${params.toString()}`;
-}
-
-interface CachedLayout {
-  hit: boolean;
-  n?: number;
-  coords?: number[];
-  frame?: ProjectionResult["frame"];
-  trust?: number | null;
-}
-
-async function readCache(url: string, n: number): Promise<{ result: ProjectionResult; trust: number | null } | null> {
-  try {
-    const response = await fetch(url, { headers: { accept: "application/json" } });
-    if (!response.ok) return null;
-    const body = (await response.json()) as CachedLayout;
-    if (!body.hit || body.n !== n || !body.coords || body.coords.length !== n * 3 || !body.frame) return null;
-    return {
-      result: { method: "umap", coords: Float32Array.from(body.coords), frame: body.frame },
-      trust: body.trust ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function writeCache(
-  cloud: Cloud,
-  digest: string,
-  embedder: string,
-  result: ProjectionResult,
-  trust: number | null,
-) {
-  const response = await fetch("/api/x/rag/projection", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      digest,
-      embedder,
-      space: cloud.space,
-      ids: cloud.idsHash,
-      params: UMAP_PARAM_KEY,
-      n: cloud.n,
-      coords: Array.from(result.coords, (v) => Math.round(v * 1e5) / 1e5),
-      frame: result.frame,
-      trust,
-    }),
-  });
-  if (!response.ok) throw new Error(`cache write refused (${response.status})`);
-}
 
 /** The same jobs, inline (no Worker): answers through the listener like the worker does. */
 function runInline(job: Job, listener: Listener) {

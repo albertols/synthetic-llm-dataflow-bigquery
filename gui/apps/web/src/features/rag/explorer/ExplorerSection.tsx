@@ -3,7 +3,7 @@
  * (PCA in a worker, or UMAP in a worker with the BFF caching the layout),
  * coloured by kind / column / table / 384-d cluster, the current strategy's
  * seeds ringed, hover text with nearest-neighbour lines, a query box, lasso
- * statistics and the projection's k-NN preservation. The 2-D canvas view is
+ * statistics and the projection's k-NN overlap. The 2-D canvas view is
  * both a choice and the WebGL fallback; "View data" is the table twin.
  */
 import { Box, Lasso, RotateCcw, Square, Table2 } from "lucide-react";
@@ -405,8 +405,8 @@ export function ExplorerSection({ model }: { model: RagModel }) {
             <>
               <div className="grid grid-cols-2 gap-3">
                 <StatTile
-                  label="k-NN kept"
-                  concept="rag:trustworthiness"
+                  label="k-NN overlap"
+                  concept="rag:knn-overlap"
                   value={shown?.status === "done" ? (shown.trust ?? null) : null}
                   format={(v) => formatPercent(v, 0)}
                   footnote={

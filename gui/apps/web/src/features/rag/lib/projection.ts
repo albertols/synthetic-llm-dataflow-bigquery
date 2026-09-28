@@ -9,9 +9,10 @@
  * - Spherical k-means (k = 3, seeded k-means++ start, cosine): clusters found
  *   in the full space, so colouring by cluster shows whether a projection
  *   kept them apart.
- * - k-NN preservation (Venna & Kaski 2001): the share of each sampled point's
- *   10 nearest neighbours in the full space (Euclidean; the same as cosine on
- *   unit vectors) that stay among its 10 nearest in 3-D.
+ * - k-NN overlap: the share of each sampled point's 10 nearest neighbours in
+ *   the full space (Euclidean; the same as cosine on unit vectors) that remain
+ *   among its 10 nearest in 3-D — a plain set overlap, not Venna & Kaski's
+ *   rank-penalised trustworthiness (see also: Venna & Kaski 2001).
  * - `normalizeCoords` centres the cloud and scales its 98th-percentile radius
  *   to 1, so the camera frames every set alike and an outlier cannot shrink
  *   the rest.
@@ -314,9 +315,10 @@ function smallestK(dist: Float64Array, k: number, self: number): number[] {
 }
 
 /**
- * k-NN preservation: over `sample` evenly spaced points, the mean share of
- * their k nearest neighbours in `high` (dim-d) that are also among their k
- * nearest in `low` (3-d). Squared Euclidean in both.
+ * k-NN overlap: over `sample` evenly spaced points, the mean share of their k
+ * nearest neighbours in `high` (dim-d) that are also among their k nearest in
+ * `low` (3-d). Squared Euclidean in both. A set overlap — it does not weigh
+ * how far an intruder ranks, as trustworthiness (Venna & Kaski 2001) does.
  */
 export function knnKept(high: Float32Array, dim: number, low: Float32Array, k = TRUST_K, sample = TRUST_SAMPLE) {
   const n = Math.floor(high.length / dim);

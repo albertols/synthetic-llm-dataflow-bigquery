@@ -205,14 +205,21 @@ test("the UMAP layout cache answers a miss, stores a layout and serves it back",
   const miss = await request.get(`/api/x/rag/projection?${query}`);
   expect(miss.status()).toBe(200);
   expect(await miss.json()).toEqual({ hit: false });
+  // Coordinates travel as base64 of n × 3 little-endian Float32.
+  const base64 = (values: number[]) => {
+    const bytes = Buffer.alloc(values.length * 4);
+    values.forEach((v, i) => bytes.writeFloatLE(v, i * 4));
+    return bytes.toString("base64");
+  };
+  const coords = base64([0, 0, 0, 1, 1, 1]);
   const stored = await request.post("/api/x/rag/projection", {
-    data: { ...key, n: 2, coords: [0, 0, 0, 1, 1, 1], frame: { center: [0, 0, 0], scale: 1 }, trust: 0.5 },
+    data: { ...key, n: 2, coords, frame: { center: [0, 0, 0], scale: 1 }, trust: 0.5 },
   });
   expect(stored.status()).toBe(201);
   const hit = (await (await request.get(`/api/x/rag/projection?${query}`)).json()) as { hit: boolean; n: number };
-  expect(hit).toMatchObject({ hit: true, n: 2, coords: [0, 0, 0, 1, 1, 1], trust: 0.5 });
+  expect(hit).toMatchObject({ hit: true, n: 2, coords, trust: 0.5 });
   const bad = await request.post("/api/x/rag/projection", {
-    data: { ...key, n: 3, coords: [0, 0, 0], frame: { center: [0, 0, 0], scale: 1 }, trust: null },
+    data: { ...key, n: 3, coords, frame: { center: [0, 0, 0], scale: 1 }, trust: null },
   });
   expect(bad.status()).toBe(400);
   expect((await request.get("/api/x/rag/projection?digest=zz")).status()).toBe(400);
