@@ -323,9 +323,19 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
 
   it("DLQ rows carry the rule's error_type, step and stage exactly as the code writes them", () => {
     const rules = new Set(data.dlq.map((d) => d.rule_id));
-    for (const rule of ["fk.orphan", "fk.unmatched", "schema.types", "schema.batch", "row.duplicate", "pk.duplicate"])
+    for (const rule of ["fk.orphan", "schema.types", "schema.batch", "row.duplicate", "pk.duplicate", "engine_failure"])
       expect(rules.has(rule), rule).toBe(true);
     expect(rules.has("null.required")).toBe(false);
+    // fk.unmatched needs a conditional edge: an enforced, non-driving FK sharing a column with the
+    // table's driving FK (ADR 0037). thelook_demo has none, so the pipeline could never write one.
+    for (const table of MOCK_RELATIONSHIP_MODEL.tables) {
+      const driving = table.fk.find((fk) => fk.drives);
+      const conditional = table.fk.filter(
+        (fk) => fk !== driving && fk.enforced && !fk.external && fk.cols.some((c) => driving?.cols.includes(c)),
+      );
+      expect(conditional, table.name).toEqual([]);
+    }
+    expect(rules.has("fk.unmatched")).toBe(false);
     for (const row of data.dlq) {
       const rule = dlqRuleById.get(row.rule_id ?? "")!;
       expect(rule.emitted, row.rule_id!).toBe(true);
@@ -337,7 +347,46 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
     }
     const orphan = data.dlq.find((d) => d.rule_id === "fk.orphan")!;
     expect([orphan.error_type, orphan.pipeline_step]).toEqual(["referential_integrity", "EnforceFkIntegrityDoFn"]);
-    expect(data.dlq.find((d) => d.rule_id === "fk.unmatched")!.stage).toBe("pre_generate");
+  });
+
+  it("error_detail and raw_record follow each DoFn's envelope", () => {
+    // PanderaValidateBatchDoFn._summarize_for_row: {failure_count, first_failures: [str()'d failure-case rows]}.
+    const batch = data.dlq.find((d) => d.rule_id === "schema.batch")!;
+    const summary = JSON.parse(batch.error_detail!) as {
+      failure_count: number;
+      first_failures: Record<string, unknown>[];
+    };
+    expect(Object.keys(summary).sort()).toEqual(["failure_count", "first_failures"]);
+    expect(summary.failure_count).toBe(summary.first_failures.length);
+    for (const failure of summary.first_failures) {
+      expect(Object.keys(failure).sort()).toEqual([
+        "check",
+        "check_number",
+        "column",
+        "failure_case",
+        "index",
+        "schema_context",
+      ]);
+      for (const cell of Object.values(failure)) expect(typeof cell).toBe("string");
+    }
+    // GenerateRecordsDoFn: f"{type(e).__name__}: {e}" over _failed_request's key-batch summary.
+    const crash = data.dlq.find((d) => d.rule_id === "engine_failure")!;
+    expect(JSON.parse(crash.error_detail!)).toMatch(/^[A-Za-z]+Error: \S/);
+    expect(crash.raw_record).toMatch(
+      /^\{"batch_id":\d{18,19},"keys":\[\[\d+\](,\[\d+\]){0,9}\],"keys_total":\d+,"n":\d+\}$/,
+    );
+    // pydantic ValidationError.errors(): a list of {type, loc, msg, input}.
+    const types = JSON.parse(data.dlq.find((d) => d.rule_id === "schema.types")!.error_detail!) as object[];
+    expect(Object.keys(types[0]!).sort()).toEqual(["input", "loc", "msg", "type"]);
+  });
+
+  it("the sample tier keeps a primary key distinct: distinct = the sampled rows", () => {
+    const pks = data.sourceStats.filter((r) => r.is_pk && r.stats_tier === "sample");
+    expect(pks.length).toBeGreaterThan(0);
+    for (const r of pks) {
+      expect(r.distinct, `${r.table_fqn}.${r.column}`).toBe(Math.round(r.sample_rows! * (1 - r.null_fraction!)));
+      expect(r.distinct_ratio).toBe(1);
+    }
   });
 
   it("per-table run ids are <base>-NN-<table> in generation order; one table keeps the base", () => {

@@ -506,8 +506,10 @@ calls; they never run SQL of their own.
   `GUI_WEB_PORT` (the Vite dev proxy forwards the browser's Host), or one of
   `ALLOWED_HOSTS` (comma-separated `host:port`) — a DNS-rebinding page reaches
   127.0.0.1 under its own name and gets a 403. On `/api/*`, a browser request
-  with `Sec-Fetch-Site: cross-site` or an `Origin` that is not an allowed host
-  is refused too, so a foreign page cannot make the BFF spend BigQuery bytes.
+  whose `Sec-Fetch-Site` is not `same-origin` or `none` (`cross-site`, and
+  `same-site` — another port of the same host is another local app) or whose
+  `Origin` is not an allowed host is refused too, so a foreign page cannot make
+  the BFF spend BigQuery bytes.
 - Only the named, parameterized, read-only queries of
   `apps/server/src/queries/registry.ts`; client values are parameters, never
   SQL text; `assertReadOnly` guards every statement.

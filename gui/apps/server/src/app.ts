@@ -11,9 +11,11 @@
  *
  * Request guard (onRequest, before any route): the `Host` header must be one of
  * `allowedHosts(config)` — a DNS-rebinding page reaches 127.0.0.1 under its own
- * name and is refused — and on `/api/*` a cross-site browser request
- * (`Sec-Fetch-Site: cross-site`, or an `Origin` that is not an allowed host) is
- * refused, so a foreign page can never make the BFF spend BigQuery bytes.
+ * name and is refused — and on `/api/*` a browser request from any other page
+ * (`Sec-Fetch-Site` other than `same-origin` / `none`: `cross-site`, or
+ * `same-site`, which covers another port of the same host; or an `Origin` that is
+ * not an allowed host) is refused, so a foreign page can never make the BFF spend
+ * BigQuery bytes.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -65,7 +67,8 @@ export async function buildApp({ config, provider, serveStatic = true }: AppOpti
     if (request.url.startsWith("/api/")) {
       const site = request.headers["sec-fetch-site"];
       const origin = request.headers.origin;
-      if (site === "cross-site" || (origin !== undefined && !origins.has(origin.toLowerCase()))) {
+      const foreignSite = typeof site === "string" && site !== "same-origin" && site !== "none";
+      if (foreignSite || (origin !== undefined && !origins.has(origin.toLowerCase()))) {
         request.log.warn({ site, origin }, "refused: cross-site API request");
         void reply.code(403).send(forbidden("cross-site requests to /api are refused"));
         return;

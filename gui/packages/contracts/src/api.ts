@@ -17,7 +17,7 @@
  * Vocabulary fields (the generated `z.enum`s parsed from BigQuery column
  * descriptions) are tolerant on live data: a value the contract does not know yet
  * passes through as a plain string and the response carries `x-contract-warnings`
- * (count, then the first findings). Render an unknown vocabulary value as text; never
+ * (a JSON array of the first findings). Render an unknown vocabulary value as text; never
  * switch over a vocabulary without a default branch. Any other drift is a 502.
  */
 import { z } from "zod";
@@ -34,6 +34,7 @@ import {
 } from "../generated/schemas";
 import type { RelationshipModel } from "./relational";
 import { profilerStatsSchema } from "./sourceStats";
+import { canonicalBound } from "./timestamps";
 
 // ---------------------------------------------------------------- helpers --
 
@@ -49,8 +50,15 @@ const csv = <T extends z.ZodType>(item: T) =>
     return trimmed.length ? trimmed : undefined;
   }, z.array(item).optional());
 
-/** A filter bound: an ISO timestamp with offset, or a date (midnight UTC). */
-const timeBound = z.union([isoTimestamp, z.iso.date()]).optional();
+/**
+ * A filter bound: an ISO timestamp with offset, or a date (midnight UTC), canonicalized
+ * to six fraction digits in UTC (`canonicalBound`: extra digits round up, so the
+ * comparison is unchanged and BigQuery's `TIMESTAMP(@from)` accepts it).
+ */
+const timeBound = z
+  .union([isoTimestamp, z.iso.date()])
+  .transform((value) => canonicalBound(value) ?? value)
+  .optional();
 
 const optionalNumber = z.preprocess(
   (value) => (value === undefined || value === "" ? undefined : Number(value)),
@@ -61,7 +69,7 @@ export const HEADER_DATA_SOURCE = "x-data-source";
 export const HEADER_BYTES_ESTIMATE = "x-bq-bytes-estimate";
 export const HEADER_VECTOR_DIM = "x-vector-dim";
 export const HEADER_VECTOR_COUNT = "x-vector-count";
-/** "<n>; <finding>; <finding>…" — vocabulary values newer than the contract (live data only). */
+/** A JSON array of findings (ASCII-escaped; at most five, then "… and N more"): vocabulary values newer than the contract (live data only). */
 export const HEADER_CONTRACT_WARNINGS = "x-contract-warnings";
 
 export const dataSourceModeSchema = z.enum(["mock", "bigquery"]);

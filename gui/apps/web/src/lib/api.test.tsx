@@ -49,14 +49,18 @@ describe("the API client", () => {
         respond(JSON.stringify([]), {
           headers: {
             "x-data-source": "bigquery",
-            "x-contract-warnings": '2; runs.list: status="NEW" not in the contract vocabulary; dlq.summary: x',
+            "x-contract-warnings": JSON.stringify([
+              'runs.list: status="NEW; OLD" not in the contract vocabulary',
+              "dlq.summary: x",
+            ]),
           },
         }),
       ),
     );
     vi.stubGlobal("fetch", fetch);
     const runs = await api.runs({ limit: 5 });
-    expect(runs.warnings).toEqual(['runs.list: status="NEW" not in the contract vocabulary', "dlq.summary: x"]);
+    // A finding may contain "; " itself: the header is a JSON array, not a joined string.
+    expect(runs.warnings).toEqual(['runs.list: status="NEW; OLD" not in the contract vocabulary', "dlq.summary: x"]);
     await api.evaluation("eval-0001");
     expect(fetch).toHaveBeenLastCalledWith("/api/evaluations/eval-0001", expect.anything());
     await api.evaluation("eval-0001", { profiles: "all" });

@@ -255,9 +255,9 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     const app = await buildApp({ config, provider, serveStatic: false });
     const res = await app.inject({ url: "/api/runs?limit=5", headers: { host: "127.0.0.1:8787" } });
     expect(res.statusCode).toBe(200);
-    expect(res.headers["x-contract-warnings"]).toBe(
-      '1; runs.list: status="PASSED_WITH_NOTES" not in the contract vocabulary (2 rows)',
-    );
+    expect(JSON.parse(res.headers["x-contract-warnings"] as string)).toEqual([
+      'runs.list: status="PASSED_WITH_NOTES" not in the contract vocabulary (2 rows)',
+    ]);
     await app.close();
   });
 
@@ -277,6 +277,21 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     const scoped = calls.filter((c) => /metrics|profiles|flags/.test((c.options.labels as { query: string }).query));
     expect(scoped.length).toBe(6);
     for (const call of scoped) expect((call.options.params as { evaluated_at: string }).evaluated_at).toBe(at);
+  });
+
+  it("sends from/to with six fraction digits, however many the client typed (never a 500)", async () => {
+    const { client, calls } = stubClient({ "evaluations.list": () => [] });
+    const provider = new BigQueryProvider(config, () => Promise.resolve(client));
+    const app = await buildApp({ config, provider, serveStatic: false });
+    const res = await app.inject({
+      url: "/api/evaluations?from=2026-09-01T10:00:00.123456789Z&to=2026-09-02",
+      headers: { host: "127.0.0.1:8787" },
+    });
+    expect(res.statusCode, res.body.slice(0, 200)).toBe(200);
+    const params = calls.find((c) => !c.options.dryRun)!.options.params as { from: string; to: string };
+    expect(params.from).toBe("2026-09-01T10:00:00.123457Z");
+    expect(params.to).toBe("2026-09-02T00:00:00.000000Z");
+    await app.close();
   });
 
   it("caches by the full SQL: two sorts with equally long column names never share an entry", async () => {

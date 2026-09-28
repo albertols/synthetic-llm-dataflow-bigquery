@@ -50,7 +50,7 @@ export interface ApiResult<T> {
   /** Bytes the route's BigQuery queries would scan (dry run); null in mock mode. */
   bytesEstimate: number | null;
   dataSource: "mock" | "bigquery" | null;
-  /** `x-contract-warnings`: "<n>; <finding>; …" split into findings (empty when the rows matched the contract). */
+  /** `x-contract-warnings`: the findings (a JSON array on the wire; empty when the rows matched the contract). */
   warnings: string[];
 }
 
@@ -100,6 +100,18 @@ async function send(path: string, params?: object, signal?: AbortSignal): Promis
   return response;
 }
 
+/** `x-contract-warnings` → findings. A header that is not a JSON string array is shown as one finding. */
+export function parseContractWarnings(header: string | null): string[] {
+  if (!header) return [];
+  try {
+    const parsed: unknown = JSON.parse(header);
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) return parsed;
+  } catch {
+    /* not JSON: fall through */
+  }
+  return [header];
+}
+
 function meta(response: Response): Omit<ApiResult<unknown>, "data"> {
   const bytes = response.headers.get("x-bq-bytes-estimate");
   const source = response.headers.get("x-data-source");
@@ -107,7 +119,7 @@ function meta(response: Response): Omit<ApiResult<unknown>, "data"> {
   return {
     bytesEstimate: bytes === null ? null : Number(bytes),
     dataSource: source === "mock" || source === "bigquery" ? source : null,
-    warnings: warnings ? warnings.split("; ").slice(1) : [],
+    warnings: parseContractWarnings(warnings),
   };
 }
 

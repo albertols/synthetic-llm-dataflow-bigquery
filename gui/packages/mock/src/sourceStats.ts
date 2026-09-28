@@ -30,6 +30,21 @@ import { sourceFqn, TABLES, type ColumnDef, type Row, type TableDef } from "./th
 const PROFILER_VERSION = "2";
 const TOP_VALUES_MAX_DISTINCT = 50;
 
+/**
+ * The reference sample as the pipeline reads it: distinct rows (a SELECT … LIMIT never
+ * repeats one, so a PK stays unique), here a seeded 80 % subset drawn without
+ * replacement — the part of the table the sample tier sees, noisy against the exact tier.
+ */
+function referenceSample(rows: readonly Row[], rng: Random): Row[] {
+  const pool = [...rows];
+  const size = Math.round(rows.length * 0.8);
+  for (let i = 0; i < size; i += 1) {
+    const j = rng.int(i, pool.length - 1);
+    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+  }
+  return pool.slice(0, size);
+}
+
 const mask = (v: string) => v.replace(/[0-9]/g, "9").replace(/[A-Z]/g, "A").replace(/[a-z]/g, "a");
 const round = (v: number, digits = 6) => Math.round(v * 10 ** digits) / 10 ** digits;
 
@@ -198,10 +213,9 @@ export function buildSourceStats(samples: Record<string, { source: Row[] }>): So
       seen.add(key);
       const table = TABLES[name]!;
       const rows = samples[name]!.source;
-      // The sample tier profiles the reference sample; a bootstrap of the mock rows stands in for it.
+      // The sample tier profiles the reference sample; a seeded subset of the mock rows stands in for it.
       const rng = new Random(seedFrom("stats", key));
-      const profiled =
-        tier === "exact" ? rows : Array.from({ length: rows.length }, () => rows[rng.int(0, rows.length - 1)]!);
+      const profiled = tier === "exact" ? rows : referenceSample(rows, rng);
       const { run, at } = firstRun.get(key)!;
       const push = (column: string, stats: Record<string, unknown>) =>
         out.push({
@@ -232,7 +246,7 @@ export function buildSourceStats(samples: Record<string, { source: Row[] }>): So
   const digest = sha256Hex(`${sourceFqn(LEGACY.table)}|${LEGACY.limit}|${LEGACY.era}-snapshot`);
   const rng = new Random(seedFrom("stats", "legacy", LEGACY.table));
   const rows = samples[LEGACY.table]!.source;
-  const profiled = Array.from({ length: rows.length }, () => rows[rng.int(0, rows.length - 1)]!);
+  const profiled = referenceSample(rows, rng);
   for (const column of table.columns) {
     const { stats_tier: _t, profiler_version: _v, ...stats } = entry(table, column, profiled, "sample", LEGACY.limit);
     out.push({

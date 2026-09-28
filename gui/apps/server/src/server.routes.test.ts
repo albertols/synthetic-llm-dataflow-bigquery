@@ -310,7 +310,9 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
       expect((await inject("/api/health", { host })).statusCode, host).toBe(200);
     expect((await inject("/api/facets", { "sec-fetch-site": "cross-site" })).statusCode).toBe(403);
     expect((await inject("/api/facets", { "sec-fetch-site": "same-origin" })).statusCode).toBe(200);
-    expect((await inject("/api/facets", { "sec-fetch-site": "same-site" })).statusCode).toBe(200);
+    // Same-site is another port (or subdomain) of this host: another local app, refused like cross-site.
+    expect((await inject("/api/facets", { "sec-fetch-site": "same-site" })).statusCode).toBe(403);
+    expect((await inject("/api/facets", { "sec-fetch-site": "none" })).statusCode).toBe(200);
     expect((await inject("/api/health", { origin: "https://evil.example.com" })).statusCode).toBe(403);
     expect((await inject("/api/health", { origin: "null" })).statusCode).toBe(403);
     expect((await inject("/api/health", { origin: "http://127.0.0.1:5173" })).statusCode).toBe(200);

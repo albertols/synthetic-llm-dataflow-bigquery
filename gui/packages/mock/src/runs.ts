@@ -7,8 +7,11 @@
  *
  * Every DLQ row's error_type, pipeline_step and stage come from the generated rule
  * map (`dlqRuleById`, exported from the DoFns and `dlq.normalize_dlq_record`), and
- * its error_detail / raw_record follow the envelope each DoFn builds. `null.required`
- * is declared in thresholds.yml but no DoFn emits it, so the mock never writes it.
+ * its error_detail / raw_record follow the envelope each DoFn builds. The mock never
+ * writes two rules: `null.required` is declared in thresholds.yml but no DoFn emits
+ * it, and `fk.unmatched` needs a non-nullable conditional edge (an FK sharing columns
+ * with the driving edge, ADR 0037 ruling B) — thelook_demo has none: order_items'
+ * other edges are the documented user_id and the external product_id.
  */
 import {
   dlqRuleById,
@@ -34,17 +37,12 @@ function ruleShape(rule: string): { errorType: string; step: string; stage: stri
 }
 
 /** The DoFn envelope's (raw_record, error_detail) for one DLQ row of `rule`. */
-function envelope(rule: string, table: string, record: Record<string, unknown>, i: number) {
+function envelope(rule: string, record: Record<string, unknown>, i: number) {
   switch (rule) {
     case "fk.orphan":
       return {
         raw: record,
         detail: `product_id=(${9_000_000 + i},) is not a landed parent key — the row references a parent that does not exist`,
-      };
-    case "fk.unmatched":
-      return {
-        raw: { batch_id: 40 + i, keys: [[record.order_id, record.user_id]], n: 1 },
-        detail: `no (order_id,user_id)->orders candidate for key (${String(record.order_id)}, ${String(record.user_id)})`,
       };
     case "schema.types":
       return {
@@ -59,11 +57,34 @@ function envelope(rule: string, table: string, record: Record<string, unknown>, 
         ],
       };
     case "schema.batch":
-      return { raw: record, detail: { column: "num_of_item", check: "greater_than_or_equal_to(1)", failure_case: 0 } };
-    case "engine_failure":
+      // PanderaValidateBatchDoFn._summarize_for_row: the row's failure cases, every cell str()'d.
       return {
-        raw: { batch_id: 7 + i, n: 10_000, table },
-        detail: "TimeoutError: vLLM did not answer within 600 s (batch requeued once)",
+        raw: record,
+        detail: {
+          failure_count: 1,
+          first_failures: [
+            {
+              schema_context: "Column",
+              column: "num_of_item",
+              check: "greater_than_or_equal_to(1)",
+              check_number: "0",
+              failure_case: "0",
+              index: String(17 + i),
+            },
+          ],
+        },
+      };
+    case "engine_failure":
+      // GenerateRecordsDoFn: `f"{type(e).__name__}: {e}"`, and for a key batch (orders is driven
+      // by users) `_failed_request`'s summary — batch_id, n, a ≤ 10-key sample and keys_total.
+      return {
+        raw: {
+          batch_id: BATCH_ID_PLACEHOLDER,
+          n: 10_000,
+          keys: Array.from({ length: 10 }, (_, k) => [1 + (((i * 10 + k) * 7919) % 100_000)]),
+          keys_total: 7_937,
+        },
+        detail: "APITimeoutError: Request timed out.",
       };
     default:
       return { raw: record, detail: `${rule}: duplicate of an earlier record in this run` };
@@ -109,6 +130,17 @@ const EXTRA_LAUNCHES: {
   { day: "2026-09-19T05:55:00Z", engine: "b1_rag", llm: "gemma4-26b-a4b-awq" },
   { day: "2026-09-26T12:15:00Z", engine: "b2_library", llm: "gemma4-26b-a4b-awq" },
 ];
+
+/**
+ * A key batch's id is `blake2b(repr(keys[0]), 8 bytes) >> 1` (pipeline.py): a 63-bit
+ * integer, past JavaScript's safe range, so it is spliced into the JSON as digits.
+ */
+const BATCH_ID_PLACEHOLDER = "__batch_id__";
+function keyBatchId(runId: string, i: number): string {
+  // Its own stream: the launch's seeded draws (and every number after them) stay put.
+  const rng = new Random(seedFrom("dlq-batch-id", runId, i));
+  return `${rng.int(1_000_000_000, 4_611_686_017)}${String(rng.int(0, 999_999_999)).padStart(9, "0")}`;
+}
 
 function sampleRecord(table: string, rng: Random): Record<string, unknown> {
   const def = TABLES[table]!;
@@ -157,9 +189,9 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
       if (spec.uniquenessMode === "streaming") add("pk.duplicate", rng.poisson(rows * 2e-7));
       if (name === "users") add("schema.types", rng.binomial(rows, spec.quality.invalidShare));
       if (name === "order_items") add("fk.orphan", rng.binomial(rows, spec.quality.orphanShare));
-      // A driving key with no candidate parent (pre_generate): rare, only on early b1 launches.
-      if (name === "order_items" && spec.engine === "b1_rag" && spec.quality.temporalBlend)
-        add("fk.unmatched", rng.poisson(3));
+      // fk.unmatched is impossible here (no conditional edge; see the header). The draw that
+      // used to size it stays, so every seeded number after it keeps its value.
+      if (name === "order_items" && spec.engine === "b1_rag" && spec.quality.temporalBlend) rng.poisson(3);
       if (name === "orders" && spec.engine === "b2_library") add("schema.batch", rng.poisson(rows * 4e-7));
       if (spec.quality.drift >= 0.05 && name === "orders") add("engine_failure", 10_000);
       if (launch.forceBlocker?.table === name)
@@ -203,11 +235,13 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
       for (const [rule, count] of Object.entries(byRule)) {
         const { errorType, step, stage } = ruleShape(rule);
         for (let i = 0; i < Math.min(3, count); i += 1) {
-          const { raw, detail } = envelope(rule, name, sampleRecord(name, rng), i);
+          const { raw, detail } = envelope(rule, sampleRecord(name, rng), i);
+          let rawJson = JSON.stringify(raw, Object.keys(raw).sort());
+          if (rule === "engine_failure") rawJson = rawJson.replace(`"${BATCH_ID_PLACEHOLDER}"`, keyBatchId(runId, i));
           dlq.push({
             dlq_inserted_at: isoMicros(Date.parse(launch.createdAt) - (i + 1) * 47_000, 100 + i),
             run_id: runId,
-            raw_record: JSON.stringify(raw, Object.keys(raw).sort()),
+            raw_record: rawJson,
             error_type: errorType,
             error_detail: JSON.stringify(detail),
             rule_id: rule,

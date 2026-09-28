@@ -38,6 +38,23 @@ export function canonicalTimestamp(text: string): string | null {
   return fromEpoch(wholeMs - offsetMs, micros);
 }
 
+/**
+ * A filter bound (`from` / `to`) → the canonical form, rounded UP to the
+ * microsecond. BigQuery rejects more than six fraction digits in
+ * `TIMESTAMP(@from)`, and it stores microseconds, so for any stored value
+ * `at >= from` and `at < to` hold exactly when they hold against the bound
+ * rounded up. Null when the text is not a timestamp or a date.
+ */
+export function canonicalBound(text: string): string | null {
+  const canonical = canonicalTimestamp(text);
+  if (canonical === null) return null;
+  const extra = (TEXT.exec(text.trim())?.[5] ?? "").slice(6);
+  if (!/[1-9]/.test(extra)) return canonical;
+  const wholeMs = Date.parse(`${canonical.slice(0, 19)}Z`);
+  const micros = Number(canonical.slice(20, 26)) + 1;
+  return micros === 1_000_000 ? fromEpoch(wholeMs + 1000, 0) : fromEpoch(wholeMs, micros);
+}
+
 /** Epoch seconds (float, as BigQuery's REST API may return) → the canonical form, rounded to the microsecond. */
 export function timestampFromEpochSeconds(seconds: number): string | null {
   if (!Number.isFinite(seconds)) return null;
