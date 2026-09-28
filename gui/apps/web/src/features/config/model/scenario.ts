@@ -73,6 +73,16 @@ export const CONSTANTS = {
   defaultN: knobNumber("reference_rows_limit"),
 } as const;
 
+/** The measured relational pair every performance number stands on (MEASURED "shuffle" block). */
+export const MEASURED_PAIR = {
+  rowsPerTable: measured("make_throughput_figures.ROWS_PER_TABLE").value as number,
+  tables: measured("make_throughput_figures.TABLES").value as number,
+};
+/** "2 × 10M-row tables", from the MEASURED block. */
+export const MEASURED_PAIR_LABEL = `${MEASURED_PAIR.tables} × ${new Intl.NumberFormat("en-US", {
+  notation: "compact",
+}).format(MEASURED_PAIR.rowsPerTable)}-row tables`;
+
 /** Rows past a quantile a tail estimate needs (design 2026-07-24 §9: "≥ ~20 points"). */
 export const TAIL_POINTS_WANTED = 20;
 /** α for every DKW band on this tab (95 % confidence). */

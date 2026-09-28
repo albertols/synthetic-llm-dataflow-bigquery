@@ -27,6 +27,7 @@ import { CodeLink } from "../CodeLink";
 import { MeasuredNote } from "../MeasuredNote";
 import { ANNOTATIONS, asText, choicesOf, knob, knobNumber, measured } from "../model/knobs";
 import { DOCS } from "../model/links";
+import { MEASURED_PAIR_LABEL } from "../model/scenario";
 import { useScenario } from "../model/state";
 import { Part } from "../ui";
 
@@ -424,7 +425,7 @@ function UniquenessModes({ onOpenKnob }: { onOpenKnob: (id: string) => void }) {
                 <Row label="Barriers">{text?.barriers ?? MISSING}</Row>
                 <Row label="What lands">{text?.lands ?? MISSING}</Row>
                 <Row label="Cost">{text?.cost ?? MISSING}</Row>
-                <Row label="Dedup + load, 2 × 10M">
+                <Row label={`Dedup + load, ${MEASURED_PAIR_LABEL}`}>
                   {minutes[m] === null || minutes[m] === undefined ? (
                     <span className="text-text-3">not measured</span>
                   ) : (

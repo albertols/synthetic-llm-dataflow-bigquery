@@ -21,6 +21,7 @@ import {
   duplicateShare,
   effectiveBatchSize,
   expectedDistinctUniform,
+  MEASURED_PAIR_LABEL,
   type ScenarioInputs,
 } from "../model/scenario";
 
@@ -258,7 +259,7 @@ function specFor(id: string, settings: Record<string, KnobValue>, inputs: Scenar
         minutes: phases["dedup + load C + A"]?.[i] ?? null,
       }));
       return {
-        title: "Dedup + load minutes, two 10M-row tables",
+        title: `Dedup + load minutes, ${MEASURED_PAIR_LABEL}`,
         description:
           "Measured: the R6 cold run used the three-barrier chain; the R7 pair one barrier. streaming has no barrier and no measured run.",
         build: () => ({
@@ -271,7 +272,7 @@ function specFor(id: string, settings: Record<string, KnobValue>, inputs: Scenar
     case "sdk_containers": {
       const phases = measured("make_throughput_figures.ACCEPT_PHASES_MIN").value as Record<string, number[]>;
       return {
-        title: "Generation minutes, two 10M-row tables",
+        title: `Generation minutes, ${MEASURED_PAIR_LABEL}`,
         description: "Measured R7 pair: one SDK process per worker (single) vs one per vCPU (multi).",
         build: () => ({
           data: [

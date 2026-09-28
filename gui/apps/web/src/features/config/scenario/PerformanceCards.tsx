@@ -20,6 +20,7 @@ import { themed } from "../charts";
 import { MeasuredNote } from "../MeasuredNote";
 import { measured } from "../model/knobs";
 import { DOCS } from "../model/links";
+import { MEASURED_PAIR_LABEL } from "../model/scenario";
 import { useScenario, type ScenarioData } from "../model/state";
 import { DocFigure } from "../ui";
 
@@ -238,7 +239,7 @@ function WarmColdCard({ warm }: { warm: boolean }) {
           Warm vs cold: where the minutes went <InfoHint concept="config:warm-cold" />
         </CardTitle>
         <p className="text-sm text-text-2">
-          The R6 pair, 10M rows per table: a cold run and its immediate warm re-trigger. The pool branch is the only
+          The R6 pair ({MEASURED_PAIR_LABEL}): a cold run and its immediate warm re-trigger. The pool branch is the only
           phase warming removes; generation and the dedup barriers are the same in both.
         </p>
       </CardHeader>

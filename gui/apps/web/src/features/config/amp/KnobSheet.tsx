@@ -12,6 +12,7 @@ import type { Knob, KnobValue } from "@contracts/knobs";
 
 import { Callout } from "@/components/Callout";
 import { Formula } from "@/components/Formula";
+import { InfoHint } from "@/components/InfoHint";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -65,10 +66,13 @@ export function KnobSheet({
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, concept, children }: { title: string; concept?: string; children: ReactNode }) {
   return (
     <section className="grid gap-2">
-      <h3 className="text-xs font-semibold tracking-wide text-text-3 uppercase">{title}</h3>
+      <h3 className="flex items-center gap-1 text-xs font-semibold tracking-wide text-text-3 uppercase">
+        {title}
+        {concept ? <InfoHint concept={concept} /> : null}
+      </h3>
       {children}
     </section>
   );
@@ -95,7 +99,10 @@ function KnobSheetBody({ knob: k }: { knob: Knob }) {
         <div className="flex flex-wrap items-center gap-1.5 pt-1">
           <code className="rounded-sm bg-surface-3 px-1.5 py-0.5 font-mono text-xs text-text-1">{k.id}</code>
           {kind === "planned" ? (
-            <Badge variant="outline">planned</Badge>
+            <span className="inline-flex items-center gap-0.5">
+              <Badge variant="outline">planned</Badge>
+              <InfoHint concept="config:planned" />
+            </span>
           ) : (
             k.settable_via.map((via) => (
               <Badge key={via} variant={via === "constant" || via === "derived" ? "neutral" : "info"}>
@@ -135,7 +142,7 @@ function KnobSheetBody({ knob: k }: { knob: Knob }) {
         ) : null}
       </Section>
 
-      <Section title="Settable?">
+      <Section title="Settable?" concept="config:settable-via">
         <p className="text-sm text-text-2">{settableText(k, kind)}</p>
         <ul className="grid gap-1 text-sm">
           {k.cli_flag ? <Flag label="Launcher flag" value={k.cli_flag} /> : null}
