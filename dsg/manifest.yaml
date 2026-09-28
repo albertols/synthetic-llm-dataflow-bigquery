@@ -85,6 +85,8 @@ exclude:
   - packages/sdfb-tests/tests/unit/scripts/test_dsg_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_e2e_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_freetext_crosscheck.py
+  # The GUI exporters' tests load scripts/gui/ (the GUI never ships, ADR 0042).
+  - packages/sdfb-tests/tests/unit/scripts/test_gui_exporters.py
   - packages/sdfb-tests/tests/unit/scripts/test_history_mappings.py
   - packages/sdfb-tests/tests/unit/scripts/test_make_release_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redact*.py
