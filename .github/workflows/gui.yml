@@ -17,41 +17,54 @@ name: GUI
 # Synthetic Platform (gui/, ADR 0042): typecheck, lint, unit tests, build,
 # bundle budgets, contract drift against the Python side, repo-figure drift,
 # the tab-ownership gate on feat/gui-<tab> branches, then Playwright + axe on
-# Playwright's bundled Chromium. Runs only when the GUI, the Python files it
-# generates contracts from, or the figures it copies (assets:check) change.
+# Playwright's bundled Chromium.
 #
-# The `exports` job re-runs the Python exporters (scripts/gui/) in `--check`
-# mode: knobs.json, relationships.json, dlq_rules.json and the golden
-# fixtures must match the code in values, ids, anchor tokens and paths. Line
-# numbers may move (the default Python gate does not run this check, so an
-# unrelated Python PR that shifts a line never fails; this job catches a
-# value or anchor drift whenever the code the GUI imports changes).
+# The workflow triggers on the union of what its two jobs read; the `changes`
+# job then runs each job only when its own paths changed, so a Python-only PR
+# runs the exporter check, not the whole GUI job:
+#
+#   exports  the Python exporters (scripts/gui/) in `--check` mode:
+#            knobs.json, relationships.json, dlq_rules.json and the golden
+#            fixtures must match the code in values, ids, anchor tokens and
+#            paths. Line numbers may move (the default Python gate does not
+#            run this check, so an unrelated Python PR that shifts a line never
+#            fails; this job catches a value or anchor drift whenever the code
+#            the GUI imports changes).
+#   gui      gui/ itself, the contract sources, the figures assets:check
+#            copies, and the repo files the GUI's tests quote verbatim
+#            (DESIGN.md, READMEs, ADRs, articles, and the few Python lines the
+#            CONFIG tab cites by path:line). gui/apps/web/src/test/
+#            workflow-paths.test.ts keeps GUI_PATHS in step with those tests.
 
 on:
   push:
     branches: [master]
-    paths: &gui_paths
+    paths: &all_paths
       - "gui/**"
-      - "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/**"
-      - "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/**"
+      - "packages/sdfb-evaluation/**"
       - "config/bq_schema/**"
       - "scripts/gui/**"
       # What the exporters import or parse (value + anchor drift).
       - "packages/sdfb-core/src/**"
       - "packages/sdfb-beam/src/**"
+      - "packages/sdfb-tests/tests/unit/scripts/test_gui_exporters.py"
       - "composer/**"
       - "docker/flex_template_metadata.json"
       - "config/thresholds.yml"
       - "config/relationships/**"
       - "scripts/doc/make_throughput_figures.py"
       - "scripts/doc/make_ws5_figures.py"
-      - "docs/designs/*.md"
+      # What the GUI's tests quote or copy.
+      - "README.md"
+      - "docs/DESIGN.md"
+      - "docs/adr/**"
+      - "docs/articles/**"
+      - "docs/designs/**"
       - "docs/assets/**"
-      - "docs/designs/assets/**"
-      - "docs/articles/assets/**"
+      - ".claude/skills/validation-mode-a.md"
       - ".github/workflows/gui.yml"
   pull_request:
-    paths: *gui_paths
+    paths: *all_paths
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -61,8 +74,46 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    # Which of the jobs below this change needs (extended regexes over the changed paths).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      gui: ${{ steps.filter.outputs.gui }}
+      exports: ${{ steps.filter.outputs.exports }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Match the changed paths against each job's filter
+        id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          GUI_PATHS: '^(gui/|packages/sdfb-evaluation/(README\.md$|pyproject\.toml$|src/sdfb_evaluation/(schemas|catalogue)/)|config/bq_schema/|README\.md$|docs/(DESIGN\.md$|adr/|articles/|designs/|assets/)|\.claude/skills/validation-mode-a\.md$|packages/sdfb-beam/src/sdfb_beam/(pipeline\.py|dofns/validate_record\.py)$|packages/sdfb-core/src/sdfb_core/(engines/b1_rag/engine\.py|validation/summary\.py)$|\.github/workflows/gui\.yml$)'
+          EXPORTS_PATHS: '^(scripts/gui/|packages/sdfb-(core|beam|evaluation)/src/|packages/sdfb-tests/tests/unit/scripts/test_gui_exporters\.py$|gui/packages/contracts/generated/|composer/|docker/flex_template_metadata\.json$|config/(thresholds\.yml$|relationships/)|scripts/doc/make_(throughput|ws5)_figures\.py$|docs/designs/[^/]+\.md$|\.github/workflows/gui\.yml$)'
+        run: |
+          # No usable base (a new branch, a force-push): run every job.
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "gui=true" >> "$GITHUB_OUTPUT"
+            echo "exports=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE" "$GITHUB_SHA")"
+          printf '%s\n' "$changed"
+          for job in gui exports; do
+            if [ "$job" = gui ]; then filter="$GUI_PATHS"; else filter="$EXPORTS_PATHS"; fi
+            if printf '%s\n' "$changed" | grep -Eq "$filter"; then
+              echo "$job=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$job=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
   exports:
     # Python truth → gui/packages/contracts/generated (value + anchor drift).
+    needs: changes
+    if: needs.changes.outputs.exports == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -90,6 +141,8 @@ jobs:
         run: uv run pytest -q packages/sdfb-tests/tests/unit/scripts/test_gui_exporters.py
 
   gui:
+    needs: changes
+    if: needs.changes.outputs.gui == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     defaults:
