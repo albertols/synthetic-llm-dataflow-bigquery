@@ -1,16 +1,53 @@
 /**
  * CONFIG route module (owned by the CONFIG tab agent). Contract: `searchSchema`
- * (`zod/mini`, see intro/route.tsx) + lazy `component`; read params with
- * `getRouteApi("/config").useSearch()`.
+ * (`zod/mini`, it sits in the shell chunk) + lazy `component`; the page reads
+ * params with `getRouteApi("/config").useSearch()`.
+ *
+ *   section   amp | scenario | sources | guardrails (in-page tab)
+ *   knob      knobs.json id whose sheet is open
+ *   scenario  calculator preset id (e.g. "90m-from-1m")
+ *   table     source-stats table (fqn or bare name)
+ *   digest    reference digest to compare across tiers
+ *   snapshot  one snapshot key (digest|tier|profiler_version|run_id)
+ *   column    source-stats column whose detail is open
+ *   N M n p q tier uniq env K D s sdk warm filter
+ *             scenario inputs that differ from the preset (model/state.tsx),
+ *             so a deep link reproduces the calculator
  */
 import { lazyRouteComponent } from "@tanstack/react-router";
 import { z } from "zod/mini";
 
+const optionalString = z.catch(z.optional(z.string().check(z.maxLength(400))), undefined);
+const optionalNumber = z.catch(z.optional(z.number()), undefined);
+const optionalBoolean = z.catch(z.optional(z.boolean()), undefined);
+
+export const CONFIG_SECTIONS = ["amp", "scenario", "sources", "guardrails"] as const;
+export type ConfigSection = (typeof CONFIG_SECTIONS)[number];
+
 export const searchSchema = z.object({
+  section: z.catch(z.optional(z.enum(CONFIG_SECTIONS)), undefined),
   /** Knob id whose sheet is open (a knobs.json id). */
-  knob: z.catch(z.optional(z.string()), undefined),
+  knob: optionalString,
   /** Scenario preset id for the calculator. */
-  scenario: z.catch(z.optional(z.string()), undefined),
+  scenario: optionalString,
+  table: optionalString,
+  digest: optionalString,
+  snapshot: optionalString,
+  column: optionalString,
+  N: optionalNumber,
+  M: optionalNumber,
+  n: optionalNumber,
+  p: optionalNumber,
+  q: optionalNumber,
+  tier: optionalString,
+  uniq: optionalString,
+  env: optionalString,
+  K: optionalNumber,
+  D: optionalNumber,
+  s: optionalNumber,
+  sdk: optionalString,
+  warm: optionalBoolean,
+  filter: optionalBoolean,
 });
 export type ConfigSearch = z.infer<typeof searchSchema>;
 
