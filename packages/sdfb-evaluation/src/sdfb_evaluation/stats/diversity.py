@@ -49,7 +49,12 @@ References:
     https://doi.org/10.1002/j.1538-7305.1948.tb01338.x
   Good, I.J. (1953), "The Population Frequencies of Species and the
     Estimation of Population Parameters". https://doi.org/10.1093/biomet/40.3-4.237
-  Paninski, L. (2003), "Estimation of Entropy and Mutual Information".
+  Miller, G.A. (1955), "Note on the Bias of Information Estimates", in
+    H. Quastler (ed.), Information Theory in Psychology: Problems and
+    Methods, pp. 95-100 (the primary source for `miller_madow_bits`'s
+    correction term). https://www.semanticscholar.org/paper/922ef4c778a7145da54b0de3e8ef5240a8584cd7
+  Paninski, L. (2003), "Estimation of Entropy and Mutual Information" (a
+    secondary source restating Miller's bias term in modern notation).
     https://doi.org/10.1162/089976603321780272
   Chao, A., Shen, T-J. (2003), "Nonparametric Estimation of Shannon's Index
     of Diversity when there are Unseen Species in Sample".
@@ -76,6 +81,34 @@ _TOP_K = 1000
 # synthetic copy of it is scored as a memorization risk, not ordinary
 # category mass (`field.substantive_copy_rate`).
 _K_ANON_FLOOR = 10
+
+# A distribution with 0 or 1 distinct value carries no uncertainty at all
+# (entropy is EXACTLY 0, not "close to 0"); below this `k`, `entropy_bits`
+# skips the floating-point formula entirely rather than let cancellation
+# between its two nearly-equal terms (`log2(n)` and `clc / (n ln 2)`) leave
+# residue like `-8.9e-16` (Ruling R20).
+_CONSTANT_K = 1
+
+# `summarize`'s float outputs are rounded to this many significant digits
+# (Ruling R21 #9): floating-point summation over a `merge` tree is not
+# strictly associative, so two runs over the identical rows in a different
+# bundle order can differ in the last few ulps; float64 carries ~15-17
+# significant digits, so rounding to 12 is well past real precision and
+# only erases that reordering noise, never a genuine difference.
+_SUMMARIZE_SIG_DIGITS = 12
+
+
+def _round_sig(x: float, sig: int = _SUMMARIZE_SIG_DIGITS) -> float:
+  """`x` rounded to `sig` significant digits (not decimal places).
+
+  `0.0` and non-finite values (`nan`/`inf`, which should not occur in
+  practice but must never raise here) pass through unchanged — `log10` is
+  undefined for the former and meaningless for the latter.
+  """
+  if x == 0.0 or not math.isfinite(x):
+    return x
+  shift = sig - math.floor(math.log10(abs(x))) - 1
+  return round(x, shift)
 
 
 def _top_sort_key(item: tuple[int, int]) -> tuple[int, int]:
@@ -265,34 +298,47 @@ class CensusAccumulator:
     )
 
 
-def entropy_bits(n: int, clc: float) -> float | None:
-  """Plug-in Shannon entropy in bits, from the total count `n` and
-  `clc = sum(c * ln(c))` over the same values (Shannon, 1948).
+def entropy_bits(n: int, clc: float, k: int) -> float | None:
+  """Plug-in Shannon entropy in bits, from the total count `n`, `clc =
+  sum(c * ln(c))` over the same values, and `k` the number of distinct
+  values `clc` was summed over (Shannon, 1948).
 
-  The closed form of `-sum((c/n) * log2(c/n))` that never re-derives each
-  per-value probability: `log2(n) - clc / (n * ln(2))`. `None` when `n <=
-  0` — entropy is undefined for an empty sample, not zero.
+  `None` when `n <= 0` — entropy is undefined for an empty sample, not
+  zero. `k <= 1` (a constant column: 0 or 1 distinct value) returns
+  EXACTLY `0.0` rather than evaluating the general formula: mathematically
+  `log2(n) - clc / (n * ln(2))` is 0 there too (`clc = n * ln(n)` when a
+  single value holds every row), but subtracting two nearly-equal
+  floating-point terms leaves residue on the order of `1e-16` — enough for
+  a caller dividing by it (`entropy_ratio`) to blow up (Ruling R20). For
+  `k >= 2` the general closed form of `-sum((c/n) * log2(c/n))` is used,
+  clamped to `max(0.0, ...)` for the same reason (entropy can never be
+  negative; a near-zero true value can still round below 0).
   """
   if n <= 0:
     return None
-  return math.log2(n) - clc / (n * math.log(2.0))
+  if k <= _CONSTANT_K:
+    return 0.0
+  return max(0.0, math.log2(n) - clc / (n * math.log(2.0)))
 
 
 def miller_madow_bits(h: float, k: int, n: int) -> float:
   """The Miller-Madow bias-corrected entropy estimate, in bits:
-  `h + (k - 1) / (2 * n * ln(2))`.
+  `h + (k - 1) / (2 * n * ln(2))` (Miller, 1955; restated in Paninski,
+  2003).
 
-  A finite-sample plug-in entropy `h` is biased low by roughly this much
-  (Paninski, 2003); `k` is the number of distinct values `h` was computed
-  over and `n` the total count. Only meaningful where `h` itself is
-  defined (`n > 0`); the caller only reaches this once `entropy_bits` has
-  returned a value, not `None`.
+  A finite-sample plug-in entropy `h` is biased low by roughly this much;
+  `k` is the number of distinct values `h` was computed over and `n` the
+  total count. Only meaningful where `h` itself is defined (`n > 0`); the
+  caller only reaches this once `entropy_bits` has returned a value, not
+  `None`. Clamped to `max(0.0, ...)`: entropy is never negative (Ruling
+  R20), and the correction term itself is never negative for `k >= 1`, so
+  this only guards a caller passing a raw, unclamped `h`.
   """
-  return h + (k - 1) / (2.0 * n * math.log(2.0))
+  return max(0.0, h + (k - 1) / (2.0 * n * math.log(2.0)))
 
 
 def _chao_shen_coverage(f1: int, n: int) -> float | None:
-  """The Good-Turnbull sample-coverage estimate `C_hat = 1 - f1/n`
+  """The Good-Turing sample-coverage estimate `C_hat = 1 - f1/n`
   (Chao & Shen, 2003), guarded when every observed value is a singleton
   (`f1 == n`, where the plain formula would give 0): `C_hat = 1 - (f1 - 1)
   / n`. `None` when `n <= 0` (no sample, no coverage to estimate).
@@ -315,13 +361,25 @@ def chao_shen_term(c: int, n: int, coverage: float) -> float:
   so the two can never drift apart. `0.0` for a degenerate `c <= 0`, `n <=
   0` or `coverage <= 0` (no mass, no contribution) rather than raising or
   dividing by zero.
+
+  The denominator is `1 - (1 - p_tilde) ** n`, computed as
+  `-expm1(n * log1p(-p_tilde))` rather than literally (Ruling R21 #8):
+  for a small `p_tilde` and a large `n` (a long-tailed column with many
+  values and a big `n`), `(1 - p_tilde) ** n` rounds to something very
+  close to 1, and `1 - (that)` then loses most of its significant digits
+  to catastrophic cancellation; `expm1`/`log1p` are built for exactly this
+  "answer near zero" regime and keep full precision there.
   """
   if c <= 0 or n <= 0 or coverage <= 0.0:
     return 0.0
   p_tilde = coverage * c / n
   if p_tilde <= 0.0:
     return 0.0
-  denom = 1.0 - (1.0 - p_tilde)**n
+  # p_tilde == 1.0 (a single value holding the whole sample, coverage == 1)
+  # would make log1p(-1.0) raise (log(0) is undefined); (1 - 1) ** n == 0
+  # directly, so the denominator is exactly 1 without needing the
+  # expm1/log1p path at all.
+  denom = 1.0 if p_tilde >= 1.0 else -math.expm1(n * math.log1p(-p_tilde))
   if denom <= 0.0:
     return 0.0
   return -p_tilde * math.log(p_tilde) / denom
@@ -366,12 +424,16 @@ def tvd_jsd_from_census(
   what a missing entry means either way. On the same aligned vectors this
   agrees with `stats.distances.tvd`/`jsd_bits` (see `test_diversity.py`).
 
-  Unlike `distances.tvd`/`jsd_bits`, this never returns `None`: `(0.0,
-  0.0)` when `n_src <= 0` or `n_syn <= 0`, since Task 22 only runs this
-  second pass once both totals are already known to be positive.
+  Unlike `distances.tvd`/`jsd_bits` (which return `None` for a degenerate
+  side), this raises `ValueError` when `n_src <= 0` or `n_syn <= 0`
+  (Ruling R21 #4): Task 22 only runs this second pass once both totals are
+  already known positive from the first pass, so a non-positive total
+  here is a caller bug to surface loudly, not a valid degenerate case to
+  swallow into a silent `(0.0, 0.0)`.
   """
   if n_src <= 0 or n_syn <= 0:
-    return (0.0, 0.0)
+    raise ValueError(
+        f"n_src and n_syn must be positive: got n_src={n_src}, n_syn={n_syn}")
   tvd_sum = 0.0
   jsd_p_terms = 0.0
   jsd_q_terms = 0.0
@@ -388,7 +450,7 @@ def tvd_jsd_from_census(
 
 
 def summarize(
-    acc: CensusAccumulator) -> dict[str, float | int | list[Any] | None]:
+    acc: CensusAccumulator) -> dict[str, float | int | str | list[Any] | None]:
   """The catalogue-ready diversity metrics for one column's census.
 
   Entropy/distinct metrics read the matched-n fields (D5: n-dependent);
@@ -398,14 +460,43 @@ def summarize(
   second pass over every value's count (Ruling R3; see `chao_shen_term`).
   Every derived field is `None` where its inputs are degenerate (an empty
   column, a zero-entropy constant column, ...) rather than raising or
-  dividing by zero.
+  dividing by zero. Every float value is rounded to `_SUMMARIZE_SIG_DIGITS`
+  significant digits (Ruling R21 #9): merge-tree floating-point summation
+  is not strictly associative, so this is what makes re-running a census
+  over the same rows (a different bundle order, a retried job) compare
+  equal rather than differ in the last few ulps.
+
+  `entropy_ratio` gates on `k_src_m`/`k_syn_m` (`_CONSTANT_K`), never on
+  comparing a computed entropy to `0.0` (Ruling R20: `entropy_bits`'s
+  near-zero floating-point residue on a near-constant column made a plain
+  `!= 0.0` check unreliable — see `entropy_bits`'s docstring):
+    - both sides constant (`k_src_m <= 1` and `k_syn_m <= 1`): `1.0` —
+      neither side has any diversity to compare, so they match exactly.
+    - source constant, synthetic not: `None`, with `entropy_ratio_reason`
+      set to `"source constant"` — the ratio's denominator is genuinely
+      zero, so no value describes this case.
+    - source not constant, synthetic constant: `0.0` — the synthetic side
+      collapsed to no diversity at all.
+    - neither constant: the plain ratio `entropy_syn_m / entropy_src_m`.
   """
-  entropy_src_m = entropy_bits(acc.n_src_m, acc.clc_src_m)
-  entropy_syn_m = entropy_bits(acc.n_syn_m, acc.clc_syn_m)
-  entropy_ratio = None
-  if (entropy_src_m is not None and entropy_syn_m is not None and
-      entropy_src_m != 0.0):
+  entropy_src_m = entropy_bits(acc.n_src_m, acc.clc_src_m, acc.k_src_m)
+  entropy_syn_m = entropy_bits(acc.n_syn_m, acc.clc_syn_m, acc.k_syn_m)
+  src_constant = acc.k_src_m <= _CONSTANT_K
+  syn_constant = acc.k_syn_m <= _CONSTANT_K
+
+  entropy_ratio: float | None = None
+  entropy_ratio_reason: str | None = None
+  if entropy_src_m is None or entropy_syn_m is None:
+    pass  # no matched-n data at all on one side; ratio stays None.
+  elif src_constant and syn_constant:
+    entropy_ratio = 1.0
+  elif src_constant:
+    entropy_ratio_reason = "source constant"
+  elif syn_constant:
+    entropy_ratio = 0.0
+  else:
     entropy_ratio = entropy_syn_m / entropy_src_m
+
   miller_madow_src_m = (
       miller_madow_bits(entropy_src_m, acc.k_src_m, acc.n_src_m)
       if entropy_src_m is not None else None)
@@ -419,7 +510,15 @@ def summarize(
       abs(top1_share_syn - top1_share_src)
       if top1_share_src is not None and top1_share_syn is not None else None)
 
-  return {
+  novelty_mass = (acc.novelty_syn / acc.n_syn) if acc.n_syn > 0 else None
+  # field.category_adherence: the mass-weighted share of synthetic ROWS
+  # (not distinct values) whose value is in the source vocabulary — exactly
+  # the complement of novelty_mass, which is the same mass split the other
+  # way (Ruling R21 #7).
+  category_adherence = (1.0 -
+                        novelty_mass) if novelty_mass is not None else None
+
+  result: dict[str, float | int | str | list[Any] | None] = {
       "n_src":
           acc.n_src,
       "n_syn":
@@ -442,6 +541,8 @@ def summarize(
           entropy_syn_m,
       "entropy_ratio":
           entropy_ratio,
+      "entropy_ratio_reason":
+          entropy_ratio_reason,
       "miller_madow_src_m_bits":
           miller_madow_src_m,
       "miller_madow_syn_m_bits":
@@ -452,7 +553,10 @@ def summarize(
           _chao_shen_coverage(acc.f1_syn_m, acc.n_syn_m),
       "coverage_mass":
           (acc.coverage_mass_num / acc.n_src) if acc.n_src > 0 else None,
-      "novelty_mass": (acc.novelty_syn / acc.n_syn) if acc.n_syn > 0 else None,
+      "novelty_mass":
+          novelty_mass,
+      "category_adherence":
+          category_adherence,
       "good_turing_unseen_src":
           (acc.f1_src / acc.n_src) if acc.n_src > 0 else None,
       "top1_share_src":
@@ -468,4 +572,8 @@ def summarize(
           list(acc.top_src),
       "top_syn":
           list(acc.top_syn),
+  }
+  return {
+      key: (_round_sig(value) if isinstance(value, float) else value)
+      for key, value in result.items()
   }
