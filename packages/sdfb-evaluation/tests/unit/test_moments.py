@@ -35,13 +35,14 @@ from sdfb_evaluation.stats.moments import Moments
 def test_empty_moments_is_a_valid_empty_state():
   m = Moments()
   assert m.n == 0
-  assert m.variance == 0.0
-  assert m.std == 0.0
+  assert m.variance is None
+  assert m.std is None
   assert m.skewness is None
   assert m.kurtosis_excess is None
   assert m.min == math.inf
   assert m.max == -math.inf
   assert m.zeros == 0
+  assert m.nonfinite == 0
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,36 @@ def test_add_array_drops_nan():
   m.add_array(np.array([1.0, float("nan"), 3.0]))
   assert m.n == 2
   assert math.isclose(m.mean, 2.0)
+  assert m.nonfinite == 1
+
+
+def test_add_array_drops_infinite_rows_and_counts_them():
+  # A +inf row must never poison mean/variance with NaN, and must not
+  # silently count as a value either — it is tracked in `nonfinite`.
+  m = Moments()
+  m.add_array(np.array([1.0, 2.0, 3.0, float("inf")]))
+  assert m.n == 3
+  assert math.isclose(m.mean, 2.0)
+  assert m.nonfinite == 1
+  assert math.isfinite(m.mean)
+  assert math.isfinite(m.m2)
+  d = m.to_dict()
+  assert all(
+      v is None or math.isfinite(v) for v in d.values() if isinstance(v, float))
+
+
+def test_add_array_counts_negative_infinity_and_nan_together():
+  m = Moments()
+  m.add_array(np.array([1.0, float("-inf"), float("nan"), 2.0]))
+  assert m.n == 2
+  assert m.nonfinite == 2
+
+
+def test_add_array_all_nonfinite_batch_still_counts_nonfinite():
+  m = Moments()
+  m.add_array(np.array([float("inf"), float("nan")]))
+  assert m.n == 0
+  assert m.nonfinite == 2
 
 
 def test_add_array_empty_batch_is_a_no_op():
@@ -119,6 +150,16 @@ def test_merge_of_two_empties_is_empty():
   assert merged.n == 0
   assert merged.min == math.inf
   assert merged.max == -math.inf
+  assert merged.nonfinite == 0
+
+
+def test_merge_sums_nonfinite_from_both_sides():
+  a, b = Moments(), Moments()
+  a.add_array(np.array([1.0, float("inf")]))
+  b.add_array(np.array([2.0, float("nan"), float("nan")]))
+  merged = a.merge(b)
+  assert merged.n == 2
+  assert merged.nonfinite == 3
 
 
 @settings(max_examples=60)
@@ -174,10 +215,11 @@ def test_constant_column_has_zero_std_and_no_skewness():
 
 def test_to_dict_from_dict_round_trip():
   m = Moments()
-  m.add_array(np.array([1.0, 2.0, 3.0, 4.0]))
+  m.add_array(np.array([1.0, 2.0, 3.0, 4.0, float("inf")]))
   d = m.to_dict()
   assert d["min"] == 1.0
   assert d["max"] == 4.0
+  assert d["nonfinite"] == 1
   restored = Moments.from_dict(d)
   assert restored.n == m.n
   assert restored.mean == m.mean
@@ -187,13 +229,31 @@ def test_to_dict_from_dict_round_trip():
   assert restored.min == m.min
   assert restored.max == m.max
   assert restored.zeros == m.zeros
+  assert restored.nonfinite == m.nonfinite
 
 
 def test_empty_moments_to_dict_is_json_safe():
   d = Moments().to_dict()
   assert d["min"] is None
   assert d["max"] is None
+  assert d["nonfinite"] == 0
   restored = Moments.from_dict(d)
   assert restored.min == math.inf
   assert restored.max == -math.inf
   assert restored.n == 0
+  assert restored.nonfinite == 0
+
+
+def test_from_dict_defaults_nonfinite_for_a_pre_existing_dict():
+  # A dict written before `nonfinite` existed must still round-trip.
+  d = {
+      "n": 3,
+      "mean": 2.0,
+      "m2": 2.0,
+      "m3": 0.0,
+      "m4": 2.0,
+      "min": 1.0,
+      "max": 3.0
+  }
+  restored = Moments.from_dict(d)
+  assert restored.nonfinite == 0

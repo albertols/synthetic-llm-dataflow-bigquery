@@ -36,6 +36,9 @@ References:
   Ramdas, A., Garcia Trillos, N., Cuturi, M. (2017), "On Wasserstein
     Two-Sample Testing and Related Families of Nonparametric Tests".
     https://doi.org/10.3390/e19020047
+  Czado, C., Gneiting, T., Held, L. (2009), "Predictive Model Assessment
+    for Count Data" (the mid-distribution / non-randomized PIT that
+    `pit_w1` uses to stay unbiased on discrete and binned columns).
 """
 
 from __future__ import annotations
@@ -47,6 +50,28 @@ import numpy as np
 # w1_from_bins needs at least one finite interval [e0, e_last] to integrate
 # over, which takes 2 edges.
 _MIN_EDGES_FOR_INTERVAL = 2
+
+
+def _validate_equal_counts(c_src: np.ndarray, c_syn: np.ndarray) -> None:
+  """Raise `ValueError` unless `c_src` and `c_syn` are the same length.
+
+  Both must be `bin_counts` against the identical edges to be comparable at
+  all; a length mismatch is a caller bug (Task 21 pins this contract, so it
+  fails loudly rather than broadcasting or truncating silently).
+  """
+  if c_src.shape != c_syn.shape:
+    raise ValueError(
+        "c_src and c_syn must be counted against the same edges (same "
+        f"length): got shapes {c_src.shape} and {c_syn.shape}")
+
+
+def _validate_edges_match_counts(edges: np.ndarray, counts: np.ndarray) -> None:
+  """Raise `ValueError` unless `counts` has exactly `edges.size + 1` bins."""
+  expected = edges.shape[0] + 1
+  if counts.shape[0] != expected:
+    raise ValueError(
+        f"counts must have edges.size + 1 = {expected} entries for "
+        f"{edges.shape[0]} edges, got {counts.shape[0]}")
 
 
 def union_edges(
@@ -80,8 +105,12 @@ def profile_edges(q_src: Sequence[float], bins: int = 100) -> np.ndarray:
   grid's own resolution evenly (e.g. `bins=100` against a 1,001-point grid)
   lands exactly on those quantiles. Duplicates collapse via `np.unique`
   (a source column with repeated values can make adjacent quantiles equal).
+  An empty `q_src` (an all-NULL source column has no quantile grid at all)
+  returns an empty array rather than raising.
   """
   q = np.asarray(q_src, dtype=float)
+  if q.size == 0:
+    return np.array([], dtype=float)
   probs = np.arange(1, bins) / bins
   idx = np.round(probs * (q.size - 1)).astype(int)
   edges = q[idx]
@@ -131,10 +160,15 @@ def ks_bracket(
   The two converge as the edge grid gets finer; `D_hi - D_lo` is the
   resolution penalty of the fixed grid.
 
-  Returns `None` if either side's total count is zero (nothing to compare).
+  Raises `ValueError` if `c_src` and `c_syn` are not the same length (they
+  must be counts against the same edges). Returns `None` if either side's
+  total count is zero (nothing to compare).
   """
-  f_src, total_src = _cdf_at_edges(np.asarray(c_src, dtype=float))
-  f_syn, total_syn = _cdf_at_edges(np.asarray(c_syn, dtype=float))
+  c_src_arr = np.asarray(c_src, dtype=float)
+  c_syn_arr = np.asarray(c_syn, dtype=float)
+  _validate_equal_counts(c_src_arr, c_syn_arr)
+  f_src, total_src = _cdf_at_edges(c_src_arr)
+  f_syn, total_syn = _cdf_at_edges(c_syn_arr)
   if total_src <= 0.0 or total_syn <= 0.0:
     return None
   d_lo = float(np.max(np.abs(f_src - f_syn)))
@@ -181,14 +215,23 @@ def w1_from_bins(
 
   Mass outside `[e0, e_last]` has no known location, so it is excluded from
   the integral rather than guessed at; `tail_masses` reports it separately.
-  Returns `None` if either side's total count is zero, or fewer than 2
-  edges are given (no interval to integrate over).
+  Use `union_edges`, not a source-only grid: edges that are coarse or
+  absent on the synthetic side push its mass into fewer, wider bins, which
+  biases this integral (a source-only decile grid, in particular, is too
+  coarse for this metric even though it is fine for `pit_w1`).
+
+  Raises `ValueError` if `c_src`/`c_syn` are not the same length, or if
+  either does not have exactly `edges.size + 1` entries. Returns `None` if
+  either side's total count is zero, or fewer than 2 edges are given (no
+  interval to integrate over).
   """
   edge_arr = np.asarray(edges, dtype=float)
-  if edge_arr.size < _MIN_EDGES_FOR_INTERVAL:
-    return None
   c_src_arr = np.asarray(c_src, dtype=float)
   c_syn_arr = np.asarray(c_syn, dtype=float)
+  _validate_equal_counts(c_src_arr, c_syn_arr)
+  _validate_edges_match_counts(edge_arr, c_src_arr)
+  if edge_arr.size < _MIN_EDGES_FOR_INTERVAL:
+    return None
   total_src = float(c_src_arr.sum())
   total_syn = float(c_syn_arr.sum())
   if total_src <= 0.0 or total_syn <= 0.0:
@@ -200,32 +243,55 @@ def w1_from_bins(
   return float(np.sum(gap * widths))
 
 
+def _mid_cdf(counts: np.ndarray, total: float) -> np.ndarray:
+  """The Parzen mid-distribution value at every bin: `cumsum(p) - p / 2`.
+
+  For bin `b`, this sits halfway between the CDF just before `b`'s mass
+  arrives and the CDF just after — the discrete/binned analogue of "the
+  point itself" a continuous CDF would use, and the reason `pit_w1` stays
+  unbiased on a column with a large point mass (a spike of zeros, a
+  constant column, an integer column) instead of always crediting that
+  mass to one edge of its bin (Czado, Gneiting & Held, 2009).
+  """
+  p = counts / total
+  return np.cumsum(p) - p / 2.0
+
+
 def pit_w1(c_src: np.ndarray, c_syn: np.ndarray) -> float | None:
-  """The PIT Wasserstein-1 distance `sum_b p_src(b) * |F_syn(e_b) -
-  F_src(e_b)|`, over the bins with a finite right edge — the probability
-  integral transform of both columns through the source's own CDF, so the
-  result is scale-free and lands in `[0, 1/2]` (0.5 exactly for two
-  disjoint distributions, in the limit of infinitely many edges).
+  """The PIT Wasserstein-1 distance `sum_b p_src(b) * |Fbar_syn(b) -
+  Fbar_src(b)|`, where `Fbar` is the Parzen mid-distribution function
+  (`_mid_cdf`) rather than the ordinary right-continuous CDF — the
+  probability integral transform of both columns through the source's own
+  distribution, so the result is scale-free and lands in `[0, 1/2]` (0.5
+  for two fully disjoint distributions).
 
-  `c_src`/`c_syn` should be counted against edges drawn from `q_src` itself
-  (`profile_edges`/`decile_edges`), so that `p_src(b)` is (near-)uniform by
-  construction — that is what makes this the probability-integral-
-  transformed distance rather than a plain binned W1. The final,
-  infinite-right-edge bin is excluded: there, `F_src = F_syn = 1` always,
-  contributing zero regardless.
+  Summed over ALL bins, including the open-ended last one: unlike
+  `w1_from_bins`, `pit_w1` needs no finite outer edge, because the
+  mid-distribution function is already well-defined for an unbounded bin
+  (its own `p(b)` still has a well-defined midpoint, even though the bin
+  itself has no right edge to evaluate an ordinary CDF at).
 
+  The weighting by `p_src(b)` (not `p_syn(b)`) is what makes this a PIT
+  distance rather than a plain binned W1, and it holds on ANY shared edge
+  set — unlike the ordinary-CDF version this replaces, it does not need
+  `p_src(b)` to be uniform. `union_edges` (the grid Task 21 uses for every
+  binned metric) is the recommended grid; `profile_edges`/`decile_edges`
+  also work and remain useful where a source-only grid is wanted.
+
+  Raises `ValueError` if `c_src` and `c_syn` are not the same length.
   Returns `None` if either side's total count is zero.
   """
   c_src_arr = np.asarray(c_src, dtype=float)
   c_syn_arr = np.asarray(c_syn, dtype=float)
+  _validate_equal_counts(c_src_arr, c_syn_arr)
   total_src = float(c_src_arr.sum())
   total_syn = float(c_syn_arr.sum())
   if total_src <= 0.0 or total_syn <= 0.0:
     return None
-  f_src = (np.cumsum(c_src_arr) / total_src)[:-1]
-  f_syn = (np.cumsum(c_syn_arr) / total_syn)[:-1]
-  p_src = (c_src_arr / total_src)[:-1]
-  return float(np.sum(p_src * np.abs(f_syn - f_src)))
+  p_src = c_src_arr / total_src
+  f_mid_src = _mid_cdf(c_src_arr, total_src)
+  f_mid_syn = _mid_cdf(c_syn_arr, total_syn)
+  return float(np.sum(p_src * np.abs(f_mid_syn - f_mid_src)))
 
 
 def decile_ks_legacy(a: Sequence[float], b: Sequence[float]) -> float:

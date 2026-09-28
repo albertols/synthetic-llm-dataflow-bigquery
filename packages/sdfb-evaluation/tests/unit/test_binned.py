@@ -21,6 +21,9 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from scipy import stats
 
 from sdfb_evaluation.stats.binned import (
@@ -73,6 +76,17 @@ def test_profile_edges_collapses_duplicates():
   assert set(np.unique(edges)) <= {0.0, 1.0}
 
 
+def test_profile_edges_empty_source_is_an_empty_array_not_a_crash():
+  # An all-NULL source column has no quantile grid at all (Ruling R17).
+  edges = profile_edges(np.array([]), bins=100)
+  assert isinstance(edges, np.ndarray)
+  assert edges.size == 0
+
+
+def test_decile_edges_empty_source_is_an_empty_array():
+  assert decile_edges(np.array([])).size == 0
+
+
 # ---------------------------------------------------------------------------
 # bin_counts
 # ---------------------------------------------------------------------------
@@ -105,6 +119,11 @@ def test_ks_bracket_none_when_a_side_is_empty():
   edges = np.array([1.0, 2.0])
   assert ks_bracket(np.array([0, 0, 0]), np.array([1, 2, 3])) is None
   assert ks_bracket(bin_counts(np.array([1.0]), edges), np.zeros(3)) is None
+
+
+def test_ks_bracket_raises_on_length_mismatch():
+  with pytest.raises(ValueError, match="same length"):
+    ks_bracket(np.array([1.0, 2.0]), np.array([1.0, 2.0, 3.0]))
 
 
 def test_ks_bracket_zero_for_identical_samples():
@@ -150,10 +169,9 @@ def test_shift_500_is_resolved():
   assert d_lo > 0.99
   assert d_hi >= d_lo
 
-  pit_edges = profile_edges(q_src, bins=1000)
-  c_src_pit = bin_counts(src, pit_edges)
-  c_syn_pit = bin_counts(syn, pit_edges)
-  assert pit_w1(c_src_pit, c_syn_pit) > 0.49
+  # pit_w1 on the SAME union grid (Ruling R16/R17: union_edges is the
+  # recommended grid for pit_w1 too, not just a source-only one).
+  assert pit_w1(c_src, c_syn) > 0.49
 
 
 def test_collapse_within_one_source_bin_is_missed_by_deciles_alone():
@@ -196,6 +214,20 @@ def test_w1_from_bins_none_when_degenerate():
                                                                    2])) is None
   assert w1_from_bins(np.array([1.0, 2.0]), np.zeros(3), np.array([1, 2,
                                                                    3])) is None
+
+
+def test_w1_from_bins_raises_on_count_length_mismatch():
+  edges = np.array([1.0, 2.0])
+  with pytest.raises(ValueError, match="same length"):
+    w1_from_bins(edges, np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0]))
+
+
+def test_w1_from_bins_raises_on_edges_counts_mismatch():
+  # edges.size + 1 counts are required; here edges has 2 entries but the
+  # counts only have 2 (should be 3).
+  edges = np.array([1.0, 2.0])
+  with pytest.raises(ValueError, match=r"edges\.size"):
+    w1_from_bins(edges, np.array([1.0, 2.0]), np.array([1.0, 2.0]))
 
 
 def test_w1_from_bins_matches_scipy_wasserstein_distance():
@@ -248,6 +280,62 @@ def test_pit_w1_in_range():
   c_b = bin_counts(b, edges)
   value = pit_w1(c_a, c_b)
   assert 0.0 <= value <= 0.5
+
+
+def test_pit_w1_raises_on_length_mismatch():
+  with pytest.raises(ValueError, match="same length"):
+    pit_w1(np.array([1.0, 2.0]), np.array([1.0, 2.0, 3.0]))
+
+
+def test_pit_w1_constant_source_synthetic_entirely_above_is_exactly_half():
+  # A single-point source (a constant column) puts all of p_src on bin 0;
+  # synthetic entirely above it (bin 1) is the maximally-disjoint case the
+  # mid-CDF formula must saturate at exactly 0.5, not overshoot past it
+  # (the CRITICAL regression: the old right-edge-CDF version gave 1.0).
+  c_src = np.array([100.0, 0.0])
+  c_syn = np.array([0.0, 100.0])
+  assert pit_w1(c_src, c_syn) == 0.5
+
+
+def test_pit_w1_symmetric_under_integer_shift():
+  # An exactly-uniform discrete column (10,000 of each digit 0-9) shifted
+  # by +1 and by -1 must give the SAME pit_w1 magnitude: the old
+  # right-edge-CDF version was asymmetric (it always credited a bin's mass
+  # to its upper edge), inflating one direction over the other.
+  source = np.repeat(np.arange(10, dtype=float), 10_000)
+  edges = np.arange(0.5, 9.5, 1.0)
+  c_src = bin_counts(source, edges)
+  c_plus = bin_counts(source + 1.0, edges)
+  c_minus = bin_counts(source - 1.0, edges)
+  value_plus = pit_w1(c_src, c_plus)
+  value_minus = pit_w1(c_src, c_minus)
+  assert math.isclose(value_plus, value_minus, rel_tol=1e-9)
+
+
+def test_pit_w1_continuous_disjoint_on_union_edges_is_near_half():
+  rng = np.random.default_rng(13)
+  a = rng.normal(loc=0.0, scale=1.0, size=20_000)
+  b = rng.normal(loc=500.0, scale=1.0, size=20_000)
+  edges = union_edges(np.quantile(a, _GRID), np.quantile(b, _GRID))
+  c_a = bin_counts(a, edges)
+  c_b = bin_counts(b, edges)
+  assert math.isclose(pit_w1(c_a, c_b), 0.5, abs_tol=1e-3)
+
+
+@settings(max_examples=200)
+@given(
+    st.lists(
+        st.integers(min_value=0, max_value=10_000), min_size=1, max_size=40),
+    st.lists(
+        st.integers(min_value=0, max_value=10_000), min_size=1, max_size=40))
+def test_pit_w1_stays_within_bounds_for_random_counts(counts_a, counts_b):
+  n = min(len(counts_a), len(counts_b))
+  c_src = np.array(counts_a[:n], dtype=float)
+  c_syn = np.array(counts_b[:n], dtype=float)
+  value = pit_w1(c_src, c_syn)
+  if value is None:
+    return
+  assert 0.0 <= value <= 0.5 + 1e-9
 
 
 # ---------------------------------------------------------------------------
