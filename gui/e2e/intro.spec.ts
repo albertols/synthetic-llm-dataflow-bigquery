@@ -156,6 +156,7 @@ test("How it works quotes DESIGN.md with figures that load and carry provenance"
 });
 
 test("reduced motion gets the rail at rest, fully lit; otherwise it plays and pauses", async ({ page }) => {
+  test.setTimeout(90_000);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
   await expect(page.getByText("Animation off: your system asks for reduced motion.")).toBeVisible();
@@ -164,6 +165,13 @@ test("reduced motion gets the rail at rest, fully lit; otherwise it plays and pa
     .locator("li[data-stage]")
     .evaluateAll((items) => items.map((li) => li.getAttribute("data-lit")));
   expect(lit).toEqual(Array(9).fill("true"));
+  // Mermaid lays out at its natural size under reduced motion too (the intro.css workaround).
+  await page.locator("#packages figure").scrollIntoViewIfNeeded();
+  const diagram = page.locator("#packages svg[id^='mermaid']");
+  await expect(diagram).toHaveCount(1, { timeout: 30_000 });
+  const viewBoxWidth = Number(((await diagram.getAttribute("viewBox")) ?? "").split(" ")[2]);
+  expect(viewBoxWidth).toBeGreaterThan(0);
+  expect(viewBoxWidth).toBeLessThan(2000);
 
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto("/");
