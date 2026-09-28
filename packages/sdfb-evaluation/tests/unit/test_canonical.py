@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import numpy as np
 
@@ -66,9 +66,48 @@ def test_canonical_value_all_bq_types():
   assert canonical_value([Decimal("1.0"), None, "x"]) == ["1", None, "x"]
 
 
-def test_canonical_value_decimal_strips_trailing_zeros_after_normalize():
+def test_canonical_value_decimal_strips_trailing_zeros():
   assert canonical_value(Decimal("10.50")) == canonical_value(Decimal("10.5"))
   assert canonical_value(Decimal("10.50")) == "10.5"
+  assert canonical_value(Decimal("1E+2")) == "100"
+
+
+def test_canonical_value_decimal_does_not_round_bignumeric_width_values():
+  # NUMERIC(38, ...): 38 significant digits. `.normalize()` would apply the
+  # ambient decimal context (28 digits by default) and silently round this.
+  thirty_eight_digits = Decimal("12345678901234567890123456789012345678")
+  assert canonical_value(thirty_eight_digits) == (
+      "12345678901234567890123456789012345678")
+
+  # BIGNUMERIC width: up to 76-77 significant digits.
+  seventy_six_digits = Decimal("1" * 76)
+  assert canonical_value(seventy_six_digits) == "1" * 76
+
+  # A fractional BIGNUMERIC-width value keeps its exact digits too.
+  whole_part = "9" * 40
+  fraction_part = "8" * 36
+  fractional = Decimal(f"{whole_part}.{fraction_part}")
+  assert canonical_value(fractional) == f"{whole_part}.{fraction_part}"
+
+
+def test_canonical_value_decimal_is_independent_of_ambient_context():
+  value = Decimal("12345678901234567890123456789012345678")
+  with localcontext() as ctx:
+    ctx.prec = 5
+    # Under the buggy `.normalize()` implementation this rounds to 5
+    # significant digits; the fix must ignore the ambient context entirely.
+    assert canonical_value(value) == ("12345678901234567890123456789012345678")
+
+
+def test_canonical_value_decimal_negative_zero_folds_to_positive_zero():
+  assert canonical_value(Decimal("-0.00")) == "0"
+  assert canonical_value(Decimal("-0")) == "0"
+  assert canonical_value(Decimal("-0")) == canonical_value(Decimal("0"))
+
+
+def test_canonical_value_float_negative_zero_folds_to_positive_zero():
+  assert canonical_value(-0.0) == 0.0
+  assert canonical_value(-0.0) == canonical_value(0.0)
 
 
 def test_canonical_value_float_rounds_to_15_significant_digits():
@@ -137,6 +176,17 @@ def test_row_digest_is_16_bytes_hex():
   digest = row_digest({"a": 1}, ["a"])
   assert len(digest) == 32
   int(digest, 16)  # does not raise
+
+
+def test_row_digest_treats_decimal_negative_zero_as_zero():
+  assert row_digest({"a": Decimal("-0.00")},
+                    ["a"]) == row_digest({"a": Decimal("0")}, ["a"])
+  assert hash64("a", Decimal("-0.00")) == hash64("a", Decimal("0"))
+
+
+def test_row_digest_treats_float_negative_zero_as_zero():
+  assert row_digest({"a": -0.0}, ["a"]) == row_digest({"a": 0.0}, ["a"])
+  assert hash64("a", -0.0) == hash64("a", 0.0)
 
 
 # ---------------------------------------------------------------------------

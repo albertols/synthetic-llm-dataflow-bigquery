@@ -68,24 +68,37 @@ def canonical_value(  # noqa: PLR0911 — type dispatch, clearer flat than neste
   """One BigQuery-relevant Python value, mapped to a type-stable form.
 
   `None`/`bool`/`int`/`str` pass through unchanged. `Decimal` becomes a
-  normalized, trailing-zero-stripped fixed-point string, so `Decimal("10.5")`
-  and `Decimal("10.50")` canonicalize identically. `float` is rounded to 15
-  significant digits (non-finite -> `None`). `datetime` becomes a UTC
-  ISO-8601 string with microseconds; a naive `datetime` is treated as
-  already UTC. `date`/`time` become their ISO string. `bytes`/`bytearray`
-  become base64 text. A `Mapping` recurses with its keys sorted; a
-  `list`/`tuple` recurses element-wise. Anything else becomes `str(v)`.
+  trailing-zero-stripped fixed-point string of its own exact digits (no
+  context rounding, so a full-width BIGNUMERIC survives), so `Decimal("10.5")`
+  and `Decimal("10.50")` canonicalize identically; every zero (`0`, `-0`,
+  `0E-10`, ...) canonicalizes to `"0"`. `float` is rounded to 15 significant
+  digits (non-finite -> `None`; every zero, including `-0.0`, -> `0.0`).
+  `datetime` becomes a UTC ISO-8601 string with microseconds; a naive
+  `datetime` is treated as already UTC. `date`/`time` become their ISO
+  string. `bytes`/`bytearray` become base64 text. A `Mapping` recurses with
+  its keys sorted; a `list`/`tuple` recurses element-wise. Anything else
+  becomes `str(v)`.
   """
   if v is None or isinstance(v, (bool, int, str)):
     return v
   if isinstance(v, Decimal):
-    text = format(v.normalize(), "f")
+    if v == 0:
+      # Also folds every negative-zero spelling (`-0`, `-0.00`, ...) onto
+      # the same "0", since they are numerically equal to positive zero.
+      return "0"
+    # No `.normalize()`: it applies the *ambient* decimal context precision
+    # (28 digits by default) and would silently round a BIGNUMERIC-width
+    # value. `format(v, "f")` renders the Decimal's own exact digits,
+    # independent of context.
+    text = format(v, "f")
     if "." in text:
       text = text.rstrip("0").rstrip(".")
     return text
   if isinstance(v, float):
     if not math.isfinite(v):
       return None
+    if v == 0:
+      return 0.0  # folds -0.0 onto 0.0 (numerically equal, same digest).
     return float(f"{v:.{_SIG_DIGITS}g}")
   if isinstance(v, datetime):
     aware = v if v.tzinfo is not None else v.replace(tzinfo=UTC)
