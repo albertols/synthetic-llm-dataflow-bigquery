@@ -64,12 +64,33 @@ export function extend<A extends Fields, B extends Fields>(base: SearchValidator
   return searchParams<Omit<A, keyof B> & B>({ ...base.fields, ...fields });
 }
 
-/** A string of at most `max` characters, optionally matching `pattern` (`z.string().check(z.maxLength, z.regex)`). */
+/** Code points, as zod 4's `maxLength` counts them: a surrogate pair is one, a lone surrogate one. */
+export function codePointLength(value: string): number {
+  let count = value.length;
+  for (let i = 0; i < value.length - 1; i += 1) {
+    if ((value.charCodeAt(i) & 0xfc00) === 0xd800 && (value.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      count -= 1;
+      i += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * A string of at most `max` code points, optionally matching `pattern`
+ * (`z.string().check(z.maxLength, z.regex)`): "🎁" counts one, as in zod 4, and a
+ * `/g` or `/y` pattern starts from 0 on every call (zod resets `lastIndex` too).
+ */
 export function text({ max, pattern }: { max?: number; pattern?: RegExp } = {}): Field<string | undefined> {
-  return (value) =>
-    typeof value === "string" && (max === undefined || value.length <= max) && (!pattern || pattern.test(value))
-      ? value
-      : undefined;
+  return (value) => {
+    if (typeof value !== "string") return undefined;
+    if (max !== undefined && value.length > max && codePointLength(value) > max) return undefined;
+    if (pattern) {
+      pattern.lastIndex = 0;
+      if (!pattern.test(value)) return undefined;
+    }
+    return value;
+  };
 }
 
 /** One of `values` (`z.enum`). */

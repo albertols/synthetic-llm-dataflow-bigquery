@@ -166,6 +166,12 @@ const BASE_VALUES: unknown[] = [
   Array.from({ length: 51 }, (_, i) => i),
   {},
   { a: 1 },
+  // Code points vs UTF-16 units: zod 4 counts "🎁" (two units) as one.
+  "🎁".repeat(120),
+  "🎁".repeat(121),
+  "🎁".repeat(200),
+  "a".repeat(119) + "🎁",
+  "\ud83c".repeat(121),
 ];
 
 function vocabulary(): unknown[] {
@@ -238,6 +244,34 @@ describe("the helpers", () => {
     expect(validate({ q: "abc", other: 1 } as never)).toEqual({ q: "abc", ids: [] });
     expect(validate({ q: "abcd", ids: ["x"] } as never)).toEqual({ ids: ["x"] });
     expect(validate({ ids: ["x", "y", "z"] } as never)).toEqual({ ids: [] });
+  });
+
+  it("text({ max }) counts code points, like zod 4", () => {
+    const three = text({ max: 3 });
+    expect(three("🎁🎁🎁")).toBe("🎁🎁🎁"); // six UTF-16 units, three code points
+    expect(three("🎁🎁🎁🎁")).toBeUndefined();
+    expect(three("a👨‍👩‍👧")).toBeUndefined(); // a ZWJ family is five code points
+    expect(three("\ud83c\ud83c\ud83c")).toBe("\ud83c\ud83c\ud83c"); // lone surrogates count one each
+    const zodThree = z.string().check(z.maxLength(3));
+    for (const v of ["🎁🎁🎁", "🎁🎁🎁🎁", "a👨‍👩‍👧", "\ud83c\ud83c\ud83c", "abc", "abcd"])
+      expect(three(v) !== undefined, JSON.stringify(v)).toBe(zodThree.safeParse(v).success);
+  });
+
+  it("text({ pattern }) gives the same answer on every call, even for a /g or /y pattern", () => {
+    for (const pattern of [/^a+$/g, /a/y]) {
+      const field = text({ pattern });
+      expect([field("aaa"), field("aaa"), field("aaa")]).toEqual(["aaa", "aaa", "aaa"]);
+      expect(field("b")).toBeUndefined();
+      expect(field("aaa")).toBe("aaa");
+    }
+  });
+
+  it("the CONFIG channel param takes a channel id and nothing else", () => {
+    const channel = (value: unknown) => config.searchSchema({ channel: value } as never).channel;
+    expect(channel("free_text")).toBe("free_text");
+    for (const bad of ["Free_Text", "free-text", "1sampling", "_x", "", "a".repeat(41), "ok ", 3, ["free_text"], null])
+      expect(channel(bad), JSON.stringify(bad)).toBeUndefined();
+    expect(channel("a".repeat(40))).toBe("a".repeat(40));
   });
 
   it("extend overrides and adds fields", () => {
