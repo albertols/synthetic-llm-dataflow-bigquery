@@ -35,7 +35,7 @@ import { metricShort } from "../lib/catalogue";
 import { ecdfChart, histogramOverlay, pairedBars, qqChart, topkItems } from "../lib/charts";
 import { fmtMetric, fmtShare, fmtSig } from "../lib/format";
 import { interpretRow } from "../lib/interpret";
-import { statusRank, type ColumnSummary } from "../lib/model";
+import { countsPhrase, countsTotal, statusRank, type ColumnSummary } from "../lib/model";
 import { niceTicks } from "../lib/scale";
 import { useChartTokens } from "../lib/tokens";
 
@@ -496,7 +496,7 @@ export function ColumnDrawer({
           </SheetTitle>
           <SheetDescription id={`${drawerId}-desc`}>
             {summary
-              ? `${summary.metrics.length} field- and column-level metrics: ${summary.counts.fail} fail, ${summary.counts.warn} warn, ${summary.counts.not_evaluated} not evaluated. Profiles load on open.`
+              ? `${countsTotal(summary.counts)} field- and column-level metrics: ${countsPhrase(summary.counts)}. Profiles load on open.`
               : "This column has no metrics in this evaluation."}
           </SheetDescription>
         </SheetHeader>

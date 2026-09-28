@@ -53,8 +53,9 @@ export function InterpretationPanel({
           <InfoHint concept="eval:interpretation" />
         </h2>
       </div>
-      <p className="max-w-4xl text-sm leading-relaxed text-text-1" data-testid="run-headline">
-        {headline}
+      <p className="max-w-4xl text-sm leading-relaxed text-text-1">
+        <span data-testid="run-headline">{headline}</span>
+        <InfoHint concept="eval:info-status" />
       </p>
       {findings.length ? (
         <>

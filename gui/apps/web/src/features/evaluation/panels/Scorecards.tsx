@@ -16,19 +16,10 @@ import { FAMILY_LABEL, FAMILY_QUESTION, isLevel, metricConcept, metricShort } fr
 import { fmtMetric, fmtScore, scopeLabel } from "../lib/format";
 import type { RunTab } from "../lib/interpret";
 import { tabFor } from "../lib/interpret";
-import type { FamilyCard, StatusCounts } from "../lib/model";
+import type { FamilyCard } from "../lib/model";
+import { StatusCounts } from "../components/StatusCounts";
 
 export type OpenTarget = { tab: RunTab; column?: string; table?: string };
-
-function Counts({ counts }: { counts: StatusCounts }) {
-  const parts = [
-    counts.fail ? `${counts.fail} fail` : null,
-    counts.warn ? `${counts.warn} warn` : null,
-    counts.not_evaluated ? `${counts.not_evaluated} n/e` : null,
-    `${counts.pass} pass`,
-  ].filter(Boolean);
-  return <span className="text-[11px] text-text-3 tabular-nums">{parts.join(" · ")}</span>;
-}
 
 function ScoreBar({ score, warn, fail }: { score: number | null; warn: number; fail: number }) {
   return (
@@ -140,11 +131,15 @@ function Card({
           ))}
         </ul>
       ) : null}
+      <p className="-mb-1 flex items-center gap-0.5 text-[11px] font-medium tracking-wide text-text-3 uppercase">
+        Metrics per level
+        <InfoHint concept="eval:info-status" />
+      </p>
       <ul className="flex flex-wrap gap-x-3 gap-y-1.5" aria-label={`${FAMILY_LABEL[card.family]} metrics per level`}>
         {card.levels.map((l) => (
           <li key={l.level} className="inline-flex items-center gap-1.5">
             {isLevel(l.level) ? <LevelChip level={l.level} size="sm" /> : <span className="text-xs">{l.level}</span>}
-            <Counts counts={l.counts} />
+            <StatusCounts counts={l.counts} />
           </li>
         ))}
       </ul>

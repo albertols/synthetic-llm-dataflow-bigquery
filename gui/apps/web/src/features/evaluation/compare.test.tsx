@@ -10,7 +10,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { MetricCell } from "@contracts/api";
 
 import { diffMetric, encodingDiffers, paretoFrontier, pairReasons, slotMap } from "./lib/compare";
-import { topMovers } from "./lib/compareCharts";
+import { radarSpec, scoreAxisFloor, topMovers } from "./lib/compareCharts";
+import { FALLBACK_TOKENS } from "./lib/tokens";
 import { comparison } from "./test/fixtures";
 import { EMPTY_PAGE, renderAt, stubApi } from "./test/harness";
 
@@ -128,6 +129,22 @@ describe("noise-aware diff", () => {
     const b = { x: 0.8, y: 0.9 };
     const c = { x: 0.7, y: 0.4 };
     expect([...paretoFrontier([a, b, c])]).toEqual([a, b]);
+  });
+
+  it("never clamps a low family score onto the radar's floor", () => {
+    expect(scoreAxisFloor([0.9, 0.5])).toBe(0.5);
+    expect(scoreAxisFloor([0.9, 0.23])).toBe(0.2);
+    expect(scoreAxisFloor([0.04])).toBe(0);
+    expect(scoreAxisFloor([null, undefined])).toBe(0.5);
+    const c = comparison({ sameVersions: true });
+    c.evaluations[0] = { ...c.evaluations[0]!, privacy_score: 0.2 };
+    const low = radarSpec(c, [0, 1], FALLBACK_TOKENS)!;
+    expect(low.floor).toBe(0.2);
+    const radar = low.option.radar as { indicator: { min: number }[] };
+    expect(radar.indicator.every((axis) => axis.min === 0.2)).toBe(true);
+    expect(low.data[0]).toMatchObject({ privacy: 0.2 });
+    const high = radarSpec(comparison({ sameVersions: true }), [0, 1], FALLBACK_TOKENS)!;
+    expect(high.floor).toBe(0.5);
   });
 
   it("picks the metrics that moved beyond noise, status changes first", () => {

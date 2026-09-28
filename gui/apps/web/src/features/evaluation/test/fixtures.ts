@@ -413,3 +413,27 @@ export function comparison(options: { sameVersions?: boolean } = {}): Comparison
     },
   };
 }
+
+/** richDetail plus a row whose status is newer than the GUI's vocabulary: INFO > 0 and "other" > 0. */
+export function countsDetail(): EvaluationDetail {
+  const detail = richDetail();
+  detail.metrics = [
+    ...detail.metrics,
+    metric("column.tvd", {
+      column_name: "state",
+      column_kind: "categorical",
+      value: 0.05,
+      status: "stale" as MetricRow["status"],
+    }),
+    metric("column.wasserstein", {
+      column_name: "age",
+      column_kind: "numeric",
+      value: 1.4,
+      score: 1.4,
+      status: "info",
+      threshold_warn: null,
+      threshold_fail: null,
+    }),
+  ];
+  return detail;
+}

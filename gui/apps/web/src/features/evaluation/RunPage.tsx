@@ -24,6 +24,7 @@ import { ApiError, useEvaluation, useEvaluations, useRelationships } from "@/lib
 import { formatCompact, formatCount, formatDateTime } from "@/lib/format";
 
 import { NoiseLegend } from "./components/NoiseLegend";
+import { StatusCounts } from "./components/StatusCounts";
 import { isRollup } from "./lib/catalogue";
 import { fmtScore, shortModel } from "./lib/format";
 import { buildGraph } from "./lib/graph";
@@ -284,7 +285,7 @@ export function EvaluationRunPage() {
                   label="Metrics failing"
                   value={derived.counts.fail}
                   format={formatCount}
-                  footnote={`${derived.counts.warn} warn · ${derived.counts.pass} pass · ${formatCount(derived.counts.fail + derived.counts.warn + derived.counts.pass + derived.counts.info + derived.counts.not_evaluated + derived.counts.other)} measured`}
+                  footnote={<StatusCounts counts={derived.counts} totalLabel="measured" hint className="text-xs" />}
                   concept="core:status"
                 />
                 <StatTile

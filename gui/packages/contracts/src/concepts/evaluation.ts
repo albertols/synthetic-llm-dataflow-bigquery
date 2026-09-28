@@ -373,6 +373,16 @@ export const concepts = defineConcepts([
     links: [{ label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" }],
   },
   {
+    id: "eval:info-status",
+    title: "INFO and other statuses",
+    purpose:
+      "An INFO row is measured but not scored against a threshold: the metric has none (catalogue score: none — Wasserstein in column units, fan-out W1, the source's own orphan rate) or the foreign key is documented (enforced: false). INFO rows count in every total and never pass or fail.",
+    interpretation: {
+      tip: "“Other status” counts rows whose status is newer than this GUI's vocabulary; they are shown as plain text wherever they appear. Every breakdown here adds up to its total.",
+    },
+    links: [catalogueLink],
+  },
+  {
     id: "eval:heatmap",
     title: "Column × metric heatmap",
     purpose:

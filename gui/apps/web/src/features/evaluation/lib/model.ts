@@ -46,6 +46,39 @@ export function countStatuses(rows: Iterable<Pick<MetricRow, "status">>): Status
   return counts;
 }
 
+/**
+ * The buckets every count breakdown shows, in display order. INFO (measured, no threshold) and
+ * "other" (a status newer than this GUI's vocabulary) are real rows: leaving them out makes a
+ * breakdown fall short of its total.
+ */
+export const COUNT_BUCKETS = [
+  { key: "fail", label: "fail" },
+  { key: "warn", label: "warn" },
+  { key: "pass", label: "pass" },
+  { key: "info", label: "info" },
+  { key: "not_evaluated", label: "not evaluated" },
+  { key: "other", label: "other status" },
+] as const satisfies readonly { key: keyof StatusCounts; label: string }[];
+
+export function countsTotal(counts: StatusCounts): number {
+  return COUNT_BUCKETS.reduce((acc, b) => acc + counts[b.key], 0);
+}
+
+/** The buckets a breakdown renders: every non-zero one, and pass always (so "0 pass" still reads). */
+export function visibleBuckets(counts: StatusCounts) {
+  return COUNT_BUCKETS.filter((b) => counts[b.key] > 0 || b.key === "pass").map((b) => ({
+    ...b,
+    count: counts[b.key],
+  }));
+}
+
+/** "13 fail, 15 warn, 350 pass, 17 info, 3 not evaluated": the parts always sum to `countsTotal`. */
+export function countsPhrase(counts: StatusCounts, separator = ", "): string {
+  return visibleBuckets(counts)
+    .map((b) => `${b.count.toLocaleString("en-US")} ${b.label}`)
+    .join(separator);
+}
+
 /** "<metric>|<table>|<column>|<column_2>|<edge>" — the same key the compare route uses. */
 export function metricKey(row: Pick<MetricRow, "metric_id" | "table_name" | "column_name" | "column_name_2" | "edge">) {
   return [row.metric_id, row.table_name, row.column_name ?? "", row.column_name_2 ?? "", row.edge ?? ""].join("|");

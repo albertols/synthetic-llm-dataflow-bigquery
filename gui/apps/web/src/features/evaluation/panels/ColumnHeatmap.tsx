@@ -18,7 +18,7 @@ import { cn } from "@/lib/cn";
 
 import { FAMILIES, FAMILY_LABEL, metricConcept, metricShort, metricTitle } from "../lib/catalogue";
 import { fmtMetric } from "../lib/format";
-import type { ColumnSummary, HeatmapModel } from "../lib/model";
+import { countsPhrase, type ColumnSummary, type HeatmapModel } from "../lib/model";
 import { isDocumentedEdge } from "../lib/reading";
 
 export const HEATMAP_PAGE = 50;
@@ -50,7 +50,7 @@ const HeatRow = memo(function HeatRow({
           type="button"
           onClick={() => onOpen(summary.key)}
           className="flex max-w-[15rem] min-w-0 cursor-pointer items-center gap-1.5 rounded-sm text-left hover:underline"
-          aria-label={`Open ${summary.key}: ${summary.counts.fail} fail, ${summary.counts.warn} warn, ${summary.counts.not_evaluated} not evaluated`}
+          aria-label={`Open ${summary.key}: ${countsPhrase(summary.counts)}`}
         >
           <span aria-hidden="true" className="w-3 shrink-0 text-center text-xs text-text-2">
             {worst?.glyph ?? "·"}

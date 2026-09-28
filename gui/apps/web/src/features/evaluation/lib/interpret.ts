@@ -12,7 +12,7 @@ import type { EvaluationDetail, MetricRow } from "@contracts/api";
 
 import { FAMILY_LABEL, isRollup, metricMeta, metricShort } from "./catalogue";
 import { fmtMetric, fmtSampleSize, fmtScore, fmtSig, scopeLabel } from "./format";
-import { countStatuses, metricKey, statusRank } from "./model";
+import { countsPhrase, countStatuses, countsTotal, metricKey, statusRank } from "./model";
 import { readingOf, type Reading } from "./reading";
 
 export type RunTab = "overview" | "columns" | "pairs" | "privacy" | "detection" | "relational" | "params";
@@ -196,7 +196,7 @@ export function headline(detail: Pick<EvaluationDetail, "evaluation" | "metrics"
   const counts = countStatuses(measured);
   const overall = metrics.find((m) => m.metric_id === "model.overall_score")?.value ?? evaluation.overall_score;
   const parts = [
-    `Overall score ${fmtScore(overall)} over ${measured.length.toLocaleString("en-US")} measured metrics: ${counts.fail} fail, ${counts.warn} warn, ${counts.pass} pass${counts.not_evaluated ? `, ${counts.not_evaluated} not evaluated` : ""}.`,
+    `Overall score ${fmtScore(overall)} over ${countsTotal(counts).toLocaleString("en-US")} measured metrics: ${countsPhrase(counts)}.`,
   ];
   const failing = measured.filter((m) => m.status === "fail");
   if (failing.length) {

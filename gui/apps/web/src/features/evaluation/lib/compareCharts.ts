@@ -150,6 +150,17 @@ export function familyScore(
   return e[key] ?? null;
 }
 
+/**
+ * The low end of a 0–1 score axis: 0.5, or lower when a score is below it —
+ * floor(min × 10) / 10 — so 0.2 and 0.5 never draw at the same radius. The
+ * table twin stays the exact carrier of every value.
+ */
+export function scoreAxisFloor(scores: readonly (number | null | undefined)[]): number {
+  const finite = scores.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (!finite.length) return 0.5;
+  return Math.max(0, Math.min(0.5, Math.floor(Math.min(...finite) * 10) / 10));
+}
+
 /** The radar of family scores for up to three runs (a fourth polygon is unreadable; the table carries all). */
 export function radarSpec(
   comparison: Pick<Comparison, "metrics" | "evaluations">,
@@ -158,13 +169,14 @@ export function radarSpec(
 ) {
   const shown = indices.slice(0, 3);
   if (!shown.length) return null;
+  const floor = scoreAxisFloor(shown.flatMap((i) => FAMILY_IDS.map((id) => familyScore(comparison, i, id))));
   const data = shown.map((i) => {
     const e = comparison.evaluations[i]!;
     return {
       name: e.evaluation_id,
       value: FAMILY_IDS.map((id) => {
         const v = familyScore(comparison, i, id);
-        return v === null ? 0 : Number(v.toFixed(4));
+        return v === null ? floor : Number(v.toFixed(4));
       }),
       lineStyle: { color: tokens.slots[i] ?? tokens.other, width: 2 },
       itemStyle: { color: tokens.slots[i] ?? tokens.other },
@@ -178,7 +190,7 @@ export function radarSpec(
     radar: {
       center: ["50%", "56%"],
       radius: "62%",
-      indicator: FAMILY_NAMES.map((name) => ({ name, min: 0.5, max: 1 })),
+      indicator: FAMILY_NAMES.map((name) => ({ name, min: floor, max: 1 })),
       axisName: { color: tokens.text2 },
     },
     series: [{ type: "radar", data, symbolSize: 6 }],
@@ -187,7 +199,7 @@ export function radarSpec(
     evaluation: comparison.evaluations[i]!.evaluation_id,
     ...Object.fromEntries(FAMILY_IDS.map((id, k) => [FAMILY_NAMES[k]!.toLowerCase(), familyScore(comparison, i, id)])),
   }));
-  return { option, data: rows };
+  return { option, data: rows, floor };
 }
 
 /** Fidelity vs privacy for the compared runs over the whole history in grey; the frontier (max both) as a step line. */
@@ -297,6 +309,7 @@ export function parallelSpec(
     key === "llm_model_uri" ? shortModel(e.llm_model_uri) : (e[key] as string | number | null);
   const params = PARALLEL_PARAMS.filter((p) => new Set(evals.map((e) => String(value(e, p.key)))).size > 1).slice(0, 6);
   const scores = ["model.overall_score", ...FAMILY_IDS];
+  const scoreFloor = scoreAxisFloor(evals.flatMap((_, i) => scores.map((id) => familyScore(comparison, i, id))));
   const axes = [
     ...params.map((p, dim) =>
       p.numeric
@@ -312,7 +325,7 @@ export function parallelSpec(
       dim: params.length + k,
       name: id.replace("model.", "").replace("_score", ""),
       type: "value" as const,
-      min: 0.5,
+      min: scoreFloor,
       max: 1,
     })),
   ];

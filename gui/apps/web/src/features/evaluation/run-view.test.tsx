@@ -8,11 +8,12 @@ import { configure, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { isRollup } from "./lib/catalogue";
 import { buildGraph } from "./lib/graph";
 import { findings, headline, interpretRow } from "./lib/interpret";
-import { columnSummaries, familyCards } from "./lib/model";
+import { columnSummaries, countStatuses, countsTotal, familyCards } from "./lib/model";
 import { explainStatus, readingOf } from "./lib/reading";
-import { evaluation, metric, profile, richDetail, tableEntry } from "./test/fixtures";
+import { countsDetail, evaluation, metric, profile, richDetail, tableEntry } from "./test/fixtures";
 import { pageOf, renderAt, stubApi } from "./test/harness";
 
 // The first render lazy-loads the route chunk and the concept batch: give async queries room.
@@ -190,5 +191,49 @@ describe("the run view", () => {
     const summaries = columnSummaries(richDetail().metrics);
     expect(summaries.map((s) => s.key)).toEqual(["users.created_at", "users.age"]);
     expect(summaries[1]!.worst).toBe("pass");
+  });
+});
+
+describe("count breakdowns add up to their totals", () => {
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+  it("the headline's buckets, INFO and other included, sum to its measured total", () => {
+    const detail = countsDetail();
+    const measured = detail.metrics.filter((m) => !isRollup(m.metric_id));
+    const counts = countStatuses(measured);
+    expect(counts.info).toBeGreaterThan(0);
+    expect(counts.other).toBe(1);
+    const match = /over ([\d,]+) measured metrics: ([^.]+)\./.exec(headline(detail))!;
+    const total = Number(match[1]!.replaceAll(",", ""));
+    const parts = match[2]!.split(", ").map((part) => Number(part.split(" ")[0]!.replaceAll(",", "")));
+    expect(total).toBe(measured.length);
+    expect(sum(parts)).toBe(total);
+    expect(match[2]).toMatch(/\d+ info/);
+    expect(match[2]).toMatch(/1 other status/);
+    expect(countsTotal(counts)).toBe(measured.length);
+  });
+
+  it("every rendered breakdown — KPI footnote and each level row — sums to its stated total", async () => {
+    const detail = countsDetail();
+    stubRun(detail);
+    renderAt("/evaluation/eval-t001");
+    await screen.findByRole("region", { name: "Tables in scope" });
+    const headlineText = (await screen.findByTestId("run-headline")).textContent ?? "";
+    const headlineTotal = Number(/over ([\d,]+) measured/.exec(headlineText)![1]!.replaceAll(",", ""));
+    const breakdowns = [...document.querySelectorAll<HTMLElement>('[data-slot="status-counts"]')];
+    // The KPI footnote plus one row per level in each of the five cards.
+    expect(breakdowns.length).toBeGreaterThan(5);
+    for (const el of breakdowns) {
+      const total = Number(el.dataset.total);
+      const counts = [...el.querySelectorAll<HTMLElement>("[data-count]")].map((b) => Number(b.dataset.count));
+      expect(sum(counts), el.textContent ?? "").toBe(total);
+      expect(el.textContent).toContain(`= ${total.toLocaleString("en-US")}`);
+    }
+    const kpi = breakdowns.find((el) => el.textContent?.includes("measured"))!;
+    expect(Number(kpi.dataset.total)).toBe(headlineTotal);
+    expect(kpi.querySelector('[data-bucket="info"]')).not.toBeNull();
+    expect(kpi.querySelector('[data-bucket="other"]')).not.toBeNull();
+    expect(breakdowns.some((el) => el !== kpi && el.querySelector('[data-bucket="info"]'))).toBe(true);
+    expect(breakdowns.some((el) => el !== kpi && el.querySelector('[data-bucket="other"]'))).toBe(true);
   });
 });

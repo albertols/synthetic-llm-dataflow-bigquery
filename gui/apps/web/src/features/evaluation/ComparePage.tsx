@@ -419,7 +419,8 @@ function ABDiff({
         </ToggleGroup>
       </div>
       <p className="text-sm text-text-2" data-testid="ab-summary">
-        B against A: <strong className="text-text-1">{counts.better} better</strong>,{" "}
+        B against A over {rows.length.toLocaleString("en-US")} metrics:{" "}
+        <strong className="text-text-1">{counts.better} better</strong>,{" "}
         <strong className="text-text-1">{counts.worse} worse</strong>, {counts.approx} ≈ within noise, {counts.same}{" "}
         identical, {counts.unjudged} not judged
         {notComparable ? ` (${notComparable} rows not comparable)` : ""}, {counts.missing + counts.not_evaluated}{" "}
@@ -840,7 +841,7 @@ export function EvaluationComparePage() {
           description={
             n > 3
               ? `The first three runs (a fourth polygon is unreadable); the table above carries all ${n}.`
-              : "Model roll-up per family; axes from 0.5 to 1."
+              : `Model roll-up per family; axes from ${charts?.radar?.floor ?? 0.5} to 1 (a missing score sits at the centre). View data has the exact values.`
           }
           option={charts?.radar?.option ?? {}}
           data={charts?.radar?.data ?? []}

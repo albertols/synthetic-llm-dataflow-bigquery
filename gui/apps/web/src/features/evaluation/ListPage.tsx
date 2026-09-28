@@ -313,14 +313,20 @@ function SortHead({
 
 function Metrics({ e }: { e: EvaluationSummary }) {
   if (e.metrics_total === null) return <span className="text-text-3">{MISSING}</span>;
+  const gated = (e.metrics_pass ?? 0) + (e.metrics_warn ?? 0) + (e.metrics_fail ?? 0) + (e.metrics_not_evaluated ?? 0);
+  const rest = e.metrics_total - gated;
+  const full = `${e.metrics_fail ?? 0} fail · ${e.metrics_warn ?? 0} warn · ${e.metrics_pass ?? 0} pass${rest > 0 ? ` · ${rest} info or other` : ""}${e.metrics_not_evaluated ? ` · ${e.metrics_not_evaluated} not evaluated` : ""} = ${e.metrics_total} metrics`;
   return (
-    <span className="text-xs whitespace-nowrap tabular-nums">
-      <span className={cn(e.metrics_fail ? "font-semibold text-status-critical-text" : "text-text-2")}>
-        {e.metrics_fail ?? 0} fail
+    <span className="text-xs whitespace-nowrap tabular-nums" title={full}>
+      <span className="sr-only">{full}</span>
+      <span aria-hidden="true">
+        <span className={cn(e.metrics_fail ? "font-semibold text-status-critical-text" : "text-text-2")}>
+          {e.metrics_fail ?? 0} fail
+        </span>
+        <span className="text-text-3"> · </span>
+        <span className="text-text-2">{e.metrics_warn ?? 0} warn</span>
+        {e.metrics_not_evaluated ? <span className="text-text-3"> · {e.metrics_not_evaluated} n/e</span> : null}
       </span>
-      <span className="text-text-3"> · </span>
-      <span className="text-text-2">{e.metrics_warn ?? 0} warn</span>
-      {e.metrics_not_evaluated ? <span className="text-text-3"> · {e.metrics_not_evaluated} n/e</span> : null}
     </span>
   );
 }
