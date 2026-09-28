@@ -19,38 +19,58 @@ the semantic authority; this module only executes it.
 - `score_value` applies one of the five score functions, mapping a value to
   `[0, 1]` (higher is better), or `None`.
 - `status_for` assigns PASS / WARN / FAIL / INFO / NOT_EVALUATED. Its order:
-  1. no value (or NaN) -> NOT_EVALUATED;
-  2. `table.pmse_ratio` whose `detail["ceiling"]` (`N / (k - 1)`) is below
-     the fail threshold -> NOT_EVALUATED: the design cannot reach a FAIL
-     (Ruling R33);
-  3. a relationship-level integrity metric on a documented edge
-     (`enforced=False`) -> INFO, never FAIL;
+  1. the gated value g is the value, or for a `uses_ci_bound` metric its CI
+     bound (`ci_low` for lower_better, `ci_high` for higher_better; Rulings
+     R1, R12). A missing or NaN g -> NOT_EVALUATED. A lift gates on its
+     bound even when its point value is None or infinite (no events on
+     either side, Ruling R38), so a clean run is not NOT_EVALUATED;
+  2. `table.pmse_ratio` without `detail["ceiling"]` (`N / (k - 1)`), or with
+     a ceiling below the fail threshold, -> NOT_EVALUATED: the design could
+     not reach a FAIL (Ruling R33);
+  3. `relationship.orphan_rate` on a documented edge (`enforced=False`) ->
+     INFO, never FAIL. Only the orphan rate: fan-out metrics compare
+     children per parent with the source whatever the enforcement, so they
+     stay graded (Ruling R42);
   4. null warn and fail -> INFO;
-  5. the gated value g is the value, or the CI bound for `uses_ci_bound`
-     metrics (`ci_low` for lower_better, `ci_high` for higher_better; a
-     missing bound -> NOT_EVALUATED, never the point estimate; Rulings R1,
-     R12); a non-finite g -> NOT_EVALUATED. A `target` metric gates on
-     d = |g - target|, its target being the catalogue's or, when that is
-     null (`column.novelty_mass`), the row's `source_value` (Ruling R9);
-     x below is d on a `target` metric and g otherwise;
-  6. warn == fail == 0 (integrity by construction): FAIL iff x > 0, else
-     PASS, and the noise floor is never applied;
-  7. otherwise crossing is inclusive (Ruling R9): lower_better and target
+  5. a `target` metric reads x = |g - target|, its target being the
+     catalogue's or, when that is null (`column.novelty_mass`), the row's
+     `source_value` (Ruling R9); x = g otherwise;
+  6. an infinite g past the bad side (+inf on lower_better and target,
+     -inf on higher_better) -> FAIL with `detail["nonfinite"]` ("+inf" or
+     "-inf"); on the good side it cannot be graded -> NOT_EVALUATED;
+  7. warn == fail == 0 (integrity by construction): FAIL iff x > 0, else
+     PASS, and the noise check is never applied;
+  8. otherwise crossing is inclusive (Ruling R9): lower_better and target
      reach a threshold at x >= threshold, higher_better at x <= threshold.
      Equality is checked with a 1e-9 relative tolerance, so `|0.9 - 1.0|`
      (0.09999999999999998 in floating point) still reaches a 0.1 warn;
-  8. a WARN or FAIL whose |g - reference| <= the row's `noise_floor` is
-     sampling noise, not a real difference (D5), and becomes PASS (the
+  9. a WARN or FAIL that sampling noise explains becomes PASS (D5: the
      brief's "past fail but below the noise floor -> PASS", applied to WARN
-     alike). The reference is the target (catalogue or `source_value`),
-     else 0 for lower_better and 1 for higher_better (Ruling R12).
+     alike), recorded as `detail["noise_downgraded_from"]`. The check
+     follows the catalogue's `noise_floor` method (Ruling R41):
+     - scalar methods (ks_two_sample, tvd_null, jsd_null, fisher_z,
+       mi_bias): noise iff |g - reference| <= the row's `noise_floor`;
+     - interval methods (wilson, newcombe, delong): noise iff
+       [`ci_low`, `ci_high`] covers the reference;
+     - rate_ratio: none beyond gating on the bound; `none`: no check.
+     When the input a check needs is missing, nothing is downgraded and
+     `detail["noise_check"] = "unavailable"`. The reference is the target
+     (catalogue or `source_value`), else 0 for lower_better and 1 for
+     higher_better (Ruling R12).
+- Producer contract (Tasks 21-25): an interval-method metric puts its
+  confidence interval in `ci_low`/`ci_high` (a folded interval for an
+  absolute difference); a scalar-method metric puts its floor in
+  `noise_floor`; a relationship metric's `table` is the CHILD table and
+  its `edge` the edge label.
 - A row's score is the score function on the same g its status read, and
-  `None` for INFO and NOT_EVALUATED rows. `score: none` is the value only
-  for aggregate ids (table.*_score, model.*); every other `score: none`
-  metric scores `None` (Ruling R26). So a noise-downgraded PASS can still
-  score low: the score measures the value, the status its significance.
+  `None` for INFO and NOT_EVALUATED rows. A noise-downgraded row scores at
+  its reference (normally 1.0; Ruling R40), so roll-ups raise no false
+  alarm on small tables, while every other row keeps its raw score. An
+  infinite g scores at the function's limit (0 on the bad side).
+  `score: none` is the value only for aggregate ids (table.*_score,
+  model.*); every other `score: none` metric scores `None` (Ruling R26).
 - `to_metric_row` writes one `evaluation_metrics` row, JSON-safe.
-- `aggregate_scores` rolls scores up over units (Ruling R11), and
+- `aggregate_scores` rolls scores up over units (Ruling R11) and
   `headline_counts` counts statuses so that they reconcile with the total.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
@@ -81,12 +101,17 @@ MODEL_KEY = "__model__"
 # The four measured families; `overall` is the roll-up family.
 FAMILIES: tuple[str, ...] = ("fidelity", "privacy", "integrity", "diversity")
 OVERALL = "overall"
-# Per table (and model): how many non-aggregate integrity rows FAILed, so a
-# caller can show a FAIL badge whatever the averages say.
+# Per table (and model): how many zero-tolerance integrity rows (warn ==
+# fail == 0: duplicate keys, orphans on enforced edges) FAILed, so a caller
+# can show a FAIL badge whatever the averages say (Ruling R39).
 INTEGRITY_FAIL = "integrity_fail"
 
+SCALAR_NOISE_METHODS = frozenset(
+    {"ks_two_sample", "tvd_null", "jsd_null", "fisher_z", "mi_bias"})
+INTERVAL_NOISE_METHODS = frozenset({"wilson", "newcombe", "delong"})
+
 _PMSE_ID = "table.pmse_ratio"
-_PMSE_REASON = "ceiling below fail threshold"
+_ORPHAN_ID = "relationship.orphan_rate"
 _REL_TOL = 1e-9  # tolerance for "at the threshold" (inclusive crossing)
 _UNSCORED = (Status.INFO, Status.NOT_EVALUATED)
 
@@ -94,6 +119,15 @@ _UNSCORED = (Status.INFO, Status.NOT_EVALUATED)
 @functools.cache
 def _catalogue() -> Catalogue:
   return load_catalogue()
+
+
+@functools.cache
+def _zero_tolerance_ids() -> frozenset[str]:
+  """The integrity metrics with warn == fail == 0, from the catalogue."""
+  return frozenset(
+      metric.id
+      for metric in _catalogue().metrics
+      if metric.family == "integrity" and metric.warn == 0 and metric.fail == 0)
 
 
 def is_aggregate(metric_id: str) -> bool:
@@ -137,13 +171,13 @@ def score_value(  # noqa: PLR0911 — score-function dispatch, clearer flat than
   `target` is used only when the catalogue's target is null (the row's
   `source_value` for `column.novelty_mass`); without either a target
   metric has no score. For a `uses_ci_bound` metric pass the CI bound its
-  status gates on, not the point estimate. `None`, NaN or an infinite
-  value scores `None`.
+  status gates on, not the point estimate. `None` or NaN scores `None`; an
+  infinite value scores the function's limit (0 on the bad side).
 
   Raises:
     ValueError: a `complement` metric without a positive range top.
   """
-  if value is None or not math.isfinite(value):
+  if value is None or math.isnan(value):
     return None
   fn = metric.score_fn
   if fn == "none":
@@ -169,11 +203,15 @@ def score_value(  # noqa: PLR0911 — score-function dispatch, clearer flat than
 
 
 class _Assessment(NamedTuple):
-  """A status, the reason behind it and the numbers the score reads."""
+  """A status, the detail keys that explain it and what the score reads."""
   status: Status
-  reason: str | None = None
-  gated: float | None = None  # the value (or CI bound) status read
+  notes: dict[str, Any] | None = None  # merged into the row's `detail`
+  score_at: float | None = None  # g, or the reference after a downgrade
   target: float | None = None  # the effective target of a `target` metric
+
+
+def _not_evaluated(reason: str) -> _Assessment:
+  return _Assessment(Status.NOT_EVALUATED, {"reason": reason})
 
 
 def _reached(x: float, threshold: float | None, higher_better: bool) -> bool:
@@ -186,7 +224,7 @@ def _reached(x: float, threshold: float | None, higher_better: bool) -> bool:
 
 
 def _noise_reference(metric: Metric, target: float | None) -> float:
-  """What a value is compared with for the D5 noise floor (Ruling R12)."""
+  """What a value is compared with for the D5 noise check (Ruling R12)."""
   if target is not None:
     return target
   if metric.target is not None:
@@ -194,49 +232,65 @@ def _noise_reference(metric: Metric, target: float | None) -> float:
   return 1.0 if metric.direction == "higher_better" else 0.0
 
 
-def _not_evaluated(reason: str) -> _Assessment:
-  return _Assessment(Status.NOT_EVALUATED, reason)
+def _is_noise(metric: Metric, mv: MetricValue, gated: float,
+              reference: float) -> bool | None:
+  """Whether sampling noise explains g (Ruling R41); None when it cannot tell.
 
-
-def _gate(metric: Metric, mv: MetricValue) -> _Assessment | float:
-  """The value status reads (step 5), or a NOT_EVALUATED assessment."""
-  if not metric.uses_ci_bound:
-    gated = mv.value
-    name = "value"
-  elif metric.direction == "target":
-    raise ValueError(f"{metric.id}: uses_ci_bound needs a one-sided direction")
-  elif metric.direction == "higher_better":
-    gated, name = mv.ci_high, "ci_high"
-  else:
-    gated, name = mv.ci_low, "ci_low"
-  if gated is None:
-    return _not_evaluated(
-        f"{name} missing: {metric.id} gates on its confidence bound")
-  if not math.isfinite(gated):
-    return _not_evaluated(f"non-finite {name} ({gated!r})")
-  return float(gated)
-
-
-def _grade(metric: Metric, x: float, gated: float, target: float | None,
-           floor: float | None) -> Status:
-  """Steps 6-8: the integrity rule, inclusive crossings, the D5 noise floor.
-
-  `x` is what the thresholds read: d = |gated - target| on a `target`
-  metric, else `gated` itself.
+  Returns False for the methods with no check (rate_ratio, none).
   """
+  method = metric.noise_floor
+  if method in SCALAR_NOISE_METHODS:
+    floor = mv.noise_floor
+    if floor is None or math.isnan(floor):
+      return None
+    return abs(gated - reference) <= floor
+  if method in INTERVAL_NOISE_METHODS:
+    low, high = mv.ci_low, mv.ci_high
+    if low is None or high is None or math.isnan(low) or math.isnan(high):
+      return None
+    return low <= reference <= high
+  return False
+
+
+def _gated(metric: Metric, mv: MetricValue) -> tuple[str, float | None, str]:
+  """Step 1: the name and value of what status reads (None or NaN when it
+  cannot be read) and the reason to give in that case."""
+  if not metric.uses_ci_bound:
+    missing = "no value computed" if mv.value is None else "value is NaN"
+    return "value", mv.value, missing
+  if metric.direction == "target":
+    raise ValueError(f"{metric.id}: uses_ci_bound needs a one-sided direction")
+  name = "ci_high" if metric.direction == "higher_better" else "ci_low"
+  bound = getattr(mv, name)
+  if bound is None or math.isnan(bound):
+    return name, None, f"{name} missing: {metric.id} gates on its confidence bound"
+  point_missing = mv.value is None or not math.isfinite(mv.value)
+  if point_missing and not math.isfinite(bound):
+    return name, None, f"neither the value nor {name} is finite"
+  return name, float(bound), ""
+
+
+def _grade(metric: Metric, mv: MetricValue, gated: float, x: float,
+           target: float | None) -> _Assessment:
+  """Steps 7-9: the integrity rule, inclusive crossings, the D5 noise check."""
   if metric.warn == 0 and metric.fail == 0:
-    return Status.FAIL if x > 0 else Status.PASS
+    status = Status.FAIL if x > 0 else Status.PASS
+    return _Assessment(status, None, gated, target)
   higher_better = metric.direction == "higher_better"
   if _reached(x, metric.fail, higher_better):
     status = Status.FAIL
   elif _reached(x, metric.warn, higher_better):
     status = Status.WARN
   else:
-    return Status.PASS
-  if (floor is not None and math.isfinite(floor) and
-      abs(gated - _noise_reference(metric, target)) <= floor):
-    return Status.PASS
-  return status
+    return _Assessment(Status.PASS, None, gated, target)
+  reference = _noise_reference(metric, target)
+  noise = _is_noise(metric, mv, gated, reference)
+  if noise is None:
+    return _Assessment(status, {"noise_check": "unavailable"}, gated, target)
+  if noise:
+    notes = {"noise_downgraded_from": status.value}
+    return _Assessment(Status.PASS, notes, reference, target)
+  return _Assessment(status, None, gated, target)
 
 
 def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
@@ -245,22 +299,21 @@ def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
   if mv.metric_id != metric.id:
     raise ValueError(
         f"metric value {mv.metric_id!r} scored against catalogue {metric.id!r}")
-  if mv.value is None or math.isnan(mv.value):
-    fallback = "no value computed" if mv.value is None else "value is NaN"
-    return _not_evaluated(str(mv.detail.get("reason") or fallback))
-  ceiling = mv.detail.get("ceiling")
-  if (metric.id == _PMSE_ID and ceiling is not None and
-      metric.fail is not None and float(ceiling) < metric.fail):
-    return _not_evaluated(_PMSE_REASON)
-  if (not enforced and metric.level == "relationship" and
-      metric.family == "integrity"):
+  name, gated, missing = _gated(metric, mv)
+  if gated is None or math.isnan(gated):
+    return _not_evaluated(str(mv.detail.get("reason") or missing))
+  if metric.id == _PMSE_ID:
+    ceiling = mv.detail.get("ceiling")
+    if ceiling is None or math.isnan(float(ceiling)):
+      return _not_evaluated("pmse ceiling missing")
+    if metric.fail is not None and float(ceiling) < metric.fail:
+      return _not_evaluated("ceiling below fail threshold")
+  if metric.id == _ORPHAN_ID and not enforced:
     return _Assessment(
-        Status.INFO, "documented edge (enforced: false): reported, not gated")
+        Status.INFO,
+        {"reason": "documented edge (enforced: false): reported, not gated"})
   if metric.warn is None and metric.fail is None:
     return _Assessment(Status.INFO)
-  gated = _gate(metric, mv)
-  if isinstance(gated, _Assessment):
-    return gated
   target = None
   x = gated
   if metric.direction == "target":
@@ -268,8 +321,15 @@ def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
     if target is None or not math.isfinite(target):
       return _not_evaluated("no target: source_value missing or non-finite")
     x = abs(gated - target)
-  status = _grade(metric, x, gated, target, mv.noise_floor)
-  return _Assessment(status, None, gated, target)
+  if math.isinf(gated):
+    sign = "+inf" if gated > 0 else "-inf"
+    bad_side = (
+        metric.direction == "target" or
+        (gated > 0) != (metric.direction == "higher_better"))
+    if not bad_side:
+      return _not_evaluated(f"{name} is {sign}, on the good side")
+    return _Assessment(Status.FAIL, {"nonfinite": sign}, gated, target)
+  return _grade(metric, mv, gated, x, target)
 
 
 def status_for(metric: Metric,
@@ -278,8 +338,8 @@ def status_for(metric: Metric,
                enforced: bool = True) -> Status:
   """`mv`'s status under `metric`'s catalogue entry (D5; see module docstring).
 
-  `enforced=False` marks a documented foreign-key edge: its integrity
-  metrics (orphan rates) are reported as INFO, never gated.
+  `enforced=False` marks a documented foreign-key edge: its orphan rate is
+  reported as INFO, never gated (Ruling R42).
 
   Raises:
     ValueError: `mv.metric_id` is not `metric.id`.
@@ -308,6 +368,21 @@ def _plain(obj: Any) -> Any:
   return obj
 
 
+def _timestamp(evaluated_at: datetime | str) -> str:
+  """`evaluated_at` as UTC ISO-8601 with microseconds (naive = UTC).
+
+  Raises:
+    ValueError: a string that is not ISO-8601.
+  """
+  if isinstance(evaluated_at, str):
+    try:
+      evaluated_at = datetime.fromisoformat(evaluated_at)
+    except ValueError as exc:
+      raise ValueError(
+          f"evaluated_at is not ISO-8601: {evaluated_at!r}") from exc
+  return str(canonical_value(evaluated_at))
+
+
 def to_metric_row(mv: MetricValue,
                   *,
                   evaluation_id: str,
@@ -321,29 +396,28 @@ def to_metric_row(mv: MetricValue,
   `noise_floor_method` come from the catalogue; `table`/`column`/
   `column_2` map to `table_name`/`column_name`/`column_name_2` (Ruling
   R15). A relationship row is the child table's (`mv.table`), labelled by
-  `mv.edge`. Every NOT_EVALUATED row carries `detail["reason"]` (the
-  producer's own when it gave one), and a documented edge's INFO row says
-  so there too. `evaluated_at` may be a `datetime` (written as UTC ISO-8601
-  with microseconds). Non-finite floats become `None` (`json_safe`), so the
-  row can go straight to a BigQuery load job.
+  `mv.edge`. `detail` gains the keys that explain the status: `reason` on
+  every NOT_EVALUATED row (the producer's own when it gave one) and on a
+  documented edge's INFO row, `noise_downgraded_from`, `noise_check` and
+  `nonfinite` (see the module docstring). `evaluated_at` is a `datetime`
+  or an ISO-8601 string, written as UTC ISO-8601 with microseconds.
+  Non-finite floats become `None` (`json_safe`), so the row can go straight
+  to a BigQuery load job.
 
   Raises:
     KeyError: `mv.metric_id` is not in the catalogue.
+    ValueError: `evaluated_at` is a string that is not ISO-8601.
   """
   metric = _catalogue().get(mv.metric_id)
   assessment = _assess(metric, mv, enforced)
   detail = dict(mv.detail)
-  if assessment.reason is not None:
-    detail["reason"] = assessment.reason
+  detail.update(assessment.notes or {})
   score = None
   if assessment.status not in _UNSCORED:
-    score = score_value(metric, assessment.gated, target=assessment.target)
-  when = (
-      canonical_value(evaluated_at)
-      if isinstance(evaluated_at, datetime) else evaluated_at)
+    score = score_value(metric, assessment.score_at, target=assessment.target)
   row = {
       "evaluation_id": evaluation_id,
-      "evaluated_at": when,
+      "evaluated_at": _timestamp(evaluated_at),
       "table_name": mv.table,
       "landing_table": landing_table,
       "source_table": source_table,
@@ -408,32 +482,41 @@ def aggregate_scores(
     rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
   """Family and overall scores per table and for the model (Ruling R11).
 
-  `rows` are `to_metric_row` rows. A table's family score is the mean over
-  UNITS with at least one scored row in that family: each column (the mean
-  of its field and column scores), the pair group (one unit), each
-  row-level metric, each non-aggregate table-level metric and each edge the
-  table is the child of (one unit, keyed by `edge`). Aggregate ids never
-  feed themselves, `None` scores are skipped and a unit with none left
-  does not count. `overall` is the mean of the available family scores.
+  `rows` are `to_metric_row` rows. Aggregate rows (table.*_score, model.*)
+  are skipped entirely: they never feed a score and never create a table.
+  A table's family score is the mean over UNITS with at least one scored
+  row in that family: each column (the mean of its field and column
+  scores), the pair group (one unit), each row-level metric, each
+  non-aggregate table-level metric and each edge the table is the child of
+  (one unit, keyed by `edge`). `None` scores are skipped and a unit with
+  none left does not count. `overall` is the mean of the available family
+  scores.
 
   Returns `{table: {fidelity, privacy, integrity, diversity, overall,
   integrity_fail}, MODEL_KEY: {...}}`, tables sorted by name. A family
   with no unit is `None`. The model's family score is the mean of the
   tables' family scores and its overall the mean of its family scores.
-  `integrity_fail` counts the non-aggregate integrity rows with status
-  FAIL (summed for the model), so a caller can show a FAIL badge whatever
-  the averages say.
+  `integrity_fail` counts the FAILed zero-tolerance integrity rows (warn ==
+  fail == 0 in the catalogue: duplicate keys and orphans on enforced
+  edges; Ruling R39), summed for the model, so a caller can show a FAIL
+  badge whatever the averages say.
+
+  Raises:
+    ValueError: a non-aggregate row without a `table_name`.
   """
   units: dict[str, dict[str, dict[tuple[str, str | None], list[float]]]] = (
       defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
   fails: dict[str, int] = defaultdict(int)
-  tables: set[str] = set()  # every table seen, scored rows or not
+  tables: set[str] = set()  # every table with a measured row, scored or not
   for row in rows:
-    table = row["table_name"]
-    tables.add(table)
     if is_aggregate(row["metric_id"]):
       continue
-    if row["family"] == "integrity" and row["status"] == Status.FAIL:
+    table = row["table_name"]
+    if table is None:
+      raise ValueError(f"{row['metric_id']} row has no table_name")
+    tables.add(table)
+    if (row["metric_id"] in _zero_tolerance_ids() and
+        row["status"] == Status.FAIL):
       fails[table] += 1
     score = row.get("score")
     if score is not None and math.isfinite(score):
@@ -458,10 +541,14 @@ def aggregate_scores(
 
 
 def headline_counts(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-  """How many rows have each status, plus `total`.
+  """How many measured rows have each status, plus `total`.
 
-  Every `Status` value is a key, zero included, so the counts always sum to
-  `total` (info and not_evaluated rows included).
+  Aggregate rows (table.*_score, table.column_shape_score,
+  table.pair_trend_score, model.*) are excluded: they restate the measured
+  rows, so counting them would double-count a run's verdicts. Every
+  `Status` value is a key, zero included, so pass + warn + fail + info +
+  not_evaluated always equals `total`. The keys feed the registry's
+  `metrics_<key>` columns (Ruling R37).
 
   Raises:
     ValueError: a row's status is not a `Status` value.
@@ -469,6 +556,8 @@ def headline_counts(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
   counts = {status.value: 0 for status in Status}
   total = 0
   for row in rows:
+    if is_aggregate(row["metric_id"]):
+      continue
     status = row["status"]
     if status not in counts:
       raise ValueError(f"unknown status {status!r}")

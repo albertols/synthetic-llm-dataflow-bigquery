@@ -55,8 +55,9 @@
 #                 warn 0 / fail 0: integrity by construction, FAIL iff
 #                 value > 0 (PASS at exactly 0);
 #                 null / null: INFO only.
-#                 A FAIL also needs the value to clear its noise floor
-#                 relative to the noise reference (see target, D5).
+#                 A WARN or FAIL also needs the value to clear sampling
+#                 noise relative to the noise reference (see target and
+#                 noise_floor, D5); otherwise it is PASS.
 #                 source: literature | repo-continuity | heuristic, or none
 #                 when there are no thresholds.
 #   score         maps the value to [0, 1], higher = better (Ruling R10):
@@ -70,9 +71,18 @@
 #                 auc          = 1 - 2 max(0, v - 0.5);
 #                 none         = v when 0 <= v <= 1, else null (a roll-up
 #                                score is its own score).
+#                 A row whose WARN or FAIL D5 attributes to sampling noise
+#                 is scored at its noise reference (normally 1, Ruling
+#                 R40); every other row keeps the function's score.
 #   noise_floor   the method sizing sampling noise: ks_two_sample | wilson |
 #                 newcombe | tvd_null | jsd_null | fisher_z | mi_bias |
-#                 rate_ratio | delong | none (D5).
+#                 rate_ratio | delong | none (D5, Ruling R41). The scalar
+#                 methods (ks_two_sample, tvd_null, jsd_null, fisher_z,
+#                 mi_bias) call a difference noise when |value - reference|
+#                 <= the row's noise_floor; the interval methods (wilson,
+#                 newcombe, delong) when [ci_low, ci_high] covers the
+#                 reference; rate_ratio metrics gate on their CI bound
+#                 with no further check.
 #   n_dependent   the raw value moves with sample size, so it is computed at
 #                 matched n (D5).
 #   baseline      the row also stores baseline_value = metric(R, source): the

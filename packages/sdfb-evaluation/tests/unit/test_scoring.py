@@ -18,6 +18,8 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import json
 import math
 from datetime import UTC, datetime
@@ -36,6 +38,7 @@ from sdfb_evaluation.scoring import is_aggregate
 from sdfb_evaluation.scoring import score_value
 from sdfb_evaluation.scoring import status_for
 from sdfb_evaluation.scoring import to_metric_row
+from sdfb_evaluation.stats.noise import rate_ratio
 from sdfb_evaluation.types import Method
 from sdfb_evaluation.types import MetricValue
 from sdfb_evaluation.types import Status
@@ -179,11 +182,20 @@ def test_score_integrity_zero_threshold_is_a_step():
   assert score_value(pk, 1e-9) == 0.0
 
 
-@pytest.mark.parametrize("value", [None, math.nan, math.inf, -math.inf])
-def test_score_missing_or_non_finite_is_none(value):
+@pytest.mark.parametrize("value", [None, math.nan])
+def test_score_missing_or_nan_is_none(value):
   for metric_id in ("column.ks", "column.jsd", "column.std_ratio",
                     "table.detection_auc", "table.fidelity_score"):
     assert score_value(_metric(metric_id), value) is None
+
+
+def test_score_infinite_is_the_limit():
+  for metric_id in ("column.ks", "column.jsd", "column.std_ratio",
+                    "table.detection_auc", "table.pmse_ratio"):
+    assert score_value(_metric(metric_id), math.inf) == 0.0, metric_id
+  assert score_value(_metric("field.category_adherence"), -math.inf) == 0.0
+  assert score_value(_metric("column.std_ratio"), -math.inf) == 0.0
+  assert score_value(_metric("table.fidelity_score"), math.inf) is None
 
 
 # ---------------------------------------------------------------------------
@@ -270,16 +282,128 @@ def test_status_noise_floor_non_finite_is_ignored():
   assert _status("column.ks", 0.25, noise_floor=math.nan) == Status.FAIL
 
 
-def test_status_noise_reference_is_the_catalogue_target():
-  # detection_auc target 0.5: |0.9 - 0.5| = 0.4 is what the floor sees.
-  assert _status("table.detection_auc", 0.9, noise_floor=0.45) == Status.PASS
-  assert _status("table.detection_auc", 0.9, noise_floor=0.3) == Status.FAIL
-
-
 def test_status_noise_reference_null_target_higher_better_is_one():
-  # row.coverage: fail 0.7, reference 1 -> |0.6 - 1| = 0.4.
-  assert _status("row.coverage", 0.6, noise_floor=0.45) == Status.PASS
-  assert _status("row.coverage", 0.6, noise_floor=0.3) == Status.FAIL
+  # No catalogue metric pairs a null-target higher_better entry with a noise
+  # method, so give row.coverage a scalar one: fail 0.7, reference 1, so
+  # the floor sees |0.6 - 1| = 0.4.
+  metric = dataclasses.replace(
+      _metric("row.coverage"), noise_floor="ks_two_sample")
+  mv = _mv("row.coverage", 0.6, noise_floor=0.45)
+  assert status_for(metric, mv) == Status.PASS
+  mv = _mv("row.coverage", 0.6, noise_floor=0.3)
+  assert status_for(metric, mv) == Status.FAIL
+
+
+def test_noise_downgrade_is_recorded_and_scored_at_the_reference():
+  row = _row_of(_mv("column.ks", 0.25, column="amount", noise_floor=0.3))
+  assert row["status"] == "pass"
+  assert row["detail"] == {"noise_downgraded_from": "fail"}
+  assert row["score"] == 1.0  # scored at the reference 0, not at 0.25
+  row = _row_of(_mv("column.ks", 0.15, column="amount", noise_floor=0.2))
+  assert row["detail"] == {"noise_downgraded_from": "warn"}
+  assert row["score"] == 1.0
+
+
+def test_a_real_difference_keeps_its_raw_score():
+  row = _row_of(_mv("column.ks", 0.25, column="amount", noise_floor=0.1))
+  assert row["status"] == "fail"
+  assert row["score"] == pytest.approx(0.75)  # complement on 0.25
+  assert row["detail"] is None
+  assert _row_of(_mv("column.ks", 0.01, column="amount"))["detail"] is None
+
+
+def test_interval_wilson_covering_the_reference_is_noise():
+  # category_adherence: higher_better, fail 0.95, reference (target) 1.
+  row = _row_of(_mv("field.category_adherence", 0.9, ci_low=0.7, ci_high=1.0))
+  assert row["status"] == "pass"
+  assert row["detail"]["noise_downgraded_from"] == "fail"
+  assert row["score"] == 1.0
+  row = _row_of(_mv("field.category_adherence", 0.9, ci_low=0.85, ci_high=0.95))
+  assert row["status"] == "fail"
+  assert row["score"] == 0.0
+  # lower_better, null target: the reference is 0
+  assert _status(
+      "row.exact_match_rate", 0.01, ci_low=0.0, ci_high=0.05) == Status.PASS
+  assert _status(
+      "row.exact_match_rate", 0.01, ci_low=0.002, ci_high=0.05) == Status.FAIL
+
+
+def test_interval_newcombe_covering_zero_is_noise():
+  delta = "column.null_rate_delta"  # warn 0.02, fail 0.05
+  assert _status(delta, 0.06, ci_low=0.0, ci_high=0.1) == Status.PASS
+  assert _status(delta, 0.06, ci_low=0.03, ci_high=0.09) == Status.FAIL
+  row = _row_of(_mv(delta, 0.03, ci_low=-0.01, ci_high=0.05))
+  assert row["detail"]["noise_downgraded_from"] == "warn"
+  assert _status(delta, 0.03, ci_low=0.01, ci_high=0.05) == Status.WARN
+
+
+def test_interval_delong_covering_one_half_is_noise():
+  # detection_auc: fail 0.85, reference (target) 0.5.
+  auc = "table.detection_auc"
+  assert _status(auc, 0.9, ci_low=0.45, ci_high=0.95) == Status.PASS
+  assert _status(auc, 0.9, ci_low=0.8, ci_high=0.95) == Status.FAIL
+
+
+def test_interval_method_without_ci_is_unavailable_whatever_the_floor():
+  row = _row_of(_mv("field.category_adherence", 0.9, noise_floor=10.0))
+  assert row["status"] == "fail"
+  assert row["detail"] == {"noise_check": "unavailable"}
+  row = _row_of(_mv("field.category_adherence", 0.9, ci_low=0.7))
+  assert row["detail"] == {"noise_check": "unavailable"}
+
+
+def test_scalar_method_without_floor_is_unavailable():
+  row = _row_of(_mv("column.ks", 0.25, column="amount"))
+  assert row["status"] == "fail"
+  assert row["detail"] == {"noise_check": "unavailable"}
+  # a CI does not stand in for a scalar floor
+  row = _row_of(_mv("column.ks", 0.25, ci_low=0.0, ci_high=0.5))
+  assert row["status"] == "fail"
+
+
+def test_rate_ratio_and_none_methods_have_no_noise_check():
+  row = _row_of(
+      _mv("row.memorization_lift",
+          8.0,
+          ci_low=6.0,
+          ci_high=20.0,
+          noise_floor=100.0))
+  assert row["status"] == "fail"
+  assert row["detail"] is None
+  row = _row_of(_mv("column.pit_w1", 0.2, column="amount", noise_floor=1.0))
+  assert row["status"] == "fail"
+  assert row["detail"] is None
+
+
+def test_noise_downgraded_small_table_does_not_warn():
+  edge = "orders.user_id->users.id"
+  mvs = [
+      _mv("column.ks", 0.3, column="a", noise_floor=0.35),
+      _mv("field.category_adherence", 0.9, column="a", ci_low=0.7, ci_high=1.0),
+      _mv("column.null_rate_delta", 0.08, column="b", ci_low=0.0, ci_high=0.2),
+      _mv("column.top1_share_delta", 0.2, column="b", ci_low=0.0, ci_high=0.3),
+      _mv("pair.pearson_delta", 0.25, column="a", column_2="b",
+          noise_floor=0.3),
+      _mv("row.exact_match_rate", 0.01, ci_low=0.0, ci_high=0.05),
+      _mv("row.null_pattern_tvd", 0.25, noise_floor=0.3),
+      _mv("table.detection_auc", 0.9, ci_low=0.4, ci_high=0.99),
+      _mv("relationship.fanout_tvd", 0.3, edge=edge, noise_floor=0.35),
+      _mv("relationship.zero_child_share_delta",
+          0.1,
+          edge=edge,
+          ci_low=0.0,
+          ci_high=0.2),
+  ]
+  rows = [_row_of(mv) for mv in mvs]
+  for row in rows:
+    assert row["status"] == "pass", row["metric_id"]
+    assert row["detail"]["noise_downgraded_from"] == "fail", row["metric_id"]
+  rows.append(_row_of(_mv("table.pk_duplicate_rate", 0.0)))
+  table = aggregate_scores(rows)["orders"]
+  for family in _FAMILIES:
+    family_id = f"table.{family}_score"
+    assert status_for(_metric(family_id),
+                      _mv(family_id, table[family])) == Status.PASS, family
 
 
 def test_status_lift_gates_on_ci_low():
@@ -302,6 +426,39 @@ def test_status_holdout_share_gates_on_ci_low():
   share = "row.dcr_train_holdout_share"
   assert _status(share, 0.7, ci_low=0.52, ci_high=0.8) == Status.PASS
   assert _status(share, 0.7, ci_low=0.62, ci_high=0.8) == Status.FAIL
+
+
+_LIFTS = tuple(m.id for m in CAT.metrics if m.noise_floor == "rate_ratio")
+
+
+def test_the_lifts_are_the_rate_ratio_ci_bound_metrics():
+  assert len(_LIFTS) == 5
+  assert all(_metric(metric_id).uses_ci_bound for metric_id in _LIFTS)
+
+
+@pytest.mark.parametrize("metric_id", _LIFTS)
+def test_clean_run_lift_gates_on_its_bound(metric_id):
+  # No copies on either side: the ratio is undefined, the interval (0, inf).
+  ratio, low, high = rate_ratio(0, 10000, 0, 10000)
+  assert ratio is None
+  row = _row_of(_mv(metric_id, ratio, ci_low=low, ci_high=high))
+  assert row["status"] == "pass"
+  assert row["score"] == 1.0
+  assert row["value"] is None
+  assert row["ci_low"] == 0.0
+  assert row["ci_high"] is None  # inf is written as NULL
+
+
+def test_lift_with_a_nan_point_still_gates_on_its_bound():
+  lift = "row.memorization_lift"
+  assert _status(lift, math.nan, ci_low=1.5, ci_high=3.0) == Status.PASS
+  assert _status(lift, math.nan, ci_low=6.0, ci_high=9.0) == Status.FAIL
+
+
+def test_lift_without_a_finite_value_or_bound_is_not_evaluated():
+  row = _row_of(_mv("row.memorization_lift", None, ci_low=math.inf))
+  assert row["status"] == "not_evaluated"
+  assert "ci_low" in row["detail"]["reason"]
 
 
 def test_status_ci_bound_missing_is_not_evaluated_with_reason():
@@ -328,9 +485,14 @@ def test_status_documented_edge_is_info():
       "relationship.orphan_rate", 0.3, enforced=False, **kw) == Status.INFO
   assert _status(
       "relationship.orphan_rate", 0.3, enforced=True, **kw) == Status.FAIL
-  # only integrity metrics of the edge turn INFO; fan-out is still graded
+  # R42: only the orphan rate turns INFO; fan-out stays graded as fidelity
   assert _status(
       "relationship.fanout_tvd", 0.5, enforced=False, **kw) == Status.FAIL
+  assert _status(
+      "relationship.fanout_mean_ratio", 1.5, enforced=False,
+      **kw) == Status.FAIL
+  assert _status(
+      "relationship.parent_coverage", 0.5, enforced=False, **kw) == Status.FAIL
 
 
 def test_documented_edge_row_is_info_with_null_score():
@@ -355,6 +517,15 @@ def test_status_pmse_ceiling_below_fail_is_not_evaluated(
       "table.pmse_ratio", value, detail={"ceiling": ceiling}) == expected
 
 
+def test_status_pmse_without_ceiling_is_not_evaluated():
+  row = _row_of(_mv("table.pmse_ratio", 2.0))
+  assert row["status"] == "not_evaluated"
+  assert row["detail"]["reason"] == "pmse ceiling missing"
+  assert _status(
+      "table.pmse_ratio", 2.0,
+      detail={"ceiling": math.nan}) == Status.NOT_EVALUATED
+
+
 def test_pmse_ceiling_row_carries_reason_and_no_score():
   row = _row_of(_mv("table.pmse_ratio", 2.0, detail={"ceiling": 5.0, "k": 4}))
   assert row["status"] == "not_evaluated"
@@ -363,12 +534,37 @@ def test_pmse_ceiling_row_carries_reason_and_no_score():
   assert row["score"] is None
 
 
-def test_status_non_finite_value_is_not_evaluated():
-  assert _status("column.ks", math.nan) == Status.NOT_EVALUATED
-  assert _status("column.ks", math.inf) == Status.NOT_EVALUATED
-  row = _row_of(_mv("column.ks", math.inf))
-  assert row["detail"]["reason"]
+def test_status_nan_value_is_not_evaluated():
+  row = _row_of(_mv("column.ks", math.nan))
+  assert row["status"] == "not_evaluated"
+  assert row["detail"]["reason"] == "value is NaN"
   assert row["value"] is None
+
+
+@pytest.mark.parametrize(("metric_id", "value", "sign"), [
+    ("column.ks", math.inf, "+inf"),
+    ("table.pmse_ratio", math.inf, "+inf"),
+    ("field.category_adherence", -math.inf, "-inf"),
+    ("column.std_ratio", math.inf, "+inf"),
+    ("column.std_ratio", -math.inf, "-inf"),
+])
+def test_status_infinite_past_the_bad_side_is_fail(metric_id, value, sign):
+  row = _row_of(_mv(metric_id, value, detail={"ceiling": 1e6}))
+  assert row["status"] == "fail"
+  assert row["detail"]["nonfinite"] == sign
+  assert row["score"] == 0.0
+  assert row["value"] is None
+
+
+@pytest.mark.parametrize(("metric_id", "value"), [
+    ("column.ks", -math.inf),
+    ("field.category_adherence", math.inf),
+])
+def test_status_infinite_on_the_good_side_is_not_evaluated(metric_id, value):
+  row = _row_of(_mv(metric_id, value))
+  assert row["status"] == "not_evaluated"
+  assert "good side" in row["detail"]["reason"]
+  assert row["score"] is None
 
 
 def test_status_for_rejects_a_mismatched_metric():
@@ -435,7 +631,7 @@ def test_row_noise_floor_method_is_null_when_the_catalogue_has_none():
 def test_row_is_json_safe():
   mv = _mv(
       "column.ks",
-      0.1,
+      0.05,
       column="amount",
       source_value=math.nan,
       baseline_value=math.inf,
@@ -453,6 +649,19 @@ def test_row_is_json_safe():
   assert row["ci_high"] is None
   assert row["detail"] == {"edges": [1.0, None], "inner": {"x": None}}
   assert "NaN" not in text
+
+
+def test_row_evaluated_at_string_is_validated_and_normalized():
+  kw = {
+      "evaluation_id": "eval-0001",
+      "landing_table": None,
+      "source_table": None,
+  }
+  mv = _mv("column.ks", 0.1, column="amount")
+  row = to_metric_row(mv, evaluated_at="2026-09-28T10:00:00Z", **kw)
+  assert row["evaluated_at"] == "2026-09-28T10:00:00.000000+00:00"
+  with pytest.raises(ValueError, match="ISO-8601"):
+    to_metric_row(mv, evaluated_at="yesterday at ten", **kw)
 
 
 def test_row_not_evaluated_keeps_the_producers_reason():
@@ -489,7 +698,7 @@ def test_row_score_for_aggregate_is_its_value():
 # ---------------------------------------------------------------------------
 
 
-def _row(table: str,
+def _row(table: str | None,
          metric_id: str,
          score: float | None,
          *,
@@ -625,6 +834,37 @@ def test_aggregate_empty_has_a_model_entry_of_nones():
   }
 
 
+def test_integrity_fail_counts_only_zero_tolerance_metrics():
+  rows = [
+      _row_of(_mv("column.source_stats_drift", 0.5, column="a")),
+      _row_of(_mv("table.row_count_ratio", 1.5)),
+      _row_of(_mv("field.type_validity", 0.5, column="a")),
+  ]
+  assert [row["status"] for row in rows] == ["fail", "fail", "fail"]
+  result = aggregate_scores(rows)
+  assert result["orders"]["integrity_fail"] == 0
+  assert result[MODEL_KEY]["integrity_fail"] == 0
+  rows.append(_row_of(_mv("table.identity_duplicate_rate", 0.01)))
+  assert aggregate_scores(rows)["orders"]["integrity_fail"] == 1
+
+
+def test_aggregate_model_rows_create_no_phantom_table():
+  rows = [
+      _row("orders", "column.ks", 0.5, column="a"),
+      _row(None, "model.fidelity_score", 0.1),
+      _row(MODEL_KEY, "model.overall_score", 0.1),
+      _row("users", "table.fidelity_score", 0.2),
+  ]
+  result = aggregate_scores(rows)
+  assert set(result) == {"orders", MODEL_KEY}
+  assert result[MODEL_KEY]["fidelity"] == 0.5
+
+
+def test_aggregate_rejects_a_measured_row_without_a_table():
+  with pytest.raises(ValueError, match="table_name"):
+    aggregate_scores([_row(None, "column.ks", 0.5, column="a")])
+
+
 def test_aggregate_is_order_independent():
   rows = [
       _row("t", "column.ks", 0.1, column="a"),
@@ -654,7 +894,7 @@ def test_aggregate_from_real_rows_skips_a_documented_edge():
 
 def test_headline_counts_every_status_and_reconciles():
   statuses = ["pass", "pass", "warn", "fail", "info", "info", "not_evaluated"]
-  rows = [{"status": status} for status in statuses]
+  rows = [{"metric_id": "column.ks", "status": status} for status in statuses]
   counts = headline_counts(rows)
   assert set(counts) == {status.value for status in Status} | {"total"}
   assert counts["total"] == len(rows)
@@ -668,14 +908,127 @@ def test_headline_counts_empty_has_every_key_at_zero():
   assert counts == {status.value: 0 for status in Status} | {"total": 0}
 
 
+def test_headline_counts_exclude_aggregate_rows():
+  rows = [
+      {
+          "metric_id": "column.ks",
+          "status": "pass"
+      },
+      {
+          "metric_id": "table.fidelity_score",
+          "status": "warn"
+      },
+      {
+          "metric_id": "table.column_shape_score",
+          "status": "fail"
+      },
+      {
+          "metric_id": "model.overall_score",
+          "status": "fail"
+      },
+  ]
+  counts = headline_counts(rows)
+  assert counts["total"] == 1
+  assert counts["pass"] == 1
+  assert counts["warn"] == counts["fail"] == 0
+
+
+def test_headline_counts_feed_every_registry_metrics_column():
+  names = schemas.field_names("evaluation_data_history")
+  columns = [name for name in names if name.startswith("metrics_")]
+  assert names.index("metrics_info") == names.index("metrics_not_evaluated") + 1
+  rows = [
+      _row_of(_mv("column.ks", 0.01, column="a")),
+      _row_of(_mv("column.ks", 0.15, column="b")),
+      _row_of(_mv("column.ks", 0.5, column="c", noise_floor=0.1)),
+      _row_of(_mv("column.wasserstein", 3.0, column="a")),
+      _row_of(_mv("column.ks", None, column="d")),
+      _row_of(_mv("table.fidelity_score", 0.8)),
+  ]
+  counts = headline_counts(rows)
+  for column in columns:
+    assert column.removeprefix("metrics_") in counts, column
+  assert (counts["fail"] + counts["warn"] + counts["pass"] + counts["info"] +
+          counts["not_evaluated"]) == counts["total"] == 5
+  assert counts["info"] == 1
+
+
 def test_headline_counts_rejects_an_unknown_status():
   with pytest.raises(ValueError, match="bogus"):
-    headline_counts([{"status": "bogus"}])
+    headline_counts([{"metric_id": "column.ks", "status": "bogus"}])
 
 
 # ---------------------------------------------------------------------------
 # Property: every catalogue metric scores in [0, 1] or None
 # ---------------------------------------------------------------------------
+
+_GATED = tuple(
+    m.id for m in CAT.metrics if m.warn is not None or m.fail is not None)
+_NOVELTY_SOURCE = 0.1  # the source_value novelty_mass (null target) reads
+
+
+def _reference(metric) -> float:
+  if metric.direction == "target":
+    return metric.target if metric.target is not None else _NOVELTY_SOURCE
+  if metric.target is not None:
+    return metric.target
+  return 1.0 if metric.direction == "higher_better" else 0.0
+
+
+def _gated_mv(metric, gated: float) -> MetricValue:
+  """A row whose status reads `gated`, with no noise floor and no CI."""
+  kw: dict[str, Any] = {"detail": {"ceiling": 1e6}}  # only pmse reads it
+  if metric.uses_ci_bound:
+    bound = "ci_high" if metric.direction == "higher_better" else "ci_low"
+    kw[bound] = gated
+  if metric.direction == "target" and metric.target is None:
+    kw["source_value"] = _NOVELTY_SOURCE
+  return _mv(metric.id, gated, **kw)
+
+
+def test_the_sweep_covers_every_thresholded_metric():
+  assert set(CAT.ids()) - set(_GATED) == {
+      "column.wasserstein", "relationship.orphan_rate_source",
+      "relationship.fanout_w1"
+  }
+
+
+@pytest.mark.parametrize("metric_id", _GATED)
+def test_every_gated_metric_passes_at_its_reference(metric_id):
+  metric = _metric(metric_id)
+  row = _row_of(_gated_mv(metric, _reference(metric)))
+  assert row["status"] == "pass"
+  assert row["score"] in (1.0, None)
+
+
+@pytest.mark.parametrize("metric_id", _GATED)
+def test_every_gated_metric_fails_at_its_fail_threshold(metric_id):
+  metric = _metric(metric_id)
+  if metric.warn == 0 and metric.fail == 0:
+    gated = 1e-9  # zero tolerance: any positive value fails
+  elif metric.direction == "target":
+    gated = _reference(metric) + metric.fail
+  else:
+    gated = metric.fail
+  assert _row_of(_gated_mv(metric, gated))["status"] == "fail"
+
+
+@pytest.mark.parametrize("metric_id", _GATED)
+def test_every_gated_score_is_non_increasing_toward_the_bad_side(metric_id):
+  metric = _metric(metric_id)
+  reference = _reference(metric)
+  if metric.direction == "higher_better":
+    steps = [reference - reference * i / 24 for i in range(25)]
+  else:
+    span = 2 * metric.fail if metric.fail else 1.0
+    steps = [reference + span * i / 24 for i in range(25)]
+  scores = [_row_of(_gated_mv(metric, gated))["score"] for gated in steps]
+  present = [score for score in scores if score is not None]
+  assert all(a >= b for a, b in itertools.pairwise(present)), scores
+  if metric.score_fn != "none" or is_aggregate(metric_id):
+    assert len(present) == len(scores)
+    assert present[-1] < present[0]
+
 
 _ANY_FLOAT = st.one_of(st.none(),
                        st.floats(allow_nan=True, allow_infinity=True),
