@@ -102,7 +102,8 @@ describe("the 90M / 1M / 10k preset", () => {
   });
 
   it("sizes the pool as the code does: exact stats → source filter → sample (ADR 0033 D2)", () => {
-    // The pool layer attaches a source-value store: the filter's cardinality sizes the pool, no exact tier needed.
+    // Every run attaches a source-value store (source_values_table = --reference_table): the filter's
+    // cardinality sizes the pool, no exact tier needed.
     expect(out.poolDistinctVia).toBe("source filter");
     expect(out.poolTarget).toBe(512);
     expect(out.poolTargetSampleOnly).toBe(470);

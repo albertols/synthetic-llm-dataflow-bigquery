@@ -7,12 +7,15 @@
  */
 import { base64ToFloat32, float32ToBase64 } from "./float32Base64";
 import { UMAP_PARAMS, type ProjectionResult } from "./projection";
-import type { Cloud } from "./useCloud";
 
 export const LAYOUT_CACHE_PATH = "/api/x/rag/projection";
 export const UMAP_PARAM_KEY = `umap-js 1.4.0; nNeighbors=${UMAP_PARAMS.nNeighbors}; minDist=${UMAP_PARAMS.minDist}; seed=${UMAP_PARAMS.seed}`;
 
-type LayoutKey = Pick<Cloud, "space" | "idsHash" | "n">;
+/**
+ * What names a layout: a `Cloud`'s space, ids hash and point count. Structural, so
+ * this file imports nothing of the page (the BFF's route test encodes bodies with it).
+ */
+export type LayoutKey = { space: string; idsHash: string; n: number };
 
 export function projectionUrl(cloud: LayoutKey, digest: string, embedder: string): string {
   const params = new URLSearchParams({
@@ -60,29 +63,4 @@ export function parseCachedLayout(body: unknown, n: number): { result: Projectio
   const coords = base64ToFloat32(layout.coords);
   if (!coords || coords.length !== n * 3) return null;
   return { result: { method: "umap", coords, frame: layout.frame }, trust: layout.trust ?? null };
-}
-
-export async function readCache(url: string, n: number) {
-  try {
-    const response = await fetch(url, { headers: { accept: "application/json" } });
-    if (!response.ok) return null;
-    return parseCachedLayout(await response.json(), n);
-  } catch {
-    return null;
-  }
-}
-
-export async function writeCache(
-  cloud: LayoutKey,
-  digest: string,
-  embedder: string,
-  result: ProjectionResult,
-  trust: number | null,
-) {
-  const response = await fetch(LAYOUT_CACHE_PATH, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(layoutCacheBody(cloud, digest, embedder, result, trust)),
-  });
-  if (!response.ok) throw new Error(`cache write refused (${response.status})`);
 }

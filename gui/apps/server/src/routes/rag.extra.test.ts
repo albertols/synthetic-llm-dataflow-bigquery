@@ -1,50 +1,38 @@
 /**
- * The UMAP layout cache through Fastify `inject`: the route plugin
- * (apps/server/src/routes/rag.extra.ts) mounted as app.ts mounts it — under
- * /api/x/rag, with the BFF's body limit (read from app.ts's source, so the
- * test follows it) and its BadRequest → 400 handler. A realistic
- * 3,000-point layout, encoded exactly as the browser encodes it
- * (layoutCache.ts), is stored and read back bit for bit; the JSON-array form
- * it replaced is shown to overflow the limit; malformed layouts are refused.
- *
- * It lives in the RAG feature folder because the route file is the only
- * server file the tab owns. It cannot import app.ts itself: config.ts builds
- * a `new URL(…, import.meta.url)` default that the web project's Vite
- * transform turns into an http URL.
+ * The UMAP layout cache (RAG's routes/rag.extra.ts) through the real BFF:
+ * `buildApp` mounts it under /api/x/rag with the app's body limit and its
+ * BadRequest → 400 handler. A realistic 3,000-point layout, encoded exactly as
+ * the browser encodes it (features/rag/lib/layoutCache.ts), is stored and read
+ * back bit for bit; the JSON-array form it replaced is shown to overflow the
+ * body limit; malformed layouts are refused.
  */
-import Fastify, { type FastifyInstance } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { mulberry32 } from "@synthetic-platform/stats";
 
-import appSource from "../../../../server/src/app.ts?raw";
-import { BadRequest, type RouteOptions } from "../../../../server/src/routes/context";
-import ragExtra from "../../../../server/src/routes/rag.extra";
-import { float32ToBase64 } from "./lib/float32Base64";
-import { layoutCacheBody, LAYOUT_CACHE_PATH, parseCachedLayout, projectionUrl } from "./lib/layoutCache";
+import { float32ToBase64 } from "../../../web/src/features/rag/lib/float32Base64";
+import {
+  layoutCacheBody,
+  LAYOUT_CACHE_PATH,
+  parseCachedLayout,
+  projectionUrl,
+} from "../../../web/src/features/rag/lib/layoutCache";
+import { buildApp } from "../app";
+import { loadConfig } from "../config";
+import type { DataProvider } from "../providers/types";
 
-/** `bodyLimit: 64 * 1024` in buildApp. */
-const BODY_LIMIT = (() => {
-  const match = /bodyLimit:\s*(\d+)\s*\*\s*(\d+)/.exec(appSource);
-  if (!match) throw new Error("app.ts no longer sets bodyLimit as a product; update this test");
-  return Number(match[1]) * Number(match[2]);
-})();
+/** buildApp's `bodyLimit`. */
+const BODY_LIMIT = 64 * 1024;
 const N = 3000;
 const HOST = { host: "127.0.0.1:8787" };
 
 let app: FastifyInstance;
 
 beforeAll(async () => {
-  app = Fastify({ logger: false, bodyLimit: BODY_LIMIT });
-  app.setErrorHandler((error, _request, reply) =>
-    error instanceof BadRequest
-      ? reply.code(400).send({ statusCode: 400, error: "Bad Request", message: error.message, details: error.issues })
-      : reply.send(error),
-  );
-  // The provider and config are never touched by the projection routes; only the cache's get/set are.
-  // (A Map stands in for the app's LRUCache, whose browser build the web test project resolves.)
-  const options = { provider: {}, config: {}, cache: new Map<string, object>() } as unknown as RouteOptions;
-  await app.register(ragExtra, { ...options, prefix: "/api/x/rag" });
+  // The projection routes never touch the provider; only the app's LRU cache.
+  const provider = { mode: "mock" } as unknown as DataProvider;
+  app = await buildApp({ config: loadConfig({ LOG_LEVEL: "silent" }), provider, serveStatic: false });
   await app.ready();
 });
 
@@ -68,8 +56,16 @@ const DIGEST = "c56bf2985de78330b2fcb76879f4abe7f2cdb919ffb4cf199c33a6368c02fb98
 const EMBEDDER = "hashing-384/v1";
 
 describe("the RAG layout cache through the BFF", () => {
-  it("reads the BFF's body limit from app.ts", () => {
-    expect(BODY_LIMIT).toBe(64 * 1024);
+  it("the app's body limit is 64 KiB: just under reaches the route (400), just over is a 413", async () => {
+    const post = (bytes: number) =>
+      app.inject({
+        method: "POST",
+        url: LAYOUT_CACHE_PATH,
+        headers: { ...HOST, "content-type": "application/json" },
+        payload: JSON.stringify({ pad: "x".repeat(bytes - '{"pad":""}'.length) }),
+      });
+    expect((await post(BODY_LIMIT)).statusCode).toBe(400);
+    expect((await post(BODY_LIMIT + 1)).statusCode).toBe(413);
   });
 
   it("stores a 3,000-point layout inside the 64 KB body limit and reads it back bit for bit", async () => {

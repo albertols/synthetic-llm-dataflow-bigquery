@@ -30,11 +30,11 @@ const ON_THIS_PAGE = [
   { href: "#glossary", label: "Glossary" },
 ] as const;
 
-/** The README's promise, one clause per item. */
+/** The README's promise, one clause per chip, each chip sentence-cased as shown. */
 const PROMISES = [
   { icon: ShieldCheck, text: "No data or prompts ever leave the project boundary" },
-  { icon: Ban, text: "no external AI APIs" },
-  { icon: HardDrive, text: "no model hubs at runtime" },
+  { icon: Ban, text: "No external AI APIs" },
+  { icon: HardDrive, text: "No model hubs at runtime" },
 ] as const;
 
 export function IntroPage() {
@@ -79,7 +79,7 @@ export function IntroPage() {
                   className="inline-flex items-center gap-1.5 rounded-full border border-border-strong bg-surface-1 px-3 py-1 text-xs font-medium text-text-2"
                 >
                   <Icon className="size-3.5 text-cpu-text" aria-hidden="true" />
-                  {text.charAt(0).toUpperCase() + text.slice(1)}
+                  {text}
                 </li>
               ))}
             </ul>

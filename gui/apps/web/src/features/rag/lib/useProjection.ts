@@ -14,7 +14,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Cloud } from "./useCloud";
-import { projectionUrl, readCache, writeCache } from "./layoutCache";
+import { projectionUrl } from "./layoutCache";
+import { readCache, writeCache } from "./layoutCacheIo";
 import { knnKept, runPca, sphericalKMeans, type ProjectionResult } from "./projection";
 import type { WorkerRequest, WorkerResponse } from "./projectionProtocol";
 import { computeStrategies, type StrategyJobResult } from "./strategyJob";

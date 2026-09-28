@@ -376,7 +376,7 @@ function StageCard({
             <span className="flex items-center gap-1.5">
               <span className="font-mono text-[11px] text-text-3">{String(index + 1).padStart(2, "0")}</span>
               {stage.isNew ? (
-                <Badge variant="accent" className="px-1.5 py-0 text-[10px]">
+                <Badge variant="accent" className="px-1.5 py-0 text-xs xl:text-[10px]">
                   new
                 </Badge>
               ) : null}
@@ -404,7 +404,7 @@ function StageCard({
             {stage.chips(context).map((chip) => (
               <li
                 key={chip}
-                className="rounded-sm bg-surface-3 px-1.5 py-0.5 font-mono text-[10.5px] leading-tight text-text-2"
+                className="rounded-sm bg-surface-3 px-1.5 py-0.5 font-mono text-xs leading-tight text-text-2 xl:text-[10.5px]"
               >
                 {chip}
               </li>

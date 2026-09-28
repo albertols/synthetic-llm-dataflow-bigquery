@@ -108,7 +108,10 @@ const BASE: ScenarioInputs = {
   // ADR 0033 context §2: a 95 %-empty column with 4,022 source-distinct values.
   columnDistinct: 4_022,
   nonEmptyShare: 0.05,
-  // The pool layer attaches a source-value store (run_pipeline.resolve_pool_layer).
+  // Every run attaches a source-value store: run_pipeline sets PipelineConfig.source_values_table
+  // to --reference_table (a required flag), and GenerateRecordsDoFn.setup attaches the store from
+  // it (the ADR 0023 seam in dofns/generate.py). Not resolve_pool_layer, which runs only under
+  // --build_pool_layer.
   sourceFilter: true,
   // The code default (Composer `sdk_containers`); the time card can switch it.
   sdkContainers: knob("sdk_containers").value === "multi" ? "multi" : "single",
