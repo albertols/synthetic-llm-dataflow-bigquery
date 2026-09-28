@@ -9,7 +9,7 @@ import type { EdgeRole } from "@contracts/relational";
 
 import { cn } from "@/lib/cn";
 
-import { layoutGraph, type Graph, type PlacedNode } from "../content/graphLayout";
+import { layoutGraph, nodeCaption, type Graph, type PlacedNode } from "../content/graphLayout";
 import { ROLE_ORDER, ROLE_STYLE } from "../content/shapes";
 
 export function describeGraph(graph: Graph): string {
@@ -90,7 +90,6 @@ export function RelationGraph({
 
 function TableBox({ node, highlight }: { node: PlacedNode; highlight: boolean }) {
   const x = node.x - node.width / 2;
-  const pk = node.pk.length ? `pk ${node.pk.join(",")}` : "";
   const maxChars = Math.floor((node.width - 10) / 5.2);
   return (
     <g opacity={node.disabled ? 0.55 : 1}>
@@ -124,11 +123,7 @@ function TableBox({ node, highlight }: { node: PlacedNode; highlight: boolean })
         fontFamily="var(--font-code)"
         fill="var(--text-3)"
       >
-        {node.disabled
-          ? "enabled: false"
-          : node.external
-            ? truncate(`external · ${node.id.split(".").slice(0, -1).join(".")}`, maxChars)
-            : truncate(pk, maxChars)}
+        {truncate(nodeCaption(node), maxChars)}
       </text>
     </g>
   );

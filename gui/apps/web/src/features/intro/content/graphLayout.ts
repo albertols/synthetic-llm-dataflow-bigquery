@@ -92,8 +92,15 @@ export function graphFromModel(model: RelationshipModel, tables?: readonly strin
   return { nodes, edges };
 }
 
+/** The box's second line: the key, or what kind of parent it is. */
+export function nodeCaption(node: GraphNode): string {
+  if (node.disabled) return "enabled: false";
+  if (node.external) return `external · ${node.id.split(".").slice(0, -1).join(".")}`;
+  return node.pk.length ? `pk ${node.pk.join(",")}` : "";
+}
+
 function nodeWidth(node: GraphNode): number {
-  const text = Math.max(node.label.length, node.pk.length ? `pk ${node.pk.join(",")}`.length * 0.85 : 0);
+  const text = Math.max(node.label.length, nodeCaption(node).length * 0.85);
   return Math.min(LAYOUT.maxNodeWidth, Math.max(LAYOUT.minNodeWidth, text * LAYOUT.charWidth + 18));
 }
 
