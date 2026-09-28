@@ -10,7 +10,7 @@
  * ≥ 1280 px the rail is horizontal (an SVG under a nine-column grid); below,
  * it runs down the left edge of a vertical list.
  */
-import { AnimatePresence, animate, m, useMotionValue, useTransform } from "motion/react";
+import { animate, m, useMotionValue, useTransform } from "motion/react";
 import { ArrowRight, ChevronLeft, ChevronRight, Pause, Play, RotateCcw } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
@@ -432,52 +432,42 @@ function StageDetail({ stage, index, context }: { stage: Stage; index: number; c
   return (
     <div className="relative min-h-44 overflow-hidden rounded-lg border border-border bg-surface-1">
       <span aria-hidden="true" className="absolute inset-y-0 left-0 w-1" style={{ background: kind.color }} />
-      <AnimatePresence mode="wait" initial={false}>
-        <m.div
-          key={stage.id}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.18 }}
-          className="grid gap-4 p-4 pl-5 md:grid-cols-[1fr_auto] md:p-5 md:pl-6"
-          data-testid="stage-detail"
-        >
-          <div className="grid min-w-0 gap-2">
-            <p className="font-mono text-[11px] text-text-3">
-              Step {index + 1} of {STAGES.length} · {phase.label} · {phase.where}
+      <div className="grid gap-4 p-4 pl-5 md:grid-cols-[1fr_auto] md:p-5 md:pl-6" data-testid="stage-detail">
+        <div className="grid min-w-0 gap-2">
+          <p className="font-mono text-[11px] text-text-3">
+            Step {index + 1} of {STAGES.length} · {phase.label} · {phase.where}
+          </p>
+          <h3 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-text-1">
+            <Icon className={cn("size-5 shrink-0", kind.text)} aria-hidden="true" />
+            {stage.title}
+            <InfoHint concept={stage.concept} size="md" />
+          </h3>
+          <p className="text-sm text-text-2">{stage.summary}</p>
+          <blockquote className="border-l-2 border-border-strong pl-3 text-sm leading-relaxed text-text-1">
+            <p>
+              “<InlineCode text={stage.quote.text} />”
             </p>
-            <h3 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-text-1">
-              <Icon className={cn("size-5 shrink-0", kind.text)} aria-hidden="true" />
-              {stage.title}
-              <InfoHint concept={stage.concept} size="md" />
-            </h3>
-            <p className="text-sm text-text-2">{stage.summary}</p>
-            <blockquote className="border-l-2 border-border-strong pl-3 text-sm leading-relaxed text-text-1">
-              <p>
-                “<InlineCode text={stage.quote.text} />”
-              </p>
-              <footer className="mt-1 text-xs text-text-3">
-                —{" "}
-                <ExternalAnchor href={sourceHref(stage.quote.source, stage.quote.anchor)}>
-                  {stage.quote.source}
-                </ExternalAnchor>
-              </footer>
-            </blockquote>
-          </div>
-          <div className="flex flex-col items-start gap-3 md:items-end md:justify-between">
-            <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", kind.text)}>
-              <span aria-hidden="true" className="size-2 rounded-full" style={{ background: kind.color }} />
-              {kind.label}
-            </span>
-            <Button asChild variant="primary" size="sm">
-              <TargetLink to={target}>
-                Open {targetTabName(target)}
-                <ArrowRight aria-hidden="true" />
-              </TargetLink>
-            </Button>
-          </div>
-        </m.div>
-      </AnimatePresence>
+            <footer className="mt-1 text-xs text-text-3">
+              —{" "}
+              <ExternalAnchor href={sourceHref(stage.quote.source, stage.quote.anchor)}>
+                {stage.quote.source}
+              </ExternalAnchor>
+            </footer>
+          </blockquote>
+        </div>
+        <div className="flex flex-col items-start gap-3 md:items-end md:justify-between">
+          <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", kind.text)}>
+            <span aria-hidden="true" className="size-2 rounded-full" style={{ background: kind.color }} />
+            {kind.label}
+          </span>
+          <Button asChild variant="primary" size="sm">
+            <TargetLink to={target}>
+              Open {targetTabName(target)}
+              <ArrowRight aria-hidden="true" />
+            </TargetLink>
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
