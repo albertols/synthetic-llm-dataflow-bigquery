@@ -1,26 +1,27 @@
 /**
  * INTRO route module (owned by the INTRO tab agent).
  *
- * Contract with src/router.tsx: export `searchSchema` (zod, validated by the
+ * Contract with src/router.tsx: export `searchSchema` (validated by the
  * router before render) and `component` (lazy: the page code stays out of
  * the shell chunk). Inside the page read params with
  * `getRouteApi("/").useSearch()`.
  *
  * Search params: the glossary's query `q` and concept group `ns`, so a search
- * is shareable. Malformed values fall back to "none" (`z.catch`).
+ * is shareable. Malformed values fall back to "none".
  *
- * Search schemas use `zod/mini` (tree-shakable) because route modules sit in
- * the shell chunk; classic `zod` is fine inside the lazy page code.
+ * Search params are validated with `@/lib/search` (plain checks, no zod:
+ * route modules sit in the shell chunk).
  */
 import { lazyRouteComponent } from "@tanstack/react-router";
-import { z } from "zod/mini";
 
-export const searchSchema = z.object({
+import { searchParams, text, type SearchOf } from "@/lib/search";
+
+export const searchSchema = searchParams({
   /** Glossary query. */
-  q: z.catch(z.optional(z.string().check(z.maxLength(120))), undefined),
+  q: text({ max: 120 }),
   /** Glossary concept group: a concept id namespace ("metric", "intro" …). */
-  ns: z.catch(z.optional(z.string().check(z.regex(/^[a-z][a-z0-9_-]{0,23}$/))), undefined),
+  ns: text({ pattern: /^[a-z][a-z0-9_-]{0,23}$/ }),
 });
-export type IntroSearch = z.infer<typeof searchSchema>;
+export type IntroSearch = SearchOf<typeof searchSchema>;
 
 export const component = lazyRouteComponent(() => import("./IntroPage"), "IntroPage");

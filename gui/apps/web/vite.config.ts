@@ -44,12 +44,19 @@ export default defineConfig({
   preview: { host: "127.0.0.1", port: E2E_PORT, strictPort: true },
   build: {
     target: "es2023",
+    // .size-limit.mjs budgets each tab by its import closure (dist/.vite/manifest.json) and
+    // checks the shell's chunks for lazy libraries by their source maps.
+    manifest: true,
     sourcemap: true,
+    // Never inline a font as a data: URI: @font-face files load only when their unicode-range
+    // is on the page, but an inlined one is in the CSS for everyone (a 2.7 kB Cyrillic subset
+    // sat in the shell CSS this way).
+    assetsInlineLimit: (file) => (/\.woff2?$/.test(file) ? false : undefined),
     chunkSizeWarningLimit: 1500,
     rolldownOptions: {
       output: {
-        // Tab code lands in `tab-<tab>-*.js` so `.size-limit.json` can budget
-        // each tab on its own; everything else keeps Vite's default naming.
+        // Tab code lands in `tab-<tab>-*.js`, readable in a build listing (the budgets in
+        // .size-limit.mjs follow the manifest's import closures, not these names).
         chunkFileNames(chunk) {
           const tab = chunk.facadeModuleId?.replaceAll("\\", "/").match(TAB_CHUNK)?.[1];
           return tab ? `assets/tab-${tab}-[name]-[hash].js` : "assets/[name]-[hash].js";

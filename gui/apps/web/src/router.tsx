@@ -1,7 +1,7 @@
 /**
  * Code-based routes (no generated route tree). Each tab owns its route
  * module under src/features/<tab>/route.tsx and exports, for every route it
- * serves, a zod `searchSchema` and a lazy `component`; this file only wires
+ * serves, a search validator (`@/lib/search`) and a lazy `component`; this file only wires
  * them. Pages read typed params with `getRouteApi("<path>")`.
  *
  *   /                          INTRO

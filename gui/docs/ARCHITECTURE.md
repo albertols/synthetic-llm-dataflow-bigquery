@@ -53,7 +53,7 @@ flowchart TB
   MAIN["main.tsx<br/>theme stamp · QueryClient · ErrorBoundary"]:::shell
   ROUTER["router.tsx<br/>code-based routes"]:::shell
   SHELL["app/AppShell<br/>TopNav · skip link · announcer · toasts"]:::shell
-  ROUTES["features/&lt;tab&gt;/route.tsx<br/>zod/mini searchSchema + lazy component"]:::shell
+  ROUTES["features/&lt;tab&gt;/route.tsx<br/>search validator + lazy component"]:::shell
   PAGES["features/&lt;tab&gt;/*Page.tsx<br/>tab code"]:::lazy
   ECH["EChartCanvas<br/>echarts/core"]:::lazy
   DECK["DeckCanvas<br/>deck.gl"]:::lazy
@@ -72,7 +72,7 @@ Dashed arrows are dynamic imports._
 
 ### Routes (code-based; `src/router.tsx`)
 
-| Path                        | Module                                          | Search params (zod, owned by the tab)   |
+| Path                        | Module                                          | Search params (owned by the tab)        |
 | :-------------------------- | :---------------------------------------------- | :-------------------------------------- |
 | `/`                         | `features/intro/route.tsx`                      | —                                       |
 | `/evaluation`               | `features/evaluation/route.tsx` `listComponent` | `listSearchSchema` (filters)            |
@@ -82,11 +82,16 @@ Dashed arrows are dynamic imports._
 | `/config`                   | `features/config/route.tsx`                     | `knob`, `scenario`                      |
 | `/kit`                      | `app/kit/KitPage.tsx`                           | — (design-system reference)             |
 
-**Route-module contract.** A tab's `route.tsx` exports its zod search
-schema(s) and lazy component(s) (`lazyRouteComponent(() => import("./Page"), "Page")`).
+**Route-module contract.** A tab's `route.tsx` exports its search
+validator(s) and lazy component(s) (`lazyRouteComponent(() => import("./Page"), "Page")`).
 Route modules are imported by the router, so they sit in the shell chunk:
-write their schemas with **`zod/mini`** and keep page code behind the lazy
-import. Inside a page, read typed params with `getRouteApi("/rag").useSearch()`
+build validators with `@/lib/search` (`searchParams`, `text`, `oneOf`,
+`integer`, `finite`, `flag`, `list`, `withDefault`, `extend` — no zod in the
+shell; zod/mini alone cost it about 13 kB gzip) and keep page code behind the
+lazy import. Every field is catch-guarded: a malformed value becomes undefined
+(or the field's default), never an error page; `lib/search.test.ts` checks each
+route against the zod/mini schema it replaced. Inside a page, read typed params
+with `getRouteApi("/rag").useSearch()`
 (avoids importing the router). Each route sets `staticData.title` (document
 title and the navigation announcement).
 
@@ -116,6 +121,7 @@ title and the navigation announcement).
 | `@/lib/color`                                 | `hexToRgb`, `tokenRgba("--chart-2")`                                                                                                                                                                | deck.gl colours from tokens                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `@/lib/motion`                                | `useReducedMotion()`, `prefersReducedMotion()`                                                                                                                                                      | Wrap Motion code in `<MotionConfig reducedMotion="user">`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `@/lib/useInViewOnce`                         | `const [ref, seen] = useInViewOnce<HTMLDivElement>(margin?)`                                                                                                                                        | True once the element comes within `margin` (600 px) of the viewport, then stays true; heavy lazy pieces (mermaid, chart grids) wait for it                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `@/lib/search`                                | `searchParams({ q: text({ max }), k: integer({ min, max }), … })`, `extend`, `SearchOf<typeof v>`                                                                                                   | Route search validators (shell-sized, zod-free); a link's `search` is typed from them                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `@/lib/links`                                 | `REPO_URL`, `DSG_URL`, `repoBlobUrl`, `parseSource`                                                                                                                                                 |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `@/lib/webgl`                                 | `isWebGL2Available()`                                                                                                                                                                               |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `@/lib/dataSource`                            | `useDataSource()` → `{ mode: "mock" } \| { mode: "bigquery"; project; maxBytesBilled? } \| { mode: "connecting" } \| { mode: "offline" }`                                                           | Reads `/api/health` (TanStack Query); the badge shows MOCK, BIGQUERY <project>, CONNECTING or OFFLINE                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -159,18 +165,29 @@ transform, tooltip, axis pointer (via tooltip), legend, title, mark
 line/area/point, visual map, data zoom, brush, graphic, aria; label layout,
 universal transition; canvas renderer. Pie is left out on purpose.
 
-## Size budgets (`.size-limit.json`, gzip)
+## Size budgets (`.size-limit.mjs`, gzip)
 
-| Entry                                                                       | Budget |
-| :-------------------------------------------------------------------------- | -----: |
-| App shell: `index-*.js` + `index-*.css`                                     | 200 kB |
-| Each tab: `tab-<tab>-*.js` (chunks whose facade is under `features/<tab>/`) | 350 kB |
-| Lazy ECharts (`EChartCanvas-*.js`)                                          | 300 kB |
-| Lazy KaTeX (`KatexRender-*.js`)                                             |  90 kB |
-| Lazy deck.gl React binding (`DeckCanvas-*.js`)                              |  80 kB |
+Budgets are **import closures** read from Vite's manifest
+(`apps/web/dist/.vite/manifest.json`): a chunk, its CSS, and every chunk it
+imports statically, transitively. Measuring by chunk name let shared chunks
+escape every budget (the deck.gl chunk had none, and the shell's own shared
+chunks were uncounted).
 
-mermaid, KaTeX, deck.gl and umap-js are lazy by construction; a tab that
-imports one statically pulls it into its own tab budget.
+| Budget                                                                                       |  Limit |
+| :------------------------------------------------------------------------------------------- | -----: |
+| App shell: `index.html`'s closure (entry chunk, the shared chunks it imports, global CSS)    | 200 kB |
+| Each tab: the closure of its lazy page chunks (`src/features/<tab>/`), minus the shell       | 350 kB |
+| Lazy ECharts: `EChartCanvas`'s closure beyond the shell                                      | 300 kB |
+| Lazy KaTeX: `KatexRender`'s closure (JS + CSS)                                               |  90 kB |
+| Lazy deck.gl React binding: the `DeckCanvas` chunk                                           |  80 kB |
+| Lazy deck.gl core + layers: the shared chunks holding `@deck.gl/core` / `layers` / `luma.gl` | 200 kB |
+
+The same file is a gate: the shell's chunks must not bundle mermaid, KaTeX,
+ECharts, deck.gl or umap-js (checked in their source maps, so the check holds
+whatever Rolldown names a chunk). A tab that imports one of them statically
+pulls it into its own tab budget. Fonts are never inlined as `data:` URIs
+(`build.assetsInlineLimit`): an `@font-face` file loads only when its
+unicode-range is on the page, an inlined one ships in the shell CSS to everyone.
 
 ## Dependencies (pinned exactly; `.npmrc` `save-exact=true`)
 
@@ -182,7 +199,7 @@ releases on 2026-09-28, except where a peer range forced an older line.
 | react, react-dom                            |   19.3.0 | web                    | UI                                                                       |
 | @tanstack/react-router                      | 1.170.40 | web                    | code-based routes, typed search params                                   |
 | @tanstack/react-query                       |  5.104.0 | web                    | server state (`/api/*`)                                                  |
-| zod                                         |    4.6.5 | web, server, contracts | contracts; `zod/mini` in route modules                                   |
+| zod                                         |    4.6.5 | web, server, contracts | contracts; EVALUATION parses profile payloads (`@contracts/payloads`)    |
 | tailwindcss, @tailwindcss/vite              |    4.3.3 | web (dev)              | tokens → utilities                                                       |
 | radix-ui                                    |    1.6.7 | web                    | accessible primitives                                                    |
 | class-variance-authority                    |    0.7.1 | web                    | component variants                                                       |
@@ -255,7 +272,7 @@ writes `NEEDS_FOUNDATION: …` in its report instead of editing the file.
     "gui/.prettierignore",
     "gui/playwright.config.ts",
     "gui/vitest.config.ts",
-    "gui/.size-limit.json",
+    "gui/.size-limit.mjs",
     "gui/Dockerfile",
     "gui/apps/web/{index.html,vite.config.ts,package.json,tsconfig.json}",
     "gui/apps/web/src/{main.tsx,router.tsx}",

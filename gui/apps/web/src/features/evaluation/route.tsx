@@ -2,21 +2,32 @@
  * EVALUATION route module (owned by the EVALUATION tab).
  *
  * Three routes share it: "/evaluation" (list), "/evaluation/$evaluationId"
- * (run view) and "/evaluation/compare" (compare view). Each gets a zod search
- * schema and a lazy component; src/router.tsx wires them. Schemas use
- * `zod/mini` so the shell chunk stays small (see intro/route.tsx). Every
- * field is `catch`-guarded: a malformed or stale link falls back to the
+ * (run view) and "/evaluation/compare" (compare view). Each gets a search
+ * validator and a lazy component; src/router.tsx wires them. Validators use
+ * `@/lib/search` so the shell chunk stays small (see intro/route.tsx). Every
+ * field is catch-guarded: a malformed or stale link falls back to the
  * default instead of an error page. Lists travel as JSON arrays (the
  * router's default), so a filtered view is a shareable URL.
  */
 import { lazyRouteComponent } from "@tanstack/react-router";
-import { z } from "zod/mini";
 
-const optString = () => z.catch(z.optional(z.string().check(z.maxLength(200))), undefined);
-const optNumber = () => z.catch(z.optional(z.number()), undefined);
-const stringList = () =>
-  z.catch(z.optional(z.array(z.string().check(z.maxLength(300))).check(z.maxLength(50))), undefined);
-const numberList = () => z.catch(z.optional(z.array(z.number()).check(z.maxLength(50))), undefined);
+import {
+  extend,
+  finite,
+  flag,
+  integer,
+  list,
+  oneOf,
+  searchParams,
+  text,
+  withDefault,
+  type SearchOf,
+} from "@/lib/search";
+
+const optString = () => text({ max: 200 });
+const optNumber = () => finite();
+const stringList = () => list(text({ max: 300 }), 50);
+const numberList = () => list(finite(), 50);
 
 export const listSortKeys = [
   "evaluated_at",
@@ -30,7 +41,7 @@ export const listSortKeys = [
 ] as const;
 
 /** List filters: every facet of `/api/evaluations`, plus sort, page and the rows picked for compare. */
-export const listSearchSchema = z.object({
+export const listSearchSchema = searchParams({
   q: optString(),
   status: stringList(),
   engine: stringList(),
@@ -55,47 +66,47 @@ export const listSearchSchema = z.object({
   /** Dates (YYYY-MM-DD) or ISO timestamps. */
   from: optString(),
   to: optString(),
-  sort: z.catch(z.optional(z.enum(listSortKeys)), undefined),
-  order: z.catch(z.optional(z.enum(["asc", "desc"])), undefined),
-  page: z.catch(z.optional(z.int().check(z.minimum(0), z.maximum(10_000))), undefined),
+  sort: oneOf(listSortKeys),
+  order: oneOf(["asc", "desc"]),
+  page: integer({ min: 0, max: 10_000 }),
   /** Evaluation ids ticked for compare. */
   pick: stringList(),
 });
-export type EvaluationListSearch = z.infer<typeof listSearchSchema>;
+export type EvaluationListSearch = SearchOf<typeof listSearchSchema>;
 
 /** Compare view: the evaluation ids side by side, plus the list filters. */
-export const compareSearchSchema = z.extend(listSearchSchema, {
-  ids: z.catch(z._default(z.array(z.string()).check(z.maxLength(12)), []), []),
+export const compareSearchSchema = extend(listSearchSchema, {
+  ids: withDefault(list(text(), 12), () => []),
   /** Colour runs by engine or by LLM model in the trend, Pareto and parallel views. */
-  color: z.catch(z.optional(z.enum(["engine", "model"])), undefined),
+  color: oneOf(["engine", "model"]),
   /** The A side of the A/B diff (default: the first id). */
   a: optString(),
   /** The B side (default: the second id). */
   b: optString(),
   /** Diff rows: every metric or only the ones that changed beyond noise. */
-  rows: z.catch(z.optional(z.enum(["changed", "all", "not_comparable"])), undefined),
-  family: z.catch(z.optional(z.enum(["overall", "fidelity", "privacy", "integrity", "diversity"])), undefined),
+  rows: oneOf(["changed", "all", "not_comparable"]),
+  family: oneOf(["overall", "fidelity", "privacy", "integrity", "diversity"]),
 });
-export type EvaluationCompareSearch = z.infer<typeof compareSearchSchema>;
+export type EvaluationCompareSearch = SearchOf<typeof compareSearchSchema>;
 
 export const runTabs = ["overview", "columns", "pairs", "privacy", "detection", "relational", "params"] as const;
 export type RunTabId = (typeof runTabs)[number];
 
 /** Run view: the section, the open column drawer, and the heatmap filters. */
-export const runSearchSchema = z.object({
-  tab: z.catch(z.optional(z.enum(runTabs)), undefined),
+export const runSearchSchema = searchParams({
+  tab: oneOf(runTabs),
   /** "table.column" whose drawer is open. */
   column: optString(),
   /** Scope every section to one table (the model graph sets it). */
   table: optString(),
-  family: z.catch(z.optional(z.enum(["fidelity", "privacy", "integrity", "diversity"])), undefined),
-  problems: z.catch(z.optional(z.boolean()), undefined),
+  family: oneOf(["fidelity", "privacy", "integrity", "diversity"]),
+  problems: flag(),
   /** Column search in the heatmap. */
   q: optString(),
   /** Heatmap rows shown (grows by 50). */
-  rows: z.catch(z.optional(z.int().check(z.minimum(1), z.maximum(5000))), undefined),
+  rows: integer({ min: 1, max: 5000 }),
 });
-export type EvaluationRunSearch = z.infer<typeof runSearchSchema>;
+export type EvaluationRunSearch = SearchOf<typeof runSearchSchema>;
 
 export const listComponent = lazyRouteComponent(() => import("./ListPage"), "EvaluationListPage");
 export const runComponent = lazyRouteComponent(() => import("./RunPage"), "EvaluationRunPage");

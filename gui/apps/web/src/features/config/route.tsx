@@ -1,6 +1,6 @@
 /**
  * CONFIG route module (owned by the CONFIG tab agent). Contract: `searchSchema`
- * (`zod/mini`, it sits in the shell chunk) + lazy `component`; the page reads
+ * (`@/lib/search`, it sits in the shell chunk) + lazy `component`; the page reads
  * params with `getRouteApi("/config").useSearch()`.
  *
  *   section   amp | scenario | sources | guardrails (in-page tab)
@@ -15,17 +15,18 @@
  *             so a deep link reproduces the calculator
  */
 import { lazyRouteComponent } from "@tanstack/react-router";
-import { z } from "zod/mini";
 
-const optionalString = z.catch(z.optional(z.string().check(z.maxLength(400))), undefined);
-const optionalNumber = z.catch(z.optional(z.number()), undefined);
-const optionalBoolean = z.catch(z.optional(z.boolean()), undefined);
+import { finite, flag, oneOf, searchParams, text, type SearchOf } from "@/lib/search";
+
+const optionalString = text({ max: 400 });
+const optionalNumber = finite();
+const optionalBoolean = flag();
 
 export const CONFIG_SECTIONS = ["amp", "scenario", "sources", "guardrails"] as const;
 export type ConfigSection = (typeof CONFIG_SECTIONS)[number];
 
-export const searchSchema = z.object({
-  section: z.catch(z.optional(z.enum(CONFIG_SECTIONS)), undefined),
+export const searchSchema = searchParams({
+  section: oneOf(CONFIG_SECTIONS),
   /** Knob id whose sheet is open (a knobs.json id). */
   knob: optionalString,
   /** Scenario preset id for the calculator. */
@@ -49,6 +50,6 @@ export const searchSchema = z.object({
   warm: optionalBoolean,
   filter: optionalBoolean,
 });
-export type ConfigSearch = z.infer<typeof searchSchema>;
+export type ConfigSearch = SearchOf<typeof searchSchema>;
 
 export const component = lazyRouteComponent(() => import("./ConfigPage"), "ConfigPage");
