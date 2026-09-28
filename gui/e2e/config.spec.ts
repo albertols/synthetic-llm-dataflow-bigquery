@@ -194,20 +194,24 @@ test("screenshots of the config tab (set GUI_SHOTS_DIR to capture)", async ({ pa
     await page.waitForTimeout(1500);
   };
   await page.emulateMedia({ reducedMotion: "reduce" });
-  const shots: Array<[string, string]> = [
-    ["amp", "/config"],
-    ["scenario-90m", "/config?section=scenario&scenario=90m-from-1m"],
-    ["sources", `/config?section=sources&table=${USERS}&column=country`],
-    ["guardrails", "/config?section=guardrails"],
+  // Each shot waits for the data it shows (the mock BFF can be slow to warm).
+  const shots: Array<[string, string, string]> = [
+    ["amp", "/config", "meter-bridge"],
+    ["scenario-90m", "/config?section=scenario&scenario=90m-from-1m", "recommendations"],
+    ["sources", `/config?section=sources&table=${USERS}&column=country`, "column-detail"],
+    ["guardrails", "/config?section=guardrails", "dlq-rules"],
   ];
-  for (const [name, path] of shots) {
+  for (const [name, path, ready] of shots) {
     await page.goto(path);
+    await expect(page.getByTestId(ready)).toBeVisible({ timeout: 60_000 });
+    if (name === "guardrails") await expect(page.getByTestId("dlq-rules")).not.toContainText("…", { timeout: 60_000 });
     await settle();
     await page.screenshot({ path: `${dir}/config-${name}-${width}.png`, fullPage: true });
   }
   await page.goto(`/config?section=sources&table=${USERS}`);
+  await expect(page.getByTestId("snapshot-card").first()).toBeVisible({ timeout: 60_000 });
   await page.getByRole("radio", { name: "Tier compare" }).click();
-  await expect(page.getByTestId("tier-compare")).toBeVisible();
+  await expect(page.getByTestId("tier-compare")).toBeVisible({ timeout: 60_000 });
   await settle();
   await page.screenshot({ path: `${dir}/config-sources-tier-compare-${width}.png`, fullPage: true });
 
