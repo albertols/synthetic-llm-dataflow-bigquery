@@ -311,7 +311,12 @@ function SortHead({
   );
 }
 
-function Metrics({ e }: { e: EvaluationSummary }) {
+/**
+ * The list's "fail · warn · n/e" cell. Its screen-reader text is the full
+ * breakdown, and the registry row has no info/other column, so "info or other"
+ * is the remainder: metrics_total minus the counted statuses (list-page.test).
+ */
+export function MetricsCell({ e }: { e: EvaluationSummary }) {
   if (e.metrics_total === null) return <span className="text-text-3">{MISSING}</span>;
   const gated = (e.metrics_pass ?? 0) + (e.metrics_warn ?? 0) + (e.metrics_fail ?? 0) + (e.metrics_not_evaluated ?? 0);
   const rest = e.metrics_total - gated;
@@ -429,7 +434,7 @@ function EvaluationsTable({
                   <ScoreCell score={e.diversity_score} label="diversity" />
                 </TableCell>
                 <TableCell>
-                  <Metrics e={e} />
+                  <MetricsCell e={e} />
                 </TableCell>
                 <TableCell className="text-xs whitespace-nowrap">
                   {e.engine ?? MISSING} · <span className="text-text-2">{shortModel(e.llm_model_uri)}</span>
@@ -522,7 +527,7 @@ function EvaluationCards({
               </div>
             ))}
           </dl>
-          <Metrics e={e} />
+          <MetricsCell e={e} />
         </li>
       ))}
     </ul>
