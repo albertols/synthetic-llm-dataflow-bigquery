@@ -175,3 +175,25 @@ export function quantilesFromBins(
     return bounds.max;
   });
 }
+
+/**
+ * The legacy decile KS (VERBATIM semantics of scripts/e2e/source_synthetic_stats_diff.py
+ * `decile_ks`): two piecewise-linear CDFs built from 11-point decile vectors, compared
+ * on the union grid (numpy.interp: flat outside the knots, the last knot wins on ties).
+ */
+export function decileKsLegacy(a: readonly number[], b: readonly number[]): number {
+  if (!a.length || !b.length) return 0;
+  const interp = (x: number, xp: readonly number[]) => {
+    const n = xp.length;
+    const fp = (i: number) => (n === 1 ? 0 : i / (n - 1));
+    if (x < xp[0]!) return fp(0);
+    if (x >= xp[n - 1]!) return fp(n - 1);
+    let j = 0;
+    while (j + 1 < n && xp[j + 1]! <= x) j += 1;
+    const x0 = xp[j]!;
+    const x1 = xp[j + 1]!;
+    return x1 === x0 ? fp(j) : fp(j) + ((x - x0) / (x1 - x0)) * (fp(j + 1) - fp(j));
+  };
+  const grid = [...new Set([...a, ...b])].sort((x, y) => x - y);
+  return Math.max(...grid.map((x) => Math.abs(interp(x, a) - interp(x, b))));
+}

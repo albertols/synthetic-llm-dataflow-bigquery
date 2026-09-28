@@ -149,13 +149,21 @@ export interface FamilyScores {
   overall: number | null;
 }
 
-/** A table's family scores: the mean over UNITS (a column, the pair group, each row/table metric, each child edge). */
-export function tableFamilyScores(rows: readonly ScoredRow[]): FamilyScores {
+/**
+ * A table's family scores: the mean over UNITS (a column, the pair group, each
+ * row/table metric, each child edge). `exclude` drops more metric ids (e.g. the
+ * ones whose catalogue score function is `none`).
+ */
+export function tableFamilyScores(
+  rows: readonly ScoredRow[],
+  options: { exclude?: (metricId: string) => boolean } = {},
+): FamilyScores {
   const out = {} as FamilyScores;
   for (const family of FAMILIES) {
     const units = new Map<string, number[]>();
     for (const row of rows) {
       if (row.family !== family || row.score === null || isAggregateMetric(row.metric_id)) continue;
+      if (options.exclude?.(row.metric_id)) continue;
       let unit: string;
       if (row.level === "field" || row.level === "column") unit = `column:${row.column_name ?? ""}`;
       else if (row.level === "pair") unit = "pairs";

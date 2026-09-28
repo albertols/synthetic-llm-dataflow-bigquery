@@ -49,3 +49,10 @@ export function rarefaction(counts: readonly number[], m: number): number {
 export function poolReuse(rows: number, poolSize: number): number {
   return poolSize > 0 ? rows / poolSize : Infinity;
 }
+
+/** Expected distinct values in n draws WITH replacement from probabilities p: Σ 1 − (1 − p_i)^n. */
+export function expectedDistinct(probs: readonly number[], n: number): number {
+  let sum = 0;
+  for (const p of probs) if (p > 0) sum += -Math.expm1(n * Math.log1p(-Math.min(p, 1 - 1e-16)));
+  return sum;
+}

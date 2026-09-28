@@ -3,5 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "license": "Apache-2.0",
-  "type": "module"
+  "type": "module",
+  "description": "Seeded, self-consistent mock data for DATA_SOURCE=mock: an invented thelook-shaped model, 40 evaluations whose metrics packages/stats computes from generated rows, runs, DLQ, source stats, RAG chunks and pools.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@synthetic-platform/contracts": "0.1.0",
+    "@synthetic-platform/stats": "0.1.0"
+  }
 }

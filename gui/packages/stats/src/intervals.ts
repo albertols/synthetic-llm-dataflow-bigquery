@@ -96,10 +96,19 @@ export interface RateRatio {
  * Clopper–Pearson interval on that proportion mapped to (π/(1−π))·(t2/t1).
  * The evaluator's lifts (memorization, exposure, near-match) use it.
  */
-export function rateRatio(m1: number, t1: number, m2: number, t2: number, alpha = 0.05): RateRatio {
+export function rateRatio(
+  m1: number,
+  t1: number,
+  m2: number,
+  t2: number,
+  alpha = 0.05,
+  options: { zeroCorrection?: boolean } = {},
+): RateRatio {
   const total = m1 + m2;
   if (total === 0 || t1 <= 0 || t2 <= 0) return { ratio: null, lo: 0, hi: Infinity };
-  const ratio = m2 > 0 ? m1 / t1 / (m2 / t2) : null;
+  // With m2 = 0 the point estimate is infinite; `zeroCorrection` reports the
+  // Haldane–Anscombe (+½) estimate instead. The interval is exact either way.
+  const ratio = m2 > 0 ? m1 / t1 / (m2 / t2) : options.zeroCorrection ? (m1 + 0.5) / t1 / ((m2 + 0.5) / t2) : null;
   const piLo = m1 === 0 ? 0 : betaQuantile(alpha / 2, m1, m2 + 1);
   const piHi = m2 === 0 ? 1 : betaQuantile(1 - alpha / 2, m1 + 1, m2);
   const map = (pi: number) => (pi >= 1 ? Infinity : (pi / (1 - pi)) * (t2 / t1));

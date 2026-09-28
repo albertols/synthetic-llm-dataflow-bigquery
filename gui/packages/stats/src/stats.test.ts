@@ -6,6 +6,7 @@ import { catalogueById } from "@contracts/generated/catalogue";
 import { contingencyTvd, cramersV, nmi, pearson, spearman } from "./correlation";
 import { cohensW, hellinger, jsdBits, psi, tvd } from "./distances";
 import {
+  decileKsLegacy,
   ecdf,
   histogram,
   ksBracket,
@@ -32,7 +33,7 @@ import {
 } from "./intervals";
 import { cosine, knnPreservation, pca3 } from "./linalg";
 import { Random } from "./rng";
-import { birthdayCollisionProb, poolReuse, rarefaction, rareCaptureProb, tailPoints } from "./scale";
+import { birthdayCollisionProb, expectedDistinct, poolReuse, rarefaction, rareCaptureProb, tailPoints } from "./scale";
 import { modelFamilyScores, scoreValue, statusFor, tableFamilyScores } from "./scoring";
 import { betaQuantile, incompleteBeta, normalCdf, normalQuantile } from "./special";
 import { mmr, randomPick, TEACHING_ONLY } from "./teaching";
@@ -78,6 +79,8 @@ describe("noise floors and intervals", () => {
     expect(leak.ratio).toBeCloseTo(10, 10);
     expect(leak.lo).toBeGreaterThan(2.5);
     expect(rateRatio(0, 10, 0, 10)).toEqual({ ratio: null, lo: 0, hi: Infinity });
+    expect(rateRatio(8, 100, 0, 100).ratio).toBeNull();
+    expect(rateRatio(8, 100, 0, 100, 0.05, { zeroCorrection: true }).ratio).toBeCloseTo(17, 12);
   });
 
   it("special functions invert each other", () => {
@@ -165,6 +168,18 @@ describe("binned CDF maths", () => {
     expect(pitW1([1, 0], [0, 1])).toBeCloseTo(0.5, 12);
   });
 
+  it("the legacy decile KS matches numpy.interp on the union grid", () => {
+    const ramp = Array.from({ length: 11 }, (_, i) => i);
+    // Values printed by the Python original (numpy 2.3).
+    expect(decileKsLegacy(ramp, ramp)).toBe(0);
+    expect(decileKsLegacy(new Array<number>(11).fill(1), ramp)).toBeCloseTo(0.9, 12);
+    expect(decileKsLegacy([0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8], ramp)).toBeCloseTo(0.2, 12);
+    expect(decileKsLegacy([0, 1, 1, 1, 2, 3, 4, 5, 6, 7, 8], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])).toBeCloseTo(
+      0.4,
+      12,
+    );
+  });
+
   it("W1 from bins, quantiles, ECDF and the profiler's deciles", () => {
     expect(w1FromBins([0, 1, 2], [0, 1, 0, 0], [0, 0, 1, 0])).toBeCloseTo(1, 12);
     expect(quantiles([1, 2, 3, 4], [0, 0.5, 1])).toEqual([1, 2.5, 4]);
@@ -232,6 +247,8 @@ describe("scale", () => {
     expect(poolReuse(90_000_000, 512)).toBeCloseTo(175_781.25, 6);
     expect(rarefaction([5, 5], 10)).toBe(2);
     expect(rarefaction([1, 1, 1, 1], 2)).toBeCloseTo(2, 9);
+    expect(expectedDistinct([0.5, 0.5], 1)).toBeCloseTo(1, 12);
+    expect(expectedDistinct([0.5, 0.5], 1000)).toBeCloseTo(2, 12);
   });
 });
 

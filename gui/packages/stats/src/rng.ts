@@ -79,6 +79,19 @@ export class Random {
     return weights.length - 1;
   }
 
+  /** Index drawn from a cumulative distribution (see `cumulative`), by binary search. */
+  fromCdf(cdf: ArrayLike<number>): number {
+    const u = this.uniform() * cdf[cdf.length - 1]!;
+    let lo = 0;
+    let hi = cdf.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cdf[mid]! > u) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
+  }
+
   /** Poisson(lambda): inversion below 30, normal approximation above. */
   poisson(lambda: number): number {
     if (lambda <= 0) return 0;
@@ -136,6 +149,14 @@ export class Random {
     }
     return items;
   }
+}
+
+/** Running sums of `weights`, for `Random.fromCdf` (O(log n) weighted draws). */
+export function cumulative(weights: readonly number[]): Float64Array {
+  const out = new Float64Array(weights.length);
+  let acc = 0;
+  weights.forEach((w, i) => (out[i] = acc += w));
+  return out;
 }
 
 /** A stable 32-bit seed from a string (FNV-1a), to derive per-entity streams. */
