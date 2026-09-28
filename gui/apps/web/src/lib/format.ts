@@ -56,17 +56,23 @@ export function formatBytes(bytes: number | null | undefined, digits = 1): strin
   return `${formatNumber(scaled, unit === 0 ? 0 : digits)} ${BYTE_UNITS[unit]}`;
 }
 
-/** Seconds → "48 s", "3 min 20 s", "1 h 05 min". */
+/**
+ * Seconds → "4.2 s", "48 s", "3 min 20 s", "1 h 05 min". Rounds once, at the
+ * unit shown, so 119.7 s reads "2 min" and 3599.6 s "1 h 00 min" (never "60 s").
+ */
 export function formatDuration(seconds: number | null | undefined): string {
   if (!isFiniteNumber(seconds) || seconds < 0) return MISSING;
-  if (seconds < 60) return `${formatNumber(seconds, seconds < 10 ? 1 : 0)} s`;
-  const totalMinutes = Math.floor(seconds / 60);
-  if (totalMinutes < 60) {
-    const rest = Math.round(seconds - totalMinutes * 60);
-    return rest ? `${totalMinutes} min ${rest} s` : `${totalMinutes} min`;
+  if (seconds < 9.95) return `${formatNumber(seconds, 1)} s`;
+  const wholeSeconds = Math.round(seconds);
+  if (wholeSeconds < 60) return `${wholeSeconds} s`;
+  if (wholeSeconds < 3600) {
+    const minutes = Math.floor(wholeSeconds / 60);
+    const rest = wholeSeconds - minutes * 60;
+    return rest ? `${minutes} min ${rest} s` : `${minutes} min`;
   }
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes - hours * 60;
+  const wholeMinutes = Math.round(seconds / 60);
+  const hours = Math.floor(wholeMinutes / 60);
+  const minutes = wholeMinutes - hours * 60;
   return `${hours} h ${String(minutes).padStart(2, "0")} min`;
 }
 

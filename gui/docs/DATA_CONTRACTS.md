@@ -57,6 +57,9 @@ type Concept = {
 Rules, enforced by `apps/web/src/lib/concepts.test.ts`:
 
 - ids match `^[a-z][a-z0-9_-]*:[a-z0-9][a-z0-9._-]*$` and are unique across files;
+- each file defines only its namespaces: `core.ts` → `core:`, `intro.ts` → `intro:`,
+  `evaluation.ts` → `eval:`, `rag.ts` → `rag:`, `config.ts` → `knob:` / `config:` / `stats:`;
+  `metric:` is reserved for the catalogue concepts G0b generates (`catalogue.ts`);
 - every link is `https`; every formula renders in KaTeX with `throwOnError`;
 - every `diagram` names a registered MiniDiagram;
 - `purpose` has at most two sentences.

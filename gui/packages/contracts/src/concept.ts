@@ -36,6 +36,20 @@ export type Concept = {
   level?: ConceptLevel;
 };
 
+/**
+ * Which id namespaces each concept file may define (enforced by
+ * apps/web/src/lib/concepts.test.ts). `metric:` is reserved for the concepts
+ * generated from the metric catalogue (task G0b, `catalogue.ts`).
+ */
+export const conceptNamespaces: Readonly<Record<string, readonly string[]>> = {
+  "core.ts": ["core"],
+  "intro.ts": ["intro"],
+  "evaluation.ts": ["eval"],
+  "rag.ts": ["rag"],
+  "config.ts": ["knob", "config", "stats"],
+  "catalogue.ts": ["metric"],
+};
+
 /** Namespaced id: `<namespace>:<name>`, lower case, dots/dashes/underscores allowed in the name. */
 export const conceptIdPattern = /^[a-z][a-z0-9_-]*:[a-z0-9][a-z0-9._-]*$/;
 

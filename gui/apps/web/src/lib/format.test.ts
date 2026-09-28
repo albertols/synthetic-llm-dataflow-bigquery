@@ -40,9 +40,19 @@ describe("format", () => {
   });
 
   it("formats durations", () => {
+    expect(formatDuration(4.24)).toBe("4.2 s");
     expect(formatDuration(48)).toBe("48 s");
     expect(formatDuration(200)).toBe("3 min 20 s");
     expect(formatDuration(3900)).toBe("1 h 05 min");
+  });
+
+  it("rounds durations once, at the unit shown", () => {
+    expect(formatDuration(9.97)).toBe("10 s");
+    expect(formatDuration(59.6)).toBe("1 min");
+    expect(formatDuration(119.7)).toBe("2 min");
+    expect(formatDuration(119.4)).toBe("1 min 59 s");
+    expect(formatDuration(3599.6)).toBe("1 h 00 min");
+    expect(formatDuration(7199.9)).toBe("2 h 00 min");
   });
 
   it("formats metric values by kind", () => {

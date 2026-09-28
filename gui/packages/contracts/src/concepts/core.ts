@@ -49,13 +49,13 @@ export const concepts = defineConcepts([
     id: "core:score",
     title: "Score (0 – 1)",
     purpose:
-      "Maps a metric's raw value to [0, 1], higher is better, with the catalogue's score function. Family and overall scores are means over units (columns, the pair group, rows, edges).",
+      "Maps a metric's raw value to [0, 1], higher is better, with one of the catalogue's five score functions; a metric that uses its CI bound scores ci_low instead of the value. Family and overall scores are means over units (columns, the pair group, rows, edges).",
     formula:
-      "s = \\operatorname{clip}\\!\\left(\\frac{v_{\\mathrm{fail}} - v}{v_{\\mathrm{fail}} - v_{\\mathrm{warn}}},\\ 0,\\ 1\\right)",
+      "s = \\begin{cases} \\operatorname{clip}(1 - |v| / r_{\\mathrm{hi}},\\ 0,\\ 1) & \\text{complement} \\\\ \\operatorname{clip}\\!\\left(\\frac{f - v}{f - w},\\ 0,\\ 1\\right) & \\text{linear (lower better; mirrored)} \\\\ \\operatorname{clip}\\!\\left(\\frac{f - d}{f - w},\\ 0,\\ 1\\right),\\ d = |v - t| & \\text{ratio to one} \\\\ 1 - 2\\max(0,\\ v - 0.5) & \\text{AUC} \\\\ v \\text{ if } 0 \\le v \\le 1 \\text{, else null} & \\text{none (roll-ups)} \\end{cases}",
     interpretation: {
-      good: "1.0: at or better than the warn threshold.",
-      bad: "0.0: at or past the fail threshold.",
-      tip: "Compare raw values with the noise floor before reading a score change between runs.",
+      good: "1.0: at or better than the warn threshold (w), or a detection AUC at or below 0.5.",
+      bad: "0.0: at or past the fail threshold (f).",
+      tip: "w = warn threshold, f = fail threshold, t = target, r_hi = top of the range. Compare raw values with the noise floor before reading a score change.",
     },
     pitfalls:
       "A score hides the unit. Two runs can score the same while one sits on the noise floor and the other does not.",

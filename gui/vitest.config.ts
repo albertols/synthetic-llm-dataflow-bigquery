@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { defineConfig } from "vitest/config";
 
 /**
@@ -10,6 +12,15 @@ export default defineConfig({
     projects: [
       "apps/web",
       {
+        resolve: {
+          alias: [
+            {
+              find: "@contracts/generated",
+              replacement: fileURLToPath(new URL("./packages/contracts/generated", import.meta.url)),
+            },
+            { find: "@contracts", replacement: fileURLToPath(new URL("./packages/contracts/src", import.meta.url)) },
+          ],
+        },
         test: {
           name: "node",
           environment: "node",

@@ -6,6 +6,7 @@
     "types": ["vite/client", "node"],
     "paths": {
       "@/*": ["./src/*"],
+      "@contracts/generated/*": ["../../packages/contracts/generated/*"],
       "@contracts/*": ["../../packages/contracts/src/*"]
     }
   },

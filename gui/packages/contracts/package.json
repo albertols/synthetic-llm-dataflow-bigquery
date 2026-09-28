@@ -13,7 +13,8 @@
     ".": "./src/index.ts",
     "./concept": "./src/concept.ts",
     "./concept.schema": "./src/concept.schema.ts",
-    "./concepts/*": "./src/concepts/*.ts"
+    "./concepts/*": "./src/concepts/*.ts",
+    "./generated/*": "./generated/*"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

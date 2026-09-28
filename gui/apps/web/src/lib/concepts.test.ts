@@ -1,11 +1,12 @@
 import katex from "katex";
 import { beforeAll, describe, expect, it } from "vitest";
 
+import { conceptNamespaces } from "@contracts/concept";
 import { conceptSchema } from "@contracts/concept.schema";
 
 import { hasDiagram } from "@/components/MiniDiagram";
 
-import { conceptProblems, conceptsComplete, getConcept, listConcepts, loadConcepts } from "./concepts";
+import { conceptProblems, conceptSource, conceptsComplete, getConcept, listConcepts, loadConcepts } from "./concepts";
 
 /** The contract every concept file must meet (tab files included — this suite is their gate). */
 describe("concept registry", () => {
@@ -25,6 +26,22 @@ describe("concept registry", () => {
     for (const level of ["field", "column", "pair", "row", "table", "relationship", "model"]) {
       expect(getConcept(`core:level-${level}`)?.level).toBe(level);
     }
+  });
+
+  it("each concept file defines only its own namespaces (metric: is the generated catalogue's)", () => {
+    const failures: string[] = [];
+    for (const concept of listConcepts()) {
+      const file = conceptSource(concept.id) ?? "?";
+      const allowed = conceptNamespaces[file];
+      const namespace = concept.id.split(":")[0] ?? "";
+      if (!allowed)
+        failures.push(
+          `${concept.id}: ${file} is not a known concept file (${Object.keys(conceptNamespaces).join(", ")})`,
+        );
+      else if (!allowed.includes(namespace))
+        failures.push(`${concept.id}: ${file} may define ${allowed.map((n) => `${n}:`).join(" ")} only`);
+    }
+    expect(failures).toEqual([]);
   });
 
   it("every concept parses, its formula renders in KaTeX, and its diagram exists", () => {
