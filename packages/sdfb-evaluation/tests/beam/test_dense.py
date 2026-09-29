@@ -50,14 +50,17 @@ from sdfb_evaluation.beam import census, dense
 from sdfb_evaluation.beam.census import CensusMetrics
 from sdfb_evaluation.beam.dense import (
     CHAR_CLASSES,
+    NOT_EVALUATED_BELOW_K,
     NULL_PATTERN_CAP,
     OWNED_METRIC_IDS,
     PAIR_BINS,
     RARE_COUNT,
+    WITHHELD_BELOW_K,
     DenseMetrics,
     DenseProfile,
     DenseProfileCombineFn,
     DenseSpec,
+    _kept_range,
     calendar_counts,
     char_class_masks,
     dense_outputs,
@@ -2062,8 +2065,8 @@ def _mixed_rows(n: int, seed: int, sd: float = 1.0) -> list[dict]:
   for r, row in enumerate(z):
     stamp = _T0 + timedelta(
         microseconds=int(30 * 86_400e6 + row[2] * 5 * 86_400e6))
-    clock = datetime(2000, 1, 1,
-                     12) + timedelta(microseconds=int(row[5] * 2 * 3_600e6))
+    noon = datetime(2000, 1, 1,
+                    12) + timedelta(microseconds=int(row[5] * 2 * 3_600e6))
     rows.append({
         "id":
             r,
@@ -2079,7 +2082,7 @@ def _mixed_rows(n: int, seed: int, sd: float = 1.0) -> list[dict]:
         "d":
             date(2024, 1, 1) + timedelta(days=round(200 + 40 * row[4])),
         "tm":
-            clock.time(),
+            noon.time(),
     })
   return rows
 
@@ -2259,14 +2262,18 @@ def _publishable(n: int) -> list[float]:
   ]
 
 
-def test_metric_side_values_are_withheld_below_the_count_floor():
-  """R77.6 (the reviewer's p_mom_metric): a side with fewer than k values
-  has its moment-based `source_value`/`synthetic_value`/`baseline_value`
-  withheld on smd, std_ratio and range_coverage — `value` and the status
-  stay, and the detail says why; a side with k values shows them."""
+def test_moment_metrics_are_not_evaluated_below_the_count_floor():
+  """R80.3 (the reviewer's p_mom_recover): smd and std_ratio are not
+  evaluated when either side holds fewer than k values — their value
+  with the synthetic's published moments gives the source mean and std
+  (both records at n = 2). range_coverage stays evaluated (no published
+  extreme lets its value be inverted) with only its baseline withheld
+  when the reference is tiny, and `detail.withheld` names exactly that
+  (R77.6, R80.5). At n = k everything shows but a 3-record reference's
+  baseline."""
   rng = np.random.default_rng(4)
   synthetic = _uniform_rows(rng.normal(50, 10, 3000))
-  for n in (1, 2, 5):
+  for n in (1, 2, 5, RARE_COUNT - 1):
     source = _uniform_rows(rng.normal(50, 10, n))
     table = planned_table("m", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
     metrics, _ = _pure(table, {
@@ -2275,18 +2282,23 @@ def test_metric_side_values_are_withheld_below_the_count_floor():
         "reference": source
     })
     rows = _by_key(metrics)
-    for metric_id in ("column.smd", "column.std_ratio",
-                      "column.range_coverage"):
+    for metric_id in ("column.smd", "column.std_ratio"):
       row = rows[(metric_id, "x", None)]
-      if row.value is None:
-        continue  # not evaluated: n = 1 is a constant source (std 0)
-      assert row.source_value is None and row.baseline_value is None
-      assert row.synthetic_value is not None or metric_id.endswith("coverage")
-      assert row.detail["withheld"] == {
-          "source_value": dense._WITHHELD_BELOW_K,
-          "baseline_value": dense._WITHHELD_BELOW_K,
-      }
-      assert row.detail["baseline_reason"] == dense._WITHHELD_BELOW_K
+      assert row.value is None
+      assert NOT_EVALUATED_BELOW_K in json.dumps(row.detail)
+    coverage = rows[("column.range_coverage", "x", None)]
+    if coverage.value is not None:  # n = 1: a zero source range
+      assert coverage.baseline_value is None
+      assert coverage.detail["withheld"] == {"baseline_value": WITHHELD_BELOW_K}
+      assert coverage.detail["baseline_reason"] == WITHHELD_BELOW_K
+  # a tiny SYNTHETIC side is not evaluated either
+  tiny = _uniform_rows(rng.normal(50, 10, 5))
+  source = _uniform_rows(rng.normal(50, 10, 300))
+  table = planned_table("t", _UNIFORM_FIELDS, source, tiny, pk=("id",))
+  metrics, _ = _pure(table, {"source": source, "synthetic": tiny})
+  assert _by_key(metrics)[("column.smd", "x", None)].value is None
+  # at n = k: evaluated, side values shown, a 3-record reference's
+  # baseline withheld and named
   source = _uniform_rows(rng.normal(50, 10, RARE_COUNT))
   table = planned_table("k", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
   metrics, _ = _pure(table, {
@@ -2294,10 +2306,66 @@ def test_metric_side_values_are_withheld_below_the_count_floor():
       "synthetic": synthetic,
       "reference": source[:3]
   })
-  row = _by_key(metrics)[("column.smd", "x", None)]
+  rows = _by_key(metrics)
+  for metric_id in ("column.smd", "column.std_ratio", "column.range_coverage"):
+    row = rows[(metric_id, "x", None)]
+    assert row.value is not None and row.baseline_value is None
+    assert row.detail["withheld"] == {"baseline_value": WITHHELD_BELOW_K}
+  row = rows[("column.smd", "x", None)]
   assert row.source_value is not None and row.synthetic_value is not None
-  assert row.baseline_value is None  # the 3-record reference only
-  assert row.detail["withheld"] == {"baseline_value": dense._WITHHELD_BELOW_K}
+
+
+@pytest.mark.parametrize("n", [50, 3000])
+def test_synthetic_payloads_do_not_depend_on_an_unevaluated_source(n):
+  """R80.2 (the reviewer's p_nosrc_invariance): with no source side at
+  dense time, the same synthetic under two plans built from different
+  sources gives identical synthetic payloads on every column. On INT64
+  and DATE every value is a grid point, and a provenance-selective drop
+  of the points a source value coincides with (4b14f50) mapped the
+  source's value set through the integer pattern; now exactly the
+  synthetic grid's own points are kept, so the payloads are a function
+  of the synthetic alone (R77.3 as amended). A NULL-column source side
+  is the same branch. Every published probability is one of the
+  synthetic grid's own, so a published quantile is always that grid
+  point and an extra kept edge could never move it: the kept set itself
+  is pinned too, so keeping every edge (the R74.4 revert) fails as well
+  as the selective drop."""
+  synthetic = _mixed_rows(3001, 77, sd=3.0)
+  sources = [_mixed_rows(n, seed) for seed in (n, n + 500)]
+  assert {r["i"] for r in sources[0]} != {r["i"] for r in sources[1]}
+  payloads = []
+  source_only = 0
+  for source in sources:
+    table = planned_table("v", _MIXED_FIELDS, source, synthetic, pk=("id",))
+    spec = DenseSpec.from_table(table)
+    empty = DenseProfile.empty(spec, "source")
+    for gi, grid in enumerate(spec.grids):
+      column = next(c for c in table.columns if c.name == grid.name)
+      on_grid = np.isin(grid.union,
+                        np.asarray(column.quantiles_syn, dtype=float))
+      np.testing.assert_array_equal(_kept_range(grid, empty, gi), on_grid)
+      source_only += int(np.count_nonzero(~on_grid))
+    nulls = [{"id": r["id"], **{c: None for c in _MIXED_NAMES}} for r in source]
+    for rows_by in ({
+        "synthetic": synthetic
+    }, {
+        "source": nulls,
+        "synthetic": synthetic
+    }):
+      _, profiles = _pure(table, rows_by)
+      payloads.append({
+          (p.profile_kind, p.column): p.payload
+          for p in profiles
+          if p.side == "synthetic" and p.profile_kind in ("histogram",
+                                                          "quantiles",
+                                                          "moments")
+      })
+  assert source_only > 100  # the plans did contribute source-only edges
+  assert all(payload == payloads[0] for payload in payloads[1:])
+  assert all(("quantiles", c) in payloads[0] for c in _MIXED_NAMES)
+  for column in ("i", "d"):  # complete, from the synthetic grid alone
+    assert payloads[0][("quantiles", column)]["probs"] == _PROBS
+    assert payloads[0][("histogram", column)]["edges"] == []
 
 
 def test_union_left_counts_are_exact_in_any_merge_order():

@@ -147,14 +147,20 @@ qualifies, a lone extreme never does.
     the p with p * n >= k and (1 - p) * n >= k, and bounds need
     n * 0.005 >= k (n the side's own).
   - With no evaluated source value in a column (no source side, or a
-    NULL column), every source-grid point and atom is dropped — they are
-    plan-time source records — and only the synthetic grid's own points
-    remain (R77.3).
+    NULL column), the kept edges are exactly the synthetic grid's own
+    points — including any a source value coincides with — and the
+    points only the source grid or the atoms contributed are dropped, as
+    plan-time source records. The kept set is a function of the synthetic
+    alone, so the payloads carry nothing about the unevaluated source
+    (R77.3, amended by R80.1: a provenance-selective drop of the
+    coinciding points mapped the source's value set on INT64/DATE).
   - Moments payloads (mean, std, skewness, kurtosis) are withheld on a
-    side with fewer than k values: n <= 4 values determine them (R74.5);
-    so are the moment-based `source_value`/`synthetic_value`/
-    `baseline_value` of a metric row when that side has fewer than k
-    values, while `value` (a delta) and the status stay (R77.6).
+    side with fewer than k values: n <= 4 values determine them (R74.5).
+    smd and std_ratio are not_evaluated when either side holds fewer
+    than k values — their value with the synthetic's published moments
+    would give the source's mean and std (R80.3) — and a metric's
+    `baseline_value` is withheld when the reference holds fewer than k
+    (R77.6), `detail.withheld` naming exactly what is withheld (R80.5).
   - The counts include any ±inf a hand-built batch carries (the encoder
     turns non-finite values into NULL-like NaN) while Moments.n does not;
     such a value only ever changes which edges carry k records, never
@@ -205,10 +211,12 @@ __all__ = [
     "CONTINGENCY_TOP_PAIRS",
     "HOT_KEY_FANOUT",
     "LENGTH_BINS",
+    "NOT_EVALUATED_BELOW_K",
     "NULL_PATTERN_CAP",
     "OWNED_METRIC_IDS",
     "PAIR_BINS",
     "RARE_COUNT",
+    "WITHHELD_BELOW_K",
     "DenseMetrics",
     "DenseProfile",
     "DenseProfileCombineFn",
@@ -316,7 +324,13 @@ _BOUND_PROBS = (0.005, 0.995)
 # R69: a published bound, end edge or tail quantile has at least this many
 # records at or beyond it (D6/R56's k-anonymity floor, plan.LITERAL_MIN_COUNT)
 RARE_COUNT = 10
-_WITHHELD_BELOW_K = f"fewer than {RARE_COUNT} values on that side (R77)"
+# R77.6: a reference with fewer than k values withholds a row's baseline
+WITHHELD_BELOW_K = f"fewer than {RARE_COUNT} values on that side (R77)"
+# R80.3: smd / std_ratio with a side below k are not evaluated at all —
+# their value with the synthetic's published moments would give the
+# source's mean and std (both records at n = 2)
+NOT_EVALUATED_BELOW_K = f"fewer than k records on a side (k = {RARE_COUNT}, R80)"
+_MOMENT_VALUE_IDS = frozenset({"column.smd", "column.std_ratio"})
 _EDGE_DIGITS = range(6, 18)  # 17 significant digits tell any two floats apart
 _TIME_UNITS: tuple[Literal["s"], Literal["ms"],
                    Literal["us"]] = ("s", "ms", "us")
@@ -524,17 +538,17 @@ def _capped(patterns: dict[int, int],
 # --------------------------------------------------------------------------
 @dataclass(frozen=True, eq=False)
 class _Grid:  # pylint: disable=too-many-instance-attributes  # one field per grid the column is counted on
-  """One numeric or temporal column and its plan-time grids; `source_edge`
-  marks the union edges the source's planning stats contributed (its
-  quantile grid and atoms — plan-time source records), which only the
-  no-source case consults (R77.3)."""
+  """One numeric or temporal column and its plan-time grids;
+  `synthetic_edge` marks the union edges that are points of the
+  synthetic's own quantile grid (whether or not a source value coincides
+  with them), which only the no-source case consults (R77.3, R80.1)."""
   j: int
   name: str
   kind: ColumnKind
   bq_type: str
   num_k: int
   union: np.ndarray
-  source_edge: np.ndarray
+  synthetic_edge: np.ndarray
   profile: np.ndarray
   deciles: np.ndarray
   lo: float | None
@@ -639,8 +653,8 @@ def _pair_column(j: int, column: ColumnPlan,
 
 def _grid(j: int, column: ColumnPlan, layout: BatchLayout) -> _Grid:
   q_src = column.quantiles_src or ()
+  q_syn = np.asarray(column.quantiles_syn or (), dtype=np.float64)
   union = binned.union_edges(q_src, column.quantiles_syn or (), column.atoms)
-  from_source = np.asarray([*q_src, *column.atoms], dtype=np.float64)
   return _Grid(
       j=j,
       name=column.name,
@@ -648,7 +662,7 @@ def _grid(j: int, column: ColumnPlan, layout: BatchLayout) -> _Grid:
       bq_type=column.bq_type,
       num_k=layout.num_columns.index(column.name),
       union=union,
-      source_edge=np.isin(union, from_source),
+      synthetic_edge=np.isin(union, q_syn),
       profile=binned.profile_edges(q_src),
       deciles=binned.decile_edges(q_src),
       lo=float(q_src[0]) if q_src else None,
@@ -1408,12 +1422,15 @@ _CONSTANT_SOURCE = {
 def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
                     sizes: _Sizes) -> None:
   """smd, std_ratio and range_coverage (exact, from Moments) and, numeric,
-  zero_rate_delta. A side's moment-based `source_value`/`synthetic_value`
-  and the reference's `baseline_value` are withheld when that side holds
-  fewer than RARE_COUNT values (R77.6): n <= 4 values determine them.
-  `value` (a delta, what the status reads) is unchanged."""
+  zero_rate_delta. smd and std_ratio are not_evaluated when either side
+  holds fewer than RARE_COUNT values: their value with the synthetic's
+  published moments would give the source's mean and std (R80.3). A
+  reference with fewer than RARE_COUNT values withholds `baseline_value`
+  (R77.6), and `detail.withheld` names exactly that (R80.5)."""
   ms, my = s.src.moments[gi], s.syn.moments[gi]
   mr = None if s.ref is None else s.ref.moments[gi]
+  tiny = min(ms.n, my.n) < RARE_COUNT
+  baseline_withheld = mr is not None and mr.n < RARE_COUNT
   functions: tuple[tuple[str, Callable[[Moments, Moments | None],
                                        float | None]],
                    ...] = (("column.smd", _smd), ("column.std_ratio",
@@ -1424,12 +1441,10 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
       "column.std_ratio": (ms.std, my.std),
       "column.range_coverage": (None, None),
   }
-  withheld = [
-      name for name, m in (("source_value", ms), ("synthetic_value", my),
-                           ("baseline_value", mr))
-      if m is not None and m.n < RARE_COUNT
-  ]
   for metric_id, fn in functions:
+    if tiny and metric_id in _MOMENT_VALUE_IDS:
+      e.skip(metric_id, NOT_EVALUATED_BELOW_K, scope, sizes=sizes)
+      continue
     value = fn(ms, my)
     if value is None:
       e.skip(metric_id, _CONSTANT_SOURCE[metric_id], scope, sizes=sizes)
@@ -1440,18 +1455,16 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
         if metric_id == "column.range_coverage" else {
             "unit": grid.unit
         })
-    if withheld:
-      detail["withheld"] = {name: _WITHHELD_BELOW_K for name in withheld}
-      if "baseline_value" in withheld:
-        detail["baseline_reason"] = _WITHHELD_BELOW_K
+    if baseline_withheld:
+      detail["withheld"] = {"baseline_value": WITHHELD_BELOW_K}
+      detail["baseline_reason"] = WITHHELD_BELOW_K
     e.value(
         metric_id,
         value,
         scope,
-        baseline=None if "baseline_value" in withheld else fn(ms, mr),
-        source_value=None if "source_value" in withheld else source_value,
-        synthetic_value=(None
-                         if "synthetic_value" in withheld else synthetic_value),
+        baseline=None if baseline_withheld else fn(ms, mr),
+        source_value=source_value,
+        synthetic_value=synthetic_value,
         detail=detail,
         sizes=sizes)
   if grid.kind is _NUMERIC:
@@ -1987,12 +2000,14 @@ def _kept_union(src: DenseProfile, gi: int) -> np.ndarray:
 
 def _kept_range(grid: _Grid, src: DenseProfile, gi: int) -> np.ndarray:
   """`_kept_union`, except that a column with no evaluated source value
-  (no source side, or a NULL column) keeps only the synthetic grid's own
-  points: the source-grid points and atoms are plan-time source records,
-  and there is nothing else to leak (R77.3)."""
+  (no source side, or a NULL column) keeps exactly the synthetic grid's
+  own points — every one of them, including a point a source value
+  coincides with — and drops the points only the source grid or the
+  atoms contributed (plan-time source records). The kept set is then a
+  function of the synthetic alone, so the payloads cannot depend on the
+  unevaluated source (R77.3 as amended by R80.1)."""
   if not src.union[gi].sum():
-    no_source: np.ndarray = ~grid.source_edge
-    return no_source
+    return grid.synthetic_edge
   return _kept_union(src, gi)
 
 
