@@ -43,6 +43,8 @@ from sdfb_evaluation.context.launch import LaunchContext, RunRecord
 from sdfb_evaluation.context.reference import reference_digest
 from sdfb_evaluation.context.relationships import from_sources
 
+from .bq_rules import check_one_point_in_time_per_table
+
 PROJECT = "demo-project"
 DS = f"{PROJECT}.thelook_synthetic"
 SRC = "bigquery-public-data.thelook_ecommerce"
@@ -380,6 +382,9 @@ class PlanBq:
     self.dry_runs: list[tuple[str, dict]] = []
     self.executed: list[tuple[str, dict]] = []
     self.execute_caps: list[int | None] = []
+    # SQL substring → the error a dry run / an execute raises instead.
+    self.dry_failures: dict[str, BaseException] = {}
+    self.execute_failures: dict[str, BaseException] = {}
     self.max_bytes: list[int | None] = []
     self.events: list[tuple[str, str]] = []  # (dry | query | execute, sql)
 
@@ -403,8 +408,12 @@ class PlanBq:
   def dry_run_bytes(self,
                     sql: str,
                     params: Mapping[str, Any] | None = None) -> int:
+    check_one_point_in_time_per_table(sql)
     self.dry_runs.append((sql, dict(params or {})))
     self.events.append(("dry", sql))
+    for needle, exc in self.dry_failures.items():
+      if needle in sql:
+        raise exc
     return self.dry_bytes
 
   def execute(self,
@@ -412,6 +421,10 @@ class PlanBq:
               params: Mapping[str, Any] | None = None,
               *,
               max_bytes: int | None = None) -> None:
+    check_one_point_in_time_per_table(sql)
+    for needle, exc in self.execute_failures.items():
+      if needle in sql:
+        raise exc
     self.executed.append((sql, dict(params or {})))
     self.execute_caps.append(max_bytes)
     self.events.append(("execute", sql))
@@ -424,6 +437,7 @@ class PlanBq:
             params: Mapping[str, Any] | None = None,
             *,
             max_bytes: int | None = None) -> list[dict]:
+    check_one_point_in_time_per_table(sql)
     self.queries.append((sql, dict(params or {})))
     self.max_bytes.append(max_bytes)
     self.events.append(("query", sql))

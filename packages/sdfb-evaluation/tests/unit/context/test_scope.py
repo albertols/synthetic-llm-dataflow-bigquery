@@ -39,6 +39,7 @@ from typing import Any
 import pytest
 
 from sdfb_evaluation.context import scope as scope_module
+from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.jobs import JobWrite
 from sdfb_evaluation.context.scope import (
     ScopePlan,
@@ -47,6 +48,8 @@ from sdfb_evaluation.context.scope import (
     resolve_scope,
     sampled_read,
 )
+
+from .bq_rules import check_one_point_in_time_per_table
 
 DS = "demo-project.thelook_synthetic"
 ORDERS = f"{DS}.orders"
@@ -138,14 +141,27 @@ def _resolve(**overrides) -> ScopePlan:
   return resolve_scope(**kwargs)
 
 
-def _diff_select(table: str = ORDERS) -> str:
-  """as_of_diff's SELECT: the end state minus the start state, as
-  multisets of TO_JSON_STRING rows."""
-  number = ("TO_JSON_STRING(t) AS __sdfb_json, ROW_NUMBER() OVER "
-            "(PARTITION BY TO_JSON_STRING(t)) AS __sdfb_rn")
+_NUMBERED = ("TO_JSON_STRING(t) AS __sdfb_json, ROW_NUMBER() OVER "
+             "(PARTITION BY TO_JSON_STRING(t)) AS __sdfb_rn")
+
+
+def _diff_select(start: str, table: str = ORDERS) -> str:
+  """as_of_diff's SELECT: the table AS OF the window end minus its start
+  snapshot (another table, read now), as multisets of TO_JSON_STRING
+  rows."""
   return (f"SELECT e.* EXCEPT(__sdfb_json, __sdfb_rn) FROM (SELECT t.*, "
-          f"{number} FROM (SELECT * FROM `{table}` FOR SYSTEM_TIME AS OF "
-          f"{END_LIT}) AS t) AS e LEFT JOIN (SELECT {number} FROM "
+          f"{_NUMBERED} FROM (SELECT * FROM `{table}` FOR SYSTEM_TIME AS OF "
+          f"{END_LIT}) AS t) AS e LEFT JOIN (SELECT {_NUMBERED} FROM "
+          f"`{start}` AS t) AS s ON e.__sdfb_json = s.__sdfb_json AND "
+          "e.__sdfb_rn = s.__sdfb_rn WHERE s.__sdfb_rn IS NULL")
+
+
+def _r51_select(table: str = ORDERS) -> str:
+  """Round 1's shape — the same table at two points in one statement,
+  which BigQuery rejects."""
+  return (f"SELECT e.* EXCEPT(__sdfb_json, __sdfb_rn) FROM (SELECT t.*, "
+          f"{_NUMBERED} FROM (SELECT * FROM `{table}` FOR SYSTEM_TIME AS OF "
+          f"{END_LIT}) AS t) AS e LEFT JOIN (SELECT {_NUMBERED} FROM "
           f"(SELECT * FROM `{table}` FOR SYSTEM_TIME AS OF {START_LIT}) AS t) "
           "AS s ON e.__sdfb_json = s.__sdfb_json AND e.__sdfb_rn = "
           "s.__sdfb_rn WHERE s.__sdfb_rn IS NULL")
@@ -169,6 +185,7 @@ def test_overwrite_uses_whole_table():
   assert plan.window == WINDOW
   assert plan.expected_rows == 18250
   assert plan.written_rows == 18250  # Σ the job's own output_rows
+  assert plan.planning_sql == () and plan.start_table == ""
 
 
 def test_overwrite_with_later_write_snapshots_as_of():
@@ -317,36 +334,54 @@ def test_append_with_a_copy_job_uses_the_as_of_difference():
   assert plan.mode == "as_of_diff"
   assert plan.status == "ok" and plan.reason is None
   assert re.fullmatch(_temp_re("syn", "orders"), plan.read_table)
-  # AS OF carries literals, as the snapshot clone does; nothing is bound.
+  # (1) A zero-byte, expiring snapshot of the table AS OF the window
+  # start, created by the PLANNER (the read_expr depends on it) ...
+  start = plan.start_table
+  assert re.fullmatch(_temp_re("start", "orders"), start)
+  assert plan.planning_sql == (f"CREATE SNAPSHOT TABLE `{start}` CLONE "
+                               f"`{ORDERS}` FOR SYSTEM_TIME AS OF {START_LIT} "
+                               f"{EXPIRY}",)
+  # (2) ... then the table AS OF the window end minus that snapshot read
+  # now: two tables, each at one point in time.
   assert plan.prepare_sql == (
-      f"CREATE TABLE `{plan.read_table}` {EXPIRY} AS {_diff_select()}",)
-  assert plan.read_expr == f"({_diff_select()})"
-  assert plan.params == {}
+      f"CREATE TABLE `{plan.read_table}` {EXPIRY} AS {_diff_select(start)}",)
+  assert plan.read_expr == f"({_diff_select(start)})"
+  assert plan.params == {}  # AS OF carries literals, as the clone does
   assert plan.window == WINDOW
   assert plan.written_rows == 18250
+  for sql in (*plan.planning_sql, *plan.prepare_sql, plan.read_expr):
+    check_one_point_in_time_per_table(sql)
 
 
 def test_as_of_difference_expires_on_its_start_point():
   plan = _resolve(writes=COPY_WRITES, now="2026-09-20T12:49:21Z")
   assert plan.mode == "as_of_diff" and plan.status == "expired"
   assert "2026-09-13T13:49:20" in plan.reason  # the start point
+  assert plan.planning_sql == () and plan.start_table == ""
 
 
 def test_as_of_difference_is_contaminated_by_an_overlapping_writer():
   plan = _resolve(writes=COPY_WRITES, foreign=(OVERLAPPING_LOAD,))
   assert plan.mode == "as_of_diff" and plan.status == "contaminated"
   assert not plan.readable and "manual_load_77" in plan.reason
+  assert plan.planning_sql == ()  # nothing is created for a rejected scope
 
 
-def test_a_table_created_inside_the_window_is_read_as_of_its_end():
+@pytest.mark.parametrize("requested", ["auto", "as_of_diff"])
+def test_a_table_created_inside_the_window_is_read_as_of_its_end(requested):
   # Nothing existed at the window start, so the table as of the window
   # end IS the difference (and AS OF a pre-creation time would fail).
   plan = _resolve(
-      writes=COPY_WRITES, table_created="2026-09-13T13:49:20.500000Z")
+      writes=COPY_WRITES,
+      requested=requested,
+      table_created="2026-09-13T13:49:20.500000Z")
   assert plan.mode == "as_of" and plan.ok
   assert plan.prepare_sql[0].startswith("CREATE SNAPSHOT TABLE")
+  assert plan.planning_sql == ()
+  # Said, not silent.
+  assert "2026-09-13T13:49:20.5" in plan.reason and "as_of" in plan.reason
   before = _resolve(writes=COPY_WRITES, table_created="2026-09-01T00:00:00Z")
-  assert before.mode == "as_of_diff"
+  assert before.mode == "as_of_diff" and before.reason is None
 
 
 def test_a_table_recreated_after_the_window_is_unknown():
@@ -362,20 +397,28 @@ def test_appends_requested_over_copy_jobs_is_kept_with_a_warning():
 
 
 class _TimeTravelTable:
-  """One table's commit history, readable AS OF any instant, plus a
-  BigQuery reduced to as_of_diff's SELECT over it.
+  """One table's commit history plus a BigQuery reduced to as_of_diff's
+  statements over it: the start snapshot clone, the difference SELECT and
+  its CTAS. Every statement must read each table at ONE point in time
+  (`bq_rules`), as BigQuery requires.
 
   ROW_NUMBER over identical TO_JSON_STRING rows numbers them in an order
   BigQuery does not promise; `rng` shuffles it on every read.
   """
 
-  _RE = re.compile(
-      re.escape(_diff_select("TABLE")).replace("TABLE", "[^`]+").replace(
-          re.escape(END_LIT), r"TIMESTAMP '(?P<end>[^']+)'").replace(
-              re.escape(START_LIT), r"TIMESTAMP '(?P<start>[^']+)'"))
+  _SNAPSHOT_RE = re.compile(
+      r"CREATE SNAPSHOT TABLE `(?P<snap>[^`]+)` CLONE `[^`]+` FOR "
+      r"SYSTEM_TIME AS OF TIMESTAMP '(?P<at>[^']+)' " + re.escape(EXPIRY))
+  _CTAS_RE = re.compile(r"CREATE TABLE `(?P<temp>[^`]+)` " + re.escape(EXPIRY) +
+                        r" AS (?P<select>.+)")
+  _DIFF_RE = re.compile(
+      re.escape(_diff_select("START")).replace(
+          re.escape(END_LIT),
+          r"TIMESTAMP '(?P<end>[^']+)'").replace("START", "(?P<start>[^`]+)"))
 
   def __init__(self, seed: int):
     self.commits: list[tuple[datetime, list[dict[str, Any]]]] = []
+    self.tables: dict[str, list[dict[str, Any]]] = {}
     self.rng = random.Random(seed)
 
   def commit(self, at: str, rows: list[dict[str, Any]]) -> None:
@@ -387,6 +430,8 @@ class _TimeTravelTable:
     return rows
 
   def _numbered(self, rows: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    rows = list(rows)
+    self.rng.shuffle(rows)
     seen: Counter[str] = Counter()
     out = []
     for row in rows:
@@ -395,12 +440,27 @@ class _TimeTravelTable:
       out.append((text, seen[text]))
     return out
 
+  def execute(self, sql: str) -> None:
+    check_one_point_in_time_per_table(sql)
+    snapshot = self._SNAPSHOT_RE.fullmatch(sql)
+    if snapshot:
+      self.tables[snapshot["snap"]] = self.as_of(
+          datetime.fromisoformat(snapshot["at"]))
+      return
+    ctas = self._CTAS_RE.fullmatch(sql)
+    assert ctas, sql
+    select = ctas["select"]
+    self.tables[ctas["temp"]] = self.query(f"({select})")
+
   def query(self, read_expr: str) -> list[dict[str, Any]]:
-    match = self._RE.fullmatch(read_expr[1:-1])
+    check_one_point_in_time_per_table(read_expr)
+    match = self._DIFF_RE.fullmatch(read_expr[1:-1])
     assert match, read_expr
+    snapshot = match["start"]
+    if snapshot not in self.tables:
+      raise LookupError(f"Not found: Table {snapshot}")
     end = self._numbered(self.as_of(datetime.fromisoformat(match["end"])))
-    start = set(
-        self._numbered(self.as_of(datetime.fromisoformat(match["start"]))))
+    start = set(self._numbered(self.tables[snapshot]))
     return [json.loads(text) for text, rn in end if (text, rn) not in start]
 
 
@@ -421,9 +481,35 @@ def test_as_of_difference_is_the_exact_multiset_of_appended_rows(seed):
   # After the window: never part of the difference.
   table.commit("2026-09-14T08:00:05+00:00", [a, c])
   plan = _resolve(writes=COPY_WRITES, expected_rows=4)
-  got = table.query(plan.read_expr)
-  assert Counter(json.dumps(r) for r in got) == Counter(
-      json.dumps(r) for r in (a, b, c, c))
+  expected = Counter(json.dumps(r) for r in (a, b, c, c))
+  # The read_expr needs the planner's start snapshot first.
+  with pytest.raises(LookupError):
+    table.query(plan.read_expr)
+  for sql in plan.planning_sql:
+    table.execute(sql)
+  assert Counter(json.dumps(r) for r in table.query(plan.read_expr)) == expected
+  for sql in plan.prepare_sql:
+    table.execute(sql)
+  assert Counter(json.dumps(r) for r in table.tables[plan.read_table]) == (
+      expected)
+
+
+def test_the_fakes_reject_one_table_at_two_points_in_time():
+  # Round 1's single-statement difference: BigQuery rejects it, and so
+  # must every fake that stands in for BigQuery.
+  with pytest.raises(BqApiError, match="more than one point in time"):
+    _TimeTravelTable(0).query(f"({_r51_select()})")
+  with pytest.raises(BqApiError, match="more than one point in time"):
+    _TimeTravelTable(0).execute(f"CREATE TABLE `{TEMP}.x` {EXPIRY} AS "
+                                f"{_r51_select()}")
+  # AS OF against the current time counts as two points too.
+  with pytest.raises(BqApiError):
+    check_one_point_in_time_per_table(
+        f"SELECT * FROM `{ORDERS}` JOIN (SELECT * FROM `{ORDERS}` FOR "
+        f"SYSTEM_TIME AS OF {END_LIT}) USING (order_id)")
+  # The same point twice is fine.
+  check_one_point_in_time_per_table(
+      f"SELECT * FROM `{ORDERS}` JOIN `{ORDERS}` USING (order_id)")
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +638,7 @@ def test_an_unknown_mode_never_falls_through_to_appends():
   scope = scope_module._Scope(  # pylint: disable=protected-access  # the internal mode dispatch has no public door
       table=ORDERS,
       temp=f"{TEMP}.t",
+      start=f"{TEMP}.s",
       expected=None,
       written=None,
       window=WINDOW,
@@ -713,6 +800,15 @@ def test_source_with_unknown_create_time_is_unpinned():
 def test_source_create_time_after_now_is_rejected():
   with pytest.raises(ValueError, match="after"):
     _pin(job_create_time="2026-09-15T00:00:00Z")
+  with pytest.raises(ValueError, match="after"):
+    _pin(job_create_time="2026-09-14T12:05:00.000001Z")
+
+
+def test_source_create_time_within_five_minutes_of_now_is_clock_skew():
+  pin = _pin(job_create_time="2026-09-14T12:04:59Z")
+  assert pin.pinned and pin.as_of == NOW
+  assert "TIMESTAMP '2026-09-14T12:00:00.000000Z'" in pin.prepare_sql[0]
+  assert "skew" in pin.reason
 
 
 # ---------------------------------------------------------------------------

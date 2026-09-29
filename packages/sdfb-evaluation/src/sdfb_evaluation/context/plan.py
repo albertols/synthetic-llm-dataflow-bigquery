@@ -23,9 +23,11 @@ table side.
           ▼
     per launch table: bq.table → resolve_scope (+ foreign writers)
           │           → pin_source → provisional ColumnPlans
+          │           → as_of_diff only: its start snapshot (R57)
           ▼
     dry runs (planning SELECTs, panel, prepare DDL and, sampled, the
-          │  worst-case sample reads) ─► Budget.check_bytes
+          │  worst-case sample reads) ─► Budget.check_bytes; a table whose
+          │  dry run fails is skipped as scope `unknown`, not the plan
           ▼             nothing billed before this point
     ONE planning SELECT per side → scope.verify(rows) → R/E/H panel
           ▼
@@ -1017,9 +1019,12 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
   """The whole evaluation, decided before the pipeline runs.
 
   `prepare_sql` is a tuple of `PrepareStatement` (sql, params) pairs, in
-  execution order; `prepare(bq)` runs them. `bq_bytes_estimate` sums the
-  dry runs of every query the evaluation issues (planning, panel, prepare,
-  samples); `predicted_shuffle_gb` is `budget.predict_shuffle_gb`.
+  execution order; `prepare(bq)` runs them. `planning_ddl` lists what
+  planning ALREADY ran (R57: the as_of_diff start snapshots, zero bytes,
+  expiring in 24 h) — for the report and for cleanup. `bq_bytes_estimate`
+  sums the dry runs of every query the evaluation issues (planning,
+  panel, prepare, samples); `predicted_shuffle_gb` is
+  `budget.predict_shuffle_gb`.
   """
   evaluation_id: str
   evaluation_key: str
@@ -1037,6 +1042,7 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
   bq_bytes_estimate: int
   predicted_shuffle_gb: float
   warnings: tuple[str, ...] = ()
+  planning_ddl: tuple[PrepareStatement, ...] = ()
   catalogue_version: str = ""
   evaluator_version: str = EVALUATOR_VERSION
   temp_dataset: str = ""
@@ -1289,6 +1295,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     self.notes: list[str] = []
     self.bytes: dict[str, int] = {"planning": 0, "panel": 0, "prepare": 0}
     self.samples: list[PrepareStatement] = []
+    self.planning_ddl: list[PrepareStatement] = []  # run in phase A (R57)
     self.multi = len(launch.tables_in_order) > 1
 
   # --- tables ----------------------------------------------------------------
@@ -1567,7 +1574,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
         time_travel_hours=int(src_meta["timeTravelHours"]),
         temp_dataset=self.temp_dataset,
         evaluation_id=self.evaluation_id)
-    if not work.pin.pinned:
+    if work.pin.reason:
       work.notes.append(f"{work.source}: {work.pin.reason}")
     modified = src_meta.get("lastModified")
     if modified and created:
@@ -1620,29 +1627,75 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     and, sampled, the full read of every side whose table holds more than
     `sample_rows` (the worst case: the planning counts that decide it are
     not known yet) — then refuse the plan over `max_bytes_billed`, before
-    anything is billed."""
-    n = self.panel_n()
+    anything is billed. A table whose dry run BigQuery rejects (a 400, a
+    denied or missing table) is skipped as scope `unknown` with the error
+    as its reason, and its bytes are not counted; the others go on."""
     worst = 0
     for work in works:
-      assert work.scope is not None and work.pin is not None
-      for sql in work.src_queries:
-        self.bytes["planning"] += self.bq.dry_run_bytes(sql,
-                                                        read_params(work.pin))
-      for sql in work.syn_queries:
-        self.bytes["planning"] += self.bq.dry_run_bytes(sql, work.scope.params)
-      if n is not None:
-        self.bytes["panel"] += self.bq.dry_run_bytes(
-            panel_sql(work.pin, n), read_params(work.pin))
-      for sql in work.scope.prepare_sql:
-        self.bytes["prepare"] += self._dry_prepare(sql, work.scope)
-      for sql in work.pin.prepare_sql:
-        self.bytes["prepare"] += self._dry_prepare(sql, work.pin)
-      if self.mode == "sampled":
-        worst += self._worst_samples(work)
+      before = dict(self.bytes)
+      try:
+        worst += self._dry_run_table(work)
+      except _BQ_ERRORS as exc:
+        self.bytes = before
+        self._unreadable_scope(work, f"a dry run of its reads failed ({exc})")
     parts = dict(self.bytes)
     if self.mode == "sampled":
       parts["sample (worst case)"] = worst
     self.budget.check_bytes(parts)
+
+  def _dry_run_table(self, work: _Work) -> int:
+    """One table's dry runs (into `self.bytes`); returns its worst-case
+    sample bytes."""
+    assert work.scope is not None and work.pin is not None
+    n = self.panel_n()
+    for sql in work.src_queries:
+      self.bytes["planning"] += self.bq.dry_run_bytes(sql,
+                                                      read_params(work.pin))
+    for sql in work.syn_queries:
+      self.bytes["planning"] += self.bq.dry_run_bytes(sql, work.scope.params)
+    if n is not None:
+      self.bytes["panel"] += self.bq.dry_run_bytes(
+          panel_sql(work.pin, n), read_params(work.pin))
+    for sql in work.scope.prepare_sql:
+      self.bytes["prepare"] += self._dry_prepare(sql, work.scope)
+    for sql in work.pin.prepare_sql:
+      self.bytes["prepare"] += self._dry_prepare(sql, work.pin)
+    return self._worst_samples(work) if self.mode == "sampled" else 0
+
+  def _unreadable_scope(self, work: _Work, why: str) -> None:
+    """Skip one table whose scope cannot be read after all: status
+    `unknown` with the error as the reason — the rest of the plan goes
+    on."""
+    assert work.scope is not None
+    work.scope = dataclasses.replace(
+        work.scope,
+        status="unknown",
+        reason=why,
+        read_table="",
+        read_expr="",
+        prepare_sql=(),
+        params={})
+    work.skip_with(f"scope unknown: {why}")
+
+  def create_planning_tables(self, work: _Work) -> None:
+    """R57 (R5 amended): an as_of_diff scope's start snapshot — zero bytes
+    billed, expiring in 24 h — is the one table planning creates, before
+    the dry runs, because the scope's `read_expr` reads it. A failure
+    (e.g. the table did not exist yet at the window start) skips only
+    this table."""
+    assert work.scope is not None
+    for sql in work.scope.planning_sql:
+      try:
+        self.bq.execute(sql, {}, max_bytes=self.budget.max_bytes_billed)
+      except _BQ_ERRORS as exc:
+        self._unreadable_scope(
+            work, f"its as_of_diff start snapshot could not be created "
+            f"({exc})")
+        return
+      self.planning_ddl.append(PrepareStatement(sql, {}))
+      work.notes.append(
+          f"{work.landing}: planning created the as_of_diff start snapshot "
+          f"{work.scope.start_table} (zero bytes billed, expires in 24 h)")
 
   def _worst_samples(self, work: _Work) -> int:
     assert work.scope is not None and work.pin is not None
@@ -1907,7 +1960,13 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
   (refused over `max_bytes_billed`), one planning SELECT per side, the
   panel, samples (`mode="sampled"`), census shares, pairs and digests.
   Only the planning SELECTs, the panel and the metadata reads run here;
-  every DDL waits in `prepare_sql` (R5).
+  every DDL waits in `prepare_sql` (R5) — with ONE exception (R57): an
+  `as_of_diff` scope's start snapshot (zero bytes billed, expiring in
+  24 h) is created in phase A, before the dry runs, because the scope's
+  `read_expr` reads it. Each one is recorded in `planning_ddl` and noted
+  in the table's warnings. A table whose snapshot or dry run fails is
+  skipped with scope status `unknown` and the error as its reason; the
+  other tables are still planned.
 
   Raises:
     PlanError: a launch table the model does not declare (R50), or no
@@ -1936,8 +1995,11 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
   for work in works:
     if work.role != "external":
       planner.locate(work)
+      if work.active:
+        planner.create_planning_tables(work)
   active = [w for w in works if w.active]
   planner.dry_run(active)
+  active = [w for w in active if w.active]  # a failed dry run skips a table
   for work in active:
     planner.scan(work)
     planner.sample(work)
@@ -1990,6 +2052,7 @@ def _assemble(planner: _Planner, tables: tuple[TablePlan, ...], key: str,
       tables=tables,
       knobs=knobs,
       prepare_sql=tuple(prepare) + tuple(planner.samples),
+      planning_ddl=tuple(planner.planning_ddl),
       bq_bytes_estimate=sum(planner.bytes.values()),
       predicted_shuffle_gb=predicted,
       warnings=warnings,

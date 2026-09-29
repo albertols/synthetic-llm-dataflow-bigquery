@@ -48,6 +48,7 @@ from sdfb_evaluation.context.plan import (
     planning_sql,
     select_pairs,
 )
+from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.scope import MODES as SCOPE_MODES
 from sdfb_evaluation.types import ColumnKind
 
@@ -884,18 +885,82 @@ def test_appends_scope_params_are_bound_everywhere():
   assert len(pins) == 3 and all(not s.params for s in pins)
 
 
-def test_copy_job_appends_plan_the_as_of_difference():
-  bq = thelook_bq()
+def _copy_launch(bq):
   launch = thelook_launch(bq, write_disposition="append")
   copies = tuple(dataclasses.replace(w, job_type="COPY") for w in launch.writes)
-  plan, _ = _plan(bq, dataclasses.replace(launch, writes=copies))
+  return dataclasses.replace(launch, writes=copies)
+
+
+def test_copy_job_appends_plan_the_as_of_difference():
+  bq = thelook_bq()
+  plan, _ = _plan(bq, _copy_launch(bq))
+  # The one table planning may create (R57): each as_of_diff scope's
+  # zero-byte, expiring start snapshot — in phase A, before any dry run,
+  # because the scope's read_expr reads it.
+  executed = [sql for sql, _ in bq.executed]
+  assert len(executed) == len(TABLES)
+  assert all(
+      sql.startswith("CREATE SNAPSHOT TABLE") and "_start_" in sql
+      for sql in executed)
+  first_dry = next(
+      i for i, (event, _) in enumerate(bq.events) if event == "dry")
+  assert max(i for i, (event, _) in enumerate(bq.events)
+             if event == "execute") < first_dry
+  assert [s.sql for s in plan.planning_ddl] == executed
+  assert all(cap == KNOBS.max_bytes_billed for cap in bq.execute_caps)
   for table in plan.tables[1:]:
     scope = table.scope
     assert scope.mode == "as_of_diff" and scope.ok and scope.params == {}
+    assert scope.planning_sql[0] in executed
+    assert f"`{scope.start_table}` AS t" in scope.read_expr
     assert "LEFT JOIN" in scope.prepare_sql[0]
+    # Created once, by the planner: never again at prepare time.
+    assert scope.planning_sql[0] not in {s.sql for s in plan.prepare_sql}
     reads = [s for s, _ in bq.planning_queries() if scope.read_expr in s]
     assert len(reads) == 1
     assert scope.observed_rows == scope.written_rows
+    assert any(scope.start_table in w for w in table.warnings)
+
+
+def test_plan_fake_rejects_one_table_at_two_points_in_time():
+  bq = thelook_bq()
+  r51 = (f"SELECT * FROM (SELECT * FROM `{DS}.orders` FOR SYSTEM_TIME AS OF "
+         "TIMESTAMP '2026-09-13T13:49:41.250000Z') AS e JOIN (SELECT * FROM "
+         f"`{DS}.orders` FOR SYSTEM_TIME AS OF TIMESTAMP "
+         "'2026-09-13T13:49:20.000000Z') AS s USING (order_id)")
+  for call in (bq.query, bq.dry_run_bytes, bq.execute):
+    with pytest.raises(BqApiError, match="more than one point in time"):
+      call(r51)
+
+
+def test_a_failing_scope_dry_run_skips_only_that_table():
+  bq = thelook_bq()
+  bq.dry_failures[f"`{DS}.orders`"] = BqApiError("400 (fake) Syntax error")
+  plan, _ = _plan(bq)
+  orders = next(t for t in plan.tables if t.name == "orders")
+  assert not orders.evaluated
+  assert orders.scope.status == "unknown" and not orders.scope.readable
+  assert "Syntax error" in orders.scope.reason
+  assert "Syntax error" in orders.skip_reason
+  assert all(
+      t.evaluated for t in plan.tables if t.name in ("users", "order_items"))
+  assert not any(f"`{DS}.orders`" in s for s, _ in bq.planning_queries())
+  assert plan.skip_reason is None
+
+
+def test_a_failing_start_snapshot_skips_only_that_table():
+  # e.g. the table did not exist yet at the window start.
+  bq = thelook_bq()
+  bq.execute_failures[f"CLONE `{DS}.users`"] = BqApiError(
+      "400 (fake) Invalid snapshot time")
+  plan, _ = _plan(bq, _copy_launch(bq))
+  users = next(t for t in plan.tables if t.name == "users")
+  assert not users.evaluated and users.scope.status == "unknown"
+  assert "Invalid snapshot time" in users.scope.reason
+  assert not any(users.scope.start_table and users.scope.start_table in s.sql
+                 for s in plan.planning_ddl)
+  assert all(
+      t.evaluated for t in plan.tables if t.name in ("orders", "order_items"))
 
 
 def test_an_unpinned_source_is_read_through_its_own_read_expr():

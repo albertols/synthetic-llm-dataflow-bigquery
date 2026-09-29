@@ -39,10 +39,29 @@ numbered within identical `TO_JSON_STRING` groups on both sides
 before the window, a duplicate after it and a row re-appended identical
 to an existing one all count exactly. It is exact for an append-only
 window; a delete or update inside the window shrinks it (the count check
-says so). It reads the table twice — about 2x its bytes, which the
-planner's dry run of the CTAS counts into the budget. A table created
-inside the window has no start state to subtract: it is read AS OF the
-window end (`as_of`).
+says so).
+
+BigQuery's time-travel rule shapes it: "A single query statement can't
+reference a single table at more than one point in time, including the
+current time." So it takes two statements, each reading every table at
+one point:
+
+    planning_sql  CREATE SNAPSHOT TABLE <start> CLONE t FOR SYSTEM_TIME
+    (planner,     AS OF <ws> OPTIONS(24 h)       zero bytes, auto-expiring
+     phase A)
+    read_expr /   t FOR SYSTEM_TIME AS OF <we>   minus   <start> (read now)
+    prepare_sql     one table at we                   another table, now
+
+The start snapshot is the ONE table planning may create (R5 amended by
+R57): the scope's `read_expr` reads it, and the planner's dry runs and
+planning SELECTs run over that `read_expr`. It is named
+`{temp_dataset}.sdfb_eval_{evaluation_id}_start_{short}` and recorded
+(`ScopePlan.planning_sql`/`start_table`, the plan's `planning_ddl`). The
+difference reads the table and the snapshot once each — about 2x the
+table's bytes, which the planner's dry run of the CTAS counts into the
+budget. A table created inside the window has no start state to
+subtract: it is read AS OF the window end (`as_of`), and the reason says
+so.
 
 The window pads the job's own writes by a second on each side, and every
 other writer is placed against it:
@@ -106,7 +125,11 @@ M4 live checks (not provable on the laptop):
 - the snapshot clone with `OPTIONS(expiration_timestamp=…)` and the
   as-of literal succeed with the evaluator's roles;
 - a landing table created by the job (`--create_if_not_exists`) takes
-  the `as_of` path via `Bq.table`'s `created`.
+  the `as_of` path via `Bq.table`'s `created`;
+- `creationTime` after a CREATE OR REPLACE TABLE (a new table: later than
+  the window, so `unknown`) and after a WRITE_TRUNCATE load or copy
+  (assumed unchanged — if it moves, as_of_diff windows fall back to
+  `as_of` and overwrite windows may read as `unknown`).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -145,6 +168,7 @@ _DISPOSITIONS = ("append", "overwrite")
 
 _PAD = timedelta(seconds=1)
 _MARGIN = timedelta(hours=1)
+_SKEW = timedelta(minutes=5)  # tolerated Dataflow-vs-evaluator clock skew
 _EXPIRY = ("OPTIONS(expiration_timestamp="
            "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR))")
 # Row counts agree within 0.5 % — exactly below 1000 rows.
@@ -260,8 +284,11 @@ class ScopePlan:
   `read_table` is what the pipeline DIRECT_READs once `prepare_sql` (DDL,
   run driver-side right before the pipeline) has built it; `read_expr` is
   the same rows as a FROM item for planning queries and dry runs, which
-  must not create tables. Both reference exactly the parameters in
-  `params`. `read_table == ""` means nothing can be read (see `readable`).
+  must not create tables — except `planning_sql`: an `as_of_diff`
+  scope's zero-byte, expiring start snapshot (`start_table`), which the
+  planner creates before its dry runs because `read_expr` reads it (R57).
+  All of them reference exactly the parameters in `params`.
+  `read_table == ""` means nothing can be read (see `readable`).
   `written_rows` is Σ the job's own committed `output_rows` for the table
   (None when any is unknown); `expected_rows` is Σ `valid_count`.
   """
@@ -277,6 +304,8 @@ class ScopePlan:
   params: dict[str, Any] = field(default_factory=dict, hash=False)
   observed_rows: int | None = None
   written_rows: int | None = None
+  planning_sql: tuple[str, ...] = ()
+  start_table: str = ""
 
   @property
   def ok(self) -> bool:
@@ -342,9 +371,10 @@ class ScopePlan:
 
 class SourcePin(NamedTuple):
   """Where the source is read from: `(read_table, prepare_sql, pinned)`
-  first, then the planning FROM item, the pin time, why it was not pinned
-  (None when it was) and the parameters `read_expr`/`prepare_sql` bind
-  (none: the pin's AS OF is a literal)."""
+  first, then the planning FROM item, the pin time, a reason (why it was
+  not pinned, or a note on the pin such as clamped clock skew; None
+  otherwise) and the parameters `read_expr`/`prepare_sql` bind (none: the
+  pin's AS OF is a literal)."""
   read_table: str
   prepare_sql: tuple[str, ...]
   pinned: bool
@@ -413,13 +443,20 @@ def _is_empty(own: Sequence[JobWrite], expected: int | None) -> bool:
   return False
 
 
-def _diff_select(table: str, ws: datetime, we: datetime) -> str:
-  """The multiset difference `table AS OF we` minus `table AS OF ws`."""
+def _diff_select(table: str, start_table: str, we: datetime) -> str:
+  """The multiset difference `table AS OF we` minus `start_table` (the
+  table's snapshot AS OF the window start, read now): each table at one
+  point in time, as one BigQuery statement must."""
   return (f"SELECT e.* EXCEPT(__sdfb_json, __sdfb_rn) FROM (SELECT t.*, "
           f"{_NUMBERED} FROM {as_of_expr(table, we)} AS t) AS e LEFT JOIN "
-          f"(SELECT {_NUMBERED} FROM {as_of_expr(table, ws)} AS t) AS s ON "
+          f"(SELECT {_NUMBERED} FROM {quote_fqn(start_table)} AS t) AS s ON "
           "e.__sdfb_json = s.__sdfb_json AND e.__sdfb_rn = s.__sdfb_rn "
           "WHERE s.__sdfb_rn IS NULL")
+
+
+def _snapshot_sql(snapshot: str, table: str, moment: datetime) -> str:
+  return (f"CREATE SNAPSHOT TABLE `{snapshot}` CLONE {quote_fqn(table)} "
+          f"FOR SYSTEM_TIME AS OF {_timestamp_literal(moment)} {_EXPIRY}")
 
 
 @dataclass(frozen=True)
@@ -427,6 +464,7 @@ class _Scope:
   """What every plan of one `resolve_scope` call shares."""
   table: str
   temp: str
+  start: str  # the as_of_diff start snapshot's name
   expected: int | None
   written: int | None
   window: tuple[str | None, str | None]
@@ -446,13 +484,16 @@ class _Scope:
         expected_rows=self.expected,
         read_expr=read.get("read_expr", ""),
         params=read.get("params", {}),
-        written_rows=self.written)
+        written_rows=self.written,
+        planning_sql=read.get("planning_sql", ()),
+        start_table=read.get("start_table", ""))
 
   def reads(self,
             mode: str,
             bounds: tuple[datetime, datetime] | None = None) -> dict[str, Any]:
-    """`read_table`/`prepare_sql`/`read_expr`/`params` of one mode;
-    `bounds` = the padded window, which every mode but table/manual needs.
+    """`read_table`/`prepare_sql`/`read_expr`/`params` (+ as_of_diff's
+    `planning_sql`/`start_table`) of one mode; `bounds` = the padded
+    window, which every mode but table/manual needs.
 
     Raises:
       ValueError: a mode with no read plan (never a silent fallthrough),
@@ -469,23 +510,27 @@ class _Scope:
     if mode == "as_of":
       return {
           "read_table": self.temp,
-          "prepare_sql":
-              (f"CREATE SNAPSHOT TABLE `{self.temp}` CLONE {table} "
-               f"FOR SYSTEM_TIME AS OF {_timestamp_literal(we)} {_EXPIRY}",),
+          "prepare_sql": (_snapshot_sql(self.temp, self.table, we),),
           "read_expr": as_of_expr(self.table, we),
       }
+    extra: dict[str, Any] = {}
     if mode == "appends":
       suffix = _short(self.table, "params")
       select = ("SELECT * EXCEPT(_CHANGE_TYPE, _CHANGE_TIMESTAMP) FROM "
                 f"APPENDS(TABLE {table}, @start_{suffix}, @end_{suffix})")
       params = {f"start_{suffix}": ws, f"end_{suffix}": we}
     else:
-      select, params = _diff_select(self.table, ws, we), {}
+      select, params = _diff_select(self.table, self.start, we), {}
+      extra = {
+          "planning_sql": (_snapshot_sql(self.start, self.table, ws),),
+          "start_table": self.start,
+      }
     return {
         "read_table": self.temp,
         "prepare_sql": (f"CREATE TABLE `{self.temp}` {_EXPIRY} AS {select}",),
         "read_expr": f"({select})",
         "params": params,
+        **extra,
     }
 
 
@@ -593,6 +638,7 @@ def resolve_scope(*,
   created = (None if table_created in (None, "") else _moment(
       table_created, "table_created"))
   temp = _temp_table(temp_dataset, evaluation_id, "syn", table, "scope")
+  start = _temp_table(temp_dataset, evaluation_id, "start", table, "start")
 
   own = _for_table(writes, table)
   own_ids = {w.job_id for w in own}
@@ -602,6 +648,7 @@ def resolve_scope(*,
   scope = _Scope(
       table=table,
       temp=temp,
+      start=start,
       expected=expected,
       written=_written(own),
       window=((_rfc3339(bounds[0]), _rfc3339(bounds[1])) if bounds else
@@ -658,8 +705,12 @@ def _windowed(scope: _Scope, mode: str, requested: str, *,
   later = [w for w in others if _start(w) > we]
   if mode == "table" and later and requested == "auto":
     mode = "as_of"
+  note = None
   if mode == "as_of_diff" and created is not None and created >= ws:
-    mode = "as_of"  # no start state to subtract
+    mode = "as_of"
+    note = (f"{table} was created at {_rfc3339(created)}, inside the job's "
+            "write window: there is no earlier state to subtract, so "
+            "as_of_diff reads it as_of the window end")
   point = {"appends": ws, "as_of_diff": ws, "as_of": we}.get(mode)
   if point is not None and point < scope.floor:
     return scope.plan(
@@ -670,7 +721,6 @@ def _windowed(scope: _Scope, mode: str, requested: str, *,
         "longer be separated; pass --scope manual to evaluate the table as "
         "it is now")
 
-  note = None
   copies = ", ".join(sorted(w.job_id for w in own if w.job_type == "COPY"))
   if mode == "appends" and copies:
     note = (f"appends requested although COPY job(s) {copies} landed rows "
@@ -711,9 +761,12 @@ def pin_source(*, source_table: str, job_create_time: str | datetime | None,
   is now with `pinned=False` and the reason — the reference digest check
   then tells whether it still yields the generator's sample.
 
+  A create time at most 5 min after `now` is clock skew between Dataflow
+  and the evaluator: it is pinned at `now`, and the reason says so.
+
   Raises:
     ValueError: an input that would reach SQL is malformed, or the create
-      time is after `now`.
+      time is more than 5 min after `now`.
   """
   source = normalize_fqn(source_table)
   current = quote_fqn(source)
@@ -727,9 +780,15 @@ def pin_source(*, source_table: str, job_create_time: str | datetime | None,
         "generation job create time unknown: the source is read as it is "
         "now, not as the job saw it")
   created = _moment(job_create_time, "job_create_time")
-  if created > clock:
+  note = None
+  if created > clock + _SKEW:
     raise ValueError(f"job create time {_rfc3339(created)} is after now "
-                     f"({_rfc3339(clock)})")
+                     f"({_rfc3339(clock)}) by more than the tolerated "
+                     "5 min clock skew")
+  if created > clock:
+    note = (f"job create time {_rfc3339(created)} is after now "
+            f"({_rfc3339(clock)}): clock skew of at most 5 min, pinned at now")
+    created = clock
   if created < floor:
     return SourcePin(
         source, (), False, current, None,
@@ -740,7 +799,7 @@ def pin_source(*, source_table: str, job_create_time: str | datetime | None,
   prepare = (f"CREATE SNAPSHOT TABLE `{temp}` CLONE {current} FOR SYSTEM_TIME "
              f"AS OF {_timestamp_literal(created)} {_EXPIRY}",)
   return SourcePin(temp, prepare, True, as_of_expr(source, created),
-                   _rfc3339(created), None)
+                   _rfc3339(created), note)
 
 
 def sampled_read(read_table: str, *, keep: int, modulo: int, salt: str,
