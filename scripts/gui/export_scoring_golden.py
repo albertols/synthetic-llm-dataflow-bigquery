@@ -465,6 +465,16 @@ CASES: tuple[dict[str, Any], ...] = (
           "table.fidelity_score", 1.2),
     _case("R43", "an aggregate with no value: not evaluated",
           "table.column_shape_score", None),
+    # --- Appended (ids s01-s78 stay stable): a DeLong AUC without its CI and
+    # a lift whose holdout had no copy while R had many (value +inf).
+    _case("R41", "DeLong AUC past warn without a CI: noise unavailable",
+          "table.detection_auc", 0.78),
+    _case(
+        "R38",
+        "holdout has no copy, R has many: value +inf, ci_low past fail",
+        "row.memorization_lift",
+        _INF,
+        ci=(6.1, _INF)),
 )
 
 # (metric, value, target): the five score functions straight, including the

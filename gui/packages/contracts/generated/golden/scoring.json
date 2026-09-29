@@ -2037,6 +2037,58 @@
      "reason": "no value computed"
     }
    }
+  },
+  {
+   "id": "s79",
+   "rule": "R41",
+   "note": "DeLong AUC past warn without a CI: noise unavailable",
+   "input": {
+    "metric_id": "table.detection_auc",
+    "value": 0.78,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "warn",
+    "score": 0.44,
+    "value": 0.78,
+    "ci_low": null,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "noise_check": "unavailable"
+    }
+   }
+  },
+  {
+   "id": "s80",
+   "rule": "R38",
+   "note": "holdout has no copy, R has many: value +inf, ci_low past fail",
+   "input": {
+    "metric_id": "row.memorization_lift",
+    "value": "+inf",
+    "ci_low": 6.1,
+    "ci_high": "+inf",
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true
+   },
+   "row": {
+    "status": "fail",
+    "score": 0.0,
+    "value": null,
+    "ci_low": 6.1,
+    "ci_high": null,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": null
+   }
   }
  ],
  "score_values": [
