@@ -27,7 +27,7 @@ import math
 import pickle
 import time as clock
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -665,7 +665,7 @@ def test_read_pools_seam_binds_the_pool_identity():
   assert params == {"reference_digest": "d" * 64, "model_uri": "gs://bucket/m"}
   assert max_bytes == 1 << 30
   assert "`values`" in sql
-  assert pools_from_rows([]) == {}
+  assert not pools_from_rows([])
   with pytest.raises(ValueError):
     pools_sql("not a table")
 
@@ -993,6 +993,11 @@ def test_empty_placeholder_in_the_sampled_range_is_counted_exactly():
                     "field.category_adherence"):
     e, s = exact[(metric_id, "sku")], got[(metric_id, "sku")]
     assert s.value == pytest.approx(e.value, abs=0.15), metric_id
+  # R70: the copy rate's tail total is exact — the census counts every
+  # substantive synthetic row before the value sample
+  copy_key = ("field.substantive_copy_rate", "sku")
+  assert got[copy_key].detail["substantive"] == exact[copy_key].detail[
+      "substantive"]
   # M5: the baseline's missing-R term uses the driver's R mass on the same
   # draw, so the sampled baseline tracks the exact one
   e, s = exact[("column.tvd", "sku")], got[("column.tvd", "sku")]
@@ -1064,34 +1069,34 @@ def _pool_population(seed: int,
                      pool: int = 512,
                      reps: int = 40) -> list[tuple[int, tuple[int, ...]]]:
   """A pool-driven text column: `pool` synthetic values, each repeated
-  `reps` times; `copies` of them reproduce a rare source value (c_src =
-  1). Codes are fresh random hashes per seed (a new value sample)."""
+  `reps` times; `copies` of them (at random) reproduce a rare source value
+  (c_src = 1). Codes are fresh random hashes per seed (a new value
+  sample)."""
   rng = np.random.default_rng(seed)
   codes = rng.integers(0, 2**63, size=pool, dtype=np.int64).tolist()
-  return [(int(code), (1 if k < copies else 0, reps, 0, reps, 0, 0))
+  copied = set(rng.choice(pool, size=copies, replace=False).tolist())
+  return [(int(code), (1 if k in copied else 0, reps, 0, reps, 0, 0))
           for k, code in enumerate(codes)]
 
 
-def test_sampled_copy_rate_interval_is_cluster_robust():
-  """Rows of one value are a cluster: on a pool-driven column (512
-  values, n/512 rows each) a row-level Wilson interval on the sampled
-  rows is far too narrow. The stratified ratio's interval (values as the
-  sampling units, the head certain) covers the exact rate at about its
-  nominal level across value samples (seeds)."""
+def _sampled_copy_coverage(copies: int, rate: float, head_size: int,
+                           seeds: int) -> tuple[float, float, float, float]:
+  """(coverage, row-level Wilson coverage, median width, median Wilson
+  width) of the census's copy-rate interval over value samples of a
+  512-value pool column, through the census's own per-value sums
+  (`value_contribution`) and its tail total (every substantive row)."""
   table, _ = users_table(n_source=300, n_synthetic=300, n_reference=60)
   base = next(
       c for c in CensusSpec.from_table(table).columns if c.name == "bio")
-  rate, keep = 0.2, 2000
+  keep = round(rate * budget_module.VALUE_SAMPLE_MODULUS)
   # the column totals a dense pass would give
   sizes = census.ColumnSizes(20_000, 20_480, 20_000, 20_480, 20_000, 20_480)
   combine = census.ContributionCombineFn()
-  truth = 100 / 512
   covered = wilson_covered = 0
   widths, wilson_widths = [], []
-  seeds = range(300)
-  for seed in seeds:
-    values = _pool_population(seed)
-    head = frozenset(code for code, _ in values[::2][:128])
+  for seed in range(seeds):
+    values = _pool_population(seed, copies=copies)
+    head = frozenset(code for code, _ in values[:head_size])
     col = dataclasses.replace(
         base, census="value_sampled", rate=rate, keep=keep, head=head)
     total = combine.create_accumulator()
@@ -1105,20 +1110,97 @@ def test_sampled_copy_rate_interval_is_cluster_robust():
                                     (None, None)))
       k += counts[1] if counts[0] else 0
       n += counts[1]
-    ratio = noise.stratified_ratio_interval(total.ht_copies, total.ht_subst,
-                                            total.cr_yy, total.cr_xy,
-                                            total.cr_xx, rate, total.cr_n)
+    substantive = sum(counts[1] for _, counts in values)
+    ratio = noise.stratified_ratio_interval(
+        census.stratified_share(total, "copy"),
+        rate,
+        tail_total=substantive - total.cr_hx)
     assert ratio is not None
+    truth = sum(c[1] for _, c in values if c[0]) / substantive
     _, lo, hi = ratio
     covered += lo <= truth <= hi
     widths.append(hi - lo)
     w_lo, w_hi = noise.wilson_interval(k, n)
     wilson_covered += w_lo <= truth <= w_hi
     wilson_widths.append(w_hi - w_lo)
-  coverage = covered / len(seeds)
+  return (covered / seeds, wilson_covered / seeds, float(np.median(widths)),
+          float(np.median(wilson_widths)))
+
+
+def test_sampled_copy_rate_interval_is_cluster_robust():
+  """Rows of one value are a cluster: on a pool-driven column (512
+  values, n/512 rows each) a row-level Wilson interval on the sampled
+  rows is far too narrow. The census's interval (the head exact, K&G on
+  the tail's ratio) covers the exact rate across value samples."""
+  coverage, wilson, width, wilson_width = _sampled_copy_coverage(
+      copies=100, rate=0.2, head_size=128, seeds=300)
   assert coverage >= 0.90, coverage
-  assert wilson_covered / len(seeds) < 0.75  # the row-level interval fails
-  assert np.median(widths) > 2 * np.median(wilson_widths)
+  assert wilson < 0.75, wilson  # the row-level interval fails
+  assert width > 2 * wilson_width
+
+
+@pytest.mark.parametrize(("copies", "rate", "head_size"), [
+    (2, 0.2, 254),
+    (2, 0.02, 254),
+    (5, 0.02, 254),
+    (5, 0.2, 128),
+    (20, 0.05, 128),
+])
+def test_sampled_copy_rate_covers_when_few_copies_reach_the_tail(
+    copies, rate, head_size):
+  """R70 (the review's few-copied-pool-values scenarios): 2-20 copied
+  values out of 512, a head of 128-254 — the interval must not collapse
+  when few copies reach the sampled tail: coverage >= 0.85 over 300
+  value samples."""
+  coverage, *_ = _sampled_copy_coverage(copies, rate, head_size, seeds=300)
+  assert coverage >= 0.85, (copies, rate, head_size, coverage)
+
+
+def _share_coverage(pool_sizes: Callable[[np.random.Generator],
+                                         np.ndarray], copies: int, rate: float,
+                    head_size: int, seeds: int) -> float:
+  """Coverage of `noise.stratified_ratio_interval` on a larger column,
+  its sums built with numpy as the census builds them (head = the
+  largest values, the planner's top list; tail Poisson-sampled)."""
+  hits = 0
+  for seed in range(seeds):
+    rng = np.random.default_rng(seed)
+    x = pool_sizes(rng).astype(float)
+    y = np.zeros_like(x)
+    copied = rng.choice(x.size, size=copies, replace=False)
+    y[copied] = x[copied]
+    head = np.zeros(x.size, dtype=bool)
+    head[np.argsort(-x, kind="stable")[:head_size]] = True
+    sampled = ~head & (rng.random(x.size) < rate)
+    ys, xs = y[sampled], x[sampled]
+    share = noise.StratifiedShare(y[head].sum(), x[head].sum(), ys.sum(),
+                                  xs.sum(), (ys * ys).sum(), (ys * xs).sum(),
+                                  (xs * xs).sum(), float((xs > 0).sum()))
+    ratio = noise.stratified_ratio_interval(
+        share, rate, tail_total=x[~head].sum())
+    assert ratio is not None
+    hits += ratio[1] <= y.sum() / x.sum() <= ratio[2]
+  return hits / seeds
+
+
+@pytest.mark.parametrize(("label", "copies", "rate"), [
+    ("pool5000x40", 10, 0.02),
+    ("pool5000x40", 50, 0.02),
+    ("zipf20000", 200, 0.05),
+    ("singletons40000", 23, 0.02),
+])
+def test_stratified_interval_covers_on_large_columns(label, copies, rate):
+  """The review's larger scenarios (a 5000-value pool, a zipf-sized
+  20000-value column, 40000 singletons), head 508, 300 value samples."""
+
+  def sizes(rng: np.random.Generator) -> np.ndarray:
+    if label == "pool5000x40":
+      return np.full(5000, 40)
+    if label == "zipf20000":
+      return np.minimum(rng.zipf(1.6, size=20_000), 5000)
+    return np.ones(40_000, dtype=int)
+
+  assert _share_coverage(sizes, copies, rate, 508, seeds=300) >= 0.85
 
 
 def test_value_lift_null_calibration_covers_one():

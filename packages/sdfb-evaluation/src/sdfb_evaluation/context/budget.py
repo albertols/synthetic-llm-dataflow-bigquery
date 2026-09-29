@@ -33,10 +33,12 @@ on the rows the pipeline actually reads:
                                                           head = the census
                                                           head (R67), never
                                                           sampled
-    masks        Σ text/identifier keys * 48 B            the shape-mask pass:
-                   census columns                         never value-sampled
+    masks        Σ text/identifier keys * (24 B + 1.5 *   the shape-mask pass:
+                   census columns   min(avg_len, 256))    never value-sampled
                                                           (R67), at most one
-                                                          key per value
+                                                          key per value, the
+                                                          mask's UTF-8 text in
+                                                          each key (R70)
     relational   Σ edges           child rows * 16 B     (hash, count) per row
     row keys     rows * 16 B (non-key duplicate count, both sides)
                  + synthetic rows * 16 B per PK / identity duplicate count
@@ -68,6 +70,8 @@ if TYPE_CHECKING:
 __all__ = [
     "CENSUS_KEY_BYTES",
     "GB",
+    "MASK_KEY_OVERHEAD",
+    "MASK_UTF8_FACTOR",
     "VALUE_SAMPLE_MODULUS",
     "Budget",
     "BudgetExceededError",
@@ -75,6 +79,7 @@ __all__ = [
     "census_demand",
     "fixed_shuffle_bytes",
     "mask_bytes",
+    "mask_key_bytes",
     "predict_shuffle_gb",
     "value_census_bytes",
     "value_sample_rate",
@@ -83,8 +88,14 @@ __all__ = [
 
 GB = 1e9
 CENSUS_KEY_BYTES = 24  # (table, column, value hash) key + four counts
-# (table, column, mask hash) key + two counts + the mask text (an estimate)
-MASK_KEY_BYTES = 48
+# A mask key: (table, column, mask hash) + two counts, then the mask's text,
+# which is as long as the value (up to 256 characters; longer ones pool into
+# one `<long>` key). Its UTF-8 size per character is an estimate: class
+# placeholders and ASCII punctuation are 1 byte, the space mark `␣` 3.
+MASK_KEY_OVERHEAD = 24
+MASK_UTF8_FACTOR = 1.5
+MASK_MAX_CHARS = 256
+MASK_DEFAULT_CHARS = 16  # no planned length (an INT64 identity's digits)
 _MASKED_KINDS = frozenset({"text", "identifier"})
 ROW_KEY_BYTES = 16  # (uint64 hash, count)
 NULL_PATTERN_LIMIT = 4096  # the dense null-pattern dict's key cap
@@ -199,12 +210,22 @@ def value_census_bytes(columns: Iterable[ColumnPlan], rows_source: float,
   return total
 
 
+def mask_key_bytes(column: ColumnPlan) -> float:
+  """One mask key's bytes for `column`: the overhead plus its mask text,
+  from the planner's AVG(LENGTH(x)) (R70)."""
+  length = column.avg_len if column.avg_len is not None else MASK_DEFAULT_CHARS
+  return MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * min(length, MASK_MAX_CHARS)
+
+
 def mask_bytes(columns: Iterable[ColumnPlan], rows_source: float,
                rows_synthetic: float) -> float:
   """The shape-mask pass's shuffle: every text/identifier census column,
-  never value-sampled, at most one mask key per distinct value."""
+  never value-sampled, at most one mask key per distinct value (a
+  near-unique column — prose, UUID-like ids — costs about its value
+  census again; row-sampling the synthetic mask side is future work)."""
   return sum(
-      census_demand(column, rows_source, rows_synthetic) * MASK_KEY_BYTES
+      census_demand(column, rows_source, rows_synthetic) *
+      mask_key_bytes(column)
       for column in columns
       if column.census != "none" and str(column.kind) in _MASKED_KINDS)
 
@@ -220,9 +241,12 @@ def census_bytes(columns: Iterable[ColumnPlan], rows_source: float,
 
 def predict_shuffle_gb(tables: Sequence[TablePlan]) -> float:
   """Predicted Beam shuffle of evaluating `tables`, in GB (10^9 bytes):
-  census keys * 24 B + relational child rows * 16 B + row-hash counts +
-  null patterns, over the rows each side actually reads. Read-only and
-  skipped tables shuffle nothing of their own."""
+  the value census (head unsampled, the rest at its rate, 24 B a key) +
+  the shape-mask pass (text/identifier columns, never sampled; a key's
+  bytes grow with the planned value length, `mask_key_bytes`) +
+  relational child rows * 16 B + row-hash counts + null patterns, over
+  the rows each side actually reads. Read-only and skipped tables shuffle
+  nothing of their own."""
   total = 0.0
   for table in tables:
     if not table.evaluated:

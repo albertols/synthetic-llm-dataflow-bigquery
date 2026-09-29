@@ -88,10 +88,17 @@ exact. Estimators (w_v = 1 in the head, 1 / rate in the tail):
 
 The copy rate (and category adherence) on a value-sampled column carries
 a cluster-robust interval with the values as the sampling units
-(`noise.stratified_ratio_interval`: linearised, the tail's (1 - rate) /
-rate factor, no variance from the head, as a Clopper-Pearson interval on
-the effective sample size so a sample without a copy still bounds the
-rate — Korn & Graubard, 1998). The Horvitz-Thompson view is
+(`noise.stratified_ratio_interval`, R70): the head is counted exactly,
+so only the tail's ratio q̂ is uncertain; its tail row total is exact too
+(the dense non-null count for adherence; for the copy rate the census
+counts substantive synthetic rows over every present value, before the
+value sample), so R̂ = (Y_head + X_tail q̂) / (X_head + X_tail). q̂ gets a
+Korn & Graubard (1998) Clopper-Pearson interval on its effective sample
+size — linearised variance with the (1 - rate) factor, capped at the
+tail's effective cluster count (Σx)² / Σx², with K&G's t degrees-of-
+freedom factor — mapped through that function with the head as a known
+constant, so a sample without a copy still bounds the rate. Novelty is
+1 - adherence there (one estimator). The Horvitz-Thompson view is
 validated before use — Σ c ln c within [0, n ln n] on each side, shares
 and TVD/JSD at most 1, a positive source entropy — and a metric whose
 view fails is `not_evaluated` with the reason, never a crash. Chao-Shen
@@ -140,10 +147,10 @@ placeholder (9, A, a, ␣); a mask that is only literal characters is the
 value itself, so it is labelled.
 
 `field.substantive_copy_rate` is gated only on `text` columns: `scoring`
-reports it as INFO on every other kind (numeric and day-granular
-temporal values collide by domain size; reusing a rare real category is
-not memorisation — Ruling R66), from `column_kind` and
-`detail.day_granularity`.
+reports it as INFO on every other kind, from `column_kind` (numeric and
+temporal values collide by domain size; reusing a rare real category or
+identifier is not memorisation — Ruling R66). `detail.day_granularity`
+still records a temporal column's granularity.
 
 References (author-year, R22): Horvitz & Thompson (1952); Woodruff
 (1971); Särndal, Swensson & Wretman (1992); Korn & Graubard (1998); Good
@@ -228,6 +235,7 @@ __all__ = [
     "pools_sql",
     "read_pools",
     "shape_masks",
+    "stratified_share",
     "table_outputs",
     "value_contribution",
 ]
@@ -274,6 +282,7 @@ _MASK_LABEL = "sdfb:shape-mask"
 _COUNTED_SIDES = frozenset({Side.SOURCE, Side.SYNTHETIC})
 _SOURCE, _SYNTHETIC = Side.SOURCE.value, Side.SYNTHETIC.value
 _VALUES, _MASKS, _LITERALS = "values", "masks", "literals"
+_SUBSTANTIVE = "substantive"
 _METRICS, _PROFILES = "metrics", "profiles"
 _SEED = "seed"
 _TWO_64 = 2**64
@@ -819,10 +828,13 @@ class BatchCounts:
   """A bundle's pre-aggregated census: `values[(t, j, code)]` = counts6
   (lists, merged in place), `masks[(t, j, mask code)]` = [c_src, c_syn,
   mask], `literals[(t, j)]` = {code: text} of a literal-ok column's
-  dictionary values."""
+  dictionary values, `substantive[(t, j)]` = a value-sampled column's
+  substantive synthetic rows over EVERY present value (the copy rate's
+  exact denominator, R70)."""
   values: dict[tuple[str, int, int], list[int]] = field(default_factory=dict)
   masks: dict[tuple[str, int, int], list[Any]] = field(default_factory=dict)
   literals: dict[tuple[str, int], dict[int, str]] = field(default_factory=dict)
+  substantive: dict[tuple[str, int], int] = field(default_factory=dict)
 
   def __len__(self) -> int:
     return len(self.values) + len(self.masks)
@@ -950,6 +962,10 @@ def _accumulate_column(spec: CensusSpec, col: CensusColumn, batch: EncodedBatch,
       _add_literals(out, key_head, col, uniq, texts)
     if col.has_shapes:
       _add_masks(out, key_head, flags.src, texts, full)
+  nonsub = _nonsubstantive(col, batch, first_rows)
+  if col.sampled and not flags.src:
+    out.substantive[key_head] = (
+        out.substantive.get(key_head, 0) + int(full[~nonsub].sum()))
   kept = _kept_mask(col, uniq)
   if not kept.any():
     return
@@ -960,8 +976,7 @@ def _accumulate_column(spec: CensusSpec, col: CensusColumn, batch: EncodedBatch,
                    minlength=size).astype(np.int64)[kept],
                np.bincount(inverse, weights=flags.in_r[rows],
                            minlength=size).astype(np.int64)[kept])
-  _add_values(out, key_head, flags.src, uniq[kept], per_value,
-              _nonsubstantive(col, batch, first_rows[kept]))
+  _add_values(out, key_head, flags.src, uniq[kept], per_value, nonsub[kept])
 
 
 def accumulate(spec: CensusSpec, batch: EncodedBatch, out: BatchCounts) -> None:
@@ -1090,10 +1105,10 @@ class _Contribution(NamedTuple):  # pylint: disable=too-many-instance-attributes
   """One column's additive second-pass sums, each value weighted by its
   Horvitz-Thompson weight w_v (1 when exact or in the head, 1 / rate in
   the tail). `ht_*` are the weighted counts a value-sampled view reads;
-  `ca_*`/`cr_*` the plain Σy², Σxy, Σx² over the tail values of the
-  adherence / copy-rate ratios (their cluster-robust variance) and
-  `ca_n`/`cr_n` their denominators' rows observed; lift counts are plain
-  counts over the hash range."""
+  `ca_*`/`cr_*` the adherence / copy-rate ratios' plain sums as
+  `noise.StratifiedShare` holds them (head y/x, tail y/x, the tail's
+  Σy², Σxy, Σx² and cluster count); lift counts are plain counts over
+  the hash range."""
   tvd: float = 0.0
   jsd: float = 0.0
   tvd_floor: float = 0.0
@@ -1139,14 +1154,22 @@ class _Contribution(NamedTuple):  # pylint: disable=too-many-instance-attributes
   ht_novel: float = 0.0
   ht_copies: float = 0.0
   ht_subst: float = 0.0
+  ca_hy: float = 0.0
+  ca_hx: float = 0.0
+  ca_ty: float = 0.0
+  ca_tx: float = 0.0
   ca_yy: float = 0.0
   ca_xy: float = 0.0
   ca_xx: float = 0.0
+  ca_tc: float = 0.0
+  cr_hy: float = 0.0
+  cr_hx: float = 0.0
+  cr_ty: float = 0.0
+  cr_tx: float = 0.0
   cr_yy: float = 0.0
   cr_xy: float = 0.0
   cr_xx: float = 0.0
-  ca_n: float = 0.0
-  cr_n: float = 0.0
+  cr_tc: float = 0.0
 
 
 def _add_contributions(a: _Contribution, b: _Contribution) -> _Contribution:
@@ -1373,13 +1396,23 @@ def _ht_shares(f: dict[str, float], w: float, counts: Sequence[int],
   f["ht_novel"] = w * (cy - adherent)
   f["ht_copies"] = w * copies
   f["ht_subst"] = w * substantive
-  f["ca_n"], f["cr_n"] = float(cy), float(substantive)  # rows observed
-  if tail:
-    f["ca_yy"], f["ca_xy"], f["ca_xx"] = (float(adherent * adherent),
-                                          float(adherent * cy), float(cy * cy))
-    f["cr_yy"], f["cr_xy"], f["cr_xx"] = (float(copies * copies),
-                                          float(copies * substantive),
-                                          float(substantive * substantive))
+  for prefix, y, x in (("ca", adherent, cy), ("cr", copies, substantive)):
+    if not tail:
+      f[f"{prefix}_hy"], f[f"{prefix}_hx"] = float(y), float(x)
+      continue
+    f[f"{prefix}_ty"], f[f"{prefix}_tx"] = float(y), float(x)
+    f[f"{prefix}_yy"], f[f"{prefix}_xy"], f[f"{prefix}_xx"] = (float(y * y),
+                                                               float(y * x),
+                                                               float(x * x))
+    f[f"{prefix}_tc"] = 1.0 if x > 0 else 0.0
+
+
+def stratified_share(c: _Contribution, share: str) -> noise.StratifiedShare:
+  """One share's sums (`adherence` or `copy`) as the interval reads them."""
+  prefix = {"adherence": "ca", "copy": "cr"}[share]
+  return noise.StratifiedShare(*(getattr(c, f"{prefix}_{name}")
+                                 for name in ("hy", "hx", "ty", "tx", "yy",
+                                              "xy", "xx", "tc")))
 
 
 def value_contribution(
@@ -1448,6 +1481,7 @@ class ColumnParts:
   contrib: _Contribution | None = None
   masks: MaskSummary | None = None
   literals: dict[int, str] = field(default_factory=dict)
+  substantive_syn: int | None = None
 
 
 class _Emitter:
@@ -1539,6 +1573,7 @@ class _View:  # pylint: disable=too-many-instance-attributes  # everything one c
   ref: ColumnRef | None
   shares: dict[str, tuple[float, float, float] | None] | None = None
   ht_problem: str | None = None
+  substantive_syn: int | None = None
 
   def distinct(self, matched: bool) -> tuple[float, float]:
     """(source, synthetic) distinct values, full or matched n: counted
@@ -1591,9 +1626,9 @@ class _View:  # pylint: disable=too-many-instance-attributes  # everything one c
 _NO_CENSUS = ("no value census for this column (census: none — the planner "
               "censuses every non-key, non-nested column)")
 
-_SAMPLED_INTERVAL = ("cluster-robust: values are the sampling units; "
-                     "stratified Horvitz-Thompson ratio, linearised variance, "
-                     "Korn-Graubard effective-n Clopper-Pearson")
+_SAMPLED_INTERVAL = ("cluster-robust: values are the sampling units; the head "
+                     "exact, a Korn-Graubard Clopper-Pearson interval on the "
+                     "tail's ratio over its exact row total")
 
 
 def _share_row(e: _Emitter, v: _View, metric_id: str, share: str,
@@ -1611,14 +1646,7 @@ def _share_row(e: _Emitter, v: _View, metric_id: str, share: str,
           "no counted synthetic value (value-sampled census)",
           sizes=v.pair)
       return
-    value, lo, hi = ratio
-    if value > 1.0 + _REL_TOL:
-      e.skip(
-          metric_id,
-          v.col, f"the Horvitz-Thompson share {value:.6g} exceeds 1: value "
-          "sampling cannot estimate it here",
-          sizes=v.pair)
-      return
+    value, lo, hi = ratio  # in [0, 1]: a mix of the head's and tail's shares
     detail = {**detail, "interval": _SAMPLED_INTERVAL}
   else:
     k, n = counts
@@ -1655,16 +1683,19 @@ def _category_adherence(e: _Emitter, v: _View) -> None:
 def _copy_rate(e: _Emitter, v: _View) -> None:
   metric_id = "field.substantive_copy_rate"
   acc = v.acc
-  substantive = v.c.ht_subst if v.col.sampled else acc.substantive_syn
+  substantive = v.substantive_syn if v.col.sampled else acc.substantive_syn
   reason = v.missing() or (None if substantive else (
       "no substantive synthetic values (non-null, non-empty, not a "
       "0001-/9999- date sentinel)"))
   if reason:
     e.skip(metric_id, v.col, reason, sizes=v.pair)
     return
-  detail: dict[str, Any] = {"rare_below": RARE_COUNT}
+  detail: dict[str, Any] = {
+      "rare_below": RARE_COUNT,
+      "substantive": substantive
+  }
   if not v.col.sampled:
-    detail.update(copies=acc.copies_substantive, substantive=substantive)
+    detail["copies"] = acc.copies_substantive
   if v.col.kind is _K.TEMPORAL:
     detail["day_granularity"] = v.col.day_granularity
   _share_row(e, v, metric_id, "copy",
@@ -2221,26 +2252,32 @@ def _ht_problem(c: _Contribution, sizes: ColumnSizes) -> str | None:
 
 
 def _sampled_parts(
-    col: CensusColumn, c: _Contribution, sizes: ColumnSizes
+    col: CensusColumn, c: _Contribution, sizes: ColumnSizes,
+    substantive_syn: int | None
 ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any], str | None]:
   """A value-sampled column's (summary, entropy, shares, problem): the
   Horvitz-Thompson ratios, `summarize` of the HT entropy view (validated),
-  and the adherence / copy-rate ratios with cluster-robust intervals."""
+  and the adherence / copy-rate ratios with their tail-only Korn-Graubard
+  intervals, each tail total exact (the dense non-null count, the census's
+  substantive count over every value; R70)."""
+  adherence = noise.stratified_ratio_interval(
+      stratified_share(c, "adherence"),
+      col.rate,
+      tail_total=sizes.n_syn - c.ca_hx)
+  copy = noise.stratified_ratio_interval(
+      stratified_share(c, "copy"),
+      col.rate,
+      tail_total=(None if substantive_syn is None else substantive_syn -
+                  c.cr_hx))
   summary = {
       "coverage_mass": _ratio(c.ht_cov, c.ht_n_src),
-      "novelty_mass": _ratio(c.ht_novel, c.ht_n_syn),
+      # one estimator for the two complements (adherence = 1 - novelty)
+      "novelty_mass": (1.0 - adherence[0] if adherence is not None else _ratio(
+          c.ht_novel, c.ht_n_syn)),
       "good_turing_unseen_src": _ratio(c.ht_f1_src, c.ht_n_src),
       "distinct_ratio": _ratio(c.ht_k_syn_m, c.ht_k_src_m),
   }
-  shares = {
-      "adherence":
-          noise.stratified_ratio_interval(c.ht_n_syn - c.ht_novel, c.ht_n_syn,
-                                          c.ca_yy, c.ca_xy, c.ca_xx, col.rate,
-                                          c.ca_n),
-      "copy":
-          noise.stratified_ratio_interval(c.ht_copies, c.ht_subst, c.cr_yy,
-                                          c.cr_xy, c.cr_xx, col.rate, c.cr_n),
-  }
+  shares = {"adherence": adherence, "copy": copy}
   problem = _ht_problem(c, sizes)
   if problem is not None:
     return summary, None, shares, problem
@@ -2286,9 +2323,11 @@ def _view(col: CensusColumn, parts: ColumnParts | None, sizes: ColumnSizes,
       literals=dict(parts.literals) if parts is not None else {},
       sizes=sizes,
       ref=ref)
+  if parts is not None:
+    view.substantive_syn = parts.substantive_syn
   if col.sampled:
     view.summary, view.entropy, view.shares, view.ht_problem = _sampled_parts(
-        col, c, sizes)
+        col, c, sizes, view.substantive_syn)
   else:
     view.summary = view.entropy = summarize(acc)
   return view
@@ -2407,6 +2446,8 @@ def census_outputs(spec: CensusSpec, batches: Iterable[EncodedBatch],
     part.masks = item_m if part.masks is None else part.masks.merge(item_m)
   for (_, j), found in counts.literals.items():
     parts.setdefault(j, ColumnParts()).literals.update(found)
+  for (_, j), rows in counts.substantive.items():
+    parts.setdefault(j, ColumnParts()).substantive_syn = rows
   metrics, profiles = table_outputs(
       spec, parts, {
           _SOURCE: src,
@@ -2434,6 +2475,9 @@ def _outputs(counts: BatchCounts, windowed: bool) -> Iterator[Any]:
     if found:
       yield beam.pvalue.TaggedOutput(
           _LITERALS, _windowed((literal_key, dict(found)), windowed))
+  for column_key, rows in counts.substantive.items():
+    yield beam.pvalue.TaggedOutput(_SUBSTANTIVE,
+                                   _windowed((column_key, rows), windowed))
 
 
 class CensusPreAggregateFn(beam.DoFn):
@@ -2447,7 +2491,7 @@ class CensusPreAggregateFn(beam.DoFn):
   Outputs: main `((t, j, code), counts6)` and tagged `masks` `((t, j,
   mask code), (c_src, c_syn, mask))`, each code as the int64 with the
   same 64 bits (a Beam key then takes the coder's varint path); tagged
-  `literals`."""
+  `literals` and `substantive` `((t, j), rows)`."""
 
   def __init__(self,
                specs: Mapping[str, CensusSpec],
@@ -2569,6 +2613,8 @@ def _emit_table(item: tuple[str, Iterable[tuple[str, int, Any]]],
       part.contrib = value
     elif kind == _MASKS:
       part.masks = value
+    elif kind == _SUBSTANTIVE:
+      part.substantive_syn = int(value)
     else:
       part.literals = dict(value)
   src, syn = _side_totals(table, spec, totals)
@@ -2635,7 +2681,7 @@ class CensusMetrics(beam.PTransform):
     refs = beam.pvalue.AsDict(p | "Refs" >> beam.Create(self._refs))
     counted = batches | "PreAggregate" >> beam.ParDo(
         CensusPreAggregateFn(specs)).with_outputs(
-            _MASKS, _LITERALS, main=_VALUES)
+            _MASKS, _LITERALS, _SUBSTANTIVE, main=_VALUES)
     # no hot-key fanout: after pre-aggregation a value key arrives at most
     # once per bundle; the per-column combines keep combiner lifting
     values = counted[_VALUES] | "SumValues" >> beam.CombinePerKey(
@@ -2658,6 +2704,8 @@ class CensusMetrics(beam.PTransform):
         | "MaskSummaries" >> beam.CombinePerKey(MaskSummaryCombineFn()))
     literals = counted[_LITERALS] | "Literals" >> beam.CombinePerKey(
         LiteralsCombineFn())
+    substantive = counted[_SUBSTANTIVE] | "Substantive" >> beam.CombinePerKey(
+        sum)
     seeds = p | "Seeds" >> beam.Create([(table, (_SEED, -1, None))
                                         for table in sorted(specs)])
     parts = ((
@@ -2665,6 +2713,7 @@ class CensusMetrics(beam.PTransform):
         contributions | "TagContrib" >> beam.Map(_tagged, "contrib"),
         masks | "TagMasks" >> beam.Map(_tagged, _MASKS),
         literals | "TagLiterals" >> beam.Map(_tagged, _LITERALS),
+        substantive | "TagSubstantive" >> beam.Map(_tagged, _SUBSTANTIVE),
         seeds,
     )
              | "Parts" >> beam.Flatten()

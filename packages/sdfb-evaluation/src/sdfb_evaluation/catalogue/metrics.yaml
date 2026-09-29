@@ -136,9 +136,12 @@ metrics:
     interpretation:
       good: "Above 0.99 the generator stays inside the source vocabulary."
       bad: "At or below 0.95, 1 value in 20 or more is an invented category (a typo, a hallucinated label, a format drift); the value census lists the top offenders."
-    pitfalls: "A column that emits only the most common category still scores 1.0: adherence says nothing about proportions (read column.tvd for that)."
+    pitfalls: "A column that emits only the most common category still scores 1.0: adherence says nothing about proportions (read column.tvd for that). On a value-sampled column the interval treats values, not rows, as the sampled units (the same stratified interval as field.substantive_copy_rate)."
     references:
       - {label: "SDMetrics — CategoryAdherence", url: "https://docs.sdv.dev/sdmetrics/data-metrics/diagnostic/categoryadherence"}
+      - {label: "Horvitz & Thompson 1952 — sampling without replacement from a finite universe", url: "https://doi.org/10.1080/01621459.1952.10483446"}
+      - {label: "Woodruff 1971 — approximating the variance of a complicated estimate", url: "https://doi.org/10.1080/01621459.1971.10482279"}
+      - {label: "Korn & Graubard 1998 — intervals for proportions with small expected counts from survey data (Survey Methodology 24(2))", url: "https://www150.statcan.gc.ca/n1/pub/12-001-x/1998002/article/4356-eng.pdf"}
 
   - id: field.range_adherence
     version: "1"
@@ -213,12 +216,15 @@ metrics:
     purpose: "Share of substantive synthetic values (non-null, non-empty, not a 0001-/9999- date sentinel) that equal a RARE source value, one held by fewer than 10 source rows. Frequent values are k-anonymous category mass; rare ones copied verbatim look like memorization."
     interpretation:
       good: "Below 1e-4 (100 per million) copies are within coincidental-collision noise."
-      bad: "At or above 1e-3, rare source strings (names, free text, identifiers) are being reproduced; check field.value_memorization_lift to see whether they come from the rows the generator read."
-    pitfalls: "Gated only on free text (kind text), where the rule comes from. Every other kind reports INFO only: numeric and day-granularity temporal values collide with a dense source by domain size, and reusing a rare real category, identifier or timestamp is not evidence of memorization; field.value_memorization_lift (reference vs holdout) is the gated test there. On a value-sampled column the interval treats values, not rows, as the sampled units."
+      bad: "At or above 1e-3 on a free-text column, rare source strings are being reproduced; check field.value_memorization_lift to see whether they come from the rows the generator read."
+    pitfalls: "Gated only on free text (kind text), where the rule comes from. Every other kind reports INFO only: numeric and temporal values collide with a dense source by domain size, and reusing a rare real category or identifier is not evidence of memorization; field.value_memorization_lift (reference vs holdout) is the gated test there. On a value-sampled column the most frequent values are counted exactly and only the hash-sampled rest is uncertain: the interval is a Clopper-Pearson interval for the sampled rest's rate on its effective number of sampled values (Korn & Graubard), with the exact part added back as a known constant, so values, not rows, are the sampled units and a sample without a copy still bounds the rate."
     references:
       - {label: "Sweeney 2002 — k-anonymity", url: "https://doi.org/10.1142/S0218488502001648"}
       - {label: "Carlini et al. 2021 — extracting training data from LLMs", url: "https://arxiv.org/abs/2012.07805"}
       - {label: "config/thresholds.yml — freetext.copy_fraction", url: "https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/config/thresholds.yml"}
+      - {label: "Horvitz & Thompson 1952 — sampling without replacement from a finite universe", url: "https://doi.org/10.1080/01621459.1952.10483446"}
+      - {label: "Woodruff 1971 — approximating the variance of a complicated estimate", url: "https://doi.org/10.1080/01621459.1971.10482279"}
+      - {label: "Korn & Graubard 1998 — intervals for proportions with small expected counts from survey data (Survey Methodology 24(2))", url: "https://www150.statcan.gc.ca/n1/pub/12-001-x/1998002/article/4356-eng.pdf"}
 
   - id: field.value_memorization_lift
     version: "1"

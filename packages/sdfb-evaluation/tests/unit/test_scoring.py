@@ -515,8 +515,8 @@ def test_documented_edge_row_is_info_with_null_score():
     }, Status.INFO, "domain"),
     ("temporal", {
         "day_granularity": False
-    }, Status.INFO, "R66"),
-    ("temporal", {}, Status.INFO, "R66"),
+    }, Status.INFO, "domain-size"),
+    ("temporal", {}, Status.INFO, "domain-size"),
     ("categorical", {}, Status.INFO, "R66"),
     ("identifier", {}, Status.INFO, "R66"),
     ("categorical", {
@@ -527,7 +527,7 @@ def test_documented_edge_row_is_info_with_null_score():
 ])
 def test_copy_rate_is_gated_only_on_free_text(kind, detail, expected, reason):
   """Ruling R66: only a text column's copy rate is gated; numeric and
-  day-granular temporal ones collide by domain size, and every other kind
+  temporal ones collide by domain size, and every other kind
   reuses real values — field.value_memorization_lift gates there."""
   mv = _mv(
       "field.substantive_copy_rate",

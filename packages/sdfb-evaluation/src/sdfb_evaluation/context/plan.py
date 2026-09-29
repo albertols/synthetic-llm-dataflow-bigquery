@@ -319,7 +319,9 @@ class ColumnPlan:  # pylint: disable=too-many-instance-attributes  # the plan's 
   including any value only the synthetic side holds — is a hashed label.
   `census_head` (R67) holds the codes of the source's then the synthetic
   side's top-254 values: the certainty stratum of a value-sampled
-  census (module docstring); never a literal gate.
+  census (module docstring); never a literal gate. `avg_len` is the
+  larger side's AVG(LENGTH(x)) of a STRING/BYTES column: the census
+  budget sizes the mask pass's keys by it (R70); it changes no encoding.
   """
   name: str
   bq_type: str
@@ -340,6 +342,7 @@ class ColumnPlan:  # pylint: disable=too-many-instance-attributes  # the plan's 
   detection_dictionary: tuple[int, ...] | None = None
   synthetic_distinct: int | None = None
   census_head: tuple[int, ...] | None = None
+  avg_len: float | None = None
 
   def __post_init__(self) -> None:
     object.__setattr__(self, "kind", ColumnKind(self.kind))
@@ -680,6 +683,16 @@ def _day_granular(column: ColumnPlan, kind: ColumnKind, midnight: int | None,
   return non_null > 0 and midnight == non_null
 
 
+def _avg_len(src: Mapping[str, Any], syn: Mapping[str, Any]) -> float | None:
+  """The larger side's planned AVG(LENGTH(x)), or None when neither has
+  one (all NULL)."""
+  lengths = [
+      value for value in (_finite(src.get("avg_len")),
+                          _finite(syn.get("avg_len"))) if value is not None
+  ]
+  return max(lengths) if lengths else None
+
+
 def _census_head(name: str, src_top: Sequence[tuple[Any, int]],
                  syn_top: Sequence[tuple[Any, int]]) -> tuple[int, ...]:
   """The census's certainty stratum (R67): each side's ranked top values
@@ -724,6 +737,7 @@ def _planned(column: ColumnPlan, src: Mapping[str, Any], syn: Mapping[str, Any],
       synthetic_distinct=syn.get("distinct"),
       census_head=(_census_head(column.name, top, _top_pairs(syn.get("top")))
                    if headed else None),
+      avg_len=_avg_len(src, syn) if column.bq_type in _STRING_TYPES else None,
   )
 
 

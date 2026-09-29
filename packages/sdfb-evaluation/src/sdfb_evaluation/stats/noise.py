@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from scipy.stats import beta
+from scipy.stats import t as student_t
 
 # noise_floor methods that return an interval rather than a scalar floor
 # (wilson, newcombe, rate_ratio) or that are not implemented in this module
@@ -137,60 +138,98 @@ def folded_abs_interval(lo: float, hi: float) -> tuple[float, float]:
   return (min(abs(lo), abs(hi)), max(abs(lo), abs(hi)))
 
 
+class StratifiedShare(NamedTuple):
+  """The additive sums a stratified value sample keeps for one share
+  `R = Y / X` (`stratified_ratio_interval`): plain sums of y and x over
+  the certainty stratum (the head) and over the SAMPLED tail values,
+  the tail's Σy², Σxy, Σx², and how many sampled tail values have
+  x > 0 (the sampled clusters)."""
+  head_y: float
+  head_x: float
+  tail_y: float
+  tail_x: float
+  tail_yy: float
+  tail_xy: float
+  tail_xx: float
+  tail_clusters: float
+
+
 def stratified_ratio_interval(
-    num: float,
-    den: float,
-    tail_yy: float,
-    tail_xy: float,
-    tail_xx: float,
+    share: StratifiedShare,
     rate: float,
-    sampled_den: float,
+    tail_total: float | None = None,
     alpha: float = 0.05) -> tuple[float, float, float] | None:
   """A share `R = Y / X` from a stratified value sample, with its
-  cluster-robust interval: `(ratio, lo, hi)`, or None when `den <= 0`.
+  cluster-robust interval: `(ratio, lo, hi)`, or None when there is no
+  denominator.
 
   Design: the VALUES are the sampling units (every row of a value moves
-  with it, so rows are clustered). A certainty stratum enters with weight
-  1 and no sampling variance; the tail is Poisson-sampled, each value
-  independently with probability `rate` (weight 1 / rate). `num` and
-  `den` are the weighted totals Ŷ = Σ_head y + Σ_tail,sampled y / rate
-  and X̂ likewise; `tail_yy`, `tail_xy`, `tail_xx` are the plain sums
-  Σ y², Σ x y, Σ x² over the SAMPLED tail values, and `sampled_den` the
-  plain Σ x over every counted value (the rows actually observed). With
-  the Taylor-linearised residuals e_v = y_v - R̂ x_v of R̂ = Ŷ / X̂ and the
-  Horvitz-Thompson variance estimator of Poisson sampling,
-  Σ_sampled (1 - π) e_v² / π² with π = rate:
+  with it, so rows are clustered). The head is a certainty stratum —
+  known exactly, no sampling variance; the tail is Poisson-sampled, each
+  value independently with probability `rate`. With X_t the tail's x
+  total — `tail_total` when the caller counted it exactly (the census
+  does: every row passes through it before the value sample), else its
+  Horvitz-Thompson estimate x_t / rate (Horvitz & Thompson, 1952) — and
+  q̂ = y_t / x_t the tail's sample ratio, the estimate is
 
-      V̂(R̂) = ((1 - rate) / rate) · (Σ_sampled e_v² / rate) / X̂²
-            = (1 - rate) / rate² · (Σy² - 2 R̂ Σxy + R̂² Σx²) / X̂²
+      R̂ = (Y_head + X_t q̂) / (X_head + X_t).
 
-  — the (1 - rate) / rate finite-population factor times the
-  Horvitz-Thompson estimate of the population's residual sum of squares
-  (Horvitz & Thompson, 1952; Woodruff, 1971, for the linearisation;
-  Särndal, Swensson & Wretman, 1992). A normal interval on V̂ collapses
-  to a point when the sample holds no event (a rare copy rate), so the
-  interval is Korn & Graubard's (1998): Clopper-Pearson on the effective
-  sample size n* = R̂ (1 - R̂) / V̂, capped at the observed rows (a design
-  effect never below 1), with R̂ n* events; n* is the observed rows when
-  R̂ is 0 or 1 or V̂ is 0. A two-sided `alpha`.
+  With an exact X_t only q̂ carries sampling noise, so the interval is
+  built for q̂ alone and mapped through that monotone function, the head
+  added back as a known constant (an HT X_t is treated as known too,
+  which undercovers when the head holds most of Y). For q̂: the
+  linearised variance of a ratio of sample sums under Poisson sampling
+  (Woodruff, 1971; Särndal, Swensson & Wretman, 1992),
+
+      V̂(q̂) = (1 - rate) · Σ_tail e² / x_t² · s / (s - 1),
+      e = y - q̂ x over the s sampled tail clusters,
+
+  and Korn & Graubard's (1998) Clopper-Pearson interval on the effective
+  sample size n* = q̂ (1 - q̂) / V̂, with R̂ n* events. n* is capped at the
+  tail's effective cluster count (Σx)² / Σx² (Kish), which is also n*
+  when q̂ is 0 or 1 or V̂ is 0 — so a sample without a copy still bounds
+  the rate by how many clusters it saw — and is scaled by K&G's degrees-
+  of-freedom factor [t_{n-1} / t_{s-1}]² (n = the tail's rows), which
+  widens the interval when few clusters were sampled. With no sampled
+  tail value q is unknown: the point takes the head's ratio and the
+  interval spans every tail rate, q in [0, 1] (a point when the tail is
+  empty).
   """
+  x_t = share.tail_x
+  if tail_total is None:
+    tail_total = x_t / rate if x_t > 0 else 0.0
+  tail_total = max(0.0, tail_total)
+  den = share.head_x + tail_total
   if den <= 0.0:
     return None
-  ratio = min(1.0, max(0.0, num / den))
-  squares = max(0.0, tail_yy - 2.0 * ratio * tail_xy + ratio * ratio * tail_xx)
-  variance = (1.0 - rate) / (rate * rate) * squares / (den * den)
-  observed = max(float(sampled_den), 1.0)
-  n_eff = observed
-  if 0.0 < ratio < 1.0 and variance > 0.0:
-    n_eff = min(observed, ratio * (1.0 - ratio) / variance)
-  events = ratio * n_eff
+
+  def combined(q: float) -> float:
+    return (share.head_y + tail_total * q) / den
+
+  if x_t <= 0.0:
+    proxy = share.head_y / share.head_x if share.head_x > 0 else 0.0
+    return (combined(proxy), combined(0.0), combined(1.0))
+  q = min(1.0, max(0.0, share.tail_y / x_t))
+  clusters = max(share.tail_clusters, 1.0)
+  squares = max(0.0,
+                share.tail_yy - 2.0 * q * share.tail_xy + q * q * share.tail_xx)
+  correction = clusters / (clusters - 1.0) if clusters > 1.0 else 1.0
+  variance = (1.0 - rate) * squares / (x_t * x_t) * correction
+  kish = x_t * x_t / share.tail_xx if share.tail_xx > 0 else 1.0
+  n_star = kish
+  if 0.0 < q < 1.0 and variance > 0.0:
+    n_star = min(kish, q * (1.0 - q) / variance)
+  upper = 1.0 - alpha / 2.0
+  n_star *= (float(student_t.ppf(upper, max(x_t - 1.0, 1.0))) /
+             float(student_t.ppf(upper, max(clusters - 1.0, 1.0))))**2
+  events = q * n_star
   lo = (
-      float(beta.ppf(alpha / 2.0, events, n_eff - events +
+      float(beta.ppf(alpha / 2.0, events, n_star - events +
                      1.0)) if events > 0.0 else 0.0)
   hi = (
-      float(beta.ppf(1.0 - alpha / 2.0, events + 1.0, n_eff -
-                     events)) if events < n_eff else 1.0)
-  return (ratio, lo, hi)
+      float(beta.ppf(upper, events + 1.0, n_star -
+                     events)) if events < n_star else 1.0)
+  return (combined(q), combined(lo), combined(hi))
 
 
 def tvd_null_expectation(p: Sequence[float], n: int, m: int) -> float:

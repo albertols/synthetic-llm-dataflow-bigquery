@@ -29,11 +29,13 @@ from sdfb_evaluation import schemas
 from sdfb_evaluation.canonical import hash64
 from sdfb_evaluation.context.budget import (
     CENSUS_KEY_BYTES,
-    MASK_KEY_BYTES,
+    MASK_KEY_OVERHEAD,
+    MASK_UTF8_FACTOR,
     Budget,
     BudgetExceededError,
     census_bytes,
     mask_bytes,
+    mask_key_bytes,
     predict_shuffle_gb,
     value_census_bytes,
     water_fill,
@@ -526,6 +528,8 @@ def test_census_head_is_each_sides_top_values_for_string_and_bool():
              ()) == {hash64("flag", True),
                      hash64("flag", False)}
   assert by["qty"].census_head is None and by["id"].census_head is None
+  # R70: the planned length sizes the mask pass's keys
+  assert by["note"].avg_len == 45.0 and by["qty"].avg_len is None
   # the head moves the encoding digest (it changes the census)
   columns = list(by.values())
   moved = [
@@ -550,7 +554,8 @@ def test_census_bytes_count_the_head_unsampled_and_the_mask_pass():
       value_sample_rate=0.01,
       source_distinct=100_000,
       synthetic_distinct=100_000,
-      census_head=tuple(range(500)))
+      census_head=tuple(range(500)),
+      avg_len=40.0)
   flag = dataclasses.replace(
       text,
       name="flag",
@@ -564,7 +569,13 @@ def test_census_bytes_count_the_head_unsampled_and_the_mask_pass():
   keys = 200_000
   assert value_census_bytes([text], rows, rows) == pytest.approx(
       (500 + (keys - 500) * 0.01) * CENSUS_KEY_BYTES)
-  assert mask_bytes([text, flag], rows, rows) == keys * MASK_KEY_BYTES
+  # R70: a mask key carries the mask's text, as long as the value
+  assert mask_key_bytes(text) == MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * 40
+  assert mask_bytes([text, flag], rows, rows) == keys * mask_key_bytes(text)
+  prose = dataclasses.replace(text, avg_len=900.0)  # capped at 256 chars
+  assert mask_key_bytes(prose) == MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * 256
+  assert mask_key_bytes(dataclasses.replace(text, avg_len=None)) > (
+      MASK_KEY_OVERHEAD)
   assert census_bytes([text, flag], rows, rows) == pytest.approx(
       value_census_bytes([text, flag], rows, rows) +
       mask_bytes([text, flag], rows, rows))

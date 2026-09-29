@@ -33,10 +33,10 @@ the semantic authority; this module only executes it.
      stay graded (Ruling R42); likewise `field.substantive_copy_rate` is
      gated only on a `text` column (free text, where the probe's rule
      came from) and INFO on every other kind (Ruling R66): numeric and
-     day-granular temporal values (`detail["day_granularity"]`) collide
-     with a dense source by domain size, and reusing a rare real
-     category, identifier or timestamp is not evidence of memorisation —
-     `field.value_memorization_lift` (R vs H) is the gated signal there;
+     temporal values collide with a dense source by domain size, and
+     reusing a rare real category or identifier is not evidence of
+     memorisation — `field.value_memorization_lift` (R vs H) is the gated
+     signal there;
   4. null warn and fail -> INFO;
   5. a `target` metric reads x = |g - target|, its target being the
      catalogue's or, when that is null (`column.novelty_mass`), the row's
@@ -122,13 +122,13 @@ _PMSE_ID = "table.pmse_ratio"
 _ORPHAN_ID = "relationship.orphan_rate"
 _COPY_RATE_ID = "field.substantive_copy_rate"
 _DOMAIN_COLLISION_REASON = (
-    "domain collision: a numeric or day-granular temporal column meets a "
-    "dense source by domain size, not by copying; reported, not gated "
+    "domain-size collision: a numeric or temporal column meets a dense "
+    "source by domain size, not by copying; reported, not gated "
     "(field.value_memorization_lift is the fair test)")
 _FREE_TEXT_ONLY_REASON = (
-    "gated only on free text (Ruling R66): reusing a rare real category, "
-    "identifier or timestamp is not evidence of memorisation; reported, "
-    "not gated (field.value_memorization_lift is the gated signal)")
+    "gated only on free text (Ruling R66): reusing a rare real category or "
+    "identifier is not evidence of memorisation; reported, not gated "
+    "(field.value_memorization_lift is the gated signal)")
 _REL_TOL = 1e-9  # tolerance for "at the threshold" (inclusive crossing)
 _UNSCORED = (Status.INFO, Status.NOT_EVALUATED)
 
@@ -316,8 +316,7 @@ def _copy_rate_info_reason(mv: MetricValue) -> str | None:
   kind = mv.column_kind
   if kind is None or kind == "text":
     return None
-  if kind == "numeric" or (kind == "temporal" and
-                           mv.detail.get("day_granularity") is True):
+  if kind in ("numeric", "temporal"):
     return _DOMAIN_COLLISION_REASON
   return _FREE_TEXT_ONLY_REASON
 
