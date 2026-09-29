@@ -1302,7 +1302,7 @@ metrics:
     n_dependent: false
     baseline: false
     uses_ci_bound: true
-    formula: '\operatorname{lift}_{near} = \frac{m^{near}_R / \lvert R \rvert}{m^{near}_H / \lvert H \rvert}'
+    formula: '\operatorname{lift}_{near} = \frac{m^{near}_R / \lvert L_R \cap \bar{L}_H \rvert}{m^{near}_H / \lvert L_H \cap \bar{L}_R \rvert}, \quad L_S = \text{leave-one-out keys of } S \text{, per column}'
     purpose: "The share of the leave-one-column-out keys only the reference sample holds (at the same column) that a verified near match reproduces, over the same share for the holdout's exclusive keys. Near 1 means near-copies occur only at chance level."
     interpretation:
       good: "CI lower bound below 2: no evidence of a 2× or larger near-copy lift. Smaller copying is not ruled out, and few near matches give a wide interval."
@@ -1333,7 +1333,7 @@ metrics:
     interpretation:
       good: "Under 0.01: at most 1 % more repetition than in the source."
       bad: "At 0.05 or above: 5 % or more extra rows are internal duplicates, a sign of a small sampling pool or mode collapse."
-    pitfalls: "Duplicate shares grow with the number of rows compared, which is why both sides are rarefied to the same m; the value still depends on m, so compare runs of similar size. Rows of one duplicate group are not independent draws: the interval is Newcombe's on Korn & Graubard effective counts, the effective n from the null variance of the duplicate count of an m-row subset of both sides' rows pooled (exact, multivariate hypergeometric), so a faithful generator's difference is read as noise. Rows with no non-key content are left out; a row-sampled side (sampled mode) is not evaluated."
+    pitfalls: "Duplicate shares grow with the number of rows compared, which is why both sides are rarefied to the same m; the value still depends on m, so compare runs of similar size. Rows of one duplicate group are not independent draws: the interval is Newcombe's on Korn & Graubard effective counts with ONE effective n for both sides, from the pooled rows' duplicate share at m and the null variance of the duplicate count of an m-row subset of both sides' rows pooled (exact, multivariate hypergeometric), so a faithful generator's difference is read as noise while a 2-3x repeating generator still fails. Rows with no non-key content are left out; a row-sampled side (sampled mode) is not evaluated."
     references:
       - {label: "Hurlbert 1971 — rarefaction and the nonconcept of diversity", url: "https://doi.org/10.2307/1934145"}
       - {label: "Heck, van Belle & Simberloff 1975 — explicit calculation of the rarefaction diversity measurement", url: "https://doi.org/10.2307/1934716"}

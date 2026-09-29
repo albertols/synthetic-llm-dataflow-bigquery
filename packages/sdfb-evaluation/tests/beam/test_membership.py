@@ -29,6 +29,7 @@ import json
 import math
 import pickle
 import time as clock
+import tracemalloc
 import zlib
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -64,9 +65,10 @@ from sdfb_evaluation.beam.membership import (
     RowFlag,
     RowKeysFn,
     batch_membership,
+    duplicate_excess,
+    duplicate_null_variance,
     flag_row,
     membership_outputs,
-    duplicate_null_variance,
     rarefied_duplicates,
 )
 from sdfb_evaluation.canonical import hashed_label
@@ -74,6 +76,7 @@ from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.context.budget import (
     MEMBERSHIP_CODE_BYTES,
     fixed_shuffle_bytes,
+    membership_code_bytes,
     source_sets_fit,
 )
 from sdfb_evaluation.context.reference import Panel
@@ -871,6 +874,15 @@ def test_keyed_count_shuffle_stays_within_the_budgeted_bytes_per_code(
     record_property(f"bytes_per_code_bits_{bits}", round(emitted / codes_in, 2))
     assert emitted / codes_in <= MEMBERSHIP_CODE_BYTES, bits
     assert compacted / codes_in <= MEMBERSHIP_CODE_BYTES, bits
+  # the corners (B5): a lone batch at the 10-bit maximum, and a long table
+  # name, stay within the budgeted MEMBERSHIP_CODE_BYTES + len(name)
+  for name in (table.name, "project_dataset_" + "x" * 40):
+    corner = dataclasses.replace(spec, table=name, bucket_bits=10)
+    lone = [dataclasses.replace(batches[0], table=name)]
+    out = _row_key_outputs(RowKeysFn({name: corner}), lone)
+    per_code = sum(len(coder.encode(e)) for e in out) / (3 * lone[0].n)
+    record_property(f"bytes_per_code_corner_{len(name)}", round(per_code, 2))
+    assert per_code <= membership_code_bytes(name), name
 
 
 def test_budget_counts_the_keyed_mode_row_hashes():
@@ -884,6 +896,13 @@ def test_budget_counts_the_keyed_mode_row_hashes():
   side = fixed_shuffle_bytes(**args, nonkey=True, keyed=True, side_input=True)
   keyed = fixed_shuffle_bytes(**args, nonkey=True, keyed=True, side_input=False)
   assert keyed - side == pytest.approx(both * MEMBERSHIP_CODE_BYTES)
+  # B5: every element repeats the key's table name: each membership code
+  # (non-key both sides, the PK, the keyed-mode row hashes) costs its length
+  named = fixed_shuffle_bytes(
+      **args, nonkey=True, keyed=True, side_input=False, table="orders")
+  codes = both + 3e7 + both
+  assert named - keyed == pytest.approx(codes * len("orders"))
+  assert membership_code_bytes("orders") == MEMBERSHIP_CODE_BYTES + 6
   keyless = fixed_shuffle_bytes(
       **args, nonkey=True, keyed=False, side_input=False)
   assert keyless == pytest.approx(side)  # the row IS the content
@@ -1093,13 +1112,15 @@ def test_sampled_mode_withholds_verdicts_that_need_every_row():
     assert mv.detail["sample_rate"] == 0.25, metric_id
 
 
-def test_a_table_failing_on_a_worker_is_not_evaluated(monkeypatch):
-  """A data error while a table's metrics are computed makes that table
-  not_evaluated with the reason; nothing raises."""
+@pytest.mark.parametrize("error", [ZeroDivisionError, MemoryError])
+def test_a_table_failing_on_a_worker_is_not_evaluated(monkeypatch, error):
+  """A data error — or running out of memory — while a table's metrics
+  are computed makes that table not_evaluated with the reason; nothing
+  raises."""
   table, rows, _ = _people_with(copies=6)
 
   def broken(*_args: Any, **_kwargs: Any) -> None:
-    raise ZeroDivisionError("division by zero")
+    raise error("division by zero")
 
   monkeypatch.setattr(membership, "_lifts", broken)
   result = _pure(table, rows)
@@ -1107,7 +1128,7 @@ def test_a_table_failing_on_a_worker_is_not_evaluated(monkeypatch):
   assert {mv.metric_id for mv in result.metrics} == set(OWNED_METRIC_IDS)
   for mv in result.metrics:
     assert mv.value is None
-    assert "ZeroDivisionError" in mv.detail["reason"]
+    assert error.__name__ in mv.detail["reason"]
 
 
 def test_a_failing_table_does_not_fail_the_run(tmp_path, monkeypatch):
@@ -1178,6 +1199,127 @@ def test_a_failing_table_does_not_fail_the_run(tmp_path, monkeypatch):
   assert sorted([f for f in flags if f.table == "people"],
                 key=lambda f: (f.check, f.rank)) == sorted(
                     pure.flags, key=lambda f: (f.check, f.rank))
+
+
+def _freqs_of(values: np.ndarray) -> tuple[tuple[int, int], ...]:
+  """The frequency of frequencies of `values`' distinct items."""
+  return tuple(sorted(Counter(Counter(values.tolist()).values()).items()))
+
+
+def _pooled(*freqs: tuple[tuple[int, int], ...]) -> tuple[tuple[int, int], ...]:
+  total: Counter = Counter()
+  for f in freqs:
+    total.update(dict(f))
+  return tuple(sorted(total.items()))
+
+
+def _excess_status(x: Any) -> Status:
+  return _status(
+      MetricValue(
+          metric_id="row.internal_duplicate_excess",
+          table="t",
+          value=x.value,
+          ci_low=x.ci_low,
+          ci_high=x.ci_high))
+
+
+def _unique_but_pairs(n: int, pairs: int) -> tuple[tuple[int, int], ...]:
+  return tuple(x for x in ((1, n - 2 * pairs), (2, pairs)) if x[1])
+
+
+def test_duplicate_excess_verdicts_are_monotone_in_source_pairs():
+  """R76: a 10n-row synthetic side repeating every record 2 or 3 times
+  FAILs against a near-unique source, whatever its handful of duplicate
+  pairs (one design effect from the pooled null; a per-side one read a
+  source with 1-2 pairs as a tiny sample and passed the excess)."""
+  for n in (400, 800):
+    for repeats in (2, 3):
+      values = []
+      for pairs in (0, 1, 2, 5):
+        freqs_src = _unique_but_pairs(n, pairs)
+        freqs_syn = ((repeats, 10 * n // repeats),)
+        x = duplicate_excess(freqs_src, freqs_syn,
+                             _pooled(freqs_src, freqs_syn))
+        assert x.ci_low <= x.value <= x.ci_high  # B2: inside its own CI
+        assert x.ci_low > 0.0 and _excess_status(x) is Status.FAIL, (n, repeats,
+                                                                     pairs)
+        values.append(x.value)
+      assert values == sorted(values, reverse=True), (n, repeats)
+  # the same through the pipeline's keyed counts
+  for pairs in (0, 2):
+    rng = np.random.default_rng(3)
+    perm = rng.permutation(CATALOG_PATTERNS)
+    source = perm[:400].copy()
+    source[400 - pairs:] = source[:pairs]
+    synthetic = np.repeat(perm[400:2400], 2)
+    table, rows = catalog_table(source, synthetic, n_reference=200)
+    mv = _by_id(_pure(table, rows).metrics)["row.internal_duplicate_excess"]
+    assert mv.ci_low <= mv.value <= mv.ci_high
+    assert _status(mv) is Status.FAIL, pairs
+
+
+@pytest.mark.slow
+def test_duplicate_excess_null_miss_rate_stays_nominal():
+  """Both sides drawn from one Zipf (200 seeds a setting): the interval
+  misses 0 at most at its nominal 5 %, and always holds the value."""
+  for k, n_src, n_syn in ((1000, 800, 8000), (10000, 800, 800), (100000, 8000,
+                                                                 800)):
+    weights = zipf_weights(k, 1.1)
+    misses = 0
+    for seed in range(200):
+      rng = np.random.default_rng(seed)
+      src = rng.choice(k, n_src, p=weights)
+      syn = rng.choice(k, n_syn, p=weights)
+      x = duplicate_excess(
+          _freqs_of(src), _freqs_of(syn), _freqs_of(np.concatenate([src, syn])))
+      assert x.ci_low <= x.value <= x.ci_high
+      misses += not x.ci_low <= 0.0 <= x.ci_high
+    assert misses / 200 <= 0.05, (k, n_src, n_syn, misses)
+
+
+def test_duplicate_null_variance_stays_exact_at_millions_of_rows():
+  """Exact log-ratio sums, not log-gamma differences: an all-distinct pool
+  has variance 0 at any size, and a half-paired pool scales exactly."""
+  for total in (20_000, 20_000_000):
+    m = total // 2
+    assert duplicate_null_variance(((1, total),), m) <= 1e-6 * m
+  small = duplicate_null_variance(((1, 10_000), (2, 5_000)), 10_000)
+  large = duplicate_null_variance(((1, 10_000_000), (2, 5_000_000)), 10_000_000)
+  assert large / 20_000_000 == pytest.approx(small / 20_000, rel=1e-3)
+
+
+@pytest.mark.slow
+def test_duplicate_null_variance_memory_is_bounded():
+  """12,000 count classes (B3): the pair sum runs in row blocks over a
+  tabulated scale, so memory stays bounded; the value matches the
+  rare-duplication closed form Var(D) ≈ 4·E[pairs]."""
+  pool = tuple((c, 50) for c in range(1, 12_001))
+  total = sum(c * f for c, f in pool)
+  tracemalloc.start()
+  start = clock.perf_counter()
+  variance = duplicate_null_variance(pool, 1000)
+  elapsed = clock.perf_counter() - start
+  _, peak = tracemalloc.get_traced_memory()
+  tracemalloc.stop()
+  assert peak < 128 * 2**20 and elapsed < 60
+  pairs = 1000 * 999 / 2 * sum(f * c * (c - 1) for c, f in pool) / (
+      total * (total - 1))
+  assert variance == pytest.approx(4 * pairs, rel=0.1)
+
+
+def test_an_emit_failure_drops_the_tables_flags_in_beam(tmp_path, monkeypatch):
+  """B4: a table whose metrics fail at emit time writes not_evaluated
+  rows and no flags on the Beam path, as in process."""
+  table, rows, _ = _people_with(copies=6)
+
+  def broken(*_args: Any, **_kwargs: Any) -> None:
+    raise ZeroDivisionError("division by zero")
+
+  monkeypatch.setattr(membership, "_lifts", broken)
+  metrics, flags = _run(table, rows, tmp_path)
+  assert not flags
+  assert {mv.metric_id for mv in metrics} == set(OWNED_METRIC_IDS)
+  assert all("ZeroDivisionError" in mv.detail["reason"] for mv in metrics)
 
 
 def test_label_key_never_enters_the_job_graph(tmp_path):

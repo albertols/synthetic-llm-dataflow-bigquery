@@ -75,14 +75,17 @@ def ks_critical(n: int, m: int, alpha: float = 0.05) -> float:
   return math.sqrt(-math.log(alpha / 2.0) / 2.0) * math.sqrt((n + m) / (n * m))
 
 
-def wilson_interval(k: int, n: int, z: float = 1.959964) -> tuple[float, float]:
+def wilson_interval(k: float,
+                    n: float,
+                    z: float = 1.959964) -> tuple[float, float]:
   """The Wilson score interval for a binomial proportion `k / n` (Wilson, 1927).
 
   Bounded to `[0, 1]` by construction, unlike the Wald interval, which can
   cross either bound near `p = 0` or `p = 1`. `k = 0` and `k = n` return the
   exact bounds `0.0`/`1.0` (rather than a value merely close to them, which
   the general formula's floating-point evaluation would not guarantee), so
-  a fully degenerate count reads as a fully degenerate interval.
+  a fully degenerate count reads as a fully degenerate interval. `k` and
+  `n` may be real-valued: an effective count (Korn & Graubard, 1998).
   """
   if n <= 0:
     return (0.0, 1.0)
@@ -97,10 +100,10 @@ def wilson_interval(k: int, n: int, z: float = 1.959964) -> tuple[float, float]:
 
 
 def newcombe_diff_interval(
-    k1: int,
-    n1: int,
-    k2: int,
-    n2: int,
+    k1: float,
+    n1: float,
+    k2: float,
+    n2: float,
     z: float = 1.959964,
 ) -> tuple[float, float]:
   """The interval for `p1 - p2` from two independent proportions.

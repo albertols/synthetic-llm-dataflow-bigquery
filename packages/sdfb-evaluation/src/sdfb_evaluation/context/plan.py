@@ -1990,7 +1990,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
           keyed_counts=int(bool(work.pk)) + int(bool(work.identity)),
           nonkey=nonkey,
           keyed=keyed,
-          side_input=source_sets_fit(rows[0], nonkey=nonkey, keyed=keyed))
+          side_input=source_sets_fit(rows[0], nonkey=nonkey, keyed=keyed),
+          table=work.name)
     capacity = self.budget.max_shuffle_gb * GB - fixed
     if capacity < 0:
       self.notes.append(
