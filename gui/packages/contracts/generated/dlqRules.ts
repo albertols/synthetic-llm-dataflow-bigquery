@@ -262,7 +262,7 @@ export const dlqRules: DlqRulesFile = {
     }
   ],
   "exported_from": {
-    "commit": "7e55aa8e4431b98fb757d9889f8b30b0cf581828",
+    "commit": "d050836ab240e9d49e75bcb0c26828f6d3fba228",
     "dirty": []
   }
 };
