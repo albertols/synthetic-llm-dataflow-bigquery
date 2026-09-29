@@ -21,7 +21,9 @@ payloads the GUI draws.
     CombinePerKey((table, side), DenseProfileCombineFn)
       │  .with_hot_key_fanout(8)                      one DenseProfile per
       ▼                                               (table, side)
-    GroupByKey(table) ──► dense_outputs(spec, {side: profile})
+    GroupByKey(table) ──► dense_outputs(spec, {side: profile}, label_key=)
+                            ▲ label_key: AsSingleton(LabelKey), made on a
+                            │ worker, never in the job graph (R68)
                             ├─► MetricValue   (OWNED_METRIC_IDS)
                             └─► ProfileValue  (histogram, quantiles, …)
 
@@ -112,8 +114,16 @@ Source extremes (R65): a source-drawn side's (source, reference,
 holdout) exact min and max are each a single record's value, so no
 payload or detail shows them; range_adherence and range_coverage compare
 against them internally, and payloads/details carry the side's
-p0.5/p99.5 instead (`extremes: "p0.5_p99.5"`; a bound that still lands on
-an extreme is withheld). The synthetic side shows its exact extremes.
+p0.5/p99.5 instead (`extremes: "p0.5_p99.5"`). The synthetic side shows
+its exact extremes.
+
+Count rule (R69, k = RARE_COUNT = 10): a bound, end edge or tail quantile
+is published only when at least k records lie at or beyond it. Bounds
+need n * 0.005 >= k; a histogram or pair-axis edge needs k source records
+at or below AND at or above it (exact from the left- and right-closed
+profile bins; the same edges then serve every side, as they all come from
+the source grid; a common end atom qualifies, a lone extreme never does);
+a quantile payload keeps only the p with p * n >= k and (1 - p) * n >= k.
 
 References (author-year, R22): Pébay (2008); Chan, Golub & LeVeque (1983);
 Czado, Gneiting & Held (2009) for the mid-CDF PIT; Wilson (1927);
@@ -163,6 +173,7 @@ __all__ = [
     "NULL_PATTERN_CAP",
     "OWNED_METRIC_IDS",
     "PAIR_BINS",
+    "RARE_COUNT",
     "DenseMetrics",
     "DenseProfile",
     "DenseProfileCombineFn",
@@ -267,6 +278,9 @@ _INNER_DECILE_PROBS = tuple(k / 10 for k in range(1, 10))
 # R65: a source-drawn side's profile shows these quantiles, never its
 # exact min/max (each a single record's value)
 _BOUND_PROBS = (0.005, 0.995)
+# R69: a published bound, end edge or tail quantile has at least this many
+# records at or beyond it (D6/R56's k-anonymity floor, plan.LITERAL_MIN_COUNT)
+RARE_COUNT = 10
 _SOURCE_DRAWN = frozenset(
     {Side.SOURCE.value, Side.REFERENCE.value, Side.HOLDOUT.value})
 _EDGE_DIGITS = range(6, 18)  # 17 significant digits tell any two floats apart
@@ -759,9 +773,11 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
   """One (table, side)'s mergeable dense profile (module docstring).
 
   Arrays follow the spec's order: `nulls`/`nulls_m` the plan columns,
-  `union`/`profile`/`deciles`/`moments`/`in_range`/`dow`/`month`/`hour`
-  `spec.grids`, `str_*`/`lengths`/`classes` `spec.strings` (class columns
-  in `CHAR_CLASSES` order); `null_patterns` maps a null_bits pattern to
+  `union`/`profile`/`profile_left`/`deciles`/`moments`/`in_range`/`dow`/
+  `month`/`hour` `spec.grids` (`profile_left` counts the profile edges'
+  left-closed bins, so count(x >= edge) is exact, R69),
+  `str_*`/`lengths`/`classes` `spec.strings` (class columns in
+  `CHAR_CLASSES` order); `null_patterns` maps a null_bits pattern to
   its row count (at most `NULL_PATTERN_CAP`, the rest in `null_overflow`);
   `literals` maps a pair column to {dictionary code: text} where D6 allows
   a literal. Task 22 reads its matched-n totals from `rows_m`/`nulls_m`.
@@ -775,6 +791,7 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
   nulls_m: np.ndarray
   union: list[np.ndarray]
   profile: list[np.ndarray]
+  profile_left: list[np.ndarray]
   deciles: list[np.ndarray]
   moments: list[Moments]
   in_range: np.ndarray
@@ -809,6 +826,7 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
         nulls_m=zeros(columns),
         union=[zeros(g.union.size + 1) for g in spec.grids],
         profile=[zeros(g.profile.size + 1) for g in spec.grids],
+        profile_left=[zeros(g.profile.size + 1) for g in spec.grids],
         deciles=[zeros(g.deciles.size + 1) for g in spec.grids],
         moments=[Moments() for _ in spec.grids],
         in_range=zeros(grids),
@@ -859,6 +877,10 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
       finite = values[~np.isnan(values)]
       self.union[gi] += binned.bin_counts(finite, grid.union)
       self.profile[gi] += binned.bin_counts(finite, grid.profile)
+      # left-closed twin [e_{i-1}, e_i): count(x >= e) is exact too (R69)
+      self.profile_left[gi] += np.bincount(
+          np.searchsorted(grid.profile, finite, side="right"),
+          minlength=grid.profile.size + 1)
       self.deciles[gi] += binned.bin_counts(finite, grid.deciles)
       if grid.lo is not None:
         self.in_range[gi] = np.count_nonzero((finite >= grid.lo)
@@ -907,6 +929,7 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
         nulls_m=self.nulls_m + other.nulls_m,
         union=_add(self.union, other.union),
         profile=_add(self.profile, other.profile),
+        profile_left=_add(self.profile_left, other.profile_left),
         deciles=_add(self.deciles, other.deciles),
         moments=[
             a.merge(b)
@@ -1859,17 +1882,47 @@ def _profile_bounds(grid: _Grid, p: DenseProfile,
                     gi: int) -> tuple[float | None, float | None]:
   """A side's p0.5 / p99.5 from its union bins — what a source-drawn
   side's payloads and details show instead of its exact extremes (R65).
-  A bound that still lands on an exact extreme (a tiny side, or a point
-  mass at the end) is withheld as None."""
+  Published only when n * 0.005 >= RARE_COUNT, so at least k records lie
+  at or beyond each (R69); a bound outside the side's own [min, max] is an
+  interpolation artifact and is withheld too."""
   m = p.moments[gi]
-  if not m.n:
+  if m.n * _BOUND_PROBS[0] < RARE_COUNT:
     return None, None
   bounds = binned.quantiles_from_bins(grid.union, p.union[gi], _BOUND_PROBS)
   shown = [
-      None if not np.isfinite(b) or b in (m.min, m.max) else float(b)
+      float(b) if np.isfinite(b) and m.min <= b <= m.max else None
       for b in bounds
   ]
   return shown[0], shown[1]
+
+
+def _published(p: DenseProfile, gi: int) -> np.ndarray:
+  """Which profile edges may be shown, decided on the SOURCE side (R69):
+  an edge needs at least RARE_COUNT source records at or below it and at
+  or above it (a common end atom qualifies; a lone extreme never does).
+  The same mask applies to every side, whose edges all come from the
+  source grid."""
+  below = np.cumsum(p.profile[gi])[:-1]  # count(x <= e_j)
+  under = np.cumsum(p.profile_left[gi])[:-1]  # count(x < e_j)
+  above = p.moments[gi].n - under  # count(x >= e_j)
+  published: np.ndarray = (below >= RARE_COUNT) & (above >= RARE_COUNT)
+  return published
+
+
+def _merged(counts: np.ndarray, kept: np.ndarray) -> np.ndarray:
+  """Bin counts on `edges + 1` bins, re-binned on the kept edges only
+  (a dropped edge's two bins merge)."""
+  starts = np.concatenate(([0], np.flatnonzero(kept) + 1))
+  merged: np.ndarray = np.add.reduceat(counts, starts)
+  return merged
+
+
+def _tail_safe(probs: Sequence[float], n: int) -> list[float]:
+  """The quantile probabilities with at least RARE_COUNT of the side's n
+  values at or beyond them, in either tail (R69)."""
+  return [
+      q for q in probs if q * n >= RARE_COUNT and (1.0 - q) * n >= RARE_COUNT
+  ]
 
 
 def _extremes(grid: _Grid, p: DenseProfile,
@@ -1885,9 +1938,12 @@ def _extremes(grid: _Grid, p: DenseProfile,
   return float(m.min), float(m.max), "exact"
 
 
-def _grid_profiles(spec: DenseSpec, p: DenseProfile) -> Iterator[ProfileValue]:
+def _grid_profiles(spec: DenseSpec, p: DenseProfile,
+                   src: DenseProfile) -> Iterator[ProfileValue]:
   for gi, grid in enumerate(spec.grids):
     m = p.moments[gi]
+    kept = _published(src, gi)
+    edges = grid.profile[kept]
     unit = "epoch_seconds" if grid.kind is _TEMPORAL else "value"
     scale = grid.scale
 
@@ -1900,8 +1956,8 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile) -> Iterator[ProfileValue]:
     yield ProfileValue(
         profile_kind="histogram",
         payload={
-            "edges": [float(v) * scale for v in grid.profile],
-            "counts": p.profile[gi].tolist(),
+            "edges": [float(v) * scale for v in edges],
+            "counts": _merged(p.profile[gi], kept).tolist(),
             "min": scaled(low),
             "max": scaled(high),
             "extremes": extremes,
@@ -1909,17 +1965,17 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile) -> Iterator[ProfileValue]:
             "unit": unit,
         },
         n=m.n,
-        edges_digest=_edges_digest(grid.profile, grid.unit),
+        edges_digest=_edges_digest(edges, grid.unit),
         table=spec.table,
         side=p.side,
         column=grid.name)
-    values = binned.quantiles_from_bins(grid.union, p.union[gi],
-                                        _QUANTILE_PROBS)
-    if m.n and np.isfinite(values).all():  # the GUI's values are numbers
+    probs = _tail_safe(_QUANTILE_PROBS, m.n)
+    values = binned.quantiles_from_bins(grid.union, p.union[gi], probs)
+    if probs and np.isfinite(values).all():  # the GUI's values are numbers
       yield ProfileValue(
           profile_kind="quantiles",
           payload={
-              "probs": list(_QUANTILE_PROBS),
+              "probs": probs,
               "values": [scaled(v) for v in values],
               "unit": unit,
           },
@@ -2062,38 +2118,57 @@ def _corr_profiles(spec: DenseSpec, p: DenseProfile) -> Iterator[ProfileValue]:
         n=p.rows)
 
 
-def _edge_labels(column: _PairColumn) -> list[str]:
+def _edge_labels(edges: Sequence[float], kind: ColumnKind) -> list[str]:
   """Readable labels of a pair axis's decile edges, never two alike: the
   fewest significant digits (numbers) or the coarsest unit (timestamps,
   UTC) that tell every edge apart; `repr` (always distinct) otherwise."""
-  edges = [float(e) for e in column.deciles]
-  if column.kind is _TEMPORAL and all(e.is_integer() for e in edges):
-    stamps = np.array(edges, dtype=np.int64).astype("datetime64[us]")
+  values = [float(e) for e in edges]
+  if kind is _TEMPORAL and all(e.is_integer() for e in values):
+    stamps = np.array(values, dtype=np.int64).astype("datetime64[us]")
     for unit in _TIME_UNITS:
       labels = [str(v) for v in np.datetime_as_string(stamps, unit=unit)]
-      if len(set(labels)) == len(edges):
+      if len(set(labels)) == len(values):
         return labels
   else:
     for digits in _EDGE_DIGITS:
-      labels = [f"{e:.{digits}g}" for e in edges]
-      if len(set(labels)) == len(edges):
+      labels = [f"{e:.{digits}g}" for e in values]
+      if len(set(labels)) == len(values):
         return labels
-  return [repr(e) for e in edges]
+  return [repr(e) for e in values]
 
 
-def _axis(column: _PairColumn, literals: Mapping[int, str],
-          label_key: bytes) -> tuple[list[int], list[str]]:
-  """The slots a pair axis uses and their labels (D6 for dictionary
-  values: a literal only where `literal_ok`, else a keyed hashed label,
-  R64)."""
+def _decile_kept(column: _PairColumn, grid: _Grid,
+                 profile_kept: np.ndarray) -> np.ndarray:
+  """The pair axis's decile edges that R69 lets a label show: each is a
+  profile edge, published or not with it."""
+  kept = np.zeros(column.deciles.size, dtype=bool)
+  if not grid.profile.size:
+    return kept
+  index = np.searchsorted(grid.profile, column.deciles)
+  found = index < grid.profile.size
+  found[found] = grid.profile[index[found]] == column.deciles[found]
+  kept[found] = profile_kept[index[found]]
+  return kept
+
+
+def _axis(column: _PairColumn, literals: Mapping[int, str], label_key: bytes,
+          kept: np.ndarray | None) -> tuple[list[list[int]], list[str]]:
+  """The pair-grid slot groups an axis shows and their labels: decile bins
+  merged across the edges R69 withholds; D6 for dictionary values (a
+  literal only where `literal_ok`, else a keyed hashed label, R64)."""
   if column.grid:
-    edges = _edge_labels(column)
-    if not edges:
-      return [0, PAIR_BINS], ["any", "NULL"]
+    assert kept is not None
+    shown = np.flatnonzero(kept)
+    if not shown.size:
+      return [list(range(column.deciles.size + 1)),
+              [PAIR_BINS]], ["any", "NULL"]
+    edges = _edge_labels(column.deciles[shown].tolist(), column.kind)
+    starts = [0, *(int(k) + 1 for k in shown), column.deciles.size + 1]
+    groups = [list(range(a, b)) for a, b in itertools.pairwise(starts)]
     labels = [f"<= {edges[0]}"]
     labels += [f"({a}, {b}]" for a, b in itertools.pairwise(edges)]
     labels.append(f"> {edges[-1]}")
-    return [*range(len(edges) + 1), PAIR_BINS], [*labels, "NULL"]
+    return [*groups, [PAIR_BINS]], [*labels, "NULL"]
   labels = []
   for code in column.dictionary:
     literal = column.bool_labels.get(code) or literals.get(code)
@@ -2101,7 +2176,12 @@ def _axis(column: _PairColumn, literals: Mapping[int, str],
         literal if column.literal_ok and literal is not None else hashed_label(
             code, key=label_key))
   slots = [*range(len(column.dictionary)), _OTHER_SLOT, PAIR_BINS]
-  return slots, [*labels, "other", "NULL"]
+  return [[slot] for slot in slots], [*labels, "other", "NULL"]
+
+
+def _grouped(table: np.ndarray, rows: Sequence[Sequence[int]],
+             cols: Sequence[Sequence[int]]) -> list[list[int]]:
+  return [[int(table[np.ix_(r, c)].sum()) for c in cols] for r in rows]
 
 
 def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
@@ -2111,15 +2191,23 @@ def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
   if src is None or syn is None or src.bivariate is None:
     return
   literals = _merge_literals(src.literals, syn.literals)
+  grid_of = {g.j: gi for gi, g in enumerate(spec.grids)}
+
+  def kept(column: _PairColumn) -> np.ndarray | None:
+    if not column.grid:
+      return None
+    gi = grid_of[column.j]
+    return _decile_kept(column, spec.grids[gi], _published(src, gi))
+
   top = sorted(tvds, key=lambda k: (-tvds[k], k))[:CONTINGENCY_TOP_PAIRS]
   for k in sorted(top):
     a, b = spec.pairs[k]
     ca, cb = spec.pair_columns[a], spec.pair_columns[b]
-    x_slots, x_labels = _axis(ca, literals.get(a, {}), label_key)
-    y_slots, y_labels = _axis(cb, literals.get(b, {}), label_key)
+    x_groups, x_labels = _axis(ca, literals.get(a, {}), label_key, kept(ca))
+    y_groups, y_labels = _axis(cb, literals.get(b, {}), label_key, kept(cb))
     for p in (src, syn):
       assert p.bivariate is not None
-      counts = p.bivariate.counts2d[k][np.ix_(x_slots, y_slots)]
+      counts = _grouped(p.bivariate.counts2d[k], x_groups, y_groups)
       yield ProfileValue(
           table=spec.table,
           side=p.side,
@@ -2130,7 +2218,7 @@ def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
               "column_y": cb.name,
               "x_labels": x_labels,
               "y_labels": y_labels,
-              "counts": counts.tolist(),
+              "counts": counts,
           },
           n=int(p.bivariate.counts2d[k].sum()))
 
@@ -2139,11 +2227,12 @@ def _profiles(spec: DenseSpec, present: Mapping[str, DenseProfile],
               tvds: Mapping[int,
                             float], label_key: bytes) -> list[ProfileValue]:
   out: list[ProfileValue] = []
+  src = present.get(_SOURCE) or DenseProfile.empty(spec, _SOURCE)
   for side in _SIDE_ORDER:
     p = present.get(side)
     if p is None:
       continue
-    out.extend(_grid_profiles(spec, p))
+    out.extend(_grid_profiles(spec, p, src))
     out.extend(_string_profiles(spec, p))
     out.extend(_null_pattern_profile(spec, p))
     out.extend(_corr_profiles(spec, p))
@@ -2224,17 +2313,24 @@ class DenseMetrics(beam.PTransform):
   PCollection[ProfileValue], "accumulators": PCollection[((table, side),
   DenseProfile)]}` (module docstring). The accumulators are the census's
   totals side input (Task 22). Only each table's slim `DenseSpec` is
-  pickled, never its panel rows. `label_key` keys the hashed labels
-  (Ruling R64: the operator's secret or a per-evaluation ephemeral key,
-  supplied by the pipeline).
+  pickled, never its panel rows. `label_key` is the one-element key
+  PCollection `beam.label_key.LabelKey` makes on a worker; the emitter
+  reads it as a side input, so the key never enters the job graph
+  (Rulings R64, R68).
 
   Raises:
-    ValueError: `label_key` is empty or not bytes.
+    TypeError: `label_key` is not a PCollection (bytes here would be
+      pickled into the graph).
   """
 
-  def __init__(self, tables: Sequence[TablePlan], *, label_key: bytes):
+  def __init__(self, tables: Sequence[TablePlan], *,
+               label_key: beam.PCollection):
     super().__init__()
-    self._label_key = _checked_key(label_key)
+    if not isinstance(label_key, beam.PCollection):
+      raise TypeError("label_key must be the LabelKey PCollection, never "
+                      "bytes: a constructor argument is pickled into the job "
+                      "graph (Ruling R68)")
+    self._label_key = label_key
     self._specs = {table.name: DenseSpec.from_table(table) for table in tables}
 
   def expand(self, input_or_inputs: beam.PCollection) -> dict[str, Any]:
@@ -2248,8 +2344,9 @@ class DenseMetrics(beam.PTransform):
         accumulators
         | "ByTable" >> beam.Map(_by_table)
         | "GroupSides" >> beam.GroupByKey()
-        | "Emit" >> beam.FlatMap(_emit, specs, self._label_key).with_outputs(
-            _PROFILES_TAG, main=_METRICS_TAG))
+        | "Emit" >>
+        beam.FlatMap(_emit, specs, beam.pvalue.AsSingleton(
+            self._label_key)).with_outputs(_PROFILES_TAG, main=_METRICS_TAG))
     return {
         _METRICS_TAG: emitted[_METRICS_TAG],
         _PROFILES_TAG: emitted[_PROFILES_TAG],

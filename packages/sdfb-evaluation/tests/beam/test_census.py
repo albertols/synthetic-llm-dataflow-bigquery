@@ -132,13 +132,13 @@ def _run(
         for side in rows_by
     ]
     batches = encoded | "Flatten" >> beam.Flatten()
-    dense_out = batches | "Dense" >> DenseMetrics([table], label_key=LABEL_KEY)
+    key = p | "Key" >> beam.Create([LABEL_KEY])
+    dense_out = batches | "Dense" >> DenseMetrics([table], label_key=key)
     out = ({
         "batches": batches,
         "accumulators": dense_out["accumulators"]
     }
-           |
-           "Census" >> CensusMetrics([table], label_key=LABEL_KEY, pools=pools))
+           | "Census" >> CensusMetrics([table], label_key=key, pools=pools))
     _collect(out["metrics"], tmp_path / "metrics.pkl", "Metrics")
     _collect(out["profiles"], tmp_path / "profiles.pkl", "Profiles")
     _collect(out["summaries"], tmp_path / "summaries.pkl", "Summaries")

@@ -19,33 +19,41 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import base64
+import bz2
 import dataclasses
 import json
 import math
 import pickle
 import random
+import re
+import zlib
 import time as clock
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import apache_beam as beam
 import numpy as np
 import pytest
+from apache_beam.internal import pickler
+from apache_beam.portability import common_urns
+from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.testing.test_pipeline import TestPipeline as BeamTestPipeline
 from apache_beam.testing.util import assert_that
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from sdfb_evaluation.beam import dense
+from sdfb_evaluation.beam import census, dense
+from sdfb_evaluation.beam.census import CensusMetrics
 from sdfb_evaluation.beam.dense import (
     CHAR_CLASSES,
     NULL_PATTERN_CAP,
     OWNED_METRIC_IDS,
     PAIR_BINS,
+    RARE_COUNT,
     DenseMetrics,
     DenseProfile,
     DenseProfileCombineFn,
@@ -57,7 +65,8 @@ from sdfb_evaluation.beam.dense import (
 )
 from sdfb_evaluation.beam.encode import BatchEncoder, EncodeSide
 from sdfb_evaluation.beam.io import InMemorySources
-from sdfb_evaluation.canonical import hash64, numeric_value
+from sdfb_evaluation.beam.label_key import LabelKey
+from sdfb_evaluation.canonical import hash64, hashed_label, numeric_value
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.context import plan as plan_module
 from sdfb_evaluation.scoring import status_for, to_metric_row
@@ -129,9 +138,10 @@ def _run(tables: Sequence[Any], rows_by: Mapping[str, Mapping[str, list]],
       for side in rows_by[table.name]:
         rows = sources.read(p, table, side)
         encoded.append(rows | EncodeSide(table, side, salt=SALT))
+    key = p | "Key" >> beam.Create([LABEL_KEY])
     outputs = (
         encoded | "Flatten" >> beam.Flatten()
-        | DenseMetrics(tables, label_key=LABEL_KEY))
+        | DenseMetrics(tables, label_key=key))
     _collect(outputs["metrics"], tmp_path / "metrics.pkl", "Metrics")
     _collect(outputs["profiles"], tmp_path / "profiles.pkl", "Profiles")
     _collect(outputs["accumulators"], tmp_path / "acc.pkl", "Accumulators")
@@ -713,7 +723,7 @@ def _assert_same(a: DenseProfile, b: DenseProfile) -> None:
                "str_nonnull", "str_empty", "str_nonempty", "lengths",
                "classes"):
     np.testing.assert_array_equal(getattr(a, name), getattr(b, name), name)
-  for name in ("union", "profile", "deciles"):
+  for name in ("union", "profile", "profile_left", "deciles"):
     for x, y in zip(getattr(a, name), getattr(b, name), strict=True):
       np.testing.assert_array_equal(x, y, name)
   for x, y in zip(a.moments, b.moments, strict=True):
@@ -1182,7 +1192,7 @@ def test_decile_ks_legacy_reads_exact_extremes_when_synthetic_overflows():
   # U(0, 1) vs U(0, 3): the legacy value is 2/3 (the grid-extreme
   # reconstruction read 0.60)
   assert legacy.value == pytest.approx(2 / 3, abs=0.02)
-  assert legacy.value == pytest.approx(exact, abs=0.01)
+  assert legacy.value == pytest.approx(exact, abs=2e-3)
   xr = xs[:1000]
   exact_base = binned.decile_ks_legacy(
       np.quantile(xs, probs).tolist(),
@@ -1238,8 +1248,9 @@ def test_hashed_labels_are_keyed_and_leak_neither_values_nor_key(monkeypatch):
   for bad in (b"", "text-key"):
     with pytest.raises(ValueError, match="R64"):
       dense_outputs(spec, profiles, label_key=bad)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="R64"):
-      DenseMetrics([table], label_key=bad)  # type: ignore[arg-type]
+  # bytes handed to the transform would be pickled into the job graph
+  with pytest.raises(TypeError, match="R68"):
+    DenseMetrics([table], label_key=LABEL_KEY)  # type: ignore[arg-type]
 
 
 def _numbers(obj: Any) -> Iterator[float]:
@@ -1303,18 +1314,244 @@ def test_contingency_tvd_noise_floor_is_the_joint_null_expectation():
 
 
 def test_edge_labels_tell_every_edge_apart():
-  numeric = SimpleNamespace(
-      kind=ColumnKind.NUMERIC,
-      deciles=np.array([1.0000001, 1.0000002, 12.5, 1e-05]))
-  labels = dense._edge_labels(numeric)  # pylint: disable=protected-access  # the formatter itself is under test
+  labels = dense._edge_labels(  # pylint: disable=protected-access  # the formatter itself is under test
+      [1.0000001, 1.0000002, 12.5, 1e-05], ColumnKind.NUMERIC)
   assert len(set(labels)) == 4
   assert labels[2] == "12.5"
-  close = np.array([1_700_000_000_000_000, 1_700_000_000_000_001], dtype=float)
   stamps = dense._edge_labels(  # pylint: disable=protected-access  # as above
-      SimpleNamespace(kind=ColumnKind.TEMPORAL, deciles=close))
+      [1_700_000_000_000_000.0, 1_700_000_000_000_001.0], ColumnKind.TEMPORAL)
   assert len(set(stamps)) == 2 and stamps[0].endswith(".000000")
-  apart = np.array([0.0, 86_400e6])
   assert dense._edge_labels(  # pylint: disable=protected-access  # as above
-      SimpleNamespace(kind=ColumnKind.TEMPORAL, deciles=apart)) == [
-          "1970-01-01T00:00:00", "1970-01-02T00:00:00"
-      ]
+      [0.0, 86_400e6],
+      ColumnKind.TEMPORAL) == ["1970-01-01T00:00:00", "1970-01-02T00:00:00"]
+
+
+# --------------------------------------------------------------------------
+# review round 2: R68 (the key off the job graph), R69 (the count rule)
+# --------------------------------------------------------------------------
+def _pickled_payloads(p: beam.Pipeline) -> list[bytes]:
+  """Every ParDo's pickled DoFn in `p`'s runner API graph, decompressed
+  (Beam pickles as base64(bz2|zlib(cloudpickle)))."""
+  proto = p.to_runner_api()
+  out = []
+  for transform in proto.components.transforms.values():
+    if transform.spec.urn != common_urns.primitives.PAR_DO.urn:
+      continue
+    payload = beam_runner_api_pb2.ParDoPayload.FromString(
+        transform.spec.payload)
+    blob = payload.do_fn.payload
+    pickler.loads(blob)  # every payload unpickles
+    raw = base64.b64decode(blob)
+    for decompress in (bz2.decompress, zlib.decompress):
+      try:
+        raw = decompress(raw)
+        break
+      except (OSError, zlib.error):
+        continue
+    out.append(raw)
+  out.append(proto.SerializeToString())
+  return out
+
+
+def _key_file_reader(uri: str) -> bytes:
+  """A fake operator-key reader (Secret Manager/GCS in production): the
+  key lives in a local file, so only its path is in the graph."""
+  return Path(uri).read_bytes()
+
+
+@pytest.mark.parametrize("mode", ["ephemeral", "operator"])
+def test_label_key_never_enters_the_job_graph(mode, tmp_path):
+  table, rows_by = orders_table(n_source=300, n_synthetic=300, n_reference=60)
+  operator_key = b"operator-secret-key-material-0042"
+  key_file = tmp_path / "label.key"
+  key_file.write_bytes(operator_key)
+  uri = str(key_file) if mode == "operator" else None
+  sources = InMemorySources({
+      ("orders", side): rows_by[side] for side in ("source", "synthetic")
+  })
+  pipeline = BeamTestPipeline()
+  with pipeline as p:
+    batches = [
+        sources.read(p, table, side) | EncodeSide(table, side, salt=SALT)
+        for side in rows_by
+    ] | "Flatten" >> beam.Flatten()
+    key = p | "LabelKey" >> LabelKey(uri, reader=_key_file_reader)
+    dense_out = batches | "Dense" >> DenseMetrics([table], label_key=key)
+    census_out = ({
+        "batches": batches,
+        "accumulators": dense_out["accumulators"]
+    }
+                  | "Census" >> CensusMetrics([table], label_key=key))
+    _collect(key, tmp_path / "key.pkl", "Key")
+    _collect(dense_out["profiles"], tmp_path / "dense.pkl", "DenseProfiles")
+    _collect(census_out["profiles"], tmp_path / "census.pkl", "CensusProfiles")
+  (resolved,) = pickle.loads((tmp_path / "key.pkl").read_bytes())
+  if mode == "operator":
+    assert resolved == operator_key
+  else:
+    assert len(resolved) == 32 and resolved != operator_key
+  for blob in _pickled_payloads(pipeline):
+    assert resolved not in blob
+    assert resolved.hex().encode() not in blob
+  # both passes labelled with the worker's key
+  profiles = (
+      pickle.loads((tmp_path / "dense.pkl").read_bytes()) + pickle.loads(
+          (tmp_path / "census.pkl").read_bytes()))
+  text = json.dumps([dict(p.payload) for p in profiles], default=str)
+  note = next(c for c in table.columns if c.name == "note")
+  expected = hashed_label(note.dictionary[0], key=resolved)
+  assert expected in text
+  assert resolved.hex() not in text
+
+
+def test_label_key_constructor_bytes_are_refused_by_census():
+  table, _ = orders_table(n_source=100, n_synthetic=10, n_reference=10)
+  with pytest.raises(TypeError, match="R68"):
+    CensusMetrics([table], label_key=LABEL_KEY)  # type: ignore[arg-type]
+
+
+def test_rare_count_is_the_d6_floor():
+  assert RARE_COUNT == plan_module.LITERAL_MIN_COUNT == census.RARE_COUNT
+
+
+_TINY_FIELDS = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "x",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "y",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+)
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:e[-+]?\d+)?")
+
+
+def _tiny(n: int, seed: int) -> list[dict]:
+  rng = np.random.default_rng(seed)
+  xs, ys = rng.normal(50, 10, n), rng.normal(20, 5, n)
+  return [{
+      "id": i,
+      "x": float(x),
+      "y": float(y)
+  } for i, (x, y) in enumerate(zip(xs, ys, strict=True))]
+
+
+def _extremes_of(rows: Sequence[Mapping[str, Any]],
+                 names: Sequence[str]) -> set[float]:
+  out: set[float] = set()
+  for name in names:
+    x = _finite(rows, name)
+    if x.size:
+      out.update({float(x.min()), float(x.max())})
+  return out
+
+
+def _label_shows(token: str, secret: float) -> bool:
+  """Whether a label's printed number is `secret` at the label's own
+  precision (its significant digits)."""
+  mantissa = token.lstrip("-").split("e")[0]
+  digits = len(mantissa.replace(".", "").lstrip("0")) or 1
+  return f"{secret:.{digits}g}" == f"{float(token):.{digits}g}"
+
+
+def _leaks(metrics: Sequence[MetricValue], profiles: Sequence[ProfileValue],
+           rows_by: Mapping[str, list], names: Sequence[str]) -> list:
+  """Every shown number that is a SOURCE record's exact extreme (payloads
+  and details exactly; contingency labels at their printed precision),
+  plus any reference/holdout payload min/max that is that side's own
+  exact extreme."""
+  secrets = _extremes_of(rows_by["source"], names)
+  shown = [n for p in profiles for n in _numbers(p.payload)]
+  shown += [n for m in metrics for n in _numbers(m.detail)]
+  found = [
+      n for n in shown for s in secrets if math.isclose(n, s, rel_tol=1e-12)
+  ]
+  labels = [
+      label for p in profiles if p.profile_kind == "contingency"
+      for label in (*p.payload["x_labels"], *p.payload["y_labels"])
+      if ":" not in label  # numeric axes (timestamps print as ISO)
+  ]
+  found += [(label, s)
+            for label in labels
+            for token in _NUMBER.findall(label)
+            for s in secrets
+            if _label_shows(token, s)]
+  for p in profiles:
+    if p.side in ("reference", "holdout") and p.column in names and (
+        p.profile_kind in ("histogram", "moments")):
+      own = _extremes_of(rows_by[p.side], [p.column])
+      found += [(p.side, p.payload[key])
+                for key in ("min", "max")
+                if p.payload[key] in own]
+  return found
+
+
+@pytest.mark.parametrize("n", [20, 50, 190])
+def test_small_tables_publish_no_source_extreme(n, monkeypatch):
+  monkeypatch.setattr(dense, "CONTINGENCY_TOP_PAIRS", 10_000)
+  source, synthetic = _tiny(n, seed=n), _tiny(n, seed=n + 1)
+  rows_by = {
+      "source": source,
+      "synthetic": synthetic,
+      "reference": source[:max(1, n // 5)],
+      "holdout": source[max(1, n // 5):2 * max(1, n // 5)],
+  }
+  table = planned_table("tiny", _TINY_FIELDS, source, synthetic, pk=("id",))
+  metrics, profiles = _pure(table, rows_by)
+  assert [p for p in profiles if p.profile_kind == "contingency"]
+  assert not _leaks(metrics, profiles, rows_by, ("x", "y"))
+  for p in profiles:
+    if p.profile_kind in ("histogram", "moments") and p.side != "synthetic":
+      # n * 0.005 < 10: bounds withheld, so no "p0.5" below a side's own
+      # minimum (the n = 190 artifact) can be shown
+      assert p.payload["min"] is None and p.payload["max"] is None
+    if p.profile_kind == "quantiles":
+      for q in p.payload["probs"]:
+        assert q * p.n >= RARE_COUNT and (1 - q) * p.n >= RARE_COUNT
+  for metric_id in ("field.range_adherence", "column.range_coverage"):
+    detail = _by_key(metrics)[(metric_id, "x", None)].detail
+    assert detail["source_p0_5"] is None and detail["source_p99_5"] is None
+
+
+def test_a_common_end_atom_may_be_shown_a_lone_extreme_never():
+  rng = np.random.default_rng(41)
+  values = [0.0] * 30 + [100.0] * 30 + list(rng.uniform(1, 99, 140))
+  source = [{
+      "id": i,
+      "x": v,
+      "y": float(rng.normal())
+  } for i, v in enumerate(values)]
+  source.append({"id": 999, "x": 250.0, "y": 0.5})  # a lone maximum
+  synthetic = _tiny(200, seed=43)
+  table = planned_table("atoms", _TINY_FIELDS, source, synthetic, pk=("id",))
+  _, profiles = _pure(table, {"source": source, "synthetic": synthetic})
+  histogram = next(p for p in profiles if p.profile_kind == "histogram" and
+                   p.side == "source" and p.column == "x")
+  edges = histogram.payload["edges"]
+  assert 0.0 in edges and 100.0 in edges  # 30 records sit at each
+  assert 250.0 not in edges  # one record: never published
+  assert sum(histogram.payload["counts"]) == len(source)
+  assert len(histogram.payload["counts"]) == len(edges) + 1
+
+
+def test_bounds_are_shown_once_n_clears_the_count_rule():
+  table, rows_by = orders_table()  # ~2,850 finite amounts: 0.005 n >= 10
+  metrics, profiles = _pure(table, rows_by)
+  histogram = next(p for p in profiles if p.profile_kind == "histogram" and
+                   p.side == "source" and p.column == "amount")
+  xs = _finite(rows_by["source"], "amount")
+  assert xs.min() < histogram.payload["min"] < histogram.payload["max"] < (
+      xs.max())
+  # the reference (600 rows) is below the rule: withheld
+  reference = next(p for p in profiles if p.profile_kind == "histogram" and
+                   p.side == "reference" and p.column == "amount")
+  assert reference.payload["min"] is None
+  assert not _leaks(metrics, profiles, rows_by, ("amount", "created_at"))

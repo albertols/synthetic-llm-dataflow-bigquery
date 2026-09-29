@@ -171,14 +171,16 @@ def hashed_label(code: int, *, key: bytes) -> str:
   it. A plain hash of a low-entropy value is not anonymisation — anyone can
   enumerate a small domain (a status list, ages 0..120) and match the
   hashes — so the label is a keyed hash and means nothing without `key`.
-  The key has two modes, chosen by the driver (Tasks 26/27), and is never
-  written to BigQuery, a log or a payload:
+  The key has two modes (`beam.label_key.LabelKey` resolves it ON A
+  WORKER, Ruling R68). It is never written to BigQuery, a log, a payload
+  or the job graph; it lives in worker memory:
 
       operator    `--label_key_uri` (Secret Manager or GCS, the operator's
                   own secret): stable across runs, so labels line up run to
                   run and the operator can recompute a label to investigate
-      ephemeral   a fresh `os.urandom(32)` per evaluation, never persisted:
-                  labels line up source and synthetic within the run only
+      ephemeral   a fresh `os.urandom(32)` per evaluation, made on a worker
+                  and dropped with it: labels line up source and synthetic
+                  within the run only
 
   The registry records only which mode ran (`label_key_mode`).
 

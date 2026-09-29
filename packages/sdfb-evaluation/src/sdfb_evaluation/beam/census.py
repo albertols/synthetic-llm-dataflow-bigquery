@@ -2555,6 +2555,8 @@ def _emit_table(item: tuple[str, Iterable[tuple[str, int, Any]]],
                 totals: Mapping[tuple[str, str], SideTotals],
                 refs: Mapping[tuple[str, int], ColumnRef]) -> Iterator[Any]:
   table, entries = item
+  if not isinstance(label_key, bytes) or not label_key:
+    raise ValueError("the label key side input must be non-empty bytes (R64)")
   spec = specs[table]
   parts: dict[int, ColumnParts] = {}
   for kind, j, value in entries:
@@ -2592,25 +2594,30 @@ class CensusMetrics(beam.PTransform):
   "summaries": PCollection[((table, j), CensusAccumulator)]}` (module
   docstring).
 
-  `label_key` keys every hashed label (Ruling R64: an operator secret or
-  a per-run ephemeral key, never persisted). `pools` maps table →
+  `label_key` is the one-element key PCollection `beam.label_key.LabelKey`
+  makes on a worker; it keys every hashed label and is read as a side
+  input, so the key never enters the job graph (Rulings R64, R68).
+  `pools` maps table →
   column → `FreeTextPool` (the CLI's `read_pools`); None means the pool
   side input is absent. The panel's R/H views are built here, on the
   driver, and shipped as a side input; only each table's slim
   `CensusSpec` is pickled into the DoFns.
 
   Raises:
-    ValueError: `label_key` is empty or not bytes.
+    TypeError: `label_key` is not a PCollection (bytes here would be
+      pickled into the graph).
   """
 
   def __init__(self,
                tables: Sequence[TablePlan],
                *,
-               label_key: bytes,
+               label_key: beam.PCollection,
                pools: Mapping[str, Mapping[str, FreeTextPool]] | None = None):
     super().__init__()
-    if not isinstance(label_key, bytes) or not label_key:
-      raise ValueError("label_key must be non-empty bytes (Ruling R64)")
+    if not isinstance(label_key, beam.PCollection):
+      raise TypeError("label_key must be the LabelKey PCollection, never "
+                      "bytes: a constructor argument is pickled into the job "
+                      "graph (Ruling R68)")
     self._label_key = label_key
     self._specs = {table.name: CensusSpec.from_table(table) for table in tables}
     self._refs = sorted(
@@ -2663,7 +2670,8 @@ class CensusMetrics(beam.PTransform):
              | "Parts" >> beam.Flatten()
              | "ByTable" >> beam.GroupByKey())
     emitted = parts | "Emit" >> beam.FlatMap(
-        _emit_table, specs, self._label_key, totals, refs).with_outputs(
+        _emit_table, specs, beam.pvalue.AsSingleton(self._label_key), totals,
+        refs).with_outputs(
             _PROFILES, main=_METRICS)
     return {
         _METRICS: emitted[_METRICS],
