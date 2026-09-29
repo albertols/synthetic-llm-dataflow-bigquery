@@ -33,6 +33,7 @@ import tracemalloc
 import zlib
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -689,7 +690,7 @@ def test_duplicate_null_variance_matches_subsampling():
     simulated = _subsample_duplicates(pool, m, 3000, seed=m)
     assert duplicate_null_variance(freqs, m) == pytest.approx(
         float(simulated.var()), rel=0.12), m
-  assert duplicate_null_variance(((1, 5000),), 1000) == 0.0
+  assert duplicate_null_variance(((1, 5000),), 1000) <= 1e-9  # exactly 0
   assert duplicate_null_variance(((2, 10),), 20) == 0.0  # m = N
 
 
@@ -891,21 +892,25 @@ def test_budget_counts_the_keyed_mode_row_hashes():
       "rows_source": 3e7,
       "rows_synthetic": 3e7,
       "edges": 0,
-      "keyed_counts": 1
+      "keyed_counts": 1,
+      "table": "orders",
   }
+  per_code = membership_code_bytes("orders")
   side = fixed_shuffle_bytes(**args, nonkey=True, keyed=True, side_input=True)
   keyed = fixed_shuffle_bytes(**args, nonkey=True, keyed=True, side_input=False)
-  assert keyed - side == pytest.approx(both * MEMBERSHIP_CODE_BYTES)
-  # B5: every element repeats the key's table name: each membership code
-  # (non-key both sides, the PK, the keyed-mode row hashes) costs its length
-  named = fixed_shuffle_bytes(
-      **args, nonkey=True, keyed=True, side_input=False, table="orders")
-  codes = both + 3e7 + both
-  assert named - keyed == pytest.approx(codes * len("orders"))
-  assert membership_code_bytes("orders") == MEMBERSHIP_CODE_BYTES + 6
+  assert keyed - side == pytest.approx(both * per_code)
   keyless = fixed_shuffle_bytes(
       **args, nonkey=True, keyed=False, side_input=False)
   assert keyless == pytest.approx(side)  # the row IS the content
+  # B5/R79: every element repeats the key's table name, in UTF-8 bytes
+  assert per_code == MEMBERSHIP_CODE_BYTES + 6
+  assert membership_code_bytes("orders_ñ") == MEMBERSHIP_CODE_BYTES + 9
+  with pytest.raises(TypeError, match="table"):
+    fixed_shuffle_bytes(  # type: ignore[call-arg]  # table is required
+        rows_source=1.0,
+        rows_synthetic=1.0,
+        edges=0,
+        keyed_counts=0)
   # the switch: 8 B a source row and array within 160 MB
   assert source_sets_fit(2e7, nonkey=True, keyed=False)
   assert not source_sets_fit(2e7, nonkey=True, keyed=True)
@@ -1286,6 +1291,67 @@ def test_duplicate_null_variance_stays_exact_at_millions_of_rows():
   small = duplicate_null_variance(((1, 10_000), (2, 5_000)), 10_000)
   large = duplicate_null_variance(((1, 10_000_000), (2, 5_000_000)), 10_000_000)
   assert large / 20_000_000 == pytest.approx(small / 20_000, rel=1e-3)
+
+
+def _exact_null_variance(freqs: Sequence[tuple[int, int]], m: int) -> Fraction:
+  """Var(F1) of an m-subset of the pool, in exact rational arithmetic
+  (math.comb): the reference `duplicate_null_variance` is held to."""
+  total = sum(c * f for c, f in freqs)
+  every = math.comb(total, m)
+
+  def p_one(c: int) -> Fraction:
+    rest = total - c
+    return Fraction(c * math.comb(rest, m - 1),
+                    every) if rest >= m - 1 else (Fraction(0))
+
+  def pair(s: int) -> Fraction:
+    rest = total - s
+    return Fraction(math.comb(rest, m -
+                              2), every) if rest >= m - 2 else (Fraction(0))
+
+  a = [p_one(c) for c, _ in freqs]
+  variance = sum(
+      (f * a_i * (1 - a_i) for (_, f), a_i in zip(freqs, a, strict=True)),
+      Fraction(0))
+  for i, ((c_i, f_i), a_i) in enumerate(zip(freqs, a, strict=True)):
+    for j, ((c_j, f_j), a_j) in enumerate(zip(freqs, a, strict=True)):
+      pairs = f_i * (f_j - (i == j))
+      if pairs:
+        variance += pairs * (c_i * c_j * pair(c_i + c_j) - a_i * a_j)
+  return variance
+
+
+# (pool, m, Var(F1)) with records held 2.1-3 million times at N ≈ 1e9: the
+# reviewer's R79 cases. The references are `_exact_null_variance`'s values
+# (Fraction/comb, 1-21 s each), at 13 significant digits; the fastest is
+# recomputed live below.
+_PAST_THE_CAP = (
+    (((1, 900_000_000), (2, 45_000_000), (2_200_000, 1)), 10_000,
+     22.14176348560),
+    (((1, 900_000_000), (2, 45_000_000), (2_100_000, 1)), 10_000,
+     21.14041211859),
+    (((1, 1_900_000_000), (2, 40_000_000), (3, 1_000_000), (3_000_000, 3)),
+     20_000, 89.96946402206),
+    (((1, 900_000_000), (5, 1_000_000), (2_500_000, 4)), 3_000, 32.56568956400),
+)
+
+
+@pytest.mark.parametrize("freqs, m, exact", _PAST_THE_CAP)
+def test_duplicate_null_variance_is_exact_past_the_table_cap(freqs, m, exact):
+  """R79: pair sums past the dense table are walked on from the same exact
+  running sum (never a whole-matrix switch to log-gamma values, which was
+  6.9-13x off here)."""
+  assert 2 * max(c for c, _ in freqs) > membership.PAIR_TABLE_CAP
+  assert duplicate_null_variance(freqs, m) == pytest.approx(exact, rel=1e-9)
+
+
+def test_exact_null_variance_reference_is_recomputed_live():
+  freqs, m, exact = _PAST_THE_CAP[3]
+  assert float(_exact_null_variance(freqs, m)) == pytest.approx(
+      exact, rel=1e-11)
+  small = ((1, 400), (2, 60), (3, 15), (7, 3), (40, 1))
+  assert duplicate_null_variance(small, 250) == pytest.approx(
+      float(_exact_null_variance(small, 250)), rel=1e-12)
 
 
 @pytest.mark.slow

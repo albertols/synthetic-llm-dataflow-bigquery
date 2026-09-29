@@ -231,7 +231,6 @@ import apache_beam as beam
 import numpy as np
 from apache_beam.transforms.window import GlobalWindows
 from apache_beam.utils.shared import Shared
-from scipy.special import gammaln
 
 from sdfb_evaluation.beam.encode import BatchEncoder, BatchLayout, EncodedBatch
 from sdfb_evaluation.canonical import (
@@ -264,6 +263,7 @@ __all__ = [
     "MAX_BUCKET_BITS",
     "NEAR_COPY",
     "OWNED_METRIC_IDS",
+    "PAIR_TABLE_CAP",
     "PANEL_SET_MAX_BYTES",
     "SIDE_INPUT",
     "SOURCE_SETS",
@@ -332,7 +332,9 @@ _FLUSH_PER_BUCKET = 256  # flush no sooner than this many codes per bucket
 # the null variance (a record held ~33 times its expected share or more)
 _NEGLIGIBLE = 1e-12
 _PAIR_BLOCK = 1 << 20  # class pairs a variance block holds (~8 MB an array)
-_TABLE_CAP = 1 << 22  # entries of an exact log-step table (32 MB)
+PAIR_TABLE_CAP = 1 << 20  # entries of the dense exact pair table (8 MB)
+_WALK_CHUNK = 1 << 20  # terms a chunk of the running log sum holds
+_LOG_SKIP = math.log(1e-15)  # a P(X = 1) bound below this is 0
 _PAIR_OFFSET = 2  # the smallest sum of two records' counts
 _UNKNOWN_BUCKET_BITS = 4
 _COMPACT_CODES = 1 << 20  # pending codes before a combine compacts
@@ -1583,57 +1585,75 @@ def rarefied_duplicates(freqs: Iterable[tuple[int, int]], m: int) -> float:
   return max(0.0, float((f * (m * c / total - p1)).sum()))
 
 
-def _log_steps(q: int, offset: int, count: int, total: int) -> np.ndarray:
-  """[0, Σ_{u<k} log1p(-q / (total - offset - u)) for k = 1..count]: the
-  hypergeometric log-ratios below as a running sum of small, exact terms,
-  never a difference of log-gamma values of size N·ln N (-inf once fewer
-  than q rows would remain)."""
-  u = np.arange(count, dtype=np.float64)
+def _log_terms(q: int, offset: int, total: int, start: int,
+               stop: int) -> np.ndarray:
+  """log1p(-q / (total - offset - u)) for u in [start, stop): the exact
+  per-step log-ratios of the hypergeometric products below (-inf once
+  fewer than q rows would remain)."""
+  u = np.arange(start, stop, dtype=np.float64)
   denom = total - offset - u
   with np.errstate(divide="ignore", invalid="ignore"):
     ratio = np.where(denom > 0, q / np.where(denom > 0, denom, 1.0), np.inf)
-    steps = np.where(ratio < 1.0, np.log1p(-np.minimum(ratio, 1.0)), -np.inf)
+    steps: np.ndarray = np.where(ratio < 1.0, np.log1p(-np.minimum(ratio, 1.0)),
+                                 -np.inf)
+  return steps
+
+
+def _log_steps(q: int, offset: int, count: int, total: int) -> np.ndarray:
+  """[0, Σ_{u<k} log1p(-q / (total - offset - u)) for k = 1..count]: the
+  running sum as a dense table (`count` ≤ PAIR_TABLE_CAP), never a
+  difference of log-gamma values of size N·ln N."""
   out = np.zeros(count + 1)
-  np.cumsum(steps, out=out[1:])
+  np.cumsum(_log_terms(q, offset, total, 0, count), out=out[1:])
+  return out
+
+
+def _log_steps_at(q: int, offset: int, total: int,
+                  ks: np.ndarray) -> np.ndarray:
+  """The same running sum at each k of `ks` (any order), walked in chunks
+  of _WALK_CHUNK terms up to max(ks): exact to the rounding of each term,
+  with memory bounded whatever the largest k — a heavy record's count
+  or a pair sum past the dense table."""
+  ks = np.asarray(ks, dtype=np.int64)
+  out = np.zeros(len(ks))
+  if q == 0 or not ks.size:
+    return out  # every factor is 1
+  order = np.argsort(ks, kind="stable")
+  wanted = ks[order]
+  values = np.zeros(len(ks))
+  lo = int(np.searchsorted(wanted, 1))  # k = 0: the empty sum
+  acc, start, last = 0.0, 0, int(wanted[-1])
+  while start < last:
+    if acc == -np.inf:  # a zero factor: every later product is 0
+      values[lo:] = -np.inf
+      break
+    stop = min(start + _WALK_CHUNK, last)
+    running = acc + np.cumsum(_log_terms(q, offset, total, start, stop))
+    hi = int(np.searchsorted(wanted, stop, side="right"))
+    values[lo:hi] = running[wanted[lo:hi] - start - 1]
+    lo, acc, start = hi, float(running[-1]), stop
+  out[order] = values
+  return out
+
+
+def _one_steps(c: np.ndarray, total: int, m: int) -> np.ndarray:
+  """A(c - 1) = log(P(X = 1) / (c m / N)) per count c, X ~
+  Hypergeometric(N = total, c, m): the running log sum of Π_{u < c - 1}
+  (1 - (m - 1) / (N - 1 - u)). Each factor is at most exp(-(m - 1) / N),
+  so a count whose bound (c m / N) · exp(-(c - 1)(m - 1) / N) is below
+  1e-15 is -inf without walking its product."""
+  out = np.full(len(c), -np.inf)
+  if not c.size:
+    return out
+  live = np.log(c * m / total) - (c - 1.0) * (m - 1) / total > _LOG_SKIP
+  if live.any():
+    out[live] = _log_steps_at(m - 1, 1, total, c[live].astype(np.int64) - 1)
   return out
 
 
 def _p_one(c: np.ndarray, total: int, m: int) -> np.ndarray:
-  """P(X = 1) for X ~ Hypergeometric(N = total, c, m), vectorised over the
-  counts c: c · C(N - c, m - 1) / C(N, m) = (c m / N) · Π_{u < c - 1}
-  (1 - (m - 1) / (N - 1 - u)), from a running log sum (`_log_steps`) for
-  counts up to _TABLE_CAP, from log-gamma values above it (where the
-  probability is negligible but for extreme side ratios)."""
-  out = np.zeros(len(c))
-  small = c <= _TABLE_CAP
-  if small.any():
-    counts = c[small].astype(np.int64)
-    steps = _log_steps(m - 1, 1, int(counts.max()) - 1, total)
-    with np.errstate(divide="ignore"):
-      out[small] = np.exp(np.log(c[small] * m / total) + steps[counts - 1])
-  if (~small).any():
-    rest = total - c[~small]
-    log_p = (
-        np.log(c[~small]) + _log_choose(np.maximum(rest, m - 1), m - 1) -
-        _log_choose(float(total), m))
-    out[~small] = np.where(rest >= m - 1, np.exp(log_p), 0.0)
-  return out
-
-
-def _pair_table(s_max: int, total: int, m: int) -> np.ndarray:
-  """E(s) = C(N - s, m - 2) / C(N, m) for s = 0..s_max (used from 2):
-  m (m - 1) / (N (N - 1)) · Π_{u < s - 2} (1 - (m - 2) / (N - 2 - u))."""
-  table = np.zeros(s_max + 1)
-  if s_max >= _PAIR_OFFSET:
-    steps = _log_steps(m - 2, _PAIR_OFFSET, s_max - _PAIR_OFFSET, total)
-    base = math.log(m * (m - 1) / (total * (total - 1.0)))
-    table[_PAIR_OFFSET:] = np.exp(base + steps)
-  return table
-
-
-def _log_choose(n: np.ndarray | float, k: float) -> np.ndarray:
-  n = np.asarray(n, dtype=np.float64)
-  out: np.ndarray = gammaln(n + 1.0) - gammaln(k + 1.0) - gammaln(n - k + 1.0)
+  """P(X = 1) = c · C(N - c, m - 1) / C(N, m) per count c (`_one_steps`)."""
+  out: np.ndarray = np.exp(np.log(c * m / total) + _one_steps(c, total, m))
   return out
 
 
@@ -1645,63 +1665,83 @@ def duplicate_null_variance(freqs_pool: Iterable[tuple[int, int]],
   are exchangeable and each side is a random m-subset of the pool.
 
   D_m = m - F1 (F1 = the rows of records held once), so Var(D_m) =
-  Var(F1) = Σ_x a_x (1 - a_x) + Σ_{x≠y} (b_xy - a_x a_y), with a_x =
-  P(X_x = 1) (hypergeometric) and b_xy = P(X_x = 1, X_y = 1) =
+  Var(F1) = Σ_x a_x (1 - a_x) + Σ_{x≠y} a_x a_y (rho_xy - 1), with a_x =
+  P(X_x = 1) (hypergeometric), b_xy = P(X_x = 1, X_y = 1) =
   c_x c_y C(N - c_x - c_y, m - 2) / C(N, m) (multivariate
-  hypergeometric), summed over the count classes. A heavy record (always
-  duplicated) adds nothing; a class with P(X = 1) below 1e-12 is
-  dropped. a and b come from running sums of exact log-ratios
-  (`_log_steps`), never from differences of log-gamma values of size
-  N·ln N, whose rounding swamps the variance at millions of rows. b
-  depends on a pair only through c_x c_y and c_x + c_y, so C(N - s,
-  m - 2) / C(N, m) is tabulated once over the integer sums and the pair
-  sum runs in row blocks of the class matrix: memory stays bounded
-  whatever the number of classes (Ruling R76). The tests hold it to a
-  simulation, to the exact 0 of an all-distinct pool, and to closed forms
-  at 2·10^8 rows."""
+  hypergeometric) and rho_xy = b_xy / (a_x a_y), summed over the count
+  classes. A heavy record (always duplicated) adds nothing; a class with
+  P(X = 1) below 1e-12 is dropped.
+
+  Exactness: with A(k) and B(k) the running sums of the exact per-step
+  log-ratios of the two hypergeometric products (`_log_steps`),
+  log rho = log1p(-(N - m) / (m (N - 1))) + B(c_x + c_y - 2) - A(c_x - 1)
+  - A(c_y - 1) and rho - 1 = expm1(log rho): never a difference of log-gamma
+  values of size N·ln N, nor of b and a a (both of size m²), whose
+  rounding swamps the variance at millions of rows. B is a dense table
+  for sums up to PAIR_TABLE_CAP; a pair sum past it (a record held more than
+  about a million times) is walked on from the same running sum, at the
+  distinct sums needed only — the whole pair sum never switches formula
+  (Ruling R79). Held to Fraction/comb references (1e-9 relative) at
+  N ≈ 1e9 with records held 2-3 million times, to a simulation, and to
+  the exact 0 of an all-distinct pool.
+
+  Memory: the pair sum runs in row blocks of _PAIR_BLOCK class pairs,
+  and the table and the walks hold at most PAIR_TABLE_CAP / _WALK_CHUNK
+  float64s (8 MB an array): a call peaks at about 60 MiB whatever the
+  number of classes or the heaviest record (Ruling R76). Before the walk
+  was chunked, a record held about 2^21 times spiked 78-200 MiB."""
   c, f, total = _classes_of(freqs_pool)
   if m <= 1 or total <= m:
     return 0.0
-  a = _p_one(c, total, m)
+  steps_a = _one_steps(c, total, m)
+  a = np.exp(np.log(c * m / total) + steps_a)
   kept = a > _NEGLIGIBLE
-  c, f, a = c[kept], f[kept], a[kept]
+  c, f, a, steps_a = c[kept], f[kept], a[kept], steps_a[kept]
   if not c.size:
     return 0.0
   counts = c.astype(np.int64)
-  fc, fa = f * c, f * a
+  fa = f * a
   s_max = 2 * int(counts.max())
-  # b_xy = c_x c_y · E(c_x + c_y): E tabulated once over the integer sums
-  # (exact running log sums), or from log-gamma values past the cap
-  log_all = float(_log_choose(total, m))
-  table = _pair_table(s_max, total, m) if s_max < _TABLE_CAP else None
-
-  def scale(sums: np.ndarray) -> np.ndarray:
-    if table is not None:
-      out: np.ndarray = table[sums]
-      return out
-    return _pair_scale(sums, total, m, log_all)
-
-  pair_b = 0.0
+  top = min(s_max, PAIR_TABLE_CAP)
+  table = _log_steps(m - 2, _PAIR_OFFSET, max(0, top - _PAIR_OFFSET), total)
   step = max(1, _PAIR_BLOCK // len(c))  # rows per block: bounded memory
-  for lo in range(0, len(c), step):
-    rows = slice(lo, lo + step)
-    pair_b += float((fc[rows, None] * fc[None, :] *
-                     scale(counts[rows, None] + counts[None, :])).sum())
-  diagonal = fc * c * scale(2 * counts)
-  # Σ_{x≠y} (b - a a) = Σ_{i,j} f_i f_j (b_ij - a_i a_j) - Σ_i f_i (b_ii - a_i²)
-  pair_sum = (pair_b - float(fa.sum())**2 - float((diagonal - fa * a).sum()))
-  variance = float((fa * (1.0 - a)).sum()) + pair_sum
+  blocks = [slice(lo, lo + step) for lo in range(0, len(c), step)]
+  large: np.ndarray | None = None
+  large_steps = np.zeros(0)
+  if s_max > top:  # sums past the table: walked on, at the ones needed
+    found = [2 * counts[2 * counts > top]]
+    for rows in blocks:
+      sums = counts[rows, None] + counts[None, :]
+      found.append(np.unique(sums[sums > top]))
+    large = np.unique(np.concatenate(found))
+    large_steps = _log_steps_at(m - 2, _PAIR_OFFSET, total,
+                                large - _PAIR_OFFSET)
+
+  def steps_b(sums: np.ndarray) -> np.ndarray:
+    out: np.ndarray = table[np.minimum(sums, top) - _PAIR_OFFSET]
+    if large is not None:
+      past = sums > top
+      if past.any():
+        out = out.copy()
+        out[past] = large_steps[np.searchsorted(large, sums[past])]
+    return out
+
+  const = math.log1p(-(total - m) / (m * (total - 1.0)))
+
+  def rho_minus_one(sums: np.ndarray, a_i: np.ndarray,
+                    a_j: np.ndarray) -> np.ndarray:
+    out: np.ndarray = np.expm1(const + steps_b(sums) - a_i - a_j)
+    return out
+
+  pair = 0.0
+  for rows in blocks:
+    pair += float((fa[rows, None] * fa[None, :] *
+                   rho_minus_one(counts[rows, None] + counts[None, :],
+                                 steps_a[rows, None], steps_a[None, :])).sum())
+  # the x = y terms: a class's pairs with itself are f (f - 1), not f²
+  diagonal = float((fa * a * rho_minus_one(2 * counts, steps_a, steps_a)).sum())
+  variance = float((fa * (1.0 - a)).sum()) + pair - diagonal
   return max(0.0, variance)
-
-
-def _pair_scale(sums: np.ndarray, total: int, m: int,
-                log_all: float) -> np.ndarray:
-  """E(s) = C(N - s, m - 2) / C(N, m) for record-count sums s (0 when
-  fewer than m - 2 rows would remain)."""
-  rest = total - sums
-  log_e = _log_choose(np.maximum(rest, m - 2), m - 2) - log_all
-  out: np.ndarray = np.where(rest >= m - 2, np.exp(log_e), 0.0)
-  return out
 
 
 def _pooled_effective_n(pooled_share: float, var_d: float, m: int) -> float:

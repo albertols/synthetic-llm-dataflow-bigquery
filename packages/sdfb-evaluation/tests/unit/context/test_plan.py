@@ -572,8 +572,14 @@ def test_census_bytes_count_the_head_unsampled_and_the_mask_pass():
   # R70: a mask key carries the mask's text, as long as the value
   assert mask_key_bytes(text) == MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * 40
   assert mask_bytes([text, flag], rows, rows) == keys * mask_key_bytes(text)
-  prose = dataclasses.replace(text, avg_len=900.0)  # capped at 256 chars
-  assert mask_key_bytes(prose) == MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * 256
+  # R75: values over 256 characters pool into ONE `<long>` key a column
+  prose = dataclasses.replace(text, avg_len=900.0)
+  assert mask_key_bytes(
+      prose) == MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * len("<long>")
+  assert mask_bytes([prose], rows, rows) == 2 * mask_key_bytes(prose)
+  edge = dataclasses.replace(text, avg_len=256.0)  # still one key a value
+  assert mask_bytes([edge], rows, rows) == keys * (
+      MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * 256)
   assert mask_key_bytes(dataclasses.replace(text, avg_len=None)) > (
       MASK_KEY_OVERHEAD)
   assert census_bytes([text, flag], rows, rows) == pytest.approx(

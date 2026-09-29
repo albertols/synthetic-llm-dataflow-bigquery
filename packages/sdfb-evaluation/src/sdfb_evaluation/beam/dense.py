@@ -118,15 +118,18 @@ synthetic side. range_adherence and range_coverage compare against them
 internally; payloads and details carry each side's p0.5/p99.5 instead
 (`extremes: "p0.5_p99.5"`).
 
-Count rule (R69, R74; k = RARE_COUNT = 10): a bound, end edge or tail
-quantile is published only when at least k SOURCE records lie at or
-beyond it. An edge is DROPPED only when a source record sits on it and
-fewer than k source records lie at or below it or at or above it (both
-counts exact, from the right- and left-closed twins of the profile and
-union bins); every other edge stays, since it is no source record's
-value: a synthetic-grid point outside the source range, or any edge when
-the source side is empty (R74.4). A common end atom qualifies, a lone
-extreme never does.
+Count rule (R69, R77; k = RARE_COUNT = 10): which edges may be published
+depends ONLY on publishable statistics — the EVALUATED source counts —
+never on a value or on which grid contributed an edge. An edge is kept
+iff at least k source records lie at or below it AND at least k at or
+above it (both counts exact, from the right- and left-closed twins of
+the profile and union bins). Both counts are monotone in the edge, so
+the kept edges are one contiguous range [first kept, last kept]: every
+edge outside it is dropped, synthetic-grid, atom and source-grid points
+alike, and every interior edge stays (an interior point is no extreme;
+R69 protects extremes). In sampled mode the sample's counts are a lower
+bound of the full source's, so the rule stays safe. A common end atom
+qualifies, a lone extreme never does.
   - Histogram and pair-axis edges are the profile edges that rule keeps;
     the same edges serve every side, as they all come from the source
     grid, and a dropped edge's two bins merge.
@@ -135,15 +138,29 @@ extreme never does.
     the dropped edges): a p inside an edge's jump is that edge, a p
     between jumps interpolates over the mass strictly inside the bin, and
     a probability outside (F⁻(first kept edge), F(last kept edge)] is
-    WITHHELD, never clamped (R74.3). So a published value lands on an
-    edge only where the side's own records sit on it, and no kept edge
-    is a source tail value; a value that coincides with a dropped edge
-    (a discrete column's bin arithmetic can reproduce the rare source
-    value the edge was dropped for) is withheld as well. A quantile
-    payload also keeps only the p with p * n >= k and (1 - p) * n >= k,
-    and bounds need n * 0.005 >= k (n the side's own).
+    WITHHELD, never clamped: nothing outside the kept range is ever
+    published as a value on any side (R77.2). Each side's histogram and
+    quantile payloads carry `below_mass`/`above_mass` instead, the share
+    of that side's non-null values below the first / above the last kept
+    edge, so the GUI can say how much of a wider synthetic lies outside
+    the source's publishable range. A quantile payload also keeps only
+    the p with p * n >= k and (1 - p) * n >= k, and bounds need
+    n * 0.005 >= k (n the side's own).
+  - With no evaluated source value in a column (no source side, or a
+    NULL column), the kept edges are exactly the synthetic grid's own
+    points — including any a source value coincides with — and the
+    points only the source grid or the atoms contributed are dropped, as
+    plan-time source records. The kept set is a function of the synthetic
+    alone, so the payloads carry nothing about the unevaluated source
+    (R77.3, amended by R80.1: a provenance-selective drop of the
+    coinciding points mapped the source's value set on INT64/DATE).
   - Moments payloads (mean, std, skewness, kurtosis) are withheld on a
     side with fewer than k values: n <= 4 values determine them (R74.5).
+    smd and std_ratio are not_evaluated when either side holds fewer
+    than k values — their value with the synthetic's published moments
+    would give the source's mean and std (R80.3) — and a metric's
+    `baseline_value` is withheld when the reference holds fewer than k
+    (R77.6), `detail.withheld` naming exactly what is withheld (R80.5).
   - The counts include any ±inf a hand-built batch carries (the encoder
     turns non-finite values into NULL-like NaN) while Moments.n does not;
     such a value only ever changes which edges carry k records, never
@@ -194,10 +211,12 @@ __all__ = [
     "CONTINGENCY_TOP_PAIRS",
     "HOT_KEY_FANOUT",
     "LENGTH_BINS",
+    "NOT_EVALUATED_BELOW_K",
     "NULL_PATTERN_CAP",
     "OWNED_METRIC_IDS",
     "PAIR_BINS",
     "RARE_COUNT",
+    "WITHHELD_BELOW_K",
     "DenseMetrics",
     "DenseProfile",
     "DenseProfileCombineFn",
@@ -305,10 +324,13 @@ _BOUND_PROBS = (0.005, 0.995)
 # R69: a published bound, end edge or tail quantile has at least this many
 # records at or beyond it (D6/R56's k-anonymity floor, plan.LITERAL_MIN_COUNT)
 RARE_COUNT = 10
-# a published quantile this close to a dropped union edge (a rare source
-# record's value) is withheld: an arithmetic coincidence, not a leak, but
-# indistinguishable from one to a reader
-_COINCIDENCE_RTOL = 1e-12
+# R77.6: a reference with fewer than k values withholds a row's baseline
+WITHHELD_BELOW_K = f"fewer than {RARE_COUNT} values on that side (R77)"
+# R80.3: smd / std_ratio with a side below k are not evaluated at all —
+# their value with the synthetic's published moments would give the
+# source's mean and std (both records at n = 2)
+NOT_EVALUATED_BELOW_K = f"fewer than k records on a side (k = {RARE_COUNT}, R80)"
+_MOMENT_VALUE_IDS = frozenset({"column.smd", "column.std_ratio"})
 _EDGE_DIGITS = range(6, 18)  # 17 significant digits tell any two floats apart
 _TIME_UNITS: tuple[Literal["s"], Literal["ms"],
                    Literal["us"]] = ("s", "ms", "us")
@@ -516,13 +538,17 @@ def _capped(patterns: dict[int, int],
 # --------------------------------------------------------------------------
 @dataclass(frozen=True, eq=False)
 class _Grid:  # pylint: disable=too-many-instance-attributes  # one field per grid the column is counted on
-  """One numeric or temporal column and its plan-time grids."""
+  """One numeric or temporal column and its plan-time grids;
+  `synthetic_edge` marks the union edges that are points of the
+  synthetic's own quantile grid (whether or not a source value coincides
+  with them), which only the no-source case consults (R77.3, R80.1)."""
   j: int
   name: str
   kind: ColumnKind
   bq_type: str
   num_k: int
   union: np.ndarray
+  synthetic_edge: np.ndarray
   profile: np.ndarray
   deciles: np.ndarray
   lo: float | None
@@ -627,13 +653,16 @@ def _pair_column(j: int, column: ColumnPlan,
 
 def _grid(j: int, column: ColumnPlan, layout: BatchLayout) -> _Grid:
   q_src = column.quantiles_src or ()
+  q_syn = np.asarray(column.quantiles_syn or (), dtype=np.float64)
+  union = binned.union_edges(q_src, column.quantiles_syn or (), column.atoms)
   return _Grid(
       j=j,
       name=column.name,
       kind=column.kind,
       bq_type=column.bq_type,
       num_k=layout.num_columns.index(column.name),
-      union=binned.union_edges(q_src, column.quantiles_syn or (), column.atoms),
+      union=union,
+      synthetic_edge=np.isin(union, q_syn),
       profile=binned.profile_edges(q_src),
       deciles=binned.decile_edges(q_src),
       lo=float(q_src[0]) if q_src else None,
@@ -1093,9 +1122,9 @@ class _Emitter:
     if not metric.baseline:
       baseline = None
     elif baseline is None:
-      notes["baseline_reason"] = ("undefined on the reference sample"
-                                  if self.has_reference else
-                                  "no reference sample (the R panel)")
+      notes.setdefault(
+          "baseline_reason", "undefined on the reference sample"
+          if self.has_reference else "no reference sample (the R panel)")
     self.rows.append(
         MetricValue(
             metric_id=metric_id,
@@ -1393,9 +1422,15 @@ _CONSTANT_SOURCE = {
 def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
                     sizes: _Sizes) -> None:
   """smd, std_ratio and range_coverage (exact, from Moments) and, numeric,
-  zero_rate_delta."""
+  zero_rate_delta. smd and std_ratio are not_evaluated when either side
+  holds fewer than RARE_COUNT values: their value with the synthetic's
+  published moments would give the source's mean and std (R80.3). A
+  reference with fewer than RARE_COUNT values withholds `baseline_value`
+  (R77.6), and `detail.withheld` names exactly that (R80.5)."""
   ms, my = s.src.moments[gi], s.syn.moments[gi]
   mr = None if s.ref is None else s.ref.moments[gi]
+  tiny = min(ms.n, my.n) < RARE_COUNT
+  baseline_withheld = mr is not None and mr.n < RARE_COUNT
   functions: tuple[tuple[str, Callable[[Moments, Moments | None],
                                        float | None]],
                    ...] = (("column.smd", _smd), ("column.std_ratio",
@@ -1407,20 +1442,30 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
       "column.range_coverage": (None, None),
   }
   for metric_id, fn in functions:
+    if tiny and metric_id in _MOMENT_VALUE_IDS:
+      e.skip(metric_id, NOT_EVALUATED_BELOW_K, scope, sizes=sizes)
+      continue
     value = fn(ms, my)
     if value is None:
       e.skip(metric_id, _CONSTANT_SOURCE[metric_id], scope, sizes=sizes)
       continue
     source_value, synthetic_value = side_values[metric_id]
+    detail: dict[str, Any] = (
+        _coverage_detail(grid, gi, s)
+        if metric_id == "column.range_coverage" else {
+            "unit": grid.unit
+        })
+    if baseline_withheld:
+      detail["withheld"] = {"baseline_value": WITHHELD_BELOW_K}
+      detail["baseline_reason"] = WITHHELD_BELOW_K
     e.value(
         metric_id,
         value,
         scope,
-        baseline=fn(ms, mr),
+        baseline=None if baseline_withheld else fn(ms, mr),
         source_value=source_value,
         synthetic_value=synthetic_value,
-        detail=_coverage_detail(grid, gi, s)
-        if metric_id == "column.range_coverage" else {"unit": grid.unit},
+        detail=detail,
         sizes=sizes)
   if grid.kind is _NUMERIC:
     _share_delta(e, "column.zero_rate_delta", scope,
@@ -1431,12 +1476,12 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
 
 def _source_bounds(grid: _Grid, gi: int, s: _Sides) -> dict[str, Any]:
   """The source's p0.5/p99.5 (R65: in place of its exact extremes)."""
-  lo, hi = _profile_bounds(grid, s.src, gi, _kept_union(s.src, gi))
+  lo, hi = _profile_bounds(grid, s.src, gi, _kept_range(grid, s.src, gi))
   return {"source_p0_5": lo, "source_p99_5": hi}
 
 
 def _coverage_detail(grid: _Grid, gi: int, s: _Sides) -> dict[str, Any]:
-  lo, hi = _profile_bounds(grid, s.syn, gi, _kept_union(s.src, gi))
+  lo, hi = _profile_bounds(grid, s.syn, gi, _kept_range(grid, s.src, gi))
   return {
       **_source_bounds(grid, gi, s),
       "synthetic_p0_5": lo,
@@ -1922,19 +1967,18 @@ def _edges_digest(edges: np.ndarray, unit: str) -> str:
 
 def _kept_edges(right: np.ndarray, left: np.ndarray) -> np.ndarray:
   """Which edges may be shown or interpolated over, decided on the SOURCE
-  side (R69, R74): an edge is dropped only when a source record sits on
-  it AND fewer than RARE_COUNT source records lie at or below it or at or
-  above it. `right`/`left` are the source's right- and left-closed bin
-  counts on the edges, so count(x <= e), count(x < e) and count(x == e)
-  are exact. A common end atom qualifies, a lone extreme never does, and
-  an edge carrying no source record — a synthetic-grid point, or any edge
-  when the source side is empty — always stays: it is no source record's
-  value."""
+  side's evaluated counts alone (R69, R77.1): an edge is kept iff at
+  least RARE_COUNT source records lie at or below it AND at least
+  RARE_COUNT at or above it. `right`/`left` are the source's right- and
+  left-closed bin counts on the edges, so count(x <= e) and count(x >= e)
+  are exact. Both counts are monotone in the edge, so the kept edges are
+  one contiguous range: everything outside it is dropped whatever grid
+  contributed it, everything inside stays. A common end atom qualifies,
+  a lone extreme never does; an empty source keeps nothing."""
   below = np.cumsum(right)[:-1]  # count(x <= e)
   under = np.cumsum(left)[:-1]  # count(x < e)
   above = int(right.sum()) - under  # count(x >= e)
-  rare = (below < RARE_COUNT) | (above < RARE_COUNT)
-  kept: np.ndarray = ~(rare & (below > under))
+  kept: np.ndarray = (below >= RARE_COUNT) & (above >= RARE_COUNT)
   return kept
 
 
@@ -1949,9 +1993,38 @@ def _kept_union(src: DenseProfile, gi: int) -> np.ndarray:
   """The union edges every side's quantiles and bounds may interpolate
   over: `_kept_edges` on the source's union counts. No kept edge is a
   source value with fewer than k records at or beyond it, so no plateau
-  can land on one, and the synthetic grid outside the source range stays
-  whole, so nothing clamps (R74.1)."""
+  can land on one, and nothing outside [first kept, last kept] is ever
+  published as a value (R77.1)."""
   return _kept_edges(src.union[gi], src.union_left[gi])
+
+
+def _kept_range(grid: _Grid, src: DenseProfile, gi: int) -> np.ndarray:
+  """`_kept_union`, except that a column with no evaluated source value
+  (no source side, or a NULL column) keeps exactly the synthetic grid's
+  own points — every one of them, including a point a source value
+  coincides with — and drops the points only the source grid or the
+  atoms contributed (plan-time source records). The kept set is then a
+  function of the synthetic alone, so the payloads cannot depend on the
+  unevaluated source (R77.3 as amended by R80.1)."""
+  if not src.union[gi].sum():
+    return grid.synthetic_edge
+  return _kept_union(src, gi)
+
+
+def _tail_masses(p: DenseProfile, gi: int,
+                 kept: np.ndarray) -> tuple[float | None, float | None]:
+  """`(below_mass, above_mass)`: the share of side `p`'s non-null values
+  below the first kept edge and above the last (R77.2) — what the payload
+  says about the mass whose values are withheld; None with no kept edge
+  or no values."""
+  total = float(p.union[gi].sum())
+  if not total or not kept.any():
+    return None, None
+  first = int(np.argmax(kept))
+  last = kept.size - 1 - int(np.argmax(kept[::-1]))
+  below = float(np.cumsum(p.union_left[gi])[first]) / total  # count(x < e)
+  above = 1.0 - float(np.cumsum(p.union[gi])[last]) / total  # count(x > e)
+  return below, above
 
 
 def _inverted(edges: np.ndarray, f_at: np.ndarray, f_before: np.ndarray,
@@ -1978,14 +2051,11 @@ def _inverted(edges: np.ndarray, f_at: np.ndarray, f_before: np.ndarray,
 def _side_quantiles(grid: _Grid, p: DenseProfile, gi: int, kept: np.ndarray,
                     probs: Sequence[float]) -> tuple[list[float], list[float]]:
   """`(probs, values)`: a side's quantiles over its union bins merged
-  across the edges `_kept_union` drops, at the `probs` its merged CDF
-  spans — a probability outside `(F⁻(first kept edge), F(last kept
-  edge)]` is withheld, never clamped (R74.3); the jump at an edge is
-  exact from the left-closed twin, so a common atom at a side's minimum
-  is its own lower quantiles. A value that coincides with a dropped edge
-  is withheld too: on a discrete column the arithmetic inside a merged
-  bin can land exactly on the rare source value the edge was dropped
-  for."""
+  across the dropped edges, at the `probs` its merged CDF spans — a
+  probability outside `(F⁻(first kept edge), F(last kept edge)]` is
+  withheld, never clamped (R77.2); the jump at an edge is exact from the
+  left-closed twin, so a common atom at a side's minimum is its own lower
+  quantiles."""
   edges = grid.union[kept]
   right = _merged(p.union[gi], kept)
   left = _merged(p.union_left[gi], kept)
@@ -1995,18 +2065,7 @@ def _side_quantiles(grid: _Grid, p: DenseProfile, gi: int, kept: np.ndarray,
   f_at = np.cumsum(right)[:-1] / total  # F(e): share at or below e
   f_before = np.cumsum(left)[:-1] / total  # F⁻(e): share below e
   shown = [q for q in probs if f_before[0] < q <= f_at[-1]]
-  values = _inverted(edges, f_at, f_before, shown)
-  dropped = grid.union[~kept]
-  if not dropped.size or not values:
-    return shown, values
-  coincides = np.isclose(
-      np.asarray(values)[:, np.newaxis],
-      dropped[np.newaxis, :],
-      rtol=_COINCIDENCE_RTOL,
-      atol=0.0).any(axis=1)
-  clear = ~coincides
-  return ([q for q, ok in zip(shown, clear, strict=True) if ok],
-          [v for v, ok in zip(values, clear, strict=True) if ok])
+  return shown, _inverted(edges, f_at, f_before, shown)
 
 
 def _profile_bounds(grid: _Grid, p: DenseProfile, gi: int,
@@ -2050,7 +2109,7 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
   for gi, grid in enumerate(spec.grids):
     m = p.moments[gi]
     kept = _published(src, gi)
-    safe = _kept_union(src, gi)
+    safe = _kept_range(grid, src, gi)
     edges = grid.profile[kept]
     unit = "epoch_seconds" if grid.kind is _TEMPORAL else "value"
     scale = grid.scale
@@ -2060,6 +2119,7 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
       return None if number is None else number * scale
 
     low, high = _profile_bounds(grid, p, gi, safe)
+    below_mass, above_mass = _tail_masses(p, gi, safe)
     extremes = "p0.5_p99.5"
 
     yield ProfileValue(
@@ -2070,6 +2130,8 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
             "min": scaled(low),
             "max": scaled(high),
             "extremes": extremes,
+            "below_mass": below_mass,
+            "above_mass": above_mass,
             "nulls": int(p.nulls[grid.j]),
             "unit": unit,
         },
@@ -2086,6 +2148,8 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
           payload={
               "probs": probs,
               "values": [scaled(v) for v in values],
+              "below_mass": below_mass,
+              "above_mass": above_mass,
               "unit": unit,
           },
           n=m.n,
