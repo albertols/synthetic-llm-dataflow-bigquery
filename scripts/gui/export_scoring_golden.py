@@ -527,7 +527,8 @@ def _row(scoring: ModuleType, types: ModuleType, case: dict[str, Any]):
   metric = scoring._catalogue().get(case["metric_id"])  # pylint: disable=protected-access  # the scorer's own catalogue instance
   status = scoring.status_for(metric, mv, enforced=case["enforced"])
   if status.value != row["status"]:
-    raise AssertionError(f"{case['note']}: status_for {status} != row")
+    note = case["note"]
+    raise AssertionError(f"{note}: status_for {status} != row")
   return row
 
 
