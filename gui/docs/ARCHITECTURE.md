@@ -33,15 +33,15 @@ _Arrows are imports (and the one generation step from Python). Nothing in
 
 ## Workspace
 
-| Path                 | What                                                                                              | Owner                             |
-| :------------------- | :------------------------------------------------------------------------------------------------ | :-------------------------------- |
-| `apps/web`           | React 19 + TypeScript (strict) + Vite 8 SPA                                                       | G0a (shell, kit), tabs (features) |
-| `apps/server`        | Fastify BFF: named read-only BigQuery queries or the mock provider; serves `apps/web/dist`        | G0b                               |
-| `packages/contracts` | zod types generated from the Python side (`generated/**`), the concept contract and concept files | G0b (+ one concept file per tab)  |
-| `packages/stats`     | Pure TS maths shared by web and mock (DKW, Wilson, TVD, hashing embedder …)                       | G0b                               |
-| `packages/mock`      | Seeded, self-consistent mock data                                                                 | G0b                               |
-| `scripts/`           | `check-owned-paths.mjs`, `assets-sync.mjs`                                                        | G0a                               |
-| `../scripts/gui/`    | Python exporters: `export_knobs.py` (knobs.json), `export_golden_fixtures.py` (golden/*.json)     | G0b                               |
+| Path                 | What                                                                                                                                            | Owner                             |
+| :------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------- |
+| `apps/web`           | React 19 + TypeScript (strict) + Vite 8 SPA                                                                                                     | G0a (shell, kit), tabs (features) |
+| `apps/server`        | Fastify BFF: named read-only BigQuery queries or the mock provider; serves `apps/web/dist`                                                      | G0b                               |
+| `packages/contracts` | zod types generated from the Python side (`generated/**`), the concept contract and concept files                                               | G0b (+ one concept file per tab)  |
+| `packages/stats`     | Pure TS maths shared by web and mock (DKW, Wilson, TVD, hashing embedder …)                                                                     | G0b                               |
+| `packages/mock`      | Seeded, self-consistent mock data                                                                                                               | G0b                               |
+| `scripts/`           | `check-owned-paths.mjs`, `assets-sync.mjs`                                                                                                      | G0a                               |
+| `../scripts/gui/`    | Python exporters: `export_knobs.py` (knobs.json …), `export_golden_fixtures.py` (golden/*.json), `export_scoring_golden.py` (the scoring cases) | G0b                               |
 
 ## The web app
 
@@ -187,14 +187,44 @@ imports statically, transitively. Measuring by chunk name let shared chunks
 escape every budget (the deck.gl chunk had none, and the shell's own shared
 chunks were uncounted).
 
-| Budget                                                                                       |  Limit |
-| :------------------------------------------------------------------------------------------- | -----: |
-| App shell: `index.html`'s closure (entry chunk, the shared chunks it imports, global CSS)    | 200 kB |
-| Each tab: the closure of its lazy page chunks (`src/features/<tab>/`), minus the shell       | 350 kB |
-| Lazy ECharts: `EChartCanvas`'s closure beyond the shell                                      | 300 kB |
-| Lazy KaTeX: `KatexRender`'s closure (JS + CSS)                                               |  90 kB |
-| Lazy deck.gl React binding: the `DeckCanvas` chunk                                           |  80 kB |
-| Lazy deck.gl core + layers: the shared chunks holding `@deck.gl/core` / `layers` / `luma.gl` | 200 kB |
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  HTML["📄 index.html"]:::data --> SHELL["⚙️ app shell<br/>router · nav · shared UI<br/>≤ 200 kB"]:::cpu
+  SHELL -.->|"route"| TABS["⚙️ one tab's pages<br/>≤ 350 kB each"]:::cpu
+  TABS -.->|"first chart"| EC["⚪ ECharts<br/>≤ 300 kB"]:::data
+  TABS -.->|"first formula"| KX["⚪ KaTeX<br/>≤ 90 kB"]:::data
+  TABS -.->|"first 3-D view"| DK["⚪ deck.gl<br/>≤ 80 + 200 kB"]:::data
+  TABS -.->|"first diagram"| MM["⚪ mermaid<br/>its own chunks"]:::data
+```
+
+_What a first visit downloads: the shell only. A tab's code arrives on its
+route; each heavy library arrives the first time a view needs it. Dashed
+arrows are dynamic imports._
+
+Measured with `npm run build && npm run size` (size-limit, gzip) on
+2026-09-29, on the tree of the commit that added this table (its parent is
+`16b4294`). **This table is the only place the sizes are typed**; re-run the
+command to refresh them.
+
+| Budget                                                                                       |  Limit |  Measured |
+| :------------------------------------------------------------------------------------------- | -----: | --------: |
+| App shell: `index.html`'s closure (entry chunk, the shared chunks it imports, global CSS)    | 200 kB | 187.42 kB |
+| Tab INTRO: the closure of its lazy page chunks (`src/features/intro/`), minus the shell      | 350 kB | 112.17 kB |
+| Tab EVALUATION (same rule)                                                                   | 350 kB | 135.51 kB |
+| Tab RAG (same rule)                                                                          | 350 kB |  80.06 kB |
+| Tab CONFIG (same rule)                                                                       | 350 kB | 106.98 kB |
+| Lazy ECharts: `EChartCanvas`'s closure beyond the shell                                      | 300 kB |  270.8 kB |
+| Lazy KaTeX: `KatexRender`'s closure (JS + CSS)                                               |  90 kB |  80.56 kB |
+| Lazy deck.gl React binding: the `DeckCanvas` chunk                                           |  80 kB |  44.27 kB |
+| Lazy deck.gl core + layers: the shared chunks holding `@deck.gl/core` / `layers` / `luma.gl` | 200 kB | 169.34 kB |
+
+Relative to its limit, the shell is the fullest budget, and every visitor
+downloads it: a new eager import in `main.tsx`, `router.tsx`, a route module
+or a shared component lands there. mermaid and umap-js have no budget line of
+their own; the gate below keeps them out of the shell.
 
 The same file is a gate: the shell's chunks must not bundle mermaid, KaTeX,
 ECharts, deck.gl or umap-js (checked in their source maps, so the check holds
@@ -438,6 +468,31 @@ vocabulary values live rows carried that the contract does not know yet
 (400 invalid params, 403 refused by the Host / Origin guard, 404 unknown id,
 422 over the bytes cap, 502 live rows no longer match the generated contract).
 
+### Named queries (`apps/server/src/queries/registry.ts`)
+
+The only SQL the GUI runs. The BigQuery provider runs a query by its name
+(`QueryName` is the type of `QUERIES`' keys, so an unknown name does not
+compile), and a route reaches BigQuery only through the provider.
+
+| Name                                                                                              | Reads                                                                 | Serves                               |
+| :------------------------------------------------------------------------------------------------ | :-------------------------------------------------------------------- | :----------------------------------- |
+| `evaluations.list`, `evaluations.count`                                                           | `evaluation_latest` (filtered, sorted, one page, and its total)       | `/api/evaluations`                   |
+| `evaluations.events`                                                                              | `evaluation_data_history` (every event of one evaluation)             | `/api/evaluations/:id`, `…/profiles` |
+| `evaluations.latestByIds`, `metrics.byEvaluations`                                                | the latest row and the metrics of several evaluations                 | `/api/compare`                       |
+| `evaluations.slim`, `metrics.ids`, `runs.count`, `sourceStats.tables`, `rag.sets`, `rag.poolSets` | what the filters offer                                                | `/api/facets`                        |
+| `metrics.byEvaluation`, `flags.byEvaluation`                                                      | one evaluation's metrics and flagged rows (keys only)                 | `/api/evaluations/:id`               |
+| `profiles.byEvaluation`                                                                           | one evaluation's profiles, narrowed by table, column, kind, side      | `/api/evaluations/:id/profiles`      |
+| `trend`                                                                                           | one metric across evaluations                                         | `/api/trend`                         |
+| `runs.list`, `dlq.summary`                                                                        | `validation_runs`; `dlq` grouped by run, rule, type, step, stage      | `/api/runs`, `/api/dlq`              |
+| `sourceStats.tables`, `sourceStats.byTable`                                                       | `source_table_stats`: the profiled tables, then one table's snapshots | `/api/source-stats`                  |
+| `rag.chunks`, `rag.pools`                                                                         | `rag_chunks` (≤ 3,000 vectors), `freetext_pools`                      | `/api/rag/chunks`, `/api/rag/pools`  |
+
+`/api/health`, `/api/knobs`, `/api/catalogue` and `/api/relationships` run no
+query: they answer from the configuration and the generated contracts.
+`providers/bigquery.contract.test.ts` ("the named-query registry") holds every
+entry to one read-only statement whose `@params` are exactly its declared
+types, and checks that `assertReadOnly` rejects anything that writes.
+
 **Relational views.** A registry row names its model (`relationship_model`);
 resolve it through `/api/relationships`. Real models are gitignored or on GCS
 and never served, so when the name is not listed, rebuild the graph from the
@@ -508,32 +563,127 @@ export default plugin;
 
 It is registered under `/api/x/<tab>` (e.g. `/api/x/rag/umap`) with the same
 provider, config and a small in-memory LRU. Extra routes compose provider
-calls; they never run SQL of their own.
+calls; they never run SQL of their own. Registered today:
+
+| Route                                                        | File                  | What                                                                                                                                                         |
+| :----------------------------------------------------------- | :-------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/x/rag/projection?digest&embedder&space&ids&params` | `routes/rag.extra.ts` | a cached 3-D layout (`{ hit: false }` on a miss, not a 404)                                                                                                  |
+| `POST /api/x/rag/projection`                                 | `routes/rag.extra.ts` | stores a finished UMAP/PCA layout: base64 Float32 coordinates, ≤ 3,000 points, no chunk text and no vectors; memory only; the only request with a body (201) |
+
+EVALUATION and CONFIG have no extra routes.
 
 ### BFF safety
 
-- Binds `127.0.0.1` by default (`HOST`); port `PORT` → `GUI_SERVER_PORT` → 8787.
-  A non-loopback `HOST` with `DATA_SOURCE=bigquery` logs a loud warning at
-  startup (in a container: publish only on loopback, `-p 127.0.0.1:8787:8787`).
-- **Host / Origin guard** (an `onRequest` hook, before any route): the `Host`
-  header must be `127.0.0.1`, `localhost` or `[::1]` on `PORT` or on
-  `GUI_WEB_PORT` (the Vite dev proxy forwards the browser's Host), or one of
-  `ALLOWED_HOSTS` (comma-separated `host:port`) — a DNS-rebinding page reaches
-  127.0.0.1 under its own name and gets a 403. On `/api/*`, a browser request
-  whose `Sec-Fetch-Site` is not `same-origin` or `none` (`cross-site`, and
-  `same-site` — another port of the same host is another local app) or whose
-  `Origin` is not an allowed host is refused too, so a foreign page cannot make
-  the BFF spend BigQuery bytes.
-- Only the named, parameterized, read-only queries of
-  `apps/server/src/queries/registry.ts`; client values are parameters, never
-  SQL text; `assertReadOnly` guards every statement.
-- Each query dry-runs first; above `MAX_BYTES_BILLED` (10 GiB default) it is
-  refused (422); the job itself also carries `maximumBytesBilled`.
-- Live rows are validated against the generated zod (a mismatch is a 502, not a
-  silent pass — except an unknown vocabulary value, which passes as a string
-  with `x-contract-warnings`); results are cached in an LRU keyed by the full
-  SQL text and parameters (TTL 5 min) and never persisted; the runner's ADC
-  never leaves the server.
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  REQ["⚪ request"]:::data --> HOST["🛡️ Host guard<br/>allowed host:port?"]:::cpu
+  HOST -->|"/api/*"| SITE["🛡️ Sec-Fetch-Site<br/>+ Origin guard"]:::cpu
+  HOST -->|"other paths"| SPA[("📄 built SPA")]:::store
+  SITE --> BODY["🛡️ bodyLimit 64 KiB<br/>zod-checked params"]:::cpu
+  BODY --> ROUTE["⚙️ route<br/>provider call"]:::cpu
+  ROUTE -->|"bigquery mode"| CAP["🛡️ LRU, then dry run<br/>refuse above the cap"]:::cpu
+  CAP --> BQ[("🗄️ named SELECT<br/>maximumBytesBilled")]:::store
+```
+
+_Every request crosses the same guards, in this order, before a route runs; a
+refusal is a 403 (Host, site or origin), 413 (body over the limit), 400
+(parameters) or 422 (bytes cap). Only bigquery mode adds the cache, the dry
+run and the cap._
+
+- **Binding.** `127.0.0.1` by default (`HOST`); port `PORT` → `GUI_SERVER_PORT`
+  → 8787. A non-loopback `HOST` with `DATA_SOURCE=bigquery` logs a loud warning
+  at startup (in a container: publish only on loopback,
+  `-p 127.0.0.1:8787:8787`).
+- **Host guard** (an `onRequest` hook, before any route): the `Host` header must
+  be `127.0.0.1`, `localhost` or `[::1]` on `PORT` or on `GUI_WEB_PORT` (the
+  Vite dev proxy forwards the browser's Host), `HOST` itself when it names a
+  specific interface, or one of `ALLOWED_HOSTS` (comma-separated `host:port`).
+  A DNS-rebinding page reaches 127.0.0.1 under its own name and gets a 403.
+- **Sec-Fetch-Site / Origin guard** (same hook, `/api/*` only): a browser
+  request whose `Sec-Fetch-Site` is not `same-origin` or `none` (`cross-site`,
+  and `same-site`, since another port of the same host is another local app),
+  or whose `Origin` is not `http://` plus an allowed host, is refused, so a
+  foreign page cannot make the BFF spend BigQuery bytes. Both guards know only
+  `host:port` names and `http://` origins; an HTTPS deployment behind a proxy
+  (Cloud Run) needs them extended first.
+- **Body limit.** Fastify's `bodyLimit` is 64 KiB. The one route with a body,
+  `POST /api/x/rag/projection`, sends 3,000 points as 48,000 base64
+  characters; the same layout as a JSON number array would not fit.
+- **Named queries only.** The queries of `apps/server/src/queries/registry.ts`
+  ([above](#named-queries-appsserversrcqueriesregistryts)); client values are
+  parameters, never SQL text; `assertReadOnly` guards every statement.
+- **Bytes cap.** Each query not in the cache dry-runs first; its bytes are
+  summed into the response's `x-bq-bytes-estimate` (a cache hit adds nothing),
+  and above `MAX_BYTES_BILLED` (10 GiB by default) the query is refused with 422
+  before it runs. The job itself also carries `maximumBytesBilled`
+  ([BigQuery: restrict the bytes billed](https://docs.cloud.google.com/bigquery/docs/best-practices-costs)),
+  a 60 s job timeout, and the labels `app=synthetic-platform` and
+  `query=<name>`, so its spend is traceable in `INFORMATION_SCHEMA.JOBS`.
+- **Contract on the way in.** Live rows are normalized (TIMESTAMP → ISO string
+  with microseconds, INT64 → number, JSON → parsed) and validated against the
+  generated zod on every read, cached or not (a mismatch is a 502, not a silent
+  pass, except an unknown vocabulary value, which passes as a string with
+  `x-contract-warnings`).
+- **Two in-memory LRUs, never persisted.** The BigQuery provider caches query
+  results keyed by the full SQL text and parameters (`CACHE_MAX_ENTRIES`,
+  default 500; `CACHE_TTL_SECONDS`, default 300). Extra routes share a second
+  LRU for derived results such as RAG layouts (64 entries, 15 minutes, set in
+  `app.ts`). Both vanish with the process; nothing is written to disk.
+- **Credentials.** The runner's ADC stays in the BFF process; no response body
+  or header carries it. Every response sets `x-content-type-options: nosniff`,
+  `referrer-policy: no-referrer` and `x-frame-options: DENY`; `/api/*` adds
+  `cache-control: no-store` and `x-data-source`.
+
+### Scoring parity (Python → TypeScript)
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  PY["⚙️ sdfb_evaluation.scoring<br/>the evaluator's scorer"]:::cpu
+  CASES["⚙️ export_scoring_golden.py<br/>hand-picked cases"]:::cpu
+  GOLD[("📄 golden/scoring.json<br/>inputs + Python's rows")]:::store
+  TS["⚙️ packages/stats<br/>scoring.ts"]:::cpu
+  MOCK["⚙️ packages/mock<br/>every stored metric row"]:::cpu
+  VIEW["⚙️ EVALUATION<br/>status explanations"]:::cpu
+
+  CASES --> PY -->|"export_golden_fixtures.py"| GOLD
+  GOLD -->|"scoring.golden.test.ts"| TS
+  GOLD -->|"reading.golden.test.ts"| VIEW
+  TS --> MOCK
+  TS --> VIEW
+```
+
+_The GUI never re-derives a status: it mirrors the evaluator's scorer in
+TypeScript, and the mirror must reproduce Python's output case for case._
+
+- **The cases.** `scripts/gui/export_scoring_golden.py` lists metric readings
+  chosen to hit every scoring ruling in both directions: inclusive thresholds
+  and the 1e-9 tolerance, target metrics, CI-bound lifts, the zero-tolerance
+  integrity rule, noise downgrades, the noise-method dispatch, documented edges,
+  infinities and NaN, the pMSE ceiling, and aggregate ids left out of the
+  headline counts. `export_golden_fixtures.py` runs them through
+  `sdfb_evaluation.scoring` (`to_metric_row`, `status_for`, `score_value`,
+  `aggregate_scores`, `headline_counts`) and writes
+  `packages/contracts/generated/golden/scoring.json`: 80 cases at `16b4294`
+  (`node -p 'require("./packages/contracts/generated/golden/scoring.json").cases.length'`),
+  plus score-function values and one roll-up.
+- **The replay.** `packages/stats/src/scoring.golden.test.ts` feeds every case
+  to `scoring.ts` and asserts the same status, score, detail notes and stored
+  numbers (scores to a 1e-12 relative tolerance). `reading.golden.test.ts`
+  (EVALUATION) checks that each explanation agrees with the stored status and
+  names what the evaluator recorded.
+- **Downstream.** The mock scores every metric row with the same `scoreRow`, and
+  `mock.storyline.test.ts` recomputes the stored status, score, roll-ups and
+  headline counts from its profiles.
+- **Drift.** CI's `exports` job re-runs the exporter with `--check`, so a
+  change to the evaluator's scorer that the golden does not match fails; the
+  TS tests then fail until `scoring.ts` follows.
 
 ### Content-Security-Policy (notes; the BFF does not send one yet)
 

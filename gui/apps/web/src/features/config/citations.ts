@@ -22,7 +22,7 @@ export const CITES = {
     excerpt: "BigQuery itself refuses at load time",
   },
   skillLineThree: { source: ".claude/skills/validation-mode-a.md:28", excerpt: "## Line 3 — BigQueryIO `FailedRows`" },
-  readmeUniqueness: { source: "README.md:203", excerpt: "3. **Uniqueness**" },
+  readmeUniqueness: { source: "README.md:204", excerpt: "3. **Uniqueness**" },
   gateRatio: {
     source: "packages/sdfb-core/src/sdfb_core/validation/summary.py:182",
     excerpt: "observed = (blocker_count / total)",

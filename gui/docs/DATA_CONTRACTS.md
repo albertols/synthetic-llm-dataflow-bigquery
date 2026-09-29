@@ -24,6 +24,34 @@ flowchart LR
 _`contracts:check` regenerates into a temporary directory and diffs; any
 difference fails CI. `generated/**` is never edited by hand._
 
+## What generates what
+
+Every generated type traces back to the Python side. `gen.mjs` (run by
+`npm run contracts:sync`) reads the JSON schemas and the catalogue itself; the
+exporters in `scripts/gui/` write the JSON that `gen.mjs` then types.
+
+| Python-side source (the truth)                                                                                                          | Written by                  | Generated file                                                       | What the TypeScript side imports                                                                                                        |
+| :-------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------- | :------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_{data_history,metrics,profiles,row_flags}.schema.json` (+ `views.sql`) | `gen.mjs`                   | `generated/schemas.ts`                                               | `evaluationDataHistoryRowSchema`, `evaluationMetricsRowSchema`, `evaluationProfilesRowSchema`, `evaluationRowFlagsRowSchema`, `bqViews` |
+| `config/bq_schema/synthetic_data_quality/{dlq,fk_fanout_stats,validation_runs}.schema.json`                                             | `gen.mjs`                   | `generated/schemas.ts`                                               | `dlqRowSchema`, `fkFanoutStatsRowSchema`, `validationRunsRowSchema`                                                                     |
+| `config/bq_schema/synthetic_rag/{freetext_pools,rag_chunks,source_table_stats}.schema.json`                                             | `gen.mjs`                   | `generated/schemas.ts`                                               | `freetextPoolsRowSchema`, `ragChunksRowSchema`, `sourceTableStatsRowSchema`                                                             |
+| column descriptions in those schemas that open with a vocabulary (`a \| b \| c — …`)                                                    | `gen.mjs`                   | `generated/schemas.ts`                                               | `vocabularies["<table>.<field>"]` (a `z.enum` inside each row schema), plus `bqTables` field metadata and `rowSchemas`                  |
+| `packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml`                                                                   | `gen.mjs`                   | `generated/catalogue.ts`                                             | `catalogue`, `catalogueById`, `MetricId`, `CatalogueMetric`, `catalogueVersion`, and one `metric:<id>` concept per metric               |
+| `run_pipeline.parse_args` defaults, module constants, `config/thresholds.yml`, the composer DAG and Flex Template parameters            | `export_knobs.py`           | `generated/knobs.json` → `knobs.ts`                                  | `knobs`, `KnobId`, `ChannelId`                                                                                                          |
+| `config/relationships/example_*.yaml`, `*_example.yaml`, parsed by `RelationshipRegistry`                                               | `export_knobs.py`           | `generated/relationships.json` → `relationships.ts`                  | `relationships`, `RelationshipModelId`                                                                                                  |
+| the DLQ envelopes of `sdfb_beam/dofns`, `dlq.normalize_dlq_record`, `config/thresholds.yml`                                             | `export_knobs.py`           | `generated/dlq_rules.json` → `dlqRules.ts`                           | `dlqRules`, `dlqRuleById`, `DlqRuleId`                                                                                                  |
+| `sdfb_core.rag` (`HashingEmbedder`, `serialize_row`, retrieval)                                                                         | `export_golden_fixtures.py` | `generated/golden/{hashing_embedder,great_serialize,retrieval}.json` | test fixtures, imported as JSON by the golden tests                                                                                     |
+| `sdfb_evaluation.scoring`, over the cases in `export_scoring_golden.py`                                                                 | `export_golden_fixtures.py` | `generated/golden/scoring.json`                                      | test fixtures ([scoring parity](ARCHITECTURE.md#scoring-parity-python--typescript))                                                     |
+| every input above                                                                                                                       | `gen.mjs`                   | `generated/manifest.json`                                            | the sha256 of each input, so a hand edit of an exported file is drift too                                                               |
+
+The API contract (`src/api.ts`), the payload parsers (`src/payloads.ts`) and
+the relational and source-stats helpers are hand-written zod **on top of**
+these generated rows. Most response shapes embed the row schemas whole or
+reuse their vocabularies (`evaluationMetricsRowSchema.shape.status`). A few
+joined shapes, such as `trendPointSchema`, restate columns by hand; those are
+not regenerated, so a column type change on the Python side has to be followed
+there by hand.
+
 ## Status
 
 | Contract                                                      | Owner | State                                                                                                    |
@@ -36,7 +64,7 @@ difference fails CI. `generated/**` is never edited by hand._
 | `knobs.json` (values from code, `source: path:line`)          | G0b   | **done** — `scripts/gui/export_knobs.py`; typed as `generated/knobs.ts`                                  |
 | `relationships.json` (the committed sample models)            | G0b   | **done** — `export_knobs.py`; typed as `generated/relationships.ts`; `parseEdge` in `src/relational.ts`  |
 | `dlq_rules.json` (rule → error_type, step, stage, severity)   | G0b   | **done** — `export_knobs.py`; typed as `generated/dlqRules.ts` (`dlqRuleById`)                           |
-| Golden fixtures (hashing embedder, GReaT, retrieval)          | G0b   | **done** — `scripts/gui/export_golden_fixtures.py` → `generated/golden/*.json`                           |
+| Golden fixtures (hashing embedder, GReaT, retrieval, scoring) | G0b   | **done** — `scripts/gui/export_golden_fixtures.py` → `generated/golden/*.json`                           |
 | API contract (`src/api.ts`), payloads, profiler entry         | G0b   | **done** — hand-written zod on top of the generated rows                                                 |
 | API client + TanStack Query hooks (`apps/web/src/lib/api.ts`) | G0b   | **done**                                                                                                 |
 
@@ -51,7 +79,7 @@ difference fails CI. `generated/**` is never edited by hand._
 | a sample relationship model, or a DoFn's DLQ envelope / step   | `export_knobs.py --check` (`relationships.json`, `dlq_rules.json`)           |
 | only a line moved (`path:LINE`)                                | nothing: `--check` ignores line numbers (`--check-strict` does not)          |
 | a "Docs differ" anchor that moved or vanished                  | `export_knobs.py` fails (the annotation is re-verified every run)            |
-| `HashingEmbedder`, `serialize_row`, retrieval                  | `export_golden_fixtures.py --check`, then the TS golden tests                |
+| `HashingEmbedder`, `serialize_row`, retrieval, the scorer      | `export_golden_fixtures.py --check`, then the TS golden tests                |
 | a hand edit of an exported JSON or a golden file               | `contracts:check` — the input sha256 in `manifest.json`                      |
 | a live vocabulary value the contract does not know             | passes as a string, `x-contract-warnings` on the response                    |
 | live BigQuery rows that no longer match otherwise              | the BigQuery provider (502 `Contract Mismatch`, with the failing paths)      |
@@ -120,11 +148,101 @@ What it shows today:
 
 ## Golden fixtures
 
-| File                    | Python original                                              | TS port (packages/stats)                                         | Pinned                                                     |
-| :---------------------- | :----------------------------------------------------------- | :--------------------------------------------------------------- | :--------------------------------------------------------- |
-| `hashing_embedder.json` | `sdfb_core.rag.embedding.HashingEmbedder`                    | `hashingEmbed`, `pySplit`, `hashingBucket`                       | tokens, uint64-modulo buckets and signs exact; values 1e-6 |
-| `great_serialize.json`  | `sdfb_core.rag.serialize.serialize_row`                      | `serializeGreat`, `pyFloatRepr`, `pyStr`                         | the text, exactly                                          |
-| `retrieval.json`        | `retrieve_centroid_top_k` (pure index), `retrieve_kcenter_k` | `centroidTopK`, `kcenter`, `kcenterRotate`, `selectSeedExamples` | the picks, exactly (duplicates and a collapsed matrix)     |
+| File                    | Python original                                                        | TS port (packages/stats)                                                   | Pinned                                                           |
+| :---------------------- | :--------------------------------------------------------------------- | :------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `hashing_embedder.json` | `sdfb_core.rag.embedding.HashingEmbedder`                              | `hashingEmbed`, `pySplit`, `hashingBucket`                                 | tokens, uint64-modulo buckets and signs exact; values 1e-6       |
+| `great_serialize.json`  | `sdfb_core.rag.serialize.serialize_row`                                | `serializeGreat`, `pyFloatRepr`, `pyStr`                                   | the text, exactly                                                |
+| `retrieval.json`        | `retrieve_centroid_top_k` (pure index), `retrieve_kcenter_k`           | `centroidTopK`, `kcenter`, `kcenterRotate`, `selectSeedExamples`           | the picks, exactly (duplicates and a collapsed matrix)           |
+| `scoring.json`          | `sdfb_evaluation.scoring` (`to_metric_row`, roll-ups, headline counts) | `scoreRow`, `scoreValue`, `statusFor`, `aggregateScores`, `headlineCounts` | status, score and detail notes exactly; scores to 1e-12 relative |
+
+## The `metrics_info` identity
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  ROWS[("🗄️ evaluation_metrics<br/>one evaluation's rows")]:::store
+  AGG["⚙️ drop aggregate ids<br/>table.*_score · model.*"]:::cpu
+  B["⚪ count by status<br/>pass · warn · fail<br/>info · not_evaluated"]:::data
+  REG[("🗄️ evaluation_data_history<br/>five metrics_* counts<br/>+ metrics_total")]:::store
+
+  ROWS --> AGG --> B --> REG
+```
+
+_The registry's five status counts always add up to its total:
+`metrics_pass + metrics_warn + metrics_fail + metrics_info + metrics_not_evaluated = metrics_total`._
+
+- **Why `info` has its own column.** An `info` row is measured but not gated
+  (a documented edge's orphan rate, for example). Before `metrics_info`
+  existed, those rows were in `metrics_total` and in no bucket, so the counts
+  did not add up (Ruling R37; aggregate ids left out of the counts: R43).
+- **Who computes it.** The evaluator's `headline_counts`
+  (`sdfb_evaluation/scoring/__init__.py`) and its TypeScript mirror
+  `headlineCounts` (`packages/stats/src/scoring.ts`), pinned to each other by
+  the scoring golden's roll-up.
+- **Who holds it to the identity.** Python:
+  `test_headline_counts_feed_every_registry_metrics_column` (`test_scoring.py`).
+  Mock: `mock.storyline.test.ts` recomputes every FINAL row's counts from its
+  metric rows. BFF: `bigquery.contract.test.ts` checks that every registry
+  query selects `metrics_info` and that the list rows add up.
+- **How the list shows it.** The EVALUATION list's metrics cell
+  (`MetricsCell` in `features/evaluation/ListPage.tsx`) reads the breakdown
+  aloud as the identity. A row written before the column existed has
+  `metrics_info = NULL`; the cell then shows the remainder as "info or other".
+  Counts that do not add up are shown as inconsistent data, in words.
+
+## How to add a metric
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  CAT[("📄 metrics.yaml<br/>+ the evaluator's producer")]:::store
+  SYNC["⚙️ npm run contracts:sync<br/>MetricId · metric: concept"]:::cpu
+  MOCK["⚙️ packages/mock<br/>a producer from stats"]:::cpu
+  VIEW["⚙️ EVALUATION views<br/>by level and family"]:::cpu
+  CHECK["🛡️ npm run check<br/>+ exporters --check"]:::cpu
+
+  CAT --> SYNC --> MOCK --> VIEW --> CHECK
+```
+
+_The catalogue is the only list of metrics; everything after it reads the
+catalogue or is checked against it._
+
+1. **Catalogue (Python side).** Add the metric to
+   `packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml` with
+   its producer in the evaluator; that work belongs to the evaluation package.
+   If it needs a scoring rule the scorer does not have yet, add cases for it to
+   `scripts/gui/export_scoring_golden.py` and re-run
+   `export_golden_fixtures.py`.
+2. **`npm run contracts:sync`.** `catalogue.ts` gains the id in `MetricId` and
+   `catalogueById`, and a `metric:<id>` concept (its (i) popover) comes from the
+   catalogue entry; `contracts.check.test.ts` holds catalogue and concepts one
+   to one. Commit the regenerated files; `contracts:check` fails CI until you do.
+3. **Mock.** Add a producer to `packages/mock/src/evaluate.ts`
+   (`this.metric(id, reading)`), computing the value from the mock's profiles
+   with a `packages/stats` function (add one, with a unit test, if the maths is
+   new). A new profile kind also needs its parser in
+   `packages/contracts/src/payloads.ts` (`parseProfile`). The scorer and the
+   roll-ups need nothing: `scoreRow` reads direction, thresholds and noise
+   method from the catalogue. The mock emits every catalogue id today, but no
+   test fails when one is missing, so check the run view.
+4. **Views.** Wherever the EVALUATION tab lists metrics by catalogue level and
+   family (the scorecards' per-level counts, the interpretation list, the
+   column heatmap, trends, compare), a new id appears without code. The
+   dedicated panels name their ids (the pair order in `PairsPanel.tsx`, the
+   privacy and detection panels, the column drawer's rate rows), so a metric
+   meant for one of them needs a line there. Also optional: a related knob in
+   `features/evaluation/lib/relatedKnobs.ts` (the cross-link test checks the
+   knob exists) and an explanation sentence in `features/evaluation/lib/reading.ts`
+   when the metric brings a new rule. Views are owned by the EVALUATION tab.
+5. **Checks.** `npm run check` (types, unit tests including the mock storyline and
+   the golden replays, `contracts:check`), then
+   `export_golden_fixtures.py --check` and `export_knobs.py --check` from the
+   repository root.
 
 ## The concept contract
 
@@ -160,10 +278,10 @@ prefix.
 
 ## Data sources
 
-| Mode             | Set by                                | Reads                                                                                                                                                     | Credentials                            |
-| :--------------- | :------------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------- |
-| `mock` (default) | `DATA_SOURCE=mock`                    | seeded fixtures (`packages/mock`), invented or public thelook names                                                                                       | none                                   |
-| `bigquery`       | `DATA_SOURCE=bigquery`, `GCP_PROJECT` | `synthetic_data_quality.*`, `synthetic_rag.*` through named, parameterized, read-only `SELECT`s with `maximumBytesBilled` (10 GB default) after a dry run | the runner's ADC, held by the BFF only |
+| Mode             | Set by                                | Reads                                                                                                                                                      | Credentials                            |
+| :--------------- | :------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------- |
+| `mock` (default) | `DATA_SOURCE=mock`                    | seeded fixtures (`packages/mock`), invented or public thelook names                                                                                        | none                                   |
+| `bigquery`       | `DATA_SOURCE=bigquery`, `GCP_PROJECT` | `synthetic_data_quality.*`, `synthetic_rag.*` through named, parameterized, read-only `SELECT`s with `maximumBytesBilled` (10 GiB default) after a dry run | the runner's ADC, held by the BFF only |
 
 Both modes serve the same routes and validate against the same generated zod.
 Fetched rows are cached in memory (LRU) and never persisted.

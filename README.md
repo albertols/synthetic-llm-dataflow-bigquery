@@ -35,6 +35,7 @@ Generate fictitious-but-realistic synthetic rows for any BigQuery table — driv
 - [Getting started](#getting-started)
 - [CI/CD](#cicd)
 - [Integration testing & validation reports](#integration-testing--validation-reports)
+- [Platform GUI](#platform-gui)
 - [Documentation map](#documentation-map)
 - [Glossary](#glossary)
 - [License](#license)
@@ -262,6 +263,16 @@ Real-run evidence flows through a fixed contract:
 - **Promote** bundles a release cites to `docs/releases/<version>/evidence/<JOB_ID>/` — the layout the release Action reads. Evidence bundles stay out of the public repo (the sensitive-content gate in `scripts/dsg/precheck.py` forbids that path); published releases carry the aggregate report only.
 - **Interpret** with the report generators in [`.github/prompts/`](.github/prompts/): the end-to-end validation report, the free-text crosscheck report, and the prompt-constraint recommender.
 
+## Platform GUI
+
+> Design rationale: [`docs/DESIGN.md` §12](docs/DESIGN.md#12-platform-gui); decision: [ADR 0042](docs/adr/0042-self-hosted-platform-gui.md).
+
+**Synthetic Platform** (`gui/`) is a local web app that reads and explains this project's data: evaluations and their scorecards, validation runs and the DLQ, source statistics, the RAG embedding space, and every generation knob with its value from the code. It runs on a seeded mock with no GCP access (`npm ci && npm run build && npm start` in `gui/`, then open `http://127.0.0.1:8787`), or against your BigQuery tables through named, read-only, bytes-capped queries on a backend bound to `127.0.0.1`. It writes nothing, the pipeline does not depend on it, and it is not part of the Dataflow Solution Guides copy.
+
+![Synthetic Platform: the EVALUATION run view of one evaluation in mock mode, with its tables in scope, headline numbers and family scorecards](gui/docs/assets/evaluation-run-1440.png)
+
+Quickstart for live mode, environment variables and the four tabs: [`gui/README.md`](gui/README.md).
+
 ## Documentation map
 
 | Layer | Where | What |
@@ -272,6 +283,7 @@ Real-run evidence flows through a fixed contract:
 | Guides | [`docs/`](docs/) | run playbook, deployment prerequisites, DDL contract guide, model layout, E2E matrix |
 | Releases | [`docs/releases/`](docs/releases/README.md) | per-version deterministic reports (aggregate metrics and charts) |
 | Articles | [`docs/articles/`](docs/articles/README.md) | the Medium series — VCS-tracked, kept in sync with the implementation |
+| GUI | [`gui/`](gui/README.md) | the Synthetic Platform app: quickstart, architecture, data contracts, screenshots |
 
 ## Glossary
 
