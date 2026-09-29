@@ -556,7 +556,7 @@ as before, and the GUI only reads them.*
 
 - **The browser never sends SQL.** It names a query and passes its
   parameters. The backend-for-frontend (BFF) holds the SQL, binds the
-  parameters, dry-runs the query and caps the bytes billed (10 GB by default).
+  parameters, dry-runs the query and caps the bytes billed (10 GiB by default).
   The UI shows the estimate. Fetched rows are cached in memory and never
   written anywhere.
 - **Two data sources, one contract.** `DATA_SOURCE=bigquery` reads the

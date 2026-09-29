@@ -51,7 +51,7 @@ That deployment is optional, and the pipeline never requires it.
 **D2 — Read-only named queries with a bytes cap.**
 
 - The browser never sends SQL. It names a query registered in the BFF and passes typed [query parameters](https://docs.cloud.google.com/bigquery/docs/parameterized-queries). The BFF refuses a name it does not know.
-- Every registered query is a `SELECT`. The BFF dry-runs it, then runs it with the maximum bytes billed set ([restrict the number of bytes billed per query](https://docs.cloud.google.com/bigquery/docs/best-practices-costs)). The cap defaults to 10 GB, and the UI shows the estimate.
+- Every registered query is a `SELECT`. The BFF dry-runs it, then runs it with the maximum bytes billed set ([restrict the number of bytes billed per query](https://docs.cloud.google.com/bigquery/docs/best-practices-costs)). The cap defaults to 10 GiB, and the UI shows the estimate.
 - The identity the BFF runs as needs only [BigQuery Data Viewer and Job User](https://docs.cloud.google.com/bigquery/docs/access-control). Locally that identity is the developer's own ADC, which may hold more, so read-only rests on the named `SELECT`s. On Cloud Run the service account holds only those two roles, so IAM enforces read-only as well. The GUI writes nothing to BigQuery or GCS.
 - Credentials stay in the BFF and never reach the browser. This is the Backend for Frontend architecture of [RFC 10017 §6.1, *OAuth 2.0 for Browser-Based Applications* (IETF, 2026)](https://www.rfc-editor.org/rfc/rfc10017#section-6.1), where tokens stay on the server and the browser holds none.
 - Fetched rows are cached in memory in a bounded LRU cache and are never persisted.

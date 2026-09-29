@@ -269,9 +269,7 @@ Real-run evidence flows through a fixed contract:
 
 **Synthetic Platform** (`gui/`) is a local web app that reads and explains this project's data: evaluations and their scorecards, validation runs and the DLQ, source statistics, the RAG embedding space, and every generation knob with its value from the code. It runs on a seeded mock with no GCP access (`npm ci && npm run build && npm start` in `gui/`, then open `http://127.0.0.1:8787`), or against your BigQuery tables through named, read-only, bytes-capped queries on a backend bound to `127.0.0.1`. It writes nothing, the pipeline does not depend on it, and it is not part of the Dataflow Solution Guides copy.
 
-![Synthetic Platform: the EVALUATION run view of one evaluation in mock mode, with its tables in scope, headline numbers and family scorecards](gui/docs/assets/evaluation-run-1440.png)
-
-Quickstart for live mode, environment variables and the four tabs: [`gui/README.md`](gui/README.md).
+Quickstart for live mode, environment variables, the four tabs and screenshots: [`gui/README.md`](gui/README.md).
 
 ## Documentation map
 
