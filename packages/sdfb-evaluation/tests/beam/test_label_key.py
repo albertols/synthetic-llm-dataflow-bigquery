@@ -77,6 +77,12 @@ def test_read_label_key_reads_a_local_file_verbatim(tmp_path):
   assert read_label_key(str(path)) == b"\x00secret\n"
 
 
+def test_a_compressed_looking_name_is_still_read_verbatim(tmp_path):
+  path = tmp_path / "label.key.gz"  # not gzip: AUTO would try to inflate it
+  path.write_bytes(b"raw-key-bytes")
+  assert read_label_key(str(path)) == b"raw-key-bytes"
+
+
 def test_read_label_key_reads_a_secret_manager_version():
   session = _Session(
       _Response(200, {"payload": {

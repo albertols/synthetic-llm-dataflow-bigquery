@@ -98,8 +98,12 @@ def read_label_key(uri: str,
       session_factory = make_session
     return _secret(uri, session_factory)
   if uri.startswith("gs://") or os.path.isabs(uri):
-    from apache_beam.io.filesystems import FileSystems  # pylint: disable=import-outside-toplevel  # a worker-side read
-    with FileSystems.open(uri) as handle:
+    from apache_beam.io.filesystem import CompressionTypes  # pylint: disable=import-outside-toplevel  # a worker-side read
+    from apache_beam.io.filesystems import FileSystems  # pylint: disable=import-outside-toplevel  # same
+    # UNCOMPRESSED: the key is the object's bytes, whatever its suffix
+    # (AUTO would gunzip a `key.gz`)
+    with FileSystems.open(
+        uri, compression_type=CompressionTypes.UNCOMPRESSED) as handle:
       data: bytes = handle.read()
     return data
   raise ValueError("label key URI must be a Secret Manager version "

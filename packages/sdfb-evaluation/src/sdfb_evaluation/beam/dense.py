@@ -110,20 +110,30 @@ null patterns, contingency tables for the 5 most divergent pairs only,
 and a KEYED hashed label `h:<8 hex>` (`canonical.hashed_label`, R64) for
 every dictionary value D6 keeps out of a payload.
 
-Source extremes (R65): a source-drawn side's (source, reference,
-holdout) exact min and max are each a single record's value, so no
-payload or detail shows them; range_adherence and range_coverage compare
-against them internally, and payloads/details carry the side's
-p0.5/p99.5 instead (`extremes: "p0.5_p99.5"`). The synthetic side shows
-its exact extremes.
+Extremes (R65, R71): an exact min or max is a single record's value, so
+no payload or detail shows one, on ANY side — a source-drawn side's
+(source, reference, holdout) is a source record, and a generator that
+clamps to the source range would publish the source extremes through the
+synthetic side. range_adherence and range_coverage compare against them
+internally; payloads and details carry each side's p0.5/p99.5 instead
+(`extremes: "p0.5_p99.5"`).
 
-Count rule (R69, k = RARE_COUNT = 10): a bound, end edge or tail quantile
-is published only when at least k records lie at or beyond it. Bounds
-need n * 0.005 >= k; a histogram or pair-axis edge needs k source records
-at or below AND at or above it (exact from the left- and right-closed
-profile bins; the same edges then serve every side, as they all come from
-the source grid; a common end atom qualifies, a lone extreme never does);
-a quantile payload keeps only the p with p * n >= k and (1 - p) * n >= k.
+Count rule (R69, R71; k = RARE_COUNT = 10): a bound, end edge or tail
+quantile is published only when at least k SOURCE records lie at or
+beyond it.
+  - Histogram and pair-axis edges need k source records at or below AND
+    at or above them (exact from the left- and right-closed profile
+    bins); the same edges serve every side, as they all come from the
+    source grid; a common end atom qualifies, a lone extreme never does.
+  - Every side's quantiles and bounds interpolate over the union bins
+    MERGED across the edges without k source records at or below and k
+    above (exact from the source's union counts), so neither an
+    interpolation plateau nor a clamp can land on a source tail value
+    (R71); a quantile payload also keeps only the p with p * n >= k and
+    (1 - p) * n >= k, and bounds need n * 0.005 >= k (n the side's own).
+  - The counts include any ±inf a hand-built batch carries (the encoder
+    turns non-finite values into NULL-like NaN) while Moments.n does not,
+    which only ever withholds more (the conservative direction).
 
 References (author-year, R22): Pébay (2008); Chan, Golub & LeVeque (1983);
 Czado, Gneiting & Held (2009) for the mid-CDF PIT; Wilson (1927);
@@ -275,14 +285,12 @@ _MIN_OCCUPIED = 2  # rows/columns a joint table needs for an association
 _MICROS_PER_SECOND = 1e6
 _QUANTILE_PROBS = tuple(round(p / 100, 2) for p in range(1, 100))
 _INNER_DECILE_PROBS = tuple(k / 10 for k in range(1, 10))
-# R65: a source-drawn side's profile shows these quantiles, never its
-# exact min/max (each a single record's value)
+# R65/R71: every side's profile shows these quantiles, never its exact
+# min/max (each a single record's value)
 _BOUND_PROBS = (0.005, 0.995)
 # R69: a published bound, end edge or tail quantile has at least this many
 # records at or beyond it (D6/R56's k-anonymity floor, plan.LITERAL_MIN_COUNT)
 RARE_COUNT = 10
-_SOURCE_DRAWN = frozenset(
-    {Side.SOURCE.value, Side.REFERENCE.value, Side.HOLDOUT.value})
 _EDGE_DIGITS = range(6, 18)  # 17 significant digits tell any two floats apart
 _TIME_UNITS: tuple[Literal["s"], Literal["ms"],
                    Literal["us"]] = ("s", "ms", "us")
@@ -874,6 +882,9 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
     for gi, grid in enumerate(spec.grids):
       values = batch.num[:, grid.num_k][~null[:, grid.j]]
       self.moments[gi].add_array(values)  # non-finite → Moments.nonfinite
+      # NaN out; a ±inf (never from the encoder, which maps non-finite to
+      # NaN) would land in the end bins and not in Moments.n, which only
+      # makes the R69/R71 count rule withhold more (conservative)
       finite = values[~np.isnan(values)]
       self.union[gi] += binned.bin_counts(finite, grid.union)
       self.profile[gi] += binned.bin_counts(finite, grid.profile)
@@ -1389,18 +1400,18 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
 
 def _source_bounds(grid: _Grid, gi: int, s: _Sides) -> dict[str, Any]:
   """The source's p0.5/p99.5 (R65: in place of its exact extremes)."""
-  lo, hi = _profile_bounds(grid, s.src, gi)
+  lo, hi = _profile_bounds(grid, s.src, gi, _safe_union(s.src, gi))
   return {"source_p0_5": lo, "source_p99_5": hi}
 
 
 def _coverage_detail(grid: _Grid, gi: int, s: _Sides) -> dict[str, Any]:
-  my = s.syn.moments[gi]
+  lo, hi = _profile_bounds(grid, s.syn, gi, _safe_union(s.src, gi))
   return {
       **_source_bounds(grid, gi, s),
-      "synthetic_min": my.min,
-      "synthetic_max": my.max,
+      "synthetic_p0_5": lo,
+      "synthetic_p99_5": hi,
       "unit": grid.unit,
-      "bounds": "the source's exact min and max (not shown, R65)",
+      "bounds": "each side's exact min and max (not shown, R65/R71)",
   }
 
 
@@ -1878,17 +1889,36 @@ def _edges_digest(edges: np.ndarray, unit: str) -> str:
   return hashlib.blake2b(payload, digest_size=16).hexdigest()
 
 
-def _profile_bounds(grid: _Grid, p: DenseProfile,
-                    gi: int) -> tuple[float | None, float | None]:
-  """A side's p0.5 / p99.5 from its union bins — what a source-drawn
-  side's payloads and details show instead of its exact extremes (R65).
+def _safe_union(src: DenseProfile, gi: int) -> np.ndarray:
+  """The union edges a quantile may interpolate over (R71): those with at
+  least RARE_COUNT source records at or below AND above them, exact from
+  the source's union counts. Every source tail value lies outside the
+  kept range, so no plateau or clamp can land on one."""
+  below = np.cumsum(src.union[gi])[:-1]  # count(x <= e_i)
+  total = int(src.union[gi].sum())
+  safe: np.ndarray = (below >= RARE_COUNT) & (total - below >= RARE_COUNT)
+  return safe
+
+
+def _side_quantiles(grid: _Grid, p: DenseProfile, gi: int, safe: np.ndarray,
+                    probs: Sequence[float]) -> list[float]:
+  """A side's quantiles over its union bins merged across the edges
+  `_safe_union` withholds (NaN when no edge is left)."""
+  return binned.quantiles_from_bins(grid.union[safe],
+                                    _merged(p.union[gi], safe), probs)
+
+
+def _profile_bounds(grid: _Grid, p: DenseProfile, gi: int,
+                    safe: np.ndarray) -> tuple[float | None, float | None]:
+  """A side's p0.5 / p99.5 over the merged union bins — what every side's
+  payloads and details show instead of its exact extremes (R65, R71).
   Published only when n * 0.005 >= RARE_COUNT, so at least k records lie
   at or beyond each (R69); a bound outside the side's own [min, max] is an
   interpolation artifact and is withheld too."""
   m = p.moments[gi]
   if m.n * _BOUND_PROBS[0] < RARE_COUNT:
     return None, None
-  bounds = binned.quantiles_from_bins(grid.union, p.union[gi], _BOUND_PROBS)
+  bounds = _side_quantiles(grid, p, gi, safe, _BOUND_PROBS)
   shown = [
       float(b) if np.isfinite(b) and m.min <= b <= m.max else None
       for b in bounds
@@ -1925,24 +1955,12 @@ def _tail_safe(probs: Sequence[float], n: int) -> list[float]:
   ]
 
 
-def _extremes(grid: _Grid, p: DenseProfile,
-              gi: int) -> tuple[float | None, float | None, str]:
-  """(min, max, what they are) for a payload: exact on the synthetic side,
-  the p0.5/p99.5 bounds on a source-drawn side (R65)."""
-  m = p.moments[gi]
-  if p.side in _SOURCE_DRAWN:
-    lo, hi = _profile_bounds(grid, p, gi)
-    return lo, hi, "p0.5_p99.5"
-  if not m.n:
-    return None, None, "exact"
-  return float(m.min), float(m.max), "exact"
-
-
 def _grid_profiles(spec: DenseSpec, p: DenseProfile,
                    src: DenseProfile) -> Iterator[ProfileValue]:
   for gi, grid in enumerate(spec.grids):
     m = p.moments[gi]
     kept = _published(src, gi)
+    safe = _safe_union(src, gi)
     edges = grid.profile[kept]
     unit = "epoch_seconds" if grid.kind is _TEMPORAL else "value"
     scale = grid.scale
@@ -1951,7 +1969,8 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
       number = _json_number(x)
       return None if number is None else number * scale
 
-    low, high, extremes = _extremes(grid, p, gi)
+    low, high = _profile_bounds(grid, p, gi, safe)
+    extremes = "p0.5_p99.5"
 
     yield ProfileValue(
         profile_kind="histogram",
@@ -1970,7 +1989,7 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
         side=p.side,
         column=grid.name)
     probs = _tail_safe(_QUANTILE_PROBS, m.n)
-    values = binned.quantiles_from_bins(grid.union, p.union[gi], probs)
+    values = _side_quantiles(grid, p, gi, safe, probs)
     if probs and np.isfinite(values).all():  # the GUI's values are numbers
       yield ProfileValue(
           profile_kind="quantiles",

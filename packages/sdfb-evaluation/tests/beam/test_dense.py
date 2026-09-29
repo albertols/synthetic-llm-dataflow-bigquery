@@ -1269,32 +1269,22 @@ def _numbers(obj: Any) -> Iterator[float]:
 def test_no_source_extreme_in_any_payload_or_detail():
   table, rows_by = orders_table()
   metrics, profiles = _pure(table, rows_by)
-  secrets = set()
-  for side in ("source", "reference", "holdout"):
-    for name in ("amount", "created_at"):  # continuous: lone extremes
-      x = _finite(rows_by[side], name)
-      for extreme in (x.min(), x.max()):
-        secrets.update({float(extreme), float(extreme) / 1e6})
-  shown = [
-      n for p in profiles if p.side != "synthetic" for n in _numbers(p.payload)
-  ] + [n for m in metrics for n in _numbers(m.detail)]
-  leaks = [
-      n for n in shown for s in secrets if math.isclose(n, s, rel_tol=1e-12)
-  ]
-  assert not leaks
-  # the payloads say what their extremes are
+  assert not _leaks(metrics, profiles, rows_by, ("amount", "created_at"))
+  # no side shows its exact extremes (R71): each says what it shows
   histograms = {
       (p.side, p.column): p.payload
       for p in profiles
       if p.profile_kind == "histogram"
   }
-  assert histograms[("source", "amount")]["extremes"] == "p0.5_p99.5"
-  assert histograms[("synthetic", "amount")]["extremes"] == "exact"
+  assert {h["extremes"] for h in histograms.values()} == {"p0.5_p99.5"}
   xy = _finite(rows_by["synthetic"], "amount")
-  assert histograms[("synthetic", "amount")]["min"] == xy.min()
+  synthetic = histograms[("synthetic", "amount")]
+  assert xy.min() < synthetic["min"] < synthetic["max"] < xy.max()
   coverage = _by_key(metrics)[("column.range_coverage", "amount", None)]
   assert coverage.detail["source_p0_5"] is not None
-  assert "source_min" not in coverage.detail
+  assert coverage.detail["synthetic_p0_5"] is not None
+  assert not {"source_min", "synthetic_min", "synthetic_max"} & set(
+      coverage.detail)
 
 
 def test_contingency_tvd_noise_floor_is_the_joint_null_expectation():
@@ -1432,6 +1422,7 @@ _TINY_FIELDS = (
     },
 )
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:e[-+]?\d+)?")
+_ISO = re.compile(r"\d{4}-\d\d-\d\dT[\d:.]+")
 
 
 def _tiny(n: int, seed: int) -> list[dict]:
@@ -1454,6 +1445,29 @@ def _extremes_of(rows: Sequence[Mapping[str, Any]],
   return out
 
 
+def _tail_values(rows: Sequence[Mapping[str, Any]], name: str) -> set[float]:
+  """The column's values with fewer than RARE_COUNT records at or below
+  or at or above them: what R69/R71 never lets a payload show (the exact
+  extremes among them)."""
+  v = np.sort(_finite(rows, name))
+  below = np.searchsorted(v, v, side="right")
+  above = v.size - np.searchsorted(v, v, side="left")
+  return set(v[(below < RARE_COUNT) | (above < RARE_COUNT)].tolist())
+
+
+def _floats(obj: Any) -> Iterator[float]:
+  """Every float in a payload or detail (record values are floats; the
+  counts beside them are ints and never a record's value)."""
+  if isinstance(obj, float):
+    yield obj
+  elif isinstance(obj, Mapping):
+    for value in obj.values():
+      yield from _floats(value)
+  elif isinstance(obj, (list, tuple)):
+    for value in obj:
+      yield from _floats(value)
+
+
 def _label_shows(token: str, secret: float) -> bool:
   """Whether a label's printed number is `secret` at the label's own
   precision (its significant digits)."""
@@ -1462,28 +1476,62 @@ def _label_shows(token: str, secret: float) -> bool:
   return f"{secret:.{digits}g}" == f"{float(token):.{digits}g}"
 
 
-def _leaks(metrics: Sequence[MetricValue], profiles: Sequence[ProfileValue],
-           rows_by: Mapping[str, list], names: Sequence[str]) -> list:
-  """Every shown number that is a SOURCE record's exact extreme (payloads
-  and details exactly; contingency labels at their printed precision),
-  plus any reference/holdout payload min/max that is that side's own
+def _iso_shows(stamp: str, secret: float) -> bool:
+  """Whether an ISO label is the micros `secret` at the label's own unit."""
+  clock_part = stamp.split("T")[1]
+  unit = {8: "s", 12: "ms"}.get(len(clock_part), "us")
+  shown = np.datetime_as_string(np.datetime64(int(secret), "us"), unit=unit)
+  return bool(shown == stamp)
+
+
+def _label_leaks(labels: Sequence[str], secrets: set[float]) -> list:
+  found = []
+  for label in labels:
+    stamps = _ISO.findall(label)
+    if stamps:
+      found += [(label, s) for t in stamps for s in secrets if _iso_shows(t, s)]
+      continue
+    found += [(label, s)
+              for token in _NUMBER.findall(label)
+              for s in secrets
+              if _label_shows(token, s)]
+  return found
+
+
+def _leaks(metrics: Sequence[MetricValue],
+           profiles: Sequence[ProfileValue],
+           rows_by: Mapping[str, list],
+           names: Sequence[str],
+           *,
+           tail: bool = False) -> list:
+  """Every shown value that is one of a column's SOURCE secrets — its
+  exact extremes, or with `tail` every value with fewer than k records at
+  or beyond it — matched against that column's own payloads, details and
+  axis labels only: floats exactly, temporal payloads also in epoch
+  seconds, labels at their printed precision (ISO labels at their unit).
+  Also any reference/holdout payload min/max that is that side's own
   exact extreme."""
-  secrets = _extremes_of(rows_by["source"], names)
-  shown = [n for p in profiles for n in _numbers(p.payload)]
-  shown += [n for m in metrics for n in _numbers(m.detail)]
-  found = [
-      n for n in shown for s in secrets if math.isclose(n, s, rel_tol=1e-12)
-  ]
-  labels = [
-      label for p in profiles if p.profile_kind == "contingency"
-      for label in (*p.payload["x_labels"], *p.payload["y_labels"])
-      if ":" not in label  # numeric axes (timestamps print as ISO)
-  ]
-  found += [(label, s)
-            for label in labels
-            for token in _NUMBER.findall(label)
-            for s in secrets
-            if _label_shows(token, s)]
+  found: list = []
+  for name in names:
+    secrets = (
+        _tail_values(rows_by["source"], name) if tail else _extremes_of(
+            rows_by["source"], [name]))
+    scaled = secrets | {v / 1e6 for v in secrets}
+    shown = [
+        x for p in profiles if p.column == name for x in _floats(p.payload)
+    ]
+    shown += [
+        x for m in metrics if name in (m.column, m.column_2)
+        for x in _floats(m.detail)
+    ]
+    found += [(name, x) for x in shown if x in scaled]
+    for p in profiles:
+      if p.profile_kind != "contingency":
+        continue
+      if p.payload["column_x"] == name:
+        found += _label_leaks(p.payload["x_labels"], secrets)
+      if p.payload["column_y"] == name:
+        found += _label_leaks(p.payload["y_labels"], secrets)
   for p in profiles:
     if p.side in ("reference", "holdout") and p.column in names and (
         p.profile_kind in ("histogram", "moments")):
@@ -1508,10 +1556,11 @@ def test_small_tables_publish_no_source_extreme(n, monkeypatch):
   metrics, profiles = _pure(table, rows_by)
   assert [p for p in profiles if p.profile_kind == "contingency"]
   assert not _leaks(metrics, profiles, rows_by, ("x", "y"))
+  assert not _leaks(metrics, profiles, rows_by, ("x", "y"), tail=True)
   for p in profiles:
-    if p.profile_kind in ("histogram", "moments") and p.side != "synthetic":
-      # n * 0.005 < 10: bounds withheld, so no "p0.5" below a side's own
-      # minimum (the n = 190 artifact) can be shown
+    if p.profile_kind in ("histogram", "moments"):
+      # n * 0.005 < 10 on every side: bounds withheld, so no "p0.5" below
+      # a side's own minimum (the n = 190 artifact) can be shown
       assert p.payload["min"] is None and p.payload["max"] is None
     if p.profile_kind == "quantiles":
       for q in p.payload["probs"]:
@@ -1555,3 +1604,118 @@ def test_bounds_are_shown_once_n_clears_the_count_rule():
                    p.side == "reference" and p.column == "amount")
   assert reference.payload["min"] is None
   assert not _leaks(metrics, profiles, rows_by, ("amount", "created_at"))
+
+
+# --------------------------------------------------------------------------
+# review round 3: no source tail value through any side's quantiles (R71)
+# --------------------------------------------------------------------------
+def _uniform_rows(values: np.ndarray) -> list[dict]:
+  return [{"id": i, "x": float(v)} for i, v in enumerate(values)]
+
+
+def test_synthetic_quantiles_never_land_on_a_source_extreme():
+  # the reviewer's construction: 30 of 3,000 synthetic values below the
+  # source min, the 31st between the source min and its second value, so
+  # the synthetic p0.01 sat on the source min (an interpolation plateau)
+  rng = np.random.default_rng(7)
+  src = rng.normal(50, 10, 3000)
+  ordered = np.sort(src)
+  lo, lo2 = ordered[0], ordered[1]
+  syn = np.concatenate([
+      rng.uniform(lo - 20, lo - 1, 30),
+      [lo + (lo2 - lo) / 2],
+      rng.uniform(lo2 + 1e-9, ordered[-1], 2969),
+  ])
+  source, synthetic = _uniform_rows(src), _uniform_rows(syn)
+  table = planned_table("q", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  rows_by = {"source": source, "synthetic": synthetic}
+  metrics, profiles = _pure(table, rows_by)
+  assert not _leaks(metrics, profiles, rows_by, ("x",), tail=True)
+  quantiles = next(p for p in profiles
+                   if p.profile_kind == "quantiles" and p.side == "synthetic")
+  assert lo not in quantiles.payload["values"]
+  assert quantiles.payload["probs"][0] == 0.01  # the payload still shows p1
+
+
+def test_a_generator_clamping_to_the_source_range_shows_no_source_extreme():
+  rng = np.random.default_rng(8)
+  src = rng.normal(50, 10, 3000)
+  syn = np.clip(rng.normal(50, 20, 3000), src.min(), src.max())
+  source, synthetic = _uniform_rows(src), _uniform_rows(syn)
+  table = planned_table("clamp", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  rows_by = {"source": source, "synthetic": synthetic}
+  metrics, profiles = _pure(table, rows_by)
+  # hundreds of synthetic records sit on each source extreme, yet no
+  # synthetic payload or detail shows them (R71)
+  assert np.count_nonzero(syn == src.min()) > RARE_COUNT
+  assert not _leaks(metrics, profiles, rows_by, ("x",), tail=True)
+
+
+_PROPERTY_FIELDS = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "x",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "y",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "t",
+        "type": "TIMESTAMP",
+        "mode": "NULLABLE"
+    },
+)
+_T0 = datetime(2024, 1, 1, tzinfo=UTC)
+
+
+def _property_rows(n: int,
+                   seed: int,
+                   *,
+                   sd: float = 10.0,
+                   tsd: float = 86_400e6) -> list[dict]:
+  rng = np.random.default_rng(seed)
+  xs = rng.normal(50, sd, n)
+  ys = rng.normal(20, 5, n) + 0.3 * xs
+  ts = np.abs(rng.normal(30 * 86_400e6, tsd, n))
+  return [{
+      "id": i,
+      "x": float(x),
+      "y": float(y),
+      "t": _T0 + timedelta(microseconds=int(t))
+  } for i, (x, y, t) in enumerate(zip(xs, ys, ts, strict=True))]
+
+
+@pytest.mark.parametrize(("n", "shape"), [(20, "wide"), (50, "narrow"),
+                                          (190, "same"), (400, "wide"),
+                                          (3000, "narrow")])
+def test_no_source_tail_value_on_any_side_property(n, shape, monkeypatch):
+  """The reviewer's generic probe as a seeded property: every float any
+  side's payload, any detail or any axis label shows is never a source
+  value with fewer than k records at or beyond it (x, y and a TIMESTAMP,
+  whose payloads are in epoch seconds and labels ISO)."""
+  monkeypatch.setattr(dense, "CONTINGENCY_TOP_PAIRS", 10_000)
+  source = _property_rows(n, seed=n)
+  spread = {
+      "same": (n, 10.0, 86_400e6),
+      "wide": (3000, 30.0, 5 * 86_400e6),
+      "narrow": (3000, 2.0, 86_400e6 / 5)
+  }[shape]
+  synthetic = _property_rows(spread[0], seed=n + 1, sd=spread[1], tsd=spread[2])
+  cut = max(1, n // 5)
+  rows_by = {
+      "source": source,
+      "synthetic": synthetic,
+      "reference": source[:cut],
+      "holdout": source[cut:2 * cut],
+  }
+  table = planned_table("p", _PROPERTY_FIELDS, source, synthetic, pk=("id",))
+  metrics, profiles = _pure(table, rows_by)
+  assert not _leaks(metrics, profiles, rows_by, ("x", "y", "t"), tail=True)
