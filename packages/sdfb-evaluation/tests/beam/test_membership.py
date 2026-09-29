@@ -42,10 +42,13 @@ from apache_beam.internal import pickler
 from apache_beam.portability import common_urns
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.testing.test_pipeline import TestPipeline as BeamTestPipeline
+from apache_beam.coders import coders
+from apache_beam.pvalue import TaggedOutput
 from apache_beam.testing.util import assert_that
+from scipy.stats import hypergeom
 
 from sdfb_evaluation.beam import census, dense, membership
-from sdfb_evaluation.beam.encode import EncodeSide, key_hash
+from sdfb_evaluation.beam.encode import BatchEncoder, EncodeSide, key_hash
 from sdfb_evaluation.beam.io import InMemorySources
 from sdfb_evaluation.beam.label_key import LabelKey
 from sdfb_evaluation.beam.membership import (
@@ -59,17 +62,25 @@ from sdfb_evaluation.beam.membership import (
     PanelIndex,
     PanelRefs,
     RowFlag,
+    RowKeysFn,
     batch_membership,
     flag_row,
-    key_counts,
     membership_outputs,
+    duplicate_null_variance,
+    rarefied_duplicates,
 )
 from sdfb_evaluation.canonical import hashed_label
 from sdfb_evaluation.catalogue import load_catalogue
+from sdfb_evaluation.context.budget import (
+    MEMBERSHIP_CODE_BYTES,
+    fixed_shuffle_bytes,
+    source_sets_fit,
+)
+from sdfb_evaluation.context.reference import Panel
 from sdfb_evaluation.schemas import load_schema
 from sdfb_evaluation.scoring import status_for, to_metric_row
 from sdfb_evaluation.stats import noise
-from sdfb_evaluation.types import MetricValue, Status
+from sdfb_evaluation.types import Method, MetricValue, Status
 
 from .membership_data import (
     CATALOG_PATTERNS,
@@ -369,7 +380,8 @@ def test_reference_unverified_marks_lifts_not_evaluated():
                     "row.near_match_rate", "row.near_match_lift"):
     mv = by_id[metric_id]
     assert mv.value is None and mv.ci_low is None, metric_id
-    assert mv.detail["reason"] == UNVERIFIED_REASON, metric_id
+    assert mv.detail["reason"] == (f"{UNVERIFIED_REASON}: reference digest "
+                                   "mismatch (test)"), metric_id
     assert _status(mv) is Status.NOT_EVALUATED
   # the full-source metrics are still computed
   assert by_id["row.exact_match_rate_nonkey"].value == pytest.approx(
@@ -622,19 +634,76 @@ def test_all_null_nonkey_rows_never_match_or_duplicate():
   assert not result.flags
 
 
-def test_internal_duplicates_count_the_full_data():
-  """R59: duplicate rates at FULL n on both sides (never the matched-n
-  subsample), synthetic minus source, with a Newcombe interval and the
-  reference sample's own rate as the baseline (D4)."""
+def _brute_rarefied(counts: Sequence[int], m: int) -> float:
+  """E[D_m] summed over records by the full hypergeometric pmf: an
+  independent formulation of `rarefied_duplicates`."""
+  total = sum(counts)
+  d = 0.0
+  for c in counts:
+    xs = np.arange(2, min(c, m) + 1)
+    d += float((xs * hypergeom.pmf(xs, total, c, m)).sum())
+  return d
+
+
+def _subsample_duplicates(rows: np.ndarray, m: int, draws: int,
+                          seed: int) -> np.ndarray:
+  """Rows in duplicate groups of `draws` uniform m-subsets of `rows`."""
+  rng = np.random.default_rng(seed)
+  out = []
+  for _ in range(draws):
+    _, held = np.unique(
+        rng.choice(rows, size=m, replace=False), return_counts=True)
+    out.append(int(held[held >= 2].sum()))
+  return np.array(out)
+
+
+def test_rarefied_duplicates_match_the_hypergeometric_and_simulation():
+  counts = [1] * 400 + [2] * 60 + [3] * 15 + [7] * 3 + [40]
+  freqs = tuple(sorted(Counter(counts).items()))
+  total = sum(counts)
+  for m in (1, 2, 50, 300, total - 1, total, total + 5):
+    assert rarefied_duplicates(freqs, m) == pytest.approx(
+        _brute_rarefied(counts, min(m, total)), rel=1e-9, abs=1e-9), m
+  assert rarefied_duplicates(freqs, 0) == 0.0
+  assert rarefied_duplicates((), 10) == 0.0
+  rows = np.repeat(np.arange(len(counts)), counts)
+  simulated = _subsample_duplicates(rows, 250, 2000, seed=3)
+  assert float(simulated.mean()) == pytest.approx(
+      rarefied_duplicates(freqs, 250), rel=0.02)
+
+
+def test_duplicate_null_variance_matches_subsampling():
+  """The null variance of the duplicate count of an m-subset of the
+  pooled rows (exact, via the multivariate hypergeometric) against a
+  simulation, on a skewed pool, a paired pool and an all-unique pool."""
+  rng = np.random.default_rng(0)
+  skewed = rng.choice(
+      CATALOG_PATTERNS, size=8800, p=zipf_weights(CATALOG_PATTERNS, 1.1))
+  paired = np.concatenate(
+      [np.arange(4000), np.repeat(np.arange(4000, 4500), 2)])
+  for pool, m in ((skewed, 800), (skewed, 4400), (paired, 1000)):
+    freqs = tuple(sorted(Counter(Counter(pool.tolist()).values()).items()))
+    simulated = _subsample_duplicates(pool, m, 3000, seed=m)
+    assert duplicate_null_variance(freqs, m) == pytest.approx(
+        float(simulated.var()), rel=0.12), m
+  assert duplicate_null_variance(((1, 5000),), 1000) == 0.0
+  assert duplicate_null_variance(((2, 10),), 20) == 0.0  # m = N
+
+
+def test_internal_duplicates_rarefy_the_larger_side():
+  """R73: both sides at matched n = min(n_src, n_syn) content rows — the
+  smaller side at its observed share, the larger by exact rarefaction —
+  with a design-effect Newcombe interval and the reference sample's own
+  rarefied rate as the baseline (D4)."""
   source = people_rows(2000, 31, SOURCE_ID_BASE)
   synthetic = people_rows(5000, 32, SYNTHETIC_ID_BASE)
   for k in range(30):  # 30 source records repeated once: 60 rows
     source[1000 + k] = copy_content(source[1500 + k], source[1000 + k])
-  for k in range(100):  # 100 synthetic records repeated twice: 300 rows
+  for k in range(100):  # 100 synthetic records held three times: 300 rows
     for extra in (1, 2):
       at = 1000 + 3 * k + extra
       synthetic[at] = copy_content(synthetic[1000 + 3 * k], synthetic[at])
-  for k in range(5):  # two duplicated pairs inside R
+  for k in range(5):  # five duplicated pairs inside R
     source[10 + k] = copy_content(source[20 + k], source[10 + k])
   table = planned(
       "people",
@@ -648,14 +717,58 @@ def test_internal_duplicates_count_the_full_data():
       "source": source,
       "synthetic": synthetic
   }).metrics)["row.internal_duplicate_excess"]
-  d_src, d_syn = 70 / 2000, 300 / 5000
+  d_syn = _brute_rarefied([3] * 100 + [1] * 4700, 2000) / 2000
+  d_src = 70 / 2000  # the smaller side: its observed share
+  assert mv.detail["matched_n"] == 2000
+  assert mv.detail["duplicate_rows_synthetic"] == 300  # full n, observed
   assert mv.source_value == pytest.approx(d_src)
   assert mv.synthetic_value == pytest.approx(d_syn)
   assert mv.value == pytest.approx(d_syn - d_src)
-  lo, hi = noise.newcombe_diff_interval(300, 5000, 70, 2000)
-  assert (mv.ci_low, mv.ci_high) == pytest.approx((lo, hi))
-  assert mv.baseline_value == pytest.approx(10 / 500 - d_src)
+  assert mv.ci_low < mv.value < mv.ci_high
+  # the pooled null's effective n never exceeds m: never narrower than an
+  # independent-rows interval
+  naive = noise.newcombe_diff_interval(
+      round(d_syn * 2000), 2000, round(d_src * 2000), 2000)
+  assert mv.ci_high - mv.ci_low >= naive[1] - naive[0] - 1e-12
+  assert mv.detail["null_sd_share"] > 0.0
+  # D4: R (500 rows, five pairs) against the source rarefied to 500
+  src_counts = [2] * 35 + [1] * 1930
+  assert mv.baseline_value == pytest.approx(10 / 500 -
+                                            _brute_rarefied(src_counts, 500) /
+                                            500)
   assert mv.n_source == 2000 and mv.n_synthetic == 5000
+
+
+def test_faithful_generator_with_ten_times_the_rows_passes_duplicates():
+  """A generator drawing from the source's own skewed distribution, with
+  10x the rows, holds far more duplicates at full n (the old full-n excess
+  FAILed at ~0.37); at matched n it passes."""
+  weights = zipf_weights(CATALOG_PATTERNS, 1.1)
+  for seed in range(4):
+    rng = np.random.default_rng(40 + seed)
+    source = rng.choice(CATALOG_PATTERNS, size=800, p=weights)
+    synthetic = rng.choice(CATALOG_PATTERNS, size=8000, p=weights)
+    table, rows = catalog_table(source, synthetic, n_reference=300)
+    mv = _by_id(_pure(table, rows).metrics)["row.internal_duplicate_excess"]
+    full_n = (
+        mv.detail["duplicate_rows_synthetic"] / 8000 -
+        mv.detail["duplicate_rows_source"] / 800)
+    assert full_n >= 0.05, seed  # the old full-n excess FAILed
+    assert mv.detail["matched_n"] == 800
+    assert mv.ci_low <= 0.0 <= mv.ci_high, (seed, mv)
+    assert _status(mv) is Status.PASS, (seed, mv)
+
+
+def test_planted_duplicates_fail_at_matched_n():
+  weights = zipf_weights(CATALOG_PATTERNS, 1.1)
+  rng = np.random.default_rng(9)
+  source = rng.choice(CATALOG_PATTERNS, size=800, p=weights)
+  synthetic = rng.choice(CATALOG_PATTERNS, size=8000, p=weights)
+  synthetic[:3200] = np.repeat(synthetic[3200:3400], 16)  # a small pool
+  table, rows = catalog_table(source, synthetic, n_reference=300)
+  mv = _by_id(_pure(table, rows).metrics)["row.internal_duplicate_excess"]
+  assert mv.value >= 0.05 and mv.ci_low > 0.0
+  assert _status(mv) is Status.FAIL
 
 
 def test_panel_size_guard_skips_near_matching_with_a_reason():
@@ -688,34 +801,97 @@ def test_flags_are_bounded_ranked_and_deterministic():
   assert rechunked == first
 
 
+def _row_key_outputs(fn: RowKeysFn, batches: Sequence[Any]) -> list[tuple]:
+  """RowKeysFn's main outputs over one bundle (tagged outputs dropped)."""
+  fn.start_bundle()
+  out = [
+      o for b in batches for o in fn.process(b)
+      if not isinstance(o, TaggedOutput)
+  ]
+  out += [wv.value for wv in fn.finish_bundle()]
+  return out
+
+
 def test_keyed_counts_do_not_depend_on_buckets_or_compaction(monkeypatch):
   table, rows, _ = _people_with(copies=20, near_copies=5)
   baseline = _pure(table, rows)
   monkeypatch.setattr(membership, "_bucket_bits", lambda _table: 5)
   monkeypatch.setattr(membership, "_COMPACT_CODES", 64)
   assert _pure(table, rows) == baseline
-  # the keyed-count combine: split and merged in any order, exact sums
+  # the keyed-count combine over packed parts: split and merged in any
+  # order, the same exact counts; every code in its own bucket
   spec = MembershipSpec.from_table(table, salt=SALT)
   assert spec.bucket_bits == 5
   parts: dict[tuple, list] = {}
-  for batch in encode_all(table, rows):
-    for key, part in key_counts(spec, batch)[0]:
-      parts.setdefault(key, []).append(part)
+  for key, part in _row_key_outputs(
+      RowKeysFn({table.name: spec}, flush_codes=64), encode_all(table, rows)):
+    parts.setdefault(key, []).append(part)
   assert len({key[2] for key in parts}) > 1
   fn = KeyCountsCombineFn()
-  for (_, _, bucket), items in parts.items():
+  content_rows = 0
+  for (_, kind, bucket), items in parts.items():
     whole = fn.extract_output(
         functools.reduce(fn.add_input, items, fn.create_accumulator()))
     halves = [
-        functools.reduce(fn.add_input, items[k::2], fn.create_accumulator())
-        for k in (1, 0)
+        fn.compact(
+            functools.reduce(fn.add_input, items[k::2],
+                             fn.create_accumulator())) for k in (1, 0)
     ]
     merged = fn.extract_output(fn.merge_accumulators(halves))
-    for name in ("codes", "src", "syn"):
+    for name in ("src_codes", "src_counts", "syn_codes", "syn_counts"):
       assert np.array_equal(getattr(whole, name), getattr(merged, name))
-    assert set((whole.codes >> np.uint64(59)).tolist()) == {bucket}
-    assert int(whole.src.sum() + whole.syn.sum()) == sum(
-        int(i.src.sum() + i.syn.sum()) for i in items)
+    for codes in (whole.src_codes, whole.syn_codes):
+      assert set((codes >> np.uint64(59)).tolist()) <= {bucket}
+    if kind == "nk":
+      content_rows += int(whole.src_counts.sum() + whole.syn_counts.sum())
+  assert content_rows == len(rows["source"]) + len(rows["synthetic"])
+
+
+def test_keyed_count_shuffle_stays_within_the_budgeted_bytes_per_code(
+    record_property):
+  """Packed sparse per-side parts, merged per bundle: the bytes a code
+  costs on the shuffle (FastPrimitivesCoder, as Beam encodes them) stay
+  within `budget.MEMBERSHIP_CODE_BYTES` at every bucket count."""
+  table, rows = people_table(n_source=3000, n_synthetic=16384, n_reference=600)
+  spec = MembershipSpec.from_table(table, salt=SALT)
+  batches = encode(table, "synthetic", rows["synthetic"], chunk=4096)
+  codes_in = sum(3 * b.n for b in batches)  # nk, pk and identity per row
+  coder = coders.FastPrimitivesCoder()
+  combine = KeyCountsCombineFn()
+  for bits in (0, 4, 6):  # >= 256 codes a bucket in this bundle
+    fn = RowKeysFn({table.name: dataclasses.replace(spec, bucket_bits=bits)})
+    out = _row_key_outputs(fn, batches)
+    emitted = sum(len(coder.encode(element)) for element in out)
+    by_key: dict[tuple, list] = {}
+    for key, part in out:
+      by_key.setdefault(key, []).append(part)
+    compacted = sum(
+        len(coder.encode((key, combine.compact(list(items)))))
+        for key, items in by_key.items())
+    record_property(f"bytes_per_code_bits_{bits}", round(emitted / codes_in, 2))
+    assert emitted / codes_in <= MEMBERSHIP_CODE_BYTES, bits
+    assert compacted / codes_in <= MEMBERSHIP_CODE_BYTES, bits
+
+
+def test_budget_counts_the_keyed_mode_row_hashes():
+  both = 3e7 + 3e7
+  args: dict[str, Any] = {
+      "rows_source": 3e7,
+      "rows_synthetic": 3e7,
+      "edges": 0,
+      "keyed_counts": 1
+  }
+  side = fixed_shuffle_bytes(**args, nonkey=True, keyed=True, side_input=True)
+  keyed = fixed_shuffle_bytes(**args, nonkey=True, keyed=True, side_input=False)
+  assert keyed - side == pytest.approx(both * MEMBERSHIP_CODE_BYTES)
+  keyless = fixed_shuffle_bytes(
+      **args, nonkey=True, keyed=False, side_input=False)
+  assert keyless == pytest.approx(side)  # the row IS the content
+  # the switch: 8 B a source row and array within 160 MB
+  assert source_sets_fit(2e7, nonkey=True, keyed=False)
+  assert not source_sets_fit(2e7, nonkey=True, keyed=True)
+  assert source_sets_fit(1e7, nonkey=True, keyed=True)
+  assert not source_sets_fit(None, nonkey=True, keyed=True)
 
 
 def test_keyless_table_flags_name_the_record_by_its_content():
@@ -734,11 +910,274 @@ def test_keyless_table_flags_name_the_record_by_its_content():
   assert by_id["table.pk_duplicate_rate"].value is None
   flags = [f for f in result.flags if f.check == EXACT_COPY]
   assert len(flags) == 12
+  donors = BatchEncoder.from_table(
+      table, "reference", salt=SALT).encode(source[:12]).row_hash
+  assert {f.source_key_hash for f in flags} == {
+      hashed_label(int(code), key=LABEL_KEY) for code in donors.tolist()
+  }
   for flag in flags:
     assert flag.synthetic_key is None and flag.detail["full_row"] is True
-    assert flag.source_key_hash is not None
-    assert flag.source_key_hash.startswith("h:")
   _flag_values_absent(flags, {"source": source}, PEOPLE_FIELDS_NAMES)
+
+
+def test_keyless_source_copies_are_labelled_with_the_record_hash():
+  """Copies of source rows OUTSIDE the panel in a key-less table: the flag
+  names the copied record by the keyed label of its row hash."""
+  source = people_rows(900, 31, SOURCE_ID_BASE)
+  synthetic = people_rows(700, 32, SYNTHETIC_ID_BASE)
+  for k in range(5):
+    synthetic[k] = dict(source[800 + k])  # outside R (0..299), H (300..599)
+  table = planned(
+      "people", PEOPLE_FIELDS, source, synthetic, panel=panel_of(source, 300))
+  flags = _pure(table, {"source": source, "synthetic": synthetic}).flags
+  donors = BatchEncoder.from_table(
+      table, "source", salt=SALT).encode(source[800:805]).row_hash
+  assert [f.source_set for f in flags] == ["source"] * 5
+  assert {f.source_key_hash for f in flags} == {
+      hashed_label(int(code), key=LABEL_KEY) for code in donors.tolist()
+  }
+
+
+@pytest.mark.parametrize("heavy_donor", range(6))
+def test_keyless_repeated_copies_take_one_flag_slot(heavy_donor):
+  """One R record copied 200 times plus 20 other copies: the top-10 flags
+  name 10 distinct records (candidates are distinct by synthetic row hash
+  and source code)."""
+  source = people_rows(900, 31, SOURCE_ID_BASE)
+  synthetic = people_rows(700, 32, SYNTHETIC_ID_BASE)
+  for k in range(200):
+    synthetic[k] = dict(source[heavy_donor])
+  for k in range(20):
+    synthetic[200 + k] = dict(source[10 + k])
+  table = planned(
+      "people", PEOPLE_FIELDS, source, synthetic, panel=panel_of(source, 300))
+  flags = _pure(
+      table, {
+          "source": source,
+          "synthetic": synthetic
+      }, row_flags_top_k=10).flags
+  assert len(flags) == 10
+  assert len({f.source_key_hash for f in flags}) == 10
+
+
+def test_identity_only_table_flags_carry_the_identity_handle():
+  source = people_rows(900, 31, SOURCE_ID_BASE)
+  synthetic = people_rows(700, 32, SYNTHETIC_ID_BASE)
+  for k in range(6):
+    synthetic[k] = copy_content(source[k], synthetic[k])
+  table = planned(
+      "people",
+      PEOPLE_FIELDS,
+      source,
+      synthetic,
+      identity=PEOPLE_IDENTITY,
+      panel=panel_of(source, 300))
+  flags = _pure(table, {"source": source, "synthetic": synthetic}).flags
+  assert len(flags) == 6
+  by_handle = {f.synthetic_key["email"]: f for f in flags}
+  for k in range(6):
+    flag = by_handle[synthetic[k]["email"]]
+    assert flag.source_key_hash == hashed_label(
+        key_hash([source[k]["email"]]), key=LABEL_KEY)
+
+
+def test_all_key_table_copies_are_flagged():
+  """Every column a key: the key tuple is the record, so its copies are
+  flagged (the content metrics are not evaluated)."""
+  fields = PEOPLE_FIELDS[:2]
+
+  def keys_of(rows: Sequence[dict]) -> list[dict]:
+    return [{"person_id": r["person_id"], "email": r["email"]} for r in rows]
+
+  source = keys_of(people_rows(900, 31, SOURCE_ID_BASE))
+  synthetic = keys_of(people_rows(700, 32, SYNTHETIC_ID_BASE))
+  for k in range(5):
+    synthetic[k] = dict(source[k])  # inside R
+  for k in range(3):
+    synthetic[10 + k] = dict(source[800 + k])  # outside the panel
+  table = planned(
+      "links",
+      fields,
+      source,
+      synthetic,
+      pk=("person_id",),
+      identity=("email",),
+      panel=panel_of(source, 300))
+  result = _pure(table, {"source": source, "synthetic": synthetic})
+  by_id = _by_id(result.metrics)
+  assert by_id["row.exact_match_rate"].value == pytest.approx(8 / 700)
+  assert "non-key" in by_id["row.memorization_lift"].detail["reason"]
+  sets = Counter(f.source_set for f in result.flags)
+  assert sets["source"] == 3 and sets["E"] + sets["R"] == 5
+  # a full-row copy's synthetic key IS the copied source key (documented)
+  assert {f.synthetic_key["person_id"] for f in result.flags
+         } == {r["person_id"] for r in [*source[:5], *source[800:803]]}
+
+
+def test_exact_matches_are_never_near_and_common_records_are_not_e():
+  """A row copying an H record exactly is not a near match of the R
+  record one field away; a record R and H both hold is flagged R, not E."""
+  source = people_rows(1500, 31, SOURCE_ID_BASE)
+  synthetic = people_rows(1200, 32, SYNTHETIC_ID_BASE)
+  # H row 400 = R row 3 with the city changed; synthetic 0 copies it
+  source[400] = {**copy_content(source[3], source[400]), "city": "Twin001"}
+  synthetic[0] = copy_content(source[400], synthetic[0])
+  # R row 7's content is also an H row: common, so its copy is R
+  source[450] = copy_content(source[7], source[450])
+  synthetic[1] = copy_content(source[7], synthetic[1])
+  table = planned(
+      "people",
+      PEOPLE_FIELDS,
+      source,
+      synthetic,
+      pk=("person_id",),
+      identity=PEOPLE_IDENTITY,
+      panel=panel_of(source, 300, e_n=100))
+  result = _pure(table, {"source": source, "synthetic": synthetic})
+  by_id = _by_id(result.metrics)
+  assert by_id["row.near_match_rate"].value == 0.0
+  assert by_id["row.near_match_rate"].detail["near_rows_h"] == 0
+  sets = {f.synthetic_key["person_id"]: f.source_set for f in result.flags}
+  assert sets[synthetic[0]["person_id"]] == "H"
+  assert sets[synthetic[1]["person_id"]] == "R"
+  assert not [f for f in result.flags if f.check == NEAR_COPY]
+
+
+def test_unexposed_lift_with_an_empty_set_is_explained_not_a_crash():
+  """(R minus H) minus E empty while (H minus R) minus H_E is hit: the
+  secondary lift in `detail.unexposed` says why instead of dividing by
+  zero (the review's probe)."""
+  n = 1200
+  r = [k % 100 for k in range(1024)] + [k % 100 for k in range(n - 1024)]
+  h = [100 + k % 100 for k in range(1024)
+      ] + [200 + k % 10 for k in range(n - 1024)]
+  source = r + h + [5000 + k for k in range(300)]
+  synthetic = [200, 201, 7000, 7001]
+  table, rows = catalog_table(source, synthetic, n_reference=n)
+  by_id = _by_id(_pure(table, rows).metrics)
+  unexposed = by_id["row.exposure_lift"].detail["unexposed"]
+  assert unexposed["exposed_r"] == 0 and unexposed["events_h"] == 2
+  assert unexposed["lift"] is None and "empty" in unexposed["reason"]
+  assert by_id["row.memorization_lift"].ci_low is not None
+
+
+def test_sampled_mode_withholds_verdicts_that_need_every_row():
+  """R72: a row-sampled side cannot support full-coverage verdicts (not
+  evaluated, the observed lower bound in detail); panel-based metrics stay
+  evaluated, marked as sampled."""
+  table, rows, _ = _people_with(copies=20)
+  src = _by_id(
+      _pure(dataclasses.replace(table, sample_rate_source=0.5), rows).metrics)
+  for metric_id in ("row.exact_match_rate", "row.exact_match_rate_nonkey",
+                    "row.internal_duplicate_excess"):
+    reason = src[metric_id].detail["reason"]
+    assert src[metric_id].value is None, metric_id
+    assert reason.startswith("sampled mode cannot measure"), metric_id
+    assert reason.endswith("run exact mode"), metric_id
+  assert src["row.exact_match_rate_nonkey"].detail["matches_lower_bound"] == 20
+  assert src["table.pk_duplicate_rate"].value == 0.0
+  assert src["row.memorization_lift"].method is Method.EXACT
+  syn = _by_id(
+      _pure(dataclasses.replace(table, sample_rate_synthetic=0.25),
+            rows).metrics)
+  for metric_id in ("table.pk_duplicate_rate", "table.identity_duplicate_rate",
+                    "row.internal_duplicate_excess"):
+    assert syn[metric_id].value is None, metric_id
+    assert "run exact mode" in syn[metric_id].detail["reason"], metric_id
+  assert syn["table.pk_duplicate_rate"].detail[
+      "duplicate_rows_lower_bound"] == 0
+  for metric_id in ("row.memorization_lift", "row.near_match_rate",
+                    "row.exact_match_rate"):
+    mv = syn[metric_id]
+    assert mv.method is Method.SAMPLE and mv.sample_rate == 0.25, metric_id
+    assert mv.detail["sample_rate"] == 0.25, metric_id
+
+
+def test_a_table_failing_on_a_worker_is_not_evaluated(monkeypatch):
+  """A data error while a table's metrics are computed makes that table
+  not_evaluated with the reason; nothing raises."""
+  table, rows, _ = _people_with(copies=6)
+
+  def broken(*_args: Any, **_kwargs: Any) -> None:
+    raise ZeroDivisionError("division by zero")
+
+  monkeypatch.setattr(membership, "_lifts", broken)
+  result = _pure(table, rows)
+  assert not result.flags
+  assert {mv.metric_id for mv in result.metrics} == set(OWNED_METRIC_IDS)
+  for mv in result.metrics:
+    assert mv.value is None
+    assert "ZeroDivisionError" in mv.detail["reason"]
+
+
+def test_a_failing_table_does_not_fail_the_run(tmp_path, monkeypatch):
+  """Three tables in one pipeline: one fails on the driver (a panel row
+  the encoder rejects), one while its batches are counted on a worker;
+  both become not_evaluated rows with a reason and write no flags, while
+  the third matches the in-process path."""
+  good, good_rows, _ = _people_with(copies=6)
+  rng = np.random.default_rng(1)
+  bad, bad_rows = catalog_table(
+      rng.choice(CATALOG_PATTERNS, 600), rng.choice(CATALOG_PATTERNS, 400), 200)
+  assert bad.panel is not None
+  bad = dataclasses.replace(
+      bad,
+      panel=Panel(
+          r_rows=[{
+              k: v for k, v in row.items() if k != "brand"
+          } for row in bad.panel.r_rows],
+          h_rows=bad.panel.h_rows,
+          e_n=bad.panel.e_n,
+          he_n=bad.panel.he_n,
+          digest="d" * 64,
+          verified=True,
+          expected_digest="d" * 64))
+  worker, worker_rows = catalog_table(
+      rng.choice(CATALOG_PATTERNS, 600), rng.choice(CATALOG_PATTERNS, 400), 200)
+  worker = dataclasses.replace(
+      worker, name="catalog_w", landing_table=f"{worker.landing_table}_w")
+  real_key_counts = membership.key_counts
+
+  def failing(spec: Any, batch: Any) -> Any:
+    if spec.table == "catalog_w":
+      raise ValueError("a malformed batch (test)")
+    return real_key_counts(spec, batch)
+
+  monkeypatch.setattr(membership, "key_counts", failing)
+  tables = {"people": good, "catalog": bad, "catalog_w": worker}
+  rows_by = {"people": good_rows, "catalog": bad_rows, "catalog_w": worker_rows}
+  sources = InMemorySources({
+      (name, side): r for name, by in rows_by.items() for side, r in by.items()
+  })
+  with BeamTestPipeline() as p:
+    batches = [
+        sources.read(p, tables[name], side)
+        | EncodeSide(tables[name], side, salt=SALT)
+        for name, by_side in rows_by.items()
+        for side in by_side
+    ] | "Flatten" >> beam.Flatten()
+    key = p | "Key" >> beam.Create([LABEL_KEY])
+    out = batches | "Membership" >> Membership(
+        list(tables.values()), salt=SALT, label_key=key)
+    _collect(out["metrics"], tmp_path / "metrics.pkl", "Metrics")
+    _collect(out["flags"], tmp_path / "flags.pkl", "Flags")
+  metrics = pickle.loads((tmp_path / "metrics.pkl").read_bytes())
+  flags = pickle.loads((tmp_path / "flags.pkl").read_bytes())
+  for name, cause in (("catalog", "ValueError"), ("catalog_w", "malformed")):
+    rows_of = [mv for mv in metrics if mv.table == name]
+    assert {mv.metric_id for mv in rows_of} == set(OWNED_METRIC_IDS), name
+    for mv in rows_of:
+      assert mv.value is None and cause in mv.detail["reason"], (name, mv)
+      assert mv.encoding_plan_digest == tables[name].encoding_plan_digest
+  assert not [f for f in flags if f.table != "people"]
+  monkeypatch.setattr(membership, "key_counts", real_key_counts)
+  pure = _pure(good, good_rows)
+  assert sorted([mv for mv in metrics if mv.table == "people"],
+                key=lambda mv: mv.metric_id) == sorted(
+                    pure.metrics, key=lambda mv: mv.metric_id)
+  assert sorted([f for f in flags if f.table == "people"],
+                key=lambda f: (f.check, f.rank)) == sorted(
+                    pure.flags, key=lambda f: (f.check, f.rank))
 
 
 def test_label_key_never_enters_the_job_graph(tmp_path):

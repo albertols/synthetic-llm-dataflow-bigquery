@@ -138,6 +138,8 @@ from sdfb_evaluation.context.budget import (
     fixed_shuffle_bytes,
     mask_bytes,
     predict_shuffle_gb,
+    source_sets_fit,
+    table_key_shape,
     value_census_bytes,
     value_sample_rate,
     water_fill,
@@ -248,7 +250,7 @@ _PAIR_KINDS = frozenset({
 _GRID_KINDS = frozenset({ColumnKind.NUMERIC, ColumnKind.TEMPORAL})
 _CODED_KINDS = frozenset({ColumnKind.CATEGORICAL, ColumnKind.BOOLEAN})
 _SCOPE_REQUESTS = ("auto", *SCOPE_MODES)  # whatever modes scope.py knows
-_SOURCE_KEYS = ("hashed", "raw")
+_SOURCE_KEYS = ("hashed",)  # "raw" is refused with its own reason
 # Knobs that change no metric value: they stay out of evaluation_key.
 _OPERATIONAL_KNOBS = frozenset(
     {"max_bytes_billed", "output_dataset", "temp_dataset", "evaluation_id"})
@@ -919,6 +921,11 @@ class Knobs:  # pylint: disable=too-many-instance-attributes  # one field per CL
     if self.scope not in _SCOPE_REQUESTS:
       raise ValueError(f"scope {self.scope!r}: expected one of "
                        f"{list(_SCOPE_REQUESTS)}")
+    if self.row_flags_source_keys == "raw":
+      raise ValueError(
+          "row_flags_source_keys 'raw' is not supported: row flags carry the "
+          "matched source key only as a keyed hash (the label key, Rulings "
+          "R64/R68), never its value; use 'hashed'")
     if self.row_flags_source_keys not in _SOURCE_KEYS:
       raise ValueError(f"row_flags_source_keys {self.row_flags_source_keys!r}"
                        f": expected one of {list(_SOURCE_KEYS)}")
@@ -1975,11 +1982,15 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       demands.append(value_census_bytes(exact, *rows))
       # the mask pass is never value-sampled: a fixed cost (R67)
       fixed += mask_bytes(exact, *rows)
+      nonkey, keyed = table_key_shape(exact, work.pk, work.identity, work.edges)
       fixed += fixed_shuffle_bytes(
           rows_source=rows[0],
           rows_synthetic=rows[1],
           edges=len(work.edges),
-          keyed_counts=int(bool(work.pk)) + int(bool(work.identity)))
+          keyed_counts=int(bool(work.pk)) + int(bool(work.identity)),
+          nonkey=nonkey,
+          keyed=keyed,
+          side_input=source_sets_fit(rows[0], nonkey=nonkey, keyed=keyed))
     capacity = self.budget.max_shuffle_gb * GB - fixed
     if capacity < 0:
       self.notes.append(

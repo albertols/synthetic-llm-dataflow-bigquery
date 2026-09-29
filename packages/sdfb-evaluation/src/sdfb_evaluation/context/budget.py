@@ -40,9 +40,26 @@ on the rows the pipeline actually reads:
                                                           mask's UTF-8 text in
                                                           each key (R70)
     relational   Σ edges           child rows * 16 B     (hash, count) per row
-    row keys     rows * 16 B (non-key duplicate count, both sides)
-                 + synthetic rows * 16 B per PK / identity duplicate count
+    membership   codes * MEMBERSHIP_CODE_BYTES           the membership pass's
+                   (MEMBERSHIP_CODE_BYTES = 12 B)        exact keyed counts:
+                                                         the non-key hash on
+                                                         both sides (content),
+                                                         the PK and identity
+                                                         hashes on the
+                                                         synthetic side, and
+                                                         the row hash on both
+                                                         sides when a keyed
+                                                         table's source sets
+                                                         exceed the side-input
+                                                         cap (keyed-count mode)
     null bits    min(rows, 4096) * 16 B                  bounded pattern dict
+
+`MEMBERSHIP_CODE_BYTES` is measured, not assumed: a membership code
+crosses the shuffle as 8 B of uint64 plus its count packed to the
+smallest unsigned width, inside bundle-merged elements whose per-element
+overhead is spread over the bundle's codes of a bucket (FastPrimitivesCoder:
+9.0-9.5 B a code with 64 or more rows a bucket in a bundle; 12.4 B for a
+lone 8192-row batch at the 10-bit bucket maximum; budgeted at 12 B).
 
 The census gets what the fixed parts leave, shared max-min fairly
 (`water_fill`): first across tables, then across one table's census
@@ -66,12 +83,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
   from sdfb_evaluation.context.plan import ColumnPlan, TablePlan
+  from sdfb_evaluation.context.relationships import Edge
 
 __all__ = [
     "CENSUS_KEY_BYTES",
     "GB",
     "MASK_KEY_OVERHEAD",
     "MASK_UTF8_FACTOR",
+    "MEMBERSHIP_CODE_BYTES",
+    "SOURCE_SET_MAX_BYTES",
     "VALUE_SAMPLE_MODULUS",
     "Budget",
     "BudgetExceededError",
@@ -80,7 +100,11 @@ __all__ = [
     "fixed_shuffle_bytes",
     "mask_bytes",
     "mask_key_bytes",
+    "membership_bytes",
     "predict_shuffle_gb",
+    "source_set_arrays",
+    "source_sets_fit",
+    "table_key_shape",
     "value_census_bytes",
     "value_sample_rate",
     "water_fill",
@@ -98,6 +122,12 @@ MASK_MAX_CHARS = 256
 MASK_DEFAULT_CHARS = 16  # no planned length (an INT64 identity's digits)
 _MASKED_KINDS = frozenset({"text", "identifier"})
 ROW_KEY_BYTES = 16  # (uint64 hash, count)
+# One membership keyed-count code as shuffled (module docstring: measured
+# 9.0-9.5 B with FastPrimitivesCoder over bundle-merged, packed elements)
+MEMBERSHIP_CODE_BYTES = 12
+# The full-source side input of the membership pass, all its sorted uint64
+# arrays together (8 B a source row and array): above it, keyed counts
+SOURCE_SET_MAX_BYTES = 160_000_000
 NULL_PATTERN_LIMIT = 4096  # the dense null-pattern dict's key cap
 VALUE_SAMPLE_MODULUS = 10_000
 
@@ -182,14 +212,72 @@ def value_sample_rate(granted: float, demand: float) -> float | None:
   return max(keep, 1) / VALUE_SAMPLE_MODULUS
 
 
-def fixed_shuffle_bytes(*, rows_source: float, rows_synthetic: float,
-                        edges: int, keyed_counts: int) -> float:
+def table_key_shape(columns: Iterable[ColumnPlan], pk: Iterable[str],
+                    identity: Iterable[str],
+                    edges: Iterable[Edge]) -> tuple[bool, bool]:
+  """(the table has a non-key column, the table has a key column), with
+  the key set `beam.encode.BatchLayout` uses: `is_key` columns, the PK,
+  the identity columns and every FK column."""
+  names = [column.name for column in columns]
+  keys = {column.name for column in columns if column.is_key}
+  keys |= set(pk) | set(identity)
+  keys |= {c for edge in edges for c in edge.cols}
+  return any(name not in keys for name in names), bool(keys)
+
+
+def source_set_arrays(*, nonkey: bool, keyed: bool) -> int:
+  """How many sorted arrays the full-source side input holds: the record
+  hashes (the non-key hash, or the row hash of an all-key table), plus the
+  row hashes when a keyed table also has content."""
+  return 1 + int(nonkey and keyed)
+
+
+def source_sets_fit(rows_source: float | None,
+                    *,
+                    nonkey: bool,
+                    keyed: bool,
+                    max_bytes: int = SOURCE_SET_MAX_BYTES) -> bool:
+  """Whether the membership pass reads the full source as a side input
+  (8 B a source row and array, within `max_bytes`) rather than through
+  the keyed count; an unknown source count never fits."""
+  if rows_source is None:
+    return False
+  arrays = source_set_arrays(nonkey=nonkey, keyed=keyed)
+  return rows_source * 8 * arrays <= max_bytes
+
+
+def membership_bytes(*, rows_source: float, rows_synthetic: float, nonkey: bool,
+                     keyed: bool, keyed_counts: int, side_input: bool) -> float:
+  """The membership pass's keyed-count shuffle (module docstring)."""
+  both = rows_source + rows_synthetic
+  codes = both if nonkey else 0.0
+  codes += keyed_counts * rows_synthetic
+  if keyed and not side_input:
+    codes += both
+  return codes * MEMBERSHIP_CODE_BYTES
+
+
+def fixed_shuffle_bytes(*,
+                        rows_source: float,
+                        rows_synthetic: float,
+                        edges: int,
+                        keyed_counts: int,
+                        nonkey: bool = True,
+                        keyed: bool = True,
+                        side_input: bool = True) -> float:
   """The non-census shuffle of one table: relational child rows per edge,
-  the row-hash duplicate counts and the null-pattern dicts (see the module
-  docstring)."""
+  the membership pass's keyed counts and the null-pattern dicts (see the
+  module docstring). `nonkey`/`keyed` are `table_key_shape`, `side_input`
+  is `source_sets_fit` (the keyed-count mode adds the row counts)."""
   both = rows_source + rows_synthetic
   relational = edges * both * ROW_KEY_BYTES
-  row_keys = (both + keyed_counts * rows_synthetic) * ROW_KEY_BYTES
+  row_keys = membership_bytes(
+      rows_source=rows_source,
+      rows_synthetic=rows_synthetic,
+      nonkey=nonkey,
+      keyed=keyed,
+      keyed_counts=keyed_counts,
+      side_input=side_input)
   null_bits = (min(rows_source, NULL_PATTERN_LIMIT) +
                min(rows_synthetic, NULL_PATTERN_LIMIT)) * ROW_KEY_BYTES
   return relational + row_keys + null_bits
@@ -252,11 +340,18 @@ def predict_shuffle_gb(tables: Sequence[TablePlan]) -> float:
     if not table.evaluated:
       continue
     rows_source, rows_synthetic = table.rows_read
-    keyed = int(bool(table.pk)) + int(bool(table.identity))
+    nonkey, keyed = table_key_shape(table.columns, table.pk, table.identity,
+                                    table.edges)
     total += census_bytes(table.columns, rows_source, rows_synthetic)
     total += fixed_shuffle_bytes(
         rows_source=rows_source,
         rows_synthetic=rows_synthetic,
         edges=len(table.edges),
-        keyed_counts=keyed)
+        keyed_counts=int(bool(table.pk)) + int(bool(table.identity)),
+        nonkey=nonkey,
+        keyed=keyed,
+        side_input=source_sets_fit(
+            rows_source if table.rows_source is not None else None,
+            nonkey=nonkey,
+            keyed=keyed))
   return total / GB

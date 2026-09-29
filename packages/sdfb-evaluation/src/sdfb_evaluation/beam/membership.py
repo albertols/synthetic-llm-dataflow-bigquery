@@ -16,52 +16,58 @@ or all but one field, and whether the rows the generator read come back
 more often than rows it never saw.
 
     driver: the panel (D3) ─ BatchEncoder ─► PanelRefs per table
-      │   R, H non-key / row / key hashes in rank order (E = the first
+      │   R, H record / row / key hashes in rank order (E = the first
       │   e_n ranks of R, H_E of H) and their cell-code matrices
       ▼
     EncodedBatch ─ Partition(table) ─┬─ source ─► SourceHashes ─► Combine
       │                              │   Globally: SourceSets (sorted uint64
-      │                              │   non-key and row hashes) ── AsSingleton
+      │                              │   record and row hashes) ── AsSingleton
       │                              └─ synthetic ─► MembershipFn ◄─ panel
       │                                   │  (Shared PanelIndex)   AsSingleton
       │                                   ├─ (table, MembershipAcc)
       │                                   │    ─► CombinePerKey ────────────┐
       │                                   └─ ((table, check), candidate)    │
-      │                                        ─► Top.PerKey(k) ─► RowFlag   │
+      │                                        ─► CombinePerKey(top-k       │
+      │                                           distinct) ─► RowFlag      │
       │                                           (label key: AsSingleton)  │
-      └─ RowKeysFn ─► ((table, kind, bucket), code counts)                  │
-           ─► CombinePerKey ─► KeyStats ─► CombinePerKey(table) ────────────┤
-    one seed per table ─────────────────────────────────────────────────────┤
+      └─ RowKeysFn (bundle-merged) ─► ((table, kind, bucket), packed counts)│
+           ─► CombinePerKey (compact) ─► KeyStats ─► CombinePerKey(table) ──┤
+    per-table failures (driver or worker) and one seed per table ───────────┤
                                                GroupByKey(table) ◄──────────┘
                                                  ─► MetricValue (OWNED_METRIC_IDS)
 
 Hashes (`beam.encode`): `nonkey_hash` is the salted linear hash of the
 non-key cells (no PK, identity or FK column), so a record copied under a
-fresh key still matches; `row_hash` covers every column. A row whose
-every non-key cell is NULL has one constant non-key hash: it carries no
-record content and is NEVER a match, near match or internal duplicate
-(Ruling R60); a row whose every cell is NULL never matches either.
+fresh key still matches; `row_hash` covers every column. A table's
+RECORD hash is its non-key hash — or, for an all-key table (every column
+a key, no content), its row hash: the key tuple is then the record, so
+its copies are still flagged, though the content metrics are not
+evaluated. A row whose record cells are all NULL has one constant record
+hash: it carries no content and is NEVER a match, near match or internal
+duplicate (Ruling R60).
 
-Exact sets and the lifts (D3). With U_S the distinct non-key hashes of
+Exact sets and the lifts (D3). With U_S the distinct record hashes of
 panel set S, the exclusive sets are R \\ H and H \\ R — a record both
 halves hold is common, and hitting it is chance — and, for the exposure
-lift, E \\ H against H_E \\ R; R\\E and H\\H_E (the exclusive records
-outside the exposed prefixes) give `detail.unexposed`. R and H are
-exchangeable halves of one ranking, so under the null a synthetic
-generator hits either exclusive set alike. The EVENT is a distinct
-exclusive record the synthetic side reproduces at least once, never a
-synthetic row: a record hit by many synthetic rows is one event, which
-keeps the counts close to Poisson. Counting rows instead would weight
-every chance hit by the synthetic rows its pattern draws, which on a
-skewed table puts the whole R/H selection noise into a narrow Poisson
-interval (a simulation at n_syn ≫ n missed 1 in 39-81 % of null runs,
-against 0-1 % for distinct records). The row counts are in `detail`
-(`rows_r`/`rows_h`); a record copied many times still shows in
-`row.exact_match_rate_nonkey` and in the flags. The lift is the
-conditional rate-ratio test of the event counts over the exclusive set
-sizes, with a Clopper-Pearson interval (Przyborowski & Wilenski, 1940;
-Clopper & Pearson, 1934); status reads ci_low (Rulings R1, R12, R38: no
-event on either side leaves the value NULL with ci_low 0).
+lift, E \\ H against H_E \\ R; (R \\ H) \\ E against (H \\ R) \\ H_E (the
+exclusive records outside the exposed prefixes) give `detail.unexposed`,
+or a reason when either is empty (a steep-tailed source can hold every
+exclusive R record inside E). R and H are exchangeable halves of one
+ranking, so under the null a synthetic generator hits either exclusive
+set alike. The EVENT is a distinct exclusive record the synthetic side
+reproduces at least once, never a synthetic row: a record hit by many
+synthetic rows is one event, which keeps the counts close to Poisson.
+Counting rows instead would weight every chance hit by the synthetic
+rows its pattern draws, which on a skewed table puts the whole R/H
+selection noise into a narrow Poisson interval (a simulation at
+n_syn ≫ n missed 1 in 39-81 % of null runs, against 0-1 % for distinct
+records). The row counts are in `detail` (`rows_r`/`rows_h`); a record
+copied many times still shows in `row.exact_match_rate_nonkey` and in
+the flags. The lift is the conditional rate-ratio test of the event
+counts over the exclusive set sizes, with a Clopper-Pearson interval
+(Przyborowski & Wilenski, 1940; Clopper & Pearson, 1934); status reads
+ci_low (Rulings R1, R12, R38: no event on either side leaves the value
+NULL with ci_low 0).
 
 Near matches (leave one out, Ruling R2). Row x's key at non-key column j
 is `canonical.loo_hashes`: its non-key hash without column j's term, so
@@ -69,75 +75,138 @@ two rows equal in every non-key column but j share it. A synthetic row
 near-matches set S when, at some j, its key equals the key of an S row at
 the same j AND every other non-key cell code equals that row's
 (`hash64` per cell, compared exactly: a linear-hash collision is
-rejected), and it does not match an S record exactly. The dropped
-column's all-NULL remainder is never a key (R60). `row.near_match_rate`
-is the share of synthetic rows near-matching R (Wilson, 1927); the near
-lift counts distinct exclusive keys (a key of R not held by H at the same
-column, and vice versa), as the exact lift does. Fewer than two non-key
-columns leave nothing to compare once one is dropped.
+rejected). A row that matches an R or an H record exactly is never a
+near match of either set (exact matches are counted as exact). The
+dropped column's all-NULL remainder is never a key (R60).
+`row.near_match_rate` is the share of synthetic rows near-matching R
+(Wilson, 1927); the near lift counts distinct exclusive keys (a key of R
+not held by H at the same column, and vice versa), as the exact lift
+does. Fewer than two non-key columns leave nothing to compare once one
+is dropped.
 
 The full source. `row.exact_match_rate` (every column) and
 `row.exact_match_rate_nonkey` compare the synthetic side with every
 source row read:
 
-    source side input ≤ SOURCE_SET_MAX_BYTES     sorted distinct source
-      (8 B per row and array; an array for        hashes, one CombineGlobally
-      the non-key hash, one for the row hash      per table, read with
-      when the table has keys: 20M rows           AsSingleton; membership is
-      key-less, 10M keyed at 160 MB)              map-side, so full-source
-                                                  exact copies are flagged
+    source side input fits SOURCE_SET_MAX_BYTES  sorted distinct source
+      (`context.budget.source_sets_fit`: 8 B a   hashes, one CombineGlobally
+      source row and array; the record hashes,   per table, read with
+      plus the row hashes when a keyed table     AsSingleton; membership is
+      has content: 20M rows key-less or          map-side, so full-source
+      all-key, 10M keyed, at 160 MB)             exact copies are flagged
     above it, or the source count unknown        the keyed count below IS the
                                                   co-grouping: Σ c_syn over
                                                   the hashes with c_src ≥ 1;
                                                   no full-source flag (panel
                                                   flags remain)
 
-Task 26 sets `max_cache_memory_usage_mb` (Beam 2.74 defaults to 0, no
-side-input cache) above the largest side input so a worker materialises
-it once; the derived panel index is built once per worker behind
-`apache_beam.utils.shared.Shared`, tagged by the panel's content token.
+Task 26 sizes `max_cache_memory_usage_mb` (Beam 2.74 defaults to 0, no
+side-input cache) to the SUM of the side inputs a worker holds at once,
+so each is materialised once; the derived panel index is built once per
+worker behind `apache_beam.utils.shared.Shared`, tagged by the panel's
+content token.
 
 Keyed counts (all tables, one pass). Every hash is counted exactly per
-side, in `(table, kind, bucket)` keys whose value holds the bucket's
-sorted codes with their source and synthetic counts (numpy arrays) — the
-hash space split by its top bits into up to 2^MAX_BUCKET_BITS buckets of
-about KEY_BUCKET_CODES codes each, so a batch sends one element per
-bucket instead of one per row:
+side, in `(table, kind, bucket)` keys — the hash space split by its top
+bits into up to 2^MAX_BUCKET_BITS buckets of about KEY_BUCKET_CODES codes
+each:
 
-    nk     non-key hash, both sides   internal duplicates (rows in a hash
-                                      counted ≥ 2, over rows with content);
-                                      the keyed full-source non-key matches
+    nk     non-key hash, both sides   internal duplicates (the frequency
+                                      of frequencies of each side); the
+                                      keyed full-source non-key matches
     pk     PK hash, synthetic         table.pk_duplicate_rate (a NULL part is
     id     identity hash, synthetic   no key: counted as `null_key_rows`,
                                       never a duplicate)
     row    row hash, both sides       keyed mode only, keyed tables only
 
-Internal duplicates are counted on the FULL data of each side (Ruling
-R59), never the matched-n subsample: `row.internal_duplicate_excess` =
-d_syn - d_src with a Newcombe interval (Newcombe, 1998; informational:
-rows of a duplicate group are not independent, and the catalogue gives
-this metric no noise floor), `baseline_value` = d_R - d_src (D4).
+A value is SPARSE and packed: one side's sorted codes as little-endian
+uint64 bytes and their counts at the smallest unsigned width that holds
+them — primitives FastPrimitivesCoder writes without pickling. `RowKeysFn`
+merges the batches of a bundle per key before it emits (flushing when it
+holds FLUSH_CODES codes), and `KeyCountsCombineFn.compact` merges a
+lifted accumulator to one part per side before it crosses the shuffle, so
+a code costs about 9 B (budgeted as `context.budget.MEMBERSHIP_CODE_BYTES`).
 
-Flags. `Top.PerKey(row_flags_top_k)` per (table, check) for `exact_copy`
-and `near_copy`, ranked by the set a row copies (E, then R, H, the full
-source), then a salted SplitMix64 spread of its row hash (Steele, Lea &
-Flood, 2014), then its synthetic key: deterministic for an evaluation,
-and a sample, not the first rows read. A flag carries the synthetic PK
-(the synthetic table's own key, as JSON) and the matched source record's
-key as a KEYED label (`canonical.hashed_label` of its PK hash — identity
-hash, row hash for a key-less table — with the worker-side label key,
-Rulings R64, R68); `source_key` stays NULL. No attribute value is ever
-written. A full-source copy has no panel row to name, so its
-`source_key_hash` is NULL. With an unverified reference only full-source
-flags are written: the panel sets are not known to be the generator's.
+Internal duplicates at matched n (Ruling R73, amending R59). The share of
+rows whose content is held twice or more grows with n, so both sides are
+compared at m = min(n_src, n_syn) content rows by exact rarefaction from
+each side's frequency of frequencies (Hurlbert, 1971; Heck, van Belle &
+Simberloff, 1975): a record held c times among N rows keeps X ~
+Hypergeometric(N, c, m) of them in a subsample of m, so
+
+    E[D_m] = Σ_c f_c · (c·m/N - P(X = 1))    rows in duplicate groups
+
+and `row.internal_duplicate_excess` = (E[D_m]_syn - E[D_m]_src) / m (the
+smaller side is not subsampled: its value is its observed share). Noise:
+under the null the two sides are exchangeable, each a random m-subset of
+their pooled rows, and D_m = m - F1 (the rows of records held once), so
+the null variance is Var(F1) of an m-subset of the pool — exact from the
+pooled frequency of frequencies with the multivariate hypergeometric
+(`duplicate_null_variance`), divided by the finite-population factor
+1 - m / (n_src + n_syn) so it is the variance of an m-row sample of the
+population rather than of the pool (Cochran, 1977; two sides of equal
+size are complementary halves of the pool, whose difference varies twice
+as much as a half does alone). Rows of one duplicate group are not
+independent draws and a heavy record adds no variance at all, so each
+side's count enters Newcombe's (1998) interval through Korn & Graubard's
+(1998) effective sample size n* = d (1 - d) / Var(d), capped at m — the
+catalogue's `newcombe` noise method then reads a faithful generator's
+difference as noise. `baseline_value` = the same at min(|R|, n_src) for
+R against the source (D4).
+
+Sampled mode (Ruling R72). A side read as a row sample (`--mode
+sampled`, rate < 1: a salted content-hash sample that keeps identical
+rows together) cannot support a verdict that needs every row of a side:
+the full-source match rates (the source side), the PK/identity duplicate
+rates (the synthetic side) and internal duplicates (both) are
+`not_evaluated` with "sampled mode cannot measure …; run exact mode" and
+the observed lower-bound count in `detail`. The panel-based rates and
+lifts compare R/H/E, read in full, with the synthetic rows read, so they
+stay evaluated with `method` = sample and the synthetic `sample_rate`
+(also in `detail`).
+
+Flags. A top-k of DISTINCT candidates per (table, check) for
+`exact_copy` and `near_copy` (distinct by the synthetic row hash and the
+source record's code, so a record copied 200 times into a key-less table
+takes one slot), ranked by the set a row copies (E — an exclusive E
+record — then R, H, the full source), then a salted SplitMix64 spread of
+its row hash (Steele, Lea & Flood, 2014), then its synthetic handle:
+deterministic for an evaluation, and a sample, not the first rows read.
+A flag carries:
+
+    synthetic_key     the synthetic row's handle: its PK tuple, else its
+                      identity tuple, as JSON (NULL for a table with
+                      neither). It is the synthetic table's own key, not
+                      covered by D6 hashing — so for a full-row copy
+                      (keys included) it IS the copied source row's key
+    source_key_hash   `canonical.hashed_label` of the matched source
+                      record's code with the worker-side label key
+                      (Rulings R64, R68): its PK hash; else its identity
+                      hash; else (no PK, no identity) its record hash —
+                      the row hash itself when the table has no key
+                      column. A full-source copy is labelled only in the
+                      last case (map-side the source record's key is
+                      unknown), NULL otherwise
+    source_key        always NULL (`row_flags_source_keys=raw` is refused)
+
+No attribute value is ever written. With an unverified reference only
+full-source flags are written: the panel sets are not known to be the
+generator's.
 
 An unverified reference (`Panel.verified` False) makes every R/H/E-based
-metric `not_evaluated` with `UNVERIFIED_REASON` (Review Focus 5); the
-full-source metrics are still computed.
+metric `not_evaluated` with `UNVERIFIED_REASON` and the panel's own
+reason; the full-source metrics are still computed.
+
+Failures stay per table. A table whose spec or panel cannot be built on
+the driver, or whose batches raise a data error on a worker
+(`TABLE_ERRORS`), writes `not_evaluated` rows with the reason for every
+owned id and no flags; the other tables and the pipeline carry on.
 
 References (author-year, R22): Przyborowski & Wilenski (1940); Clopper &
-Pearson (1934); Wilson (1927); Newcombe (1998); Steele, Lea & Flood
-(2014); Stadler, Oprisanu & Troncoso (2022) for near copies.
+Pearson (1934); Wilson (1927); Newcombe (1998); Hurlbert (1971); Heck,
+van Belle & Simberloff (1975); Cochran (1977); Korn & Graubard (1998);
+Steele, Lea & Flood (2014); Stadler, Oprisanu & Troncoso (2022) for
+near copies.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -148,6 +217,7 @@ import functools
 import hashlib
 import json
 import math
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
@@ -155,7 +225,10 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import apache_beam as beam
 import numpy as np
+from apache_beam.transforms.window import GlobalWindows
 from apache_beam.utils.shared import Shared
+from scipy.special import gammaln
+from scipy.stats import hypergeom
 
 from sdfb_evaluation.beam.encode import BatchEncoder, BatchLayout, EncodedBatch
 from sdfb_evaluation.canonical import (
@@ -168,6 +241,11 @@ from sdfb_evaluation.canonical import (
     loo_hashes,
     multipliers,
 )
+from sdfb_evaluation.context.budget import (
+    SOURCE_SET_MAX_BYTES,
+    source_set_arrays,
+    source_sets_fit,
+)
 from sdfb_evaluation.stats import noise
 from sdfb_evaluation.types import Method, MetricValue, Side
 
@@ -176,6 +254,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "EXACT_COPY",
+    "FLUSH_CODES",
     "KEYED_COUNT",
     "KEY_BUCKET_CODES",
     "LIFT_ALPHA",
@@ -186,6 +265,7 @@ __all__ = [
     "SIDE_INPUT",
     "SOURCE_SETS",
     "SOURCE_SET_MAX_BYTES",
+    "TABLE_ERRORS",
     "UNVERIFIED_REASON",
     "KeyCountsCombineFn",
     "KeyStats",
@@ -200,12 +280,15 @@ __all__ = [
     "PanelStats",
     "RowFlag",
     "RowKeysFn",
+    "SideCounts",
     "SourceSets",
     "SourceSetsCombineFn",
     "batch_membership",
+    "duplicate_null_variance",
     "flag_row",
     "key_counts",
     "membership_outputs",
+    "rarefied_duplicates",
     "source_hashes",
     "table_outputs",
 ]
@@ -223,14 +306,25 @@ OWNED_METRIC_IDS: tuple[str, ...] = (
 )
 
 PANEL_SET_MAX_BYTES = 16 * 2**20  # one panel side-input array
-SOURCE_SET_MAX_BYTES = 160_000_000  # the full-source side input, all arrays
 EXACT_COPY, NEAR_COPY = "exact_copy", "near_copy"
 SOURCE_SETS: tuple[str, ...] = ("E", "R", "H", "source")  # flag priority
 SIDE_INPUT, KEYED_COUNT = "side_input", "keyed_count"
 LIFT_ALPHA = 0.05
-UNVERIFIED_REASON = "reference sample not verified (digest mismatch)"
-KEY_BUCKET_CODES = 1 << 20  # codes per keyed-count bucket, about
-MAX_BUCKET_BITS = 12
+UNVERIFIED_REASON = "reference sample not verified"
+# codes per keyed-count bucket, about: bounds a bucket's final accumulator
+# (~9 B a code) while keeping buckets few enough that a bundle's element
+# for one bucket carries many codes (the per-element overhead amortised)
+KEY_BUCKET_CODES = 1 << 23
+MAX_BUCKET_BITS = 10
+FLUSH_CODES = 1 << 18  # codes a RowKeysFn holds before it flushes
+# The data errors a table's membership can raise (a malformed panel row, a
+# degenerate count): they make that table not_evaluated, never the run fail.
+TABLE_ERRORS: tuple[type[Exception], ...] = (ArithmeticError, IndexError,
+                                             KeyError, TypeError, ValueError)
+_FLUSH_PER_BUCKET = 256  # flush no sooner than this many codes per bucket
+# a record class whose P(X = 1) is below this adds nothing measurable to
+# the null variance (a record held ~33 times its expected share or more)
+_NEGLIGIBLE = 1e-12
 _UNKNOWN_BUCKET_BITS = 4
 _COMPACT_CODES = 1 << 20  # pending codes before a combine compacts
 _DUPLICATED = 2  # a hash counted this often or more is a duplicate
@@ -239,7 +333,10 @@ _MIN_NEAR_COLUMNS = 2  # dropping one of fewer leaves nothing to compare
 _PRIO_E, _PRIO_R, _PRIO_H, _PRIO_SOURCE = range(4)
 # a panel record's class (`_classes`)
 _SHARED, _EXPOSED, _REST = 0, 1, 2
+_SRC, _SYN = 0, 1  # the side slot of a packed keyed-count part
 _MB = 1e6
+_REASON_CHARS = 300
+_COUNT_DTYPES = {1: "<u1", 2: "<u2", 4: "<u4", 8: "<u8"}
 
 _NO_SYNTHETIC = "no synthetic rows were read"
 _NO_SOURCE = "no source rows were read"
@@ -255,16 +352,30 @@ _NO_EXPOSURE = ("no non-key record is held only by {a}, or none only by {b} "
                 "side")
 _NULL_KEY_NOTE = ("rows whose key has a NULL part are not duplicates; a NULL "
                   "key is its own integrity defect")
+_SAMPLED_SOURCE = ("sampled mode cannot measure matches against the full "
+                   "source: the source side is a {rate:.3g} row sample, so a "
+                   "copy of an unsampled source row goes unseen; run exact "
+                   "mode")
+_SAMPLED_KEYS = ("sampled mode cannot measure {what} duplicates: the "
+                 "synthetic side is a {rate:.3g} row sample, so a duplicate "
+                 "whose twin was not sampled goes unseen; run exact mode")
+_SAMPLED_DUPLICATES = ("sampled mode cannot measure internal duplicates: the "
+                       "{side} side is a {rate:.3g} sample of rows by content "
+                       "hash, which keeps or drops identical rows together; "
+                       "run exact mode")
 
 _INT_TYPES = frozenset({"INT64", "INTEGER"})
 _COUNTED_SIDES = frozenset({Side.SOURCE, Side.SYNTHETIC})
 _SPLITMIX = (np.uint64(0x9E3779B97F4A7C15), np.uint64(0xBF58476D1CE4E5B9),
              np.uint64(0x94D049BB133111EB))
 _SPREAD_LABEL = "sdfb:flag-spread"
-_ACCS, _FLAGS, _STATS, _COUNTS = "accs", "flags", "stats", "counts"
+_ACCS, _FLAGS, _STATS, _COUNTS, _FAILED = ("accs", "flags", "stats", "counts",
+                                           "failed")
 _ACC, _KEYS, _SEED = "acc", "keys", "seed"
 _EMPTY_POS = np.zeros(0, dtype=np.int64)
 _EMPTY_CODES = np.zeros(0, dtype=np.uint64)
+
+FreqOfFreqs = tuple[tuple[int, int], ...]  # (count c, records held c times)
 
 
 def _mix64(x: np.ndarray) -> np.ndarray:
@@ -322,6 +433,30 @@ def _union(a: np.ndarray, b: np.ndarray) -> np.ndarray:
   return merged
 
 
+def _failure(exc: BaseException) -> str:
+  """A failed table's reason: the error class and its message (bounded;
+  encoder and numpy messages name columns and types, never values)."""
+  text = f"membership could not be computed for this table ({type(exc).__name__}: {exc})"
+  return text[:_REASON_CHARS]
+
+
+def _freqs(counts: np.ndarray) -> FreqOfFreqs:
+  """The frequency of frequencies of positive `counts`: (c, f_c) pairs."""
+  values, freq = np.unique(counts[counts > 0], return_counts=True)
+  return tuple((int(c), int(f))
+               for c, f in zip(values.tolist(), freq.tolist(), strict=True))
+
+
+def _freqs_sum(a: FreqOfFreqs, b: FreqOfFreqs) -> FreqOfFreqs:
+  if not a:
+    return b
+  if not b:
+    return a
+  total = Counter(dict(a))
+  total.update(dict(b))
+  return tuple(sorted(total.items()))
+
+
 # --------------------------------------------------------------------------
 # the per-table spec (driver-built, pickled into the DoFns: slim)
 # --------------------------------------------------------------------------
@@ -331,9 +466,12 @@ class MembershipSpec:  # pylint: disable=too-many-instance-attributes  # one fie
   (`PanelRefs` carries their hashes, as a side input).
 
   `null_content`/`null_row` are the non-key / row hashes of a row whose
-  cells are all NULL (R60); `source_mode` is SIDE_INPUT or KEYED_COUNT
-  (module docstring), `source_note` says why; `bucket_bits` splits the
-  keyed counts.
+  cells are all NULL (R60); `handle` is the synthetic flag handle's
+  columns (the PK, else the identity) and `code_kind` which source code a
+  flag labels (`pk`, `identity` or `record`); `source_mode` is SIDE_INPUT
+  or KEYED_COUNT (module docstring), `source_note` says why;
+  `bucket_bits` splits the keyed counts; `rate_source`/`rate_synthetic`
+  are the sides' row-sample rates (1.0 when read in full, R72).
   """
   table: str
   encoding_plan_digest: str
@@ -342,14 +480,23 @@ class MembershipSpec:  # pylint: disable=too-many-instance-attributes  # one fie
   keyed: bool
   pk: tuple[str, ...]
   identity: tuple[str, ...]
-  pk_text: tuple[int, ...] | None
-  pk_int: tuple[bool, ...]
+  handle: tuple[str, ...]
+  handle_text: tuple[int, ...] | None
+  handle_int: tuple[bool, ...]
+  code_kind: str
   null_content: int
   null_row: int
   source_mode: str
   source_note: str
   bucket_bits: int
   panel_max_bytes: int
+  rate_source: float = 1.0
+  rate_synthetic: float = 1.0
+
+  @property
+  def null_record(self) -> int:
+    """The record hash of a row with no content (module docstring)."""
+    return self.null_content if self.nonkey_columns else self.null_row
 
   @classmethod
   def from_table(
@@ -370,10 +517,13 @@ class MembershipSpec:  # pylint: disable=too-many-instance-attributes  # one fie
         linear_hash(
             np.full((1, len(nonkey)), NULL_CODE, dtype=np.uint64),
             multipliers(nonkey, salt))[0]) if nonkey else NULL_CODE
+    handle = layout.pk or layout.identity
     bq_type = {c.name: c.bq_type for c in table.columns}
-    pk_text = (
-        tuple(layout.text_columns.index(c) for c in layout.pk)
-        if layout.pk and set(layout.pk) <= set(layout.text_columns) else None)
+    handle_text = (
+        tuple(layout.text_columns.index(c) for c in handle)
+        if handle and set(handle) <= set(layout.text_columns) else None)
+    code_kind = "pk" if layout.pk else "identity" if layout.identity else (
+        "record")
     mode, note = _source_mode(
         table, nonkey=bool(nonkey), keyed=keyed, max_bytes=source_set_max_bytes)
     return cls(
@@ -384,26 +534,33 @@ class MembershipSpec:  # pylint: disable=too-many-instance-attributes  # one fie
         keyed=keyed,
         pk=layout.pk,
         identity=layout.identity,
-        pk_text=pk_text,
-        pk_int=tuple(bq_type[c].upper() in _INT_TYPES for c in layout.pk),
+        handle=handle,
+        handle_text=handle_text,
+        handle_int=tuple(bq_type[c].upper() in _INT_TYPES for c in handle),
+        code_kind=code_kind,
         null_content=null_content,
         null_row=null_row,
         source_mode=mode,
         source_note=note,
         bucket_bits=_bucket_bits(table),
-        panel_max_bytes=panel_max_bytes)
+        panel_max_bytes=panel_max_bytes,
+        rate_source=_rate(table.sample_rate_source),
+        rate_synthetic=_rate(table.sample_rate_synthetic))
+
+
+def _rate(rate: float | None) -> float:
+  return 1.0 if rate is None or rate >= 1.0 else float(rate)
 
 
 def _source_mode(table: TablePlan, *, nonkey: bool, keyed: bool,
                  max_bytes: int) -> tuple[str, str]:
-  """SIDE_INPUT when the sorted source sets fit `max_bytes` (8 B per
-  source row and array: the non-key hashes when there is content, the row
-  hashes when the table has keys), else KEYED_COUNT."""
-  arrays = int(nonkey) + int(keyed)
+  """SIDE_INPUT when the sorted source sets fit `max_bytes`
+  (`context.budget.source_sets_fit`), else KEYED_COUNT."""
   if table.rows_source is None:
     return KEYED_COUNT, "source row count unknown: the keyed count"
-  need = table.rows_read[0] * 8 * arrays
-  if need <= max_bytes:
+  rows = table.rows_read[0]
+  need = rows * 8 * source_set_arrays(nonkey=nonkey, keyed=keyed)
+  if source_sets_fit(rows, nonkey=nonkey, keyed=keyed, max_bytes=max_bytes):
     return SIDE_INPUT, f"source sets {_mb(need)} <= {_mb(max_bytes)}"
   return KEYED_COUNT, f"source sets {_mb(need)} > {_mb(max_bytes)}"
 
@@ -418,23 +575,28 @@ def _bucket_bits(table: TablePlan) -> int:
   return min(MAX_BUCKET_BITS, math.ceil(math.log2(rows / KEY_BUCKET_CODES)))
 
 
+def _record(spec: MembershipSpec, batch: EncodedBatch) -> np.ndarray:
+  """A batch's record hashes (module docstring)."""
+  return batch.nonkey_hash if spec.nonkey_columns else batch.row_hash
+
+
 # --------------------------------------------------------------------------
 # the panel: hashes (driver) and the derived index (worker, Shared)
 # --------------------------------------------------------------------------
 @dataclass(frozen=True, eq=False)
 class PanelRefs:  # pylint: disable=too-many-instance-attributes  # one field per panel array
   """The R/H panel of one table as hashes, in rank order (the membership
-  side input). E is `r_*[:e_n]`, H_E `h_*[:he_n]`. `r_key`/`h_key` are the
-  rows' source-key codes (PK hash; identity hash; the row hash of a
-  key-less table), labelled only at flag time with the worker's key.
-  `r_cells`/`h_cells` are the (n, d) non-key cell codes (near matches).
-  `lift_reason`/`near_reason` say why the exact / near sets are absent
-  (their arrays are then empty); `r_dup` = (rows of R in a non-key hash
-  held twice or more, R rows with content) for the D4 baseline."""
+  side input). E is `r_*[:e_n]`, H_E `h_*[:he_n]`. `r_record` holds the
+  record hashes, `r_key` the rows' source-key codes (`spec.code_kind`),
+  labelled only at flag time with the worker's key, `r_cells`/`h_cells`
+  the (n, d) non-key cell codes (near matches). `lift_reason`/
+  `near_reason` say why the exact / near sets are absent (their arrays
+  are then empty); `r_freqs` is R's content frequency of frequencies,
+  for the D4 duplicate baseline."""
   table: str
   token: str
-  r_nonkey: np.ndarray
-  h_nonkey: np.ndarray
+  r_record: np.ndarray
+  h_record: np.ndarray
   r_row: np.ndarray
   h_row: np.ndarray
   r_key: np.ndarray
@@ -445,32 +607,40 @@ class PanelRefs:  # pylint: disable=too-many-instance-attributes  # one field pe
   he_n: int
   lift_reason: str | None
   near_reason: str | None
-  r_dup: tuple[int, int] | None
+  r_freqs: FreqOfFreqs | None
 
   @classmethod
   def from_table(cls, table: TablePlan, spec: MembershipSpec) -> PanelRefs:
     """The panel's hashes (the plan's salt, `BatchEncoder`); every R/H
-    reason decided here, in order: no content, no panel, unverified, then
-    the size guard (`spec.panel_max_bytes` per array)."""
+    reason decided here, in order: no panel, unverified (with the panel's
+    own reason), the size guard (`spec.panel_max_bytes` per array), then
+    for near matches too few non-key columns and the cell-matrix guard.
+
+    Raises:
+      ValueError: a panel row the encoder rejects (the caller makes the
+        table not_evaluated).
+    """
     panel = table.panel
     empty = cls(table.name, "", _EMPTY_CODES, _EMPTY_CODES, _EMPTY_CODES,
                 _EMPTY_CODES, _EMPTY_CODES, _EMPTY_CODES, None, None, 0, 0,
                 _NO_PANEL, _NO_PANEL, None)
-    if not spec.nonkey_columns:
-      return replace(empty, lift_reason=_NO_CONTENT, near_reason=_NO_CONTENT)
     if panel is None:
       return empty
-    r = _encode_panel(table, Side.REFERENCE, panel.r_rows, spec.salt)
-    h = _encode_panel(table, Side.HOLDOUT, panel.h_rows, spec.salt)
-    r_dup = _dup_rows(r[0], spec.null_content)
-    lift_reason = None if panel.verified else UNVERIFIED_REASON
-    vector_bytes = max(len(r[0]), len(h[0])) * 8
+    r = _encode_panel(table, spec, Side.REFERENCE, panel.r_rows)
+    h = _encode_panel(table, spec, Side.HOLDOUT, panel.h_rows)
+    r_freqs = _record_freqs(r.record,
+                            spec.null_content) if spec.nonkey_columns else None
+    lift_reason = None
+    if not panel.verified:
+      why = panel.reason or "digest mismatch"
+      lift_reason = f"{UNVERIFIED_REASON}: {why}"
+    vector_bytes = max(len(r.record), len(h.record)) * 8
     if lift_reason is None and vector_bytes > spec.panel_max_bytes:
       lift_reason = (f"the reference hash side input would be "
                      f"{_mb(vector_bytes)}, above the "
                      f"{_mb(spec.panel_max_bytes)} cap per panel array")
     near_reason = lift_reason
-    cell_bytes = max(r[3].nbytes, h[3].nbytes)
+    cell_bytes = max(r.cells.nbytes, h.cells.nbytes)
     if near_reason is None and len(spec.nonkey_columns) < _MIN_NEAR_COLUMNS:
       near_reason = _FEW_COLUMNS
     if near_reason is None and cell_bytes > spec.panel_max_bytes:
@@ -479,54 +649,63 @@ class PanelRefs:  # pylint: disable=too-many-instance-attributes  # one field pe
                      "array")
     if lift_reason is not None:
       return replace(
-          empty, lift_reason=lift_reason, near_reason=near_reason, r_dup=r_dup)
-    cells = (None, None) if near_reason is not None else (r[3], h[3])
-    arrays = (*r[:3], *h[:3], *(c for c in cells if c is not None))
+          empty,
+          lift_reason=lift_reason,
+          near_reason=near_reason,
+          r_freqs=r_freqs)
+    cells = (None, None) if near_reason is not None else (r.cells, h.cells)
+    arrays = (r.record, r.row, r.key, h.record, h.row, h.key,
+              *(c for c in cells if c is not None))
     return cls(
         table=table.name,
         token=_token(table.name, spec.salt, arrays),
-        r_nonkey=r[0],
-        r_row=r[1],
-        r_key=r[2],
-        h_nonkey=h[0],
-        h_row=h[1],
-        h_key=h[2],
+        r_record=r.record,
+        r_row=r.row,
+        r_key=r.key,
+        h_record=h.record,
+        h_row=h.row,
+        h_key=h.key,
         r_cells=cells[0],
         h_cells=cells[1],
         e_n=panel.e_n,
         he_n=panel.he_n,
         lift_reason=None,
         near_reason=near_reason,
-        r_dup=r_dup)
+        r_freqs=r_freqs)
 
 
-def _encode_panel(
-    table: TablePlan, side: Side, rows: Sequence[Mapping[str, Any]],
-    salt: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-  """(non-key hashes, row hashes, key codes, cell codes) of panel rows."""
+class _PanelSide(NamedTuple):
+  record: np.ndarray
+  row: np.ndarray
+  key: np.ndarray
+  cells: np.ndarray
+
+
+def _encode_panel(table: TablePlan, spec: MembershipSpec, side: Side,
+                  rows: Sequence[Mapping[str, Any]]) -> _PanelSide:
+  """(record hashes, row hashes, source-key codes, cell codes) of panel
+  rows, in rank order."""
   if not rows:
-    d = len(BatchLayout.from_table(table).nonkey_columns)
-    return (_EMPTY_CODES, _EMPTY_CODES, _EMPTY_CODES,
-            np.zeros((0, d), dtype=np.uint64))
+    d = len(spec.nonkey_columns)
+    return _PanelSide(_EMPTY_CODES, _EMPTY_CODES, _EMPTY_CODES,
+                      np.zeros((0, d), dtype=np.uint64))
   batch = BatchEncoder.from_table(
-      table, side, salt=salt, subsample_rate=1.0).encode(rows)
-  layout = batch.layout
-  if layout.pk:
-    key = batch.pk_hash
-  elif layout.identity:
-    key = batch.identity_hash
-  else:
-    key = batch.row_hash
-  return batch.nonkey_hash, batch.row_hash, key, batch.h_nonkey
+      table, side, salt=spec.salt, subsample_rate=1.0).encode(rows)
+  record = _record(spec, batch)
+  key = {
+      "pk": batch.pk_hash,
+      "identity": batch.identity_hash
+  }.get(spec.code_kind, record)
+  return _PanelSide(record, batch.row_hash, key, batch.h_nonkey)
 
 
-def _dup_rows(nonkey: np.ndarray, null_content: int) -> tuple[int, int]:
-  """(rows in a non-key hash held twice or more, rows with content)."""
-  content = nonkey[nonkey != np.uint64(null_content)]
+def _record_freqs(record: np.ndarray, null_content: int) -> FreqOfFreqs:
+  """The frequency of frequencies of the records with content."""
+  content = record[record != np.uint64(null_content)]
   if content.size == 0:
-    return 0, 0
+    return ()
   _, counts = np.unique(content, return_counts=True)
-  return int(counts[counts >= _DUPLICATED].sum()), len(content)
+  return _freqs(counts)
 
 
 def _token(table: str, salt: str, arrays: Iterable[np.ndarray]) -> str:
@@ -594,14 +773,14 @@ class PanelStats(NamedTuple):
   t_h_rest: int  # |(H \ R) \ H_E|
   t_near_r: int  # R's leave-one-out keys H lacks at the same column
   t_near_h: int
-  r_dup: tuple[int, int] | None
+  r_freqs: FreqOfFreqs | None
 
 
 @dataclass(eq=False)
 class PanelIndex:  # pylint: disable=too-many-instance-attributes  # one field per lookup structure
   """The panel's lookup structures, built from `PanelRefs` once per worker
   (`Shared`) and on the driver for `stats` (the same function, so both
-  agree). Position arrays index `u_r`/`u_h` (distinct non-key hashes with
+  agree). Position arrays index `u_r`/`u_h` (distinct record hashes with
   content); `r_class`/`h_class` classify each position: 0 not exclusive,
   1 exclusive and in the exposed prefix (E \\ H, H_E \\ R), 2 exclusive
   outside it."""
@@ -625,23 +804,23 @@ class PanelIndex:  # pylint: disable=too-many-instance-attributes  # one field p
 
   @classmethod
   def build(cls, spec: MembershipSpec, refs: PanelRefs) -> PanelIndex:
-    content = np.uint64(spec.null_content)
-    u_r, r_first = _first_unique(refs.r_nonkey, refs.r_nonkey != content)
-    u_h, h_first = _first_unique(refs.h_nonkey, refs.h_nonkey != content)
-    r_class = _classes(u_r, u_h, refs.r_nonkey[:refs.e_n])
-    h_class = _classes(u_h, u_r, refs.h_nonkey[:refs.he_n])
+    null = np.uint64(spec.null_record)
+    u_r, r_first = _first_unique(refs.r_record, refs.r_record != null)
+    u_h, h_first = _first_unique(refs.h_record, refs.h_record != null)
+    r_class = _classes(u_r, u_h, refs.r_record[:refs.e_n])
+    h_class = _classes(u_h, u_r, refs.h_record[:refs.he_n])
     a = multipliers(spec.nonkey_columns, spec.salt)
     loo_r = loo_h = None
     if refs.r_cells is not None and refs.h_cells is not None:
       null_loo = loo_hashes(
           np.full((1, len(spec.nonkey_columns)), NULL_CODE, dtype=np.uint64), a,
           np.array([spec.null_content], dtype=np.uint64))[0]
-      r_side = _Loo.build(refs.r_cells, refs.r_nonkey, a, null_loo)
-      h_side = _Loo.build(refs.h_cells, refs.h_nonkey, a, null_loo)
+      r_side = _Loo.build(refs.r_cells, refs.r_record, a, null_loo)
+      h_side = _Loo.build(refs.h_cells, refs.h_record, a, null_loo)
       loo_r, loo_h = r_side.exclusive_of(h_side), h_side.exclusive_of(r_side)
     stats = PanelStats(
-        n_r=len(refs.r_nonkey),
-        n_h=len(refs.h_nonkey),
+        n_r=len(refs.r_record),
+        n_h=len(refs.h_record),
         e_n=refs.e_n,
         he_n=refs.he_n,
         lift_reason=refs.lift_reason,
@@ -652,7 +831,7 @@ class PanelIndex:  # pylint: disable=too-many-instance-attributes  # one field p
         t_h_rest=int((h_class == _REST).sum()),
         t_near_r=int(loo_r.only.sum()) if loo_r is not None else 0,
         t_near_h=int(loo_h.only.sum()) if loo_h is not None else 0,
-        r_dup=refs.r_dup)
+        r_freqs=refs.r_freqs)
     return cls(
         exact=refs.lift_reason is None,
         near=loo_r is not None,
@@ -680,7 +859,7 @@ def _classes(own: np.ndarray, twin: np.ndarray,
   exclusive = ~np.isin(own, twin)
   in_prefix = np.isin(own, exposed)
   out: np.ndarray = np.where(exclusive, np.where(in_prefix, _EXPOSED, _REST),
-                             0).astype(np.int8)
+                             _SHARED).astype(np.int8)
   return out
 
 
@@ -689,27 +868,26 @@ def _classes(own: np.ndarray, twin: np.ndarray,
 # --------------------------------------------------------------------------
 @dataclass(frozen=True, eq=False)
 class SourceSets:
-  """The distinct source hashes of one table: non-key (content rows) and,
-  for a table with keys, row hashes (all-NULL rows left out); sorted."""
-  nonkey: np.ndarray
+  """The distinct source hashes of one table, sorted: the record hashes
+  (rows with content) and, for a keyed table with content, the row hashes
+  (all-NULL rows left out)."""
+  record: np.ndarray
   row: np.ndarray | None
 
 
 def source_hashes(spec: MembershipSpec, batch: EncodedBatch) -> SourceSets:
   """One source batch's distinct hashes (the combine's input)."""
-  nonkey = _EMPTY_CODES
-  if spec.nonkey_columns:
-    nk = batch.nonkey_hash
-    nonkey = np.unique(nk[nk != np.uint64(spec.null_content)])
-  row = None
-  if spec.keyed:
+  record = _record(spec, batch)
+  rows = None
+  if spec.keyed and spec.nonkey_columns:
     rh = batch.row_hash
-    row = np.unique(rh[rh != np.uint64(spec.null_row)])
-  return SourceSets(nonkey, row)
+    rows = np.unique(rh[rh != np.uint64(spec.null_row)])
+  return SourceSets(
+      np.unique(record[record != np.uint64(spec.null_record)]), rows)
 
 
 def _codes_held(sets: SourceSets) -> int:
-  return len(sets.nonkey) + (0 if sets.row is None else len(sets.row))
+  return len(sets.record) + (0 if sets.row is None else len(sets.row))
 
 
 class SourceSetsCombineFn(beam.CombineFn):
@@ -722,24 +900,27 @@ class SourceSetsCombineFn(beam.CombineFn):
                 element: SourceSets) -> list[SourceSets]:
     mutable_accumulator.append(element)
     if sum(_codes_held(s) for s in mutable_accumulator) > _COMPACT_CODES:
-      return [self._compact(mutable_accumulator)]
+      return [self._union(mutable_accumulator)]
     return mutable_accumulator
 
   def merge_accumulators(
       self, accumulators: Iterable[list[SourceSets]]) -> list[SourceSets]:
     merged = [part for acc in accumulators for part in acc]
-    return [self._compact(merged)] if len(merged) > 1 else merged
+    return [self._union(merged)] if len(merged) > 1 else merged
+
+  def compact(self, accumulator: list[SourceSets]) -> list[SourceSets]:
+    return [self._union(accumulator)] if len(accumulator) > 1 else accumulator
 
   def extract_output(self, accumulator: list[SourceSets]) -> SourceSets:
-    return self._compact(accumulator)
+    return self._union(accumulator)
 
   @staticmethod
-  def _compact(parts: Sequence[SourceSets]) -> SourceSets:
-    nonkey = np.unique(
-        np.concatenate([_EMPTY_CODES, *(p.nonkey for p in parts)]))
+  def _union(parts: Sequence[SourceSets]) -> SourceSets:
+    record = np.unique(
+        np.concatenate([_EMPTY_CODES, *(p.record for p in parts)]))
     rows = [p.row for p in parts if p.row is not None]
     row = np.unique(np.concatenate(rows)) if rows else None
-    return SourceSets(nonkey.astype(np.uint64), row)
+    return SourceSets(record.astype(np.uint64), row)
 
 
 # --------------------------------------------------------------------------
@@ -778,8 +959,12 @@ class MembershipAcc:  # pylint: disable=too-many-instance-attributes  # one fiel
     return MembershipAcc(**values)
 
 
-class _Candidate(NamedTuple):
-  """A flag before ranking: ordered by (prio, spread, key_text)."""
+@dataclass(frozen=True)
+class _Candidate:  # pylint: disable=too-many-instance-attributes  # one field per flag column
+  """A flag before ranking: ordered by (prio, spread, key_text), distinct
+  by (spread, source_code) — the spread is a bijection of the row hash.
+  A dataclass, not a NamedTuple, so Beam never infers a schema coder for
+  its dict fields (it pickles)."""
   prio: int
   spread: int
   key_text: str
@@ -794,10 +979,20 @@ def _flag_order(candidate: _Candidate) -> tuple[int, int, str]:
   return candidate.prio, candidate.spread, candidate.key_text
 
 
+def _top(candidates: Iterable[_Candidate], k: int) -> list[_Candidate]:
+  """The `k` best DISTINCT candidates: one per (synthetic row hash,
+  source code), so identical copies of one record take one slot."""
+  best: dict[tuple[int, int | None], _Candidate] = {}
+  for candidate in sorted(candidates, key=_flag_order):
+    best.setdefault((candidate.spread, candidate.source_code), candidate)
+  return sorted(best.values(), key=_flag_order)[:k]
+
+
 class _Near(NamedTuple):
   rows: np.ndarray  # bool (n,): a verified near match
   column: np.ndarray  # the first dropped column it matched at
   rank: np.ndarray  # the matched row's rank
+  key: np.ndarray  # the matched key's position (`_Loo.keys`)
   hits: np.ndarray  # distinct exclusive key positions hit
 
 
@@ -808,6 +1003,7 @@ def _near(loo: _Loo, keys: np.ndarray, cells: np.ndarray,
   rows = np.zeros(n, dtype=bool)
   column = np.full(n, -1, dtype=np.int64)
   rank = np.full(n, -1, dtype=np.int64)
+  key = np.full(n, -1, dtype=np.int64)
   hits = []
   for j in range(keys.shape[1]):
     lo = int(loo.offsets[j])
@@ -826,18 +1022,20 @@ def _near(loo: _Loo, keys: np.ndarray, cells: np.ndarray,
     rows[rows_ok[fresh]] = True
     column[rows_ok[fresh]] = j
     rank[rows_ok[fresh]] = ranks_ok[fresh]
+    key[rows_ok[fresh]] = key_pos[fresh]
   merged = np.unique(np.concatenate(hits)) if hits else _EMPTY_POS
-  return _Near(rows, column, rank, merged.astype(np.int64))
+  return _Near(rows, column, rank, key, merged.astype(np.int64))
 
 
 def _synthetic_key(spec: MembershipSpec, batch: EncodedBatch,
                    i: int) -> tuple[dict[str, Any] | None, str]:
-  """Row i's synthetic PK as a dict (INT64 parts as ints) and its JSON."""
-  if spec.pk_text is None:
+  """Row i's synthetic handle (PK, else identity) as a dict — INT64 parts
+  as ints — and its JSON."""
+  if spec.handle_text is None:
     return None, ""
   key: dict[str, Any] = {}
   for name, slot, is_int in zip(
-      spec.pk, spec.pk_text, spec.pk_int, strict=True):
+      spec.handle, spec.handle_text, spec.handle_int, strict=True):
     text = batch.text[slot][i]
     key[name] = int(text) if is_int and text is not None else text
   return key, json.dumps(key, sort_keys=True)
@@ -857,13 +1055,17 @@ class _Picked(NamedTuple):
   details: Sequence[dict[str, Any]]
 
 
-def _best(rows: np.ndarray, prio: np.ndarray, spread: np.ndarray,
-          top_k: int) -> np.ndarray:
-  """The order of the `top_k` best `rows` by (priority, spread): only
-  those are turned into candidates, so a batch full of copies costs one
-  sort, not a Python loop per row."""
-  order: np.ndarray = np.lexsort((spread[rows], prio))[:top_k]
-  return order
+def _choose(rows: np.ndarray, prio: np.ndarray, codes: np.ndarray,
+            row_hash: np.ndarray, spread: np.ndarray, top_k: int) -> np.ndarray:
+  """The positions (into `rows`) of the `top_k` best DISTINCT candidates
+  by (priority, spread): the first row of each (row hash, code) pair, then
+  one sort — so a batch full of copies costs no Python loop per row."""
+  pairs = np.stack([row_hash[rows], codes], axis=1)
+  _, first = np.unique(pairs, axis=0, return_index=True)
+  first = np.sort(first)
+  order = np.lexsort((spread[rows[first]], prio[first]))[:top_k]
+  chosen: np.ndarray = first[order]
+  return chosen
 
 
 def _candidates(spec: MembershipSpec, batch: EncodedBatch, rows: np.ndarray,
@@ -885,135 +1087,238 @@ def _candidates(spec: MembershipSpec, batch: EncodedBatch, rows: np.ndarray,
   return out
 
 
+class _Matches(NamedTuple):
+  """One batch's record lookups: panel positions and hits, source hits."""
+  record: np.ndarray
+  content: np.ndarray
+  pos_r: np.ndarray
+  in_r: np.ndarray
+  pos_h: np.ndarray
+  in_h: np.ndarray
+  r_class: np.ndarray
+  src_rec: np.ndarray
+  src_row: np.ndarray | None
+
+
+def _matches(spec: MembershipSpec, index: PanelIndex,
+             sources: SourceSets | None, batch: EncodedBatch) -> _Matches:
+  n, rh = batch.n, batch.row_hash
+  record = _record(spec, batch)
+  content = record != np.uint64(spec.null_record)
+  src_rec = np.zeros(n, dtype=bool)
+  src_row = None
+  if sources is not None:
+    src_rec = content & _member(sources.record, record)
+    if sources.row is not None:
+      src_row = _member(sources.row, rh) & (rh != np.uint64(spec.null_row))
+    else:  # key-less or all-key: the record IS the row
+      src_row = src_rec
+  pos_r, in_r = _lookup(index.u_r, record, content & index.exact)
+  pos_h, in_h = _lookup(index.u_h, record, content & index.exact)
+  r_class = index.r_class[pos_r] if index.u_r.size else np.zeros(n, np.int8)
+  return _Matches(record, content, pos_r, in_r, pos_h, in_h, r_class, src_rec,
+                  src_row)
+
+
 def batch_membership(
     spec: MembershipSpec, index: PanelIndex, sources: SourceSets | None,
     batch: EncodedBatch,
     top_k: int) -> tuple[MembershipAcc, dict[str, list[_Candidate]]]:
   """One synthetic batch's membership counts and its best flag candidates
   per check (module docstring). `sources` is None in keyed-count mode."""
-  n = batch.n
-  nk, rh = batch.nonkey_hash, batch.row_hash
-  acc = MembershipAcc(n=n)
-  content = (
-      nk != np.uint64(spec.null_content) if spec.nonkey_columns else np.zeros(
-          n, dtype=bool))
-  src_nk = np.zeros(n, dtype=bool)
-  src_row = None
+  m = _matches(spec, index, sources, batch)
+  acc = MembershipAcc(n=batch.n)
   if sources is not None:
-    src_nk = content & _member(sources.nonkey, nk)
-    acc.src_nonkey = int(src_nk.sum())
-    if spec.keyed and sources.row is not None:
-      src_row = _member(sources.row, rh) & (rh != np.uint64(spec.null_row))
-    else:
-      src_row = src_nk
-    acc.src_row = int(src_row.sum())
-  pos_r, in_r = _lookup(index.u_r, nk, content & index.exact)
-  pos_h, in_h = _lookup(index.u_h, nk, content & index.exact)
-  r_class = index.r_class[pos_r] if index.u_r.size else np.zeros(n, np.int8)
-  h_class = index.h_class[pos_h] if index.u_h.size else np.zeros(n, np.int8)
-  if index.exact:
-    acc.rows_r, acc.rows_h = int(in_r.sum()), int(in_h.sum())
-    acc.rows_r_only = int((in_r & (r_class != _SHARED)).sum())
-    acc.rows_h_only = int((in_h & (h_class != _SHARED)).sum())
-    acc.rows_full_r = int((_member(index.r_rows, rh) & content).sum())
-    acc.hits_e = _positions(pos_r, in_r & (r_class == _EXPOSED))
-    acc.hits_r_rest = _positions(pos_r, in_r & (r_class == _REST))
-    acc.hits_he = _positions(pos_h, in_h & (h_class == _EXPOSED))
-    acc.hits_h_rest = _positions(pos_h, in_h & (h_class == _REST))
-  spread = _spread(spec, rh)
-  out = {
-      EXACT_COPY:
-          _exact_candidates(spec, index, batch, (in_r, pos_r, in_h, pos_h),
-                            (src_nk, src_row), spread, top_k)
-  }
+    acc.src_nonkey = int(m.src_rec.sum()) if spec.nonkey_columns else 0
+    acc.src_row = int(m.src_row.sum()) if m.src_row is not None else 0
+  if index.exact and spec.nonkey_columns:
+    h_class = index.h_class[m.pos_h] if index.u_h.size else np.zeros(
+        batch.n, np.int8)
+    acc.rows_r, acc.rows_h = int(m.in_r.sum()), int(m.in_h.sum())
+    acc.rows_r_only = int((m.in_r & (m.r_class != _SHARED)).sum())
+    acc.rows_h_only = int((m.in_h & (h_class != _SHARED)).sum())
+    acc.rows_full_r = int(
+        (_member(index.r_rows, batch.row_hash) & m.content).sum())
+    acc.hits_e = _positions(m.pos_r, m.in_r & (m.r_class == _EXPOSED))
+    acc.hits_r_rest = _positions(m.pos_r, m.in_r & (m.r_class == _REST))
+    acc.hits_he = _positions(m.pos_h, m.in_h & (h_class == _EXPOSED))
+    acc.hits_h_rest = _positions(m.pos_h, m.in_h & (h_class == _REST))
+  spread = _spread(spec, batch.row_hash)
+  out = {EXACT_COPY: _exact_candidates(spec, index, batch, m, spread, top_k)}
   if index.near and index.loo_r is not None and index.loo_h is not None:
-    keys = loo_hashes(batch.h_nonkey, index.a_nonkey, nk)
-    near_r = _near(index.loo_r, keys, batch.h_nonkey, content & ~in_r)
-    near_h = _near(index.loo_h, keys, batch.h_nonkey, content & ~in_h)
+    keys = loo_hashes(batch.h_nonkey, index.a_nonkey, batch.nonkey_hash)
+    # a row matching an R or an H record exactly is exact, never near
+    eligible = m.content & ~(m.in_r | m.in_h)
+    near_r = _near(index.loo_r, keys, batch.h_nonkey, eligible)
+    near_h = _near(index.loo_h, keys, batch.h_nonkey, eligible)
     acc.near_rows_r, acc.near_rows_h = (int(near_r.rows.sum()),
                                         int(near_h.rows.sum()))
     acc.near_hits_r, acc.near_hits_h = near_r.hits, near_h.hits
-    out[NEAR_COPY] = _near_candidates(spec, index, batch, near_r, near_h,
+    out[NEAR_COPY] = _near_candidates(spec, index, batch, (near_r, near_h),
                                       spread, top_k)
   return acc, out
 
 
 def _exact_candidates(spec: MembershipSpec, index: PanelIndex,
-                      batch: EncodedBatch, panel: tuple[np.ndarray, ...],
-                      source: tuple[np.ndarray, np.ndarray | None],
-                      spread: np.ndarray, top_k: int) -> list[_Candidate]:
-  """The best flag candidates among the synthetic rows that copy a record,
-  each labelled with the first set of E, R, H, the full source it matches
-  (`SOURCE_SETS`)."""
-  in_r, pos_r, in_h, pos_h = panel
-  src_nk, src_row = source
-  rows = np.nonzero(in_r | in_h | src_nk)[0]
+                      batch: EncodedBatch, m: _Matches, spread: np.ndarray,
+                      top_k: int) -> list[_Candidate]:
+  """The best distinct flag candidates among the synthetic rows that copy
+  a record, each labelled with the first set of E (an exclusive E record),
+  R, H, the full source it matches (`SOURCE_SETS`)."""
+  rows = np.nonzero(m.in_r | m.in_h | m.src_rec)[0]
   if not rows.size:
     return []
-  in_e = np.zeros(len(in_r), dtype=bool)
-  if index.u_r.size:  # the record occurs in E: its first rank is in E
-    in_e = in_r & (index.r_first[pos_r] < index.e_n)
+  in_e = m.in_r & (m.r_class == _EXPOSED)
   prio = np.where(
       in_e, _PRIO_E,
-      np.where(in_r, _PRIO_R, np.where(in_h, _PRIO_H, _PRIO_SOURCE)))[rows]
-  order = _best(rows, prio, spread, top_k)
-  rows, prio = rows[order], prio[order]
+      np.where(m.in_r, _PRIO_R, np.where(m.in_h, _PRIO_H, _PRIO_SOURCE)))[rows]
+  codes = np.zeros(len(rows), dtype=np.uint64)
+  from_r, from_h = prio <= _PRIO_R, prio == _PRIO_H
+  if from_r.any():
+    codes[from_r] = index.r_key[index.r_first[m.pos_r[rows[from_r]]]]
+  if from_h.any():
+    codes[from_h] = index.h_key[index.h_first[m.pos_h[rows[from_h]]]]
+  labelled = spec.code_kind == "record"  # a full-source copy's own record
+  if labelled:
+    codes[prio == _PRIO_SOURCE] = m.record[rows[prio == _PRIO_SOURCE]]
+  chosen = _choose(rows, prio, codes, batch.row_hash, spread, top_k)
+  rows, prio, codes = rows[chosen], prio[chosen], codes[chosen]
   rh = batch.row_hash[rows]
+  full_r = _member(index.r_rows, rh)
+  full_h = _member(index.h_rows, rh)
   sets: list[str] = []
-  codes: list[int | None] = []
+  labels: list[int | None] = []
   details: list[dict[str, Any]] = []
   for o, (i, p) in enumerate(zip(rows.tolist(), prio.tolist(), strict=True)):
     sets.append(SOURCE_SETS[p])
-    if p in (_PRIO_E, _PRIO_R):
-      codes.append(int(index.r_key[index.r_first[pos_r[i]]]))
-      full = bool(_member(index.r_rows, rh[o:o + 1])[0])
-    elif p == _PRIO_H:
-      codes.append(int(index.h_key[index.h_first[pos_h[i]]]))
-      full = bool(_member(index.h_rows, rh[o:o + 1])[0])
-    else:  # a full-source copy: no panel row to name
-      codes.append(None)
-      full = src_row is not None and bool(src_row[i])
+    if p == _PRIO_SOURCE:
+      labels.append(int(codes[o]) if labelled else None)
+      full = m.src_row is not None and bool(m.src_row[i])
+    else:
+      labels.append(int(codes[o]))
+      full = bool(full_h[o] if p == _PRIO_H else full_r[o])
     details.append({"full_row": full})
-  return _candidates(spec, batch, rows, _Picked(prio, sets, codes, 0.0,
+  return _candidates(spec, batch, rows, _Picked(prio, sets, labels, 0.0,
                                                 details), spread)
 
 
 def _near_candidates(spec: MembershipSpec, index: PanelIndex,
-                     batch: EncodedBatch, near_r: _Near, near_h: _Near,
+                     batch: EncodedBatch, near: tuple[_Near, _Near],
                      spread: np.ndarray, top_k: int) -> list[_Candidate]:
-  """The best flag candidates among the synthetic rows that near-copy a
-  panel record (E, then R, then H), each naming the column that differs."""
+  """The best distinct flag candidates among the synthetic rows that
+  near-copy a panel record (an exclusive E key first, then R, then H),
+  each naming the column that differs."""
+  near_r, near_h = near
+  assert index.loo_r is not None
   rows = np.nonzero(near_r.rows | near_h.rows)[0]
   if not rows.size:
     return []
   from_r = near_r.rows[rows]
   rank = np.where(from_r, near_r.rank[rows], near_h.rank[rows])
   column = np.where(from_r, near_r.column[rows], near_h.column[rows])
-  prio = np.where(from_r, np.where(rank < index.e_n, _PRIO_E, _PRIO_R), _PRIO_H)
-  order = _best(rows, prio, spread, top_k)
-  rows, prio, rank, column = rows[order], prio[order], rank[order], column[
-      order]
-  sets: list[str] = []
-  codes: list[int | None] = []
-  details: list[dict[str, Any]] = []
-  for p, r, j in zip(
-      prio.tolist(), rank.tolist(), column.tolist(), strict=True):
-    sets.append(SOURCE_SETS[p])
-    codes.append(int((index.h_key if p == _PRIO_H else index.r_key)[r]))
-    details.append({"differs_in": spec.nonkey_columns[j]})
-  distance = 1.0 / len(spec.nonkey_columns)
-  return _candidates(spec, batch, rows,
-                     _Picked(prio, sets, codes, distance, details), spread)
+  exclusive = np.zeros(len(rows), dtype=bool)
+  exclusive[from_r] = index.loo_r.only[near_r.key[rows[from_r]]]
+  prio = np.where(from_r,
+                  np.where(exclusive & (rank < index.e_n), _PRIO_E, _PRIO_R),
+                  _PRIO_H)
+  codes = np.zeros(len(rows), dtype=np.uint64)
+  codes[from_r] = index.r_key[rank[from_r]]
+  codes[~from_r] = index.h_key[rank[~from_r]]
+  chosen = _choose(rows, prio, codes, batch.row_hash, spread, top_k)
+  rows, prio, codes, column = (rows[chosen], prio[chosen], codes[chosen],
+                               column[chosen])
+  details = [{"differs_in": spec.nonkey_columns[j]} for j in column.tolist()]
+  return _candidates(
+      spec, batch, rows,
+      _Picked(prio, [SOURCE_SETS[p] for p in prio.tolist()],
+              [int(c) for c in codes.tolist()], 1.0 / len(spec.nonkey_columns),
+              details), spread)
 
 
 # --------------------------------------------------------------------------
-# keyed counts (all tables)
+# keyed counts (all tables): packed sparse parts
 # --------------------------------------------------------------------------
-class KeyStats(NamedTuple):
-  """One table's keyed-count totals (sums over sides and buckets)."""
+Packed = tuple[int, bytes, bytes]  # (side, codes <u8 bytes, counts bytes)
+
+
+def _pack(side: int, codes: np.ndarray, counts: np.ndarray) -> Packed:
+  """One side's sorted codes and counts as primitives: the codes as
+  little-endian uint64 bytes, the counts at the smallest unsigned width
+  that holds them."""
+  top = int(counts.max()) if counts.size else 0
+  width = 8
+  for candidate in (1, 2, 4):
+    if top < 1 << (8 * candidate):
+      width = candidate
+      break
+  return (side, np.ascontiguousarray(codes, dtype="<u8").tobytes(),
+          np.ascontiguousarray(counts, dtype=_COUNT_DTYPES[width]).tobytes())
+
+
+def _unpack(part: Packed) -> tuple[int, np.ndarray, np.ndarray]:
+  side, codes_bytes, counts_bytes = part
+  n = len(codes_bytes) // 8
+  codes = np.frombuffer(codes_bytes, dtype="<u8").astype(np.uint64)
+  width = len(counts_bytes) // n if n else 1
+  counts = np.frombuffer(
+      counts_bytes, dtype=_COUNT_DTYPES[width]).astype(np.int64)
+  return side, codes, counts
+
+
+def _merge_side(
+    parts: Sequence[tuple[np.ndarray, np.ndarray]]
+) -> tuple[np.ndarray, np.ndarray]:
+  """Sorted distinct codes with their summed counts."""
+  if len(parts) == 1:
+    return parts[0]
+  codes = np.concatenate([p[0] for p in parts])
+  unique, inverse = np.unique(codes, return_inverse=True)
+  counts = np.bincount(
+      inverse,
+      weights=np.concatenate([p[1] for p in parts]),
+      minlength=len(unique))
+  return unique.astype(np.uint64), counts.astype(np.int64)
+
+
+def _merge_parts(
+    parts: Iterable[tuple[int, np.ndarray, np.ndarray]]) -> list[Packed]:
+  """Raw (side, codes, counts) parts merged to one packed part per side."""
+  by_side: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+  for side, codes, counts in parts:
+    if codes.size:
+      by_side.setdefault(side, []).append((codes, counts))
+  return [
+      _pack(side, *_merge_side(items))
+      for side, items in sorted(by_side.items())
+  ]
+
+
+def _bucketed(
+    codes: np.ndarray, bits: int,
+    side: int) -> Iterator[tuple[int, tuple[int, np.ndarray, np.ndarray]]]:
+  """(bucket, (side, sorted codes, counts)) of one batch's codes."""
+  if codes.size == 0:
+    return
+  unique, counts = np.unique(codes, return_counts=True)
+  counts = counts.astype(np.int64)
+  if bits == 0:
+    yield 0, (side, unique, counts)
+    return
+  bucket = (unique >> np.uint64(64 - bits)).astype(np.int64)
+  edges = np.searchsorted(bucket, np.arange(2**bits + 1))
+  for b in np.nonzero(np.diff(edges))[0].tolist():
+    lo, hi = edges[b], edges[b + 1]
+    yield b, (side, unique[lo:hi], counts[lo:hi])
+
+
+@dataclass(frozen=True)
+class KeyStats:  # pylint: disable=too-many-instance-attributes  # one field per keyed-count total
+  """One table's keyed-count totals (sums over sides and buckets); the
+  frequency of frequencies of each side's content and of both sides
+  pooled (R73)."""
   n_src: int = 0
   n_syn: int = 0
-  null_src: int = 0  # rows with no non-key content (R60)
+  null_src: int = 0  # rows with no record content (R60)
   null_syn: int = 0
   pk_null: int = 0  # synthetic rows whose PK has a NULL part
   id_null: int = 0
@@ -1025,55 +1330,41 @@ class KeyStats(NamedTuple):
   id_dup: int = 0
   id_distinct: int = 0
   row_match_syn: int = 0  # keyed mode: synthetic rows a source row matches
+  freqs_src: FreqOfFreqs = ()
+  freqs_syn: FreqOfFreqs = ()
+  freqs_pool: FreqOfFreqs = ()  # both sides' rows together (the R73 null)
 
   def plus(self, other: KeyStats) -> KeyStats:
-    return KeyStats(*(a + b for a, b in zip(self, other, strict=True)))
+    values: dict[str, Any] = {}
+    for f in fields(self):
+      mine, theirs = getattr(self, f.name), getattr(other, f.name)
+      values[f.name] = (
+          _freqs_sum(mine, theirs) if isinstance(mine, tuple) else mine +
+          theirs)
+    return KeyStats(**values)
 
 
-@dataclass(frozen=True, eq=False)
-class _Codes:
-  """Exact counts per code of one keyed-count bucket: sorted codes."""
-  codes: np.ndarray
-  src: np.ndarray
-  syn: np.ndarray
-
-
-def _bucketed(codes: np.ndarray, bits: int, source: bool) -> Iterator[tuple]:
-  """(bucket, _Codes) of one batch's codes on one side."""
-  if codes.size == 0:
-    return
-  unique, counts = np.unique(codes, return_counts=True)
-  counts = counts.astype(np.int64)
-  zeros = np.zeros(len(unique), dtype=np.int64)
-  src, syn = (counts, zeros) if source else (zeros, counts)
-  if bits == 0:
-    yield 0, _Codes(unique, src, syn)
-    return
-  bucket = (unique >> np.uint64(64 - bits)).astype(np.int64)
-  edges = np.searchsorted(bucket, np.arange(2**bits + 1))
-  for b in np.nonzero(np.diff(edges))[0].tolist():
-    lo, hi = edges[b], edges[b + 1]
-    yield b, _Codes(unique[lo:hi], src[lo:hi], syn[lo:hi])
-
-
-def key_counts(spec: MembershipSpec,
-               batch: EncodedBatch) -> tuple[list[tuple], KeyStats]:
-  """One batch's keyed-count elements `((table, kind, bucket), _Codes)`
-  and its row totals (module docstring); REFERENCE/HOLDOUT batches count
-  nothing."""
+def key_counts(
+    spec: MembershipSpec, batch: EncodedBatch
+) -> tuple[list[tuple[tuple[str, str, int], tuple[int, np.ndarray,
+                                                  np.ndarray]]], KeyStats]:
+  """One batch's raw keyed-count parts `((table, kind, bucket), (side,
+  codes, counts))` and its row totals (module docstring);
+  REFERENCE/HOLDOUT batches count nothing."""
   if batch.side not in _COUNTED_SIDES:
     return [], KeyStats()
   source = batch.side is Side.SOURCE
+  side = _SRC if source else _SYN
   table, bits = spec.table, spec.bucket_bits
-  out: list[tuple] = []
+  out: list[tuple[tuple[str, str, int], tuple[int, np.ndarray,
+                                              np.ndarray]]] = []
   nulls = 0
   if spec.nonkey_columns:
     nk = batch.nonkey_hash
     content = nk != np.uint64(spec.null_content)
     nulls = int((~content).sum())
-    out += [
-        ((table, "nk", b), c) for b, c in _bucketed(nk[content], bits, source)
-    ]
+    out += [((table, "nk", b), p) for b, p in _bucketed(nk[content], bits, side)
+           ]
   pk_null = id_null = 0
   if not source:
     for kind, cols, codes in (("pk", spec.pk, batch.pk_hash),
@@ -1085,13 +1376,13 @@ def key_counts(spec: MembershipSpec,
         pk_null = int((~present).sum())
       else:
         id_null = int((~present).sum())
-      out += [((table, kind, b), c)
-              for b, c in _bucketed(codes[present], bits, source)]
+      out += [((table, kind, b), p)
+              for b, p in _bucketed(codes[present], bits, side)]
   if spec.source_mode == KEYED_COUNT and spec.keyed:
     rh = batch.row_hash
     out += [
-        ((table, "row", b), c)
-        for b, c in _bucketed(rh[rh != np.uint64(spec.null_row)], bits, source)
+        ((table, "row", b), p)
+        for b, p in _bucketed(rh[rh != np.uint64(spec.null_row)], bits, side)
     ]
   n = batch.n
   totals = KeyStats(
@@ -1104,55 +1395,65 @@ def key_counts(spec: MembershipSpec,
   return out, totals
 
 
-class KeyCountsCombineFn(beam.CombineFn):
-  """Exact per-code counts of one bucket: `_Codes` parts merged by code
-  (lazily compacted, so the combine stays O(total codes))."""
+@dataclass(frozen=True, eq=False)
+class SideCounts:
+  """A bucket's exact counts per side: sorted codes and their counts."""
+  src_codes: np.ndarray
+  src_counts: np.ndarray
+  syn_codes: np.ndarray
+  syn_counts: np.ndarray
 
-  def create_accumulator(self) -> list[_Codes]:
+
+def _held(accumulator: Sequence[Packed]) -> int:
+  return sum(len(part[1]) // 8 for part in accumulator)
+
+
+class KeyCountsCombineFn(beam.CombineFn):
+  """Exact per-code counts of one bucket from packed sparse parts; the
+  accumulator is a list of packed parts, and `compact` (Beam calls it on
+  a lifted accumulator before the shuffle) merges it to one part per
+  side, so a code crosses the shuffle at most once per side and bundle."""
+
+  def create_accumulator(self) -> list[Packed]:
     return []
 
-  def add_input(self, mutable_accumulator: list[_Codes],
-                element: _Codes) -> list[_Codes]:
+  def add_input(self, mutable_accumulator: list[Packed],
+                element: Packed) -> list[Packed]:
     mutable_accumulator.append(element)
-    if sum(len(p.codes) for p in mutable_accumulator) > _COMPACT_CODES:
-      return [_compact_codes(mutable_accumulator)]
+    if _held(mutable_accumulator) > _COMPACT_CODES:
+      return self.compact(mutable_accumulator)
     return mutable_accumulator
 
   def merge_accumulators(self,
-                         accumulators: Iterable[list[_Codes]]) -> list[_Codes]:
-    merged = [part for acc in accumulators for part in acc]
-    return [_compact_codes(merged)] if len(merged) > 1 else merged
+                         accumulators: Iterable[list[Packed]]) -> list[Packed]:
+    return self.compact([part for acc in accumulators for part in acc])
 
-  def extract_output(self, accumulator: list[_Codes]) -> _Codes:
-    return _compact_codes(accumulator)
+  def compact(self, accumulator: list[Packed]) -> list[Packed]:
+    if len(accumulator) <= 1:
+      return accumulator
+    return _merge_parts(_unpack(part) for part in accumulator)
 
-
-def _compact_codes(parts: Sequence[_Codes]) -> _Codes:
-  if not parts:
-    return _Codes(_EMPTY_CODES, _EMPTY_POS, _EMPTY_POS)
-  if len(parts) == 1:
-    return parts[0]
-  codes = np.concatenate([p.codes for p in parts])
-  unique, inverse = np.unique(codes, return_inverse=True)
-  src = np.bincount(
-      inverse,
-      weights=np.concatenate([p.src for p in parts]),
-      minlength=len(unique))
-  syn = np.bincount(
-      inverse,
-      weights=np.concatenate([p.syn for p in parts]),
-      minlength=len(unique))
-  return _Codes(unique, src.astype(np.int64), syn.astype(np.int64))
+  def extract_output(self, accumulator: list[Packed]) -> SideCounts:
+    sides = {_SRC: (_EMPTY_CODES, _EMPTY_POS), _SYN: (_EMPTY_CODES, _EMPTY_POS)}
+    for part in self.compact(accumulator):
+      side, codes, counts = _unpack(part)
+      sides[side] = (codes, counts)
+    return SideCounts(*sides[_SRC], *sides[_SYN])  # pylint: disable=no-value-for-parameter  # four positional fields
 
 
-def _stats_of(kind: str, counts: _Codes) -> KeyStats:
+def _stats_of(kind: str, counts: SideCounts) -> KeyStats:
   """One bucket's exact counts as `KeyStats` terms."""
-  src, syn = counts.src, counts.syn
+  src, syn = counts.src_counts, counts.syn_counts
   if kind == "nk":
+    pooled = _merge_side([(counts.src_codes, src), (counts.syn_codes, syn)])[1]
     return KeyStats(
         nk_dup_src=int(src[src >= _DUPLICATED].sum()),
         nk_dup_syn=int(syn[syn >= _DUPLICATED].sum()),
-        nk_match_syn=int(syn[src >= 1].sum()))
+        nk_match_syn=int(syn[np.isin(counts.syn_codes,
+                                     counts.src_codes)].sum()),
+        freqs_src=_freqs(src),
+        freqs_syn=_freqs(syn),
+        freqs_pool=_freqs(pooled))
   if kind == "pk":
     return KeyStats(
         pk_dup=int(syn[syn >= _DUPLICATED].sum()),
@@ -1161,10 +1462,12 @@ def _stats_of(kind: str, counts: _Codes) -> KeyStats:
     return KeyStats(
         id_dup=int(syn[syn >= _DUPLICATED].sum()),
         id_distinct=int((syn > 0).sum()))
-  return KeyStats(row_match_syn=int(syn[src >= 1].sum()))
+  return KeyStats(
+      row_match_syn=int(syn[np.isin(counts.syn_codes, counts.src_codes)].sum()))
 
 
-def _stats_entry(item: tuple[tuple[str, str, int], _Codes]) -> tuple[str, Any]:
+def _stats_entry(
+    item: tuple[tuple[str, str, int], SideCounts]) -> tuple[str, KeyStats]:
   (table, kind, _), counts = item
   return table, _stats_of(kind, counts)
 
@@ -1187,21 +1490,140 @@ class _SumStatsCombineFn(beam.CombineFn):
 
 
 class RowKeysFn(beam.DoFn):
-  """`EncodedBatch` → keyed-count elements (main) and row totals (tagged
-  `stats`), for every table in `specs`."""
+  """`EncodedBatch` → packed keyed-count parts `((table, kind, bucket),
+  part)` (main), row totals (tagged `stats`) and per-table failures
+  (tagged `failed`), for every table in `specs` (a table in `skip`
+  failed on the driver: its batches are ignored).
 
-  def __init__(self, specs: Mapping[str, MembershipSpec]):
+  The batches of a bundle are merged per key before anything is emitted
+  (flushed once `flush_codes` codes are held, and in `finish_bundle`), so
+  an element carries many codes, not a batch's handful per bucket."""
+
+  def __init__(self,
+               specs: Mapping[str, MembershipSpec],
+               *,
+               skip: Iterable[str] = (),
+               flush_codes: int = FLUSH_CODES):
     super().__init__()
     self._specs = dict(specs)
+    self._skip = frozenset(skip)
+    bits = max((s.bucket_bits for s in self._specs.values()), default=0)
+    self._flush_at = max(flush_codes, _FLUSH_PER_BUCKET << bits)
+    self._pending: dict[tuple[str, str, int], list[tuple[int, np.ndarray,
+                                                         np.ndarray]]] = {}
+    self._held = 0
+
+  def start_bundle(self) -> None:
+    self._pending, self._held = {}, 0
 
   def process(self, element: EncodedBatch) -> Iterator[Any]:
+    if element.table in self._skip:
+      return
     spec = self._specs.get(element.table)
     if spec is None:
       raise ValueError(f"no membership spec for table {element.table!r}")
-    counts, totals = key_counts(spec, element)
-    yield from counts
+    try:
+      parts, totals = key_counts(spec, element)
+    except TABLE_ERRORS as exc:
+      yield beam.pvalue.TaggedOutput(_FAILED, (spec.table, _failure(exc)))
+      return
     if element.side in _COUNTED_SIDES:
       yield beam.pvalue.TaggedOutput(_STATS, (spec.table, totals))
+    for key, part in parts:
+      self._pending.setdefault(key, []).append(part)
+      self._held += len(part[1])
+    if self._held >= self._flush_at:
+      yield from self._flush(windowed=False)
+
+  def finish_bundle(self) -> Iterator[Any]:
+    yield from self._flush(windowed=True)
+
+  def _flush(self, *, windowed: bool) -> Iterator[Any]:
+    pending, self._pending, self._held = self._pending, {}, 0
+    for key, parts in pending.items():
+      for packed in _merge_parts(parts):
+        value = (key, packed)
+        yield GlobalWindows.windowed_value(value) if windowed else value
+
+
+# --------------------------------------------------------------------------
+# duplicates at matched n (R73)
+# --------------------------------------------------------------------------
+def _classes_of(
+    freqs: Iterable[tuple[int, int]]) -> tuple[np.ndarray, np.ndarray, int]:
+  """(counts c, their frequencies f_c, rows N = Σ c·f_c) as arrays."""
+  pairs = [(c, f) for c, f in freqs if c > 0 and f > 0]
+  c = np.array([p[0] for p in pairs], dtype=np.float64)
+  f = np.array([p[1] for p in pairs], dtype=np.float64)
+  return c, f, int((c * f).sum())
+
+
+def rarefied_duplicates(freqs: Iterable[tuple[int, int]], m: int) -> float:
+  """E[D_m] of a side whose content rows have the frequency of
+  frequencies `freqs` ((c, f_c): f_c records held c times, N = Σ c·f_c
+  rows) subsampled without replacement to `m` rows: the rows of the
+  subsample whose record it holds twice or more, Σ_c f_c · (c·m/N -
+  P(X = 1)) with X ~ Hypergeometric(N, c, m) (Hurlbert, 1971; Heck, van
+  Belle & Simberloff, 1975). At m ≥ N, the observed rows."""
+  c, f, total = _classes_of(freqs)
+  if m <= 0 or total == 0:
+    return 0.0
+  if m >= total:
+    return float((c * f)[c >= _DUPLICATED].sum())
+  p1 = hypergeom.pmf(1, total, c.astype(np.int64), m)
+  return max(0.0, float((f * (m * c / total - p1)).sum()))
+
+
+def _log_choose(n: np.ndarray | float, k: float) -> np.ndarray:
+  n = np.asarray(n, dtype=np.float64)
+  out: np.ndarray = gammaln(n + 1.0) - gammaln(k + 1.0) - gammaln(n - k + 1.0)
+  return out
+
+
+def duplicate_null_variance(freqs_pool: Iterable[tuple[int, int]],
+                            m: int) -> float:
+  """Var(D_m) of an m-row subsample, without replacement, of the POOLED
+  rows of both sides (frequency of frequencies `freqs_pool`): the null of
+  `row.internal_duplicate_excess`, under which source and synthetic rows
+  are exchangeable and each side is a random m-subset of the pool.
+
+  D_m = m - F1 (F1 = the rows of records held once), so Var(D_m) =
+  Var(F1) = Σ_x a_x (1 - a_x) + Σ_{x≠y} (b_xy - a_x a_y), with a_x =
+  P(X_x = 1) (hypergeometric) and b_xy = P(X_x = 1, X_y = 1) =
+  c_x c_y C(N - c_x - c_y, m - 2) / C(N, m) (multivariate
+  hypergeometric), summed over the count classes. A heavy record (always
+  duplicated) adds nothing; a class with P(X = 1) below 1e-12 is
+  dropped. The tests hold it to a simulation."""
+  c, f, total = _classes_of(freqs_pool)
+  if m <= 1 or total <= m:
+    return 0.0
+  a = hypergeom.pmf(1, total, c.astype(np.int64), m)
+  kept = a > _NEGLIGIBLE
+  c, f, a = c[kept], f[kept], a[kept]
+  if not c.size:
+    return 0.0
+  rest = total - (c[:, None] + c[None, :])
+  log_b = (
+      np.log(c)[:, None] + np.log(c)[None, :] +
+      _log_choose(np.maximum(rest, m - 2), m - 2) - _log_choose(total, m))
+  b = np.where(rest >= m - 2, np.exp(log_b), 0.0)
+  pairs = f[:, None] * (f[None, :] - np.eye(len(f)))
+  variance = float((f * a * (1.0 - a)).sum() +
+                   (pairs * (b - a[:, None] * a[None, :])).sum())
+  return max(0.0, variance)
+
+
+def _effective(d: float, var_d: float, m: int) -> tuple[int, int]:
+  """(effective duplicate rows, effective rows) of a side with d rows of
+  m in duplicate groups, whose share has variance `var_d`: Korn &
+  Graubard's effective sample size n* = share (1 - share) / var_d, capped
+  at m (a design effect never below 1)."""
+  share = d / m
+  n_eff = float(m)
+  if 0.0 < share < 1.0 and var_d > 0.0:
+    n_eff = min(float(m), share * (1.0 - share) / var_d)
+  n_eff = max(1.0, n_eff)
+  return round(share * n_eff), max(1, round(n_eff))
 
 
 # --------------------------------------------------------------------------
@@ -1215,32 +1637,54 @@ class _Emitter:
     self.rows: list[MetricValue] = []
 
   def value(self, metric_id: str, value: float | None, **fields_: Any) -> None:
+    fields_.setdefault("method", Method.EXACT)
     self.rows.append(
         MetricValue(
             metric_id=metric_id,
             table=self.spec.table,
             value=value,
-            method=Method.EXACT,
             encoding_plan_digest=self.spec.encoding_plan_digest,
             **fields_))
 
   def skip(self, metric_id: str, reason: str, **detail: Any) -> None:
     self.rows.append(
-        MetricValue(
-            metric_id=metric_id,
-            table=self.spec.table,
-            value=None,
-            method=Method.EXACT,
-            encoding_plan_digest=self.spec.encoding_plan_digest,
-            detail={
-                "reason": reason,
-                **detail
-            }))
+        _skipped(self.spec.table, self.spec.encoding_plan_digest, metric_id,
+                 reason, detail))
+
+
+def _skipped(table: str, digest: str, metric_id: str, reason: str,
+             detail: Mapping[str, Any]) -> MetricValue:
+  return MetricValue(
+      metric_id=metric_id,
+      table=table,
+      value=None,
+      method=Method.EXACT,
+      encoding_plan_digest=digest,
+      detail={
+          "reason": reason,
+          **detail
+      })
+
+
+def _failed_metrics(table: str, digest: str, reason: str) -> list[MetricValue]:
+  """Every owned id `not_evaluated` with a failed table's reason."""
+  return [_skipped(table, digest, i, reason, {}) for i in OWNED_METRIC_IDS]
+
+
+def _sampling(spec: MembershipSpec) -> dict[str, Any]:
+  """A synthetic row sample's `method`/`sample_rate` fields (R72)."""
+  if spec.rate_synthetic >= 1.0:
+    return {}
+  return {"method": Method.SAMPLE, "sample_rate": spec.rate_synthetic}
 
 
 def _share(e: _Emitter, metric_id: str, k: int, n: int, *, n_source: int,
            detail: Mapping[str, Any]) -> None:
   lo, hi = noise.wilson_interval(k, n)
+  sampled = _sampling(e.spec)
+  notes = dict(detail)
+  if sampled:
+    notes["sample_rate"] = sampled["sample_rate"]
   e.value(
       metric_id,
       k / n,
@@ -1248,7 +1692,8 @@ def _share(e: _Emitter, metric_id: str, k: int, n: int, *, n_source: int,
       ci_high=hi,
       n_source=n_source,
       n_synthetic=n,
-      detail=dict(detail))
+      detail=notes,
+      **sampled)
 
 
 def _exact_rates(e: _Emitter, acc: MembershipAcc, keys: KeyStats) -> None:
@@ -1271,6 +1716,13 @@ def _exact_rates(e: _Emitter, acc: MembershipAcc, keys: KeyStats) -> None:
       k = acc.src_row
     else:
       k = keys.row_match_syn if spec.keyed else keys.nk_match_syn
+    if spec.rate_source < 1.0:
+      e.skip(
+          metric_id,
+          _SAMPLED_SOURCE.format(rate=spec.rate_source),
+          matches_lower_bound=k,
+          sample_rate_source=spec.rate_source)
+      continue
     detail: dict[str, Any] = {
         "matches": k,
         "path": spec.source_mode,
@@ -1283,15 +1735,30 @@ def _exact_rates(e: _Emitter, acc: MembershipAcc, keys: KeyStats) -> None:
 
 def _rate_ratio_detail(m1: int, t1: int, m2: int, t2: int,
                        names: tuple[str, str]) -> dict[str, Any]:
+  """A secondary lift for `detail`: no rate ratio exists when either
+  exclusive set is empty, so it then says why instead."""
+  out: dict[str, Any] = {
+      f"events_{names[0]}": m1,
+      f"events_{names[1]}": m2,
+      f"exposed_{names[0]}": t1,
+      f"exposed_{names[1]}": t2,
+  }
+  if t1 <= 0 or t2 <= 0:
+    return {
+        "lift": None,
+        "ci_low": None,
+        "ci_high": None,
+        "reason": ("an exclusive set outside the exposed prefix is empty "
+                   "(every exclusive record of that half is exposed): no "
+                   "rate ratio"),
+        **out
+    }
   ratio, lo, hi = noise.rate_ratio(m1, t1, m2, t2, alpha=LIFT_ALPHA)
   return {
       "lift": ratio,
       "ci_low": lo,
       "ci_high": None if math.isinf(hi) else hi,
-      f"events_{names[0]}": m1,
-      f"events_{names[1]}": m2,
-      f"exposed_{names[0]}": t1,
-      f"exposed_{names[1]}": t2,
+      **out
   }
 
 
@@ -1307,21 +1774,26 @@ def _lift(e: _Emitter, metric_id: str, counts: tuple[int, int, int, int],
     })
     return
   ratio, lo, hi = noise.rate_ratio(m1, t1, m2, t2, alpha=LIFT_ALPHA)
+  sampled = _sampling(e.spec)
+  notes: dict[str, Any] = {
+      f"events_{names[0]}": m1,
+      f"events_{names[1]}": m2,
+      f"exposed_{names[0]}": t1,
+      f"exposed_{names[1]}": t2,
+      "unit": "distinct exclusive reference records",
+      "alpha": LIFT_ALPHA,
+      **detail,
+  }
+  if sampled:
+    notes["sample_rate"] = sampled["sample_rate"]
   e.value(
       metric_id,
       ratio,
       ci_low=lo,
       ci_high=None if math.isinf(hi) else hi,
       n_synthetic=n_syn,
-      detail={
-          f"events_{names[0]}": m1,
-          f"events_{names[1]}": m2,
-          f"exposed_{names[0]}": t1,
-          f"exposed_{names[1]}": t2,
-          "unit": "distinct exclusive reference records",
-          "alpha": LIFT_ALPHA,
-          **detail,
-      })
+      detail=notes,
+      **sampled)
 
 
 def _panel_reason(spec: MembershipSpec, stats: PanelStats, keys: KeyStats,
@@ -1399,36 +1871,62 @@ def _near_metrics(e: _Emitter, stats: PanelStats, acc: MembershipAcc,
 
 def _duplicates(e: _Emitter, stats: PanelStats, keys: KeyStats) -> None:
   metric_id = "row.internal_duplicate_excess"
-  if not e.spec.nonkey_columns:
+  spec = e.spec
+  if not spec.nonkey_columns:
     e.skip(metric_id, _NO_CONTENT)
     return
   n_syn, n_src = keys.n_syn - keys.null_syn, keys.n_src - keys.null_src
+  observed = {
+      "duplicate_rows_synthetic": keys.nk_dup_syn,
+      "duplicate_rows_source": keys.nk_dup_src,
+  }
+  for side, rate in (("source", spec.rate_source), ("synthetic",
+                                                    spec.rate_synthetic)):
+    if rate < 1.0:
+      e.skip(metric_id, _SAMPLED_DUPLICATES.format(side=side, rate=rate),
+             **observed)
+      return
   if n_syn <= 0 or n_src <= 0:
     side = "synthetic" if n_syn <= 0 else "source"
     e.skip(metric_id, f"no {side} row with non-key content was read")
     return
-  d_syn, d_src = keys.nk_dup_syn / n_syn, keys.nk_dup_src / n_src
-  lo, hi = noise.newcombe_diff_interval(keys.nk_dup_syn, n_syn, keys.nk_dup_src,
-                                        n_src)
+  m = min(n_src, n_syn)
+  d_syn = rarefied_duplicates(keys.freqs_syn, m)
+  d_src = rarefied_duplicates(keys.freqs_src, m)
+  pooled = n_src + n_syn
+  # the pool's finite-population factor removed: each side's count then
+  # varies like an m-row sample of the population, not of the pool
+  var_d = duplicate_null_variance(keys.freqs_pool, m) / (
+      (1.0 - m / pooled) * m * m)
+  (k_syn, e_syn), (k_src, e_src) = (_effective(d_syn, var_d,
+                                               m), _effective(d_src, var_d, m))
+  lo, hi = noise.newcombe_diff_interval(k_syn, e_syn, k_src, e_src)
   detail: dict[str, Any] = {
-      "duplicate_rows_synthetic": keys.nk_dup_syn,
-      "duplicate_rows_source": keys.nk_dup_src,
+      **observed,
       "null_content_rows_synthetic": keys.null_syn,
       "null_content_rows_source": keys.null_src,
-      "counted_on": "full data (Ruling R59)",
+      "matched_n": m,
+      "rarefied_duplicate_rows_synthetic": d_syn,
+      "rarefied_duplicate_rows_source": d_src,
+      "null_sd_share": math.sqrt(var_d),
+      "effective_n_synthetic": e_syn,
+      "effective_n_source": e_src,
+      "counted_on": "exact rarefaction to matched n (Ruling R73)",
   }
   baseline = None
-  if stats.r_dup is not None and stats.r_dup[1] > 0:
-    baseline = stats.r_dup[0] / stats.r_dup[1] - d_src
+  if stats.r_freqs:
+    n_r = sum(c * f for c, f in stats.r_freqs)
+    m_r = min(n_r, n_src)
+    baseline = (rarefied_duplicates(stats.r_freqs, m_r) -
+                rarefied_duplicates(keys.freqs_src, m_r)) / m_r
   else:
     detail["baseline_reason"] = ("no reference sample (the R panel)"
-                                 if stats.r_dup is None else
+                                 if stats.r_freqs is None else
                                  "no reference row with non-key content")
   e.value(
-      metric_id,
-      d_syn - d_src,
-      source_value=d_src,
-      synthetic_value=d_syn,
+      metric_id, (d_syn - d_src) / m,
+      source_value=d_src / m,
+      synthetic_value=d_syn / m,
       baseline_value=baseline,
       ci_low=lo,
       ci_high=hi,
@@ -1438,10 +1936,11 @@ def _duplicates(e: _Emitter, stats: PanelStats, keys: KeyStats) -> None:
 
 
 def _key_duplicates(e: _Emitter, keys: KeyStats) -> None:
-  for metric_id, cols, dup, distinct, nulls, missing in (
-      ("table.pk_duplicate_rate", e.spec.pk, keys.pk_dup, keys.pk_distinct,
-       keys.pk_null, _NO_PK),
-      ("table.identity_duplicate_rate", e.spec.identity, keys.id_dup,
+  spec = e.spec
+  for metric_id, what, cols, dup, distinct, nulls, missing in (
+      ("table.pk_duplicate_rate", "primary-key", spec.pk, keys.pk_dup,
+       keys.pk_distinct, keys.pk_null, _NO_PK),
+      ("table.identity_duplicate_rate", "identity", spec.identity, keys.id_dup,
        keys.id_distinct, keys.id_null, _NO_IDENTITY),
   ):
     if not cols:
@@ -1449,6 +1948,13 @@ def _key_duplicates(e: _Emitter, keys: KeyStats) -> None:
       continue
     if keys.n_syn <= 0:
       e.skip(metric_id, _NO_SYNTHETIC)
+      continue
+    if spec.rate_synthetic < 1.0:
+      e.skip(
+          metric_id,
+          _SAMPLED_KEYS.format(what=what, rate=spec.rate_synthetic),
+          duplicate_rows_lower_bound=dup,
+          null_key_rows=nulls)
       continue
     e.value(
         metric_id,
@@ -1486,8 +1992,10 @@ def table_outputs(spec: MembershipSpec, stats: PanelStats,
 @dataclass(frozen=True)
 class RowFlag:  # pylint: disable=too-many-instance-attributes  # the flag table's fields
   """One `evaluation_row_flags` row before the run's ids are attached
-  (`flag_row`). Keys only: the synthetic PK and a keyed label of the
-  matched source key; never an attribute value."""
+  (`flag_row`). Keys only: the synthetic handle (PK, else identity — the
+  synthetic table's own key, which for a full-row copy is the copied
+  source row's key; D6 hashing does not cover it) and a keyed label of
+  the matched source record's code; never an attribute value."""
   table: str
   check: str
   rank: int
@@ -1499,23 +2007,31 @@ class RowFlag:  # pylint: disable=too-many-instance-attributes  # the flag table
   detail: Mapping[str, Any] = field(default_factory=dict)
 
 
-def _flags(item: tuple[tuple[str, str], Iterable[_Candidate]],
-           label_key: bytes) -> Iterator[RowFlag]:
+def _flags(
+    item: tuple[tuple[str, str], Iterable[_Candidate]],
+    label_key: bytes,
+    failed: Iterable[tuple[str, str]] = ()) -> list[RowFlag]:
+  """One (table, check)'s ranked flags, labelled with the worker's key; a
+  failed table writes none."""
   (table, check), candidates = item
   if not isinstance(label_key, bytes) or not label_key:
     raise ValueError("the label key side input must be non-empty bytes (R64)")
-  for rank, c in enumerate(sorted(candidates, key=_flag_order), start=1):
-    yield RowFlag(
-        table=table,
-        check=check,
-        rank=rank,
-        synthetic_key=c.synthetic_key,
-        source_key_hash=(None if c.source_code is None else hashed_label(
-            c.source_code, key=label_key)),
-        source_set=c.source_set,
-        distance=c.distance,
-        score=1.0 - c.distance,
-        detail=c.detail)
+  if table in {name for name, _ in failed}:
+    return []
+  return [
+      RowFlag(
+          table=table,
+          check=check,
+          rank=rank,
+          synthetic_key=c.synthetic_key,
+          source_key_hash=(None if c.source_code is None else hashed_label(
+              c.source_code, key=label_key)),
+          source_set=c.source_set,
+          distance=c.distance,
+          score=1.0 - c.distance,
+          detail=c.detail)
+      for rank, c in enumerate(sorted(candidates, key=_flag_order), start=1)
+  ]
 
 
 def _utc(evaluated_at: datetime | str) -> str:
@@ -1529,7 +2045,8 @@ def _utc(evaluated_at: datetime | str) -> str:
 def flag_row(flag: RowFlag, *, evaluation_id: str,
              evaluated_at: datetime | str) -> dict[str, Any]:
   """One `evaluation_row_flags` row: exactly its fields, in schema order,
-  JSON-safe. `source_key` is always NULL (hashed source keys, D6/R64).
+  JSON-safe. `source_key` is always NULL (keyed source-key hashes only,
+  D6/R64; `row_flags_source_keys=raw` is refused by the plan's knobs).
 
   Raises:
     ValueError: `evaluated_at` is a string that is not ISO-8601.
@@ -1553,6 +2070,34 @@ def flag_row(flag: RowFlag, *, evaluation_id: str,
   return safe
 
 
+class _TopFlagsCombineFn(beam.CombineFn):
+  """The `k` best distinct candidates of one (table, check) (`_top`)."""
+
+  def __init__(self, k: int):
+    super().__init__()
+    self._k = k
+
+  def create_accumulator(self) -> list[_Candidate]:
+    return []
+
+  def add_input(self, mutable_accumulator: list[_Candidate],
+                element: _Candidate) -> list[_Candidate]:
+    mutable_accumulator.append(element)
+    if len(mutable_accumulator) > 2 * self._k:
+      return _top(mutable_accumulator, self._k)
+    return mutable_accumulator
+
+  def merge_accumulators(
+      self, accumulators: Iterable[list[_Candidate]]) -> list[_Candidate]:
+    return _top([c for acc in accumulators for c in acc], self._k)
+
+  def compact(self, accumulator: list[_Candidate]) -> list[_Candidate]:
+    return _top(accumulator, self._k)
+
+  def extract_output(self, accumulator: list[_Candidate]) -> list[_Candidate]:
+    return _top(accumulator, self._k)
+
+
 # --------------------------------------------------------------------------
 # in process (the reference implementation the Beam path is held to)
 # --------------------------------------------------------------------------
@@ -1570,7 +2115,27 @@ def membership_outputs(
     row_flags_top_k: int = 100,
     panel_max_bytes: int = PANEL_SET_MAX_BYTES,
     source_set_max_bytes: int = SOURCE_SET_MAX_BYTES) -> MembershipResult:
-  """The whole membership pass of one table in one process."""
+  """The whole membership pass of one table in one process. A data error
+  (`TABLE_ERRORS`) makes the table not_evaluated, as in Beam."""
+  try:
+    return _membership_outputs(
+        table,
+        batches,
+        salt=salt,
+        label_key=label_key,
+        top_k=row_flags_top_k,
+        panel_max_bytes=panel_max_bytes,
+        source_set_max_bytes=source_set_max_bytes)
+  except TABLE_ERRORS as exc:
+    return MembershipResult(
+        _failed_metrics(table.name, table.encoding_plan_digest, _failure(exc)),
+        [])
+
+
+def _membership_outputs(table: TablePlan, batches: Iterable[EncodedBatch], *,
+                        salt: str, label_key: bytes, top_k: int,
+                        panel_max_bytes: int,
+                        source_set_max_bytes: int) -> MembershipResult:
   spec = MembershipSpec.from_table(
       table,
       salt=salt,
@@ -1587,25 +2152,25 @@ def membership_outputs(
         parts = combine.add_input(parts, source_hashes(spec, batch))
     sources = combine.extract_output(parts)
   keys = KeyStats()
-  buckets: dict[tuple, list[_Codes]] = {}
+  counts = KeyCountsCombineFn()
+  buckets: dict[tuple[str, str, int], list[Packed]] = {}
   for batch in batches:
     elements, totals = key_counts(spec, batch)
     keys = keys.plus(totals)
     for key, part in elements:
-      buckets.setdefault(key, []).append(part)
-  for (_, kind, _), parts_ in sorted(buckets.items(), key=lambda kv: kv[0]):
-    keys = keys.plus(_stats_of(kind, _compact_codes(parts_)))
+      for packed in _merge_parts([part]):
+        buckets[key] = counts.add_input(buckets.get(key, []), packed)
+  for (_, kind, _), acc_ in sorted(buckets.items(), key=lambda kv: kv[0]):
+    keys = keys.plus(_stats_of(kind, counts.extract_output(acc_)))
   acc = MembershipAcc()
   best: dict[str, list[_Candidate]] = {}
   for batch in batches:
     if batch.side is not Side.SYNTHETIC:
       continue
-    part, candidates = batch_membership(spec, index, sources, batch,
-                                        row_flags_top_k)
-    acc = acc.merge(part)
+    batch_acc, candidates = batch_membership(spec, index, sources, batch, top_k)
+    acc = acc.merge(batch_acc)
     for check, items in candidates.items():
-      best[check] = sorted([*best.get(check, []), *items],
-                           key=_flag_order)[:row_flags_top_k]
+      best[check] = _top([*best.get(check, []), *items], top_k)
   flags = [
       flag for check in sorted(best)
       for flag in _flags(((table.name, check), best[check]), label_key)
@@ -1617,10 +2182,11 @@ def membership_outputs(
 # Beam
 # --------------------------------------------------------------------------
 class MembershipFn(beam.DoFn):
-  """Synthetic `EncodedBatch` → `(table, MembershipAcc)` and tagged flag
-  candidates `((table, check), candidate)`. The panel index is built once
-  per worker from the panel side input (`Shared`, tagged by its content
-  token) and kept alive by the DoFn; other sides pass through untouched."""
+  """Synthetic `EncodedBatch` → `(table, MembershipAcc)`, tagged flag
+  candidates `((table, check), candidate)` and tagged failures `(table,
+  reason)`. The panel index is built once per worker from the panel side
+  input (`Shared`, tagged by its content token) and kept alive by the
+  DoFn; other sides pass through untouched."""
 
   def __init__(self, spec: MembershipSpec, top_k: int):
     super().__init__()
@@ -1636,10 +2202,14 @@ class MembershipFn(beam.DoFn):
     if element.side is not Side.SYNTHETIC:
       return
     spec = self._spec
-    self._index = self._shared.acquire(
-        functools.partial(PanelIndex.build, spec, refs), tag=refs.token)
-    acc, candidates = batch_membership(spec, self._index, sources, element,
-                                       self._top_k)
+    try:
+      self._index = self._shared.acquire(
+          functools.partial(PanelIndex.build, spec, refs), tag=refs.token)
+      acc, candidates = batch_membership(spec, self._index, sources, element,
+                                         self._top_k)
+    except TABLE_ERRORS as exc:
+      yield beam.pvalue.TaggedOutput(_FAILED, (spec.table, _failure(exc)))
+      return
     yield spec.table, acc
     for check, items in candidates.items():
       for candidate in items:
@@ -1647,14 +2217,19 @@ class MembershipFn(beam.DoFn):
 
 
 class _SourceHashesFn(beam.DoFn):
+  """Source `EncodedBatch` → its distinct `SourceSets`; tagged failures."""
 
   def __init__(self, spec: MembershipSpec):
     super().__init__()
     self._spec = spec
 
-  def process(self, element: EncodedBatch) -> Iterator[SourceSets]:
-    if element.side is Side.SOURCE:
+  def process(self, element: EncodedBatch) -> Iterator[Any]:
+    if element.side is not Side.SOURCE:
+      return
+    try:
       yield source_hashes(self._spec, element)
+    except TABLE_ERRORS as exc:
+      yield beam.pvalue.TaggedOutput(_FAILED, (self._spec.table, _failure(exc)))
 
 
 class MembershipCombineFn(beam.CombineFn):
@@ -1676,16 +2251,20 @@ class MembershipCombineFn(beam.CombineFn):
 
 
 class _ByTable(beam.PartitionFn):
-  """The partition of a batch: its table's index in `names`."""
+  """The partition of a batch: its table's index in `names`; a table that
+  failed on the driver goes to the last partition, which nothing reads."""
 
-  def __init__(self, names: Sequence[str]):
+  def __init__(self, names: Sequence[str], failed: Iterable[str]):
     super().__init__()
     self._names = tuple(names)
+    self._failed = frozenset(failed)
 
   def partition_for(self, element: Any, num_partitions: int, *args: Any,
                     **kwargs: Any) -> int:
     del args, kwargs  # no extra partition arguments
-    if element.table not in self._names[:num_partitions]:
+    if element.table in self._failed:
+      return num_partitions - 1
+    if element.table not in self._names:
       raise ValueError(f"no membership spec for table {element.table!r}")
     return self._names.index(element.table)
 
@@ -1697,15 +2276,29 @@ def _tagged(item: tuple[str, Any], tag: str) -> tuple[str, tuple[str, Any]]:
 
 def _emit_table(item: tuple[str, Iterable[tuple[str, Any]]],
                 specs: Mapping[str, MembershipSpec],
-                stats: Mapping[str, PanelStats]) -> Iterator[MetricValue]:
+                stats: Mapping[str, PanelStats], failed: Mapping[str, str],
+                digests: Mapping[str, str]) -> list[MetricValue]:
+  """One table's metrics — or, when the table failed anywhere (the
+  driver, a worker, or here), every owned id not_evaluated with the
+  reason."""
   table, entries = item
-  acc, keys = None, None
+  acc, keys, reasons = None, None, []
   for tag, value in entries:
     if tag == _ACC:
       acc = value
     elif tag == _KEYS:
       keys = value
-  yield from table_outputs(specs[table], stats[table], acc, keys)
+    elif tag == _FAILED:
+      reasons.append(value)
+  if table in failed:
+    reasons.append(failed[table])
+  spec = specs.get(table)
+  if spec is None or reasons:
+    return _failed_metrics(table, digests[table], sorted(reasons)[0])
+  try:
+    return table_outputs(spec, stats[table], acc, keys)
+  except TABLE_ERRORS as exc:
+    return _failed_metrics(table, spec.encoding_plan_digest, _failure(exc))
 
 
 class Membership(beam.PTransform):
@@ -1718,7 +2311,9 @@ class Membership(beam.PTransform):
   the key never enters the job graph (Rulings R64, R68). `salt` must be
   the salt the batches were encoded with (the plan's). The panel hashes
   are built here, on the driver, and shipped as one side input per table;
-  only each table's slim `MembershipSpec` is pickled into the DoFns.
+  only each table's slim `MembershipSpec` is pickled into the DoFns. A
+  table whose spec or panel cannot be built (`TABLE_ERRORS`) is not
+  evaluated, with the reason; the others run.
 
   Raises:
     TypeError: `label_key` is not a PCollection (bytes here would be
@@ -1740,30 +2335,36 @@ class Membership(beam.PTransform):
                       "graph (Ruling R68)")
     self._label_key = label_key
     self._top_k = row_flags_top_k
-    self._names = tuple(table.name for table in tables)
-    self._specs = {
-        table.name:
-            MembershipSpec.from_table(
-                table,
-                salt=salt,
-                panel_max_bytes=panel_max_bytes,
-                source_set_max_bytes=source_set_max_bytes) for table in tables
-    }
-    self._refs = {
-        table.name: PanelRefs.from_table(table, self._specs[table.name])
-        for table in tables
-    }
-    self._stats = {
-        name: PanelIndex.build(self._specs[name], refs).stats
-        for name, refs in self._refs.items()
-    }
+    self._all = tuple(table.name for table in tables)
+    self._digests = {t.name: t.encoding_plan_digest for t in tables}
+    self._specs: dict[str, MembershipSpec] = {}
+    self._refs: dict[str, PanelRefs] = {}
+    self._stats: dict[str, PanelStats] = {}
+    self._failed: dict[str, str] = {}
+    for table in tables:
+      try:
+        spec = MembershipSpec.from_table(
+            table,
+            salt=salt,
+            panel_max_bytes=panel_max_bytes,
+            source_set_max_bytes=source_set_max_bytes)
+        refs = PanelRefs.from_table(table, spec)
+        stats = PanelIndex.build(spec, refs).stats
+      except TABLE_ERRORS as exc:
+        self._failed[table.name] = _failure(exc)
+        continue
+      self._specs[table.name] = spec
+      self._refs[table.name] = refs
+      self._stats[table.name] = stats
 
   def expand(self, input_or_inputs: beam.PCollection) -> dict[str, Any]:
     batches = input_or_inputs
     p = batches.pipeline
-    names, specs = self._names, self._specs
-    keyed = batches | "RowKeys" >> beam.ParDo(RowKeysFn(specs)).with_outputs(
-        _STATS, main=_COUNTS)
+    specs = self._specs
+    names = tuple(name for name in self._all if name in specs)
+    keyed = batches | "RowKeys" >> beam.ParDo(
+        RowKeysFn(specs, skip=self._failed)).with_outputs(
+            _STATS, _FAILED, main=_COUNTS)
     key_stats = ((
         keyed[_COUNTS]
         | "SumKeys" >> beam.CombinePerKey(KeyCountsCombineFn())
@@ -1772,44 +2373,50 @@ class Membership(beam.PTransform):
     )
                  | "FlattenKeyStats" >> beam.Flatten()
                  | "SumKeyStats" >> beam.CombinePerKey(_SumStatsCombineFn()))
-    parts = batches | "ByTable" >> beam.Partition(_ByTable(names), len(names))
-    accs, candidates = [], []
+    parts = batches | "ByTable" >> beam.Partition(
+        _ByTable(names, self._failed),
+        len(names) + 1)
+    accs, candidates, failures = [], [], [keyed[_FAILED]]
     for i, name in enumerate(names):
       spec = specs[name]
       refs = beam.pvalue.AsSingleton(
           p | f"Panel[{name}]" >> beam.Create([self._refs[name]]))
       side_inputs: list[Any] = [refs]
       if spec.source_mode == SIDE_INPUT:
-        sets = (
-            parts[i]
-            | f"SourceHashes[{name}]" >> beam.ParDo(_SourceHashesFn(spec))
-            | f"SourceSets[{name}]" >> beam.CombineGlobally(
-                SourceSetsCombineFn()))
+        hashed = parts[i] | f"SourceHashes[{name}]" >> beam.ParDo(
+            _SourceHashesFn(spec)).with_outputs(
+                _FAILED, main=_COUNTS)
+        failures.append(hashed[_FAILED])
+        sets = hashed[_COUNTS] | f"SourceSets[{name}]" >> beam.CombineGlobally(
+            SourceSetsCombineFn())
         side_inputs.append(beam.pvalue.AsSingleton(sets))
       out = parts[i] | f"Membership[{name}]" >> beam.ParDo(
           MembershipFn(spec, self._top_k), *side_inputs).with_outputs(
-              _FLAGS, main=_ACCS)
+              _FLAGS, _FAILED, main=_ACCS)
       accs.append(out[_ACCS])
       candidates.append(out[_FLAGS])
-    combined = (
-        accs
-        | "FlattenAccs" >> beam.Flatten()
-        | "SumAccs" >> beam.CombinePerKey(MembershipCombineFn()))
+      failures.append(out[_FAILED])
+    failed = failures | "FlattenFailures" >> beam.Flatten()
+    combined = ((accs or [p | "NoAccs" >> beam.Create([])])
+                | "FlattenAccs" >> beam.Flatten()
+                | "SumAccs" >> beam.CombinePerKey(MembershipCombineFn()))
     flags = (
-        candidates
+        (candidates or [p | "NoCandidates" >> beam.Create([])])
         | "FlattenCandidates" >> beam.Flatten()
-        | "TopFlags" >> beam.combiners.Top.PerKey(
-            self._top_k, key=_flag_order, reverse=True)
-        | "Flags" >> beam.FlatMap(_flags,
-                                  beam.pvalue.AsSingleton(self._label_key)))
+        | "TopFlags" >> beam.CombinePerKey(_TopFlagsCombineFn(self._top_k))
+        |
+        "Flags" >> beam.FlatMap(_flags, beam.pvalue.AsSingleton(
+            self._label_key), beam.pvalue.AsList(failed)))
     seeds = p | "Seeds" >> beam.Create([(name, (_SEED, None))
-                                        for name in names])
+                                        for name in self._all])
     metrics = ((
         combined | "TagAccs" >> beam.Map(_tagged, _ACC),
         key_stats | "TagKeys" >> beam.Map(_tagged, _KEYS),
+        failed | "TagFailures" >> beam.Map(_tagged, _FAILED),
         seeds,
     )
                | "Parts" >> beam.Flatten()
                | "ByTableParts" >> beam.GroupByKey()
-               | "Emit" >> beam.FlatMap(_emit_table, specs, self._stats))
+               | "Emit" >> beam.FlatMap(_emit_table, specs, self._stats,
+                                        self._failed, self._digests))
     return {"metrics": metrics, "flags": flags}

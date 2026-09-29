@@ -911,6 +911,16 @@ def test_knobs_accept_a_mapping_and_reject_unknown_keys():
     assert Knobs(scope=mode).scope == mode
 
 
+def test_raw_row_flag_source_keys_are_refused():
+  """Row flags carry a source key only as a keyed hash (R64/R68): the
+  `raw` value is refused with its reason, never silently ignored."""
+  assert Knobs().row_flags_source_keys == "hashed"
+  with pytest.raises(ValueError, match="'raw' is not supported"):
+    Knobs(row_flags_source_keys="raw")
+  with pytest.raises(ValueError, match="expected one of"):
+    Knobs(row_flags_source_keys="plain")
+
+
 def test_plan_records_reject_unknown_vocabulary():
   with pytest.raises(ValueError, match="census"):
     _col("x", ColumnKind.NUMERIC, 3, census="sometimes")
