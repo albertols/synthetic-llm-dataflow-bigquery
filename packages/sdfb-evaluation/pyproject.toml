@@ -26,6 +26,7 @@ dependencies = [
     "scikit-learn>=1.6",
     "pyyaml>=6.0",
     "google-auth>=2.30",
+    "google-cloud-bigquery>=3,<4",
     "requests>=2.32",
 ]
 

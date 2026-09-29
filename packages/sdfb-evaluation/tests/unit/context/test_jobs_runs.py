@@ -143,6 +143,7 @@ def test_foreign_writes_excludes_own_job_and_reads_all_writers(fake_bq):
   [(sql, params)] = bq.queries
   assert "destination_table.dataset_id = @dataset_id" in sql
   assert "end_time BETWEEN @start AND @end" in sql
+  assert "creation_time <= @end" in sql
   assert params["exclude_job"] == JOB_ID
   assert params["table_id"] == "orders"
   assert params["start"] == datetime(
@@ -159,6 +160,7 @@ def test_foreign_writes_open_window_runs_to_now(fake_bq):
       exclude_job=JOB_ID) == []
   [(sql, params)] = bq.queries
   assert "CURRENT_TIMESTAMP()" in sql and "end" not in params
+  assert "creation_time <= @end" not in sql
 
 
 def test_foreign_writes_needs_a_window_start(fake_bq):
@@ -231,3 +233,36 @@ def test_runs_for_without_tables_queries_nothing(fake_bq):
       landing_tables=[],
       window=WINDOW) == []
   assert bq.queries == []
+
+
+def test_runs_for_matches_the_launch_by_run_id_base(fake_bq):
+  bq = fake_bq()
+  rows = runs_for(
+      bq,
+      quality_dataset="demo-project.synthetic_data_quality",
+      landing_tables=[f"{DS}.order_items"],
+      window=WINDOW,
+      base_run_id="thelook-0913-a1b2c3")
+  assert [r["run_id"] for r in rows] == [
+      "thelook-0913-a1b2c3-00-users",
+      "thelook-0913-a1b2c3-01-orders",
+      "thelook-0913-a1b2c3-02-order_items",
+  ]
+  [(sql, params)] = bq.queries
+  assert ("(landing_table IN UNNEST(@landing_tables) OR run_id = @base OR "
+          "STARTS_WITH(run_id, CONCAT(@base, '-')))") in sql
+  assert params["base"] == "thelook-0913-a1b2c3"
+
+
+def test_runs_for_by_base_alone(fake_bq):
+  bq = fake_bq()
+  rows = runs_for(
+      bq,
+      quality_dataset="demo-project.synthetic_data_quality",
+      landing_tables=[],
+      window=(None, None),
+      base_run_id="thelook-0913-ffee00")
+  assert [r["run_id"] for r in rows] == ["thelook-0913-ffee00-01-orders"]
+  [(sql, params)] = bq.queries
+  assert "landing_tables" not in params and "@landing_tables" not in sql
+  assert "created_at" not in sql.split("WHERE", 1)[1].split("ORDER")[0]

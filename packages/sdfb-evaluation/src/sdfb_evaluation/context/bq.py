@@ -27,9 +27,11 @@ Two rules hold for every caller:
 - Table identifiers that must be interpolated go through `normalize_fqn` /
   `quote_fqn`, which accept only a strict `project.dataset.table`.
 
-Access errors surface as the builtin `PermissionError` (HTTP 403) and
-missing resources as `LookupError` (HTTP 404), so callers can add their own
-remediation hint without importing `google.api_core`.
+Access errors surface as the builtin `PermissionError` (HTTP 403),
+missing resources as `LookupError` (HTTP 404) and every other API failure
+(a 400 such as an unknown location, a 5xx after the client's own retries)
+as `BqApiError`, so callers can degrade or add a remediation hint without
+importing `google.api_core`.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -43,7 +45,7 @@ from typing import Any, TypeVar
 
 from sdfb_evaluation.canonical import json_safe
 
-__all__ = ["Bq", "normalize_fqn", "quote_fqn"]
+__all__ = ["Bq", "BqApiError", "normalize_fqn", "quote_fqn"]
 
 _PROJECT = r"[a-z][a-z0-9-]{4,28}[a-z0-9]"
 _DATASET = r"[A-Za-z0-9_]{1,1024}"
@@ -56,6 +58,10 @@ _HTTP_FORBIDDEN = 403
 _HTTP_NOT_FOUND = 404
 
 _T = TypeVar("_T")
+
+
+class BqApiError(RuntimeError):
+  """A BigQuery API call failed with neither a 403 nor a 404."""
 
 
 def normalize_fqn(fqn: str) -> str:
@@ -82,12 +88,19 @@ def _status(exc: BaseException) -> int | None:
   return int(code) if isinstance(code, int) else None
 
 
+def _is_google_api_error(exc: BaseException) -> bool:
+  from google.api_core import exceptions  # pylint: disable=import-outside-toplevel  # only reached on a failing real call
+
+  return isinstance(exc, exceptions.GoogleAPIError)
+
+
 def _translated(call: Callable[[], _T], what: str) -> _T:
-  """Run a client call, mapping 403/404 onto builtin exception types
-  whose message starts with `what`."""
+  """Run a client call; an API failure becomes `PermissionError` (403),
+  `LookupError` (404) or `BqApiError` (anything else), its message
+  starting with `what`."""
   try:
     return call()
-  except (PermissionError, LookupError):
+  except (PermissionError, LookupError, BqApiError):
     raise
   except Exception as exc:
     status = _status(exc)
@@ -95,6 +108,8 @@ def _translated(call: Callable[[], _T], what: str) -> _T:
       raise PermissionError(f"{what}: {exc}") from exc
     if status == _HTTP_NOT_FOUND:
       raise LookupError(f"{what}: {exc}") from exc
+    if status is not None or _is_google_api_error(exc):
+      raise BqApiError(f"{what}: {exc}") from exc
     raise
 
 

@@ -71,8 +71,13 @@ def runs_for(bq: Any,
              quality_dataset: str,
              landing_tables: Sequence[str],
              window: tuple[str | None, str | None],
-             table_name: str = "validation_runs") -> list[dict]:
-  """`validation_runs` rows for `landing_tables` created inside `window`.
+             table_name: str = "validation_runs",
+             base_run_id: str | None = None) -> list[dict]:
+  """`validation_runs` rows created inside `window` for `landing_tables`
+  OR, when `base_run_id` is known, for any run of that launch
+  (`run_id = @base` or `STARTS_WITH(run_id, CONCAT(@base, '-'))`) — so a
+  relational launch is found whole even when only its target table is
+  known.
 
   Args:
     bq: a `Bq` (or fake).
@@ -81,6 +86,7 @@ def runs_for(bq: Any,
     window: (start, end), RFC 3339; either side may be `None` (unbounded).
       Each bound is padded by ten minutes.
     table_name: the generator's `--validation_runs_table` short name.
+    base_run_id: the launch's `--run_id`, when known.
 
   Returns:
     Rows with `run_id`, `landing_table`, `reference_table`,
@@ -96,13 +102,19 @@ def runs_for(bq: Any,
                      f"{quality_dataset!r}")
   if _TABLE_NAME_RE.fullmatch(table_name or "") is None:
     raise ValueError(f"malformed table name {table_name!r}")
-  if not landing_tables:
+  if not landing_tables and not base_run_id:
     return []
   source = f"`{match.group(1)}.{match.group(2)}.{table_name}`"
-  params: dict[str, Any] = {
-      "landing_tables": sorted({t.replace(":", ".", 1) for t in landing_tables})
-  }
-  clauses = ["landing_table IN UNNEST(@landing_tables)"]
+  params: dict[str, Any] = {}
+  matches = []
+  if landing_tables:
+    params["landing_tables"] = sorted(
+        {t.replace(":", ".", 1) for t in landing_tables})
+    matches.append("landing_table IN UNNEST(@landing_tables)")
+  if base_run_id:
+    params["base"] = base_run_id
+    matches.append("run_id = @base OR STARTS_WITH(run_id, CONCAT(@base, '-'))")
+  clauses = ["(" + " OR ".join(matches) + ")"]
   if window[0]:
     params["start"] = parse_timestamp(window[0]) - _RUNS_WINDOW_PAD
     clauses.append("created_at >= @start")

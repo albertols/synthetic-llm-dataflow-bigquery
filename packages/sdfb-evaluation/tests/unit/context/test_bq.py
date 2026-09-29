@@ -20,8 +20,9 @@ import math
 from datetime import UTC, date, datetime
 
 import pytest
+from google.api_core.exceptions import RetryError
 
-from sdfb_evaluation.context.bq import Bq, normalize_fqn, quote_fqn
+from sdfb_evaluation.context.bq import Bq, BqApiError, normalize_fqn, quote_fqn
 
 
 class _Row(dict):
@@ -256,3 +257,33 @@ def test_normalize_fqn_accepts_both_separators(fqn, expected):
 def test_normalize_fqn_rejects_anything_but_project_dataset_table(bad):
   with pytest.raises(ValueError):
     normalize_fqn(bad)
+
+
+class _ApiError(Exception):
+  """A google.api_core-style error carrying an HTTP status."""
+
+  def __init__(self, code, message):
+    super().__init__(message)
+    self.code = code
+
+
+@pytest.mark.parametrize("code", [400, 500, 503])
+def test_other_api_errors_become_bq_api_error(code):
+  client = _FakeClient()
+  client.raise_on_query = _ApiError(code, f"{code} backend said no")
+  with pytest.raises(BqApiError, match=f"query: {code} backend said no"):
+    Bq("demo-project", client=client).query("SELECT 1")
+
+
+def test_google_api_error_without_status_becomes_bq_api_error():
+  client = _FakeClient()
+  client.raise_on_query = RetryError("deadline exceeded", cause=None)
+  with pytest.raises(BqApiError, match="deadline exceeded"):
+    Bq("demo-project", client=client).query("SELECT 1")
+
+
+def test_non_api_errors_propagate_untouched():
+  client = _FakeClient()
+  client.raise_on_query = KeyError("programming error")
+  with pytest.raises(KeyError):
+    Bq("demo-project", client=client).query("SELECT 1")

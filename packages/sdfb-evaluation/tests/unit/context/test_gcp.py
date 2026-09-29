@@ -180,6 +180,8 @@ def test_find_filter_covers_worker_and_launcher_routes(fake_session):
   assert (f'logName="projects/{PROJECT}/logs/dataflow.googleapis.com%2Fworker"'
           in log_filter)
   assert 'resource.type="dataflow_step"' in log_filter
+  assert ('logName="projects/demo-project/logs/'
+          'dataflow.googleapis.com%2Flauncher"') in log_filter
   # Window padded: create - 120 s … end + 180 s.
   assert 'timestamp>="2026-09-13T13:08:16Z"' in log_filter
   assert 'timestamp<="2026-09-13T14:05:41Z"' in log_filter
@@ -188,6 +190,18 @@ def test_find_filter_covers_worker_and_launcher_routes(fake_session):
   assert ('logName="projects/demo-project/logs/'
           'dataflow.googleapis.com%2Flauncher"') in follow["filter"]
   assert "SDFB_MILESTONE" not in follow["filter"]
+
+
+def test_find_window_offsets_are_normalised_to_utc(fake_session):
+  session = fake_session()
+  LogMilestones(
+      session, PROJECT,
+      sleep=_no_sleep).find(JOB_ID, "relationships_loaded",
+                            ("2026-09-13T15:10:16.512345+02:00",
+                             "2026-09-13T16:02:41.118204+02:00"))
+  log_filter = session.calls[0][2]["filter"]
+  assert 'timestamp>="2026-09-13T13:08:16Z"' in log_filter
+  assert 'timestamp<="2026-09-13T14:05:41Z"' in log_filter
 
 
 def test_find_open_window_has_no_upper_bound(fake_session):

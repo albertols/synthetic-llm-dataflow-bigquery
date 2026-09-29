@@ -2039,6 +2039,7 @@ source = { editable = "." }
 dependencies = [
     { name = "apache-beam", extra = ["gcp"] },
     { name = "google-auth" },
+    { name = "google-cloud-bigquery" },
     { name = "numpy" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -2059,6 +2060,7 @@ dev = [
 requires-dist = [
     { name = "apache-beam", extras = ["gcp"], specifier = "==2.74.0" },
     { name = "google-auth", specifier = ">=2.30" },
+    { name = "google-cloud-bigquery", specifier = ">=3,<4" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32" },
