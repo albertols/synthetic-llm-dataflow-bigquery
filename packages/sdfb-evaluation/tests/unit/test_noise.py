@@ -220,6 +220,10 @@ def _share(head_y, head_x, ys, xs):
 
 def test_stratified_ratio_interval_degenerate_cases():
   assert noise.stratified_ratio_interval(_share(0, 0, [], []), 0.5) is None
+  # R75: nothing observed (no head row, no sampled tail row) is no
+  # estimate, even when the tail is known to hold rows — never a made-up 0
+  assert noise.stratified_ratio_interval(
+      _share(0, 0, [], []), 0.02, tail_total=5000.0) is None
   # an empty tail: the head is the whole column, known exactly
   head_only = _share(3.0, 10.0, [], [])
   assert noise.stratified_ratio_interval(

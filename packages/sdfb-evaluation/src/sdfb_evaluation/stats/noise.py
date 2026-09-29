@@ -164,7 +164,7 @@ def stratified_ratio_interval(
     alpha: float = 0.05) -> tuple[float, float, float] | None:
   """A share `R = Y / X` from a stratified value sample, with its
   cluster-robust interval: `(ratio, lo, hi)`, or None when there is no
-  denominator.
+  denominator or nothing was observed.
 
   Design: the VALUES are the sampling units (every row of a value moves
   with it, so rows are clustered). The head is a certainty stratum —
@@ -196,7 +196,8 @@ def stratified_ratio_interval(
   widens the interval when few clusters were sampled. With no sampled
   tail value q is unknown: the point takes the head's ratio and the
   interval spans every tail rate, q in [0, 1] (a point when the tail is
-  empty).
+  empty). With nothing observed at all — no head row and no sampled tail
+  row — there is no estimate: None (R75), never a fabricated 0.
   """
   x_t = share.tail_x
   if tail_total is None:
@@ -210,7 +211,9 @@ def stratified_ratio_interval(
     return (share.head_y + tail_total * q) / den
 
   if x_t <= 0.0:
-    proxy = share.head_y / share.head_x if share.head_x > 0 else 0.0
+    if share.head_x <= 0.0:
+      return None  # nothing observed: no estimate (R75)
+    proxy = share.head_y / share.head_x
     return (combined(proxy), combined(0.0), combined(1.0))
   q = min(1.0, max(0.0, share.tail_y / x_t))
   clusters = max(share.tail_clusters, 1.0)

@@ -1225,3 +1225,44 @@ def test_lifts_read_the_hash_range_only_on_a_sampled_column():
   assert lift.method.value == "value_sampled"
   assert 100 < lift.detail["copies_r"] < 200  # about half of the copies
   assert lift.ci_low is not None and lift.ci_low > 5
+
+
+def test_unobserved_sampled_column_is_not_evaluated_never_fabricated():
+  """R75 (the review's p_novelty_empty): a headless (INT64 identity) value-
+  sampled column whose synthetic values — copies of 3 source values — all
+  fall outside the hash range. Nothing synthetic was observed, so novelty,
+  the copy rate and the distinct ratio are not evaluated with the reason,
+  never a fabricated 0 (novelty 1.0 used to PASS where the exact census
+  FAILs)."""
+  table, rows = identity_table()
+  sampled = with_census(table, member_no=("value_sampled", 0.02))
+  col = next(
+      c for c in CensusSpec.from_table(sampled).columns
+      if c.name == "member_no")
+  assert not col.head  # an INT64 column has no planned top list
+  outside = [
+      r["member_no"]
+      for r in rows["source"]
+      if not col.kept(hash64("member_no", str(r["member_no"])))
+  ][:3]
+  synthetic = [
+      dict(r, member_no=outside[i % 3]) for i, r in enumerate(rows["synthetic"])
+  ]
+  rows_by = {"source": rows["source"], "synthetic": synthetic}
+  exact = _by_key(_pure(table, rows_by).metrics)
+  got = _by_key(_pure(sampled, rows_by).metrics)
+  novelty = _CATALOGUE.get("column.novelty_mass")
+  assert status_for(novelty, exact[(novelty.id, "member_no")]) is Status.FAIL
+  for metric_id, words in (
+      ("column.novelty_mass", "no counted synthetic value"),
+      ("field.substantive_copy_rate", "no substantive synthetic values"),
+      ("column.distinct_ratio", "no counted synthetic value"),
+  ):
+    mv = got[(metric_id, "member_no")]
+    assert mv.value is None and mv.ci_low is None, metric_id
+    assert words in mv.detail["reason"], (metric_id, mv.detail["reason"])
+    assert "hash range" in mv.detail["reason"]
+    assert status_for(_CATALOGUE.get(metric_id),
+                      mv) is Status.NOT_EVALUATED, metric_id
+  # the sibling columns are untouched
+  assert got[("column.novelty_mass", "email")].value is not None

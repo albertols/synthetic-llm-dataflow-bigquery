@@ -34,11 +34,15 @@ on the rows the pipeline actually reads:
                                                           head (R67), never
                                                           sampled
     masks        Σ text/identifier keys * (24 B + 1.5 *   the shape-mask pass:
-                   census columns   min(avg_len, 256))    never value-sampled
+                   census columns   avg_len)              never value-sampled
                                                           (R67), at most one
                                                           key per value, the
                                                           mask's UTF-8 text in
-                                                          each key (R70)
+                                                          each key (R70); a
+                                                          column averaging over
+                                                          256 chars pools into
+                                                          one `<long>` key a
+                                                          side (R75)
     relational   Σ edges           child rows * 16 B     (hash, count) per row
     membership   codes * (MEMBERSHIP_CODE_BYTES +        the membership pass's
                    UTF-8 bytes of the table name)        exact keyed counts:
@@ -317,24 +321,47 @@ def value_census_bytes(columns: Iterable[ColumnPlan], rows_source: float,
   return total
 
 
+_LONG_MASK_KEY_CHARS = len("<long>")
+_SIDES = 2
+
+
+def _pooled_long(column: ColumnPlan) -> bool:
+  """Values averaging over `MASK_MAX_CHARS` characters: their masks pool
+  into the one `<long>` key per column (the census's count-time pooling),
+  so the column costs a key a side, not a key per distinct value."""
+  return column.avg_len is not None and column.avg_len > MASK_MAX_CHARS
+
+
 def mask_key_bytes(column: ColumnPlan) -> float:
   """One mask key's bytes for `column`: the overhead plus its mask text,
-  from the planner's AVG(LENGTH(x)) (R70)."""
+  from the planner's AVG(LENGTH(x)) (R70); the short `<long>` label for a
+  pooled column (R75)."""
+  if _pooled_long(column):
+    return MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * _LONG_MASK_KEY_CHARS
   length = column.avg_len if column.avg_len is not None else MASK_DEFAULT_CHARS
-  return MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * min(length, MASK_MAX_CHARS)
+  return MASK_KEY_OVERHEAD + MASK_UTF8_FACTOR * length
 
 
 def mask_bytes(columns: Iterable[ColumnPlan], rows_source: float,
                rows_synthetic: float) -> float:
   """The shape-mask pass's shuffle: every text/identifier census column,
   never value-sampled, at most one mask key per distinct value (a
-  near-unique column — prose, UUID-like ids — costs about its value
-  census again; row-sampling the synthetic mask side is future work)."""
-  return sum(
-      census_demand(column, rows_source, rows_synthetic) *
-      mask_key_bytes(column)
-      for column in columns
-      if column.census != "none" and str(column.kind) in _MASKED_KINDS)
+  near-unique column — short prose, UUID-like ids — costs about its value
+  census again; row-sampling the synthetic mask side is future work). A
+  column whose values average over 256 characters is charged one pooled
+  `<long>` key a side (R75). Only avg_len is planned, so this is an
+  estimate either way: a column averaging below 256 is charged a key per
+  distinct value (over, when some of its values are long), one averaging
+  above as pooled (under, when some of its values are short)."""
+  total = 0.0
+  for column in columns:
+    if column.census == "none" or str(column.kind) not in _MASKED_KINDS:
+      continue
+    keys = (
+        _SIDES if _pooled_long(column) else census_demand(
+            column, rows_source, rows_synthetic))
+    total += keys * mask_key_bytes(column)
+  return total
 
 
 def census_bytes(columns: Iterable[ColumnPlan], rows_source: float,

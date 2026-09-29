@@ -165,6 +165,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import functools
+import hashlib
 import math
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -865,9 +866,19 @@ def _add_values(out: BatchCounts, key_head: tuple[str, int], src: bool,
       slot[_FLAGS] |= _NONSUBSTANTIVE
 
 
+_MASK_PREFIX = f"{_MASK_LABEL}\x1f".encode()
+
+
 def mask_code(mask: str) -> int:
-  """The key of one mask in the mask pass (and its hashed label's code)."""
-  return hash64(_MASK_LABEL, mask)
+  """The key of one mask in the mask pass (and its hashed label's code): a
+  64-bit BLAKE2b of the mask's text. A mask is already a plain string, so
+  it skips `hash64`'s canonical JSON (the mask pass's hottest call, R75);
+  the label built from it is keyed (R64), so the code itself reveals
+  nothing."""
+  digest = hashlib.blake2b(
+      _MASK_PREFIX + mask.encode("utf-8", "surrogatepass"),
+      digest_size=8).digest()
+  return int.from_bytes(digest, "big")
 
 
 def _add_masks(out: BatchCounts, key_head: tuple[str, int], src: bool,
@@ -876,14 +887,19 @@ def _add_masks(out: BatchCounts, key_head: tuple[str, int], src: bool,
   — into the bundle dict, keyed by mask hash."""
   slot_i = 0 if src else 1
   table, j = key_head
-  present = [(t, c)
-             for t, c in zip(texts, counts.tolist(), strict=True)
-             if t and len(t) <= MASK_MAX_CHARS]
-  masks = shape_masks([t for t, _ in present])
-  long_count = sum(c for t, c in zip(texts, counts.tolist(), strict=True)
-                   if t and len(t) > MASK_MAX_CHARS)
+  short: list[str] = []
+  short_counts: list[int] = []
+  long_count = 0
+  for text, c in zip(texts, counts.tolist(), strict=True):
+    if not text:
+      continue
+    if len(text) > MASK_MAX_CHARS:
+      long_count += c
+    else:
+      short.append(text)
+      short_counts.append(c)
   per_mask: dict[str, int] = {}
-  for mask, (_, c) in zip(masks, present, strict=True):
+  for mask, c in zip(shape_masks(short), short_counts, strict=True):
     per_mask[mask] = per_mask.get(mask, 0) + c
   if long_count:
     per_mask[_LONG_MASK] = long_count
@@ -962,11 +978,17 @@ def _accumulate_column(spec: CensusSpec, col: CensusColumn, batch: EncodedBatch,
       _add_literals(out, key_head, col, uniq, texts)
     if col.has_shapes:
       _add_masks(out, key_head, flags.src, texts, full)
-  nonsub = _nonsubstantive(col, batch, first_rows)
+  kept = _kept_mask(col, uniq)
+  # the substantive flag of every present value is needed only for the
+  # copy rate's exact denominator: the synthetic side of a value-sampled
+  # column (R70); everywhere else only the counted values' flags (R75)
   if col.sampled and not flags.src:
+    nonsub = _nonsubstantive(col, batch, first_rows)
     out.substantive[key_head] = (
         out.substantive.get(key_head, 0) + int(full[~nonsub].sum()))
-  kept = _kept_mask(col, uniq)
+    kept_nonsub = nonsub[kept]
+  else:
+    kept_nonsub = _nonsubstantive(col, batch, first_rows[kept])
   if not kept.any():
     return
   size = uniq.size
@@ -976,7 +998,7 @@ def _accumulate_column(spec: CensusSpec, col: CensusColumn, batch: EncodedBatch,
                    minlength=size).astype(np.int64)[kept],
                np.bincount(inverse, weights=flags.in_r[rows],
                            minlength=size).astype(np.int64)[kept])
-  _add_values(out, key_head, flags.src, uniq[kept], per_value, nonsub[kept])
+  _add_values(out, key_head, flags.src, uniq[kept], per_value, kept_nonsub)
 
 
 def accumulate(spec: CensusSpec, batch: EncodedBatch, out: BatchCounts) -> None:
@@ -1630,21 +1652,23 @@ _SAMPLED_INTERVAL = ("cluster-robust: values are the sampling units; the head "
                      "exact, a Korn-Graubard Clopper-Pearson interval on the "
                      "tail's ratio over its exact row total")
 
+_UNOBSERVED = ("value-sampled census: none in the head or the sampled hash "
+               "range, so there is nothing to estimate from")
+
 
 def _share_row(e: _Emitter, v: _View, metric_id: str, share: str,
-               counts: tuple[int, int], detail: dict[str, Any]) -> None:
+               counts: tuple[int, int], detail: dict[str, Any],
+               unobserved: str) -> None:
   """A share with its interval: Wilson on the exact census's rows; on a
   value-sampled column the stratified ratio and its cluster-robust
-  interval (`noise.stratified_ratio_interval`)."""
+  interval (`noise.stratified_ratio_interval`) — not evaluated, with
+  `unobserved` as the reason, when no denominator row was observed
+  (R75: never a fabricated 0)."""
   if v.col.sampled:
     assert v.shares is not None
     ratio = v.shares.get(share)
     if ratio is None:
-      e.skip(
-          metric_id,
-          v.col,
-          "no counted synthetic value (value-sampled census)",
-          sizes=v.pair)
+      e.skip(metric_id, v.col, f"{unobserved} ({_UNOBSERVED})", sizes=v.pair)
       return
     value, lo, hi = ratio  # in [0, 1]: a mix of the head's and tail's shares
     detail = {**detail, "interval": _SAMPLED_INTERVAL}
@@ -1677,7 +1701,8 @@ def _category_adherence(e: _Emitter, v: _View) -> None:
       "counted_rows": acc.n_syn
   })
   _share_row(e, v, metric_id, "adherence",
-             (acc.n_syn - acc.novelty_syn, acc.n_syn), detail)
+             (acc.n_syn - acc.novelty_syn, acc.n_syn), detail,
+             "no counted synthetic value")
 
 
 def _copy_rate(e: _Emitter, v: _View) -> None:
@@ -1699,7 +1724,8 @@ def _copy_rate(e: _Emitter, v: _View) -> None:
   if v.col.kind is _K.TEMPORAL:
     detail["day_granularity"] = v.col.day_granularity
   _share_row(e, v, metric_id, "copy",
-             (acc.copies_substantive, acc.substantive_syn), detail)
+             (acc.copies_substantive, acc.substantive_syn), detail,
+             "no substantive synthetic values counted")
 
 
 def _bounded(x: float | None, hi: float = 1.0) -> float | None:
@@ -1805,8 +1831,12 @@ def _novelty(e: _Emitter, v: _View) -> None:
   reason = v.missing()
   novelty = _bounded(v.summary["novelty_mass"])
   if reason or novelty is None:
+    unobserved = f" ({_UNOBSERVED})" if v.col.sampled else ""
     e.skip(
-        metric_id, v.col, reason or "no counted synthetic value", sizes=v.pair)
+        metric_id,
+        v.col,
+        reason or f"no counted synthetic value{unobserved}",
+        sizes=v.pair)
     return
   e.value(
       metric_id,
@@ -1886,6 +1916,10 @@ def _distinct(e: _Emitter, v: _View, base: dict[str, Any] | None,
   reason = v.missing_matched()
   if not reason and ratio is None:
     reason = "no counted source value at the matched n"
+  if not reason and v.col.sampled and not v.c.ht_k_syn_m:
+    # rows exist at matched n but none was counted: an HT distinct count
+    # of 0 would be a fabricated collapse (R75)
+    reason = f"no counted synthetic value at the matched n ({_UNOBSERVED})"
   if reason:
     e.skip(metric_id, v.col, reason, sizes=sizes)
     return
