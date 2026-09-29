@@ -17,22 +17,32 @@ hash sample (`sampled_read`) — all pure SQL planning, no BigQuery.
 
 One invented timeline (thelook `orders`, `demo-project`) throughout:
 
-    13:10:16.5 job created ─ 13:49:21 ┬ COPY #1 ┬ 13:49:30.5
-                                      13:49:31 ┴ COPY #2 ┴ 13:49:40.25
+    13:10:16.5 job created ─ 13:49:21 ┬ write #1 ┬ 13:49:30.5
+                                      13:49:31 ┴ write #2 ┴ 13:49:40.25
     scope window = [13:49:20, 13:49:41.25]   (first start - 1 s, last end + 1 s)
-    now = 2026-09-14 12:00 → the 168 h time-travel floor is 2026-09-07 12:00
+    now = 2026-09-14 12:00; the time-travel floor is now - 168 h + 1 h margin
+
+The writes are LOAD jobs (an APPENDS window) unless a test swaps in the
+COPY jobs Beam's multi-partition FILE_LOADS path commits (as_of_diff).
 """
 
 from __future__ import annotations
 
+import json
+import random
 import re
+from collections import Counter
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
+from sdfb_evaluation.context import scope as scope_module
 from sdfb_evaluation.context.jobs import JobWrite
 from sdfb_evaluation.context.scope import (
     ScopePlan,
+    from_item,
     pin_source,
     resolve_scope,
     sampled_read,
@@ -49,6 +59,8 @@ EXPIRY = ("OPTIONS(expiration_timestamp="
 WINDOW = ("2026-09-13T13:49:20.000000Z", "2026-09-13T13:49:41.250000Z")
 WINDOW_DT = (datetime(2026, 9, 13, 13, 49, 20, tzinfo=UTC),
              datetime(2026, 9, 13, 13, 49, 41, 250000, tzinfo=UTC))
+START_LIT = "TIMESTAMP '2026-09-13T13:49:20.000000Z'"
+END_LIT = "TIMESTAMP '2026-09-13T13:49:41.250000Z'"
 
 
 def _write(start: str,
@@ -56,8 +68,8 @@ def _write(start: str,
            *,
            table: str = ORDERS,
            rows: int | None = 9000,
-           job_id: str = "beam_bq_job_COPY_sdfbthelook0913_0",
-           job_type: str = "COPY") -> JobWrite:
+           job_id: str = "beam_bq_job_LOAD_sdfbthelook0913_0",
+           job_type: str = "LOAD") -> JobWrite:
   return JobWrite(
       table=table,
       job_type=job_type,
@@ -72,18 +84,26 @@ WRITES = (
         "2026-09-13T13:49:21.000000Z",
         "2026-09-13T13:49:30.500000Z",
         rows=9000,
-        job_id="beam_bq_job_COPY_sdfbthelook0913_0"),
+        job_id="beam_bq_job_LOAD_sdfbthelook0913_0"),
     _write(
         "2026-09-13T13:49:31.000000Z",
         "2026-09-13T13:49:40.250000Z",
         rows=9250,
-        job_id="beam_bq_job_COPY_sdfbthelook0913_1"),
+        job_id="beam_bq_job_LOAD_sdfbthelook0913_1"),
+)
+COPY_WRITES = (
+    WRITES[0],
+    _write(
+        "2026-09-13T13:49:31.000000Z",
+        "2026-09-13T13:49:40.250000Z",
+        rows=9250,
+        job_id="beam_bq_job_COPY_sdfbthelook0913_1",
+        job_type="COPY"),
 )
 EARLIER_LAUNCH = _write(
     "2026-09-12T09:00:00.000000Z",
     "2026-09-12T09:00:12.000000Z",
     job_id="beam_bq_job_LOAD_sdfbthelook0912_0",
-    job_type="LOAD",
     rows=None)
 LATER_DML = _write(
     "2026-09-14T08:00:00.000000Z",
@@ -95,7 +115,6 @@ OVERLAPPING_LOAD = _write(
     "2026-09-13T13:49:35.000000Z",
     "2026-09-13T13:49:37.000000Z",
     job_id="manual_load_77",
-    job_type="LOAD",
     rows=None)
 
 
@@ -119,6 +138,19 @@ def _resolve(**overrides) -> ScopePlan:
   return resolve_scope(**kwargs)
 
 
+def _diff_select(table: str = ORDERS) -> str:
+  """as_of_diff's SELECT: the end state minus the start state, as
+  multisets of TO_JSON_STRING rows."""
+  number = ("TO_JSON_STRING(t) AS __sdfb_json, ROW_NUMBER() OVER "
+            "(PARTITION BY TO_JSON_STRING(t)) AS __sdfb_rn")
+  return (f"SELECT e.* EXCEPT(__sdfb_json, __sdfb_rn) FROM (SELECT t.*, "
+          f"{number} FROM (SELECT * FROM `{table}` FOR SYSTEM_TIME AS OF "
+          f"{END_LIT}) AS t) AS e LEFT JOIN (SELECT {number} FROM "
+          f"(SELECT * FROM `{table}` FOR SYSTEM_TIME AS OF {START_LIT}) AS t) "
+          "AS s ON e.__sdfb_json = s.__sdfb_json AND e.__sdfb_rn = "
+          "s.__sdfb_rn WHERE s.__sdfb_rn IS NULL")
+
+
 # ---------------------------------------------------------------------------
 # overwrite
 # ---------------------------------------------------------------------------
@@ -136,6 +168,7 @@ def test_overwrite_uses_whole_table():
   assert plan.params == {}
   assert plan.window == WINDOW
   assert plan.expected_rows == 18250
+  assert plan.written_rows == 18250  # Σ the job's own output_rows
 
 
 def test_overwrite_with_later_write_snapshots_as_of():
@@ -143,26 +176,30 @@ def test_overwrite_with_later_write_snapshots_as_of():
   assert plan.mode == "as_of"
   assert plan.status == "ok"
   assert re.fullmatch(_temp_re("syn", "orders"), plan.read_table)
-  as_of = "TIMESTAMP '2026-09-13T13:49:41.250000Z'"
   assert plan.prepare_sql == (
       f"CREATE SNAPSHOT TABLE `{plan.read_table}` CLONE `{ORDERS}` "
-      f"FOR SYSTEM_TIME AS OF {as_of} {EXPIRY}",)
+      f"FOR SYSTEM_TIME AS OF {END_LIT} {EXPIRY}",)
   assert plan.read_expr == (f"(SELECT * FROM `{ORDERS}` "
-                            f"FOR SYSTEM_TIME AS OF {as_of})")
+                            f"FOR SYSTEM_TIME AS OF {END_LIT})")
   assert plan.params == {}
   assert plan.window == WINDOW
 
 
-def test_overwrite_with_later_write_beyond_time_travel_is_expired():
-  # The as-of point (13:49:41.25) fell out of the 168 h window a
-  # microsecond ago: never silently read the (since modified) table.
-  now = WINDOW_DT[1] + timedelta(hours=168, microseconds=1)
-  plan = _resolve(write_disposition="overwrite", foreign=(LATER_DML,), now=now)
+def test_overwrite_as_of_point_expires_one_hour_before_time_travel_does():
+  # 1 h safety margin: the as-of point (13:49:41.25) is refused from the
+  # moment it is 167 h old, not 168 h.
+  later = (LATER_DML,)
+  edge = WINDOW_DT[1] + timedelta(hours=167)
+  assert _resolve(write_disposition="overwrite", foreign=later, now=edge).ok
+  plan = _resolve(
+      write_disposition="overwrite",
+      foreign=later,
+      now=edge + timedelta(microseconds=1))
   assert plan.mode == "as_of"
   assert plan.status == "expired" and not plan.ok
   assert not plan.readable and plan.read_table == "" and plan.read_expr == ""
   assert plan.prepare_sql == ()
-  assert "168 h" in plan.reason
+  assert "168 h" in plan.reason and "1 h" in plan.reason
   assert plan.window == WINDOW
 
 
@@ -174,8 +211,13 @@ def test_overwrite_table_contaminated_by_an_interleaved_writer():
 
 
 # ---------------------------------------------------------------------------
-# append
+# append: APPENDS for LOAD/DML-only windows
 # ---------------------------------------------------------------------------
+
+
+def _suffix(plan: ScopePlan) -> str:
+  (start,) = [k for k in plan.params if k.startswith("start_")]
+  return start[len("start_"):]
 
 
 def test_append_within_window_uses_appends_ctas():
@@ -183,32 +225,54 @@ def test_append_within_window_uses_appends_ctas():
   assert plan.mode == "appends"
   assert plan.status == "ok" and plan.reason is None
   assert re.fullmatch(_temp_re("syn", "orders"), plan.read_table)
+  sfx = _suffix(plan)
+  assert re.fullmatch(r"orders_[0-9a-f]{8}", sfx)
+  select = ("SELECT * EXCEPT(_CHANGE_TYPE, _CHANGE_TIMESTAMP) FROM APPENDS("
+            f"TABLE `{ORDERS}`, @start_{sfx}, @end_{sfx})")
   assert plan.prepare_sql == (
-      f"CREATE TABLE `{plan.read_table}` {EXPIRY} AS SELECT * "
-      f"EXCEPT(_CHANGE_TYPE, _CHANGE_TIMESTAMP) FROM APPENDS(TABLE "
-      f"`{ORDERS}`, @start, @end)",)
-  assert plan.read_expr == ("(SELECT * EXCEPT(_CHANGE_TYPE, _CHANGE_TIMESTAMP) "
-                            f"FROM APPENDS(TABLE `{ORDERS}`, @start, @end))")
-  # Bound, never formatted: no timestamp reaches the SQL text.
-  assert plan.params == {"start": WINDOW_DT[0], "end": WINDOW_DT[1]}
+      f"CREATE TABLE `{plan.read_table}` {EXPIRY} AS {select}",)
+  assert plan.read_expr == f"({select})"
+  # Bound, never formatted — and namespaced per table, so two tables'
+  # read_exprs can share one statement.
+  assert plan.params == {
+      f"start_{sfx}": WINDOW_DT[0],
+      f"end_{sfx}": WINDOW_DT[1]
+  }
   assert "2026-09-13" not in plan.prepare_sql[0] + plan.read_expr
   assert plan.window == WINDOW
+  users = _resolve(
+      landing_table=f"{DS}.users",
+      writes=tuple(
+          JobWrite(f"{DS}.users", w.job_type, w.start, w.end, w.output_rows,
+                   w.job_id) for w in WRITES))
+  assert not set(users.params) & set(plan.params)
 
 
 def test_append_beyond_window_is_expired():
-  # The window start (13:49:20) is one second older than the floor.
-  plan = _resolve(now="2026-09-20T13:49:21.000000Z")
+  # The floor is now - 167 h: the window start (13:49:20) is one second
+  # older than it.
+  plan = _resolve(now="2026-09-20T12:49:21.000000Z")
   assert plan.mode == "appends"
   assert plan.status == "expired" and not plan.readable
   assert plan.prepare_sql == () and plan.params == {}
   assert "168 h" in plan.reason and "2026-09-13T13:49:21" in plan.reason
+  assert _resolve(now="2026-09-20T12:49:20.000000Z").ok
 
 
 def test_append_expiry_uses_the_tables_own_time_travel_window():
-  plan = _resolve(now="2026-09-15T14:00:00Z", time_travel_hours=48)
+  plan = _resolve(now="2026-09-15T13:00:00Z", time_travel_hours=48)
   assert plan.status == "expired"
   assert "48 h" in plan.reason
-  assert _resolve(now="2026-09-15T13:00:00Z", time_travel_hours=48).ok
+  assert _resolve(now="2026-09-15T12:00:00Z", time_travel_hours=48).ok
+
+
+def test_a_window_ending_in_the_future_is_unknown():
+  # The job may still be writing, or the clocks disagree.
+  plan = _resolve(now="2026-09-13T13:49:41.000000Z")
+  assert plan.status == "unknown" and not plan.readable
+  assert "after now" in plan.reason
+  over = _resolve(write_disposition="overwrite", now="2026-09-13T13:49:41Z")
+  assert over.status == "unknown" and not over.readable
 
 
 def test_contaminated_appends_window_rejected():
@@ -232,8 +296,8 @@ def test_contaminated_appends_window_allowed_keeps_status_and_warns():
 
 
 def test_a_writer_that_started_inside_the_window_contaminates_it():
-  # Its commit (end) is after the window, but its start is inside it:
-  # rows it committed may carry a change timestamp inside the window.
+  # Its commit lies somewhere in its own [start, end], which meets the
+  # window, so its rows may carry a change time inside it.
   straddling = _write(
       "2026-09-13T13:49:40.000000Z",
       "2026-09-13T13:49:55.000000Z",
@@ -243,31 +307,188 @@ def test_a_writer_that_started_inside_the_window_contaminates_it():
   assert _resolve(foreign=(straddling,)).status == "contaminated"
 
 
+# ---------------------------------------------------------------------------
+# append with COPY jobs: as_of_diff
+# ---------------------------------------------------------------------------
+
+
+def test_append_with_a_copy_job_uses_the_as_of_difference():
+  plan = _resolve(writes=COPY_WRITES, foreign=(EARLIER_LAUNCH, LATER_DML))
+  assert plan.mode == "as_of_diff"
+  assert plan.status == "ok" and plan.reason is None
+  assert re.fullmatch(_temp_re("syn", "orders"), plan.read_table)
+  # AS OF carries literals, as the snapshot clone does; nothing is bound.
+  assert plan.prepare_sql == (
+      f"CREATE TABLE `{plan.read_table}` {EXPIRY} AS {_diff_select()}",)
+  assert plan.read_expr == f"({_diff_select()})"
+  assert plan.params == {}
+  assert plan.window == WINDOW
+  assert plan.written_rows == 18250
+
+
+def test_as_of_difference_expires_on_its_start_point():
+  plan = _resolve(writes=COPY_WRITES, now="2026-09-20T12:49:21Z")
+  assert plan.mode == "as_of_diff" and plan.status == "expired"
+  assert "2026-09-13T13:49:20" in plan.reason  # the start point
+
+
+def test_as_of_difference_is_contaminated_by_an_overlapping_writer():
+  plan = _resolve(writes=COPY_WRITES, foreign=(OVERLAPPING_LOAD,))
+  assert plan.mode == "as_of_diff" and plan.status == "contaminated"
+  assert not plan.readable and "manual_load_77" in plan.reason
+
+
+def test_a_table_created_inside_the_window_is_read_as_of_its_end():
+  # Nothing existed at the window start, so the table as of the window
+  # end IS the difference (and AS OF a pre-creation time would fail).
+  plan = _resolve(
+      writes=COPY_WRITES, table_created="2026-09-13T13:49:20.500000Z")
+  assert plan.mode == "as_of" and plan.ok
+  assert plan.prepare_sql[0].startswith("CREATE SNAPSHOT TABLE")
+  before = _resolve(writes=COPY_WRITES, table_created="2026-09-01T00:00:00Z")
+  assert before.mode == "as_of_diff"
+
+
+def test_a_table_recreated_after_the_window_is_unknown():
+  plan = _resolve(writes=COPY_WRITES, table_created="2026-09-14T09:00:00Z")
+  assert plan.status == "unknown" and not plan.readable
+  assert "re)created" in plan.reason
+
+
+def test_appends_requested_over_copy_jobs_is_kept_with_a_warning():
+  plan = _resolve(writes=COPY_WRITES, requested="appends")
+  assert plan.mode == "appends" and plan.ok
+  assert "COPY" in plan.reason and "beam_bq_job_COPY" in plan.reason
+
+
+class _TimeTravelTable:
+  """One table's commit history, readable AS OF any instant, plus a
+  BigQuery reduced to as_of_diff's SELECT over it.
+
+  ROW_NUMBER over identical TO_JSON_STRING rows numbers them in an order
+  BigQuery does not promise; `rng` shuffles it on every read.
+  """
+
+  _RE = re.compile(
+      re.escape(_diff_select("TABLE")).replace("TABLE", "[^`]+").replace(
+          re.escape(END_LIT), r"TIMESTAMP '(?P<end>[^']+)'").replace(
+              re.escape(START_LIT), r"TIMESTAMP '(?P<start>[^']+)'"))
+
+  def __init__(self, seed: int):
+    self.commits: list[tuple[datetime, list[dict[str, Any]]]] = []
+    self.rng = random.Random(seed)
+
+  def commit(self, at: str, rows: list[dict[str, Any]]) -> None:
+    self.commits.append((datetime.fromisoformat(at), [dict(r) for r in rows]))
+
+  def as_of(self, moment: datetime) -> list[dict[str, Any]]:
+    rows = [r for at, batch in self.commits if at <= moment for r in batch]
+    self.rng.shuffle(rows)
+    return rows
+
+  def _numbered(self, rows: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    seen: Counter[str] = Counter()
+    out = []
+    for row in rows:
+      text = json.dumps(row, separators=(",", ":"))
+      seen[text] += 1
+      out.append((text, seen[text]))
+    return out
+
+  def query(self, read_expr: str) -> list[dict[str, Any]]:
+    match = self._RE.fullmatch(read_expr[1:-1])
+    assert match, read_expr
+    end = self._numbered(self.as_of(datetime.fromisoformat(match["end"])))
+    start = set(
+        self._numbered(self.as_of(datetime.fromisoformat(match["start"]))))
+    return [json.loads(text) for text, rn in end if (text, rn) not in start]
+
+
+def _order(oid: int, status: str) -> dict[str, Any]:
+  return {"order_id": oid, "user_id": 7, "status": status}
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_as_of_difference_is_the_exact_multiset_of_appended_rows(seed):
+  table = _TimeTravelTable(seed)
+  a, b, c = _order(1, "Shipped"), _order(2, "Complete"), _order(3, "Returned")
+  # Before the window: a twice (duplicates before), and b.
+  table.commit("2026-09-12T09:00:12+00:00", [a, a, b])
+  # The job: a again (a duplicate after), b re-appended (an identical row
+  # already in the table), c twice.
+  table.commit("2026-09-13T13:49:30.500000+00:00", [a, c])
+  table.commit("2026-09-13T13:49:40.250000+00:00", [b, c])
+  # After the window: never part of the difference.
+  table.commit("2026-09-14T08:00:05+00:00", [a, c])
+  plan = _resolve(writes=COPY_WRITES, expected_rows=4)
+  got = table.query(plan.read_expr)
+  assert Counter(json.dumps(r) for r in got) == Counter(
+      json.dumps(r) for r in (a, b, c, c))
+
+
+# ---------------------------------------------------------------------------
+# verify: Σ output_rows always, Σ valid_count when present
+# ---------------------------------------------------------------------------
+
+
 def test_append_scope_count_mismatch_flags_not_ok():
   plan = _resolve()
   assert plan.ok and plan.observed_rows is None
   exact = plan.verify(18250)
   assert exact.status == "ok" and exact.observed_rows == 18250
+  assert exact.reason is None
   # 0.5 % of 18 250 is 91.25 rows.
   assert plan.verify(18250 + 91).status == "ok"
   mismatch = plan.verify(18250 + 92)
   assert mismatch.status == "count_mismatch" and not mismatch.ok
   assert mismatch.observed_rows == 18342
   assert "18342" in mismatch.reason and "18250" in mismatch.reason
+  # The likely cause under APPENDS, and the remedy.
+  assert "copy job" in mismatch.reason and "--scope manual" in mismatch.reason
   assert plan.status == "ok"  # verify returns a new plan
 
 
+def test_count_mismatch_under_as_of_diff_names_deletes_and_updates():
+  checked = _resolve(writes=COPY_WRITES).verify(17000)
+  assert checked.status == "count_mismatch"
+  assert "delete" in checked.reason and "--scope manual" in checked.reason
+
+
 def test_count_check_is_exact_below_one_thousand_rows():
-  plan = _resolve(expected_rows=999)
+  small = (_write(
+      "2026-09-13T13:49:21.000000Z", "2026-09-13T13:49:30.500000Z", rows=999),)
+  plan = _resolve(writes=small, expected_rows=999)
   assert plan.verify(999).ok
   assert plan.verify(998).status == "count_mismatch"
   assert plan.verify(1000).status == "count_mismatch"
 
 
-def test_count_check_without_an_expected_count_says_so():
-  checked = _resolve(expected_rows=None).verify(18250)
-  assert checked.status == "ok" and checked.observed_rows == 18250
-  assert "not verified" in checked.reason
+def test_count_check_uses_the_committed_rows_without_valid_count():
+  plan = _resolve(expected_rows=None)
+  assert plan.verify(18250).ok
+  checked = plan.verify(17000)
+  assert checked.status == "count_mismatch"
+  assert "18250" in checked.reason and "output_rows" in checked.reason
+
+
+def test_count_check_compares_against_both_counts():
+  # validation_runs and the job's commits disagree: either mismatch shows.
+  plan = _resolve(expected_rows=18000)
+  checked = plan.verify(18250)
+  assert checked.status == "count_mismatch"
+  assert "18000" in checked.reason and "valid_count" in checked.reason
+  assert "output_rows" not in checked.reason
+
+
+def test_no_count_at_all_is_unknown_never_ok():
+  unread = tuple(
+      JobWrite(w.table, w.job_type, w.start, w.end, None, w.job_id)
+      for w in WRITES)
+  plan = _resolve(writes=unread, expected_rows=None)
+  assert plan.ok and plan.written_rows is None
+  checked = plan.verify(18250)
+  assert checked.status == "unknown" and not checked.ok
+  assert checked.observed_rows == 18250 and "not verified" in checked.reason
 
 
 def test_count_mismatch_keeps_a_worse_status():
@@ -315,6 +536,8 @@ def test_requested_mode_overrides_the_write_disposition():
   plan = _resolve(requested="appends", write_disposition="overwrite")
   assert plan.mode == "appends" and plan.ok
   assert plan.prepare_sql[0].startswith("CREATE TABLE ")
+  diff = _resolve(requested="as_of_diff", write_disposition="overwrite")
+  assert diff.mode == "as_of_diff" and diff.ok
   table = _resolve(requested="table", foreign=(LATER_DML,))
   assert table.mode == "table" and table.status == "contaminated"
   assert "bquxjob_5e1f0a2b" in table.reason
@@ -323,6 +546,19 @@ def test_requested_mode_overrides_the_write_disposition():
 def test_unknown_requested_mode_is_rejected():
   with pytest.raises(ValueError, match="snapshot"):
     _resolve(requested="snapshot")
+
+
+def test_an_unknown_mode_never_falls_through_to_appends():
+  scope = scope_module._Scope(  # pylint: disable=protected-access  # the internal mode dispatch has no public door
+      table=ORDERS,
+      temp=f"{TEMP}.t",
+      expected=None,
+      written=None,
+      window=WINDOW,
+      hours=168,
+      floor=WINDOW_DT[0])
+  with pytest.raises(ValueError, match="bogus"):
+    scope.reads("bogus", WINDOW_DT)
 
 
 def test_unknown_write_disposition_is_unknown_not_guessed():
@@ -337,7 +573,7 @@ def test_no_labelled_write_on_an_overwrite_launch_reads_the_table_as_unknown():
   plan = _resolve(write_disposition="overwrite", writes=())
   assert plan.mode == "table" and plan.status == "unknown"
   assert plan.readable and plan.read_table == ORDERS
-  assert plan.window == (None, None)
+  assert plan.window == (None, None) and plan.written_rows is None
   assert "no labelled" in plan.reason
 
 
@@ -363,17 +599,15 @@ def test_writes_to_other_tables_do_not_widen_the_window():
       "2026-09-13T13:40:55.100000Z",
       "2026-09-13T13:41:10.200000Z",
       table=f"{DS}.users",
-      job_id="beam_bq_job_LOAD_sdfbthelook0913_9",
-      job_type="LOAD")
+      job_id="beam_bq_job_LOAD_sdfbthelook0913_9")
   plan = _resolve(writes=(users, *WRITES))
-  assert plan.window == WINDOW
+  assert plan.window == WINDOW and plan.written_rows == 18250
   # A foreign write into ANOTHER table inside the window is not ours.
   other = _write(
       "2026-09-13T13:49:35.000000Z",
       "2026-09-13T13:49:37.000000Z",
       table=f"{DS}.users",
-      job_id="manual_load_78",
-      job_type="LOAD")
+      job_id="manual_load_78")
   assert _resolve(foreign=(other,)).ok
 
 
@@ -396,6 +630,8 @@ def test_landing_table_accepts_the_colon_form():
     "time_travel_hours": 0
 }, {
     "expected_rows": -1
+}, {
+    "table_created": "yesterday"
 }])
 def test_inputs_that_would_reach_sql_are_validated(bad):
   with pytest.raises(ValueError):
@@ -405,16 +641,12 @@ def test_inputs_that_would_reach_sql_are_validated(bad):
 def test_temp_tables_differ_per_table_even_with_the_same_short_name():
   other = "demo-project.thelook_synthetic_b.orders"
   writes = tuple(
-      JobWrite(
-          table=other,
-          job_type=w.job_type,
-          start=w.start,
-          end=w.end,
-          output_rows=w.output_rows,
-          job_id=w.job_id) for w in WRITES)
+      JobWrite(other, w.job_type, w.start, w.end, w.output_rows, w.job_id)
+      for w in WRITES)
   first = _resolve()
   second = _resolve(landing_table=other, writes=writes)
   assert first.read_table != second.read_table
+  assert set(first.params).isdisjoint(second.params)
   assert _resolve().read_table == first.read_table  # deterministic
 
 
@@ -448,6 +680,7 @@ def test_source_pinned_as_of_job_create_time():
                            f"FOR SYSTEM_TIME AS OF {as_of})")
   assert pin.as_of == "2026-09-13T13:10:16.512345Z"
   assert pin.reason is None
+  assert not pin.params and isinstance(pin.params, Mapping)
 
 
 def test_source_pin_renders_its_own_utc_literal():
@@ -461,12 +694,14 @@ def test_source_pin_renders_its_own_utc_literal():
     _pin(job_create_time="2026-09-13T13:10:16Z' OR TRUE --")
 
 
-def test_source_beyond_time_travel_is_read_current_and_unpinned():
-  pin = _pin(now="2026-09-25T00:00:00Z")
+def test_source_pin_keeps_the_one_hour_margin():
+  created = datetime(2026, 9, 13, 13, 10, 16, 512345, tzinfo=UTC)
+  assert _pin(now=created + timedelta(hours=167)).pinned
+  pin = _pin(now=created + timedelta(hours=167, microseconds=1))
   assert pin[:3] == (SOURCE, (), False)
   assert pin.read_expr == f"`{SOURCE}`"
   assert pin.as_of is None
-  assert "168 h" in pin.reason
+  assert "168 h" in pin.reason and "1 h" in pin.reason
 
 
 def test_source_with_unknown_create_time_is_unpinned():
@@ -481,14 +716,38 @@ def test_source_create_time_after_now_is_rejected():
 
 
 # ---------------------------------------------------------------------------
-# sampled_read
+# from_item: structured pieces, never re-parsed text
 # ---------------------------------------------------------------------------
 
 
-def _bq_abs_mod(value: int, modulo: int) -> int:
-  """BigQuery's `ABS(MOD(x, m))`: MOD takes the sign of `x`."""
-  rest = abs(value) % modulo
-  return abs(rest if value >= 0 else -rest)
+def test_from_item_takes_every_read_expr_this_module_builds():
+  pinned, unpinned = _pin(), _pin(job_create_time=None)
+  assert from_item(pinned) == pinned.read_expr
+  assert from_item(unpinned) == f"`{SOURCE}`"
+  for plan in (_resolve(), _resolve(writes=COPY_WRITES),
+               _resolve(write_disposition="overwrite", foreign=(LATER_DML,)),
+               _resolve(write_disposition="overwrite")):
+    assert from_item(plan) == plan.read_expr
+  assert from_item(ORDERS) == from_item(f"`{ORDERS}`") == f"`{ORDERS}`"
+
+
+@pytest.mark.parametrize("bad", [
+    "(SELECT 1)",
+    f"(SELECT * FROM `{ORDERS}` FOR SYSTEM_TIME AS OF "
+    "TIMESTAMP '2026-09-13T13:10:16Z')",
+    "orders",
+    f"`{ORDERS}`; DROP TABLE x",
+])
+def test_from_item_rejects_text_that_is_not_a_table_name(bad):
+  with pytest.raises(ValueError):
+    from_item(bad)
+  with pytest.raises(ValueError, match="nothing"):
+    from_item(_resolve(now="2026-09-30T00:00:00Z"))  # expired: no read_expr
+
+
+# ---------------------------------------------------------------------------
+# sampled_read
+# ---------------------------------------------------------------------------
 
 
 def test_sampled_read_deterministic():
@@ -500,21 +759,24 @@ def test_sampled_read_deterministic():
       "evaluation_id": EVAL_ID,
       "side": "syn",
   }
-  sql, temp = sampled_read(ORDERS, **kwargs)
-  assert (sql, temp) == sampled_read(ORDERS, **kwargs)
+  sql, temp, params = sampled_read(ORDERS, **kwargs)
+  assert (sql, temp, params) == sampled_read(ORDERS, **kwargs)
   assert re.fullmatch(_temp_re("syn", "orders"), temp)
   assert temp != _resolve().read_table  # never the scope's own temp table
+  # ABS(MOD(x, m)): the same rows as MOD(ABS(x), m), without ABS's INT64
+  # overflow on the one fingerprint with no positive counterpart.
   assert sql == (f"CREATE TABLE `{temp}` {EXPIRY} AS SELECT * FROM "
                  f"`{ORDERS}` AS t WHERE ABS(MOD(FARM_FINGERPRINT("
                  "CONCAT(@salt, TO_JSON_STRING(t))), 1000)) < 37")
-  # The salt is bound (@salt), so the text does not depend on it.
-  assert "c2FsdA" not in sql
-  assert sampled_read(ORDERS, **{**kwargs, "salt": "other"}) == (sql, temp)
-  # ABS(MOD(x, m)) keeps exactly the rows MOD(ABS(x), m) would, and cannot
-  # overflow on the one INT64 whose absolute value does not exist.
-  for value in (-(2**63) + 1, -1001, -37, -1, 0, 36, 37, 999, 2**63 - 1):
-    assert _bq_abs_mod(value, 1000) == abs(value) % 1000
-  assert _bq_abs_mod(-(2**63), 1000) < 1000
+  # The salt is bound by construction: it travels in params, never in
+  # the text, so the text does not depend on it.
+  assert params == {"salt": "c2FsdA"} and "c2FsdA" not in sql
+  other_sql, other_temp, other_params = sampled_read(
+      ORDERS, **{
+          **kwargs, "salt": "other"
+      })
+  assert (other_sql, other_temp) == (sql, temp)
+  assert other_params == {"salt": "other"}
 
 
 @pytest.mark.parametrize("bad", [{

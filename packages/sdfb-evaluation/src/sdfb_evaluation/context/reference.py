@@ -51,7 +51,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from sdfb_evaluation.context.scope import from_item
+from sdfb_evaluation.context.scope import SourcePin, from_item, read_params
 
 __all__ = [
     "EXPOSURE_ROWS",
@@ -109,13 +109,14 @@ def _panel_n(n: Any) -> int:
   return n
 
 
-def panel_sql(source_read_table: str, n: int) -> str:
+def panel_sql(source_read_table: str | SourcePin, n: int) -> str:
   """The first 2n source rows of the generator's order, each with its
   rank `__sdfb_rk` (1-based).
 
   `source_read_table` is a `project.dataset.table` (e.g. the pinned
-  snapshot clone once built) or a `SourcePin.read_expr` (the same state
-  read `FOR SYSTEM_TIME AS OF`, for planning, which creates no table).
+  snapshot clone once built) or a `SourcePin`, read through its
+  `read_expr`: the state `FOR SYSTEM_TIME AS OF` the job's create time
+  when pinned (planning creates no table), the table itself when not.
   Either way `TO_JSON_STRING(ref)` must see exactly the source's columns,
   which a clone and an as-of read both preserve.
 
@@ -126,7 +127,7 @@ def panel_sql(source_read_table: str, n: int) -> str:
 
   Raises:
     ValueError: `n` is not a positive int, or the source is neither a
-      strict table name nor a pinned read expression.
+      strict table name nor a `SourcePin`.
   """
   size = 2 * _panel_n(n)
   source = from_item(source_read_table)
@@ -191,7 +192,7 @@ def _verdict(digest: str, expected: str | None) -> str | None:
 
 def fetch_panel(bq: Any,
                 *,
-                source_read_table: str,
+                source_read_table: str | SourcePin,
                 n: int,
                 expected_digest: str | None,
                 max_bytes: int | None = None) -> Panel:
@@ -200,7 +201,8 @@ def fetch_panel(bq: Any,
   Args:
     bq: a `Bq` (or fake) — the client returns the same Python types the
       generator's `load_reference_rows` got, which the digest depends on.
-    source_read_table: see `panel_sql`.
+    source_read_table: see `panel_sql`; a `SourcePin`'s own `params`
+      are bound with it.
     n: the generator's reference sample size (`--reference_rows_limit`).
     expected_digest: `validation_runs.reference_digest`, or None.
     max_bytes: caps the bytes billed (the query scans the whole source).
@@ -209,7 +211,10 @@ def fetch_panel(bq: Any,
     ValueError: a bad `n`/source, or ranks that do not run 1..k.
   """
   size = _panel_n(n)
-  rows = bq.query(panel_sql(source_read_table, size), max_bytes=max_bytes)
+  rows = bq.query(
+      panel_sql(source_read_table, size),
+      read_params(source_read_table),
+      max_bytes=max_bytes)
   ranked = _ranked(rows, 2 * size)
   r_rows = [row for rank, row in ranked if rank <= size]
   h_rows = [row for rank, row in ranked if rank > size]

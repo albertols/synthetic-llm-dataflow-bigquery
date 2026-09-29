@@ -24,9 +24,9 @@ Two rules hold for every caller:
 - SQL values are bound as query parameters (`@name`), never formatted into
   the text. `query` and `execute` infer each parameter's BigQuery type
   from its Python type and refuse `None` (an untyped NULL). The one
-  exception is a DDL clause documented only with constant expressions (a
-  snapshot clone's `FOR SYSTEM_TIME AS OF`): `context.scope` gives it a
-  `TIMESTAMP` literal re-rendered from a parsed datetime.
+  exception is `FOR SYSTEM_TIME AS OF`: query parameters are constant
+  expressions and would do, but `context.scope` keeps a `TIMESTAMP`
+  literal re-rendered from a parsed datetime there, for safety.
 - Table identifiers that must be interpolated go through `normalize_fqn` /
   `quote_fqn`, which accept only a strict `project.dataset.table`.
 
@@ -229,8 +229,9 @@ class Bq:
 
     Returns:
       `schema` (BigQuery JSON field list), `numRows` (int), `location`,
-      `timePartitioning` (dict or None), `lastModified` (RFC 3339 UTC) and
-      `timeTravelHours` (the dataset's window; 168 when unset).
+      `timePartitioning` (dict or None), `lastModified` and `created`
+      (RFC 3339 UTC) and `timeTravelHours` (the dataset's window; 168
+      when unset).
     """
     name = normalize_fqn(fqn)
     resource = _translated(lambda: self._client.get_table(name),
@@ -251,6 +252,8 @@ class Bq:
             resource.get("timePartitioning"),
         "lastModified":
             _ms_to_iso(resource.get("lastModifiedTime")),
+        "created":
+            _ms_to_iso(resource.get("creationTime")),
         "timeTravelHours":
             int(hours) if hours is not None else _DEFAULT_TIME_TRAVEL_HOURS,
     }
@@ -281,18 +284,24 @@ class Bq:
     _translated(job.result, f"load into {name}")
     return str(job.job_id)
 
-  def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> None:
+  def execute(self,
+              sql: str,
+              params: Mapping[str, Any] | None = None,
+              *,
+              max_bytes: int | None = None) -> None:
     """Run a DDL statement (snapshot clone, CTAS, view) to completion.
 
-    `params` are bound exactly as `query` binds them — e.g. the `@start`/
-    `@end` inside an `APPENDS` CTAS's query. A DDL clause BigQuery
-    documents only with constant expressions (the `FOR SYSTEM_TIME AS OF`
-    of a snapshot clone) carries a validated literal instead.
+    `params` are bound exactly as `query` binds them — e.g. the
+    `@start_…`/`@end_…` inside an `APPENDS` CTAS's query. `max_bytes` caps
+    the bytes billed: a CTAS over `APPENDS` or an AS OF difference can
+    scan a lot.
     """
     from google.cloud import bigquery  # pylint: disable=import-outside-toplevel  # optional heavy client
 
     config = bigquery.QueryJobConfig(
         query_parameters=_query_parameters(params or {}))
+    if max_bytes is not None:
+      config.maximum_bytes_billed = int(max_bytes)
     job = _translated(
         lambda: self._client.query(
             sql, job_config=config, location=self.location), "DDL")

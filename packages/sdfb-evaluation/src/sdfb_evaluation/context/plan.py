@@ -125,6 +125,7 @@ from sdfb_evaluation.context.scope import (
     ScopePlan,
     SourcePin,
     pin_source,
+    read_params,
     resolve_scope,
     sampled_read,
 )
@@ -802,8 +803,9 @@ class Knobs:  # pylint: disable=too-many-instance-attributes  # one field per CL
 
 class PrepareStatement(NamedTuple):
   """One DDL statement to run before the pipeline, with the parameters it
-  binds (`bq.execute(sql, params)`): a scope's own `params`, `{}` for a
-  source pin, `{"salt": …}` for a sample."""
+  binds (`bq.execute(sql, params)`): a scope's or a source pin's own
+  `params` (`{}` for a pin: its AS OF is a literal), `sampled_read`'s
+  `{"salt": …}` for a sample."""
   sql: str
   params: Mapping[str, Any]
 
@@ -981,9 +983,14 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
     return f"no table can be evaluated — {reasons}"
 
   def prepare(self, bq: Any) -> None:
-    """Run every prepare statement, in order, with its own parameters."""
+    """Run every prepare statement, in order, with its own parameters and
+    the budget's byte cap (a CTAS over APPENDS or an AS OF difference can
+    scan a lot)."""
     for statement in self.prepare_sql:
-      bq.execute(statement.sql, dict(statement.params))
+      bq.execute(
+          statement.sql,
+          dict(statement.params),
+          max_bytes=self.budget.max_bytes_billed)
 
   def registry_seed(self) -> dict[str, Any]:
     """Every `evaluation_data_history` field known before the pipeline
@@ -1397,7 +1404,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
         time_travel_hours=int(land_meta["timeTravelHours"]),
         temp_dataset=self.temp_dataset,
         evaluation_id=self.evaluation_id,
-        allow_contaminated=self.knobs.allow_contaminated)
+        allow_contaminated=self.knobs.allow_contaminated,
+        table_created=land_meta.get("created"))
     if not work.scope.readable:
       work.skip_with(f"scope {work.scope.status}: {work.scope.reason}")
       return
@@ -1510,10 +1518,6 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     work.cols_src = [src[i] for i in kept]
 
   # --- bytes -----------------------------------------------------------------
-  def _panel_source(self, work: _Work) -> str:
-    assert work.pin is not None
-    return work.pin.read_expr if work.pin.pinned else work.pin.read_table
-
   def panel_n(self) -> int | None:
     n = self.launch.typed_filters().get("reference_rows_limit")
     return n if isinstance(n, int) and n > 0 else None
@@ -1526,17 +1530,19 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     for work in works:
       assert work.scope is not None and work.pin is not None
       for sql in work.src_queries:
-        self.bytes["planning"] += self.bq.dry_run_bytes(sql, {})
+        self.bytes["planning"] += self.bq.dry_run_bytes(sql,
+                                                        read_params(work.pin))
       for sql in work.syn_queries:
         self.bytes["planning"] += self.bq.dry_run_bytes(sql, work.scope.params)
       if n is not None:
         self.bytes["panel"] += self.bq.dry_run_bytes(
-            panel_sql(self._panel_source(work), n), {})
+            panel_sql(work.pin, n), read_params(work.pin))
       for sql in work.scope.prepare_sql:
         self.bytes["prepare"] += self._dry_prepare(sql, work.scope.params,
                                                    work.scope.read_expr)
       for sql in work.pin.prepare_sql:
-        self.bytes["prepare"] += self._dry_prepare(sql, {}, work.pin.read_expr)
+        self.bytes["prepare"] += self._dry_prepare(sql, read_params(work.pin),
+                                                   work.pin.read_expr)
     self.budget.check_bytes(self.bytes)
 
   def _dry_prepare(self, sql: str, params: Mapping[str, Any], expr: str) -> int:
@@ -1557,7 +1563,9 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     R/E/H panel."""
     assert work.scope is not None and work.pin is not None
     cap = self.budget.max_bytes_billed
-    src_rows = [self._one(sql, {}, cap) for sql in work.src_queries]
+    src_rows = [
+        self._one(sql, read_params(work.pin), cap) for sql in work.src_queries
+    ]
     syn_rows = [
         self._one(sql, work.scope.params, cap) for sql in work.syn_queries
     ]
@@ -1576,7 +1584,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       return
     work.panel = fetch_panel(
         self.bq,
-        source_read_table=self._panel_source(work),
+        source_read_table=work.pin,
         n=n,
         expected_digest=work.run.reference_digest if work.run else None,
         max_bytes=cap)
@@ -1597,7 +1605,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     assert work.src_stats is not None and work.syn_stats is not None
     work.rate_src, work.source_read = self._side_sample(
         work.pin.read_table, int(work.src_stats["rows"]), "src",
-        work.pin.read_expr, {})
+        work.pin.read_expr, read_params(work.pin))
     work.rate_syn, work.synthetic_read = self._side_sample(
         work.scope.read_table, int(work.syn_stats["rows"]), "syn",
         work.scope.read_expr, work.scope.params)
@@ -1611,7 +1619,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     keep = min(
         math.ceil(self.knobs.sample_rows * SAMPLE_MODULUS / rows),
         SAMPLE_MODULUS)
-    sql, temp = sampled_read(
+    sql, temp, bound = sampled_read(
         read_table,
         keep=keep,
         modulo=SAMPLE_MODULUS,
@@ -1619,7 +1627,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
         temp_dataset=self.temp_dataset,
         evaluation_id=self.evaluation_id,
         side=side)
-    self.samples.append(PrepareStatement(sql, {"salt": self.salt}))
+    self.samples.append(PrepareStatement(sql, bound))
     self.bytes["sample"] = self.bytes.get("sample", 0) + int(
         self.bq.dry_run_bytes(f"SELECT * FROM {_from_expr(expr)} AS t", params))
     return keep / SAMPLE_MODULUS, temp
@@ -1840,7 +1848,7 @@ def _assemble(planner: _Planner, tables: tuple[TablePlan, ...], key: str,
       for sql in t.scope.prepare_sql
   ]
   prepare += [
-      PrepareStatement(sql, {}) for t in tables
+      PrepareStatement(sql, read_params(t.source_pin)) for t in tables
       if t.evaluated and t.source_pin is not None
       for sql in t.source_pin.prepare_sql
   ]

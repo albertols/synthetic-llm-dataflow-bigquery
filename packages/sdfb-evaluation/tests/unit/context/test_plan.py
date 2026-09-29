@@ -739,8 +739,42 @@ def test_appends_scope_params_are_bound_everywhere():
   plan.prepare(bq)
   assert [(s, p) for s, p in bq.executed
          ] == [(s.sql, dict(s.params)) for s in plan.prepare_sql]
+  # Every prepare DDL is capped at the budget (a CTAS can scan a lot).
+  assert bq.execute_caps and all(
+      cap == KNOBS.max_bytes_billed for cap in bq.execute_caps)
   pins = [s for s in plan.prepare_sql if "CREATE SNAPSHOT TABLE" in s.sql]
   assert len(pins) == 3 and all(not s.params for s in pins)
+
+
+def test_copy_job_appends_plan_the_as_of_difference():
+  bq = thelook_bq()
+  launch = thelook_launch(bq, write_disposition="append")
+  copies = tuple(dataclasses.replace(w, job_type="COPY") for w in launch.writes)
+  plan, _ = _plan(bq, dataclasses.replace(launch, writes=copies))
+  for table in plan.tables[1:]:
+    scope = table.scope
+    assert scope.mode == "as_of_diff" and scope.ok and scope.params == {}
+    assert "LEFT JOIN" in scope.prepare_sql[0]
+    reads = [s for s, _ in bq.planning_queries() if scope.read_expr in s]
+    assert len(reads) == 1
+    assert scope.observed_rows == scope.written_rows
+
+
+def test_an_unpinned_source_is_read_through_its_own_read_expr():
+  # The job's create time is past the source's time travel: the source is
+  # read as it is now — planning, dry runs and the panel all use the
+  # pin's read_expr (the table itself), not a special case.
+  bq = thelook_bq()
+  launch = thelook_launch(bq, started_at="2026-09-01T00:00:00Z")
+  plan, _ = _plan(bq, launch)
+  users = next(t for t in plan.tables if t.name == "users")
+  assert not users.source_pinned
+  assert users.source_pin.read_expr == f"`{SRC}.users`"
+  panels = [s for s, _ in bq.queries if "__sdfb_rk" in s]
+  assert any(f"FROM `{SRC}.users` AS ref" in s for s in panels)
+  assert not any("FOR SYSTEM_TIME" in s for s in panels)
+  assert users.panel is not None and users.panel.verified
+  assert not any("CREATE SNAPSHOT" in s.sql for s in plan.prepare_sql)
 
 
 def test_sampled_mode_samples_large_sides():

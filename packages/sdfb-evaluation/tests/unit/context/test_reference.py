@@ -254,35 +254,49 @@ def test_fetch_panel_passes_the_byte_cap():
       n=1,
       expected_digest=None,
       max_bytes=5_000_000_000)
-  assert seen == [(panel_sql(TABLE, 1), None, 5_000_000_000)]
+  assert seen == [(panel_sql(TABLE, 1), {}, 5_000_000_000)]
 
 
-def test_panel_reads_the_pinned_source_expression():
-  pin = pin_source(
-      source_table=TABLE,
-      job_create_time="2026-09-13T13:10:16.512345Z",
-      now="2026-09-14T12:00:00Z",
-      time_travel_hours=168,
-      temp_dataset="demo-project.sdfb_eval_tmp",
-      evaluation_id="ev_20260914_0001")
-  sql = panel_sql(pin.read_expr, 2)
-  assert f"FROM ({pin.read_expr[1:-1]}) AS ref ORDER BY" in sql
+def _pin(**overrides):
+  kwargs = {
+      "source_table": TABLE,
+      "job_create_time": "2026-09-13T13:10:16.512345Z",
+      "now": "2026-09-14T12:00:00Z",
+      "time_travel_hours": 168,
+      "temp_dataset": "demo-project.sdfb_eval_tmp",
+      "evaluation_id": "ev_20260914_0001",
+  }
+  kwargs.update(overrides)
+  return pin_source(**kwargs)
+
+
+def test_panel_reads_the_pinned_source():
+  pin = _pin()
+  sql = panel_sql(pin, 2)
+  assert f"FROM {pin.read_expr} AS ref ORDER BY" in sql
   bq = _FingerprintBq(USERS, FINGERPRINTS)
-  panel = fetch_panel(
-      bq, source_read_table=pin.read_expr, n=2, expected_digest=None)
+  panel = fetch_panel(bq, source_read_table=pin, n=2, expected_digest=None)
   assert [r["id"] for r in panel.r_rows] == FP_ORDER[:2]
   # The materialized snapshot (after prepare_sql ran) reads the same way.
   assert f"FROM `{pin.read_table}` AS ref" in panel_sql(pin.read_table, 2)
 
 
+def test_panel_reads_an_unpinned_source_through_its_read_expr():
+  pin = _pin(job_create_time=None)
+  assert not pin.pinned and pin.read_expr == f"`{TABLE}`"
+  assert panel_sql(pin, 2) == panel_sql(TABLE, 2)
+  bq = _FingerprintBq(USERS, FINGERPRINTS)
+  panel = fetch_panel(bq, source_read_table=pin, n=2, expected_digest=None)
+  assert [r["id"] for r in panel.r_rows] == FP_ORDER[:2]
+
+
 @pytest.mark.parametrize("source", [
     "(SELECT 1)",
-    "`demo-project.thelook_ecommerce.users`",
     "(SELECT * FROM `demo-project.x.users` FOR SYSTEM_TIME AS OF "
     "TIMESTAMP '2026-09-13T13:10:16Z'; DROP TABLE x --')",
     "users",
 ])
-def test_panel_rejects_anything_but_a_table_or_a_pinned_expression(source):
+def test_panel_rejects_text_that_is_not_a_table_name(source):
   with pytest.raises(ValueError):
     panel_sql(source, 2)
 

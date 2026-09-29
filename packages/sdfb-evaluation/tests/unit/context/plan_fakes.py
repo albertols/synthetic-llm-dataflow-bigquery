@@ -379,6 +379,7 @@ class PlanBq:
     self.queries: list[tuple[str, dict]] = []
     self.dry_runs: list[tuple[str, dict]] = []
     self.executed: list[tuple[str, dict]] = []
+    self.execute_caps: list[int | None] = []
     self.max_bytes: list[int | None] = []
     self.events: list[tuple[str, str]] = []  # (dry | query | execute, sql)
 
@@ -406,8 +407,13 @@ class PlanBq:
     self.events.append(("dry", sql))
     return self.dry_bytes
 
-  def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> None:
+  def execute(self,
+              sql: str,
+              params: Mapping[str, Any] | None = None,
+              *,
+              max_bytes: int | None = None) -> None:
     self.executed.append((sql, dict(params or {})))
+    self.execute_caps.append(max_bytes)
     self.events.append(("execute", sql))
 
   def job_stats(self, job_id: str, location: str) -> dict:

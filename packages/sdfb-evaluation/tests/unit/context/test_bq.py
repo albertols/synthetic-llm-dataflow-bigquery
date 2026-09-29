@@ -95,6 +95,7 @@ class _FakeClient:
             "field": "created_at"
         },
         "lastModifiedTime": "1789307370500",
+        "creationTime": "1788249600000",
     })
 
   def get_dataset(self, ref):
@@ -176,6 +177,7 @@ def test_table_summary():
   assert info["location"] == "EU"
   assert info["timePartitioning"] == {"type": "DAY", "field": "created_at"}
   assert info["lastModified"] == "2026-09-13T13:49:30.500000Z"
+  assert info["created"] == "2026-09-01T08:00:00.000000Z"
   assert info["timeTravelHours"] == 96
 
 
@@ -217,9 +219,11 @@ def test_execute_binds_parameters():
   start = datetime(2026, 9, 13, 13, 49, 20, tzinfo=UTC)
   Bq("demo-project", client=client, location="EU").execute(
       "CREATE TABLE `demo-project.tmp.a` AS SELECT * FROM "
-      "APPENDS(TABLE `demo-project.d.t`, @start, NULL)", {"start": start})
+      "APPENDS(TABLE `demo-project.d.t`, @start, NULL)", {"start": start},
+      max_bytes=2_000_000_000)
   _, _, config, location = client.calls[0]
   assert location == "EU"
+  assert config.maximum_bytes_billed == 2_000_000_000
   params = _params_by_name(config)
   assert params["start"].type_ == "TIMESTAMP"
   assert params["start"].value == start
