@@ -65,7 +65,7 @@ import hashlib
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, time
 from typing import Any, cast
 
 import numpy as np
@@ -76,8 +76,9 @@ from sdfb_evaluation.stats.noise import wilson_interval
 
 # Bumped whenever the encoding changes meaning (grid convention, null codes,
 # distance), so a cached encoding keyed by `GowerSpace.digest` cannot be
-# reused across incompatible versions.
-_DIGEST_VERSION = b"sdfb-gower/1 mid-cdf-pit hash64"
+# reused across incompatible versions. /2: temporal cells read as UNIX
+# microseconds, the plan grids' scale (Ruling R54), no longer epoch seconds.
+_DIGEST_VERSION = b"sdfb-gower/2 mid-cdf-pit hash64 unix-micros"
 
 # Upper bound for one chunk's working set, in bytes (64 MB).
 _MAX_WORKING_SET_BYTES = 64_000_000
@@ -125,26 +126,31 @@ def _validated_grid(name: str, grid: Any) -> np.ndarray:
 
 
 def _parse_numeric_text(text: str) -> float | None:
-  """A numeric string (`"10.5"`) or an ISO-8601 date/time as epoch seconds."""
+  """A numeric string (`"10.5"`), or ISO-8601 date/time text on
+  `numeric_value`'s temporal scale (UNIX microseconds; a time of day as
+  microseconds since midnight — Ruling R54)."""
   try:
     return float(text)
   except ValueError:
     pass
   try:
-    parsed = datetime.fromisoformat(text)
+    return numeric_value(datetime.fromisoformat(text))
+  except ValueError:
+    pass
+  try:
+    return numeric_value(time.fromisoformat(text))
   except ValueError:
     return None
-  aware = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-  return aware.timestamp()
 
 
 def _numeric_reading(column: str, value: Any) -> float:
   """One numeric/temporal cell as a float; `NaN` for NULL or non-finite.
 
-  Beam reads give `Decimal`/`int`/`float`/`datetime`/`date` values, which
-  `numeric_value` maps (temporal to epoch seconds, a naive `datetime` read as
-  UTC); a canonicalised row carries the same values as strings (`"10.5"`, an
-  ISO timestamp), which are parsed back. A value with no numeric reading at
+  Beam reads give `Decimal`/`int`/`float`/`datetime`/`date`/`time` values,
+  which `numeric_value` maps (temporal to UNIX microseconds, a naive
+  `datetime` read as UTC, a `time` as microseconds since midnight); a
+  canonicalised row carries the same values as strings (`"10.5"`, an ISO
+  timestamp), which are parsed back. A value with no numeric reading at
   all is a plan/data mismatch and raises rather than being silently treated
   as NULL; the message names the column and the type, never the value.
   """
@@ -195,8 +201,8 @@ def pit_mid_cdf(values: Sequence[Any],
   """Public entry to this module's numeric encoding, for `stats.detection`.
 
   `values` are raw numeric/temporal cells, read exactly as `GowerSpace.encode`
-  reads them (`None`/non-finite -> `NaN`, temporal -> epoch seconds, numeric
-  strings parsed back; no numeric reading raises), and mapped through
+  reads them (`None`/non-finite -> `NaN`, temporal -> UNIX microseconds,
+  numeric strings parsed back; no numeric reading raises), and mapped through
   `grid`'s mid-CDF PIT (`_mid_cdf_pit`), after `grid` passes the same
   validation as a `GowerSpace` grid. Returns float64 (`encode` stores the
   same values as float32). `column` only names the column in error messages.
@@ -213,9 +219,10 @@ class GowerSpace:
   """The plan's Gower feature space: numeric grids and categorical columns.
 
   `num_grids[j]` is the source's quantile grid for `num_names[j]` (a
-  1,001-point `APPROX_QUANTILES(x, 1000)` grid, temporal columns in epoch
-  seconds), evenly spaced in probability; `cat_names` are the categorical,
-  boolean, text and identifier columns. Keys are never features. Equality
+  1,001-point `APPROX_QUANTILES(x, 1000)` grid, temporal columns in UNIX
+  microseconds like the plan's, Ruling R54), evenly spaced in probability;
+  `cat_names` are the categorical, boolean, text and identifier columns.
+  Keys are never features. Equality
   is identity (`eq=False`: comparing arrays elementwise is not a truth
   value); compare spaces by `digest`.
   """

@@ -47,7 +47,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
@@ -61,6 +61,11 @@ import numpy as np
 NULL_CODE = 0x9E3779B97F4A7C15
 
 _SIG_DIGITS = 15
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_UNIX_EPOCH_DATE = date(1970, 1, 1)
+_ONE_MICROSECOND = timedelta(microseconds=1)
+_MICROS_PER_SECOND = 1_000_000
+_MICROS_PER_DAY = 86_400 * _MICROS_PER_SECOND
 
 
 def canonical_value(  # noqa: PLR0911 — type dispatch, clearer flat than nested
@@ -215,18 +220,29 @@ def loo_hashes(h: np.ndarray, a: np.ndarray, total: np.ndarray) -> np.ndarray:
 def numeric_value(v: Any) -> float | None:
   """`v` as a float for numeric statistics, or `None` if it has no numeric reading.
 
-  `Decimal`/`int`/`float`/`bool` convert directly; `datetime`/`date` convert
-  to epoch seconds (a naive `datetime` is treated as UTC, matching
-  `canonical_value`). Everything else (`str`, `bytes`, nested structures,
-  `time`) is not a scalar numeric value, so it returns `None`.
+  `Decimal`/`int`/`float`/`bool` convert directly. Temporal values land on
+  the planning scale (Ruling R54), the one unit of every grid, atom, mean
+  and encoded value in the evaluator:
+
+      TIMESTAMP, DATETIME   UNIX_MICROS (a naive `datetime` is UTC, as in
+                            `canonical_value` and the planning SQL)
+      DATE                  UNIX_MICROS of its UTC midnight
+      TIME                  microseconds since midnight
+
+  computed in exact integer microseconds, then made a float (exact within
+  ±2**53 us, about the years 1685-2255). Everything else (`str`, `bytes`,
+  nested structures) is not a scalar numeric value, so it returns `None`.
   """
   if isinstance(v, (bool, int, float, Decimal)):
     return float(v)
   if isinstance(v, datetime):
     aware = v if v.tzinfo is not None else v.replace(tzinfo=UTC)
-    return aware.timestamp()
+    return float((aware - _UNIX_EPOCH) // _ONE_MICROSECOND)
   if isinstance(v, date):
-    return datetime(v.year, v.month, v.day, tzinfo=UTC).timestamp()
+    return float((v - _UNIX_EPOCH_DATE).days * _MICROS_PER_DAY)
+  if isinstance(v, time):
+    seconds = (v.hour * 60 + v.minute) * 60 + v.second
+    return float(seconds * _MICROS_PER_SECOND + v.microsecond)
   return None
 
 

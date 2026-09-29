@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import tracemalloc
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -39,10 +39,19 @@ from sdfb_evaluation.stats.privacy import holdout_mass
 from sdfb_evaluation.stats.privacy import nn_privacy
 from sdfb_evaluation.stats.privacy import nn_privacy_encoded
 from sdfb_evaluation.stats.privacy import permutation_se
+from sdfb_evaluation.stats.privacy import pit_mid_cdf
 from sdfb_evaluation.stats.privacy import summarize_nn
 
-_EPOCH_2020 = datetime(2020, 1, 1, tzinfo=UTC).timestamp()
-_FOUR_YEARS_S = 4 * 365 * 86_400
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _micros(moment: datetime) -> float:
+  """A timestamp on the planning scale: UNIX microseconds (Ruling R54)."""
+  return float((moment - _UNIX_EPOCH) // timedelta(microseconds=1))
+
+
+_EPOCH_2020 = _micros(datetime(2020, 1, 1, tzinfo=UTC))
+_FOUR_YEARS_US = 4 * 365 * 86_400 * 1_000_000
 _STATUSES = ("new", "paid", "shipped", "returned")
 _STATUS_P = (0.1, 0.5, 0.3, 0.1)
 
@@ -56,14 +65,14 @@ def _draw_rows(rng: np.random.Generator, n: int) -> list[dict[str, Any]]:
   amount = rng.lognormal(3.0, 1.0, n)
   amount_null = rng.random(n) < 0.05
   age = rng.integers(18, 90, n)
-  created = _EPOCH_2020 + rng.random(n) * _FOUR_YEARS_S
+  created = _EPOCH_2020 + rng.random(n) * _FOUR_YEARS_US
   status = rng.choice(len(_STATUSES), size=n, p=_STATUS_P)
   city = rng.integers(0, 40, n)
   city_null = rng.random(n) < 0.05
   return [{
       "amount": None if amount_null[i] else float(amount[i]),
       "age": int(age[i]),
-      "created_at": datetime.fromtimestamp(float(created[i]), tz=UTC),
+      "created_at": _UNIX_EPOCH + timedelta(microseconds=float(created[i])),
       "status": _STATUSES[int(status[i])],
       "city": None if city_null[i] else f"city_{int(city[i])}",
   } for i in range(n)]
@@ -77,7 +86,7 @@ def _grid(values: Sequence[float]) -> np.ndarray:
 def _space_for(source: Sequence[dict[str, Any]]) -> GowerSpace:
   amounts = [row["amount"] for row in source if row["amount"] is not None]
   ages = [row["age"] for row in source]
-  created = [row["created_at"].timestamp() for row in source]
+  created = [_micros(row["created_at"]) for row in source]
   return GowerSpace(
       num_grids=(_grid(amounts), _grid(ages), _grid(created)),
       num_names=("amount", "age", "created_at"),
@@ -310,7 +319,7 @@ def test_constant_source_grid_maps_its_value_to_one_half():
 
 def test_temporal_and_numeric_readings_agree_across_representations():
   moment = datetime(2023, 5, 17, 12, 30, tzinfo=UTC)
-  grid = np.linspace(moment.timestamp() - 1e6, moment.timestamp() + 1e6, 1001)
+  grid = np.linspace(_micros(moment) - 1e12, _micros(moment) + 1e12, 1001)
   space = GowerSpace(
       num_grids=(grid, np.linspace(0, 100, 1001)),
       num_names=("ts", "amount"),
@@ -321,7 +330,7 @@ def test_temporal_and_numeric_readings_agree_across_representations():
           "amount": Decimal("10.50")
       },
       {
-          "ts": moment.timestamp(),
+          "ts": _micros(moment),
           "amount": 10.5
       },
       {
@@ -338,6 +347,17 @@ def test_temporal_and_numeric_readings_agree_across_representations():
     np.testing.assert_array_equal(num[i], num[0])
   nulls, _ = space.encode([{"ts": float("nan"), "amount": float("inf")}])
   assert np.isnan(nulls).all()
+
+
+def test_time_of_day_readings_are_micros_since_midnight():
+  # Ruling R54: TIME is TIME_DIFF(x, '00:00:00', MICROSECOND), as planned;
+  # a canonicalised row's "HH:MM:SS[.ffffff]" text reads the same.
+  grid = np.linspace(0.0, 86_400_000_000.0, 1001)
+  u = pit_mid_cdf([time(12, 0), "12:00:00", "12:00:00.000000", None],
+                  grid,
+                  column="pickup_time")
+  np.testing.assert_allclose(u[:3], [0.5, 0.5, 0.5])
+  assert math.isnan(u[3])
 
 
 def test_unreadable_numeric_value_raises_naming_the_column():

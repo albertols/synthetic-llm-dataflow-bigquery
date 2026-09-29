@@ -179,10 +179,13 @@ class DetectionColumn:
   plan's columns to it).
 
   `grid` is the source quantile grid of a numeric/temporal column (temporal
-  in epoch seconds), `dictionary` the `hash64` codes of a categorical/
-  boolean column's top source values (at most 254, most frequent first),
-  `head_masks` the `shapes.shape_of` masks a text/identifier column keeps
-  as their own category (at most 254). A key or nested column is never a
+  in UNIX microseconds, the plan's scale — Ruling R54; a TIME column in
+  microseconds since midnight), `dictionary` the `hash64` codes of a
+  categorical/boolean column's top source values (at most 254, most
+  frequent first), `head_masks` the `shapes.shape_of` masks a
+  text/identifier column keeps as their own category (at most 254); cells
+  are read on the same scale (`stats.privacy.pit_mid_cdf`, through
+  `canonical.numeric_value`). A key or nested column is never a
   feature and needs none of them; a feature column without the one its kind
   needs raises `ValueError`. Equality is identity (`eq=False`: comparing
   grids elementwise is not a truth value).
