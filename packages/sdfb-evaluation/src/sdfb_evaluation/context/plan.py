@@ -242,16 +242,24 @@ _SOURCE_KEYS = ("hashed", "raw")
 _OPERATIONAL_KNOBS = frozenset(
     {"max_bytes_billed", "output_dataset", "temp_dataset", "evaluation_id"})
 _BQ_ERRORS = (PermissionError, LookupError, BqApiError)
+# Malformed table metadata (R61): not a BqApiError, but no less a failure.
+_METADATA_ERRORS = (KeyError, TypeError, ValueError)
 _PAD = timedelta(seconds=1)
+_HTTP_CONFLICT = 409  # BigQuery uses 409 for more than "Already Exists" (R61)
 
 
 def _is_already_exists(exc: BaseException) -> bool:
-  """A BigQuery 409 Already Exists (e.g. a retried CREATE SNAPSHOT TABLE
-  under the same name): `BqApiError` carries no structured HTTP status of
-  its own (context/bq.py's `_status`/`_translated` only special-case 403
-  and 404), so this reads the wrapped API error's text instead."""
-  text = str(exc)
-  return "409" in text and "already exists" in text.lower()
+  """A BigQuery 409 Conflict whose message says "Already Exists" (e.g. a
+  retried CREATE SNAPSHOT TABLE under the same name). `status` is
+  `BqApiError`'s own structured HTTP status (R61: set from the
+  already-computed status in context/bq.py's `_translated`), checked
+  first; BigQuery uses 409 for other conflicts too (a concurrent job
+  clashing on id, a concurrent DDL on the same table), so the "already
+  exists" text is the discriminator between those, not the only
+  signal — an exception whose `status` is not 409 (including one that
+  carries no `status` attribute at all) is never treated as this."""
+  return (getattr(exc, "status", None) == _HTTP_CONFLICT and
+          "already exists" in str(exc).lower())
 
 
 class PlanError(ValueError):
@@ -1548,6 +1556,35 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       return
     self._pin_and_columns(work, land_meta)
 
+  def locate_table(self, work: _Work) -> None:
+    """One phase-A launch table: `locate`, then (still active)
+    `create_planning_tables` — guarded against the table's OWN metadata
+    being malformed or missing (e.g. a non-numeric or absent
+    `timeTravelHours`): a `KeyError`/`TypeError`/`ValueError` here marks
+    just this table unreadable, the same as a read failure, rather than
+    escaping this per-table loop in `build_plan`. R61 picks "skip this
+    table, keep planning" over raising — a later table's bad metadata
+    says nothing about an earlier table's already-created snapshot
+    (`planning_ddl`, R57/R58), so there is nothing to unwind. `PlanError`
+    (itself a `ValueError`, e.g. `create_planning_tables`' own 409
+    Already Exists) is excluded from that and always still escapes."""
+    try:
+      self.locate(work)
+      if work.active:
+        self.create_planning_tables(work)
+    except PlanError:
+      # PlanError IS a ValueError (create_planning_tables' own 409
+      # Already Exists, R58): that one must still escape, planning_ddl
+      # and all — never mistaken for this table's own malformed metadata.
+      raise
+    except _METADATA_ERRORS as exc:
+      reason = f"{work.landing}: table metadata is malformed ({exc})"
+      if work.scope is None:
+        work.scope = _unreadable(work.landing, reason)
+        work.skip_with(reason)
+      else:
+        self._unreadable_scope(work, reason)
+
   def _foreign(self, work: _Work, meta: Mapping[str,
                                                 Any]) -> tuple[JobWrite, ...]:
     own = [
@@ -1593,8 +1630,10 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     try:
       src_meta = self.bq.table(work.source)
     except _BQ_ERRORS as exc:
-      work.skip_with(f"the source table {work.source} could not be read "
-                     f"({exc})")
+      # R61: generalises _unreadable_scope's principle to this bail too —
+      # a skipped table carries no temp-table names.
+      self._unreadable_scope(
+          work, f"the source table {work.source} could not be read ({exc})")
       return
     work.table_rows["src"] = int(src_meta.get("numRows") or 0)
     created = self.launch.started_at
@@ -1709,7 +1748,10 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     sampled mode, the worst-case full-read bytes of both sides over
     `sample_rows`. Returns the worst-case sample bytes; `notes` collects
     `_dry_prepare` fallbacks the same way as the source side."""
-    assert work.scope is not None
+    # The sampled path (_worst_samples) reads work.pin too, for the
+    # source side's own worst-case bytes: asserted here, not only inside
+    # it, since this is where the real precondition is (R61).
+    assert work.scope is not None and work.pin is not None
     for sql in work.syn_queries:
       self.bytes["planning"] += self.bq.dry_run_bytes(sql, work.scope.params)
     for sql in work.scope.prepare_sql:
@@ -2038,7 +2080,12 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
   `read_expr` reads it. Each one is recorded in `planning_ddl` and noted
   in the table's warnings. A table whose snapshot or dry run fails is
   skipped with scope status `unknown` and the error as its reason; the
-  other tables are still planned.
+  other tables are still planned. The same holds for a table whose OWN
+  metadata is malformed or missing (e.g. a non-numeric `timeTravelHours`):
+  `_Planner.locate_table` marks it unreadable and moves on rather than
+  letting the `KeyError`/`TypeError`/`ValueError` escape this loop, so a
+  later table's bad metadata can never lose an earlier table's
+  already-created snapshot (R61).
 
   Raises:
     PlanError: a launch table the model does not declare (R50), no table
@@ -2068,9 +2115,7 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
   works = planner.targets()
   for work in works:
     if work.role != "external":
-      planner.locate(work)
-      if work.active:
-        planner.create_planning_tables(work)
+      planner.locate_table(work)
   active = [w for w in works if w.active]
   try:
     planner.dry_run(active)

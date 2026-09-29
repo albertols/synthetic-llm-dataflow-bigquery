@@ -64,7 +64,20 @@ _T = TypeVar("_T")
 
 
 class BqApiError(RuntimeError):
-  """A BigQuery API call failed with neither a 403 nor a 404."""
+  """A BigQuery API call failed with neither a 403 nor a 404.
+
+  `status` is the HTTP status `_translated` already computed for this
+  failure (e.g. 409 for a conflict), so a caller that needs to
+  discriminate between different failures carrying the same status (a
+  409 Already Exists vs. a 409 concurrent-job conflict) reads it instead
+  of re-parsing the message text (Ruling R61). `None` when the
+  underlying error carried no numeric status of its own (a
+  `GoogleAPIError` `_translated` still recognises by type).
+  """
+
+  def __init__(self, message: str, *, status: int | None = None) -> None:
+    super().__init__(message)
+    self.status = status
 
 
 def normalize_fqn(fqn: str) -> str:
@@ -112,7 +125,7 @@ def _translated(call: Callable[[], _T], what: str) -> _T:
     if status == _HTTP_NOT_FOUND:
       raise LookupError(f"{what}: {exc}") from exc
     if status is not None or _is_google_api_error(exc):
-      raise BqApiError(f"{what}: {exc}") from exc
+      raise BqApiError(f"{what}: {exc}", status=status) from exc
     raise
 
 

@@ -284,19 +284,26 @@ class _ApiError(Exception):
     self.code = code
 
 
-@pytest.mark.parametrize("code", [400, 500, 503])
+@pytest.mark.parametrize("code", [400, 409, 500, 503])
 def test_other_api_errors_become_bq_api_error(code):
+  # R61: `_translated` already knows the status (it just branched on it
+  # for 403/404); BqApiError keeps it instead of dropping it, so a
+  # caller (e.g. plan.py's `_is_already_exists`) can read it back
+  # structurally rather than re-parsing the message.
   client = _FakeClient()
   client.raise_on_query = _ApiError(code, f"{code} backend said no")
-  with pytest.raises(BqApiError, match=f"query: {code} backend said no"):
+  with pytest.raises(
+      BqApiError, match=f"query: {code} backend said no") as info:
     Bq("demo-project", client=client).query("SELECT 1")
+  assert info.value.status == code
 
 
 def test_google_api_error_without_status_becomes_bq_api_error():
   client = _FakeClient()
   client.raise_on_query = RetryError("deadline exceeded", cause=None)
-  with pytest.raises(BqApiError, match="deadline exceeded"):
+  with pytest.raises(BqApiError, match="deadline exceeded") as info:
     Bq("demo-project", client=client).query("SELECT 1")
+  assert info.value.status is None
 
 
 def test_non_api_errors_propagate_untouched():

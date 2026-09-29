@@ -1028,11 +1028,47 @@ def test_a_conflicting_start_snapshot_raises_instead_of_skipping():
   bq.execute_failures[f"CLONE `{DS}.users`"] = BqApiError(
       "409 POST https://bigquery.googleapis.com/bigquery/v2/projects/x: "
       "Already Exists: Table demo-project:thelook_synthetic."
-      "sdfb_eval_ev1_start_users_a1b2c3d4")
+      "sdfb_eval_ev1_start_users_a1b2c3d4",
+      status=409)
   with pytest.raises(PlanError, match="already exists") as info:
     _plan(bq, _copy_launch(bq))
   assert "fresh evaluation_id" in str(info.value)
   assert info.value.planning_ddl == ()  # users is the first table planned
+
+
+def test_a_409_without_already_exists_text_is_a_normal_failure():
+  # R61: BqApiError.status is checked first, but BigQuery uses 409 for
+  # more than "Already Exists" (e.g. a concurrent-job conflict) — the
+  # text is still the discriminator, so this is handled like any other
+  # execute failure, not raised as a fresh-evaluation_id PlanError.
+  bq = thelook_bq()
+  bq.execute_failures[f"CLONE `{DS}.users`"] = BqApiError(
+      "409 POST https://bigquery.googleapis.com/bigquery/v2/projects/x: "
+      "concurrentJobs: another job is already running for this table",
+      status=409)
+  plan, _ = _plan(bq, _copy_launch(bq))
+  users = next(t for t in plan.tables if t.name == "users")
+  assert not users.evaluated and users.scope.status == "unknown"
+  assert "concurrentJobs" in users.scope.reason
+  assert all(
+      t.evaluated for t in plan.tables if t.name in ("orders", "order_items"))
+
+
+def test_a_409_with_the_text_but_no_structured_status_is_a_normal_failure():
+  # The mirror case: text alone ("already exists") is no longer enough —
+  # status must say 409 too (R61). A BqApiError that never went through
+  # context/bq.py's `_translated` (so it carries no status) does not
+  # trip the fresh-evaluation_id raise.
+  bq = thelook_bq()
+  bq.execute_failures[f"CLONE `{DS}.users`"] = BqApiError(
+      "409 POST https://bigquery.googleapis.com/bigquery/v2/projects/x: "
+      "Already Exists: Table demo-project:thelook_synthetic."
+      "sdfb_eval_ev1_start_users_a1b2c3d4")
+  plan, _ = _plan(bq, _copy_launch(bq))
+  users = next(t for t in plan.tables if t.name == "users")
+  assert not users.evaluated and users.scope.status == "unknown"
+  assert all(
+      t.evaluated for t in plan.tables if t.name in ("orders", "order_items"))
 
 
 def test_planning_ddl_survives_a_budget_refusal_after_phase_a():
@@ -1048,6 +1084,55 @@ def test_planning_ddl_survives_a_budget_refusal_after_phase_a():
   ]
   assert len(created) == len(TABLES) == 3
   assert [s.sql for s in info.value.planning_ddl] == created
+
+
+def test_malformed_time_travel_hours_skips_only_that_table():
+  # R61: a later table's own metadata being malformed (here `orders`'
+  # timeTravelHours, not a BqApiError but a bare str where an int is
+  # expected) must not escape build_plan's phase-A loop — `users`,
+  # planned first, keeps its already-created start snapshot, and
+  # `order_items` is still planned after `orders` is skipped.
+  bq = thelook_bq()
+  bq.tables[f"{DS}.orders"]["timeTravelHours"] = "not-a-number"
+  plan, _ = _plan(bq, _copy_launch(bq))
+  users = next(t for t in plan.tables if t.name == "users")
+  orders = next(t for t in plan.tables if t.name == "orders")
+  items = next(t for t in plan.tables if t.name == "order_items")
+  assert users.evaluated and items.evaluated
+  assert not orders.evaluated and orders.scope.status == "unknown"
+  assert "metadata is malformed" in orders.scope.reason
+  assert orders.skip_reason == orders.scope.reason
+  assert orders.scope.start_table == "" and orders.scope.read_table == ""
+  created = [
+      sql for sql, _ in bq.executed if sql.startswith("CREATE SNAPSHOT TABLE")
+  ]
+  assert len(created) == 2  # users and order_items only — never orders
+  assert not any("orders_" in sql for sql in created)
+  assert [s.sql for s in plan.planning_ddl] == created
+
+
+def test_the_source_table_missing_clears_the_scope_temp_names():
+  # R61: generalises R58's _unreadable_scope principle to
+  # _pin_and_columns's own early bail — a skipped table carries no
+  # temp-table names, whichever phase-A step skipped it. An "append"
+  # scope has real temp names (a clone in prepare_sql, read_table !=
+  # read_expr) to prove they were actually cleared, not just absent.
+  bq = thelook_bq()
+  del bq.tables[f"{SRC}.orders"]
+  launch = thelook_launch(bq, write_disposition="append")
+  plan, _ = _plan(bq, launch)
+  users = next(t for t in plan.tables if t.name == "users")
+  orders = next(t for t in plan.tables if t.name == "orders")
+  items = next(t for t in plan.tables if t.name == "order_items")
+  assert users.evaluated and items.evaluated
+  assert not orders.evaluated and orders.scope.status == "unknown"
+  assert f"the source table {SRC}.orders could not be read" in (
+      orders.scope.reason)
+  assert orders.skip_reason == orders.scope.reason
+  assert orders.source_read_table == "" and orders.synthetic_read_table == ""
+  assert orders.scope.read_table == "" and orders.scope.read_expr == ""
+  assert orders.scope.prepare_sql == () and orders.scope.params == {}
+  assert not orders.source_pinned and orders.source_pin is None
 
 
 def test_an_unpinned_source_is_read_through_its_own_read_expr():
