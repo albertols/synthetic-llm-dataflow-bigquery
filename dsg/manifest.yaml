@@ -93,6 +93,12 @@ exclude:
   - packages/sdfb-tests/tests/unit/scripts/test_redaction.py
   - packages/sdfb-tests/tests/unit/scripts/test_source_synthetic_stats_diff.py
   - packages/sdfb-tests/tests/unit/public_cloud/**
+  # Root side of packages/sdfb-evaluation's two-sided golden parity test
+  # (D2). The standalone eval project is not part of this manifest and
+  # does not ship to the DSG either, so this test — which pins
+  # sdfb_core/sdfb_beam against goldens generated FROM the eval project's
+  # fixtures — has nothing to check on the DSG side.
+  - packages/sdfb-tests/tests/unit/evaluation_parity/**
   - packages/sdfb-tests/tests/unit/cli/test_run_tableset.py
   - packages/sdfb-tests/tests/unit/validation/test_freetext_rules.py
   # Reads composer/ (not shipped); the golden source's CI keeps covering it.

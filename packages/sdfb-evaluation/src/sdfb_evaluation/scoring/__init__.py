@@ -513,7 +513,11 @@ def aggregate_scores(
       continue
     table = row["table_name"]
     if table is None:
-      raise ValueError(f"{row['metric_id']} row has no table_name")
+      # Hoisted local: an inline `row['metric_id']` would nest the same
+      # quote character the py3.14 pylint gate treats as inconsistent
+      # with the rest of this double-quoted file (W1405).
+      metric_id = row["metric_id"]
+      raise ValueError(f"{metric_id} row has no table_name")
     tables.add(table)
     if (row["metric_id"] in _zero_tolerance_ids() and
         row["status"] == Status.FAIL):
