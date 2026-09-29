@@ -20,8 +20,9 @@ side, the orphan rate and the children-per-parent distribution.
       │  (edge.cols, in order). A tuple with a NULL part is COUNTED
       │  (null_keys), never joined — SQL MATCH SIMPLE
       ▼
-    (hash, count) per distinct key of a batch ─► CombinePerKey(sum)
-      │  = Count.PerKey of the child keys, pre-summed per batch
+    (hash, count) per distinct key of a bundle ─► CombinePerKey(sum)
+      │  = Count.PerKey of the child keys, pre-summed per bundle (flushed
+      │  at FLUSH_CODES held keys, as membership.RowKeysFn does)
       │
       │   parent rows: read ONCE per (parent, side) through `Sources`,
       │   projected to the edges' referenced columns ─► ParentKeysFn:
@@ -62,18 +63,33 @@ small enough to broadcast is cheaper as a side input, joined map-side:
 
 Both paths feed the same FanoutAcc and give identical metrics (a test
 pins it). A parent side above the bound would make every worker hold the
-whole set, so it shuffles instead. Task 26 sizes the side-input cache to
-the sets it broadcasts (8 B a parent key).
+whole set, so it shuffles instead. Sizing the side-input cache to the
+sets broadcast (8 B a parent key, from the planned rows) is Task 26's
+job; here a runtime guard fails an edge (not_evaluated, with the reason)
+whose parent set holds more than twice the rows its plan expects — the
+plan, and the cache sized from it, no longer describe the data.
 
 Counting. Every parent is a DISTINCT non-NULL referenced key tuple
 (`parents`): a key held by several parent rows (a duplicate in a non-PK
-`ref_cols`) is one parent, and `parent_rows - parents` is reported. A
-child tuple is `matched` when a parent holds its key, an `orphan`
+`ref_cols`) is one parent, and `parent_rows - parents` is reported; a
+parent row whose key has a NULL part is no parent (`parent_null_keys`),
+not a childless one. A child tuple is `matched` when a parent holds its
+key, an `orphan`
 otherwise, a `null_key` when any part is NULL. The fan-out of a parent is
-its matched children (0 when none); the mean fan-out is matched children
-over parents — `relationship.fanout_mean_ratio`'s n_child / n_parent with
-n_child = the matched tuples, so the mean and the histogram describe the
-same distribution (orphans and NULL keys are the orphan rate's).
+its matched children (0 when none): the histogram, TVD, W1, the
+childless share, adherence and coverage read those. The mean ratio does
+not (Ruling R82): it is the catalogue formula over ROWS,
+
+    FMR = (n_child / n_parent)_syn / (n_child / n_parent)_src
+    n_child   every child row read — matched, orphaned, NULL-keyed
+    n_parent  every parent row read — a NULL-part key included
+
+so a source with 100 of its 400 orders NULL-keyed (guest checkouts)
+against a synthetic side with none scores 1.0, and extra NULL-keyed or
+orphaned synthetic child rows move it (matched-only means would read
+4/3 and 1.0 there). A parent row sample at rate r scales a side's rows
+per parent by 1/r; the ratio is evaluated only when both parent sides
+share one rate (they cancel), `not_evaluated` otherwise.
 
     metric                         reads                    noise (R41)
     ─────────────────────────────  ───────────────────────  ─────────────
@@ -95,14 +111,35 @@ pipeline to pass to `scoring.to_metric_row(enforced=…)` — the scorer
 reports only the orphan rate as INFO; the fan-out metrics stay graded.
 The source's own orphan rate is the synthetic row's `source_value`.
 
+Fewer than k parents (Ruling R83, k = RARE_COUNT = 10, the R80.3 rule
+for relations): when either side holds fewer than k distinct parent keys,
+every fan-out metric is `not_evaluated` with "fewer than k parents on a
+side (k = 10)" and publishes no mean, no `children_*`/`parents_*` detail:
+a fan-out over a handful of parents is theirs (one parent's IS its
+count). The orphan rows stay evaluated — an integrity verdict must hold
+on every edge — without their parent counts; their rate and n still
+give the matched total, which below k bounds those few parents' summed
+fan-out (accepted for the integrity gate).
+
 Extremes (R65, R71): an exact min or max fan-out is one parent's count,
 so no detail publishes one (nor an overflow mean, which can be a single
-parent's); `cardinality_adherence` uses them internally only.
+parent's); `cardinality_adherence` uses them internally only. Its
+adherent count (adherence * n_synthetic) can still pin max_src when
+fan-outs are dense integers — accepted and documented, as R65 accepts
+the same channel for `field.range_adherence`.
+
+A missing source twin (Ruling R84): a read-only parent whose
+`<source dataset>.<name>` does not exist, or a launch parent with no
+source table, leaves only the metrics that need the source side
+`not_evaluated` (the source orphan rate and the six fan-out metrics);
+the synthetic orphan rate is still measured against the parent's
+landing table.
 
 Sampled mode (Ruling R72, as in `beam.membership`): a side whose plan
 rate is below 1 was read as a row sample. A metric that needs every row
 of a side it reads is `not_evaluated` with "sampled mode cannot measure
-…; run exact mode" and the observed lower bounds in `detail`:
+…; run exact mode" and the observed lower bounds in `detail`, each named
+`*_lower_bound`:
 
     metric                       needs in full           why
     ───────────────────────────  ──────────────────────  ─────────────────
@@ -114,6 +151,9 @@ of a side it reads is `not_evaluated` with "sampled mode cannot measure
     fanout_tvd, _w1, _mean_      both child sides        a thinned child
       ratio, zero_child_share_                           side lowers every
       delta, parent_coverage                             parent's fan-out
+    fanout_mean_ratio, also      equal parent rates on   a parent sample
+                                 both sides              scales rows per
+                                                         parent by 1/r
     cardinality_adherence        both child sides and    a sample's extremes
                                  the source parent       fall inside the
                                                          source's range
@@ -148,6 +188,7 @@ from typing import TYPE_CHECKING, Any
 
 import apache_beam as beam
 import numpy as np
+from apache_beam.transforms.window import GlobalWindows
 
 from sdfb_evaluation.beam.encode import (
     MAX_BATCH_SIZE,
@@ -155,9 +196,10 @@ from sdfb_evaluation.beam.encode import (
     EncodedBatch,
     key_hashes,
 )
+from sdfb_evaluation.beam.dense import RARE_COUNT
 from sdfb_evaluation.beam.membership import TABLE_ERRORS
 from sdfb_evaluation.canonical import NULL_CODE
-from sdfb_evaluation.context.bq import normalize_fqn
+from sdfb_evaluation.context.plan import parent_landing
 from sdfb_evaluation.stats import noise
 from sdfb_evaluation.stats.relational import fanout_metrics, orphan_summary
 from sdfb_evaluation.types import Method, MetricValue, Side
@@ -170,6 +212,7 @@ if TYPE_CHECKING:
 __all__ = [
     "COGROUP",
     "FANOUT_CAP",
+    "FLUSH_CODES",
     "OWNED_METRIC_IDS",
     "SIDE_INPUT",
     "SIDE_INPUT_MAX_KEYS",
@@ -216,7 +259,7 @@ _NEEDS: dict[str, tuple[tuple[Side, str], ...]] = {
     _ADHERENCE: (*_BOTH_CHILDREN, (Side.SOURCE, _PARENT)),
 }
 _COMPACT_CODES = 1 << 20  # pending set codes before a combine compacts
-_FQN_PARTS = 3  # project.dataset.table
+FLUSH_CODES = 1 << 18  # distinct child keys a bundle holds before it flushes
 _REASON_CHARS = 300
 _KEYS, _STATS, _PARTS, _FAILED = "keys", "stats", "parts", "failed"
 _SUMMARY, _SEED = "summary", "seed"
@@ -224,10 +267,16 @@ _NULL = np.uint64(NULL_CODE)
 _EMPTY_CODES = np.zeros(0, dtype=np.uint64)
 _MATCH_SIMPLE = ("SQL MATCH SIMPLE: a key tuple with a NULL part is counted "
                  "in null_keys, never joined and never an orphan")
-_MATCHED_ONLY = ("matched non-null key tuples: orphans and NULL keys are the "
-                 "orphan rate's, not a parent's children")
-_EXTREMES_NOTE = ("the source's exact [min, max] fan-out is one parent's "
-                  "count each, so it is used, never published (R65/R71)")
+_MATCHED_ONLY = ("the histogram counts matched non-null key tuples: orphans "
+                 "and NULL keys are the orphan rate's, not a parent's children")
+_ROWS_ONLY = ("every child row read (matched, orphaned, NULL-keyed) over "
+              "every parent row read, per side (the catalogue formula, R82)")
+_EXTREMES_NOTE = ("the source's exact [min, max] fan-out (each one parent's "
+                  "count) bounds the count internally and is never published "
+                  "as a value; the adherent count can still pin max_src when "
+                  "fan-outs are dense integers — accepted, as R65 accepts it "
+                  "for field.range_adherence")
+_BELOW_K = f"fewer than k parents on a side (k = {RARE_COUNT})"
 
 
 def _failure(exc: BaseException) -> str:
@@ -267,13 +316,16 @@ class SidePlan:
   side cannot be evaluated (None: it can); `parent` is the parent's
   landing table (the key of its one read); the rates are the plan's
   row-sample rates (1.0 when read in full); `path` is SIDE_INPUT or
-  COGROUP, `path_note` why."""
+  COGROUP, `path_note` why; `planned_keys` the parent rows the plan
+  expects that side to read (the side-input set's size bound; None when
+  the parent was not counted)."""
   reason: str | None = None
   parent: str | None = None
   child_rate: float = 1.0
   parent_rate: float = 1.0
   path: str = COGROUP
   path_note: str = ""
+  planned_keys: float | None = None
 
   def rate(self, role: str) -> float:
     return self.child_rate if role == _CHILD else self.parent_rate
@@ -300,18 +352,6 @@ class EdgeSpec:  # pylint: disable=too-many-instance-attributes  # one field per
     return self.source if Side(side) is Side.SOURCE else self.synthetic
 
 
-def _parent_landing(child: TablePlan, edge: Edge) -> str:
-  """Where the planner reads a parent this launch did not write (mirrors
-  `context.plan._Planner._parent_landing`): an external `ref`
-  (`dataset.table`, or fully qualified) in the child's project; an
-  in-model parent in the child's dataset."""
-  project, dataset, _ = normalize_fqn(child.landing_table).split(".")
-  if edge.external:
-    qualified = len(edge.ref.split(".")) == _FQN_PARTS
-    return normalize_fqn(edge.ref if qualified else f"{project}.{edge.ref}")
-  return normalize_fqn(f"{project}.{dataset}.{edge.ref}")
-
-
 def _side_plan(side: Side, child: TablePlan, parent: TablePlan, edge: Edge,
                max_keys: int) -> SidePlan:
   """One side of an edge whose parent is planned (module docstring)."""
@@ -321,6 +361,7 @@ def _side_plan(side: Side, child: TablePlan, parent: TablePlan, edge: Edge,
   parent_rate = _rate(
       parent.sample_rate_source if source else parent.sample_rate_synthetic)
   rows = parent.rows_source if source else parent.rows_synthetic
+  read: float | None = None
   if rows is None:
     path, note = COGROUP, ("parent row count unknown (a read-only parent is "
                            "not counted at planning): CoGroupByKey")
@@ -338,13 +379,17 @@ def _side_plan(side: Side, child: TablePlan, parent: TablePlan, edge: Edge,
       child_rate=child_rate,
       parent_rate=parent_rate,
       path=path,
-      path_note=note)
+      path_note=note,
+      planned_keys=read)
   if parent.role != "external" and parent.skip_reason is not None:
     why = f"the parent table is not evaluated: {parent.skip_reason}"
+  elif source and not parent.source_read_table and parent.role == "external":
+    why = (f"no source-side parent: the read-only parent {parent.name} has no "
+           f"source-dataset twin (<source dataset>.{parent.name} was not "
+           "found)")
   elif source and not parent.source_read_table:
-    why = (f"no source-side parent: {parent.name} has no readable source "
-           f"table (a read-only parent's <source dataset>.{parent.name} was "
-           "not found)")
+    why = (f"no source-side parent: the parent table {parent.landing_table} "
+           "has no source table to read")
   elif not source and not (parent.synthetic_read_table or
                            parent.scope.read_table):
     unread = parent.scope.reason or "no read table was planned"
@@ -382,7 +427,7 @@ def _edge_spec(key: int, child: TablePlan, index: int, edge: Edge,
   launch = {t.name: t for t in tables if t.role != "external"}
   parent = launch.get(edge.ref) if not edge.external else None
   if parent is None:
-    landing = _parent_landing(child, edge)
+    landing = parent_landing(child.landing_table, edge)
     parent = next((t for t in tables
                    if t.role == "external" and t.landing_table == landing),
                   None)
@@ -521,8 +566,21 @@ class EdgeSummary:  # pylint: disable=too-many-instance-attributes  # one field 
     return self.children + self.orphans
 
   @property
-  def mean(self) -> float:
-    return self.children / self.parents if self.parents else 0.0
+  def child_rows(self) -> int:
+    """Every child row read: matched, orphaned and NULL-keyed."""
+    return self.nonnull + self.nulls
+
+  @property
+  def all_parent_rows(self) -> int:
+    """Every parent row read, one with a NULL-part key included."""
+    return self.parent_rows + self.parent_nulls
+
+  @property
+  def row_mean(self) -> float:
+    """The catalogue's n_child / n_parent (R82): child rows over parent
+    rows (0 when no parent row was read)."""
+    rows = self.all_parent_rows
+    return self.child_rows / rows if rows else 0.0
 
 
 def summarize(acc: FanoutAcc, cap: int = FANOUT_CAP) -> EdgeSummary:
@@ -597,11 +655,6 @@ class _KeySetCombineFn(beam.CombineFn):
 
   def extract_output(self, accumulator: list[np.ndarray]) -> np.ndarray:
     return _union(accumulator)
-
-
-def _set_part(key_set: np.ndarray) -> FanoutAcc:
-  """The side-input path's parents: the distinct keys of the set."""
-  return FanoutAcc(parents=int(key_set.size))
 
 
 # --------------------------------------------------------------------------
@@ -702,33 +755,35 @@ def _orphan_metric(e: _Emitter, side: Side, summary: EdgeSummary | None,
   if plan.reason is not None or summary is None:
     e.skip(metric_id, plan.reason or f"the {side} side was not computed")
     return None
+  few = summary.parents < RARE_COUNT  # R83: no parent counts below k
   sampled = _sampled(spec, metric_id)
   if sampled is not None:
-    bounds: dict[str, Any] = {"matched_lower_bound": summary.children}
+    bounds: dict[str, Any] = {"null_keys_lower_bound": summary.nulls}
+    if not few:
+      bounds["matched_lower_bound"] = summary.children
     if plan.parent_rate >= 1.0:  # every observed orphan is a real one
       bounds["orphans_lower_bound"] = summary.orphans
-    e.skip(
-        metric_id,
-        sampled,
-        **bounds,
-        null_keys=summary.nulls,
-        sample_rates=_sample_rates(spec))
+    e.skip(metric_id, sampled, **bounds, sample_rates=_sample_rates(spec))
     return None
   result = orphan_summary(summary.nonnull, summary.orphans, summary.nulls)
-  detail = {
+  detail: dict[str, Any] = {
       "orphans": summary.orphans,
       "orphan_keys": summary.orphan_keys,
       "nonnull_keys": summary.nonnull,
       "null_keys": summary.nulls,
-      "parents": summary.parents,
-      "parent_rows": summary.parent_rows,
-      "parent_duplicate_rows": summary.parent_rows - summary.parents,
-      "parent_null_keys": summary.parent_nulls,
       "parent_role": spec.parent_role,
       "semantics": _MATCH_SIMPLE,
       "path": plan.path,
       "path_note": plan.path_note,
   }
+  if few:
+    detail["parent_counts"] = _BELOW_K + ": not published"
+  else:
+    detail.update(
+        parents=summary.parents,
+        parent_rows=summary.parent_rows,
+        parent_duplicate_rows=summary.parent_rows - summary.parents,
+        parent_null_keys=summary.parent_nulls)
   rate = result["rate"]
   if rate is None:
     e.skip(
@@ -746,19 +801,44 @@ def _orphan_metric(e: _Emitter, side: Side, summary: EdgeSummary | None,
   return float(rate)
 
 
+def _unequal_parent_samples(spec: EdgeSpec) -> str | None:
+  """Why the mean fan-out ratio cannot be measured on these parent row
+  samples (R82), or None: a parent sample at rate r scales that side's
+  rows per parent by 1/r, which cancels only at equal rates."""
+  r_src, r_syn = spec.source.parent_rate, spec.synthetic.parent_rate
+  if r_src == r_syn:
+    return None
+  return ("sampled mode cannot measure the mean fan-out ratio: the parent "
+          f"sides are row samples at different rates (source {r_src:.3g}, "
+          f"synthetic {r_syn:.3g}), and a parent sample at rate r scales "
+          "that side's rows per parent by 1/r, which cancels only at equal "
+          "rates; run exact mode")
+
+
 def _fanout_values(e: _Emitter, src: EdgeSummary, syn: EdgeSummary) -> None:
   """The six fan-out rows of an edge both of whose sides were computed."""
   spec = e.spec
+  few = [(side, summary.parents)
+         for side, summary in ((Side.SOURCE, src), (Side.SYNTHETIC, syn))
+         if summary.parents < RARE_COUNT]
+  if few:  # R83: the fan-out of fewer than k parents stays theirs
+    side, parents = few[0]
+    reason = _BELOW_K if parents else f"{_BELOW_K}; the {side} side has none"
+    for metric_id in _FANOUT_IDS:
+      e.skip(metric_id, reason)
+    return
   fm = fanout_metrics(
       src.hist.tolist(),
       syn.hist.tolist(),
-      src.mean,
-      syn.mean,
+      src.row_mean,
+      syn.row_mean,
       src.min_fanout,
       src.max_fanout,
       cap=FANOUT_CAP,
       mean_overflow_src=src.overflow_mean,
       mean_overflow_syn=syn.overflow_mean)
+  # Type narrowing only: None means a side with no parent, excluded above.
+  assert fm is not None, "unreachable: both sides hold at least k parents"
   detail: dict[str, Any] = {
       "cap": FANOUT_CAP,
       "parents_source": src.parents,
@@ -784,6 +864,8 @@ def _fanout_values(e: _Emitter, src: EdgeSummary, syn: EdgeSummary) -> None:
     fields_.update(method=Method.SAMPLE, sample_rate=min(parent_rates.values()))
   for metric_id in _FANOUT_IDS:
     sampled = _sampled(spec, metric_id)
+    if sampled is None and metric_id == _MEAN_RATIO:
+      sampled = _unequal_parent_samples(spec)
     if sampled is not None:
       e.skip(
           metric_id,
@@ -791,11 +873,6 @@ def _fanout_values(e: _Emitter, src: EdgeSummary, syn: EdgeSummary) -> None:
           parents_with_children_lower_bound_source=src.with_children,
           parents_with_children_lower_bound_synthetic=syn.with_children,
           sample_rates=_sample_rates(spec))
-    elif fm is None:
-      side = Side.SOURCE if src.parents == 0 else Side.SYNTHETIC
-      e.skip(
-          metric_id, f"no {side} parent key was read (an empty parent "
-          "side has no fan-out)", **detail)
     else:
       _fanout_value(e, metric_id, fm, (src, syn), detail, fields_)
 
@@ -814,17 +891,24 @@ def _fanout_value(e: _Emitter, metric_id: str, fm: Mapping[str, Any],
   elif metric_id == _W1:
     e.value(metric_id, fm["w1"], detail=detail, **fields_)
   elif metric_id == _MEAN_RATIO:
+    rows = {
+        **detail,
+        "child_rows_source": src.child_rows,
+        "child_rows_synthetic": syn.child_rows,
+        "parent_rows_source": src.all_parent_rows,
+        "parent_rows_synthetic": syn.all_parent_rows,
+        "ratio_counts": _ROWS_ONLY,
+    }
     if fm["mean_ratio"] is None:
-      e.skip(
-          metric_id, "the source's mean fan-out is 0 (no source parent has "
-          "a child): the ratio is undefined", **detail)
+      e.skip(metric_id, "no source child row was read: the ratio is undefined",
+             **rows)
       return
     e.value(
         metric_id,
         fm["mean_ratio"],
-        detail=detail,
-        source_value=src.mean,
-        synthetic_value=syn.mean,
+        detail=rows,
+        source_value=src.row_mean,
+        synthetic_value=syn.row_mean,
         **fields_)
   elif metric_id == _ZERO:
     e.value(
@@ -890,16 +974,49 @@ def edge_outputs(spec: EdgeSpec,
 # --------------------------------------------------------------------------
 # Beam
 # --------------------------------------------------------------------------
+def _merged(
+    parts: Sequence[tuple[np.ndarray, np.ndarray]]
+) -> tuple[np.ndarray, np.ndarray]:
+  """(distinct codes, summed counts) of several `child_keys` parts."""
+  if len(parts) == 1:
+    return parts[0]
+  codes, inverse = np.unique(
+      np.concatenate([c for c, _ in parts]), return_inverse=True)
+  counts = np.zeros(len(codes), dtype=np.int64)
+  np.add.at(counts, inverse, np.concatenate([n for _, n in parts]))
+  return codes, counts
+
+
+def _tagged_out(tag: str, value: Any, windowed: bool) -> Any:
+  if windowed:  # finish_bundle emits windowed values only
+    value = GlobalWindows.windowed_value(value)
+  return beam.pvalue.TaggedOutput(tag, value)
+
+
 class _ChildKeysFn(beam.DoFn):
   """Child `EncodedBatch` → per live (edge, side) `t`: tagged `keys<t>`
   (signed hash, count) per distinct non-NULL key and a tagged `stats<t>`
   `FanoutAcc` of its NULL tuples; failures `(edge key, reason)` on the
-  main output. Batches of other tables pass untouched."""
+  main output. Batches of other tables pass untouched.
 
-  def __init__(self, routes: Mapping[tuple[str, str],
-                                     Sequence[tuple[int, int, str, int]]]):
+  The batches of a bundle are merged per key before anything is emitted
+  (flushed once `FLUSH_CODES` distinct keys are held, and in
+  `finish_bundle`, as `membership.RowKeysFn` does): an element per
+  distinct key of a bundle, never one per row."""
+
+  def __init__(self,
+               routes: Mapping[tuple[str, str], Sequence[tuple[int, int, str,
+                                                               int]]],
+               flush_codes: int | None = None):
     super().__init__()
     self._routes = dict(routes)
+    self._flush_at = FLUSH_CODES if flush_codes is None else flush_codes
+    self._pending: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+    self._nulls: dict[int, int] = {}
+    self._held = 0
+
+  def start_bundle(self) -> None:
+    self._pending, self._nulls, self._held = {}, {}, 0
 
   def process(self, element: EncodedBatch) -> Iterator[Any]:
     for t, index, label, key in self._routes.get(
@@ -913,11 +1030,25 @@ class _ChildKeysFn(beam.DoFn):
       except TABLE_ERRORS as exc:
         yield key, _failure(exc)
         continue
+      self._pending.setdefault(t, []).append((codes, counts))
+      self._nulls[t] = self._nulls.get(t, 0) + nulls
+      self._held += len(codes)
+    if self._held >= self._flush_at:
+      yield from self._flush(windowed=False)
+
+  def finish_bundle(self) -> Iterator[Any]:
+    yield from self._flush(windowed=True)
+
+  def _flush(self, *, windowed: bool) -> Iterator[Any]:
+    pending, nulls = self._pending, self._nulls
+    self._pending, self._nulls, self._held = {}, {}, 0
+    for t, parts in pending.items():
+      codes, counts = _merged(parts)
       tag = f"{_KEYS}{t}"
       for code, count in zip(_signed(codes), counts.tolist(), strict=True):
-        yield beam.pvalue.TaggedOutput(tag, (code, count))
-      yield beam.pvalue.TaggedOutput(f"{_STATS}{t}",
-                                     FanoutAcc(child_nulls=nulls))
+        yield _tagged_out(tag, (code, count), windowed)
+    for t, count in nulls.items():
+      yield _tagged_out(f"{_STATS}{t}", FanoutAcc(child_nulls=count), windowed)
 
 
 class _ParentKeysFn(beam.DoFn):
@@ -954,17 +1085,53 @@ class _ParentKeysFn(beam.DoFn):
     yield from zip(_signed(uniq), rows.tolist(), strict=True)
 
 
+def _check_set_size(size: int, planned: float) -> None:
+  """Raise `ValueError` when a side-input parent set holds more than twice
+  the parent rows the plan expects (rows bound distinct keys): the plan no
+  longer describes the data, and the side-input cache Task 26 sizes from
+  it would not hold the set."""
+  if size > 2.0 * max(planned, 1.0):
+    raise ValueError(f"the parent key set holds {size} keys, more than twice "
+                     f"the {planned:.0f} parent rows planned for this side: "
+                     "the plan is stale and the side-input cache is sized "
+                     "from it")
+
+
+class _KeySetCountFn(beam.DoFn):
+  """The side-input path's parent count (the set's distinct keys), behind
+  the size guard (`_check_set_size`): a set past twice its plan fails
+  every edge of its group."""
+
+  def __init__(self, planned: float, keys: Sequence[int]):
+    super().__init__()
+    self._planned = planned
+    self._keys = tuple(keys)
+
+  def process(self, element: np.ndarray) -> Iterator[Any]:
+    try:
+      _check_set_size(int(element.size), self._planned)
+    except TABLE_ERRORS as exc:
+      reason = _failure(exc)
+      for key in self._keys:
+        yield beam.pvalue.TaggedOutput(_FAILED, (key, reason))
+      return
+    yield FanoutAcc(parents=int(element.size))
+
+
 class _MatchFn(beam.DoFn):
   """A batch of (signed hash, children) → the `FanoutAcc` part of the
-  side-input path: np.searchsorted membership in the parent key set."""
+  side-input path: np.searchsorted membership in the parent key set
+  (behind the same size guard as `_KeySetCountFn`)."""
 
-  def __init__(self, key: int):
+  def __init__(self, key: int, planned: float):
     super().__init__()
     self._key = key
+    self._planned = planned
 
   def process(self, element: Sequence[tuple[int, int]],
               key_set: np.ndarray) -> Iterator[Any]:
     try:
+      _check_set_size(int(key_set.size), self._planned)
       codes = np.array([code for code, _ in element],
                        dtype=np.int64).view(np.uint64)
       counts = np.array([count for _, count in element], dtype=np.int64)
@@ -1038,6 +1205,7 @@ class _ParentKeys:
   the `FanoutAcc` counts every edge of the group adds."""
   path: str
   keys: beam.PCollection
+  planned: float | None
   parts: tuple[beam.PCollection, ...]
 
 
@@ -1139,13 +1307,18 @@ class Relational(beam.PTransform):
               _STATS, _FAILED, main=_KEYS)
       failures.append(keyed[_FAILED])
       if path == SIDE_INPUT:
+        planned = members[0].side(side).planned_keys
+        assert planned is not None  # the side-input path needs a row count
         key_set = keyed[_KEYS] | f"ParentSet[{name}]" >> beam.CombineGlobally(
             _KeySetCombineFn())
-        count = key_set | f"ParentCount[{name}]" >> beam.Map(_set_part)
-        out[(landing, side, cols)] = _ParentKeys(path, key_set,
-                                                 (keyed[_STATS], count))
+        count = key_set | f"ParentCount[{name}]" >> beam.ParDo(
+            _KeySetCountFn(planned, [s.key for s in members])).with_outputs(
+                _FAILED, main=_PARTS)
+        failures.append(count[_FAILED])
+        out[(landing, side, cols)] = _ParentKeys(path, key_set, planned,
+                                                 (keyed[_STATS], count[_PARTS]))
       else:
-        out[(landing, side, cols)] = _ParentKeys(path, keyed[_KEYS],
+        out[(landing, side, cols)] = _ParentKeys(path, keyed[_KEYS], None,
                                                  (keyed[_STATS],))
     return out, failures
 
@@ -1181,8 +1354,9 @@ class Relational(beam.PTransform):
             counts
             | f"MatchBatch[{name}]" >> batching
             | f"Match[{name}]" >> beam.ParDo(
-                _MatchFn(spec.key), beam.pvalue.AsSingleton(
-                    group.keys)).with_outputs(_FAILED, main=_PARTS))
+                _MatchFn(spec.key, float(group.planned or 0.0)),
+                beam.pvalue.AsSingleton(group.keys)).with_outputs(
+                    _FAILED, main=_PARTS))
       else:
         joined = ({
             "child": counts,

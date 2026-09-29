@@ -200,7 +200,8 @@ def _thelook(
 def test_orphans_detected(tmp_path):
   """Seven synthetic orders reference two users the synthetic users table
   does not hold: orphans, a FAIL on an enforced edge; the source, intact,
-  has none. Orphans never enter the fan-out."""
+  has none. Orphans never enter the fan-out histogram; they are child
+  rows of the mean ratio (R82)."""
   fanouts = [1, 2, 3] * 10
   tables, rows_by = users_orders(fanouts, fanouts)
   orders = rows_by[("orders", "synthetic")]
@@ -226,9 +227,12 @@ def test_orphans_detected(tmp_path):
   baseline = rows["relationship.orphan_rate_source"]
   assert baseline.value == 0.0 and baseline.n_source == 60
   assert _status(baseline) is Status.INFO
-  # the 60 matched children keep the source's fan-out exactly
-  assert rows["relationship.fanout_mean_ratio"].value == pytest.approx(1.0)
+  # the 60 matched children keep the source's fan-out shape exactly ...
   assert rows["relationship.fanout_tvd"].value == pytest.approx(0.0)
+  # ... while the ratio counts every child row: 67 against 60, 30 parents
+  ratio = rows["relationship.fanout_mean_ratio"]
+  assert ratio.value == pytest.approx((67 / 30) / (60 / 30))
+  assert ratio.detail["child_rows_synthetic"] == 67
 
 
 def test_fanout_distribution_metrics(tmp_path):
@@ -369,13 +373,17 @@ def test_null_fk_counted_not_orphaned(tmp_path):
   pair = by_edge[composite.label("orders")]["relationship.orphan_rate"]
   assert pair.value == 0.0 and pair.detail["orphans"] == 0
   assert pair.detail["null_keys"] == 13 and pair.n_synthetic == 40
-  # the 4 matched single-column children add to their parents' fan-out
-  single_ratio = by_edge[USER_EDGE.label(
-      "orders")]["relationship.fanout_mean_ratio"]
-  assert single_ratio.synthetic_value == pytest.approx(44 / 20)
-  pair_ratio = by_edge[composite.label(
-      "orders")]["relationship.fanout_mean_ratio"]
-  assert pair_ratio.value == pytest.approx(1.0)
+  # the 4 rows the single-column edge matches add to their parents'
+  # fan-out on it alone ...
+  single = by_edge[USER_EDGE.label("orders")]
+  pair = by_edge[composite.label("orders")]
+  assert single["relationship.fanout_w1"].value > 0.0
+  assert pair["relationship.fanout_w1"].value == pytest.approx(0.0)
+  # ... while the mean ratio reads every child row (53) on both (R82)
+  for rows in (single, pair):
+    ratio = rows["relationship.fanout_mean_ratio"]
+    assert ratio.value == pytest.approx((53 / 20) / (40 / 20))
+    assert ratio.synthetic_value == pytest.approx(53 / 20)
 
 
 def test_external_parent_checked_against_external_table(tmp_path):
@@ -531,47 +539,89 @@ def test_ref_cols_other_than_the_pk_or_reordered_give_no_false_orphans(
 def test_sampled_mode_withholds_what_a_sample_biases(tmp_path):
   """A row-sampled side cannot support a metric that needs every row of
   it: a sampled child side hides orphans and thins every parent's fan-out;
-  a sampled parent side makes children look orphaned and pulls the
-  source's extremes in. Those are not_evaluated with the observed lower
-  bound; what a parent sample leaves unbiased stays, marked sampled."""
-  fanouts = [1, 2, 3] * 10
+  a sampled parent side makes children look orphaned, pulls the source's
+  extremes in and scales rows per parent by 1/r. Those are not_evaluated
+  with the observed lower bounds; what a parent sample leaves unbiased
+  equals its oracle over the sampled parents, marked sampled."""
+  fanouts = [1, 2, 3, 0, 4] * 10  # 50 users a side, 100 orders
   tables, rows_by = users_orders(fanouts, fanouts)
   users, orders = tables
   label = USER_EDGE.label("orders")
+  # a synthetic child row sample: every other order (rate 0.5)
+  kept_orders = rows_by[("orders", "synthetic")][::2]
   child_sampled = _by_edge(
       _run(
-          [users, dataclasses.replace(orders, sample_rate_synthetic=0.5)],
-          rows_by, tmp_path))[label]
+          [users, dataclasses.replace(orders, sample_rate_synthetic=0.5)], {
+              **rows_by, ("orders", "synthetic"): kept_orders
+          }, tmp_path))[label]
   orphan = child_sampled["relationship.orphan_rate"]
   assert orphan.value is None
   assert orphan.detail["reason"].startswith("sampled mode cannot measure")
   assert orphan.detail["reason"].endswith("run exact mode")
   assert orphan.detail["orphans_lower_bound"] == 0
-  assert orphan.detail["matched_lower_bound"] == 60
+  assert orphan.detail["matched_lower_bound"] == len(kept_orders)
+  assert orphan.detail["null_keys_lower_bound"] == 0
+  with_children = len({o["user_id"] for o in kept_orders})
   for metric_id in _FANOUT_IDS:
     mv = child_sampled[metric_id]
     assert mv.value is None and "run exact mode" in mv.detail["reason"]
-    assert mv.detail["parents_with_children_lower_bound_synthetic"] == 30
+    assert mv.detail[
+        "parents_with_children_lower_bound_synthetic"] == with_children
   assert child_sampled["relationship.orphan_rate_source"].value == 0.0
 
+  # a parent row sample: 2 users in 5 (rate 0.4), every child row read
+  def sampled_users(side: str) -> list[dict[str, Any]]:
+    return [
+        u for i, u in enumerate(rows_by[("users", side)]) if i % 5 in (0, 2)
+    ]
+
+  src_kept = [f for i, f in enumerate(fanouts) if i % 5 in (0, 2)]
+  parent_rows = {**rows_by, ("users", "source"): sampled_users("source")}
   parent_sampled = _by_edge(
       _run([dataclasses.replace(users, sample_rate_source=0.4), orders],
-           rows_by, tmp_path))[label]
+           parent_rows, tmp_path))[label]
   source = parent_sampled["relationship.orphan_rate_source"]
   assert source.value is None and "run exact mode" in source.detail["reason"]
   assert "orphans_lower_bound" not in source.detail  # not a bound here
-  assert source.detail["matched_lower_bound"] == 60
+  assert source.detail["matched_lower_bound"] == sum(src_kept)
   assert parent_sampled["relationship.orphan_rate"].value == 0.0
-  adherence = parent_sampled["relationship.cardinality_adherence"]
-  assert adherence.value is None
-  assert "run exact mode" in adherence.detail["reason"]
-  for metric_id in ("relationship.fanout_tvd", "relationship.fanout_w1",
-                    "relationship.fanout_mean_ratio",
-                    "relationship.zero_child_share_delta",
-                    "relationship.parent_coverage"):
+  for metric_id in ("relationship.cardinality_adherence",
+                    "relationship.fanout_mean_ratio"):
     mv = parent_sampled[metric_id]
-    assert mv.value is not None, metric_id
+    assert mv.value is None and "run exact mode" in mv.detail["reason"]
+  assert "different rates" in parent_sampled[
+      "relationship.fanout_mean_ratio"].detail["reason"]
+  want = fanout_metrics(
+      fanout_histogram(src_kept),
+      fanout_histogram(fanouts),
+      1.0,
+      1.0,
+      min(src_kept),
+      max(src_kept),
+      cap=FANOUT_CAP)
+  assert want is not None
+  for metric_id, key in (("relationship.fanout_tvd",
+                          "tvd"), ("relationship.fanout_w1", "w1"),
+                         ("relationship.zero_child_share_delta",
+                          "zero_child_share_delta"),
+                         ("relationship.parent_coverage", "parent_coverage")):
+    mv = parent_sampled[metric_id]
+    assert mv.value == pytest.approx(want[key]), metric_id
     assert mv.method is Method.SAMPLE and mv.sample_rate == 0.4, metric_id
+    assert (mv.n_source, mv.n_synthetic) == (len(src_kept), 50), metric_id
+
+  # both parent sides sampled at one rate: the ratio's 1/r cancels
+  both = _by_edge(
+      _run([
+          dataclasses.replace(
+              users, sample_rate_source=0.4, sample_rate_synthetic=0.4), orders
+      ], {
+          **parent_rows, ("users", "synthetic"): sampled_users("synthetic")
+      }, tmp_path))[label]
+  ratio = both["relationship.fanout_mean_ratio"]
+  assert ratio.value == pytest.approx(1.0)
+  assert ratio.source_value == pytest.approx(100 / 20)
+  assert ratio.method is Method.SAMPLE and ratio.sample_rate == 0.4
 
 
 def test_a_failing_edge_does_not_fail_the_run(tmp_path, monkeypatch):
@@ -610,6 +660,8 @@ def test_unreadable_parents_and_skipped_children_are_explained(tmp_path):
   id with the reason."""
   ghost = Edge(cols=("user_id",), ref="products", ref_cols=("id",))
   tables, rows_by = users_orders([1] * 10, [1] * 10, edges=(USER_EDGE, ghost))
+  # a launch parent with no source table to read
+  tables[0] = dataclasses.replace(tables[0], source_read_table="")
   items = launch_table(
       "order_items",
       ITEMS_FIELDS,
@@ -625,8 +677,12 @@ def test_unreadable_parents_and_skipped_children_are_explained(tmp_path):
     assert sorted(rows) == sorted(OWNED_METRIC_IDS), label
     for mv in rows.values():
       assert mv.value is None and cause in mv.detail["reason"], (label, mv)
-  assert by_edge[USER_EDGE.label(
-      "orders")]["relationship.orphan_rate"].value == 0.0
+  users_edge = by_edge[USER_EDGE.label("orders")]
+  assert users_edge["relationship.orphan_rate"].value == 0.0
+  no_source = users_edge["relationship.orphan_rate_source"].detail["reason"]
+  assert "the parent table demo-project.thelook_synthetic.users has no " \
+      "source table" in no_source
+  assert "read-only" not in no_source
 
 
 def test_parents_are_read_once_projected_to_their_ref_columns(tmp_path):
@@ -646,19 +702,143 @@ def test_parents_are_read_once_projected_to_their_ref_columns(tmp_path):
                        ("users", "synthetic", ("id", "email"))]
 
 
-def test_fanout_counts_are_exact_past_one_batch(tmp_path):
-  """Children of one parent spread over many batches (and bundles) still
-  add up to one exact fan-out: 9000 orders over 3 users."""
-  src = [3000, 4000, 2000, 0]
-  syn = [2500, 4500, 2000, 0]
+def test_fanout_counts_are_exact_past_one_batch(tmp_path, monkeypatch):
+  """Children of one parent spread over many batches, bundles and bundle
+  flushes (every two held keys here) still add up to one exact fan-out:
+  9000 orders over 3 of 10 users."""
+  monkeypatch.setattr(relational, "FLUSH_CODES", 2)
+  src = [3000, 4000, 2000] + [0] * 7
+  syn = [2500, 4500, 2000] + [0] * 7
   tables, rows_by = users_orders(src, syn)
   rows = _by_edge(_run(tables, rows_by, tmp_path))[USER_EDGE.label("orders")]
   ratio = rows["relationship.fanout_mean_ratio"]
-  assert ratio.source_value == pytest.approx(9000 / 4)
-  assert ratio.synthetic_value == pytest.approx(9000 / 4)
+  assert ratio.source_value == pytest.approx(9000 / 10)
+  assert ratio.synthetic_value == pytest.approx(9000 / 10)
+  assert rows["relationship.fanout_mean_ratio"].detail["children_source"] == (
+      9000)
   assert rows["relationship.zero_child_share_delta"].value == 0.0
   assert rows["relationship.fanout_tvd"].value == 0.0  # all past the cap
   assert rows["relationship.fanout_w1"].value == pytest.approx(0.0)
   assert rows["relationship.cardinality_adherence"].value == 1.0
-  assert rows["relationship.cardinality_adherence"].detail["adherent"] == 4
+  assert rows["relationship.cardinality_adherence"].detail["adherent"] == 10
   assert np.isclose(rows["relationship.parent_coverage"].value, 1.0)
+
+
+# --------------------------------------------------------------------------
+# review round 1 (R82-R84)
+# --------------------------------------------------------------------------
+def test_fanout_mean_ratio_reads_every_child_and_parent_row(tmp_path):
+  """R82: the catalogue's (n_child / n_parent) ratio over ROWS. 100 of the
+  source's 400 orders are guest checkouts (a NULL user): against a
+  synthetic side with none the ratio is 1.0, not 4/3; a doubled child
+  table, or one padded with orphans, FAILs."""
+  label = USER_EDGE.label("orders")
+
+  def ratio(src: Sequence[int],
+            syn: Sequence[int],
+            *,
+            guests: int = 0,
+            orphans: int = 0) -> MetricValue:
+    tables, rows_by = users_orders(src, syn)
+    for k in range(guests):
+      rows_by[("orders", "source")].append({
+          "order_id": CHILD_BASE + 50_000 + k,
+          "user_id": None,
+          "user_email": None,
+          "status": "Complete",
+      })
+    for k in range(orphans):
+      ghost = SYNTHETIC_BASE + 5_000 + k % 7
+      rows_by[("orders", "synthetic")].append({
+          "order_id": CHILD_BASE + 60_000 + k,
+          "user_id": ghost,
+          "user_email": f"user{ghost}@example.com",
+          "status": "Complete",
+      })
+    tables[1] = counted(tables[1], rows_by)
+    rows = _by_edge(_run(tables, rows_by, tmp_path))[label]
+    return rows["relationship.fanout_mean_ratio"]
+
+  guest = ratio([3] * 100, [4] * 100, guests=100)
+  assert guest.value == pytest.approx(1.0)
+  assert (guest.source_value, guest.synthetic_value) == (4.0, 4.0)
+  assert guest.detail["child_rows_source"] == 400
+  assert guest.detail["parent_rows_source"] == 100
+  assert _status(guest) is Status.PASS
+  doubled = ratio([4] * 100, [8] * 100)
+  assert doubled.value == pytest.approx(2.0)
+  assert _status(doubled) is Status.FAIL
+  padded = ratio([4] * 100, [4] * 100, orphans=400)
+  assert padded.value == pytest.approx(2.0)
+  assert _status(padded) is Status.FAIL
+
+
+def test_fewer_than_k_parents_publish_no_fanout(tmp_path):
+  """R83: a side with fewer than k = 10 parents publishes no fan-out — no
+  metric, mean or children/parents count; the orphan rates stay (the
+  integrity verdict), without their parent counts on that side."""
+  src = [2, 5, 1, 3, 4, 2, 1, 6, 2]  # 9 source parents
+  tables, rows_by = users_orders(src, [2] * 30)
+  rows = _by_edge(_run(tables, rows_by, tmp_path))[USER_EDGE.label("orders")]
+  for metric_id in _FANOUT_IDS:
+    mv = rows[metric_id]
+    assert mv.value is None, metric_id
+    assert mv.detail == {
+        "reason": "fewer than k parents on a side (k = 10)",
+        "enforced": True,
+    }, metric_id
+    assert mv.source_value is None and mv.synthetic_value is None
+    assert mv.n_source is None and mv.n_synthetic is None
+  source = rows["relationship.orphan_rate_source"]
+  assert source.value == 0.0 and _status(source) is Status.INFO
+  assert not {"parents", "parent_rows", "parent_null_keys"} & set(source.detail)
+  assert source.detail["parent_counts"].startswith("fewer than k parents")
+  synthetic = rows["relationship.orphan_rate"]
+  assert synthetic.value == 0.0 and synthetic.detail["parents"] == 30
+
+
+@pytest.mark.parametrize("max_keys", [0, SIDE_INPUT_MAX_KEYS])
+def test_null_part_parent_keys_are_no_parents(tmp_path, max_keys):
+  """A parent row whose referenced key has a NULL part references nothing
+  (MATCH SIMPLE on the parent side too): it is no parent — not a
+  childless one — and is counted apart, on both join paths; the mean
+  ratio still counts it as a parent row (R82)."""
+  composite = Edge(
+      cols=("user_id", "user_email"), ref="users", ref_cols=("id", "email"))
+  fanouts = [0, 0] + [1, 2, 3] * 4  # 14 users; the first two have no order
+  tables, rows_by = users_orders(fanouts, fanouts, edges=(composite,))
+  for user in rows_by[("users", "synthetic")][:2]:
+    user["email"] = None  # their (id, email) key has a NULL part
+  rows = _by_edge(
+      _run(tables, rows_by, tmp_path,
+           side_input_max_keys=max_keys))[composite.label("orders")]
+  orphan = rows["relationship.orphan_rate"]
+  assert orphan.value == 0.0
+  assert orphan.detail["parents"] == 12 and orphan.detail["parent_rows"] == 12
+  assert orphan.detail["parent_null_keys"] == 2
+  zero = rows["relationship.zero_child_share_delta"]
+  assert zero.synthetic_value == 0.0  # every synthetic parent has a child
+  assert zero.source_value == pytest.approx(2 / 14)
+  assert zero.n_synthetic == 12
+  assert rows["relationship.parent_coverage"].synthetic_value == 1.0
+  ratio = rows["relationship.fanout_mean_ratio"]
+  assert ratio.value == pytest.approx(1.0)  # 24 child rows, 14 parent rows
+  assert ratio.detail["parent_rows_synthetic"] == 14
+
+
+def test_a_side_input_set_past_twice_its_plan_fails_the_edge(tmp_path):
+  """A side-input parent set holding more than twice the rows its plan
+  expects fails the edge (not_evaluated, with the reason): the plan, and
+  the side-input cache sized from it, no longer describe the data. At
+  twice the plan it is still used."""
+  tables, rows_by = users_orders([1, 2] * 15, [1, 2] * 15)
+  label = USER_EDGE.label("orders")
+  stale = dataclasses.replace(tables[0], rows_synthetic=14)  # 30 users read
+  rows = _by_edge(_run([stale, tables[1]], rows_by, tmp_path))[label]
+  assert sorted(rows) == sorted(OWNED_METRIC_IDS)
+  for mv in rows.values():
+    assert mv.value is None and "more than twice" in mv.detail["reason"], mv
+  planned = dataclasses.replace(tables[0], rows_synthetic=15)
+  rows = _by_edge(_run([planned, tables[1]], rows_by, tmp_path))[label]
+  assert rows["relationship.orphan_rate"].value == 0.0
+  assert rows["relationship.orphan_rate"].detail["path"] == SIDE_INPUT
