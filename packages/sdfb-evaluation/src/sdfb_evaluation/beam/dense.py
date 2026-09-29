@@ -1281,11 +1281,17 @@ def _decile_ks(edges: np.ndarray, a: tuple[np.ndarray, Moments],
 
 def _binned_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
                     sizes: _Sizes) -> None:
-  """ks, pit_w1, wasserstein, jsd, psi and decile_ks_legacy."""
+  """ks, pit_w1, wasserstein, jsd, psi and decile_ks_legacy. wasserstein and
+  decile_ks_legacy are not_evaluated when either side holds fewer than
+  RARE_COUNT values (Ruling R81, extending R80.3): `_w1` and
+  `_legacy_deciles` both read the source's raw Moments.min/max with no k
+  gate of their own, so a tiny side's exact extremes could otherwise
+  constrain published values."""
   cs, cy = s.src.union[gi], s.syn.union[gi]
   cr = None if s.ref is None else s.ref.union[gi]
   ms, my = s.src.moments[gi], s.syn.moments[gi]
   n_src, n_syn = sizes.n_source, sizes.n_synthetic
+  tiny = min(ms.n, my.n) < RARE_COUNT
   bracket = binned.ks_bracket(cs, cy)
   assert bracket is not None  # both sides hold values (guarded)
   base = None if cr is None else binned.ks_bracket(cs, cr)
@@ -1312,26 +1318,29 @@ def _binned_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
       method=Method.BINNED,
       sizes=sizes)
   mr = None if s.ref is None else s.ref.moments[gi]
-  w1 = _w1(grid.union, cs, cy, ms, my)
-  if w1 is None:
-    e.skip(
-        "column.wasserstein",
-        "fewer than 2 bin edges for a non-constant column",
-        scope,
-        sizes=sizes)
+  if tiny:
+    e.skip("column.wasserstein", NOT_EVALUATED_BELOW_K, scope, sizes=sizes)
   else:
-    tails = binned.tail_masses(cs, cy)
-    e.value(
-        "column.wasserstein",
-        w1,
-        scope,
-        baseline=(None if cr is None or mr is None else _w1(
-            grid.union, cs, cr, ms, mr)),
-        method=Method.BINNED,
-        detail={
-            **tails, "unit": grid.unit
-        },
-        sizes=sizes)
+    w1 = _w1(grid.union, cs, cy, ms, my)
+    if w1 is None:
+      e.skip(
+          "column.wasserstein",
+          "fewer than 2 bin edges for a non-constant column",
+          scope,
+          sizes=sizes)
+    else:
+      tails = binned.tail_masses(cs, cy)
+      e.value(
+          "column.wasserstein",
+          w1,
+          scope,
+          baseline=(None if cr is None or mr is None else _w1(
+              grid.union, cs, cr, ms, mr)),
+          method=Method.BINNED,
+          detail={
+              **tails, "unit": grid.unit
+          },
+          sizes=sizes)
   ds, dy = s.src.deciles[gi].tolist(), s.syn.deciles[gi].tolist()
   dr = None if s.ref is None else s.ref.deciles[gi].tolist()
   jsd = distances.jsd_bits(ds, dy)
@@ -1356,22 +1365,26 @@ def _binned_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
       detail={"bins": len(ds)},
       sizes=sizes)
   if grid.kind is _NUMERIC:
-    legacy = _decile_ks(grid.union, (cs, ms), (cy, my))
-    if legacy is None:
+    if tiny:
       e.skip(
-          "column.decile_ks_legacy",
-          "no bin edges to read deciles from",
-          scope,
-          sizes=sizes)
+          "column.decile_ks_legacy", NOT_EVALUATED_BELOW_K, scope, sizes=sizes)
     else:
-      e.value(
-          "column.decile_ks_legacy",
-          legacy,
-          scope,
-          baseline=(None if cr is None or mr is None else _decile_ks(
-              grid.union, (cs, ms), (cr, mr))),
-          method=Method.BINNED,
-          sizes=sizes)
+      legacy = _decile_ks(grid.union, (cs, ms), (cy, my))
+      if legacy is None:
+        e.skip(
+            "column.decile_ks_legacy",
+            "no bin edges to read deciles from",
+            scope,
+            sizes=sizes)
+      else:
+        e.value(
+            "column.decile_ks_legacy",
+            legacy,
+            scope,
+            baseline=(None if cr is None or mr is None else _decile_ks(
+                grid.union, (cs, ms), (cr, mr))),
+            method=Method.BINNED,
+            sizes=sizes)
 
 
 def _constant(m: Moments) -> bool:

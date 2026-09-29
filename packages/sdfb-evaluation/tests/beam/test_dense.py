@@ -2315,6 +2315,43 @@ def test_moment_metrics_are_not_evaluated_below_the_count_floor():
   assert row.source_value is not None and row.synthetic_value is not None
 
 
+def test_legacy_deciles_and_wasserstein_not_evaluated_below_count_floor():
+  """Ruling R81, extending R80.3: column.decile_ks_legacy and
+  column.wasserstein are not evaluated when either side holds fewer than
+  k values — `_legacy_deciles` and `_w1`'s constant-side branch both read
+  the source's raw Moments.min/max with no k gate of their own, so a tiny
+  side's exact extremes could otherwise constrain a published value. At
+  n = k both are evaluated again."""
+  rng = np.random.default_rng(81)
+  synthetic = _uniform_rows(rng.normal(50, 10, 3000))
+  for n in (2, 5, RARE_COUNT - 1):
+    source = _uniform_rows(rng.normal(50, 10, n))
+    table = planned_table(
+        "legacy", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+    metrics, _ = _pure(table, {"source": source, "synthetic": synthetic})
+    rows = _by_key(metrics)
+    for metric_id in ("column.wasserstein", "column.decile_ks_legacy"):
+      row = rows[(metric_id, "x", None)]
+      assert row.value is None, (n, metric_id)
+      assert NOT_EVALUATED_BELOW_K in json.dumps(row.detail), (n, metric_id)
+  # a tiny SYNTHETIC side is not evaluated either
+  tiny = _uniform_rows(rng.normal(50, 10, 5))
+  source = _uniform_rows(rng.normal(50, 10, 300))
+  table = planned_table("legacy_syn", _UNIFORM_FIELDS, source, tiny, pk=("id",))
+  metrics, _ = _pure(table, {"source": source, "synthetic": tiny})
+  rows = _by_key(metrics)
+  for metric_id in ("column.wasserstein", "column.decile_ks_legacy"):
+    assert rows[(metric_id, "x", None)].value is None, metric_id
+  # at n = k: evaluated on both sides
+  source = _uniform_rows(rng.normal(50, 10, RARE_COUNT))
+  table = planned_table(
+      "legacy_k", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  metrics, _ = _pure(table, {"source": source, "synthetic": synthetic})
+  rows = _by_key(metrics)
+  for metric_id in ("column.wasserstein", "column.decile_ks_legacy"):
+    assert rows[(metric_id, "x", None)].value is not None, metric_id
+
+
 @pytest.mark.parametrize("n", [50, 3000])
 def test_synthetic_payloads_do_not_depend_on_an_unevaluated_source(n):
   """R80.2 (the reviewer's p_nosrc_invariance): with no source side at
