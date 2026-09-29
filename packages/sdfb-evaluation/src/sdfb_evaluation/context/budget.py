@@ -41,7 +41,7 @@ on the rows the pipeline actually reads:
                                                           each key (R70)
     relational   Σ edges           child rows * 16 B     (hash, count) per row
     membership   codes * (MEMBERSHIP_CODE_BYTES +        the membership pass's
-                   len(table name))                      exact keyed counts:
+                   UTF-8 bytes of the table name)        exact keyed counts:
                                                          the non-key hash on
                                                          both sides (content),
                                                          the PK and identity
@@ -61,9 +61,11 @@ overhead is spread over the bundle's codes of a bucket (FastPrimitivesCoder:
 9.0-9.5 B a code with 64 or more rows a bucket in a bundle; 12.4 B for a
 lone 8192-row batch at the 10-bit bucket maximum). Every element also
 repeats its key `(table, kind, bucket)`, whose table name costs its
-length; at worst an element carries a single code, so a code is
-budgeted at `MEMBERSHIP_CODE_BYTES + len(table name)` (Ruling R76): an
-upper bound, generous for the usual bundle.
+UTF-8 bytes L, so a code is budgeted at `MEMBERSHIP_CODE_BYTES + L`
+(Ruling R76, R79): an AMORTISED ESTIMATE, generous for the usual bundle
+(hundreds of codes an element), not an upper bound — an element that
+carries a single code (a tiny bundle spread over many buckets) costs
+about 30 + L bytes.
 
 The census gets what the fixed parts leave, shared max-min fairly
 (`water_fill`): first across tables, then across one table's census
@@ -253,19 +255,14 @@ def source_sets_fit(rows_source: float | None,
 
 def membership_code_bytes(table: str) -> int:
   """The budgeted shuffle bytes of one keyed-count code of `table`: the
-  measured code plus the key's table name, repeated per element (module
-  docstring)."""
-  return MEMBERSHIP_CODE_BYTES + len(table)
+  measured code plus the UTF-8 bytes of the key's table name, repeated
+  per element — an amortised estimate (module docstring)."""
+  return MEMBERSHIP_CODE_BYTES + len(table.encode("utf-8"))
 
 
-def membership_bytes(*,
-                     rows_source: float,
-                     rows_synthetic: float,
-                     nonkey: bool,
-                     keyed: bool,
-                     keyed_counts: int,
-                     side_input: bool,
-                     table: str = "") -> float:
+def membership_bytes(*, rows_source: float, rows_synthetic: float, nonkey: bool,
+                     keyed: bool, keyed_counts: int, side_input: bool,
+                     table: str) -> float:
   """The membership pass's keyed-count shuffle (module docstring)."""
   both = rows_source + rows_synthetic
   codes = both if nonkey else 0.0
@@ -283,12 +280,13 @@ def fixed_shuffle_bytes(*,
                         nonkey: bool = True,
                         keyed: bool = True,
                         side_input: bool = True,
-                        table: str = "") -> float:
+                        table: str) -> float:
   """The non-census shuffle of one table: relational child rows per edge,
   the membership pass's keyed counts and the null-pattern dicts (see the
   module docstring). `nonkey`/`keyed` are `table_key_shape`, `side_input`
   is `source_sets_fit` (the keyed-count mode adds the row counts), `table`
-  the table's name (its length is in every keyed-count key)."""
+  the table's name (required: its UTF-8 bytes are in every keyed-count
+  key)."""
   both = rows_source + rows_synthetic
   relational = edges * both * ROW_KEY_BYTES
   row_keys = membership_bytes(
