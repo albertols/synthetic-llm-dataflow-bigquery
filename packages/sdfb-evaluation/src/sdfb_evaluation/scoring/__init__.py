@@ -30,11 +30,13 @@ the semantic authority; this module only executes it.
   3. `relationship.orphan_rate` on a documented edge (`enforced=False`) ->
      INFO, never FAIL. Only the orphan rate: fan-out metrics compare
      children per parent with the source whatever the enforcement, so they
-     stay graded (Ruling R42); likewise `field.substantive_copy_rate` on a
-     numeric column, or a temporal one whose `detail["day_granularity"]`
-     is true -> INFO: such values collide with a dense source by domain
-     size, not by copying (the catalogue's pitfall; the value lift is the
-     fair test there);
+     stay graded (Ruling R42); likewise `field.substantive_copy_rate` is
+     gated only on a `text` column (free text, where the probe's rule
+     came from) and INFO on every other kind (Ruling R66): numeric and
+     day-granular temporal values (`detail["day_granularity"]`) collide
+     with a dense source by domain size, and reusing a rare real
+     category, identifier or timestamp is not evidence of memorisation —
+     `field.value_memorization_lift` (R vs H) is the gated signal there;
   4. null warn and fail -> INFO;
   5. a `target` metric reads x = |g - target|, its target being the
      catalogue's or, when that is null (`column.novelty_mass`), the row's
@@ -123,6 +125,10 @@ _DOMAIN_COLLISION_REASON = (
     "domain collision: a numeric or day-granular temporal column meets a "
     "dense source by domain size, not by copying; reported, not gated "
     "(field.value_memorization_lift is the fair test)")
+_FREE_TEXT_ONLY_REASON = (
+    "gated only on free text (Ruling R66): reusing a rare real category, "
+    "identifier or timestamp is not evidence of memorisation; reported, "
+    "not gated (field.value_memorization_lift is the gated signal)")
 _REL_TOL = 1e-9  # tolerance for "at the threshold" (inclusive crossing)
 _UNSCORED = (Status.INFO, Status.NOT_EVALUATED)
 
@@ -304,11 +310,16 @@ def _grade(metric: Metric, mv: MetricValue, gated: float, x: float,
   return _Assessment(status, None, gated, target)
 
 
-def _domain_collision(mv: MetricValue) -> bool:
-  """A copy rate the catalogue reports as INFO only: a numeric column, or
-  a day-granular temporal one (the producer states it in detail)."""
-  return mv.column_kind == "numeric" or (
-      mv.column_kind == "temporal" and mv.detail.get("day_granularity") is True)
+def _copy_rate_info_reason(mv: MetricValue) -> str | None:
+  """Why a copy rate is reported as INFO, or None when it is gated: only
+  a `text` column (or one with no kind given) is gated (Ruling R66)."""
+  kind = mv.column_kind
+  if kind is None or kind == "text":
+    return None
+  if kind == "numeric" or (kind == "temporal" and
+                           mv.detail.get("day_granularity") is True):
+    return _DOMAIN_COLLISION_REASON
+  return _FREE_TEXT_ONLY_REASON
 
 
 def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
@@ -330,8 +341,10 @@ def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
     return _Assessment(
         Status.INFO,
         {"reason": "documented edge (enforced: false): reported, not gated"})
-  if metric.id == _COPY_RATE_ID and _domain_collision(mv):
-    return _Assessment(Status.INFO, {"reason": _DOMAIN_COLLISION_REASON})
+  copy_info = (
+      _copy_rate_info_reason(mv) if metric.id == _COPY_RATE_ID else None)
+  if copy_info is not None:
+    return _Assessment(Status.INFO, {"reason": copy_info})
   if metric.warn is None and metric.fail is None:
     return _Assessment(Status.INFO)
   target = None

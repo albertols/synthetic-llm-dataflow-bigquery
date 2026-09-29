@@ -121,7 +121,7 @@ metrics:
     family: fidelity
     kinds: [categorical, boolean]
     value_kind: share
-    estimator: exact
+    estimator: exact/value_sampled
     direction: higher_better
     target: 1.0
     range: [0, 1]
@@ -214,7 +214,7 @@ metrics:
     interpretation:
       good: "Below 1e-4 (100 per million) copies are within coincidental-collision noise."
       bad: "At or above 1e-3, rare source strings (names, free text, identifiers) are being reproduced; check field.value_memorization_lift to see whether they come from the rows the generator read."
-    pitfalls: "Numeric and day-granularity temporal columns collide with a dense source by domain size, not by copying, so they report INFO only; the lift metrics are the fair test there."
+    pitfalls: "Gated only on free text (kind text), where the rule comes from. Every other kind reports INFO only: numeric and day-granularity temporal values collide with a dense source by domain size, and reusing a rare real category, identifier or timestamp is not evidence of memorization; field.value_memorization_lift (reference vs holdout) is the gated test there. On a value-sampled column the interval treats values, not rows, as the sampled units."
     references:
       - {label: "Sweeney 2002 — k-anonymity", url: "https://doi.org/10.1142/S0218488502001648"}
       - {label: "Carlini et al. 2021 — extracting training data from LLMs", url: "https://arxiv.org/abs/2012.07805"}
@@ -227,7 +227,7 @@ metrics:
     family: privacy
     kinds: [categorical, text, identifier, numeric, temporal]
     value_kind: ratio
-    estimator: exact
+    estimator: exact/value_sampled
     direction: lower_better
     target: 1.0
     range: [0, null]
@@ -242,7 +242,7 @@ metrics:
     interpretation:
       good: "CI lower bound below 2: no evidence of a 2× or larger lift. Smaller copying is not ruled out, and few hits give a wide interval."
       bad: "CI lower bound at 5 or more: reference-only rare values reappear at five times the holdout rate or more; the generator is copying what it read."
-    pitfalls: "With few rare exclusive values the interval is wide and the point estimate swings, so status reads the CI lower bound (Bonferroni-corrected over the m columns tested); no hits on either side gives no ratio."
+    pitfalls: "With few rare exclusive values the interval is wide and the point estimate swings, so status reads the CI lower bound (Bonferroni-corrected over the m columns tested); no hits on either side gives no ratio. A generator that draws empirical categoricals from R reproduces rare R-only values, so it FAILs by construction unless its source k-anonymity scrub (ADR 0027) removed the rare values first: a FAIL means rare sample values leaked, which is what the metric exists to show."
     references:
       - {label: "Przyborowski & Wilenski 1940 — comparing two Poisson counts", url: "https://doi.org/10.1093/biomet/31.3-4.313"}
       - {label: "Clopper & Pearson 1934 — exact binomial interval", url: "https://doi.org/10.1093/biomet/26.4.404"}
@@ -254,7 +254,7 @@ metrics:
     family: privacy
     kinds: [text]
     value_kind: ratio
-    estimator: exact
+    estimator: exact/value_sampled
     direction: lower_better
     target: 1.0
     range: [0, null]
@@ -269,7 +269,7 @@ metrics:
     interpretation:
       good: "CI lower bound below 2: no evidence that the pool favours rare values the LLM was shown by 2× or more. Smaller copying is not ruled out, and few hits give a wide interval."
       bad: "CI lower bound at 5 or more: the LLM writes rare reference values into the pool; every row drawn from it inherits the copy."
-    pitfalls: "Only evaluated when a pool for exactly this reference digest and model is found; a pool holds at most 512 values, so the interval is wide."
+    pitfalls: "Only evaluated when a pool for exactly this reference digest and model is found; a pool holds at most 512 values, so the interval is wide. Each pooled column is its own test at an uncorrected alpha of 0.05 (the pool lifts are a separate family from the value lift, which carries the Bonferroni correction across columns)."
     references:
       - {label: "ADR 0020 — free-text pools as a persisted artifact", url: "https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/docs/adr/0020-freetext-pools-as-persisted-artifact.md"}
       - {label: "Przyborowski & Wilenski 1940 — comparing two Poisson counts", url: "https://doi.org/10.1093/biomet/31.3-4.313"}
@@ -468,7 +468,7 @@ metrics:
     family: fidelity
     kinds: [numeric, temporal, categorical, boolean]
     value_kind: bits
-    estimator: exact/binned
+    estimator: exact/binned/value_sampled
     direction: lower_better
     target: null
     range: [0, 1]
@@ -494,7 +494,7 @@ metrics:
     family: fidelity
     kinds: [categorical, boolean]
     value_kind: distance
-    estimator: exact
+    estimator: exact/value_sampled
     direction: lower_better
     target: null
     range: [0, 1]
@@ -729,7 +729,7 @@ metrics:
     family: fidelity
     kinds: [categorical, boolean]
     value_kind: distance
-    estimator: exact
+    estimator: exact/value_sampled
     direction: lower_better
     target: null
     range: [0, null]
@@ -755,7 +755,7 @@ metrics:
     family: diversity
     kinds: [categorical, boolean]
     value_kind: distance
-    estimator: exact
+    estimator: exact/value_sampled
     direction: lower_better
     target: null
     range: [0, 1]
@@ -781,7 +781,7 @@ metrics:
     family: diversity
     kinds: [categorical, boolean]
     value_kind: share
-    estimator: exact
+    estimator: exact/value_sampled
     direction: higher_better
     target: null
     range: [0, 1]
@@ -807,7 +807,7 @@ metrics:
     family: diversity
     kinds: [categorical, text, identifier]
     value_kind: share
-    estimator: exact
+    estimator: exact/value_sampled
     direction: target
     target: null
     range: [0, 1]
@@ -833,7 +833,7 @@ metrics:
     family: diversity
     kinds: [categorical, boolean, text, identifier]
     value_kind: ratio
-    estimator: exact
+    estimator: exact/value_sampled
     direction: target
     target: 1.0
     range: [0, null]
@@ -861,7 +861,7 @@ metrics:
     family: diversity
     kinds: [categorical, text, identifier]
     value_kind: ratio
-    estimator: exact
+    estimator: exact/value_sampled
     direction: target
     target: 1.0
     range: [0, null]

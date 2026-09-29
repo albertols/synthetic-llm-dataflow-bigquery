@@ -209,3 +209,52 @@ def test_folded_abs_interval(lo, hi, folded):
 
 def test_folded_abs_interval_is_still_importable_from_relational():
   assert relational._folded_abs_interval is noise.folded_abs_interval  # pylint: disable=protected-access  # the compatibility alias (R63)
+
+
+def test_stratified_ratio_interval_degenerate_and_exact_cases():
+  assert noise.stratified_ratio_interval(1.0, 0.0, 0, 0, 0, 0.5, 10) is None
+  # rate 1 (an exact census): no design variance, Clopper-Pearson on rows
+  ratio, lo, hi = noise.stratified_ratio_interval(3.0, 10.0, 9, 30, 100, 1.0,
+                                                  10)
+  assert ratio == 0.3
+  assert lo == pytest.approx(stats.beta.ppf(0.025, 3, 8))
+  assert hi == pytest.approx(stats.beta.ppf(0.975, 4, 7))
+  # no event in the sample: the upper bound still bounds the rate
+  ratio, lo, hi = noise.stratified_ratio_interval(0.0, 1000.0, 0, 0, 1000, 0.1,
+                                                  100)
+  assert ratio == 0.0 and lo == 0.0
+  assert hi == pytest.approx(1.0 - 0.025**(1.0 / 100))
+
+
+def test_stratified_ratio_interval_widens_with_cluster_size():
+  """The same share from the same number of rows: heavy clusters (40 rows
+  a value) carry far more sampling variance than singletons."""
+  rate = 0.2
+
+  def interval(size):
+    values = 400 // size
+    copied = values // 5
+    y = [size] * copied + [0] * (values - copied)
+    x = [size] * values
+    num, den = sum(y) / rate, sum(x) / rate
+    sums = (sum(a * a for a in y),
+            sum(a * b for a, b in zip(y, x, strict=True)),
+            sum(b * b for b in x))
+    return noise.stratified_ratio_interval(num, den, *sums, rate, sum(x))
+
+  singletons, clusters = interval(1), interval(40)
+  assert singletons[0] == clusters[0] == pytest.approx(0.2)
+  assert clusters[2] - clusters[1] > 3 * (singletons[2] - singletons[1])
+  # the linearised variance: (1 - r)/r² · Σ(y - R x)² / X̂²
+  y = [40] * 2 + [0] * 8
+  squares = sum((a - 0.2 * 40)**2 for a in y)
+  variance = (1 - rate) / rate**2 * squares / (400 / rate)**2
+  n_eff = 0.2 * 0.8 / variance
+  ratio, lo, hi = noise.stratified_ratio_interval(80 / rate, 400 / rate,
+                                                  2 * 1600, 2 * 1600, 10 * 1600,
+                                                  rate, 400)
+  assert ratio == pytest.approx(0.2)
+  assert lo == pytest.approx(
+      stats.beta.ppf(0.025, 0.2 * n_eff, n_eff - 0.2 * n_eff + 1))
+  assert hi == pytest.approx(
+      stats.beta.ppf(0.975, 0.2 * n_eff + 1, n_eff - 0.2 * n_eff))

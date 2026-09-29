@@ -17,22 +17,30 @@ memorization lifts, top-k lists and shape mixes.
 
     EncodedBatch (source | synthetic)
       │  ParDo(CensusPreAggregateFn)   one dict per bundle, flushed in
-      │                                finish_bundle, or early past
-      │                                MAX_PREAGG_KEYS (never dropped)
-      ├─ values   ((t, j, code), counts6)
-      ├─ masks    ((t, j, mask), (c_src, c_syn))        text, identifier
-      └─ literals ((t, j), {code: text})                literal-ok columns
-    values ─► CombinePerKey(CountsCombineFn).with_hot_key_fanout(16)
+      │                                finish_bundle, or before a column
+      │                                could take it past MAX_PREAGG_KEYS
+      │                                (never dropped)
+      ├─ values   ((t, j, code), counts6)         census values (a head /
+      │                                           tail sample, see below)
+      ├─ masks    ((t, j, mask code), (c_src, c_syn, mask))   every value
+      └─ literals ((t, j), {code: text})          literal-ok columns
+    values ─► CombinePerKey(CountsCombineFn)   one entry per value (keys
+      │                                        cannot be hot: each bundle
+      │                                        sends a key at most once)
       ├─► Map ((t, j), (code, counts)) ─► CombinePerKey(CensusCombineFn)
       │     = the Task 8 CensusAccumulator per column ──► summarize
       │     └─► Chao-Shen coverage per column ─── side input ──┐
       └─► Map(value_contribution, totals, refs, coverage) ◄─────┘
             ─► CombinePerKey(sum): TVD/JSD/w², their floors and
-               baselines, Chao-Shen, rarefaction, R/H/E/H_E lift counts
-    masks ─► CombinePerKey(sum).with_hot_key_fanout(16)
+               baselines, Chao-Shen, rarefaction, Horvitz-Thompson sums
+               and tail cluster sums, R/H/E/H_E lift counts
+    masks ─► CombinePerKey(MaskCountsCombineFn)
           ─► Map(mask_part, totals, refs) ─► CombinePerKey(MaskSummary)
     parts + one seed per table ─► GroupByKey(table) ─► table_outputs
           ─► MetricValue (OWNED_METRIC_IDS), ProfileValue (topk, shape_mix)
+
+The per-column combines keep Beam's combiner lifting (a column is a hot
+key; lifting sends one partial accumulator per bundle).
 
 `counts6` = (c_src, c_syn, c_src_m, c_syn_m, c_src_r, flags): full-n
 counts, matched-n counts (`subsample_m`, R59: only the n-dependent
@@ -54,32 +62,43 @@ Side inputs:
     refs      per census column, from the R/H panel (D3), built on the
               driver: R value counts, H/E/H_E value sets, R masks and
               the free-text pool (`census_refs`)
-    coverage  the first pass's Chao-Shen sample coverage (Ruling R3)
+    coverage  the first pass's Chao-Shen sample coverage (Ruling R3; an
+              exact census only)
 
-Value-hash sampling (`census: value_sampled`, rate = K / M with M =
-`VALUE_SAMPLE_MODULUS`): only values whose hash has `code mod M < K`
-enter the census — a Bernoulli(K / M) draw per VALUE, independent of its
-counts, its side, and its R/H membership. Every retained value's counts
-are exact. Estimators, with w = M / K:
+Value sampling (`census: value_sampled`, rate = K / M with M =
+`VALUE_SAMPLE_MODULUS`) is a stratified Horvitz-Thompson design (Ruling
+R67). The certainty stratum is the plan's `census_head` — the source's
+and the synthetic side's top-254 values — included with probability 1
+(weight 1), so no heavy hitter is left to the hash. The tail is
+Poisson-sampled by the value hash: a value enters iff `code mod M < K`,
+a Bernoulli(rate) draw per VALUE independent of its counts, side and
+R/H membership (weight w = 1 / rate). Every retained value's counts are
+exact. Estimators (w_v = 1 in the head, 1 / rate in the tail):
 
-    distinct counts     w · (sampled distinct)                 unbiased
-    Σ_v f(counts_v)     w · Σ_sampled f  — TVD, JSD, w², the   unbiased
-      (totals exact)    tvd_null floor, entropy's Σ c ln c,    (Horvitz &
-                        rarefaction, Chao-Shen, baselines      Thompson)
-    shares (copy rate,  Σ_sampled a / Σ_sampled b: w cancels   ratio
-      adherence,        (both sums are Horvitz-Thompson        estimator,
-      coverage, novelty) totals of the same draw)              unbiased to
-                                                               first order
-    lifts               rates on sampled values only: R, H, E, H_E are
-                        thinned alike, so the ratio is unchanged
+    distinct counts     Σ_sampled w_v                           unbiased
+    Σ_v f(counts_v)     Σ_sampled w_v f — TVD, JSD, w², the     unbiased
+      (totals exact)    tvd_null floor, entropy's Σ c ln c,     (Horvitz &
+                        rarefaction, baselines                  Thompson)
+    shares (copy rate,  Σ w_v y_v / Σ w_v x_v, the combined      ratio,
+      adherence,        ratio of two Horvitz-Thompson totals    unbiased to
+      coverage, novelty)                                        first order
+    lifts               values in the hash range only (head or not): a
+                        uniform draw, R, H, E, H_E thinned alike, so the
+                        rates' ratio is unchanged
 
-The copy rate is thus unbiased (to first order) for the value-weighted
-rate, and its Wilson interval is computed on the sampled counts (rows of
-one value are a cluster, so the interval is somewhat narrow when single
-values carry many copies). A value-sampled column's top-1 value may lie
-outside the sampled hash range, so `column.top1_share_delta` and
-`column.distinct_ceiling_hit` are `not_evaluated` there, and its top-k
-profile lists sampled values (`value_sample_rate` in the payload).
+The copy rate (and category adherence) on a value-sampled column carries
+a cluster-robust interval with the values as the sampling units
+(`noise.stratified_ratio_interval`: linearised, the tail's (1 - rate) /
+rate factor, no variance from the head, as a Clopper-Pearson interval on
+the effective sample size so a sample without a copy still bounds the
+rate — Korn & Graubard, 1998). The Horvitz-Thompson view is
+validated before use — Σ c ln c within [0, n ln n] on each side, shares
+and TVD/JSD at most 1, a positive source entropy — and a metric whose
+view fails is `not_evaluated` with the reason, never a crash. Chao-Shen
+(detail only) is not estimated on a value-sampled column, and
+`column.distinct_ceiling_hit` is `not_evaluated` there (the exact K_syn
+is not measured); its top-k profile is exact on the head and carries
+`value_sample_rate`.
 
 Rare values and lifts. A value is rare when 0 < c_src < 10 in the census
 (the full source read; the repo's k-anonymity floor). With V_S the rare,
@@ -95,10 +114,15 @@ over the m columns of the table whose lift has exposure on both sides
 `field.pool_memorization_lift` counts m_S = |P ∩ V_S| over the free-text
 pool P of the run's (reference digest, model) — a side input the CLI
 fills from `freetext_pools_table` (`read_pools`); absent, it is
-`not_evaluated` with the reason. An unverified reference makes both
-lifts `not_evaluated` (Review Focus 5); fidelity is still computed.
+`not_evaluated` with the reason; each pooled column is its own test at
+an uncorrected alpha. An unverified reference, or an empty synthetic
+side, makes both lifts `not_evaluated` (Review Focus 5); fidelity is
+still computed.
 
-Shapes follow ADR 0026 as `stats.shapes` implements it: a mask is a head
+Shapes follow ADR 0026 as `stats.shapes` implements it, over EVERY
+present value — the mask pass is never value-sampled (R67), so
+`column.shape_head_tv` and `field.shape_adherence` are exact. Masks are
+keyed by their hash and pre-aggregated like values. A mask is a head
 mask when it holds at least 2 % of the source's non-empty values (a
 per-mask decision from its own count and the dense total, so no global
 head set has to be broadcast); every other mask pools into the tail.
@@ -115,14 +139,18 @@ when it holds at least 10 source values and contains a class
 placeholder (9, A, a, ␣); a mask that is only literal characters is the
 value itself, so it is labelled.
 
-`field.substantive_copy_rate` on numeric and day-granular temporal
-columns is reported, never gated: `scoring` turns it into INFO from
-`column_kind` and `detail.day_granularity` (the catalogue's pitfall).
+`field.substantive_copy_rate` is gated only on `text` columns: `scoring`
+reports it as INFO on every other kind (numeric and day-granular
+temporal values collide by domain size; reusing a rare real category is
+not memorisation — Ruling R66), from `column_kind` and
+`detail.day_granularity`.
 
-References (author-year, R22): Horvitz & Thompson (1952); Good (1953);
-Chao & Shen (2003); Miller (1955); Hurlbert (1971); Lin (1991); Cohen
-(1988); Wilson (1927); Newcombe (1998); Przyborowski & Wilenski (1940);
-Clopper & Pearson (1934); Dunn (1961) for Bonferroni; Sweeney (2002).
+References (author-year, R22): Horvitz & Thompson (1952); Woodruff
+(1971); Särndal, Swensson & Wretman (1992); Korn & Graubard (1998); Good
+(1953); Chao & Shen
+(2003); Miller (1955); Hurlbert (1971); Lin (1991); Cohen (1988); Wilson
+(1927); Newcombe (1998); Przyborowski & Wilenski (1940); Clopper &
+Pearson (1934); Dunn (1961) for Bonferroni; Sweeney (2002).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -168,7 +196,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "APPLIES_TO",
-    "HOT_KEY_FANOUT",
     "MAX_PREAGG_KEYS",
     "OWNED_METRIC_IDS",
     "POOL_CAP",
@@ -185,8 +212,11 @@ __all__ = [
     "CensusSpec",
     "ColumnParts",
     "ColumnRef",
+    "ColumnSizes",
+    "ContributionCombineFn",
     "CountsCombineFn",
     "FreeTextPool",
+    "MaskCountsCombineFn",
     "MaskSummary",
     "SideTotals",
     "accumulate",
@@ -220,7 +250,6 @@ OWNED_METRIC_IDS: tuple[str, ...] = (
     "column.shape_head_tv",
 )
 
-HOT_KEY_FANOUT = 16
 MAX_PREAGG_KEYS = 100_000
 TOPK_ITEMS = 50  # = ADR 0022's literal column cap: a literal column fits
 RARE_COUNT = 10  # the repo's k-anonymity floor (e2e_gcp_probe.py)
@@ -229,6 +258,8 @@ SHAPE_HEAD_FLOOR = 0.02  # ADR 0026 (`shapes.shape_head_tv`'s default)
 MASK_MAX_CHARS = 256
 LIFT_ALPHA = 0.05
 _SIG_DIGITS = 12
+_REL_TOL = 1e-9  # float slack on range guards (a share at exactly 1)
+_DIVERSE_K = 2  # a side with this many values has a positive entropy
 
 _K = ColumnKind
 _CODED = frozenset({_K.CATEGORICAL, _K.BOOLEAN})
@@ -305,10 +336,14 @@ def _unsigned(key: int) -> int:
 
 def _sig(x: Any) -> Any:
   """A finite float at 12 significant digits (Ruling R21's rerun
-  determinism: merge-tree float sums differ in the last ulps); anything
-  else unchanged."""
+  determinism: merge-tree float sums differ in the last ulps), through
+  mappings and lists; anything else unchanged."""
   if isinstance(x, float) and math.isfinite(x) and x != 0.0:
     return float(f"{x:.{_SIG_DIGITS}g}")
+  if isinstance(x, Mapping):
+    return {key: _sig(value) for key, value in x.items()}
+  if isinstance(x, (list, tuple)):
+    return [_sig(item) for item in x]
   return x
 
 
@@ -376,7 +411,8 @@ class CensusColumn:  # pylint: disable=too-many-instance-attributes  # one field
   """One plan column as the census sees it. `code_block` says where its
   `hash64` codes come from: `nonkey` (`h_nonkey`, the encoder's own
   codes) or `text` (an identity column: `hash64(name, text)`); `keep` is
-  K of `code mod M < K` for a value-sampled census."""
+  K of `code mod M < K` for a value-sampled census, and `head` its
+  certainty stratum (the plan's `census_head`, R67)."""
   j: int
   name: str
   kind: ColumnKind
@@ -391,6 +427,7 @@ class CensusColumn:  # pylint: disable=too-many-instance-attributes  # one field
   literal_ok: bool
   detection: frozenset[int]
   day_granularity: bool
+  head: frozenset[int] = frozenset()
 
   @property
   def censused(self) -> bool:
@@ -402,8 +439,27 @@ class CensusColumn:  # pylint: disable=too-many-instance-attributes  # one field
 
   @property
   def weight(self) -> float:
-    """w = 1 / rate, the Horvitz-Thompson weight of a sampled value."""
+    """w = 1 / rate, the Horvitz-Thompson weight of a tail value."""
     return 1.0 / self.rate
+
+  def in_hash_range(self, code: int) -> bool:
+    """The tail's Bernoulli(rate) draw: `code mod M < K` (always True for
+    an exact census)."""
+    return self.keep is None or code % VALUE_SAMPLE_MODULUS < self.keep
+
+  def kept(self, code: int) -> bool:
+    """Whether the census counts this value: the head with certainty, the
+    tail when its hash is in range (R67)."""
+    return self.keep is None or code in self.head or self.in_hash_range(code)
+
+  def weight_of(self, code: int) -> float:
+    """The Horvitz-Thompson weight of a counted value: 1 for an exact
+    census and for the head, 1 / rate for the tail."""
+    return 1.0 if self.keep is None or code in self.head else self.weight
+
+  def in_tail(self, code: int) -> bool:
+    """A value-sampled column's hash-sampled (non-head) value."""
+    return self.keep is not None and code not in self.head
 
   @property
   def method(self) -> Method:
@@ -459,7 +515,8 @@ class CensusColumn:  # pylint: disable=too-many-instance-attributes  # one field
                if name in layout.num_columns else None),
         literal_ok=bool(column.literal_ok),
         detection=frozenset(int(c) for c in column.detection_dictionary or ()),
-        day_granularity=bool(column.day_granularity))
+        day_granularity=bool(column.day_granularity),
+        head=frozenset(int(c) for c in column.census_head or ()))
 
 
 @dataclass(frozen=True)
@@ -545,7 +602,7 @@ class SideTotals:
         nonempty=tuple(nonempty))
 
 
-class _Sizes(NamedTuple):
+class ColumnSizes(NamedTuple):
   """One column's exact totals: non-null, matched non-null, non-empty."""
   n_src: int
   n_syn: int
@@ -555,9 +612,10 @@ class _Sizes(NamedTuple):
   ne_syn: int
 
 
-def _sizes(src: SideTotals, syn: SideTotals, j: int) -> _Sizes:
-  return _Sizes(src.nonnull[j], syn.nonnull[j], src.nonnull_m[j],
-                syn.nonnull_m[j], src.nonempty[j] or 0, syn.nonempty[j] or 0)
+def _sizes(src: SideTotals, syn: SideTotals, j: int) -> ColumnSizes:
+  return ColumnSizes(src.nonnull[j], syn.nonnull[j], src.nonnull_m[j],
+                     syn.nonnull_m[j], src.nonempty[j] or 0, syn.nonempty[j] or
+                     0)
 
 
 # --------------------------------------------------------------------------
@@ -566,8 +624,12 @@ def _sizes(src: SideTotals, syn: SideTotals, j: int) -> _Sizes:
 @dataclass(frozen=True)
 class ColumnRef:  # pylint: disable=too-many-instance-attributes  # one field per panel set
   """One census column's panel view (D3), built on the driver. For a
-  value-sampled column the code sets and R masks keep sampled values only
-  (the census sees nothing else); `r_nonnull`/`r_nonempty` stay full."""
+  value-sampled column the code sets keep the values the census counts
+  (head and hash range; it sees nothing else), and `r_mass_ht` is the
+  Horvitz-Thompson estimate of R's mass on them (1 when exact) — the
+  same draw the census's baseline sums use, so their difference is R's
+  mass outside the census without sampling noise. R's masks, like the
+  mask pass, cover every value; `r_nonnull`/`r_nonempty` stay full."""
   r_counts: Mapping[int, int]
   h_codes: frozenset[int]
   e_codes: frozenset[int]
@@ -575,6 +637,7 @@ class ColumnRef:  # pylint: disable=too-many-instance-attributes  # one field pe
   r_nonnull: int
   r_nonempty: int
   r_masks: Mapping[str, int]
+  r_mass_ht: float = 1.0
   pool: FreeTextPool | None = None
   pool_codes: frozenset[int] = frozenset()
   pool_reason: str | None = None
@@ -593,10 +656,6 @@ def _panel_code(col: CensusColumn, value: Any) -> int | None:
   if col.code_block == "text":
     return hash64(col.name, cell_text(value))
   return hash64(col.name, value)
-
-
-def _kept(col: CensusColumn, code: int) -> bool:
-  return col.keep is None or code % VALUE_SAMPLE_MODULUS < col.keep
 
 
 def _mask_of(text: str) -> str:
@@ -625,15 +684,16 @@ def _column_ref(col: CensusColumn, panel: Any,
     text = cell_text(value) if col.has_shapes else None
     if text:
       r_nonempty += 1
-    if not _kept(col, code):
-      continue
-    r_codes[code] += 1
-    if text:
       r_masks[_mask_of(text)] += 1
+    if col.kept(code):
+      r_codes[code] += 1
 
   def codes(rows: Sequence[Mapping[str, Any]]) -> frozenset[int]:
     found = (_panel_code(col, row.get(col.name)) for row in rows)
-    return frozenset(c for c in found if c is not None and _kept(col, c))
+    return frozenset(c for c in found if c is not None and col.kept(c))
+
+  head = sum(c for code, c in r_codes.items() if not col.in_tail(code))
+  tail = sum(c for code, c in r_codes.items() if col.in_tail(code))
 
   pool = None if pools is None else pools.get(col.name)
   return ColumnRef(
@@ -644,6 +704,7 @@ def _column_ref(col: CensusColumn, panel: Any,
       r_nonnull=r_nonnull,
       r_nonempty=r_nonempty,
       r_masks=dict(r_masks),
+      r_mass_ht=(head + col.weight * tail) / r_nonnull if r_nonnull else 0.0,
       pool=pool,
       pool_codes=frozenset(
           c for v in (pool.values if pool else ())
@@ -756,11 +817,11 @@ def _nonsubstantive(col: CensusColumn, batch: EncodedBatch,
 @dataclass
 class BatchCounts:
   """A bundle's pre-aggregated census: `values[(t, j, code)]` = counts6
-  (lists, merged in place), `masks[(t, j, mask)]` = [c_src, c_syn],
-  `literals[(t, j)]` = {code: text} of a literal-ok column's dictionary
-  values."""
+  (lists, merged in place), `masks[(t, j, mask code)]` = [c_src, c_syn,
+  mask], `literals[(t, j)]` = {code: text} of a literal-ok column's
+  dictionary values."""
   values: dict[tuple[str, int, int], list[int]] = field(default_factory=dict)
-  masks: dict[tuple[str, int, str], list[int]] = field(default_factory=dict)
+  masks: dict[tuple[str, int, int], list[Any]] = field(default_factory=dict)
   literals: dict[tuple[str, int], dict[int, str]] = field(default_factory=dict)
 
   def __len__(self) -> int:
@@ -792,8 +853,15 @@ def _add_values(out: BatchCounts, key_head: tuple[str, int], src: bool,
       slot[_FLAGS] |= _NONSUBSTANTIVE
 
 
+def mask_code(mask: str) -> int:
+  """The key of one mask in the mask pass (and its hashed label's code)."""
+  return hash64(_MASK_LABEL, mask)
+
+
 def _add_masks(out: BatchCounts, key_head: tuple[str, int], src: bool,
                texts: Sequence[str | None], counts: np.ndarray) -> None:
+  """Fold the batch's masks — of EVERY present value, never sampled (R67)
+  — into the bundle dict, keyed by mask hash."""
   slot_i = 0 if src else 1
   table, j = key_head
   present = [(t, c)
@@ -802,13 +870,16 @@ def _add_masks(out: BatchCounts, key_head: tuple[str, int], src: bool,
   masks = shape_masks([t for t, _ in present])
   long_count = sum(c for t, c in zip(texts, counts.tolist(), strict=True)
                    if t and len(t) > MASK_MAX_CHARS)
-  pairs = [*zip(masks, (c for _, c in present), strict=True)]
+  per_mask: dict[str, int] = {}
+  for mask, (_, c) in zip(masks, present, strict=True):
+    per_mask[mask] = per_mask.get(mask, 0) + c
   if long_count:
-    pairs.append((_LONG_MASK, long_count))
-  for mask, c in pairs:
-    slot = out.masks.get((table, j, mask))
+    per_mask[_LONG_MASK] = long_count
+  for mask, c in per_mask.items():
+    key = (table, j, mask_code(mask))
+    slot = out.masks.get(key)
     if slot is None:
-      slot = out.masks[(table, j, mask)] = [0, 0]
+      slot = out.masks[key] = [0, 0, mask]
     slot[slot_i] += c
 
 
@@ -821,6 +892,78 @@ def _add_literals(out: BatchCounts, key_head: tuple[str,
       found[code] = text
 
 
+class _BatchFlags(NamedTuple):
+  """A batch's per-row inputs shared by every census column."""
+  src: bool
+  matched: np.ndarray
+  in_r: np.ndarray
+
+
+def _batch_flags(spec: CensusSpec, batch: EncodedBatch) -> _BatchFlags | None:
+  """None for a batch the census does not count (reference/holdout: the
+  panel reaches it as the refs side input; or empty).
+
+  Raises:
+    ValueError: the batch belongs to another table.
+  """
+  side = Side(batch.side)
+  if side not in _COUNTED_SIDES or not batch.n:
+    return None
+  if batch.table != spec.table:
+    raise ValueError(f"a batch of {batch.table!r} reached the census spec of "
+                     f"{spec.table!r}")
+  src = side is Side.SOURCE
+  in_r = (
+      _r_subsample(batch.row_hash, spec.rate_r)
+      if src and spec.rate_r is not None else np.zeros(batch.n, dtype=bool))
+  return _BatchFlags(src, batch.subsample_m, in_r)
+
+
+def _kept_mask(col: CensusColumn, uniq: np.ndarray) -> np.ndarray:
+  """Which distinct values the census counts: every one when exact; the
+  head and the hash range when value-sampled (R67)."""
+  if col.keep is None:
+    return np.ones(uniq.size, dtype=bool)
+  in_range = (uniq % np.uint64(VALUE_SAMPLE_MODULUS)) < np.uint64(col.keep)
+  if not col.head:
+    return in_range
+  head = np.fromiter(col.head, dtype=np.uint64, count=len(col.head))
+  kept: np.ndarray = in_range | np.isin(uniq, head)
+  return kept
+
+
+def _accumulate_column(spec: CensusSpec, col: CensusColumn, batch: EncodedBatch,
+                       flags: _BatchFlags, out: BatchCounts) -> None:
+  """One column of one batch: masks and literals over every present
+  value, census counts over the kept ones."""
+  codes = _column_codes(col, batch)
+  rows = np.flatnonzero(codes != np.uint64(NULL_CODE))
+  if not rows.size:
+    return
+  uniq, first, inverse, full = np.unique(
+      codes[rows], return_index=True, return_inverse=True, return_counts=True)
+  first_rows = rows[first]
+  key_head = (spec.table, col.j)
+  if col.text_k is not None:
+    texts = [batch.text[col.text_k][i] for i in first_rows.tolist()]
+    if col.literal_ok and col.detection:
+      _add_literals(out, key_head, col, uniq, texts)
+    if col.has_shapes:
+      _add_masks(out, key_head, flags.src, texts, full)
+  kept = _kept_mask(col, uniq)
+  if not kept.any():
+    return
+  size = uniq.size
+  per_value = (full.astype(np.int64)[kept],
+               np.bincount(
+                   inverse, weights=flags.matched[rows],
+                   minlength=size).astype(np.int64)[kept],
+               np.bincount(inverse, weights=flags.in_r[rows],
+                           minlength=size).astype(np.int64)[kept])
+  _add_values(out, key_head, flags.src, uniq[kept], per_value,
+              _nonsubstantive(col, batch, first_rows[kept]))
+
+
 def accumulate(spec: CensusSpec, batch: EncodedBatch, out: BatchCounts) -> None:
   """Fold one encoded batch of `spec`'s table into `out` (the fused
   FlatMap of the module docstring). Reference/holdout batches are not
@@ -829,44 +972,11 @@ def accumulate(spec: CensusSpec, batch: EncodedBatch, out: BatchCounts) -> None:
   Raises:
     ValueError: the batch belongs to another table.
   """
-  side = Side(batch.side)
-  if side not in _COUNTED_SIDES or not batch.n:
+  flags = _batch_flags(spec, batch)
+  if flags is None:
     return
-  if batch.table != spec.table:
-    raise ValueError(f"a batch of {batch.table!r} reached the census spec of "
-                     f"{spec.table!r}")
-  src = side is Side.SOURCE
-  matched = batch.subsample_m
-  in_r = (
-      _r_subsample(batch.row_hash, spec.rate_r)
-      if src and spec.rate_r is not None else np.zeros(batch.n, dtype=bool))
   for col in spec.censused:
-    codes = _column_codes(col, batch)
-    present = codes != np.uint64(NULL_CODE)
-    if col.keep is not None:
-      present &= (codes % np.uint64(VALUE_SAMPLE_MODULUS)) < np.uint64(col.keep)
-    rows = np.flatnonzero(present)
-    if not rows.size:
-      continue
-    uniq, first, inverse, full = np.unique(
-        codes[rows], return_index=True, return_inverse=True, return_counts=True)
-    first_rows = rows[first]
-    size = uniq.size
-    per_value = (full.astype(np.int64),
-                 np.bincount(inverse, weights=matched[rows],
-                             minlength=size).astype(np.int64),
-                 np.bincount(inverse, weights=in_r[rows],
-                             minlength=size).astype(np.int64))
-    key_head = (spec.table, col.j)
-    _add_values(out, key_head, src, uniq, per_value,
-                _nonsubstantive(col, batch, first_rows))
-    if col.text_k is None:
-      continue
-    texts = [batch.text[col.text_k][i] for i in first_rows.tolist()]
-    if col.literal_ok and col.detection:
-      _add_literals(out, key_head, col, uniq, texts)
-    if col.has_shapes:
-      _add_masks(out, key_head, src, texts, per_value[0])
+    _accumulate_column(spec, col, batch, flags, out)
 
 
 def batch_counts(spec: CensusSpec, batch: EncodedBatch) -> BatchCounts:
@@ -913,6 +1023,33 @@ class CountsCombineFn(beam.CombineFn):
     return tuple(accumulator)
 
 
+class MaskCountsCombineFn(beam.CombineFn):
+  """Sums one mask's (c_src, c_syn, mask) entries; the mask text is the
+  same for every entry of a mask hash (the smallest is kept, order-free)."""
+
+  def create_accumulator(self) -> list[Any]:
+    return [0, 0, None]
+
+  def add_input(self, mutable_accumulator: list[Any],
+                element: Sequence[Any]) -> list[Any]:
+    mutable_accumulator[0] += int(element[0])
+    mutable_accumulator[1] += int(element[1])
+    mask = element[2]
+    if mask is not None and (mutable_accumulator[2] is None or
+                             mask < mutable_accumulator[2]):
+      mutable_accumulator[2] = mask
+    return mutable_accumulator
+
+  def merge_accumulators(self, accumulators: Iterable[list[Any]]) -> list[Any]:
+    merged = self.create_accumulator()
+    for accumulator in accumulators:
+      self.add_input(merged, accumulator)
+    return merged
+
+  def extract_output(self, accumulator: list[Any]) -> tuple[Any, ...]:
+    return tuple(accumulator)
+
+
 def _add_census(acc: CensusAccumulator, code: int,
                 counts: Sequence[int]) -> CensusAccumulator:
   acc.add(
@@ -949,9 +1086,14 @@ class CensusCombineFn(beam.CombineFn):
     return accumulator
 
 
-class _Contribution(NamedTuple):
-  """One column's additive second-pass sums (Horvitz-Thompson weighted
-  where the module docstring says so; lift counts are plain counts)."""
+class _Contribution(NamedTuple):  # pylint: disable=too-many-instance-attributes  # one field per additive sum
+  """One column's additive second-pass sums, each value weighted by its
+  Horvitz-Thompson weight w_v (1 when exact or in the head, 1 / rate in
+  the tail). `ht_*` are the weighted counts a value-sampled view reads;
+  `ca_*`/`cr_*` the plain Σy², Σxy, Σx² over the tail values of the
+  adherence / copy-rate ratios (their cluster-robust variance) and
+  `ca_n`/`cr_n` their denominators' rows observed; lift counts are plain
+  counts over the hash range."""
   tvd: float = 0.0
   jsd: float = 0.0
   tvd_floor: float = 0.0
@@ -982,6 +1124,29 @@ class _Contribution(NamedTuple):
   m_he: float = 0.0
   pool_r: float = 0.0
   pool_h: float = 0.0
+  ht_n_src: float = 0.0
+  ht_n_syn: float = 0.0
+  ht_k_src: float = 0.0
+  ht_k_syn: float = 0.0
+  ht_k_src_m: float = 0.0
+  ht_k_syn_m: float = 0.0
+  ht_clc_src_m: float = 0.0
+  ht_clc_syn_m: float = 0.0
+  ht_f1_src: float = 0.0
+  ht_f1_src_m: float = 0.0
+  ht_f1_syn_m: float = 0.0
+  ht_cov: float = 0.0
+  ht_novel: float = 0.0
+  ht_copies: float = 0.0
+  ht_subst: float = 0.0
+  ca_yy: float = 0.0
+  ca_xy: float = 0.0
+  ca_xx: float = 0.0
+  cr_yy: float = 0.0
+  cr_xy: float = 0.0
+  cr_xx: float = 0.0
+  ca_n: float = 0.0
+  cr_n: float = 0.0
 
 
 def _add_contributions(a: _Contribution, b: _Contribution) -> _Contribution:
@@ -1094,35 +1259,15 @@ class LiteralsCombineFn(beam.CombineFn):
 # --------------------------------------------------------------------------
 # the second pass (per value, per mask)
 # --------------------------------------------------------------------------
-def _entropy_view(col: CensusColumn, acc: CensusAccumulator,
-                  sizes: _Sizes) -> CensusAccumulator:
-  """The accumulator `summarize` reads entropy, Miller-Madow, Chao-Shen
-  coverage and Good-Turing from: the census itself when exact; for a
-  value-sampled column the Horvitz-Thompson view (exact totals from the
-  dense pass, Σ c ln c and the counts of values scaled by w)."""
-  if not col.sampled:
-    return acc
-  w = col.weight
-  return CensusAccumulator(
-      n_src=sizes.n_src,
-      n_syn=sizes.n_syn,
-      n_src_m=sizes.n_src_m,
-      n_syn_m=sizes.n_syn_m,
-      k_src=round(acc.k_src * w),
-      k_syn=round(acc.k_syn * w),
-      k_src_m=round(acc.k_src_m * w),
-      k_syn_m=round(acc.k_syn_m * w),
-      clc_src_m=acc.clc_src_m * w,
-      clc_syn_m=acc.clc_syn_m * w,
-      f1_src=round(acc.f1_src * w),
-      f1_src_m=round(acc.f1_src_m * w),
-      f1_syn_m=round(acc.f1_syn_m * w))
-
-
 def column_coverage(col: CensusColumn, acc: CensusAccumulator,
-                    sizes: _Sizes) -> tuple[float | None, float | None]:
-  """(source, synthetic) Chao-Shen sample coverage at matched n."""
-  view = summarize(_entropy_view(col, acc, sizes))
+                    sizes: ColumnSizes) -> tuple[float | None, float | None]:
+  """(source, synthetic) Chao-Shen sample coverage at matched n; (None,
+  None) on a value-sampled column, where the census does not estimate
+  it (Chao-Shen is a detail, R3)."""
+  del sizes  # the exact census's own totals are the dense ones
+  if col.sampled:
+    return None, None
+  view = summarize(acc)
   src, syn = view["chao_shen_coverage_src_m"], view["chao_shen_coverage_syn_m"]
   return (src if isinstance(src, float) else None,
           syn if isinstance(syn, float) else None)
@@ -1142,7 +1287,7 @@ def _present_probability(n: int, c: int, m: int) -> float:
 
 
 def _distribution_terms(f: dict[str, float], w: float, counts: Sequence[int],
-                        sizes: _Sizes) -> None:
+                        sizes: ColumnSizes) -> None:
   cs, cy = counts[_SRC], counts[_SYN]
   n_src, n_syn = sizes.n_src, sizes.n_syn
   tvd, jsd = tvd_jsd_from_census(((cs, cy),), n_src, n_syn)
@@ -1195,13 +1340,58 @@ def _lift_terms(f: dict[str, float], code: int, counts: Sequence[int],
     f[f"m_{side}"] = hit
 
 
+def _ht_counts(f: dict[str, float], w: float, counts: Sequence[int]) -> None:
+  """The weighted counts of values and rows (the value-sampled view)."""
+  cs, cy, csm, cym = (counts[_SRC], counts[_SYN], counts[_SRC_M],
+                      counts[_SYN_M])
+  f["ht_n_src"] = w * cs
+  f["ht_n_syn"] = w * cy
+  if cs:
+    f["ht_k_src"] = w
+    f["ht_f1_src"] = w if cs == 1 else 0.0
+  if cy:
+    f["ht_k_syn"] = w
+  if csm:
+    f["ht_k_src_m"] = w
+    f["ht_clc_src_m"] = w * csm * math.log(csm)
+    f["ht_f1_src_m"] = w if csm == 1 else 0.0
+  if cym:
+    f["ht_k_syn_m"] = w
+    f["ht_clc_syn_m"] = w * cym * math.log(cym)
+    f["ht_f1_syn_m"] = w if cym == 1 else 0.0
+
+
+def _ht_shares(f: dict[str, float], w: float, counts: Sequence[int],
+               tail: bool) -> None:
+  """The ratio numerators/denominators (coverage, novelty, adherence,
+  copies) and, for a tail value, its cluster sums."""
+  cs, cy = counts[_SRC], counts[_SYN]
+  adherent = cy if cs > 0 else 0
+  substantive = cy if not counts[_FLAGS] & _NONSUBSTANTIVE else 0
+  copies = substantive if 0 < cs < RARE_COUNT else 0
+  f["ht_cov"] = w * cs if cy > 0 else 0.0
+  f["ht_novel"] = w * (cy - adherent)
+  f["ht_copies"] = w * copies
+  f["ht_subst"] = w * substantive
+  f["ca_n"], f["cr_n"] = float(cy), float(substantive)  # rows observed
+  if tail:
+    f["ca_yy"], f["ca_xy"], f["ca_xx"] = (float(adherent * adherent),
+                                          float(adherent * cy), float(cy * cy))
+    f["cr_yy"], f["cr_xy"], f["cr_xx"] = (float(copies * copies),
+                                          float(copies * substantive),
+                                          float(substantive * substantive))
+
+
 def value_contribution(
-    col: CensusColumn, code: int, counts: Sequence[int], sizes: _Sizes,
+    col: CensusColumn, code: int, counts: Sequence[int], sizes: ColumnSizes,
     ref: ColumnRef | None, coverage: tuple[float | None,
                                            float | None]) -> _Contribution:
-  """One distinct value's share of every additive second-pass sum."""
-  w = col.weight
+  """One distinct value's share of every additive second-pass sum, at its
+  Horvitz-Thompson weight (`CensusColumn.weight_of`)."""
+  w = col.weight_of(code)
   f: dict[str, float] = {}
+  _ht_counts(f, w, counts)
+  _ht_shares(f, w, counts, col.in_tail(code))
   cs, csm, cym, csr = counts[_SRC], counts[_SRC_M], counts[_SYN_M], counts[
       _SRC_R]
   if sizes.n_src > 0 and sizes.n_syn > 0:
@@ -1220,20 +1410,22 @@ def value_contribution(
       _baseline_terms(f, w, cs, ref.r_counts.get(code, 0), sizes.n_src,
                       ref.r_nonnull)
     substantive = not counts[_FLAGS] & _NONSUBSTANTIVE
-    if substantive and 0 < cs < RARE_COUNT:
+    # lifts read the hash range only (a uniform draw; R, H, E, H_E thinned
+    # alike), never the head's certainty
+    if substantive and 0 < cs < RARE_COUNT and col.in_hash_range(code):
       _lift_terms(f, code, counts, ref)
   return _Contribution(**f)
 
 
-def mask_part(col: CensusColumn, mask: str, counts: Sequence[int],
-              sizes: _Sizes, ref: ColumnRef | None) -> MaskSummary:
-  """One mask's share of its column's `MaskSummary`."""
+def mask_part(mask: str, counts: Sequence[int], sizes: ColumnSizes,
+              ref: ColumnRef | None) -> MaskSummary:
+  """One mask's share of its column's `MaskSummary` (exact: the mask pass
+  counts every value, R67)."""
   cs, cy = int(counts[0]), int(counts[1])
-  w = col.weight
   summary = MaskSummary(
       seen_src=cs, seen_syn=cy, masks_src=int(cs > 0), masks_syn=int(cy > 0))
   if sizes.ne_src > 0 and sizes.ne_syn > 0:
-    summary.raw_tv = w * 0.5 * abs(cs / sizes.ne_src - cy / sizes.ne_syn)
+    summary.raw_tv = 0.5 * abs(cs / sizes.ne_src - cy / sizes.ne_syn)
   if mask == _LONG_MASK:
     summary.long_src, summary.long_syn = cs, cy
     return summary
@@ -1241,7 +1433,7 @@ def mask_part(col: CensusColumn, mask: str, counts: Sequence[int],
     summary.adherent_syn = cy
     if ref is not None:
       summary.adherent_ref = int(ref.r_masks.get(mask, 0))
-  if sizes.ne_src > 0 and w * cs / sizes.ne_src >= SHAPE_HEAD_FLOOR:
+  if sizes.ne_src > 0 and cs / sizes.ne_src >= SHAPE_HEAD_FLOOR:
     summary.head = {mask: (cs, cy)}
   return summary
 
@@ -1277,9 +1469,11 @@ class _Emitter:
             baseline: float | None = None,
             baseline_reason: str | None = None,
             detail: Mapping[str, Any] | None = None,
+            method: Method | None = None,
             **fields: Any) -> None:
     metric = _catalogue().get(metric_id)
-    notes = dict(detail or {})
+    notes = dict(_sig(dict(detail or {})))
+    method = method or col.method
     if not metric.baseline:
       baseline = None
     elif baseline is None:
@@ -1296,8 +1490,8 @@ class _Emitter:
             baseline_value=None if baseline is None else _sig(float(baseline)),
             n_source=sizes[0],
             n_synthetic=sizes[1],
-            method=col.method,
-            sample_rate=col.rate if col.sampled else None,
+            method=method,
+            sample_rate=(col.rate if method is Method.VALUE_SAMPLED else None),
             encoding_plan_digest=self.spec.encoding_plan_digest,
             detail=notes,
             **{
@@ -1309,7 +1503,9 @@ class _Emitter:
            col: CensusColumn,
            reason: str,
            *,
-           sizes: tuple[int | None, int | None] = (None, None)) -> None:
+           sizes: tuple[int | None, int | None] = (None, None),
+           method: Method | None = None) -> None:
+    method = method or col.method
     self.rows.append(
         MetricValue.not_evaluated(
             metric_id,
@@ -1319,24 +1515,41 @@ class _Emitter:
             column_kind=col.kind.value,
             n_source=sizes[0],
             n_synthetic=sizes[1],
-            method=col.method,
-            sample_rate=col.rate if col.sampled else None,
+            method=method,
+            sample_rate=(col.rate if method is Method.VALUE_SAMPLED else None),
             encoding_plan_digest=self.spec.encoding_plan_digest))
 
 
 @dataclass
 class _View:  # pylint: disable=too-many-instance-attributes  # everything one column's metrics read
   """One census column's parts and totals, as the metric functions read
-  them."""
+  them. `summary`/`entropy` are `summarize` of the census when exact; on
+  a value-sampled column `summary` holds the Horvitz-Thompson shares,
+  `entropy` `summarize` of the HT view (None with `ht_problem` saying
+  why when that view is out of range), and `shares` the adherence and
+  copy-rate ratios with their cluster-robust intervals."""
   col: CensusColumn
   acc: CensusAccumulator
   summary: dict[str, Any]
-  entropy: dict[str, Any]
+  entropy: dict[str, Any] | None
   c: _Contribution
   masks: MaskSummary | None
   literals: dict[int, str]
-  sizes: _Sizes
+  sizes: ColumnSizes
   ref: ColumnRef | None
+  shares: dict[str, tuple[float, float, float] | None] | None = None
+  ht_problem: str | None = None
+
+  def distinct(self, matched: bool) -> tuple[float, float]:
+    """(source, synthetic) distinct values, full or matched n: counted
+    when exact, Horvitz-Thompson estimates when value-sampled."""
+    if self.col.sampled:
+      c = self.c
+      return ((c.ht_k_src_m, c.ht_k_syn_m) if matched else
+              (c.ht_k_src, c.ht_k_syn))
+    acc = self.acc
+    return ((float(acc.k_src_m), float(acc.k_syn_m)) if matched else
+            (float(acc.k_src), float(acc.k_syn)))
 
   @property
   def pair(self) -> tuple[int, int]:
@@ -1367,65 +1580,105 @@ class _View:  # pylint: disable=too-many-instance-attributes  # everything one c
     return self.ref is not None and self.ref.r_nonnull > 0
 
   def ref_missing_mass(self) -> float:
-    """R's mass on values the census never saw (a source that moved)."""
-    return 0.5 * max(0.0, 1.0 - self.c.b_r_mass)
+    """Half R's mass on counted values the census never saw (a source
+    that moved): the driver's R mass on the census's draw less the part
+    the census found, both on the same draw (R67 M5)."""
+    if self.ref is None:
+      return 0.0
+    return 0.5 * max(0.0, self.ref.r_mass_ht - self.c.b_r_mass)
 
 
 _NO_CENSUS = ("no value census for this column (census: none — the planner "
               "censuses every non-key, non-nested column)")
 
+_SAMPLED_INTERVAL = ("cluster-robust: values are the sampling units; "
+                     "stratified Horvitz-Thompson ratio, linearised variance, "
+                     "Korn-Graubard effective-n Clopper-Pearson")
+
+
+def _share_row(e: _Emitter, v: _View, metric_id: str, share: str,
+               counts: tuple[int, int], detail: dict[str, Any]) -> None:
+  """A share with its interval: Wilson on the exact census's rows; on a
+  value-sampled column the stratified ratio and its cluster-robust
+  interval (`noise.stratified_ratio_interval`)."""
+  if v.col.sampled:
+    assert v.shares is not None
+    ratio = v.shares.get(share)
+    if ratio is None:
+      e.skip(
+          metric_id,
+          v.col,
+          "no counted synthetic value (value-sampled census)",
+          sizes=v.pair)
+      return
+    value, lo, hi = ratio
+    if value > 1.0 + _REL_TOL:
+      e.skip(
+          metric_id,
+          v.col, f"the Horvitz-Thompson share {value:.6g} exceeds 1: value "
+          "sampling cannot estimate it here",
+          sizes=v.pair)
+      return
+    detail = {**detail, "interval": _SAMPLED_INTERVAL}
+  else:
+    k, n = counts
+    value = k / n
+    lo, hi = noise.wilson_interval(k, n)
+  e.value(
+      metric_id,
+      v.col,
+      value,
+      synthetic_value=value,
+      ci_low=lo,
+      ci_high=hi,
+      sizes=v.pair,
+      detail=detail)
+
 
 def _category_adherence(e: _Emitter, v: _View) -> None:
   metric_id = "field.category_adherence"
   acc = v.acc
-  reason = v.missing() or (None if acc.n_syn else
-                           "no sampled synthetic value (value-sampled census)")
+  reason = v.missing()
+  if not reason and not v.col.sampled and not acc.n_syn:
+    reason = "no counted synthetic value"
   if reason:
     e.skip(metric_id, v.col, reason, sizes=v.pair)
     return
-  adherent = acc.n_syn - acc.novelty_syn
-  lo, hi = noise.wilson_interval(adherent, acc.n_syn)
-  e.value(
-      metric_id,
-      v.col,
-      adherent / acc.n_syn,
-      synthetic_value=adherent / acc.n_syn,
-      ci_low=lo,
-      ci_high=hi,
-      sizes=v.pair,
-      detail={
-          "invented_rows": acc.novelty_syn,
-          "counted_rows": acc.n_syn
-      })
+  detail = ({} if v.col.sampled else {
+      "invented_rows": acc.novelty_syn,
+      "counted_rows": acc.n_syn
+  })
+  _share_row(e, v, metric_id, "adherence",
+             (acc.n_syn - acc.novelty_syn, acc.n_syn), detail)
 
 
 def _copy_rate(e: _Emitter, v: _View) -> None:
   metric_id = "field.substantive_copy_rate"
   acc = v.acc
-  reason = v.missing() or (None if acc.substantive_syn else (
+  substantive = v.c.ht_subst if v.col.sampled else acc.substantive_syn
+  reason = v.missing() or (None if substantive else (
       "no substantive synthetic values (non-null, non-empty, not a "
       "0001-/9999- date sentinel)"))
   if reason:
     e.skip(metric_id, v.col, reason, sizes=v.pair)
     return
-  lo, hi = noise.wilson_interval(acc.copies_substantive, acc.substantive_syn)
-  detail: dict[str, Any] = {
-      "copies": acc.copies_substantive,
-      "substantive": acc.substantive_syn,
-      "rare_below": RARE_COUNT,
-  }
+  detail: dict[str, Any] = {"rare_below": RARE_COUNT}
+  if not v.col.sampled:
+    detail.update(copies=acc.copies_substantive, substantive=substantive)
   if v.col.kind is _K.TEMPORAL:
     detail["day_granularity"] = v.col.day_granularity
-  rate = acc.copies_substantive / acc.substantive_syn
-  e.value(
-      metric_id,
-      v.col,
-      rate,
-      synthetic_value=rate,
-      ci_low=lo,
-      ci_high=hi,
-      sizes=v.pair,
-      detail=detail)
+  _share_row(e, v, metric_id, "copy",
+             (acc.copies_substantive, acc.substantive_syn), detail)
+
+
+def _bounded(x: float | None, hi: float = 1.0) -> float | None:
+  """`x`, or None past `hi`: a Horvitz-Thompson estimate of a bounded
+  quantity that left its range cannot be reported (R67 guards)."""
+  return None if x is None or x > hi + _REL_TOL else x
+
+
+_OUT_OF_RANGE = ("the Horvitz-Thompson estimate exceeds 1, the metric's "
+                 "range: value sampling cannot estimate it here")
 
 
 def _tvd_jsd_w(e: _Emitter, v: _View) -> None:
@@ -1436,22 +1689,24 @@ def _tvd_jsd_w(e: _Emitter, v: _View) -> None:
       e.skip(metric_id, v.col, reason, sizes=v.pair)
     return
   c, has_ref = v.c, v.ref_baseline()
-  k = max(1, round(v.acc.k_src * v.col.weight))
-  e.value(
-      "column.tvd",
-      v.col,
-      c.tvd,
-      noise_floor=c.tvd_floor,
-      baseline=c.b_tvd + v.ref_missing_mass() if has_ref else None,
-      sizes=v.pair)
-  e.value(
-      "column.jsd",
-      v.col,
-      c.jsd,
-      noise_floor=noise.jsd_null_expectation_bits(k, *v.pair),
-      baseline=c.b_jsd + v.ref_missing_mass() if has_ref else None,
-      sizes=v.pair,
-      detail={"categories": k})
+  k = max(1, round(v.distinct(matched=False)[0]))
+  for metric_id, value, floor, base in (("column.tvd", c.tvd, c.tvd_floor,
+                                         c.b_tvd),
+                                        ("column.jsd", c.jsd,
+                                         noise.jsd_null_expectation_bits(
+                                             k, *v.pair), c.b_jsd)):
+    if _bounded(value) is None:
+      e.skip(metric_id, v.col, _OUT_OF_RANGE, sizes=v.pair)
+      continue
+    e.value(
+        metric_id,
+        v.col,
+        value,
+        noise_floor=floor,
+        baseline=_bounded(base + v.ref_missing_mass()) if has_ref else None,
+        baseline_reason=(None if not has_ref else _OUT_OF_RANGE),
+        sizes=v.pair,
+        detail={"categories": k} if metric_id == "column.jsd" else None)
   e.value(
       "column.cohens_w",
       v.col,
@@ -1463,12 +1718,13 @@ def _tvd_jsd_w(e: _Emitter, v: _View) -> None:
 
 def _top1(e: _Emitter, v: _View) -> None:
   metric_id = "column.top1_share_delta"
-  if v.col.sampled:
+  if v.col.sampled and not v.col.head:
     e.skip(
         metric_id,
         v.col,
-        f"value-sampled census (rate {v.col.rate:g}): the top-1 value may lie "
-        "outside the sampled hash range",
+        f"value-sampled census (rate {v.col.rate:g}) with no head stratum "
+        "(no top list was planned): the top-1 value may lie outside the "
+        "sampled hash range",
         sizes=v.pair)
     return
   reason = v.missing()
@@ -1493,36 +1749,39 @@ def _top1(e: _Emitter, v: _View) -> None:
       ci_low=lo,
       ci_high=hi,
       baseline=baseline,
-      sizes=v.pair)
+      sizes=v.pair,
+      detail={"head_values": len(v.col.head)} if v.col.sampled else None)
 
 
 def _coverage(e: _Emitter, v: _View) -> None:
   metric_id = "column.coverage_mass"
   reason = v.missing()
-  if reason or v.summary["coverage_mass"] is None:
-    e.skip(metric_id, v.col, reason or "no sampled source value", sizes=v.pair)
+  coverage = _bounded(v.summary["coverage_mass"])
+  if reason or coverage is None:
+    e.skip(metric_id, v.col, reason or "no counted source value", sizes=v.pair)
     return
   e.value(
       metric_id,
       v.col,
-      v.summary["coverage_mass"],
-      baseline=v.c.b_cov if v.ref_baseline() else None,
+      coverage,
+      baseline=_bounded(v.c.b_cov) if v.ref_baseline() else None,
+      baseline_reason=_OUT_OF_RANGE if v.ref_baseline() else None,
       sizes=v.pair)
 
 
 def _novelty(e: _Emitter, v: _View) -> None:
   metric_id = "column.novelty_mass"
   reason = v.missing()
-  novelty = v.summary["novelty_mass"]
+  novelty = _bounded(v.summary["novelty_mass"])
   if reason or novelty is None:
     e.skip(
-        metric_id, v.col, reason or "no sampled synthetic value", sizes=v.pair)
+        metric_id, v.col, reason or "no counted synthetic value", sizes=v.pair)
     return
   e.value(
       metric_id,
       v.col,
       novelty,
-      source_value=v.entropy["good_turing_unseen_src"],
+      source_value=v.summary["good_turing_unseen_src"],
       synthetic_value=novelty,
       sizes=v.pair,
       detail={"target": "Good-Turing f1/N of the source"})
@@ -1554,16 +1813,17 @@ def _entropy(e: _Emitter, v: _View, base: dict[str, Any] | None,
              base_reason: str | None) -> None:
   metric_id = "column.entropy_ratio"
   sizes = (v.sizes.n_src_m, v.sizes.n_syn_m)
-  reason = v.missing_matched()
-  if not reason and v.col.sampled and not (v.acc.k_src_m and v.acc.k_syn_m):
-    reason = "no sampled value at the matched n on one side"
+  reason = v.missing_matched() or v.ht_problem
   ent = v.entropy
-  if not reason and ent["entropy_ratio"] is None:
+  if not reason and ent is not None and ent["entropy_ratio"] is None:
     reason = str(ent["entropy_ratio_reason"] or "no matched-n values")
-  if reason:
-    e.skip(metric_id, v.col, reason, sizes=sizes)
+    if v.col.sampled:
+      reason = f"{reason} (Horvitz-Thompson view of a value-sampled census)"
+  if reason or ent is None:
+    e.skip(metric_id, v.col, str(reason), sizes=sizes)
     return
   ln2 = math.log(2.0)
+  sampled = v.col.sampled
   detail = {
       "matched_n": min(sizes),
       "n_src_m": sizes[0],
@@ -1572,8 +1832,8 @@ def _entropy(e: _Emitter, v: _View, base: dict[str, Any] | None,
       "miller_madow_syn_m_bits": ent["miller_madow_syn_m_bits"],
       "chao_shen_coverage_src_m": ent["chao_shen_coverage_src_m"],
       "chao_shen_coverage_syn_m": ent["chao_shen_coverage_syn_m"],
-      "chao_shen_src_m_bits": v.c.cs_src / ln2,
-      "chao_shen_syn_m_bits": v.c.cs_syn / ln2,
+      "chao_shen_src_m_bits": None if sampled else v.c.cs_src / ln2,
+      "chao_shen_syn_m_bits": None if sampled else v.c.cs_syn / ln2,
   }
   e.value(
       metric_id,
@@ -1594,15 +1854,16 @@ def _distinct(e: _Emitter, v: _View, base: dict[str, Any] | None,
   ratio = v.summary["distinct_ratio"]
   reason = v.missing_matched()
   if not reason and ratio is None:
-    reason = "no sampled source value at the matched n"
+    reason = "no counted source value at the matched n"
   if reason:
     e.skip(metric_id, v.col, reason, sizes=sizes)
     return
-  w, c = v.col.weight, v.c
+  c = v.c
+  full, matched = v.distinct(matched=False), v.distinct(matched=True)
   detail = {
       "matched_n": min(sizes),
-      "distinct_src": round(v.acc.k_src * w),
-      "distinct_syn": round(v.acc.k_syn * w),
+      "distinct_src": round(full[0]),
+      "distinct_syn": round(full[1]),
       "rarefaction_n": min(v.pair),
       "rarefied_distinct_src": c.rf_src,
       "rarefied_distinct_syn": c.rf_syn,
@@ -1612,8 +1873,8 @@ def _distinct(e: _Emitter, v: _View, base: dict[str, Any] | None,
       metric_id,
       v.col,
       ratio,
-      source_value=v.acc.k_src_m * w,
-      synthetic_value=v.acc.k_syn_m * w,
+      source_value=matched[0],
+      synthetic_value=matched[1],
       baseline=None if base is None else base["distinct_ratio"],
       baseline_reason=base_reason,
       sizes=sizes,
@@ -1653,18 +1914,17 @@ def _ceiling(e: _Emitter, v: _View) -> None:
       })
 
 
-def _tail_share(head_counts: Iterable[int], w: float, total: int) -> float:
+def _tail_share(head_counts: Iterable[int], total: int) -> float:
   """The tail's share from counts (the head's integer sum first), so no
   float residue of `1 - Σ shares` — whose size depends on summation
   order — reaches a floor or a payload."""
-  return max(0.0, total - w * sum(head_counts)) / total
+  return max(0, total - sum(head_counts)) / total
 
 
-def _masses(masks: MaskSummary, w: float, side: int,
-            total: int) -> dict[str, float]:
+def _masses(masks: MaskSummary, side: int, total: int) -> dict[str, float]:
   """{head mask: share} + the tail, in sorted mask order."""
-  head = {m: w * masks.head[m][side] / total for m in sorted(masks.head)}
-  head[_TAIL] = _tail_share((c[side] for c in masks.head.values()), w, total)
+  head = {m: masks.head[m][side] / total for m in sorted(masks.head)}
+  head[_TAIL] = _tail_share((c[side] for c in masks.head.values()), total)
   return head
 
 
@@ -1678,20 +1938,18 @@ def _shape_head(e: _Emitter, v: _View) -> None:
               "non-empty values (near-unique masks, e.g. long prose): the head "
               "TV would compare one tail bucket")
   if reason or masks is None:
-    e.skip(metric_id, v.col, str(reason), sizes=sizes)
+    e.skip(metric_id, v.col, str(reason), sizes=sizes, method=Method.EXACT)
     return
-  w = v.col.weight
-  src = _masses(masks, w, 0, v.sizes.ne_src)
-  syn = _masses(masks, w, 1, v.sizes.ne_syn)
+  src = _masses(masks, 0, v.sizes.ne_src)
+  syn = _masses(masks, 1, v.sizes.ne_syn)
   _, head, _ = shapes.shape_head_tv(src, syn, floor=SHAPE_HEAD_FLOOR)
   baseline = None
   ref = v.ref
   if ref is not None and ref.r_nonempty:
     r_mass = {
-        m: w * ref.r_masks.get(m, 0) / ref.r_nonempty
-        for m in sorted(masks.head)
+        m: ref.r_masks.get(m, 0) / ref.r_nonempty for m in sorted(masks.head)
     }
-    r_mass[_TAIL] = _tail_share((ref.r_masks.get(m, 0) for m in masks.head), w,
+    r_mass[_TAIL] = _tail_share((ref.r_masks.get(m, 0) for m in masks.head),
                                 ref.r_nonempty)
     baseline = shapes.shape_head_tv(src, r_mass, floor=SHAPE_HEAD_FLOOR)[1]
   e.value(
@@ -1701,6 +1959,7 @@ def _shape_head(e: _Emitter, v: _View) -> None:
       noise_floor=noise.tvd_null_expectation(list(src.values()), *sizes),
       baseline=baseline,
       sizes=sizes,
+      method=Method.EXACT,
       detail={
           "raw_tv": masks.raw_tv,
           "head_masks": len(masks.head),
@@ -1720,7 +1979,7 @@ def _shape_adherence(e: _Emitter, v: _View) -> None:
     reason = (f"every non-empty synthetic value is longer than "
               f"{MASK_MAX_CHARS} characters (masks pooled, not compared)")
   if reason or masks is None:
-    e.skip(metric_id, v.col, str(reason), sizes=sizes)
+    e.skip(metric_id, v.col, str(reason), sizes=sizes, method=Method.EXACT)
     return
   lo, hi = noise.wilson_interval(masks.adherent_syn, counted)
   baseline = None
@@ -1735,6 +1994,7 @@ def _shape_adherence(e: _Emitter, v: _View) -> None:
       ci_high=hi,
       baseline=baseline,
       sizes=sizes,
+      method=Method.EXACT,
       detail={"compared_values": counted})
 
 
@@ -1751,6 +2011,8 @@ def _lift_input(spec: CensusSpec, col: CensusColumn,
     return _LiftInput(None, str(spec.panel_reason))
   if view is None or view.ref is None:
     return _LiftInput(None, "no reference values for this column")
+  if view.sizes.n_syn <= 0:
+    return _LiftInput(view, "no non-null values on the synthetic side")
   if not view.c.v_r or not view.c.v_h:
     return _LiftInput(
         view, "no rare (source count < 10), substantive value is held only by "
@@ -1871,17 +2133,16 @@ def _topk_items(v: _View, top: Sequence[tuple[int, int]], total: int,
 
 def _topk_profiles(spec: CensusSpec, v: _View, totals: Mapping[str, SideTotals],
                    label_key: bytes) -> Iterator[ProfileValue]:
-  w = v.col.weight
-  for side, top, k in ((_SOURCE, v.acc.top_src, v.acc.k_src),
-                       (_SYNTHETIC, v.acc.top_syn, v.acc.k_syn)):
+  distinct = v.distinct(matched=False)
+  for side, top, k in ((_SOURCE, v.acc.top_src, distinct[0]),
+                       (_SYNTHETIC, v.acc.top_syn, distinct[1])):
     side_totals = totals[side]
     total = side_totals.nonnull[v.col.j]
     items = _topk_items(v, top, total, label_key)
-    distinct = round(k * w)
     payload: dict[str, Any] = {
         "items": items,
         "other_count": max(0, total - sum(i["count"] for i in items)),
-        "distinct": distinct,
+        "distinct": round(k),
         "total": total,
         "nulls": side_totals.rows - total,
     }
@@ -1894,13 +2155,13 @@ def _topk_profiles(spec: CensusSpec, v: _View, totals: Mapping[str, SideTotals],
         column=v.col.name,
         payload=payload,
         n=total,
-        truncated=v.col.sampled or distinct > len(items))
+        truncated=v.col.sampled or round(k) > len(items))
 
 
-def _mask_label(mask: str, src_count: float, label_key: bytes) -> str:
+def _mask_label(mask: str, src_count: int, label_key: bytes) -> str:
   if src_count >= RARE_COUNT and _PLACEHOLDERS.intersection(mask):
     return mask
-  return hashed_label(hash64(_MASK_LABEL, mask), key=label_key)
+  return hashed_label(mask_code(mask), key=label_key)
 
 
 def _shape_profiles(spec: CensusSpec, v: _View,
@@ -1908,53 +2169,129 @@ def _shape_profiles(spec: CensusSpec, v: _View,
   masks = v.masks
   if masks is None:
     return
-  w = v.col.weight
   ranked = sorted(masks.head.items(), key=lambda kv: (-kv[1][0], kv[0]))
   for side, slot, total in ((_SOURCE, 0, v.sizes.ne_src), (_SYNTHETIC, 1,
                                                            v.sizes.ne_syn)):
     if total <= 0:
       continue
     items = [{
-        "mask": _mask_label(mask, w * counts[0], label_key),
-        "count": min(total, round(w * counts[slot])),
-        "share": min(1.0, w * counts[slot] / total),
+        "mask": _mask_label(mask, counts[0], label_key),
+        "count": counts[slot],
+        "share": counts[slot] / total,
     } for mask, counts in ranked]
-    payload: dict[str, Any] = {
-        "items":
-            items,
-        "tail_share":
-            _tail_share((c[slot] for c in masks.head.values()), w, total),
-        "head_floor":
-            SHAPE_HEAD_FLOOR,
-    }
-    if v.col.sampled:
-      payload["value_sample_rate"] = v.col.rate
     yield ProfileValue(
         table=spec.table,
         profile_kind="shape_mix",
         side=side,
         column=v.col.name,
-        payload=payload,
+        payload={
+            "items":
+                items,
+            "tail_share":
+                _tail_share((c[slot] for c in masks.head.values()), total),
+            "head_floor":
+                SHAPE_HEAD_FLOOR,
+        },
         n=total)
 
 
-def _view(col: CensusColumn, parts: ColumnParts | None, sizes: _Sizes,
+def _ratio(num: float, den: float) -> float | None:
+  return num / den if den > 0 else None
+
+
+def _ht_problem(c: _Contribution, sizes: ColumnSizes) -> str | None:
+  """Why a value-sampled column's Horvitz-Thompson entropy view cannot be
+  used (R67), or None: each side needs a counted value at matched n and
+  Σ c ln c within [0, n ln n] (a heavy value weighted by 1 / rate can
+  push it past, where the entropy would turn negative)."""
+  for side, clc, n, k in (("source", c.ht_clc_src_m, sizes.n_src_m,
+                           c.ht_k_src_m), ("synthetic", c.ht_clc_syn_m,
+                                           sizes.n_syn_m, c.ht_k_syn_m)):
+    if n <= 0:
+      continue
+    if k <= 0:
+      return (f"no counted value at the matched n on the {side} side "
+              "(value-sampled census)")
+    limit = n * math.log(n)
+    if clc < 0.0 or clc > limit * (1.0 + _REL_TOL):
+      return (f"the Horvitz-Thompson view is out of range on the {side} side "
+              f"(Σ c ln c = {clc:.6g} outside [0, n ln n = {limit:.6g}]): "
+              "value sampling cannot estimate the entropy here")
+  return None
+
+
+def _sampled_parts(
+    col: CensusColumn, c: _Contribution, sizes: ColumnSizes
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any], str | None]:
+  """A value-sampled column's (summary, entropy, shares, problem): the
+  Horvitz-Thompson ratios, `summarize` of the HT entropy view (validated),
+  and the adherence / copy-rate ratios with cluster-robust intervals."""
+  summary = {
+      "coverage_mass": _ratio(c.ht_cov, c.ht_n_src),
+      "novelty_mass": _ratio(c.ht_novel, c.ht_n_syn),
+      "good_turing_unseen_src": _ratio(c.ht_f1_src, c.ht_n_src),
+      "distinct_ratio": _ratio(c.ht_k_syn_m, c.ht_k_src_m),
+  }
+  shares = {
+      "adherence":
+          noise.stratified_ratio_interval(c.ht_n_syn - c.ht_novel, c.ht_n_syn,
+                                          c.ca_yy, c.ca_xy, c.ca_xx, col.rate,
+                                          c.ca_n),
+      "copy":
+          noise.stratified_ratio_interval(c.ht_copies, c.ht_subst, c.cr_yy,
+                                          c.cr_xy, c.cr_xx, col.rate, c.cr_n),
+  }
+  problem = _ht_problem(c, sizes)
+  if problem is not None:
+    return summary, None, shares, problem
+  entropy = summarize(
+      CensusAccumulator(
+          n_src=sizes.n_src,
+          n_syn=sizes.n_syn,
+          n_src_m=sizes.n_src_m,
+          n_syn_m=sizes.n_syn_m,
+          k_src=round(c.ht_k_src),
+          k_syn=round(c.ht_k_syn),
+          k_src_m=round(c.ht_k_src_m),
+          k_syn_m=round(c.ht_k_syn_m),
+          clc_src_m=c.ht_clc_src_m,
+          clc_syn_m=c.ht_clc_syn_m,
+          f1_src=round(c.ht_f1_src),
+          f1_src_m=round(c.ht_f1_src_m),
+          f1_syn_m=round(c.ht_f1_syn_m)))
+  for side in ("src", "syn"):
+    bits, k = entropy[f"entropy_{side}_m_bits"], entropy[f"distinct_{side}_m"]
+    if isinstance(k, int) and k >= _DIVERSE_K and not (isinstance(bits, float)
+                                                       and bits > 0.0):
+      return summary, None, shares, (
+          f"the Horvitz-Thompson entropy of the {side} side is not positive "
+          f"with {k} values: value sampling cannot estimate it here")
+  return summary, entropy, shares, None
+
+
+def _view(col: CensusColumn, parts: ColumnParts | None, sizes: ColumnSizes,
           ref: ColumnRef | None) -> _View:
   acc = parts.acc if parts is not None and parts.acc is not None else (
       CensusAccumulator())
-  summary = summarize(acc)
-  return _View(
+  c = (
+      parts.contrib
+      if parts is not None and parts.contrib is not None else _Contribution())
+  view = _View(
       col=col,
       acc=acc,
-      summary=summary,
-      entropy=(summarize(_entropy_view(col, acc, sizes))
-               if col.sampled else summary),
-      c=(parts.contrib if parts is not None and parts.contrib is not None else
-         _Contribution()),
+      summary={},
+      entropy=None,
+      c=c,
       masks=parts.masks if parts is not None else None,
       literals=dict(parts.literals) if parts is not None else {},
       sizes=sizes,
       ref=ref)
+  if col.sampled:
+    view.summary, view.entropy, view.shares, view.ht_problem = _sampled_parts(
+        col, c, sizes)
+  else:
+    view.summary = view.entropy = summarize(acc)
+  return view
 
 
 _VIEW_METRICS: tuple[tuple[str, ...], ...] = (
@@ -2064,10 +2401,9 @@ def census_outputs(spec: CensusSpec, batches: Iterable[EncodedBatch],
                               refs.get(j), coverage[j])
     part.contrib = item if part.contrib is None else _add_contributions(
         part.contrib, item)
-  for (_, j, mask), value in sorted(counts.masks.items()):
+  for (_, j, _), slot in sorted(counts.masks.items(), key=lambda kv: kv[0]):
     part = parts.setdefault(j, ColumnParts())
-    item_m = mask_part(spec.columns[j], mask, value, _sizes(src, syn, j),
-                       refs.get(j))
+    item_m = mask_part(str(slot[2]), slot, _sizes(src, syn, j), refs.get(j))
     part.masks = item_m if part.masks is None else part.masks.merge(item_m)
   for (_, j), found in counts.literals.items():
     parts.setdefault(j, ColumnParts()).literals.update(found)
@@ -2091,9 +2427,9 @@ def _windowed(value: Any, windowed: bool) -> Any:
 def _outputs(counts: BatchCounts, windowed: bool) -> Iterator[Any]:
   for (table, j, code), slot in counts.values.items():
     yield _windowed(((table, j, _signed(code)), tuple(slot)), windowed)
-  for mask_key, pair in counts.masks.items():
-    yield beam.pvalue.TaggedOutput(_MASKS,
-                                   _windowed((mask_key, tuple(pair)), windowed))
+  for (table, j, code), slot in counts.masks.items():
+    yield beam.pvalue.TaggedOutput(
+        _MASKS, _windowed(((table, j, _signed(code)), tuple(slot)), windowed))
   for literal_key, found in counts.literals.items():
     if found:
       yield beam.pvalue.TaggedOutput(
@@ -2103,12 +2439,14 @@ def _outputs(counts: BatchCounts, windowed: bool) -> Iterator[Any]:
 class CensusPreAggregateFn(beam.DoFn):
   """`EncodedBatch` → pre-aggregated census entries (module docstring).
 
-  One `BatchCounts` per bundle, flushed in `finish_bundle`; past
-  `max_keys` keys (values + masks) it is flushed right after the batch
-  that filled it, so it holds at most `max_keys` plus one batch's
-  distinct keys, and no count is ever dropped. Outputs: main `((t, j,
-  code), counts6)`, the code as the int64 with the same 64 bits (a Beam
-  key then takes the coder's varint path); tagged `masks` and
+  One `BatchCounts` per bundle, flushed in `finish_bundle`, and flushed
+  early before any column whose keys could take it past `max_keys`
+  (values + masks; a column of a batch adds at most two keys per row), so
+  it never holds more than `max_keys` keys — or one column-batch's keys
+  when that alone is larger — and no count is ever dropped (R67 M1).
+  Outputs: main `((t, j, code), counts6)` and tagged `masks` `((t, j,
+  mask code), (c_src, c_syn, mask))`, each code as the int64 with the
+  same 64 bits (a Beam key then takes the coder's varint path); tagged
   `literals`."""
 
   def __init__(self,
@@ -2120,6 +2458,11 @@ class CensusPreAggregateFn(beam.DoFn):
     self._max_keys = max_keys
     self._counts = BatchCounts()
 
+  @property
+  def held(self) -> int:
+    """How many keys the bundle dict holds now."""
+    return len(self._counts)
+
   def start_bundle(self) -> None:
     self._counts = BatchCounts()
 
@@ -2127,10 +2470,15 @@ class CensusPreAggregateFn(beam.DoFn):
     spec = self._specs.get(element.table)
     if spec is None:
       raise ValueError(f"no census spec for table {element.table!r}")
-    accumulate(spec, element, self._counts)
-    if len(self._counts) > self._max_keys:
-      counts, self._counts = self._counts, BatchCounts()
-      yield from _outputs(counts, windowed=False)
+    flags = _batch_flags(spec, element)
+    if flags is None:
+      return
+    bound = 2 * element.n  # a column's value keys + mask keys, at most
+    for col in spec.censused:
+      if self._counts and len(self._counts) + bound > self._max_keys:
+        counts, self._counts = self._counts, BatchCounts()
+        yield from _outputs(counts, windowed=False)
+      _accumulate_column(spec, col, element, flags, self._counts)
 
   def finish_bundle(self) -> Iterator[Any]:
     counts, self._counts = self._counts, BatchCounts()
@@ -2186,15 +2534,15 @@ def _contribution_entry(
                                         coverage.get((table, j), (None, None)))
 
 
-def _mask_entry(item: tuple[tuple[str, int, str],
-                            Sequence[int]], specs: Mapping[str, CensusSpec],
+def _mask_entry(item: tuple[tuple[str, int, int],
+                            Sequence[Any]], specs: Mapping[str, CensusSpec],
                 totals: Mapping[tuple[str, str], SideTotals],
                 refs: Mapping[tuple[str, int], ColumnRef]) -> tuple[Any, Any]:
-  (table, j, mask), counts = item
+  (table, j, _), counts = item
   spec = specs[table]
   src, syn = _side_totals(table, spec, totals)
-  return (table, j), mask_part(spec.columns[j], mask, counts,
-                               _sizes(src, syn, j), refs.get((table, j)))
+  return (table, j), mask_part(counts[2], counts, _sizes(src, syn, j),
+                               refs.get((table, j)))
 
 
 def _tagged(item: tuple[tuple[str, int], Any], kind: str) -> tuple[str, Any]:
@@ -2281,8 +2629,10 @@ class CensusMetrics(beam.PTransform):
     counted = batches | "PreAggregate" >> beam.ParDo(
         CensusPreAggregateFn(specs)).with_outputs(
             _MASKS, _LITERALS, main=_VALUES)
+    # no hot-key fanout: after pre-aggregation a value key arrives at most
+    # once per bundle; the per-column combines keep combiner lifting
     values = counted[_VALUES] | "SumValues" >> beam.CombinePerKey(
-        CountsCombineFn()).with_hot_key_fanout(HOT_KEY_FANOUT)
+        CountsCombineFn())
     summaries = (
         values
         | "ByColumn" >> beam.Map(_by_column)
@@ -2296,9 +2646,7 @@ class CensusMetrics(beam.PTransform):
         | "SumContributions" >> beam.CombinePerKey(ContributionCombineFn()))
     masks = (
         counted[_MASKS]
-        | "SumMasks" >> beam.CombinePerKey(
-            CountsCombineFn(
-                width=2, flags_index=None)).with_hot_key_fanout(HOT_KEY_FANOUT)
+        | "SumMasks" >> beam.CombinePerKey(MaskCountsCombineFn())
         | "MaskParts" >> beam.Map(_mask_entry, specs, totals, refs)
         | "MaskSummaries" >> beam.CombinePerKey(MaskSummaryCombineFn()))
     literals = counted[_LITERALS] | "Literals" >> beam.CombinePerKey(

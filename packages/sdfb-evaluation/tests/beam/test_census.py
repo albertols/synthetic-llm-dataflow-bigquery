@@ -20,6 +20,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -66,7 +67,7 @@ from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.context import budget as budget_module
 from sdfb_evaluation.context import plan as plan_module
 from sdfb_evaluation.scoring import status_for, to_metric_row, to_profile_row
-from sdfb_evaluation.stats import distances, shapes
+from sdfb_evaluation.stats import distances, noise, shapes
 from sdfb_evaluation.stats.diversity import CensusAccumulator, summarize
 from sdfb_evaluation.types import MetricValue, ProfileValue, Status
 
@@ -168,8 +169,10 @@ def _pure_accumulator(
     table: Any, j: int,
     rows_by: Mapping[str, Sequence[Mapping[str, Any]]]) -> CensusAccumulator:
   """The Task 8 accumulator of plan column j, counted with a Counter over
-  `hash64` codes (the matched-n flags are the encoder's own)."""
+  `hash64` codes (the matched-n flags are the encoder's own); a
+  value-sampled column counts only the head and the hash range."""
   name = table.columns[j].name
+  column = CensusSpec.from_table(table).columns[j]
   full: dict[str, Counter] = {}
   matched: dict[str, Counter] = {}
   substantive: dict[int, bool] = {}
@@ -181,6 +184,8 @@ def _pure_accumulator(
       if value is None:
         continue
       code = hash64(name, value)
+      if not column.kept(code):
+        continue
       substantive[code] = _substantive(value)
       full[side][code] += 1
       if flag:
@@ -197,6 +202,16 @@ def _pure_accumulator(
   return acc
 
 
+def _floats(obj: Any) -> list[float]:
+  if isinstance(obj, float):
+    return [obj] if math.isfinite(obj) else []
+  if isinstance(obj, Mapping):
+    return [x for value in obj.values() for x in _floats(value)]
+  if isinstance(obj, (list, tuple)):
+    return [x for value in obj for x in _floats(value)]
+  return []
+
+
 def _column_index(table: Any, name: str) -> int:
   return [c.name for c in table.columns].index(name)
 
@@ -208,8 +223,10 @@ def _counts(rows: Sequence[Mapping[str, Any]], name: str) -> Counter:
 @pytest.fixture(scope="module", name="users_run")
 def fixture_users_run(tmp_path_factory: pytest.TempPathFactory) -> tuple:
   """One DirectRunner pass over the users table, shared by the tests that
-  only read its output."""
+  only read its output; `sku` is value-sampled (R67's head/tail design)
+  so the Beam path is held to the in-process one there too."""
   table, rows = users_table()
+  table = with_census(table, sku=("value_sampled", 0.25))
   metrics, profiles, summaries = _run(table, rows,
                                       tmp_path_factory.mktemp("users"))
   return table, rows, metrics, profiles, summaries
@@ -364,16 +381,20 @@ def test_value_sampling_above_budget_is_unbiased():
   truth_entropy = exact[("column.entropy_ratio", "handle")]
   assert entropy.source_value == pytest.approx(
       truth_entropy.source_value, rel=0.05)
-  # only sampled hashes enter the census
+  # only the head (with certainty) and the tail's hash range enter
   spec = CensusSpec.from_table(sampled_table)
+  head = spec.columns[1].head
+  assert head, "the planner's census head (source + synthetic top values)"
   counts = batch_counts(spec, encode(sampled_table, "source", source)[0])
   keep = round(0.02 * budget_module.VALUE_SAMPLE_MODULUS)
   assert counts.values
-  assert all(code % budget_module.VALUE_SAMPLE_MODULUS < keep
+  assert all(code in head or code % budget_module.VALUE_SAMPLE_MODULUS < keep
              for (_, _, code) in counts.values)
-  # a value-sampled top-1 may lie outside the sampled hash range
+  assert any(code % budget_module.VALUE_SAMPLE_MODULUS >= keep
+             for (_, _, code) in counts.values)
+  # the top values sit in the certainty stratum: top-1 is exact (R67)
   top1 = sampled[("column.top1_share_delta", "handle")]
-  assert top1.value is None and "top-1" in top1.detail["reason"]
+  assert top1.value == exact[("column.top1_share_delta", "handle")].value
 
 
 def test_value_lift_detects_planted_rare_copies(tmp_path):
@@ -476,9 +497,13 @@ def test_numeric_and_day_temporal_copy_rate_is_info(users_run):
     assert row["status"] == "info" and row["score"] is None
     assert "domain" in row["detail"]["reason"]
   assert by_key[(metric.id, "signup_date")].detail["day_granularity"] is True
+  # R66: gated only on free text; every other kind reports INFO
   for name in ("last_login", "full_name", "city"):
     mv = by_key[(metric.id, name)]
-    assert status_for(metric, mv) is not Status.INFO, name
+    assert status_for(metric, mv) is Status.INFO, name
+  bio = by_key[(metric.id, "bio")]
+  assert bio.column_kind == "text"
+  assert status_for(metric, bio) is not Status.INFO
 
 
 # --------------------------------------------------------------------------
@@ -498,6 +523,9 @@ def test_catalogue_coverage_every_owned_id_emitted_or_explained(users_run):
     assert mv.column_kind in {str(k) for k in census.APPLIES_TO[mv.metric_id]}
     if mv.value is None and not metric.uses_ci_bound:
       assert mv.detail.get("reason"), mv
+    # M3: every float in detail at 12 significant digits (R21)
+    for x in _floats(mv.detail):
+      assert float(f"{x:.12g}") == x, (mv.metric_id, x)
     assert mv.encoding_plan_digest == table.encoding_plan_digest
     json.dumps(
         to_metric_row(
@@ -691,23 +719,18 @@ def test_shape_head_tv_follows_the_pure_head_pooling(users_run):
   assert bio.value is None and "2 %" in bio.detail["reason"]
 
 
-def test_preaggregation_flushes_early_and_never_drops():
-  table, rows = users_table(n_source=800, n_synthetic=600, n_reference=200)
-  spec = CensusSpec.from_table(table)
-  batches = encode(table, "source", rows["source"], chunk=200)
-  batches += encode(table, "synthetic", rows["synthetic"], chunk=200)
-  fn = CensusPreAggregateFn({table.name: spec}, max_keys=50)
-  fn.setup()
-  fn.start_bundle()
-  early = []
-  for batch in batches:
-    early.extend(fn.process(batch))
-  late = list(fn.finish_bundle())
-  assert early, "a full dict flushes before the bundle ends"
+def _signed_key(key: tuple) -> tuple:
+  table, j, code = key
+  return (table, j, code - 2**64 if code >= 2**63 else code)
+
+
+def _drain(outputs: Sequence[Any]) -> tuple[dict, dict]:
+  """Sum a DoFn's main and `masks` outputs by key."""
   totals: dict[tuple, list[int]] = {}
-  masks: dict[tuple, list[int]] = {}
+  masks: dict[tuple, list[Any]] = {}
   combine = CountsCombineFn()
-  for output in early + late:
+  mask_combine = census.MaskCountsCombineFn()
+  for output in outputs:
     tag, element = None, output
     if isinstance(element, beam.pvalue.TaggedOutput):
       tag, element = element.tag, element.value
@@ -715,26 +738,45 @@ def test_preaggregation_flushes_early_and_never_drops():
       element = element.value
     key, value = element
     if tag == "masks":
-      slot = masks.setdefault(key, [0, 0])
-      slot[0] += value[0]
-      slot[1] += value[1]
+      masks[key] = mask_combine.add_input(
+          masks.get(key) or mask_combine.create_accumulator(), value)
     elif tag is None:
       totals[key] = combine.add_input(
           totals.get(key) or combine.create_accumulator(), value)
+  return totals, masks
+
+
+@pytest.mark.parametrize("max_keys", [50, 3000])
+def test_preaggregation_flushes_early_and_never_drops(max_keys):
+  table, rows = users_table(n_source=800, n_synthetic=600, n_reference=200)
+  table = with_census(table, sku=("value_sampled", 0.3))
+  spec = CensusSpec.from_table(table)
+  batches = encode(table, "source", rows["source"], chunk=200)
+  batches += encode(table, "synthetic", rows["synthetic"], chunk=200)
+  fn = CensusPreAggregateFn({table.name: spec}, max_keys=max_keys)
+  fn.setup()
+  fn.start_bundle()
+  early = []
+  for batch in batches:
+    early.extend(fn.process(batch))
+    # M1: never more than max_keys held (or one column-batch's keys)
+    assert fn.held <= max(max_keys, 2 * batch.n)
+  late = list(fn.finish_bundle())
+  assert early, "a full dict flushes before the bundle ends"
+  totals, masks = _drain(early + late)
   expected = batch_counts(spec, batches[0])
   for batch in batches[1:]:
     census.accumulate(spec, batch, expected)
-  # a Beam key carries the code as the int64 with the same 64 bits
+  # a Beam key carries each code as the int64 with the same 64 bits
   assert {
       k: tuple(v) for k, v in totals.items()
   } == {
-      (t, j, code - 2**64 if code >= 2**63 else code): tuple(v)
-      for (t, j, code), v in expected.values.items()
+      _signed_key(k): tuple(v) for k, v in expected.values.items()
   }
   assert {
       k: tuple(v) for k, v in masks.items()
   } == {
-      k: tuple(v) for k, v in expected.masks.items()
+      _signed_key(k): tuple(v) for k, v in expected.masks.items()
   }
   assert MAX_PREAGG_KEYS == 100_000
 
@@ -742,7 +784,7 @@ def test_preaggregation_flushes_early_and_never_drops():
 def test_constants_match_the_planner():
   assert RARE_COUNT == plan_module.LITERAL_MIN_COUNT
   assert census.VALUE_SAMPLE_MODULUS == budget_module.VALUE_SAMPLE_MODULUS
-  assert census.HOT_KEY_FANOUT == 16
+  assert not hasattr(census, "HOT_KEY_FANOUT")  # M2: no value-level fanout
 
 
 def test_throughput_census_batch(record_property):
@@ -791,13 +833,8 @@ def test_empty_synthetic_side_is_not_evaluated_with_reasons():
   result = _pure(table, {"source": rows["source"]})
   assert result.metrics
   for mv in result.metrics:
-    metric = _CATALOGUE.get(mv.metric_id)
-    if metric.uses_ci_bound and mv.ci_low is not None:
-      continue  # a lift with no events gates on its bound (R38)
-    if mv.value is None:
-      assert mv.detail["reason"], mv
-    else:
-      assert mv.metric_id in ("field.value_memorization_lift",), mv
+    assert mv.value is None and mv.ci_low is None, mv  # lifts too (M4)
+    assert mv.detail["reason"], mv
   assert all(pv.side == "source" or pv.payload["total"] == 0
              for pv in result.profiles
              if pv.profile_kind == "topk")
@@ -819,3 +856,290 @@ def test_interval_metrics_carry_ci_and_scalar_metrics_a_noise_floor(users_run):
     else:
       assert method in (None, "none"), mv
       assert mv.noise_floor is None and mv.ci_low is None, mv
+
+
+# --------------------------------------------------------------------------
+# value sampling (Ruling R67): stratified head/tail, guards, exact masks
+# --------------------------------------------------------------------------
+def _cities(n: int, seed: int, name: str) -> tuple[Any, dict[str, list]]:
+  """A zipf city column whose top value holds about a quarter of the
+  rows; the synthetic side halves it into invented values (a heavy-hitter
+  distortion value sampling must not miss)."""
+  rng = np.random.default_rng(seed)
+  src = [f"Town{int(rng.zipf(1.3)) % 20000:05d}" for _ in range(n)]
+  syn = [f"Town{int(rng.zipf(1.3)) % 20000:05d}" for _ in range(n)]
+  top = Counter(src).most_common(1)[0][0]
+  syn = [
+      f"New{i:06d}" if v == top and i % 2 == 0 else v for i, v in enumerate(syn)
+  ]
+  fields = ({
+      "name": "row_id",
+      "type": "INT64",
+      "mode": "REQUIRED"
+  }, {
+      "name": name,
+      "type": "STRING",
+      "mode": "NULLABLE"
+  })
+  rows = {
+      "source": [{
+          "row_id": i,
+          name: v
+      } for i, v in enumerate(src)],
+      "synthetic": [{
+          "row_id": 10**6 + i,
+          name: v
+      } for i, v in enumerate(syn)],
+  }
+  table = planned_table(
+      "cities",
+      fields,
+      rows["source"],
+      rows["synthetic"],
+      pk=("row_id",),
+      pair_max_columns=0)
+  return table, rows
+
+
+def _without_head(table: Any, name: str) -> Any:
+  columns = tuple(
+      dataclasses.replace(c, census_head=None) if c.name == name else c
+      for c in table.columns)
+  return dataclasses.replace(table, columns=columns)
+
+
+def test_value_sampled_heavy_hitter_is_exact_in_the_head_and_never_crashes():
+  """The review probes (probe_heavy2/3): a heavy value that lands in the
+  hash range used to push Σ c ln c past n ln n (ZeroDivisionError). The
+  head stratum now counts it with certainty; without a head the HT view
+  is validated and a metric out of range is not_evaluated, never a crash."""
+  for name in ("city_c", "city_3", "city_8"):
+    table, rows = _cities(20_000, 7, name)
+    column = next(c for c in table.columns if c.name == name)
+    assert column.census_head, "the planner fills the census head"
+    exact = _by_key(
+        _pure(with_census(table, **{name: ("exact", None)}), rows).metrics)
+    sampled_table = with_census(table, **{name: ("value_sampled", 0.02)})
+    sampled = _by_key(_pure(sampled_table, rows).metrics)
+    for metric_id in ("column.tvd", "column.coverage_mass",
+                      "column.top1_share_delta", "field.category_adherence"):
+      e, s = exact[(metric_id, name)], sampled[(metric_id, name)]
+      assert s.value == pytest.approx(e.value, abs=0.03), (name, metric_id)
+    # the distorted head value is counted exactly: top-1 matches
+    assert sampled[("column.top1_share_delta",
+                    name)].value == exact[("column.top1_share_delta",
+                                           name)].value
+    # no head: the HT view is guarded, never a crash
+    headless = _by_key(_pure(_without_head(sampled_table, name), rows).metrics)
+    for (metric_id, column_name), mv in headless.items():
+      if column_name != name:
+        continue
+      if mv.value is None and mv.ci_low is None:
+        assert mv.detail["reason"], metric_id
+      elif metric_id in ("column.tvd", "column.jsd", "column.coverage_mass",
+                         "column.novelty_mass", "field.category_adherence"):
+        assert 0.0 <= mv.value <= 1.0, (metric_id, mv.value)
+
+
+def test_heavy_value_in_the_hash_range_is_guarded_without_a_head():
+  """A heavy value forced into the tail's hash range (the head removed):
+  its weight 1/rate pushes Σ c ln c past n ln n, so entropy is not
+  evaluated with the reason instead of dividing by zero."""
+  name = "city_c"
+  table, rows = _cities(20_000, 7, name)
+  top = Counter(r[name] for r in rows["source"]).most_common(1)[0][0]
+  rate = (hash64(name, top) % budget_module.VALUE_SAMPLE_MODULUS + 1) / (
+      budget_module.VALUE_SAMPLE_MODULUS)
+  forced = _without_head(
+      with_census(table, **{name: ("value_sampled", rate)}), name)
+  spec = CensusSpec.from_table(forced)
+  assert spec.columns[1].in_hash_range(hash64(name, top))
+  by_key = _by_key(_pure(forced, rows).metrics)
+  entropy = by_key[("column.entropy_ratio", name)]
+  assert entropy.value is None
+  assert "Horvitz-Thompson" in entropy.detail["reason"]
+  for metric_id in ("column.tvd", "column.jsd"):
+    mv = by_key[(metric_id, name)]
+    assert mv.value is None or 0.0 <= mv.value <= 1.0
+
+
+def test_empty_placeholder_in_the_sampled_range_is_counted_exactly():
+  """probe_empty: users.sku's "" placeholder (about 5 % of rows) inside
+  the sampled hash range — it is in the head, so it is exact; and with
+  no head nothing crashes."""
+  table, rows = users_table(
+      n_source=12_000, n_synthetic=12_000, n_reference=600)
+  r = hash64("sku", "") % budget_module.VALUE_SAMPLE_MODULUS
+  rate = (r + 1) / budget_module.VALUE_SAMPLE_MODULUS
+  sampled = with_census(table, sku=("value_sampled", rate))
+  spec = CensusSpec.from_table(sampled)
+  sku = next(c for c in spec.columns if c.name == "sku")
+  assert hash64("sku", "") in sku.head and sku.in_hash_range(hash64("sku", ""))
+  exact_table = with_census(table, sku=("exact", None))
+  exact_run = _pure(exact_table, rows)
+  exact = _by_key(exact_run.metrics)
+  got_run = _pure(sampled, rows)
+  got = _by_key(got_run.metrics)
+  j = _column_index(table, "sku")
+  # the placeholder is counted exactly: its row counts equal the exact ones
+  top = {code: count for count, code in exact_run.summaries[j].top_src}
+  sampled_top = {code: count for count, code in got_run.summaries[j].top_src}
+  assert sampled_top[hash64("sku", "")] == top[hash64("sku", "")]
+  assert got[("column.top1_share_delta",
+              "sku")].value == exact[("column.top1_share_delta", "sku")].value
+  # the rest carries the tail's Horvitz-Thompson noise (rate ~0.02 on a
+  # near-unique column: about 0.05 standard error here)
+  for metric_id in ("column.tvd", "column.coverage_mass",
+                    "field.category_adherence"):
+    e, s = exact[(metric_id, "sku")], got[(metric_id, "sku")]
+    assert s.value == pytest.approx(e.value, abs=0.15), metric_id
+  # M5: the baseline's missing-R term uses the driver's R mass on the same
+  # draw, so the sampled baseline tracks the exact one
+  e, s = exact[("column.tvd", "sku")], got[("column.tvd", "sku")]
+  assert e.baseline_value is not None and s.baseline_value is not None
+  assert s.baseline_value == pytest.approx(e.baseline_value, abs=0.15)
+  refs = census_refs(sampled)
+  assert 0.5 < refs[j].r_mass_ht < 1.5
+  assert census_refs(exact_table)[j].r_mass_ht == 1.0
+  headless = _pure(_without_head(sampled, "sku"), rows)
+  assert any(mv.column == "sku" for mv in headless.metrics)
+
+
+def _addresses(n_src: int, n_syn: int) -> tuple[Any, dict[str, list]]:
+  rng = np.random.default_rng(3)
+  words = ("Oak", "Elm", "Maplewood", "Pine", "Cedarbrook", "Birch", "Ash",
+           "Willowdale", "Spruce", "Laurel")
+  suffixes = ("St", "Ave", "Blvd", "Rd", "Ln", "Terrace", "Way")
+
+  def addr() -> str:
+    parts = [str(int(rng.integers(1, 99999)))]
+    parts += [
+        words[int(rng.integers(0, len(words)))]
+        for _ in range(int(rng.integers(1, 4)))
+    ]
+    parts.append(suffixes[int(rng.integers(0, len(suffixes)))])
+    if rng.random() < 0.3:
+      parts.append(f"Apt {int(rng.integers(1, 999))}")
+    return " ".join(parts)
+
+  fields = ({
+      "name": "row_id",
+      "type": "INT64",
+      "mode": "REQUIRED"
+  }, {
+      "name": "addr",
+      "type": "STRING",
+      "mode": "NULLABLE"
+  })
+  source = [{"row_id": i, "addr": addr()} for i in range(n_src)]
+  synthetic = [{"row_id": 10**6 + i, "addr": addr()} for i in range(n_syn)]
+  rows = {"source": source, "synthetic": synthetic}
+  return planned_table(
+      "addrs", fields, source, synthetic, pk=("row_id",),
+      pair_max_columns=0), rows
+
+
+def test_mask_pass_is_never_value_sampled():
+  """probe_shape_sampling: shape metrics were biased low (0.639 FAIL vs
+  0.978) when masks came from sampled values only; the mask pass now
+  counts every value, so value-sampled equals exact."""
+  table, rows = _addresses(20_000, 15_000)
+  exact = _by_key(_pure(with_census(table, addr=("exact", None)), rows).metrics)
+  sampled = _by_key(
+      _pure(with_census(table, addr=("value_sampled", 0.02)), rows).metrics)
+  for metric_id in ("field.shape_adherence", "column.shape_head_tv"):
+    e, s = exact[(metric_id, "addr")], sampled[(metric_id, "addr")]
+    assert s.value == e.value and s.ci_low == e.ci_low, metric_id
+    assert s.method.value == "exact" and s.sample_rate is None
+  assert exact[("field.shape_adherence", "addr")].value > 0.9
+  # the copy rate's interval still bounds the exact rate with no sampled copy
+  e = exact[("field.substantive_copy_rate", "addr")]
+  s = sampled[("field.substantive_copy_rate", "addr")]
+  assert s.ci_low <= e.value <= s.ci_high
+  assert s.detail["interval"].startswith("cluster-robust")
+
+
+def _pool_population(seed: int,
+                     copies: int = 100,
+                     pool: int = 512,
+                     reps: int = 40) -> list[tuple[int, tuple[int, ...]]]:
+  """A pool-driven text column: `pool` synthetic values, each repeated
+  `reps` times; `copies` of them reproduce a rare source value (c_src =
+  1). Codes are fresh random hashes per seed (a new value sample)."""
+  rng = np.random.default_rng(seed)
+  codes = rng.integers(0, 2**63, size=pool, dtype=np.int64).tolist()
+  return [(int(code), (1 if k < copies else 0, reps, 0, reps, 0, 0))
+          for k, code in enumerate(codes)]
+
+
+def test_sampled_copy_rate_interval_is_cluster_robust():
+  """Rows of one value are a cluster: on a pool-driven column (512
+  values, n/512 rows each) a row-level Wilson interval on the sampled
+  rows is far too narrow. The stratified ratio's interval (values as the
+  sampling units, the head certain) covers the exact rate at about its
+  nominal level across value samples (seeds)."""
+  table, _ = users_table(n_source=300, n_synthetic=300, n_reference=60)
+  base = next(
+      c for c in CensusSpec.from_table(table).columns if c.name == "bio")
+  rate, keep = 0.2, 2000
+  # the column totals a dense pass would give
+  sizes = census.ColumnSizes(20_000, 20_480, 20_000, 20_480, 20_000, 20_480)
+  combine = census.ContributionCombineFn()
+  truth = 100 / 512
+  covered = wilson_covered = 0
+  widths, wilson_widths = [], []
+  seeds = range(300)
+  for seed in seeds:
+    values = _pool_population(seed)
+    head = frozenset(code for code, _ in values[::2][:128])
+    col = dataclasses.replace(
+        base, census="value_sampled", rate=rate, keep=keep, head=head)
+    total = combine.create_accumulator()
+    k = n = 0
+    for code, counts in values:
+      if not col.kept(code):
+        continue
+      total = combine.add_input(
+          total,
+          census.value_contribution(col, code, counts, sizes, None,
+                                    (None, None)))
+      k += counts[1] if counts[0] else 0
+      n += counts[1]
+    ratio = noise.stratified_ratio_interval(total.ht_copies, total.ht_subst,
+                                            total.cr_yy, total.cr_xy,
+                                            total.cr_xx, rate, total.cr_n)
+    assert ratio is not None
+    _, lo, hi = ratio
+    covered += lo <= truth <= hi
+    widths.append(hi - lo)
+    w_lo, w_hi = noise.wilson_interval(k, n)
+    wilson_covered += w_lo <= truth <= w_hi
+    wilson_widths.append(w_hi - w_lo)
+  coverage = covered / len(seeds)
+  assert coverage >= 0.90, coverage
+  assert wilson_covered / len(seeds) < 0.75  # the row-level interval fails
+  assert np.median(widths) > 2 * np.median(wilson_widths)
+
+
+def test_value_lift_null_calibration_covers_one():
+  """M9: a synthetic side that reproduces rare values of R and of H alike
+  (no memorization of what the generator read) gives a lift whose CI
+  covers 1, so it passes."""
+  table, rows = users_table(copies_from_reference=150, copies_from_holdout=150)
+  lift = _by_key(_pure(table, rows).metrics)[("field.value_memorization_lift",
+                                              "full_name")]
+  assert lift.detail["copies_r"] >= 140 and lift.detail["copies_h"] >= 140
+  assert lift.ci_low <= 1.0 <= lift.ci_high
+  assert status_for(_CATALOGUE.get(lift.metric_id), lift) is Status.PASS
+
+
+def test_lifts_read_the_hash_range_only_on_a_sampled_column():
+  """A value-sampled column's lift counts only hash-range values, so the
+  head's certainty never tilts R against H."""
+  table, rows = users_table(copies_from_reference=300)
+  sampled = with_census(table, full_name=("value_sampled", 0.5))
+  lift = _by_key(_pure(sampled, rows).metrics)[("field.value_memorization_lift",
+                                                "full_name")]
+  assert lift.method.value == "value_sampled"
+  assert 100 < lift.detail["copies_r"] < 200  # about half of the copies
+  assert lift.ci_low is not None and lift.ci_low > 5

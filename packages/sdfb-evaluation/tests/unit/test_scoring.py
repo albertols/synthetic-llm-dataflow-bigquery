@@ -508,22 +508,27 @@ def test_documented_edge_row_is_info_with_null_score():
   assert row["edge"] == "order_items.user_id->users.id"
 
 
-@pytest.mark.parametrize(("kind", "detail", "expected"), [
-    ("numeric", {}, Status.INFO),
+@pytest.mark.parametrize(("kind", "detail", "expected", "reason"), [
+    ("numeric", {}, Status.INFO, "domain"),
     ("temporal", {
         "day_granularity": True
-    }, Status.INFO),
+    }, Status.INFO, "domain"),
     ("temporal", {
         "day_granularity": False
-    }, Status.FAIL),
-    ("temporal", {}, Status.FAIL),
-    ("text", {}, Status.FAIL),
+    }, Status.INFO, "R66"),
+    ("temporal", {}, Status.INFO, "R66"),
+    ("categorical", {}, Status.INFO, "R66"),
+    ("identifier", {}, Status.INFO, "R66"),
     ("categorical", {
         "day_granularity": True
-    }, Status.FAIL),
+    }, Status.INFO, "R66"),
+    ("text", {}, Status.FAIL, None),
+    (None, {}, Status.FAIL, None),
 ])
-def test_copy_rate_is_info_on_numeric_and_day_temporal_columns(
-    kind, detail, expected):
+def test_copy_rate_is_gated_only_on_free_text(kind, detail, expected, reason):
+  """Ruling R66: only a text column's copy rate is gated; numeric and
+  day-granular temporal ones collide by domain size, and every other kind
+  reuses real values — field.value_memorization_lift gates there."""
   mv = _mv(
       "field.substantive_copy_rate",
       0.01,
@@ -536,7 +541,7 @@ def test_copy_rate_is_info_on_numeric_and_day_temporal_columns(
   row = _row_of(mv)
   assert row["status"] == expected.value
   if expected is Status.INFO:
-    assert row["score"] is None and "domain" in row["detail"]["reason"]
+    assert row["score"] is None and reason in row["detail"]["reason"]
   # every other id keeps its grading on a numeric column
   assert _status(
       "field.value_memorization_lift", 9.0, ci_low=6.0,

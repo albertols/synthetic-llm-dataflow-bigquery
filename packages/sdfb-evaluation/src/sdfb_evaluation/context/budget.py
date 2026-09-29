@@ -28,8 +28,15 @@ Two budgets, two different enforcement points:
 The shuffle prediction (GB = 10^9 bytes), per evaluated table and side,
 on the rows the pipeline actually reads:
 
-    census       Σ census columns  keys * rate * 24 B    keys = min(distinct,
-                                                          rows), both sides
+    census       Σ census columns  (head + (keys - head)  keys = min(distinct,
+                                   * rate) * 24 B         rows), both sides;
+                                                          head = the census
+                                                          head (R67), never
+                                                          sampled
+    masks        Σ text/identifier keys * 48 B            the shape-mask pass:
+                   census columns                         never value-sampled
+                                                          (R67), at most one
+                                                          key per value
     relational   Σ edges           child rows * 16 B     (hash, count) per row
     row keys     rows * 16 B (non-key duplicate count, both sides)
                  + synthetic rows * 16 B per PK / identity duplicate count
@@ -40,8 +47,10 @@ The census gets what the fixed parts leave, shared max-min fairly
 columns, so a column needing little is never sampled to feed one needing
 much, and a column expecting at most 1 000 keys is exact whatever is
 left. A column granted less than its demand is value-sampled at `K /
-10 000` (`VALUE_SAMPLE_MODULUS`): only value hashes with `hash mod M < K`
-enter the census, which keeps every retained value's count exact.
+10 000` (`VALUE_SAMPLE_MODULUS`): its census head enters with certainty
+and, of the other values, only hashes with `hash mod M < K`, which keeps
+every retained value's count exact. The mask pass cannot be sampled, so
+the planner counts it with the fixed shuffle (`mask_bytes`).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -65,13 +74,18 @@ __all__ = [
     "census_bytes",
     "census_demand",
     "fixed_shuffle_bytes",
+    "mask_bytes",
     "predict_shuffle_gb",
+    "value_census_bytes",
     "value_sample_rate",
     "water_fill",
 ]
 
 GB = 1e9
 CENSUS_KEY_BYTES = 24  # (table, column, value hash) key + four counts
+# (table, column, mask hash) key + two counts + the mask text (an estimate)
+MASK_KEY_BYTES = 48
+_MASKED_KINDS = frozenset({"text", "identifier"})
 ROW_KEY_BYTES = 16  # (uint64 hash, count)
 NULL_PATTERN_LIMIT = 4096  # the dense null-pattern dict's key cap
 VALUE_SAMPLE_MODULUS = 10_000
@@ -170,17 +184,38 @@ def fixed_shuffle_bytes(*, rows_source: float, rows_synthetic: float,
   return relational + row_keys + null_bits
 
 
-def census_bytes(columns: Iterable[ColumnPlan], rows_source: float,
-                 rows_synthetic: float) -> float:
-  """The census shuffle of one table's columns, value sampling applied."""
+def value_census_bytes(columns: Iterable[ColumnPlan], rows_source: float,
+                       rows_synthetic: float) -> float:
+  """The value census's shuffle, value sampling applied: a column's head
+  (R67) always enters, the rest at its rate."""
   total = 0.0
   for column in columns:
     if column.census == "none":
       continue
     rate = column.value_sample_rate or 1.0  # set only when value-sampled
     keys = census_demand(column, rows_source, rows_synthetic)
-    total += keys * rate * CENSUS_KEY_BYTES
+    head = min(float(len(column.census_head or ())), keys)
+    total += (head + (keys - head) * rate) * CENSUS_KEY_BYTES
   return total
+
+
+def mask_bytes(columns: Iterable[ColumnPlan], rows_source: float,
+               rows_synthetic: float) -> float:
+  """The shape-mask pass's shuffle: every text/identifier census column,
+  never value-sampled, at most one mask key per distinct value."""
+  return sum(
+      census_demand(column, rows_source, rows_synthetic) * MASK_KEY_BYTES
+      for column in columns
+      if column.census != "none" and str(column.kind) in _MASKED_KINDS)
+
+
+def census_bytes(columns: Iterable[ColumnPlan], rows_source: float,
+                 rows_synthetic: float) -> float:
+  """The census shuffle of one table's columns: the value census (value
+  sampling applied) plus the mask pass."""
+  columns = list(columns)
+  return (value_census_bytes(columns, rows_source, rows_synthetic) +
+          mask_bytes(columns, rows_source, rows_synthetic))
 
 
 def predict_shuffle_gb(tables: Sequence[TablePlan]) -> float:

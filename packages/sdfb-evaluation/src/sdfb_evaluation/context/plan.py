@@ -94,6 +94,16 @@ the `hash64` codes of the top-9 source values (the pair grid's 10th cell
 is "other"), `detection_dictionary` the top-254 (Ruling R32), most
 frequent first, NULL never a value.
 
+Census head (Ruling R67): `census_head` holds the `hash64` codes of the
+source's top-254 values followed by the synthetic side's top-254 (each
+side's own `APPROX_TOP_COUNT(x', 255)`; duplicates once), for every
+non-key STRING, BYTES and BOOL column whatever its routed kind. A
+value-sampled census includes these values with certainty (weight 1)
+and hash-samples only the tail (weight 1 / rate), a stratified
+Horvitz-Thompson design, so a heavy hitter is never left to the hash.
+Numeric and temporal columns have no head (their top list is 10 atoms on
+the planning scale, not value codes).
+
 Pairs: the `pair_max_columns` pairable columns (numeric, temporal,
 categorical, boolean; never a key; ≥ 2 source-distinct values) ranked by
 APPROX_COUNT_DISTINCT as an entropy proxy on the 10-cell pair grid —
@@ -124,10 +134,11 @@ from sdfb_evaluation.context.budget import (
     GB,
     Budget,
     BudgetExceededError,
-    census_bytes,
     census_demand,
     fixed_shuffle_bytes,
+    mask_bytes,
     predict_shuffle_gb,
+    value_census_bytes,
     value_sample_rate,
     water_fill,
 )
@@ -306,6 +317,9 @@ class ColumnPlan:  # pylint: disable=too-many-instance-attributes  # the plan's 
   SOURCE values. D6: a value is stored literally iff `literal_ok` AND
   `hash64(name, value) in detection_dictionary`; every other value —
   including any value only the synthetic side holds — is a hashed label.
+  `census_head` (R67) holds the codes of the source's then the synthetic
+  side's top-254 values: the certainty stratum of a value-sampled
+  census (module docstring); never a literal gate.
   """
   name: str
   bq_type: str
@@ -325,6 +339,7 @@ class ColumnPlan:  # pylint: disable=too-many-instance-attributes  # the plan's 
   source_distinct: int | None = None
   detection_dictionary: tuple[int, ...] | None = None
   synthetic_distinct: int | None = None
+  census_head: tuple[int, ...] | None = None
 
   def __post_init__(self) -> None:
     object.__setattr__(self, "kind", ColumnKind(self.kind))
@@ -665,6 +680,17 @@ def _day_granular(column: ColumnPlan, kind: ColumnKind, midnight: int | None,
   return non_null > 0 and midnight == non_null
 
 
+def _census_head(name: str, src_top: Sequence[tuple[Any, int]],
+                 syn_top: Sequence[tuple[Any, int]]) -> tuple[int, ...]:
+  """The census's certainty stratum (R67): each side's ranked top values
+  (source first), as `hash64` codes, each once."""
+  head: dict[int, None] = {}
+  for top in (src_top, syn_top):
+    for value, _ in _ranked_values(top)[:DETECTION_DICTIONARY_SIZE]:
+      head.setdefault(hash64(name, value), None)
+  return tuple(head)
+
+
 def _planned(column: ColumnPlan, src: Mapping[str, Any], syn: Mapping[str, Any],
              rows: int) -> ColumnPlan:
   non_null = max(rows - (src.get("null") or 0), 0)
@@ -677,6 +703,8 @@ def _planned(column: ColumnPlan, src: Mapping[str, Any], syn: Mapping[str, Any],
   coded = kind in _CODED_KINDS and not column.is_key
   values = _ranked_values(top) if coded else []
   codes = tuple(hash64(column.name, v) for v, _ in values)
+  headed = (not column.is_key and kind is not ColumnKind.NESTED and
+            column.bq_type in _STRING_TYPES | _BOOL_TYPES)
   return dataclasses.replace(
       column,
       kind=kind,
@@ -694,6 +722,8 @@ def _planned(column: ColumnPlan, src: Mapping[str, Any], syn: Mapping[str, Any],
       literal_ok=coded and _literal_ok(values, non_null),
       source_distinct=distinct,
       synthetic_distinct=syn.get("distinct"),
+      census_head=(_census_head(column.name, top, _top_pairs(syn.get("top")))
+                   if headed else None),
   )
 
 
@@ -806,6 +836,7 @@ def _column_payload(column: ColumnPlan) -> dict[str, Any]:
       "atoms": list(column.atoms),
       "dictionary": listed(column.dictionary),
       "detection_dictionary": listed(column.detection_dictionary),
+      "census_head": listed(column.census_head),
   }
 
 
@@ -814,7 +845,8 @@ def encoding_plan_digest(columns: Sequence[ColumnPlan],
                          edges: Sequence[Edge]) -> str:
   """blake2b-128 over the canonical JSON of what the encoding depends on:
   per column (keyed by name) its kind, key flag, census method, quantile
-  grids, atoms and dictionaries; the pairs by column name; the edges.
+  grids, atoms, dictionaries and census head; the pairs by column name;
+  the edges.
   Column, pair and edge ORDER does not move it; any grid, dictionary,
   census or pair change does."""
   names = [c.name for c in columns]
@@ -1926,7 +1958,9 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       exact = apply_planning(
           work.cols_syn, work.src_stats, work.syn_stats, budget=unlimited)
       rows = (_rows_read(work.src_stats), _rows_read(work.syn_stats))
-      demands.append(census_bytes(exact, *rows))
+      demands.append(value_census_bytes(exact, *rows))
+      # the mask pass is never value-sampled: a fixed cost (R67)
+      fixed += mask_bytes(exact, *rows)
       fixed += fixed_shuffle_bytes(
           rows_source=rows[0],
           rows_synthetic=rows[1],
@@ -1935,7 +1969,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     capacity = self.budget.max_shuffle_gb * GB - fixed
     if capacity < 0:
       self.notes.append(
-          f"the non-census shuffle alone ({fixed / GB:.3f} GB) exceeds "
+          f"the fixed shuffle alone (non-census parts and the mask pass, "
+          f"{fixed / GB:.3f} GB) exceeds "
           f"max_shuffle_gb = {self.budget.max_shuffle_gb}: every census "
           f"column above {CENSUS_EXACT_FLOOR} keys is value-sampled at the "
           "minimum rate")

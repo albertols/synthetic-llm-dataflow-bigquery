@@ -28,9 +28,14 @@ import pytest
 from sdfb_evaluation import schemas
 from sdfb_evaluation.canonical import hash64
 from sdfb_evaluation.context.budget import (
+    CENSUS_KEY_BYTES,
+    MASK_KEY_BYTES,
     Budget,
     BudgetExceededError,
+    census_bytes,
+    mask_bytes,
     predict_shuffle_gb,
+    value_census_bytes,
     water_fill,
 )
 from sdfb_evaluation.context.plan import (
@@ -465,6 +470,104 @@ def test_string_routing():
 
 def _top(*pairs):
   return [{"value": v, "count": c} for v, c in pairs]
+
+
+def test_census_head_is_each_sides_top_values_for_string_and_bool():
+  """R67: the census's certainty stratum — source top-254 then synthetic
+  top-254 codes, each once — for every non-key STRING/BYTES/BOOL column
+  whatever its routed kind; none for numeric, temporal or key columns."""
+  cols = kinds_from_schema([{
+      "name": "note",
+      "type": "STRING"
+  }, {
+      "name": "flag",
+      "type": "BOOL"
+  }, {
+      "name": "qty",
+      "type": "INT64"
+  }, {
+      "name": "id",
+      "type": "STRING"
+  }],
+                           keys={"id"})
+  n = 10_000
+  src_top = _top(*((f"s{i}", 300 - i) for i in range(300)), (None, 5))
+  syn_top = _top(("s0", 90), *((f"y{i}", 80 - i // 10) for i in range(300)))
+  src = {
+      "rows": n,
+      "columns": {
+          "note": _string_stats(9_800, n, 45.0, top=src_top),
+          "flag": {
+              "null": 0,
+              "distinct": 2,
+              "top": _top((True, 6000), (False, 4000))
+          },
+          "qty": {
+              "null": 0,
+              "distinct": 50,
+              "top": _top((3.0, 900))
+          },
+          "id": _string_stats(n, n, 8.0, top=_top(("k1", 1))),
+      }
+  }
+  syn = dict(src)
+  syn["columns"] = {
+      **src["columns"], "note": _string_stats(9_800, n, 45.0, top=syn_top)
+  }
+  by = _by_name(apply_planning(cols, src, syn, budget=BIG))
+  head = by["note"].census_head
+  assert head is not None and by["note"].kind is ColumnKind.TEXT
+  source_part = [hash64("note", f"s{i}") for i in range(254)]
+  assert list(head[:254]) == source_part  # NULL never takes a slot
+  # the synthetic top-254 follows: s0 again (listed once) and 253 new
+  assert hash64("note", "s0") not in head[254:]
+  assert list(head[254:]) == [hash64("note", f"y{i}") for i in range(253)]
+  assert set(by["flag"].census_head or
+             ()) == {hash64("flag", True),
+                     hash64("flag", False)}
+  assert by["qty"].census_head is None and by["id"].census_head is None
+  # the head moves the encoding digest (it changes the census)
+  columns = list(by.values())
+  moved = [
+      dataclasses.replace(c, census_head=c.census_head[1:])
+      if c.name == "note" else c for c in columns
+  ]
+  assert encoding_plan_digest(columns, (),
+                              ()) != encoding_plan_digest(moved, (), ())
+
+
+def test_census_bytes_count_the_head_unsampled_and_the_mask_pass():
+  """M2: a value-sampled column's head enters with certainty, and the
+  mask pass of text/identifier columns is never sampled."""
+  text = ColumnPlan(
+      name="note",
+      bq_type="STRING",
+      mode="NULLABLE",
+      kind=ColumnKind.TEXT,
+      is_key=False,
+      day_granularity=False,
+      census="value_sampled",
+      value_sample_rate=0.01,
+      source_distinct=100_000,
+      synthetic_distinct=100_000,
+      census_head=tuple(range(500)))
+  flag = dataclasses.replace(
+      text,
+      name="flag",
+      kind=ColumnKind.BOOLEAN,
+      census="exact",
+      value_sample_rate=None,
+      source_distinct=2,
+      synthetic_distinct=2,
+      census_head=(1, 2))
+  rows = 100_000.0
+  keys = 200_000
+  assert value_census_bytes([text], rows, rows) == pytest.approx(
+      (500 + (keys - 500) * 0.01) * CENSUS_KEY_BYTES)
+  assert mask_bytes([text, flag], rows, rows) == keys * MASK_KEY_BYTES
+  assert census_bytes([text, flag], rows, rows) == pytest.approx(
+      value_census_bytes([text, flag], rows, rows) +
+      mask_bytes([text, flag], rows, rows))
 
 
 def test_literal_policy_and_dictionaries():

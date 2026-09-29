@@ -137,6 +137,62 @@ def folded_abs_interval(lo: float, hi: float) -> tuple[float, float]:
   return (min(abs(lo), abs(hi)), max(abs(lo), abs(hi)))
 
 
+def stratified_ratio_interval(
+    num: float,
+    den: float,
+    tail_yy: float,
+    tail_xy: float,
+    tail_xx: float,
+    rate: float,
+    sampled_den: float,
+    alpha: float = 0.05) -> tuple[float, float, float] | None:
+  """A share `R = Y / X` from a stratified value sample, with its
+  cluster-robust interval: `(ratio, lo, hi)`, or None when `den <= 0`.
+
+  Design: the VALUES are the sampling units (every row of a value moves
+  with it, so rows are clustered). A certainty stratum enters with weight
+  1 and no sampling variance; the tail is Poisson-sampled, each value
+  independently with probability `rate` (weight 1 / rate). `num` and
+  `den` are the weighted totals Ŷ = Σ_head y + Σ_tail,sampled y / rate
+  and X̂ likewise; `tail_yy`, `tail_xy`, `tail_xx` are the plain sums
+  Σ y², Σ x y, Σ x² over the SAMPLED tail values, and `sampled_den` the
+  plain Σ x over every counted value (the rows actually observed). With
+  the Taylor-linearised residuals e_v = y_v - R̂ x_v of R̂ = Ŷ / X̂ and the
+  Horvitz-Thompson variance estimator of Poisson sampling,
+  Σ_sampled (1 - π) e_v² / π² with π = rate:
+
+      V̂(R̂) = ((1 - rate) / rate) · (Σ_sampled e_v² / rate) / X̂²
+            = (1 - rate) / rate² · (Σy² - 2 R̂ Σxy + R̂² Σx²) / X̂²
+
+  — the (1 - rate) / rate finite-population factor times the
+  Horvitz-Thompson estimate of the population's residual sum of squares
+  (Horvitz & Thompson, 1952; Woodruff, 1971, for the linearisation;
+  Särndal, Swensson & Wretman, 1992). A normal interval on V̂ collapses
+  to a point when the sample holds no event (a rare copy rate), so the
+  interval is Korn & Graubard's (1998): Clopper-Pearson on the effective
+  sample size n* = R̂ (1 - R̂) / V̂, capped at the observed rows (a design
+  effect never below 1), with R̂ n* events; n* is the observed rows when
+  R̂ is 0 or 1 or V̂ is 0. A two-sided `alpha`.
+  """
+  if den <= 0.0:
+    return None
+  ratio = min(1.0, max(0.0, num / den))
+  squares = max(0.0, tail_yy - 2.0 * ratio * tail_xy + ratio * ratio * tail_xx)
+  variance = (1.0 - rate) / (rate * rate) * squares / (den * den)
+  observed = max(float(sampled_den), 1.0)
+  n_eff = observed
+  if 0.0 < ratio < 1.0 and variance > 0.0:
+    n_eff = min(observed, ratio * (1.0 - ratio) / variance)
+  events = ratio * n_eff
+  lo = (
+      float(beta.ppf(alpha / 2.0, events, n_eff - events +
+                     1.0)) if events > 0.0 else 0.0)
+  hi = (
+      float(beta.ppf(1.0 - alpha / 2.0, events + 1.0, n_eff -
+                     events)) if events < n_eff else 1.0)
+  return (ratio, lo, hi)
+
+
 def tvd_null_expectation(p: Sequence[float], n: int, m: int) -> float:
   """The expected TVD between two same-`p` multinomial samples of sizes `n`, `m`.
 

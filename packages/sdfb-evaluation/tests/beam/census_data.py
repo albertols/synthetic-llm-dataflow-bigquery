@@ -163,16 +163,23 @@ def users_table(n_source: int = 4000,
                 n_reference: int = 600,
                 *,
                 copies_from_reference: int = 0,
+                copies_from_holdout: int = 0,
                 verified: bool = True) -> tuple[TablePlan, dict[str, list]]:
   """The users plan and its rows by side. R and H are the first 2 x
   `n_reference` source rows (the panel); `copies_from_reference`
   synthetic rows reuse the full_name (and the rare numeric age) of an R
-  row — planted copies of rare reference-only values."""
+  row — planted copies of rare reference-only values; the next
+  `copies_from_holdout` synthetic rows copy an H row's full_name alike
+  (the null of the value lift when both are set equal)."""
   source = users_rows(n_source, seed=11)
   synthetic = users_rows(n_synthetic, seed=12, name_base=50_000)
   for k in range(copies_from_reference):
     donor = source[k % n_reference]
     synthetic[k] = {**synthetic[k], "full_name": donor["full_name"]}
+  for k in range(copies_from_holdout):
+    donor = source[n_reference + k % n_reference]
+    at = copies_from_reference + k
+    synthetic[at] = {**synthetic[at], "full_name": donor["full_name"]}
   reference = source[:n_reference]
   holdout = source[n_reference:2 * n_reference]
   panel = make_panel(reference, holdout)
