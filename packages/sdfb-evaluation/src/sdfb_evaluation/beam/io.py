@@ -20,7 +20,8 @@
                                            True) → normalize_direct_read
                           InMemorySources  beam.Create(rows_by[(table, side)])
       reference, holdout  both             beam.Create(table.panel.r_rows /
-                                           h_rows) — never re-read (D3)
+                                           h_rows), projected to the plan
+                                           columns — never re-read (D3)
 
     Sinks.write(rows, table) ─► the PCollections complete once the rows are
                                 committed (the FINAL registry row waits on
@@ -28,7 +29,10 @@
       BigQuerySinks    WriteToBigQuery(FILE_LOADS, WRITE_APPEND, CREATE_NEVER,
                        the package schema) → (load job ids, copy job ids);
                        never STREAMING_INSERTS
-      LocalJsonSinks   NDJSON shards <out_dir>/<table>/part-*.jsonl → (files,)
+      LocalJsonSinks   NDJSON shards <out_dir>/<table>/<NNNN>-<label>-*.jsonl,
+                       one prefix per write → (files,); `read_rows` reads
+                       only this instance's prefixes, and a table directory
+                       holding another run's files is refused
       ClientLoadSinks  LocalJsonSinks, then — after the pipeline, driver-side
                        — `load(bq)`: one `Bq.load_json` job per table, the
                        registry (evaluation_data_history) last
@@ -76,6 +80,7 @@ import abc
 import glob
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -117,7 +122,11 @@ LOAD_ORDER = (
     "evaluation_data_history",
 )
 _PANEL_SIDES = frozenset({Side.REFERENCE, Side.HOLDOUT})
-_SHARD_GLOB = "part-*.jsonl"
+# Beam's default shard template (-SSSSS-of-NNNNN) after a write's prefix.
+_SHARD_SUFFIX = "-[0-9]*-of-[0-9]*.jsonl"
+_UNSAFE_PATH_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+_GLOB_CHARS = re.compile(r"[*?\[\]]")
+_SHOWN_FILES = 3
 
 
 # --------------------------------------------------------------------------
@@ -176,13 +185,19 @@ def normalize_direct_read(row: Mapping[str, Any],
 # sources
 # --------------------------------------------------------------------------
 def _panel_rows(table: TablePlan, side: Side) -> list[dict]:
+  """The panel side's rows restricted to the plan's columns: the panel is
+  `SELECT ref.*` of the source, and `beam.Create` embeds its elements in
+  the job graph, so source-only columns would only make it bigger. A
+  plan column a row lacks stays absent (the encoder names it)."""
   panel = table.panel
   if panel is None:
     raise ValueError(
         f"{table.landing_table}: no R/E/H panel was planned, so the {side} "
         "side has no rows; the reference-based metrics are not evaluated "
         "for this table (check TablePlan.panel before reading it)")
-  return list(panel.r_rows if side is Side.REFERENCE else panel.h_rows)
+  names = [c.name for c in table.columns]
+  rows = panel.r_rows if side is Side.REFERENCE else panel.h_rows
+  return [{name: row[name] for name in names if name in row} for row in rows]
 
 
 class Sources(abc.ABC):
@@ -372,11 +387,28 @@ class BigQuerySinks(Sinks):
 
 class LocalJsonSinks(Sinks):
   """NDJSON shards under `<out_dir>/<table>/` (`json_line` per row), for
-  the DirectRunner. `out_dir` is a local directory, fresh per evaluation:
-  `read_rows` reads every shard present."""
+  the DirectRunner.
+
+  Every `write` gets its own shard prefix, `<NNNN>-<label slug>` (a
+  counter per instance), so two writes to one table never finalise onto
+  the same file. `read_rows` reads only the prefixes this instance wrote,
+  and `write` refuses a table directory that holds anything else — another
+  run's shards, or a crashed run's temp files — instead of mixing runs:
+  give each evaluation a fresh `out_dir`.
+  """
 
   def __init__(self, out_dir: str):
+    """Raises:
+      ValueError: `out_dir` holds a glob character (`*?[]`): Beam's file
+        sink finds its own shards by glob and would fail at finalize.
+    """
+    if _GLOB_CHARS.search(out_dir):
+      raise ValueError(f"output directory {out_dir!r} holds a glob character "
+                       "(*?[]): Beam's file sink matches its shards by glob "
+                       "and cannot finalise there; choose another path")
     self.out_dir = out_dir
+    self._writes = 0
+    self._prefixes: dict[str, list[str]] = {}
 
   def table_dir(self, table: str) -> str:
     _check_table(table)
@@ -387,20 +419,55 @@ class LocalJsonSinks(Sinks):
             table: str,
             *,
             label: str | None = None) -> tuple[beam.PCollection, ...]:
-    prefix = os.path.join(self.table_dir(table), "part")
+    """Raises:
+      ValueError: `table` is not an evaluation table, or its directory
+        holds files this instance did not write.
+    """
+    self._refuse_foreign(table)
     label = label or f"Write[{table}]"
+    self._writes += 1
+    slug = _UNSAFE_PATH_CHARS.sub("_", label).strip("_") or "write"
+    prefix = os.path.join(self.table_dir(table), f"{self._writes:04d}-{slug}")
+    self._prefixes.setdefault(table, []).append(prefix)
     files = (
         rows
-        | f"{label}/Json" >> beam.Map(json_line, table)
-        | f"{label}/Files" >> beam.io.WriteToText(
+        | f"{label}/Json#{self._writes}" >> beam.Map(json_line, table)
+        | f"{label}/Files#{self._writes}" >> beam.io.WriteToText(
             prefix, file_name_suffix=".jsonl"))
     return (files,)
 
+  def _own_shards(self, table: str) -> list[str]:
+    return sorted(
+        path for prefix in self._prefixes.get(table, ())
+        for path in glob.glob(glob.escape(prefix) + _SHARD_SUFFIX))
+
+  def _refuse_foreign(self, table: str) -> None:
+    directory = self.table_dir(table)
+    if not os.path.isdir(directory):
+      return
+    own = set(self._own_shards(table))
+    foreign = sorted(
+        name for name in os.listdir(directory)
+        if os.path.join(directory, name) not in own)
+    if foreign:
+      shown = ", ".join(foreign[:_SHOWN_FILES])
+      if len(foreign) > _SHOWN_FILES:
+        shown += ", …"
+      raise ValueError(
+          f"{directory} already holds {len(foreign)} file(s) from another run "
+          f"({shown}); this sink never mixes runs — write each evaluation to "
+          "a fresh output directory")
+
   def read_rows(self, table: str) -> list[dict]:
-    """Every row written to `table` (shard order; `[]` when none)."""
+    """Every row this instance wrote to `table` (shard order; `[]` when
+    none) — never a shard another run left in the directory.
+
+    Raises:
+      ValueError: `table` is not an evaluation table.
+    """
+    _check_table(table)
     rows: list[dict] = []
-    for path in sorted(
-        glob.glob(os.path.join(self.table_dir(table), _SHARD_GLOB))):
+    for path in self._own_shards(table):
       with open(path, encoding="utf-8") as shard:
         rows.extend(json.loads(line) for line in shard if line.strip())
     return rows

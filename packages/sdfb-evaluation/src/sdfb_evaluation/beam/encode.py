@@ -33,12 +33,18 @@ one:
     REPEATED, JSON, …)                           canonical JSON
 
 `num` is NaN for NULL and for a non-finite value (the planning SQL reads
-FLOAT64 NaN/±Inf as NULL too); `cat` is `NULL_CODE` for NULL; `text` is
-column-major (`text[j][i]` is row i of `layout.text_columns[j]`) and holds
-`str` cells as they are, any other cell as its canonical text (BYTES as
-base64, an INT64 id as its digits). A cell is NULL when it is `None` or,
-for a REPEATED column, empty — BigQuery stores a NULL array as an empty
-one, and the planning scan counts `ARRAY_LENGTH(x) = 0` as its NULL.
+FLOAT64 NaN/±Inf as NULL too); a FLOAT64/INT64 column holding only
+int/float/None converts in one numpy call, every other cell goes through
+`canonical.numeric_value` (same values; text still raises). `cat` is
+`NULL_CODE` for NULL; `text` is column-major (`text[j][i]` is row i of
+`layout.text_columns[j]`) and holds `str` cells as they are, any other
+cell as its canonical text (an INT64 id as its digits). BYTES text is
+base64, so its length is ≈ 4/3 of the byte length the planner's
+`AVG(LENGTH(x))` (`avg_len`) measures: compare BYTES lengths only with
+other encoded lengths, never with `avg_len`. A cell is NULL when it is
+`None` or, for a REPEATED column, empty — BigQuery stores a NULL array as
+an empty one, and the planning scan counts `ARRAY_LENGTH(x) = 0` as its
+NULL.
 
 The row-level uint64 hashes, all over `hash64` cells (so they agree with
 `canonical.hash_matrix`, the plan's dictionaries and Task 16's
@@ -65,14 +71,20 @@ produced it):
                    documented cap for `row.null_pattern_tvd`
     subsample_m    hash64(salt, row_hash) < p · 2^64: a Bernoulli(p)
                    draw with p = m / n, m = min(n_source, n_synthetic)
-                   (`matched_rate`) — the matched-n subsample the
-                   n-dependent metrics use (D5)
+                   (`matched_rate`) — the matched-n subsample of the
+                   n-dependent diversity metrics (D5)
 
 A row's hashes and its subsample draw depend on its values and the salt
 alone, never on the batch, bundle, worker or run. The draw is keyed on
 the whole row, so exact duplicate rows are kept or dropped together: at
 p < 1 the subsample thins distinct rows, not copies (a cluster sample of
-duplicates).
+duplicates). Ruling R59 bounds where that matters: `subsample_m` feeds
+ONLY the n-dependent diversity metrics (entropy, distinct counts at
+matched n); the internal-duplicate metrics (`row.internal_duplicate_rate`
+/ `_excess`) are computed on the full data, never on the subsample, so a
+duplicate rate never depends on the sampler. Whole-row duplicates (keys
+included) arise only in key-less tables, where keeping them together
+widens the diversity noise slightly — a documented, conservative bias.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -131,6 +143,10 @@ _CAT_KINDS = frozenset(
 _TEXT_KINDS = frozenset(
     {ColumnKind.CATEGORICAL, ColumnKind.TEXT, ColumnKind.IDENTIFIER})
 _MATCHED_SIDES = frozenset({Side.SOURCE, Side.SYNTHETIC})
+# Columns whose cells are int/float/None from both read paths: numpy
+# converts them in one call (`_fast_numeric`).
+_FAST_NUMERIC_TYPES = frozenset({"FLOAT64", "FLOAT", "INT64", "INTEGER"})
+_FAST_CELL_TYPES = frozenset({int, float, type(None)})
 _TWO_64 = 2**64
 _LOGGER = logging.getLogger(__name__)
 
@@ -199,18 +215,30 @@ def subsample_flags(row_hash: np.ndarray, salt: str, rate: float) -> np.ndarray:
 def matched_rate(table: TablePlan, side: Side | str) -> float:
   """`p = m / n` of one side: `m = min(n_source, n_synthetic)` rows read
   (`TablePlan.rows_read`, sampling applied), so the larger side is thinned
-  to the smaller. The smaller side, the R/H panel sides (already n rows
-  each) and a table without planned counts keep every row (1.0); a side
-  facing an empty other side keeps none (0.0: there is no matched n)."""
+  to the smaller.
+
+      the R/H panel sides                  1.0  already n rows each
+      a count unknown (None) on either     1.0  NOTE: no matched n can be
+        side (an external parent, a             formed, so every row is
+        skipped table)                          kept; the n-dependent
+                                                metrics are then not at
+                                                matched n
+      this side empty (0 rows)             1.0  nothing to thin
+      the other side empty (0 rows)        0.0  no matched n exists (m = 0)
+      the smaller side                     1.0
+      the larger side                      m / n
+  """
   side = Side(side)
   if side not in _MATCHED_SIDES:
     return 1.0
+  if table.rows_source is None or table.rows_synthetic is None:
+    return 1.0
   n_source, n_synthetic = table.rows_read
   n = n_source if side is Side.SOURCE else n_synthetic
-  m = min(n_source, n_synthetic)
-  if n <= 0 or m >= n:
+  if n <= 0:
     return 1.0
-  return m / n
+  m = min(n_source, n_synthetic)
+  return 1.0 if m >= n else m / n
 
 
 def _checked_rate(rate: float) -> float:
@@ -232,6 +260,7 @@ class BatchLayout:  # pylint: disable=too-many-instance-attributes  # one field 
   table: str
   columns: tuple[str, ...]
   kinds: tuple[ColumnKind, ...]
+  bq_types: tuple[str, ...]
   repeated: tuple[bool, ...]
   num_columns: tuple[str, ...]
   cat_columns: tuple[str, ...]
@@ -282,6 +311,7 @@ class BatchLayout:  # pylint: disable=too-many-instance-attributes  # one field 
         table=table.name,
         columns=columns,
         kinds=kinds,
+        bq_types=tuple(c.bq_type for c in table.columns),
         repeated=tuple(c.mode == "REPEATED" for c in table.columns),
         num_columns=placed(_NUM_KINDS),
         cat_columns=placed(_CAT_KINDS),
@@ -449,6 +479,10 @@ class BatchEncoder:
   def _numeric(self, values: Sequence[Sequence[Any]], n: int) -> np.ndarray:
     num = np.full((n, len(self._num_idx)), np.nan, dtype=np.float64)
     for k, j in enumerate(self._num_idx):
+      fast = self._fast_numeric(j, values[j])
+      if fast is not None:
+        num[:, k] = fast
+        continue
       name, kind = self.layout.columns[j], self.layout.kinds[j]
       column = num[:, k]
       for i, value in enumerate(values[j]):
@@ -462,6 +496,19 @@ class BatchEncoder:
         if math.isfinite(reading):
           column[i] = reading
     return num
+
+  def _fast_numeric(self, j: int, values: Sequence[Any]) -> np.ndarray | None:
+    """Column j in one numpy call, or None for the per-cell path: only a
+    FLOAT64/INT64 column whose cells are all int/float/None (numpy would
+    otherwise parse text and read a bool as a number). `float()` of each
+    cell, None → NaN, non-finite → NaN: exactly the per-cell values."""
+    if self.layout.bq_types[j] not in _FAST_NUMERIC_TYPES:
+      return None
+    if not set(map(type, values)) <= _FAST_CELL_TYPES:
+      return None
+    column = np.array(values, dtype=np.float64)
+    column[~np.isfinite(column)] = np.nan
+    return column
 
   def _nonkey_hash(self, h_nonkey: np.ndarray) -> np.ndarray:
     if not self.layout.nonkey_columns:  # an all-key table: no content hash

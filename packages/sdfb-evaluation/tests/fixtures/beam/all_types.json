@@ -24,7 +24,14 @@
     {"name": "tags", "type": "STRING", "mode": "REPEATED", "kind": "nested"},
     {"name": "shipping", "type": "RECORD", "mode": "NULLABLE", "kind": "nested"},
     {"name": "attributes", "type": "JSON", "mode": "NULLABLE", "kind": "nested"},
-    {"name": "store_location", "type": "GEOGRAPHY", "mode": "NULLABLE", "kind": "nested"}
+    {"name": "store_location", "type": "GEOGRAPHY", "mode": "NULLABLE", "kind": "nested"},
+    {"name": "weight_kg", "type": "BIGNUMERIC", "mode": "NULLABLE", "kind": "numeric"},
+    {"name": "fulfilment", "type": "RECORD", "mode": "NULLABLE", "kind": "nested", "fields": [
+      {"name": "packed_at", "type": "DATETIME", "mode": "NULLABLE"},
+      {"name": "cost", "type": "NUMERIC", "mode": "NULLABLE"},
+      {"name": "scanned_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+      {"name": "due", "type": "DATE", "mode": "NULLABLE"}
+    ]}
   ],
   "rows": [
     {
@@ -45,7 +52,9 @@
       "tags": ["denim", "blue"],
       "shipping": {"city": "Valencia", "zip": "46001"},
       "attributes": {"size": "M", "fit": ["slim", "tall"]},
-      "store_location": "POINT(-0.3763 39.4699)"
+      "store_location": "POINT(-0.3763 39.4699)",
+      "weight_kg": "0.450000000000000000000000000100",
+      "fulfilment": {"packed_at": "2026-01-02T18:30:00.500000", "cost": "3.10", "scanned_at": "2026-01-03T08:00:00Z", "due": "2026-01-06"}
     },
     {
       "id": 2,
@@ -65,7 +74,9 @@
       "tags": [],
       "shipping": null,
       "attributes": null,
-      "store_location": null
+      "store_location": null,
+      "weight_kg": null,
+      "fulfilment": null
     },
     {
       "id": 3,
@@ -85,7 +96,9 @@
       "tags": ["socks"],
       "shipping": {"city": null, "zip": "08001"},
       "attributes": [1, 2.5, "x"],
-      "store_location": "POINT(2.1734 41.3851)"
+      "store_location": "POINT(2.1734 41.3851)",
+      "weight_kg": "12",
+      "fulfilment": {"packed_at": null, "cost": null, "scanned_at": null, "due": null}
     },
     {
       "id": 4,
@@ -105,7 +118,9 @@
       "tags": ["outerwear"],
       "shipping": {"city": "Lyon", "zip": "69001"},
       "attributes": "plain",
-      "store_location": "POINT(4.8357 45.764)"
+      "store_location": "POINT(4.8357 45.764)",
+      "weight_kg": "-7.25",
+      "fulfilment": {"packed_at": "1970-01-01T00:00:00", "cost": "0.00", "scanned_at": "1969-12-31T23:59:59.999999Z", "due": "1969-12-31"}
     }
   ]
 }

@@ -34,6 +34,7 @@ import pytest
 from apache_beam.testing.test_pipeline import TestPipeline as BeamTestPipeline
 from apache_beam.testing.util import assert_that, equal_to
 
+from sdfb_evaluation.beam import encode as encode_module
 from sdfb_evaluation.beam.encode import (
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
@@ -110,13 +111,15 @@ def test_layout_follows_the_plan_kinds():
                             "sale_price", "discount", "quantity", "is_gift",
                             "created_at", "shipped_at", "delivery_date",
                             "pickup_time", "barcode", "review", "tags",
-                            "shipping", "attributes", "store_location")
+                            "shipping", "attributes", "store_location",
+                            "weight_kg", "fulfilment")
   assert layout.num_columns == ("sale_price", "discount", "quantity", "is_gift",
                                 "created_at", "shipped_at", "delivery_date",
-                                "pickup_time")
+                                "pickup_time", "weight_kg")
   # booleans also carry their hash64 code, like categoricals (dictionaries)
   assert layout.cat_columns == ("status", "is_gift", "barcode", "tags",
-                                "shipping", "attributes", "store_location")
+                                "shipping", "attributes", "store_location",
+                                "fulfilment")
   assert layout.text_columns == ("id", "order_id", "user_email", "status",
                                  "barcode", "review")
   # PK, identity and FK columns are left out of the non-key hash
@@ -140,7 +143,7 @@ def test_placement_follows_the_plan_never_the_values():
       client_rows(), table=dataclasses.replace(plan, columns=routed))
   assert "status" in batch.layout.text_columns
   assert "status" not in batch.layout.cat_columns
-  assert batch.cat.shape == (4, 6)
+  assert batch.cat.shape == (4, 7)
   # an INT64 key column is an identifier: text, never a number
   assert "id" not in batch.layout.num_columns
 
@@ -153,7 +156,7 @@ def test_placement_follows_the_plan_never_the_values():
 def test_all_types_numeric_block_is_float64_micros_and_bool01():
   batch = _encode(client_rows())
   assert batch.num.dtype == np.float64
-  assert batch.num.shape == (4, 8)
+  assert batch.num.shape == (4, 9)
   nan = math.nan
   expected = {
       "sale_price": [19.9, 5.0, nan, 120.5],
@@ -174,6 +177,10 @@ def test_all_types_numeric_block_is_float64_micros_and_bool01():
       ],
       "pickup_time": [(9 * 3600 + 30 * 60) * 1e6 + 250_000, nan, 0.0,
                       _DAY_US - 1.0],
+      # BIGNUMERIC: float of the exact Decimal, 30 fractional digits
+      "weight_kg": [
+          float(Decimal("0.450000000000000000000000000100")), nan, 12.0, -7.25
+      ],
   }
   for name, values in expected.items():
     np.testing.assert_array_equal(
@@ -184,7 +191,7 @@ def test_all_types_cat_block_is_hash64_with_null_code():
   rows = client_rows()
   batch = _encode(rows)
   assert batch.cat.dtype == np.uint64
-  assert batch.cat.shape == (4, 7)
+  assert batch.cat.shape == (4, 8)
   for name in batch.layout.cat_columns:
     expected = []
     for row in rows:
@@ -396,8 +403,10 @@ def test_null_bits_mark_sql_nulls_and_empty_arrays_in_plan_order():
                                          "delivery_date", "pickup_time",
                                          "barcode", "review", "tags",
                                          "shipping", "attributes",
-                                         "store_location")
-  # row 3: NaN is a value, not a NULL; "" is empty, not NULL
+                                         "store_location", "weight_kg",
+                                         "fulfilment")
+  # row 3: NaN is a value, not a NULL; "" is empty, not NULL; a RECORD of
+  # NULL sub-fields is a value
   assert int(batch.null_bits[2]) == bits("order_id", "user_email", "status",
                                          "sale_price", "quantity", "is_gift",
                                          "created_at")
@@ -498,9 +507,74 @@ def test_matched_rate_thins_the_larger_side_to_the_smaller():
   assert encoder.subsample_rate == 0.25
 
 
+def test_matched_rate_none_counts_keep_everything_zero_counts_are_empty():
+  half = _orders_plan(rows_source=1_000)  # synthetic count unknown (None)
+  assert half.rows_synthetic is None
+  assert matched_rate(half, Side.SOURCE) == 1.0
+  assert matched_rate(half, Side.SYNTHETIC) == 1.0
+  empty_syn = _orders_plan(rows_source=1_000, rows_synthetic=0)
+  assert matched_rate(empty_syn, Side.SYNTHETIC) == 1.0  # nothing to thin
+  assert matched_rate(empty_syn, Side.SOURCE) == 0.0  # no matched n exists
+  both_empty = _orders_plan(rows_source=0, rows_synthetic=0)
+  assert matched_rate(both_empty, Side.SOURCE) == 1.0
+
+
 # ---------------------------------------------------------------------------
 # no silent drops
 # ---------------------------------------------------------------------------
+
+
+def _one_numeric(bq_type: str) -> Any:
+  column = ColumnPlan("x", bq_type, "NULLABLE", ColumnKind.NUMERIC, False,
+                      False)
+  return table_plan("measures", [column])
+
+
+def test_float64_and_int64_fast_path_equals_the_per_cell_path():
+  # FLOAT64/INT64 columns skip numeric_value (numpy converts directly);
+  # a NUMERIC column of the same Python values takes the per-cell path.
+  rng = random.Random(11)
+  floats: list[Any] = [rng.uniform(-1e6, 1e6) for _ in range(500)]
+  floats += [None, math.nan, math.inf, -math.inf, -0.0, 1e308, 5e-324]
+  ints: list[Any] = [rng.randint(-2**62, 2**62) for _ in range(500)]
+  ints += [None, 0, 2**53 + 1, -2**63, 2**63 - 1]
+  for bq_type, values in (("FLOAT64", floats), ("FLOAT", floats),
+                          ("INT64", ints), ("INTEGER", ints)):
+    rows = [{"x": v} for v in values]
+    fast = _encode(rows, table=_one_numeric(bq_type)).num
+    slow = _encode(rows, table=_one_numeric("NUMERIC")).num
+    np.testing.assert_array_equal(fast, slow, err_msg=bq_type)
+  mixed = [{"x": 1}, {"x": 2.5}, {"x": None}]  # int cells in a FLOAT64 column
+  np.testing.assert_array_equal(
+      _encode(mixed, table=_one_numeric("FLOAT64")).num[:, 0],
+      [1.0, 2.5, math.nan])
+
+
+def test_the_fast_path_never_calls_numeric_value(monkeypatch):
+
+  def per_cell(value: Any) -> float:
+    raise AssertionError(f"per-cell path used for {value!r}")
+
+  monkeypatch.setattr(encode_module, "numeric_value", per_cell)
+  rows = [{"x": 1.5}, {"x": None}, {"x": 7}]
+  for bq_type in ("FLOAT64", "INT64"):
+    _encode(rows, table=_one_numeric(bq_type))
+  with pytest.raises(AssertionError, match="per-cell"):
+    _encode(rows, table=_one_numeric("NUMERIC"))
+
+
+def test_the_fast_path_still_refuses_non_numbers():
+  # numpy would parse "1.5" and read True as 1: those fall back to the
+  # per-cell path, which reads a bool as 0/1 and refuses text.
+  table = _one_numeric("FLOAT64")
+  assert _encode([{
+      "x": True
+  }, {
+      "x": 2.0
+  }], table=table).num[:, 0].tolist() == [1.0, 2.0]
+  with pytest.raises(ValueError, match="'x'") as info:
+    _encode([{"x": 1.0}, {"x": "1.5"}], table=table)
+  assert "1.5" not in str(info.value)
 
 
 def test_a_row_missing_a_plan_column_raises():

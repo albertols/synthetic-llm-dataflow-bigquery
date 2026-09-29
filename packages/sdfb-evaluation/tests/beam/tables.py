@@ -61,6 +61,7 @@ _CLIENT = {
     "INT64": int,
     "FLOAT64": _float,
     "NUMERIC": Decimal,
+    "BIGNUMERIC": Decimal,
     "BOOL": bool,
     "STRING": str,
     "BYTES": base64.b64decode,
@@ -75,14 +76,17 @@ _CLIENT = {
 def client_value(field: Mapping[str, Any], raw: Any) -> Any:
   """One REST-typed cell as the BigQuery client returns it
   (`google.cloud.bigquery._helpers.CellDataParser`): TIMESTAMP an aware
-  UTC `datetime`, DATETIME a naive one, NUMERIC a `Decimal`, BYTES
-  `bytes`, JSON parsed, RECORD a dict, REPEATED a list."""
+  UTC `datetime`, DATETIME a naive one, (BIG)NUMERIC a `Decimal`, BYTES
+  `bytes`, JSON parsed, RECORD a dict of typed sub-fields (untyped when
+  the fixture declares none), REPEATED a list."""
   if raw is None:
     return None
   bq_type = field["type"]
   if field.get("mode") == "REPEATED":
     scalar = {**field, "mode": "NULLABLE"}
     return [client_value(scalar, item) for item in raw]
+  if bq_type == "RECORD" and "fields" in field:
+    return {f["name"]: client_value(f, raw[f["name"]]) for f in field["fields"]}
   if bq_type in ("RECORD", "JSON"):
     return raw
   return _CLIENT[bq_type](raw)
@@ -99,11 +103,14 @@ def client_rows(fixture: Mapping[str, Any] | None = None) -> list[dict]:
 
 def _arrow_type(field: Mapping[str, Any]) -> pa.DataType | None:
   """The Storage Read API's Arrow type for a BigQuery field (None: let
-  pyarrow infer it, for RECORD)."""
+  pyarrow infer it, for a RECORD the fixture declares no sub-fields for)."""
+  if field["type"] == "RECORD" and "fields" in field:
+    return pa.struct([(f["name"], _arrow_type(f)) for f in field["fields"]])
   types: dict[str, pa.DataType] = {
       "INT64": pa.int64(),
       "FLOAT64": pa.float64(),
       "NUMERIC": pa.decimal128(38, 9),
+      "BIGNUMERIC": pa.decimal256(76, 38),
       "BOOL": pa.bool_(),
       "STRING": pa.string(),
       "BYTES": pa.binary(),

@@ -24,7 +24,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +132,19 @@ def test_bigquery_sources_compose_every_side_in_one_pipeline():
     assert f"Read[{table.landing_table}/{side}]/Types" in labels
 
 
+def test_panel_rows_are_projected_to_the_plan_columns():
+  # The panel is `SELECT ref.*` of the source: columns the landing table
+  # lacks are dropped before beam.Create, so the job graph carries only
+  # what the encoder reads.
+  rows = [dict(r, source_only="x" * 64) for r in client_rows()]
+  table = all_types_plan(panel=make_panel(rows[:2], rows[2:]))
+  names = {c.name for c in table.columns}
+  with BeamTestPipeline() as p:
+    keys = (InMemorySources({}).read(p, table, Side.HOLDOUT) | beam.Map(sorted))
+    assert_that(keys, equal_to([sorted(names)] * 2))
+  assert "source_only" in rows[0]  # the plan's own rows are not mutated
+
+
 def test_bigquery_sources_refuse_a_side_with_nothing_to_read():
   table = all_types_plan()
   empty = dataclasses.replace(table, source_read_table="")
@@ -207,6 +221,22 @@ def test_direct_read_rows_normalize_to_the_client_types():
   } for row in client]
   assert normalized[3]["attributes"] == "plain"  # a JSON string scalar
   assert normalized[2]["attributes"] == [1, 2.5, "x"]
+  # a RECORD's DATETIME/NUMERIC/TIMESTAMP/DATE sub-fields and a BIGNUMERIC
+  # arrive typed as the client types them, at every depth (Arrow)
+  for got, want in zip(normalized, client, strict=True):
+    assert type(got["weight_kg"]) is type(want["weight_kg"])
+    if want["fulfilment"] is not None:
+      assert {
+          k: type(v) for k, v in got["fulfilment"].items()
+      } == {
+          k: type(v) for k, v in want["fulfilment"].items()
+      }
+  sub = normalized[0]["fulfilment"]
+  assert isinstance(sub["packed_at"],
+                    datetime) and sub["packed_at"].tzinfo is None
+  assert sub["scanned_at"].utcoffset() == timedelta(0)
+  assert isinstance(sub["cost"], Decimal) and isinstance(sub["due"], date)
+  assert normalized[0]["weight_kg"] == Decimal("0.4500000000000000000000000001")
 
 
 def test_direct_read_rows_encode_exactly_like_client_rows():
@@ -351,3 +381,63 @@ def test_client_load_sinks_load_after_the_pipeline_registry_last(
       "evaluation_profiles": "job_2",
       "evaluation_data_history": "job_3",
   }
+
+
+def test_two_writes_to_one_table_keep_every_row(tmp_path: Path):
+  # Task 26 may write one table from two branches: each write gets its own
+  # shard prefix, so neither finalises over the other.
+  sinks = ClientLoadSinks(str(tmp_path), project=PROJECT, dataset=QDS)
+  first = [_metric_row(i, 1.0) for i in range(3)]
+  second = [_metric_row(i, 2.0) for i in range(100, 105)]
+  with BeamTestPipeline() as p:
+    sinks.write(p | "A" >> beam.Create(first), "evaluation_metrics")
+    sinks.write(
+        p | "B" >> beam.Create(second),
+        "evaluation_metrics",
+        label="Write[evaluation_metrics]")  # the same label twice
+  assert len(sinks.read_rows("evaluation_metrics")) == 8
+  bq = _FakeBq()
+  sinks.load(bq)
+  assert len(bq.loads) == 1
+  loaded = bq.loads[0][1]
+  assert len(loaded) == 8
+  assert sorted(r["metric_id"] for r in loaded) == sorted(
+      r["metric_id"] for r in first + second)
+
+
+def _stale_shard(tmp_path: Path, table: str = "evaluation_metrics") -> Path:
+  """A shard an earlier run left behind in the same output directory."""
+  stale = tmp_path / table / "part-00000-of-00001.jsonl"
+  stale.parent.mkdir(parents=True)
+  stale.write_text(json_line(_metric_row(7, 0.7), table) + "\n")
+  return stale
+
+
+def test_a_table_dir_holding_another_runs_files_is_refused(tmp_path: Path):
+  _stale_shard(tmp_path)
+  sinks = LocalJsonSinks(str(tmp_path))
+  with pytest.raises(ValueError, match="another run") as info:
+    sinks.write(beam.Pipeline() | beam.Create([]), "evaluation_metrics")
+  assert "evaluation_metrics" in str(info.value)
+  # a table this run has not touched is still writable
+  sinks.write(beam.Pipeline() | beam.Create([]), "evaluation_profiles")
+
+
+def test_an_out_dir_beam_would_read_as_a_glob_is_refused(tmp_path: Path):
+  # Beam's file sink matches its shards by glob: under "ev_[1]*" it cannot
+  # find them and fails at finalize, so the sink refuses the path upfront.
+  with pytest.raises(ValueError, match="glob"):
+    LocalJsonSinks(str(tmp_path / "ev_[1]*"))
+
+
+def test_read_rows_never_reloads_stale_shards(tmp_path: Path):
+  _stale_shard(tmp_path)
+  sinks = ClientLoadSinks(str(tmp_path), project=PROJECT, dataset=QDS)
+  assert not sinks.read_rows("evaluation_metrics")  # not written by this run
+  profile = {"evaluation_id": "ev_1", "profile_kind": "histogram"}
+  with BeamTestPipeline() as p:
+    sinks.write(p | beam.Create([profile]), "evaluation_profiles")
+  bq = _FakeBq()
+  assert sinks.load(bq) == {"evaluation_profiles": "job_1"}
+  assert [fqn.rsplit(".", 1)[1] for fqn, _, _ in bq.loads
+         ] == ["evaluation_profiles"]
