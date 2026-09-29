@@ -1,0 +1,1872 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+"""The evaluation plan: everything the Beam job needs to know before it
+reads a row, decided from BigQuery metadata and ONE aggregate scan per
+table side.
+
+    launch + models ──► tables: launch tables parents first, their
+          │             already-landed parents read-only ("external");
+          │             a launch table with no model entry → PlanError (R50)
+          ▼
+    per launch table: bq.table → resolve_scope (+ foreign writers)
+          │           → pin_source → provisional ColumnPlans
+          ▼
+    dry runs (planning SELECTs, panel, prepare DDL) ─► Budget.check_bytes
+          ▼             nothing billed before this point
+    ONE planning SELECT per side → scope.verify(rows) → R/E/H panel
+          ▼
+    [sampled] a salted sample CTAS per side above sample_rows ─► check again
+          ▼
+    census shares (fixed shuffle first, the rest max-min fair across
+    tables, then columns) → kinds, grids, dictionaries → pairs → digest
+
+Planning SQL, per column (`t` is the read; a key column stops after the
+distinct count, a nested one after the null count):
+
+    all          COUNTIF(NULL)            (REPEATED: ARRAY_LENGTH = 0)
+    STRING/BYTES COUNTIF(TRIM(x) = '')    (BYTES: LENGTH(x) = 0)
+    scalar       APPROX_COUNT_DISTINCT(x)
+    numeric,     APPROX_QUANTILES(v, 1000), AVG, STDDEV_POP, MIN, MAX,
+    temporal     APPROX_TOP_COUNT(v, 10) (atoms); TIMESTAMP/DATETIME also
+                 COUNTIF(TIME(x) = 00:00:00) (day granularity)
+    STRING/BYTES AVG(LENGTH(x)), APPROX_TOP_COUNT(x, 254) (dictionaries)
+    BOOL         APPROX_TOP_COUNT(x, 254)
+
+`v` is x on one numeric scale: FLOAT64 with NaN/±Inf as NULL, the other
+numerics CAST AS FLOAT64, and temporal values as UNIX_MICROS epochs (DATE
+and DATETIME read as UTC; TIME as microseconds since midnight). Every
+temporal grid, atom, mean and std in a `ColumnPlan` is on that scale, so
+the Beam encoder must encode temporal cells in epoch microseconds too.
+BigQuery allows 10 000 output columns per SELECT (and ~1 M characters of
+query text): a table wider than that is planned in several SELECTs over
+the same read, each with its own `COUNT(*)`, which must agree.
+
+STRING routing (source statistics, non-NULL n):
+
+    key (PK / FK column) or identity column   → identifier
+    distinct ≤ 1000                            → categorical
+    distinct / n ≥ 0.9, AVG(LENGTH) ≥ 20      → text
+    distinct / n ≥ 0.9                         → identifier
+    otherwise, AVG(LENGTH) ≥ 20               → text
+    otherwise                                  → categorical (high cardinality)
+
+Literals (D6): `literal_ok` holds when the column has ≤ 50 source-distinct
+values AND every one of them has a source count ≥ 10 (the top-254 list
+covering all non-NULL rows proves both); otherwise profiles carry hashed
+labels. `dictionary` is the `hash64` codes of the top-9 source values (the
+pair grid's 10th cell is "other"), `detection_dictionary` the top-254
+(Ruling R32), most frequent first, NULL never a value.
+
+Pairs: the `pair_max_columns` pairable columns (numeric, temporal,
+categorical, boolean; never a key; ≥ 2 source-distinct values) ranked by
+APPROX_COUNT_DISTINCT as an entropy proxy on the 10-cell pair grid —
+first by log2(min(distinct, 10)) descending, then by |ln(distinct / 10)|
+ascending (a numeric or temporal column fills the grid by deciles, so its
+distance is 0), then schema order — and every pair among them.
+
+Design: docs/designs/2026-07-07-evaluation-framework-design.md
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import json
+import math
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, NamedTuple
+
+from sdfb_evaluation.canonical import canonical_value, hash64, json_safe
+from sdfb_evaluation.catalogue import load_catalogue
+from sdfb_evaluation.context.bq import BqApiError, normalize_fqn, quote_fqn
+from sdfb_evaluation.context.budget import (
+    CENSUS_KEY_BYTES,
+    GB,
+    Budget,
+    census_bytes,
+    census_demand,
+    fixed_shuffle_bytes,
+    predict_shuffle_gb,
+    value_sample_rate,
+    water_fill,
+)
+from sdfb_evaluation.context.jobs import (
+    JobWrite,
+    foreign_writes,
+    parse_timestamp,
+)
+from sdfb_evaluation.context.launch import LaunchContext, RunRecord
+from sdfb_evaluation.context.reference import Panel, fetch_panel, panel_sql
+from sdfb_evaluation.context.relationships import (
+    Edge,
+    RelModel,
+    component,
+    enforced_edges,
+    generation_order,
+    model_for,
+    sha12,
+)
+from sdfb_evaluation.context.scope import (
+    MODES as SCOPE_MODES,
+    ScopePlan,
+    SourcePin,
+    pin_source,
+    resolve_scope,
+    sampled_read,
+)
+from sdfb_evaluation.schemas import load_schema
+from sdfb_evaluation.types import ColumnKind
+from sdfb_evaluation.version import EVALUATOR_VERSION
+
+__all__ = [
+    "ColumnPlan",
+    "EvaluationPlan",
+    "Knobs",
+    "PlanError",
+    "PlanningOutput",
+    "PrepareStatement",
+    "TablePlan",
+    "apply_planning",
+    "build_plan",
+    "encoding_plan_digest",
+    "kinds_from_schema",
+    "parse_planning",
+    "planning_outputs",
+    "planning_queries",
+    "planning_sql",
+    "select_pairs",
+    "string_kind",
+]
+
+GRID_POINTS = 1001  # APPROX_QUANTILES(x, 1000)
+_QUANTILE_STEPS = GRID_POINTS - 1
+_ATOM_CANDIDATES = 10
+_ATOM_MIN_COUNT = 2  # a value seen once is no point mass
+PAIR_GRID_CELLS = 10  # top-9 + other, or deciles
+_MIN_PAIR_DISTINCT = 2  # a constant column has no dependence
+_FQN_PARTS = 3  # project.dataset.table
+DICTIONARY_SIZE = PAIR_GRID_CELLS - 1
+DETECTION_DICTIONARY_SIZE = 254  # Ruling R32
+LITERAL_MAX_DISTINCT = 50  # ADR 0022
+LITERAL_MIN_COUNT = 10  # the repo's k-anonymity floor
+CATEGORICAL_MAX_DISTINCT = 1000
+UNIQUE_RATIO = 0.9
+TEXT_MIN_AVG_LENGTH = 20
+MAX_OUTPUT_COLUMNS = 10_000  # BigQuery's cap on a SELECT's columns
+_MAX_QUERY_CHARS = 900_000  # under BigQuery's 1,024 K-character query text
+SAMPLE_MODULUS = 1_000_000
+_GRANT_TOLERANCE = 1e-9  # float round trips never downgrade an exact census
+
+MODES = ("exact", "sampled")
+TRIGGERS = ("cli", "composer", "chained", "agent")
+ROLES = ("root", "driven", "side_input", "isolated", "standalone", "external")
+CENSUS_METHODS = ("none", "exact", "value_sampled")
+_ROWS = "n_rows"
+_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_DATASET_RE = re.compile(r"[A-Za-z0-9_]{1,1024}")
+_BAD_NAME_CHARS = re.compile(r"[`\\\x00-\x1f]")
+
+_INT_TYPES = frozenset({"INT64", "INTEGER"})
+_FLOAT_TYPES = frozenset({"FLOAT64", "FLOAT"})
+_DECIMAL_TYPES = frozenset({"NUMERIC", "BIGNUMERIC", "DECIMAL", "BIGDECIMAL"})
+_NUMERIC_TYPES = _INT_TYPES | _FLOAT_TYPES | _DECIMAL_TYPES
+_TEMPORAL_TYPES = frozenset({"TIMESTAMP", "DATETIME", "DATE", "TIME"})
+_BOOL_TYPES = frozenset({"BOOL", "BOOLEAN"})
+_STRING_TYPES = frozenset({"STRING", "BYTES"})
+_NESTED_TYPES = frozenset(
+    {"RECORD", "STRUCT", "JSON", "GEOGRAPHY", "INTERVAL", "RANGE"})
+KNOWN_TYPES = (
+    _NUMERIC_TYPES | _TEMPORAL_TYPES | _BOOL_TYPES | _STRING_TYPES
+    | _NESTED_TYPES)
+_PAIR_KINDS = frozenset({
+    ColumnKind.NUMERIC, ColumnKind.TEMPORAL, ColumnKind.CATEGORICAL,
+    ColumnKind.BOOLEAN
+})
+_GRID_KINDS = frozenset({ColumnKind.NUMERIC, ColumnKind.TEMPORAL})
+_CODED_KINDS = frozenset({ColumnKind.CATEGORICAL, ColumnKind.BOOLEAN})
+_SCOPE_REQUESTS = ("auto", *SCOPE_MODES)  # whatever modes scope.py knows
+_SOURCE_KEYS = ("hashed", "raw")
+# Knobs that change no metric value: they stay out of evaluation_key.
+_OPERATIONAL_KNOBS = frozenset(
+    {"max_bytes_billed", "output_dataset", "temp_dataset", "evaluation_id"})
+_BQ_ERRORS = (PermissionError, LookupError, BqApiError)
+_PAD = timedelta(seconds=1)
+
+
+class PlanError(ValueError):
+  """The launch cannot be planned as resolved (the message says why and
+  what to pass)."""
+
+
+# --------------------------------------------------------------------------
+# columns
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ColumnPlan:  # pylint: disable=too-many-instance-attributes  # the plan's per-column contract is wide by design
+  """How one column is encoded, profiled and compared.
+
+  `quantiles_src`/`quantiles_syn` are the 1,001-point `APPROX_QUANTILES`
+  grids of each side and `atoms` the source's point masses (a top-10
+  value holding at least one grid step, 1/1000, of the non-NULL mass);
+  with `mean_src`/`std_src` they are on the planning scale — numbers as
+  FLOAT64, temporal values as epoch MICROseconds. `census` is how the
+  keyed value census runs (`none` | `exact` | `value_sampled`, the last at
+  `value_sample_rate` of the value-hash space). `dictionary` (top-9) and
+  `detection_dictionary` (top-254) hold `hash64(name, value)` codes;
+  `literal_ok` is the D6 gate for literal labels.
+  """
+  name: str
+  bq_type: str
+  mode: str
+  kind: ColumnKind
+  is_key: bool
+  day_granularity: bool
+  census: str = "none"
+  value_sample_rate: float | None = None
+  quantiles_src: tuple[float, ...] | None = None
+  quantiles_syn: tuple[float, ...] | None = None
+  atoms: tuple[float, ...] = ()
+  mean_src: float | None = None
+  std_src: float | None = None
+  dictionary: tuple[int, ...] | None = None
+  literal_ok: bool = False
+  source_distinct: int | None = None
+  detection_dictionary: tuple[int, ...] | None = None
+  synthetic_distinct: int | None = None
+
+  def __post_init__(self) -> None:
+    object.__setattr__(self, "kind", ColumnKind(self.kind))
+    if self.census not in CENSUS_METHODS:
+      raise ValueError(f"{self.name}: census {self.census!r}, expected one "
+                       f"of {list(CENSUS_METHODS)}")
+    sampled = self.census == "value_sampled"
+    if sampled != (self.value_sample_rate is not None):
+      raise ValueError(f"{self.name}: value_sample_rate is set exactly when "
+                       "the census is value_sampled")
+
+
+def _kind_of(bq_type: str, mode: str) -> ColumnKind:
+  if mode == "REPEATED" or bq_type not in KNOWN_TYPES - _NESTED_TYPES:
+    return ColumnKind.NESTED
+  if bq_type in _NUMERIC_TYPES:
+    return ColumnKind.NUMERIC
+  if bq_type in _TEMPORAL_TYPES:
+    return ColumnKind.TEMPORAL
+  if bq_type in _BOOL_TYPES:
+    return ColumnKind.BOOLEAN
+  return ColumnKind.CATEGORICAL  # STRING / BYTES until routed
+
+
+def kinds_from_schema(
+    fields: Iterable[Mapping[str, Any]],
+    *,
+    keys: Iterable[str],
+    identity: Iterable[str] = ()) -> list[ColumnPlan]:
+  """Provisional `ColumnPlan`s from a BigQuery JSON schema, in order.
+
+  The kind follows the type (legacy and standard names alike; REPEATED,
+  RECORD/STRUCT, JSON, GEOGRAPHY, INTERVAL, RANGE and any type this
+  module does not know are `nested`, never an error). A `keys` column
+  (PK/FK) is an identifier with `is_key`; an `identity` column
+  (unique-but-not-a-key) is an identifier WITHOUT `is_key`, so its values
+  still enter the census. STRING/BYTES stay `categorical` until
+  `apply_planning` routes them; only a DATE is day-granular before the
+  planning scan has seen values.
+  """
+  key_set, identity_set = set(keys), set(identity)
+  columns = []
+  for spec in fields:
+    name = str(spec["name"])
+    bq_type = str(spec.get("type") or "").upper()
+    mode = str(spec.get("mode") or "NULLABLE").upper()
+    kind = _kind_of(bq_type, mode)
+    nested = kind is ColumnKind.NESTED
+    is_key = name in key_set and not nested
+    if not nested and (is_key or name in identity_set):
+      kind = ColumnKind.IDENTIFIER
+    columns.append(
+        ColumnPlan(
+            name=name,
+            bq_type=bq_type,
+            mode=mode,
+            kind=kind,
+            is_key=is_key,
+            day_granularity=kind is ColumnKind.TEMPORAL and bq_type == "DATE"))
+  return columns
+
+
+# --------------------------------------------------------------------------
+# planning SQL
+# --------------------------------------------------------------------------
+class PlanningOutput(NamedTuple):
+  """One output column of the planning SELECT: `sql AS alias`."""
+  alias: str
+  column: str
+  stat: str
+  sql: str
+
+
+def _ref(name: str) -> str:
+  if not name or _BAD_NAME_CHARS.search(name):
+    raise ValueError(f"column name {name!r} cannot be quoted for SQL")
+  return f"t.`{name}`"
+
+
+def _numeric_expr(ref: str, bq_type: str) -> str:
+  """The column on the planning scale (see the module docstring)."""
+  if bq_type in _FLOAT_TYPES:
+    return f"IF(IS_NAN({ref}) OR IS_INF({ref}), NULL, {ref})"
+  if bq_type == "TIMESTAMP":
+    return f"UNIX_MICROS({ref})"
+  if bq_type in ("DATE", "DATETIME"):
+    return f"UNIX_MICROS(TIMESTAMP({ref}))"
+  if bq_type == "TIME":
+    return f"TIME_DIFF({ref}, TIME '00:00:00', MICROSECOND)"
+  return f"CAST({ref} AS FLOAT64)"
+
+
+def _column_outputs(index: int, column: ColumnPlan) -> list[PlanningOutput]:
+  ref = _ref(column.name)
+  bq_type = column.bq_type
+  items: list[tuple[str, str]] = []
+  if column.kind is ColumnKind.NESTED:
+    empty = (f"ARRAY_LENGTH({ref}) = 0"
+             if column.mode == "REPEATED" else f"{ref} IS NULL")
+    items.append(("null", f"COUNTIF({empty})"))
+  else:
+    items.append(("null", f"COUNTIF({ref} IS NULL)"))
+    if bq_type == "STRING":
+      items.append(("empty", f"COUNTIF(TRIM({ref}) = '')"))
+    elif bq_type == "BYTES":
+      items.append(("empty", f"COUNTIF(LENGTH({ref}) = 0)"))
+    items.append(("distinct", f"APPROX_COUNT_DISTINCT({ref})"))
+    if not column.is_key:
+      items.extend(_value_outputs(ref, bq_type))
+  return [
+      PlanningOutput(f"c{index}_{stat}", column.name, stat, sql)
+      for stat, sql in items
+  ]
+
+
+def _value_outputs(ref: str, bq_type: str) -> list[tuple[str, str]]:
+  if bq_type in _NUMERIC_TYPES | _TEMPORAL_TYPES:
+    value = _numeric_expr(ref, bq_type)
+    items = [
+        ("quantiles", f"APPROX_QUANTILES({value}, {_QUANTILE_STEPS})"),
+        ("mean", f"AVG({value})"),
+        ("std", f"STDDEV_POP({value})"),
+        ("min", f"MIN({value})"),
+        ("max", f"MAX({value})"),
+        ("top", f"APPROX_TOP_COUNT({value}, {_ATOM_CANDIDATES})"),
+    ]
+    if bq_type in ("TIMESTAMP", "DATETIME"):
+      items.append(("midnight", f"COUNTIF(TIME({ref}) = TIME '00:00:00')"))
+    return items
+  top = ("top", f"APPROX_TOP_COUNT({ref}, {DETECTION_DICTIONARY_SIZE})")
+  if bq_type in _BOOL_TYPES:
+    return [top]
+  if bq_type in _STRING_TYPES:
+    return [("avg_len", f"AVG(LENGTH({ref}))"), top]
+  return []
+
+
+def planning_outputs(
+    columns: Sequence[ColumnPlan]) -> tuple[PlanningOutput, ...]:
+  """Every output of the planning scan over `columns`, aliased
+  `c<index>_<stat>` by position in `columns`."""
+  return tuple(o for i, c in enumerate(columns) for o in _column_outputs(i, c))
+
+
+def _from_expr(read: str) -> str:
+  """A FROM item: a strict table name (bare or backtick-quoted), or a
+  parenthesized `ScopePlan`/`SourcePin` `read_expr`, passed through as
+  built there (it is bound with that plan's own `params`)."""
+  text = (read or "").strip()
+  if text.startswith("(") and text.endswith(")") and ";" not in text:
+    return text
+  if text.startswith("`") and text.endswith("`"):
+    text = text[1:-1]
+  return quote_fqn(text)
+
+
+def _select(expr: str, outputs: Sequence[PlanningOutput]) -> str:
+  lines = [f"  COUNT(*) AS {_ROWS}"]
+  lines += [f"  {o.sql} AS {o.alias}" for o in outputs]
+  body = ",\n".join(lines)
+  return f"SELECT\n{body}\nFROM {expr} AS t"
+
+
+def planning_sql(read_table: str, columns: Sequence[ColumnPlan]) -> str:
+  """ONE aggregate SELECT over `read_table` (a table name or a read_expr)
+  computing every planning statistic of `columns` (see the module
+  docstring).
+
+  Raises:
+    ValueError: an unsafe table or column name, or more outputs than one
+      SELECT may have (use `planning_queries`).
+  """
+  outputs = planning_outputs(columns)
+  if len(outputs) + 1 > MAX_OUTPUT_COLUMNS:
+    raise ValueError(f"{len(outputs) + 1} output columns exceed BigQuery's "
+                     f"{MAX_OUTPUT_COLUMNS} per SELECT; plan the table with "
+                     "planning_queries, which splits it")
+  return _select(_from_expr(read_table), outputs)
+
+
+def planning_queries(read_table: str,
+                     columns: Sequence[ColumnPlan]) -> tuple[str, ...]:
+  """The planning scan of `columns` as few SELECTs as BigQuery's limits
+  allow: one for any ordinary table; for a wide one, consecutive column
+  groups (a column's outputs never split) under 10 000 output columns and
+  ~1 M characters each, all over the same read."""
+  expr = _from_expr(read_table)
+  chunks: list[list[PlanningOutput]] = [[]]
+  chars = 0
+  for index, column in enumerate(columns):
+    outputs = _column_outputs(index, column)
+    size = sum(len(o.sql) + len(o.alias) + 8 for o in outputs)
+    current = chunks[-1]
+    if current and (len(current) + len(outputs) + 1 > MAX_OUTPUT_COLUMNS or
+                    chars + size > _MAX_QUERY_CHARS):
+      chunks.append([])
+      chars = 0
+    chunks[-1].extend(outputs)
+    chars += size
+  return tuple(_select(expr, chunk) for chunk in chunks)
+
+
+def _count(value: Any) -> int | None:
+  return None if value is None else int(value)
+
+
+def _finite(value: Any) -> float | None:
+  if value is None:
+    return None
+  number = float(value)
+  return number if math.isfinite(number) else None
+
+
+def _top_pairs(value: Any) -> list[tuple[Any, int]]:
+  """`APPROX_TOP_COUNT`'s ARRAY<STRUCT<value, count>> as (value, count),
+  whatever row shape the client returned."""
+  pairs = []
+  for item in value or ():
+    if isinstance(item, Mapping):
+      pairs.append((item.get("value"), int(item["count"])))
+    else:
+      pairs.append((item[0], int(item[1])))
+  return pairs
+
+
+def _grid(value: Any) -> tuple[float, ...] | None:
+  """A quantile grid as finite floats; None when there is none."""
+  grid = [_finite(v) for v in value or ()]
+  return tuple(v for v in grid if v is not None) or None
+
+
+def _parse_stat(stat: str, value: Any) -> Any:
+  if stat in ("null", "empty", "distinct", "midnight"):
+    return _count(value)
+  if stat == "quantiles":
+    return _grid(value)
+  if stat == "top":
+    return _top_pairs(value)
+  return _finite(value)
+
+
+def parse_planning(rows: Sequence[Mapping[str, Any]],
+                   columns: Sequence[ColumnPlan]) -> dict[str, Any]:
+  """`{"rows": n, "columns": {name: {stat: value}}}` from the result row
+  of each planning SELECT (one per `planning_queries` chunk).
+
+  Raises:
+    ValueError: no row, or the chunks disagree on the row count (the
+      table changed while it was planned).
+  """
+  if not rows:
+    raise ValueError("no planning result row to parse")
+  merged: dict[str, Any] = {}
+  counts = set()
+  for row in rows:
+    counts.add(_count(row.get(_ROWS)))
+    merged.update(row)
+  if len(counts) != 1 or None in counts:
+    raise ValueError(f"planning chunks disagree on row counts "
+                     f"{sorted(counts, key=str)}: the read changed while it "
+                     "was planned")
+  stats: dict[str, dict[str, Any]] = {c.name: {} for c in columns}
+  for output in planning_outputs(columns):
+    stats[output.column][output.stat] = _parse_stat(output.stat,
+                                                    merged.get(output.alias))
+  return {"rows": counts.pop(), "columns": stats}
+
+
+# --------------------------------------------------------------------------
+# routing, dictionaries, census
+# --------------------------------------------------------------------------
+def string_kind(distinct: int | None, non_null: int,
+                avg_length: float | None) -> ColumnKind:
+  """The kind of a non-key STRING/BYTES column (module docstring table)."""
+  if not non_null or distinct is None or distinct <= CATEGORICAL_MAX_DISTINCT:
+    return ColumnKind.CATEGORICAL
+  long_values = (avg_length or 0.0) >= TEXT_MIN_AVG_LENGTH
+  if distinct / non_null >= UNIQUE_RATIO:
+    return ColumnKind.TEXT if long_values else ColumnKind.IDENTIFIER
+  return ColumnKind.TEXT if long_values else ColumnKind.CATEGORICAL
+
+
+def _ranked_values(top: Sequence[tuple[Any, int]]) -> list[tuple[Any, int]]:
+  """Non-NULL top values, most frequent first, ties by canonical value."""
+  present = [(v, c) for v, c in top if v is not None]
+  return sorted(
+      present,
+      key=lambda vc: (-vc[1], json.dumps(canonical_value(vc[0]), default=str)))
+
+
+def _literal_ok(distinct: int | None, values: Sequence[tuple[Any, int]],
+                non_null: int) -> bool:
+  return (distinct is not None and distinct <= LITERAL_MAX_DISTINCT and
+          non_null > 0 and bool(values) and
+          sum(c for _, c in values) == non_null and
+          min(c for _, c in values) >= LITERAL_MIN_COUNT)
+
+
+def _atoms(top: Sequence[tuple[Any, int]], non_null: int) -> tuple[float, ...]:
+  floor = max(_ATOM_MIN_COUNT, math.ceil(non_null / _QUANTILE_STEPS))
+  points = {
+      float(v)
+      for v, c in top
+      if v is not None and c >= floor and math.isfinite(float(v))
+  }
+  return tuple(sorted(points))
+
+
+def _day_granular(column: ColumnPlan, kind: ColumnKind, midnight: int | None,
+                  non_null: int) -> bool:
+  if kind is not ColumnKind.TEMPORAL:
+    return False
+  if column.bq_type == "DATE":
+    return True
+  return non_null > 0 and midnight == non_null
+
+
+def _planned(column: ColumnPlan, src: Mapping[str, Any], syn: Mapping[str, Any],
+             rows: int) -> ColumnPlan:
+  non_null = max(rows - (src.get("null") or 0), 0)
+  distinct = src.get("distinct")
+  kind = column.kind
+  if kind is ColumnKind.CATEGORICAL and not column.is_key:
+    kind = string_kind(distinct, non_null, src.get("avg_len"))
+  top = _top_pairs(src.get("top"))
+  grid = kind in _GRID_KINDS and not column.is_key
+  coded = kind in _CODED_KINDS and not column.is_key
+  values = _ranked_values(top) if coded else []
+  codes = tuple(hash64(column.name, v) for v, _ in values)
+  return dataclasses.replace(
+      column,
+      kind=kind,
+      day_granularity=_day_granular(column, kind, src.get("midnight"),
+                                    non_null),
+      census="none",
+      value_sample_rate=None,
+      quantiles_src=_grid(src.get("quantiles")) if grid else None,
+      quantiles_syn=_grid(syn.get("quantiles")) if grid else None,
+      atoms=_atoms(top, non_null) if grid else (),
+      mean_src=_finite(src.get("mean")) if grid else None,
+      std_src=_finite(src.get("std")) if grid else None,
+      dictionary=codes[:DICTIONARY_SIZE] if coded else None,
+      detection_dictionary=codes[:DETECTION_DICTIONARY_SIZE] if coded else None,
+      literal_ok=coded and _literal_ok(distinct, values, non_null),
+      source_distinct=distinct,
+      synthetic_distinct=syn.get("distinct"),
+  )
+
+
+def _rows_read(stats: Mapping[str, Any]) -> float:
+  return float(stats.get("rows_read", stats.get("rows") or 0))
+
+
+def apply_planning(cols: Sequence[ColumnPlan], src_stats: Mapping[str, Any],
+                   syn_stats: Mapping[str, Any], *,
+                   budget: Budget) -> list[ColumnPlan]:
+  """The provisional `cols` completed from the planning scans.
+
+  `src_stats`/`syn_stats` are `parse_planning` results (optionally with
+  `rows_read`, the rows the pipeline will read of that side when it
+  samples). STRING/BYTES columns are routed (module docstring), grids,
+  atoms, moments and dictionaries filled from the source (the synthetic
+  grid too), and every non-key, non-nested column gets its census method:
+  `budget.max_shuffle_gb` is the census shuffle THIS table may use, shared
+  max-min fairly across its columns; a column granted less than its
+  distinct keys is value-sampled (`budget.value_sample_rate`).
+  """
+  src_columns = src_stats.get("columns") or {}
+  syn_columns = syn_stats.get("columns") or {}
+  rows = int(src_stats.get("rows") or 0)
+  planned = [
+      _planned(c,
+               src_columns.get(c.name) or {},
+               syn_columns.get(c.name) or {}, rows) for c in cols
+  ]
+  rows_src, rows_syn = _rows_read(src_stats), _rows_read(syn_stats)
+  eligible = [
+      i for i, c in enumerate(planned)
+      if not c.is_key and c.kind is not ColumnKind.NESTED
+  ]
+  demands = [census_demand(planned[i], rows_src, rows_syn) for i in eligible]
+  grants = water_fill(demands, budget.max_shuffle_gb * GB / CENSUS_KEY_BYTES)
+  for index, demand, grant in zip(eligible, demands, grants, strict=True):
+    rate = value_sample_rate(grant * (1 + _GRANT_TOLERANCE), demand)
+    planned[index] = dataclasses.replace(
+        planned[index],
+        census="exact" if rate is None else "value_sampled",
+        value_sample_rate=rate)
+  return planned
+
+
+# --------------------------------------------------------------------------
+# pairs and the encoding digest
+# --------------------------------------------------------------------------
+def _pairable(column: ColumnPlan) -> bool:
+  return (not column.is_key and column.kind in _PAIR_KINDS and
+          column.source_distinct is not None and
+          column.source_distinct >= _MIN_PAIR_DISTINCT)
+
+
+def _pair_rank(column: ColumnPlan) -> tuple[float, float]:
+  distinct = int(column.source_distinct or 0)
+  fills_grid = column.kind in _GRID_KINDS and distinct >= PAIR_GRID_CELLS
+  distance = 0.0 if fills_grid else abs(math.log(distinct / PAIR_GRID_CELLS))
+  return -math.log2(min(distinct, PAIR_GRID_CELLS)), distance
+
+
+def select_pairs(columns: Sequence[ColumnPlan],
+                 max_columns: int) -> tuple[tuple[int, int], ...]:
+  """Every pair among the `max_columns` best-ranked pairable columns, as
+  `(i, j)` indices into `columns` with i < j (ranking: module
+  docstring)."""
+  ranked = sorted((i for i, c in enumerate(columns) if _pairable(c)),
+                  key=lambda i: (*_pair_rank(columns[i]), i))
+  chosen = sorted(ranked[:max(max_columns, 0)])
+  return tuple((a, b) for x, a in enumerate(chosen) for b in chosen[x + 1:])
+
+
+def _edge_payload(edge: Edge) -> str:
+  return json.dumps(
+      {
+          "cols": list(edge.cols),
+          "ref": edge.ref,
+          "ref_cols": list(edge.ref_cols),
+          "enforced": edge.enforced,
+      },
+      sort_keys=True)
+
+
+def _column_payload(column: ColumnPlan) -> dict[str, Any]:
+
+  def listed(values: Sequence[Any] | None) -> list[Any] | None:
+    return None if values is None else list(values)
+
+  return {
+      "kind": str(column.kind),
+      "is_key": column.is_key,
+      "day_granularity": column.day_granularity,
+      "census": column.census,
+      "value_sample_rate": column.value_sample_rate,
+      "quantiles_src": listed(column.quantiles_src),
+      "quantiles_syn": listed(column.quantiles_syn),
+      "atoms": list(column.atoms),
+      "dictionary": listed(column.dictionary),
+      "detection_dictionary": listed(column.detection_dictionary),
+  }
+
+
+def encoding_plan_digest(columns: Sequence[ColumnPlan],
+                         pairs: Sequence[tuple[int, int]],
+                         edges: Sequence[Edge]) -> str:
+  """blake2b-128 over the canonical JSON of what the encoding depends on:
+  per column (keyed by name) its kind, key flag, census method, quantile
+  grids, atoms and dictionaries; the pairs by column name; the edges.
+  Column, pair and edge ORDER does not move it; any grid, dictionary,
+  census or pair change does."""
+  names = [c.name for c in columns]
+  payload = {
+      "columns": {
+          c.name: _column_payload(c) for c in columns
+      },
+      "pairs": sorted(sorted((names[i], names[j])) for i, j in pairs),
+      "edges": sorted(_edge_payload(e) for e in edges),
+  }
+  text = json.dumps(
+      payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+  return hashlib.blake2b(text.encode(), digest_size=16).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# knobs, table and evaluation plans
+# --------------------------------------------------------------------------
+def _positive_int(name: str, value: Any, *, minimum: int = 1) -> None:
+  if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+    raise ValueError(f"{name}: expected an int >= {minimum}, got {value!r}")
+
+
+@dataclass(frozen=True)
+class Knobs:  # pylint: disable=too-many-instance-attributes  # one field per CLI knob
+  """The evaluation's knobs (the `sdfb-eval run` flags that shape the plan).
+
+  Every knob except `max_bytes_billed`, `output_dataset`, `temp_dataset`
+  and `evaluation_id` (which change no metric value) enters
+  `evaluation_key`. `temp_dataset` (`project.dataset`) defaults to
+  `<bq project>.<output_dataset>`.
+  """
+  sample_rows: int = 200_000
+  privacy_sample_rows: int = 50_000
+  detection_sample_rows: int = 50_000
+  pair_max_columns: int = 20
+  topk_profile: int = 1000
+  row_flags_top_k: int = 100
+  row_flags_source_keys: str = "hashed"
+  max_bytes_billed: int = 1 << 40
+  max_shuffle_gb: float = 500.0
+  scope: str = "auto"
+  allow_contaminated: bool = False
+  output_dataset: str = "synthetic_data_quality"
+  temp_dataset: str | None = None
+  evaluation_id: str | None = None
+
+  def __post_init__(self) -> None:
+    for name in ("sample_rows", "privacy_sample_rows", "detection_sample_rows",
+                 "topk_profile", "row_flags_top_k"):
+      _positive_int(name, getattr(self, name))
+    _positive_int("pair_max_columns", self.pair_max_columns, minimum=0)
+    Budget(  # validates both caps
+        max_shuffle_gb=self.max_shuffle_gb,
+        max_bytes_billed=self.max_bytes_billed)
+    if self.scope not in _SCOPE_REQUESTS:
+      raise ValueError(f"scope {self.scope!r}: expected one of "
+                       f"{list(_SCOPE_REQUESTS)}")
+    if self.row_flags_source_keys not in _SOURCE_KEYS:
+      raise ValueError(f"row_flags_source_keys {self.row_flags_source_keys!r}"
+                       f": expected one of {list(_SOURCE_KEYS)}")
+    if not isinstance(self.allow_contaminated, bool):
+      raise ValueError("allow_contaminated: expected true or false")
+    if _DATASET_RE.fullmatch(self.output_dataset or "") is None:
+      raise ValueError(f"output_dataset {self.output_dataset!r}: expected a "
+                       "dataset id")
+    if self.temp_dataset is not None:
+      normalize_fqn(f"{self.temp_dataset}.probe")
+    if (self.evaluation_id is not None and
+        _ID_RE.fullmatch(self.evaluation_id) is None):
+      raise ValueError(f"evaluation_id {self.evaluation_id!r}: expected 1-128 "
+                       "of [A-Za-z0-9_-]")
+
+  @classmethod
+  def from_mapping(cls, values: Mapping[str, Any]) -> Knobs:
+    """Knobs from a mapping; an unknown key is a `ValueError` naming it."""
+    known = {f.name for f in dataclasses.fields(cls)}
+    unknown = sorted(set(values) - known)
+    if unknown:
+      raise ValueError(f"unknown knob(s) {unknown}; expected any of "
+                       f"{sorted(known)}")
+    return cls(**dict(values))
+
+  @property
+  def budget(self) -> Budget:
+    return Budget(
+        max_shuffle_gb=self.max_shuffle_gb,
+        max_bytes_billed=self.max_bytes_billed)
+
+  def to_dict(self) -> dict[str, Any]:
+    return dataclasses.asdict(self)
+
+  def key_dict(self) -> dict[str, Any]:
+    """The knobs that can change a metric value (they key the run)."""
+    return {
+        k: v for k, v in self.to_dict().items() if k not in _OPERATIONAL_KNOBS
+    }
+
+
+class PrepareStatement(NamedTuple):
+  """One DDL statement to run before the pipeline, with the parameters it
+  binds (`bq.execute(sql, params)`): a scope's own `params`, `{}` for a
+  source pin, `{"salt": …}` for a sample."""
+  sql: str
+  params: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class TablePlan:  # pylint: disable=too-many-instance-attributes  # the registry's per-table record is wide
+  """One table of the evaluation.
+
+  Launch tables are evaluated; a role-`external` table is a read-only
+  parent (an FK parent this launch did not write) read only for integrity
+  joins. `source_read_table`/`synthetic_read_table` are what the pipeline
+  reads of each side (the pinned clone / scope, or their samples);
+  `skip_reason` is set when the table cannot be evaluated.
+  """
+  name: str
+  landing_table: str
+  source_table: str | None
+  run_id: str | None
+  role: str
+  pk: tuple[str, ...]
+  identity: tuple[str, ...]
+  edges: tuple[Edge, ...]
+  columns: tuple[ColumnPlan, ...]
+  scope: ScopePlan
+  source_read_table: str
+  source_pinned: bool
+  panel: Panel | None
+  pairs: tuple[tuple[int, int], ...]
+  encoding_plan_digest: str
+  model: str | None = None
+  source_pin: SourcePin | None = None
+  synthetic_read_table: str = ""
+  rows_source: int | None = None
+  rows_synthetic: int | None = None
+  sample_rate_source: float | None = None
+  sample_rate_synthetic: float | None = None
+  source_drifted: bool | None = None
+  reference_digest: str | None = None
+  skip_reason: str | None = None
+  warnings: tuple[str, ...] = ()
+
+  def __post_init__(self) -> None:
+    if self.role not in ROLES:
+      raise ValueError(f"{self.name}: role {self.role!r}, expected one of "
+                       f"{list(ROLES)}")
+
+  @property
+  def evaluated(self) -> bool:
+    """A launch table with something to read on both sides."""
+    return self.role != "external" and self.skip_reason is None
+
+  @property
+  def rows_read(self) -> tuple[float, float]:
+    """(source, synthetic) rows the pipeline reads, sampling applied."""
+    return ((self.rows_source or 0) * (self.sample_rate_source or 1.0),
+            (self.rows_synthetic or 0) * (self.sample_rate_synthetic or 1.0))
+
+  def registry_entry(self) -> dict[str, Any]:
+    """This table's `tables` record of `evaluation_data_history`."""
+    scope, panel, pin = self.scope, self.panel, self.source_pin
+    evaluated = self.evaluated
+    rates = (self.sample_rate_source, self.sample_rate_synthetic)
+    return {
+        "name":
+            self.name,
+        "landing_table":
+            self.landing_table,
+        "source_table":
+            self.source_table,
+        "run_id":
+            self.run_id,
+        "role":
+            self.role,
+        "scope_mode":
+            scope.mode,
+        "scope_status":
+            scope.status,
+        "scope_ok":
+            scope.ok,
+        "scope_reason":
+            scope.reason,
+        "window_start":
+            scope.window[0],
+        "window_end":
+            scope.window[1],
+        "source_snapshot_ts":
+            pin.as_of if pin is not None else None,
+        "source_drifted":
+            self.source_drifted,
+        "reference_digest":
+            self.reference_digest,
+        "reference_verified":
+            panel.verified if panel is not None else
+            (False if evaluated else None),
+        "reference_n":
+            len(panel.r_rows) if panel is not None else None,
+        "exposure_n":
+            panel.e_n if panel is not None else None,
+        "holdout_n":
+            len(panel.h_rows) if panel is not None else None,
+        "rows_source":
+            self.rows_source,
+        "rows_synthetic":
+            self.rows_synthetic,
+        "rows_expected":
+            scope.expected_rows,
+        "sampled":
+            any(r is not None and r < 1 for r in rates) if evaluated else None,
+        "sample_rate_source":
+            self.sample_rate_source,
+        "sample_rate_synthetic":
+            self.sample_rate_synthetic,
+        "encoding_plan_digest":
+            self.encoding_plan_digest,
+        "table_score":
+            None,
+    }
+
+
+def _rfc3339(value: str | datetime) -> str:
+  return parse_timestamp(value).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _ordered(row: Mapping[str, Any], fields: Sequence[Mapping[str,
+                                                              Any]]) -> dict:
+  """`row` in schema order; a missing or extra key is a programming error."""
+  names = [str(f["name"]) for f in fields]
+  if set(row) != set(names):
+    raise AssertionError(f"registry row keys differ from the schema: missing "
+                         f"{sorted(set(names) - set(row))}, extra "
+                         f"{sorted(set(row) - set(names))}")
+  return {name: row[name] for name in names}
+
+
+@dataclass(frozen=True)
+class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one field per registry concern
+  """The whole evaluation, decided before the pipeline runs.
+
+  `prepare_sql` is a tuple of `PrepareStatement` (sql, params) pairs, in
+  execution order; `prepare(bq)` runs them. `bq_bytes_estimate` sums the
+  dry runs of every query the evaluation issues (planning, panel, prepare,
+  samples); `predicted_shuffle_gb` is `budget.predict_shuffle_gb`.
+  """
+  evaluation_id: str
+  evaluation_key: str
+  evaluated_at: str
+  salt: str
+  mode: str
+  trigger: str
+  runner: str
+  launch: LaunchContext
+  models: tuple[RelModel, ...]
+  model_sha: str | None
+  tables: tuple[TablePlan, ...]
+  knobs: Knobs
+  prepare_sql: tuple[PrepareStatement, ...]
+  bq_bytes_estimate: int
+  predicted_shuffle_gb: float
+  warnings: tuple[str, ...] = ()
+  catalogue_version: str = ""
+  evaluator_version: str = EVALUATOR_VERSION
+  temp_dataset: str = ""
+
+  @property
+  def budget(self) -> Budget:
+    return self.knobs.budget
+
+  @property
+  def skip_reason(self) -> str | None:
+    """Why nothing can be evaluated (every launch table skipped), or None."""
+    launch_tables = [t for t in self.tables if t.role != "external"]
+    if any(t.evaluated for t in launch_tables):
+      return None
+    reasons = "; ".join(f"{t.name}: {t.skip_reason}" for t in launch_tables)
+    return f"no table can be evaluated — {reasons}"
+
+  def prepare(self, bq: Any) -> None:
+    """Run every prepare statement, in order, with its own parameters."""
+    for statement in self.prepare_sql:
+      bq.execute(statement.sql, dict(statement.params))
+
+  def registry_seed(self) -> dict[str, Any]:
+    """Every `evaluation_data_history` field known before the pipeline
+    runs, in schema order: a RUNNING event, or — when no table can be
+    evaluated — the FINAL SKIPPED event (reason and warnings included,
+    metric counts 0). Scores stay NULL; `bq_bytes_processed` is the
+    dry-run estimate of the queries issued so far and to come."""
+    launch = self.launch
+    reason = self.skip_reason
+    skipped = reason is not None
+    counts = 0 if skipped else None
+    fields = load_schema("evaluation_data_history")
+    record = next(f for f in fields if f["name"] == "tables")
+    row: dict[str, Any] = {
+        "evaluation_id":
+            self.evaluation_id,
+        "recorded_at":
+            self.evaluated_at,
+        "evaluated_at":
+            self.evaluated_at,
+        "finished_at":
+            self.evaluated_at if skipped else None,
+        "event":
+            "FINAL" if skipped else "RUNNING",
+        "status":
+            "SKIPPED" if skipped else "RUNNING",
+        "status_reason":
+            reason,
+        "evaluation_key":
+            self.evaluation_key,
+        "trigger":
+            self.trigger,
+        "runner":
+            self.runner,
+        "mode":
+            self.mode,
+        "evaluator_version":
+            self.evaluator_version,
+        "catalogue_version":
+            self.catalogue_version,
+        "evaluation_job_id":
+            None,
+        "image":
+            None,
+        **self._generation_fields(),
+        "tables": [
+            _ordered(t.registry_entry(), record["fields"]) for t in self.tables
+        ],
+        **launch.typed_filters(),
+        "generation_params":
+            json.loads(json.dumps(json_safe(dict(launch.params)), default=str)),
+        "evaluation_params": {
+            **self.knobs.to_dict(),
+            "temp_dataset": self.temp_dataset,
+            "mode": self.mode,
+            "trigger": self.trigger,
+            "runner": self.runner,
+        },
+        "overall_score":
+            None,
+        "fidelity_score":
+            None,
+        "privacy_score":
+            None,
+        "integrity_score":
+            None,
+        "diversity_score":
+            None,
+        "metrics_total":
+            counts,
+        "metrics_pass":
+            counts,
+        "metrics_warn":
+            counts,
+        "metrics_fail":
+            counts,
+        "metrics_not_evaluated":
+            counts,
+        "metrics_info":
+            counts,
+        "bq_bytes_processed":
+            self.bq_bytes_estimate,
+        "predicted_shuffle_gb":
+            self.predicted_shuffle_gb,
+        "warnings":
+            list(self.warnings),
+        "artifacts_uri":
+            None,
+    }
+    return _ordered(row, fields)
+
+  def _generation_fields(self) -> dict[str, Any]:
+    launch = self.launch
+    names = sorted({t.model for t in self.tables if t.model})
+    adjusted = launch.adjusted_model_uri if launch.model_adjusted else None
+    return {
+        "generation_job_id":
+            launch.generation_job_id,
+        "generation_job_name":
+            launch.job_name,
+        "generation_region":
+            launch.region,
+        "generation_started_at":
+            _rfc3339(launch.started_at) if launch.started_at else None,
+        "generation_finished_at":
+            _rfc3339(launch.finished_at) if launch.finished_at else None,
+        "base_run_id":
+            launch.base_run_id,
+        "run_ids":
+            list(launch.run_ids),
+        "params_source":
+            launch.params_source,
+        "relationship_model":
+            launch.model_name or ",".join(names) or None,
+        "relationship_model_sha":
+            launch.model_sha or self.model_sha,
+        "relationship_model_uri":
+            adjusted or launch.relationships_uri,
+        "model_adjusted":
+            launch.model_adjusted,
+    }
+
+
+# --------------------------------------------------------------------------
+# build_plan
+# --------------------------------------------------------------------------
+def _flag(value: Any, default: bool) -> bool:
+  if value is None or value == "":
+    return default
+  if isinstance(value, bool):
+    return value
+  return str(value).strip().lower() not in ("false", "0", "no", "off")
+
+
+def _names(value: Any) -> tuple[str, ...]:
+  return tuple(p.strip() for p in str(value or "").split(",") if p.strip())
+
+
+@dataclass
+class _Work:  # pylint: disable=too-many-instance-attributes  # the planner's scratch record
+  """One table while it is being planned (mutable scratch)."""
+  name: str
+  landing: str
+  role: str
+  model: str | None = None
+  pk: tuple[str, ...] = ()
+  identity: tuple[str, ...] = ()
+  edges: tuple[Edge, ...] = ()
+  key_cols: set[str] = field(default_factory=set)
+  children: list[_Work] = field(default_factory=list)
+  run: RunRecord | None = None
+  source: str | None = None
+  scope: ScopePlan | None = None
+  pin: SourcePin | None = None
+  cols_syn: list[ColumnPlan] = field(default_factory=list)
+  cols_src: list[ColumnPlan] = field(default_factory=list)
+  src_queries: tuple[str, ...] = ()
+  syn_queries: tuple[str, ...] = ()
+  src_stats: dict[str, Any] | None = None
+  syn_stats: dict[str, Any] | None = None
+  panel: Panel | None = None
+  drifted: bool | None = None
+  skip: str | None = None
+  source_read: str = ""
+  synthetic_read: str = ""
+  rate_src: float | None = None
+  rate_syn: float | None = None
+  columns: list[ColumnPlan] = field(default_factory=list)
+  notes: list[str] = field(default_factory=list)
+
+  @property
+  def active(self) -> bool:
+    return self.role != "external" and self.skip is None
+
+  def skip_with(self, reason: str) -> None:
+    self.skip = reason
+    self.notes.append(f"{self.landing}: not evaluated — {reason}")
+
+
+def _unreadable(landing: str, reason: str) -> ScopePlan:
+  return ScopePlan(
+      landing_table=landing,
+      mode="table",
+      status="unknown",
+      reason=reason,
+      read_table="",
+      prepare_sql=(),
+      window=(None, None),
+      expected_rows=None)
+
+
+class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one build_plan call's state
+  """One `build_plan` call (see its docstring)."""
+
+  def __init__(self, *, launch: LaunchContext, models: Sequence[RelModel],
+               bq: Any, knobs: Knobs, mode: str, now: str | datetime,
+               evaluation_id: str, salt: str, temp_dataset: str):
+    self.launch = launch
+    self.models = tuple(models)
+    self.bq = bq
+    self.knobs = knobs
+    self.budget = knobs.budget
+    self.mode = mode
+    self.now = now
+    self.evaluation_id = evaluation_id
+    self.salt = salt
+    self.temp_dataset = temp_dataset
+    self.notes: list[str] = []
+    self.bytes: dict[str, int] = {"planning": 0, "panel": 0, "prepare": 0}
+    self.samples: list[PrepareStatement] = []
+    self.multi = len(launch.tables_in_order) > 1
+
+  # --- tables ----------------------------------------------------------------
+  def targets(self) -> list[_Work]:
+    """Launch tables (parents first) and their read-only parents; raises
+    `PlanError` for a table the model does not declare (Ruling R50)."""
+    listed = [normalize_fqn(t) for t in self.launch.tables_in_order]
+    tables = list(dict.fromkeys(listed))
+    if len(tables) != len(listed):
+      self.notes.append("the launch listed a table more than once; each is "
+                        "evaluated once")
+    if not tables:
+      raise PlanError("the launch resolved no landing table to evaluate")
+    self._check_models(tables)
+    generate = _flag(
+        self.launch.params.get("generate_fk_relationships"), default=True)
+    works = [self._launch_work(t, generate) for t in tables]
+    works = self._parents_first(works)
+    by_name = {w.name: w for w in works}
+    self._assign_roles(works, by_name)
+    parents = self._read_only_parents(works, by_name)
+    if generate:
+      self._check_components(works, {p.name for p in parents})
+    return parents + works
+
+  def _check_components(self, works: Sequence[_Work],
+                        read_only: set[str]) -> None:
+    """Warn about model tables connected to the launch that it neither
+    wrote nor reads as a parent: they are not evaluated."""
+    launched = {w.name for w in works}
+    connected = {
+        t for w in works if w.model is not None
+        for t in component(self.models, w.name)
+    }
+    left = sorted(connected - launched - read_only)
+    if left:
+      self.notes.append(
+          f"model tables {left} are connected to this launch's tables but "
+          "were not generated by it; they are not evaluated")
+
+  def _check_models(self, tables: Sequence[str]) -> None:
+    missing = [t for t in tables if model_for(self.models, t) is None]
+    if not missing:
+      return
+    relationships_off = (not self.models and
+                         not (self.launch.relationships_uri or "").strip())
+    if len(tables) == 1 or relationships_off:
+      if self.models:
+        self.notes.append(
+            f"{missing[0]} is not declared in the relationship model(s) "
+            f"{self._model_names()}; it is evaluated standalone (keys from "
+            "--pk_cols / --identity_cols)")
+      elif len(tables) > 1:
+        self.notes.append(
+            f"relationships are off for this launch (no relationships_uri "
+            f"and no model): each of its {len(tables)} tables is evaluated "
+            "standalone, with no FK edges")
+      return
+    uri = self.launch.relationships_uri or "(no relationships_uri recorded)"
+    adjusted = self.launch.adjusted_model_uri
+    also = f" (adjusted model: {adjusted})" if adjusted else ""
+    missing_text = ", ".join(missing)
+    raise PlanError(
+        f"{missing_text}: no entry in the relationship model(s) loaded from "
+        f"{uri}{also} — models {self._model_names()}. A relational launch is "
+        "evaluated against the model it applied: a table the model does not "
+        "declare has no keys, parents or edges to evaluate, and is never "
+        "skipped silently. Load the model the launch applied, or evaluate "
+        "the table alone (a single-table launch).")
+
+  def _model_names(self) -> list[str]:
+    return sorted({m.model for m in self.models})
+
+  def _launch_work(self, landing: str, generate: bool) -> _Work:
+    name = landing.rsplit(".", 1)[1]
+    model = model_for(self.models, name)
+    if model is None:
+      return _Work(
+          name=name,
+          landing=landing,
+          role="standalone",
+          pk=_names(self.launch.params.get("pk_cols")),
+          identity=_names(self.launch.params.get("identity_cols")))
+    relations = model.tables[name]
+    edges = self._edges(name, relations.enabled)
+    if edges and not generate:
+      self.notes.append(
+          f"{landing}: generate_fk_relationships=false — its FK edges were "
+          "not generated, so they are not evaluated")
+      edges = ()
+    return _Work(
+        name=name,
+        landing=landing,
+        role="",
+        model=model.model,
+        pk=relations.pk,
+        identity=relations.identity,
+        edges=edges)
+
+  def _edges(self, name: str, enabled: bool) -> tuple[Edge, ...]:
+    """Enforced edges as drawn (widened), then documented edges whose
+    parent is external or enabled."""
+    if not enabled:
+      return ()
+    model = model_for(self.models, name)
+    assert model is not None
+    documented = tuple(
+        e for e in model.tables[name].fk
+        if not e.enforced and (e.external or self._enabled(e.ref)))
+    return enforced_edges(self.models, name) + documented
+
+  def _enabled(self, table: str) -> bool:
+    model = model_for(self.models, table)
+    return model is None or model.tables[table.rsplit(".", 1)[-1]].enabled
+
+  def _parents_first(self, works: list[_Work]) -> list[_Work]:
+    position = {w.name: i for i, w in enumerate(works)}
+    late = [
+        w.name
+        for w in works
+        for e in w.edges
+        if e.enforced and position.get(e.ref, -1) > position[w.name]
+    ]
+    if not late:
+      return works
+    order = generation_order(self.models, tuple(position))
+    self.notes.append(
+        f"the launch's table order put {sorted(set(late))} before their "
+        f"parents; evaluated parents first as {list(order)}")
+    by_name = {w.name: w for w in works}
+    return [by_name[n] for n in order]
+
+  @staticmethod
+  def _assign_roles(works: list[_Work], by_name: Mapping[str, _Work]) -> None:
+    referenced = {
+        e.ref
+        for w in works
+        for e in w.edges
+        if e.enforced and not e.external and e.ref in by_name
+    }
+    for work in works:
+      work.key_cols = set(work.pk) | {c for e in work.edges for c in e.cols}
+      if work.role == "standalone":
+        continue
+      enforced = [e for e in work.edges if e.enforced]
+      if any(not e.external and e.ref in by_name for e in enforced):
+        work.role = "driven"
+      elif enforced:
+        work.role = "side_input"
+      elif work.name in referenced:
+        work.role = "root"
+      else:
+        work.role = "isolated"
+
+  def _read_only_parents(self, works: Sequence[_Work],
+                         by_name: Mapping[str, _Work]) -> list[_Work]:
+    parents: dict[str, _Work] = {}
+    for work in works:
+      for edge in work.edges:
+        if not edge.external and edge.ref in by_name:
+          continue
+        landing = self._parent_landing(work.landing, edge)
+        parent = parents.setdefault(
+            landing,
+            _Work(name=edge.ref_name, landing=landing, role="external"))
+        parent.key_cols.update(edge.ref_cols)
+        parent.children.append(work)
+    return list(parents.values())
+
+  @staticmethod
+  def _parent_landing(child: str, edge: Edge) -> str:
+    """An external `ref` (`dataset.table`, or fully qualified) resolves in
+    the child's project; an in-model parent this launch did not write
+    lives in the child's dataset (the generator's parent landing)."""
+    project, dataset, _ = child.split(".")
+    if edge.external:
+      parts = edge.ref.split(".")
+      return normalize_fqn(
+          edge.ref if len(parts) == _FQN_PARTS else f"{project}.{edge.ref}")
+    return normalize_fqn(f"{project}.{dataset}.{edge.ref}")
+
+  # --- per launch table ------------------------------------------------------
+  def locate(self, work: _Work) -> None:
+    """Scope, source pin and provisional columns of one launch table."""
+    try:
+      land_meta = self.bq.table(work.landing)
+    except _BQ_ERRORS as exc:
+      work.scope = _unreadable(work.landing,
+                               f"the landing table could not be read ({exc})")
+      work.skip_with(work.scope.reason or "")
+      return
+    work.run = self.launch.run_for(work.landing)
+    work.scope = resolve_scope(
+        landing_table=work.landing,
+        write_disposition=self.launch.write_disposition,
+        writes=self.launch.writes,
+        foreign=self._foreign(work, land_meta),
+        expected_rows=work.run.valid_count if work.run else None,
+        requested=self.knobs.scope,
+        now=self.now,
+        time_travel_hours=int(land_meta["timeTravelHours"]),
+        temp_dataset=self.temp_dataset,
+        evaluation_id=self.evaluation_id,
+        allow_contaminated=self.knobs.allow_contaminated)
+    if not work.scope.readable:
+      work.skip_with(f"scope {work.scope.status}: {work.scope.reason}")
+      return
+    if not work.scope.ok:
+      work.notes.append(f"{work.landing}: scope {work.scope.status} — "
+                        f"{work.scope.reason}")
+    work.source = self._source_of(work)
+    if work.source is None:
+      work.skip_with("no source table is known (validation_runs has no "
+                     "reference_table for it and the launch named no "
+                     "--reference_table); pass manual reference_table")
+      return
+    self._pin_and_columns(work, land_meta)
+
+  def _foreign(self, work: _Work, meta: Mapping[str,
+                                                Any]) -> tuple[JobWrite, ...]:
+    own = [
+        w for w in self.launch.writes if normalize_fqn(w.table) == work.landing
+    ]
+    job = self.launch.generation_job_id
+    location = self.bq.location or meta.get("location")
+    if not own or not job or not location:
+      return ()
+    try:
+      start = min(parse_timestamp(w.start or w.end) for w in own) - _PAD
+      return tuple(
+          foreign_writes(
+              self.bq,
+              location=str(location),
+              table=work.landing,
+              window=(_rfc3339(start), None),
+              exclude_job=job))
+    except (*_BQ_ERRORS, ValueError) as exc:
+      work.notes.append(
+          f"{work.landing}: the contamination check (other writers in the "
+          f"job's window) could not run ({exc}); the scope rests on the "
+          "row-count check alone")
+      return ()
+
+  def _source_of(self, work: _Work) -> str | None:
+    if work.run is not None and work.run.reference_table:
+      return normalize_fqn(work.run.reference_table)
+    reference = (
+        self.launch.reference_table or
+        str(self.launch.params.get("reference_table") or "").strip())
+    if not reference:
+      return None
+    reference = normalize_fqn(reference)
+    if not self.multi:
+      return reference
+    dataset = reference.rsplit(".", 1)[0]
+    return f"{dataset}.{work.name}"
+
+  def _pin_and_columns(self, work: _Work, land_meta: Mapping[str, Any]) -> None:
+    assert work.source is not None and work.scope is not None
+    try:
+      src_meta = self.bq.table(work.source)
+    except _BQ_ERRORS as exc:
+      work.skip_with(f"the source table {work.source} could not be read "
+                     f"({exc})")
+      return
+    created = self.launch.started_at
+    work.pin = pin_source(
+        source_table=work.source,
+        job_create_time=created,
+        now=self.now,
+        time_travel_hours=int(src_meta["timeTravelHours"]),
+        temp_dataset=self.temp_dataset,
+        evaluation_id=self.evaluation_id)
+    if not work.pin.pinned:
+      work.notes.append(f"{work.source}: {work.pin.reason}")
+    modified = src_meta.get("lastModified")
+    if modified and created:
+      work.drifted = parse_timestamp(modified) > parse_timestamp(created)
+    self._columns(work, land_meta["schema"], src_meta["schema"])
+    work.src_queries = planning_queries(work.pin.read_expr, work.cols_src)
+    work.syn_queries = planning_queries(work.scope.read_expr, work.cols_syn)
+    work.source_read = work.pin.read_table
+    work.synthetic_read = work.scope.read_table
+
+  def _columns(self, work: _Work, landing_fields: Sequence[Mapping],
+               source_fields: Sequence[Mapping]) -> None:
+    source_by = {str(f["name"]): f for f in source_fields}
+    landing_names = {str(f["name"]) for f in landing_fields}
+    common = [f for f in landing_fields if str(f["name"]) in source_by]
+    only = sorted(landing_names ^ set(source_by))
+    if only:
+      work.notes.append(f"{work.landing}: columns {only} exist on one side "
+                        "only and are not compared")
+    identity = set(work.identity)
+    syn = kinds_from_schema(common, keys=work.key_cols, identity=identity)
+    src = kinds_from_schema([source_by[str(f["name"])] for f in common],
+                            keys=work.key_cols,
+                            identity=identity)
+    clash = [a.name for a, b in zip(syn, src, strict=True) if a.kind != b.kind]
+    if clash:
+      work.notes.append(f"{work.landing}: columns {clash} have different "
+                        "kinds in the source and the landing table and are "
+                        "not compared")
+    unknown = sorted({c.bq_type for c in syn if c.bq_type not in KNOWN_TYPES})
+    if unknown:
+      work.notes.append(f"{work.landing}: BigQuery types {unknown} are not "
+                        "known to the planner; those columns are nested "
+                        "(null counts only)")
+    kept = [
+        i for i, (a, b) in enumerate(zip(syn, src, strict=True))
+        if a.kind == b.kind
+    ]
+    work.cols_syn = [syn[i] for i in kept]
+    work.cols_src = [src[i] for i in kept]
+
+  # --- bytes -----------------------------------------------------------------
+  def _panel_source(self, work: _Work) -> str:
+    assert work.pin is not None
+    return work.pin.read_expr if work.pin.pinned else work.pin.read_table
+
+  def panel_n(self) -> int | None:
+    n = self.launch.typed_filters().get("reference_rows_limit")
+    return n if isinstance(n, int) and n > 0 else None
+
+  def dry_run(self, works: Sequence[_Work]) -> None:
+    """Dry-run every query planning issues and every prepare statement,
+    then refuse the plan over `max_bytes_billed` — before anything is
+    billed."""
+    n = self.panel_n()
+    for work in works:
+      assert work.scope is not None and work.pin is not None
+      for sql in work.src_queries:
+        self.bytes["planning"] += self.bq.dry_run_bytes(sql, {})
+      for sql in work.syn_queries:
+        self.bytes["planning"] += self.bq.dry_run_bytes(sql, work.scope.params)
+      if n is not None:
+        self.bytes["panel"] += self.bq.dry_run_bytes(
+            panel_sql(self._panel_source(work), n), {})
+      for sql in work.scope.prepare_sql:
+        self.bytes["prepare"] += self._dry_prepare(sql, work.scope.params,
+                                                   work.scope.read_expr)
+      for sql in work.pin.prepare_sql:
+        self.bytes["prepare"] += self._dry_prepare(sql, {}, work.pin.read_expr)
+    self.budget.check_bytes(self.bytes)
+
+  def _dry_prepare(self, sql: str, params: Mapping[str, Any], expr: str) -> int:
+    """A DDL statement's dry run; when BigQuery refuses to dry-run it, the
+    full read it materializes stands in (an upper bound), with a note."""
+    try:
+      return int(self.bq.dry_run_bytes(sql, params))
+    except _BQ_ERRORS as exc:
+      self.notes.append(f"a prepare statement could not be dry-run ({exc}); "
+                        "its full read is counted instead")
+      return int(
+          self.bq.dry_run_bytes(f"SELECT * FROM {_from_expr(expr)} AS t",
+                                params))
+
+  # --- running the scans -----------------------------------------------------
+  def scan(self, work: _Work) -> None:
+    """The planning SELECTs of both sides, the row-count check and the
+    R/E/H panel."""
+    assert work.scope is not None and work.pin is not None
+    cap = self.budget.max_bytes_billed
+    src_rows = [self._one(sql, {}, cap) for sql in work.src_queries]
+    syn_rows = [
+        self._one(sql, work.scope.params, cap) for sql in work.syn_queries
+    ]
+    work.src_stats = parse_planning(src_rows, work.cols_src)
+    work.syn_stats = parse_planning(syn_rows, work.cols_syn)
+    verified = work.scope.verify(int(work.syn_stats["rows"]))
+    if verified.status != work.scope.status:
+      work.notes.append(f"{work.landing}: scope {verified.status} — "
+                        f"{verified.reason}")
+    work.scope = verified
+    n = self.panel_n()
+    if n is None:
+      work.notes.append(f"{work.landing}: reference_rows_limit unknown — no "
+                        "R/E/H panel, so the reference-based privacy metrics "
+                        "are not evaluated")
+      return
+    work.panel = fetch_panel(
+        self.bq,
+        source_read_table=self._panel_source(work),
+        n=n,
+        expected_digest=work.run.reference_digest if work.run else None,
+        max_bytes=cap)
+    if not work.panel.verified:
+      work.notes.append(f"{work.landing}: {work.panel.reason}")
+
+  def _one(self, sql: str, params: Mapping[str, Any], cap: int) -> dict:
+    rows = self.bq.query(sql, dict(params), max_bytes=cap)
+    if len(rows) != 1:
+      raise ValueError(f"a planning SELECT returned {len(rows)} rows, "
+                       "expected exactly 1")
+    return dict(rows[0])
+
+  # --- sampling and census ---------------------------------------------------
+  def sample(self, work: _Work) -> None:
+    """In sampled mode, a salted sample CTAS per side over `sample_rows`."""
+    assert work.pin is not None and work.scope is not None
+    assert work.src_stats is not None and work.syn_stats is not None
+    work.rate_src, work.source_read = self._side_sample(
+        work.pin.read_table, int(work.src_stats["rows"]), "src",
+        work.pin.read_expr, {})
+    work.rate_syn, work.synthetic_read = self._side_sample(
+        work.scope.read_table, int(work.syn_stats["rows"]), "syn",
+        work.scope.read_expr, work.scope.params)
+    work.src_stats["rows_read"] = work.src_stats["rows"] * work.rate_src
+    work.syn_stats["rows_read"] = work.syn_stats["rows"] * work.rate_syn
+
+  def _side_sample(self, read_table: str, rows: int, side: str, expr: str,
+                   params: Mapping[str, Any]) -> tuple[float, str]:
+    if self.mode != "sampled" or rows <= self.knobs.sample_rows:
+      return 1.0, read_table
+    keep = min(
+        math.ceil(self.knobs.sample_rows * SAMPLE_MODULUS / rows),
+        SAMPLE_MODULUS)
+    sql, temp = sampled_read(
+        read_table,
+        keep=keep,
+        modulo=SAMPLE_MODULUS,
+        salt=self.salt,
+        temp_dataset=self.temp_dataset,
+        evaluation_id=self.evaluation_id,
+        side=side)
+    self.samples.append(PrepareStatement(sql, {"salt": self.salt}))
+    self.bytes["sample"] = self.bytes.get("sample", 0) + int(
+        self.bq.dry_run_bytes(f"SELECT * FROM {_from_expr(expr)} AS t", params))
+    return keep / SAMPLE_MODULUS, temp
+
+  def census(self, works: Sequence[_Work]) -> None:
+    """Max-min fair census shares: fixed shuffle first, then tables, then
+    (inside `apply_planning`) columns."""
+    unlimited = Budget(
+        max_shuffle_gb=math.inf, max_bytes_billed=self.budget.max_bytes_billed)
+    demands, fixed = [], 0.0
+    for work in works:
+      assert work.src_stats is not None and work.syn_stats is not None
+      exact = apply_planning(
+          work.cols_syn, work.src_stats, work.syn_stats, budget=unlimited)
+      rows = (_rows_read(work.src_stats), _rows_read(work.syn_stats))
+      demands.append(census_bytes(exact, *rows))
+      fixed += fixed_shuffle_bytes(
+          rows_source=rows[0],
+          rows_synthetic=rows[1],
+          edges=len(work.edges),
+          keyed_counts=int(bool(work.pk)) + int(bool(work.identity)))
+    capacity = self.budget.max_shuffle_gb * GB - fixed
+    if capacity < 0:
+      self.notes.append(
+          f"the non-census shuffle alone ({fixed / GB:.3f} GB) exceeds "
+          f"max_shuffle_gb = {self.budget.max_shuffle_gb}: every census "
+          "column is value-sampled at the minimum rate")
+    for work, grant in zip(works, water_fill(demands, capacity), strict=True):
+      share = Budget(
+          max_shuffle_gb=grant / GB,
+          max_bytes_billed=self.budget.max_bytes_billed)
+      assert work.src_stats is not None and work.syn_stats is not None
+      work.columns = apply_planning(
+          work.cols_syn, work.src_stats, work.syn_stats, budget=share)
+      sampled = [c.name for c in work.columns if c.census == "value_sampled"]
+      if sampled:
+        work.notes.append(f"{work.landing}: value-sampled census for "
+                          f"{sampled} (max_shuffle_gb)")
+
+  # --- read-only parents -----------------------------------------------------
+  def locate_parent(self, work: _Work) -> None:
+    """A read-only parent: its key columns, read as they are now."""
+    try:
+      meta = self.bq.table(work.landing)
+    except _BQ_ERRORS as exc:
+      work.scope = _unreadable(work.landing,
+                               f"read-only parent could not be read ({exc})")
+      work.notes.append(f"{work.landing}: {work.scope.reason}; the edges "
+                        "into it are not evaluated")
+      return
+    fields = [f for f in meta["schema"] if str(f["name"]) in work.key_cols]
+    work.columns = kinds_from_schema(fields, keys=work.key_cols)
+    missing = sorted(work.key_cols - {c.name for c in work.columns})
+    if missing:
+      work.notes.append(f"{work.landing}: referenced key column(s) {missing} "
+                        "are not in the table")
+    work.scope = ScopePlan(
+        landing_table=work.landing,
+        mode="table",
+        status="ok",
+        reason="read-only parent: this launch did not write it; read as it "
+        "is now, for integrity joins only",
+        read_table=work.landing,
+        prepare_sql=(),
+        window=(None, None),
+        expected_rows=None,
+        read_expr=quote_fqn(work.landing))
+    work.synthetic_read = work.landing
+    work.source = self._parent_source(work)
+    work.source_read = work.source or ""
+
+  def _parent_source(self, work: _Work) -> str | None:
+    sources = [c.source for c in work.children if c.source]
+    if not sources:
+      return None
+    dataset = sources[0].rsplit(".", 1)[0]
+    candidate = normalize_fqn(f"{dataset}.{work.name}")
+    try:
+      self.bq.table(candidate)
+    except _BQ_ERRORS as exc:
+      work.notes.append(f"{work.landing}: its source-side twin {candidate} "
+                        f"could not be read ({exc}); source-side integrity "
+                        "on the edges into it is not evaluated")
+      return None
+    return candidate
+
+  # --- assembly --------------------------------------------------------------
+  def table_plan(self, work: _Work) -> TablePlan:
+    assert work.scope is not None
+    columns = tuple(work.columns or work.cols_syn)
+    active = work.active and work.src_stats is not None
+    pairs = select_pairs(columns, self.knobs.pair_max_columns) if active else ()
+    return TablePlan(
+        name=work.name,
+        landing_table=work.landing,
+        source_table=work.source,
+        run_id=work.run.run_id if work.run else None,
+        role=work.role,
+        pk=work.pk,
+        identity=work.identity,
+        edges=work.edges,
+        columns=columns,
+        scope=work.scope,
+        source_read_table=work.source_read,
+        source_pinned=bool(work.pin and work.pin.pinned),
+        panel=work.panel,
+        pairs=pairs,
+        encoding_plan_digest=encoding_plan_digest(columns, pairs, work.edges),
+        model=work.model,
+        source_pin=work.pin,
+        synthetic_read_table=work.synthetic_read,
+        rows_source=int(work.src_stats["rows"])
+        if active and work.src_stats else None,
+        rows_synthetic=int(work.syn_stats["rows"])
+        if active and work.syn_stats else None,
+        sample_rate_source=work.rate_src if active else None,
+        sample_rate_synthetic=work.rate_syn if active else None,
+        source_drifted=work.drifted,
+        reference_digest=work.run.reference_digest if work.run else None,
+        skip_reason=work.skip,
+        warnings=tuple(work.notes))
+
+
+def _evaluation_key(launch: LaunchContext, catalogue_version: str, mode: str,
+                    knobs: Knobs) -> str:
+  payload = {
+      "generation_job_id": launch.generation_job_id,
+      "run_ids": list(launch.run_ids),
+      "tables": [normalize_fqn(t) for t in launch.tables_in_order],
+      "catalogue_version": catalogue_version,
+      "evaluator_version": EVALUATOR_VERSION,
+      "mode": mode,
+      "knobs": knobs.key_dict(),
+  }
+  text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+  return hashlib.blake2b(text.encode(), digest_size=16).hexdigest()
+
+
+def _check_call(mode: str, trigger: str, runner: str) -> None:
+  if mode not in MODES:
+    raise ValueError(f"mode {mode!r}: expected one of {list(MODES)}")
+  if trigger not in TRIGGERS:
+    raise ValueError(f"trigger {trigger!r}: expected one of {list(TRIGGERS)}")
+  if not isinstance(runner, str) or not runner.strip():
+    raise ValueError(f"runner: expected a runner name, got {runner!r}")
+
+
+def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
+               knobs: Knobs | Mapping[str, Any], mode: str, trigger: str,
+               runner: str, now: str | datetime) -> EvaluationPlan:
+  """Plan the evaluation of one generation launch (module docstring).
+
+  Identity first: `evaluation_key = blake2b(generation job id, run ids,
+  tables, catalogue_version, evaluator_version, mode, value knobs)`,
+  `salt = blake2b(evaluation_key)`, and `evaluation_id` (the knob, else
+  `ev_<now>_<key[:8]>`) names every temp table. Then the tables (R50: a
+  launch table with no model entry raises `PlanError` naming it and the
+  model URI, unless the launch is a single table or relationships are
+  off — then it is `standalone`), their scopes, source pins, dry runs
+  (refused over `max_bytes_billed`), one planning SELECT per side, the
+  panel, samples (`mode="sampled"`), census shares, pairs and digests.
+  Only the planning SELECTs, the panel and the metadata reads run here;
+  every DDL waits in `prepare_sql` (R5).
+
+  Raises:
+    PlanError: a launch table the model does not declare (R50), or no
+      table at all.
+    BudgetExceededError: the dry runs exceed `max_bytes_billed`.
+    ValueError: a bad mode/trigger/runner/knob, or malformed input that
+      would reach SQL.
+  """
+  knobs = knobs if isinstance(knobs, Knobs) else Knobs.from_mapping(knobs)
+  _check_call(mode, trigger, runner)
+  catalogue_version = load_catalogue().version
+  key = _evaluation_key(launch, catalogue_version, mode, knobs)
+  evaluated_at = _rfc3339(now)
+  stamp = parse_timestamp(now).strftime("%Y%m%dT%H%M%S")
+  planner = _Planner(
+      launch=launch,
+      models=models,
+      bq=bq,
+      knobs=knobs,
+      mode=mode,
+      now=now,
+      evaluation_id=knobs.evaluation_id or f"ev_{stamp}_{key[:8]}",
+      salt=hashlib.blake2b(key.encode(), digest_size=16).hexdigest(),
+      temp_dataset=knobs.temp_dataset or f"{bq.project}.{knobs.output_dataset}")
+  works = planner.targets()
+  for work in works:
+    if work.role != "external":
+      planner.locate(work)
+  active = [w for w in works if w.active]
+  planner.dry_run(active)
+  for work in active:
+    planner.scan(work)
+    planner.sample(work)
+  planner.budget.check_bytes(planner.bytes)
+  planner.census(active)
+  for work in works:
+    if work.role == "external":
+      planner.locate_parent(work)
+  tables = tuple(planner.table_plan(w) for w in works)
+  return _assemble(planner, tables, key, evaluated_at, catalogue_version,
+                   trigger, runner)
+
+
+def _assemble(planner: _Planner, tables: tuple[TablePlan, ...], key: str,
+              evaluated_at: str, catalogue_version: str, trigger: str,
+              runner: str) -> EvaluationPlan:
+  launch, knobs = planner.launch, planner.knobs
+  notes = list(planner.notes)
+  model_sha = sha12(planner.models) if planner.models else None
+  if launch.model_sha and model_sha and launch.model_sha != model_sha:
+    notes.append(f"the relationship model loaded here (sha {model_sha}) is "
+                 f"not the one the launch applied (sha {launch.model_sha})")
+  prepare = [
+      PrepareStatement(sql, t.scope.params) for t in tables if t.evaluated
+      for sql in t.scope.prepare_sql
+  ]
+  prepare += [
+      PrepareStatement(sql, {}) for t in tables
+      if t.evaluated and t.source_pin is not None
+      for sql in t.source_pin.prepare_sql
+  ]
+  predicted = predict_shuffle_gb(tables)
+  if predicted > knobs.max_shuffle_gb:
+    notes.append(f"predicted shuffle {predicted:.3f} GB exceeds "
+                 f"max_shuffle_gb = {knobs.max_shuffle_gb} even with value "
+                 "sampling (row-level and relational keys are not sampled)")
+  table_notes = [n for t in tables for n in t.warnings]
+  warnings = tuple(dict.fromkeys([*launch.warnings, *notes, *table_notes]))
+  return EvaluationPlan(
+      evaluation_id=planner.evaluation_id,
+      evaluation_key=key,
+      evaluated_at=evaluated_at,
+      salt=planner.salt,
+      mode=planner.mode,
+      trigger=trigger,
+      runner=runner,
+      launch=launch,
+      models=planner.models,
+      model_sha=model_sha,
+      tables=tables,
+      knobs=knobs,
+      prepare_sql=tuple(prepare) + tuple(planner.samples),
+      bq_bytes_estimate=sum(planner.bytes.values()),
+      predicted_shuffle_gb=predicted,
+      warnings=warnings,
+      catalogue_version=catalogue_version,
+      temp_dataset=planner.temp_dataset)

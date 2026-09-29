@@ -1,0 +1,199 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+"""What an evaluation may spend: BigQuery bytes and Beam shuffle.
+
+Two budgets, two different enforcement points:
+
+    budget            enforced by                       when exceeded
+    ────────────────  ────────────────────────────────  ─────────────────────────
+    max_bytes_billed  the planner, from dry runs         refused (raises) before
+                      (planning SQL, panel, prepare)     anything is billed
+    max_shuffle_gb    the census method per column       high-cardinality columns
+                      (exact | value_sampled)            switch to value sampling
+
+The shuffle prediction (GB = 10^9 bytes), per evaluated table and side,
+on the rows the pipeline actually reads:
+
+    census       Σ census columns  keys * rate * 24 B    keys = min(distinct,
+                                                          rows), both sides
+    relational   Σ edges           child rows * 16 B     (hash, count) per row
+    row keys     rows * 16 B (non-key duplicate count, both sides)
+                 + synthetic rows * 16 B per PK / identity duplicate count
+    null bits    min(rows, 4096) * 16 B                  bounded pattern dict
+
+The census gets what the fixed parts leave, shared max-min fairly
+(`water_fill`): first across tables, then across one table's census
+columns, so a column needing little is never sampled to feed one needing
+much. A column granted less than its demand is value-sampled at `K /
+10 000` (`VALUE_SAMPLE_MODULUS`): only value hashes with `hash mod M < K`
+enter the census, which keeps every retained value's count exact.
+
+Design: docs/designs/2026-07-07-evaluation-framework-design.md
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from sdfb_evaluation.context.plan import ColumnPlan, TablePlan
+
+__all__ = [
+    "CENSUS_KEY_BYTES",
+    "GB",
+    "VALUE_SAMPLE_MODULUS",
+    "Budget",
+    "BudgetExceededError",
+    "census_bytes",
+    "census_demand",
+    "fixed_shuffle_bytes",
+    "predict_shuffle_gb",
+    "value_sample_rate",
+    "water_fill",
+]
+
+GB = 1e9
+CENSUS_KEY_BYTES = 24  # (table, column, value hash) key + four counts
+ROW_KEY_BYTES = 16  # (uint64 hash, count)
+NULL_PATTERN_LIMIT = 4096  # the dense null-pattern dict's key cap
+VALUE_SAMPLE_MODULUS = 10_000
+
+
+@dataclass(frozen=True)
+class Budget:
+  """The evaluation's spending caps (`--max_shuffle_gb`,
+  `--max_bytes_billed`)."""
+  max_shuffle_gb: float
+  max_bytes_billed: int
+
+  def __post_init__(self) -> None:
+    if (isinstance(self.max_shuffle_gb, bool) or
+        not isinstance(self.max_shuffle_gb, (int, float)) or
+        math.isnan(self.max_shuffle_gb) or self.max_shuffle_gb < 0):
+      raise ValueError(f"max_shuffle_gb: expected a number >= 0, got "
+                       f"{self.max_shuffle_gb!r}")
+    if (isinstance(self.max_bytes_billed, bool) or
+        not isinstance(self.max_bytes_billed, int) or
+        self.max_bytes_billed <= 0):
+      raise ValueError(f"max_bytes_billed: expected a positive int, got "
+                       f"{self.max_bytes_billed!r}")
+
+  def check_bytes(self, parts: Mapping[str, int]) -> int:
+    """The total of `parts` (bytes per kind of query), refused above
+    `max_bytes_billed`.
+
+    Raises:
+      BudgetExceededError: the message carries every part, the total and
+        the cap.
+    """
+    total = sum(parts.values())
+    if total > self.max_bytes_billed:
+      detail = ", ".join(f"{k} {v}" for k, v in parts.items())
+      raise BudgetExceededError(
+          f"planning would process {total} bytes ({total / 2**30:.2f} GiB: "
+          f"{detail}), over max_bytes_billed = {self.max_bytes_billed} "
+          f"bytes. Raise --max_bytes_billed, or narrow the evaluation (fewer "
+          f"tables, --mode sampled).")
+    return total
+
+
+class BudgetExceededError(ValueError):
+  """The dry-run bytes exceed `Budget.max_bytes_billed`."""
+
+
+def water_fill(demands: Sequence[float], capacity: float) -> list[float]:
+  """Max-min fair shares of `capacity`: every demand below the running
+  fair share is met in full, the rest split what remains equally. Ties
+  keep input order, so the result is deterministic."""
+  shares = [0.0] * len(demands)
+  remaining = max(float(capacity), 0.0)
+  left = len(demands)
+  for index in sorted(range(len(demands)), key=lambda i: demands[i]):
+    give = min(float(demands[index]), remaining / left)
+    shares[index] = give
+    remaining -= give
+    left -= 1
+  return shares
+
+
+def census_demand(column: ColumnPlan, rows_source: float,
+                  rows_synthetic: float) -> float:
+  """Keys an exact census of `column` shuffles: its distinct values on
+  each side, never more than that side's rows (a missing count is taken
+  as all rows distinct)."""
+
+  def side(distinct: int | None, rows: float) -> float:
+    return float(rows if distinct is None else min(distinct, rows))
+
+  return (side(column.source_distinct, rows_source) +
+          side(column.synthetic_distinct, rows_synthetic))
+
+
+def value_sample_rate(granted: float, demand: float) -> float | None:
+  """None when `granted` covers `demand` (exact census); otherwise the
+  largest `K / VALUE_SAMPLE_MODULUS` rate within the grant, at least
+  `1 / VALUE_SAMPLE_MODULUS`."""
+  if demand <= granted:
+    return None
+  keep = math.floor(VALUE_SAMPLE_MODULUS * granted / demand)
+  return max(keep, 1) / VALUE_SAMPLE_MODULUS
+
+
+def fixed_shuffle_bytes(*, rows_source: float, rows_synthetic: float,
+                        edges: int, keyed_counts: int) -> float:
+  """The non-census shuffle of one table: relational child rows per edge,
+  the row-hash duplicate counts and the null-pattern dicts (see the module
+  docstring)."""
+  both = rows_source + rows_synthetic
+  relational = edges * both * ROW_KEY_BYTES
+  row_keys = (both + keyed_counts * rows_synthetic) * ROW_KEY_BYTES
+  null_bits = (min(rows_source, NULL_PATTERN_LIMIT) +
+               min(rows_synthetic, NULL_PATTERN_LIMIT)) * ROW_KEY_BYTES
+  return relational + row_keys + null_bits
+
+
+def census_bytes(columns: Iterable[ColumnPlan], rows_source: float,
+                 rows_synthetic: float) -> float:
+  """The census shuffle of one table's columns, value sampling applied."""
+  total = 0.0
+  for column in columns:
+    if column.census == "none":
+      continue
+    rate = column.value_sample_rate or 1.0  # set only when value-sampled
+    keys = census_demand(column, rows_source, rows_synthetic)
+    total += keys * rate * CENSUS_KEY_BYTES
+  return total
+
+
+def predict_shuffle_gb(tables: Sequence[TablePlan]) -> float:
+  """Predicted Beam shuffle of evaluating `tables`, in GB (10^9 bytes):
+  census keys * 24 B + relational child rows * 16 B + row-hash counts +
+  null patterns, over the rows each side actually reads. Read-only and
+  skipped tables shuffle nothing of their own."""
+  total = 0.0
+  for table in tables:
+    if not table.evaluated:
+      continue
+    rows_source, rows_synthetic = table.rows_read
+    keyed = int(bool(table.pk)) + int(bool(table.identity))
+    total += census_bytes(table.columns, rows_source, rows_synthetic)
+    total += fixed_shuffle_bytes(
+        rows_source=rows_source,
+        rows_synthetic=rows_synthetic,
+        edges=len(table.edges),
+        keyed_counts=keyed)
+  return total / GB

@@ -47,6 +47,11 @@ dropped silently.
           ▼ plus
     --landing_table targets not seen anywhere else
 
+Side tables are the ones the launch parameters name. When they do not
+name all six, a write into `synthetic_data_quality` / `synthetic_rag` or
+under a side-table name (`dlq`, `validation_runs`, …) is a side table too
+(Ruling R50), and the guess is a warning naming the tables.
+
 A Dataflow job that is not found (wrong region, or past Dataflow's
 retention) is not fatal on its own: JOBS labels, validation_runs and
 manual input are still tried, and `JobNotFoundError` is raised only when
@@ -99,6 +104,18 @@ _AUX_TABLE_PARAMS = (
     "fk_fanout_stats_table",
     "source_stats_table",
 )
+# Ruling R50: when the launch parameters do not name every side table, a
+# written table is one anyway if it lives in the generator's quality/RAG
+# dataset or carries one of its side-table names.
+_SIDE_DATASETS = frozenset({"synthetic_data_quality", "synthetic_rag"})
+_SIDE_NAMES = frozenset({
+    "dlq",
+    "validation_runs",
+    "freetext_pools",
+    "rag_chunks",
+    "fk_fanout_stats",
+    "source_table_stats",
+})
 _MANUAL_KEYS = frozenset({
     "generation_job_id",
     "job_name",
@@ -541,13 +558,40 @@ def _params(job: Mapping[str, Any] | None,
   return params, source
 
 
-def _side_tables(params: Mapping[str, Any]) -> set[str]:
-  """The generator's own side tables this launch named (never landing)."""
-  return {
+def _looks_like_side_table(table: str) -> bool:
+  parts = _dotted(table).split(".")
+  return parts[-1] in _SIDE_NAMES or (len(parts) > 1 and
+                                      parts[-2] in _SIDE_DATASETS)
+
+
+def _side_tables(params: Mapping[str, Any],
+                 written: Sequence[str] = (),
+                 notes: list[str] | None = None) -> set[str]:
+  """The generator's own side tables (never landing tables).
+
+  Those the launch named, plus — when its parameters do not name all six
+  (`_AUX_TABLE_PARAMS`: a Dataflow display data list omits defaults, and
+  manual input may carry none) — every `written` table in a side dataset
+  (`synthetic_data_quality`, `synthetic_rag`) or under a side-table name
+  (Ruling R50). A guess is a note naming the tables, never silent.
+  """
+  named = {
       _dotted(str(params[key]))
       for key in _AUX_TABLE_PARAMS
       if _text(params.get(key))
   }
+  if all(key in params for key in _AUX_TABLE_PARAMS):
+    return named
+  guessed = sorted(
+      {t for t in written if t not in named and _looks_like_side_table(t)})
+  if guessed and notes is not None:
+    notes.append(
+        f"tables {guessed} were treated as the generator's side tables and "
+        "are not evaluated: the launch parameters do not name its side "
+        f"tables, and these live in {sorted(_SIDE_DATASETS)} or are named "
+        f"one of {sorted(_SIDE_NAMES)}. Pass manual params (dlq_table, "
+        "validation_runs_table, …) to override")
+  return named | set(guessed)
 
 
 def _order(
@@ -562,7 +606,7 @@ def _order(
   missed in write-end order, then any `--landing_table` target not seen —
   with a warning naming each table added from the writes.
   """
-  side = _side_tables(params)
+  side = _side_tables(params, [w.table for w in writes], notes)
   written = list(
       dict.fromkeys(
           w.table
@@ -851,7 +895,8 @@ def resolve_launch(*,
       str(known.get("landing_table") or "").split(",") if str(t).strip()
   ] or list(manual_fields.get("tables_in_order") or ())
   writes = _read_writes(bq, job_id, window, targets, notes)
-  side = _side_tables(known)
+  # No notes here: `LaunchContext.from_sources` (`_order`) warns once.
+  side = _side_tables(known, [w.table for w in writes])
   candidates = list(
       dict.fromkeys(targets + [w.table for w in writes if w.table not in side]))
   base = _text(known.get("run_id")) or manual_fields.get("base_run_id")

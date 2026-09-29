@@ -546,6 +546,86 @@ def test_job_not_found_falls_back_to_labels_and_runs(fake_session, fake_bq):
   assert any("retention" in w and "Falling back" in w for w in ctx.warnings)
 
 
+# --------------------------------------------------------------------------
+# R50 — side tables recognised when the launch parameters do not name them
+# --------------------------------------------------------------------------
+def _with_side_writes(fixture_data):
+  """The recorded JOBS rows plus a DLQ written INTO the landing dataset
+  (short name `dlq`) and a RAG layer table in `synthetic_rag`."""
+  base = fixture_data("jobs_by_project")[0]
+  extra = [
+      dict(base, job_id="beam_bq_job_LOAD_side_dlq", table_id="dlq"),
+      dict(
+          base,
+          job_id="beam_bq_job_LOAD_side_rag",
+          dataset_id="synthetic_rag",
+          table_id="chunks_thelook"),
+  ]
+  stats = dict(
+      fixture_data("job_stats"),
+      beam_bq_job_LOAD_side_dlq={"load": {
+          "outputRows": "3"
+      }},
+      beam_bq_job_LOAD_side_rag={"load": {
+          "outputRows": "40"
+      }})
+  return [*fixture_data("jobs_by_project"), *extra], stats
+
+
+def test_side_tables_recognised_without_params(fake_session, fake_bq,
+                                               fixture_data):
+  """Past retention with no manual params: nothing names the side tables,
+  so a write into a side dataset or under a side-table name is a side
+  table (warned by name), never a landing table to evaluate."""
+  rows, stats = _with_side_writes(fixture_data)
+  bq = fake_bq(
+      location="EU",
+      responses=[("JOBS_BY_PROJECT", rows),
+                 ("validation_runs", fixture_data("validation_runs"))],
+      job_stats=stats)
+  ctx = _resolve(fake_session(jobs={}), bq, job_id=JOB_ID)
+  assert ctx.params_source == "manual"
+  assert ctx.tables_in_order == TABLES
+  note = next(w for w in ctx.warnings if "side tables" in w)
+  for side in (f"{QDS}.validation_runs", f"{DS}.dlq",
+               "demo-project.synthetic_rag.chunks_thelook"):
+    assert side in note
+  assert not any(t in note for t in TABLES)
+
+
+def test_side_table_heuristic_fills_params_that_name_only_some(
+    fake_session, fake_bq, fixture_data):
+  """Dataflow display data names validation_runs_table and dlq_table only;
+  a write into synthetic_rag is still recognised as a side table."""
+  rows, stats = _with_side_writes(fixture_data)
+  bq = fake_bq(
+      responses=[("JOBS_BY_PROJECT", rows),
+                 ("validation_runs", fixture_data("validation_runs"))],
+      job_stats=stats)
+  ctx = _resolve(fake_session(entries=[]), bq, job_id=JOB_ID)
+  assert ctx.params_source == "dataflow_params"
+  assert ctx.tables_in_order == TABLES
+  note = next(w for w in ctx.warnings if "side tables" in w)
+  assert "demo-project.synthetic_rag.chunks_thelook" in note
+  assert f"{DS}.dlq" in note
+
+
+def test_side_table_heuristic_off_when_params_name_every_side_table(
+    fake_session, fake_bq, fixture_data):
+  """A launch_config names all six side tables: nothing is guessed, and a
+  labelled write outside its table list is reported, not reclassified."""
+  rows, stats = _with_side_writes(fixture_data)
+  bq = fake_bq(
+      responses=[("JOBS_BY_PROJECT", rows),
+                 ("validation_runs", fixture_data("validation_runs"))],
+      job_stats=stats)
+  ctx = _resolve(fake_session(), bq, job_id=JOB_ID)
+  assert ctx.params_source == "jobs_labels+logs"
+  assert ctx.tables_in_order == TABLES
+  assert not any("side tables" in w for w in ctx.warnings)
+  assert any(f"{DS}.dlq" in w and "not evaluated" in w for w in ctx.warnings)
+
+
 @pytest.mark.parametrize("manual,field", [
     ({
         "model_adjusted": "yes"
