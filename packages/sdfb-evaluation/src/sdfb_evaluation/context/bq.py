@@ -22,8 +22,11 @@ inside the methods that build its config objects.
 Two rules hold for every caller:
 
 - SQL values are bound as query parameters (`@name`), never formatted into
-  the text. `query` infers each parameter's BigQuery type from its Python
-  type and refuses `None` (an untyped NULL).
+  the text. `query` and `execute` infer each parameter's BigQuery type
+  from its Python type and refuse `None` (an untyped NULL). The one
+  exception is a DDL clause documented only with constant expressions (a
+  snapshot clone's `FOR SYSTEM_TIME AS OF`): `context.scope` gives it a
+  `TIMESTAMP` literal re-rendered from a parsed datetime.
 - Table identifiers that must be interpolated go through `normalize_fqn` /
   `quote_fqn`, which accept only a strict `project.dataset.table`.
 
@@ -278,10 +281,21 @@ class Bq:
     _translated(job.result, f"load into {name}")
     return str(job.job_id)
 
-  def execute(self, sql: str) -> None:
-    """Run a DDL statement (snapshot clone, CTAS, view) to completion."""
-    job = _translated(lambda: self._client.query(sql, location=self.location),
-                      "DDL")
+  def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> None:
+    """Run a DDL statement (snapshot clone, CTAS, view) to completion.
+
+    `params` are bound exactly as `query` binds them — e.g. the `@start`/
+    `@end` inside an `APPENDS` CTAS's query. A DDL clause BigQuery
+    documents only with constant expressions (the `FOR SYSTEM_TIME AS OF`
+    of a snapshot clone) carries a validated literal instead.
+    """
+    from google.cloud import bigquery  # pylint: disable=import-outside-toplevel  # optional heavy client
+
+    config = bigquery.QueryJobConfig(
+        query_parameters=_query_parameters(params or {}))
+    job = _translated(
+        lambda: self._client.query(
+            sql, job_config=config, location=self.location), "DDL")
     _translated(job.result, "DDL")
 
   def job_stats(self, job_id: str, location: str) -> dict:

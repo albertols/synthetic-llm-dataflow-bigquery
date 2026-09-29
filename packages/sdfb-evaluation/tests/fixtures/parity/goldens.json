@@ -1,4 +1,5 @@
 {
+  "exposure_rows": 1024,
   "is_sample_model": {
     "config/relationships/bar_example.yml": true,
     "config/relationships/example_retail.yaml": true,

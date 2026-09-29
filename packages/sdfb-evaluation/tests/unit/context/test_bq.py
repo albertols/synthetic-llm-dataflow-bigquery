@@ -212,6 +212,19 @@ def test_execute_runs_ddl():
   assert client.calls[0][0] == "query"
 
 
+def test_execute_binds_parameters():
+  client = _FakeClient()
+  start = datetime(2026, 9, 13, 13, 49, 20, tzinfo=UTC)
+  Bq("demo-project", client=client, location="EU").execute(
+      "CREATE TABLE `demo-project.tmp.a` AS SELECT * FROM "
+      "APPENDS(TABLE `demo-project.d.t`, @start, NULL)", {"start": start})
+  _, _, config, location = client.calls[0]
+  assert location == "EU"
+  params = _params_by_name(config)
+  assert params["start"].type_ == "TIMESTAMP"
+  assert params["start"].value == start
+
+
 def test_job_stats_returns_statistics():
   client = _FakeClient()
   bq = Bq("demo-project", client=client)

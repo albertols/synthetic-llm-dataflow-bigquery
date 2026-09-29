@@ -23,8 +23,9 @@ root environment, writes
 `packages/sdfb-evaluation/tests/fixtures/parity/goldens.json` from the
 ORIGINALS. This test recomputes the same values from the originals again
 (a regression pin on `RelationshipRegistry`, `is_sample_model`,
-`compute_reference_digest` and `load_reference_rows`'s query text) and
-asserts equality with that file. The mirror side of the pair is
+`compute_reference_digest`, `load_reference_rows`'s query text and the
+row-doc prefix `MAX_ROW_DOC_ROWS`) and asserts equality with that file.
+The mirror side of the pair is
 `packages/sdfb-evaluation/tests/unit/test_parity_goldens.py`, which
 recomputes them from the mirrors — this module deliberately never
 imports `sdfb_evaluation`, so the two sides cannot cheat by sharing code.
@@ -50,6 +51,7 @@ from sdfb_beam.io.bq_sources import load_reference_rows
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.io.relationships import is_sample_model
 from sdfb_core.contracts.relationships import RelationshipRegistry
+from sdfb_core.rag.chunking import MAX_ROW_DOC_ROWS
 
 _GOLDENS = (
     Path(__file__).parents[5] / "packages" / "sdfb-evaluation" / "tests" /
@@ -178,3 +180,12 @@ def test_reference_sql_matches_the_golden():
       table=goldens["table"], limit=goldens["limit"], client=client)
   sql = client.query.call_args[0][0]
   assert sql == goldens["sql"]
+
+
+# ---------------------------------------------------------------------------
+# The prompt-exposed prefix: MAX_ROW_DOC_ROWS
+# ---------------------------------------------------------------------------
+
+
+def test_exposure_rows_match_the_golden():
+  assert _load_goldens()["exposure_rows"] == MAX_ROW_DOC_ROWS
