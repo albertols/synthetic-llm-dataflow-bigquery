@@ -162,6 +162,16 @@ def hash64(column: str, value: Any) -> int:
   return int.from_bytes(digest, "big")
 
 
+def hashed_label(code: int) -> str:
+  """The D6 hashed label `h:<8 hex>` of a `hash64` code: its top 32 bits.
+
+  What a profile shows instead of a value the literal policy keeps out of
+  it. Unsalted, so one value carries the same label on every side and in
+  every run (a GUI can line up source and synthetic labels, and runs).
+  """
+  return f"h:{(int(code) >> 32) & 0xFFFFFFFF:08x}"
+
+
 def hash_matrix(rows: Sequence[Mapping[str, Any]],
                 columns: Sequence[str]) -> np.ndarray:
   """The `(len(rows), len(columns))` uint64 matrix of `hash64` per cell."""

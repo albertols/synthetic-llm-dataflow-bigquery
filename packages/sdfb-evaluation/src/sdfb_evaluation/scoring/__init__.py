@@ -69,7 +69,8 @@ the semantic authority; this module only executes it.
   infinite g scores at the function's limit (0 on the bad side).
   `score: none` is the value only for aggregate ids (table.*_score,
   model.*); every other `score: none` metric scores `None` (Ruling R26).
-- `to_metric_row` writes one `evaluation_metrics` row, JSON-safe.
+- `to_metric_row` writes one `evaluation_metrics` row, JSON-safe;
+  `to_profile_row` one `evaluation_profiles` row.
 - `aggregate_scores` rolls scores up over units (Ruling R11) and
   `headline_counts` counts statuses so that they reconcile with the total.
 
@@ -94,6 +95,7 @@ from sdfb_evaluation.catalogue import Metric
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.types import Method
 from sdfb_evaluation.types import MetricValue
+from sdfb_evaluation.types import ProfileValue
 from sdfb_evaluation.types import Status
 
 # The key of the model-wide entry in `aggregate_scores`' result.
@@ -449,6 +451,35 @@ def to_metric_row(mv: MetricValue,
       "encoding_plan_digest": mv.encoding_plan_digest,
       "feature_set_digest": mv.feature_set_digest,
       "detail": _plain(detail) or None,
+  }
+  safe: dict[str, Any] = json_safe(row)
+  return safe
+
+
+def to_profile_row(pv: ProfileValue, *, evaluation_id: str,
+                   evaluated_at: datetime | str) -> dict[str, Any]:
+  """One `evaluation_profiles` row: exactly its fields, in schema order.
+
+  The profile counterpart of `to_metric_row`: `table`/`column` map to
+  `table_name`/`column_name`, numpy values in the payload become Python
+  values and non-finite floats `None` (`json_safe`), so the row can go
+  straight to a BigQuery load job.
+
+  Raises:
+    ValueError: `evaluated_at` is a string that is not ISO-8601.
+  """
+  row = {
+      "evaluation_id": evaluation_id,
+      "evaluated_at": _timestamp(evaluated_at),
+      "table_name": pv.table,
+      "column_name": pv.column,
+      "edge": pv.edge,
+      "profile_kind": pv.profile_kind,
+      "side": pv.side,
+      "n": _as_int(pv.n),
+      "truncated": pv.truncated,
+      "edges_digest": pv.edges_digest,
+      "payload": _plain(pv.payload),
   }
   safe: dict[str, Any] = json_safe(row)
   return safe

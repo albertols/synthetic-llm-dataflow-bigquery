@@ -30,6 +30,7 @@ from sdfb_evaluation.canonical import (
     canonical_value,
     hash64,
     hash_matrix,
+    hashed_label,
     json_safe,
     linear_hash,
     loo_hashes,
@@ -351,3 +352,11 @@ def test_json_safe_leaves_other_types_unchanged():
   assert json_safe(None) is None
   assert json_safe("text") == "text"
   assert json_safe(7) == 7
+
+
+def test_hashed_label_is_h_and_the_top_eight_hex_digits():
+  code = hash64("status", "Complete")
+  label = hashed_label(code)
+  assert label == f"h:{code >> 32:08x}"
+  assert len(label) == 10
+  assert hashed_label(0) == "h:00000000"

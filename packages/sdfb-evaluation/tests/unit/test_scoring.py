@@ -25,6 +25,7 @@ import math
 from datetime import UTC, datetime
 from typing import Any
 
+import numpy as np
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -38,9 +39,11 @@ from sdfb_evaluation.scoring import is_aggregate
 from sdfb_evaluation.scoring import score_value
 from sdfb_evaluation.scoring import status_for
 from sdfb_evaluation.scoring import to_metric_row
+from sdfb_evaluation.scoring import to_profile_row
 from sdfb_evaluation.stats.noise import rate_ratio
 from sdfb_evaluation.types import Method
 from sdfb_evaluation.types import MetricValue
+from sdfb_evaluation.types import ProfileValue
 from sdfb_evaluation.types import Status
 
 CAT = load_catalogue()
@@ -580,6 +583,29 @@ def test_status_for_rejects_a_mismatched_metric():
 def test_row_keys_equal_the_schema_fields_exactly():
   row = _row_of(_mv("column.ks", 0.1, column="amount"))
   assert list(row) == list(schemas.field_names("evaluation_metrics"))
+
+
+def test_profile_row_keys_equal_the_schema_fields_exactly():
+  profile = ProfileValue(
+      table="orders",
+      profile_kind="moments",
+      side="synthetic",
+      payload={
+          "n": np.int64(3),
+          "mean": math.nan,
+          "values": np.array([1.0, math.inf])
+      },
+      column="amount",
+      n=3,
+      truncated=False)
+  row = to_profile_row(
+      profile, evaluation_id="e1", evaluated_at="2026-09-28T10:00:00+00:00")
+  assert list(row) == list(schemas.field_names("evaluation_profiles"))
+  assert (row["table_name"], row["column_name"],
+          row["edge"]) == ("orders", "amount", None)
+  assert row["evaluated_at"] == "2026-09-28T10:00:00.000000+00:00"
+  assert row["payload"] == {"n": 3, "mean": None, "values": [1.0, None]}
+  json.dumps(row, allow_nan=False)
 
 
 def test_row_maps_short_names_and_copies_the_catalogue():
