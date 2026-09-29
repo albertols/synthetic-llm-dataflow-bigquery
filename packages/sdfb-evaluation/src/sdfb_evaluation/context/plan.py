@@ -123,6 +123,7 @@ from sdfb_evaluation.context.budget import (
     CENSUS_KEY_BYTES,
     GB,
     Budget,
+    BudgetExceededError,
     census_bytes,
     census_demand,
     fixed_shuffle_bytes,
@@ -244,9 +245,39 @@ _BQ_ERRORS = (PermissionError, LookupError, BqApiError)
 _PAD = timedelta(seconds=1)
 
 
+def _is_already_exists(exc: BaseException) -> bool:
+  """A BigQuery 409 Already Exists (e.g. a retried CREATE SNAPSHOT TABLE
+  under the same name): `BqApiError` carries no structured HTTP status of
+  its own (context/bq.py's `_status`/`_translated` only special-case 403
+  and 404), so this reads the wrapped API error's text instead."""
+  text = str(exc)
+  return "409" in text and "already exists" in text.lower()
+
+
 class PlanError(ValueError):
   """The launch cannot be planned as resolved (the message says why and
-  what to pass)."""
+  what to pass). `planning_ddl` lists any as_of_diff start snapshot phase
+  A already created before the raise (R58) — empty unless a table's DDL
+  already ran, since every raise this class carries happens before phase A
+  starts."""
+
+  def __init__(
+      self, message: str, planning_ddl: tuple[PrepareStatement,
+                                              ...] = ()) -> None:
+    super().__init__(message)
+    self.planning_ddl = planning_ddl
+
+
+class _BudgetExceededWithDdlError(BudgetExceededError):
+  """`BudgetExceededError` (defined in `context.budget`, so it cannot
+  carry `planning_ddl` itself) wrapped with the as_of_diff start
+  snapshot(s) phase A already created before a later budget check refused
+  the plan (R58): the CLI can report or clean them up."""
+
+  def __init__(self, message: str, planning_ddl: tuple[PrepareStatement,
+                                                       ...]) -> None:
+    super().__init__(message)
+    self.planning_ddl = planning_ddl
 
 
 # --------------------------------------------------------------------------
@@ -1629,43 +1660,69 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     not known yet) — then refuse the plan over `max_bytes_billed`, before
     anything is billed. A table whose dry run BigQuery rejects (a 400, a
     denied or missing table) is skipped as scope `unknown` with the error
-    as its reason, and its bytes are not counted; the others go on."""
+    as its reason — naming the source when the source side's own reads are
+    what failed (R58) — and its bytes are not counted; a `_dry_prepare`
+    fallback note gathered for it is dropped rather than kept stale. The
+    other tables go on."""
     worst = 0
     for work in works:
       before = dict(self.bytes)
+      pending: list[str] = []
       try:
-        worst += self._dry_run_table(work)
+        self._dry_run_source(work, pending)
       except _BQ_ERRORS as exc:
         self.bytes = before
-        self._unreadable_scope(work, f"a dry run of its reads failed ({exc})")
+        self._unreadable_scope(work,
+                               f"source dry run failed: {work.source} ({exc})")
+        continue
+      try:
+        worst += self._dry_run_synthetic(work, pending)
+      except _BQ_ERRORS as exc:
+        self.bytes = before
+        self._unreadable_scope(
+            work, f"scope unknown: a dry run of its reads failed ({exc})")
+        continue
+      work.notes.extend(pending)
     parts = dict(self.bytes)
     if self.mode == "sampled":
       parts["sample (worst case)"] = worst
     self.budget.check_bytes(parts)
 
-  def _dry_run_table(self, work: _Work) -> int:
-    """One table's dry runs (into `self.bytes`); returns its worst-case
-    sample bytes."""
-    assert work.scope is not None and work.pin is not None
+  def _dry_run_source(self, work: _Work, notes: list[str]) -> None:
+    """The source side's phase-A dry runs (into `self.bytes`): its
+    planning queries, the R/E/H panel and its prepare DDL. A
+    `_dry_prepare` fallback note is appended to `notes`, not committed
+    yet (R58: dropped if the table's dry run fails after all)."""
+    assert work.pin is not None
     n = self.panel_n()
     for sql in work.src_queries:
       self.bytes["planning"] += self.bq.dry_run_bytes(sql,
                                                       read_params(work.pin))
-    for sql in work.syn_queries:
-      self.bytes["planning"] += self.bq.dry_run_bytes(sql, work.scope.params)
     if n is not None:
       self.bytes["panel"] += self.bq.dry_run_bytes(
           panel_sql(work.pin, n), read_params(work.pin))
-    for sql in work.scope.prepare_sql:
-      self.bytes["prepare"] += self._dry_prepare(sql, work.scope)
     for sql in work.pin.prepare_sql:
-      self.bytes["prepare"] += self._dry_prepare(sql, work.pin)
+      self.bytes["prepare"] += self._dry_prepare(sql, work.pin, notes)
+
+  def _dry_run_synthetic(self, work: _Work, notes: list[str]) -> int:
+    """The synthetic side's phase-A dry runs (into `self.bytes`) and,
+    sampled mode, the worst-case full-read bytes of both sides over
+    `sample_rows`. Returns the worst-case sample bytes; `notes` collects
+    `_dry_prepare` fallbacks the same way as the source side."""
+    assert work.scope is not None
+    for sql in work.syn_queries:
+      self.bytes["planning"] += self.bq.dry_run_bytes(sql, work.scope.params)
+    for sql in work.scope.prepare_sql:
+      self.bytes["prepare"] += self._dry_prepare(sql, work.scope, notes)
     return self._worst_samples(work) if self.mode == "sampled" else 0
 
   def _unreadable_scope(self, work: _Work, why: str) -> None:
-    """Skip one table whose scope cannot be read after all: status
-    `unknown` with the error as the reason — the rest of the plan goes
-    on."""
+    """Skip one table whose scope cannot be read after all: `why` becomes
+    both the scope's reason (status `unknown`) and, verbatim, the table's
+    skip reason — the caller names the side that failed. Every read table
+    already resolved for it — the scope's own, and the source pin's — is
+    cleared too (R58): a skipped table reports no temp table, snapshot or
+    pin, pinned or not. The rest of the plan goes on."""
     assert work.scope is not None
     work.scope = dataclasses.replace(
         work.scope,
@@ -1675,22 +1732,34 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
         read_expr="",
         prepare_sql=(),
         params={})
-    work.skip_with(f"scope unknown: {why}")
+    work.synthetic_read = ""
+    work.source_read = ""
+    work.pin = None
+    work.skip_with(why)
 
   def create_planning_tables(self, work: _Work) -> None:
     """R57 (R5 amended): an as_of_diff scope's start snapshot — zero bytes
     billed, expiring in 24 h — is the one table planning creates, before
     the dry runs, because the scope's `read_expr` reads it. A failure
     (e.g. the table did not exist yet at the window start) skips only
-    this table."""
+    this table — except a 409 Already Exists, which means the same
+    `evaluation_id` already created it under a previous, still-live
+    attempt: that RAISES `PlanError`, since every planning attempt must
+    mint a fresh `evaluation_id` (R58)."""
     assert work.scope is not None
     for sql in work.scope.planning_sql:
       try:
         self.bq.execute(sql, {}, max_bytes=self.budget.max_bytes_billed)
       except _BQ_ERRORS as exc:
+        if _is_already_exists(exc):
+          raise PlanError(
+              f"{work.landing}: the as_of_diff start snapshot "
+              f"{work.scope.start_table} already exists ({exc}) — each "
+              "planning attempt needs a fresh evaluation_id",
+              tuple(self.planning_ddl)) from exc
         self._unreadable_scope(
-            work, f"its as_of_diff start snapshot could not be created "
-            f"({exc})")
+            work, f"scope unknown: its as_of_diff start snapshot could not "
+            f"be created ({exc})")
         return
       self.planning_ddl.append(PrepareStatement(sql, {}))
       work.notes.append(
@@ -1712,15 +1781,18 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
         self.bq.dry_run_bytes(f"SELECT * FROM {from_item(source)} AS t",
                               read_params(source)))
 
-  def _dry_prepare(self, sql: str, source: SourcePin | ScopePlan) -> int:
+  def _dry_prepare(self, sql: str, source: SourcePin | ScopePlan,
+                   notes: list[str]) -> int:
     """A DDL statement's dry run, with `source`'s parameters; when
-    BigQuery refuses to dry-run it, the full read it materializes stands in
-    (an upper bound), with a note."""
+    BigQuery refuses to dry-run it, the full read it materializes stands
+    in (an upper bound), noted in `notes` — committed to the table's
+    warnings only once the rest of its phase-A dry run also succeeds
+    (R58: a table that fails afterward drops the note as stale)."""
     try:
       return int(self.bq.dry_run_bytes(sql, read_params(source)))
     except _BQ_ERRORS as exc:
-      self.notes.append(f"a prepare statement could not be dry-run ({exc}); "
-                        "its full read is counted instead")
+      notes.append(f"a prepare statement could not be dry-run ({exc}); its "
+                   "full read is counted instead")
       return self._full_read_bytes(source)
 
   # --- running the scans -----------------------------------------------------
@@ -1969,9 +2041,11 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
   other tables are still planned.
 
   Raises:
-    PlanError: a launch table the model does not declare (R50), or no
-      table at all.
-    BudgetExceededError: the dry runs exceed `max_bytes_billed`.
+    PlanError: a launch table the model does not declare (R50), no table
+      at all, or (R58) a 409 Already Exists on an as_of_diff start
+      snapshot — `planning_ddl` lists what phase A already created.
+    BudgetExceededError: the dry runs exceed `max_bytes_billed`;
+      `planning_ddl` lists what phase A already created (R58).
     ValueError: a bad mode/trigger/runner/knob, or malformed input that
       would reach SQL.
   """
@@ -1998,12 +2072,18 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
       if work.active:
         planner.create_planning_tables(work)
   active = [w for w in works if w.active]
-  planner.dry_run(active)
-  active = [w for w in active if w.active]  # a failed dry run skips a table
-  for work in active:
-    planner.scan(work)
-    planner.sample(work)
-  planner.budget.check_bytes(planner.bytes)
+  try:
+    planner.dry_run(active)
+    active = [w for w in active if w.active]  # a failed dry run skips a table
+    for work in active:
+      planner.scan(work)
+      planner.sample(work)
+    planner.budget.check_bytes(planner.bytes)
+  except BudgetExceededError as exc:
+    # R58: phase A (create_planning_tables, above) already ran in full —
+    # attach what it created so the CLI can report or clean it up.
+    raise _BudgetExceededWithDdlError(str(exc),
+                                      tuple(planner.planning_ddl)) from exc
   planner.census(active)
   for work in works:
     if work.role == "external":

@@ -26,7 +26,7 @@ launch's write disposition and the job's own commit window (the labelled
     append       LOAD / DML only                    appends     CTAS over APPENDS(t,
                                                                 window start, end)
     append       any COPY job (Beam FILE_LOADS'     as_of_diff  CTAS: t AS OF end
-                 multi-partition path)                          minus t AS OF start
+                 multi-partition path)                          minus the start snapshot
     --scope manual                                  manual      the table as it is now
 
 `as_of_diff` exists because BigQuery's documented change-history
@@ -106,8 +106,12 @@ of the same table, never collide) and expire 24 h after creation. The
 DDL is a plain `CREATE TABLE`: a retry of the same `evaluation_id`
 within those 24 h collides loudly, so every attempt must mint a fresh
 `evaluation_id`. The temp dataset must live in the landing/source
-table's location; a snapshot with an expiration needs
-`bigquery.tables.createSnapshot` and `bigquery.tables.deleteSnapshot`.
+table's location. The permissions this needs: on the base (landing or
+source) table, `bigquery.tables.get`, `tables.getData`,
+`tables.createSnapshot`, `datasets.get` and `jobs.create`; on the temp
+dataset, `tables.create` and `tables.updateData`; for the 24 h expiry,
+`tables.deleteSnapshot`. Only the predefined `dataOwner`, `admin` or
+`studioAdmin` roles can create a snapshot with an expiration time.
 
 The row count read is always checked (`ScopePlan.verify`): against Σ the
 job's own committed `output_rows` for the table and, when present, Σ

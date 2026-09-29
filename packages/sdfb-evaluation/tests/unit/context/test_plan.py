@@ -948,19 +948,106 @@ def test_a_failing_scope_dry_run_skips_only_that_table():
   assert plan.skip_reason is None
 
 
+def test_a_failing_source_dry_run_names_the_source_not_scope_unknown():
+  # R58: a source-side dry-run failure reads "source dry run failed: …"
+  # and names the source table, not the generic "scope unknown" reason
+  # that a synthetic-side (scope) dry-run failure carries.
+  bq = thelook_bq()
+  bq.dry_failures[f"`{SRC}.orders`"] = BqApiError(
+      "400 (fake) Source unreachable")
+  plan, _ = _plan(bq)
+  orders = next(t for t in plan.tables if t.name == "orders")
+  assert not orders.evaluated and orders.scope.status == "unknown"
+  assert orders.scope.reason.startswith("source dry run failed:")
+  assert f"{SRC}.orders" in orders.scope.reason
+  assert "Source unreachable" in orders.scope.reason
+  assert "scope unknown" not in orders.scope.reason
+  assert orders.skip_reason == orders.scope.reason
+  assert all(
+      t.evaluated for t in plan.tables if t.name in ("users", "order_items"))
+
+
+def test_a_dry_prepare_fallback_note_is_dropped_if_the_table_later_fails():
+  # The source pin's own snapshot-clone prepare cannot be dry-run: its
+  # full read stands in (a fallback note, R58: pending, not yet kept).
+  # Then the synthetic side's own planning query fails outright: the
+  # whole table is skipped, and that fallback note must not survive as a
+  # stale leftover in its warnings.
+  bq = thelook_bq()
+  bq.dry_failures[f"CLONE `{SRC}.orders`"] = BqApiError(
+      "400 (fake) cannot dry-run the clone")
+  bq.dry_failures[f"`{DS}.orders`"] = BqApiError("400 (fake) Syntax error")
+  plan, _ = _plan(bq)
+  orders = next(t for t in plan.tables if t.name == "orders")
+  assert not orders.evaluated
+  assert not any("could not be dry-run" in w for w in orders.warnings)
+  assert not any("full read is counted instead" in w for w in orders.warnings)
+
+
+def test_a_dry_prepare_fallback_note_is_kept_when_the_table_succeeds():
+  # The mirror of the test above: nothing else fails, so the fallback
+  # note the source pin's clone dry run left behind is committed.
+  bq = thelook_bq()
+  bq.dry_failures[f"CLONE `{SRC}.orders`"] = BqApiError(
+      "400 (fake) cannot dry-run the clone")
+  plan, _ = _plan(bq)
+  orders = next(t for t in plan.tables if t.name == "orders")
+  assert orders.evaluated
+  assert any("could not be dry-run" in w for w in orders.warnings)
+
+
 def test_a_failing_start_snapshot_skips_only_that_table():
-  # e.g. the table did not exist yet at the window start.
+  # e.g. the table did not exist yet at the window start. users is a
+  # parent of orders (an enforced edge): the parent is skipped, but the
+  # child — its own scope resolved fine — is still evaluated (R58).
   bq = thelook_bq()
   bq.execute_failures[f"CLONE `{DS}.users`"] = BqApiError(
       "400 (fake) Invalid snapshot time")
   plan, _ = _plan(bq, _copy_launch(bq))
   users = next(t for t in plan.tables if t.name == "users")
+  orders = next(t for t in plan.tables if t.name == "orders")
+  assert orders.edges and orders.edges[0].enforced and orders.edges[0].ref == (
+      "users")
   assert not users.evaluated and users.scope.status == "unknown"
   assert "Invalid snapshot time" in users.scope.reason
   assert not any(users.scope.start_table and users.scope.start_table in s.sql
                  for s in plan.planning_ddl)
   assert all(
       t.evaluated for t in plan.tables if t.name in ("orders", "order_items"))
+  # R58: a skipped table carries no temp table, snapshot or pin — pinned
+  # or not — left over from before the failure.
+  assert users.source_read_table == "" and users.synthetic_read_table == ""
+  assert users.scope.read_table == "" and users.scope.start_table != ""
+  assert not users.source_pinned and users.source_pin is None
+
+
+def test_a_conflicting_start_snapshot_raises_instead_of_skipping():
+  # A 409 Already Exists means the same evaluation_id already created it
+  # under a still-live attempt — never silently treated as unreadable.
+  bq = thelook_bq()
+  bq.execute_failures[f"CLONE `{DS}.users`"] = BqApiError(
+      "409 POST https://bigquery.googleapis.com/bigquery/v2/projects/x: "
+      "Already Exists: Table demo-project:thelook_synthetic."
+      "sdfb_eval_ev1_start_users_a1b2c3d4")
+  with pytest.raises(PlanError, match="already exists") as info:
+    _plan(bq, _copy_launch(bq))
+  assert "fresh evaluation_id" in str(info.value)
+  assert info.value.planning_ddl == ()  # users is the first table planned
+
+
+def test_planning_ddl_survives_a_budget_refusal_after_phase_a():
+  # R58: phase A (the as_of_diff start snapshots) already ran by the time
+  # the dry-run budget check refuses the plan; the CLI needs them back to
+  # report or clean up.
+  bq = thelook_bq()
+  knobs = dataclasses.replace(KNOBS, max_bytes_billed=1)
+  with pytest.raises(BudgetExceededError) as info:
+    _plan(bq, _copy_launch(bq), knobs=knobs)
+  created = [
+      sql for sql, _ in bq.executed if sql.startswith("CREATE SNAPSHOT TABLE")
+  ]
+  assert len(created) == len(TABLES) == 3
+  assert [s.sql for s in info.value.planning_ddl] == created
 
 
 def test_an_unpinned_source_is_read_through_its_own_read_expr():

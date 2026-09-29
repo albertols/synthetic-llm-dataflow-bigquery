@@ -16,9 +16,19 @@ BigQuery would reject fails the laptop suite too.
 
 Time travel (query syntax, FOR SYSTEM_TIME AS OF): "A single query
 statement can't reference a single table at more than one point in time,
-including the current time." Every backticked `project.dataset.table` in
-a statement is one reference — at the `TIMESTAMP` literal of a directly
-following `FOR SYSTEM_TIME AS OF`, else at the current time.
+including the current time." Every table reference in a statement is one
+reference — at the `[TIMESTAMP] '…'` literal of a directly following
+`FOR SYSTEM_TIME AS OF` (case- and whitespace-insensitive, an optional
+`[AS] alias` allowed in between), else at the current time. A reference
+is `` `project.dataset.table` ``: fully or partially backtick-quoted, or
+bare, and `project:dataset.table` normalises to `project.dataset.table`
+(the same table read under either spelling is the same reference).
+
+This must fail CLOSED: a `FOR SYSTEM_TIME AS OF` this module cannot parse
+(a query parameter, an expression such as `TIMESTAMP_SUB(...)`, anything
+that is not a literal) is never silently read as the current time — that
+would hide a real violation. `points_in_time` raises `AssertionError` on
+one instead.
 """
 
 from __future__ import annotations
@@ -27,17 +37,53 @@ import re
 
 from sdfb_evaluation.context.bq import BqApiError
 
-_FQN = r"[a-z][a-z0-9-]{4,28}[a-z0-9][.:][A-Za-z0-9_]+\.[A-Za-z0-9_$-]+"
-_REFERENCE_RE = re.compile(rf"`(?P<table>{_FQN})`"
-                           r"(?: FOR SYSTEM_TIME AS OF TIMESTAMP "
-                           r"'(?P<as_of>[^']+)')?")
+_PROJECT = r"[a-z][a-z0-9-]{4,28}[a-z0-9]"
+_DATASET = r"[A-Za-z0-9_]+"
+_TABLE = r"[A-Za-z0-9_$-]+"
+# Each segment's backticks are matched independently, so a fully
+# backtick-quoted FQN, a partially quoted one (`` `project.dataset`.table
+# ``, common when a project id holds hyphens) and a bare one all match the
+# same way; `[.:]` between project and dataset accepts either spelling.
+_FQN = (rf"`?(?P<project>{_PROJECT})`?[.:]`?(?P<dataset>{_DATASET})`?"
+        rf"\.`?(?P<table>{_TABLE})`?")
+# An optional alias, `AS x` or bare `x`, but never the `FOR` that starts
+# the AS OF clause this same reference may carry next.
+_ALIAS = r"(?:\s+(?:AS\s+)?(?!FOR\b)[A-Za-z_][A-Za-z0-9_]*)?"
+# The TIMESTAMP keyword is optional (a bare quoted literal still parses);
+# anything else after AS OF (a parameter, an expression) does not match,
+# so this whole optional group contributes nothing — caught below.
+_AS_OF = (r"(?:\s+FOR\s+SYSTEM_TIME\s+AS\s+OF\s+(?:TIMESTAMP\s+)?"
+          r"'(?P<as_of>[^']*)')?")
+_REFERENCE_RE = re.compile(rf"{_FQN}{_ALIAS}{_AS_OF}", re.IGNORECASE)
+# Every FOR SYSTEM_TIME AS OF in the statement, parsed or not — checked
+# against how many `_REFERENCE_RE` actually parsed (fail-closed).
+_ANY_AS_OF_RE = re.compile(r"\bFOR\s+SYSTEM_TIME\s+AS\s+OF\b", re.IGNORECASE)
 
 
 def points_in_time(sql: str) -> dict[str, set[str]]:
-  """Each table the statement references → the points it reads it at."""
+  """Each table the statement references → the points it reads it at
+  (module docstring).
+
+  Raises:
+    AssertionError: the statement holds a `FOR SYSTEM_TIME AS OF` this
+      cannot parse — it is never assumed to read at the current time.
+  """
   seen: dict[str, set[str]] = {}
+  parsed = 0
   for match in _REFERENCE_RE.finditer(sql):
-    seen.setdefault(match["table"], set()).add(match["as_of"] or "current")
+    # Hoisted: a quote nested in an f-string trips the py3.14 W1405 gate.
+    project, dataset, name = match["project"], match["dataset"], match["table"]
+    table = f"{project}.{dataset}.{name}"
+    seen.setdefault(table, set()).add(match["as_of"] or "current")
+    if match["as_of"] is not None:
+      parsed += 1
+  found = len(_ANY_AS_OF_RE.findall(sql))
+  if found != parsed:
+    raise AssertionError(
+        f"{found - parsed} of {found} FOR SYSTEM_TIME AS OF clause(s) in "
+        "this statement could not be parsed (expected `[TIMESTAMP] '…'` "
+        f"right after AS OF) — never assumed to read at the current time: "
+        f"{sql!r}")
   return seen
 
 
