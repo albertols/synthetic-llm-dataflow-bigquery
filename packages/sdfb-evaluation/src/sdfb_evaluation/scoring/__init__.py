@@ -30,7 +30,11 @@ the semantic authority; this module only executes it.
   3. `relationship.orphan_rate` on a documented edge (`enforced=False`) ->
      INFO, never FAIL. Only the orphan rate: fan-out metrics compare
      children per parent with the source whatever the enforcement, so they
-     stay graded (Ruling R42);
+     stay graded (Ruling R42); likewise `field.substantive_copy_rate` on a
+     numeric column, or a temporal one whose `detail["day_granularity"]`
+     is true -> INFO: such values collide with a dense source by domain
+     size, not by copying (the catalogue's pitfall; the value lift is the
+     fair test there);
   4. null warn and fail -> INFO;
   5. a `target` metric reads x = |g - target|, its target being the
      catalogue's or, when that is null (`column.novelty_mass`), the row's
@@ -114,6 +118,11 @@ INTERVAL_NOISE_METHODS = frozenset({"wilson", "newcombe", "delong"})
 
 _PMSE_ID = "table.pmse_ratio"
 _ORPHAN_ID = "relationship.orphan_rate"
+_COPY_RATE_ID = "field.substantive_copy_rate"
+_DOMAIN_COLLISION_REASON = (
+    "domain collision: a numeric or day-granular temporal column meets a "
+    "dense source by domain size, not by copying; reported, not gated "
+    "(field.value_memorization_lift is the fair test)")
 _REL_TOL = 1e-9  # tolerance for "at the threshold" (inclusive crossing)
 _UNSCORED = (Status.INFO, Status.NOT_EVALUATED)
 
@@ -295,6 +304,13 @@ def _grade(metric: Metric, mv: MetricValue, gated: float, x: float,
   return _Assessment(status, None, gated, target)
 
 
+def _domain_collision(mv: MetricValue) -> bool:
+  """A copy rate the catalogue reports as INFO only: a numeric column, or
+  a day-granular temporal one (the producer states it in detail)."""
+  return mv.column_kind == "numeric" or (
+      mv.column_kind == "temporal" and mv.detail.get("day_granularity") is True)
+
+
 def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
     metric: Metric, mv: MetricValue, enforced: bool) -> _Assessment:
   """The full status decision, in the order the module docstring lists."""
@@ -314,6 +330,8 @@ def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
     return _Assessment(
         Status.INFO,
         {"reason": "documented edge (enforced: false): reported, not gated"})
+  if metric.id == _COPY_RATE_ID and _domain_collision(mv):
+    return _Assessment(Status.INFO, {"reason": _DOMAIN_COLLISION_REASON})
   if metric.warn is None and metric.fail is None:
     return _Assessment(Status.INFO)
   target = None

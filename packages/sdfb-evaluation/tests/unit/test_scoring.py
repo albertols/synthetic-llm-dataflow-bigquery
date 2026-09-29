@@ -508,6 +508,41 @@ def test_documented_edge_row_is_info_with_null_score():
   assert row["edge"] == "order_items.user_id->users.id"
 
 
+@pytest.mark.parametrize(("kind", "detail", "expected"), [
+    ("numeric", {}, Status.INFO),
+    ("temporal", {
+        "day_granularity": True
+    }, Status.INFO),
+    ("temporal", {
+        "day_granularity": False
+    }, Status.FAIL),
+    ("temporal", {}, Status.FAIL),
+    ("text", {}, Status.FAIL),
+    ("categorical", {
+        "day_granularity": True
+    }, Status.FAIL),
+])
+def test_copy_rate_is_info_on_numeric_and_day_temporal_columns(
+    kind, detail, expected):
+  mv = _mv(
+      "field.substantive_copy_rate",
+      0.01,
+      column="c",
+      column_kind=kind,
+      ci_low=0.009,
+      ci_high=0.011,
+      detail=detail)
+  assert status_for(_metric(mv.metric_id), mv) == expected
+  row = _row_of(mv)
+  assert row["status"] == expected.value
+  if expected is Status.INFO:
+    assert row["score"] is None and "domain" in row["detail"]["reason"]
+  # every other id keeps its grading on a numeric column
+  assert _status(
+      "field.value_memorization_lift", 9.0, ci_low=6.0,
+      column_kind="numeric") == Status.FAIL
+
+
 @pytest.mark.parametrize(("ceiling", "value", "expected"), [
     (5.0, 2.0, Status.NOT_EVALUATED),
     (9.99, 12.0, Status.NOT_EVALUATED),
