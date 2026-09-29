@@ -233,6 +233,11 @@ function sourceSamples(): Record<string, Samples> {
 
 const minutes = (iso: string, delta: number) => isoMicros(Date.parse(iso) + delta * 60_000);
 
+/** Rows per side in sampled mode: the spec's --sample_rows, else the eval_sample_rows knob. */
+function sampleRowsOf(spec: EvalSpec): number {
+  return spec.sampleRows ?? Number(knobs.knobs.find((k) => k.id === "eval_sample_rows")?.value ?? 200_000);
+}
+
 function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
   const jobRng = new Random(seedFrom("generation-job", spec.id));
   const evaluatorVersion = spec.index <= 20 ? EVALUATOR_VERSIONS[0]! : EVALUATOR_VERSIONS[1]!;
@@ -242,6 +247,7 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
   ) as Record<string, unknown>;
   const evaluationParams = {
     ...eval_,
+    ...(spec.sampleRows === undefined ? {} : { sample_rows: spec.sampleRows }),
     mode: spec.mode,
     scope: spec.scopeStatus === "empty" ? "appends" : "auto",
     runner: spec.runner,
@@ -348,7 +354,7 @@ function tableEntry(spec: EvalSpec, table: TableDef, runIds: Map<string, string>
   const note = spec.scopeNote?.table === table.name ? spec.scopeNote : null;
   const rowsSynthetic = empty ? 0 : mismatch ? Math.round(rowsExpected * 0.969635) : rowsExpected;
   const sampled = spec.mode === "sampled";
-  const sampleRows = Number(knobs.knobs.find((k) => k.id === "eval_sample_rows")?.value ?? 200_000);
+  const sampleRows = sampleRowsOf(spec);
   const verified = spec.referenceVerified ?? true;
   return {
     name: table.name,
@@ -500,7 +506,7 @@ export function createMockDataset(seed = 20260928): MockDataset {
         if (textUniverse(table.name, column.name))
           textDraws.set(column.name, drawTextValues(inputs, column.name, 12_000));
       const sampled = spec.mode === "sampled";
-      const sampleRows = Number(knobs.knobs.find((k) => k.id === "eval_sample_rows")?.value ?? 200_000);
+      const sampleRows = sampleRowsOf(spec);
       const ctx: TableContext = {
         spec,
         table,
@@ -625,9 +631,7 @@ export function createMockDataset(seed = 20260928): MockDataset {
     // Operational warnings (not metric results: those are metrics_fail / metrics_warn).
     const warnings: string[] = [];
     if (spec.mode === "sampled")
-      warnings.push(
-        `sampled mode: ${Number(knobs.knobs.find((k) => k.id === "eval_sample_rows")?.value)} rows per side; n-dependent metrics at matched n`,
-      );
+      warnings.push(`sampled mode: ${sampleRowsOf(spec)} rows per side; n-dependent metrics at matched n`);
     if (spec.referenceVerified === false)
       warnings.push("reference digest not verified: privacy lifts and DCR not evaluated");
     if (spec.scopeStatus === "count_mismatch") warnings.push("orders: rows in scope differ from rows_expected");

@@ -148,15 +148,16 @@ function memo<T>(owner: object, key: string, compute: () => T): T {
 }
 
 /**
- * A lift's row when neither side has a copy: the rate ratio is undefined (value null) but its
- * interval is (0, ∞), so status gates on ci_low 0 and a clean run PASSes at score 1 (Ruling R38).
+ * A lift's reading as the evaluator's `rate_ratio` returns it (Ruling R38): with no copies on
+ * either side the ratio is undefined (None) and the interval (0, ∞); with copies only in R the
+ * ratio is +∞ — both store value NULL (json_safe) while status gates on ci_low. No zero
+ * correction: the point estimate is what Python writes, not a smoothed stand-in.
  */
-const noCopies = (m1: number, m2: number) => ({
-  value: null,
-  ciLow: 0,
-  ciHigh: Number.POSITIVE_INFINITY,
-  detail: { copies_r: m1, copies_h: m2 },
-});
+function liftReading(m1: number, t1: number, m2: number, t2: number) {
+  const r = rateRatio(m1, t1, m2, t2, 0.05);
+  const value = m1 + m2 === 0 ? null : m2 === 0 ? Number.POSITIVE_INFINITY : r.ratio;
+  return { value, ciLow: r.lo, ciHigh: r.hi, detail: { copies_r: m1, copies_h: m2 } };
+}
 
 /** detail.reason for a pair statistic that is undefined on a side (a constant column there). */
 function undefinedOn(statistic: string, source: number | null, synthetic: number | null) {
@@ -179,6 +180,10 @@ export class TableEvaluator {
 
   metric(id: MetricId, reading: Reading): EvaluationMetricsRow {
     const catalogue: CatalogueMetric = catalogueById[id];
+    // Staged (storyline): this metric arrives without its noise input, as from a producer that
+    // did not record it — the scorer keeps a WARN/FAIL and says the check was unavailable.
+    const gap = this.ctx.spec.staged?.withoutNoiseInput === id && !catalogue.uses_ci_bound;
+    if (gap) reading = { ...reading, noiseFloor: null, ciLow: null, ciHigh: null };
     // The producer's MetricValue (twelve significant digits), scored as to_metric_row does.
     const scored = scoreRow(
       catalogue,
@@ -483,12 +488,16 @@ export class TableEvaluator {
       syntheticValue: y.mean,
       baseline: Math.abs(r.mean - s.mean) / pooled(s, r),
     });
+    // Staged (storyline): a column the source holds constant in this scope while the synthetic
+    // side varies — the ratio is +∞, past the bad side of a target metric: FAIL, nonfinite (R43).
+    const staged = this.ctx.spec.staged?.spreadFromConstant;
+    const sourceSd = staged && staged.table === this.ctx.table.name && staged.column === column.name ? 0 : s.sd;
     this.metric("column.std_ratio", {
       column,
-      value: s.sd > 0 ? y.sd / s.sd : null,
-      sourceValue: s.sd,
+      value: sourceSd > 0 ? y.sd / sourceSd : y.sd > 0 ? Number.POSITIVE_INFINITY : null,
+      sourceValue: sourceSd,
       syntheticValue: y.sd,
-      baseline: s.sd > 0 ? r.sd / s.sd : null,
+      baseline: sourceSd > 0 ? r.sd / sourceSd : null,
     });
     if (!isTime) {
       const zs = rng.binomial(nSource, src.filter((v) => v === 0).length / src.length);
@@ -980,16 +989,7 @@ export class TableEvaluator {
     const m2 = rng.poisson(n * (rateH + CHANCE_MATCH));
     if (commonValues && m1 + m2 === 0)
       return this.notEvaluated(id, "no rare source values: every value is shared by ≥ 10 source rows", { column });
-    const lift = rateRatio(m1, nReference, m2, nReference, 0.05, { zeroCorrection: true });
-    if (lift.ratio === null) return this.metric(id, { column, ...noCopies(m1, m2), nSynthetic: n });
-    return this.metric(id, {
-      column,
-      value: lift.ratio,
-      ciLow: lift.lo,
-      ciHigh: lift.hi,
-      detail: { copies_r: m1, copies_h: m2, lift: lift.ratio },
-      nSynthetic: n,
-    });
+    return this.metric(id, { column, ...liftReading(m1, nReference, m2, nReference), nSynthetic: n });
   }
 
   // ---------------------------------------------------------------- pairs --
@@ -1278,15 +1278,7 @@ export class TableEvaluator {
         return this.notEvaluated(id, "reference not verified: R and H are not the generator's sample");
       const m1 = rng.poisson(nPrivacy * (rateR + CHANCE_MATCH * 10));
       const m2 = rng.poisson(nPrivacy * CHANCE_MATCH * 10);
-      const r = rateRatio(m1, sizeR, m2, sizeR, 0.05, { zeroCorrection: true });
-      if (r.ratio === null) return this.metric(id, { ...noCopies(m1, m2), nSynthetic: nPrivacy });
-      return this.metric(id, {
-        value: r.ratio,
-        ciLow: r.lo,
-        ciHigh: r.hi,
-        detail: { copies_r: m1, copies_h: m2 },
-        nSynthetic: nPrivacy,
-      });
+      return this.metric(id, { ...liftReading(m1, sizeR, m2, sizeR), nSynthetic: nPrivacy });
     };
     lift("row.memorization_lift", q.rowLeak, nReference);
     lift("row.exposure_lift", q.exposureLeak * (nReference / 1024), 1024);

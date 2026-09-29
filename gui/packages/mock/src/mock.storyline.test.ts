@@ -131,7 +131,8 @@ describe("the storyline", { timeout: 60_000 }, () => {
   });
 
   it("early b1 runs fail memorization; later runs pass it", () => {
-    for (const row of finals().filter((r) => idx(r.evaluation_id) <= 10)) {
+    // The 60-row smoke evaluation (eval-0003) is too small for a lift to reach its thresholds.
+    for (const row of finals().filter((r) => idx(r.evaluation_id) <= 10 && r.mode !== "sampled")) {
       const m = metricsOf(row.evaluation_id);
       expect(
         m.some((x) => x.metric_id === "row.memorization_lift" && x.status === "fail"),
@@ -254,8 +255,10 @@ describe("metrics recompute from the profiles with packages/stats", { timeout: 6
       // What the producer handed the scorer: the stored numbers, its own detail (the scorer's
       // notes are re-derived) and, for an edge, whether the launch enforced it.
       const { reason: _r, noise_downgraded_from: _d, noise_check: _c, nonfinite: _n, ...producer } = detail;
+      // A stored NULL that detail.nonfinite marks was ±∞ when the scorer read it (json_safe).
+      const inf = detail.nonfinite === "+inf" ? Infinity : detail.nonfinite === "-inf" ? -Infinity : null;
       const reading = {
-        value: m.value,
+        value: m.value ?? (catalogueById[m.metric_id as MetricId].uses_ci_bound ? null : inf),
         ciLow: m.ci_low,
         ciHigh: m.ci_high,
         noiseFloor: m.noise_floor,
@@ -335,7 +338,8 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
       if (m.noise_floor_method && interval.has(m.noise_floor_method)) expect(m.noise_floor, where).toBeNull();
       if (m.noise_floor_method === null || m.noise_floor_method === "rate_ratio")
         expect(m.noise_floor, where).toBeNull();
-      // Every graded crossing had the input its noise check needs.
+      // Every graded crossing had the input its noise check needs — but for the one staged gap.
+      if (m.metric_id === "row.exact_match_rate_nonkey" && m.evaluation_id === "eval-0006") continue;
       if (m.status === "warn" || m.status === "fail") {
         if (m.noise_floor_method && interval.has(m.noise_floor_method)) {
           expect(m.ci_low, where).not.toBeNull();
@@ -349,21 +353,50 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
 
   it("shows every scorer state the EVALUATION tab explains", () => {
     const detailOf = (m: EvaluationMetricsRow) => (m.detail ?? {}) as Record<string, unknown>;
-    // R40: a crossing within sampling noise is PASS, says what it was, and scores at the reference.
+    // R40: a crossing within sampling noise is PASS, says what it was — WARN and FAIL alike —
+    // and scores at the reference (the smoke run's wide floors make several).
     const downgraded = data.metrics.filter((m) => detailOf(m).noise_downgraded_from);
-    expect(downgraded.length).toBeGreaterThan(0);
+    for (const from of ["warn", "fail"])
+      expect(
+        downgraded.some((m) => detailOf(m).noise_downgraded_from === from),
+        `was ${from}`,
+      ).toBe(true);
     for (const m of downgraded) {
       expect(m.status).toBe("pass");
-      expect(["warn", "fail"]).toContain(detailOf(m).noise_downgraded_from);
       expect(m.score).toBe(1);
     }
-    // R38: a lift with no copies on either side has no value but PASSes on ci_low 0 at score 1.
-    const clean = data.metrics.filter((m) => m.metric_id.endsWith("_lift") && m.value === null && m.status === "pass");
+    // R41: a WARN/FAIL whose noise input is missing keeps its status and says the check was unavailable.
+    const unavailable = data.metrics.filter((m) => detailOf(m).noise_check === "unavailable");
+    expect(unavailable.map((m) => `${m.evaluation_id} ${m.table_name} ${m.metric_id} ${m.status}`).sort()).toEqual([
+      "eval-0006 order_items row.exact_match_rate_nonkey fail",
+      "eval-0006 orders row.exact_match_rate_nonkey fail",
+      "eval-0006 users row.exact_match_rate_nonkey fail",
+    ]);
+    // R43: an infinite value past the bad side is a FAIL stored as NULL with detail.nonfinite.
+    const nonfinite = data.metrics.filter((m) => detailOf(m).nonfinite);
+    expect(nonfinite.map((m) => [m.evaluation_id, m.metric_id, m.column_name, m.status, m.value, m.score])).toEqual([
+      ["eval-0009", "column.std_ratio", "age", "fail", null, 0],
+    ]);
+    // R38: a lift with no copies on either side has no value but PASSes on ci_low 0 at score 1 …
+    const lifts = data.metrics.filter((m) => m.metric_id.endsWith("_lift") && m.status !== "not_evaluated");
+    const clean = lifts.filter((m) => m.value === null && m.ci_low === 0);
     expect(clean.length).toBeGreaterThan(0);
     for (const m of clean) {
-      expect(m.ci_low).toBe(0);
+      expect(m.status).toBe("pass");
       expect(m.score).toBe(1);
     }
+    // … and one with copies only in R stores NULL too (Python's rate_ratio gives +∞), gated on ci_low > 0.
+    const holdoutZero = lifts.filter((m) => {
+      const d = detailOf(m) as { copies_r?: number; copies_h?: number };
+      return d.copies_h === 0 && (d.copies_r ?? 0) > 0;
+    });
+    expect(holdoutZero.length).toBeGreaterThan(0);
+    for (const m of holdoutZero) {
+      expect(m.value, `${m.evaluation_id} ${m.metric_id}`).toBeNull();
+      expect(m.ci_low!).toBeGreaterThan(0);
+      expect(m.ci_high).toBeNull();
+    }
+    expect(holdoutZero.some((m) => m.status === "fail")).toBe(true);
     // R42: documented edges' orphan rates are INFO; R39: zero-tolerance FAILs exist to badge.
     expect(data.metrics.some((m) => m.metric_id === "relationship.orphan_rate" && m.status === "info")).toBe(true);
     const zeroTolerance = zeroToleranceIds(catalogue);

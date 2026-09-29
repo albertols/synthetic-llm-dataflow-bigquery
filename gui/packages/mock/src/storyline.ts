@@ -75,6 +75,20 @@ export interface EvalSpec {
   scopeNote?: { table: string; status: "contaminated" | "expired"; reason: string };
   referenceVerified?: boolean;
   warnings?: string[];
+  /** Sampled mode only: the evaluation's --sample_rows (default: the eval_sample_rows knob). */
+  sampleRows?: number;
+  /**
+   * Producer inputs staged on one evaluation each, so the mock has a real row for every scorer
+   * state the EVALUATION tab explains; the scorer (scoreRow) still decides every status.
+   */
+  staged?: Staged;
+}
+
+export interface Staged {
+  /** This metric's rows arrive without their noise input (floor or CI): WARN/FAIL stays, "noise check unavailable" (R41). */
+  withoutNoiseInput?: string;
+  /** A numeric column whose source spread is 0 in this scope while the synthetic side varies: std ratio +∞, FAIL (R43). */
+  spreadFromConstant?: { table: string; column: string };
 }
 
 const THELOOK = ["users", "orders", "order_items"];
@@ -119,11 +133,14 @@ const ROWS: Row[] = [
     quality: { valueLeak: 0.31, rowLeak: 0.011, exposureLeak: 0.018, nearLeak: 0.01, poolCollapse: true },
   },
   {
+    // A DirectRunner smoke evaluation at --sample_rows 60: noise floors this wide explain several
+    // WARN and FAIL crossings away ("≈ within noise, was FAIL", Ruling R40).
     day: "2026-08-05",
     at: "14:05",
     runner: "DirectRunner",
     mode: "sampled",
     trigger: "cli",
+    sampleRows: 60,
     numRows: 1_000_000,
     quality: { valueLeak: 0.3, rowLeak: 0.01, exposureLeak: 0.015, nearLeak: 0.008, poolCollapse: true },
   },
@@ -144,6 +161,7 @@ const ROWS: Row[] = [
     day: "2026-08-10",
     at: "07:55",
     embedder: "bge-small-en-v1.5",
+    staged: { withoutNoiseInput: "row.exact_match_rate_nonkey" },
     quality: {
       valueLeak: 0.26,
       rowLeak: 0.008,
@@ -175,6 +193,7 @@ const ROWS: Row[] = [
     day: "2026-08-13",
     at: "09:00",
     numRows: 10_000_000,
+    staged: { spreadFromConstant: { table: "users", column: "age" } },
     quality: { valueLeak: 0.19, rowLeak: 0.006, exposureLeak: 0.009, nearLeak: 0.005, poolCollapse: true },
   },
   {
