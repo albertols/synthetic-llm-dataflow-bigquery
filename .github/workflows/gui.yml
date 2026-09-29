@@ -28,10 +28,11 @@ name: GUI
 #            fixtures (incl. the evaluator's scorer) must match the code in
 #            values, ids, anchor tokens and paths; workflow-paths.test.ts
 #            keeps EXPORTS_PATHS covering every file the exporters read or
-#            cite (docs/designs, docs/articles, docs/adr included). Line numbers may move (the default Python gate does not
-#            run this check, so an unrelated Python PR that shifts a line never
-#            fails; this job catches a value or anchor drift whenever the code
-#            the GUI imports changes).
+#            cite (docs/designs, docs/articles, docs/adr included). Line
+#            numbers may move (the default Python gate does not run this
+#            check, so an unrelated Python PR that shifts a line never fails;
+#            this job catches a value or anchor drift whenever the code the
+#            GUI imports changes).
 #   gui      gui/ itself, the contract sources, the figures assets:check
 #            copies, and the repo files the GUI's tests quote verbatim
 #            (DESIGN.md, READMEs, ADRs, articles, and the few Python lines the

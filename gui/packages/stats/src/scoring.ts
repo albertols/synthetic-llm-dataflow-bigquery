@@ -207,7 +207,9 @@ function gatedOf(metric: ScoringMetric, reading: MetricReading): { source: GateS
 
 function reasonOf(reading: MetricReading): string | null {
   const reason = reading.detail?.reason;
-  // Python: str(detail.get("reason") or missing) — any truthy reason, stringified.
+  // Python: str(detail.get("reason") or missing). Falsy reasons fall through to the scorer's own;
+  // strings, numbers and booleans read as Python's str() for them (producers write strings). Other
+  // values are JSON-encoded here where Python writes their repr — the one place the two differ.
   if (reason === undefined || reason === null || reason === "" || reason === false || reason === 0) return null;
   return typeof reason === "string" || typeof reason === "number" || typeof reason === "boolean"
     ? String(reason)
@@ -346,8 +348,12 @@ export interface RollupRow {
   score: number | null;
 }
 
-/** A sum rounded once (Python `math.fsum`, Neumaier compensation), so a mean does not depend on row order. */
-function fsum(xs: readonly number[]): number {
+/**
+ * A Neumaier-compensated sum: much less order-dependent than a plain sum, but not Python's
+ * `math.fsum` (Shewchuk's exactly rounded sum) — the two can differ in the last ulp, well inside
+ * the golden test's 1e-12 tolerance.
+ */
+function compensatedSum(xs: readonly number[]): number {
   let sum = 0;
   let c = 0;
   for (const x of xs) {
@@ -360,7 +366,7 @@ function fsum(xs: readonly number[]): number {
 
 const mean = (xs: readonly (number | null)[]): number | null => {
   const present = xs.filter((x): x is number => x !== null);
-  return present.length ? fsum(present) / present.length : null;
+  return present.length ? compensatedSum(present) / present.length : null;
 };
 
 /** The roll-up unit of a non-aggregate row (R11): a column, the pair group, a row/table metric, an edge. */
