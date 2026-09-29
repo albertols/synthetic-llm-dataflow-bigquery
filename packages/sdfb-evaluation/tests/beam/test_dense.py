@@ -19,15 +19,17 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import pickle
 import random
 import time as clock
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import apache_beam as beam
@@ -59,13 +61,14 @@ from sdfb_evaluation.canonical import hash64, numeric_value
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.context import plan as plan_module
 from sdfb_evaluation.scoring import status_for, to_metric_row
-from sdfb_evaluation.stats import binned, dependence, distances, shapes
+from sdfb_evaluation.stats import binned, dependence, distances, noise, shapes
 from sdfb_evaluation.types import ColumnKind, MetricValue, ProfileValue, Status
 
 from .dense_data import orders_table, planned_table
 from .tables import make_panel
 
 SALT = "d3n5" * 8
+LABEL_KEY = b"dense-test-label-key-32-bytes-00"
 _CATALOGUE = load_catalogue()
 _SIDES = ("source", "synthetic", "reference", "holdout")
 _TOL = 1e-9
@@ -100,7 +103,7 @@ def _pure(
   profiles = {
       side: _profile(table, side, rows) for side, rows in rows_by.items()
   }
-  return dense_outputs(spec, profiles)
+  return dense_outputs(spec, profiles, label_key=LABEL_KEY)
 
 
 def _collect(pcoll: beam.PCollection, path: Path, label: str) -> None:
@@ -126,7 +129,9 @@ def _run(tables: Sequence[Any], rows_by: Mapping[str, Mapping[str, list]],
       for side in rows_by[table.name]:
         rows = sources.read(p, table, side)
         encoded.append(rows | EncodeSide(table, side, salt=SALT))
-    outputs = (encoded | "Flatten" >> beam.Flatten() | DenseMetrics(tables))
+    outputs = (
+        encoded | "Flatten" >> beam.Flatten()
+        | DenseMetrics(tables, label_key=LABEL_KEY))
     _collect(outputs["metrics"], tmp_path / "metrics.pkl", "Metrics")
     _collect(outputs["profiles"], tmp_path / "profiles.pkl", "Profiles")
     _collect(outputs["accumulators"], tmp_path / "acc.pkl", "Accumulators")
@@ -181,6 +186,13 @@ def _zero_delta(a: np.ndarray, b: np.ndarray) -> float:
   return float(abs(np.mean(b == 0) - np.mean(a == 0)))
 
 
+def _legacy_deciles(edges: np.ndarray, counts: np.ndarray,
+                    x: np.ndarray) -> list[float]:
+  inner = binned.quantiles_from_bins(edges, counts,
+                                     [k / 10 for k in range(1, 10)])
+  return [x.min(), *np.clip(inner, x.min(), x.max()), x.max()]
+
+
 def _expected_grid(table: Any, rows_by: Mapping[str, list],
                    out: dict[tuple, tuple]) -> None:
   """Direct Task 6/7 calls per numeric/temporal column: (value, baseline)."""
@@ -214,17 +226,13 @@ def _expected_grid(table: Any, rows_by: Mapping[str, list],
     out[("field.range_adherence", name,
          None)] = (float(np.mean((xy >= lo) & (xy <= hi))), None)
     if column.kind is ColumnKind.NUMERIC:
-      probs = np.linspace(0.0, 1.0, 11)
-
-      def legacy(a: np.ndarray,
-                 b: np.ndarray,
-                 edges: np.ndarray = edges,
-                 probs: np.ndarray = probs) -> float:
-        return binned.decile_ks_legacy(
-            binned.quantiles_from_bins(edges, a, probs),
-            binned.quantiles_from_bins(edges, b, probs))
-
-      out[("column.decile_ks_legacy", name, None)] = pair(legacy, cs, cy, cr)
+      # the legacy rule's deciles: each side's exact min and max at 0 and
+      # 1, the inner nine read off its union bins
+      sides = ((cs, xs), (cy, xy), (cr, xr))
+      dec = [_legacy_deciles(edges, c, x) for c, x in sides]
+      out[("column.decile_ks_legacy", name,
+           None)] = (binned.decile_ks_legacy(dec[0], dec[1]),
+                     binned.decile_ks_legacy(dec[0], dec[2]))
       out[("column.zero_rate_delta", name,
            None)] = pair(_zero_delta, xs, xy, xr)
 
@@ -977,6 +985,19 @@ def test_null_pattern_cap_keeps_the_fewest_null_patterns_order_free():
   for pattern in exact:
     if (pattern.bit_count(), pattern) < (kept.bit_count(), kept):
       assert pattern in forward.null_patterns
+  # the metric says its head deviates from the catalogue's top-64
+  twin = dataclasses.replace(forward, side="synthetic")
+  metrics, _ = dense_outputs(
+      spec, {
+          "source": forward,
+          "synthetic": twin
+      }, label_key=LABEL_KEY)
+  tvd = _by_key(metrics)[("row.null_pattern_tvd", None, None)]
+  assert tvd.detail["capped_head"] is True
+  assert "top-64" in tvd.detail["note"]
+  uncapped, _ = _pure(*orders_table(n_source=300, n_synthetic=300))
+  detail = _by_key(uncapped)[("row.null_pattern_tvd", None, None)].detail
+  assert detail["capped_head"] is False and "note" not in detail
 
 
 def test_profiles_are_bounded_json_safe_and_follow_the_gui_contract(
@@ -1118,3 +1139,182 @@ def test_throughput_8192_by_30_batch(record_property):
   print(f"dense from_batch: {rows_per_s:,.0f} rows/s on an 8192 x 30 batch "
         f"({len(table.pairs)} pairs)")
   assert rows_per_s > 20_000
+
+
+# --------------------------------------------------------------------------
+# review round 1: R63, R64, R65, legacy deciles, edge labels
+# --------------------------------------------------------------------------
+_UNIFORM_FIELDS = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "x",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+)
+
+
+def test_decile_ks_legacy_reads_exact_extremes_when_synthetic_overflows():
+  rng = np.random.default_rng(31)
+  source = [{"id": i, "x": float(v)} for i, v in enumerate(rng.random(4000))]
+  synthetic = [{
+      "id": i,
+      "x": float(v)
+  } for i, v in enumerate(3.0 * rng.random(4000))]
+  table = planned_table(
+      "uniform", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  metrics, _ = _pure(table, {
+      "source": source,
+      "synthetic": synthetic,
+      "reference": source[:1000],
+  })
+  legacy = _by_key(metrics)[("column.decile_ks_legacy", "x", None)]
+  xs = np.array([r["x"] for r in source])
+  xy = np.array([r["x"] for r in synthetic])
+  probs = np.linspace(0.0, 1.0, 11)
+  exact = binned.decile_ks_legacy(
+      np.quantile(xs, probs).tolist(),
+      np.quantile(xy, probs).tolist())
+  # U(0, 1) vs U(0, 3): the legacy value is 2/3 (the grid-extreme
+  # reconstruction read 0.60)
+  assert legacy.value == pytest.approx(2 / 3, abs=0.02)
+  assert legacy.value == pytest.approx(exact, abs=0.01)
+  xr = xs[:1000]
+  exact_base = binned.decile_ks_legacy(
+      np.quantile(xs, probs).tolist(),
+      np.quantile(xr, probs).tolist())
+  assert legacy.baseline_value == pytest.approx(exact_base, abs=0.02)
+
+
+def _json_text(profiles: Sequence[ProfileValue],
+               metrics: Sequence[MetricValue]) -> str:
+  return json.dumps(
+      [dict(p.payload) for p in profiles] + [dict(m.detail) for m in metrics],
+      default=str)
+
+
+def _unkeyed_label(code: int) -> str:
+  """The pre-R64 label: the code's top 32 bits, reversible by enumeration."""
+  top = code >> 32
+  return f"h:{top:08x}"
+
+
+def test_hashed_labels_are_keyed_and_leak_neither_values_nor_key(monkeypatch):
+  monkeypatch.setattr(dense, "CONTINGENCY_TOP_PAIRS", 10_000)
+  table, rows_by = orders_table(n_source=1500, n_synthetic=1200)
+  spec = DenseSpec.from_table(table)
+  profiles = {s: _profile(table, s, rows) for s, rows in rows_by.items()}
+
+  def note_labels(key: bytes) -> tuple[list[str], list, list]:
+    metrics, payloads = dense_outputs(spec, profiles, label_key=key)
+    for p in payloads:
+      if p.profile_kind == "contingency" and p.payload["column_y"] == "note":
+        return list(p.payload["y_labels"]), metrics, payloads
+    raise AssertionError("no contingency axis on note")
+
+  first, metrics, payloads = note_labels(LABEL_KEY)
+  other, _, _ = note_labels(b"another-key")
+  hashed = [label for label in first if label.startswith("h:")]
+  assert len(hashed) == 9  # note is not literal_ok: its top-9 are labels
+  assert all(
+      a != b for a, b in zip(first, other, strict=True) if a.startswith("h:"))
+  # an enumeration attack with the old unkeyed label recovers nothing
+  domain = {
+      r["note"]
+      for rows in rows_by.values()
+      for r in rows
+      if r["note"] is not None
+  }
+  unkeyed = {_unkeyed_label(hash64("note", v)) for v in domain}
+  assert not set(hashed) & unkeyed
+  # and the key itself is in no payload and no detail
+  text = _json_text(payloads, metrics)
+  for form in (LABEL_KEY.decode(), LABEL_KEY.hex(), repr(LABEL_KEY)):
+    assert form not in text
+  for bad in (b"", "text-key"):
+    with pytest.raises(ValueError, match="R64"):
+      dense_outputs(spec, profiles, label_key=bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="R64"):
+      DenseMetrics([table], label_key=bad)  # type: ignore[arg-type]
+
+
+def _numbers(obj: Any) -> Iterator[float]:
+  if isinstance(obj, bool):
+    return
+  if isinstance(obj, (int, float)):
+    yield float(obj)
+  elif isinstance(obj, Mapping):
+    for value in obj.values():
+      yield from _numbers(value)
+  elif isinstance(obj, (list, tuple)):
+    for value in obj:
+      yield from _numbers(value)
+
+
+def test_no_source_extreme_in_any_payload_or_detail():
+  table, rows_by = orders_table()
+  metrics, profiles = _pure(table, rows_by)
+  secrets = set()
+  for side in ("source", "reference", "holdout"):
+    for name in ("amount", "created_at"):  # continuous: lone extremes
+      x = _finite(rows_by[side], name)
+      for extreme in (x.min(), x.max()):
+        secrets.update({float(extreme), float(extreme) / 1e6})
+  shown = [
+      n for p in profiles if p.side != "synthetic" for n in _numbers(p.payload)
+  ] + [n for m in metrics for n in _numbers(m.detail)]
+  leaks = [
+      n for n in shown for s in secrets if math.isclose(n, s, rel_tol=1e-12)
+  ]
+  assert not leaks
+  # the payloads say what their extremes are
+  histograms = {
+      (p.side, p.column): p.payload
+      for p in profiles
+      if p.profile_kind == "histogram"
+  }
+  assert histograms[("source", "amount")]["extremes"] == "p0.5_p99.5"
+  assert histograms[("synthetic", "amount")]["extremes"] == "exact"
+  xy = _finite(rows_by["synthetic"], "amount")
+  assert histograms[("synthetic", "amount")]["min"] == xy.min()
+  coverage = _by_key(metrics)[("column.range_coverage", "amount", None)]
+  assert coverage.detail["source_p0_5"] is not None
+  assert "source_min" not in coverage.detail
+
+
+def test_contingency_tvd_noise_floor_is_the_joint_null_expectation():
+  table, rows_by = orders_table()
+  spec = DenseSpec.from_table(table)
+  metrics, _ = _pure(table, rows_by)
+  source = _profile(table, "source", rows_by["source"])
+  assert source.bivariate is not None
+  names = [c.name for c in spec.pair_columns]
+  for k, (a, b) in enumerate(spec.pairs):
+    mv = _by_key(metrics)[("pair.contingency_tvd", names[a], names[b])]
+    joint = source.bivariate.counts2d[k]
+    expected = noise.tvd_null_expectation((joint / joint.sum()).ravel(),
+                                          mv.n_source, mv.n_synthetic)
+    assert mv.noise_floor == pytest.approx(expected, rel=1e-12)
+  assert _CATALOGUE.get("pair.contingency_tvd").noise_floor == "tvd_null"
+
+
+def test_edge_labels_tell_every_edge_apart():
+  numeric = SimpleNamespace(
+      kind=ColumnKind.NUMERIC,
+      deciles=np.array([1.0000001, 1.0000002, 12.5, 1e-05]))
+  labels = dense._edge_labels(numeric)  # pylint: disable=protected-access  # the formatter itself is under test
+  assert len(set(labels)) == 4
+  assert labels[2] == "12.5"
+  close = np.array([1_700_000_000_000_000, 1_700_000_000_000_001], dtype=float)
+  stamps = dense._edge_labels(  # pylint: disable=protected-access  # as above
+      SimpleNamespace(kind=ColumnKind.TEMPORAL, deciles=close))
+  assert len(set(stamps)) == 2 and stamps[0].endswith(".000000")
+  apart = np.array([0.0, 86_400e6])
+  assert dense._edge_labels(  # pylint: disable=protected-access  # as above
+      SimpleNamespace(kind=ColumnKind.TEMPORAL, deciles=apart)) == [
+          "1970-01-01T00:00:00", "1970-01-02T00:00:00"
+      ]

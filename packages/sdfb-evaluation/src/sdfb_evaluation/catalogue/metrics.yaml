@@ -1132,7 +1132,7 @@ metrics:
     range: [0, 1]
     thresholds: {warn: 0.10, fail: 0.20, source: heuristic}
     score: complement
-    noise_floor: none
+    noise_floor: tvd_null
     n_dependent: false
     baseline: true
     uses_ci_bound: false
@@ -1141,7 +1141,7 @@ metrics:
     interpretation:
       good: "Under 0.10: the pair's joint distribution matches."
       bad: "At or above 0.20: combinations are wrong, e.g. valid cities paired with the wrong countries."
-    pitfalls: "Values outside the source dictionary are pooled into one bin, so rare combinations are invisible."
+    pitfalls: "Values outside the source dictionary are pooled into one bin, so rare combinations are invisible. Many sparse cells carry a sampling floor even for a perfect generator (the noise floor is the null TVD expectation over the joint cells); read it with the baseline."
     references:
       - {label: "SDMetrics — ContingencySimilarity", url: "https://docs.sdv.dev/sdmetrics/data-metrics/quality/contingencysimilarity"}
 

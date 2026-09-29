@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from sdfb_evaluation.stats import noise
+from sdfb_evaluation.stats import noise, relational
 
 
 def test_dkw_10k_is_1_36_percent():
@@ -195,3 +195,17 @@ def test_noise_floor_fisher_z_needs_more_than_three_samples():
 def test_noise_floor_unknown_method_raises():
   with pytest.raises(ValueError, match="unknown noise_floor method"):
     noise.noise_floor("bootstrap", n=10, m=10)
+
+
+@pytest.mark.parametrize(("lo", "hi", "folded"), [
+    (-0.1, 0.3, (0.0, 0.3)),
+    (0.2, 0.5, (0.2, 0.5)),
+    (-0.5, -0.2, (0.2, 0.5)),
+    (-0.4, 0.1, (0.0, 0.4)),
+])
+def test_folded_abs_interval(lo, hi, folded):
+  assert noise.folded_abs_interval(lo, hi) == folded
+
+
+def test_folded_abs_interval_is_still_importable_from_relational():
+  assert relational._folded_abs_interval is noise.folded_abs_interval  # pylint: disable=protected-access  # the compatibility alias (R63)

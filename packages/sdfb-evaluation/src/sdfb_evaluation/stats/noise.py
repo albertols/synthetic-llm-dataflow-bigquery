@@ -27,6 +27,8 @@ producers call `wilson_interval`/`newcombe_diff_interval`/`rate_ratio`
 directly and the dispatcher returns `None` for them; `delong` (the AUC
 noise floor) is implemented in `stats/detection.py` (a later task), and the
 dispatcher returns `None` for it here too, pending that.
+`folded_abs_interval` turns a signed difference interval into one for the
+catalogue's unsigned deltas.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -117,6 +119,22 @@ def newcombe_diff_interval(
   lo = diff - math.sqrt((p1 - lo1)**2 + (hi2 - p2)**2)
   hi = diff + math.sqrt((hi1 - p1)**2 + (p2 - lo2)**2)
   return (lo, hi)
+
+
+def folded_abs_interval(lo: float, hi: float) -> tuple[float, float]:
+  """The interval for `|X|` implied by a two-sided interval `(lo, hi)` for a
+  signed quantity `X` that the interval always contains.
+
+  If `(lo, hi)` straddles 0, `X` could plausibly be 0 itself, so `|X|`
+  ranges from 0 up to `max(|lo|, |hi|)`. Otherwise both endpoints share
+  `X`'s sign and `|X|` is monotone in `X` there, so the folded interval is
+  `(min(|lo|, |hi|), max(|lo|, |hi|))`. Turns Newcombe's (1998) signed
+  interval for a difference of shares into a CI for the catalogue's
+  unsigned deltas (`*_rate_delta`, `zero_child_share_delta`).
+  """
+  if lo <= 0.0 <= hi:
+    return (0.0, max(abs(lo), abs(hi)))
+  return (min(abs(lo), abs(hi)), max(abs(lo), abs(hi)))
 
 
 def tvd_null_expectation(p: Sequence[float], n: int, m: int) -> float:

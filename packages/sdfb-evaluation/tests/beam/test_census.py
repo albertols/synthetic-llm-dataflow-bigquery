@@ -131,7 +131,7 @@ def _run(
         for side in rows_by
     ]
     batches = encoded | "Flatten" >> beam.Flatten()
-    dense_out = batches | "Dense" >> DenseMetrics([table])
+    dense_out = batches | "Dense" >> DenseMetrics([table], label_key=LABEL_KEY)
     out = ({
         "batches": batches,
         "accumulators": dense_out["accumulators"]

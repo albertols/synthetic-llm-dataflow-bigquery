@@ -123,6 +123,7 @@ __all__ = [
     "EncodeBatchFn",
     "EncodeSide",
     "EncodedBatch",
+    "cell_text",
     "key_hash",
     "key_hashes",
     "matched_rate",
@@ -355,7 +356,10 @@ def _is_null(value: Any, repeated: bool) -> bool:
                                                    (list, tuple)) and not value)
 
 
-def _text(value: Any) -> str | None:
+def cell_text(value: Any) -> str | None:
+  """A cell as the text block holds it: `str` as it is, NULL as None, any
+  other value as its canonical text (an INT64 id as its digits, BYTES as
+  base64). Shared with the census so both read a cell identically."""
   if value is None or isinstance(value, str):
     return value
   canonical = canonical_value(value)
@@ -434,7 +438,7 @@ class BatchEncoder:
         n=n,
         num=self._numeric(values, n),
         cat=h[:, self._cat_idx],
-        text=[[_text(v) for v in values[j]] for j in self._text_idx],
+        text=[[cell_text(v) for v in values[j]] for j in self._text_idx],
         row_hash=row_hash,
         nonkey_hash=self._nonkey_hash(h_nonkey),
         pk_hash=key_hashes(rows, layout.pk),

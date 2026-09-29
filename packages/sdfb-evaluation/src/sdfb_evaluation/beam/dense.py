@@ -57,7 +57,9 @@ below), so a merge tree never changes a result beyond the last ulps.
       rate_delta
     column.ks, length_ks      union / length bins        ks_two_sample
     column.pit_w1,            union bins (R16 mid-CDF)   —
-      wasserstein, decile_ks_legacy
+      wasserstein
+    column.decile_ks_legacy   exact min/max + 9 inner    —
+                              deciles off the union bins
     column.jsd, psi           source-decile bins         jsd_null / —
     column.smd, std_ratio,    Moments (exact)            —
       range_coverage
@@ -65,8 +67,8 @@ below), so a merge tree never changes a result beyond the last ulps.
     column.char_class_l1      class presence shares      —
     pair.pearson/spearman_    centered co-moments        fisher_z
       delta
-    pair.cramers_v/nmi_delta, joint table, 10 cells +    — / mi_bias
-      contingency_tvd         NULL per axis
+    pair.cramers_v/nmi_delta, joint table, 10 cells +    — / mi_bias /
+      contingency_tvd         NULL per axis              tvd_null (R63)
     row.null_pattern_tvd      top-64 source patterns +   tvd_null
                               a tail
     table.corr_rms/max_delta  Pearson deltas             —
@@ -103,8 +105,15 @@ follow the GUI contract (R27) and carry temporal values in epoch seconds
 (TIME: seconds since midnight, drawn on 1970-01-01), labelled by `unit`.
 Profile payloads are bounded: 100 histogram bins, 99 quantiles, ≤ 4096
 null patterns, contingency tables for the 5 most divergent pairs only,
-and a hashed label `h:<8 hex>` for every dictionary value D6 keeps out of
-a payload.
+and a KEYED hashed label `h:<8 hex>` (`canonical.hashed_label`, R64) for
+every dictionary value D6 keeps out of a payload.
+
+Source extremes (R65): a source-drawn side's (source, reference,
+holdout) exact min and max are each a single record's value, so no
+payload or detail shows them; range_adherence and range_coverage compare
+against them internally, and payloads/details carry the side's
+p0.5/p99.5 instead (`extremes: "p0.5_p99.5"`; a bound that still lands on
+an extreme is withheld). The synthetic side shows its exact extremes.
 
 References (author-year, R22): Pébay (2008); Chan, Golub & LeVeque (1983);
 Czado, Gneiting & Held (2009) for the mid-CDF PIT; Wilson (1927);
@@ -122,7 +131,7 @@ import json
 import operator
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import apache_beam as beam
 import numpy as np
@@ -133,8 +142,7 @@ from sdfb_evaluation.canonical import NULL_CODE, hash64, hashed_label
 from sdfb_evaluation.catalogue import Catalogue, load_catalogue
 from sdfb_evaluation.stats import binned, dependence, distances, noise, shapes
 from sdfb_evaluation.stats.moments import Moments
-from sdfb_evaluation.stats.relational import (
-    _folded_abs_interval as folded_abs_interval,)
+from sdfb_evaluation.stats.noise import folded_abs_interval
 from sdfb_evaluation.types import (
     ColumnKind,
     Method,
@@ -255,7 +263,15 @@ _MIN_CORRELATION_ROWS = 3
 _MIN_OCCUPIED = 2  # rows/columns a joint table needs for an association
 _MICROS_PER_SECOND = 1e6
 _QUANTILE_PROBS = tuple(round(p / 100, 2) for p in range(1, 100))
-_DECILE_PROBS = tuple(k / 10 for k in range(11))
+_INNER_DECILE_PROBS = tuple(k / 10 for k in range(1, 10))
+# R65: a source-drawn side's profile shows these quantiles, never its
+# exact min/max (each a single record's value)
+_BOUND_PROBS = (0.005, 0.995)
+_SOURCE_DRAWN = frozenset(
+    {Side.SOURCE.value, Side.REFERENCE.value, Side.HOLDOUT.value})
+_EDGE_DIGITS = range(6, 18)  # 17 significant digits tell any two floats apart
+_TIME_UNITS: tuple[Literal["s"], Literal["ms"],
+                   Literal["us"]] = ("s", "ms", "us")
 _SOURCE, _SYNTHETIC, _REFERENCE = (Side.SOURCE.value, Side.SYNTHETIC.value,
                                    Side.REFERENCE.value)
 _SIDE_ORDER = tuple(side.value for side in Side)
@@ -1146,13 +1162,25 @@ def _w1(edges: np.ndarray, a: np.ndarray, b: np.ndarray, ma: Moments,
   return None
 
 
-def _legacy_deciles(edges: np.ndarray, counts: np.ndarray) -> list[float]:
-  return binned.quantiles_from_bins(edges, counts, _DECILE_PROBS)
+def _legacy_deciles(edges: np.ndarray, counts: np.ndarray,
+                    m: Moments) -> list[float] | None:
+  """A side's 11 deciles as the legacy rule reads them (APPROX_QUANTILES(x,
+  10)): the side's EXACT min and max at 0 and 1, the nine inner deciles
+  from its union bins (clipped into [min, max], where every true decile
+  lies). None without values or bin edges."""
+  if not m.n:
+    return None
+  inner = binned.quantiles_from_bins(edges, counts, _INNER_DECILE_PROBS)
+  if any(np.isnan(inner)):
+    return None
+  clipped = np.clip(inner, m.min, m.max).tolist()
+  return [float(m.min), *clipped, float(m.max)]
 
 
-def _decile_ks(edges: np.ndarray, a: np.ndarray, b: np.ndarray) -> float | None:
-  qa, qb = _legacy_deciles(edges, a), _legacy_deciles(edges, b)
-  if any(np.isnan(qa)) or any(np.isnan(qb)):
+def _decile_ks(edges: np.ndarray, a: tuple[np.ndarray, Moments],
+               b: tuple[np.ndarray, Moments]) -> float | None:
+  qa, qb = _legacy_deciles(edges, *a), _legacy_deciles(edges, *b)
+  if qa is None or qb is None:
     return None
   return binned.decile_ks_legacy(qa, qb)
 
@@ -1234,7 +1262,7 @@ def _binned_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
       detail={"bins": len(ds)},
       sizes=sizes)
   if grid.kind is _NUMERIC:
-    legacy = _decile_ks(grid.union, cs, cy)
+    legacy = _decile_ks(grid.union, (cs, ms), (cy, my))
     if legacy is None:
       e.skip(
           "column.decile_ks_legacy",
@@ -1246,7 +1274,8 @@ def _binned_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
           "column.decile_ks_legacy",
           legacy,
           scope,
-          baseline=None if cr is None else _decile_ks(grid.union, cs, cr),
+          baseline=(None if cr is None or mr is None else _decile_ks(
+              grid.union, (cs, ms), (cr, mr))),
           method=Method.BINNED,
           sizes=sizes)
 
@@ -1325,19 +1354,31 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
         baseline=fn(ms, mr),
         source_value=source_value,
         synthetic_value=synthetic_value,
-        detail={
-            "source_min": ms.min,
-            "source_max": ms.max,
-            "synthetic_min": my.min,
-            "synthetic_max": my.max,
-            "unit": grid.unit
-        } if metric_id == "column.range_coverage" else {"unit": grid.unit},
+        detail=_coverage_detail(grid, gi, s)
+        if metric_id == "column.range_coverage" else {"unit": grid.unit},
         sizes=sizes)
   if grid.kind is _NUMERIC:
     _share_delta(e, "column.zero_rate_delta", scope,
                  (ms.zeros, my.zeros, None if mr is None else mr.zeros),
                  (ms.n, my.n, None if mr is None else mr.n),
                  "finite non-null values")
+
+
+def _source_bounds(grid: _Grid, gi: int, s: _Sides) -> dict[str, Any]:
+  """The source's p0.5/p99.5 (R65: in place of its exact extremes)."""
+  lo, hi = _profile_bounds(grid, s.src, gi)
+  return {"source_p0_5": lo, "source_p99_5": hi}
+
+
+def _coverage_detail(grid: _Grid, gi: int, s: _Sides) -> dict[str, Any]:
+  my = s.syn.moments[gi]
+  return {
+      **_source_bounds(grid, gi, s),
+      "synthetic_min": my.min,
+      "synthetic_max": my.max,
+      "unit": grid.unit,
+      "bounds": "the source's exact min and max (not shown, R65)",
+  }
 
 
 def _range_adherence(e: _Emitter, gi: int, grid: _Grid, s: _Sides,
@@ -1362,13 +1403,13 @@ def _range_adherence(e: _Emitter, gi: int, grid: _Grid, s: _Sides,
       ci_low=lo,
       ci_high=hi,
       detail={
-          "lo": grid.lo,
-          "hi": grid.hi,
-          "outside": my.n - inside,
-          "source_min": ms.min,
-          "source_max": ms.max,
-          "unit": grid.unit,
-          "bounds": "the planning grid's source q0 and q1000",
+          "outside":
+              my.n - inside,
+          **_source_bounds(grid, gi, s),
+          "unit":
+              grid.unit,
+          "bounds": ("the planning grid's source q0 and q1000, the source "
+                     "extremes (not shown, R65)"),
       },
       sizes=sizes)
 
@@ -1640,6 +1681,8 @@ def _association_metrics(e: _Emitter, p: int, tables: _PairTables,
       tvd,
       scope,
       baseline=None if tr is None else dependence.contingency_tvd(ts, tr),
+      noise_floor=noise.noise_floor(
+          "tvd_null", p=(ts / n_src).ravel().tolist(), n=n_src, m=n_syn),
       sizes=sizes)
   return tvd
 
@@ -1761,6 +1804,12 @@ def _null_pattern_metric(e: _Emitter, spec: DenseSpec, s: _Sides) -> None:
   value = distances.tvd(vs, vy)
   assert value is not None
   capped = bool(s.src.null_overflow or s.syn.null_overflow)
+  notes: dict[str, Any] = {"capped_head": capped}
+  if capped:
+    notes["note"] = (
+        "the null-pattern cap was hit: the head is the top source patterns "
+        "among those counted exactly on both sides, which can deviate from "
+        "the catalogue's top-64 source patterns")
   e.value(
       metric_id,
       value,
@@ -1775,7 +1824,7 @@ def _null_pattern_metric(e: _Emitter, spec: DenseSpec, s: _Sides) -> None:
           "patterns": len(head),
           "tail_share_source": vs[-1] / s.src.rows,
           "tail_share_synthetic": vy[-1] / s.syn.rows,
-          "capped": capped,
+          **notes,
       },
       sizes=sizes)
 
@@ -1806,6 +1855,36 @@ def _edges_digest(edges: np.ndarray, unit: str) -> str:
   return hashlib.blake2b(payload, digest_size=16).hexdigest()
 
 
+def _profile_bounds(grid: _Grid, p: DenseProfile,
+                    gi: int) -> tuple[float | None, float | None]:
+  """A side's p0.5 / p99.5 from its union bins — what a source-drawn
+  side's payloads and details show instead of its exact extremes (R65).
+  A bound that still lands on an exact extreme (a tiny side, or a point
+  mass at the end) is withheld as None."""
+  m = p.moments[gi]
+  if not m.n:
+    return None, None
+  bounds = binned.quantiles_from_bins(grid.union, p.union[gi], _BOUND_PROBS)
+  shown = [
+      None if not np.isfinite(b) or b in (m.min, m.max) else float(b)
+      for b in bounds
+  ]
+  return shown[0], shown[1]
+
+
+def _extremes(grid: _Grid, p: DenseProfile,
+              gi: int) -> tuple[float | None, float | None, str]:
+  """(min, max, what they are) for a payload: exact on the synthetic side,
+  the p0.5/p99.5 bounds on a source-drawn side (R65)."""
+  m = p.moments[gi]
+  if p.side in _SOURCE_DRAWN:
+    lo, hi = _profile_bounds(grid, p, gi)
+    return lo, hi, "p0.5_p99.5"
+  if not m.n:
+    return None, None, "exact"
+  return float(m.min), float(m.max), "exact"
+
+
 def _grid_profiles(spec: DenseSpec, p: DenseProfile) -> Iterator[ProfileValue]:
   for gi, grid in enumerate(spec.grids):
     m = p.moments[gi]
@@ -1816,13 +1895,16 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile) -> Iterator[ProfileValue]:
       number = _json_number(x)
       return None if number is None else number * scale
 
+    low, high, extremes = _extremes(grid, p, gi)
+
     yield ProfileValue(
         profile_kind="histogram",
         payload={
             "edges": [float(v) * scale for v in grid.profile],
             "counts": p.profile[gi].tolist(),
-            "min": scaled(m.min) if m.n else None,
-            "max": scaled(m.max) if m.n else None,
+            "min": scaled(low),
+            "max": scaled(high),
+            "extremes": extremes,
             "nulls": int(p.nulls[grid.j]),
             "unit": unit,
         },
@@ -1853,8 +1935,9 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile) -> Iterator[ProfileValue]:
             "std": scaled(m.std),
             "skewness": _json_number(m.skewness),
             "kurtosis_excess": _json_number(m.kurtosis_excess),
-            "min": scaled(m.min) if m.n else None,
-            "max": scaled(m.max) if m.n else None,
+            "min": scaled(low),
+            "max": scaled(high),
+            "extremes": extremes,
             "zeros": m.zeros,
             "unit": unit,
         },
@@ -1979,18 +2062,32 @@ def _corr_profiles(spec: DenseSpec, p: DenseProfile) -> Iterator[ProfileValue]:
         n=p.rows)
 
 
-def _format_edge(column: _PairColumn, edge: float) -> str:
-  if column.kind is _TEMPORAL:
-    return str(np.datetime_as_string(np.datetime64(int(edge), "us"), unit="s"))
-  return f"{edge:.6g}"
+def _edge_labels(column: _PairColumn) -> list[str]:
+  """Readable labels of a pair axis's decile edges, never two alike: the
+  fewest significant digits (numbers) or the coarsest unit (timestamps,
+  UTC) that tell every edge apart; `repr` (always distinct) otherwise."""
+  edges = [float(e) for e in column.deciles]
+  if column.kind is _TEMPORAL and all(e.is_integer() for e in edges):
+    stamps = np.array(edges, dtype=np.int64).astype("datetime64[us]")
+    for unit in _TIME_UNITS:
+      labels = [str(v) for v in np.datetime_as_string(stamps, unit=unit)]
+      if len(set(labels)) == len(edges):
+        return labels
+  else:
+    for digits in _EDGE_DIGITS:
+      labels = [f"{e:.{digits}g}" for e in edges]
+      if len(set(labels)) == len(edges):
+        return labels
+  return [repr(e) for e in edges]
 
 
-def _axis(column: _PairColumn,
-          literals: Mapping[int, str]) -> tuple[list[int], list[str]]:
+def _axis(column: _PairColumn, literals: Mapping[int, str],
+          label_key: bytes) -> tuple[list[int], list[str]]:
   """The slots a pair axis uses and their labels (D6 for dictionary
-  values: a literal only where `literal_ok`, else a hashed label)."""
+  values: a literal only where `literal_ok`, else a keyed hashed label,
+  R64)."""
   if column.grid:
-    edges = [_format_edge(column, e) for e in column.deciles]
+    edges = _edge_labels(column)
     if not edges:
       return [0, PAIR_BINS], ["any", "NULL"]
     labels = [f"<= {edges[0]}"]
@@ -2001,14 +2098,15 @@ def _axis(column: _PairColumn,
   for code in column.dictionary:
     literal = column.bool_labels.get(code) or literals.get(code)
     labels.append(
-        literal
-        if column.literal_ok and literal is not None else hashed_label(code))
+        literal if column.literal_ok and literal is not None else hashed_label(
+            code, key=label_key))
   slots = [*range(len(column.dictionary)), _OTHER_SLOT, PAIR_BINS]
   return slots, [*labels, "other", "NULL"]
 
 
 def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
-                          tvds: Mapping[int, float]) -> Iterator[ProfileValue]:
+                          tvds: Mapping[int, float],
+                          label_key: bytes) -> Iterator[ProfileValue]:
   src, syn = sides.get(_SOURCE), sides.get(_SYNTHETIC)
   if src is None or syn is None or src.bivariate is None:
     return
@@ -2017,8 +2115,8 @@ def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
   for k in sorted(top):
     a, b = spec.pairs[k]
     ca, cb = spec.pair_columns[a], spec.pair_columns[b]
-    x_slots, x_labels = _axis(ca, literals.get(a, {}))
-    y_slots, y_labels = _axis(cb, literals.get(b, {}))
+    x_slots, x_labels = _axis(ca, literals.get(a, {}), label_key)
+    y_slots, y_labels = _axis(cb, literals.get(b, {}), label_key)
     for p in (src, syn):
       assert p.bivariate is not None
       counts = p.bivariate.counts2d[k][np.ix_(x_slots, y_slots)]
@@ -2038,7 +2136,8 @@ def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
 
 
 def _profiles(spec: DenseSpec, present: Mapping[str, DenseProfile],
-              tvds: Mapping[int, float]) -> list[ProfileValue]:
+              tvds: Mapping[int,
+                            float], label_key: bytes) -> list[ProfileValue]:
   out: list[ProfileValue] = []
   for side in _SIDE_ORDER:
     p = present.get(side)
@@ -2048,22 +2147,32 @@ def _profiles(spec: DenseSpec, present: Mapping[str, DenseProfile],
     out.extend(_string_profiles(spec, p))
     out.extend(_null_pattern_profile(spec, p))
     out.extend(_corr_profiles(spec, p))
-  out.extend(_contingency_profiles(spec, present, tvds))
+  out.extend(_contingency_profiles(spec, present, tvds, label_key))
   return out
 
 
+def _checked_key(label_key: Any) -> bytes:
+  if not isinstance(label_key, bytes) or not label_key:
+    raise ValueError("label_key must be non-empty bytes (Ruling R64)")
+  return label_key
+
+
 def dense_outputs(
-    spec: DenseSpec, profiles: Mapping[str, DenseProfile]
-) -> tuple[list[MetricValue], list[ProfileValue]]:
+    spec: DenseSpec, profiles: Mapping[str, DenseProfile], *,
+    label_key: bytes) -> tuple[list[MetricValue], list[ProfileValue]]:
   """One table's metrics and profile payloads from its per-side profiles.
 
   A side with no rows (no profile) counts as empty: every metric that
   needs it is `not_evaluated` with a reason naming the side, so the set
   of (metric, scope) rows never depends on which sides arrived.
+  `label_key` keys every hashed label (`canonical.hashed_label`, R64); it
+  never reaches a payload or a detail.
 
   Raises:
-    ValueError: a profile of another table, or filed under another side.
+    ValueError: a profile of another table, or filed under another side;
+      an empty `label_key`.
   """
+  label_key = _checked_key(label_key)
   for side, p in profiles.items():
     if p.table != spec.table or p.side != Side(side).value:
       raise ValueError(f"the {p.table}/{p.side} profile was given as "
@@ -2074,7 +2183,7 @@ def dense_outputs(
       syn=present.get(_SYNTHETIC) or DenseProfile.empty(spec, _SYNTHETIC),
       ref=present.get(_REFERENCE))
   metrics, tvds = _metrics(spec, sides)
-  return metrics, _profiles(spec, present, tvds)
+  return metrics, _profiles(spec, present, tvds, label_key)
 
 
 # --------------------------------------------------------------------------
@@ -2098,12 +2207,12 @@ def _by_table(
 
 
 def _emit(item: tuple[str, Iterable[tuple[str, DenseProfile]]],
-          specs: Mapping[str, DenseSpec]) -> Iterator[Any]:
+          specs: Mapping[str, DenseSpec], label_key: bytes) -> Iterator[Any]:
   table, entries = item
   sides: dict[str, DenseProfile] = {}
   for side, profile in entries:
     sides[side] = profile if side not in sides else sides[side].merge(profile)
-  metrics, profiles = dense_outputs(specs[table], sides)
+  metrics, profiles = dense_outputs(specs[table], sides, label_key=label_key)
   yield from metrics
   for profile_value in profiles:
     yield beam.pvalue.TaggedOutput(_PROFILES_TAG, profile_value)
@@ -2115,10 +2224,17 @@ class DenseMetrics(beam.PTransform):
   PCollection[ProfileValue], "accumulators": PCollection[((table, side),
   DenseProfile)]}` (module docstring). The accumulators are the census's
   totals side input (Task 22). Only each table's slim `DenseSpec` is
-  pickled, never its panel rows."""
+  pickled, never its panel rows. `label_key` keys the hashed labels
+  (Ruling R64: the operator's secret or a per-evaluation ephemeral key,
+  supplied by the pipeline).
 
-  def __init__(self, tables: Sequence[TablePlan]):
+  Raises:
+    ValueError: `label_key` is empty or not bytes.
+  """
+
+  def __init__(self, tables: Sequence[TablePlan], *, label_key: bytes):
     super().__init__()
+    self._label_key = _checked_key(label_key)
     self._specs = {table.name: DenseSpec.from_table(table) for table in tables}
 
   def expand(self, input_or_inputs: beam.PCollection) -> dict[str, Any]:
@@ -2132,7 +2248,7 @@ class DenseMetrics(beam.PTransform):
         accumulators
         | "ByTable" >> beam.Map(_by_table)
         | "GroupSides" >> beam.GroupByKey()
-        | "Emit" >> beam.FlatMap(_emit, specs).with_outputs(
+        | "Emit" >> beam.FlatMap(_emit, specs, self._label_key).with_outputs(
             _PROFILES_TAG, main=_METRICS_TAG))
     return {
         _METRICS_TAG: emitted[_METRICS_TAG],

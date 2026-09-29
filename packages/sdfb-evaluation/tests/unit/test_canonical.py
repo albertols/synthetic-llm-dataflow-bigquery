@@ -19,10 +19,12 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import base64
+import hashlib
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal, localcontext
 
 import numpy as np
+import pytest
 
 from sdfb_evaluation.canonical import (
     NULL_CODE,
@@ -354,9 +356,29 @@ def test_json_safe_leaves_other_types_unchanged():
   assert json_safe(7) == 7
 
 
-def test_hashed_label_is_h_and_the_top_eight_hex_digits():
+def test_hashed_label_is_keyed_blake2b_of_the_code():
   code = hash64("status", "Complete")
-  label = hashed_label(code)
-  assert label == f"h:{code >> 32:08x}"
+  key = b"operator-secret"
+  label = hashed_label(code, key=key)
+  expected = hashlib.blake2b(
+      code.to_bytes(8, "big"), key=key, digest_size=4).hexdigest()
+  assert label == f"h:{expected}"
   assert len(label) == 10
-  assert hashed_label(0) == "h:00000000"
+
+
+def test_hashed_label_differs_by_key_and_resists_enumeration():
+  statuses = ("Complete", "Shipped", "Processing", "Cancelled", "Returned")
+  codes = [hash64("status", s) for s in statuses]
+  first = [hashed_label(c, key=b"key-one") for c in codes]
+  second = [hashed_label(c, key=b"key-two") for c in codes]
+  assert all(a != b for a, b in zip(first, second, strict=True))
+  # the old unkeyed label (the code's top 32 bits) matches nothing
+  unkeyed = {f"h:{c >> 32:08x}" for c in codes}
+  assert not unkeyed & set(first)
+  assert "key-one" not in "".join(first)
+
+
+def test_hashed_label_refuses_an_empty_or_text_key():
+  for bad in (b"", "text"):
+    with pytest.raises(ValueError, match="R64"):
+      hashed_label(1, key=bad)  # type: ignore[arg-type]

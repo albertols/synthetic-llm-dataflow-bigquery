@@ -162,14 +162,37 @@ def hash64(column: str, value: Any) -> int:
   return int.from_bytes(digest, "big")
 
 
-def hashed_label(code: int) -> str:
-  """The D6 hashed label `h:<8 hex>` of a `hash64` code: its top 32 bits.
+def hashed_label(code: int, *, key: bytes) -> str:
+  """The D6 hashed label `h:<8 hex>` of a `hash64` code, KEYED (Ruling
+  R64): `"h:" + blake2b(code as 8 big-endian bytes, key=key,
+  digest_size=4)`.
 
   What a profile shows instead of a value the literal policy keeps out of
-  it. Unsalted, so one value carries the same label on every side and in
-  every run (a GUI can line up source and synthetic labels, and runs).
+  it. A plain hash of a low-entropy value is not anonymisation — anyone can
+  enumerate a small domain (a status list, ages 0..120) and match the
+  hashes — so the label is a keyed hash and means nothing without `key`.
+  The key has two modes, chosen by the driver (Tasks 26/27), and is never
+  written to BigQuery, a log or a payload:
+
+      operator    `--label_key_uri` (Secret Manager or GCS, the operator's
+                  own secret): stable across runs, so labels line up run to
+                  run and the operator can recompute a label to investigate
+      ephemeral   a fresh `os.urandom(32)` per evaluation, never persisted:
+                  labels line up source and synthetic within the run only
+
+  The registry records only which mode ran (`label_key_mode`).
+
+  Raises:
+    ValueError: `key` is empty or not bytes (an unkeyed label is exactly
+      the reversible hash this function exists to avoid).
   """
-  return f"h:{(int(code) >> 32) & 0xFFFFFFFF:08x}"
+  if not isinstance(key, bytes) or not key:
+    raise ValueError("hashed_label needs a non-empty bytes key (Ruling R64)")
+  digest = hashlib.blake2b(
+      (int(code) & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big"),
+      key=key,
+      digest_size=4).hexdigest()
+  return f"h:{digest}"
 
 
 def hash_matrix(rows: Sequence[Mapping[str, Any]],

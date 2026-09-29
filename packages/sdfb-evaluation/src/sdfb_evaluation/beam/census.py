@@ -108,11 +108,12 @@ count time, which is never a head and never counts toward adherence.
 Literals (D6, R56, R64): a top-k label is the value itself only when the
 column is `literal_ok`, `hash64(name, v)` is in its (source-built)
 `detection_dictionary` and the census counts it at least 10 times in the
-source; everything else — every synthetic-only value — is `_label(code,
-label_key)`, keyed BLAKE2b, so a label cannot be reversed by enumerating
-a small domain. A shape mask is shown when it holds at least 10 source
-values and contains a class placeholder (9, A, a, ␣); a mask that is
-only literal characters is the value itself, so it is labelled.
+source; everything else — every synthetic-only value — is
+`canonical.hashed_label(code, key=label_key)`, keyed BLAKE2b, so a label
+cannot be reversed by enumerating a small domain. A shape mask is shown
+when it holds at least 10 source values and contains a class
+placeholder (9, A, a, ␣); a mask that is only literal characters is the
+value itself, so it is labelled.
 
 `field.substantive_copy_rate` on numeric and day-granular temporal
 columns is reported, never gated: `scoring` turns it into INFO from
@@ -129,7 +130,6 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import functools
-import hashlib
 import math
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -141,20 +141,19 @@ import numpy as np
 from apache_beam.transforms.window import GlobalWindows
 
 from sdfb_evaluation.beam.encode import BatchLayout, EncodedBatch
-from sdfb_evaluation.beam.encode import _text as cell_text
-from sdfb_evaluation.canonical import NULL_CODE, hash64
+from sdfb_evaluation.beam.encode import cell_text
+from sdfb_evaluation.canonical import NULL_CODE, hash64, hashed_label
 from sdfb_evaluation.catalogue import Catalogue, load_catalogue
 from sdfb_evaluation.context.bq import quote_fqn
 from sdfb_evaluation.context.budget import VALUE_SAMPLE_MODULUS
 from sdfb_evaluation.stats import noise, shapes
+from sdfb_evaluation.stats.noise import folded_abs_interval
 from sdfb_evaluation.stats.diversity import (
     CensusAccumulator,
     chao_shen_term,
     summarize,
     tvd_jsd_from_census,
 )
-from sdfb_evaluation.stats.relational import (
-    _folded_abs_interval as folded_abs_interval,)
 from sdfb_evaluation.types import (
     ColumnKind,
     Method,
@@ -311,15 +310,6 @@ def _sig(x: Any) -> Any:
   if isinstance(x, float) and math.isfinite(x) and x != 0.0:
     return float(f"{x:.{_SIG_DIGITS}g}")
   return x
-
-
-def _label(code: int, key: bytes) -> str:
-  """The D6 hashed label of a value code: keyed BLAKE2b (Ruling R64), so a
-  label cannot be reversed by enumerating a small domain without the key.
-  The one place a census label is made."""
-  digest = hashlib.blake2b(
-      int(code).to_bytes(8, "big"), key=key, digest_size=4).hexdigest()
-  return f"h:{digest}"
 
 
 # --------------------------------------------------------------------------
@@ -1871,7 +1861,7 @@ def _topk_items(v: _View, top: Sequence[tuple[int, int]], total: int,
         v.col.literal_ok and code in v.col.detection and text is not None and
         src_counts.get(code, 0) >= RARE_COUNT)
     items.append({
-        "label": text if literal else _label(code, label_key),
+        "label": text if literal else hashed_label(code, key=label_key),
         "literal": bool(literal),
         "count": int(count),
         "share": count / total if total else 0.0,
@@ -1910,7 +1900,7 @@ def _topk_profiles(spec: CensusSpec, v: _View, totals: Mapping[str, SideTotals],
 def _mask_label(mask: str, src_count: float, label_key: bytes) -> str:
   if src_count >= RARE_COUNT and _PLACEHOLDERS.intersection(mask):
     return mask
-  return _label(hash64(_MASK_LABEL, mask), label_key)
+  return hashed_label(hash64(_MASK_LABEL, mask), key=label_key)
 
 
 def _shape_profiles(spec: CensusSpec, v: _View,
