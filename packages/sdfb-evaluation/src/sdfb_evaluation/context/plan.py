@@ -17,12 +17,15 @@ table side.
 
     launch + models ──► tables: launch tables parents first, their
           │             already-landed parents read-only ("external");
-          │             a launch table with no model entry → PlanError (R50)
+          │             a table the loaded model does not declare → PlanError
+          │             (R50), unless the launch is that one table → standalone
+          │             (R55), or relationships are off (R53)
           ▼
     per launch table: bq.table → resolve_scope (+ foreign writers)
           │           → pin_source → provisional ColumnPlans
           ▼
-    dry runs (planning SELECTs, panel, prepare DDL) ─► Budget.check_bytes
+    dry runs (planning SELECTs, panel, prepare DDL and, sampled, the
+          │  worst-case sample reads) ─► Budget.check_bytes
           ▼             nothing billed before this point
     ONE planning SELECT per side → scope.verify(rows) → R/E/H panel
           ▼
@@ -38,19 +41,37 @@ distinct count, a nested one after the null count):
     STRING/BYTES COUNTIF(TRIM(x) = '')    (BYTES: LENGTH(x) = 0)
     scalar       APPROX_COUNT_DISTINCT(x)
     numeric,     APPROX_QUANTILES(v, 1000), AVG, STDDEV_POP, MIN, MAX,
-    temporal     APPROX_TOP_COUNT(v, 10) (atoms); TIMESTAMP/DATETIME also
+    temporal     APPROX_TOP_COUNT(v, 11) (atoms); TIMESTAMP/DATETIME also
                  COUNTIF(TIME(x) = 00:00:00) (day granularity)
-    STRING/BYTES AVG(LENGTH(x)), APPROX_TOP_COUNT(x, 254) (dictionaries)
-    BOOL         APPROX_TOP_COUNT(x, 254)
+    STRING/BYTES AVG(LENGTH(x)), APPROX_TOP_COUNT(x', 255) (dictionaries),
+                 x' = x when BYTE_LENGTH(x) <= 1024, else NULL
+    BOOL         APPROX_TOP_COUNT(x, 255)
+
+A top list counts NULL as a value, so each asks for one slot more than it
+keeps (10 atoms, 254 dictionary values). A value over 1 KiB is never a
+category and never enters one: that bounds a top list at 255 * (1 KiB +
+16 B) whatever the column holds.
 
 `v` is x on one numeric scale: FLOAT64 with NaN/±Inf as NULL, the other
 numerics CAST AS FLOAT64, and temporal values as UNIX_MICROS epochs (DATE
 and DATETIME read as UTC; TIME as microseconds since midnight). Every
 temporal grid, atom, mean and std in a `ColumnPlan` is on that scale, so
 the Beam encoder must encode temporal cells in epoch microseconds too.
-BigQuery allows 10 000 output columns per SELECT (and ~1 M characters of
-query text): a table wider than that is planned in several SELECTs over
-the same read, each with its own `COUNT(*)`, which must agree.
+BigQuery allows 10 000 output columns per SELECT — counted as leaves, so
+a top list's ARRAY<STRUCT<value, count>> is three — about 1 M characters
+of query text and a 100 MB result row. `planning_queries` keeps every
+SELECT under all three (the row under 90 MB, estimating each top list at
+its bound and each quantile grid at 1001 * 8 B): a table past any of them
+is planned in several SELECTs over the same read, column groups that never
+split a column, each with its own `COUNT(*)`, which must agree. Columnar
+billing reads each column once, so the chunks cost what one SELECT would.
+
+Determinism: BigQuery documents APPROX_QUANTILES, APPROX_COUNT_DISTINCT
+and APPROX_TOP_COUNT as approximate but says nothing about repeat runs
+over identical data. The plan (grids, atoms, dictionaries, kinds, pairs,
+census methods — and so `encoding_plan_digest`) may therefore differ
+slightly between two plannings of the same data. `evaluation_key` does
+not depend on them; metrics are deterministic for a given plan.
 
 STRING routing (source statistics, non-NULL n):
 
@@ -61,12 +82,15 @@ STRING routing (source statistics, non-NULL n):
     otherwise, AVG(LENGTH) ≥ 20               → text
     otherwise                                  → categorical (high cardinality)
 
-Literals (D6): `literal_ok` holds when the column has ≤ 50 source-distinct
-values AND every one of them has a source count ≥ 10 (the top-254 list
-covering all non-NULL rows proves both); otherwise profiles carry hashed
-labels. `dictionary` is the `hash64` codes of the top-9 source values (the
-pair grid's 10th cell is "other"), `detection_dictionary` the top-254
-(Ruling R32), most frequent first, NULL never a value.
+Literals (D6): `literal_ok` holds when the source top list covers every
+non-NULL row with at most 50 values, each counted at least 10 times (the
+list itself is the evidence, not the HLL distinct estimate). A value is
+stored literally iff `literal_ok` AND `hash64(name, value)` is in
+`detection_dictionary`, which is built from SOURCE values only — a value
+only the synthetic side holds is always a hashed label. `dictionary` is
+the `hash64` codes of the top-9 source values (the pair grid's 10th cell
+is "other"), `detection_dictionary` the top-254 (Ruling R32), most
+frequent first, NULL never a value.
 
 Pairs: the `pair_max_columns` pairable columns (numeric, temporal,
 categorical, boolean; never a key; ≥ 2 source-distinct values) ranked by
@@ -124,6 +148,7 @@ from sdfb_evaluation.context.scope import (
     MODES as SCOPE_MODES,
     ScopePlan,
     SourcePin,
+    from_item,
     pin_source,
     read_params,
     resolve_scope,
@@ -156,18 +181,27 @@ __all__ = [
 GRID_POINTS = 1001  # APPROX_QUANTILES(x, 1000)
 _QUANTILE_STEPS = GRID_POINTS - 1
 _ATOM_CANDIDATES = 10
+_ATOM_TOP_K = _ATOM_CANDIDATES + 1  # NULL may take a slot
 _ATOM_MIN_COUNT = 2  # a value seen once is no point mass
 PAIR_GRID_CELLS = 10  # top-9 + other, or deciles
 _MIN_PAIR_DISTINCT = 2  # a constant column has no dependence
 _FQN_PARTS = 3  # project.dataset.table
 DICTIONARY_SIZE = PAIR_GRID_CELLS - 1
 DETECTION_DICTIONARY_SIZE = 254  # Ruling R32
+DICTIONARY_TOP_K = DETECTION_DICTIONARY_SIZE + 1  # NULL may take a slot
+_TOP_ENTRY_OVERHEAD = 16  # count + struct/length overhead per top value
+_TOP_LEAVES = 3  # ARRAY<STRUCT<value, count>>
+_GRID_BYTES = GRID_POINTS * 8
+_SCALAR_BYTES = 8
+CENSUS_EXACT_FLOOR = 1000  # keys: a census this small is always exact
 LITERAL_MAX_DISTINCT = 50  # ADR 0022
 LITERAL_MIN_COUNT = 10  # the repo's k-anonymity floor
 CATEGORICAL_MAX_DISTINCT = 1000
 UNIQUE_RATIO = 0.9
 TEXT_MIN_AVG_LENGTH = 20
 MAX_OUTPUT_COLUMNS = 10_000  # BigQuery's cap on a SELECT's columns
+MAX_ROW_BYTES = 90_000_000  # BigQuery's 100 MB result row, 10 % headroom
+TOP_VALUE_MAX_BYTES = 1024  # a longer value is never a category
 _MAX_QUERY_CHARS = 900_000  # under BigQuery's 1,024 K-character query text
 SAMPLE_MODULUS = 1_000_000
 _GRANT_TOLERANCE = 1e-9  # float round trips never downgrade an exact census
@@ -227,8 +261,10 @@ class ColumnPlan:  # pylint: disable=too-many-instance-attributes  # the plan's 
   FLOAT64, temporal values as epoch MICROseconds. `census` is how the
   keyed value census runs (`none` | `exact` | `value_sampled`, the last at
   `value_sample_rate` of the value-hash space). `dictionary` (top-9) and
-  `detection_dictionary` (top-254) hold `hash64(name, value)` codes;
-  `literal_ok` is the D6 gate for literal labels.
+  `detection_dictionary` (top-254) hold `hash64(name, value)` codes of
+  SOURCE values. D6: a value is stored literally iff `literal_ok` AND
+  `hash64(name, value) in detection_dictionary`; every other value —
+  including any value only the synthetic side holds — is a hashed label.
   """
   name: str
   bq_type: str
@@ -372,17 +408,41 @@ def _value_outputs(ref: str, bq_type: str) -> list[tuple[str, str]]:
         ("std", f"STDDEV_POP({value})"),
         ("min", f"MIN({value})"),
         ("max", f"MAX({value})"),
-        ("top", f"APPROX_TOP_COUNT({value}, {_ATOM_CANDIDATES})"),
+        ("top", f"APPROX_TOP_COUNT({value}, {_ATOM_TOP_K})"),
     ]
     if bq_type in ("TIMESTAMP", "DATETIME"):
       items.append(("midnight", f"COUNTIF(TIME({ref}) = TIME '00:00:00')"))
     return items
-  top = ("top", f"APPROX_TOP_COUNT({ref}, {DETECTION_DICTIONARY_SIZE})")
   if bq_type in _BOOL_TYPES:
-    return [top]
+    return [("top", f"APPROX_TOP_COUNT({ref}, {DICTIONARY_TOP_K})")]
   if bq_type in _STRING_TYPES:
-    return [("avg_len", f"AVG(LENGTH({ref}))"), top]
+    bounded = f"IF(BYTE_LENGTH({ref}) <= {TOP_VALUE_MAX_BYTES}, {ref}, NULL)"
+    return [("avg_len", f"AVG(LENGTH({ref}))"),
+            ("top", f"APPROX_TOP_COUNT({bounded}, {DICTIONARY_TOP_K})")]
   return []
+
+
+def _output_cost(output: PlanningOutput, bq_type: str) -> tuple[int, int]:
+  """(leaves, estimated result bytes) of one planning output."""
+  if output.stat == "top":
+    if bq_type in _STRING_TYPES:
+      value = TOP_VALUE_MAX_BYTES
+      k = DICTIONARY_TOP_K
+    else:
+      value = _SCALAR_BYTES
+      k = DICTIONARY_TOP_K if bq_type in _BOOL_TYPES else _ATOM_TOP_K
+    return _TOP_LEAVES, k * (value + _TOP_ENTRY_OVERHEAD)
+  if output.stat == "quantiles":
+    return 1, _GRID_BYTES
+  return 1, _SCALAR_BYTES
+
+
+def _column_cost(index: int,
+                 column: ColumnPlan) -> tuple[list[PlanningOutput], int, int]:
+  """A column's outputs with their leaves and row bytes."""
+  outputs = _column_outputs(index, column)
+  costs = [_output_cost(o, column.bq_type) for o in outputs]
+  return outputs, sum(c[0] for c in costs), sum(c[1] for c in costs)
 
 
 def planning_outputs(
@@ -392,18 +452,6 @@ def planning_outputs(
   return tuple(o for i, c in enumerate(columns) for o in _column_outputs(i, c))
 
 
-def _from_expr(read: str) -> str:
-  """A FROM item: a strict table name (bare or backtick-quoted), or a
-  parenthesized `ScopePlan`/`SourcePin` `read_expr`, passed through as
-  built there (it is bound with that plan's own `params`)."""
-  text = (read or "").strip()
-  if text.startswith("(") and text.endswith(")") and ";" not in text:
-    return text
-  if text.startswith("`") and text.endswith("`"):
-    text = text[1:-1]
-  return quote_fqn(text)
-
-
 def _select(expr: str, outputs: Sequence[PlanningOutput]) -> str:
   lines = [f"  COUNT(*) AS {_ROWS}"]
   lines += [f"  {o.sql} AS {o.alias}" for o in outputs]
@@ -411,42 +459,52 @@ def _select(expr: str, outputs: Sequence[PlanningOutput]) -> str:
   return f"SELECT\n{body}\nFROM {expr} AS t"
 
 
-def planning_sql(read_table: str, columns: Sequence[ColumnPlan]) -> str:
-  """ONE aggregate SELECT over `read_table` (a table name or a read_expr)
-  computing every planning statistic of `columns` (see the module
-  docstring).
+def planning_sql(read_table: str | SourcePin | ScopePlan,
+                 columns: Sequence[ColumnPlan]) -> str:
+  """ONE aggregate SELECT over `read_table` computing every planning
+  statistic of `columns` (see the module docstring).
+
+  `read_table` is a strict table name or the `SourcePin`/`ScopePlan` to
+  read (`scope.from_item`: its own `read_expr`; bind
+  `scope.read_params(read_table)` when running the SQL). Text is never
+  parsed into a subquery.
 
   Raises:
     ValueError: an unsafe table or column name, or more outputs than one
       SELECT may have (use `planning_queries`).
   """
-  outputs = planning_outputs(columns)
-  if len(outputs) + 1 > MAX_OUTPUT_COLUMNS:
-    raise ValueError(f"{len(outputs) + 1} output columns exceed BigQuery's "
-                     f"{MAX_OUTPUT_COLUMNS} per SELECT; plan the table with "
-                     "planning_queries, which splits it")
-  return _select(_from_expr(read_table), outputs)
+  costed = [_column_cost(i, c) for i, c in enumerate(columns)]
+  leaves = 1 + sum(c[1] for c in costed)
+  row_bytes = _SCALAR_BYTES + sum(c[2] for c in costed)
+  if leaves > MAX_OUTPUT_COLUMNS or row_bytes > MAX_ROW_BYTES:
+    raise ValueError(
+        f"{leaves} output columns (limit {MAX_OUTPUT_COLUMNS}) and an "
+        f"estimated {row_bytes} B result row (limit {MAX_ROW_BYTES}) do not "
+        "fit one SELECT; plan the table with planning_queries, which splits "
+        "it")
+  return _select(from_item(read_table), [o for c in costed for o in c[0]])
 
 
-def planning_queries(read_table: str,
+def planning_queries(read_table: str | SourcePin | ScopePlan,
                      columns: Sequence[ColumnPlan]) -> tuple[str, ...]:
   """The planning scan of `columns` as few SELECTs as BigQuery's limits
   allow: one for any ordinary table; for a wide one, consecutive column
-  groups (a column's outputs never split) under 10 000 output columns and
-  ~1 M characters each, all over the same read."""
-  expr = _from_expr(read_table)
+  groups (a column's outputs never split), each under 10 000 output
+  leaves, ~1 M characters and a 90 MB estimated result row, all over the
+  same read (module docstring)."""
+  expr = from_item(read_table)
   chunks: list[list[PlanningOutput]] = [[]]
-  chars = 0
+  used = [1, 0, _SCALAR_BYTES]  # leaves (COUNT(*) included), chars, bytes
   for index, column in enumerate(columns):
-    outputs = _column_outputs(index, column)
-    size = sum(len(o.sql) + len(o.alias) + 8 for o in outputs)
-    current = chunks[-1]
-    if current and (len(current) + len(outputs) + 1 > MAX_OUTPUT_COLUMNS or
-                    chars + size > _MAX_QUERY_CHARS):
+    outputs, leaves, row_bytes = _column_cost(index, column)
+    chars = sum(len(o.sql) + len(o.alias) + 8 for o in outputs)
+    if chunks[-1] and (used[0] + leaves > MAX_OUTPUT_COLUMNS or
+                       used[1] + chars > _MAX_QUERY_CHARS or
+                       used[2] + row_bytes > MAX_ROW_BYTES):
       chunks.append([])
-      chars = 0
+      used = [1, 0, _SCALAR_BYTES]
     chunks[-1].extend(outputs)
-    chars += size
+    used = [used[0] + leaves, used[1] + chars, used[2] + row_bytes]
   return tuple(_select(expr, chunk) for chunk in chunks)
 
 
@@ -538,10 +596,11 @@ def _ranked_values(top: Sequence[tuple[Any, int]]) -> list[tuple[Any, int]]:
       key=lambda vc: (-vc[1], json.dumps(canonical_value(vc[0]), default=str)))
 
 
-def _literal_ok(distinct: int | None, values: Sequence[tuple[Any, int]],
-                non_null: int) -> bool:
-  return (distinct is not None and distinct <= LITERAL_MAX_DISTINCT and
-          non_null > 0 and bool(values) and
+def _literal_ok(values: Sequence[tuple[Any, int]], non_null: int) -> bool:
+  """D6's column gate: the top list is exhaustive (it covers every
+  non-NULL row) with at most 50 values, each counted at least 10 times.
+  The list is the evidence; the HLL distinct estimate is not consulted."""
+  return (0 < len(values) <= LITERAL_MAX_DISTINCT and non_null > 0 and
           sum(c for _, c in values) == non_null and
           min(c for _, c in values) >= LITERAL_MIN_COUNT)
 
@@ -591,7 +650,7 @@ def _planned(column: ColumnPlan, src: Mapping[str, Any], syn: Mapping[str, Any],
       std_src=_finite(src.get("std")) if grid else None,
       dictionary=codes[:DICTIONARY_SIZE] if coded else None,
       detection_dictionary=codes[:DETECTION_DICTIONARY_SIZE] if coded else None,
-      literal_ok=coded and _literal_ok(distinct, values, non_null),
+      literal_ok=coded and _literal_ok(values, non_null),
       source_distinct=distinct,
       synthetic_distinct=syn.get("distinct"),
   )
@@ -613,7 +672,9 @@ def apply_planning(cols: Sequence[ColumnPlan], src_stats: Mapping[str, Any],
   grid too), and every non-key, non-nested column gets its census method:
   `budget.max_shuffle_gb` is the census shuffle THIS table may use, shared
   max-min fairly across its columns; a column granted less than its
-  distinct keys is value-sampled (`budget.value_sample_rate`).
+  distinct keys is value-sampled (`budget.value_sample_rate`). A column
+  expecting at most `CENSUS_EXACT_FLOOR` keys is always exact, whatever
+  the share (a boolean or a small category never needs sampling).
   """
   src_columns = src_stats.get("columns") or {}
   syn_columns = syn_stats.get("columns") or {}
@@ -629,7 +690,18 @@ def apply_planning(cols: Sequence[ColumnPlan], src_stats: Mapping[str, Any],
       if not c.is_key and c.kind is not ColumnKind.NESTED
   ]
   demands = [census_demand(planned[i], rows_src, rows_syn) for i in eligible]
-  grants = water_fill(demands, budget.max_shuffle_gb * GB / CENSUS_KEY_BYTES)
+  tiny = [d <= CENSUS_EXACT_FLOOR for d in demands]
+  capacity = (
+      budget.max_shuffle_gb * GB / CENSUS_KEY_BYTES -
+      sum(d for d, small in zip(demands, tiny, strict=True) if small))
+  shared = iter(
+      water_fill(
+          [d for d, small in zip(demands, tiny, strict=True) if not small],
+          capacity))
+  grants = [
+      d if small else next(shared)
+      for d, small in zip(demands, tiny, strict=True)
+  ]
   for index, demand, grant in zip(eligible, demands, grants, strict=True):
     rate = value_sample_rate(grant * (1 + _GRANT_TOLERANCE), demand)
     planned[index] = dataclasses.replace(
@@ -1160,6 +1232,8 @@ class _Work:  # pylint: disable=too-many-instance-attributes  # the planner's sc
   rate_syn: float | None = None
   columns: list[ColumnPlan] = field(default_factory=list)
   notes: list[str] = field(default_factory=list)
+  table_rows: dict[str, int] = field(default_factory=dict)  # side → numRows
+  sample_bytes: dict[str, int] = field(default_factory=dict)  # side → dry run
 
   @property
   def active(self) -> bool:
@@ -1168,6 +1242,20 @@ class _Work:  # pylint: disable=too-many-instance-attributes  # the planner's sc
   def skip_with(self, reason: str) -> None:
     self.skip = reason
     self.notes.append(f"{self.landing}: not evaluated — {reason}")
+
+
+def _incomparable(landing: ColumnPlan, source: ColumnPlan) -> bool:
+  """The two sides do not hold the same kind of quantity: different
+  kinds, or temporal families that differ on the micros scale — a TIME
+  (time of day) against any date/instant, or a DATE against a TIMESTAMP
+  (a civil day against an instant). DATE/DATETIME and DATETIME/TIMESTAMP
+  compare (both read as UTC)."""
+  if landing.kind != source.kind:
+    return True
+  if landing.kind is not ColumnKind.TEMPORAL:
+    return False
+  types = {landing.bq_type, source.bq_type}
+  return ("TIME" in types and len(types) > 1) or types == {"DATE", "TIMESTAMP"}
 
 
 def _unreadable(landing: str, reason: str) -> ScopePlan:
@@ -1251,8 +1339,9 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       if self.models:
         self.notes.append(
             f"{missing[0]} is not declared in the relationship model(s) "
-            f"{self._model_names()}; it is evaluated standalone (keys from "
-            "--pk_cols / --identity_cols)")
+            f"{self._model_names()}; like the generator, which generates an "
+            "undeclared table in isolation, it is evaluated standalone (keys "
+            "from --pk_cols / --identity_cols) — R55")
       elif len(tables) > 1:
         self.notes.append(
             f"relationships are off for this launch (no relationships_uri "
@@ -1393,6 +1482,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       work.skip_with(work.scope.reason or "")
       return
     work.run = self.launch.run_for(work.landing)
+    work.table_rows["syn"] = int(land_meta.get("numRows") or 0)
     work.scope = resolve_scope(
         landing_table=work.landing,
         write_disposition=self.launch.write_disposition,
@@ -1437,7 +1527,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
               location=str(location),
               table=work.landing,
               window=(_rfc3339(start), None),
-              exclude_job=job))
+              exclude_job=job,
+              max_bytes=self.budget.max_bytes_billed))
     except (*_BQ_ERRORS, ValueError) as exc:
       work.notes.append(
           f"{work.landing}: the contamination check (other writers in the "
@@ -1467,6 +1558,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       work.skip_with(f"the source table {work.source} could not be read "
                      f"({exc})")
       return
+    work.table_rows["src"] = int(src_meta.get("numRows") or 0)
     created = self.launch.started_at
     work.pin = pin_source(
         source_table=work.source,
@@ -1481,8 +1573,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     if modified and created:
       work.drifted = parse_timestamp(modified) > parse_timestamp(created)
     self._columns(work, land_meta["schema"], src_meta["schema"])
-    work.src_queries = planning_queries(work.pin.read_expr, work.cols_src)
-    work.syn_queries = planning_queries(work.scope.read_expr, work.cols_syn)
+    work.src_queries = planning_queries(work.pin, work.cols_src)
+    work.syn_queries = planning_queries(work.scope, work.cols_syn)
     work.source_read = work.pin.read_table
     work.synthetic_read = work.scope.read_table
 
@@ -1500,20 +1592,21 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     src = kinds_from_schema([source_by[str(f["name"])] for f in common],
                             keys=work.key_cols,
                             identity=identity)
-    clash = [a.name for a, b in zip(syn, src, strict=True) if a.kind != b.kind]
+    pairs = list(zip(syn, src, strict=True))
+    clash = [
+        f"{a.name} ({a.bq_type} vs {b.bq_type})" for a, b in pairs
+        if _incomparable(a, b)
+    ]
     if clash:
-      work.notes.append(f"{work.landing}: columns {clash} have different "
-                        "kinds in the source and the landing table and are "
-                        "not compared")
+      work.notes.append(f"{work.landing}: columns {clash} (landing vs source "
+                        "type) are not the same kind of quantity and are not "
+                        "compared")
     unknown = sorted({c.bq_type for c in syn if c.bq_type not in KNOWN_TYPES})
     if unknown:
       work.notes.append(f"{work.landing}: BigQuery types {unknown} are not "
                         "known to the planner; those columns are nested "
                         "(null counts only)")
-    kept = [
-        i for i, (a, b) in enumerate(zip(syn, src, strict=True))
-        if a.kind == b.kind
-    ]
+    kept = [i for i, (a, b) in enumerate(pairs) if not _incomparable(a, b)]
     work.cols_syn = [syn[i] for i in kept]
     work.cols_src = [src[i] for i in kept]
 
@@ -1523,10 +1616,13 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     return n if isinstance(n, int) and n > 0 else None
 
   def dry_run(self, works: Sequence[_Work]) -> None:
-    """Dry-run every query planning issues and every prepare statement,
-    then refuse the plan over `max_bytes_billed` — before anything is
-    billed."""
+    """Dry-run every query planning issues and every prepare statement —
+    and, sampled, the full read of every side whose table holds more than
+    `sample_rows` (the worst case: the planning counts that decide it are
+    not known yet) — then refuse the plan over `max_bytes_billed`, before
+    anything is billed."""
     n = self.panel_n()
+    worst = 0
     for work in works:
       assert work.scope is not None and work.pin is not None
       for sql in work.src_queries:
@@ -1538,24 +1634,41 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
         self.bytes["panel"] += self.bq.dry_run_bytes(
             panel_sql(work.pin, n), read_params(work.pin))
       for sql in work.scope.prepare_sql:
-        self.bytes["prepare"] += self._dry_prepare(sql, work.scope.params,
-                                                   work.scope.read_expr)
+        self.bytes["prepare"] += self._dry_prepare(sql, work.scope)
       for sql in work.pin.prepare_sql:
-        self.bytes["prepare"] += self._dry_prepare(sql, read_params(work.pin),
-                                                   work.pin.read_expr)
-    self.budget.check_bytes(self.bytes)
+        self.bytes["prepare"] += self._dry_prepare(sql, work.pin)
+      if self.mode == "sampled":
+        worst += self._worst_samples(work)
+    parts = dict(self.bytes)
+    if self.mode == "sampled":
+      parts["sample (worst case)"] = worst
+    self.budget.check_bytes(parts)
 
-  def _dry_prepare(self, sql: str, params: Mapping[str, Any], expr: str) -> int:
-    """A DDL statement's dry run; when BigQuery refuses to dry-run it, the
-    full read it materializes stands in (an upper bound), with a note."""
+  def _worst_samples(self, work: _Work) -> int:
+    assert work.scope is not None and work.pin is not None
+    total = 0
+    for side, source in (("src", work.pin), ("syn", work.scope)):
+      if work.table_rows.get(side, 0) > self.knobs.sample_rows:
+        work.sample_bytes[side] = self._full_read_bytes(source)
+        total += work.sample_bytes[side]
+    return total
+
+  def _full_read_bytes(self, source: SourcePin | ScopePlan) -> int:
+    """The dry-run bytes of reading every column of `source`'s rows."""
+    return int(
+        self.bq.dry_run_bytes(f"SELECT * FROM {from_item(source)} AS t",
+                              read_params(source)))
+
+  def _dry_prepare(self, sql: str, source: SourcePin | ScopePlan) -> int:
+    """A DDL statement's dry run, with `source`'s parameters; when
+    BigQuery refuses to dry-run it, the full read it materializes stands in
+    (an upper bound), with a note."""
     try:
-      return int(self.bq.dry_run_bytes(sql, params))
+      return int(self.bq.dry_run_bytes(sql, read_params(source)))
     except _BQ_ERRORS as exc:
       self.notes.append(f"a prepare statement could not be dry-run ({exc}); "
                         "its full read is counted instead")
-      return int(
-          self.bq.dry_run_bytes(f"SELECT * FROM {_from_expr(expr)} AS t",
-                                params))
+      return self._full_read_bytes(source)
 
   # --- running the scans -----------------------------------------------------
   def scan(self, work: _Work) -> None:
@@ -1604,16 +1717,17 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     assert work.pin is not None and work.scope is not None
     assert work.src_stats is not None and work.syn_stats is not None
     work.rate_src, work.source_read = self._side_sample(
-        work.pin.read_table, int(work.src_stats["rows"]), "src",
-        work.pin.read_expr, read_params(work.pin))
+        work, work.pin, int(work.src_stats["rows"]), "src")
     work.rate_syn, work.synthetic_read = self._side_sample(
-        work.scope.read_table, int(work.syn_stats["rows"]), "syn",
-        work.scope.read_expr, work.scope.params)
+        work, work.scope, int(work.syn_stats["rows"]), "syn")
     work.src_stats["rows_read"] = work.src_stats["rows"] * work.rate_src
     work.syn_stats["rows_read"] = work.syn_stats["rows"] * work.rate_syn
 
-  def _side_sample(self, read_table: str, rows: int, side: str, expr: str,
-                   params: Mapping[str, Any]) -> tuple[float, str]:
+  def _side_sample(self, work: _Work, source: SourcePin | ScopePlan, rows: int,
+                   side: str) -> tuple[float, str]:
+    """(rate, what the pipeline reads) of one side; a sample's full read
+    reuses its phase-A dry run."""
+    read_table = source.read_table
     if self.mode != "sampled" or rows <= self.knobs.sample_rows:
       return 1.0, read_table
     keep = min(
@@ -1628,8 +1742,10 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
         evaluation_id=self.evaluation_id,
         side=side)
     self.samples.append(PrepareStatement(sql, bound))
-    self.bytes["sample"] = self.bytes.get("sample", 0) + int(
-        self.bq.dry_run_bytes(f"SELECT * FROM {_from_expr(expr)} AS t", params))
+    cost = work.sample_bytes.get(side)
+    if cost is None:  # planned rows exceed what the table metadata said
+      cost = self._full_read_bytes(source)
+    self.bytes["sample"] = self.bytes.get("sample", 0) + cost
     return keep / SAMPLE_MODULUS, temp
 
   def census(self, works: Sequence[_Work]) -> None:
@@ -1654,7 +1770,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       self.notes.append(
           f"the non-census shuffle alone ({fixed / GB:.3f} GB) exceeds "
           f"max_shuffle_gb = {self.budget.max_shuffle_gb}: every census "
-          "column is value-sampled at the minimum rate")
+          f"column above {CENSUS_EXACT_FLOOR} keys is value-sampled at the "
+          "minimum rate")
     for work, grant in zip(works, water_fill(demands, capacity), strict=True):
       share = Budget(
           max_shuffle_gb=grant / GB,

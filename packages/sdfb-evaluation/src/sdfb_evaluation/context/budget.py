@@ -18,7 +18,10 @@ Two budgets, two different enforcement points:
     budget            enforced by                       when exceeded
     ────────────────  ────────────────────────────────  ─────────────────────────
     max_bytes_billed  the planner, from dry runs         refused (raises) before
-                      (planning SQL, panel, prepare)     anything is billed
+                      (planning SQL, panel, prepare;     anything is billed;
+                      sampled: every side whose table    re-checked once the
+                      holds > sample_rows rows counts    planning counts pick
+                      as a full sample read)             the sides to sample
     max_shuffle_gb    the census method per column       high-cardinality columns
                       (exact | value_sampled)            switch to value sampling
 
@@ -35,7 +38,8 @@ on the rows the pipeline actually reads:
 The census gets what the fixed parts leave, shared max-min fairly
 (`water_fill`): first across tables, then across one table's census
 columns, so a column needing little is never sampled to feed one needing
-much. A column granted less than its demand is value-sampled at `K /
+much, and a column expecting at most 1 000 keys is exact whatever is
+left. A column granted less than its demand is value-sampled at `K /
 10 000` (`VALUE_SAMPLE_MODULUS`): only value hashes with `hash mod M < K`
 enter the census, which keeps every retained value's count exact.
 

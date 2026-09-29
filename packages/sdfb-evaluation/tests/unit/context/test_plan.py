@@ -34,6 +34,8 @@ from sdfb_evaluation.context.budget import (
     water_fill,
 )
 from sdfb_evaluation.context.plan import (
+    MAX_ROW_BYTES,
+    TOP_VALUE_MAX_BYTES,
     ColumnPlan,
     Knobs,
     PlanError,
@@ -278,7 +280,10 @@ def test_planning_sql_one_scan_per_side():
   # The source is read as the generation job saw it (pinned, D4).
   assert "FOR SYSTEM_TIME AS OF TIMESTAMP '2026-09-13T13:10:16.000000Z'" in source_sql
   assert "UNIX_MICROS(TIMESTAMP(t.`signup_date`))" in source_sql
-  assert "APPROX_TOP_COUNT(t.`country`, 254)" in source_sql
+  # 255 slots: NULL may take one and still leave the top-254 (R32).
+  assert ("APPROX_TOP_COUNT(IF(BYTE_LENGTH(t.`country`) <= 1024, "
+          "t.`country`, NULL), 255)") in source_sql
+  assert "APPROX_TOP_COUNT(CAST(t.`age` AS FLOAT64), 11)" in source_sql
   # Every planning and panel query was dry-run before any of them ran.
   first_billed = next(
       i for i, (event, sql) in enumerate(bq.events)
@@ -286,12 +291,12 @@ def test_planning_sql_one_scan_per_side():
   dry = [i for i, (event, _) in enumerate(bq.events) if event == "dry"]
   assert dry and max(dry) < first_billed
   assert len([s for s, _ in bq.dry_runs if "n_rows" in s]) == len(planning)
-  capped = [
-      cap for (sql, _), cap in zip(bq.queries, bq.max_bytes, strict=True)
-      if "n_rows" in sql or "__sdfb_rk" in sql
-  ]
-  assert len(capped) == 2 * len(TABLES) + len(TABLES)  # + one panel each
-  assert all(cap == KNOBS.max_bytes_billed for cap in capped)
+  kinds = [("JOBS_BY_PROJECT" in sql, "n_rows" in sql, "__sdfb_rk" in sql)
+           for sql, _ in bq.queries]
+  assert sum(k[0] for k in kinds) == len(TABLES)  # one contamination check
+  assert sum(k[1] or k[2] for k in kinds) == 3 * len(TABLES)
+  # Every query — planning, panel AND contamination — is capped.
+  assert all(cap == KNOBS.max_bytes_billed for cap in bq.max_bytes)
   assert plan.bq_bytes_estimate == bq.dry_bytes * len(bq.dry_runs)
 
 
@@ -343,11 +348,40 @@ def test_planning_sql_rejects_unsafe_input():
     planning_sql("demo-project.x.t; DROP TABLE y", ok)
   with pytest.raises(ValueError):
     planning_sql("(SELECT 1); DROP TABLE y", ok)
-  # A ScopePlan/SourcePin read_expr passes through (it binds its own params).
-  expr = "(SELECT * FROM `demo-project.thelook_synthetic.t`)"
-  assert f"FROM {expr} AS t" in planning_sql(expr, ok)
+  # Text is never parsed into a subquery, however harmless it looks...
+  with pytest.raises(ValueError):
+    planning_sql("(SELECT * FROM `demo-project.thelook_synthetic.t`)", ok)
   assert "FROM `demo-project.thelook_synthetic.t` AS t" in planning_sql(
       "`demo-project.thelook_synthetic.t`", ok)
+  # ...a SourcePin/ScopePlan contributes the read_expr built for it.
+  plan, _ = _plan()
+  users = plan.tables[1]
+  for source in (users.source_pin, users.scope):
+    assert f"FROM {source.read_expr} AS t" in planning_sql(source, ok)
+
+
+def _leaves(sql):
+  """Output columns as BigQuery counts them: an APPROX_TOP_COUNT's
+  ARRAY<STRUCT<value, count>> is three."""
+  outputs = re.findall(r" AS (c\d+_[a-z_]+|n_rows)", sql)
+  return len(outputs) + 2 * sql.count("APPROX_TOP_COUNT(")
+
+
+def test_wide_string_table_respects_leaf_and_row_size_limits():
+  """2,100 STRING columns: 7 leaves each (null, empty, distinct, avg_len,
+  a three-leaf top list) and up to 255 values of 1 KiB per top list."""
+  fields = [{"name": f"s{i}", "type": "STRING"} for i in range(2100)]
+  cols = kinds_from_schema(fields, keys=set())
+  queries = planning_queries("demo-project.thelook_synthetic.wide", cols)
+  per_top = 255 * (TOP_VALUE_MAX_BYTES + 16)
+  seen = []
+  for sql in queries:
+    assert _leaves(sql) <= 10_000
+    tops = sql.count("APPROX_TOP_COUNT(")
+    assert tops * per_top <= MAX_ROW_BYTES
+    seen += re.findall(r" AS (c\d+)_null", sql)
+  assert len(seen) == len(set(seen)) == 2100  # every column exactly once
+  assert len(queries) == -(-2100 // (MAX_ROW_BYTES // per_top))
 
 
 def test_wide_table_chunks_under_the_output_column_limit():
@@ -360,7 +394,7 @@ def test_wide_table_chunks_under_the_output_column_limit():
   aliases = set()
   for sql in queries:
     outputs = re.findall(r" AS (c\d+_[a-z_]+|n_rows)", sql)
-    assert len(outputs) <= 10_000
+    assert _leaves(sql) <= 10_000
     assert "n_rows" in outputs
     assert sql.count("FROM `demo-project.thelook_synthetic.wide` AS t") == 1
     aliases.update(o for o in outputs if o != "n_rows")
@@ -472,6 +506,73 @@ def test_literal_policy_and_dictionaries():
   assert wide.dictionary == wide.detection_dictionary[:9]
   assert all(0 <= h < 1 << 64 for h in wide.detection_dictionary)
   assert by["safe"].source_distinct == 3
+
+
+def test_d6_synthetic_only_values_are_never_in_the_dictionaries():
+  """A value is literal iff literal_ok AND its hash is in the source-built
+  detection_dictionary: a value only the synthetic side holds is hashed."""
+  cols = kinds_from_schema([{"name": "status", "type": "STRING"}], keys=set())
+  src_top = _top(("Complete", 60), ("Shipped", 40))
+  syn_top = _top(("Complete", 50), ("Shipped", 30), ("Teleported", 20))
+  src = {
+      "rows": 100,
+      "columns": {
+          "status": _string_stats(2, 100, 8.0, top=src_top)
+      }
+  }
+  syn = {
+      "rows": 100,
+      "columns": {
+          "status": _string_stats(3, 100, 8.0, top=syn_top)
+      }
+  }
+  (status,) = apply_planning(cols, src, syn, budget=BIG)
+  assert status.literal_ok
+  assert hash64("status", "Complete") in status.detection_dictionary
+  assert hash64("status", "Teleported") not in status.detection_dictionary
+  assert hash64("status", "Teleported") not in status.dictionary
+  assert status.synthetic_distinct == 3
+
+
+def test_literal_ok_counts_the_exhaustive_top_list_not_the_sketch():
+  """HLL can under- or over-count: the gate is the top list itself, which
+  covers every non-NULL row when the column is small enough."""
+  cols = kinds_from_schema([{"name": "code", "type": "STRING"}], keys=set())
+
+  def planned(values, hll):
+    top = _top(*[(f"v{i:02d}", 20) for i in range(values)])
+    n = 20 * values
+    stats = {
+        "rows": n,
+        "columns": {
+            "code": _string_stats(hll, n, 3.0, top=top)
+        }
+    }
+    return apply_planning(cols, stats, stats, budget=BIG)[0]
+
+  assert not planned(51, hll=50).literal_ok  # the probe: 51 values, HLL 50
+  assert planned(50, hll=51).literal_ok
+  assert planned(50, hll=50).literal_ok
+
+
+def test_tiny_census_demands_stay_exact_without_capacity():
+  cols = kinds_from_schema([{
+      "name": "code",
+      "type": "STRING"
+  }, {
+      "name": "note",
+      "type": "STRING"
+  }, {
+      "name": "flag",
+      "type": "BOOL"
+  }],
+                           keys=set())
+  stats = _census_stats(1_000_000)
+  none = Budget(max_shuffle_gb=0.0, max_bytes_billed=1 << 40)
+  by = _by_name(apply_planning(cols, stats, stats, budget=none))
+  assert by["code"].census == "exact" and by["flag"].census == "exact"
+  assert by["note"].census == "value_sampled"
+  assert by["note"].value_sample_rate == 1 / 10_000
 
 
 def _census_stats(n):
@@ -721,6 +822,43 @@ def test_bytes_over_budget_refused_before_any_billed_query():
   assert not any("__sdfb_rk" in s for s, _ in bq.queries)
 
 
+def test_temporal_type_families_must_match_to_compare():
+  """A TIMESTAMP compared with a DATE (or TIME with anything else) is not
+  the same quantity on the micros scale: skipped with a warning."""
+  bq = thelook_bq()
+  source = bq.tables[f"{SRC}.users"]["schema"]
+  for field in source:
+    if field["name"] == "created_at":
+      field["type"] = "DATE"  # landing: TIMESTAMP
+    if field["name"] == "signup_date":
+      field["type"] = "DATETIME"  # landing: DATE — same civil family
+  plan, _ = _plan(bq)
+  users = next(t for t in plan.tables if t.name == "users")
+  names = [c.name for c in users.columns]
+  assert "created_at" not in names and "signup_date" in names
+  assert any("created_at" in w and "DATE" in w and "TIMESTAMP" in w
+             for w in plan.warnings)
+
+
+def test_sampled_mode_refuses_on_the_worst_case_before_billing():
+  """Phase A counts every side whose table holds more than sample_rows as
+  sampled (a full read each), so the refusal comes before any billed
+  query."""
+  bq = thelook_bq()
+  knobs = dataclasses.replace(
+      KNOBS, sample_rows=100, max_bytes_billed=15 * bq.dry_bytes)
+  with pytest.raises(BudgetExceededError, match="sample") as info:
+    _plan(bq, knobs=knobs, mode="sampled")
+  assert str(18 * bq.dry_bytes) in str(info.value)  # 12 + 6 worst-case reads
+  assert not bq.planning_queries()
+  assert not any("__sdfb_rk" in s for s, _ in bq.queries)
+  plan, _ = _plan(
+      knobs=dataclasses.replace(knobs, max_bytes_billed=1 << 40),
+      mode="sampled")
+  sampled = [t for t in plan.tables if t.evaluated]
+  assert all(t.sample_rate_source < 1 for t in sampled)
+
+
 def test_appends_scope_params_are_bound_everywhere():
   """ScopePlan.params are opaque: planning, dry runs and prepare pass the
   scope's own mapping, never parameter names the planner made up."""
@@ -825,6 +963,31 @@ def test_models_missing_for_a_relational_launch_raise():
   bq = thelook_bq()
   with pytest.raises(PlanError, match="users"):
     _plan(bq, models=())
+
+
+def test_single_undeclared_table_with_a_loaded_model_is_standalone():
+  """R55: the generator always loads its models and generates a table they
+  do not declare in isolation, so the evaluator accepts it too."""
+  bq = thelook_bq()
+  launch = thelook_launch(
+      bq, tables=(EXTERNAL,), run_ids=(BASE,), params={"pk_cols": "id"})
+  plan, _ = _plan(bq, launch)
+  (products,) = plan.tables
+  assert products.role == "standalone" and products.edges == ()
+  assert products.pk == ("id",) and products.evaluated
+  assert any(EXTERNAL in w and "not declared" in w and "thelook" in w
+             for w in plan.warnings)
+  assert plan.registry_seed()["status"] == "RUNNING"
+
+
+def test_two_tables_one_undeclared_with_a_loaded_model_raise():
+  bq = thelook_bq()
+  launch = thelook_launch(bq, tables=(f"{DS}.users", EXTERNAL))
+  with pytest.raises(PlanError) as info:
+    _plan(bq, launch)
+  assert EXTERNAL in str(info.value) and MODEL_URI in str(info.value)
+  assert f"{DS}.users," not in str(info.value)  # only the undeclared one
+  assert not bq.queries and not bq.dry_runs
 
 
 def test_single_table_without_a_model_is_standalone():
