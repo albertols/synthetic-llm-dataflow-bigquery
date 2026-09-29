@@ -145,6 +145,16 @@ class FakeSession:
     return sorted(out, key=lambda e: e["timestamp"])
 
 
+def _run_matches(row: Mapping[str, Any], bound: Mapping[str, Any]) -> bool:
+  """runs_for's WHERE: landing table in the array, OR the run id is the
+  base / starts with `base-`."""
+  if row["landing_table"] in set(bound.get("landing_tables") or ()):
+    return True
+  base = bound.get("base")
+  return bool(base) and (row["run_id"] == base or
+                         str(row["run_id"]).startswith(f"{base}-"))
+
+
 class FakeBq:
   """`context.bq.Bq` over canned rows.
 
@@ -183,9 +193,8 @@ class FakeBq:
         raise exc
     for needle, rows in self.responses:
       if needle in sql:
-        if "@landing_tables" in sql:
-          wanted = set(bound["landing_tables"])
-          return [dict(r) for r in rows if r["landing_table"] in wanted]
+        if "@landing_tables" in sql or "@base" in sql:
+          return [dict(r) for r in rows if _run_matches(r, bound)]
         return [dict(r) for r in rows]
     raise AssertionError(f"FakeBq: unexpected SQL {sql!r}")
 

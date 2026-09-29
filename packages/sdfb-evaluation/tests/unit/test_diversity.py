@@ -272,6 +272,24 @@ def test_entropy_ratio_source_diverse_synthetic_constant_is_zero():
   assert res["entropy_ratio_reason"] is None
 
 
+def test_entropy_ratio_never_divides_by_a_zero_source_entropy():
+  """An estimated view (the census's value-sampled Horvitz-Thompson
+  counts, Ruling R67) can hold k >= 2 with Σ c ln c >= n ln n, so the
+  clamped source entropy is 0 although the source is not constant."""
+  n = 100
+  acc = d.CensusAccumulator(
+      n_src_m=n,
+      k_src_m=5,
+      clc_src_m=n * math.log(n) * 1.5,
+      n_syn_m=n,
+      k_syn_m=4,
+      clc_syn_m=10.0)
+  res = d.summarize(acc)
+  assert res["entropy_src_m_bits"] == 0.0
+  assert res["entropy_ratio"] is None
+  assert res["entropy_ratio_reason"] == "source entropy is 0"
+
+
 # ---------------------------------------------------------------------------
 # CensusAccumulator.merge — purity, associativity, commutativity
 # ---------------------------------------------------------------------------

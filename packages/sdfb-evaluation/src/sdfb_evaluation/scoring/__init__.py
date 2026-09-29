@@ -30,7 +30,13 @@ the semantic authority; this module only executes it.
   3. `relationship.orphan_rate` on a documented edge (`enforced=False`) ->
      INFO, never FAIL. Only the orphan rate: fan-out metrics compare
      children per parent with the source whatever the enforcement, so they
-     stay graded (Ruling R42);
+     stay graded (Ruling R42); likewise `field.substantive_copy_rate` is
+     gated only on a `text` column (free text, where the probe's rule
+     came from) and INFO on every other kind (Ruling R66): numeric and
+     temporal values collide with a dense source by domain size, and
+     reusing a rare real category or identifier is not evidence of
+     memorisation — `field.value_memorization_lift` (R vs H) is the gated
+     signal there;
   4. null warn and fail -> INFO;
   5. a `target` metric reads x = |g - target|, its target being the
      catalogue's or, when that is null (`column.novelty_mass`), the row's
@@ -69,7 +75,8 @@ the semantic authority; this module only executes it.
   infinite g scores at the function's limit (0 on the bad side).
   `score: none` is the value only for aggregate ids (table.*_score,
   model.*); every other `score: none` metric scores `None` (Ruling R26).
-- `to_metric_row` writes one `evaluation_metrics` row, JSON-safe.
+- `to_metric_row` writes one `evaluation_metrics` row, JSON-safe;
+  `to_profile_row` one `evaluation_profiles` row.
 - `aggregate_scores` rolls scores up over units (Ruling R11) and
   `headline_counts` counts statuses so that they reconcile with the total.
 
@@ -94,6 +101,7 @@ from sdfb_evaluation.catalogue import Metric
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.types import Method
 from sdfb_evaluation.types import MetricValue
+from sdfb_evaluation.types import ProfileValue
 from sdfb_evaluation.types import Status
 
 # The key of the model-wide entry in `aggregate_scores`' result.
@@ -112,6 +120,15 @@ INTERVAL_NOISE_METHODS = frozenset({"wilson", "newcombe", "delong"})
 
 _PMSE_ID = "table.pmse_ratio"
 _ORPHAN_ID = "relationship.orphan_rate"
+_COPY_RATE_ID = "field.substantive_copy_rate"
+_DOMAIN_COLLISION_REASON = (
+    "domain-size collision: a numeric or temporal column meets a dense "
+    "source by domain size, not by copying; reported, not gated "
+    "(field.value_memorization_lift is the fair test)")
+_FREE_TEXT_ONLY_REASON = (
+    "gated only on free text (Ruling R66): reusing a rare real category or "
+    "identifier is not evidence of memorisation; reported, not gated "
+    "(field.value_memorization_lift is the gated signal)")
 _REL_TOL = 1e-9  # tolerance for "at the threshold" (inclusive crossing)
 _UNSCORED = (Status.INFO, Status.NOT_EVALUATED)
 
@@ -293,6 +310,17 @@ def _grade(metric: Metric, mv: MetricValue, gated: float, x: float,
   return _Assessment(status, None, gated, target)
 
 
+def _copy_rate_info_reason(mv: MetricValue) -> str | None:
+  """Why a copy rate is reported as INFO, or None when it is gated: only
+  a `text` column (or one with no kind given) is gated (Ruling R66)."""
+  kind = mv.column_kind
+  if kind is None or kind == "text":
+    return None
+  if kind in ("numeric", "temporal"):
+    return _DOMAIN_COLLISION_REASON
+  return _FREE_TEXT_ONLY_REASON
+
+
 def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
     metric: Metric, mv: MetricValue, enforced: bool) -> _Assessment:
   """The full status decision, in the order the module docstring lists."""
@@ -312,6 +340,10 @@ def _assess(  # noqa: PLR0911 — the status order, clearer flat than nested
     return _Assessment(
         Status.INFO,
         {"reason": "documented edge (enforced: false): reported, not gated"})
+  copy_info = (
+      _copy_rate_info_reason(mv) if metric.id == _COPY_RATE_ID else None)
+  if copy_info is not None:
+    return _Assessment(Status.INFO, {"reason": copy_info})
   if metric.warn is None and metric.fail is None:
     return _Assessment(Status.INFO)
   target = None
@@ -449,6 +481,35 @@ def to_metric_row(mv: MetricValue,
       "encoding_plan_digest": mv.encoding_plan_digest,
       "feature_set_digest": mv.feature_set_digest,
       "detail": _plain(detail) or None,
+  }
+  safe: dict[str, Any] = json_safe(row)
+  return safe
+
+
+def to_profile_row(pv: ProfileValue, *, evaluation_id: str,
+                   evaluated_at: datetime | str) -> dict[str, Any]:
+  """One `evaluation_profiles` row: exactly its fields, in schema order.
+
+  The profile counterpart of `to_metric_row`: `table`/`column` map to
+  `table_name`/`column_name`, numpy values in the payload become Python
+  values and non-finite floats `None` (`json_safe`), so the row can go
+  straight to a BigQuery load job.
+
+  Raises:
+    ValueError: `evaluated_at` is a string that is not ISO-8601.
+  """
+  row = {
+      "evaluation_id": evaluation_id,
+      "evaluated_at": _timestamp(evaluated_at),
+      "table_name": pv.table,
+      "column_name": pv.column,
+      "edge": pv.edge,
+      "profile_kind": pv.profile_kind,
+      "side": pv.side,
+      "n": _as_int(pv.n),
+      "truncated": pv.truncated,
+      "edges_digest": pv.edges_digest,
+      "payload": _plain(pv.payload),
   }
   safe: dict[str, Any] = json_safe(row)
   return safe

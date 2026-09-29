@@ -160,7 +160,10 @@ _BOOL_FALSE = frozenset({"false", "no", "off", "n", "f", "0"})
 
 def _reject_unknown(spec: Mapping[str, Any], allowed: frozenset[str],
                     context: str) -> None:
-  extra = sorted(set(spec) - allowed)
+  # `key=str`: YAML keys may be ints, bools or nulls next to strings, and
+  # those must surface as a RelationshipError, not a TypeError from the
+  # sort itself.
+  extra = sorted(set(spec) - allowed, key=str)
   if extra:
     raise RelationshipError(f"{context}: unexpected field(s) {extra}")
 
@@ -285,6 +288,11 @@ def parse_model(text: str, source: str = "") -> RelModel:
   tables_raw: Mapping[str, Any] = raw.get("tables") or {}
   tables: dict[str, TableRel] = {}
   for name, table_spec in tables_raw.items():
+    if not isinstance(name, str):
+      # `tables: dict[str, ...]` upstream: pydantic does not coerce a
+      # YAML int/bool/null/float key to a string.
+      raise RelationshipError(f"{source}.tables: table name {name!r} is a "
+                              f"{type(name).__name__}, expected a string")
     table_context = f"{source}: {name}"
     if not isinstance(table_spec, Mapping):
       raise RelationshipError(f"{table_context}: expected a mapping, got "

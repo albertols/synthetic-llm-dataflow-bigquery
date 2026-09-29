@@ -11,14 +11,16 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Shared enums and the `MetricValue` record every metric function returns.
+"""Shared enums and the `MetricValue` / `ProfileValue` records the metric
+and profile producers return.
 
 `MetricValue` is the in-memory shape a metric function produces; Task 14's
 writer maps its fields onto `evaluation_metrics` rows (see
 `src/sdfb_evaluation/schemas/evaluation_metrics.schema.json`). It carries the
 raw measurement only — `status` and `score` are derived later from the
 catalogue (thresholds, direction) against `value` (or `ci_low` for
-`uses_ci_bound` metrics), not stored here.
+`uses_ci_bound` metrics), not stored here. `ProfileValue` is its
+`evaluation_profiles` counterpart (`scoring.to_profile_row` writes it).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -113,3 +115,54 @@ class MetricValue:
         value=None,
         detail={"reason": reason},
         **scope)
+
+
+# `evaluation_profiles.profile_kind` / `.side` (the schema's vocabularies).
+PROFILE_KINDS: tuple[str, ...] = (
+    "histogram",
+    "quantiles",
+    "topk",
+    "length_hist",
+    "shape_mix",
+    "char_classes",
+    "temporal_mix",
+    "null_patterns",
+    "corr_matrix",
+    "contingency",
+    "fanout_hist",
+    "dcr_hist",
+    "nndr_hist",
+    "roc_curve",
+    "moments",
+)
+PROFILE_SIDES: tuple[str, ...] = (*(side.value for side in Side), "both")
+
+
+@dataclass(frozen=True)
+class ProfileValue:
+  """One distribution payload for `evaluation_profiles`, before the run's
+  ids are attached (`scoring.to_profile_row` writes the row).
+
+  `payload` is the kind's JSON shape (the GUI's contract, Ruling R27); a
+  producer keeps it bounded and applies the D6 literal policy. `column`/
+  `edge` scope it like a `MetricValue`; `n` counts the values it was
+  computed over; `edges_digest` names its bin edges, so two payloads that
+  share it are directly comparable.
+  """
+  table: str
+  profile_kind: str
+  side: str
+  payload: Mapping[str, Any]
+  column: str | None = None
+  edge: str | None = None
+  n: int | None = None
+  truncated: bool | None = None
+  edges_digest: str | None = None
+
+  def __post_init__(self) -> None:
+    if self.profile_kind not in PROFILE_KINDS:
+      raise ValueError(f"profile_kind {self.profile_kind!r}: expected one of "
+                       f"{list(PROFILE_KINDS)}")
+    if self.side not in PROFILE_SIDES:
+      raise ValueError(f"side {self.side!r}: expected one of "
+                       f"{list(PROFILE_SIDES)}")

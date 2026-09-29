@@ -30,10 +30,11 @@ nothing from the repository's scripts or generator packages):
 Which log streams are read. The worker stream is filtered by its logName
 (`…/logs/dataflow.googleapis.com%2Fworker`, the probe's filter; a
 `resource.type` filter alone returns nothing under some projects' log
-routing). The launcher stream is reached through `resource.type=
+routing). The launcher stream is matched both by its logName
+(`…/logs/dataflow.googleapis.com%2Flauncher`) and through `resource.type=
 "dataflow_step"` + `resource.labels.job_id`, the filter the FK/PK validator
-prompt uses to pull `launch_config` and `relationships_loaded`; its logName
-is never hard-coded. The flex-template launcher forwards its Python
+prompt uses to pull `launch_config` and `relationships_loaded`, so a
+routing that hides either still finds it. The flex-template launcher forwards its Python
 process's output ONE LINE PER ENTRY, so a pretty milestone
 (`log_milestone_pretty`: header line, then indent-2 JSON) arrives as a
 header entry followed by body entries. `find` reassembles those from the
@@ -57,12 +58,13 @@ import shlex
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
 
 __all__ = [
+    "JOB_NOT_FOUND_HINT",
     "DataflowJobs",
     "GcpApiError",
     "JobNotFoundError",
@@ -138,6 +140,13 @@ class GcpApiError(RuntimeError):
 
 class JobNotFoundError(LookupError):
   """The Dataflow job does not exist in the project/region asked."""
+
+
+JOB_NOT_FOUND_HINT = (
+    "A job id is only visible in the region it ran in: pass --region "
+    "<region> (for example --region us-central1). Dataflow also keeps a "
+    "job's metadata only for its retention period (about 30 days after the "
+    "job ends); for an older job pass the tables and parameters manually.")
 
 
 def make_session(project: str) -> requests.Session:
@@ -230,7 +239,8 @@ def _shift(ts: str | None, seconds: int) -> str | None:
   if not ts:
     return None
   moment = datetime.fromisoformat(_check(_RFC3339_RE, ts, "timestamp"))
-  return (moment + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+  moment = (moment + timedelta(seconds=seconds)).astimezone(UTC)
+  return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class DataflowJobs:
@@ -274,9 +284,7 @@ class DataflowJobs:
     except LookupError as exc:
       raise JobNotFoundError(
           f"Dataflow job {job_id} was not found in project {self.project}, "
-          f"region {self.region}. A job id is only visible in the region it "
-          f"ran in: pass --region <region> (for example --region "
-          f"us-central1). ({exc})") from exc
+          f"region {self.region}. {JOB_NOT_FOUND_HINT} ({exc})") from exc
 
   @staticmethod
   def params(job: Mapping[str, Any]) -> dict[str, Any]:
@@ -379,9 +387,12 @@ class LogMilestones:
     hi = _shift(window[1], _WINDOW_PAD_AFTER_S)
     worker_log = (f"projects/{self.project}/logs/"
                   "dataflow.googleapis.com%2Fworker")
+    launcher_log = (f"projects/{self.project}/logs/"
+                    "dataflow.googleapis.com%2Flauncher")
     clauses = [
         f'resource.labels.job_id="{job_id}"',
-        f'(logName="{worker_log}" OR resource.type="dataflow_step")',
+        (f'(logName="{worker_log}" OR logName="{launcher_log}" OR '
+         'resource.type="dataflow_step")'),
         (f'(textPayload:"SDFB_MILESTONE name={name}" OR '
          f'jsonPayload.message:"SDFB_MILESTONE name={name}")'),
     ]

@@ -16,14 +16,14 @@
 These exercise the mirror directly, on small hand-written models, beyond
 what the golden-file parity test (`test_parity_goldens.py`) covers off
 the three committed example models and the goldens script's own invented
-cases: the widening tests here (`test_enforced_edges_widens_...`) predate
-that script's own invented widening model (Task 16 review round 1) and
-stay as a second, independently-written proof of the same path; the
-`parse_model` strictness tests duplicate the goldens script's
-`_PARSE_CASES` as direct, readable unit tests; and the `load_models`
-gs://-seam, dotfile and lazy-import tests have no golden-file counterpart
-at all (they are about THIS module's own IO plumbing, not about parity
-with the original).
+cases: the widening tests here (`test_enforced_edges_widens_...`) are a
+second proof of the path that script's own invented widening model pins,
+written independently of it; the `parse_model` strictness tests duplicate
+the goldens script's `_PARSE_CASES` as direct, readable unit tests, plus
+the non-string-key cases (int/bool/null/float YAML keys) the original
+rejects as a validation error; and the `load_models` gs://-seam, dotfile
+and lazy-import tests have no golden-file counterpart at all (they are
+about THIS module's own IO plumbing, not about parity with the original).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -324,6 +324,36 @@ def test_parse_model_rejects_an_unknown_fk_key():
     parse_model(text, source="x")
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # top level, table level and edge level: an int key next to a
+        # string key cannot be ordered against it
+        "model: m\n1: x\nzzz: y\ntables: {}\n",
+        "model: m\ntables:\n  A:\n    1: x\n    zzz: y\n",
+        ("model: m\ntables:\n  B:\n    pk: [B1]\n  A:\n    fk:\n"
+         "      - cols: [A1]\n        ref: B\n        ref_cols: [B1]\n"
+         "        1: x\n        zz: y\n"),
+    ],
+    ids=["model", "table", "edge"])
+def test_parse_model_rejects_mixed_type_unknown_keys_as_relationship_error(
+    text: str):
+  # The original's pydantic models reject these as a validation error
+  # (`RelationshipError`); a bare `sorted()` over mixed key types would
+  # escape as a `TypeError` instead.
+  with pytest.raises(RelationshipError, match="unexpected field"):
+    parse_model(text, source="x")
+
+
+@pytest.mark.parametrize("key", ["1", "true", "~", "1.5"])
+def test_parse_model_rejects_a_non_string_table_name(key: str):
+  # `tables: dict[str, ...]` in the original: YAML's int, bool, null and
+  # float keys are not strings (pydantic does not coerce them), so they
+  # are rejected up front — not later as an AttributeError on `.rsplit`.
+  with pytest.raises(RelationshipError, match="table name"):
+    parse_model(f"model: m\ntables:\n  {key}:\n    pk: [A1]\n", source="x")
+
+
 def test_parse_model_rejects_an_empty_fk_cols_list():
   text = ("model: m\n"
           "tables:\n"
@@ -494,7 +524,7 @@ def test_load_models_default_io_includes_dotfiles_like_filesystems_match(
     tmp_path):
   # `glob.glob`'s bare `*` hides dotfiles by default; Beam's
   # `FileSystems.match` does not — the local branch must agree with the
-  # gs:// branch on what `*.yaml` means (review finding).
+  # gs:// branch on what `*.yaml` means.
   (tmp_path / ".hidden.yaml").write_text(
       "model: hidden\ntables:\n  A:\n    pk: [A1]\n", encoding="utf-8")
   models = load_models(str(tmp_path))

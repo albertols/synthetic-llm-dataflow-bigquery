@@ -20,8 +20,9 @@ import math
 from datetime import UTC, date, datetime
 
 import pytest
+from google.api_core.exceptions import RetryError
 
-from sdfb_evaluation.context.bq import Bq, normalize_fqn, quote_fqn
+from sdfb_evaluation.context.bq import Bq, BqApiError, normalize_fqn, quote_fqn
 
 
 class _Row(dict):
@@ -94,6 +95,7 @@ class _FakeClient:
             "field": "created_at"
         },
         "lastModifiedTime": "1789307370500",
+        "creationTime": "1788249600000",
     })
 
   def get_dataset(self, ref):
@@ -175,6 +177,7 @@ def test_table_summary():
   assert info["location"] == "EU"
   assert info["timePartitioning"] == {"type": "DAY", "field": "created_at"}
   assert info["lastModified"] == "2026-09-13T13:49:30.500000Z"
+  assert info["created"] == "2026-09-01T08:00:00.000000Z"
   assert info["timeTravelHours"] == 96
 
 
@@ -209,6 +212,21 @@ def test_execute_runs_ddl():
   Bq("demo-project", client=client, location="EU").execute(
       "CREATE SNAPSHOT TABLE `demo-project.tmp.s` CLONE `demo-project.d.t`")
   assert client.calls[0][0] == "query"
+
+
+def test_execute_binds_parameters():
+  client = _FakeClient()
+  start = datetime(2026, 9, 13, 13, 49, 20, tzinfo=UTC)
+  Bq("demo-project", client=client, location="EU").execute(
+      "CREATE TABLE `demo-project.tmp.a` AS SELECT * FROM "
+      "APPENDS(TABLE `demo-project.d.t`, @start, NULL)", {"start": start},
+      max_bytes=2_000_000_000)
+  _, _, config, location = client.calls[0]
+  assert location == "EU"
+  assert config.maximum_bytes_billed == 2_000_000_000
+  params = _params_by_name(config)
+  assert params["start"].type_ == "TIMESTAMP"
+  assert params["start"].value == start
 
 
 def test_job_stats_returns_statistics():
@@ -256,3 +274,40 @@ def test_normalize_fqn_accepts_both_separators(fqn, expected):
 def test_normalize_fqn_rejects_anything_but_project_dataset_table(bad):
   with pytest.raises(ValueError):
     normalize_fqn(bad)
+
+
+class _ApiError(Exception):
+  """A google.api_core-style error carrying an HTTP status."""
+
+  def __init__(self, code, message):
+    super().__init__(message)
+    self.code = code
+
+
+@pytest.mark.parametrize("code", [400, 409, 500, 503])
+def test_other_api_errors_become_bq_api_error(code):
+  # R61: `_translated` already knows the status (it just branched on it
+  # for 403/404); BqApiError keeps it instead of dropping it, so a
+  # caller (e.g. plan.py's `_is_already_exists`) can read it back
+  # structurally rather than re-parsing the message.
+  client = _FakeClient()
+  client.raise_on_query = _ApiError(code, f"{code} backend said no")
+  with pytest.raises(
+      BqApiError, match=f"query: {code} backend said no") as info:
+    Bq("demo-project", client=client).query("SELECT 1")
+  assert info.value.status == code
+
+
+def test_google_api_error_without_status_becomes_bq_api_error():
+  client = _FakeClient()
+  client.raise_on_query = RetryError("deadline exceeded", cause=None)
+  with pytest.raises(BqApiError, match="deadline exceeded") as info:
+    Bq("demo-project", client=client).query("SELECT 1")
+  assert info.value.status is None
+
+
+def test_non_api_errors_propagate_untouched():
+  client = _FakeClient()
+  client.raise_on_query = KeyError("programming error")
+  with pytest.raises(KeyError):
+    Bq("demo-project", client=client).query("SELECT 1")

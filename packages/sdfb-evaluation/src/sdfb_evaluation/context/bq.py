@@ -22,14 +22,19 @@ inside the methods that build its config objects.
 Two rules hold for every caller:
 
 - SQL values are bound as query parameters (`@name`), never formatted into
-  the text. `query` infers each parameter's BigQuery type from its Python
-  type and refuses `None` (an untyped NULL).
+  the text. `query` and `execute` infer each parameter's BigQuery type
+  from its Python type and refuse `None` (an untyped NULL). The one
+  exception is `FOR SYSTEM_TIME AS OF`: query parameters are constant
+  expressions and would do, but `context.scope` keeps a `TIMESTAMP`
+  literal re-rendered from a parsed datetime there, for safety.
 - Table identifiers that must be interpolated go through `normalize_fqn` /
   `quote_fqn`, which accept only a strict `project.dataset.table`.
 
-Access errors surface as the builtin `PermissionError` (HTTP 403) and
-missing resources as `LookupError` (HTTP 404), so callers can add their own
-remediation hint without importing `google.api_core`.
+Access errors surface as the builtin `PermissionError` (HTTP 403),
+missing resources as `LookupError` (HTTP 404) and every other API failure
+(a 400 such as an unknown location, a 5xx after the client's own retries)
+as `BqApiError`, so callers can degrade or add a remediation hint without
+importing `google.api_core`.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -43,7 +48,7 @@ from typing import Any, TypeVar
 
 from sdfb_evaluation.canonical import json_safe
 
-__all__ = ["Bq", "normalize_fqn", "quote_fqn"]
+__all__ = ["Bq", "BqApiError", "normalize_fqn", "quote_fqn"]
 
 _PROJECT = r"[a-z][a-z0-9-]{4,28}[a-z0-9]"
 _DATASET = r"[A-Za-z0-9_]{1,1024}"
@@ -56,6 +61,23 @@ _HTTP_FORBIDDEN = 403
 _HTTP_NOT_FOUND = 404
 
 _T = TypeVar("_T")
+
+
+class BqApiError(RuntimeError):
+  """A BigQuery API call failed with neither a 403 nor a 404.
+
+  `status` is the HTTP status `_translated` already computed for this
+  failure (e.g. 409 for a conflict), so a caller that needs to
+  discriminate between different failures carrying the same status (a
+  409 Already Exists vs. a 409 concurrent-job conflict) reads it instead
+  of re-parsing the message text (Ruling R61). `None` when the
+  underlying error carried no numeric status of its own (a
+  `GoogleAPIError` `_translated` still recognises by type).
+  """
+
+  def __init__(self, message: str, *, status: int | None = None) -> None:
+    super().__init__(message)
+    self.status = status
 
 
 def normalize_fqn(fqn: str) -> str:
@@ -82,12 +104,19 @@ def _status(exc: BaseException) -> int | None:
   return int(code) if isinstance(code, int) else None
 
 
+def _is_google_api_error(exc: BaseException) -> bool:
+  from google.api_core import exceptions  # pylint: disable=import-outside-toplevel  # only reached on a failing real call
+
+  return isinstance(exc, exceptions.GoogleAPIError)
+
+
 def _translated(call: Callable[[], _T], what: str) -> _T:
-  """Run a client call, mapping 403/404 onto builtin exception types
-  whose message starts with `what`."""
+  """Run a client call; an API failure becomes `PermissionError` (403),
+  `LookupError` (404) or `BqApiError` (anything else), its message
+  starting with `what`."""
   try:
     return call()
-  except (PermissionError, LookupError):
+  except (PermissionError, LookupError, BqApiError):
     raise
   except Exception as exc:
     status = _status(exc)
@@ -95,6 +124,8 @@ def _translated(call: Callable[[], _T], what: str) -> _T:
       raise PermissionError(f"{what}: {exc}") from exc
     if status == _HTTP_NOT_FOUND:
       raise LookupError(f"{what}: {exc}") from exc
+    if status is not None or _is_google_api_error(exc):
+      raise BqApiError(f"{what}: {exc}", status=status) from exc
     raise
 
 
@@ -211,8 +242,9 @@ class Bq:
 
     Returns:
       `schema` (BigQuery JSON field list), `numRows` (int), `location`,
-      `timePartitioning` (dict or None), `lastModified` (RFC 3339 UTC) and
-      `timeTravelHours` (the dataset's window; 168 when unset).
+      `timePartitioning` (dict or None), `lastModified` and `created`
+      (RFC 3339 UTC) and `timeTravelHours` (the dataset's window; 168
+      when unset).
     """
     name = normalize_fqn(fqn)
     resource = _translated(lambda: self._client.get_table(name),
@@ -233,6 +265,8 @@ class Bq:
             resource.get("timePartitioning"),
         "lastModified":
             _ms_to_iso(resource.get("lastModifiedTime")),
+        "created":
+            _ms_to_iso(resource.get("creationTime")),
         "timeTravelHours":
             int(hours) if hours is not None else _DEFAULT_TIME_TRAVEL_HOURS,
     }
@@ -263,10 +297,27 @@ class Bq:
     _translated(job.result, f"load into {name}")
     return str(job.job_id)
 
-  def execute(self, sql: str) -> None:
-    """Run a DDL statement (snapshot clone, CTAS, view) to completion."""
-    job = _translated(lambda: self._client.query(sql, location=self.location),
-                      "DDL")
+  def execute(self,
+              sql: str,
+              params: Mapping[str, Any] | None = None,
+              *,
+              max_bytes: int | None = None) -> None:
+    """Run a DDL statement (snapshot clone, CTAS, view) to completion.
+
+    `params` are bound exactly as `query` binds them — e.g. the
+    `@start_…`/`@end_…` inside an `APPENDS` CTAS's query. `max_bytes` caps
+    the bytes billed: a CTAS over `APPENDS` or an AS OF difference can
+    scan a lot.
+    """
+    from google.cloud import bigquery  # pylint: disable=import-outside-toplevel  # optional heavy client
+
+    config = bigquery.QueryJobConfig(
+        query_parameters=_query_parameters(params or {}))
+    if max_bytes is not None:
+      config.maximum_bytes_billed = int(max_bytes)
+    job = _translated(
+        lambda: self._client.query(
+            sql, job_config=config, location=self.location), "DDL")
     _translated(job.result, "DDL")
 
   def job_stats(self, job_id: str, location: str) -> dict:

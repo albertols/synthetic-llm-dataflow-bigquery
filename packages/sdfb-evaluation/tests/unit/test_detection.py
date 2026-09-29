@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -298,7 +298,9 @@ def test_delong_rejects_a_single_class() -> None:
 def test_numeric_and_temporal_use_the_source_grid_mid_cdf() -> None:
   grid = np.array([0.0, 10.0, 20.0, 20.0, 40.0])
   t0 = datetime(2024, 1, 1, tzinfo=UTC)
-  t_grid = np.array([t0.timestamp() + 86_400.0 * i for i in range(5)])
+  # Temporal grids are UNIX microseconds, like the plan's (Ruling R54).
+  t0_us = (t0 - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1)
+  t_grid = np.array([t0_us + 86_400_000_000.0 * i for i in range(5)])
   src: list[dict[str, Any]] = [{
       "v": 0,
       "t": t0

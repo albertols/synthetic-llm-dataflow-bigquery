@@ -211,14 +211,19 @@ def writes_by_beam_job(
   return sorted(writes, key=lambda w: (w.end, w.job_id))
 
 
-def foreign_writes(bq: Any, *, location: str, table: str,
+def foreign_writes(bq: Any,
+                   *,
+                   location: str,
+                   table: str,
                    window: tuple[str | None, str | None],
-                   exclude_job: str) -> list[JobWrite]:
+                   exclude_job: str,
+                   max_bytes: int | None = None) -> list[JobWrite]:
   """Writes into `table` committed inside `window` by anything but the
   Dataflow job `exclude_job` (any job type, labelled or not).
 
   An open window (`end` None) runs to now. `output_rows` is not read
   (`None`): the check is whether anyone else wrote, not how much.
+  `max_bytes` caps the bytes billed (the evaluation's budget).
 
   Raises:
     ValueError: the window has no start, or `table` is not a strict
@@ -235,9 +240,11 @@ def foreign_writes(bq: Any, *, location: str, table: str,
       "start": parse_timestamp(window[0]),
       "exclude_job": exclude_job,
   }
+  created_before = ""
   if window[1]:
     params["end"] = parse_timestamp(window[1])
     end = "@end"
+    created_before = "  AND creation_time <= @end\n"
   else:
     end = "CURRENT_TIMESTAMP()"
   sql = (f"SELECT {_COLUMNS}\n"
@@ -247,12 +254,13 @@ def foreign_writes(bq: Any, *, location: str, table: str,
          "  AND destination_table.dataset_id = @dataset_id\n"
          "  AND destination_table.table_id = @table_id\n"
          "  AND creation_time >= TIMESTAMP_SUB(@start, INTERVAL 1 DAY)\n"
+         f"{created_before}"
          f"  AND end_time BETWEEN @start AND {end}\n"
          "  AND IFNULL((SELECT l.value FROM UNNEST(labels) AS l\n"
          "              WHERE l.key = 'beam_job_id'), '') != @exclude_job\n"
          "ORDER BY end_time, job_id")
   try:
-    rows = bq.query(sql, params)
+    rows = bq.query(sql, params, max_bytes=max_bytes)
   except PermissionError as exc:
     raise _denied(
         exc, f"listing the writers of {table} "

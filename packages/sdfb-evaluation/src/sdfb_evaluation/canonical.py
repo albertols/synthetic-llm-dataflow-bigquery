@@ -47,7 +47,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
@@ -61,6 +61,11 @@ import numpy as np
 NULL_CODE = 0x9E3779B97F4A7C15
 
 _SIG_DIGITS = 15
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_UNIX_EPOCH_DATE = date(1970, 1, 1)
+_ONE_MICROSECOND = timedelta(microseconds=1)
+_MICROS_PER_SECOND = 1_000_000
+_MICROS_PER_DAY = 86_400 * _MICROS_PER_SECOND
 
 
 def canonical_value(  # noqa: PLR0911 — type dispatch, clearer flat than nested
@@ -157,6 +162,41 @@ def hash64(column: str, value: Any) -> int:
   return int.from_bytes(digest, "big")
 
 
+def hashed_label(code: int, *, key: bytes) -> str:
+  """The D6 hashed label `h:<8 hex>` of a `hash64` code, KEYED (Ruling
+  R64): `"h:" + blake2b(code as 8 big-endian bytes, key=key,
+  digest_size=4)`.
+
+  What a profile shows instead of a value the literal policy keeps out of
+  it. A plain hash of a low-entropy value is not anonymisation — anyone can
+  enumerate a small domain (a status list, ages 0..120) and match the
+  hashes — so the label is a keyed hash and means nothing without `key`.
+  The key has two modes (`beam.label_key.LabelKey` resolves it ON A
+  WORKER, Ruling R68). It is never written to BigQuery, a log, a payload
+  or the job graph; it lives in worker memory:
+
+      operator    `--label_key_uri` (Secret Manager or GCS, the operator's
+                  own secret): stable across runs, so labels line up run to
+                  run and the operator can recompute a label to investigate
+      ephemeral   a fresh `os.urandom(32)` per evaluation, made on a worker
+                  and dropped with it: labels line up source and synthetic
+                  within the run only
+
+  The registry records only which mode ran (`label_key_mode`).
+
+  Raises:
+    ValueError: `key` is empty or not bytes (an unkeyed label is exactly
+      the reversible hash this function exists to avoid).
+  """
+  if not isinstance(key, bytes) or not key:
+    raise ValueError("hashed_label needs a non-empty bytes key (Ruling R64)")
+  digest = hashlib.blake2b(
+      (int(code) & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big"),
+      key=key,
+      digest_size=4).hexdigest()
+  return f"h:{digest}"
+
+
 def hash_matrix(rows: Sequence[Mapping[str, Any]],
                 columns: Sequence[str]) -> np.ndarray:
   """The `(len(rows), len(columns))` uint64 matrix of `hash64` per cell."""
@@ -215,18 +255,29 @@ def loo_hashes(h: np.ndarray, a: np.ndarray, total: np.ndarray) -> np.ndarray:
 def numeric_value(v: Any) -> float | None:
   """`v` as a float for numeric statistics, or `None` if it has no numeric reading.
 
-  `Decimal`/`int`/`float`/`bool` convert directly; `datetime`/`date` convert
-  to epoch seconds (a naive `datetime` is treated as UTC, matching
-  `canonical_value`). Everything else (`str`, `bytes`, nested structures,
-  `time`) is not a scalar numeric value, so it returns `None`.
+  `Decimal`/`int`/`float`/`bool` convert directly. Temporal values land on
+  the planning scale (Ruling R54), the one unit of every grid, atom, mean
+  and encoded value in the evaluator:
+
+      TIMESTAMP, DATETIME   UNIX_MICROS (a naive `datetime` is UTC, as in
+                            `canonical_value` and the planning SQL)
+      DATE                  UNIX_MICROS of its UTC midnight
+      TIME                  microseconds since midnight
+
+  computed in exact integer microseconds, then made a float (exact within
+  ±2**53 us, about the years 1685-2255). Everything else (`str`, `bytes`,
+  nested structures) is not a scalar numeric value, so it returns `None`.
   """
   if isinstance(v, (bool, int, float, Decimal)):
     return float(v)
   if isinstance(v, datetime):
     aware = v if v.tzinfo is not None else v.replace(tzinfo=UTC)
-    return aware.timestamp()
+    return float((aware - _UNIX_EPOCH) // _ONE_MICROSECOND)
   if isinstance(v, date):
-    return datetime(v.year, v.month, v.day, tzinfo=UTC).timestamp()
+    return float((v - _UNIX_EPOCH_DATE).days * _MICROS_PER_DAY)
+  if isinstance(v, time):
+    seconds = (v.hour * 60 + v.minute) * 60 + v.second
+    return float(seconds * _MICROS_PER_SECOND + v.microsecond)
   return None
 
 

@@ -17,8 +17,8 @@ Four tables — `evaluation_data_history` (one append-only event row per
 RUNNING/FINAL transition, D7), `evaluation_metrics` (tidy per-metric rows,
 with a `baseline_value` floor per D4 and a `noise_floor` per D5),
 `evaluation_profiles` (histograms/quantiles/etc., literal only under the D6
-policy) and `evaluation_row_flags` (per-row privacy flags, salted source
-keys by default) — plus the two convenience views layered on the registry.
+policy) and `evaluation_row_flags` (per-row privacy flags, keyed source-key
+hashes) — plus the two convenience views layered on the registry.
 
 This is a TypeScript GUI's data contract: every field carries a
 `description`, field names are frozen exactly as declared here, and the

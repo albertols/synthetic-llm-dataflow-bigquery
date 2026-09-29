@@ -36,7 +36,7 @@ References:
     CDF-integral identity for W1 that `_atoms_w1` applies to fan-out atoms).
   Newcombe, R. (1998), "Interval Estimation for the Difference Between
     Independent Proportions: Comparison of Eleven Methods" (the signed
-    interval `_folded_abs_interval` folds into an unsigned one).
+    interval `noise.folded_abs_interval` folds into an unsigned one).
 """
 
 from __future__ import annotations
@@ -48,7 +48,11 @@ from typing import Any
 import numpy as np
 
 from sdfb_evaluation.stats import distances
-from sdfb_evaluation.stats.noise import newcombe_diff_interval, wilson_interval
+from sdfb_evaluation.stats.noise import (
+    folded_abs_interval,
+    newcombe_diff_interval,
+    wilson_interval,
+)
 
 
 def _validate_cap(cap: int) -> None:
@@ -142,20 +146,9 @@ def _atoms_w1(atoms_src: dict[float, float], atoms_syn: dict[float,
   return float(np.sum(np.abs(f_p - f_q) * widths))
 
 
-def _folded_abs_interval(lo: float, hi: float) -> tuple[float, float]:
-  """The interval for `|X|` implied by a two-sided interval `(lo, hi)` for a
-  signed quantity `X` that the interval always contains.
-
-  If `(lo, hi)` straddles 0, `X` could plausibly be 0 itself, so `|X|`
-  ranges from 0 up to `max(|lo|, |hi|)`. Otherwise both endpoints share
-  `X`'s sign and `|X|` is monotone in `X` there, so the folded interval is
-  `(min(|lo|, |hi|), max(|lo|, |hi|))`. Used to turn Newcombe's (1998)
-  signed interval for `z_syn - z_src` into a CI for the catalogued unsigned
-  `zero_child_share_delta`.
-  """
-  if lo <= 0.0 <= hi:
-    return (0.0, max(abs(lo), abs(hi)))
-  return (min(abs(lo), abs(hi)), max(abs(lo), abs(hi)))
+# The fold moved to `stats.noise` (Ruling R63); the old private name stays
+# importable for compatibility.
+_folded_abs_interval = folded_abs_interval
 
 
 def _validate_histogram_counts(counts: np.ndarray, name: str) -> None:
@@ -268,7 +261,7 @@ def fanout_metrics(
     - `zero_child_share_source`/`zero_child_share_synthetic`: `h_src[0] /
       sum(h_src)` and its synthetic twin.
     - `zero_child_share_delta`: `relationship.zero_child_share_delta`, plus
-      `zero_child_share_delta_ci_low`/`_ci_high` (`_folded_abs_interval`
+      `zero_child_share_delta_ci_low`/`_ci_high` (`folded_abs_interval`
       over `newcombe_diff_interval`).
     - `cardinality_adherence`: `relationship.cardinality_adherence` — the
       share of synthetic parents with a fan-out in `[min_src, max_src]`,
@@ -341,7 +334,7 @@ def fanout_metrics(
   zero_delta = abs(z_syn - z_src)
   ci_lo, ci_hi = newcombe_diff_interval(
       int(h_syn_arr[0]), int(n_syn), int(h_src_arr[0]), int(n_src))
-  ci_lo, ci_hi = _folded_abs_interval(ci_lo, ci_hi)
+  ci_lo, ci_hi = folded_abs_interval(ci_lo, ci_hi)
 
   exact = max_src < cap
   lo_idx = max(0, min_src)

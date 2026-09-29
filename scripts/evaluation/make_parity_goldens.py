@@ -17,9 +17,10 @@ relationship-model and reference-sample mirrors (D2).
 
 `packages/sdfb-evaluation/` cannot import `sdfb_core`/`sdfb_beam` (the
 package must stand alone), so it carries small hand-written mirrors of
-`sdfb_core.contracts.relationships` and the reference-sample helpers in
-`sdfb_beam.io`. This script runs in the ROOT environment (it imports both
-originals) and writes one fixture both sides pin against:
+`sdfb_core.contracts.relationships`, the reference-sample helpers in
+`sdfb_beam.io` and the row-doc prefix size in `sdfb_core.rag.chunking`.
+This script runs in the ROOT environment (it imports the originals) and
+writes one fixture both sides pin against:
 `packages/sdfb-evaluation/tests/fixtures/parity/goldens.json`. A root test
 (`packages/sdfb-tests/tests/unit/evaluation_parity/test_goldens.py`)
 recomputes the same values from the originals and an eval test
@@ -56,6 +57,7 @@ from sdfb_core.contracts.relationships import (
     RelationshipError,
     RelationshipRegistry,
 )
+from sdfb_core.rag.chunking import MAX_ROW_DOC_ROWS
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MODEL_FILES = (
@@ -73,7 +75,7 @@ _OUTPUT = (
 # on both P (via P's other column PG2) and G (via G2) — the model asserts
 # CG == P.PG2 == G.G2, so P's edge to G must be widened to carry
 # (PG2 -> G2) too. None of the three committed sample models happens to
-# exercise this (review finding, Task 16 round 1).
+# exercise this path, so without this model the widening would go unpinned.
 _INVENTED_WIDENING_SOURCE = "<invented>/widening.yaml"
 _INVENTED_WIDENING_YAML = ("model: invented_widening\n"
                            "tables:\n"
@@ -96,7 +98,7 @@ _INVENTED_WIDENING_YAML = ("model: invented_widening\n"
                            "        ref: G\n"
                            "        ref_cols: [G2]\n")
 
-# ~20 invented YAML texts (or source SETS, for the cross-file checks)
+# 25 invented YAML texts (or source SETS, for the cross-file checks)
 # pinning `parse_model`/`load_models` strictness against the originals'
 # pydantic models and `RelationshipRegistry.from_sources` (R47).
 _PARSE_CASES: tuple[tuple[str, list[tuple[str, str]]], ...] = (
@@ -368,6 +370,9 @@ def build_goldens() -> dict[str, Any]:
       "parse_verdicts": _parse_verdict_goldens(),
       "reference_digest": _reference_digest_goldens(),
       "reference_sql": _reference_sql_goldens(),
+      # D3: E = the first MAX_ROW_DOC_ROWS rows of the reference order —
+      # the prompt-exposed row docs the B.1 engine reads back.
+      "exposure_rows": MAX_ROW_DOC_ROWS,
   }
 
 

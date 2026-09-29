@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from sdfb_evaluation.stats import noise
+from sdfb_evaluation.stats import noise, relational
 
 
 def test_dkw_10k_is_1_36_percent():
@@ -195,3 +195,100 @@ def test_noise_floor_fisher_z_needs_more_than_three_samples():
 def test_noise_floor_unknown_method_raises():
   with pytest.raises(ValueError, match="unknown noise_floor method"):
     noise.noise_floor("bootstrap", n=10, m=10)
+
+
+@pytest.mark.parametrize(("lo", "hi", "folded"), [
+    (-0.1, 0.3, (0.0, 0.3)),
+    (0.2, 0.5, (0.2, 0.5)),
+    (-0.5, -0.2, (0.2, 0.5)),
+    (-0.4, 0.1, (0.0, 0.4)),
+])
+def test_folded_abs_interval(lo, hi, folded):
+  assert noise.folded_abs_interval(lo, hi) == folded
+
+
+def test_folded_abs_interval_is_still_importable_from_relational():
+  assert relational._folded_abs_interval is noise.folded_abs_interval  # pylint: disable=protected-access  # the compatibility alias (R63)
+
+
+def _share(head_y, head_x, ys, xs):
+  ys, xs = np.asarray(ys, dtype=float), np.asarray(xs, dtype=float)
+  return noise.StratifiedShare(head_y, head_x, ys.sum(), xs.sum(),
+                               (ys * ys).sum(), (ys * xs).sum(),
+                               (xs * xs).sum(), float((xs > 0).sum()))
+
+
+def test_stratified_ratio_interval_degenerate_cases():
+  assert noise.stratified_ratio_interval(_share(0, 0, [], []), 0.5) is None
+  # an empty tail: the head is the whole column, known exactly
+  head_only = _share(3.0, 10.0, [], [])
+  assert noise.stratified_ratio_interval(
+      head_only, 0.5, tail_total=0.0) == (0.3, 0.3, 0.3)
+  # a tail with rows but none sampled: every tail rate is possible, the
+  # point takes the head's rate
+  ratio, lo, hi = noise.stratified_ratio_interval(
+      head_only, 0.5, tail_total=10.0)
+  assert (ratio, lo, hi) == pytest.approx((0.3, 3 / 20, 13 / 20))
+
+
+def test_stratified_ratio_interval_is_tail_only_korn_graubard():
+  """R70: the interval is built for the tail ratio q̂ alone (linearised
+  variance with the (1 - rate) factor, n* capped at the Kish cluster
+  count, K&G's t degrees-of-freedom factor, Clopper-Pearson), then mapped
+  through (Y_head + X_t q) / (X_head + X_t), the head a known constant."""
+  rate, head_y, head_x, tail_total = 0.2, 40.0, 400.0, 1000.0
+  ys = [40.0, 0.0, 0.0, 10.0, 0.0, 0.0]
+  xs = [40.0, 40.0, 20.0, 10.0, 60.0, 30.0]
+  ratio, lo, hi = noise.stratified_ratio_interval(
+      _share(head_y, head_x, ys, xs), rate, tail_total=tail_total)
+  y, x = np.array(ys), np.array(xs)
+  q = y.sum() / x.sum()
+  s = len(xs)
+  variance = (1 - rate) * ((y - q * x)**2).sum() / x.sum()**2 * s / (s - 1)
+  kish = x.sum()**2 / (x * x).sum()
+  n_star = min(kish, q * (1 - q) / variance)
+  n_star *= (stats.t.ppf(0.975, x.sum() - 1) / stats.t.ppf(0.975, s - 1))**2
+  q_lo = stats.beta.ppf(0.025, q * n_star, n_star - q * n_star + 1)
+  q_hi = stats.beta.ppf(0.975, q * n_star + 1, n_star - q * n_star)
+
+  def mapped(value):
+    return (head_y + tail_total * value) / (head_x + tail_total)
+
+  assert ratio == pytest.approx(mapped(q))
+  assert lo == pytest.approx(mapped(q_lo))
+  assert hi == pytest.approx(mapped(q_hi))
+  # no tail_total: the tail's Horvitz-Thompson total x_t / rate
+  ht = noise.stratified_ratio_interval(_share(head_y, head_x, ys, xs), rate)
+  assert ht[0] == pytest.approx(
+      (head_y + x.sum() / rate * q) / (head_x + x.sum() / rate))
+
+
+def test_stratified_ratio_interval_bounds_a_rate_with_no_sampled_copy():
+  """No copy among the sampled tail clusters: n* is the Kish cluster
+  count (times the df factor), so the upper bound still bounds the rate;
+  the lower bound is the head's own copies over the column."""
+  xs = [40.0] * 5
+  ratio, lo, hi = noise.stratified_ratio_interval(
+      _share(80.0, 1000.0, [0.0] * 5, xs), 0.02, tail_total=10_000.0)
+  n_star = 5 * (stats.t.ppf(0.975, 199) / stats.t.ppf(0.975, 4))**2
+  q_hi = 1 - 0.025**(1 / n_star)
+  assert ratio == pytest.approx(lo) == pytest.approx(80 / 11_000)
+  assert hi == pytest.approx((80 + 10_000 * q_hi) / 11_000)
+
+
+def test_stratified_ratio_interval_widens_with_cluster_size():
+  """The same share from the same number of rows: heavy clusters (40 rows
+  a value) carry far more sampling variance than singletons."""
+  rate = 0.2
+
+  def interval(size):
+    values = 400 // size
+    copied = values // 5
+    ys = [size] * copied + [0] * (values - copied)
+    xs = [size] * values
+    return noise.stratified_ratio_interval(
+        _share(0.0, 0.0, ys, xs), rate, tail_total=400 / rate)
+
+  singletons, clusters = interval(1), interval(40)
+  assert singletons[0] == clusters[0] == pytest.approx(0.2)
+  assert clusters[2] - clusters[1] > 3 * (singletons[2] - singletons[1])

@@ -19,10 +19,12 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import base64
+import hashlib
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal, localcontext
 
 import numpy as np
+import pytest
 
 from sdfb_evaluation.canonical import (
     NULL_CODE,
@@ -30,6 +32,7 @@ from sdfb_evaluation.canonical import (
     canonical_value,
     hash64,
     hash_matrix,
+    hashed_label,
     json_safe,
     linear_hash,
     loo_hashes,
@@ -294,20 +297,39 @@ def test_numeric_value_scalars():
   assert numeric_value(Decimal("4.25")) == 4.25
 
 
-def test_numeric_value_temporal_is_epoch_seconds():
+def test_numeric_value_temporal_is_unix_micros():
+  # Ruling R54: the planning scale — UNIX_MICROS, DATE/DATETIME read as UTC.
   naive = datetime(1970, 1, 1)
   aware = datetime(1970, 1, 1, tzinfo=UTC)
   assert numeric_value(naive) == 0.0
   assert numeric_value(aware) == 0.0
   assert numeric_value(date(1970, 1, 1)) == 0.0
-  assert numeric_value(date(1970, 1, 2)) == 86400.0
+  assert numeric_value(date(1970, 1, 2)) == 86_400_000_000.0
+  assert numeric_value(date(1969, 12, 31)) == -86_400_000_000.0
+  assert numeric_value(datetime(1970, 1, 1, 0, 0, 1, 7)) == 1_000_007.0
+  plus_one = timezone(timedelta(hours=1))
+  assert numeric_value(datetime(1970, 1, 1, 1, tzinfo=plus_one)) == 0.0
+
+
+def test_numeric_value_micros_are_exact_integers():
+  moment = datetime(2026, 1, 2, 3, 4, 5, 123_457, tzinfo=UTC)
+  expected = (moment -
+              datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1)
+  assert numeric_value(moment) == float(expected)
+  assert int(numeric_value(moment) or 0) == expected
+
+
+def test_numeric_value_time_is_micros_since_midnight():
+  # BigQuery's TIME_DIFF(x, TIME '00:00:00', MICROSECOND), as planned.
+  assert numeric_value(time(0, 0)) == 0.0
+  assert numeric_value(time(1, 2, 3)) == 3_723_000_000.0
+  assert numeric_value(time(23, 59, 59, 999_999)) == 86_399_999_999.0
 
 
 def test_numeric_value_non_numeric_is_none():
   assert numeric_value("x") is None
   assert numeric_value(None) is None
   assert numeric_value(b"x") is None
-  assert numeric_value(time(1, 2, 3)) is None
   assert numeric_value([1, 2]) is None
 
 
@@ -332,3 +354,31 @@ def test_json_safe_leaves_other_types_unchanged():
   assert json_safe(None) is None
   assert json_safe("text") == "text"
   assert json_safe(7) == 7
+
+
+def test_hashed_label_is_keyed_blake2b_of_the_code():
+  code = hash64("status", "Complete")
+  key = b"operator-secret"
+  label = hashed_label(code, key=key)
+  expected = hashlib.blake2b(
+      code.to_bytes(8, "big"), key=key, digest_size=4).hexdigest()
+  assert label == f"h:{expected}"
+  assert len(label) == 10
+
+
+def test_hashed_label_differs_by_key_and_resists_enumeration():
+  statuses = ("Complete", "Shipped", "Processing", "Cancelled", "Returned")
+  codes = [hash64("status", s) for s in statuses]
+  first = [hashed_label(c, key=b"key-one") for c in codes]
+  second = [hashed_label(c, key=b"key-two") for c in codes]
+  assert all(a != b for a, b in zip(first, second, strict=True))
+  # the old unkeyed label (the code's top 32 bits) matches nothing
+  unkeyed = {f"h:{c >> 32:08x}" for c in codes}
+  assert not unkeyed & set(first)
+  assert "key-one" not in "".join(first)
+
+
+def test_hashed_label_refuses_an_empty_or_text_key():
+  for bad in (b"", "text"):
+    with pytest.raises(ValueError, match="R64"):
+      hashed_label(1, key=bad)  # type: ignore[arg-type]

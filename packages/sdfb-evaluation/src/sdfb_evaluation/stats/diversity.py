@@ -477,7 +477,9 @@ def summarize(
       zero, so no value describes this case.
     - source not constant, synthetic constant: `0.0` — the synthetic side
       collapsed to no diversity at all.
-    - neither constant: the plain ratio `entropy_syn_m / entropy_src_m`.
+    - neither constant: the plain ratio `entropy_syn_m / entropy_src_m`,
+      unless the source entropy is not positive (only an estimated view
+      can get there, Ruling R67): `None` with reason "source entropy is 0".
   """
   entropy_src_m = entropy_bits(acc.n_src_m, acc.clc_src_m, acc.k_src_m)
   entropy_syn_m = entropy_bits(acc.n_syn_m, acc.clc_syn_m, acc.k_syn_m)
@@ -494,6 +496,11 @@ def summarize(
     entropy_ratio_reason = "source constant"
   elif syn_constant:
     entropy_ratio = 0.0
+  elif entropy_src_m <= 0.0:
+    # k >= 2 with a zero entropy only arises from a view whose counts are
+    # estimates (the census's value-sampled Horvitz-Thompson view, Ruling
+    # R67): never divide by it.
+    entropy_ratio_reason = "source entropy is 0"
   else:
     entropy_ratio = entropy_syn_m / entropy_src_m
 

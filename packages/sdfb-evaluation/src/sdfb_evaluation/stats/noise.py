@@ -27,6 +27,8 @@ producers call `wilson_interval`/`newcombe_diff_interval`/`rate_ratio`
 directly and the dispatcher returns `None` for them; `delong` (the AUC
 noise floor) is implemented in `stats/detection.py` (a later task), and the
 dispatcher returns `None` for it here too, pending that.
+`folded_abs_interval` turns a signed difference interval into one for the
+catalogue's unsigned deltas.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -35,9 +37,10 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from scipy.stats import beta
+from scipy.stats import t as student_t
 
 # noise_floor methods that return an interval rather than a scalar floor
 # (wilson, newcombe, rate_ratio) or that are not implemented in this module
@@ -72,14 +75,17 @@ def ks_critical(n: int, m: int, alpha: float = 0.05) -> float:
   return math.sqrt(-math.log(alpha / 2.0) / 2.0) * math.sqrt((n + m) / (n * m))
 
 
-def wilson_interval(k: int, n: int, z: float = 1.959964) -> tuple[float, float]:
+def wilson_interval(k: float,
+                    n: float,
+                    z: float = 1.959964) -> tuple[float, float]:
   """The Wilson score interval for a binomial proportion `k / n` (Wilson, 1927).
 
   Bounded to `[0, 1]` by construction, unlike the Wald interval, which can
   cross either bound near `p = 0` or `p = 1`. `k = 0` and `k = n` return the
   exact bounds `0.0`/`1.0` (rather than a value merely close to them, which
   the general formula's floating-point evaluation would not guarantee), so
-  a fully degenerate count reads as a fully degenerate interval.
+  a fully degenerate count reads as a fully degenerate interval. `k` and
+  `n` may be real-valued: an effective count (Korn & Graubard, 1998).
   """
   if n <= 0:
     return (0.0, 1.0)
@@ -94,10 +100,10 @@ def wilson_interval(k: int, n: int, z: float = 1.959964) -> tuple[float, float]:
 
 
 def newcombe_diff_interval(
-    k1: int,
-    n1: int,
-    k2: int,
-    n2: int,
+    k1: float,
+    n1: float,
+    k2: float,
+    n2: float,
     z: float = 1.959964,
 ) -> tuple[float, float]:
   """The interval for `p1 - p2` from two independent proportions.
@@ -117,6 +123,116 @@ def newcombe_diff_interval(
   lo = diff - math.sqrt((p1 - lo1)**2 + (hi2 - p2)**2)
   hi = diff + math.sqrt((hi1 - p1)**2 + (p2 - lo2)**2)
   return (lo, hi)
+
+
+def folded_abs_interval(lo: float, hi: float) -> tuple[float, float]:
+  """The interval for `|X|` implied by a two-sided interval `(lo, hi)` for a
+  signed quantity `X` that the interval always contains.
+
+  If `(lo, hi)` straddles 0, `X` could plausibly be 0 itself, so `|X|`
+  ranges from 0 up to `max(|lo|, |hi|)`. Otherwise both endpoints share
+  `X`'s sign and `|X|` is monotone in `X` there, so the folded interval is
+  `(min(|lo|, |hi|), max(|lo|, |hi|))`. Turns Newcombe's (1998) signed
+  interval for a difference of shares into a CI for the catalogue's
+  unsigned deltas (`*_rate_delta`, `zero_child_share_delta`).
+  """
+  if lo <= 0.0 <= hi:
+    return (0.0, max(abs(lo), abs(hi)))
+  return (min(abs(lo), abs(hi)), max(abs(lo), abs(hi)))
+
+
+class StratifiedShare(NamedTuple):
+  """The additive sums a stratified value sample keeps for one share
+  `R = Y / X` (`stratified_ratio_interval`): plain sums of y and x over
+  the certainty stratum (the head) and over the SAMPLED tail values,
+  the tail's Σy², Σxy, Σx², and how many sampled tail values have
+  x > 0 (the sampled clusters)."""
+  head_y: float
+  head_x: float
+  tail_y: float
+  tail_x: float
+  tail_yy: float
+  tail_xy: float
+  tail_xx: float
+  tail_clusters: float
+
+
+def stratified_ratio_interval(
+    share: StratifiedShare,
+    rate: float,
+    tail_total: float | None = None,
+    alpha: float = 0.05) -> tuple[float, float, float] | None:
+  """A share `R = Y / X` from a stratified value sample, with its
+  cluster-robust interval: `(ratio, lo, hi)`, or None when there is no
+  denominator.
+
+  Design: the VALUES are the sampling units (every row of a value moves
+  with it, so rows are clustered). The head is a certainty stratum —
+  known exactly, no sampling variance; the tail is Poisson-sampled, each
+  value independently with probability `rate`. With X_t the tail's x
+  total — `tail_total` when the caller counted it exactly (the census
+  does: every row passes through it before the value sample), else its
+  Horvitz-Thompson estimate x_t / rate (Horvitz & Thompson, 1952) — and
+  q̂ = y_t / x_t the tail's sample ratio, the estimate is
+
+      R̂ = (Y_head + X_t q̂) / (X_head + X_t).
+
+  With an exact X_t only q̂ carries sampling noise, so the interval is
+  built for q̂ alone and mapped through that monotone function, the head
+  added back as a known constant (an HT X_t is treated as known too,
+  which undercovers when the head holds most of Y). For q̂: the
+  linearised variance of a ratio of sample sums under Poisson sampling
+  (Woodruff, 1971; Särndal, Swensson & Wretman, 1992),
+
+      V̂(q̂) = (1 - rate) · Σ_tail e² / x_t² · s / (s - 1),
+      e = y - q̂ x over the s sampled tail clusters,
+
+  and Korn & Graubard's (1998) Clopper-Pearson interval on the effective
+  sample size n* = q̂ (1 - q̂) / V̂, with R̂ n* events. n* is capped at the
+  tail's effective cluster count (Σx)² / Σx² (Kish), which is also n*
+  when q̂ is 0 or 1 or V̂ is 0 — so a sample without a copy still bounds
+  the rate by how many clusters it saw — and is scaled by K&G's degrees-
+  of-freedom factor [t_{n-1} / t_{s-1}]² (n = the tail's rows), which
+  widens the interval when few clusters were sampled. With no sampled
+  tail value q is unknown: the point takes the head's ratio and the
+  interval spans every tail rate, q in [0, 1] (a point when the tail is
+  empty).
+  """
+  x_t = share.tail_x
+  if tail_total is None:
+    tail_total = x_t / rate if x_t > 0 else 0.0
+  tail_total = max(0.0, tail_total)
+  den = share.head_x + tail_total
+  if den <= 0.0:
+    return None
+
+  def combined(q: float) -> float:
+    return (share.head_y + tail_total * q) / den
+
+  if x_t <= 0.0:
+    proxy = share.head_y / share.head_x if share.head_x > 0 else 0.0
+    return (combined(proxy), combined(0.0), combined(1.0))
+  q = min(1.0, max(0.0, share.tail_y / x_t))
+  clusters = max(share.tail_clusters, 1.0)
+  squares = max(0.0,
+                share.tail_yy - 2.0 * q * share.tail_xy + q * q * share.tail_xx)
+  correction = clusters / (clusters - 1.0) if clusters > 1.0 else 1.0
+  variance = (1.0 - rate) * squares / (x_t * x_t) * correction
+  kish = x_t * x_t / share.tail_xx if share.tail_xx > 0 else 1.0
+  n_star = kish
+  if 0.0 < q < 1.0 and variance > 0.0:
+    n_star = min(kish, q * (1.0 - q) / variance)
+  upper = 1.0 - alpha / 2.0
+  n_star *= (float(student_t.ppf(upper, max(x_t - 1.0, 1.0))) /
+             float(student_t.ppf(upper, max(clusters - 1.0, 1.0))))**2
+  events = q * n_star
+  lo = (
+      float(beta.ppf(alpha / 2.0, events, n_star - events +
+                     1.0)) if events > 0.0 else 0.0)
+  hi = (
+      float(beta.ppf(upper, events + 1.0, n_star -
+                     events)) if events < n_star else 1.0)
+  return (combined(q), combined(lo), combined(hi))
 
 
 def tvd_null_expectation(p: Sequence[float], n: int, m: int) -> float:

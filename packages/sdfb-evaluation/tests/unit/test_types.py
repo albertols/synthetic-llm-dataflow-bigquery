@@ -22,7 +22,17 @@ import dataclasses
 
 import pytest
 
-from sdfb_evaluation.types import ColumnKind, Method, MetricValue, Side, Status
+from sdfb_evaluation import schemas
+from sdfb_evaluation.types import (
+    PROFILE_KINDS,
+    PROFILE_SIDES,
+    ColumnKind,
+    Method,
+    MetricValue,
+    ProfileValue,
+    Side,
+    Status,
+)
 
 
 def test_column_kind_values():
@@ -97,3 +107,30 @@ def test_metric_value_not_evaluated_forwards_scope_kwargs():
   assert metric.column == "amount"
   assert metric.n_source == 3
   assert metric.value is None
+
+
+def _described(field: str) -> set[str]:
+  """The ` | `-separated vocabulary in a profiles schema description."""
+  spec = next(
+      f for f in schemas.load_schema("evaluation_profiles")
+      if f["name"] == field)
+  return {word.strip() for word in spec["description"].split("|")}
+
+
+def test_profile_vocabularies_match_the_profiles_schema():
+  assert set(PROFILE_KINDS) == _described("profile_kind")
+  assert set(PROFILE_SIDES) == _described("side")
+
+
+def test_profile_value_validates_its_kind_and_side():
+  profile = ProfileValue(
+      table="orders",
+      profile_kind="histogram",
+      side="source",
+      payload={"edges": []},
+      column="amount")
+  assert (profile.edge, profile.n, profile.truncated) == (None, None, None)
+  with pytest.raises(ValueError, match="profile_kind"):
+    ProfileValue(table="t", profile_kind="nope", side="source", payload={})
+  with pytest.raises(ValueError, match="side"):
+    ProfileValue(table="t", profile_kind="moments", side="nowhere", payload={})
