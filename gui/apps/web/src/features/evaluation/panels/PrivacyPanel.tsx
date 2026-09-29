@@ -28,7 +28,7 @@ import { metricShort } from "../lib/catalogue";
 import { pairedHistogram } from "../lib/charts";
 import { fmtMetric, fmtShare, fmtSig, scopeLabel } from "../lib/format";
 import { LIFT_METRICS, PRIVACY_RATE_METRICS, statusRank } from "../lib/model";
-import { downgradedFrom, readingOf, reasonOf } from "../lib/reading";
+import { downgradedFrom, readingOf, reasonOf, undefinedValueText } from "../lib/reading";
 import { useChartTokens } from "../lib/tokens";
 
 const LOG_TICKS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500];
@@ -45,8 +45,8 @@ export function liftRows(metrics: readonly MetricRow[], table?: string): Interva
           ? ` · m_R/m_H ${formatCount(detail.copies_r)}/${formatCount(detail.copies_h)}`
           : "";
       const skipped = m.status === "not_evaluated";
-      // No copies on either side: the ratio is undefined but the gate still reads ci_low (Ruling R38).
-      const point = m.value === null ? "undefined" : `${fmtSig(m.value)}×`;
+      // A NULL value — undefined (no copies) or infinite (none in the holdout) — still gates on ci_low (Ruling R38).
+      const point = m.value === null ? undefinedValueText({ ciLow: m.ci_low }).split(":")[0]! : `${fmtSig(m.value)}×`;
       const text = skipped
         ? `not evaluated — ${reasonOf(m) ?? "no reason recorded"}`
         : `${point} · ci_low ${fmtSig(m.ci_low)}${m.ci_high === null && m.ci_low !== null ? " · open above" : ""}${counts}`;

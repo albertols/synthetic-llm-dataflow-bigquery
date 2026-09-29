@@ -19,7 +19,7 @@ import { cn } from "@/lib/cn";
 import { FAMILIES, FAMILY_LABEL, metricConcept, metricShort, metricTitle } from "../lib/catalogue";
 import { fmtMetric } from "../lib/format";
 import { countsPhrase, type ColumnSummary, type HeatmapModel } from "../lib/model";
-import { isDocumentedEdge } from "../lib/reading";
+import { downgradedFrom, downgradeLabel, isDocumentedEdge } from "../lib/reading";
 
 export const HEATMAP_PAGE = 50;
 
@@ -70,6 +70,7 @@ const HeatRow = memo(function HeatRow({
           );
         }
         const status = isDocumentedEdge(row) ? "info" : row.status;
+        const from = downgradedFrom(row);
         const cell = CELL[status] ?? { glyph: "?", word: status, className: "" };
         const value =
           row.value !== null
@@ -81,7 +82,7 @@ const HeatRow = memo(function HeatRow({
           <td
             key={id}
             data-status={status}
-            title={`${metricTitle(id)} on ${summary.key}: ${value} (${cell.word})`}
+            title={`${metricTitle(id)} on ${summary.key}: ${value} (${cell.word}${from ? `, ${downgradeLabel(from)}` : ""})`}
             className={cn(
               "px-1.5 py-1 text-right font-mono text-[11px] whitespace-nowrap text-text-1 tabular-nums",
               cell.className,
@@ -92,6 +93,12 @@ const HeatRow = memo(function HeatRow({
             </span>
             <span className="sr-only">{cell.word}, </span>
             {value}
+            {from ? (
+              // A PASS the evaluator downgraded as sampling noise (Ruling R40).
+              <span className="ml-1 text-text-3">
+                ≈<span className="sr-only"> within noise, was {from.toUpperCase()}</span>
+              </span>
+            ) : null}
           </td>
         );
       })}

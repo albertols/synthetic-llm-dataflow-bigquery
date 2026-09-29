@@ -36,6 +36,7 @@ function cell(value: number | null, overrides: Partial<MetricCell> = {}): Metric
     n_source: 100,
     n_synthetic: 100,
     encoding_plan_digest: "p",
+    noise_downgraded_from: null,
     ...overrides,
   };
 }
@@ -212,6 +213,42 @@ describe("trend small multiples (browser QA, 2026-09-29)", () => {
     expect(labels).toEqual(["warn 2× · fail 5×"]);
     // The table twin says where 0 was drawn.
     expect(spec.data[0]).toMatchObject({ value: 0, drawn_at: "axis floor 0.1× (log scale)" });
+  });
+
+  it("keeps a lift whose value is NULL: drawn at its gate (ci_low) with a triangle, and says so", () => {
+    const two = comparison().evaluations;
+    const lift = (value: number | null, ci_low: number | null, status: MetricCell["status"]) =>
+      cell(value, { ci_low, ci_high: null, status, threshold_warn: 2, threshold_fail: 5 });
+    const spec = trendSpec(
+      {
+        metric_id: "row.memorization_lift",
+        table_name: "users",
+        level: "row",
+        value_kind: "ratio",
+        column_name: null,
+        column_name_2: null,
+        edge: null,
+        // Copies only in R (+∞ stored NULL, gated past fail), then no copies at all (ci_low 0).
+        cells: [lift(null, 6.1, "fail"), lift(null, 0, "pass")],
+      } as Parameters<typeof trendSpec>[0],
+      two,
+      "engine",
+      FALLBACK_TOKENS,
+    )!;
+    expect(spec.data).toHaveLength(2);
+    expect(spec.data.map((d) => d.plotted)).toEqual([
+      "ci_low 6.1× (value infinite: copies in the reference sample, none in the holdout)",
+      "ci_low 0× (value undefined: no copies on either side)",
+    ]);
+    expect(spec.data.every((d) => d.value === null)).toBe(true);
+    expect(spec.note).toMatch(/^▲ 2 runs have no finite value .* drawn at the gate ci_low/);
+    const scatter = (spec.option.series as { type: string; data: { symbol?: string; value: number[] }[] }[]).filter(
+      (s) => s.type === "scatter",
+    );
+    const drawn = scatter.flatMap((s) => s.data);
+    expect(drawn.map((d) => d.symbol)).toEqual(["triangle", "triangle"]);
+    // 0 on the log axis is drawn at its floor.
+    expect(drawn.map((d) => d.value[1]!).sort((a, b) => a - b)).toEqual([0.1, 6.1]);
   });
 });
 

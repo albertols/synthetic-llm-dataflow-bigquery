@@ -192,7 +192,14 @@ const cell = (m: MetricRow): MetricCell => ({
   n_source: m.n_source,
   n_synthetic: m.n_synthetic,
   encoding_plan_digest: m.encoding_plan_digest,
+  noise_downgraded_from: downgradedFrom(m.detail),
 });
+
+/** detail.noise_downgraded_from as the compare cell carries it (Ruling R40). */
+function downgradedFrom(detail: MetricRow["detail"]): "warn" | "fail" | null {
+  const from = detail && typeof detail === "object" && !Array.isArray(detail) ? detail.noise_downgraded_from : null;
+  return from === "warn" || from === "fail" ? from : null;
+}
 
 type Json = ParamDiff["values"][number];
 

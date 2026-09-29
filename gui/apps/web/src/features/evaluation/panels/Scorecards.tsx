@@ -19,7 +19,7 @@ import { tabFor } from "../lib/interpret";
 import type { FamilyCard } from "../lib/model";
 import { NoiseDowngrade } from "../components/NoiseDowngrade";
 import { StatusCounts } from "../components/StatusCounts";
-import { downgradedFrom } from "../lib/reading";
+import { readingOf, undefinedValueText } from "../lib/reading";
 
 export type OpenTarget = { tab: RunTab; column?: string; table?: string };
 
@@ -40,13 +40,14 @@ function ScoreBar({ score, warn, fail }: { score: number | null; warn: number; f
 
 function WorstRow({ row, onOpen }: { row: MetricRow; onOpen: (target: OpenTarget) => void }) {
   const k = row.value_kind;
+  const reading = readingOf(row);
   const tab = tabFor(row);
   const concept = metricConcept(row.metric_id);
   return (
     <li className="grid min-w-0 gap-0.5 border-t border-border pt-2">
       <div className="flex min-w-0 items-center gap-1.5">
         <StatusPill status={row.status} size="sm" />
-        {downgradedFrom(row) ? <NoiseDowngrade from={downgradedFrom(row)!} /> : null}
+        {reading.downgradedFrom ? <NoiseDowngrade from={reading.downgradedFrom} /> : null}
         <button
           type="button"
           onClick={() =>
@@ -66,9 +67,10 @@ function WorstRow({ row, onOpen }: { row: MetricRow; onOpen: (target: OpenTarget
         {row.status === "not_evaluated" ? (
           <span>not evaluated</span>
         ) : row.value === null ? (
-          // A lift with no events: no point value, graded on its CI bound (Ruling R38).
+          // No finite point value, graded on its CI bound (Ruling R38): the reading names the gate.
           <>
-            value undefined · gate {fmtMetric(row.ci_low, k)} · score {fmtScore(row.score)}
+            value {undefinedValueText(reading).split(":")[0]} · gate {reading.gateSource} {fmtMetric(reading.gate, k)} ·
+            score {fmtScore(row.score)}
           </>
         ) : (
           <>

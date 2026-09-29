@@ -370,6 +370,7 @@ export function comparison(options: { sameVersions?: boolean } = {}): Comparison
     n_source: 1000,
     n_synthetic: 1000,
     encoding_plan_digest: "plan-a",
+    noise_downgraded_from: null,
     ...overrides,
   });
   const planB = same ? "plan-a" : "plan-b";

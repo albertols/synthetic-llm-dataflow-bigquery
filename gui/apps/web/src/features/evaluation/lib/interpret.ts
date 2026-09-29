@@ -12,9 +12,9 @@
 import type { EvaluationDetail, MetricRow } from "@contracts/api";
 
 import { FAMILY_LABEL, isRollup, metricMeta, metricShort } from "./catalogue";
-import { fmtMetric, fmtSampleSize, fmtScore, fmtSig, scopeLabel } from "./format";
+import { fmtCompared, fmtMetric, fmtSampleSize, fmtScore, fmtSig, scopeLabel } from "./format";
 import { countsPhrase, countStatuses, countsTotal, metricKey, statusRank } from "./model";
-import { downgradeLabel, readingOf, type Reading } from "./reading";
+import { downgradeLabel, noEffectText, readingOf, undefinedValueText, type Reading } from "./reading";
 
 export type RunTab = "overview" | "columns" | "pairs" | "privacy" | "detection" | "relational" | "params";
 
@@ -87,19 +87,22 @@ function ciPhrase(reading: Reading): string | null {
   return `95% CI ${lo}–${hi}; the gate reads ${reading.gateSource} ${fmtMetric(reading.gate, reading.kind)}`;
 }
 
-/** The crossed threshold in the metric's own terms: "≥ 0.2", "≤ 70%", "|v − 1| ≥ 0.4". */
+/**
+ * The crossed threshold in the metric's own terms: "≥ 0.2", "≤ 99.99%", "|v − 1| ≥ 0.4" — with
+ * enough digits to show the comparison (fmtCompared), never "≤ warn 100%" for 99.99%.
+ */
 function thresholdText(reading: Reading, which: "warn" | "fail"): string {
   const t = which === "warn" ? reading.warn : reading.fail;
-  const f = (v: number | null) => fmtMetric(v, reading.kind);
   if (t === null) return `${which} threshold unset`;
   if (reading.warn === 0 && reading.fail === 0) return "any value above 0 fails";
   const gate = reading.gateSource === "value" ? "value" : reading.gateSource;
-  if (reading.direction === "higher_better") return `${gate} ≤ ${which} ${f(t)}`;
   if (reading.direction === "target") {
     const d = reading.gate === null ? null : Math.abs(reading.gate - (reading.target ?? 0));
-    return `|${gate} − ${fmtSig(reading.target)}| = ${fmtSig(d)} ≥ ${which} ${fmtSig(t)}`;
+    const [dt, tt] = fmtCompared([d, t]);
+    return `|${gate} − ${fmtSig(reading.target)}| = ${dt} ≥ ${which} ${tt}`;
   }
-  return `${gate} ≥ ${which} ${f(t)}`;
+  const [, tt] = fmtCompared([reading.gate, t], reading.kind);
+  return reading.direction === "higher_better" ? `${gate} ≤ ${which} ${tt}` : `${gate} ≥ ${which} ${tt}`;
 }
 
 /** One sentence (two with the catalogue's reading) for a metric row. */
@@ -111,8 +114,10 @@ export function interpretRow(row: MetricRow, referenceN?: number | null, orphanS
   if (row.status === "not_evaluated") {
     return `${name} on ${scope} was not evaluated: ${reading.reason ?? "no reason recorded"}. Not evaluated is not a pass.`;
   }
-  // A lift with no events has no value but still gates on its CI bound (Ruling R38).
-  const value = reading.valueUndefined ? "(undefined: no copies to compare)" : fmtMetric(reading.value, reading.kind);
+  // A lift without a finite point value still gates on its CI bound (Ruling R38); ci_low says why.
+  const value = reading.valueUndefined
+    ? `(${undefinedValueText(reading)})`
+    : fmtCompared([reading.value, reading.warn, reading.fail], reading.kind)[0]!;
   if (reading.documented) {
     const source =
       orphanSource === null || orphanSource === undefined
@@ -129,7 +134,7 @@ export function interpretRow(row: MetricRow, referenceN?: number | null, orphanS
   switch (status) {
     case "pass":
       verdict = reading.downgradedFrom
-        ? `${downgradeLabel(reading.downgradedFrom)}: indistinguishable at this n, scored as no effect.`
+        ? `${downgradeLabel(reading.downgradedFrom)}: indistinguishable at this n, ${noEffectText(row.score)}.`
         : reading.withinNoise
           ? "indistinguishable at this n."
           : firstSentence(meta?.interpretation.good) || "within the warn threshold.";

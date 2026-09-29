@@ -24,7 +24,7 @@ import {
 } from "@synthetic-platform/stats/scoring";
 
 import { metricMeta } from "./catalogue";
-import { fmtMetric, fmtSig } from "./format";
+import { fmtCompared, fmtMetric, fmtSig } from "./format";
 
 export type Direction = "lower_better" | "higher_better" | "target";
 export type GateSource = "value" | "ci_low" | "ci_high";
@@ -61,12 +61,16 @@ export interface Reading {
   nonfinite: "+inf" | "-inf" | null;
   /** The point value is undefined (a lift with no events) while the gate reads its bound (R38). */
   valueUndefined: boolean;
-  /** An interval metric whose reference is its range edge (a share of 1, a rate of 0): never downgraded (R45). */
+  /**
+   * A Wilson-interval metric whose reference is its range edge — an adherence share (1) or a
+   * copy / match rate (0), R45's metrics — so an observed crossing is never downgraded as noise.
+   * Newcombe deltas also sit at 0 but ARE downgraded when their folded CI reaches it.
+   */
   edgeReference: boolean;
   /** detail.reason (why not_evaluated). */
   reason: string | null;
   kind: string | null;
-  /** The edge is documented (enforced: false): INFO, never FAIL. */
+  /** The orphan rate of a documented edge (enforced: false): INFO, never FAIL (R42). */
   documented: boolean;
   usesCi: boolean;
 }
@@ -89,19 +93,22 @@ export function downgradedFrom(row: Pick<MetricRow, "detail">): "warn" | "fail" 
   return from === "warn" || from === "fail" ? from : null;
 }
 
-/**
- * A documented edge (enforced: false): the producer's detail says so, or the rule does — the
- * orphan rate is zero-tolerance, so the evaluator writes it as INFO only on a documented edge
- * (Ruling R42), whatever else the producer put in detail.
- */
-export function isDocumentedEdge(row: Pick<MetricRow, "detail" | "level" | "metric_id" | "status">): boolean {
+/** The row belongs to a documented foreign-key edge (enforced: false), whatever its metric. */
+export function onDocumentedEdge(row: Pick<MetricRow, "detail" | "level">): boolean {
   if (row.level !== "relationship") return false;
   const detail = detailOf(row);
-  return (
-    detail.enforced === false ||
-    detail.role === "documented" ||
-    (row.metric_id === "relationship.orphan_rate" && row.status === "info")
-  );
+  return detail.enforced === false || detail.role === "documented";
+}
+
+/**
+ * The row reads as documented INFO: only the ORPHAN RATE of a documented edge (Ruling R42) — the
+ * edge's fan-out rows compare children per parent with the source and stay graded. The producer's
+ * detail says the edge is documented, or the rule does: the orphan rate is zero-tolerance, so the
+ * evaluator writes it as INFO only on a documented edge.
+ */
+export function isDocumentedEdge(row: Pick<MetricRow, "detail" | "level" | "metric_id" | "status">): boolean {
+  if (row.level !== "relationship" || row.metric_id !== "relationship.orphan_rate") return false;
+  return onDocumentedEdge(row) || row.status === "info";
 }
 
 function directionOf(row: MetricRow): Direction {
@@ -205,7 +212,7 @@ export function readingOf(row: MetricRow): Reading {
     noiseUnavailable: detailOf(row).noise_check === "unavailable",
     nonfinite: nonfiniteOf(row),
     valueUndefined: usesCi && row.value === null && gate !== null,
-    edgeReference: noiseKind === "interval" && (noiseRef === range[0] || noiseRef === range[1]),
+    edgeReference: noiseMethod === "wilson" && (noiseRef === range[0] || noiseRef === range[1]),
     reason: reasonOf(row),
     kind: row.value_kind,
     documented: isDocumentedEdge(row),
@@ -236,61 +243,70 @@ export function downgradeLabel(from: "warn" | "fail"): string {
   return `≈ within noise, was ${statusWord(from)}`;
 }
 
-/** Why the point value is missing while the gate still reads its bound (R38). */
-function undefinedValueText(row: MetricRow): string {
-  const detail = detailOf(row);
-  return detail.copies_r === 0 && detail.copies_h === 0
+/**
+ * Why a CI-bound metric has no point value while its gate still reads the bound (R38). The bound
+ * tells: a rate-ratio interval starts at 0 only with no copies at all (m_R = m_H = 0); a positive
+ * lower bound means copies in R and none in the holdout, an infinite ratio stored as NULL.
+ */
+export function undefinedValueText(reading: Pick<Reading, "ciLow">): string {
+  return reading.ciLow === 0
     ? "undefined: no copies on either side"
-    : "not finite: no copies on the holdout side";
+    : "infinite: copies in the reference sample, none in the holdout";
 }
 
-function gateTextOf(row: MetricRow, reading: Reading): string {
-  const f = (v: number | null) => fmtMetric(v, reading.kind);
-  if (reading.gateSource === "value") return `value ${f(reading.gate)}`;
+function gateTextOf(reading: Reading, gateNumber: string): string {
+  if (reading.gateSource === "value") return `value ${gateNumber}`;
   const value = reading.valueUndefined
-    ? `the value is ${undefinedValueText(row)}`
-    : `not the value ${f(reading.value)}`;
-  return `${reading.gateSource} ${f(reading.gate)} (the gate reads the 95% CI bound; ${value})`;
+    ? `the value is ${undefinedValueText(reading)}`
+    : `not the value ${fmtMetric(reading.value, reading.kind)}`;
+  return `${reading.gateSource} ${gateNumber} (the gate reads the 95% CI bound; ${value})`;
 }
 
 /** The threshold crossing alone (no noise): its sentence and the status it implies. */
-function crossing(row: MetricRow, reading: Reading): { text: string; status: "pass" | "warn" | "fail" } | null {
+function crossing(reading: Reading): { text: string; status: "pass" | "warn" | "fail" } | null {
   const { warn, fail, gate, direction } = reading;
   if (gate === null) return null;
-  const k = reading.kind;
-  const f = (v: number | null) => fmtMetric(v, k);
-  const gateText = gateTextOf(row, reading);
   // The evaluator's crossing: inclusive, with its 1e-9 relative tolerance (|0.9 − 1| reaches 0.1).
-  if (direction === "higher_better") {
-    if (reached(gate, fail, true)) return { text: `${gateText} ≤ fail ${f(fail)} (inclusive)`, status: "fail" };
-    if (reached(gate, warn, true)) return { text: `${gateText} ≤ warn ${f(warn)} (inclusive)`, status: "warn" };
-    return { text: `${gateText} > warn ${f(warn)}`, status: "pass" };
-  }
+  // Numbers print with enough digits to show the comparison they make (fmtCompared).
   if (direction === "target") {
     const d = Math.abs(gate - (reading.target ?? 0));
-    const dText = `d = |${f(gate)} − ${fmtSig(reading.target)}| = ${fmtSig(d)}`;
-    if (reached(d, fail, false)) return { text: `${dText} ≥ fail ${fmtSig(fail)} (inclusive)`, status: "fail" };
-    if (reached(d, warn, false)) return { text: `${dText} ≥ warn ${fmtSig(warn)} (inclusive)`, status: "warn" };
-    return { text: `${dText} < warn ${fmtSig(warn)}`, status: "pass" };
+    const [g, t] = fmtCompared([gate, reading.target], reading.kind);
+    const [dt, w, f] = fmtCompared([d, warn, fail]);
+    const dText = `d = |${g} − ${t}| = ${dt}`;
+    if (reached(d, fail, false)) return { text: `${dText} ≥ fail ${f} (inclusive)`, status: "fail" };
+    if (reached(d, warn, false)) return { text: `${dText} ≥ warn ${w} (inclusive)`, status: "warn" };
+    return { text: `${dText} < warn ${w}`, status: "pass" };
   }
-  if (reached(gate, fail, false)) return { text: `${gateText} ≥ fail ${f(fail)} (inclusive)`, status: "fail" };
-  if (reached(gate, warn, false)) return { text: `${gateText} ≥ warn ${f(warn)} (inclusive)`, status: "warn" };
-  return { text: `${gateText} < warn ${f(warn)}`, status: "pass" };
+  const [g, w, f] = fmtCompared([gate, warn, fail], reading.kind);
+  const gateText = gateTextOf(reading, g!);
+  if (direction === "higher_better") {
+    if (reached(gate, fail, true)) return { text: `${gateText} ≤ fail ${f} (inclusive)`, status: "fail" };
+    if (reached(gate, warn, true)) return { text: `${gateText} ≤ warn ${w} (inclusive)`, status: "warn" };
+    return { text: `${gateText} > warn ${w}`, status: "pass" };
+  }
+  if (reached(gate, fail, false)) return { text: `${gateText} ≥ fail ${f} (inclusive)`, status: "fail" };
+  if (reached(gate, warn, false)) return { text: `${gateText} ≥ warn ${w} (inclusive)`, status: "warn" };
+  return { text: `${gateText} < warn ${w}`, status: "pass" };
+}
+
+/** "scored as no effect (1.0)": a downgraded row's stored score, the score at the reference (R40). */
+export function noEffectText(score: number | null): string {
+  if (score === null) return "scored as no effect";
+  return `scored as no effect (${Number.isInteger(score) ? score.toFixed(1) : fmtSig(score)})`;
 }
 
 /** What made the crossing sampling noise (or not), in the check's own terms. */
 function noiseText(reading: Reading): string {
-  const f = (v: number | null) => fmtMetric(v, reading.kind);
-  const ref = f(reading.noiseRef);
   if (reading.noiseKind === "interval") {
-    const hi = reading.ciHigh === null ? "∞" : f(reading.ciHigh);
+    const [lo, hi, ref] = fmtCompared([reading.ciLow, reading.ciHigh, reading.noiseRef], reading.kind);
+    const upper = reading.ciHigh === null ? "∞" : hi;
     return reading.withinNoise
-      ? `its 95% CI ${f(reading.ciLow)}–${hi} covers the reference ${ref}`
-      : `its 95% CI ${f(reading.ciLow)}–${hi} excludes the reference ${ref}`;
+      ? `its 95% CI ${lo}–${upper} covers the reference ${ref}`
+      : `its 95% CI ${lo}–${upper} excludes the reference ${ref}`;
   }
-  return reading.withinNoise
-    ? `it is within the noise floor ${f(reading.noiseFloor)} of ${ref}`
-    : `it clears the noise floor ${f(reading.noiseFloor)}`;
+  const distance = reading.gate === null ? null : Math.abs(reading.gate - reading.noiseRef);
+  const [floor, ref] = fmtCompared([reading.noiseFloor, reading.noiseRef, distance], reading.kind);
+  return reading.withinNoise ? `it is within the noise floor ${floor} of ${ref}` : `it clears the noise floor ${floor}`;
 }
 
 /** One or two sentences: why this row has its status, in the catalogue's own terms. */
@@ -303,7 +319,7 @@ export function explainStatus(row: MetricRow, reading: Reading = readingOf(row))
   }
   const { warn, fail, gate } = reading;
   let text: string;
-  const cross = crossing(row, reading);
+  const cross = crossing(reading);
   if (warn === null && fail === null) {
     text = "No thresholds: this metric is informational.";
   } else if (reading.nonfinite) {
@@ -312,14 +328,14 @@ export function explainStatus(row: MetricRow, reading: Reading = readingOf(row))
   } else if (gate === null || cross === null) {
     text = "No value to gate.";
   } else if (warn === 0 && fail === 0) {
-    const gateText = gateTextOf(row, reading);
+    const gateText = gateTextOf(reading, fmtCompared([gate, 0], reading.kind)[0]!);
     text =
       gate > 0
         ? `${gateText} > 0 → FAIL: integrity holds by construction, so any violation fails, whatever the noise.`
         : `${gateText} = 0 → PASS: integrity holds by construction.`;
   } else if (reading.downgradedFrom) {
     const from = statusWord(reading.downgradedFrom);
-    text = `${cross.text} would be ${from}, but ${noiseText(reading)} → PASS (${downgradeLabel(reading.downgradedFrom)}): indistinguishable from sampling noise at this n, so it is scored at the reference ${fmtMetric(reading.noiseRef, reading.kind)}.`;
+    text = `${cross.text} would be ${from}, but ${noiseText(reading)} → PASS (${downgradeLabel(reading.downgradedFrom)}): indistinguishable from sampling noise at this n, so it is ${noEffectText(row.score)}.`;
   } else if (row.status === "pass" && cross.status !== "pass" && reading.withinNoise) {
     // A row written before the evaluator recorded its downgrades.
     text = `${cross.text}, but ${noiseText(reading)} → PASS: indistinguishable from sampling noise at this n.`;
@@ -332,7 +348,7 @@ export function explainStatus(row: MetricRow, reading: Reading = readingOf(row))
         text += ` ${noiseText(reading).replace(/^i/, "I")}.`;
         if (reading.edgeReference)
           text +=
-            " An observed copy or out-of-vocabulary value is an event, not an estimate, so this metric is never downgraded as noise.";
+            " An observed copy or out-of-vocabulary value is an event, not an estimate: a Wilson interval never reaches this edge reference, so the metric is never downgraded as noise.";
       }
     }
   }

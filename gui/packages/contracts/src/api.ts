@@ -314,6 +314,8 @@ export const metricCellSchema = z.object({
   n_source: z.int().nullable(),
   n_synthetic: z.int().nullable(),
   encoding_plan_digest: z.string().nullable(),
+  /** detail.noise_downgraded_from: the WARN/FAIL a noise-explained PASS was (Ruling R40), else null. */
+  noise_downgraded_from: z.enum(["warn", "fail"]).nullable(),
 });
 export type MetricCell = z.infer<typeof metricCellSchema>;
 

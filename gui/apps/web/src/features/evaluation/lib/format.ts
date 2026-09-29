@@ -51,6 +51,54 @@ export function fmtMetric(value: number | null | undefined, kind?: string | null
   }
 }
 
+/** `value` to `digits` significant digits in the unit of `kind`, trailing zeros dropped. */
+function fmtPrecise(value: number | null | undefined, kind: string | null | undefined, digits: number): string {
+  if (!isFiniteNumber(value)) return MISSING;
+  const sig = (x: number) => String(Number(x.toPrecision(digits)));
+  switch (kind) {
+    case "share":
+      return `${sig(value * 100)}%`;
+    case "ratio":
+      return `${sig(value)}×`;
+    case "bits":
+      return `${sig(value)} bits`;
+    default:
+      return sig(value);
+  }
+}
+
+/**
+ * The numbers of one comparison ("value 99.995% ≤ warn 99.99%"), each in the metric's unit, with
+ * as many significant digits as it takes for different numbers never to print alike — so a rule
+ * sentence never reads "value 100% ≤ warn 100%", and a count threshold of 0.5 is never shown as
+ * "1" beside a value of 0.
+ */
+export function fmtCompared(values: readonly (number | null | undefined)[], kind?: string | null): string[] {
+  // A number that is not an edge (0, or 100% for a share) must not print as one: 0.99999 is not "100%".
+  const parsed = (text: string) => {
+    const n = Number(text.replace(/,|%|×| bits/g, ""));
+    return kind === "share" ? n / 100 : n;
+  };
+  const edges = kind === "share" ? [0, 1] : [0];
+  const clash = (texts: string[]) =>
+    texts.some(
+      (t, i) =>
+        (isFiniteNumber(values[i]) && !edges.includes(values[i]) && edges.includes(parsed(t))) ||
+        texts.some(
+          (u, j) =>
+            j > i && t === u && isFiniteNumber(values[i]) && isFiniteNumber(values[j]) && values[i] !== values[j],
+        ),
+    );
+  const base = values.map((v) => fmtMetric(v, kind));
+  const roundedCount = kind === "count" && values.some((v) => isFiniteNumber(v) && !Number.isInteger(v));
+  if (!clash(base) && !roundedCount) return base;
+  for (let digits = 3; digits <= 15; digits += 1) {
+    const texts = values.map((v) => fmtPrecise(v, kind, digits));
+    if (!clash(texts)) return texts;
+  }
+  return values.map((v) => fmtPrecise(v, kind, 17));
+}
+
 /** A 0–1 score with two decimals. */
 export function fmtScore(value: number | null | undefined): string {
   return isFiniteNumber(value) ? value.toFixed(2) : MISSING;

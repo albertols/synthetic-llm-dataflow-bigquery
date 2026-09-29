@@ -10,7 +10,7 @@ import type { EvaluationDetail, MetricRow } from "@contracts/api";
 import { findEdge, formatEdge, parseEdge, type RelationshipModel } from "@contracts/relational";
 
 import { statusRank, worstStatus } from "./model";
-import { isDocumentedEdge } from "./reading";
+import { isDocumentedEdge, onDocumentedEdge } from "./reading";
 
 export interface GraphNode {
   name: string;
@@ -105,6 +105,7 @@ export function buildGraph(
     const edge = ensureEdge(row.edge, row.table_name);
     if (!edge) continue;
     edge.rows.push(row);
+    if (onDocumentedEdge(row)) edge.documented = true;
     if (row.metric_id === "relationship.orphan_rate") {
       edge.orphan = row;
       if (isDocumentedEdge(row)) edge.documented = true;
@@ -113,13 +114,13 @@ export function buildGraph(
     } else if (row.metric_id === "relationship.orphan_rate_source") edge.orphanSource = row;
     else if (row.metric_id === "relationship.fanout_tvd") edge.fanout = row;
   }
+  // Ruling R42: on a documented edge only the orphan rate is INFO; its fan-out rows compare
+  // children per parent with the source and stay graded, so the edge reads the worst of them.
   for (const edge of edges.values()) {
-    if (edge.documented) {
-      edge.status = edge.rows.length ? "info" : null;
-      continue;
-    }
-    const gated = edge.rows.filter((r) => r.status !== "info");
-    edge.status = worstStatus(gated.map((r) => r.status));
+    const graded = edge.rows.filter(
+      (r) => r.status !== "info" && !(edge.documented && r.metric_id === "relationship.orphan_rate"),
+    );
+    edge.status = graded.length ? worstStatus(graded.map((r) => r.status)) : edge.rows.length ? "info" : null;
   }
 
   // Nodes: every table plus every parent the edges name (external parents).

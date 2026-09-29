@@ -50,6 +50,7 @@ import {
   type ColorBy,
 } from "./lib/compareCharts";
 import { fmtDelta, fmtMetric, fmtScore, shortModel } from "./lib/format";
+import { downgradeLabel } from "./lib/reading";
 import { statusRank } from "./lib/model";
 import { useChartTokens } from "./lib/tokens";
 import type { EvaluationCompareSearch } from "./route";
@@ -269,6 +270,12 @@ function RunMetricHeatmap({ comparison, family }: { comparison: Comparison; fami
                           : c.status === "not_evaluated"
                             ? "n/e"
                             : "undefined"}
+                        {c.noise_downgraded_from ? (
+                          // A PASS the evaluator downgraded as sampling noise (Ruling R40).
+                          <span className="ml-1 text-text-3" title={downgradeLabel(c.noise_downgraded_from)}>
+                            ≈<span className="sr-only"> within noise, was {c.noise_downgraded_from.toUpperCase()}</span>
+                          </span>
+                        ) : null}
                       </>
                     ) : (
                       <span className="text-text-3">absent</span>
@@ -889,6 +896,7 @@ function ComparePageContent() {
               concept={metricConcept(metric.metric_id)}
               option={spec?.option ?? {}}
               data={spec?.data ?? []}
+              description={spec?.note ?? undefined}
               empty={{ when: !spec, message: "Not evaluated in these runs." }}
               height={190}
             />

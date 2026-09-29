@@ -25,6 +25,7 @@ import { formatDateTime } from "@/lib/format";
 import { metricMeta, metricShort } from "./catalogue";
 import { paretoFrontier, slotMap } from "./compare";
 import { fmtMetric, fmtScore, scopeLabel, shortModel } from "./format";
+import { undefinedValueText } from "./reading";
 import type { ChartTokens } from "./tokens";
 
 export type ColorBy = "engine" | "model";
@@ -75,30 +76,43 @@ export function trendAxis(
   return linearAxis(values, { unit: axisUnit(metric.value_kind) });
 }
 
-/** One small multiple: the metric's value per run in time order, thresholds as lines, the noise band as an area. */
+/**
+ * One small multiple: the metric's value per run in time order, thresholds as lines, the noise
+ * band as an area. A CI-bound metric (a lift) whose value is NULL — undefined with no copies, or
+ * +∞ with copies only in R, which json_safe stores as NULL — is drawn at its gate (ci_low) with a
+ * triangle, never dropped: that bound is what its status read (Ruling R38). `note` says so.
+ */
 export function trendSpec(
   metric: ComparedMetric,
   evaluations: readonly EvaluationSummary[],
   by: ColorBy,
   tokens: ChartTokens,
-): { option: EChartsOption; data: Array<Record<string, unknown>> } | null {
+): { option: EChartsOption; data: Array<Record<string, unknown>>; note: string | null } | null {
   const order = timeOrder(evaluations);
+  const meta = metricMeta(metric.metric_id);
+  const gateKey = meta?.direction === "higher_better" ? "ci_high" : "ci_low";
+  const finite = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v);
   const points = order
-    .map((i) => ({ i, e: evaluations[i]!, cell: metric.cells[i] ?? null }))
-    .filter((p) => p.cell && p.cell.value !== null && Number.isFinite(p.cell.value));
+    .map((i) => {
+      const cell = metric.cells[i] ?? null;
+      if (!cell || cell.status === "not_evaluated") return null;
+      if (finite(cell.value)) return { i, e: evaluations[i]!, cell, y: cell.value, gated: false };
+      const gate = meta?.uses_ci_bound ? cell[gateKey] : null;
+      return finite(gate) ? { i, e: evaluations[i]!, cell, y: gate, gated: true } : null;
+    })
+    .filter((p): p is NonNullable<typeof p> => p !== null);
   if (!points.length) return null;
   const slots = slotMap(evaluations.map((e) => colorKey(e, by)));
   const labels = order.map((i) => evaluations[i]!.evaluation_id);
   const kind = metric.value_kind;
-  const first = points[0]!.cell!;
-  const meta = metricMeta(metric.metric_id);
+  const first = points[0]!.cell;
   const axis = trendAxis(
     metric,
-    points.map((p) => p.cell!.value!),
+    points.map((p) => p.y),
   );
   // Where a value is drawn: on a log axis 0 sits at the floor (the tooltip and table say so).
   const y = (v: number) => (axis.kind === "log" ? axis.place(v) : v);
-  const floor = Math.max(0, ...points.map((p) => p.cell!.noise_floor ?? 0));
+  const floor = Math.max(0, ...points.map((p) => p.cell.noise_floor ?? 0));
   const ref = meta?.direction === "target" ? (meta.target ?? null) : meta?.direction === "higher_better" ? null : 0;
   const lineAt = (t: number) => (meta?.direction === "target" && meta.target !== null ? meta.target + t : t);
   const thresholds: ThresholdLine[] = [];
@@ -115,11 +129,14 @@ export function trendSpec(
       color: tokens.critical,
     });
   const markLines = thresholdMarkLines(thresholds, axis, { labelColor: tokens.text3 });
+  const atFloor = (v: number) => axis.kind === "log" && v <= axis.min;
+  const plotted = (p: (typeof points)[number]) =>
+    p.gated ? `${gateKey} ${fmtMetric(p.y, kind)} (value ${undefinedValueText({ ciLow: p.cell.ci_low })})` : null;
   const series: NonNullable<EChartsOption["series"]> = [
     {
       type: "line",
       name: "trend",
-      data: points.map((p) => [labels.indexOf(p.e.evaluation_id), y(p.cell!.value!)]),
+      data: points.map((p) => [labels.indexOf(p.e.evaluation_id), y(p.y)]),
       symbol: "none",
       lineStyle: { color: tokens.slate, width: 2 },
       silent: true,
@@ -138,21 +155,30 @@ export function trendSpec(
       name: key,
       data: points
         .filter((p) => colorKey(p.e, by) === key)
-        .map((p) => [labels.indexOf(p.e.evaluation_id), y(p.cell!.value!), p.e.evaluation_id, p.cell!.value]),
+        .map((p) => ({
+          value: [labels.indexOf(p.e.evaluation_id), y(p.y), p.e.evaluation_id, p.y, p.gated ? 1 : 0],
+          // The gate stands in for a NULL value: a triangle, not the value's dot.
+          ...(p.gated ? { symbol: "triangle", symbolSize: 11 } : {}),
+        })),
       symbolSize: 9,
       itemStyle: { color: colorOf(slots, key, tokens), borderColor: tokens.surface, borderWidth: 2 },
     })),
   ];
-  const atFloor = (v: number) => axis.kind === "log" && v <= axis.min;
+  const gatedCount = points.filter((p) => p.gated).length;
+  const note = gatedCount
+    ? `▲ ${gatedCount === 1 ? "one run has" : `${gatedCount} runs have`} no finite value (no copies, or none in the holdout): drawn at the gate ${gateKey}, the bound its status reads.`
+    : null;
   return {
+    note,
     data: points.map((p) => ({
       evaluation: p.e.evaluation_id,
       evaluated_at: formatDateTime(p.e.evaluated_at),
       [by]: colorKey(p.e, by),
-      value: p.cell!.value,
-      noise_floor: p.cell!.noise_floor,
-      status: p.cell!.status,
-      ...(atFloor(p.cell!.value!) ? { drawn_at: `axis floor ${axis.format(axis.min)} (log scale)` } : {}),
+      value: p.cell.value,
+      ...(p.gated ? { plotted: plotted(p) } : {}),
+      noise_floor: p.cell.noise_floor,
+      status: p.cell.status,
+      ...(atFloor(p.y) ? { drawn_at: `axis floor ${axis.format(axis.min)} (log scale)` } : {}),
     })),
     option: {
       dataset: [],
@@ -161,10 +187,17 @@ export function trendSpec(
       tooltip: {
         trigger: "item",
         formatter: (params: unknown) => {
-          const { data, seriesName } = params as { data?: [number, number, string, number]; seriesName?: string };
-          if (!data || !data[2]) return "";
-          const note = atFloor(data[3]) ? " (drawn at the axis floor: log scale)" : "";
-          return `${data[2]} · ${seriesName ?? ""}<br/>${fmtMetric(data[3], kind)}${note}`;
+          const { data, seriesName } = params as {
+            data?: { value: [number, number, string, number, number] };
+            seriesName?: string;
+          };
+          const v = data?.value;
+          if (!v || !v[2]) return "";
+          const shown = v[4]
+            ? `${gateKey} ${fmtMetric(v[3], kind)} (value ${undefinedValueText({ ciLow: gateKey === "ci_low" ? v[3] : null })})`
+            : fmtMetric(v[3], kind);
+          const floorNote = atFloor(v[3]) ? " (drawn at the axis floor: log scale)" : "";
+          return `${v[2]} · ${seriesName ?? ""}<br/>${shown}${floorNote}`;
         },
       },
       xAxis: { type: "category", data: labels, axisLabel: { hideOverlap: true, fontSize: 10 } },

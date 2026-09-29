@@ -56,10 +56,10 @@ describe("reading a metric row", () => {
     const reading = readingOf(row);
     expect(reading.downgradedFrom).toBe("fail");
     expect(explainStatus(row)).toBe(
-      "value 0.25 ≥ fail 0.2 (inclusive) would be FAIL, but it is within the noise floor 0.3 of 0 → PASS (≈ within noise, was FAIL): indistinguishable from sampling noise at this n, so it is scored at the reference 0.",
+      "value 0.25 ≥ fail 0.2 (inclusive) would be FAIL, but it is within the noise floor 0.3 of 0 → PASS (≈ within noise, was FAIL): indistinguishable from sampling noise at this n, so it is scored as no effect (1.0).",
     );
     expect(interpretRow(row)).toMatch(
-      /— ≈ within noise, was FAIL: indistinguishable at this n, scored as no effect\.$/,
+      /— ≈ within noise, was FAIL: indistinguishable at this n, scored as no effect \(1\.0\)\.$/,
     );
     const list = findings({ ...richDetail(), metrics: [row] });
     expect(list).toHaveLength(1);
@@ -136,7 +136,7 @@ describe("reading a metric row", () => {
       "ci_low 0× (the gate reads the 95% CI bound; the value is undefined: no copies on either side) < warn 2× → PASS.",
     );
     expect(interpretRow(row)).toMatch(
-      /^Exposure lift \(undefined: no copies to compare\) on users \(95% CI 0×–∞; the gate reads ci_low 0×\) — /,
+      /^Exposure lift \(undefined: no copies on either side\) on users \(95% CI 0×–∞; the gate reads ci_low 0×\) — /,
     );
   });
 
