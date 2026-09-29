@@ -31,7 +31,7 @@ import zlib
 import time as clock
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1636,7 +1636,15 @@ def test_synthetic_quantiles_never_land_on_a_source_extreme():
   quantiles = next(p for p in profiles
                    if p.profile_kind == "quantiles" and p.side == "synthetic")
   assert lo not in quantiles.payload["values"]
-  assert quantiles.payload["probs"][0] == 0.01  # the payload still shows p1
+  # R77: the 31 synthetic values below the source's publishable range are
+  # withheld as mass, not shown as values, so p1 is withheld — never
+  # clamped onto the first kept edge
+  kept = _kept_of(_union_of(table, "x"), src)
+  below = np.count_nonzero(syn < kept[0]) / syn.size
+  assert below > 0.01
+  assert quantiles.payload["probs"][0] > below
+  assert math.isclose(quantiles.payload["below_mass"], below)
+  assert all(v >= kept[0] for v in quantiles.payload["values"])
 
 
 def test_a_generator_clamping_to_the_source_range_shows_no_source_extreme():
@@ -1746,14 +1754,27 @@ def _union_of(table: Any, name: str) -> np.ndarray:
 
 
 def _kept_of(edges: np.ndarray, source: np.ndarray) -> np.ndarray:
-  """R74's rule re-derived from the raw source values: an edge is dropped
-  only when a source record sits on it and fewer than k source records
-  lie at or below it or at or above it."""
+  """R77's rule re-derived from the raw (evaluated) source values: an
+  edge is kept iff at least k source records lie at or below it and at
+  least k at or above it — a contiguous range, whatever contributed the
+  edges."""
   ordered = np.sort(source)
   below = np.searchsorted(ordered, edges, side="right")  # count(x <= e)
   under = np.searchsorted(ordered, edges, side="left")  # count(x < e)
-  rare = (below < RARE_COUNT) | (source.size - under < RARE_COUNT)
-  return edges[~(rare & (below > under))]
+  return edges[(below >= RARE_COUNT) & (source.size - under >= RARE_COUNT)]
+
+
+def _shares_within(values: np.ndarray, kept: np.ndarray) -> tuple[float, float]:
+  """`(F⁻(first kept), F(last kept))` of `values`: the share strictly
+  below the first kept edge and the share at or below the last."""
+  return (float(np.count_nonzero(values < kept[0]) / values.size),
+          float(np.count_nonzero(values <= kept[-1]) / values.size))
+
+
+def _quantiles_or_none(profiles: Sequence[ProfileValue], side: str,
+                       column: str) -> dict | None:
+  return next((p.payload for p in profiles if p.profile_kind == "quantiles" and
+               p.side == side and p.column == column), None)
 
 
 def _payload(profiles: Sequence[ProfileValue], kind: str, side: str,
@@ -1817,11 +1838,12 @@ _CLAMP_CASES = ((20, 3000, 10.0), (20, 3000, 30.0), (50, 3000,
 @pytest.mark.parametrize(("n_src", "n_syn", "sd_syn"), _CLAMP_CASES)
 def test_quantiles_follow_each_side_within_one_bin_never_clamped(
     n_src, n_syn, sd_syn):
-  """The reviewer's p_clamp cases (R74.1, R74.3, R74.6): a synthetic wider
-  or narrower than the source keeps its own range. Every published
-  quantile and bound on either side lies within one kept union bin of
-  the true one, the synthetic p1/p99 are never squeezed into the
-  source's k-th extremes, and no source tail value shows."""
+  """The reviewer's p_clamp cases under R77: every published quantile and
+  bound on either side lies within one kept union bin of the true one
+  and inside [first kept, last kept]; the synthetic publishes exactly the
+  probabilities its CDF spans there — never clamped to the range, never a
+  value beyond it — and reports the withheld tails as `below_mass` /
+  `above_mass`; no source tail value shows."""
   rng = np.random.default_rng(1)
   src, syn = rng.normal(50, 10, n_src), rng.normal(50, sd_syn, n_syn)
   source, synthetic = _uniform_rows(src), _uniform_rows(syn)
@@ -1829,17 +1851,26 @@ def test_quantiles_follow_each_side_within_one_bin_never_clamped(
   rows_by = {"source": source, "synthetic": synthetic}
   metrics, profiles = _pure(table, rows_by)
   kept = _kept_of(_union_of(table, "x"), src)
-  # 99 quantiles + 2 bounds on the synthetic side (n = 3,000 clears every
-  # count rule); the source side shows what its n allows
-  assert _assert_within_one_bin(profiles, "synthetic", "x", syn, kept) == 101
-  assert _assert_within_one_bin(profiles, "source", "x", src, kept) > 0
+  ordered = np.sort(src)
+  assert kept[0] >= ordered[RARE_COUNT - 1] and kept[-1] <= ordered[-RARE_COUNT]
+  low_share, high_share = _shares_within(syn, kept)
+  expected = [q for q in _PROBS if low_share < q <= high_share]
+  quantiles = _quantiles_or_none(profiles, "synthetic", "x")
+  assert (quantiles["probs"] if quantiles else []) == expected
+  histogram = _payload(profiles, "histogram", "synthetic", "x")
+  for payload in (histogram, quantiles or {}):
+    assert math.isclose(payload["below_mass"], low_share)
+    assert math.isclose(payload["above_mass"], 1.0 - high_share)
+  shown = list(quantiles["values"]) if quantiles else []
+  shown += [v for v in (histogram["min"], histogram["max"]) if v is not None]
+  assert all(kept[0] <= v <= kept[-1] for v in shown)
+  bounds = [q for q in (0.005, 0.995) if low_share < q <= high_share]
+  assert _assert_within_one_bin(profiles, "synthetic", "x", syn,
+                                kept) == len(expected) + len(bounds)
+  assert _assert_within_one_bin(profiles, "source", "x", src, kept) >= 0
   assert not _leaks(metrics, profiles, rows_by, ("x",), tail=True)
-  quantiles = _payload(profiles, "quantiles", "synthetic", "x")
-  assert quantiles["probs"] == _PROBS
-  low, high = quantiles["values"][0], quantiles["values"][-1]
-  if sd_syn > 10:  # a wider synthetic shows its own range, not the source's
-    ordered = np.sort(src)
-    assert low < ordered[RARE_COUNT - 1] and high > ordered[-RARE_COUNT]
+  if sd_syn > 10:  # a wider synthetic: out-of-range mass, not values
+    assert histogram["below_mass"] > 0.05 and histogram["above_mass"] > 0.05
 
 
 def test_a_common_end_atom_is_its_own_quantiles():
@@ -1899,22 +1930,36 @@ def test_a_clamping_generator_has_its_tails_withheld_not_clamped():
   assert not _leaks(metrics, profiles, rows_by, ("x",), tail=True)
 
 
-def test_no_source_side_shows_the_synthetic_payloads_normally():
-  """R74.4 (the reviewer's p_misc case): with no source side there is
-  nothing to leak, so the synthetic keeps every histogram edge, its 99
-  quantiles and its bounds."""
+def test_no_source_side_drops_every_plan_time_source_point():
+  """R77.3 (inverting the round-4 reading of the reviewer's p_misc case):
+  with no evaluated source side, the plan's source grid points are
+  plan-time source records, so none of them is an edge — the histogram
+  has no edges and the quantiles come from the synthetic grid alone,
+  where every published value stays accurate and complete."""
   rng = np.random.default_rng(4)
-  source = _uniform_rows(rng.normal(50, 10, 5))
+  src = rng.normal(50, 10, 5)
+  source = _uniform_rows(src)
   syn = rng.normal(50, 10, 3000)
   synthetic = _uniform_rows(syn)
   table = planned_table("m", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
   _, profiles = _pure(table, {"synthetic": synthetic})
   histogram = _payload(profiles, "histogram", "synthetic", "x")
-  assert histogram["edges"] == sorted(r["x"] for r in source)
+  assert histogram["edges"] == [] and histogram["counts"] == [3000]
   assert histogram["min"] is not None and histogram["max"] is not None
+  assert (histogram["below_mass"], histogram["above_mass"]) == (0.0, 0.0)
+  quantiles = _payload(profiles, "quantiles", "synthetic", "x")
+  assert quantiles["probs"] == _PROBS
+  shown = {*quantiles["values"], histogram["min"], histogram["max"]}
+  assert not shown & set(src.tolist())
+  column = next(c for c in table.columns if c.name == "x")
+  synthetic_grid = np.unique(np.asarray(column.quantiles_syn, dtype=float))
+  assert _assert_within_one_bin(profiles, "synthetic", "x", syn,
+                                synthetic_grid) == 101
+  # the same with a source side present but NULL in the column
+  nulls = [{"id": i, "x": None} for i in range(5)]
+  _, profiles = _pure(table, {"source": nulls, "synthetic": synthetic})
+  assert _payload(profiles, "histogram", "synthetic", "x")["edges"] == []
   assert _payload(profiles, "quantiles", "synthetic", "x")["probs"] == _PROBS
-  union = _union_of(table, "x")  # nothing dropped: every edge stays
-  assert _assert_within_one_bin(profiles, "synthetic", "x", syn, union) == 101
 
 
 def test_moments_are_withheld_below_the_count_floor():
@@ -1940,12 +1985,319 @@ def test_moments_are_withheld_below_the_count_floor():
     assert all(moments[key] is None for key in withheld)
   moments = _payload(profiles, "moments", "synthetic", "x")
   assert moments["n"] == 3000
-  assert all(moments[key] is not None for key in withheld)
+  assert all(moments[key] is not None for key in withheld[:4])
+  # a 5-record source publishes no range at all (R77), so even the
+  # synthetic's bounds are withheld: its whole mass is out of range
+  assert (moments["min"], moments["max"]) == (None, None)
+  histogram = _payload(profiles, "histogram", "synthetic", "x")
+  assert (histogram["below_mass"], histogram["above_mass"]) == (None, None)
   source_k = _uniform_rows(rng.normal(50, 10, RARE_COUNT))
   table_k = planned_table("k", _UNIFORM_FIELDS, source_k, synthetic, pk=("id",))
   _, profiles_k = _pure(table_k, {"source": source_k, "synthetic": synthetic})
   moments_k = _payload(profiles_k, "moments", "source", "x")
   assert moments_k["n"] == RARE_COUNT and moments_k["mean"] is not None
+
+
+# --------------------------------------------------------------------------
+# review round 5: publication depends only on publishable counts (R77)
+# --------------------------------------------------------------------------
+_MIXED_FIELDS = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "x",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "i",
+        "type": "INT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "ts",
+        "type": "TIMESTAMP",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "dt",
+        "type": "DATETIME",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "d",
+        "type": "DATE",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "tm",
+        "type": "TIME",
+        "mode": "NULLABLE"
+    },
+)
+_MIXED_NAMES = ("x", "i", "ts", "dt", "d", "tm")
+_INT_FIELDS = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "i",
+        "type": "INT64",
+        "mode": "NULLABLE"
+    },
+)
+
+
+def _mixed_rows(n: int, seed: int, sd: float = 1.0) -> list[dict]:
+  """The reviewer's temporal-probe rows: a float, an INT64, and every
+  temporal type, all normal with spread `sd` (in the probe's units)."""
+  rng = np.random.default_rng(seed)
+  z = rng.normal(0, sd, (n, 6))
+  rows = []
+  for r, row in enumerate(z):
+    stamp = _T0 + timedelta(
+        microseconds=int(30 * 86_400e6 + row[2] * 5 * 86_400e6))
+    clock = datetime(2000, 1, 1,
+                     12) + timedelta(microseconds=int(row[5] * 2 * 3_600e6))
+    rows.append({
+        "id":
+            r,
+        "x":
+            float(50 + 10 * row[0]),
+        "i":
+            round(100 + 8 * row[1]),
+        "ts":
+            stamp,
+        "dt":
+            datetime(2024, 3, 1) +
+            timedelta(microseconds=int(row[3] * 3 * 86_400e6)),
+        "d":
+            date(2024, 1, 1) + timedelta(days=round(200 + 40 * row[4])),
+        "tm":
+            clock.time(),
+    })
+  return rows
+
+
+def _int_rows(values: np.ndarray) -> list[dict]:
+  return [{"id": k, "i": int(v)} for k, v in enumerate(values)]
+
+
+def _sampled_rows(seed: int, *, integers: bool) -> tuple[list, list, list]:
+  """`(full, sample, synthetic)` for sampled mode: the plan sees `full`,
+  the dense pass a 2 % sample; the synthetic reaches the full extremes —
+  clamped to them (float) or simply wider (INT64)."""
+  rng = np.random.default_rng(seed)
+  if integers:
+    full = np.round(rng.normal(100, 8, 20000)).astype(int)
+    sample = full[rng.random(full.size) < 0.02]
+    synthetic = np.round(rng.normal(100, 24, 3000)).astype(int)
+    return _int_rows(full), _int_rows(sample), _int_rows(synthetic)
+  full = rng.normal(50, 10, 20000)
+  sample = full[rng.random(full.size) < 0.02]
+  synthetic = np.clip(rng.normal(50, 20, 3000), full.min(), full.max())
+  return (_uniform_rows(full), _uniform_rows(sample), _uniform_rows(synthetic))
+
+
+@pytest.mark.parametrize(("seed", "integers"), [(0, False), (1, False),
+                                                (2, False), (0, True),
+                                                (1, True), (2, True)])
+def test_sampled_mode_publishes_no_full_source_extreme(seed, integers):
+  """R77.1 (the reviewer's p_sampled / p_sampled_int): the plan's grid
+  carries the FULL source's exact extremes while the dense pass sees a
+  sample without them. The kept range comes from the sample's counts (a
+  lower bound of the full counts), so no full-source tail value — least
+  of all its min/max — reaches any payload or detail, on any side, even
+  though the synthetic has records there. The mass beyond the range is
+  reported as `above_mass`/`below_mass`."""
+  full, sample, synthetic = _sampled_rows(seed, integers=integers)
+  fields = _INT_FIELDS if integers else _UNIFORM_FIELDS
+  name = "i" if integers else "x"
+  table = planned_table("s", fields, full, synthetic, pk=("id",))
+  metrics, profiles = _pure(table, {"source": sample, "synthetic": synthetic})
+  assert not _leaks(
+      metrics,
+      profiles, {
+          "source": full,
+          "synthetic": synthetic
+      }, (name,),
+      tail=True)
+  values = _finite(full, name)
+  assert values.min() not in set(_floats(
+      [p.payload for p in profiles])) and values.max() not in set(
+          _floats([p.payload for p in profiles]))
+  kept = _kept_of(_union_of(table, name), _finite(sample, name))
+  for side, rows in (("source", sample), ("synthetic", synthetic)):
+    histogram = _payload(profiles, "histogram", side, name)
+    low_share, high_share = _shares_within(_finite(rows, name), kept)
+    assert math.isclose(histogram["below_mass"], low_share)
+    assert math.isclose(histogram["above_mass"], 1.0 - high_share)
+    quantiles = _quantiles_or_none(profiles, side, name)
+    shown = list(quantiles["values"]) if quantiles else []
+    shown += [v for v in (histogram["min"], histogram["max"]) if v is not None]
+    assert all(kept[0] <= v <= kept[-1] for v in shown)
+  synthetic_histogram = _payload(profiles, "histogram", "synthetic", name)
+  assert synthetic_histogram["above_mass"] > 0.01
+  assert synthetic_histogram["below_mass"] > 0.01
+
+
+def _inferred_gaps(values: Sequence[float]) -> set[int]:
+  """The reviewer's reader rule (p_pattern_mm): between two consecutive
+  exact-integer published values with only non-integers between them,
+  every integer strictly inside is taken for a dropped edge."""
+  inferred: set[int] = set()
+  last_int: float | None = None
+  run = False
+  for x in values:
+    if float(x).is_integer():
+      if run and last_int is not None:
+        inferred |= set(range(int(last_int) + 1, int(x)))
+      last_int, run = x, False
+    else:
+      run = True
+  return inferred
+
+
+@pytest.mark.parametrize("n", [20, 50, 190, 3000])
+@pytest.mark.parametrize("shape", ["same", "wide", "narrow"])
+def test_integer_quantile_pattern_maps_no_source_tail_value(n, shape):
+  """R77.1 (the reviewer's p_pattern_mm): on an INT64 or DATE column every
+  integer is a union edge. Under a selective drop the integer /
+  non-integer pattern of the synthetic quantile payload mapped the
+  dropped rare source values (the exact min/max among them). With one
+  contiguous kept range every interior integer stays and nothing beyond
+  the range is published, so the reader's inference recovers no source
+  tail value."""
+  source = _mixed_rows(n, n)
+  synthetic = {
+      "same": _mixed_rows(n, n + 1),
+      "wide": _mixed_rows(3000, n + 2, sd=3.0),
+      "narrow": _mixed_rows(3000, n + 3, sd=0.2),
+  }[shape]
+  table = planned_table("p", _MIXED_FIELDS, source, synthetic, pk=("id",))
+  metrics, profiles = _pure(table, {"source": source, "synthetic": synthetic})
+  rows_by = {"source": source, "synthetic": synthetic}
+  for column, unit in (("i", 1.0), ("d", 86_400.0)):
+    quantiles = _quantiles_or_none(profiles, "synthetic", column)
+    if quantiles is None:
+      continue
+    inferred = _inferred_gaps([v / unit for v in quantiles["values"]])
+    tail = {
+        s / (1e6 * unit) if column == "d" else s
+        for s in _tail_values(source, column)
+    }
+    assert not inferred & tail, (column, sorted(inferred & tail))
+  assert not _leaks(metrics, profiles, rows_by, _MIXED_NAMES, tail=True)
+
+
+def test_wide_synthetic_on_every_column_type_shows_no_source_tail_value():
+  """R77.5 (the reviewer's p_temporal, n = 3000 wide — the INT64 case
+  that the literal R74.1 reading leaked): no source tail value in any
+  payload, detail or label of the float, INT64, TIMESTAMP, DATETIME,
+  DATE or TIME column, on any side."""
+  source = _mixed_rows(3000, 3000)
+  synthetic = _mixed_rows(3000, 3002, sd=3.0)
+  rows_by = {
+      "source": source,
+      "synthetic": synthetic,
+      "reference": source[:600],
+      "holdout": source[600:1200],
+  }
+  table = planned_table("w", _MIXED_FIELDS, source, synthetic, pk=("id",))
+  metrics, profiles = _pure(table, rows_by)
+  assert not _leaks(metrics, profiles, rows_by, _MIXED_NAMES, tail=True)
+  for column in ("i", "d"):
+    quantiles = _payload(profiles, "quantiles", "synthetic", column)
+    assert quantiles["above_mass"] > 0.05 and quantiles["below_mass"] > 0.05
+
+
+def test_kept_range_is_one_contiguous_count_based_interval():
+  """R77.1 pinned against its mutations: the edges every side publishes
+  over are exactly the union edges with k source records at or below
+  AND at or above them — one contiguous interval — and nothing outside
+  it is ever a published value, whether the edge came from the synthetic
+  grid (no source record on it), the source grid or an atom."""
+  rng = np.random.default_rng(77)
+  src = rng.normal(50, 10, 190)
+  syn = rng.normal(50, 30, 3000)
+  source, synthetic = _uniform_rows(src), _uniform_rows(syn)
+  table = planned_table("c", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  spec = DenseSpec.from_table(table)
+  union = spec.grids[0].union
+  ordered = np.sort(src)
+  first, last = ordered[RARE_COUNT - 1], ordered[-RARE_COUNT]
+  expected = union[(union >= first) & (union <= last)]
+  assert 0 < expected.size < union.size
+  np.testing.assert_array_equal(_kept_of(union, src), expected)
+  # synthetic-grid points beyond the source's k-th extremes carry no
+  # source record, yet they are outside the range: dropped
+  beyond = union[(union < first) | (union > last)]
+  assert np.count_nonzero(~np.isin(beyond, src)) > 100
+  _, profiles = _pure(table, {"source": source, "synthetic": synthetic})
+  for side, values in (("source", src), ("synthetic", syn)):
+    histogram = _payload(profiles, "histogram", side, "x")
+    quantiles = _quantiles_or_none(profiles, side, "x")
+    shown = list(quantiles["values"]) if quantiles else []
+    shown += [v for v in (histogram["min"], histogram["max"]) if v is not None]
+    assert shown and all(first <= v <= last for v in shown), side
+    low_share, high_share = _shares_within(values, expected)
+    assert (quantiles["probs"] if quantiles else []) == [
+        q for q in _publishable(values.size) if low_share < q <= high_share
+    ]
+    assert math.isclose(histogram["below_mass"], low_share)
+    assert math.isclose(histogram["above_mass"], 1.0 - high_share)
+
+
+def _publishable(n: int) -> list[float]:
+  return [
+      q for q in _PROBS if q * n >= RARE_COUNT and (1 - q) * n >= RARE_COUNT
+  ]
+
+
+def test_metric_side_values_are_withheld_below_the_count_floor():
+  """R77.6 (the reviewer's p_mom_metric): a side with fewer than k values
+  has its moment-based `source_value`/`synthetic_value`/`baseline_value`
+  withheld on smd, std_ratio and range_coverage — `value` and the status
+  stay, and the detail says why; a side with k values shows them."""
+  rng = np.random.default_rng(4)
+  synthetic = _uniform_rows(rng.normal(50, 10, 3000))
+  for n in (1, 2, 5):
+    source = _uniform_rows(rng.normal(50, 10, n))
+    table = planned_table("m", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+    metrics, _ = _pure(table, {
+        "source": source,
+        "synthetic": synthetic,
+        "reference": source
+    })
+    rows = _by_key(metrics)
+    for metric_id in ("column.smd", "column.std_ratio",
+                      "column.range_coverage"):
+      row = rows[(metric_id, "x", None)]
+      if row.value is None:
+        continue  # not evaluated: n = 1 is a constant source (std 0)
+      assert row.source_value is None and row.baseline_value is None
+      assert row.synthetic_value is not None or metric_id.endswith("coverage")
+      assert row.detail["withheld"] == {
+          "source_value": dense._WITHHELD_BELOW_K,
+          "baseline_value": dense._WITHHELD_BELOW_K,
+      }
+      assert row.detail["baseline_reason"] == dense._WITHHELD_BELOW_K
+  source = _uniform_rows(rng.normal(50, 10, RARE_COUNT))
+  table = planned_table("k", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  metrics, _ = _pure(table, {
+      "source": source,
+      "synthetic": synthetic,
+      "reference": source[:3]
+  })
+  row = _by_key(metrics)[("column.smd", "x", None)]
+  assert row.source_value is not None and row.synthetic_value is not None
+  assert row.baseline_value is None  # the 3-record reference only
+  assert row.detail["withheld"] == {"baseline_value": dense._WITHHELD_BELOW_K}
 
 
 def test_union_left_counts_are_exact_in_any_merge_order():
