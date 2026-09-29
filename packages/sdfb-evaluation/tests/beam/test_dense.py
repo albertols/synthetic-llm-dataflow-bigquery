@@ -723,7 +723,7 @@ def _assert_same(a: DenseProfile, b: DenseProfile) -> None:
                "str_nonnull", "str_empty", "str_nonempty", "lengths",
                "classes"):
     np.testing.assert_array_equal(getattr(a, name), getattr(b, name), name)
-  for name in ("union", "profile", "profile_left", "deciles"):
+  for name in ("union", "union_left", "profile", "profile_left", "deciles"):
     for x, y in zip(getattr(a, name), getattr(b, name), strict=True):
       np.testing.assert_array_equal(x, y, name)
   for x, y in zip(a.moments, b.moments, strict=True):
@@ -1507,8 +1507,9 @@ def _leaks(metrics: Sequence[MetricValue],
   """Every shown value that is one of a column's SOURCE secrets — its
   exact extremes, or with `tail` every value with fewer than k records at
   or beyond it — matched against that column's own payloads, details and
-  axis labels only: floats exactly, temporal payloads also in epoch
-  seconds, labels at their printed precision (ISO labels at their unit).
+  axis labels only: floats to within a few ulps (temporal payloads are
+  in epoch seconds, micros * 1e-6, so a secret is matched in both
+  units), labels at their printed precision (ISO labels at their unit).
   Also any reference/holdout payload min/max that is that side's own
   exact extreme."""
   found: list = []
@@ -1524,7 +1525,8 @@ def _leaks(metrics: Sequence[MetricValue],
         x for m in metrics if name in (m.column, m.column_2)
         for x in _floats(m.detail)
     ]
-    found += [(name, x) for x in shown if x in scaled]
+    found += [(name, x) for x in shown if any(
+        math.isclose(x, s, rel_tol=4e-16) for s in scaled)]
     for p in profiles:
       if p.profile_kind != "contingency":
         continue
@@ -1719,3 +1721,254 @@ def test_no_source_tail_value_on_any_side_property(n, shape, monkeypatch):
   table = planned_table("p", _PROPERTY_FIELDS, source, synthetic, pk=("id",))
   metrics, profiles = _pure(table, rows_by)
   assert not _leaks(metrics, profiles, rows_by, ("x", "y", "t"), tail=True)
+  # R74.6: and what every side does publish is accurate to one kept bin
+  for name in ("x", "y", "t"):
+    kept = _kept_of(_union_of(table, name), _finite(source, name))
+    for side, rows in rows_by.items():
+      _assert_within_one_bin(
+          profiles,
+          side,
+          name,
+          _finite(rows, name),
+          kept,
+          scale=1e-6 if name == "t" else 1.0)
+
+
+# --------------------------------------------------------------------------
+# review round 4: accurate, privacy-safe payloads (R74)
+# --------------------------------------------------------------------------
+_PROBS = [round(p / 100, 2) for p in range(1, 100)]
+
+
+def _union_of(table: Any, name: str) -> np.ndarray:
+  spec = DenseSpec.from_table(table)
+  return next(g.union for g in spec.grids if g.name == name)
+
+
+def _kept_of(edges: np.ndarray, source: np.ndarray) -> np.ndarray:
+  """R74's rule re-derived from the raw source values: an edge is dropped
+  only when a source record sits on it and fewer than k source records
+  lie at or below it or at or above it."""
+  ordered = np.sort(source)
+  below = np.searchsorted(ordered, edges, side="right")  # count(x <= e)
+  under = np.searchsorted(ordered, edges, side="left")  # count(x < e)
+  rare = (below < RARE_COUNT) | (source.size - under < RARE_COUNT)
+  return edges[~(rare & (below > under))]
+
+
+def _payload(profiles: Sequence[ProfileValue], kind: str, side: str,
+             column: str) -> dict:
+  return next(
+      p.payload
+      for p in profiles
+      if p.profile_kind == kind and p.side == side and p.column == column)
+
+
+def _bin_of(edges: np.ndarray, x: float) -> int:
+  return int(np.searchsorted(edges, x, side="left"))  # bin (e_{i-1}, e_i]
+
+
+def _true_quantile(values: np.ndarray, prob: float) -> float:
+  """Q(p) = inf{x : F(x) >= p}: the smallest order statistic x_(r) with
+  r / n >= p — compared as the accumulator compares shares (`k / n`
+  against p), where `numpy.quantile(method="inverted_cdf")` rounds
+  `p * n` instead (0.28 * 50 = 14.000000000000002 → x_(15), not x_(14))."""
+  ordered = np.sort(values)
+  shares = np.arange(1, ordered.size + 1) / ordered.size
+  return float(ordered[min(np.searchsorted(shares, prob), ordered.size - 1)])
+
+
+def _assert_within_one_bin(profiles: Sequence[ProfileValue],
+                           side: str,
+                           column: str,
+                           values: np.ndarray,
+                           kept: np.ndarray,
+                           scale: float = 1.0) -> int:
+  """Every published quantile and bound of (side, column) lies in the same
+  or an adjacent kept union bin as the true quantile of `values` (R74.6):
+  the quantile function `_true_quantile`, which is what a CDF inverted at
+  the edges targets — numpy's default linear method interpolates between
+  two order statistics, which can straddle an edge. Returns how many
+  were checked."""
+  shown: list[tuple[float, float | None]] = []
+  for p in profiles:
+    if (p.profile_kind == "quantiles" and p.side == side and
+        p.column == column):
+      shown += list(zip(p.payload["probs"], p.payload["values"], strict=True))
+  histogram = _payload(profiles, "histogram", side, column)
+  shown += [(0.005, histogram["min"]), (0.995, histogram["max"])]
+  edges = kept * scale
+  checked = 0
+  for prob, value in shown:
+    if value is None:
+      continue
+    true = _true_quantile(values, prob) * scale
+    assert abs(_bin_of(edges, value) -
+               _bin_of(edges, true)) <= 1, (side, column, prob, value, true)
+    checked += 1
+  return checked
+
+
+_CLAMP_CASES = ((20, 3000, 10.0), (20, 3000, 30.0), (50, 3000,
+                                                     30.0), (190, 3000, 30.0),
+                (3000, 3000, 30.0), (3000, 3000, 60.0), (3000, 3000, 10.0))
+
+
+@pytest.mark.parametrize(("n_src", "n_syn", "sd_syn"), _CLAMP_CASES)
+def test_quantiles_follow_each_side_within_one_bin_never_clamped(
+    n_src, n_syn, sd_syn):
+  """The reviewer's p_clamp cases (R74.1, R74.3, R74.6): a synthetic wider
+  or narrower than the source keeps its own range. Every published
+  quantile and bound on either side lies within one kept union bin of
+  the true one, the synthetic p1/p99 are never squeezed into the
+  source's k-th extremes, and no source tail value shows."""
+  rng = np.random.default_rng(1)
+  src, syn = rng.normal(50, 10, n_src), rng.normal(50, sd_syn, n_syn)
+  source, synthetic = _uniform_rows(src), _uniform_rows(syn)
+  table = planned_table("q", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  rows_by = {"source": source, "synthetic": synthetic}
+  metrics, profiles = _pure(table, rows_by)
+  kept = _kept_of(_union_of(table, "x"), src)
+  # 99 quantiles + 2 bounds on the synthetic side (n = 3,000 clears every
+  # count rule); the source side shows what its n allows
+  assert _assert_within_one_bin(profiles, "synthetic", "x", syn, kept) == 101
+  assert _assert_within_one_bin(profiles, "source", "x", src, kept) > 0
+  assert not _leaks(metrics, profiles, rows_by, ("x",), tail=True)
+  quantiles = _payload(profiles, "quantiles", "synthetic", "x")
+  assert quantiles["probs"] == _PROBS
+  low, high = quantiles["values"][0], quantiles["values"][-1]
+  if sd_syn > 10:  # a wider synthetic shows its own range, not the source's
+    ordered = np.sort(src)
+    assert low < ordered[RARE_COUNT - 1] and high > ordered[-RARE_COUNT]
+
+
+def test_a_common_end_atom_is_its_own_quantiles():
+  """orders.quantity is 1..5 with ~600 records at each value (R74.2, the
+  reviewer's p_atoms case): both end atoms pass the symmetric count rule,
+  a jump is exact, so every quantile is the inverted CDF's (5 past p80
+  instead of a clamp at 4), the bounds are the end atoms, and so are the
+  range_coverage details."""
+  table, rows_by = orders_table()
+  metrics, profiles = _pure(table, rows_by)
+  for side in ("source", "synthetic"):
+    values = _finite(rows_by[side], "quantity")
+    quantiles = _payload(profiles, "quantiles", side, "quantity")
+    assert quantiles["probs"] == _PROBS
+    for prob, value in zip(
+        quantiles["probs"], quantiles["values"], strict=True):
+      assert value == _true_quantile(values, prob), (side, prob, value)
+    assert quantiles["values"][-1] == 5.0 and quantiles["values"][0] == 1.0
+    histogram = _payload(profiles, "histogram", side, "quantity")
+    assert (histogram["min"], histogram["max"]) == (1.0, 5.0)
+    assert {1.0, 5.0} <= set(histogram["edges"])
+  detail = _by_key(metrics)[("column.range_coverage", "quantity", None)].detail
+  assert (detail["source_p0_5"], detail["source_p99_5"]) == (1.0, 5.0)
+  assert (detail["synthetic_p0_5"], detail["synthetic_p99_5"]) == (1.0, 5.0)
+  assert not _leaks(
+      metrics,
+      profiles,
+      rows_by, ("quantity", "discount", "ship_date"),
+      tail=True)
+
+
+def test_a_clamping_generator_has_its_tails_withheld_not_clamped():
+  """R74.3: a synthetic clamped to the source's exact range piles ~4 % of
+  its records on each source extreme — rare source records, so those
+  edges are dropped. The probabilities inside the piles are withheld,
+  not mapped onto the next kept edge; everything else is accurate to one
+  bin; the bounds sit inside the piles, so they are withheld too."""
+  rng = np.random.default_rng(8)
+  src = rng.normal(50, 10, 3000)
+  syn = np.clip(rng.normal(50, 20, 3000), src.min(), src.max())
+  source, synthetic = _uniform_rows(src), _uniform_rows(syn)
+  table = planned_table("clamp", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  rows_by = {"source": source, "synthetic": synthetic}
+  metrics, profiles = _pure(table, rows_by)
+  kept = _kept_of(_union_of(table, "x"), src)
+  assert src.min() not in kept and src.max() not in kept
+  low_pile = np.count_nonzero(syn < kept[0]) / syn.size  # F⁻(first kept)
+  high_pile = np.count_nonzero(syn <= kept[-1]) / syn.size  # F(last kept)
+  assert low_pile > 0.01 and high_pile < 0.99  # the piles cover p1 and p99
+  quantiles = _payload(profiles, "quantiles", "synthetic", "x")
+  assert quantiles["probs"][0] > low_pile
+  assert quantiles["probs"][-1] <= high_pile
+  assert all(kept[0] <= v <= kept[-1] for v in quantiles["values"])
+  assert _assert_within_one_bin(profiles, "synthetic", "x", syn, kept) > 50
+  histogram = _payload(profiles, "histogram", "synthetic", "x")
+  assert histogram["min"] is None and histogram["max"] is None
+  assert not _leaks(metrics, profiles, rows_by, ("x",), tail=True)
+
+
+def test_no_source_side_shows_the_synthetic_payloads_normally():
+  """R74.4 (the reviewer's p_misc case): with no source side there is
+  nothing to leak, so the synthetic keeps every histogram edge, its 99
+  quantiles and its bounds."""
+  rng = np.random.default_rng(4)
+  source = _uniform_rows(rng.normal(50, 10, 5))
+  syn = rng.normal(50, 10, 3000)
+  synthetic = _uniform_rows(syn)
+  table = planned_table("m", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  _, profiles = _pure(table, {"synthetic": synthetic})
+  histogram = _payload(profiles, "histogram", "synthetic", "x")
+  assert histogram["edges"] == sorted(r["x"] for r in source)
+  assert histogram["min"] is not None and histogram["max"] is not None
+  assert _payload(profiles, "quantiles", "synthetic", "x")["probs"] == _PROBS
+  union = _union_of(table, "x")  # nothing dropped: every edge stays
+  assert _assert_within_one_bin(profiles, "synthetic", "x", syn, union) == 101
+
+
+def test_moments_are_withheld_below_the_count_floor():
+  """R74.5 (the reviewer's p_misc case): fewer than k values determine
+  the moments (n = 1: the mean IS the record), so mean, std, skewness and
+  kurtosis are withheld on such a side; n and the counts stay, and a side
+  with exactly k values shows them."""
+  rng = np.random.default_rng(4)
+  source = _uniform_rows(rng.normal(50, 10, 5))
+  synthetic = _uniform_rows(rng.normal(50, 10, 3000))
+  table = planned_table("m", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  _, profiles = _pure(
+      table, {
+          "source": source,
+          "synthetic": synthetic,
+          "reference": source[:1],
+          "holdout": source[1:3],
+      })
+  withheld = ("mean", "std", "skewness", "kurtosis_excess", "min", "max")
+  for side, n in (("source", 5), ("reference", 1), ("holdout", 2)):
+    moments = _payload(profiles, "moments", side, "x")
+    assert moments["n"] == n
+    assert all(moments[key] is None for key in withheld)
+  moments = _payload(profiles, "moments", "synthetic", "x")
+  assert moments["n"] == 3000
+  assert all(moments[key] is not None for key in withheld)
+  source_k = _uniform_rows(rng.normal(50, 10, RARE_COUNT))
+  table_k = planned_table("k", _UNIFORM_FIELDS, source_k, synthetic, pk=("id",))
+  _, profiles_k = _pure(table_k, {"source": source_k, "synthetic": synthetic})
+  moments_k = _payload(profiles_k, "moments", "source", "x")
+  assert moments_k["n"] == RARE_COUNT and moments_k["mean"] is not None
+
+
+def test_union_left_counts_are_exact_in_any_merge_order():
+  """`union_left` (the left-closed union bins) gives count(x < e) exactly
+  next to `union`'s count(x <= e), so count(x == e) and count(x >= e)
+  are exact for R74's symmetric rule — and it adds, in any merge order."""
+  rng = np.random.default_rng(3)
+  values = np.array(
+      [*rng.integers(0, 20, 400).astype(float), *rng.normal(10, 3, 300), 99.0])
+  source = _uniform_rows(values)
+  synthetic = _uniform_rows(rng.normal(10, 4, 500))
+  table = planned_table("l", _UNIFORM_FIELDS, source, synthetic, pk=("id",))
+  spec = DenseSpec.from_table(table)
+  parts = [
+      DenseProfile.from_batch(spec, b)
+      for b in _batches(table, "source", source, [37, 101, 5, 250, 90])
+  ]
+  merged = parts[-1]
+  for part in reversed(parts[:-1]):
+    merged = part.merge(merged)
+  edges = spec.grids[0].union
+  np.testing.assert_array_equal(
+      np.cumsum(merged.union_left[0])[:-1], [(values < e).sum() for e in edges])
+  np.testing.assert_array_equal(
+      np.cumsum(merged.union[0])[:-1], [(values <= e).sum() for e in edges])
+  assert merged.union_left[0].sum() == merged.union[0].sum() == values.size

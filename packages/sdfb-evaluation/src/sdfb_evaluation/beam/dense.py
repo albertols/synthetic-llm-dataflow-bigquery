@@ -118,22 +118,36 @@ synthetic side. range_adherence and range_coverage compare against them
 internally; payloads and details carry each side's p0.5/p99.5 instead
 (`extremes: "p0.5_p99.5"`).
 
-Count rule (R69, R71; k = RARE_COUNT = 10): a bound, end edge or tail
+Count rule (R69, R74; k = RARE_COUNT = 10): a bound, end edge or tail
 quantile is published only when at least k SOURCE records lie at or
-beyond it.
-  - Histogram and pair-axis edges need k source records at or below AND
-    at or above them (exact from the left- and right-closed profile
-    bins); the same edges serve every side, as they all come from the
-    source grid; a common end atom qualifies, a lone extreme never does.
-  - Every side's quantiles and bounds interpolate over the union bins
-    MERGED across the edges without k source records at or below and k
-    above (exact from the source's union counts), so neither an
-    interpolation plateau nor a clamp can land on a source tail value
-    (R71); a quantile payload also keeps only the p with p * n >= k and
-    (1 - p) * n >= k, and bounds need n * 0.005 >= k (n the side's own).
+beyond it. An edge is DROPPED only when a source record sits on it and
+fewer than k source records lie at or below it or at or above it (both
+counts exact, from the right- and left-closed twins of the profile and
+union bins); every other edge stays, since it is no source record's
+value: a synthetic-grid point outside the source range, or any edge when
+the source side is empty (R74.4). A common end atom qualifies, a lone
+extreme never does.
+  - Histogram and pair-axis edges are the profile edges that rule keeps;
+    the same edges serve every side, as they all come from the source
+    grid, and a dropped edge's two bins merge.
+  - Every side's quantiles and bounds are inverted from its own exact CDF
+    at the kept union edges (right- and left-closed twins, merged across
+    the dropped edges): a p inside an edge's jump is that edge, a p
+    between jumps interpolates over the mass strictly inside the bin, and
+    a probability outside (F⁻(first kept edge), F(last kept edge)] is
+    WITHHELD, never clamped (R74.3). So a published value lands on an
+    edge only where the side's own records sit on it, and no kept edge
+    is a source tail value; a value that coincides with a dropped edge
+    (a discrete column's bin arithmetic can reproduce the rare source
+    value the edge was dropped for) is withheld as well. A quantile
+    payload also keeps only the p with p * n >= k and (1 - p) * n >= k,
+    and bounds need n * 0.005 >= k (n the side's own).
+  - Moments payloads (mean, std, skewness, kurtosis) are withheld on a
+    side with fewer than k values: n <= 4 values determine them (R74.5).
   - The counts include any ±inf a hand-built batch carries (the encoder
-    turns non-finite values into NULL-like NaN) while Moments.n does not,
-    which only ever withholds more (the conservative direction).
+    turns non-finite values into NULL-like NaN) while Moments.n does not;
+    such a value only ever changes which edges carry k records, never
+    a published value.
 
 References (author-year, R22): Pébay (2008); Chan, Golub & LeVeque (1983);
 Czado, Gneiting & Held (2009) for the mid-CDF PIT; Wilson (1927);
@@ -291,6 +305,10 @@ _BOUND_PROBS = (0.005, 0.995)
 # R69: a published bound, end edge or tail quantile has at least this many
 # records at or beyond it (D6/R56's k-anonymity floor, plan.LITERAL_MIN_COUNT)
 RARE_COUNT = 10
+# a published quantile this close to a dropped union edge (a rare source
+# record's value) is withheld: an arithmetic coincidence, not a leak, but
+# indistinguishable from one to a reader
+_COINCIDENCE_RTOL = 1e-12
 _EDGE_DIGITS = range(6, 18)  # 17 significant digits tell any two floats apart
 _TIME_UNITS: tuple[Literal["s"], Literal["ms"],
                    Literal["us"]] = ("s", "ms", "us")
@@ -773,6 +791,15 @@ def _add(a: Sequence[np.ndarray], b: Sequence[np.ndarray]) -> list[np.ndarray]:
   return [x + y for x, y in zip(a, b, strict=True)]
 
 
+def _left_counts(x: np.ndarray, edges: np.ndarray) -> np.ndarray:
+  """`binned.bin_counts`' left-closed twin: `edges.size + 1` bins
+  `(-inf, e0), [e0, e1), ..., [e_last, +inf)`, so a cumulative sum gives
+  count(x < e) exactly (and, against the right-closed counts,
+  count(x == e))."""
+  return np.bincount(
+      np.searchsorted(edges, x, side="right"), minlength=edges.size + 1)
+
+
 # --------------------------------------------------------------------------
 # the accumulator
 # --------------------------------------------------------------------------
@@ -781,9 +808,10 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
   """One (table, side)'s mergeable dense profile (module docstring).
 
   Arrays follow the spec's order: `nulls`/`nulls_m` the plan columns,
-  `union`/`profile`/`profile_left`/`deciles`/`moments`/`in_range`/`dow`/
-  `month`/`hour` `spec.grids` (`profile_left` counts the profile edges'
-  left-closed bins, so count(x >= edge) is exact, R69),
+  `union`/`union_left`/`profile`/`profile_left`/`deciles`/`moments`/
+  `in_range`/`dow`/`month`/`hour` `spec.grids` (`union_left` and
+  `profile_left` count the left-closed twins of the union and profile
+  bins, so count(x >= edge) and count(x == edge) are exact, R69/R74),
   `str_*`/`lengths`/`classes` `spec.strings` (class columns in
   `CHAR_CLASSES` order); `null_patterns` maps a null_bits pattern to
   its row count (at most `NULL_PATTERN_CAP`, the rest in `null_overflow`);
@@ -798,6 +826,7 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
   nulls: np.ndarray
   nulls_m: np.ndarray
   union: list[np.ndarray]
+  union_left: list[np.ndarray]
   profile: list[np.ndarray]
   profile_left: list[np.ndarray]
   deciles: list[np.ndarray]
@@ -833,6 +862,7 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
         nulls=zeros(columns),
         nulls_m=zeros(columns),
         union=[zeros(g.union.size + 1) for g in spec.grids],
+        union_left=[zeros(g.union.size + 1) for g in spec.grids],
         profile=[zeros(g.profile.size + 1) for g in spec.grids],
         profile_left=[zeros(g.profile.size + 1) for g in spec.grids],
         deciles=[zeros(g.deciles.size + 1) for g in spec.grids],
@@ -883,15 +913,15 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
       values = batch.num[:, grid.num_k][~null[:, grid.j]]
       self.moments[gi].add_array(values)  # non-finite → Moments.nonfinite
       # NaN out; a ±inf (never from the encoder, which maps non-finite to
-      # NaN) would land in the end bins and not in Moments.n, which only
-      # makes the R69/R71 count rule withhold more (conservative)
+      # NaN) would land in the end bins and not in Moments.n (module
+      # docstring: it only bears on which edges carry k records)
       finite = values[~np.isnan(values)]
       self.union[gi] += binned.bin_counts(finite, grid.union)
       self.profile[gi] += binned.bin_counts(finite, grid.profile)
-      # left-closed twin [e_{i-1}, e_i): count(x >= e) is exact too (R69)
-      self.profile_left[gi] += np.bincount(
-          np.searchsorted(grid.profile, finite, side="right"),
-          minlength=grid.profile.size + 1)
+      # left-closed twins [e_{i-1}, e_i): count(x >= e) and count(x == e)
+      # are exact too (R69, R74)
+      self.union_left[gi] += _left_counts(finite, grid.union)
+      self.profile_left[gi] += _left_counts(finite, grid.profile)
       self.deciles[gi] += binned.bin_counts(finite, grid.deciles)
       if grid.lo is not None:
         self.in_range[gi] = np.count_nonzero((finite >= grid.lo)
@@ -939,6 +969,7 @@ class DenseProfile:  # pylint: disable=too-many-instance-attributes  # one field
         nulls=self.nulls + other.nulls,
         nulls_m=self.nulls_m + other.nulls_m,
         union=_add(self.union, other.union),
+        union_left=_add(self.union_left, other.union_left),
         profile=_add(self.profile, other.profile),
         profile_left=_add(self.profile_left, other.profile_left),
         deciles=_add(self.deciles, other.deciles),
@@ -1400,12 +1431,12 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
 
 def _source_bounds(grid: _Grid, gi: int, s: _Sides) -> dict[str, Any]:
   """The source's p0.5/p99.5 (R65: in place of its exact extremes)."""
-  lo, hi = _profile_bounds(grid, s.src, gi, _safe_union(s.src, gi))
+  lo, hi = _profile_bounds(grid, s.src, gi, _kept_union(s.src, gi))
   return {"source_p0_5": lo, "source_p99_5": hi}
 
 
 def _coverage_detail(grid: _Grid, gi: int, s: _Sides) -> dict[str, Any]:
-  lo, hi = _profile_bounds(grid, s.syn, gi, _safe_union(s.src, gi))
+  lo, hi = _profile_bounds(grid, s.syn, gi, _kept_union(s.src, gi))
   return {
       **_source_bounds(grid, gi, s),
       "synthetic_p0_5": lo,
@@ -1889,54 +1920,113 @@ def _edges_digest(edges: np.ndarray, unit: str) -> str:
   return hashlib.blake2b(payload, digest_size=16).hexdigest()
 
 
-def _safe_union(src: DenseProfile, gi: int) -> np.ndarray:
-  """The union edges a quantile may interpolate over (R71): those with at
-  least RARE_COUNT source records at or below AND above them, exact from
-  the source's union counts. Every source tail value lies outside the
-  kept range, so no plateau or clamp can land on one."""
-  below = np.cumsum(src.union[gi])[:-1]  # count(x <= e_i)
-  total = int(src.union[gi].sum())
-  safe: np.ndarray = (below >= RARE_COUNT) & (total - below >= RARE_COUNT)
-  return safe
+def _kept_edges(right: np.ndarray, left: np.ndarray) -> np.ndarray:
+  """Which edges may be shown or interpolated over, decided on the SOURCE
+  side (R69, R74): an edge is dropped only when a source record sits on
+  it AND fewer than RARE_COUNT source records lie at or below it or at or
+  above it. `right`/`left` are the source's right- and left-closed bin
+  counts on the edges, so count(x <= e), count(x < e) and count(x == e)
+  are exact. A common end atom qualifies, a lone extreme never does, and
+  an edge carrying no source record — a synthetic-grid point, or any edge
+  when the source side is empty — always stays: it is no source record's
+  value."""
+  below = np.cumsum(right)[:-1]  # count(x <= e)
+  under = np.cumsum(left)[:-1]  # count(x < e)
+  above = int(right.sum()) - under  # count(x >= e)
+  rare = (below < RARE_COUNT) | (above < RARE_COUNT)
+  kept: np.ndarray = ~(rare & (below > under))
+  return kept
 
 
-def _side_quantiles(grid: _Grid, p: DenseProfile, gi: int, safe: np.ndarray,
-                    probs: Sequence[float]) -> list[float]:
-  """A side's quantiles over its union bins merged across the edges
-  `_safe_union` withholds (NaN when no edge is left)."""
-  return binned.quantiles_from_bins(grid.union[safe],
-                                    _merged(p.union[gi], safe), probs)
+def _published(p: DenseProfile, gi: int) -> np.ndarray:
+  """The profile (histogram, pair-axis) edges `_kept_edges` keeps on the
+  source profile `p`; the same mask serves every side, whose edges all
+  come from the source grid."""
+  return _kept_edges(p.profile[gi], p.profile_left[gi])
+
+
+def _kept_union(src: DenseProfile, gi: int) -> np.ndarray:
+  """The union edges every side's quantiles and bounds may interpolate
+  over: `_kept_edges` on the source's union counts. No kept edge is a
+  source value with fewer than k records at or beyond it, so no plateau
+  can land on one, and the synthetic grid outside the source range stays
+  whole, so nothing clamps (R74.1)."""
+  return _kept_edges(src.union[gi], src.union_left[gi])
+
+
+def _inverted(edges: np.ndarray, f_at: np.ndarray, f_before: np.ndarray,
+              probs: Sequence[float]) -> list[float]:
+  """Q(p) from a side's exact CDF at the kept edges: `f_at[i]` is the
+  share at or below `edges[i]` and `f_before[i]` the share below it (the
+  left-closed twin), so a p within an edge's jump `(F⁻(e), F(e)]` is that
+  edge exactly (an atom's mass sits on it) and a p between two jumps
+  interpolates linearly over the mass strictly inside the bin. The caller
+  passes only p within `(F⁻(first edge), F(last edge)]`, so nothing is
+  ever extrapolated (R74.3)."""
+  p = np.asarray(probs, dtype=np.float64)
+  if not p.size:
+    return []
+  i = np.searchsorted(f_at, p, side="left")  # the first F(e_i) >= p
+  on_edge = f_before[i] < p  # p inside the jump at e_i
+  j = np.maximum(i - 1, 0)  # else F(e_j) < p <= F⁻(e_i), and i >= 1
+  span = f_before[i] - f_at[j]
+  frac = (p - f_at[j]) / np.where(span > 0, span, 1.0)
+  inside = edges[j] + frac * (edges[i] - edges[j])
+  return [float(v) for v in np.where(on_edge, edges[i], inside)]
+
+
+def _side_quantiles(grid: _Grid, p: DenseProfile, gi: int, kept: np.ndarray,
+                    probs: Sequence[float]) -> tuple[list[float], list[float]]:
+  """`(probs, values)`: a side's quantiles over its union bins merged
+  across the edges `_kept_union` drops, at the `probs` its merged CDF
+  spans — a probability outside `(F⁻(first kept edge), F(last kept
+  edge)]` is withheld, never clamped (R74.3); the jump at an edge is
+  exact from the left-closed twin, so a common atom at a side's minimum
+  is its own lower quantiles. A value that coincides with a dropped edge
+  is withheld too: on a discrete column the arithmetic inside a merged
+  bin can land exactly on the rare source value the edge was dropped
+  for."""
+  edges = grid.union[kept]
+  right = _merged(p.union[gi], kept)
+  left = _merged(p.union_left[gi], kept)
+  total = float(right.sum())
+  if not edges.size or total <= 0:
+    return [], []
+  f_at = np.cumsum(right)[:-1] / total  # F(e): share at or below e
+  f_before = np.cumsum(left)[:-1] / total  # F⁻(e): share below e
+  shown = [q for q in probs if f_before[0] < q <= f_at[-1]]
+  values = _inverted(edges, f_at, f_before, shown)
+  dropped = grid.union[~kept]
+  if not dropped.size or not values:
+    return shown, values
+  coincides = np.isclose(
+      np.asarray(values)[:, np.newaxis],
+      dropped[np.newaxis, :],
+      rtol=_COINCIDENCE_RTOL,
+      atol=0.0).any(axis=1)
+  clear = ~coincides
+  return ([q for q, ok in zip(shown, clear, strict=True) if ok],
+          [v for v, ok in zip(values, clear, strict=True) if ok])
 
 
 def _profile_bounds(grid: _Grid, p: DenseProfile, gi: int,
-                    safe: np.ndarray) -> tuple[float | None, float | None]:
+                    kept: np.ndarray) -> tuple[float | None, float | None]:
   """A side's p0.5 / p99.5 over the merged union bins — what every side's
   payloads and details show instead of its exact extremes (R65, R71).
   Published only when n * 0.005 >= RARE_COUNT, so at least k records lie
-  at or beyond each (R69); a bound outside the side's own [min, max] is an
+  at or beyond each (R69), and only where the merged CDF spans the
+  probability (R74.3); a bound outside the side's own [min, max] is an
   interpolation artifact and is withheld too."""
   m = p.moments[gi]
   if m.n * _BOUND_PROBS[0] < RARE_COUNT:
     return None, None
-  bounds = _side_quantiles(grid, p, gi, safe, _BOUND_PROBS)
-  shown = [
-      float(b) if np.isfinite(b) and m.min <= b <= m.max else None
-      for b in bounds
-  ]
-  return shown[0], shown[1]
-
-
-def _published(p: DenseProfile, gi: int) -> np.ndarray:
-  """Which profile edges may be shown, decided on the SOURCE side (R69):
-  an edge needs at least RARE_COUNT source records at or below it and at
-  or above it (a common end atom qualifies; a lone extreme never does).
-  The same mask applies to every side, whose edges all come from the
-  source grid."""
-  below = np.cumsum(p.profile[gi])[:-1]  # count(x <= e_j)
-  under = np.cumsum(p.profile_left[gi])[:-1]  # count(x < e_j)
-  above = p.moments[gi].n - under  # count(x >= e_j)
-  published: np.ndarray = (below >= RARE_COUNT) & (above >= RARE_COUNT)
-  return published
+  probs, values = _side_quantiles(grid, p, gi, kept, _BOUND_PROBS)
+  shown = {
+      q: v
+      for q, v in zip(probs, values, strict=True)
+      if np.isfinite(v) and m.min <= v <= m.max
+  }
+  return shown.get(_BOUND_PROBS[0]), shown.get(_BOUND_PROBS[1])
 
 
 def _merged(counts: np.ndarray, kept: np.ndarray) -> np.ndarray:
@@ -1960,7 +2050,7 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
   for gi, grid in enumerate(spec.grids):
     m = p.moments[gi]
     kept = _published(src, gi)
-    safe = _safe_union(src, gi)
+    safe = _kept_union(src, gi)
     edges = grid.profile[kept]
     unit = "epoch_seconds" if grid.kind is _TEMPORAL else "value"
     scale = grid.scale
@@ -1988,8 +2078,8 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
         table=spec.table,
         side=p.side,
         column=grid.name)
-    probs = _tail_safe(_QUANTILE_PROBS, m.n)
-    values = _side_quantiles(grid, p, gi, safe, probs)
+    probs, values = _side_quantiles(grid, p, gi, safe,
+                                    _tail_safe(_QUANTILE_PROBS, m.n))
     if probs and np.isfinite(values).all():  # the GUI's values are numbers
       yield ProfileValue(
           profile_kind="quantiles",
@@ -2002,19 +2092,31 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
           table=spec.table,
           side=p.side,
           column=grid.name)
+    # R74.5: n < k values determine the moments; withheld below the floor
+    shown = m.n >= RARE_COUNT
     yield ProfileValue(
         profile_kind="moments",
         payload={
-            "n": m.n,
-            "mean": scaled(m.mean) if m.n else None,
-            "std": scaled(m.std),
-            "skewness": _json_number(m.skewness),
-            "kurtosis_excess": _json_number(m.kurtosis_excess),
-            "min": scaled(low),
-            "max": scaled(high),
-            "extremes": extremes,
-            "zeros": m.zeros,
-            "unit": unit,
+            "n":
+                m.n,
+            "mean":
+                scaled(m.mean) if shown else None,
+            "std":
+                scaled(m.std) if shown else None,
+            "skewness":
+                _json_number(m.skewness) if shown else None,
+            "kurtosis_excess":
+                _json_number(m.kurtosis_excess) if shown else None,
+            "min":
+                scaled(low),
+            "max":
+                scaled(high),
+            "extremes":
+                extremes,
+            "zeros":
+                m.zeros,
+            "unit":
+                unit,
         },
         n=m.n,
         table=spec.table,
