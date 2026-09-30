@@ -186,6 +186,7 @@ __all__ = [
     "build_plan",
     "encoding_plan_digest",
     "kinds_from_schema",
+    "parent_landing",
     "parse_planning",
     "planning_outputs",
     "planning_queries",
@@ -1299,6 +1300,21 @@ def _names(value: Any) -> tuple[str, ...]:
   return tuple(p.strip() for p in str(value or "").split(",") if p.strip())
 
 
+def parent_landing(child: str, edge: Edge) -> str:
+  """The landing table of `edge`'s parent when the launch that wrote
+  `child` (its landing table, `project.dataset.table`) did not write the
+  parent: an external `ref` (`dataset.table`, or fully qualified) resolves
+  in the child's project; an in-model parent lives in the child's dataset
+  (the generator's parent landing). The planner reads its read-only
+  parents from here and `beam.relational` finds them by it."""
+  project, dataset, _ = child.split(".")
+  if edge.external:
+    parts = edge.ref.split(".")
+    return normalize_fqn(
+        edge.ref if len(parts) == _FQN_PARTS else f"{project}.{edge.ref}")
+  return normalize_fqn(f"{project}.{dataset}.{edge.ref}")
+
+
 @dataclass
 class _Work:  # pylint: disable=too-many-instance-attributes  # the planner's scratch record
   """One table while it is being planned (mutable scratch)."""
@@ -1550,25 +1566,13 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       for edge in work.edges:
         if not edge.external and edge.ref in by_name:
           continue
-        landing = self._parent_landing(work.landing, edge)
+        landing = parent_landing(work.landing, edge)
         parent = parents.setdefault(
             landing,
             _Work(name=edge.ref_name, landing=landing, role="external"))
         parent.key_cols.update(edge.ref_cols)
         parent.children.append(work)
     return list(parents.values())
-
-  @staticmethod
-  def _parent_landing(child: str, edge: Edge) -> str:
-    """An external `ref` (`dataset.table`, or fully qualified) resolves in
-    the child's project; an in-model parent this launch did not write
-    lives in the child's dataset (the generator's parent landing)."""
-    project, dataset, _ = child.split(".")
-    if edge.external:
-      parts = edge.ref.split(".")
-      return normalize_fqn(
-          edge.ref if len(parts) == _FQN_PARTS else f"{project}.{edge.ref}")
-    return normalize_fqn(f"{project}.{dataset}.{edge.ref}")
 
   # --- per launch table ------------------------------------------------------
   def locate(self, work: _Work) -> None:
