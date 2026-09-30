@@ -22,6 +22,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import base64
+import bisect
 import bz2
 import dataclasses
 import itertools
@@ -70,10 +71,11 @@ from sdfb_evaluation.beam.privacy import (
     privacy_outputs,
     sample_parts,
 )
-from sdfb_evaluation.canonical import hashed_label
+from sdfb_evaluation.canonical import hash64, hashed_label
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.scoring import status_for, to_metric_row, to_profile_row
 from sdfb_evaluation.stats.privacy import (
+    density_coverage,
     effective_chunk,
     gower_knn,
     nn_privacy,
@@ -87,7 +89,16 @@ from sdfb_evaluation.types import (
     Status,
 )
 
-from .membership_data import PEOPLE_FIELDS, copy_content
+from .membership_data import (
+    PEOPLE_FIELDS,
+    PEOPLE_IDENTITY,
+    SOURCE_ID_BASE,
+    SYNTHETIC_ID_BASE,
+    copy_content,
+    panel_of,
+    people_rows,
+    planned,
+)
 from .privacy_data import (
     DETECTION_ROWS,
     LABEL_KEY,
@@ -96,6 +107,7 @@ from .privacy_data import (
     SAMPLE_ROWS,
     encode,
     encode_all,
+    keyless,
     people,
     with_rates,
 )
@@ -578,10 +590,10 @@ def test_a_failing_table_does_not_fail_the_run(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 # the maths it consumes, and the handoffs
 # --------------------------------------------------------------------------
-def _space(table: Any) -> Any:
+def _space(table: Any, *, salt: str = SALT) -> Any:
   spec = PrivacySpec.from_table(
       table,
-      salt=SALT,
+      salt=salt,
       privacy_sample_rows=SAMPLE_ROWS,
       detection_sample_rows=SAMPLE_ROWS)
   inputs = PanelInputs.from_table(table, spec)
@@ -842,14 +854,277 @@ def test_sampling_prefilter_keeps_the_bottom_k():
 
 
 def test_a_stale_row_count_says_why_the_sample_is_empty():
-  """A plan counting far more rows than are read sets a prefilter rate no
-  row passes: both blocks say so instead of "no rows were read"."""
+  """A plan counting far more rows and distinct values than are read sets
+  a prefilter rate no row passes: both blocks say so instead of "no rows
+  were read"."""
   table, rows = people(n_synthetic=300)
-  stale = dataclasses.replace(table, rows_synthetic=10**12)
+  stale = dataclasses.replace(
+      table,
+      rows_synthetic=10**12,
+      columns=tuple(
+          dataclasses.replace(c, synthetic_distinct=10**12)
+          for c in table.columns))
   by = _by_id(_pure(stale, rows).metrics)
   for metric_id in OWNED_METRIC_IDS:
     assert by[metric_id].value is None
     assert "prefilter" in by[metric_id].detail["reason"], metric_id
+
+
+def _overstated(table: Any, factor: int) -> Any:
+  """`table` with its synthetic row and distinct counts `factor` times
+  what is read: a stale plan."""
+  return dataclasses.replace(
+      table,
+      rows_synthetic=table.rows_synthetic * factor,
+      columns=tuple(
+          dataclasses.replace(
+              c,
+              synthetic_distinct=(c.synthetic_distinct *
+                                  factor if c.synthetic_distinct else None))
+          for c in table.columns))
+
+
+def test_a_short_sample_is_flagged_with_its_counts(clean_run):
+  """R85: a sample the prefilter left short (fewer than k keys held
+  although rows were left out) is still evaluated, and every row built on
+  it says so, with the side's counts; a full sample never does."""
+  table, rows, clean = clean_run
+  for mv in clean.metrics:
+    assert "sample_short" not in mv.detail, mv.metric_id
+  result = _pure(_overstated(table, 100), rows)
+  k = max(SAMPLE_ROWS, DETECTION_ROWS)
+  for mv in result.metrics:
+    assert mv.detail["sample_short"] is True, mv.metric_id
+    counts = mv.detail["sample_short_counts"]
+    assert set(counts) == {"synthetic"}, mv.metric_id  # the source is full
+    short = counts["synthetic"]
+    assert short["rows_read"] == len(rows["synthetic"]) and short["k"] == k
+    assert 20 <= short["held_keys"] == short["held_rows"] < min(
+        k, short["rows_read"])
+    assert mv.value is not None or mv.metric_id in ("row.dcr_p5_ratio",
+                                                    "row.nndr_p5_ratio"), mv
+  share = _by_id(result.metrics)["row.dcr_train_holdout_share"]
+  assert share.n_synthetic == short["held_rows"]
+
+
+def _heavy_rows() -> list[dict]:
+  """1,000 distinct synthetic people and 5,000 copies of one more row."""
+  heavy = people_rows(1, 6, SYNTHETIC_ID_BASE + 900_000)[0]
+  return people_rows(1000, 5,
+                     SYNTHETIC_ID_BASE) + [dict(heavy) for _ in range(5000)]
+
+
+def test_one_key_holding_most_rows_does_not_shorten_the_sample():
+  """The prefilter's rate is per KEY (a lower bound of the distinct rows
+  read), so a key holding 5/6 of a side neither shortens the sample nor
+  changes it: the filtered bottom-k equals the unfiltered one."""
+  source = people_rows(2000, 31, SOURCE_ID_BASE)
+  synthetic = _heavy_rows()
+  table = planned(
+      "people",
+      PEOPLE_FIELDS,
+      source,
+      synthetic,
+      pk=("person_id",),
+      identity=PEOPLE_IDENTITY)
+  for s in range(8):
+    salt = f"heavy-{s}"
+    batches = encode(table, "synthetic", synthetic, chunk=500, salt=salt)
+    for k in (50, 200):
+      spec = PrivacySpec.from_table(
+          table, salt=salt, privacy_sample_rows=k, detection_sample_rows=k)
+      assert spec.limits[1] is not None  # the prefilter is on
+      filtered = _combined(spec, batches)
+      assert filtered == _combined(
+          dataclasses.replace(spec, limits=(None, None)), batches)
+      assert len(filtered.entries) == k, (salt, k)
+
+
+def _combined(spec: PrivacySpec, batches: Sequence[Any]) -> Any:
+  combine = SampleCombineFn(spec.sample_k)
+  acc = combine.create_accumulator()
+  for batch in batches:
+    for _, part in sample_parts(spec, batch):
+      acc = combine.add_input(acc, part)
+  return combine.extract_output(acc)
+
+
+# --------------------------------------------------------------------------
+# row samples (Ruling R85)
+# --------------------------------------------------------------------------
+@pytest.fixture(scope="module", name="keyless_run")
+def fixture_keyless_run() -> tuple[Any, dict, PrivacyResult]:
+  table, rows = keyless()
+  return table, rows, _pure(table, rows)
+
+
+def test_keyless_repeated_rows_faithful_generator_passes(keyless_run):
+  """A key-less table whose whole rows repeat (200 patterns over 20,000
+  rows a side): the privacy sample's priority prefix is a handful of
+  heavy keys, but density and coverage read a systematic PPS sample over
+  every held key, and detection simple random rows — so a faithful
+  generator passes both and the detection baseline sits at chance."""
+  _, _, result = keyless_run
+  by = _by_id(result.metrics)
+  share, coverage = by["row.dcr_train_holdout_share"], by["row.coverage"]
+  assert share.detail["sample_records"] < 60  # the cluster prefix
+  assert coverage.detail["density_records"] >= 150  # most patterns drawn
+  assert coverage.value is not None and coverage.value >= 0.95
+  assert _status(coverage) is Status.PASS
+  density = by["row.density"]
+  assert density.value is not None and abs(density.value - 1.0) < 0.1
+  assert _status(density) is Status.PASS
+  auc = by["table.detection_auc"]
+  assert auc.value is not None and 0.4 <= auc.value <= 0.6
+  assert auc.baseline_value is not None and 0.4 <= auc.baseline_value <= 0.6
+  assert _status(auc) is Status.PASS
+  assert _status(share) is not Status.FAIL
+  # DeLong reads repeated rows as independent, so its ci_low can clear 0.5
+  # here by chance; detectable flags wait for a WARN-level AUC
+  assert not [f for f in result.flags if f.check == DETECTABLE]
+
+
+def test_keyless_misspecified_generator_still_separates():
+  """The same table with a generator drawing the patterns uniformly
+  instead of Zipf(1.2): detection separates it as a simple random sample
+  of rows would, the baseline stays at chance, and density sees the
+  synthetic rows fall away from the source's dense patterns."""
+  table, rows = keyless(source_s=1.2, synthetic_s=None, seed=5)
+  by = _by_id(_pure(table, rows).metrics)
+  auc = by["table.detection_auc"]
+  assert auc.value is not None and auc.value >= 0.85
+  assert auc.ci_low is not None and auc.ci_low > 0.8
+  assert _status(auc) is Status.FAIL
+  assert auc.baseline_value is not None and 0.4 <= auc.baseline_value <= 0.6
+  assert by["table.pmse_ratio"].value is not None
+  assert _status(by["table.pmse_ratio"]) is Status.FAIL
+  density = by["row.density"]
+  assert density.value is not None and density.value < 0.6
+  assert _status(density) is Status.FAIL
+
+
+@pytest.mark.parametrize("salt", ["ref-a", "ref-b", "ref-c"])
+def test_density_matches_an_independent_reconstruction(salt):
+  """n_syn > |R| (2,600 synthetic rows, R = 2,000) with one key held
+  1,000 times: rebuilt independently — the bottom-k by priority, then
+  2,000 systematic points walked row by row from the salt's start —
+  density and coverage match `density_coverage` on those rows, and the
+  share still matches `nn_privacy` on the multiplicity prefix, to 1e-12."""
+  source = people_rows(4200, 31, SOURCE_ID_BASE)
+  fresh = people_rows(2500, 77, SYNTHETIC_ID_BASE)
+  donor = copy_content(source[5],
+                       people_rows(1, 78, SYNTHETIC_ID_BASE + 900_000)[0])
+  synthetic = fresh + [dict(donor) for _ in range(1000)]
+  table = planned(
+      "people",
+      PEOPLE_FIELDS,
+      source,
+      synthetic,
+      pk=("person_id",),
+      identity=PEOPLE_IDENTITY,
+      panel=panel_of(source, PANEL_ROWS))
+  privacy_rows = 2600
+  result = privacy_outputs(
+      table,
+      encode_all(
+          table, {
+              "source": source,
+              "synthetic": synthetic
+          },
+          chunk=613,
+          salt=salt),
+      salt=salt,
+      label_key=LABEL_KEY,
+      privacy_sample_rows=privacy_rows,
+      detection_sample_rows=40,
+      row_flags_top_k=5)
+  by = _by_id(result.metrics)
+  # the bottom-k, rebuilt: one entry per (priority, row hash), in order
+  batch = encode(
+      table, "synthetic", synthetic, chunk=len(synthetic), salt=salt)[0]
+  prio = privacy.sample_priority(batch.row_hash, salt)
+  held: dict[tuple[int, int], list[int]] = {}
+  for i in range(len(synthetic)):
+    held.setdefault((int(prio[i]), int(batch.row_hash[i])), [i, 0])[1] += 1
+  order = sorted(held)[:privacy_rows]
+  firsts = [held[key][0] for key in order]
+  counts = [held[key][1] for key in order]
+  assert max(counts) == 1000
+  # the privacy (share) sample: the multiplicity prefix
+  prefix: list[dict] = []
+  for first, count in zip(firsts, counts, strict=True):
+    prefix.extend([synthetic[first]] * min(count, privacy_rows - len(prefix)))
+  assert len(prefix) == privacy_rows
+  # density: n_eq = |R| systematic points over the held rows
+  total, n_eq = sum(counts), PANEL_ROWS
+  start = hash64(f"{privacy.PPS_LABEL}:density", salt) % total
+  bounds = np.cumsum(counts)
+  fake = [
+      synthetic[firsts[bisect.bisect_right(bounds,
+                                           (start + j * total) // n_eq)]]
+      for j in range(n_eq)
+  ]
+  space = _space(table, salt=salt)
+  assert table.panel is not None
+  density, coverage = density_coverage(
+      *space.encode(table.panel.r_rows[:n_eq]),
+      *space.encode(fake),
+      k=privacy.DENSITY_K)
+  assert by["row.density"].value == pytest.approx(density, abs=1e-12)
+  assert by["row.coverage"].value == pytest.approx(coverage, abs=1e-12)
+  assert by["row.density"].n_synthetic == n_eq
+  expected = summarize_nn(
+      nn_privacy(
+          space,
+          table.panel.r_rows,
+          table.panel.h_rows,
+          prefix,
+          k=privacy.DENSITY_K))
+  share = by["row.dcr_train_holdout_share"]
+  assert share.value == pytest.approx(
+      expected["dcr_train_holdout_share"], abs=1e-12)
+  assert share.ci_low == pytest.approx(
+      expected["dcr_train_holdout_share_ci_low"], abs=1e-12)
+  assert share.n_synthetic == privacy_rows
+
+
+def test_detection_rows_are_bounded_by_their_knob():
+  """R85: each side reaches detection as a `detection_sample_rows`-row
+  sample, whatever the privacy sample's size."""
+  table, rows = people(n_synthetic=2500)
+  spec = PrivacySpec.from_table(
+      table, salt=SALT, privacy_sample_rows=2500, detection_sample_rows=100)
+  for side in ("source", "synthetic"):
+    sample = _combined(spec, encode(table, side, rows[side]))
+    assert len(sample.entries) == 2500
+    view = privacy.detection_view(spec, side, sample)
+    assert view.size == 100 and len(view.entries) <= 100
+    assert (view.rows, view.held, view.keys) == (len(rows[side]), 2500, 2500)
+
+
+@pytest.mark.parametrize("simple", [False, True])
+def test_row_draws_are_equal_probability(simple):
+  """Systematic PPS and the simple random draw: exactly min(n, T) rows,
+  never more of a key than it holds (systematic: the floor or ceiling of
+  c·n/T), all rows when n >= T, and over salts each key drawn about
+  c·n/T times — every row equally likely."""
+  counts = [1, 1, 7, 30, 2, 1, 59]
+  total, n = sum(counts), 25
+  assert privacy.pps_hits(
+      counts, 500, salt="s", purpose="t", simple=simple) == counts
+  sums = np.zeros(len(counts))
+  salts = 600
+  for s in range(salts):
+    hits = privacy.pps_hits(counts, n, salt=f"s{s}", purpose="t", simple=simple)
+    assert sum(hits) == n
+    assert all(0 <= h <= c for h, c in zip(hits, counts, strict=True))
+    if not simple:
+      assert all(
+          math.floor(c * n / total) <= h <= math.ceil(c * n / total)
+          for h, c in zip(hits, counts, strict=True))
+    sums += hits
+  expected = np.array(counts) * n / total
+  assert np.allclose(sums / salts, expected, atol=0.35)
 
 
 def test_throughput_gower_knn_chunked(record_property):

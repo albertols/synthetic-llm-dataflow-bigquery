@@ -15,7 +15,8 @@
 invented `people` table of the membership tests (planned by the real
 planner), sized for a 2,000-row R/H panel, with planted defects —
 verbatim copies of R records, a shifted amount column, whole-row
-duplicates.
+duplicates — and a key-less `catalog` table whose rows are drawn from a
+few hundred (category, brand, size) patterns, so whole rows repeat.
 
 Nothing here is real data: invented names, `example.com` e-mails, ids in
 invented ranges (source 7_000_000+, synthetic 5_000_000+).
@@ -32,6 +33,8 @@ from typing import Any
 from sdfb_evaluation.beam.encode import BatchEncoder, EncodedBatch
 from sdfb_evaluation.context.plan import TablePlan
 
+import numpy as np
+
 from .membership_data import (
     PEOPLE_FIELDS,
     PEOPLE_IDENTITY,
@@ -41,6 +44,7 @@ from .membership_data import (
     panel_of,
     people_rows,
     planned,
+    zipf_weights,
 )
 
 SALT = "pr1v" * 8
@@ -88,6 +92,61 @@ def people(n_source: int = 5000,
   return table, {"source": source, "synthetic": synthetic}
 
 
+KEYLESS_FIELDS: tuple[dict[str, str], ...] = (
+    {
+        "name": "category",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "brand",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "size",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+)
+
+
+def pattern(p: int) -> dict[str, Any]:
+  """Pattern `p`'s row (no key column: a copy of a row IS the row)."""
+  return {
+      "category": f"cat{p % 10}",
+      "brand": f"brand{(p // 10) % 100:03d}",
+      "size": f"s{p // 1000}",
+  }
+
+
+def keyless(n_rows: int = 20_000,
+            patterns: int = 200,
+            *,
+            source_s: float = 0.8,
+            synthetic_s: float | None = 0.8,
+            seed: int = 3) -> tuple[TablePlan, dict[str, list[dict]]]:
+  """A key-less table: each side draws `n_rows` rows from `patterns`
+  patterns with Zipf(s) weights (`synthetic_s=None`: uniform, a
+  mis-specified generator), so every pattern is one key held many
+  times. R and H are the source's first 2,000 rows and the next."""
+  rng = np.random.default_rng(seed)
+  source = [
+      pattern(int(p))
+      for p in rng.choice(patterns, n_rows, p=zipf_weights(patterns, source_s))
+  ]
+  weights = (None if synthetic_s is None else zipf_weights(
+      patterns, synthetic_s))
+  synthetic = [pattern(int(p)) for p in rng.choice(patterns, n_rows, p=weights)]
+  table = planned(
+      "catalog",
+      KEYLESS_FIELDS,
+      source,
+      synthetic,
+      panel=panel_of(source, PANEL_ROWS))
+  return table, {"source": source, "synthetic": synthetic}
+
+
 def with_rates(table: TablePlan, *, synthetic: float) -> TablePlan:
   """`table` read in sampled mode at `synthetic` on the synthetic side."""
   return dataclasses.replace(table, sample_rate_synthetic=synthetic)
@@ -97,9 +156,10 @@ def encode(table: TablePlan,
            side: str,
            rows: Sequence[Mapping[str, Any]],
            *,
-           chunk: int = 997) -> list[EncodedBatch]:
+           chunk: int = 997,
+           salt: str = SALT) -> list[EncodedBatch]:
   """`rows` of one side as encoded batches, as `EncodeSide` makes them."""
-  encoder = BatchEncoder.from_table(table, side, salt=SALT)
+  encoder = BatchEncoder.from_table(table, side, salt=salt)
   return [
       encoder.encode(rows[start:start + chunk])
       for start in range(0, len(rows), chunk)
@@ -109,8 +169,9 @@ def encode(table: TablePlan,
 def encode_all(table: TablePlan,
                rows_by: Mapping[str, Sequence[Mapping[str, Any]]],
                *,
-               chunk: int = 997) -> list[EncodedBatch]:
+               chunk: int = 997,
+               salt: str = SALT) -> list[EncodedBatch]:
   return [
       batch for side, rows in rows_by.items()
-      for batch in encode(table, side, rows, chunk=chunk)
+      for batch in encode(table, side, rows, chunk=chunk, salt=salt)
   ]

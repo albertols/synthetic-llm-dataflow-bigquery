@@ -25,17 +25,20 @@ Gower search out and assembles the rows.
       CombinePerKey(side, SampleCombineFn)   BottomK(k), k = max(privacy,
         │                                    detection sample rows), with
         │                                    every key's exact multiplicity
-        ├─► ToDict ─► DetectionFn ◄── PanelInputs (AsSingleton)
+        ├─► RowSample per side (simple random rows, ≤ detection_sample_rows)
+        │     ─► ToDict ─► DetectionFn ◄── PanelInputs (AsSingleton)
         │     ONE element, so one worker: featurize ─► c2st_auc (DeLong)
         │     ─► pmse_ratio ─► table.detection_auc, table.pmse_ratio,
         │     roc_curve, detectable flags
+        ├─► density RowSample (synthetic; systematic PPS, min(|R|, n_syn)
+        │     rows) ──────────────────────────────────────────────┐ AsDict
         └─► nn_records (synthetic: priority order, weight = multiplicity,
-              │         cut at privacy_sample_rows ROWS)
+              │         cut at privacy_sample_rows ROWS)          │
               Reshuffle ─► BatchElements(≤ 4096) ─► GowerNNFn ◄── PanelInputs
               │   index: R/H Gower blocks + R source codes, built once per
               │   worker (`Shared`, tagged by the feature set and panel)
               CombineGlobally(NNMergeFn) ─► PrivacyEmitFn ◄── PanelInputs,
-                  label key (AsSingleton), side row counts, failures
+                  label key (AsSingleton), density sample, failures
                   holdout_mass ─► summarize_nn ─► the five row metrics,
                   dcr_hist / nndr_hist, nearest_record flags
 
@@ -49,29 +52,79 @@ their canonical JSON, R35). The priority is SplitMix64's finaliser of
 the row hash XOR a salt word (Steele, Lea & Flood, 2014): vectorised,
 and a pure function of (salt, key), which is all BottomK's exactness
 needs. Before any row reaches Python, a batch keeps only the rows whose
-priority lies below q · 2^64, q = min(1, (2k + 100) / N) with N the
-plan's rows read on that side. About 2k + 100 rows are expected to
-pass, and the samples only ever read the lowest priorities up to k ROWS
-(keys in priority order, each with its copies), so while at least k rows
-pass — all but a vanishing binomial tail — the kept samples equal an
-unfiltered bottom-k's, while the shuffle carries about 2k payloads per
-side instead of up to k per bundle. Should fewer rows pass (a stale row
-count, or one key holding most of the table), the sample is still an
-equal-probability sample of keys, only shorter; `detail.sample_rows`
-says how many rows it held. Every occurrence of a key shares its
-priority, so the prefilter keeps or drops all its copies together and
-the multiplicities stay exact.
+priority lies below q · 2^64, q = min(1, (2k + 100) / K), where K is a
+LOWER bound of the distinct keys a side reads: the smaller of the
+plan's rows read and the largest planned distinct count
+(APPROX_COUNT_DISTINCT) of any of its columns — a row hash is at least
+as distinct as each of its cells. Each key passes with probability q,
+so about 2k + 100 keys pass and the BottomK holds the true bottom-k of
+keys, while the shuffle carries about 2k payloads per side instead of
+up to k per bundle. A bound on ROWS would not do: on a key-less table
+whose whole rows repeat (a few hundred keys over millions of rows) it
+lets a few dozen keys through, and every sample drawn from them is a
+cluster sample (Ruling R85). Because the rate is per key, one key
+holding more than half of a side's rows no longer shortens the sample
+(under a rate on rows, it passed with probability q alone and the
+other keys could fall below k). Two exceptions remain:
+
+  - planned counts that overstate the keys actually read — a stale plan
+    (rows or distinct counts far above what is read; no row passing at
+    all is reported as such), or a sampled-mode read, which holds fewer
+    distinct values than the full table the plan counted (the factor 2
+    absorbs down to half of them);
+  - the binomial tail itself, beyond ~sqrt(k / 2) standard deviations.
+
+Either leaves the sample SHORT: fewer than k keys held although some of
+the side's rows were left out (held rows < rows read) — which covers
+every sample holding fewer than min(k, rows read) rows. A short sample
+is still an equal-probability sample of keys; every row computed from
+it carries `detail.sample_short = true` and `sample_short_counts` (that
+side's held keys and rows, rows read and k). Every occurrence of a key
+shares its priority, so the prefilter keeps or drops all its copies
+together and the multiplicities stay exact.
 
 Weights. The synthetic rows the privacy metrics see are the sampled keys
 in priority order, each repeated by its multiplicity, cut at
-`privacy_sample_rows` rows (the last key partly): an equal-probability
-sample of rows whose copies stay together. Distances are computed once
+`privacy_sample_rows` rows (the last key partly): every key equally
+likely, its copies kept together — a cluster sample of rows (below).
+Distances are computed once
 per key and repeated by its weight, so a row held c times weighs c, not
 1 (R34). The holdout share is rebuilt from the pooled nearest-neighbour
 masses, `nn_mass[:n].sum() / n_syn` (R29, whose `permutation_se` assumes
-|R| = |H| = n). Density and coverage take the first min(|R|, n_syn) of
-those rows in priority order — the BottomK hash, so the NNMerge result
-never depends on arrival order — against R at the same n (D5).
+|R| = |H| = n); NNMerge sorts by the priority rank, so no result
+depends on arrival order.
+
+Row samples (Ruling R85). A PREFIX of the multiplicity-expanded keys is
+a cluster sample: on a key-less table where whole rows repeat, its
+first rows are a few heavy keys with all their copies (coverage 0.2 to
+0.6 for a faithful generator where a row sample reads 1.0). The holdout
+share and the p5 ratios keep that validated path — `permutation_se` is
+the exact split variance given the clusters — but density and coverage
+draw a SYSTEMATIC PPS sample over EVERY held key in priority order
+(Madow, 1949): with T the held rows (the sum of the
+multiplicities) and n the rows wanted, points start + j·T/n (j < n),
+start from the salt in [0, T/n), each select the key whose cumulative
+row interval holds them, so every held row is drawn with probability
+n / T and a key appears about c·n/T times. The priority order is a
+random order of the keys, so the points spread over them as a random
+start would; the draw is a pure function of the sample and the salt.
+It gives density and coverage their min(|R|, n_syn) rows at equal n
+(D5), against R's first rows (`density_sample`).
+
+Detection draws its rows on each side (`detection_view`, and the
+thinning to equal n and to |R| for the baseline) as a SIMPLE RANDOM
+sample of the held rows without replacement instead — n distinct row
+positions out of T from a salt-seeded generator (Floyd's algorithm in
+numpy), each mapped to its key — which is equally an equal-probability
+row sample. Systematic PPS fixes each repeated key's count to the floor
+or ceiling of c·n/T on BOTH sides, and the classifier's
+cross-validation then scores such exactly balanced duplicates below
+chance (each held-out fold sees the other class over-represented in its
+training folds): on a key-less Zipf table of 200 whole-row patterns a
+faithful generator read an AUC of 0.37 and a baseline of 0.45, against
+0.50 for independent simple random samples (six seeds). A simple random
+sample keeps the multinomial variation a row sample has, so the null
+AUC sits at 0.5.
 
 The feature space is the plan's (`stats.privacy.GowerSpace`): the
 non-key numeric and temporal columns through their SOURCE quantile grid
@@ -106,13 +159,18 @@ canonicalises BYTES and its base64 text alike). Keys (primary and foreign)
 are never features; identity columns are text features. A text or
 identifier column's head masks are the SOURCE sample's `shape_of` masks
 holding at least 2 % of its non-empty values (ADR 0026's floor), most
-frequent first — never the synthetic side's. Memory: two samples of at
-most `detection_sample_rows` rows as Python tuples (about 60 B a cell),
+frequent first — never the synthetic side's. Memory: each side's
+sample is cut to its `detection_sample_rows`-row `RowSample` BEFORE the
+two meet (`ToDict`), so the element holds at most that many keys a side
+as Python tuples (about 60 B a cell), plus
 the float64 feature matrix of 2n x F features (F = numeric + categorical
 + 7 per text column; 40 MB at n = 50,000 and F = 50), the gradient
 boosting's binned copy (uint8, an eighth of it) and the logistic design
 (CSR) — well under a gigabyte at the defaults. `baseline_value` is the
-same test with R in the synthetic class (D4). `table.pmse_ratio` always
+same test with R in the synthetic class (D4) against the source rows
+thinned to |R| (`detail.baseline_n`): it is at n = |R|, not at the
+metric's n, so it is a floor to read, not a matched comparison (a D5
+note for the design doc). `table.pmse_ratio` always
 carries `detail["ceiling"]` = N / (k - 1) (R33: scoring marks it
 not_evaluated when the ceiling sits below the fail threshold). The seed
 is a function of the salt.
@@ -126,9 +184,13 @@ Flags carry keys only, never an attribute value (D6, R64/R68):
                      hash, else its record hash), `distance`/`score = 1 -
                      distance`; detail: holdout distance, NNDR,
                      multiplicity
-    detectable       only when detection is significant (DeLong ci_low >
-                     0.5): the synthetic rows the classifier scores most
-                     surely synthetic (out of fold), one per sampled key;
+    detectable       only when the AUC reaches the catalogue's warn
+                     threshold AND its DeLong ci_low clears 0.5 (the
+                     examples a WARN or FAIL explains; DeLong treats
+                     repeated rows as independent, so ci_low alone
+                     clears 0.5 by chance on a faithful key-less table):
+                     the synthetic rows the classifier scores most surely
+                     synthetic (out of fold), one per sampled key;
                      `score` = that probability
 
 `synthetic_key` is the synthetic row's PK tuple, else its identity tuple
@@ -151,7 +213,8 @@ their flags; the other block, tables and the run carry on.
 References (author-year, R22): Platzer & Reutterer (2021); Gower (1971);
 Naeem et al. (2020); Giomi et al. (2023); Lopez-Paz & Oquab (2017);
 DeLong, DeLong & Clarke-Pearson (1988); Woo et al. (2009); Snoke et al.
-(2018); Cohen & Kaplan (2007); Steele, Lea & Flood (2014).
+(2018); Cohen & Kaplan (2007); Steele, Lea & Flood (2014); Madow (1949)
+for systematic PPS sampling.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -178,6 +241,7 @@ from sdfb_evaluation.beam.membership import (
     RowFlag,
 )
 from sdfb_evaluation.canonical import NULL_CODE, hash64, hashed_label
+from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.sampling.reservoir import BottomK
 from sdfb_evaluation.stats.detection import (
     DetectionColumn,
@@ -218,6 +282,7 @@ __all__ = [
     "NEAREST_RECORD",
     "NN_BATCH_ROWS",
     "OWNED_METRIC_IDS",
+    "PPS_LABEL",
     "PRIVACY_METRIC_IDS",
     "TABLE_ERRORS",
     "UNVERIFIED_REASON",
@@ -230,17 +295,22 @@ __all__ = [
     "Privacy",
     "PrivacyResult",
     "PrivacySpec",
+    "RowSample",
     "Sample",
     "SampleCombineFn",
     "SamplePart",
     "build_nn_index",
+    "density_sample",
     "detection_block",
     "detection_columns",
+    "detection_view",
     "gower_part",
     "merge_nn",
     "nn_records",
+    "pps_hits",
     "privacy_block",
     "privacy_outputs",
+    "row_sample",
     "sample_parts",
     "sample_priority",
 ]
@@ -285,6 +355,10 @@ _TWO_64 = 2**64
 _SPLITMIX = (np.uint64(0x9E3779B97F4A7C15), np.uint64(0xBF58476D1CE4E5B9),
              np.uint64(0x94D049BB133111EB))
 _PRIORITY_LABEL = "sdfb:privacy-sample"
+# systematic PPS starts: hash64(f"{PPS_LABEL}:{purpose}", salt) mod T
+PPS_LABEL = "sdfb:pps"
+_DENSITY, _DETECTION, _EQUAL_N, _BASELINE = ("density", "detection",
+                                             "detection-n", "baseline")
 _SEED_LABEL = "sdfb:detection-seed"
 _SEED_MODULUS = 2**31
 _HEAD_MASK_SHARE = 0.02  # ADR 0026's head-mask floor
@@ -338,12 +412,12 @@ def sample_priority(row_hash: np.ndarray, salt: str) -> np.ndarray:
   return out
 
 
-def _prefilter_limit(k: int, rows: float) -> int | None:
+def _prefilter_limit(k: int, keys: float | None) -> int | None:
   """The priority below which a batch keeps a row, or None (keep all) when
-  the side's row count is unknown or the rate reaches 1."""
-  if rows <= 0:
+  the side's key bound is unknown or the rate reaches 1."""
+  if keys is None or keys <= 0:
     return None
-  rate = (_PREFILTER_FACTOR * k + _PREFILTER_SLACK) / rows
+  rate = (_PREFILTER_FACTOR * k + _PREFILTER_SLACK) / keys
   if rate >= 1.0:
     return None
   return int(rate * _TWO_64)
@@ -411,6 +485,7 @@ class PrivacySpec:  # pylint: disable=too-many-instance-attributes  # one field 
     bq_type = {c.name: c.bq_type.upper() for c in table.columns}
     k = max(privacy_rows, detection_rows)
     rows_source, rows_synthetic = table.rows_read
+    distinct_source, distinct_synthetic = _distinct_bounds(table)
     return cls(
         table=table.name,
         encoding_plan_digest=table.encoding_plan_digest,
@@ -423,11 +498,30 @@ class PrivacySpec:  # pylint: disable=too-many-instance-attributes  # one field 
         privacy_rows=privacy_rows,
         detection_rows=detection_rows,
         top_k=top_k,
-        limits=(_prefilter_limit(k, rows_source),
-                _prefilter_limit(k, rows_synthetic)),
+        limits=(_prefilter_limit(k, _keys_bound(rows_source, distinct_source)),
+                _prefilter_limit(
+                    k, _keys_bound(rows_synthetic, distinct_synthetic))),
         seed=hash64(_SEED_LABEL, salt) % _SEED_MODULUS,
         rate_source=_rate(table.sample_rate_source),
         rate_synthetic=_rate(table.sample_rate_synthetic))
+
+
+def _distinct_bounds(table: TablePlan) -> tuple[int | None, int | None]:
+  """Each side's largest planned distinct count over its columns: a lower
+  bound of its distinct rows (module docstring); None when unplanned."""
+  columns = [c for c in table.columns if c.kind is not ColumnKind.NESTED]
+  source = [c.source_distinct for c in columns if c.source_distinct]
+  synthetic = [c.synthetic_distinct for c in columns if c.synthetic_distinct]
+  return (max(source) if source else None,
+          max(synthetic) if synthetic else None)
+
+
+def _keys_bound(rows: float, distinct: int | None) -> float | None:
+  """A lower bound of the keys a side reads: min(rows read, the largest
+  column distinct count); None when either is unknown."""
+  if rows <= 0 or distinct is None:
+    return None
+  return min(rows, float(distinct))
 
 
 def _rate(rate: float | None) -> float:
@@ -632,18 +726,132 @@ class Sample:
   entries: tuple[tuple[tuple[Any, ...], int], ...]
   rows: int
 
-  def expanded(self, limit: int) -> tuple[list[tuple[Any, ...]], list[int]]:
-    """The first `limit` rows of the sample with every key repeated by its
-    multiplicity, and each row's key position."""
+  @property
+  def held(self) -> int:
+    """The rows the sample stands for: the sum of the multiplicities."""
+    return sum(count for _, count in self.entries)
+
+
+def pps_hits(counts: Sequence[int],
+             n: int,
+             *,
+             salt: str,
+             purpose: str,
+             simple: bool = False) -> list[int]:
+  """Systematic PPS (module docstring): how many of `n` equally spaced
+  points fall in each key's row interval, keys in the given order with
+  `counts` rows each. The points sit at (start + j·T) / n rows, j < n,
+  with T = sum(counts) and start = hash64(f"{PPS_LABEL}:{purpose}", salt)
+  mod T, so each of the T rows is drawn with probability n / T; the hits
+  sum to min(n, T). Exact integer arithmetic.
+
+  `simple`: a simple random sample of the rows instead — min(n, T)
+  distinct row positions out of T drawn without replacement by a
+  generator seeded with the same hash, each counted for the key whose
+  rows hold it (module docstring: what detection draws).
+  """
+  total = sum(counts)
+  n = min(n, total)
+  if n <= 0:
+    return [0] * len(counts)
+  if simple:
+    rng = np.random.default_rng(hash64(f"{PPS_LABEL}:{purpose}", salt))
+    picks = rng.choice(total, size=n, replace=False)
+    owners = np.searchsorted(np.cumsum(counts), picks, side="right")
+    return [int(h) for h in np.bincount(owners, minlength=len(counts))]
+  start = hash64(f"{PPS_LABEL}:{purpose}", salt) % total
+  hits: list[int] = []
+  before = 0  # points below the running row count: ceil((n·cum - start) / T)
+  cumulative = 0
+  for count in counts:
+    cumulative += count
+    upto = -((start - n * cumulative) // total)
+    hits.append(upto - before)
+    before = upto
+  return hits
+
+
+@dataclass(frozen=True)
+class RowSample:
+  """An equal-probability sample of a side's rows drawn from its `Sample`
+  (module docstring: systematic PPS, or a simple random sample of the
+  rows for detection): `(payload, hits, multiplicity)`
+  per drawn key, in priority order; `rows` the side's rows read, `held`
+  the rows its bottom-k sample stood for and `keys` the keys it held."""
+  entries: tuple[tuple[tuple[Any, ...], int, int], ...]
+  rows: int
+  held: int
+  keys: int
+
+  @property
+  def size(self) -> int:
+    """The sample's rows: the sum of the hits."""
+    return sum(hits for _, hits, _ in self.entries)
+
+  def expanded(self) -> tuple[list[tuple[Any, ...]], list[int]]:
+    """Every sampled row (a key repeated by its hits) and its key's
+    position in `entries`."""
     rows: list[tuple[Any, ...]] = []
     keys: list[int] = []
-    for position, (payload, count) in enumerate(self.entries):
-      take = min(count, limit - len(rows))
-      if take <= 0:
-        break
-      rows.extend([payload] * take)
-      keys.extend([position] * take)
+    for position, (payload, hits, _) in enumerate(self.entries):
+      rows.extend([payload] * hits)
+      keys.extend([position] * hits)
     return rows, keys
+
+  def thinned(self,
+              n: int,
+              *,
+              salt: str,
+              purpose: str,
+              simple: bool = False) -> RowSample:
+    """`n` of this sample's rows, drawn over its hits like `pps_hits`:
+    still an equal-probability sample of the side's rows."""
+    if n >= self.size:
+      return self
+    hits = pps_hits([h for _, h, _ in self.entries],
+                    n,
+                    salt=salt,
+                    purpose=purpose,
+                    simple=simple)
+    return RowSample(
+        tuple(
+            (payload, h, count)
+            for (payload, _, count), h in zip(self.entries, hits, strict=True)
+            if h), self.rows, self.held, self.keys)
+
+
+def row_sample(sample: Sample,
+               n: int,
+               *,
+               salt: str,
+               purpose: str,
+               simple: bool = False) -> RowSample:
+  """`n` (at most `sample.held`) rows of a side drawn over its bottom-k
+  keys in priority order, weighted by their multiplicities (`pps_hits`:
+  systematic PPS, or with `simple` a simple random sample of the rows)."""
+  counts = [count for _, count in sample.entries]
+  hits = pps_hits(counts, n, salt=salt, purpose=purpose, simple=simple)
+  return RowSample(
+      tuple((payload, h, count)
+            for (payload, count), h in zip(sample.entries, hits, strict=True)
+            if h), sample.rows, sum(counts), len(counts))
+
+
+def _short_detail(samples: Mapping[str, RowSample], k: int) -> dict[str, Any]:
+  """`sample_short` (with the counts) when a side's bottom-k sample held
+  fewer than k keys although rows were left out — the prefilter's
+  exceptions (module docstring)."""
+  short = {
+      side: {
+          "held_keys": sample.keys,
+          "held_rows": sample.held,
+          "rows_read": sample.rows,
+          "k": k
+      }
+      for side, sample in sorted(samples.items())
+      if sample.keys < k and sample.held < sample.rows
+  }
+  return {"sample_short": True, "sample_short_counts": short} if short else {}
 
 
 def _payloads(spec: PrivacySpec, batch: EncodedBatch,
@@ -729,12 +937,11 @@ class SampleCombineFn(beam.CombineFn):
 @dataclass(frozen=True)
 class NNRecord:
   """One sampled synthetic key: its priority rank, the rows it stands for
-  in the privacy sample (`weight`), its exact multiplicity (`count`), the
-  sample rows before it (`offset`) and its cells."""
+  in the privacy sample (`weight`), its exact multiplicity (`count`) and
+  its cells."""
   rank: int
   weight: int
   count: int
-  offset: int
   values: tuple[Any, ...]
 
 
@@ -747,9 +954,19 @@ def nn_records(spec: PrivacySpec, sample: Sample) -> list[NNRecord]:
     if offset >= spec.privacy_rows:
       break
     weight = min(count, spec.privacy_rows - offset)
-    out.append(NNRecord(rank, weight, count, offset, payload))
+    out.append(NNRecord(rank, weight, count, payload))
     offset += weight
   return out
+
+
+def density_sample(spec: PrivacySpec, n_panel: int,
+                   sample: Sample) -> RowSample:
+  """The density/coverage rows at equal n: min(|R|, n_syn) synthetic rows
+  by systematic PPS over every held key (n_syn = the privacy sample's
+  rows; none when the panel cannot be used)."""
+  n_syn = min(spec.privacy_rows, sample.held)
+  return row_sample(
+      sample, min(n_panel, n_syn), salt=spec.salt, purpose=_DENSITY)
 
 
 @dataclass(frozen=True, eq=False)
@@ -793,9 +1010,7 @@ def build_nn_index(spec: PrivacySpec, inputs: PanelInputs) -> NNIndex:
 class NNPart:  # pylint: disable=too-many-instance-attributes  # one array per nearest-neighbour fact
   """The nearest-neighbour results of some synthetic keys, aligned: rank,
   weight, multiplicity, the two nearest R distances `d_r` (n, 2), the
-  nearest R and H rows and H distance, and the flag handles; plus the
-  Gower blocks of the keys whose rows open the sample (offset < |R|),
-  which density reads at equal n."""
+  nearest R and H rows and H distance, and the flag handles."""
   rank: np.ndarray
   weight: np.ndarray
   count: np.ndarray
@@ -804,9 +1019,6 @@ class NNPart:  # pylint: disable=too-many-instance-attributes  # one array per n
   d_h: np.ndarray
   i_h: np.ndarray
   handles: tuple[dict[str, Any] | None, ...]
-  dense_rank: np.ndarray
-  dense_num: np.ndarray
-  dense_cat: np.ndarray
 
 
 def gower_part(spec: PrivacySpec, inputs: PanelInputs, index: NNIndex,
@@ -822,20 +1034,15 @@ def gower_part(spec: PrivacySpec, inputs: PanelInputs, index: NNIndex,
   q_num, q_cat = space.encode(rows)
   d_r, i_r = gower_knn(q_num, q_cat, index.r_num, index.r_cat, k=2)
   d_h, i_h = gower_knn(q_num, q_cat, index.h_num, index.h_cat, k=1)
-  rank = np.array([r.rank for r in records], dtype=np.int64)
-  dense = np.array([r.offset < inputs.n_panel for r in records], dtype=bool)
   return NNPart(
-      rank=rank,
+      rank=np.array([r.rank for r in records], dtype=np.int64),
       weight=np.array([r.weight for r in records], dtype=np.int64),
       count=np.array([r.count for r in records], dtype=np.int64),
       d_r=d_r,
       i_r=i_r[:, 0],
       d_h=d_h[:, 0],
       i_h=i_h[:, 0],
-      handles=tuple(_handle(spec, r.values) for r in records),
-      dense_rank=rank[dense],
-      dense_num=q_num[dense],
-      dense_cat=q_cat[dense])
+      handles=tuple(_handle(spec, r.values) for r in records))
 
 
 def merge_nn(parts: Iterable[NNPart]) -> NNPart | None:
@@ -852,8 +1059,6 @@ def merge_nn(parts: Iterable[NNPart]) -> NNPart | None:
 
   rank = joined("rank")
   order = np.argsort(rank, kind="stable")
-  dense_rank = joined("dense_rank")
-  dense_order = np.argsort(dense_rank, kind="stable")
   handles = [h for p in kept for h in p.handles]
   return NNPart(
       rank=rank[order],
@@ -863,10 +1068,7 @@ def merge_nn(parts: Iterable[NNPart]) -> NNPart | None:
       i_r=joined("i_r")[order],
       d_h=joined("d_h")[order],
       i_h=joined("i_h")[order],
-      handles=tuple(handles[i] for i in order.tolist()),
-      dense_rank=dense_rank[dense_order],
-      dense_num=joined("dense_num")[dense_order],
-      dense_cat=joined("dense_cat")[dense_order])
+      handles=tuple(handles[i] for i in order.tolist()))
 
 
 class NNMergeFn(beam.CombineFn):
@@ -931,9 +1133,11 @@ class _Emitter:
     self.value(metric_id, None, detail={"reason": reason, **detail}, **fields_)
 
 
-def _skipped(spec: PrivacySpec, ids: Sequence[str],
-             reason: str) -> list[MetricValue]:
-  e = _Emitter(spec, _mode_detail(spec))
+def _skipped(spec: PrivacySpec,
+             ids: Sequence[str],
+             reason: str,
+             extra: Mapping[str, Any] | None = None) -> list[MetricValue]:
+  e = _Emitter(spec, {**_mode_detail(spec), **(extra or {})})
   for metric_id in ids:
     e.skip(metric_id, reason)
   return e.rows
@@ -987,29 +1191,36 @@ def _edges_digest(edges: Sequence[float]) -> str:
 # --------------------------------------------------------------------------
 def privacy_block(spec: PrivacySpec, inputs: PanelInputs,
                   index_fn: Callable[[], NNIndex], merged: NNPart | None,
-                  rows_seen: int, label_key: bytes,
+                  density: RowSample | None, label_key: bytes,
                   failure: str | None) -> _Block:
   """The five row metrics, the DCR/NNDR histograms and the nearest-record
   flags of one table, or not_evaluated rows with the reason (a data error
-  here too: `TABLE_ERRORS`).
+  here too: `TABLE_ERRORS`). `density` is the synthetic side's
+  `density_sample` (None: no synthetic side arrived).
 
   Raises:
     ValueError: an empty `label_key` (a wiring error, never a data one).
   """
   label_key = _checked_key(label_key)
+  density = density or RowSample((), 0, 0, 0)
+  extra = _short_detail({_SYNTHETIC: density}, spec.sample_k)
   reason = failure or inputs.privacy_reason
   if reason is None and merged is None:
-    reason = _empty_sample(_SYNTHETIC, rows_seen)
+    reason = _empty_sample(_SYNTHETIC, density.rows)
   if reason is not None or merged is None:
-    return _Block(_skipped(spec, PRIVACY_METRIC_IDS, reason or _NO_SYNTHETIC))
+    return _Block(
+        _skipped(spec, PRIVACY_METRIC_IDS, reason or _NO_SYNTHETIC, extra))
   try:
-    return _privacy_rows(spec, inputs, index_fn(), merged, rows_seen, label_key)
+    return _privacy_rows(spec, inputs, index_fn(), merged, density, label_key,
+                         extra)
   except TABLE_ERRORS as exc:
-    return _Block(_skipped(spec, PRIVACY_METRIC_IDS, _failure("privacy", exc)))
+    return _Block(
+        _skipped(spec, PRIVACY_METRIC_IDS, _failure("privacy", exc), extra))
 
 
 def _privacy_rows(spec: PrivacySpec, inputs: PanelInputs, index: NNIndex,
-                  merged: NNPart, rows_seen: int, label_key: bytes) -> _Block:
+                  merged: NNPart, density: RowSample, label_key: bytes,
+                  extra: Mapping[str, Any]) -> _Block:
   space = inputs.space
   assert space is not None  # privacy_reason is None
   n = inputs.n_panel
@@ -1025,17 +1236,13 @@ def _privacy_rows(spec: PrivacySpec, inputs: PanelInputs, index: NNIndex,
       n_r=n,
       n_h=n)
   n_eq = min(n, n_syn)
-  density = coverage = base_density = base_coverage = None
+  dens = coverage = base_density = base_coverage = None
   if n_eq > DENSITY_K:
-    # the keys opening the sample are a prefix of the priority order
-    dense_w = w[:merged.dense_rank.size]
-    if not np.array_equal(merged.dense_rank,
-                          merged.rank[:merged.dense_rank.size]):
-      raise ValueError("the density sample is not a prefix of the privacy "
-                       "sample (inconsistent nearest-neighbour parts)")
-    fake_num = np.repeat(merged.dense_num, dense_w, axis=0)[:n_eq]
-    fake_cat = np.repeat(merged.dense_cat, dense_w, axis=0)[:n_eq]
-    density, coverage = density_coverage(
+    if density.size != n_eq:
+      raise ValueError(f"the density sample holds {density.size} rows, not "
+                       f"the {n_eq} at equal n (inconsistent side inputs)")
+    fake_num, fake_cat = space.encode(_as_rows(spec, density.expanded()[0]))
+    dens, coverage = density_coverage(
         index.r_num[:n_eq], index.r_cat[:n_eq], fake_num, fake_cat, k=DENSITY_K)
     base_density, base_coverage = density_coverage(
         index.h_num[:n_eq],
@@ -1053,15 +1260,16 @@ def _privacy_rows(spec: PrivacySpec, inputs: PanelInputs, index: NNIndex,
           nn_mass=nn_mass,
           closer_to_r=float(nn_mass[:n].sum()) / n_syn,
           n_syn=n_syn,
-          density=density,
+          density=dens,
           coverage=coverage))
   sampling = {
       **_mode_detail(spec),
+      **extra,
       "sample_rows": n_syn,
       "sample_records": int(merged.rank.size),
   }
   common = {
-      "sample_rate": _share_seen(spec, n_syn, rows_seen),
+      "sample_rate": _share_seen(spec, n_syn, density.rows),
       "feature_set_digest": space.digest,
   }
   e = _Emitter(spec, sampling)
@@ -1100,7 +1308,7 @@ def _privacy_rows(spec: PrivacySpec, inputs: PanelInputs, index: NNIndex,
     else:
       value = summary[metric_id.removeprefix("row.")]
       e.value(metric_id, value, detail=detail, **fields_)
-  for metric_id, value, base in (("row.density", density, base_density),
+  for metric_id, value, base in (("row.density", dens, base_density),
                                  ("row.coverage", coverage, base_coverage)):
     fields_ = {"n_source": n_eq, "n_synthetic": n_eq, **common}
     if value is None:
@@ -1111,7 +1319,10 @@ def _privacy_rows(spec: PrivacySpec, inputs: PanelInputs, index: NNIndex,
           metric_id,
           value,
           baseline_value=base,
-          detail={"k": DENSITY_K},
+          detail={
+              "k": DENSITY_K,
+              "density_records": len(density.entries)
+          },
           **fields_)
   profiles = [
       ProfileValue(
@@ -1233,55 +1444,86 @@ def _as_rows(spec: PrivacySpec,
   return [dict(zip(spec.sample_columns, p, strict=True)) for p in payloads]
 
 
+def detection_view(spec: PrivacySpec, side: str, sample: Sample) -> RowSample:
+  """A side's detection rows: `detection_sample_rows` of them (at most), a
+  simple random sample of the held rows (module docstring) — the only
+  part of a side's sample detection receives, so its memory is bounded
+  by the knob."""
+  return row_sample(
+      sample,
+      spec.detection_rows,
+      salt=spec.salt,
+      purpose=f"{_DETECTION}:{side}",
+      simple=True)
+
+
 def detection_block(spec: PrivacySpec, inputs: PanelInputs,
-                    samples: Mapping[str,
-                                     Sample], failure: str | None) -> _Block:
+                    views: Mapping[str,
+                                   RowSample], failure: str | None) -> _Block:
   """`table.detection_auc` and `table.pmse_ratio` of one table (with their
   R baselines), the ROC profile and the detectable flags — or
-  not_evaluated rows with the reason."""
-  source = samples.get(_SOURCE)
-  synthetic = samples.get(_SYNTHETIC)
+  not_evaluated rows with the reason. `views` are the sides'
+  `detection_view`s."""
+  source = views.get(_SOURCE)
+  synthetic = views.get(_SYNTHETIC)
+  extra = _short_detail(
+      {
+          side: view for side, view in views.items() if view is not None
+      }, spec.sample_k)
   reason = failure
-  for side, sample in ((_SOURCE, source), (_SYNTHETIC, synthetic)):
-    if reason is None and (sample is None or not sample.entries):
-      reason = _empty_sample(side, sample.rows if sample else 0)
+  for side, view in ((_SOURCE, source), (_SYNTHETIC, synthetic)):
+    if reason is None and (view is None or not view.entries):
+      reason = _empty_sample(side, view.rows if view else 0)
   if reason is not None or source is None or synthetic is None:
-    return _Block(_skipped(spec, DETECTION_METRIC_IDS, reason or _NO_SYNTHETIC))
+    return _Block(
+        _skipped(spec, DETECTION_METRIC_IDS, reason or _NO_SYNTHETIC, extra))
   try:
-    return _detection_rows(spec, inputs, source, synthetic)
+    return _detection_rows(spec, inputs, source, synthetic, extra)
   except TABLE_ERRORS as exc:
     return _Block(
-        _skipped(spec, DETECTION_METRIC_IDS, _failure("detection", exc)))
+        _skipped(spec, DETECTION_METRIC_IDS, _failure("detection", exc), extra))
 
 
-def _baseline(inputs: PanelInputs, src_rows: Sequence[Mapping[str, Any]],
-              columns: Sequence[DetectionColumn],
-              seed: int) -> tuple[dict[str, Any], str | None]:
-  """The D4 baseline: the same test with R in the synthetic class."""
+def _baseline(
+    spec: PrivacySpec, inputs: PanelInputs, source: RowSample,
+    columns: Sequence[DetectionColumn]) -> tuple[dict[str, Any], str | None]:
+  """The D4 baseline: the same test with R in the synthetic class, the
+  source rows thinned at random to n = min(|R|, source rows)."""
   if not inputs.r_rows:
     return {}, _NO_PANEL
-  r_rows = list(inputs.r_rows)
+  n = min(len(inputs.r_rows), source.size)
+  src_rows = _as_rows(
+      spec,
+      source.thinned(n, salt=spec.salt, purpose=_BASELINE,
+                     simple=True).expanded()[0])
+  r_rows = list(inputs.r_rows[:n])
   try:
     _require_columns(r_rows, [c.name for c in columns], "reference")
     x, y, cat_idx = featurize(src_rows, r_rows, columns)
-    auc, _, _, _ = c2st_auc(x, y, cat_idx, folds=DETECTION_FOLDS, seed=seed)
-    _, ratio, _, _ = pmse_ratio(x, y, cat_idx, seed=seed)
+    auc, _, _, _ = c2st_auc(
+        x, y, cat_idx, folds=DETECTION_FOLDS, seed=spec.seed)
+    _, ratio, _, _ = pmse_ratio(x, y, cat_idx, seed=spec.seed)
   except ValueError as exc:
     return {}, _failure("the baseline", exc)
   return {"auc": auc, "pmse_ratio": ratio, "n": int(y.size // 2)}, None
 
 
-def _detection_rows(spec: PrivacySpec, inputs: PanelInputs, source: Sample,
-                    synthetic: Sample) -> _Block:
-  src_payloads, _ = source.expanded(spec.detection_rows)
-  syn_payloads, syn_keys = synthetic.expanded(spec.detection_rows)
-  n = min(len(src_payloads), len(syn_payloads))
+def _detection_rows(spec: PrivacySpec, inputs: PanelInputs, source: RowSample,
+                    synthetic: RowSample, extra: Mapping[str, Any]) -> _Block:
+  # equal n per class: the larger side thinned at random, never cut
+  n = min(source.size, synthetic.size)
+  source = source.thinned(
+      n, salt=spec.salt, purpose=f"{_EQUAL_N}:{_SOURCE}", simple=True)
+  synthetic = synthetic.thinned(
+      n, salt=spec.salt, purpose=f"{_EQUAL_N}:{_SYNTHETIC}", simple=True)
+  src_payloads, _ = source.expanded()
+  syn_payloads, syn_keys = synthetic.expanded()
   src_rows, syn_rows = _as_rows(spec,
                                 src_payloads), _as_rows(spec, syn_payloads)
-  columns, excluded = detection_columns(inputs, src_rows[:n])
+  columns, excluded = detection_columns(inputs, src_rows)
   x, y, cat_idx = featurize(src_rows, syn_rows, columns)
-  base, base_reason = _baseline(inputs, src_rows[:n], columns, spec.seed)
-  sampling = {**_mode_detail(spec), "sample_rows": n}
+  base, base_reason = _baseline(spec, inputs, source, columns)
+  sampling = {**_mode_detail(spec), **extra, "sample_rows": n}
   common = {
       "n_source": n,
       "n_synthetic": n,
@@ -1329,7 +1571,7 @@ def _detection_rows(spec: PrivacySpec, inputs: PanelInputs, source: Sample,
                 "n_synthetic": n,
             },
             n=2 * n))
-    if lo > _CHANCE:
+    if lo > _CHANCE and auc >= _detection_warn():
       block.flags = _detectable_flags(spec, synthetic, syn_keys, oof[n:])
   try:
     pmse, ratio, k, ceiling = pmse_ratio(x, y, cat_idx, seed=spec.seed)
@@ -1351,8 +1593,15 @@ def _detection_rows(spec: PrivacySpec, inputs: PanelInputs, source: Sample,
   return block
 
 
-def _detectable_flags(spec: PrivacySpec, synthetic: Sample, keys: Sequence[int],
-                      scores: np.ndarray) -> list[RowFlag]:
+@functools.cache
+def _detection_warn() -> float:
+  """`table.detection_auc`'s warn threshold (the catalogue's)."""
+  warn = load_catalogue().get("table.detection_auc").warn
+  return math.inf if warn is None else float(warn)
+
+
+def _detectable_flags(spec: PrivacySpec, synthetic: RowSample,
+                      keys: Sequence[int], scores: np.ndarray) -> list[RowFlag]:
   """The `top_k` sampled synthetic keys the classifier finds most surely
   synthetic (out of fold), one flag per key."""
   order = np.lexsort((np.arange(scores.size), -scores))
@@ -1363,7 +1612,7 @@ def _detectable_flags(spec: PrivacySpec, synthetic: Sample, keys: Sequence[int],
     if key in seen:
       continue
     seen.add(key)
-    payload, count = synthetic.entries[key]
+    payload, _, count = synthetic.entries[key]
     probability = float(scores[j])
     flags.append(
         RowFlag(
@@ -1437,7 +1686,10 @@ def privacy_outputs(table: TablePlan,
   except TABLE_ERRORS as exc:
     failure = _failure("privacy", exc)
   samples = {side: combine.extract_output(acc) for side, acc in accs.items()}
-  detection = detection_block(spec, inputs, samples, failure)
+  detection = detection_block(spec, inputs, {
+      side: detection_view(spec, side, sample)
+      for side, sample in samples.items()
+  }, failure)
   cache: list[NNIndex] = []
 
   def index_fn() -> NNIndex:
@@ -1455,8 +1707,9 @@ def privacy_outputs(table: TablePlan,
           for i in range(0, len(records), NN_BATCH_ROWS))
     except TABLE_ERRORS as exc:
       nn_failure = _failure("privacy", exc)
-  nearest = privacy_block(spec, inputs, index_fn, merged,
-                          samples[_SYNTHETIC].rows, label_key, nn_failure)
+  density = density_sample(spec, inputs.n_panel, samples[_SYNTHETIC])
+  nearest = privacy_block(spec, inputs, index_fn, merged, density, label_key,
+                          nn_failure)
   return PrivacyResult(
       _ordered([*nearest.metrics,
                 *detection.metrics]), [*nearest.profiles, *detection.profiles],
@@ -1537,7 +1790,7 @@ class _PrivacyEmitFn(beam.DoFn):
     self._index: NNIndex | None = None
 
   def process(self, element: NNPart | None, inputs: PanelInputs,
-              label_key: bytes, rows: Mapping[str, int],
+              label_key: bytes, density: Mapping[str, RowSample],
               failures: Sequence[tuple[str, str]]) -> Iterator[Any]:
     spec = self._spec
 
@@ -1547,19 +1800,20 @@ class _PrivacyEmitFn(beam.DoFn):
       return self._index
 
     block = privacy_block(
-        spec, inputs, index_fn, element, rows.get(_SYNTHETIC, 0), label_key,
+        spec, inputs, index_fn, element, density.get(_SYNTHETIC), label_key,
         _first_reason(failures, frozenset({_TABLE, _PRIVACY})))
     yield from _tagged(block)
 
 
 class _DetectionFn(beam.DoFn):
-  """Both samples of a table (one element) → the detection block's rows."""
+  """Both detection views of a table (one element) → the detection
+  block's rows."""
 
   def __init__(self, spec: PrivacySpec):
     super().__init__()
     self._spec = spec
 
-  def process(self, element: Mapping[str, Sample], inputs: PanelInputs,
+  def process(self, element: Mapping[str, RowSample], inputs: PanelInputs,
               failures: Sequence[tuple[str, str]]) -> Iterator[Any]:
     block = detection_block(self._spec, inputs, element,
                             _first_reason(failures, frozenset({_TABLE})))
@@ -1574,9 +1828,18 @@ def _tagged(block: _Block) -> Iterator[Any]:
     yield beam.pvalue.TaggedOutput(_FLAGS, flag)
 
 
-def _rows_of(item: tuple[str, Sample]) -> tuple[str, int]:
+def _detection_view_of(item: tuple[str, Sample],
+                       spec: PrivacySpec) -> tuple[str, RowSample]:
   side, sample = item
-  return side, sample.rows
+  return side, detection_view(spec, side, sample)
+
+
+def _density_of(item: tuple[str, Sample], spec: PrivacySpec,
+                n_panel: int) -> list[tuple[str, RowSample]]:
+  side, sample = item
+  if side != _SYNTHETIC:
+    return []
+  return [(side, density_sample(spec, n_panel, sample))]
 
 
 class _ByTable(beam.PartitionFn):
@@ -1695,7 +1958,8 @@ class Privacy(beam.PTransform):
         f"Sample[{name}]" >> beam.CombinePerKey(SampleCombineFn(spec.sample_k)))
     detection = (
         samples
-        | f"Samples[{name}]" >> beam.combiners.ToDict()
+        | f"DetectionViews[{name}]" >> beam.Map(_detection_view_of, spec)
+        | f"Views[{name}]" >> beam.combiners.ToDict()
         | f"Detection[{name}]" >> beam.ParDo(
             _DetectionFn(spec), side_input, beam.pvalue.AsList(
                 sampled[_FAILED])).with_outputs(
@@ -1710,7 +1974,8 @@ class Privacy(beam.PTransform):
             min_batch_size=1, max_batch_size=NN_BATCH_ROWS)
         | f"GowerNN[{name}]" >> beam.ParDo(GowerNNFn(
             spec, shared), side_input).with_outputs(_FAILED, main=_PARTS))
-    rows = samples | f"Rows[{name}]" >> beam.Map(_rows_of)
+    density = samples | f"DensitySample[{name}]" >> beam.FlatMap(
+        _density_of, spec, inputs.n_panel)
     failures = ((sampled[_FAILED], searched[_FAILED])
                 | f"FlattenFailures[{name}]" >> beam.Flatten())
     nearest = (
@@ -1718,9 +1983,9 @@ class Privacy(beam.PTransform):
         | f"NNMerge[{name}]" >> beam.CombineGlobally(NNMergeFn())
         | f"PrivacyEmit[{name}]" >> beam.ParDo(
             _PrivacyEmitFn(spec, shared), side_input,
-            beam.pvalue.AsSingleton(self._label_key), beam.pvalue.AsDict(rows),
-            beam.pvalue.AsList(failures)).with_outputs(
-                _PROFILES, _FLAGS, main=_METRICS))
+            beam.pvalue.AsSingleton(self._label_key), beam.pvalue.AsDict(
+                density), beam.pvalue.AsList(failures)).with_outputs(
+                    _PROFILES, _FLAGS, main=_METRICS))
     merged_metrics = ((nearest[_METRICS], detection[_METRICS])
                       | f"Metrics[{name}]" >> beam.Flatten())
     merged_profiles = ((nearest[_PROFILES], detection[_PROFILES])
