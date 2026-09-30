@@ -1117,7 +1117,11 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
   expiring in 24 h) — for the report and for cleanup. `bq_bytes_estimate`
   sums the dry runs of every query the evaluation issues (planning,
   panel, prepare, samples); `predicted_shuffle_gb` is
-  `budget.predict_shuffle_gb`.
+  `budget.predict_shuffle_gb`. `label_key_uri` is the operator's label
+  key (Rulings R64, R68: a Secret Manager version, `gs://` object or
+  local path — never the key itself), None for an ephemeral key; the
+  pipeline resolves it on a worker and the registry records only the
+  mode.
   """
   evaluation_id: str
   evaluation_key: str
@@ -1139,6 +1143,7 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
   catalogue_version: str = ""
   evaluator_version: str = EVALUATOR_VERSION
   temp_dataset: str = ""
+  label_key_uri: str | None = None
 
   @property
   def budget(self) -> Budget:

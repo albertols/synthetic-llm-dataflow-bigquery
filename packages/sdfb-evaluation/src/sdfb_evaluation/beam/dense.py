@@ -2493,11 +2493,14 @@ def _by_table(
   return table, (side, profile)
 
 
-def _emit(item: tuple[str, Iterable[tuple[str, DenseProfile]]],
+def _emit(item: tuple[str, Iterable[tuple[str, DenseProfile] | None]],
           specs: Mapping[str, DenseSpec], label_key: bytes) -> Iterator[Any]:
   table, entries = item
   sides: dict[str, DenseProfile] = {}
-  for side, profile in entries:
+  for entry in entries:
+    if entry is None:  # the table's seed: present even with no batch
+      continue
+    side, profile = entry
     sides[side] = profile if side not in sides else sides[side].merge(profile)
   metrics, profiles = dense_outputs(specs[table], sides, label_key=label_key)
   yield from metrics
@@ -2511,7 +2514,10 @@ class DenseMetrics(beam.PTransform):
   PCollection[ProfileValue], "accumulators": PCollection[((table, side),
   DenseProfile)]}` (module docstring). The accumulators are the census's
   totals side input (Task 22). Only each table's slim `DenseSpec` is
-  pickled, never its panel rows. `label_key` is the one-element key
+  pickled, never its panel rows. One seed per table joins the per-table
+  grouping, so a table no batch reached (no rows read on any side)
+  still emits its rows, each `not_evaluated` with the side it lacks as
+  the reason. `label_key` is the one-element key
   PCollection `beam.label_key.LabelKey` makes on a worker; the emitter
   reads it as a side input, so the key never enters the job graph
   (Rulings R64, R68).
@@ -2538,9 +2544,11 @@ class DenseMetrics(beam.PTransform):
         | "Profile" >> beam.Map(_keyed_profile, specs)
         | "Combine" >> beam.CombinePerKey(
             DenseProfileCombineFn()).with_hot_key_fanout(HOT_KEY_FANOUT))
+    seeds = input_or_inputs.pipeline | "Seeds" >> beam.Create(
+        [(name, None) for name in sorted(specs)])
     emitted = (
-        accumulators
-        | "ByTable" >> beam.Map(_by_table)
+        (accumulators | "ByTable" >> beam.Map(_by_table), seeds)
+        | "Entries" >> beam.Flatten()
         | "GroupSides" >> beam.GroupByKey()
         | "Emit" >>
         beam.FlatMap(_emit, specs, beam.pvalue.AsSingleton(
