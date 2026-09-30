@@ -644,9 +644,10 @@ def holdout_mass(d_r: np.ndarray, i_r: np.ndarray, d_h: np.ndarray,
   return float(closer), nn_mass
 
 
-def _nndr(dist: np.ndarray) -> np.ndarray:
-  """`d1 / d2` per row; 1.0 where `d2 == 0` (two exact copies: nobody stands
-  out)."""
+def nndr(dist: np.ndarray) -> np.ndarray:
+  """`d1 / d2` per row of a `(n, 2)` nearest-two distance block (as
+  `gower_knn(..., k=2)` returns it); 1.0 where `d2 == 0` (two exact
+  copies: nobody stands out)."""
   ratio = np.ones(dist.shape[0])
   np.divide(dist[:, 0], dist[:, 1], out=ratio, where=dist[:, 1] > 0)
   return ratio
@@ -756,8 +757,8 @@ def nn_privacy_encoded(r: tuple[np.ndarray, np.ndarray],
       dcr_syn_r=syn_r[:, 0],
       dcr_syn_h=syn_h[:, 0],
       dcr_h_r=h_r[:, 0],
-      nndr_syn=_nndr(syn_r),
-      nndr_h=_nndr(h_r),
+      nndr_syn=nndr(syn_r),
+      nndr_h=nndr(h_r),
       nn_mass=nn_mass,
       closer_to_r=closer / n_syn,
       n_syn=n_syn,

@@ -2162,13 +2162,15 @@ class RowFlag:  # pylint: disable=too-many-instance-attributes  # the flag table
   (`flag_row`). Keys only: the synthetic handle (PK, else identity — the
   synthetic table's own key, which for a full-row copy is the copied
   source row's key; D6 hashing does not cover it) and a keyed label of
-  the matched source record's code; never an attribute value."""
+  the matched source record's code; never an attribute value. A check
+  with no matched source record (Task 24's `detectable`) has no
+  `source_set` and no label."""
   table: str
   check: str
   rank: int
   synthetic_key: Mapping[str, Any] | None
   source_key_hash: str | None
-  source_set: str
+  source_set: str | None
   distance: float | None
   score: float | None
   detail: Mapping[str, Any] = field(default_factory=dict)
