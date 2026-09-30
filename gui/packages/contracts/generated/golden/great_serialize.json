@@ -1,0 +1,427 @@
+{
+ "generated_by": "scripts/gui/export_golden_fixtures.py",
+ "python": "3.11.15",
+ "source": "packages/sdfb-core/src/sdfb_core/rag/serialize.py (serialize_row)",
+ "column_order": [
+  "order_id",
+  "user_id",
+  "status",
+  "sale_price",
+  "is_gift",
+  "created_at",
+  "shipped_on",
+  "discount",
+  "notes",
+  "country"
+ ],
+ "tags": {
+  "int": "Python int (JSON number; may exceed 2^53, compare as text)",
+  "float": "Python float; rendered with repr(), e.g. 1.0, 1e-05",
+  "str": "str",
+  "bool": "True/False rendered true/false",
+  "null": "None",
+  "datetime": "datetime.fromisoformat(v); str() uses a space",
+  "date": "date.fromisoformat(v)",
+  "decimal": "decimal.Decimal(v); str() keeps trailing zeros"
+ },
+ "rows": [
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1001
+    },
+    "user_id": {
+     "t": "int",
+     "v": 17
+    },
+    "status": {
+     "t": "str",
+     "v": "Complete"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 42.5
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": false
+    },
+    "created_at": {
+     "t": "datetime",
+     "v": "2026-03-01T10:15:00+00:00"
+    },
+    "shipped_on": {
+     "t": "date",
+     "v": "2026-03-02"
+    },
+    "discount": {
+     "t": "decimal",
+     "v": "12.50"
+    },
+    "notes": {
+     "t": "str",
+     "v": "leave at the door"
+    },
+    "country": {
+     "t": "str",
+     "v": "Spain"
+    }
+   },
+   "text": "order_id is 1001, user_id is 17, status is Complete, sale_price is 42.5, is_gift is false, created_at is 2026-03-01 10:15:00+00:00, shipped_on is 2026-03-02, discount is 12.50, notes is leave at the door, country is Spain"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1002
+    },
+    "user_id": {
+     "t": "int",
+     "v": 18
+    },
+    "status": {
+     "t": "str",
+     "v": "Shipped"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 1.0
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": true
+    },
+    "created_at": {
+     "t": "datetime",
+     "v": "2026-03-01T23:59:59.123456+00:00"
+    },
+    "shipped_on": {
+     "t": "null"
+    },
+    "discount": {
+     "t": "float",
+     "v": 0.0
+    },
+    "notes": {
+     "t": "str",
+     "v": ""
+    },
+    "country": {
+     "t": "str",
+     "v": "Brasil"
+    }
+   },
+   "text": "order_id is 1002, user_id is 18, status is Shipped, sale_price is 1.0, is_gift is true, created_at is 2026-03-01 23:59:59.123456+00:00, shipped_on is null, discount is 0.0, notes is , country is Brasil"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1003
+    },
+    "user_id": {
+     "t": "int",
+     "v": -1
+    },
+    "status": {
+     "t": "str",
+     "v": "Processing"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 1e+16
+    },
+    "is_gift": {
+     "t": "null"
+    },
+    "created_at": {
+     "t": "datetime",
+     "v": "2026-03-02T08:00:00"
+    },
+    "notes": {
+     "t": "str",
+     "v": "gift, wrapped, with a card"
+    },
+    "country": {
+     "t": "str",
+     "v": "São Paulo"
+    }
+   },
+   "text": "order_id is 1003, user_id is -1, status is Processing, sale_price is 1e+16, is_gift is null, created_at is 2026-03-02 08:00:00, shipped_on is null, discount is null, notes is gift, wrapped, with a card, country is São Paulo"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1004
+    },
+    "user_id": {
+     "t": "int",
+     "v": 0
+    },
+    "status": {
+     "t": "str",
+     "v": "Cancelled"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 1e-05
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": false
+    },
+    "discount": {
+     "t": "float",
+     "v": -0.0
+    },
+    "notes": {
+     "t": "str",
+     "v": "status is Complete"
+    },
+    "country": {
+     "t": "str",
+     "v": "Zürich"
+    }
+   },
+   "text": "order_id is 1004, user_id is 0, status is Cancelled, sale_price is 1e-05, is_gift is false, created_at is null, shipped_on is null, discount is -0.0, notes is status is Complete, country is Zürich"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1005
+    },
+    "user_id": {
+     "t": "int",
+     "v": 19
+    },
+    "status": {
+     "t": "str",
+     "v": "Returned"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 123.0
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": true
+    },
+    "created_at": {
+     "t": "datetime",
+     "v": "2026-03-03T12:00:00-05:00"
+    },
+    "discount": {
+     "t": "float",
+     "v": 2.5e-07
+    },
+    "notes": {
+     "t": "str",
+     "v": "🎁 birthday"
+    },
+    "country": {
+     "t": "str",
+     "v": "日本"
+    }
+   },
+   "text": "order_id is 1005, user_id is 19, status is Returned, sale_price is 123.0, is_gift is true, created_at is 2026-03-03 12:00:00-05:00, shipped_on is null, discount is 2.5e-07, notes is 🎁 birthday, country is 日本"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1006
+    },
+    "user_id": {
+     "t": "int",
+     "v": 20
+    },
+    "status": {
+     "t": "str",
+     "v": "Complete"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 1234567.891
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": false
+    },
+    "shipped_on": {
+     "t": "date",
+     "v": "2026-12-31"
+    },
+    "discount": {
+     "t": "float",
+     "v": 0.1
+    },
+    "notes": {
+     "t": "str",
+     "v": "  padded  "
+    },
+    "country": {
+     "t": "str",
+     "v": "United States"
+    }
+   },
+   "text": "order_id is 1006, user_id is 20, status is Complete, sale_price is 1234567.891, is_gift is false, created_at is null, shipped_on is 2026-12-31, discount is 0.1, notes is   padded  , country is United States"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1007
+    },
+    "user_id": {
+     "t": "int",
+     "v": 21
+    },
+    "status": {
+     "t": "null"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 1e+22
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": true
+    },
+    "discount": {
+     "t": "float",
+     "v": 0.0001
+    },
+    "notes": {
+     "t": "str",
+     "v": "tab\tinside"
+    },
+    "country": {
+     "t": "null"
+    }
+   },
+   "text": "order_id is 1007, user_id is 21, status is null, sale_price is 1e+22, is_gift is true, created_at is null, shipped_on is null, discount is 0.0001, notes is tab\tinside, country is null"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1008
+    },
+    "user_id": {
+     "t": "int",
+     "v": 22
+    },
+    "status": {
+     "t": "str",
+     "v": "Shipped"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 3.14159
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": false
+    },
+    "created_at": {
+     "t": "datetime",
+     "v": "2026-03-04T00:00:00+00:00"
+    },
+    "discount": {
+     "t": "decimal",
+     "v": "0.00"
+    },
+    "notes": {
+     "t": "str",
+     "v": "line\nbreak"
+    },
+    "country": {
+     "t": "str",
+     "v": "España"
+    }
+   },
+   "text": "order_id is 1008, user_id is 22, status is Shipped, sale_price is 3.14159, is_gift is false, created_at is 2026-03-04 00:00:00+00:00, shipped_on is null, discount is 0.00, notes is line\nbreak, country is España"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": "123456789012345678901"
+    },
+    "user_id": {
+     "t": "int",
+     "v": 23
+    },
+    "status": {
+     "t": "str",
+     "v": "Complete"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 99.99
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": true
+    },
+    "discount": {
+     "t": "float",
+     "v": 0.0001
+    },
+    "notes": {
+     "t": "str",
+     "v": "an int above 2^53, kept as text"
+    },
+    "country": {
+     "t": "str",
+     "v": "France"
+    }
+   },
+   "text": "order_id is 123456789012345678901, user_id is 23, status is Complete, sale_price is 99.99, is_gift is true, created_at is null, shipped_on is null, discount is 0.0001, notes is an int above 2^53, kept as text, country is France"
+  },
+  {
+   "row": {
+    "order_id": {
+     "t": "int",
+     "v": 1010
+    },
+    "user_id": {
+     "t": "int",
+     "v": 24
+    },
+    "status": {
+     "t": "str",
+     "v": "Processing"
+    },
+    "sale_price": {
+     "t": "float",
+     "v": 0.30000000000000004
+    },
+    "is_gift": {
+     "t": "bool",
+     "v": false
+    },
+    "created_at": {
+     "t": "datetime",
+     "v": "2026-03-05T06:07:08.000001+00:00"
+    },
+    "discount": {
+     "t": "float",
+     "v": 100.0
+    },
+    "notes": {
+     "t": "str",
+     "v": "is is is"
+    },
+    "country": {
+     "t": "str",
+     "v": "Deutschland"
+    }
+   },
+   "text": "order_id is 1010, user_id is 24, status is Processing, sale_price is 0.30000000000000004, is_gift is false, created_at is 2026-03-05 06:07:08.000001+00:00, shipped_on is null, discount is 100.0, notes is is is is, country is Deutschland"
+  }
+ ]
+}

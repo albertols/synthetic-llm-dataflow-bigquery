@@ -1,0 +1,24 @@
+{
+  "name": "@synthetic-platform/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "yaml": "2.9.1",
+    "zod": "4.6.5"
+  },
+  "description": "Zod contracts generated from the Python-side schemas, catalogue and knobs, the BFF's API contract, and the (i) concept registry sources.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./concept": "./src/concept.ts",
+    "./concept.schema": "./src/concept.schema.ts",
+    "./concepts/*": "./src/concepts/*.ts",
+    "./generated/*.json": "./generated/*.json",
+    "./generated/*": "./generated/*.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

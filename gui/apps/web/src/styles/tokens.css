@@ -1,0 +1,179 @@
+/*
+ * Design tokens — the only place colours are typed.
+ *
+ * Dark is the default theme; light is kept for accessibility (a toggle in the
+ * top nav, or "system"). ThemeProvider stamps data-theme="dark" | "light" on
+ * <html>; tokens.css never reads prefers-color-scheme itself, so the stamp
+ * always wins.
+ *
+ * Contrast (WCAG 2.2) and the chart palette checks are recorded once, in
+ * gui/BRANDING.md; styles/branding.contrast.test.ts recomputes every ratio in
+ * its tables from the values below, so change a colour and the test names the
+ * row to update.
+ */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surfaces: near-black, cool. */
+  --bg: #0b0d12;
+  --surface-1: #12151b;
+  --surface-2: #181c24;
+  --surface-3: #20252f;
+  --border: #262c37;
+  --border-strong: #3a4150;
+  --control-border: #737b8d;
+  --overlay: rgb(5 6 9 / 0.72);
+  --shadow-color: 0 0% 0%;
+
+  /* Ink. */
+  --text-1: #f2f4f7;
+  --text-2: #b8bfcc;
+  --text-3: #939aa7;
+
+  /* Brand accents. */
+  --accent: #eb6834; /* Beam orange: primary actions, focus, active tab */
+  --accent-hover: #f07a4a;
+  --accent-fg: #0b0d12;
+  --accent-text: #f07a4a; /* orange text (ratios: BRANDING.md) */
+  --accent-soft: rgb(235 104 52 / 0.14);
+  --brand-blue: #2a78d6; /* GCP blue */
+  --link: #6da7ec;
+  --info-soft: rgb(42 120 214 / 0.16);
+  --cpu: #1baf7a; /* aqua: CPU work, healthy */
+  --cpu-text: #1baf7a;
+  --gpu: #7a3fd1; /* purple: GPU work */
+  --gpu-text: #a37ae6;
+  --slate: #6b7280;
+  --focus-ring: #eb6834;
+
+  /* Status: always paired with an icon and a label (StatusPill). */
+  --status-good: #1baf7a;
+  --status-good-text: #1baf7a;
+  --status-warn: #fab219;
+  --status-warn-text: #fab219;
+  --status-serious: #ec835a;
+  --status-serious-text: #ec835a;
+  --status-critical: #d03b3b;
+  --status-critical-text: #f07373;
+  --status-info: #2a78d6;
+  --status-info-text: #6da7ec;
+  --status-neutral: #6b7280;
+  --status-neutral-text: #939aa7;
+
+  /* Charts: categorical slots in fixed order (never cycled). */
+  --chart-1: #3987e5; /* blue */
+  --chart-2: #d95926; /* orange (dark step of Beam orange) */
+  --chart-3: #1baf7a; /* aqua */
+  --chart-4: #c98500; /* yellow */
+  --chart-5: #d55181; /* magenta */
+  --chart-6: #008300; /* green */
+  --chart-7: #7a3fd1; /* purple */
+  --chart-8: #e66767; /* red */
+  --chart-other: #6b7280;
+  --chart-surface: #12151b;
+  --chart-grid: #262c37;
+  --chart-axis: #3a4150;
+  /* Sequential (blue): --seq-1 is "near zero" and recedes into the surface. */
+  --seq-1: #0d366b;
+  --seq-2: #184f95;
+  --seq-3: #256abf;
+  --seq-4: #3987e5;
+  --seq-5: #6da7ec;
+  --seq-6: #9ec5f4;
+  --seq-7: #cde2fb;
+  /* Diverging: blue ↔ red with a neutral grey midpoint. */
+  --div-neg: #3987e5;
+  --div-mid: #383835;
+  --div-pos: #e66767;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f5f7;
+  --surface-1: #fcfcfb;
+  --surface-2: #ffffff;
+  --surface-3: #eceef2;
+  --border: #e1e3e8;
+  --border-strong: #c9cdd5;
+  --control-border: #7d8492;
+  --overlay: rgb(11 13 18 / 0.45);
+  --shadow-color: 220 20% 20%;
+
+  --text-1: #0b0d12;
+  --text-2: #454b57;
+  --text-3: #5d6470;
+
+  --accent: #eb6834;
+  --accent-hover: #f07a4a;
+  --accent-fg: #0b0d12;
+  --accent-text: #9c3d18;
+  --accent-soft: rgb(235 104 52 / 0.12);
+  --brand-blue: #2a78d6;
+  --link: #1c5cab;
+  --info-soft: rgb(42 120 214 / 0.1);
+  --cpu: #1baf7a;
+  --cpu-text: #0d6e4b;
+  --gpu: #7a3fd1;
+  --gpu-text: #6a33bd;
+  --slate: #6b7280;
+  --focus-ring: #c4501f;
+
+  --status-good: #1baf7a;
+  --status-good-text: #0d6e4b;
+  --status-warn: #fab219;
+  --status-warn-text: #8a5a00;
+  --status-serious: #ec835a;
+  --status-serious-text: #a3401a;
+  --status-critical: #d03b3b;
+  --status-critical-text: #b42b2b;
+  --status-info: #2a78d6;
+  --status-info-text: #1c5cab;
+  --status-neutral: #6b7280;
+  --status-neutral-text: #5d6470;
+
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-7: #7a3fd1;
+  --chart-8: #e34948;
+  --chart-other: #898781;
+  --chart-surface: #fcfcfb;
+  --chart-grid: #e1e0d9;
+  --chart-axis: #c3c2b7;
+  --seq-1: #cde2fb;
+  --seq-2: #9ec5f4;
+  --seq-3: #6da7ec;
+  --seq-4: #3987e5;
+  --seq-5: #256abf;
+  --seq-6: #184f95;
+  --seq-7: #0d366b;
+  --div-neg: #2a78d6;
+  --div-mid: #f0efec;
+  --div-pos: #e34948;
+}
+
+:root {
+  /* Type and shape — theme independent. */
+  --font-ui: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-code: "JetBrains Mono Variable", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --shadow-pop: 0 12px 32px -8px hsl(var(--shadow-color) / 0.55), 0 2px 6px hsl(var(--shadow-color) / 0.25);
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --ease-emph: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+  }
+}

@@ -10,11 +10,11 @@ Generate fictitious-but-realistic synthetic rows for a target BigQuery table, dr
 
 1. **No Vertex AI in the serving path.** Everything LLM happens inside Beam DoFns. If a design step is reaching for Vertex, stop and propose a self-hosted alternative on L4 workers.
 2. **No HuggingFace Hub at runtime.** Weights live in `gs://{bucket}/synthetic/models/{family}/{model}/{version}/`, pulled once on the M4. The `transformers` / `safetensors` libraries are fine as file-format readers — never call `from_pretrained("org/repo")` against the Hub. `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are set in the GPU container.
-3. **No Dataplex, no Looker.** Validation results land in BigQuery `synthetic_data_quality.*` tables and GCS HTML/JSON artifacts only. Do not propose dashboards or DQ scans.
+3. **No Dataplex, no Looker/Looker Studio, no managed dashboard services.** A self-hosted GUI (`gui/`, ADR 0042) may read the project's BigQuery tables read-only. Validation results land in BigQuery `synthetic_data_quality.*` tables and GCS HTML/JSON artifacts only. Do not propose managed dashboards or DQ scans.
 4. **No external LLM APIs.** GPT / Claude / Grok / Deepseek API calls violate the self-hosting contract. Off-pipeline benchmarking scripts are M2+ and out of M1 scope.
 5. **Relational generation is SHIPPED — this constraint is retired (v0.3.0).** A launch generates a whole connected component of `config/relationships/*.yaml` in ONE job: children are generated from their parent's landed keys, so ratio, PK uniqueness and referential integrity hold by construction (ADR 0036). A child may have several parents — star, diamond, tree, forest, 1:1 chain, arbitrary FK graph (ADR 0037). When measuring the source proves the declared model wrong, the launch adjusts the model, says so, and carries on (ADR 0038). The relationship model is the ONLY source of relational structure; table descriptions are never read for it.
 
-Locked rationale: [ADR 0001](docs/adr/0001-no-managed-gcp-services.md) (no managed GCP services) and [ADR 0011](docs/adr/0011-adopt-beam-vllm-model-handler.md) / [ADR 0014](docs/adr/0014-vllm-model-client-owns-server.md) (self-hosted vLLM inside the DAG).
+Locked rationale: [ADR 0001](docs/adr/0001-no-managed-gcp-services.md) (no managed GCP services), [ADR 0011](docs/adr/0011-adopt-beam-vllm-model-handler.md) / [ADR 0014](docs/adr/0014-vllm-model-client-owns-server.md) (self-hosted vLLM inside the DAG) and [ADR 0042](docs/adr/0042-self-hosted-platform-gui.md) (a self-hosted GUI; managed dashboards stay out).
 
 ## Hardware split
 
@@ -100,7 +100,7 @@ M1 is complete end to end, laptop and Dataflow. The work since has been relation
 - Do not call `WriteToBigQuery` with `STREAMING_INSERTS` for batch synthetic. Use `FILE_LOADS` (cheaper, batch-shaped).
 - Do not catch `ValidationError` and silently drop. Always route to a tagged DLQ output with full error context.
 - Do not add feature flags or abstractions for hypothetical future cases. Three similar lines beat a premature abstraction.
-- Do not propose Vertex AI, Dataplex, Looker, OpenLineage, Marquez, Dagster, or external LLM APIs. Out of scope.
+- Do not propose Vertex AI, Dataplex, Looker/Looker Studio or any other managed dashboard service, OpenLineage, Marquez, Dagster, or external LLM APIs. Out of scope. Visualizing the project's BigQuery tables belongs in the self-hosted GUI (`gui/`, ADR 0042), read-only.
 
 ## When in doubt
 

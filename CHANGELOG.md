@@ -9,8 +9,12 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ## [Unreleased]
 
 ### 🚀 Added
+- **Synthetic Platform**, a local-first GUI in [`gui/`](gui/README.md) ([ADR 0042](docs/adr/0042-self-hosted-platform-gui.md)): a React app and a Fastify backend bound to `127.0.0.1` that read and explain the project's data in four tabs. INTRO tours the pipeline; EVALUATION lists evaluations, drills into one run and compares runs; RAG shows the 384-d space, the embedder lab, the FAISS index, the seed strategies and the free-text pools; CONFIG holds the Pipeline amp (every knob with its value from the code), the scenario calculator, the source-stats explorer and the guardrails. It runs on a seeded mock with no GCP access, or reads `synthetic_data_quality.*` and `synthetic_rag.*` through named, read-only queries that are dry-run first and capped by `MAX_BYTES_BILLED` (10 GiB by default); fetched rows stay in memory.
+- The GUI's types are generated from the Python side: the BigQuery schemas, the metric catalogue, [`scripts/gui/export_knobs.py`](scripts/gui/export_knobs.py) (knobs, sample relationship models, DLQ rules) and [`scripts/gui/export_golden_fixtures.py`](scripts/gui/export_golden_fixtures.py), whose golden files pin the TypeScript ports of the hashing embedder, GReaT serialization, retrieval and the evaluator's scorer. `npm run contracts:check` and the exporters' `--check` fail CI on drift.
+- [`.github/workflows/gui.yml`](.github/workflows/gui.yml): typecheck, lint, unit tests, build, bundle budgets, contract drift, the tab-ownership gate, and Playwright + axe at 1440 and 390 px, plus an `exports` job for the Python exporters.
 
 ### 🔧 Changed
+- CLAUDE.md constraint 3 and ADR 0001 are narrowed to managed dashboard services (Looker, Looker Studio / Data Studio, Dataplex): a self-hosted GUI may read the project's tables, read-only ([ADR 0042](docs/adr/0042-self-hosted-platform-gui.md)). `gui/**` and `scripts/gui/**` stay out of the Dataflow Solution Guides copy.
 
 ### ⚡ Performance
 
@@ -19,6 +23,8 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🗑️ Removed
 
 ### 📗 Docs
+- [`gui/README.md`](gui/README.md): quickstart in mock and live mode, the environment variables, the four tabs with screenshots, the developer loop and what a future Cloud Run deployment needs. [`gui/docs/ARCHITECTURE.md`](gui/docs/ARCHITECTURE.md) gains the named-query registry, measured bundle sizes against their budgets, the BFF guards in order and the scoring parity with the Python evaluator; [`gui/docs/DATA_CONTRACTS.md`](gui/docs/DATA_CONTRACTS.md) gains what generates which type, the `metrics_info` identity and how to add a metric. Screenshots in [`gui/docs/assets/`](gui/docs/assets/README.md) carry their provenance.
+- `docs/DESIGN.md` §12 Platform GUI; the root README's Platform GUI section; the articles index names the CONFIG tab as the groundwork for Part 8.
 
 ## [v0.5.3] — 2026-09-21
 
