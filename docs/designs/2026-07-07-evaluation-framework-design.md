@@ -1,61 +1,72 @@
-# Design — Evaluation framework (`synthetic_data_quality.validation_data_history`)
+# Design — Evaluation framework (`sdfb-evaluation`)
 
-> **Status: PARTIALLY IMPLEMENTED** (proposed 2026-07-07; Tier-1/2/3 code lives on branch `ws3-eval-framework` — `sdfb_core/evaluation/` — merge pending)
-> · visuals retrofitted 2026-08-05 per the `visual-first-documentation` skill
-> · related: [ADR 0022](../adr/0022-stats-driven-generation.md) (the
-> source-side stats this framework's landing-side metrics mirror),
-> [`2026-08-05-source-table-stats.md`](2026-08-05-source-table-stats.md)
-> (entropy/decile concept figures — the same mathematics, source side).
-> Concept figures regenerate via
-> `uv run --no-sync python3 scripts/doc/make_eval_figures.py`.
+> **Status: REDESIGNED 2026-09-27 · BUILT AND REVIEWED · NOT YET RUN ON
+> GOOGLE CLOUD.** This document was rewritten on 2026-10-05 for the code as
+> built under [`packages/sdfb-evaluation/`](../../packages/sdfb-evaluation/README.md)
+> (evaluator `0.1.0`, metric catalogue `1.0.0`).
+>
+> - **Supersedes** the proposal of 2026-07-07: an evaluation step inside the
+>   generation pipeline, three metric tiers and one history table. None of
+>   that was merged. The evaluator is now a standalone package and a
+>   separate job, and it writes four tables.
+> - **Decision record:** ADR 0041, "evaluation is a standalone package and a
+>   separate job". The code cites it; the record itself is written with the
+>   repository-documentation task and is not in this tree yet.
+> - **Companions:** the [package README](../../packages/sdfb-evaluation/README.md)
+>   (how to run it), [ADR 0022](../adr/0022-stats-driven-generation.md)
+>   (source statistics and the literal policy),
+>   [ADR 0026](../adr/0026-measurement-first-mask-integrity.md) (shape masks),
+>   [ADR 0032](../adr/0032-relationships-as-config.md) (the relationship
+>   model), [ADR 0036](../adr/0036-parent-driven-fanout-generation.md) to
+>   [0038](../adr/0038-measured-conflicts-adjust-the-model.md) (relational
+>   generation), and
+>   [`2026-08-05-source-table-stats.md`](2026-08-05-source-table-stats.md)
+>   (entropy and deciles on the source side).
 
-- **Scope**: formalizes and supersedes the fidelity/privacy portion of the
-  "Mode B validation pipeline" bullet in [`docs/ROADMAP.md`](../ROADMAP.md) M2 (the
-  GX/Soda structural-DQ portion of that bullet is untouched by this design — Mode A
-  already owns schema/null/range/enum checks pre-write; this design does not
-  duplicate them).
-- **Author context**: ACTION_5 from the M1→M2 planning pass.
+**What has run, and what has not.** Read every section with this table in
+mind. A sentence about BigQuery, Dataflow or Composer below describes what
+the code is written to do, not something observed.
 
-## 1. Goal
+| Surface | State on 2026-10-05 |
+| --- | --- |
+| Statistics, planning, Beam transforms, the composed pipeline | Tested on a laptop, on invented data, with an in-process Beam runner and fake BigQuery clients |
+| `sdfb-eval` command line | Run on invented data only (JSON fixtures, fake clients, local sinks). Never run against a real project |
+| Scoping SQL: `APPENDS`, time travel, snapshot clones | Generated and unit-tested as text. Never executed by BigQuery |
+| CPU image and flex template | Files and static tests exist. The image has never been built and the template has never been launched |
+| Composer DAG | Read by `ast` in tests. Airflow has never parsed it |
 
-Mode A (`.claude/skills/validation-mode-a.md`) answers *"is each synthetic row
-schema-conformant?"* — a per-record/per-batch structural question, gated before
-`WriteLanding`. It has no way to answer a different, equally important class of
-question: *does the synthetic table, taken as a whole, actually look like, and
-behave like, the real data it's standing in for* — and *is it accidentally leaking
-real rows verbatim?* That's the gap this design closes.
+Figures: every figure in this document is a **CONCEPT** figure, a seeded
+simulation or a schematic that shows how a mechanism behaves, except
+`eval-cpu-budget`, which carries laptop micro-benchmarks. None of them is a measurement of an
+evaluation run, because no evaluation run exists yet. Each figure says which
+it is, in the image and in its caption.
 
-Concretely, this design exists to:
+Rule numbers such as R73 in this document and in the code's docstrings are
+review rulings made while the package was built. Each is stated here in
+words; the number is given so that the code can be searched for it.
 
-1. **Quantify fidelity, privacy, and utility of synthetic vs. source, per run.**
-   Fidelity = do marginal distributions, correlations, and higher-order structure
-   match. Privacy = is any synthetic row a near- or exact-duplicate of a real
-   row (memorization). Utility = would a model trained on the synthetic data
-   perform comparably to one trained on the real data (deferred — §3 TSTR).
-2. **Track engine/feature evolution over time.** Every evaluation produces one
-   row in `validation_data_history`, keyed by `(run_id, engine, engine_version,
-   feature_flag_tags)`. An operator can `SELECT` the metric trend for one
-   `(landing_table, engine)` pair across runs — did fidelity improve when the
-   embedder changed, did a new similarity default regress correlation
-   preservation, did the B.1→B.2 fidelity gap close — without a dashboard,
-   just SQL (per CLAUDE.md's no-Looker/no-Dataplex constraint).
-3. **Be the sign-off basis for new engine features.** Today the only artifact
-   for "did this change make things better or worse" is `scripts/e2e/e2e_validation_analysis.py`
-   run by hand against exported CSVs (see its `_cross_overlap` docstring:
-   *"a memorization proxy when the live source is not queried here"* —
-   `scripts/e2e/e2e_validation_analysis.py:248-282`). This design turns that manual,
-   best-effort, offline step into an automated, per-run, machine-gated BigQuery
-   row computed against the *actual* live reference sample for that run.
+## Contents
 
-This is explicitly **not** a replacement for Mode A. Mode A's row-level gate
-stays exactly as implemented; this design adds a second, coarser-grained,
-opt-in signal that Mode A structurally cannot produce (see §5 for the precise
-division of labor).
+1. [Goal, scope and evidence](#1-goal-scope-and-evidence)
+2. [Architecture, independence and the seven decisions](#2-architecture-independence-and-the-seven-decisions)
+3. [What gets evaluated: context, scope, panel](#3-what-gets-evaluated-context-scope-panel)
+4. [The metric catalogue](#4-the-metric-catalogue)
+5. [The Beam plan and the cost model](#5-the-beam-plan-and-the-cost-model)
+6. [Data model and comparison queries](#6-data-model-and-comparison-queries)
+7. [Scoring](#7-scoring)
+8. [Integrations](#8-integrations)
+9. [Packaging and the DSG unit](#9-packaging-and-the-dsg-unit)
+10. [Testing strategy](#10-testing-strategy)
+11. [Acceptance criteria](#11-acceptance-criteria)
+12. [Out of scope](#12-out-of-scope)
+13. [Figure provenance](#13-figure-provenance)
+14. [References](#14-references)
 
-### Where the branch sits
+## 1. Goal, scope and evidence
 
-Claim: *evaluation is a post-`WriteLanding` sibling branch — it measures what
-landed, never gates what is being written (Mode A already owns that).*
+**Claim:** the evaluator answers one question per metric row, "how far is
+this unit of the synthetic data from the source, and is that distance more
+than sampling noise?", and writes the answer where runs can be compared.
 
 ```mermaid
 flowchart LR
@@ -64,739 +75,2181 @@ flowchart LR
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
-  GEN["🔀 GenerateRecordsDoFn"]:::beam --> MODEA["🛡️ Mode A gate<br/>schema · nulls · uniqueness"]:::cpu
-  MODEA --> WL["🔀 WriteLanding<br/>FILE_LOADS"]:::beam
-  MODEA -. rejected rows .-> DLQ[("🗄️ dead_letter")]:::store
-  WL --> LAND[("🗄️ landing table")]:::store
-  subgraph eval ["--enable-evaluation branch (post-write, opt-in)"]
-    SREAL["🔀 SampleReference<br/>CombineGlobally reservoir"]:::beam
-    SSYN["🔀 SampleSynthetic<br/>CombineGlobally reservoir"]:::beam
-    EV["🔀 EvaluationDoFn<br/>one worker, whole-sample stats"]:::beam
-    GATE["🛡️ memorization gate<br/>BLOCKER only in prd"]:::cpu
-    SREAL --> EV
-    SSYN --> EV
-    EV --> GATE
+  GEN["🔀 generation job<br/>unchanged"]:::beam --> LAND[("🗄️ landing tables")]:::store
+  SRC[("🗄️ source tables")]:::store --> EVAL
+  LAND --> EVAL["🔀 evaluation job<br/>CPU only"]:::beam
+  EVAL --> REG[("🗄️ registry<br/>one event row per state")]:::store
+  EVAL --> MET[("🗄️ metrics, profiles<br/>row flags")]:::store
+  REG --> CLI["⚙️ sdfb-eval report<br/>and compare"]:::cpu
+  MET --> CLI
+  MET --> SQL["⚪ plain SQL<br/>and a separate GUI"]:::data
+```
+
+The generation job is not touched. The evaluator starts after it, reads the
+landing tables and the source, and writes its results to four BigQuery
+tables in `synthetic_data_quality` and, optionally, to local JSON files.
+Its only other writes are temporary tables that expire after 24 hours
+(§3). No managed dashboard, lineage or data-quality-scan service is
+involved ([ADR 0001](../adr/0001-no-managed-gcp-services.md)).
+
+Three properties set this design apart from the proposal it replaces:
+
+- **Post-hoc, never a gate inside generation.** An evaluation status
+  describes the run (`SUCCEEDED`, `PARTIAL`, …), not the data: a run whose
+  metrics fail still succeeded. A calling script can turn metric statuses
+  into an exit code with `--fail_on`, and nothing more.
+- **Effect sizes with a noise floor, never p-values.** At tens of millions
+  of rows every difference is statistically significant
+  ([Lin, Lucas & Shmueli 2013][linlucas2013]), so a significance test would
+  fail every large table. Each row carries its own sampling noise instead
+  (§4.2).
+- **Similarity-based privacy metrics are risk indicators, not guarantees.**
+  A table can pass all of them and still leak
+  ([Stadler, Oprisanu & Troncoso 2022][stadler2022];
+  [Ganev & De Cristofaro 2023][ganev2023]). The catalogue says so in each
+  metric's pitfalls, and §12 lists what would be needed for more.
+
+### 1.1 Levels and families
+
+**Claim:** every metric looks at one unit of the data, from a single cell to
+the whole launch, and belongs to one of four families.
+
+![Seven levels, each a unit of the data](assets/eval-levels.png)
+
+*CONCEPT figure (schematic, no data).* *Intuition:* a "field" metric judges
+cells one at a time, a "column" metric a whole distribution, and so on up to
+the model, which is every table of the launch. *Formally:* a metric id is
+`<level>.<name>`, the level being one of `field, column, pair, row, table,
+relationship, model`; the family is `fidelity`, `privacy`, `integrity` or
+`diversity`, with `overall` reserved for roll-up scores
+([Jordon et al. 2022][jordon2022] for the fidelity, privacy and utility
+framing this narrows). *Code:* `catalogue/metrics.yaml` (`levels`,
+`families`), parsed by `catalogue.load_catalogue`. The number of metrics per
+level and family is in the generated table of §4.10, not in the figure.
+
+| Family | The question it asks |
+| --- | --- |
+| fidelity | Does the synthetic data have the source's distributions, dependences and shapes? |
+| privacy | Does it reproduce source records or rare values, beyond what chance explains? |
+| integrity | Does it keep what generation promises by construction: types, keys, referential integrity, row counts? |
+| diversity | Does it cover the source's variety without collapsing or repeating itself? |
+
+### 1.2 Evidence so far
+
+No evaluation has run on Google Cloud, so there is no run identifier to
+cite and no evidence bundle under `docs/releases/`. What exists:
+
+- **A planted-defect acceptance on a laptop.** The composed pipeline runs on
+  an invented three-table launch with seven defects planted in it, and each
+  defect must fail the metrics named for it (§10). It is a test, in
+  `tests/beam/test_acceptance.py`, not a run on real data.
+- **Laptop micro-benchmarks** of each transform, in `eval-cpu-budget`
+  (§5.3). They size the design; they are not a Dataflow measurement.
+
+The first run on GCP is the evidence this document is waiting for. §11
+lists what that run has to show.
+
+## 2. Architecture, independence and the seven decisions
+
+**Claim:** the evaluator shares files with the generator, never code.
+
+```mermaid
+flowchart TB
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph ROOT["root workspace: the generator"]
+    CORE["⚙️ sdfb-core<br/>sdfb-beam"]:::cpu
+    GOLD["⚙️ make_parity_goldens<br/>runs on the originals"]:::cpu
+    RTEST["🛡️ root parity test<br/>originals still match"]:::cpu
+    RENDER["⚙️ render_eval_catalogue<br/>reads YAML only"]:::cpu
   end
-  REF["⚪ reference_rows<br/>driver-side list"]:::data --> SREAL
-  MODEA -- "uniq['unique'] (what landed)" --> SSYN
-  EV --> HIST[("🗄️ validation_data_history")]:::store
+  subgraph EVAL["packages/sdfb-evaluation: own lock, own venv"]
+    CTX["⚙️ context<br/>launch, scope, plan"]:::cpu
+    BEAM["🔀 beam<br/>transforms, pipeline"]:::beam
+    STATS["⚙️ stats, sampling<br/>numpy, scipy"]:::cpu
+    SCORE["⚙️ scoring<br/>catalogue rules"]:::cpu
+    CAT["📄 catalogue<br/>metrics.yaml"]:::store
+    SCH["📄 schemas<br/>4 tables, 2 views"]:::store
+    ETEST["🛡️ mirror parity test<br/>mirrors match"]:::cpu
+  end
+  FILE["📄 goldens.json"]:::store
+
+  CORE --> GOLD --> FILE
+  FILE --> RTEST
+  FILE --> ETEST
+  CTX --> BEAM
+  STATS --> BEAM
+  BEAM --> SCORE
+  CAT --> SCORE
+  CAT --> RENDER
 ```
 
-The two inputs are already materialized elsewhere in the DAG (no new full BQ
-read); the single-worker `EvaluationDoFn` exists because every §3 metric is a
-whole-sample function — details in the sections below.
+| Module | What it owns |
+| --- | --- |
+| `context/` | Everything decided before a row is read: the launch (`launch`, `jobs`, `runs`, `gcp`), the relationship model mirror (`relationships`), the scope and the source pin (`scope`), the reference panel (`reference`), the plan and its budgets (`plan`, `budget`), planning from in-memory rows (`offline`), and the one wrapper every BigQuery call goes through (`bq`) |
+| `stats/`, `sampling/` | numpy and scipy statistics (the detection test also uses scikit-learn) and the bottom-k sampler. No Beam, no BigQuery |
+| `beam/` | The encoder, five transforms (`dense`, `census`, `membership`, `privacy`, `relational`), sources and sinks (`io`), the label key (`label_key`), assembly and the composed pipeline |
+| `scoring/` | Status, score and roll-ups, executed from the catalogue |
+| `catalogue/`, `schemas/` | The two contracts: every metric, and the four tables with their two views |
+| `cli/`, `report/` | `sdfb-eval`, the flex-template entry, the report and comparison renderers |
 
-## 2. Execution model
+Independence is enforced, not assumed. A test walks the package's syntax
+trees and fails on any import of `sdfb_core`, `sdfb_beam` or `sdfb_tests`
+(`tests/unit/test_independence.py`); CI installs the package alone, with its
+own lock, and asserts that none of those modules can be found.
 
-### Toggle
+### 2.1 The seven decisions
 
-A new CLI flag on `packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py`'s
-`parse_args()` (alongside the existing `--validation_runs_table`,
-`run_pipeline.py:88-90`):
+| | Decision | Why | Where it lives |
+| --- | --- | --- | --- |
+| D1 | **A standalone nested project**, excluded from the root workspace: its own `pyproject.toml`, `uv.lock` and Python pin | A fourth workspace member would break the generator's image build, which copies three member projects and then syncs every package, and the DSG unit, which ships the root project file and lock. The evaluator also pins its Python and Beam versions in its own lock, so a later bump touches this package alone | root `pyproject.toml` (`[tool.uv.workspace] exclude`), CI job `evaluation` |
+| D2 | **Parity by two-sided golden files, never by import.** The evaluator re-implements the small pieces whose semantics must match the generator: the relationship-model reader, the reference digest, the reference query and the row-document limit | An import would end the independence of D1. A copy can drift, so one golden file is checked from both sides: a root test proves the originals still produce it, a package test proves the mirrors do. (Shape masks and the legacy decile distance are verbatim ports of this repository's scripts, with their own tests) | `scripts/evaluation/make_parity_goldens.py`, `tests/fixtures/parity/goldens.json`, `context/relationships.py`, `context/reference.py` |
+| D3 | **The reference sets come from the generator's own order.** R, E, H and H_E are prefixes of one ranking of the source by row fingerprint (§3.5) | The generator's reference sample is the first n rows of that ranking. The next n rows are a holdout drawn the same way, so chance matches fall on R and H alike, and a ratio between them does not depend on how dense the value domain is | `context/reference.py` |
+| D4 | **Fidelity is measured against the full source, as the job saw it.** The source is pinned by time travel at the job's create time while that is possible. Every fidelity row also stores `baseline_value = metric(R, source)` | A generator that read only the reference sample cannot be expected to beat the sample's own distance from the source. The baseline is that floor (§4.2) | `context/scope.py::pin_source`, `baseline: true` in the catalogue |
+| D5 | **Status reads effect sizes and sampling noise.** A metric warns or fails only when its value crosses the threshold and that crossing is not explained by noise. Lifts and the holdout share gate on a confidence bound. No p-value is reported. Metrics whose raw value depends on sample size are computed at matched n | A fixed threshold is wrong at small n, where noise crosses it, and a significance test is wrong at large n, where everything is significant | `scoring.status_for`, `stats/noise.py` |
+| D6 | **Outputs honour the literal policy.** A value is written literally only when its column has at most 50 distinct source values ([ADR 0022](../adr/0022-stats-driven-generation.md)) and the value occurs at least 10 times in the source. Everything else is a keyed hash label. Source keys in row flags are keyed hashes | The evaluation tables are read more widely than the source. A value held by a handful of records is a quasi-identifier ([Sweeney 2002][sweeney2002]) | `context/plan.py` (`literal_ok`), `canonical.hashed_label`, `beam/label_key.py` |
+| D7 | **The registry is append-only events.** A run writes a `RUNNING` row and exactly one terminal row; a view picks the last event per evaluation. The terminal row is written after the metric tables' load and copy jobs have finished | A registry row that says a run finished must imply that its metrics are readable. With events only appended, every state a run went through stays on record | `beam/assemble.py`, `beam/pipeline.py`, `schemas/views.sql` |
 
-```python
-p.add_argument("--enable-evaluation", action="store_true", default=False,
-               help="Toggle the post-WriteLanding fidelity/privacy/utility "
-                    "evaluation branch. Independent of --validation_runs_table "
-                    "and of the Mode-A --fail_on_blocker gate. Default off.")
-p.add_argument("--validation_data_history_table", default="",
-               help="BQ table for the evaluation row (project.dataset.table); "
-                    "empty skips the write even when --enable-evaluation is set "
-                    "(mirrors --validation_runs_table's empty-skips-write contract).")
+## 3. What gets evaluated: context, scope, panel
+
+### 3.1 From a target to a launch
+
+**Claim:** a job id is enough, because five sources each answer part of the
+question "what did this job write, and with which parameters?", and every
+fallback taken is recorded as a warning.
+
+```mermaid
+flowchart TD
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  T["⚪ target<br/>job id, run id<br/>or tables"]:::data
+  T --> S1[("🗄️ BigQuery JOBS view<br/>tables, windows, rows")]:::store
+  T --> S2[("📄 launch_config log<br/>arguments, order, run ids")]:::store
+  T --> S3[("📄 Dataflow job<br/>display parameters")]:::store
+  T --> S4[("🗄️ validation_runs<br/>run ids, digests, valid rows")]:::store
+  T --> S5["⚪ manual flags<br/>fill gaps only"]:::data
+  S1 --> L["⚙️ LaunchContext<br/>tables in order, params<br/>warnings"]:::cpu
+  S2 --> L
+  S3 --> L
+  S4 --> L
+  S5 --> L
+  M[("📄 relationship model<br/>YAML")]:::store --> P
+  L --> P["⚙️ build_plan<br/>scopes, pins, panel<br/>kinds, budgets"]:::cpu
+  P --> E["⚪ EvaluationPlan<br/>prepare DDL, digests"]:::data
 ```
 
-`PipelineConfig` (`packages/sdfb-beam/src/sdfb_beam/pipeline.py:45-74`) gains two
-fields alongside `thresholds`/`fail_on_blocker`:
+| Source | Answers | Lost when |
+| --- | --- | --- |
+| 1. Job labels in [`INFORMATION_SCHEMA.JOBS`][bq-jobs] | Which tables the job committed rows to, when, and how many. Per Beam's source, every load and copy job it submits is labelled with the Dataflow job id (never observed by this package) | The evaluator lacks `roles/bigquery.resourceViewer` on the project |
+| 2. The launcher's `launch_config` log entry | Every launch argument, the table order, the run ids | Log retention has passed, or the launch predates the entry |
+| 3. The Dataflow job's display parameters | The launch arguments | The job is past Dataflow's retention |
+| 4. `validation_runs` | Run ids (`<base>-NN-<table>`), reference digests, valid row counts | The table is not read |
+| 5. Manual flags | Anything still missing | — |
 
-```python
-enable_evaluation: bool = False
-```
+Manual input only fills gaps: a manual value that disagrees with a resolved
+one is ignored and warned about. A relational launch is never silently
+narrowed to the one table its `--landing_table` flag names. The context is
+copied into the registry row (`generation_params`), because logs expire.
+*Code:* `context/launch.py`.
 
-`build_pipeline()` gains one new parameter, `validation_data_history_sink:
-beam.PTransform | None = None`, following the exact precedent already set by
-`validation_runs_sink` (`pipeline.py:84`) — both are optional sinks; the branch
-that uses each is skipped entirely when its sink is `None`. `enable_evaluation`
-and `validation_data_history_sink` are independent booleans (both false in a
-happy-path DirectRunner unit test today; both true in a real evaluation run) —
-this mirrors how `fail_on_blocker` is independent of whether
-`validation_runs_sink` is even supplied.
+Each table of the plan gets a role, from the enforced edges of the
+relationship model, which is the only source of relational structure:
 
-### DAG attachment point
+| Role | Meaning |
+| --- | --- |
+| `root` | No enforced edge of its own, and another launch table references it |
+| `driven` | An enforced edge into another table of the launch |
+| `side_input` | Enforced edges, all into tables outside the launch |
+| `isolated` | Neither |
+| `standalone` | A table evaluated without a model entry: a single-table launch, or relationships off |
+| `external` | A parent that this job did not write. It is read, never evaluated |
 
-Post-`WriteLanding`, sibling to the existing `if validation_runs_sink is not
-None:` block (`pipeline.py:181-215`) — a new block:
+### 3.2 Scope: which rows did this job write?
 
-```python
-if config.enable_evaluation and validation_data_history_sink is not None:
-    eval_row = _build_evaluation_branch(
-        p, reference_rows=reference_rows, synthetic_rows=uniq["unique"],
-        config=config, thresholds=thresholds,
-    )
-    _ = eval_row | "WriteValidationDataHistory" >> validation_data_history_sink
-    result["validation_data_history"] = eval_row
-```
+Landing rows carry no run id, so one job's rows are recovered from the
+launch's write disposition and from the job's own commit window. `--scope
+auto` picks one of four modes; `--scope manual` is the fifth. **One panel
+per mode:**
 
-Two inputs, both already materialized elsewhere in `build_pipeline()` — no new
-BQ read of the full dataset:
-
-- **Real side**: `reference_rows` — the same in-memory driver-side list already
-  used to compute `digest = compute_reference_digest(reference_rows)`
-  (`pipeline.py:92`), per the reference-data skill's "read reference live every
-  job" contract.
-- **Synthetic side**: `uniq["unique"]` — the exact PCollection already written
-  to `landing_sink` (`pipeline.py:153`) and already returned as `result["valid"]`
-  (`pipeline.py:174`). Evaluating this PCollection (not a duplicate generation
-  path) means the evaluation branch measures precisely what landed, not what
-  was merely attempted.
-
-### Deterministic stratified sampling (seeded by `run_id`, capped ~50k rows/side)
-
-**Stratification scheme — one concrete choice.** A new pure module,
-`sdfb_core/evaluation/profile.py`, picks a single low-cardinality categorical
-column to stratify on (deliberately **not** reusing `b1_rag/profile.py` or
-`b2_library/fidelity.py`'s engine-local `ColumnKind` — those are explicitly
-"kept local per engine during parallel development... consolidate to a shared
-`engines/_fidelity.py` post-merge if duplication warrants," `b2_library/fidelity.py:9-11`,
-and evaluation must not depend on whichever engine happened to run):
-
-```python
-@dataclass(frozen=True)
-class StratificationPlan:
-    column: str | None          # None ⇒ unstratified single "__all__" bucket
-    values: tuple[object, ...]  # distinct values observed (bounds num_strata)
-
-def choose_stratification_column(
-    table_schema: TableSchema,
-    reference_rows: list[dict],
-    *, min_categories: int = 2, max_categories: int = 50,
-) -> StratificationPlan:
-    """First column (declared schema order) whose reference-sample distinct
-    count falls in [min_categories, max_categories] and whose BQ type is not
-    numeric. No qualifying column ⇒ StratificationPlan(column=None, values=())
-    — the unstratified fallback, so this function always terminates with a
-    concrete plan, never a TBD."""
-
-def stratum_key(plan: StratificationPlan, row: dict) -> str:
-    """str(row[plan.column]) if plan.column else "__all__"."""
-```
-
-Bounding `max_categories` at 50 keeps `num_strata` bounded, which bounds
-per-stratum memory (see below) regardless of which table this runs against.
-
-**Per-row deterministic priority.** `sdfb_core/evaluation/sampling.py`:
-
-```python
-_OVERALL_CAP = 50_000
-_MIN_STRATUM_CAP = 1_000
-
-def per_stratum_cap(num_strata: int, overall_cap: int = _OVERALL_CAP) -> int:
-    return max(_MIN_STRATUM_CAP, overall_cap // max(num_strata, 1))
-
-def sort_key(run_id: str, stratum: str, row: dict) -> int:
-    """Deterministic 'bottom-k reservoir' priority. Reuses the same content
-    digest already used for the Mode-A uniqueness gate
-    (sdfb_core.validation.uniqueness.row_digest) so identical rows always
-    hash identically regardless of pipeline run."""
-    digest = row_digest(row)
-    h = hashlib.blake2b(f"{run_id}:{stratum}:{digest}".encode(), digest_size=8)
-    return int.from_bytes(h.digest(), "big")
-```
-
-Same `run_id` + same row content ⇒ same `sort_key`, every time — this is what
-makes the sample **deterministic** (re-running evaluation against the same
-run's data reproduces the same sample; it is *not* meant to reproduce across
-different `run_id`s, since two runs legitimately see different reference pulls
-per the reference-data skill's live-SELECT trade-off).
-
-**Accumulator** (pure, in `sdfb_core/evaluation/sampling.py`):
-
-```python
-@dataclass
-class ReservoirAccumulator:
-    by_stratum: dict[str, list[tuple[int, dict]]]  # bounded bottom-k per stratum
-
-def add_row(acc: ReservoirAccumulator, row: dict, *,
-            plan: StratificationPlan, run_id: str, cap: int) -> ReservoirAccumulator: ...
-def merge_accumulators(accs: Iterable[ReservoirAccumulator], *, cap: int) -> ReservoirAccumulator: ...
-def extract_sample(acc: ReservoirAccumulator, *, overall_cap: int = _OVERALL_CAP) -> list[dict]:
-    """Flattens every stratum's bottom-k, then re-sorts the union by sort_key
-    and trims to overall_cap globally. This is what guarantees the 50k/side
-    cap holds even when num_strata * per_stratum_cap overshoots it."""
-```
-
-`add_row`/`merge_accumulators` keep each stratum's list bounded to `cap`
-entries (smallest `sort_key` wins — a bounded max-heap, not an unbounded list),
-so accumulator memory is `O(num_strata * per_stratum_cap)` regardless of how
-many rows flow through — this is the same commutative/associative-accumulator
-shape already required of `MergeProfilesFn` in the whylogs merge
-(`.claude/skills/validation-mode-a.md` "Profile" section) and of
-`compute_canonical_digest`'s "associative by construction" note
-(`.claude/skills/reference-data.md`).
-
-The sampling mechanism, end to end — deterministic bottom-k per stratum,
-then a global re-trim:
+**`table`: the job overwrote the table and nobody wrote after it.**
 
 ```mermaid
 flowchart LR
-  classDef cpu  fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  J["🔀 job overwrote<br/>the table"]:::beam --> T[("🗄️ landing table<br/>as it is now")]:::store --> R["⚙️ read the<br/>whole table"]:::cpu
+```
+
+**`as_of`: the job overwrote the table, then someone else wrote to it.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  J["🔀 job overwrote<br/>the table"]:::beam --> F["🔀 a later writer<br/>added rows"]:::beam --> T[("🗄️ landing table<br/>now holds both")]:::store
+  T --> C[("🗄️ snapshot clone<br/>AS OF window end")]:::store --> R["⚙️ read the clone"]:::cpu
+```
+
+**`appends`: the job appended through load jobs or DML.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  O[("🗄️ rows already<br/>in the table")]:::store --> T[("🗄️ landing table")]:::store
+  J["🔀 job appended<br/>by LOAD or DML"]:::beam --> T
+  T --> C[("🗄️ temp table from<br/>APPENDS over the window")]:::store --> R["⚙️ read the job's<br/>rows only"]:::cpu
+```
+
+**`as_of_diff`: the job appended through copy jobs.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  T[("🗄️ landing table")]:::store --> S[("🗄️ start snapshot<br/>AS OF window start")]:::store
+  J["🔀 job appended<br/>by COPY jobs"]:::beam --> T
+  T --> E["⚙️ state AS OF<br/>window end"]:::cpu
+  E --> D[("🗄️ temp table:<br/>end minus start")]:::store
+  S --> D
+  D --> R["⚙️ read the job's<br/>rows only"]:::cpu
+```
+
+**`manual`: `--scope manual`, the table as it is now, no window.**
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  O["⚪ operator says:<br/>evaluate it as it is"]:::data --> T[("🗄️ landing table<br/>as it is now")]:::store --> R["⚙️ read the<br/>whole table"]:::cpu
+```
+
+Why `as_of_diff` exists. BigQuery's change history lists the operations
+that add rows to [`APPENDS`][bq-change-history]: the `CREATE TABLE`
+statement, `INSERT`, the appended part of `MERGE`, loading data and
+streaming ingestion. Copy jobs are not on that list, and Beam's file-loads
+write lands large writes through temporary tables and copy jobs. So a
+window that contains a copy job is read as an exact multiset difference of
+two states of the table instead: rows are numbered within groups of
+identical JSON text on both sides, and the end-side pairs absent from the
+start side are kept. It takes two statements because "a single query
+statement can't reference a single table at more than one point in time"
+([`FOR SYSTEM_TIME AS OF`][bq-as-of]): planning creates a zero-byte
+[snapshot][bq-snapshots] of the start state that expires after 24 hours,
+and the difference then reads the table at one point and the snapshot at
+another. That start snapshot is the one table planning creates. `sdfb-eval
+plan --no_planning_snapshots` plans without it and reports such tables as
+unplanned.
+
+**`--no_planning_snapshots`: one panel for each side of the flag.**
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  subgraph OFF["flag absent"]
+    A1["⚙️ plan an<br/>as_of_diff table"]:::cpu --> A2[("🗄️ zero-byte start<br/>snapshot, 24 h")]:::store --> A3["⚙️ scope planned,<br/>the table is evaluated"]:::cpu
+  end
+  subgraph ON["flag set"]
+    B1["⚙️ plan an<br/>as_of_diff table"]:::cpu --> B2["⚪ DDL refused,<br/>nothing created"]:::data --> B3["⚪ scope unknown,<br/>reported UNPLANNED"]:::data
+  end
+```
+
+Every other writer is placed against the job's window, and the scope ends
+in one of six statuses:
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  FL["⚪ floor<br/>time travel less 1 h"]:::data --> WS["⚪ window start<br/>first write less 1 s"]:::data --> JOB["⚙️ the job's<br/>own writes"]:::cpu --> WE["⚪ window end<br/>last write plus 1 s"]:::data --> NOW["⚪ now"]:::data
+  EARLY["⚪ earlier writers<br/>ignored"]:::data -.-> WS
+  OVER["⚪ overlapping writers<br/>contaminated"]:::data -.-> JOB
+  LATE["⚪ later writers<br/>as_of or ignored"]:::data -.-> NOW
+```
+
+| `scope_status` | When | What is read |
+| --- | --- | --- |
+| `ok` | The rows read agree with the rows the job committed: equal below 1,000 rows, within 0.5 % above (at 10 M rows, 50,000 rows off is still `ok`) | The scope |
+| `count_mismatch` | The rows read differ from the job's committed output rows, or from the sum of `validation_runs.valid_count` | The scope; the run is `PARTIAL` |
+| `contaminated` | Another writer's commit may fall inside the window | Nothing, unless `--allow_contaminated` |
+| `expired` | The window is older than the table's [time-travel][bq-time-travel] window less a one-hour margin | Nothing |
+| `empty` | The job wrote nothing | Nothing |
+| `unknown`, cannot be placed | The window cannot be placed (it ends after now, for example), or the table's dry run failed, or its start snapshot was not allowed | Nothing |
+| `unknown`, read and flagged | An overwrite launch with no labelled write found (`JOBS` denied, or past retention), or a scope with no count to check against | The whole current table, with a warning; the run ends `SUCCEEDED_WITH_WARNINGS` |
+
+A scope that cannot be placed reads nothing. The one case where the current
+table is read without a recovered scope is the second `unknown` row: an
+overwrite launch that lost source 1 (below) reads the whole table, because
+writes after the job cannot be ruled out, and says so. The row count is
+checked whenever a count is known, within the tolerance above; a writer
+with no BigQuery job of its own, such as a streaming insert, is invisible
+to the JOBS view, and the count check is the only guard there. *Code:* `context/scope.py`
+(`resolve_scope`, `ScopePlan.verify`), `context/jobs.py::foreign_writes`.
+
+**`--allow_contaminated`: one panel for each side of the flag.**
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  subgraph OFF["flag absent"]
+    A1["⚪ another writer<br/>inside the window"]:::data --> A2["⚪ status contaminated"]:::data --> A3["⚪ nothing read,<br/>table skipped"]:::data
+  end
+  subgraph ON["flag set"]
+    B1["⚪ another writer<br/>inside the window"]:::data --> B2["⚪ status contaminated,<br/>warning"]:::data --> B3[("🗄️ the window's rows<br/>read, with the other<br/>writer's")]:::store --> B4["⚙️ evaluated; run ends<br/>SUCCEEDED_WITH_WARNINGS"]:::cpu
+  end
+```
+
+Unverified until the first GCP run: whether `APPENDS` returns exactly the
+job's rows on a load-only window, whether it also returns copy-job rows,
+whether the difference runs within budget on a large table (it reads about
+twice the table's bytes), whether a snapshot with an expiration can be
+created with the evaluator's roles (the
+[documented permissions][bq-snapshots-create] include
+`tables.createSnapshot` and, for the expiration, `tables.deleteSnapshot`),
+and how a table's creation time behaves after an overwrite. The module
+docstring of `context/scope.py` lists these checks.
+
+### 3.3 The source as the job saw it
+
+Within the source's time-travel window, the source is read through a
+snapshot clone as of the generation job's create time (D4). Outside it, or
+when the create time is unknown, the source is read as it is now, the plan
+says so, and the reference digest check of §3.5 then tells whether the
+source still yields the generator's sample.
+
+A pin that BigQuery **refuses** degrades to the unpinned source with a
+warning: an HTTP 400, 403 or 404, as a clone across organisations or
+regions would give. Any other error (a 5xx, a 429, a conflict) may succeed
+on a retry, so it fails the run with a `FAILED` registry row rather than
+silently changing what the evaluation reads (R89). The same rule holds for
+a read-only parent that cannot be read and for the free-text pools read.
+*Code:* `beam/pipeline.py::prepare_evaluation`, `context/bq.py::is_refusal`.
+
+### 3.4 `--mode`: exact or sampled
+
+**One panel per mode.** The DirectRunner defaults to `sampled`, Dataflow to
+`exact`.
+
+**`exact`: every row of both sides.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  S[("🗄️ source pin")]:::store --> P["🔀 pipeline reads<br/>every row"]:::beam
+  L[("🗄️ landing scope")]:::store --> P
+  P --> M["⚪ every metric<br/>evaluated"]:::data
+```
+
+**`sampled`: a salted hash sample of each side above `--sample_rows`.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  S[("🗄️ source pin")]:::store --> SS[("🗄️ sample table<br/>fingerprint under a rate")]:::store
+  L[("🗄️ landing scope")]:::store --> LS[("🗄️ sample table<br/>same salt")]:::store
+  SS --> P["🔀 pipeline reads<br/>the samples"]:::beam
+  LS --> P
+  P --> M1["⚪ panel-based metrics<br/>method = sample"]:::data
+  P --> M2["⚪ full-coverage metrics<br/>not_evaluated"]:::data
+```
+
+The sample keeps the rows whose salted [`FARM_FINGERPRINT`][bq-hash] of the
+row's JSON text falls under a rate, so the same rows are kept for the same
+salt and identical rows are kept together. A sample cannot support a
+verdict that needs every row of a side. In sampled mode the full-source
+match rates, the key duplicate rates, internal duplicates, and the orphan
+rates and fan-out metrics of an edge whose child side or parent side was
+sampled are
+`not_evaluated` with the reason "sampled mode cannot measure …; run exact
+mode" and the observed lower bound in `detail` (R72). An integrity pass never comes from a sample. Rates and lifts that
+compare the panel with the rows read stay evaluated, with `method = sample`
+and the sampling rate on the row.
+
+### 3.5 The reference panel: R, E, H and H_E
+
+**Claim:** one ranking of the source gives the rows the generator read, an
+equally sized set it never saw, and inside each the rows a prompt could
+have shown.
+
+![R, E, H and H_E on the fingerprint rank line](assets/eval-sets-rhe.png)
+
+*CONCEPT figure (schematic, no data; n = 10,000 is an example).*
+*Intuition:* the generator's sample is "the first n rows" of a shuffled
+source. The next n rows were shuffled the same way and were never read, so
+they are a fair control group for anything said about the first n.
+*Formally:* with ranks under `ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(row))`,
+R = ranks 1..n, H = ranks n+1..2n, E = ranks 1..1,024 and H_E = ranks
+n+1..n+1,024. R and H are exchangeable halves of one ranking, so under "no
+memorization" a synthetic table hits records exclusive to R and records
+exclusive to H at the same rate; this is the holdout design of
+[Platzer & Reutterer 2021][platzer2021] applied to exact matches as well as
+distances. *Code:* `context/reference.py` (`REFERENCE_ORDER_BY`,
+`panel_sql`, `EXPOSURE_ROWS`).
+
+R is hashed again with the generator's digest and compared with the digest
+the generator recorded in `validation_runs`. When they differ (the source
+changed before the pin, or could not be pinned), or when no digest was
+recorded, the panel is **unverified**: every metric that rests on R, E or
+H is `not_evaluated` with the reason, the metrics against the full source
+are still computed, and the run is `PARTIAL`. E is the first 1,024 ranks because those are the rows the
+retrieval engine embeds as row documents, which is what a prompt could have
+shown ([ADR 0019](../adr/0019-rag-population-scoped-to-consumers.md)).
+
+## 4. The metric catalogue
+
+### 4.1 One file, three readers
+
+`catalogue/metrics.yaml` is the single place a metric is defined: its id,
+level, family, the column kinds it applies to, formula, estimator,
+direction, thresholds, score function, noise method, and the text shown to
+a reader (purpose, interpretation, pitfalls, references).
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  Y[("📄 metrics.yaml")]:::store --> S["⚙️ scoring<br/>status, score, roll-ups"]:::cpu
+  Y --> D["⚙️ render_eval_catalogue<br/>the tables of §4.10"]:::cpu
+  Y --> G["⚪ a GUI's popovers<br/>and its type generator"]:::data
+  Y --> R["⚙️ sdfb-eval report<br/>explains each FAIL"]:::cpu
+```
+
+The loader is strict: a missing or unknown key, an unknown vocabulary
+value or a non-numeric threshold fails at load time, so a bad edit cannot
+mis-score a run. The tables in §4.10 are generated from the file and
+checked in CI, so this document cannot disagree with the code about a
+threshold, a formula or a noise method.
+
+### 4.2 How to read a metric row
+
+A row of `evaluation_metrics` holds the value and what is needed to judge
+it without opening another table: the per-side statistics
+(`source_value`, `synthetic_value`), the floor (`baseline_value`), the
+sampling noise (`noise_floor`, or `ci_low` and `ci_high`), how it was
+computed (`method`, `sample_rate`, the digests of the encoding plan and
+feature set used), the thresholds it was graded against, and `status` and
+`score`.
+
+**Claim (D4):** a value is read against its baseline, not against zero,
+because a generator that read only R cannot be expected to score below
+`metric(R, source)`.
+
+![Baseline against value, per column](assets/eval-baseline.png)
+
+*CONCEPT figure (seeded simulation, seed 13; not a measurement of a run).*
+*Intuition:* the blue dot is how far the 10,000-row sample itself sits
+from the full table. A generator that learned the column only from that
+sample lands on or just right of it; a generator with a real defect lands
+far to the right. *Formally:* `baseline_value = metric(R, source)`, the
+value a perfect copier of the reference sample would score, stored on
+every row whose catalogue entry has `baseline: true`. *Code:*
+`beam/dense.py::dense_outputs` and `beam/census.py` compute it from the
+`reference` side; the detection metrics compute theirs in
+`beam/privacy.py`.
+
+Two limits on the baseline. It is withheld when the reference holds fewer
+than 10 values of the column (§4.9). And the detection baseline is taken at
+n = |R|, not at the metric's own n (`detail.baseline_n`): it is a floor to
+read, not a matched comparison.
+
+**Claim (D5):** the same KS value is noise at 1,000 rows and a real effect
+at a million, so each row carries its own floor and status reads both.
+
+![The KS noise floor against n, with the DKW band](assets/eval-noise-floor.png)
+
+*CONCEPT figure (seeded simulation, seed 12; not a measurement of a run).*
+*Intuition:* two samples of the very same distribution never have identical
+CDFs. The orange line is how large their gap gets by chance; it shrinks as
+tables grow, while the thresholds stay where they are. Under the line a
+difference means nothing; far above it, it means something at every size.
+*Formally:* the two-sample KS statistic exceeds
+`sqrt(-ln(α/2)/2) · sqrt((n+m)/(n·m))` with probability α under the null
+([Smirnov 1948][smirnov1948]); one empirical CDF stays within
+`sqrt(ln(2/α)/(2n))` of the truth with probability 1 − α
+([Dvoretzky, Kiefer & Wolfowitz 1956][dkw1956], with the tight constant of
+[Massart 1990][massart1990]). *Code:* `stats/noise.py::ks_critical`,
+`dkw_epsilon`; `scoring.status_for`, step 9. The DKW band is the one
+drawn, for the reference sample alone, in
+[the reference-sample scaling design](2026-07-24-reference-sample-scaling.md)
+(`assets/sampling-error-dkw.png`); this figure redraws it beside the
+two-sample KS floor.
+
+Each noise method of the catalogue is one such estimate:
+
+| `noise_floor` | What it sizes | Form | Source |
+| --- | --- | --- | --- |
+| `ks_two_sample` | KS on two samples | scalar floor | [Smirnov 1948][smirnov1948] |
+| `tvd_null` | TVD between two samples of one distribution | scalar: the expected TVD under the null | normal approximation per category |
+| `jsd_null` | JSD on k categories | scalar: `(k−1)(1/n+1/m)/(8 ln 2)` bits | the bias expansion of [Treves & Panzeri 1995][treves1995] |
+| `fisher_z` | a difference of two correlations | scalar: `1.96·sqrt(1/(n−3)+1/(m−3))` | [Fisher 1915][fisher1915] |
+| `mi_bias` | mutual information on an r × c table | scalar: `(r−1)(c−1)/(2n)` nats | [Treves & Panzeri 1995][treves1995] |
+| `wilson` | a share | interval | [Wilson 1927][wilson1927] |
+| `newcombe` | a difference of two shares | interval, folded for an absolute difference | [Newcombe 1998][newcombe1998] |
+| `delong` | an AUC | interval | [DeLong, DeLong & Clarke-Pearson 1988][delong1988] |
+| `rate_ratio` | a ratio of two rates | interval; the metric gates on its bound | [Przyborowski & Wilenski 1940][przyborowski1940], [Clopper & Pearson 1934][clopper1934] |
+
+Scalar methods call a difference noise when the value is within the floor
+of its reference; interval methods when the interval covers the reference.
+§7.1 gives the full rule.
+
+### 4.3 Distributions on a fixed grid
+
+A column of a hundred million rows cannot be sorted in a Beam combiner, and
+it does not need to be. Planning asks BigQuery for a 1,001-point quantile
+grid per side ([`APPROX_QUANTILES`][bq-approx]); the Beam pass then counts
+every row exactly against that fixed grid. Two passes, plan then count,
+replace a sort.
+
+**Claim:** on a fixed grid the KS distance is known exactly at the edges
+and bounded inside the bins, and where the source holds a point mass only
+the union of both sides' grids closes the bracket.
+
+![KS bracket: source grid against the union grid](assets/eval-ks-bracket.png)
+
+*CONCEPT figure (seeded simulation, seed 11; not a measurement of a run).
+Eleven grid points a side are drawn so the bins are visible; the evaluator
+uses 1,001, and each panel prints the bracket at that size.* *Intuition:*
+at an edge both CDFs are counted exactly, so the gap there is real (the
+black bar). Between two edges each CDF can run anywhere inside its shaded
+box, so the worst case is one side at the top of its box and the other at
+the bottom (the gray bar). Here 40 % of the source is exactly 0 and the
+generator smeared that mass around 0: the source's own grid has no point
+inside the smear however fine it is, the synthetic side's grid does.
+*Formally:* with edges e_i, `D_lo = max_i |F_src(e_i) − F_syn(e_i)|` and
+`D_hi = max_i max(F_src(e_i) − F_syn(e_{i−1}), F_syn(e_i) − F_src(e_{i−1}))`,
+so `D_lo ≤ D ≤ D_hi` for the KS statistic D of the raw rows
+([Smirnov 1948][smirnov1948]), and `D_hi − D_lo` is at most the largest
+mass both sides put in one bin. *Code:* `stats/binned.py::union_edges`,
+`bin_counts`, `ks_bracket`. `column.ks` is `D_lo`; `detail` carries `d_lo`
+and `d_hi`.
+
+**Claim:** KS and Wasserstein see different failures, so the catalogue
+keeps a sup-statistic and a mass-statistic.
+
+![Same W1, 5x different KS](assets/eval-ks-vs-wasserstein.png)
+
+*CONCEPT figure (seeded simulation, seed 7; not a measurement of a run).*
+*Intuition:* moving every value a little and moving a few values a long way
+can cost the same total "earth moved", yet the first opens a wide gap
+between the CDFs and the second barely any. *Formally:* KS is the largest
+vertical gap between the CDFs; Wasserstein-1 is the area between them,
+`∫ |F_syn − F_src| dx` ([Ramdas, García Trillos & Cuturi 2017][ramdas2017]).
+*Code:* `stats/binned.py::ks_bracket`, `w1_from_bins`, `pit_w1`.
+
+`column.wasserstein` is in the column's own units, so it has no threshold
+and is reported as information. The gated mass-statistic is
+`column.pit_w1`, the same distance after both columns are mapped through
+the source's CDF (the probability integral transform,
+[Gneiting, Balabdaoui & Raftery 2007][gneiting2007]). It is unit-free and
+lies in [0, ½]. On a grid it is
+
+`W1_PIT = Σ_b p_src(b) · |F̄_syn(b) − F̄_src(b)|`, with
+`F̄(b) = cumsum(p)(b) − p(b)/2`,
+
+summed over every bin, the open last one included. `F̄` is the
+mid-distribution function, not the right-edge CDF: it puts a bin's mass
+halfway, which keeps the measure unbiased on a column with a large point
+mass, a constant column or an integer column
+([Czado, Gneiting & Held 2009][czado2009]; R16). The same mid-CDF transform
+feeds the Spearman correlation and the Gower features, so a tied value maps
+to the middle of its run everywhere.
+
+**Pitfall: the approximate aggregates.** BigQuery documents
+`APPROX_QUANTILES`, `APPROX_COUNT_DISTINCT` and `APPROX_TOP_COUNT` as
+[approximate][bq-approx] ("a statistical estimate"; its sketch-based
+cardinality functions use HyperLogLog++,
+[Heule, Nunkesser & Hall 2013][heule2013], [PDF][heule2013pdf]) and does
+not say whether two runs over identical data return the same value. Two
+plannings of the same data may therefore differ slightly in grids, atoms,
+dictionaries, column kinds and census methods, and so in
+`encoding_plan_digest`. Metrics are deterministic **for a given plan**, and
+the `evaluation_key` does not depend on these values. Whether repeated
+plannings do differ in practice is unverified.
+
+The other distribution metrics keep their textbook forms on the same
+counts: Jensen–Shannon divergence in bits without smoothing
+([Lin 1991][lin1991]); the population stability index over the ten
+source-decile bins with half-a-row smoothing, whose value depends on that
+pseudo-count and on n when a bin is nearly empty
+([Yurdakul & Naranjo 2020][yurdakul2020]); Cohen's w
+([Cohen 1988][cohen1988]) and the standardised mean difference
+([Austin 2009][austin2009]) for effect-size thresholds taken from the
+literature. Several metric names follow [SDMetrics][sdmetrics], which a
+reader may know; no SDMetrics code runs here.
+
+### 4.4 Dependence
+
+Correlations are computed from **centred co-moments** that merge exactly
+across bundles, the pairwise update of
+[Chan, Golub & LeVeque 1983][chan1983] generalised to covariances
+([Pébay 2008][pebay2008]). Nothing sums a large raw value, so a timestamp
+in epoch microseconds does not lose its variance to rounding.
+`pair.pearson_delta` uses values standardised by the plan's mean and
+standard deviation; `pair.spearman_delta` is the Pearson correlation of
+each side's mid-CDF transform ([Spearman 1904][spearman1904]), which
+agrees with rank correlation under ties. Categorical dependence uses the
+bias-corrected Cramér's V of [Bergsma 2013][bergsma2013] and normalised
+mutual information, whose plug-in bias is its noise floor
+([Treves & Panzeri 1995][treves1995]).
+
+Pairs are chosen at plan time: the `--pair_max_columns` columns with the
+most information on a 10-cell grid, never a key, and every pair among
+them. A pair metric therefore says nothing about columns outside that set.
+
+### 4.5 Diversity at matched n
+
+**Claim (D5):** plug-in entropy and distinct counts grow with the rows
+read, so a faithful generator fails their ratio until both sides are read
+at the same n.
+
+![Entropy at each side's own n and at matched n](assets/eval-matched-n-entropy.png)
+
+*CONCEPT figure (seeded simulation, seed 14; not a measurement of a run).*
+*Intuition:* in a long-tailed column, the more rows you read, the more
+rare values you meet. A 2-million-row synthetic table looks more varied
+than a 10,000-row source even when both come from one distribution.
+*Formally:* the plug-in estimate `Ĥ = −Σ (c_v/n) log2(c_v/n)`
+([Shannon 1948][shannon1948]) is biased low by about `(K−1)/(2n ln 2)`
+bits ([Miller 1955][miller1955]; [Paninski 2003][paninski2003]), a bias
+that depends on n. Both sides are therefore compared on subsamples of
+`m = min(n_src, n_syn)` rows. *Code:* `beam/encode.py` (`subsample_m`, a
+Bernoulli draw on the row hash at rate m/n), `stats/diversity.py`;
+`column.entropy_ratio` and `column.distinct_ratio` have `n_dependent:
+true`. The row's `detail` adds the Miller–Madow and
+[Chao & Shen 2003][chaoshen2003] estimates, the latter built on the
+sample-coverage estimate of [Good 1953][good1953], which also gives
+`column.novelty_mass` its data-dependent target.
+
+**Claim (R73):** the share of rows in a duplicate group grows with the rows
+compared; rarefied to one m, a faithful generator shows no excess and a
+generator that repeats itself keeps it.
+
+![Duplicate share against the rows compared](assets/eval-rarefied-duplicates.png)
+
+*CONCEPT figure (seeded simulation, seed 15; not a measurement of a run).*
+*Intuition:* draw more rows from a finite set of contents and more of them
+collide. A synthetic table ten times the size of its source has more
+duplicates for that reason alone. Reading both curves at the same number
+of rows removes the effect. *Formally:* for a record held c times among N
+rows, the number X kept in an m-row subsample is hypergeometric, and the
+expected rows in duplicate groups are `E[D_m] = Σ_c f_c (c·m/N − P(X = 1))`,
+computed exactly from the frequency of frequencies f_c
+([Hurlbert 1971][hurlbert1971]; [Heck, van Belle & Simberloff 1975][heck1975]).
+`row.internal_duplicate_excess` is `(E[D_m]_syn − E[D_m]_src)/m`. *Code:*
+`beam/membership.py` (the keyed counts, `duplicate_null_variance`).
+
+How the rule got here, because the earlier version is still visible in
+some docstrings:
+
+```mermaid
+flowchart LR
   classDef data fill:#6b7280,color:#fff,stroke:#4b5563
-  ROWS["⚪ rows (either side)"]:::data --> KEY["⚙️ stratum_key<br/>one categorical column"]:::cpu
-  KEY --> PRI["🎲 sort_key = blake2b<br/>(run_id : stratum : row_digest)"]:::cpu
-  PRI --> HEAP["⚙️ bounded bottom-k<br/>per stratum (max-heap)"]:::cpu
-  HEAP --> UNION["⚙️ union → re-sort<br/>→ trim to 50k"]:::cpu
-  UNION --> OUT["⚪ deterministic sample<br/>same run_id ⇒ same rows"]:::data
+  A["⚪ R59<br/>duplicates on the full data<br/>never on the subsample"]:::data --> B["⚪ R73<br/>both sides at matched n<br/>by exact rarefaction"]:::data --> C["⚪ R76<br/>one effective n<br/>for the interval"]:::data
 ```
 
-The hash priority is what makes this a *deterministic* reservoir: bottom-k
-by a content-keyed hash is a uniform random sample for any fixed `run_id`
-(each row's priority is an i.i.d. 64-bit value), yet re-running evaluation
-for the same run reproduces it bit-for-bit — no RNG state to persist.
+R59 kept the duplicate rate independent of the row sampler by computing it
+on the full data. That left it dependent on n. R73 keeps the full-data
+counts and rarefies them, which needs no sampler at all. Rows of one
+duplicate group are not independent draws, so the interval is Newcombe's
+on one effective sample size for both sides
+([Korn & Graubard 1998][korn1998]; [PDF][korn1998pdf]), from the exact null
+variance of the duplicate count. **Pitfall:** the value still depends on
+m, so compare runs of similar size; and a side read as a row sample is not
+evaluated.
 
-**Beam wiring** (`packages/sdfb-beam/src/sdfb_beam/dofns/evaluation.py`):
+### 4.6 The value census, and value sampling
 
-```python
-class StratifiedReservoirFn(beam.CombineFn):
-    def __init__(self, plan: StratificationPlan, run_id: str,
-                 per_stratum_cap: int, overall_cap: int = 50_000): ...
-    def create_accumulator(self) -> ReservoirAccumulator: ...
-    def add_input(self, acc, row): ...
-    def merge_accumulators(self, accs): ...
-    def extract_output(self, acc) -> list[dict]: ...
+Metrics that need one count per distinct value (TVD, coverage, novelty,
+copy rate, the value lifts, top-k lists) come from a keyed census: one
+shuffle key per distinct value. A column with tens of millions of distinct
+values would dominate the shuffle, so the plan gives each census column a
+share of `--max_shuffle_gb` and **value-samples** the columns that do not
+fit (§5.3).
+
+Value sampling is a stratified design (R67). The source's and the
+synthetic side's top values are a certainty stratum, always counted; the
+tail is sampled by value hash, a value entering when its hash falls under
+the rate. Every retained value's counts are exact, so sums over values are
+unbiased with weight 1/rate ([Horvitz & Thompson 1952][horvitz1952]), and
+shares are ratios of two such sums ([Woodruff 1971][woodruff1971]). The
+values, not the rows, are the sampling units: a share on a value-sampled
+column carries a cluster-robust interval on an effective number of
+sampled values ([Korn & Graubard 1998][korn1998]), so a sample without a
+single copy still bounds the copy rate. The row's `method` says
+`value_sampled` and `detail` carries the rate.
+
+### 4.7 Privacy
+
+#### Copies and the memorization lifts
+
+`row.exact_match_rate` compares whole rows with the full source;
+`row.exact_match_rate_nonkey` leaves out primary-key, identity and
+foreign-key columns, so a record copied under a fresh id still matches.
+Both are raw rates. A table with a few low-cardinality columns collides
+with its source by chance, so a raw rate cannot tell chance from copying.
+The lifts can.
+
+**Claim (D3):** chance hits R and H alike, so only copying lifts the
+ratio, and status reads the interval's lower bound.
+
+![Memorization lift with its interval](assets/eval-memorization-lift.png)
+
+*CONCEPT figure (seeded simulation, seed 16; not a measurement of a run).*
+*Intuition:* count the records only the reference sample holds that come
+back in the synthetic table, and the same for the holdout. In a dense
+domain both counts are large and equal: many exact matches, no lift. Copy
+a hundred reference records on top and the first count runs away from the
+second. With a handful of events the estimate swings, so the verdict
+reads the cautious end of the interval. The third row is the limit of
+this: 300 copied records on top of about 480 chance hits lift the ratio
+to about 1.7, and its lower bound, about 1.5, stays under the warn line of
+2, so that table passes. The lifts see a small copy fraction only where
+chance hits are few; in a dense domain a few hundred copies hide among the
+chance hits. *Formally:* with exclusive sets
+`R∖H` and `H∖R` and m_S the distinct exclusive records of S reproduced,
+`lift = (m_R/|R∖H|) / (m_H/|H∖R|)`; conditional on `m_R + m_H`, m_R is
+binomial under equal rates ([Przyborowski & Wilenski 1940][przyborowski1940]),
+and the [Clopper & Pearson 1934][clopper1934] interval on that proportion
+maps onto the ratio. *Code:* `stats/noise.py::rate_ratio`,
+`beam/membership.py`. Verbatim reproduction of training text is the
+failure these lifts are built to catch ([Carlini et al. 2021][carlini2021]).
+
+Pitfalls, each of which the catalogue repeats in the metric's own text:
+
+- **The event is a distinct record, not a row.** A record reproduced a
+  thousand times is one event. Counting rows would weight every chance hit
+  by the rows its pattern draws and make the interval far too narrow on a
+  skewed table. The row counts are in `detail`; the raw rates and the row
+  flags still show the volume.
+- **The value-lift pitfall.** `field.value_memorization_lift` applies the
+  same test to rare values (held by fewer than 10 source rows) found only
+  in R against those found only in H, with the interval corrected for the
+  number of columns tested. A generator that draws categorical values from
+  the empirical distribution of R reproduces rare R-only values by
+  construction, so it fails unless its own source scrub removed them first
+  ([ADR 0027](../adr/0027-verified-wave4-operational-integrity.md)). That
+  fail is the metric working: rare sample values did reach the output.
+- **`field.substantive_copy_rate` is gated on free text only.** On every
+  other kind it is information: numeric and temporal values collide with a
+  dense source by domain size, and reusing a rare real category is not
+  evidence of memorization (R66). The lift is the gated test there.
+- **Pool-lift multiplicity.** `field.pool_memorization_lift` runs the test
+  on the persisted free-text pool of the run
+  ([ADR 0020](../adr/0020-freetext-pools-as-persisted-artifact.md)). Each
+  pooled column is its own test at an uncorrected 5 % level: the pool
+  lifts are a separate family from the value lift, which is corrected
+  across columns, so with many pooled columns the intervals hold one by
+  one, not jointly. A pool holds at most 512 values, so each interval is
+  wide. The metric is evaluated only when a pool for exactly this
+  reference digest and model is found.
+- **The exposure formula.** `row.exposure_lift` restricts the test to what
+  a prompt could have shown: records of E that H lacks against records of
+  H_E that R lacks, `(m_E/|E∖H|) / (m_{H_E}/|H_E∖R|)`. `detail.unexposed`
+  repeats it for the exclusive records outside E and H_E, or says why it
+  cannot: on a steep-tailed source every exclusive record of R can sit
+  inside E. With 1,024 rows a side matches are rare and a pass is weak
+  evidence alone.
+- **`row.near_match_rate` excludes exact matches.** A synthetic row is a
+  near match when it equals a reference row in every non-key column but
+  exactly one, found by leave-one-column-out hashes and then checked cell
+  by cell. A row that matches a reference or holdout record exactly is
+  counted as exact and never as near, so the two rates do not overlap.
+
+#### Distances: DCR, NNDR and the holdout share
+
+**Claim:** distance to the closest record flags a synthetic row parked on a
+real record; the nearest-neighbour distance ratio flags a row for which
+one real record is uniquely closest.
+
+![DCR and NNDR geometry](assets/eval-dcr-nndr.png)
+
+*CONCEPT figure (hand-placed geometry with seed 7; not a measurement of a
+run).* *Intuition:* a near-zero distance to a real row is a copy. A row
+that is not especially close to anything, but much closer to one record
+than to the next, singles that record out. *Formally:* with the Gower
+distance d ([Gower 1971][gower1971]), `DCR(y) = min_x d(y, x)` and
+`NNDR(y) = d_1(y)/d_2(y)`; numeric features are compared on the source's
+rank scale, in the spirit of [Podani 1999][podani1999], and a categorical
+feature matches only on the identical value. NNDR follows the singling-out
+reading of [Giomi et al. 2023][giomi2023]. *Code:*
+`stats/privacy.py::GowerSpace`, `gower_knn`; `row.dcr_p5_ratio` and
+`row.nndr_p5_ratio` divide the synthetic side's 5th percentile by the
+holdout's.
+
+**Claim (R87):** a copy fraction f moves the closer-to-reference share by
+only f/2, so the share fails only when a large part of the table is copied.
+
+![The holdout share: geometry, and share against copy fraction](assets/eval-holdout-dcr.png)
+
+*CONCEPT figure (seeded simulation, seed 17; not a measurement of a run).*
+*Intuition:* ask of each synthetic row whether its nearest real row is one
+the generator read or one it never saw. With no memorization it is a coin
+flip. A copied row always answers "read", but the rest still flip the
+coin, so 1 % of copies moves the share from 0.500 to 0.505.
+*Formally:* `share = mean(1[d_R < d_H] + ½·1[d_R = d_H])` on equal-size R
+and H ([Platzer & Reutterer 2021][platzer2021]); with a fraction f of exact
+copies the expectation is `½ + f/2`. Status reads the lower confidence
+bound. *Code:* `stats/privacy.py`, `beam/privacy.py::_PrivacyEmitFn`.
+
+Pitfalls:
+
+- **The share is blunt by design.** A small number of copies cannot fail
+  it. Exact copies are the job of the exact-match rates and the lifts,
+  which fail on a 1 % copy in the acceptance run where the share does not.
+- **One heavy copied cluster looks like split noise.** The interval is the
+  larger of the Wilson interval and a permutation interval over the R/H
+  split, which accounts for rows repeated many times. A single record
+  copied thousands of times widens that interval instead of moving the
+  bound, so the share cannot tell it from an unlucky split. The exact-copy
+  metrics own that case too.
+- **The permutation interval is conservative on lattice tables.** When
+  many rows sit at exactly the same distance (a table of few categorical
+  columns), all tied mass on a side is credited to one nearest row. The
+  interval is then wider than the truth: fewer false alarms, less power on
+  categorical-only tables.
+- **A heavy key can be under-sampled.** The privacy sample is a bottom-k
+  sample of distinct keys with each key's exact multiplicity
+  ([Cohen & Kaplan 2007][cohenkaplan2007]). Every key is equally likely to
+  be held, whatever its weight, so when a side has more distinct keys than
+  k, a key that holds a large share of the rows may be left out.
+  `detail.sample_short` marks a sample that holds fewer keys than asked.
+
+Density and coverage ([Naeem et al. 2020][naeem2020]) use k = 5 at equal
+sample sizes; coverage reads about `1 − 2⁻ᵏ`, not 1, for identical
+distributions. They draw their rows by systematic sampling over the held
+keys ([Madow 1949][madow1949]) so that a table of repeated rows is not
+read as a few heavy clusters (R85).
+
+#### Detection
+
+**Claim:** an AUC is read with its interval against 0.5, never alone.
+
+![ROC and the DeLong interval](assets/eval-c2st.png)
+
+*CONCEPT figure (seeded simulation of classifier scores, seed 18; not a
+measurement of a run, and no classifier is trained for it).* *Intuition:*
+train a model to tell synthetic rows from source rows. If it cannot, the
+tables are alike. With few rows a model can look good or bad by luck, and
+the interval shows how much. *Formally:* the classifier two-sample test of
+[Lopez-Paz & Oquab 2017][lopezpaz2017]; the metric is the out-of-fold ROC
+AUC, with the interval of [DeLong, DeLong & Clarke-Pearson 1988][delong1988]
+computed from midranks ([Sun & Xu 2014][sunxu2014]). *Code:*
+`stats/detection.py::c2st_auc`, `featurize`; `beam/privacy.py::_DetectionFn`.
+
+Keys are never features: they differ between the tables by construction.
+An AUC under 0.5 is noise, not "more real than real", and a flexible
+classifier also finds harmless artifacts such as rounding. Rows flagged
+`detectable` are written only when the AUC reaches the warn threshold and
+its interval clears 0.5. Detection draws a simple random sample of rows
+rather than the systematic one, because exactly balanced duplicates score
+below chance under cross-validation (R86).
+
+`table.pmse_ratio` is the propensity mean squared error of
+[Woo et al. 2009][woo2009] over its null expectation, in the manner of
+[Snoke et al. 2018][snoke2018], with one change: the expectation used is
+`E0 = (k−1)·c·(1−c)/N`, the null for two independent samples, not the
+expression for synthetic rows drawn from the source sample itself, which
+would put a perfect generator at 2 here (R31). The ratio cannot exceed
+`N/(k−1)`; when that ceiling is below the fail threshold the metric is
+`not_evaluated` rather than passed (R33).
+
+### 4.8 Relational metrics
+
+**Claim:** an equal mean fan-out can hide a wrong shape, so the catalogue
+gates the distribution of children per parent and the mean separately.
+
+![Fan-out: a faithful generator and a collapsed one](assets/eval-fanout.png)
+
+*CONCEPT figure (seeded simulation, seed 19; not a measurement of a run).*
+*Intuition:* if every order gets exactly three items, the average is right
+and the table is wrong: no order is empty, none is large. *Formally:*
+`relationship.fanout_tvd` is the total variation between the two
+distributions of children per parent, one bin per count from 0 to 49 and
+one for 50 or more; parent-child cardinality as a generation target is
+from [Patki, Wedge & Veeramachaneni 2016][patki2016]. *Code:*
+`stats/relational.py::fanout_metrics`, `beam/relational.py`.
+
+Rules a reader needs:
+
+- **The mean ratio is a ratio of row counts (R82).**
+  `fanout_mean_ratio = (n_child/n_parent)_syn / (n_child/n_parent)_src`,
+  where n_child is every child row read, matched, orphaned or with a NULL
+  key, and n_parent every parent row read. It answers "is the child table
+  the right size for its parents?". The histogram, the TVD and the W1
+  distance are over matched children per distinct parent key. The two can
+  disagree, on purpose: a source in which a quarter of the orders have no
+  user (guest checkouts) against a synthetic side with none still scores a
+  mean ratio of 1 if the row counts agree. When only one parent side is a
+  row sample, or the two are sampled at different rates, the mean ratio is
+  not evaluated.
+- **Orphans follow SQL's `MATCH SIMPLE`.** A child tuple with a NULL part
+  is counted, never joined, and is never an orphan. A generator that nulls
+  every foreign key scores an orphan rate of 0; `column.null_rate_delta`
+  on the key columns catches that.
+- **Documented edges.** On an edge the model declares but does not enforce,
+  `relationship.orphan_rate` is information, compared with the source's own
+  orphan rate; the fan-out metrics stay graded (R42).
+- **Fewer than 10 parents.** When either side holds fewer than 10 distinct
+  parent keys, every fan-out metric is `not_evaluated` and no mean or count
+  is published: a fan-out over a handful of parents is theirs (R83). The
+  orphan rate stays evaluated, because an integrity verdict must exist for
+  every edge. **Pitfall:** its rate and n still give the matched total,
+  which below 10 parents is those parents' summed fan-out. That one sum is
+  accepted for the sake of the integrity gate; nothing per parent is
+  revealed.
+- **A missing source twin.** A read-only parent with no source table leaves
+  only the metrics that need the source side unevaluated; the synthetic
+  orphan rate is still measured against the parent's landing table (R84).
+
+### 4.9 What the outputs may reveal
+
+The evaluation tables describe the source. Three rules bound what they can
+say about any one record.
+
+**Literals (D6).** A top-k label is the value itself only when the column's
+source top list covers every non-NULL row with at most 50 values, each
+counted at least 10 times, and the value is one of them. Everything else,
+every value only the synthetic side holds included, is `h:<8 hex>`.
+
+**The label key.** A plain hash of a low-entropy value can be reversed by
+enumeration, so labels and the source keys of row flags are keyed hashes
+(keyed BLAKE2b). **One panel per mode of `--label_key_uri`:**
+
+```mermaid
+flowchart TB
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  subgraph EPH["flag absent: ephemeral"]
+    E1["🎲 a worker draws<br/>32 random bytes"]:::cpu --> E2["🔀 labels align<br/>within this run only"]:::beam --> E3[("🗄️ registry records<br/>ephemeral")]:::store
+  end
+  subgraph OPE["flag set: operator"]
+    O1[("📄 secret version,<br/>object or file")]:::store --> O2["⚙️ a worker reads<br/>the key"]:::cpu --> O3["🔀 labels stable<br/>across runs"]:::beam --> O4[("🗄️ registry records<br/>operator")]:::store
+  end
 ```
 
-applied as:
+In both modes only the URI enters the job graph; the key is resolved on a
+worker and passed to the transforms as a side input. A key given to a
+transform's constructor would be pickled into the graph, where anyone who
+can read the job could recover it (R68). For the same reason the
+experiment `enable_data_sampling` is refused: it would sample the key into
+the monitoring interface. The registry records the mode, never the key or
+its URI.
 
-```python
-real_sample = (
-    p | "CreateReference" >> beam.Create(reference_rows)
-      | "SampleReference" >> beam.CombineGlobally(StratifiedReservoirFn(plan, run_id, cap))
-)
-synth_sample = (
-    synthetic_rows | "SampleSynthetic" >> beam.CombineGlobally(StratifiedReservoirFn(plan, run_id, cap))
-)
+**The count rule.** An exact minimum or maximum is one record's value.
+
+![Which grid points may be published](assets/eval-count-rule.png)
+
+*CONCEPT figure (seeded simulation, seed 20; not a measurement of a run).*
+*Intuition:* the outermost points of a quantile grid sit on single
+records. A point is safe to show only when a crowd of records lies on each
+side of it. *Formally:* an edge e is kept if and only if at least k = 10
+source records satisfy `x ≤ e` and at least k satisfy `x ≥ e`; both counts
+are monotone in e, so the kept edges form one contiguous range, and a
+quantile outside it is withheld, never clamped to the nearest kept edge.
+The threshold is the k of k-anonymity ([Sweeney 2002][sweeney2002]) that
+the repository already uses for rare values. *Code:* `beam/dense.py`
+(`RARE_COUNT`, the right- and left-closed counts), `beam/census.py`.
+
+The rule was reached in steps, each closing a channel the previous one
+left open:
+
+```mermaid
+flowchart LR
+  classDef data fill:#6b7280,color:#fff,stroke:#4b5563
+  A["⚪ R65<br/>no exact min or max<br/>of the source"]:::data --> B["⚪ R69<br/>k = 10 records<br/>beyond any bound"]:::data --> C["⚪ R71<br/>every side, the<br/>synthetic one too"]:::data --> D["⚪ R74, R77<br/>both sides of an edge<br/>withheld, never clamped"]:::data --> E["⚪ R80<br/>fewer than k values:<br/>metric not evaluated"]:::data
 ```
 
-`reference_rows` is already an in-memory driver-side list by the time
-`build_pipeline()` runs it through `beam.Create()` — sampling it in plain
-Python would be cheaper today. It's routed through the same `CombineGlobally`
-as the synthetic side anyway, deliberately, for two reasons: (1) one selection
-code path (and one test suite) governs both sides, so "real" and "synthetic"
-samples are provably drawn by identical logic; (2) it carries forward cleanly
-if `docs/ROADMAP.md`'s M2 "Reference snapshot pattern" ever replaces the
-driver-side list with a genuine PCollection read — no rewrite needed at that
-point, only a different upstream source into the same `CombineGlobally`.
+| Step | What it closed |
+| --- | --- |
+| R65 | An exact source extreme in a payload is a single record's literal value. Payloads carry the p0.5 and p99.5 bounds instead; range metrics still use the extremes internally |
+| R69 | A bound, an end edge or a tail quantile is itself close to an extreme on a small column. It is published only with at least 10 records at or beyond it |
+| R71 | A generator that clamps to the source range publishes the source extreme through the **synthetic** side. Every side gets the same treatment |
+| R74, R77 | Which edges are kept depends only on publishable counts, never on a value or on which grid contributed the edge. The rule is symmetric, and each payload carries `below_mass` and `above_mass` so a reader still sees how much lies outside. A side with fewer than 10 values has its moments withheld: a handful of values is determined by them |
+| R80 | A metric's value together with the synthetic side's published moments would give back the source's mean and deviation. `column.smd` and `column.std_ratio` are not evaluated when either side holds fewer than 10 values |
 
-### ONE evaluation DoFn on a single worker
+Two channels are accepted and documented: the adherent count of
+`field.range_adherence` and of `relationship.cardinality_adherence` can pin
+a source extreme when values are dense integers. Row flags carry keys only,
+never an attribute value: the synthetic row's own key, and a keyed hash of
+the matched source record's key (`source_key` is always NULL). The
+synthetic key is the synthetic table's own key in clear, not hashed, so
+for a whole-row copy (keys included) it is the copied source row's key in
+clear. That is a third disclosure channel, documented in the code.
 
-```python
-eval_row = (
-    p | "EvalSeed" >> beam.Create([None])
-      | "Evaluate" >> beam.ParDo(
-            EvaluationDoFn(table_schema=config.table_schema, run_id=config.run_id,
-                           engine=config.engine_name, engine_version=..., 
-                           feature_flag_tags=_build_feature_flag_tags(config),
-                           landing_table=config.landing_table, thresholds=thresholds),
-            real_sample=beam.pvalue.AsSingleton(real_sample),
-            synth_sample=beam.pvalue.AsSingleton(synth_sample),
-        )
-)
+### 4.10 The catalogue
+
+Generated from `catalogue/metrics.yaml` by
+`scripts/doc/render_eval_catalogue.py`; `--check` runs in CI. How to read
+the columns: `direction` and the thresholds are as the YAML states them
+(for `lower_better`, WARN at `value ≥ warn`; for `higher_better`, at
+`value ≤ warn`; for `target`, on the distance from the target; warn and
+fail both 0 means any value above 0 fails). Flags: `matched n` = computed
+at matched sample size; `baseline` = the row stores `baseline_value`; `CI
+bound` = status and score read the confidence bound instead of the value.
+
+<!-- eval-catalogue:start -->
+<!-- Generated by scripts/doc/render_eval_catalogue.py from packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml. Do not edit: change the YAML and run the script. -->
+
+Metric catalogue `1.0.0`: 79 metrics over 7 levels and 5 families.
+
+| level | fidelity | privacy | integrity | diversity | overall | total |
+| --- | --- | --- | --- | --- | --- | --- |
+| field | 3 | 3 | 1 | — | — | 7 |
+| column | 19 | — | 1 | 7 | — | 27 |
+| pair | 5 | — | — | — | — | 5 |
+| row | 2 | 9 | — | 2 | — | 13 |
+| table | 7 | 1 | 4 | 1 | 1 | 14 |
+| relationship | 5 | — | 2 | 1 | — | 8 |
+| model | 1 | 1 | 1 | 1 | 1 | 5 |
+| **total** | 42 | 14 | 9 | 12 | 2 | 79 |
+
+#### field (7)
+
+| metric | family | kinds | formula | estimator | direction | target | warn | fail | score | noise floor | flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `field.category_adherence`<br/>Category adherence | fidelity | categorical, boolean | $`\operatorname{CA} = \frac{1}{\lvert Y \rvert} \sum_{y \in Y} \mathbf{1}\left[ y \in \mathcal{D}_{src} \right]`$ | exact/value_sampled | higher_better | 1 | 0.99 | 0.95 | linear | wilson | — |
+| `field.range_adherence`<br/>Range adherence | fidelity | numeric, temporal | $`\operatorname{RA} = \frac{1}{\lvert Y \rvert} \sum_{y \in Y} \mathbf{1}\left[ \min_{src} \le y \le \max_{src} \right]`$ | binned | higher_better | 1 | 0.99 | 0.95 | linear | wilson | — |
+| `field.shape_adherence`<br/>Shape (mask) adherence | fidelity | text, identifier | $`\operatorname{SA} = \frac{1}{\lvert Y \rvert} \sum_{y \in Y} \mathbf{1}\left[ \operatorname{mask}(y) \in H_{src} \cup T_{src} \right]`$ | exact | higher_better | 1 | 0.95 | 0.8 | linear | wilson | baseline |
+| `field.substantive_copy_rate`<br/>Substantive copy rate | privacy | categorical, text, identifier, numeric, temporal | $`\operatorname{SCR} = \frac{1}{\lvert Y_{sub} \rvert} \sum_{y \in Y_{sub}} \mathbf{1}\left[ 1 \le c_{src}(y) < 10 \right]`$ | exact/value_sampled | lower_better | — | 0.0001 | 0.001 | linear | wilson | — |
+| `field.value_memorization_lift`<br/>Value memorization lift (reference vs holdout) | privacy | categorical, text, identifier, numeric, temporal | $`\operatorname{lift} = \frac{m_R / \lvert V_R \rvert}{m_H / \lvert V_H \rvert}, \quad \text{CI at } \alpha / m`$ | exact/value_sampled | lower_better | 1 | 2 | 5 | linear | rate_ratio | CI bound |
+| `field.pool_memorization_lift`<br/>Pool memorization lift (LLM free-text pools) | privacy | text | $`\operatorname{lift}_{pool} = \frac{m_R / \lvert V_R \rvert}{m_H / \lvert V_H \rvert}, \quad m_S = \lvert P \cap V_S \rvert`$ | exact/value_sampled | lower_better | 1 | 2 | 5 | linear | rate_ratio | CI bound |
+| `field.type_validity`<br/>Type validity | integrity | numeric, temporal, categorical, boolean, text, identifier, nested | $`\operatorname{TV} = \frac{1}{\lvert Y \rvert} \sum_{y \in Y} \mathbf{1}\left[ y \text{ parses as the declared type} \right]`$ | exact | higher_better | — | 0.9999 | 0.999 | linear | — | — |
+
+#### column (27)
+
+| metric | family | kinds | formula | estimator | direction | target | warn | fail | score | noise floor | flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `column.null_rate_delta`<br/>Null-rate difference | fidelity | numeric, temporal, categorical, boolean, text, identifier, nested | $`\Delta_{null} = \lvert p^{syn}_{null} - p^{src}_{null} \rvert`$ | exact | lower_better | — | 0.02 | 0.05 | linear | newcombe | baseline |
+| `column.empty_rate_delta`<br/>Empty-string-rate difference | fidelity | categorical, text, identifier | $`\Delta_{empty} = \lvert p^{syn}_{empty} - p^{src}_{empty} \rvert`$ | exact | lower_better | — | 0.02 | 0.05 | linear | newcombe | baseline |
+| `column.ks`<br/>Kolmogorov–Smirnov distance (exact at bin edges) | fidelity | numeric, temporal | $`D_{lo} = \max_i \lvert F_{src}(e_i) - F_{syn}(e_i) \rvert`$ | binned | lower_better | — | 0.1 | 0.2 | complement | ks_two_sample | baseline |
+| `column.pit_w1`<br/>PIT Wasserstein-1 (scale-free) | fidelity | numeric, temporal | $`W_1^{PIT} = \int \lvert F_{syn}(x) - F_{src}(x) \rvert \, dF_{src}(x) \in \left[ 0, \frac{1}{2} \right]`$ | binned | lower_better | — | 0.05 | 0.1 | linear | — | baseline |
+| `column.wasserstein`<br/>Wasserstein-1 distance (column units) | fidelity | numeric, temporal | $`W_1 = \int_{-\infty}^{\infty} \lvert F_{syn}(x) - F_{src}(x) \rvert \, dx`$ | binned | lower_better | — | — | — | none | — | baseline |
+| `column.decile_ks_legacy`<br/>Decile KS (legacy, for continuity) | fidelity | numeric | $`D_{dec} = \max_{x \in G} \lvert \tilde{F}_{src}(x) - \tilde{F}_{syn}(x) \rvert, \quad G = Q^{src}_{0..10} \cup Q^{syn}_{0..10}`$ | binned | lower_better | — | 0.2 | 0.4 | complement | — | baseline |
+| `column.jsd`<br/>Jensen–Shannon divergence (bits) | fidelity | numeric, temporal, categorical, boolean | $`\operatorname{JSD}(p, q) = \frac{1}{2} \sum_k p_k \log_2 \frac{p_k}{m_k} + \frac{1}{2} \sum_k q_k \log_2 \frac{q_k}{m_k}, \quad m = \frac{p + q}{2}`$ | exact/binned/value_sampled | lower_better | — | 0.05 | 0.1 | linear | jsd_null | baseline |
+| `column.tvd`<br/>Total variation distance (categories) | fidelity | categorical, boolean | $`\operatorname{TVD}(p, q) = 1 - \sum_k \min(p_k, q_k) = \frac{1}{2} \sum_k \lvert p_k - q_k \rvert`$ | exact/value_sampled | lower_better | — | 0.1 | 0.2 | complement | tvd_null | baseline |
+| `column.psi`<br/>Population stability index (deciles) | fidelity | numeric, temporal | $`\operatorname{PSI} = \sum_{b=1}^{B} (q_b - p_b) \ln \frac{q_b}{p_b}, \quad p_b = \frac{c^{src}_b + 0.5}{n_{src} + 0.5 B}`$ | binned | lower_better | — | 0.1 | 0.25 | linear | — | baseline |
+| `column.smd`<br/>Standardized mean difference | fidelity | numeric, temporal | $`\operatorname{SMD} = \frac{\lvert \mu_{syn} - \mu_{src} \rvert}{\sigma_{src}}`$ | exact | lower_better | — | 0.1 | 0.2 | linear | — | baseline |
+| `column.std_ratio`<br/>Standard-deviation ratio | fidelity | numeric, temporal | $`\operatorname{SR} = \frac{\sigma_{syn}}{\sigma_{src}}`$ | exact | target | 1 | 0.1 | 0.25 | ratio_to_one | — | baseline |
+| `column.zero_rate_delta`<br/>Zero-rate difference | fidelity | numeric | $`\Delta_{0} = \lvert p^{syn}_{0} - p^{src}_{0} \rvert`$ | exact | lower_better | — | 0.02 | 0.05 | linear | newcombe | baseline |
+| `column.range_coverage`<br/>Range coverage | diversity | numeric, temporal | $`\operatorname{RC} = \frac{\max\left(0, \min(M_{syn}, M_{src}) - \max(m_{syn}, m_{src})\right)}{M_{src} - m_{src}}`$ | binned | higher_better | — | 0.9 | 0.75 | linear | — | baseline |
+| `column.dow_tvd`<br/>Day-of-week mix (TVD) | fidelity | temporal | $`\operatorname{TVD}_{dow} = \frac{1}{2} \sum_{d=1}^{7} \lvert p_d - q_d \rvert`$ | exact | lower_better | — | 0.1 | 0.2 | complement | tvd_null | baseline |
+| `column.month_tvd`<br/>Month-of-year mix (TVD) | fidelity | temporal | $`\operatorname{TVD}_{month} = \frac{1}{2} \sum_{k=1}^{12} \lvert p_k - q_k \rvert`$ | exact | lower_better | — | 0.1 | 0.2 | complement | tvd_null | baseline |
+| `column.hour_tvd`<br/>Hour-of-day mix (TVD) | fidelity | temporal | $`\operatorname{TVD}_{hour} = \frac{1}{2} \sum_{h=0}^{23} \lvert p_h - q_h \rvert`$ | exact | lower_better | — | 0.1 | 0.2 | complement | tvd_null | baseline |
+| `column.cohens_w`<br/>Cohen's w (category effect size) | fidelity | categorical, boolean | $`w = \sqrt{\sum_{k : p_k > 0} \frac{(q_k - p_k)^2}{p_k}}`$ | exact/value_sampled | lower_better | — | 0.1 | 0.3 | linear | — | baseline |
+| `column.top1_share_delta`<br/>Top-value share difference | diversity | categorical, boolean | $`\Delta_{top1} = \lvert \max_k q_k - \max_k p_k \rvert`$ | exact/value_sampled | lower_better | — | 0.05 | 0.15 | linear | newcombe | baseline |
+| `column.coverage_mass`<br/>Coverage mass | diversity | categorical, boolean | $`\operatorname{Cov} = \sum_{v \in S \cap Y} p_v`$ | exact/value_sampled | higher_better | — | 0.95 | 0.8 | linear | — | baseline |
+| `column.novelty_mass`<br/>Novelty mass vs the source's unseen mass | diversity | categorical, text, identifier | $`\nu_{syn} = \sum_{v \notin S} q_v, \quad t = \hat{\nu}_{src} = \frac{f_1}{N}, \quad d = \lvert \nu_{syn} - t \rvert`$ | exact/value_sampled | target | source value | 0.1 | 0.25 | ratio_to_one | — | — |
+| `column.entropy_ratio`<br/>Entropy ratio at matched n | diversity | categorical, boolean, text, identifier | $`\operatorname{ER} = \frac{\hat{H}^{(m)}_{syn}}{\hat{H}^{(m)}_{src}}, \quad \hat{H}^{(m)} = -\sum_v \frac{c_v}{m} \log_2 \frac{c_v}{m}`$ | exact/value_sampled | target | 1 | 0.1 | 0.25 | ratio_to_one | — | matched n, baseline |
+| `column.distinct_ratio`<br/>Distinct-count ratio at matched n | diversity | categorical, text, identifier | $`\operatorname{DR} = \frac{K^{(m)}_{syn}}{K^{(m)}_{src}}`$ | exact/value_sampled | target | 1 | 0.1 | 0.3 | ratio_to_one | — | matched n, baseline |
+| `column.distinct_ceiling_hit`<br/>Distinct-count ceiling hit (pool cap) | diversity | text | $`\operatorname{hit} = \mathbf{1}\left[ K_{syn} \in \{ 512, K_{target} \} \right]`$ | exact | lower_better | — | 0.5 | 1 | none | — | — |
+| `column.length_ks`<br/>String-length KS | fidelity | categorical, text, identifier | $`D_{len} = \max_{\ell} \lvert F^{len}_{src}(\ell) - F^{len}_{syn}(\ell) \rvert`$ | binned | lower_better | — | 0.1 | 0.2 | complement | ks_two_sample | baseline |
+| `column.shape_head_tv`<br/>Shape head total variation | fidelity | text, identifier | $`\operatorname{TV}_{head} = \frac{1}{2} \left( \sum_{s \in H_{src}} \lvert p_s - q_s \rvert + \lvert p_{tail} - q_{tail} \rvert \right)`$ | exact | lower_better | — | 0.1 | 0.2 | complement | tvd_null | baseline |
+| `column.char_class_l1`<br/>Character-class profile distance | fidelity | categorical, text, identifier | $`L_1 = \sum_{k \in K} \lvert f^{syn}_k - f^{src}_k \rvert, \quad K = \{ \text{digit}, \text{upper}, \text{lower}, \text{space}, \text{punct} \}`$ | exact | lower_better | — | 0.1 | 0.2 | linear | — | baseline |
+| `column.source_stats_drift`<br/>Source-stats drift (evaluator vs generator) | integrity | numeric, temporal, categorical, boolean, text, identifier | $`\delta = \max\left( \lvert \Delta p_{null} \rvert,\, \max_{i=1}^{9} \operatorname{dist}\left( \frac{i}{10}, \left[ F^{-}_{src}(d_i), F_{src}(d_i) \right] \right),\, \frac{\lvert D_{gen} - D_{src} \rvert}{\max(D_{gen}, D_{src})} \right)`$ | exact | lower_better | — | 0.05 | 0.15 | none | — | — |
+
+#### pair (5)
+
+| metric | family | kinds | formula | estimator | direction | target | warn | fail | score | noise floor | flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `pair.pearson_delta`<br/>Pearson correlation difference | fidelity | numeric, temporal | $`\Delta\rho = \lvert \rho_{src} - \rho_{syn} \rvert`$ | exact | lower_better | — | 0.1 | 0.2 | linear | fisher_z | baseline |
+| `pair.spearman_delta`<br/>Spearman rank-correlation difference | fidelity | numeric, temporal | $`\Delta\rho^S = \lvert \rho^S_{src} - \rho^S_{syn} \rvert, \quad \rho^S = \operatorname{corr}\left( F_X(x), F_Y(y) \right)`$ | binned | lower_better | — | 0.1 | 0.2 | linear | fisher_z | baseline |
+| `pair.cramers_v_delta`<br/>Cramér's V difference (bias-corrected) | fidelity | categorical, boolean, numeric, temporal | $`\Delta\tilde{V} = \lvert \tilde{V}_{src} - \tilde{V}_{syn} \rvert, \quad \tilde{V} = \sqrt{\frac{\tilde{\varphi}^2}{\min(\tilde{k} - 1, \tilde{r} - 1)}}, \quad \tilde{\varphi}^2 = \max\left(0, \frac{\chi^2}{n} - \frac{(k-1)(r-1)}{n-1}\right), \quad \tilde{k} = k - \frac{(k-1)^2}{n-1}, \quad \tilde{r} = r - \frac{(r-1)^2}{n-1}`$ | exact | lower_better | — | 0.1 | 0.2 | linear | — | baseline |
+| `pair.nmi_delta`<br/>Normalized mutual information difference | fidelity | categorical, boolean, numeric, temporal | $`\Delta\operatorname{NMI} = \lvert \operatorname{NMI}_{src} - \operatorname{NMI}_{syn} \rvert, \quad \operatorname{NMI} = \frac{I(X; Y)}{\min(H_X, H_Y)}`$ | exact | lower_better | — | 0.05 | 0.15 | linear | mi_bias | baseline |
+| `pair.contingency_tvd`<br/>Contingency-table total variation | fidelity | categorical, boolean, numeric, temporal | $`\operatorname{TVD}_{2D} = \frac{1}{2} \sum_{a, b} \lvert p_{ab} - q_{ab} \rvert`$ | exact | lower_better | — | 0.1 | 0.2 | complement | tvd_null | baseline |
+
+#### row (13)
+
+| metric | family | kinds | formula | estimator | direction | target | warn | fail | score | noise floor | flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `row.exact_match_rate`<br/>Exact row match rate | privacy | — | $`\operatorname{EMR} = \frac{1}{n_{syn}} \sum_{i} \mathbf{1}\left[ h(y_i) \in h(\text{source}) \right]`$ | exact | lower_better | — | 1e-5 | 0.0001 | linear | wilson | — |
+| `row.exact_match_rate_nonkey`<br/>Exact row match rate (keys excluded) | privacy | — | $`\operatorname{EMR}_{nk} = \frac{1}{n_{syn}} \sum_{i} \mathbf{1}\left[ h_{nk}(y_i) \in h_{nk}(\text{source}) \right]`$ | exact | lower_better | — | 0.001 | 0.01 | linear | wilson | — |
+| `row.memorization_lift`<br/>Row memorization lift (reference vs holdout) | privacy | — | $`\operatorname{lift} = \frac{m_R / \lvert R \cap \bar{H} \rvert}{m_H / \lvert H \cap \bar{R} \rvert}, \quad m_S = \text{distinct exclusive records of } S \text{ the synthetic side reproduces}`$ | exact | lower_better | 1 | 2 | 5 | linear | rate_ratio | CI bound |
+| `row.exposure_lift`<br/>Prompt-exposure lift | privacy | — | $`\operatorname{lift}_E = \frac{m_E / \lvert E \cap \bar{H} \rvert}{m_{H_E} / \lvert H_E \cap \bar{R} \rvert}, \quad m_S = \text{distinct exclusive records of } S \text{ reproduced}`$ | exact | lower_better | 1 | 2 | 5 | linear | rate_ratio | CI bound |
+| `row.near_match_rate`<br/>Near-match rate (all but one column) | privacy | — | $`\operatorname{NMR} = \frac{1}{n_{syn}} \sum_i \mathbf{1}\left[ \exists x \in R, \exists j : h_{-j}(y_i) = h_{-j}(x) \text{ and } h_{nk}(y_i) \notin h_{nk}(R \cup H) \right]`$ | exact | lower_better | — | 0.001 | 0.01 | linear | wilson | — |
+| `row.near_match_lift`<br/>Near-match lift (reference vs holdout) | privacy | — | $`\operatorname{lift}_{near} = \frac{m^{near}_R / \lvert L_R \cap \bar{L}_H \rvert}{m^{near}_H / \lvert L_H \cap \bar{L}_R \rvert}, \quad L_S = \text{leave-one-out keys of } S \text{, per column}`$ | exact | lower_better | 1 | 2 | 5 | linear | rate_ratio | CI bound |
+| `row.internal_duplicate_excess`<br/>Internal duplicate excess | diversity | — | $`\Delta_{dup} = \frac{\operatorname{E}[D_m]_{syn} - \operatorname{E}[D_m]_{src}}{m}, \quad \operatorname{E}[D_m] = \sum_{c} f_c \left( \frac{c\,m}{N} - \Pr(X_c = 1) \right), \quad m = \min(n_{src}, n_{syn})`$ | exact | lower_better | — | 0.01 | 0.05 | linear | newcombe | matched n, baseline |
+| `row.dcr_train_holdout_share`<br/>Closer-to-reference share (DCR holdout test) | privacy | — | $`\operatorname{share} = \frac{1}{n} \sum_i \left( \mathbf{1}\left[ d_R(y_i) < d_H(y_i) \right] + \frac{1}{2} \mathbf{1}\left[ d_R(y_i) = d_H(y_i) \right] \right)`$ | sample | lower_better | 0.5 | 0.55 | 0.6 | linear | wilson | matched n, CI bound |
+| `row.dcr_p5_ratio`<br/>Distance to closest record, 5th-percentile ratio | privacy | — | $`\operatorname{DCR}_{p5} = \frac{Q_{0.05}\left( d(Y \to R) \right)}{Q_{0.05}\left( d(H \to R) \right)}`$ | sample | higher_better | — | 0.8 | 0.5 | linear | — | matched n |
+| `row.nndr_p5_ratio`<br/>Nearest-neighbour distance ratio, 5th-percentile ratio | privacy | — | $`\operatorname{NNDR}_{p5} = \frac{Q_{0.05}\left( d_1 / d_2 \text{ of } Y \right)}{Q_{0.05}\left( d_1 / d_2 \text{ of } H \right)}`$ | sample | higher_better | — | 0.8 | 0.5 | linear | — | matched n |
+| `row.density`<br/>Density (k-NN precision) | fidelity | — | $`\operatorname{density} = \frac{1}{k M} \sum_{j=1}^{M} \sum_{i=1}^{N} \mathbf{1}\left[ Y_j \in B\left( X_i, \operatorname{NND}_k(X_i) \right) \right]`$ | sample | target | 1 | 0.2 | 0.4 | ratio_to_one | — | matched n, baseline |
+| `row.coverage`<br/>Coverage (k-NN recall) | diversity | — | $`\operatorname{coverage} = \frac{1}{N} \sum_{i=1}^{N} \mathbf{1}\left[ \exists j : Y_j \in B\left( X_i, \operatorname{NND}_k(X_i) \right) \right]`$ | sample | higher_better | — | 0.85 | 0.7 | linear | — | matched n, baseline |
+| `row.null_pattern_tvd`<br/>Null-pattern total variation | fidelity | — | $`\operatorname{TVD}_{null} = \frac{1}{2} \sum_{b} \lvert p_b - q_b \rvert, \quad b \in \text{top-64 source patterns} \cup \{ \text{tail} \}`$ | exact | lower_better | — | 0.1 | 0.2 | complement | tvd_null | baseline |
+
+#### table (14)
+
+| metric | family | kinds | formula | estimator | direction | target | warn | fail | score | noise floor | flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `table.row_count_ratio`<br/>Row-count ratio | integrity | — | $`\operatorname{RCR} = \frac{n_{syn}}{n_{expected}}`$ | exact | target | 1 | 0.01 | 0.05 | ratio_to_one | — | — |
+| `table.pk_duplicate_rate`<br/>Primary-key duplicate rate | integrity | — | $`\operatorname{dup}_{pk} = \frac{1}{n_{syn}} \sum_i \mathbf{1}\left[ c\left( \operatorname{pk}(y_i) \right) \ge 2 \right]`$ | exact | lower_better | — | 0 | 0 | linear | — | — |
+| `table.identity_duplicate_rate`<br/>Identity-column duplicate rate | integrity | — | $`\operatorname{dup}_{id} = \frac{1}{n_{syn}} \sum_i \mathbf{1}\left[ c\left( \operatorname{id}(y_i) \right) \ge 2 \right]`$ | exact | lower_better | — | 0 | 0 | linear | — | — |
+| `table.detection_auc`<br/>Detection AUC (classifier two-sample test) | fidelity | — | $`\operatorname{AUC} = \Pr\left( \hat{s}(y) > \hat{s}(x) \right) + \frac{1}{2} \Pr\left( \hat{s}(y) = \hat{s}(x) \right)`$ | sample | lower_better | 0.5 | 0.7 | 0.85 | auc | delong | matched n, baseline |
+| `table.pmse_ratio`<br/>Propensity MSE ratio | fidelity | — | $`\frac{\operatorname{pMSE}}{E_0}, \quad \operatorname{pMSE} = \frac{1}{N} \sum_{i=1}^{N} (\hat{\pi}_i - c)^2, \quad E_0 = \frac{(k-1)\, c\, (1-c)}{N}`$ | sample | lower_better | — | 3 | 10 | linear | — | matched n, baseline |
+| `table.corr_rms_delta`<br/>Correlation-matrix RMS difference | fidelity | — | $`\operatorname{RMS}_{\Delta\rho} = \sqrt{\frac{2}{d(d-1)} \sum_{a < b} \left( \rho^{src}_{ab} - \rho^{syn}_{ab} \right)^2}`$ | exact | lower_better | — | 0.05 | 0.1 | linear | — | baseline |
+| `table.corr_max_delta`<br/>Correlation-matrix maximum difference | fidelity | — | $`\max_{a < b} \lvert \rho^{src}_{ab} - \rho^{syn}_{ab} \rvert`$ | exact | lower_better | — | 0.15 | 0.3 | linear | — | baseline |
+| `table.column_shape_score`<br/>Column shape score | fidelity | — | $`\operatorname{CSS} = \frac{1}{\lvert C \rvert} \sum_{c \in C} \bar{s}_c`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `table.pair_trend_score`<br/>Column pair trend score | fidelity | — | $`\operatorname{PTS} = \frac{1}{\lvert P \rvert} \sum_{(a, b) \in P} \bar{s}_{ab}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `table.fidelity_score`<br/>Table fidelity score | fidelity | — | $`S_{fidelity} = \frac{1}{\lvert U_{f} \rvert} \sum_{u \in U_{f}} \bar{s}_{u}, \quad U_{f} = C \cup \{ P \} \cup M_{row} \cup M_{table} \cup E_{child}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `table.privacy_score`<br/>Table privacy score | privacy | — | $`S_{privacy} = \frac{1}{\lvert U_{f} \rvert} \sum_{u \in U_{f}} \bar{s}_{u}, \quad U_{f} = C \cup \{ P \} \cup M_{row} \cup M_{table} \cup E_{child}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `table.integrity_score`<br/>Table integrity score | integrity | — | $`S_{integrity} = \frac{1}{\lvert U_{f} \rvert} \sum_{u \in U_{f}} \bar{s}_{u}, \quad U_{f} = C \cup \{ P \} \cup M_{row} \cup M_{table} \cup E_{child}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `table.diversity_score`<br/>Table diversity score | diversity | — | $`S_{diversity} = \frac{1}{\lvert U_{f} \rvert} \sum_{u \in U_{f}} \bar{s}_{u}, \quad U_{f} = C \cup \{ P \} \cup M_{row} \cup M_{table} \cup E_{child}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `table.overall_score`<br/>Table overall score | overall | — | $`S_{overall} = \frac{1}{\lvert F \rvert} \sum_{f \in F} S_f`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+
+#### relationship (8)
+
+| metric | family | kinds | formula | estimator | direction | target | warn | fail | score | noise floor | flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `relationship.orphan_rate`<br/>Orphan rate (foreign key) | integrity | — | $`\operatorname{orphan} = \frac{\#\{ \text{non-null child key tuples with no parent} \}}{\#\{ \text{non-null child key tuples} \}}`$ | exact | lower_better | — | 0 | 0 | linear | — | — |
+| `relationship.orphan_rate_source`<br/>Orphan rate on the source (baseline) | integrity | — | $`\operatorname{orphan}_{src} = \frac{\#\{ \text{non-null source child key tuples with no parent} \}}{\#\{ \text{non-null source child key tuples} \}}`$ | exact | lower_better | — | — | — | none | — | — |
+| `relationship.fanout_tvd`<br/>Fan-out distribution (TVD) | fidelity | — | $`\operatorname{TVD}_{fan} = \frac{1}{2} \sum_{c \in \{0, \dots, 49, \ge 50\}} \lvert p_c - q_c \rvert`$ | exact | lower_better | — | 0.1 | 0.2 | complement | tvd_null | — |
+| `relationship.fanout_w1`<br/>Fan-out Wasserstein-1 (children per parent) | fidelity | — | $`W_1^{fan} = \sum_i (x_{i+1} - x_i) \lvert F^{fan}_{src}(x_i) - F^{fan}_{syn}(x_i) \rvert, \quad \{x_i\} = \{0, \dots, 49\} \cup \{\bar c_{src}, \bar c_{syn}\}`$ | exact | lower_better | — | — | — | none | — | — |
+| `relationship.fanout_mean_ratio`<br/>Mean fan-out ratio | fidelity | — | $`\operatorname{FMR} = \frac{n^{syn}_{child} / n^{syn}_{parent}}{n^{src}_{child} / n^{src}_{parent}}`$ | exact | target | 1 | 0.05 | 0.15 | ratio_to_one | — | — |
+| `relationship.zero_child_share_delta`<br/>Childless-parent share difference | fidelity | — | $`\Delta_z = \lvert z_{syn} - z_{src} \rvert, \quad z = \frac{\#\{ \text{parents with no child} \}}{n_{parent}}`$ | exact | lower_better | — | 0.02 | 0.05 | linear | newcombe | — |
+| `relationship.cardinality_adherence`<br/>Cardinality adherence | fidelity | — | $`\operatorname{CBA} = \frac{1}{n^{syn}_{parent}} \sum_{p} \mathbf{1}\left[ \min_{src} \le c_p \le \max_{src} \right]`$ | exact | higher_better | 1 | 0.99 | 0.95 | linear | wilson | — |
+| `relationship.parent_coverage`<br/>Parent coverage | diversity | — | $`\operatorname{PC} = \frac{\Pr_{syn}\left[ c_p \ge 1 \right]}{\Pr_{src}\left[ c_p \ge 1 \right]}`$ | exact | higher_better | — | 0.95 | 0.8 | linear | — | — |
+
+#### model (5)
+
+| metric | family | kinds | formula | estimator | direction | target | warn | fail | score | noise floor | flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `model.overall_score`<br/>Model overall score | overall | — | $`S^{model}_{overall} = \frac{1}{\lvert F \rvert} \sum_{f \in F} S^{model}_{f}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `model.fidelity_score`<br/>Model fidelity score | fidelity | — | $`S^{model}_{fidelity} = \frac{1}{\lvert T \rvert} \sum_{t \in T} S_{t, fidelity}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `model.privacy_score`<br/>Model privacy score | privacy | — | $`S^{model}_{privacy} = \frac{1}{\lvert T \rvert} \sum_{t \in T} S_{t, privacy}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `model.integrity_score`<br/>Model integrity score | integrity | — | $`S^{model}_{integrity} = \frac{1}{\lvert T \rvert} \sum_{t \in T} S_{t, integrity}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+| `model.diversity_score`<br/>Model diversity score | diversity | — | $`S^{model}_{diversity} = \frac{1}{\lvert T \rvert} \sum_{t \in T} S_{t, diversity}`$ | exact | higher_better | — | 0.85 | 0.7 | none | — | — |
+<!-- eval-catalogue:end -->
+
+## 5. The Beam plan and the cost model
+
+### 5.1 Planning before a row is read
+
+Everything the Beam job needs to know is decided from BigQuery metadata and
+one aggregate scan per table side: the column kinds, the quantile grids,
+the dictionaries, which columns are censused exactly, which pairs are
+measured, and what the run will cost. Dry runs come first, so nothing is
+billed before the byte budget has been checked.
+
+| Planned per column | From |
+| --- | --- |
+| NULL and empty counts | `COUNTIF` |
+| distinct count | `APPROX_COUNT_DISTINCT` |
+| 1,001-point grid, mean, deviation, extremes, atoms | `APPROX_QUANTILES(v, 1000)`, `AVG`, `STDDEV_POP`, `MIN`, `MAX`, `APPROX_TOP_COUNT(v, 11)` |
+| dictionaries, census head | `APPROX_TOP_COUNT(x, 255)`, values over 1 KiB excluded |
+
+A string column is routed by source statistics alone: a key or identity
+column is an `identifier`; at most 1,000 distinct values is `categorical`;
+near-unique and long is `text`; near-unique and short is an `identifier`;
+of the rest, long is `text` and short is a high-cardinality `categorical`.
+The engines' own classifiers are never consulted. Temporal values are
+handled as epoch microseconds everywhere.
+
+### 5.2 The graph
+
+**Claim:** one Beam graph evaluates every table of the launch, each row is
+encoded once, and the registry's final row is written last.
+
+```mermaid
+flowchart TB
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  SRC[("🗄️ source<br/>pinned clone")]:::store --> ENC
+  SYN[("🗄️ landing<br/>scope table")]:::store --> ENC
+  PANEL["⚪ panel R and H<br/>from the plan"]:::data --> ENC
+  ENC["🔀 BatchElements<br/>EncodeBatchFn"]:::beam
+  KEY["🛡️ LabelKey<br/>made on a worker"]:::cpu
+
+  ENC --> DENSE["🔀 DenseMetrics<br/>grids, moments, pairs"]:::beam
+  ENC --> CENSUS["🔀 CensusMetrics<br/>one count per value"]:::beam
+  ENC --> MEMBER["🔀 Membership<br/>copies and lifts"]:::beam
+  ENC --> PRIV["🔀 Privacy<br/>neighbours, detection"]:::beam
+  ENC --> REL["🔀 Relational<br/>orphans, fan-out"]:::beam
+  DENSE -- "exact totals" --> CENSUS
+  KEY -. "side input" .-> DENSE
+  KEY -. "side input" .-> CENSUS
+  KEY -. "side input" .-> MEMBER
+  KEY -. "side input" .-> PRIV
+
+  DENSE --> GUARD
+  CENSUS --> GUARD
+  MEMBER --> GUARD
+  PRIV --> GUARD
+  REL --> GUARD
+  GUARD["🛡️ Guard<br/>failed table: not_evaluated"]:::beam --> ROW["⚙️ round, check interval<br/>then score"]:::cpu
+  ROW --> ROLL["🔀 roll-up rows"]:::beam
+  ROW --> SINK[("🗄️ metrics, profiles<br/>row flags")]:::store
+  ROLL --> SINK
+  SINK -- "load and copy jobs done" --> FINAL["🔀 FINAL row"]:::beam
+  FINAL --> REG[("🗄️ evaluation_data_history")]:::store
 ```
 
-This is the identical `beam.Create([None])` + `AsSingleton` side-input shape
-already used to force exactly one `_build_validation_run_row` call
-(`pipeline.py:194-210`) — the same construction, reused for the same reason:
-force one invocation on one bundle, i.e. one worker.
+| Transform | Shape | Metrics it owns |
+| --- | --- | --- |
+| `beam/encode.py` | Batches of 512 to 8,192 rows become numpy arrays: numbers, value codes, text, and row-level hashes (whole row, non-key content, keys, foreign keys, NULL pattern, the matched-n draw) | — |
+| `beam/dense.py` | One mergeable profile per table and side: exact counts on plan-time grids, moments, co-moments | Column distances, rate deltas, pair metrics, NULL patterns, type and range adherence |
+| `beam/census.py` | A keyed count per distinct value and per shape mask | Category distributions, diversity, copy rate, value lifts, shapes, top-k |
+| `beam/membership.py` | Hash lookups against the panel and the full source; exact keyed counts | Exact and near matches, row lifts, key duplicates, internal duplicates |
+| `beam/privacy.py` | A bottom-k sample per side, an exact Gower search, one classifier per table | The DCR family, density, coverage, detection |
+| `beam/relational.py` | Child-key counts joined to parent keys, by side input or by `CoGroupByKey` | Orphan rates, fan-out |
 
-**Why heavy metrics cannot be row-level.** Every metric in §3 is a function of
-the *whole* sample, not of one record: a correlation matrix, a mutual-information
-matrix, an SDMetrics `QualityReport`, and a nearest-neighbor search all require
-simultaneous access to every row's value for a column (or every row, for the
-pairwise DCR/NNDR search) to produce a single number. Beam's `ParDo` model
-gives each element an independent `process()` call with no visibility into
-sibling elements — there is no way to compute `pandas.DataFrame.corr()` inside
-a per-row `DoFn`. The `CombineGlobally` steps above exist precisely to
-materialize the bounded sample into one bundle so a single `process()` call
-can build two DataFrames and run whole-sample statistics.
+Writes use `WriteToBigQuery` with file loads, append, and no table
+creation; the driver's own registry events are client load jobs. Streaming
+inserts are never used.
 
-**Memory bounds.** At the 50k-row/side cap: 50,000 rows × ~50 columns ×
-8 bytes (float64) ≈ 20 MB per DataFrame, ≈ 40 MB for both sides — trivial for
-a single non-GPU Dataflow worker. The one metric family that is *naturally*
-pairwise — DCR/NNDR (§3) — is **not** computed via a dense 50k×50k pairwise
-matrix (which would be ~20 GB and O(n²) memory): both use
-`sklearn.neighbors.NearestNeighbors` (a tree-based nearest-neighbor index),
-whose construction is `O(n log n)` and whose per-query cost is bounded — never
-a materialized full pairwise distance matrix. This is a hard design
-requirement, not an optimization detail: without it, this single-worker DoFn
-would OOM at the target sample size.
+**Failures stay per table.** Nothing is dropped silently: every skip
+becomes a written row with a reason.
 
-**When the source sample is unavailable.** `extract_sample` on an empty
-accumulator naturally yields `[]` (empty `reference_rows`, e.g. a
-misconfigured `--reference_rows_limit=0` or a live SELECT that returned
-nothing) — no exception. Likewise `synth_sample` can be empty if every
-generated row was rejected pre-write (Mode-A BLOCKER gate tripped,
-`uniq["unique"]` empty). `EvaluationDoFn.process()` checks
-`len(real_sample) == 0 or len(synth_sample) == 0` up front and short-circuits:
-it still **writes exactly one row** — `sample_rows_real`/`sample_rows_synthetic`
-set to the true (possibly 0) counts, every metric column explicitly `NULL`,
-`raw_metrics_json = {"status": "skipped_insufficient_sample", "reason": "..."}`
-— plus a `logger.warning(...)`. The row is never silently dropped (same
-"never catch-and-drop" ethos CLAUDE.md already applies to `ValidationError`
-handling), and the memorization gate (§5) treats a `NULL` `identical_match_rate`
-as "not evaluated," never as an implicit pass.
+| Where it fails | What is written |
+| --- | --- |
+| The driver cannot read a side, or build the table's layout | Every metric the table owns, `not_evaluated` with the reason. No transform sees the table |
+| A batch fails to encode on a worker | Every metric row the table produced is rewritten `not_evaluated`; its profiles and flags are dropped |
+| Inside a transform | That transform's own rows for the table, edge or block are `not_evaluated`; the other tables and the run carry on |
 
-## 3. Metric tiers
+### 5.3 Cost model
 
-### Why the fidelity family needs BOTH a sup-statistic and a mass-statistic
+Three budgets, each with a place where it is enforced.
 
-**Claim: two failure modes with the same Wasserstein distance can differ 5×
-in KS — the two statistics see different failures, so the framework tracks
-both.**
+**BigQuery bytes: `--max_bytes_billed`.** The planner dry-runs the planning
+queries, the panel query, the prepare DDL and, in sampled mode, the
+worst-case sample reads, and refuses the run above the cap before anything
+is billed. Per BigQuery's documented billing model, columnar billing reads each
+column once, so splitting a wide table's planning into several statements
+is expected to cost what one would; no dry run has reached BigQuery. The panel
+query ranks the whole source once. An `as_of_diff` scope reads the table
+and its start snapshot once each, about twice the table's bytes. The
+registry stores the total in `bq_bytes_processed`.
 
-![KS vs Wasserstein: same W1, 5x different KS](assets/eval-ks-vs-wasserstein.png)
+**Shuffle: `--max_shuffle_gb`.** The plan predicts the shuffle of what the
+pipeline will actually read and stores it in `predicted_shuffle_gb`:
 
-*Entry level:* both panels compare a real CDF (blue) to a synthetic one
-(orange). KS is the tallest **vertical gap** between the curves (the black
-bar); Wasserstein-1 is the **entire shaded area** between them. A shifted
-twin moves every value a little (big gap, small-per-value area); a tail
-escape moves 5% of values a long way (tiny gap — only 5% of mass is ever
-displaced at any x — but the same total area). One number stays at 5.0 in
-both panels; the other changes 5×.
+| Part | Per evaluated table and side | Sampled? |
+| --- | --- | --- |
+| value census | `(head + (keys − head)·rate) × 24 B`, keys = `min(distinct, rows)` | yes, by value |
+| shape masks | text and identifier keys × `(24 B + 1.5 × average length)` | never |
+| relational | child rows × 16 B per edge | no |
+| membership | codes × `(12 B + bytes of the table name)` | no |
+| NULL patterns | `min(rows, 4096) × 16 B` | no |
 
-*Research level:* `KS = supₓ|F(x) − G(x)|` (two-sample
-Kolmogorov–Smirnov, [`scipy.stats.ks_2samp`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ks_2samp.html));
-`W₁ = ∫|F(x) − G(x)|dx` — for one-dimensional marginals the earth-mover
-distance *is* the area between the CDFs
-([`scipy.stats.wasserstein_distance`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wasserstein_distance.html)),
-which is why both read off the same picture. A sampler that clamps the tail
-(e.g. inverse-CDF's p90→p100 linearization, see the
-[source-stats doc](2026-08-05-source-table-stats.md)) shows up in W₁ long
-before KS notices.
+The fixed parts are subtracted first. The census gets what is left, shared
+max-min fairly, first across tables and then across one table's columns,
+so a column that needs little is never sampled to feed one that needs
+much, and a column expecting at most 1,000 keys is always exact. A column
+granted less than its demand is value-sampled at a rate of K/10,000. The
+12 B of a membership code is an amortised estimate taken from the
+encoding of bundle-merged elements, not an upper bound. *Code:*
+`context/budget.py::predict_shuffle_gb`, `water_fill`. How close the
+prediction is to a real job's shuffle is unverified: no job has run.
 
-### Tier 1 — always-on (`scipy` + `scikit-learn`, laptop-testable, no extras)
+**Memory: bounded side inputs.** A side input is held by every worker, so
+each has a cap, and above it the transform shuffles instead:
 
-| Metric | Definition | Why tracked | Call |
-|---|---|---|---|
-| **KS statistic** | Max CDF distance between real/synthetic marginals, per numeric column | Standard nonparametric goodness-of-fit; catches mode collapse / distribution-shape mismatch without assuming a parametric form | `scipy.stats.ks_2samp(real_col, synth_col).statistic` |
-| **Wasserstein distance** | Earth-mover's distance between the same two marginals | KS catches *shape*; Wasserstein is scale-sensitive and catches *magnitude* of the discrepancy KS can miss (e.g. a shifted-but-same-shape distribution) | `scipy.stats.wasserstein_distance(real_col, synth_col)` |
-| **TVD** (categorical) | `0.5 * Σ｜p_real(c) − p_synth(c)｜` over category `c` | Bounded [0,1] measure of how far two empirical categorical distributions diverge; dependency-free (built from `value_counts(normalize=True)`) | pure numpy, no library call |
-| **PSI** (drift between runs) | `Σ (this_run(c) − prev_run(c)) · ln(this_run(c) / prev_run(c))`, binned | Industry-standard drift statistic comparing *this run's* synthetic distribution to the *previous run's* (not real-vs-synthetic — see §5's regression-tracking query); PSI > 0.2 is the conventional "significant drift" threshold | pure numpy/pandas, binned via `pandas.cut`/`value_counts` |
-| **JSD** | Jensen–Shannon divergence, same this-run-vs-prev-run comparison as PSI | Symmetric and bounded ([0, ln 2]) where PSI is unbounded/asymmetric — a sanity-check companion to PSI, not a replacement | `scipy.spatial.distance.jensenshannon(p, q)` |
-| **Correlation-matrix diff (Frobenius)** | `‖corr_real − corr_synth‖_F` over numeric columns, Pearson *and* Spearman | Catches a synthesizer that gets every column's marginal right but destroys inter-column relationships (linear via Pearson, monotonic-rank via Spearman) — a failure KS/TVD alone cannot see | `pandas.DataFrame.corr(method="pearson"/"spearman")`, diffed via `numpy.linalg.norm(a - b, ord="fro")` |
-| **Mutual-information-matrix diff (Frobenius)** | Same Frobenius-diff idea, over a pairwise MI matrix instead of a linear-correlation matrix | Catches *nonlinear* dependency loss that Pearson/Spearman (linear/monotonic only) miss | `sklearn.feature_selection.mutual_info_regression`/`mutual_info_classif` (numeric↔numeric / numeric↔categorical), `sklearn.metrics.mutual_info_score` (categorical↔categorical), assembled into a matrix and Frobenius-diffed the same way |
-| **DCR** (Distance to Closest Record) | For each synthetic row, the minimum Gower-style mixed distance to any real row, averaged over the synthetic sample | Low DCR ⇒ a synthetic row sits very close to some real row ⇒ memorization/near-duplication risk (the core privacy signal) | Numeric block: min-max-normalize then `sklearn.neighbors.NearestNeighbors` (Manhattan/Euclidean); categorical block: indicator mismatch; combined as an equal-weighted average per column ("Gower-style" — an approximation kept deliberately dependency-light for Tier 1's scipy/sklearn-only constraint; Tier 3's SynthEval computes the exact form). Implementation constraint: build ONE concatenated feature matrix (normalized numerics + one-hot categoricals) and query a fitted `NearestNeighbors` tree — never `metric='precomputed'`, whose dense n×n distance matrix would blow the single-worker memory bound |
-| **NNDR** (Nearest-Neighbor Distance Ratio) | Per synthetic row: `dist(1st-nearest real neighbor) / dist(2nd-nearest real neighbor)`, averaged | Near 0 ⇒ one specific real record is uniquely, unambiguously the closest match ⇒ re-identification risk for *that* record; near 1 ⇒ no single record stands out. Standard SDV/anonymeter privacy-metric definition | `sklearn.neighbors.NearestNeighbors(n_neighbors=2).fit(real_matrix).kneighbors(synth_matrix)` on the same Gower-embedded space as DCR |
-| **Identical-match rate** | Fraction of sampled synthetic rows whose full-row content digest exactly matches a sampled real row's digest | Direct reuse of the existing content hash (`sdfb_core.validation.uniqueness.row_digest`, already used by `EnforceUniqueness`); `0` ⇒ no verbatim leakage, `>0` ⇒ exact copy of a real row — the strongest privacy red flag, and the metric that feeds `memorization.copy_ratio` (§5) | `row_digest(synth_row) in {row_digest(r) for r in real_sample}` |
+| Side input | Cap | Above it |
+| --- | --- | --- |
+| The full source's sorted record hashes (membership) | 160 MB, 8 B a row and array | exact keyed counts by shuffle; no full-source copy flags |
+| A parent's key set (relational) | 10 million keys, 80 MB | `CoGroupByKey` |
+| The panel, encoded once per worker | the plan's R and H | — |
 
-### The privacy pair, geometrically
+Beam 2.74 keeps no side-input cache by default, so every bundle would
+re-read them. The evaluator sets `max_cache_memory_usage_mb` to the sum of
+the side inputs a worker may hold at once, with 25 % headroom and at least
+512 MB. The Gower search charges 64 MB per chunk. On Dataflow the
+experiment `upload_graph` is always set, because a graph this wide is
+expected to exceed the job-creation request limit. No job has been
+submitted, so the limit has not been hit.
 
-**Claim: DCR flags a synthetic row parked on a real record; NNDR flags a
-row for which ONE real record is unambiguously closest — different privacy
-failures, one embedded space.**
+**CPU: the per-row pass and the fixed block.**
 
-![DCR and NNDR geometry over the Gower-embedded space](assets/eval-dcr-nndr.png)
+**Claim:** on one laptop core every statistic outran the encoder, and the nearest-neighbour block is set by the sample knobs, not
+by the table.
 
-*Entry level:* left panel — the orange × sits on top of a real row: its
-distance to the closest record is ~0, the memorization signal. Right
-panel — the orange × is not on any real row, but its nearest real neighbor
-(solid line) is far closer than its second-nearest (dashed): whoever that
-one record belongs to is singled out. The aqua × is safe on both readings:
-comfortably distant, and ambiguous between neighbors.
+![Laptop micro-benchmarks: per-row stages and the neighbour search](assets/eval-cpu-budget.png)
 
-*Research level:* both metrics live in the Gower-style mixed-feature
-embedding ([Gower 1971](https://doi.org/10.2307/2528823)): min-max-normalized
-numerics + one-hot categoricals. `DCR = min_r d(s, r)`;
-`NNDR = d₍₁₎/d₍₂₎ ∈ (0, 1]` — the standard SDV/anonymeter definitions
-([Giomi et al. 2022](https://arxiv.org/abs/2211.10459)). The §2 memory
-bound is why the design mandates a fitted
-`sklearn.neighbors.NearestNeighbors` tree (`O(n log n)` build, bounded
-per-query) and forbids the dense 50k×50k distance matrix (~20 GB).
-`identical_match_rate` is the degenerate DCR=0 case caught exactly, via the
-same `row_digest` used by `EnforceUniqueness` — memorization risk made
-gate-able ([Carlini et al. 2021](https://arxiv.org/abs/2012.07805)).
+*MEASURED figure, interim: laptop micro-benchmarks recorded while each
+transform was built, one Intel i5-6267U core. Not a Dataflow run and not a
+committed evidence bundle; the first Dataflow run is to replace it.* Left:
+each stage against the encoder's rate (the dense profile and the census
+were timed with the encoder on the same batch; for membership, 7,300 rows/s
+is the encoder's general rate from another task's notes, not that batch, so
+read the third pair as an order of magnitude). Right: the exact Gower
+search of the default `--privacy_sample_rows` against R and H, with a
+per-operation model fitted at 50 feature columns; the points at 6 and 30
+columns and the 9.4 s detection figure were timed on 4 cores at a load
+average of 6 to 10, the 50-column point single-threaded. A reader can
+reproduce the dense-pass row with `pytest
+packages/sdfb-evaluation/tests/beam/test_dense.py::test_throughput_8192_by_30_batch -s`.
+*Code:* `beam/encode.py`, `beam/dense.py`, `beam/census.py`,
+`beam/membership.py`, `stats/privacy.py::gower_knn`. A floor on the dense
+pass is pinned by `tests/beam/test_dense.py::test_throughput_8192_by_30_batch`.
 
-### Tier 2 — SDMetrics (primary suite; new base `sdfb-core` dependency, §6)
+What follows for sizing, as a model to be checked on the first run:
 
-| Metric | Definition | Why tracked | Call |
-|---|---|---|---|
-| **QualityReport** | SDMetrics' composite fidelity score — aggregates column-shape (KS/TVD-like) and column-pair-trends (correlation-like) sub-scores into one 0–1 "Overall Quality Score" | The industry-recognized single number for `fidelity_overall_score` — cheaper to communicate to stakeholders than a basket of raw Tier-1 statistics, and independently validates the Tier-1 numbers rather than duplicating their exact math | `sdmetrics.reports.single_table.QualityReport().generate(real_df, synth_df, metadata).get_score()` |
-| **DiagnosticReport** (incl. `NewRowSynthesis`) | SDMetrics' structural sanity report: coverage (are all categories/ranges represented), boundary adherence, and `NewRowSynthesis` — the fraction of synthetic rows that are *not* near-duplicates of any real row within SDMetrics' own numeric-tolerance definition | `NewRowSynthesis` is SDMetrics' own built-in novelty/privacy check; it uses a *tolerance band* (not exact-digest matching), so it's a useful cross-check against Tier 1's exact `identical_match_rate` rather than a replacement for it | `sdmetrics.reports.single_table.DiagnosticReport().generate(real_df, synth_df, metadata)` |
+- The per-row pass scales with rows × columns and is dominated by turning
+  BigQuery rows into arrays. Worker count should be sized from the
+  encoder, not from the statistics.
+- The privacy block costs about rows sampled × (|R| + |H|) × feature
+  columns distance evaluations per table, whatever the table's size. It is
+  split across workers in batches of at most 4,096 rows.
+- Detection trains on one worker per table, on at most
+  `--detection_sample_rows` rows a class.
 
-### Tier 3 — `[eval-extra]` (off by default, §6)
+### 5.4 Runners and the side-input contract
 
-| Metric | Definition | Why Tier 3 | Call |
-|---|---|---|---|
-| **SynthEval privacy (DCR/NNDR)** | Purpose-built synthetic-tabular-data evaluation library's *native*, exact Gower-distance DCR/NNDR (not Tier 1's approximation) | Pulls its own dependency tree (reporting/plotting extras beyond plain sklearn) and is a slower, more precise re-check — appropriate as an opt-in second opinion, not an always-on gate input | `syntheval.SynthEval(real_df, synth_df).evaluate(analysis_classes=["privacy"])` |
-| **Evidently drift report** | Longitudinal drift-report HTML comparing this run's synthetic distribution against a baseline (previous run, or the live reference) | Produces a durable **artifact** (an HTML file on GCS), never a dashboard — satisfies CLAUDE.md's no-Looker/no-Dataplex rule by construction (it's a file object, not a rendered service) | `evidently.Report(metrics=[DataDriftPreset()]).run(reference_data=..., current_data=...).save_html(...)`, uploaded to `gs://{bucket}/synthetic/eval/{run_id}/drift_report.html`; the GCS URI is stored in `raw_metrics_json`, never rendered in-house |
+The pipeline rests on one contract of batch execution: a side input is
+**complete** before the step that reads it runs. The failure map, the label
+key, the panel sets, the parent key sets and the "write the final row
+after every sink" ordering all depend on it.
 
-### TSTR — documented, deferred, non-priority
+| Runner | The contract |
+| --- | --- |
+| Dataflow, batch | Expected to hold. Unverified here: no job has run |
+| Beam's in-process `FnApiRunner` | Holds: a stage runs to completion before the stages that read it |
+| Prism, which Beam's `DirectRunner` hands a batch pipeline to | Did **not** hold on Beam 2.74.0 in this package's tests: a step ran with a side input that was still empty, and a failed table's row was published as a pass |
 
-**Train-on-Synthetic-Test-on-Real**: fit `lightgbm.LGBMClassifier`/`LGBMRegressor`
-on the synthetic sample, score F1 (classification) / RMSE (regression) against
-a held-out real test split, and diff against a real-trained baseline's score
-(`tstr_f1_delta`). Not implemented in this design because it needs two things
-this repo doesn't yet have: (1) a heuristic for picking a "target" column on a
-generic single-table schema with no declared ML task, and (2) a train/test
-split protocol. The `tstr_f1_delta FLOAT64` column is reserved (`NULLABLE`,
-always `NULL` today) in §4's DDL precisely so landing this later needs no
-migration.
+So a local run is in process. `--runner DirectRunner` is what the operator
+says and what the registry's `runner` column records; the pipeline itself
+runs on `FnApiRunner`, and `--runner PrismRunner` is refused as a usage
+error (R92, R94). The behaviour was reproduced with a short pipeline that
+holds no evaluator code (the reproducer is not committed). The upstream
+report on the same subject is [apache/beam#36563][beam-36563], "Prism's
+handling of side inputs could fail sometime", now closed; this package
+pins Beam 2.74.0 and has not been re-tested on a later release. What the driver saw fail before the pipeline
+started is passed to the Guard as a constant, not a side input, so no
+runner can publish a graded row for such a table.
 
-## 4. `validation_data_history` DDL
+### 5.5 Determinism
+
+`evaluation_key` is a BLAKE2b digest of the generation job id, the run
+ids, the tables, the catalogue and evaluator versions, the mode and every
+knob that can change a value; the salt of every sample and hash derives
+from it. The same plan and rows give byte-identical metric and profile
+rows. Two details make that true:
+
+- **Rows are rounded before they are graded (R89).** Counts merge exactly,
+  but moments merge in floating point in the order the runner chooses, so
+  a rerun differs in the last digits. Each gated field is rounded to 9
+  significant digits first, and status and score are then computed from
+  the rounded fields, so a persisted row scored again from its own fields
+  gives the same status and score. Integrity metrics and count-derived
+  rates keep no absolute floor: one orphan in thirty billion rows must
+  persist as more than 0 beside its FAIL.
+- **Only what moments make is rounded in profiles.** The one exception
+  is the `roc_curve` payload, whose restated AUC and interval are rounded
+  like the `table.detection_auc` row. Histogram edges,
+  quantiles and counts persist as computed, so edges stay strictly
+  increasing and still hash to the row's `edges_digest`.
+
+**Pitfall:** a temporal column's mean is moment-derived, so it keeps 9
+significant digits of an epoch value: a step of about ten seconds on
+present-day timestamps. Thresholds do not enter the key: two runs that
+differ only in `--thresholds_uri` share an `evaluation_key` and are told
+apart by the recorded digest of the overrides.
+
+## 6. Data model and comparison queries
+
+### 6.1 Four tables and two views
+
+```mermaid
+flowchart LR
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  H[("🗄️ evaluation_data_history<br/>one row per event")]:::store
+  M[("🗄️ evaluation_metrics<br/>one row per metric and scope")]:::store
+  P[("🗄️ evaluation_profiles<br/>distribution payloads")]:::store
+  F[("🗄️ evaluation_row_flags<br/>bounded row evidence")]:::store
+  V1["⚪ view evaluation_latest<br/>last event per evaluation"]:::data
+  V2["⚪ view evaluation_latest_per_job<br/>last FINAL per generation job"]:::data
+  M -- "evaluation_id" --> H
+  P -- "evaluation_id" --> H
+  F -- "evaluation_id" --> H
+  H --> V1
+  H --> V2
+```
+
+| Table | Grain | Partition, cluster | Holds |
+| --- | --- | --- | --- |
+| `evaluation_data_history` | One row per event (`RUNNING`, `FINAL`) | day on `recorded_at`; `relationship_model, engine, evaluation_id` | The run: status, versions, the generation context as typed columns and as JSON, per-table scope and panel facts, family scores, metric counts, bytes, predicted shuffle, warnings |
+| `evaluation_metrics` | One row per metric × table × column, pair or edge | month on `evaluated_at`; `table_name, metric_id, evaluation_id` | Value, per-side values, baseline, score, status, the thresholds it was graded against, noise floor or interval, n, method, digests, detail |
+| `evaluation_profiles` | One row per profile × table × column or edge × side | month on `evaluated_at`; `table_name, profile_kind, evaluation_id` | Histograms, quantiles, top-k, length and shape mixes, temporal mixes, NULL patterns, correlation matrices, contingency tables, fan-out, distance histograms, ROC curves, moments |
+| `evaluation_row_flags` | At most `--row_flags_top_k` rows per table and check | month on `evaluated_at`, expiring after 180 days; `table_name, check, evaluation_id` | `exact_copy`, `near_copy`, `nearest_record`, `detectable`: keys and keyed hashes only |
+
+The schemas live inside the package (`schemas/*.schema.json`), not under
+`config/bq_schema/`, which belongs to the generator's Terraform. `sdfb-eval
+schemas` prints the `bq mk` commands; `--apply` creates missing tables and
+replaces the two views, and never alters an existing table. Every field
+carries a description, because the files are also a GUI's data contract.
+
+### 6.2 The registry lifecycle
+
+**Claim (D7):** an evaluation leaves one `RUNNING` row and exactly one
+terminal row, written by whoever owns the outcome and by nobody while that
+is not known.
+
+```mermaid
+flowchart TD
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  A["⚙️ driver mints<br/>evaluation_id"]:::cpu --> B{"plan built?"}:::cpu
+  B -- "no" --> X[("🗄️ FAILED<br/>by the driver")]:::store
+  B -- "yes" --> R[("🗄️ RUNNING")]:::store --> C["⚙️ prepare DDL<br/>submit the job"]:::cpu
+  C -- "raised" --> X
+  C --> D{"job state"}:::cpu
+  D -- "DONE" --> E["🔀 the pipeline's<br/>own FINAL row"]:::beam
+  D -- "FAILED or CANCELLED" --> X
+  D -- "still running:<br/>interrupt or polling error" --> N["⚪ no terminal row yet<br/>job id printed"]:::data
+  E --> G{"read back:<br/>FINAL present?"}:::cpu
+  G -- "yes" --> OK["⚪ exit code<br/>from the gate"]:::data
+  G -- "no" --> X
+  G -- "cannot read" --> U["⚪ no row written<br/>one may exist"]:::data
+```
+
+| Terminal status | When |
+| --- | --- |
+| `SUCCEEDED` | Every launch table was evaluated, no warning |
+| `SUCCEEDED_WITH_WARNINGS` | As above, with warnings: a contaminated scope that was allowed, an unpinned source, a fallback taken |
+| `PARTIAL` | A launch table was not evaluated while another was; or a scope count mismatch; or a reference panel absent or unverified, so its privacy block was not evaluated |
+| `SKIPPED` | No launch table can be evaluated by plan: an empty scope, for example. A planned outcome |
+| `FAILED` | The driver caught an exception; or the pipeline ran and could evaluate none of the tables it meant to. In the second case the pipeline writes the row itself, keeps its counts, and names each table's reason |
+
+`PARTIAL` means a launch table or a whole metric block was not evaluated
+for a plan-level or driver-level reason. A metric that a transform could
+not compute and reported itself, as a `not_evaluated` row with a reason,
+shows in `metrics_not_evaluated` only and does not change the status.
+
+Two contradicting terminal rows are worse than a `RUNNING` row that stays
+open, so the driver never cancels a submitted job and never closes one it
+cannot see the end of (R93). When the wait fails but the job is found
+`DONE`, the pipeline's own row stands: after a polling error the driver
+warns and reads the result as usual; after an interrupt it writes nothing
+and prints how to read the result (R98). A `RUNNING` row with no terminal
+row therefore means the job is still running, or died after the command
+stopped watching; an orchestrator's failure callback closes that one
+(§8.3).
+
+### 6.3 Four queries
+
+These are written against the schema files and have **not** been run
+against BigQuery. Replace `demo-project` with a project.
+
+**A metric's trend over runs.**
 
 ```sql
-CREATE TABLE `{project}.synthetic_data_quality.validation_data_history` (
-  execution_id          STRING    NOT NULL
-    OPTIONS(description="Natural key for this evaluation execution (not run_id — a run_id may be re-evaluated, e.g. after a metrics-code fix, appending a new row rather than clobbering, matching this table's append-only convention)."),
-  execution_timestamp   TIMESTAMP NOT NULL
-    OPTIONS(description="Row write time (UTC); DAY partition key."),
-  run_id                STRING    NOT NULL
-    OPTIONS(description="Pipeline run id; joins to validation_runs.run_id and dead_letter.run_id."),
-  engine                STRING    NOT NULL
-    OPTIONS(description="b1_rag | b2_library — matches validation_runs.engine."),
-  engine_version        STRING    NOT NULL
-    OPTIONS(description="Engine code version (new GenerationEngine.version class attribute, proposed in §6) — distinguishes engine LOGIC evolution from the model/embedder weights already tracked via validation_runs.model_uri."),
-  feature_flag_tags     ARRAY<STRING>
-    OPTIONS(description="Sorted, human-diffable run-configuration tags, e.g. ['embedder:bge-small-en-v1.5', 'engine:b1_rag', 'identity_columns:customer_id', 'similarity:0.50']. See _build_feature_flag_tags in §4 notes."),
-  sample_rows_real      INT64
-    OPTIONS(description="Rows in the sampled real side after §2's stratified cap (0 if the reference sample was unavailable)."),
-  sample_rows_synthetic INT64
-    OPTIONS(description="Rows in the sampled synthetic side after §2's stratified cap (0 if every generated row was rejected pre-write)."),
-  fidelity_overall_score FLOAT64
-    OPTIONS(description="SDMetrics QualityReport().get_score(), 0-1. NULL when sample_rows_real or sample_rows_synthetic is 0."),
-  avg_dcr               FLOAT64
-    OPTIONS(description="Mean Distance to Closest Record (Tier 1, Gower-style), synthetic sample vs real sample. Lower = higher memorization risk."),
-  nndr                  FLOAT64
-    OPTIONS(description="Mean Nearest-Neighbor Distance Ratio (Tier 1). Near 0 = re-identification risk; near 1 = safe."),
-  identical_match_rate  FLOAT64
-    OPTIONS(description="Fraction of sampled synthetic rows with an exact row_digest match in the sampled real rows. Feeds the memorization.copy_ratio gate (§5)."),
-  max_psi               FLOAT64
-    OPTIONS(description="Max PSI across columns, this run's synthetic distribution vs the previous validation_data_history row for the same (landing_table, engine). NULL on the first run for a given pair."),
-  corr_diff_frobenius   FLOAT64
-    OPTIONS(description="Frobenius norm of (corr_real - corr_synth), Pearson. Spearman + the MI-matrix diff live in raw_metrics_json (not worth a dedicated column each)."),
-  tstr_f1_delta         FLOAT64
-    OPTIONS(description="Reserved for future TSTR (§3). Always NULL until implemented."),
-  raw_metrics_json      JSON
-    OPTIONS(description="Full nested metric payload: every Tier-1 per-column statistic, SDMetrics sub-scores, Tier-3 results when run, per-column binned distributions (needed by the NEXT run's PSI/JSD computation, since raw sample rows are never persisted — only these aggregates), the Evidently GCS URI when Tier 3 ran, the memorization-gate outcome, and sampling metadata (stratification column, per-stratum counts, whether the 50k cap was hit).")
-)
-PARTITION BY DATE(execution_timestamp)
-CLUSTER BY engine, run_id;
+SELECT h.evaluated_at, h.evaluation_id, h.generation_job_id, h.engine,
+       m.value, m.baseline_value, m.noise_floor, m.status
+FROM `demo-project.synthetic_data_quality.evaluation_metrics` AS m
+JOIN `demo-project.synthetic_data_quality.evaluation_latest` AS h
+  ON h.evaluation_id = m.evaluation_id
+WHERE h.event = 'FINAL'
+  AND h.status IN ('SUCCEEDED', 'SUCCEEDED_WITH_WARNINGS')
+  AND m.evaluated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+  AND m.table_name = 'orders'
+  AND m.metric_id = 'column.ks'
+  AND m.column_name = 'amount'
+ORDER BY h.evaluated_at;
 ```
 
-Column-by-column notes not already covered inline:
+Read `value` beside `baseline_value` and `noise_floor`: a trend inside the
+floor is not a trend.
 
-- **`execution_id` vs `run_id`**: this table is append-only like `validation_runs`
-  and `dead_letter` (`WRITE_APPEND` + `CREATE_NEVER`, matching the sink
-  convention already used for both — `run_pipeline.py:252-271`). `run_id` is
-  the join key back to `validation_runs`/`dead_letter`; `execution_id` exists
-  because a single `run_id` could in principle be re-evaluated (e.g. rerunning
-  `--enable-evaluation` against already-landed data after a metrics bug fix)
-  without a schema that assumes one evaluation per run.
-- **`engine_version`**: no such attribute exists on `GenerationEngine` today —
-  both `B1RagEngine` and `B2LibraryEngine` declare only `name`
-  (`b1_rag/engine.py:75`, `b2_library/engine.py:59`). This design proposes
-  adding a parallel `version: str = "0.1.0"` class attribute, bumped by hand
-  when engine *logic* changes materially — distinct from
-  `validation_runs.model_uri`, which tracks LLM *weights*, not engine code.
-- **`feature_flag_tags`**: built by a new `_build_feature_flag_tags(config:
-  PipelineConfig) -> list[str]` function in `sdfb_beam/pipeline.py` (same file,
-  same style as the existing `_build_validation_run_row` helper), reading
-  `config.engine_name`, `config.similarity`, `config.identity_columns`,
-  `config.embedder_uri` — sorted for determinism, so two runs with identical
-  configuration produce byte-identical tag arrays (queryable via `IN
-  UNNEST(feature_flag_tags)`).
-- **No `landing_table`/`reference_table` column** — deliberately not
-  duplicated here (per ADR 0007's DRY-across-documentation-and-code policy).
-  `run_id` joins to `validation_runs`, which already carries both. §5's
-  regression-tracking query does this join.
-- **`raw_metrics_json` carrying per-column distributions**: this is load-bearing,
-  not just a debug dump — since raw sample rows are never persisted (only
-  aggregated metrics are, keeping this table small and free of duplicated PII
-  beyond what's already in the landing table), the *next* run's PSI/JSD
-  computation has nothing to diff against except whatever the *previous* row's
-  `raw_metrics_json` stored. The evaluation DoFn must therefore write enough
-  sufficient statistics (binned histograms per numeric column, frequency
-  tables per categorical column) for a future run to recompute drift without
-  re-reading raw rows.
+**A/B between two evaluations.** The scope columns are NULL on rows that
+do not use them, so the join key is their JSON text.
 
-Provisioning follows the exact pattern already documented for `dlq`/
-`validation_runs` in `docs/DEPLOYMENT_PREREQUISITES.md` §"BigQuery — datasets &
-tables": a new `config/bq_schema/synthetic_data_quality/validation_data_history.schema.json`
-(the same BQ JSON array format as the two sibling files), created with
+```sql
+WITH rows_of AS (
+  SELECT evaluation_id,
+         TO_JSON_STRING(STRUCT(table_name, metric_id, column_name,
+                               column_name_2, edge)) AS scope_key,
+         table_name, metric_id, column_name, column_name_2, edge,
+         value, status, noise_floor, ci_low, ci_high
+  FROM `demo-project.synthetic_data_quality.evaluation_metrics`
+  WHERE evaluation_id IN (@evaluation_a, @evaluation_b)
+)
+SELECT a.table_name, a.metric_id, a.column_name, a.column_name_2, a.edge,
+       a.value AS value_a, b.value AS value_b, b.value - a.value AS delta,
+       a.status AS status_a, b.status AS status_b,
+       CASE
+         WHEN a.noise_floor IS NOT NULL AND b.noise_floor IS NOT NULL
+           THEN ABS(b.value - a.value)
+                <= SQRT(POW(a.noise_floor, 2) + POW(b.noise_floor, 2))
+         WHEN a.ci_low IS NOT NULL AND b.ci_low IS NOT NULL
+           THEN a.ci_low <= b.ci_high AND b.ci_low <= a.ci_high
+       END AS within_noise
+FROM rows_of AS a
+JOIN rows_of AS b USING (scope_key)
+WHERE a.evaluation_id = @evaluation_a
+  AND b.evaluation_id = @evaluation_b
+  AND a.status != b.status  -- only what changed status; drop for every delta
+ORDER BY a.table_name, a.metric_id;
+```
+
+`within_noise` is the rule `sdfb-eval compare` applies: two scalar floors
+combine in quadrature, two intervals must overlap, and with neither the
+delta has no noise judgement (NULL). Add each run's own `evaluated_at` to
+the filter to prune partitions.
+
+**The worst columns of the latest evaluation.**
+
+```sql
+WITH latest AS (
+  SELECT evaluation_id
+  FROM `demo-project.synthetic_data_quality.evaluation_latest`
+  WHERE event = 'FINAL' AND status != 'FAILED'
+  ORDER BY recorded_at DESC
+  LIMIT 1
+)
+SELECT m.table_name, m.column_name,
+       COUNTIF(m.status = 'fail') AS fails,
+       COUNTIF(m.status = 'warn') AS warns,
+       ROUND(AVG(m.score), 3) AS mean_score,
+       ARRAY_AGG(IF(m.status = 'fail', m.metric_id, NULL)
+                 IGNORE NULLS ORDER BY m.score LIMIT 5) AS failing_metrics
+FROM `demo-project.synthetic_data_quality.evaluation_metrics` AS m
+JOIN latest USING (evaluation_id)
+WHERE m.level IN ('field', 'column')
+  AND m.column_name IS NOT NULL
+GROUP BY m.table_name, m.column_name
+ORDER BY fails DESC, mean_score
+LIMIT 20;
+```
+
+Statuses in the metric table are lower-case; in the registry they are
+upper-case run statuses. As above, a filter on the run's `evaluated_at`
+prunes partitions.
+
+**Fidelity against privacy, per engine.**
+
+```sql
+SELECT engine,
+       COUNT(*) AS evaluations,
+       ROUND(AVG(fidelity_score), 3) AS mean_fidelity,
+       ROUND(AVG(privacy_score), 3) AS mean_privacy,
+       ROUND(MIN(privacy_score), 3) AS worst_privacy,
+       COUNTIF(metrics_fail > 0) AS evaluations_with_a_fail
+FROM `demo-project.synthetic_data_quality.evaluation_latest_per_job`
+WHERE status IN ('SUCCEEDED', 'SUCCEEDED_WITH_WARNINGS')
+  AND engine IS NOT NULL
+  AND recorded_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+GROUP BY engine
+ORDER BY engine;
+```
+
+A score is a summary for ranking runs, never a verdict: an average hides a
+failed primary key. Read the counts beside it, and note in
+`evaluation_params` whether a run was graded with overridden thresholds
+before comparing its scores with another's.
+
+`sdfb-eval compare` adds one thing SQL cannot do simply: the population
+stability index between the two runs' stored histograms of a column,
+given only when both carry the same `edges_digest`. The same digest means
+the same bin edges, so the counts line up bin for bin; different digests
+are reported as not comparable and nothing is re-binned.
+
+## 7. Scoring
+
+### 7.1 Status
+
+**Claim (D5):** a threshold crossing that sampling noise explains is a
+pass, and the row says it was downgraded.
+
+```mermaid
+flowchart TD
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  G["⚪ gated value g<br/>the value, or its<br/>confidence bound"]:::data --> N{"missing?"}:::cpu
+  N -- "yes" --> NE["⚪ not_evaluated"]:::data
+  N -- "no" --> I{"no thresholds,<br/>or an INFO rule?"}:::cpu
+  I -- "yes" --> INFO["⚪ info"]:::data
+  I -- "no" --> Z{"warn and fail<br/>both 0?"}:::cpu
+  Z -- "yes" --> ZT["⚪ fail if g above 0<br/>else pass"]:::data
+  Z -- "no" --> C{"crosses warn<br/>or fail?"}:::cpu
+  C -- "no" --> PASS["⚪ pass"]:::data
+  C -- "yes" --> F{"explained by<br/>sampling noise?"}:::cpu
+  F -- "yes" --> DOWN["⚪ pass, with<br/>noise_downgraded_from"]:::data
+  F -- "no" --> WF["⚪ warn or fail"]:::data
+```
+
+The points where the rule is easy to misread:
+
+- **The gated value.** For a metric with `uses_ci_bound`, status and score
+  read the confidence bound on the cautious side: `ci_low` for a
+  lower-is-better metric and `ci_high` for a higher-is-better one. In
+  catalogue 1.0.0 every such metric is lower-is-better (the five lifts and
+  the holdout share), so in practice it is `ci_low`. A lift with no event
+  on either side has no point value and a lower bound of 0: it passes
+  rather than being `not_evaluated`. A producer's reversed interval is
+  treated as no interval, and a metric that gates on its bound is then
+  `not_evaluated`.
+- **Crossing is inclusive.** Lower-is-better reaches a threshold at
+  `value ≥ threshold`, higher-is-better at `value ≤ threshold`; a `target`
+  metric reads the distance from its target, which for
+  `column.novelty_mass` is the row's own `source_value`.
+- **Zero tolerance.** Warn and fail both 0 means integrity by
+  construction: any value above 0 fails, exactly 0 passes, and no noise
+  check applies. These are the key duplicate rates and the orphan rate on
+  an enforced edge.
+- **Information rules.** The orphan rate on a documented edge, and the
+  copy rate on any kind but free text, are information whatever their
+  value (§4.7, §4.8).
+- **The noise check.** A scalar method calls a crossing noise when the
+  value is within the row's `noise_floor` of its reference; an interval
+  method when the interval covers the reference. The reference is the
+  metric's target, else 0 for lower-is-better and 1 for higher-is-better.
+  When the input a check needs is missing, nothing is downgraded and
+  `detail.noise_check` says `unavailable`.
+- **A downgraded row is scored at its reference.** D5 treats an effect
+  inside sampling resolution as no effect for status and for score alike,
+  so that roll-ups raise no false alarm on small tables. The score given
+  is the score function's value at the reference, which is 1 for every
+  metric of catalogue 1.0.0 that has a noise method. Every other row keeps
+  the score of its own value (R40).
+
+### 7.2 Score
+
+A score maps a value to [0, 1], higher better, through one of five
+functions named in the catalogue:
+
+| `score` | Function |
+| --- | --- |
+| `complement` | `clip(1 − abs(v) / range_hi, 0, 1)` |
+| `linear` | 1 at or inside warn, 0 at or beyond fail, linear between; mirrored for higher-is-better |
+| `ratio_to_one` | as `linear`, on the distance `abs(v − target)` |
+| `auc` | `1 − 2·max(0, v − 0.5)` |
+| `none` | the value itself for a roll-up row; no score otherwise |
+
+`info` and `not_evaluated` rows have no score.
+
+### 7.3 Roll-ups
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  U1["⚪ each column<br/>mean of its field and<br/>column metrics"]:::data --> T
+  U2["⚪ the pair group<br/>mean of pair metrics"]:::data --> T
+  U3["⚪ each row-level and<br/>table-level metric"]:::data --> T
+  U4["⚪ each edge where the<br/>table is the child"]:::data --> T
+  T["⚙️ table family score<br/>mean over units"]:::cpu --> MF["⚙️ model family score<br/>mean over tables"]:::cpu --> O["⚙️ overall score<br/>mean of family scores"]:::cpu
+  T --> TO["⚙️ table overall score<br/>mean of its family scores"]:::cpu
+```
+
+A unit is one thing a reader would name: a column, the pair group, a
+row-level metric, an edge. Averaging over units rather than rows keeps a
+wide table's many column metrics from drowning its one primary-key metric
+(R11). Roll-up rows never feed themselves, and the registry's headline
+counts leave them out, so `metrics_total` equals pass + warn + fail + info
++ not evaluated.
+
+### 7.4 Thresholds for one run
+
+The catalogue owns the defaults. `--thresholds_uri` overrides them for the
+metrics a YAML file names, for the whole run: stored status, score,
+`threshold_warn`, `threshold_fail`, roll-ups, registry counts and the gate
+(R93). **One panel per case:**
+
+```mermaid
+flowchart TB
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  subgraph NO["flag absent"]
+    N1[("📄 catalogue<br/>thresholds")]:::store --> N2["🔀 every row graded<br/>against the catalogue"]:::beam --> N3[("🗄️ registry: uri and<br/>digest NULL")]:::store
+  end
+  subgraph YES["flag set"]
+    Y1[("📄 thresholds file")]:::store --> Y2{"valid?"}:::cpu
+    Y2 -- "no" --> Y3["⚪ exit 2<br/>nothing started"]:::data
+    Y2 -- "yes" --> Y4["🔀 named metrics graded<br/>and stored against the file"]:::beam --> Y5[("🗄️ registry: uri (base name<br/>if local) and digest")]:::store
+  end
+```
+
+Nothing is graded twice: the gate reads the registry's counts, which are
+counts of the stored rows. A file may only move a gate that exists. It is
+refused, before anything starts, when it names a metric the catalogue
+only reports, gives one bound without the other, a negative bound, bounds
+in the wrong order for the metric's direction, or 0 and 0 on a
+higher-is-better metric. Rows of an overridden run are not comparable
+with a default run's without reading `evaluation_params`; `report` and
+`compare` say when thresholds differ.
+
+### 7.5 The gate and exit codes
+
+`sdfb-eval run` waits for the job, so its exit code can carry the
+`--fail_on` gate. **One panel for the three values of the flag:**
+
+```mermaid
+flowchart TD
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  S{"FINAL status"}:::cpu
+  S -- "FAILED" --> E3["⚪ exit 3<br/>whatever the flag"]:::data
+  S -- "SKIPPED" --> E0A["⚪ exit 0<br/>whatever the flag"]:::data
+  S -- "PARTIAL" --> P{"--fail_on"}:::cpu
+  S -- "SUCCEEDED" --> Q{"--fail_on"}:::cpu
+  P -- "none" --> E0B["⚪ exit 0"]:::data
+  P -- "warn or fail" --> E1A["⚪ exit 1"]:::data
+  Q -- "none" --> E0C["⚪ exit 0"]:::data
+  Q -- "fail" --> F1["⚪ exit 1 if any<br/>metric is at FAIL"]:::data
+  Q -- "warn" --> W1["⚪ exit 1 if any metric<br/>is at WARN or FAIL"]:::data
+```
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | The evaluation finished and no gate tripped |
+| 1 | The `--fail_on` gate tripped, and nothing else |
+| 2 | A usage error: nothing was started. A malformed Beam argument, an invalid thresholds file and `--runner PrismRunner` are usage errors |
+| 3 | The evaluation failed: its `FINAL` row reads `FAILED`, or the command raised. `--fail_on none` does not mask it |
+
+Under an active gate `PARTIAL` trips it, because the gate cannot vouch for
+a launch table that was not evaluated; `SKIPPED` does not, because an empty
+scope is a planned outcome.
+
+## 8. Integrations
+
+### 8.1 The command line
+
+| Command | Does |
+| --- | --- |
+| `sdfb-eval plan` | Builds and prints the plan: scopes, rows, the panel, the method per column, dry-run bytes, predicted shuffle. Runs no prepare DDL and writes no registry row |
+| `sdfb-eval run` | One evaluation: `RUNNING` row, prepare DDL, pipeline, outputs, `FINAL` row |
+| `sdfb-eval report` | A stored evaluation as markdown or JSON, each failing metric explained with the catalogue's own text |
+| `sdfb-eval compare` | Two stored evaluations, noise-aware |
+| `sdfb-eval catalogue` | The catalogue as JSON or markdown |
+| `sdfb-eval schemas` | The four tables and two views: print, or create |
+
+A target is exactly one of a generation job id, a base run id, or tables
+named by hand. An `evaluation_id` is minted fresh per attempt and never
+passed in, because temporary tables carry it and a retry within 24 hours
+would collide. The [README](../../packages/sdfb-evaluation/README.md) has
+the flags and their defaults.
+
+**`--sink`, one panel per mode:**
+
+```mermaid
+flowchart TB
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  subgraph S1["bq_client: the DirectRunner default"]
+    A1["🔀 pipeline"]:::beam --> A2[("📄 local NDJSON")]:::store --> A3[("🗄️ BigQuery<br/>client load jobs<br/>registry last")]:::store
+  end
+  subgraph S2["bq: the Dataflow default"]
+    B1["🔀 pipeline"]:::beam --> B2[("🗄️ BigQuery<br/>file loads")]:::store
+  end
+  subgraph S3["local_json"]
+    C1["🔀 pipeline"]:::beam --> C2[("📄 a directory per<br/>evaluation_id<br/>nothing in BigQuery")]:::store
+  end
+```
+
+### 8.2 Dataflow: the image and the flex template
+
+**Not built, not launched.** The CPU image
+(`packages/sdfb-evaluation/docker/Dockerfile`, on the Beam 2.74.0 Python
+3.11 SDK image) and the template metadata are files with static tests.
+What they are written to do:
+
+- The template's parameters are exactly the public flags of `sdfb-eval
+  run`, minus runner, project and region, which the template launcher
+  supplies (R97). A test compares the metadata with the parser itself. An
+  unset parameter is expected to reach the command line as an empty
+  string, which every flag reads as "not given".
+- The image carries its own dispatch entrypoint: Dataflow appends the
+  worker's boot flags to the image's entrypoint and does not override it
+  ([ADR 0009](../adr/0009-single-flex-template-image.md)), so one image
+  serves the [flex-template][flex-templates] launcher and the workers. The
+  package keeps its own copy of the script, because it must stand alone.
+- The worker image's coordinate is baked into the image by the build
+  script and applied when the launch gives none.
+- The template entry submits the job and returns. It does not wait and
+  never applies `--fail_on`.
+
+Unverified until a build and a launch: the entrypoint dispatch, the baked
+worker image, the launcher supplying project and region, and an unset
+parameter reaching the command line as an empty string.
+
+### 8.3 Composer
+
+**Not deployed and never run.** `composer/evaluation_framework.py` is read
+by `ast` in tests; Airflow has never parsed it.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph GEN["generation DAG, opt-in"]
+    G1["🔀 generation job<br/>launched"]:::beam --> G2{"run_evaluation?"}:::cpu
+  end
+  subgraph EV["DAG sdfb_evaluation_framework"]
+    B["⚙️ begin"]:::cpu --> W{"wait_gate"}:::cpu
+    W -- "wait_for_generation" --> S["⚙️ sensor: job<br/>reached DONE"]:::cpu --> ST
+    B --> ST["🔀 start_evaluation<br/>launch the template"]:::beam
+  end
+  G2 -- "true: trigger with<br/>the job id" --> B
+  ST --> L["⚙️ launcher: RUNNING row<br/>then submit"]:::cpu --> JOB["🔀 evaluation job"]:::beam --> FIN[("🗄️ FINAL row")]:::store
+  ST -. "task fails" .-> CB["⚙️ failure callback<br/>one INSERT SELECT"]:::cpu --> FAILED[("🗄️ FINAL row<br/>status FAILED")]:::store
+  M["⚪ manual trigger"]:::data --> B
+```
+
+- **Parameters** map one to one onto template parameters, each from a DAG
+  parameter or a constant. The DAG never passes runner, project, region,
+  the worker image, experiments or `fail_on` as template parameters (R99).
+  Its launch environment does pass `additionalExperiments`
+  (`use_runner_v2`, `enable_secure_boot` and the network-tag experiments). `trigger` is
+  `composer` for a manual run and `chained` when the generation DAG
+  starts it.
+- **Chaining is opt-in.** The generation DAG has a parameter
+  `run_evaluation`, false by default. With it false its task chain and
+  arguments are unchanged.
+- **The failure callback closes the open row.** The launcher writes the
+  `RUNNING` row and mints the id, so a job that dies afterwards leaves
+  only that row. The callback appends a `FAILED` row with one `INSERT …
+  SELECT` that copies the `RUNNING` row of this DAG run's evaluation,
+  matched on the launch target, the trigger and the DAG run's start time,
+  and skips any evaluation that already has a final event.
+- **Limits.** Two DAG runs overlapping on the same target can close each
+  other's row. A launch whose only target is `tables` cannot be matched,
+  so a failed job leaves its row open and the callback logs a warning. The
+  deploy workflow must substitute the evaluator version into the DAG
+  file.
+
+Unverified until a real environment: the deferrable wait, the DML, the
+callback's operator call, and how the trigger's configuration reaches the
+task. The README lists them.
+
+### 8.4 The validation prompt, agents and a GUI
+
+- **The end-to-end validation prompt** still derives fidelity by hand from
+  exported files. A step that looks up or runs the evaluation for a job
+  and folds `sdfb-eval report` into the evidence bundle is planned and is
+  not in this tree.
+- **Agents** read an evaluation through `sdfb-eval report --format json`,
+  which carries every metric row, the failing metrics with the catalogue's
+  explanations, and the run's warnings. No agent definition in
+  `.claude/agents/` uses it yet.
+- **A GUI** on another branch reads the two contracts of this package: the
+  schema files and the catalogue. It grades nothing itself and must show
+  when a run was graded with overridden thresholds. It is not part of
+  this branch.
+
+## 9. Packaging and the DSG unit
+
+The package is a standalone uv project (D1): Python 3.11, Apache Beam
+2.74.0 with the same pre-release pin the generator needs, numpy, scipy,
+scikit-learn, PyYAML and the BigQuery client. Its lock holds no pandas
+and no synthetic-data metrics library; scipy and scikit-learn double as
+test oracles (§10). CI has a separate job that installs the package from
+its own lock, checks that no generator module is importable, type-checks
+it and runs its tests.
+
+The Dataflow Solution Guides replica is built from a manifest
+([ADR 0040](../adr/0040-dsg-donation-golden-source-sync.md)). The current
+manifest ships the generator as one unit, and the evaluator is not in it:
+`packages/sdfb-evaluation/` is not copied, and the root-side parity test
+and the catalogue-renderer test are excluded because what they read stays
+here. The evaluator is meant to ship as **its own unit**, with its own
+manifest and overlay. That unit is planned and is not in this tree. The
+package was built to make it possible: its schemas, its image entrypoint
+and its relationship-model reader are inside it, and nothing in it reaches
+outside.
+
+## 10. Testing strategy
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  O["🛡️ oracles<br/>each statistic against<br/>an independent source"]:::cpu --> P["🔀 planted defects<br/>the whole pipeline on<br/>a launch with known faults"]:::beam --> C["🛡️ canaries<br/>properties that must<br/>never break"]:::cpu --> G["⚪ first GCP run<br/>what a laptop<br/>cannot prove"]:::data
+```
+
+**Oracles.** Each statistic is compared with an independent
+implementation or a closed form: scipy for KS, Wasserstein, entropy,
+Jensen–Shannon, rank correlation, association, skewness and kurtosis and
+the beta and hypergeometric laws; scikit-learn for the ROC AUC; closed
+forms and simulated null distributions for the noise floors and interval
+coverage. Mergeable accumulators are tested with
+property tests that split the same rows at random and merge in random
+trees. The mirrors of generator code are pinned by the two-sided golden
+file (D2).
+
+**Planted defects.** The acceptance test runs the composed pipeline on an
+invented three-table launch (`users`, `orders`, `order_items`) twice: once
+against a faithful twin drawn from the same generator, which must fail
+no fidelity, privacy or integrity check, and once against a twin with seven defects:
+
+| # | Planted | Must fail |
+| --- | --- | --- |
+| 1 | 1 % of `users` rows carry the content of reference records | `row.memorization_lift`, `row.exact_match_rate_nonkey` |
+| 2 | 0.5 % carry prompt-exposed records | `row.exposure_lift` |
+| 3 | `orders.amount` shifted | `column.ks`, `column.pit_w1`, `column.jsd` |
+| 4 | `order_items.cost` permuted across rows | `pair.pearson_delta` |
+| 5 | 2 % extra items whose order does not exist | `relationship.orphan_rate` |
+| 6 | `orders.status` collapsed to one value | `column.entropy_ratio`, `column.top1_share_delta` |
+| 7 | 2 % of delivery notes copied from rare reference notes | `field.substantive_copy_rate`, `field.value_memorization_lift` |
+
+The bad run must also be **specific**: it fails nothing outside the
+scopes its defects touch. Defect 1 cannot fail the holdout share (§4.7);
+that metric's fail is proved separately on a heavy copier.
+
+**Canaries.**
+
+| Canary | What it guards |
+| --- | --- |
+| No test reaches the network | A guard on Python's sockets and on credential discovery fails any non-`gcp` test that tries |
+| The label key is not in the job graph | Every transform payload of the built pipeline is unpickled and searched for the key |
+| A rerun is byte-identical | The same plan and rows give the same metric, profile and flag rows |
+| Re-scoring is exact | Every persisted row, scored again from its own fields, gives its stored status and score |
+| Every written row is schema-valid | Including `FAILED` rows built from the command's arguments alone |
+| Prism is refused | The pipeline will not be built on a runner that breaks the side-input contract |
+| The flag surface | The template metadata lists exactly the public flags of `run` |
+| Independence | No import of the generator's packages, by syntax tree and by an isolated install |
+
+Tests that need live GCP are marked `gcp` and excluded by default. None
+has been run.
+
+## 11. Acceptance criteria
+
+Each criterion can be checked against something that exists in the code:
+a test, a registry column, a command's exit code.
+
+| # | Criterion | Checked by | State |
+| --- | --- | --- | --- |
+| 1 | A faithful twin fails no fidelity, privacy or integrity metric; each planted defect fails the metrics named for it; nothing else fails | `tests/beam/test_acceptance.py` | Met on a laptop |
+| 2 | The same plan and rows give byte-identical output rows | the rerun tests | Met on a laptop |
+| 3 | The package imports no generator module and installs alone | `tests/unit/test_independence.py`, CI job `evaluation` | Met |
+| 4 | This document's catalogue tables equal the catalogue | `render_eval_catalogue.py --check` in CI | Met |
+| 5 | `sdfb-eval schemas --apply` creates the four tables and two views in a real dataset | exit code 0, tables present | Pending the first GCP run |
+| 6 | `plan --dry_run` on a real generation job resolves the launch from job labels, and every launch table has `scope_status = ok` | the printed plan, `tables[].scope_status` | Pending |
+| 7 | On an append launch, `APPENDS` or the two-state difference returns exactly the job's rows | `scope_status = ok`, never `count_mismatch` | Pending |
+| 8 | The source pin and the start snapshot are created with the evaluator's roles | no pin warning in `warnings` | Pending |
+| 9 | The reference digest matches: `tables[].reference_verified` is true | registry row | Pending |
+| 10 | The image builds, a worker boots through the dispatch entrypoint, and a template launch runs with the launcher's project and region | a Dataflow job that reaches DONE | Pending |
+| 11 | On Dataflow the `FINAL` row is recorded after the metric tables' load jobs finished | `recorded_at` of the row against the load jobs' end times in the JOBS view | Pending |
+| 12 | Predicted shuffle is within a factor of two of the job's shuffled bytes | `predicted_shuffle_gb` against the job's metrics | Pending |
+| 13 | A job killed after launch has its `RUNNING` row closed by the Composer callback | a `FAILED` final row for that `evaluation_id` | Pending |
+
+Criterion 12's factor is a first target, not a measured tolerance; it
+should be replaced by what the first runs show.
+
+## 12. Out of scope
+
+| Not built | Why |
+| --- | --- |
+| Train-on-synthetic, test-on-real utility (TSTR) | It needs a downstream task and labels per table. The detection and dependence metrics are the task-free proxy |
+| Embedding-based text quality scores such as MAUVE | They need an embedding model at evaluation time on a CPU job. Free text is measured by length, shape, character classes and copying |
+| Attack-based privacy: membership or attribute inference | These train attack models against the generator. The similarity metrics here are indicators, and a pass is not a guarantee ([Stadler, Oprisanu & Troncoso 2022][stadler2022]; [Ganev & De Cristofaro 2023][ganev2023]) |
+| Differential privacy accounting | The generator makes no differential-privacy claim, so there is no budget to account for |
+| A gate inside the generation job | Evaluation is post-hoc by decision. The generation job keeps its own blocker rules |
+| Managed dashboards, lineage or data-quality-scan services | Results stay in BigQuery tables and local or object-store files ([ADR 0001](../adr/0001-no-managed-gcp-services.md)) |
+
+## 13. Figure provenance
+
+Regenerate every figure, and print the palette check, with:
 
 ```bash
-bq mk --schema config/bq_schema/synthetic_data_quality/validation_data_history.schema.json \
-      --time_partitioning_field execution_timestamp --time_partitioning_type DAY \
-      --clustering_fields engine,run_id \
-      project:synthetic_data_quality.validation_data_history
+uv run --no-sync python3 scripts/doc/make_eval_figures.py
+uv run --no-sync python3 scripts/doc/make_eval_figures.py --only eval-fanout
 ```
 
-Adding this table (and the `--enable-evaluation`/`--validation_data_history_table`
-rows) to `DEPLOYMENT_PREREQUISITES.md`'s provisioning table is a follow-on doc
-change when this design is implemented, not part of this document's scope —
-the same deferral pattern the RAG-layer design used for `rag_chunks`
-(`docs/designs/2026-07-07-rag-layer-design.md:290-293`).
+The script needs numpy, matplotlib and PyYAML only. It imports nothing from
+the evaluator; the warn and fail thresholds drawn in the figures are read
+from `catalogue/metrics.yaml`, so no threshold is typed in the script. Two
+consecutive runs produce byte-identical files. After a change to a
+threshold in the catalogue, regenerate.
 
-## 5. Gate integration
+Palette: three series colours from the repository's asset set, with colour
+following the entity in every figure. Blue is the source and the reference
+sample R; orange is the synthetic side under test, or the reading that
+misleads; aqua is the control: the holdout H, a faithful generator, the
+corrected reading. Gray is context. The script prints the OKLab separation
+of every pair in normal vision and under simulated colour-vision
+deficiency on each run; every pair passes, and aqua's low contrast on white
+is relieved by direct labels.
 
-### New rule: `memorization.copy_ratio`
+| Figure | File | Claim it carries | Kind | Seed |
+| --- | --- | --- | --- | --- |
+| Levels | `assets/eval-levels.png` | Every metric looks at one unit of the data | CONCEPT, schematic | — |
+| Sets | `assets/eval-sets-rhe.png` | One fingerprint order gives R, E, H and H_E | CONCEPT, schematic | — |
+| Baseline | `assets/eval-baseline.png` | `metric(R, source)` is the floor a generator that read only R can reach | CONCEPT | 13 |
+| Noise floor | `assets/eval-noise-floor.png` | The same KS value is noise at 1,000 rows and an effect at a million | CONCEPT | 12 |
+| KS bracket | `assets/eval-ks-bracket.png` | KS is exact at the edges and bounded inside the bins; the union grid closes the bracket at a point mass | CONCEPT | 11 |
+| KS and W1 | `assets/eval-ks-vs-wasserstein.png` | Two failures with the same W1 can differ 5x in KS | CONCEPT | 7 |
+| Matched n | `assets/eval-matched-n-entropy.png` | Plug-in entropy grows with n; at matched n a faithful generator sits at 1 | CONCEPT | 14 |
+| Duplicates | `assets/eval-rarefied-duplicates.png` | The duplicate share grows with n; rarefied to one m a faithful generator shows no excess | CONCEPT | 15 |
+| Lift | `assets/eval-memorization-lift.png` | Only copying lifts the ratio; status reads its lower bound | CONCEPT | 16 |
+| DCR, NNDR | `assets/eval-dcr-nndr.png` | DCR flags a parked copy, NNDR a uniquely close record | CONCEPT, hand-placed | 7 |
+| Holdout share | `assets/eval-holdout-dcr.png` | A copy fraction f moves the share by f/2 | CONCEPT | 17 |
+| Detection | `assets/eval-c2st.png` | An AUC is read with its interval against 0.5 | CONCEPT | 18 |
+| Fan-out | `assets/eval-fanout.png` | An equal mean fan-out can hide a wrong shape | CONCEPT | 19 |
+| Count rule | `assets/eval-count-rule.png` | An edge is published only with 10 source records on each side | CONCEPT | 20 |
+| CPU budget | `assets/eval-cpu-budget.png` | Encoding bounds the per-row pass; the neighbour block is fixed by the sample knobs | MEASURED, laptop | — |
 
-`config/thresholds.yml` gains a new rule whose **severity itself varies by
-env** (every existing rule has a fixed severity and, at most, a per-env
-*threshold*; this is the first rule where severity is per-env, since a
-sample-based ratio genuinely warrants looser tolerance while iterating in dev
-than at prd sign-off):
+`eval-cpu-budget` is the only figure with measured numbers, and it is
+interim: laptop micro-benchmarks recorded while the package was built, not
+a committed evidence bundle, to be replaced by the first Dataflow run. The
+numbers are typed once, in the script's `MEASURED` block, with where they
+came from: one laptop core. One command reproduces the dense-pass row:
+`pytest packages/sdfb-evaluation/tests/beam/test_dense.py::test_throughput_8192_by_30_batch -s`. Diagrams are inline mermaid, in the
+repository's house classes: orange for Beam code, blue for stores, green
+for CPU work, gray for plain values.
 
-```yaml
-memorization.copy_ratio:
-  dimension: privacy
-  severity:
-    dev: MAJOR
-    uat: MAJOR
-    prd: BLOCKER
-  threshold: 0.0   # any exact duplicate of a sampled real row is a violation
-```
+## 14. References
 
-`Thresholds.rules` (`sdfb_core/validation/thresholds.py:29`) already stores the
-raw per-rule dict verbatim (`rules: dict[str, dict] = Field(default_factory=dict)`)
-— no Pydantic model change is required to hold this new rule shape. What's new
-is a small resolver, added to the same module:
+Every link below was fetched on **2026-10-05** and resolved to the work
+cited. A DOI was resolved through `doi.org` and its registered title,
+authors and year were read back; other links were fetched and their titles
+read. Exceptions are stated in the last column. In the code, sources are
+cited by author and year only; URLs live in this document and in the
+catalogue.
 
-```python
-def resolve_severity(thresholds: Thresholds, rule_id: str, *, default: str = "MINOR") -> str:
-    """Mirrors the per-env resolution already used for blocker_failure_ratio
-    (Thresholds.from_mapping, thresholds.py:33-34): severity may be a bare
-    string (fixed, like every existing rule) or a per-env dict (new, for
-    memorization.copy_ratio)."""
-    raw = thresholds.rules.get(rule_id, {}).get("severity", default)
-    return raw.get(thresholds.env, default) if isinstance(raw, dict) else raw
-```
+| Source | Used for | Fetch result |
+| --- | --- | --- |
+| [Smirnov 1948][smirnov1948], Ann. Math. Statist. | two-sample KS, §4.2, §4.3 | DOI resolves; title matches |
+| [Dvoretzky, Kiefer & Wolfowitz 1956][dkw1956], Ann. Math. Statist. | the one-sample band, §4.2 | DOI resolves; title matches |
+| [Massart 1990][massart1990], Ann. Probab. | the tight constant of the band, §4.2 | DOI resolves; title matches |
+| [Gneiting, Balabdaoui & Raftery 2007][gneiting2007], JRSS B | the probability integral transform, §4.3 | DOI resolves; title matches |
+| [Czado, Gneiting & Held 2009][czado2009], Biometrics | the mid-distribution transform, §4.3 | DOI resolves; title matches |
+| [Ramdas, García Trillos & Cuturi 2017][ramdas2017], Entropy | Wasserstein-1 as the area between CDFs, §4.3 | DOI resolves; title matches |
+| [Yurdakul & Naranjo 2020][yurdakul2020], J. Risk Model Validation | the population stability index, §4.3 | DOI resolves; title matches |
+| [Lin 1991][lin1991], IEEE Trans. Inf. Theory | Jensen–Shannon divergence, §4.3 | DOI resolves; title matches |
+| [Cohen 1988][cohen1988], 2nd ed. | effect-size thresholds, §4.3 | DOI resolves to the publisher's 2013 e-book record of the 1988 edition |
+| [Austin 2009][austin2009], Statist. Med. | the standardised mean difference threshold, §4.3 | DOI resolves; title matches |
+| [Shannon 1948][shannon1948], Bell Syst. Tech. J. | entropy, §4.5 | DOI resolves; title matches |
+| [Miller 1955][miller1955], in *Information Theory in Psychology* | the plug-in bias of entropy, §4.5 | No DOI (a book chapter). The page answered a script with HTTP 202 and no content; the record (title, author, 1955) was read through the site's API |
+| [Paninski 2003][paninski2003], Neural Comput. | entropy estimation, §4.5 | DOI resolves; title matches |
+| [Chao & Shen 2003][chaoshen2003], Environ. Ecol. Stat. | entropy with unseen values, §4.5 | DOI resolves; title matches |
+| [Good 1953][good1953], Biometrika | sample coverage, unseen mass, §4.5 | DOI resolves; title matches |
+| [Hurlbert 1971][hurlbert1971], Ecology | rarefaction, §4.5 | DOI resolves; title matches |
+| [Heck, van Belle & Simberloff 1975][heck1975], Ecology | exact rarefaction, §4.5 | DOI resolves; title matches |
+| [Chan, Golub & LeVeque 1983][chan1983], Amer. Statist. | stable, mergeable variance, §4.4 | DOI resolves; title matches |
+| [Pébay 2008][pebay2008], Sandia report | one-pass parallel co-moments, §4.4 | DOI resolves; title matches |
+| [Spearman 1904][spearman1904], Amer. J. Psychol. | rank correlation, §4.4 | DOI resolves; title matches |
+| [Fisher 1915][fisher1915], Biometrika | the z-transform floor, §4.2 | DOI resolves; title matches |
+| [Bergsma 2013][bergsma2013], J. Korean Stat. Soc. | bias-corrected Cramér's V, §4.4 | DOI resolves; title matches |
+| [Treves & Panzeri 1995][treves1995], Neural Comput. | the bias of information estimates, §4.2, §4.4 | DOI resolves; title matches |
+| [Horvitz & Thompson 1952][horvitz1952], JASA | weighting a value sample, §4.6 | DOI resolves; title matches |
+| [Woodruff 1971][woodruff1971], JASA | the variance of a ratio estimate, §4.6 | DOI resolves; title matches |
+| [Korn & Graubard 1998][korn1998], Survey Methodology 24(2) | intervals on an effective sample size, §4.5, §4.6 | The catalogue page resolves and names the article and both authors. The [PDF][korn1998pdf] resolves as a PDF; its text could not be extracted here |
+| [Wilson 1927][wilson1927], JASA | the score interval for a share, §4.2 | DOI resolves; title matches |
+| [Newcombe 1998][newcombe1998], Statist. Med. | the interval for a difference of shares, §4.2 | DOI resolves; title matches |
+| [Przyborowski & Wilenski 1940][przyborowski1940], Biometrika | the conditional test of two rates, §4.7 | DOI resolves; title matches |
+| [Clopper & Pearson 1934][clopper1934], Biometrika | the exact binomial interval, §4.7 | DOI resolves; title matches |
+| [Sweeney 2002][sweeney2002], IJUFKS | k-anonymity, §2.1, §4.9 | DOI resolves; title matches |
+| [Carlini et al. 2021][carlini2021], arXiv | extraction of training data, §4.7 | arXiv page fetched; title matches |
+| [Gower 1971][gower1971], Biometrics | the mixed-type distance, §4.7 | DOI resolves; title matches |
+| [Podani 1999][podani1999], Taxon | ordinal features in Gower's coefficient, §4.7 | DOI resolves; title matches |
+| [Platzer & Reutterer 2021][platzer2021], Front. Big Data | the holdout design, §3.5, §4.7 | DOI resolves; title matches |
+| [Giomi et al. 2023][giomi2023], arXiv | singling out, §4.7 | arXiv page fetched; title matches |
+| [Naeem et al. 2020][naeem2020], arXiv | density and coverage, §4.7 | arXiv page fetched; title matches |
+| [Cohen & Kaplan 2007][cohenkaplan2007], PODC | bottom-k samples, §4.7 | DOI resolves; title matches |
+| [Madow 1949][madow1949], Ann. Math. Statist. | systematic sampling, §4.7 | DOI resolves; title matches |
+| [Lopez-Paz & Oquab 2017][lopezpaz2017], arXiv | the classifier two-sample test, §4.7 | arXiv page fetched; title matches |
+| [DeLong, DeLong & Clarke-Pearson 1988][delong1988], Biometrics | the AUC interval, §4.2, §4.7 | DOI resolves; title matches |
+| [Sun & Xu 2014][sunxu2014], IEEE Signal Process. Lett. | the fast midrank form, §4.7 | DOI resolves; title matches |
+| [Woo et al. 2009][woo2009], J. Privacy Confid. | propensity mean squared error, §4.7 | DOI resolves; title matches |
+| [Snoke et al. 2018][snoke2018], JRSS A | its null standardisation, §4.7 | DOI resolves; title matches |
+| [Patki, Wedge & Veeramachaneni 2016][patki2016], DSAA | parent-child cardinality, §4.8 | DOI resolves; title matches |
+| [Stadler, Oprisanu & Troncoso 2022][stadler2022], arXiv | limits of similarity metrics, §1, §12 | arXiv page fetched; title matches |
+| [Ganev & De Cristofaro 2023][ganev2023], arXiv | the same, §1, §12 | arXiv page fetched; title matches |
+| [Jordon et al. 2022][jordon2022], arXiv | the fidelity, privacy and utility framing, §1.1 | arXiv page fetched; title matches |
+| [Lin, Lucas & Shmueli 2013][linlucas2013], Inf. Syst. Res. | large samples and p-values, §1 | DOI resolves; title matches |
+| [Heule, Nunkesser & Hall 2013][heule2013], EDBT | HyperLogLog++, §4.3 | DOI resolves; title matches. The [PDF][heule2013pdf] was fetched and its first page read |
+| [BigQuery: work with change history][bq-change-history] | what `APPENDS` returns, §3.2 | Fetched; the page lists the five operations and no copy job |
+| [BigQuery: `FOR SYSTEM_TIME AS OF`][bq-as-of] | one point in time per table and statement, §3.2 | Fetched; the sentence quoted is on the page |
+| [BigQuery: time travel][bq-time-travel] | the window a scope must fall in, §3.2 | Fetched; title matches |
+| [BigQuery: table snapshots][bq-snapshots], [creating them][bq-snapshots-create] | the start snapshot and its permissions, §3.2 | Both fetched; the permissions named are on the second page |
+| [BigQuery: `INFORMATION_SCHEMA.JOBS`][bq-jobs] | what a job wrote, §3.1 | Fetched; labels, job type and the required role are on the page |
+| [BigQuery: approximate aggregate functions][bq-approx] | planning statistics, §4.3 | Fetched; "a statistical estimate" is on the page |
+| [BigQuery: hash functions][bq-hash] | `FARM_FINGERPRINT`, §3.4 | Fetched; the function is on the page |
+| [Dataflow: Flex Templates][flex-templates] | the launcher, §8.2 | Fetched; title matches |
+| [apache/beam#36563][beam-36563] | Prism and side inputs, §5.4 | Fetched; the issue title matches and the issue is closed |
+| [SDMetrics documentation][sdmetrics] | the origin of several metric names, §4.3 | Fetched; title matches |
 
-And a new pure module, `sdfb_core/evaluation/gate.py` (co-located with the
-metrics code that produces its input, rather than folded into
-`validation/summary.py`'s pre-write BLOCKER gate, since this is a distinct
-post-write concern):
-
-```python
-class MemorizationThresholdExceeded(RuntimeError):  # noqa: N818 — mirrors BlockerThresholdExceeded
-    """Raised to FAIL the Dataflow job when the memorization gate trips at BLOCKER severity."""
-
-def evaluate_memorization_gate(
-    copy_ratio: float | None, thresholds: Thresholds,
-    *, rule_id: str = "memorization.copy_ratio",
-) -> None:
-    """No-ops when copy_ratio is None (§2's 'sample unavailable' case — gate
-    not evaluated, never treated as an implicit pass). Raises
-    MemorizationThresholdExceeded when copy_ratio exceeds the rule's threshold
-    AND resolve_severity(...) == 'BLOCKER' for this env. A MAJOR-severity
-    breach is recorded (identical_match_rate is already in the written row)
-    but does not fail the job — same 'MAJOR → metric only' semantics already
-    documented in the thresholds.yml header and validation-mode-a.md's
-    'Failing the job' section."""
-```
-
-Wired in `pipeline.py` as a sibling to `_BlockerGateDoFn`
-(`pipeline.py:249-259`) — a new `_MemorizationGateDoFn` inside the
-`enable_evaluation` branch, unconditional on any extra CLI flag: the
-thresholds.yml row's per-env severity *is* the toggle (BLOCKER only in `prd`),
-so no new "should this fail the job" knob is needed beyond what's already
-resolved from `--env`.
-
-### Regression tracking
-
-"Previous row per `(table, engine)`" is realized via a join through
-`validation_runs` (no duplicated `landing_table` column in
-`validation_data_history`, per §4):
-
-```sql
-SELECT h.*
-FROM `{project}.synthetic_data_quality.validation_data_history` h
-JOIN `{project}.synthetic_data_quality.validation_runs` r USING (run_id)
-WHERE r.landing_table = @landing_table
-  AND h.engine = @engine
-  AND h.execution_timestamp < @this_execution_timestamp
-ORDER BY h.execution_timestamp DESC
-LIMIT 1;
-```
-
-This is the **one new BQ read** this design introduces beyond the write
-itself — a single `LIMIT 1` lookup, executed once inside `EvaluationDoFn`
-(once per run, on the one single-worker invocation, never per-row — consistent
-with "heavy metrics must not run in row-level DoFns," since this isn't
-row-level at all). It serves two purposes: (1) it supplies the previous run's
-binned distributions (from `raw_metrics_json`) that Tier 1's PSI/JSD need to
-compute drift-between-runs (§3); (2) more broadly, it's what "track
-engine/feature evolution over time" (§1) cashes out as — any operator can run
-the same join, unfiltered by `LIMIT 1` and ordered ascending, to see
-`fidelity_overall_score`/`avg_dcr`/`nndr`/`corr_diff_frobenius` trend across
-every run for one `(landing_table, engine)` pair, as a plain `bq query`, never
-a dashboard.
-
-### Complements — does not replace — the Mode-A DLQ gate
-
-`EnforceUniqueness` (`sdfb_beam/dofns/uniqueness.py`) only ever compares
-synthetic rows **against each other** — it dedupes within one run's batch, has
-no notion of the real reference data, runs exhaustively (every row, every run,
-pre-write), and its two rule_ids (`row.duplicate`, `identity.unique`) are fixed
-BLOCKER severity regardless of env. `memorization.copy_ratio` fills the gap
-that leaves open: it compares sampled synthetic rows **against sampled real
-rows** — the one comparison Mode A structurally never makes — runs on a bounded
-sample (not exhaustive, since it's post-write and opt-in), and its severity is
-env-conditional because a sample-based ratio can have false negatives (a
-missed exact match outside the sample) that make a fixed always-BLOCKER
-posture too strict while iterating in dev.
-
-### Complements the e2e probe scripts
-
-`scripts/e2e/e2e_validation_analysis.py`'s `_cross_overlap` (line 248) is an
-offline, manually-invoked, per-column Jaccard-overlap heuristic — its own
-docstring calls it *"a memorization proxy when the live source is not queried
-here."* It exists because that script has no live BQ access in its intended
-use (analyzing exported CSVs). The evaluation branch in this design is the
-automated counterpart: it runs inside the same job that generated the data,
-against the *actual* reference sample that job pulled, using exact
-`row_digest` matching (not a proxy), and is machine-gated via thresholds.yml
-rather than eyeballed. The e2e script remains useful for ad hoc, no-BigQuery-access
-investigation; this design is what runs by default in CI/production once
-`--enable-evaluation` is on.
-
-## 6. Packaging & testability
-
-### `sdfb-core` (pure, laptop-testable — no Beam, no GCP, no torch)
-
-New package `packages/sdfb-core/src/sdfb_core/evaluation/`:
-
-| Module | Contents | Import cost |
-|---|---|---|
-| `profile.py` | `StratificationPlan`, `choose_stratification_column`, `stratum_key` | stdlib only |
-| `sampling.py` | `ReservoirAccumulator`, `sort_key`, `add_row`, `merge_accumulators`, `extract_sample`, `per_stratum_cap` | stdlib + `sdfb_core.validation.uniqueness.row_digest` |
-| `metrics_t1.py` | KS/Wasserstein/TVD/PSI/JSD/correlation-diff/MI-diff/DCR/NNDR/identical-match functions (§3 signatures) | `scipy`, `scikit-learn`, `pandas` — imported at module top (cheap, no GPU/CUDA/network — same posture as `numpy` already being an unconditional top-level import in `sdfb-core` today) |
-| `metrics_t2.py` | `sdmetrics_quality_score`, `sdmetrics_diagnostic` | `sdmetrics` — module-top import |
-| `metrics_t3.py` | `syntheval_privacy`, `evidently_drift_report` | `syntheval`/`evidently` — **deferred imports inside each function body**, `try/except ImportError` raising a clear "install `sdfb-beam[eval-extra]`" message |
-| `gate.py` | `MemorizationThresholdExceeded`, `evaluate_memorization_gate` | stdlib only |
-
-**Caveat — audit before implementing.** Before landing `sdmetrics` as a base
-dependency, audit its transitive dependency tree for the version pinned here
-(`>=0.16.0`): recent `sdmetrics` releases can pull in `torch` transitively,
-which would violate `sdfb-core`'s "no torch" rule (CLAUDE.md package map) the
-same way this whole paragraph argues the other three libraries don't. If the
-audited version does pull `torch`, move `sdmetrics` (and `metrics_t2.py`)
-behind the `[eval-extra]` tier alongside Tier 3 instead of base — do not land
-it as a base dependency in that case.
-
-`sdfb-core/pyproject.toml` gains four new base dependencies:
-`scipy>=1.11.0`, `scikit-learn>=1.4.0`, `sdmetrics>=0.16.0`, `pandas>=2.2.0`.
-This is a real (if narrow) widening of `sdfb-core`'s footprint — CLAUDE.md's
-package map describes `sdfb-core` as "no Beam, no GCP, no torch"; none of
-these four libraries are Beam, GCP, or torch, so the constraint's actual
-intent (keep `sdfb-core` importable and unit-testable on a laptop with no
-cloud creds, no GPU) is preserved. `pandas` is the one library here that
-`sdfb-core` didn't previously depend on at all (it's an existing `sdfb-beam`
-dependency, `sdfb-beam/pyproject.toml:19`); adding it to `sdfb-core` is
-required because the evaluation module needs DataFrames and must itself stay
-Beam-free. Tier 1 + Tier 2 land as base (non-optional) dependencies —
-deliberately, since the locked decision makes them "always-on": `uv sync
---group dev` alone (CLAUDE.md's documented laptop recipe) is sufficient to
-unit-test every Tier 1/2 function against fixture DataFrames, no extra flag
-needed.
-
-`sdfb-beam/pyproject.toml` gains one new optional-dependency group, following
-the exact precedent already set by `gpu`/`embedding`/`library` (extras
-declared on `sdfb-beam` even though the importing code lives in `sdfb-core` —
-`sdfb-beam/pyproject.toml:27-55`):
-
-```toml
-# Tier-3 evaluation extras — SynthEval + Evidently. Off by default; the
-# functions that import these are deferred-import (sdfb_core/evaluation/metrics_t3.py)
-# so their absence never breaks a Tier 1/2 evaluation run.
-eval-extra = [
-    "syntheval>=1.5.0",
-    "evidently>=0.4.0",
-]
-```
-
-`uv sync --group dev --package sdfb-beam --extra eval-extra` opts into Tier 3
-on request; it is never required for Tier 1/2 or for the default `pytest`
-baseline.
-
-### `sdfb-beam` (Beam wiring only)
-
-New module `packages/sdfb-beam/src/sdfb_beam/dofns/evaluation.py`:
-`StratifiedReservoirFn` (a thin `beam.CombineFn` wrapping
-`sdfb_core.evaluation.sampling`'s pure functions) and `EvaluationDoFn` (a
-`beam.DoFn` whose `process()` calls into `sdfb_core.evaluation.metrics_t1`/
-`metrics_t2`/`gate`, and — only when the Tier-3 extra is importable —
-`metrics_t3`). This is the **only** place any of Tier 1–3's libraries are
-imported at Beam-graph-construction or worker-runtime; `pipeline.py` itself
-imports only `_build_feature_flag_tags` and the `EvaluationDoFn`/
-`StratifiedReservoirFn` classes, never `scipy`/`sdmetrics`/etc. directly —
-matching how `PanderaValidateBatchDoFn`/`ValidateRecordDoFn` are the only
-importers of `pandera` today.
-
-### Tests
-
-New `packages/sdfb-tests/tests/unit/evaluation/` (mirrors the existing
-`tests/unit/dofns/`, `tests/unit/engines/` layout):
-
-- `test_profile.py`, `test_sampling.py`, `test_metrics_t1.py`,
-  `test_metrics_t2.py`, `test_gate.py` — small, hand-built fixture
-  DataFrames/row-lists (≤ 20 rows is enough to exercise every formula), no
-  Beam required. `test_sampling.py` specifically asserts (a) determinism —
-  same `run_id` + same rows fed twice ⇒ identical sample, and (b) cap
-  enforcement — output never exceeds `per_stratum_cap`/50k regardless of
-  input size — by calling `create_accumulator`/`add_row`/`merge_accumulators`/
-  `extract_sample` directly as plain functions, the same unit-testing
-  approach `MergeProfilesFn`'s commutativity requirement already implies for
-  the whylogs profile merge.
-- `test_metrics_t3.py` uses `pytest.importorskip("syntheval")` /
-  `pytest.importorskip("evidently")` so it skips cleanly on the laptop
-  (`eval-extra` not installed) rather than needing a new pytest marker wired
-  into CLAUDE.md's documented `pytest -m "not gpu and not gcp"` baseline —
-  deliberately minimizing this design's footprint on the existing verify
-  recipe.
-- Beam-side tests (`tests/unit/dofns/test_evaluation.py`) exercise
-  `StratifiedReservoirFn`/`EvaluationDoFn` via `TestPipeline`/`DirectRunner`
-  with a `FakeModelClient`-style small fixture, same pattern as the existing
-  DoFn test suite.
-
-## 7. Out of scope / future
-
-- **TSTR** (§3): target-column selection heuristic, train/test split
-  convention, LightGBM baseline management. `tstr_f1_delta` is reserved
-  (`NULLABLE`) in §4's DDL so landing it later needs no migration.
-- **Multi-table fidelity** (FK-aware joint distributions, cross-table
-  correlation): out of scope per CLAUDE.md's single-table-only M1/M2-so-far
-  constraint; `validation_data_history` is single-table-scoped exactly like
-  `validation_runs`.
-- **Dashboards**: explicitly not proposed. Any human-facing view of
-  `validation_data_history` is a `bq query` (§5's regression-tracking query)
-  or a GCS HTML artifact (Tier 3 Evidently) — never Looker, Dataplex, or any
-  managed dashboarding service.
-- Also flagged, not required for this design to be complete: a `--eval_tier`
-  CLI knob to gate Tier 3 execution behind an explicit request rather than
-  only extra-availability; a cheaper `--eval_privacy_only` fast-path (skip
-  Tier 1 marginal stats, run only DCR/NNDR/identical-match) for repeated
-  privacy-only checks; and `engine_version` migration tooling if that
-  attribute's semantics change. Natural next increments, not blockers here.
-
-## Figure provenance
-
-Regenerate: `uv run --no-sync python3 scripts/doc/make_eval_figures.py` (prints
-OKLab palette separation on every run). Concept figures: seeded,
-deterministic, parameters in the script's `CONCEPT` block; no measured run
-numbers (this design is not implemented — there are no runs to measure).
-
-| Figure | File | Claim |
-|---|---|---|
-| 1 | `assets/eval-ks-vs-wasserstein.png` | same W₁, 5× different KS — the two statistics see different failures |
-| 2 | `assets/eval-dcr-nndr.png` | DCR catches the parked copy; NNDR catches the unambiguous neighbor |
-| inline | mermaid (house classes) | evaluation branch placement; deterministic stratified reservoir |
-
-External references:
-[`scipy.stats.ks_2samp`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ks_2samp.html) ·
-[`scipy.stats.wasserstein_distance`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wasserstein_distance.html) ·
-[Gower 1971](https://doi.org/10.2307/2528823) ·
-[Giomi et al. 2022 (anonymeter)](https://arxiv.org/abs/2211.10459) ·
-[Carlini et al. 2021](https://arxiv.org/abs/2012.07805) ·
-[SDMetrics QualityReport](https://docs.sdv.dev/sdmetrics/reports/quality-report) ·
-[SDMetrics KSComplement](https://docs.sdv.dev/sdmetrics/metrics/quality-metrics/kscomplement) ·
-[Evidently](https://docs.evidentlyai.com/) —
-retrieval date for all URLs: 2026-08-05.
+[smirnov1948]: https://doi.org/10.1214/aoms/1177730256
+[dkw1956]: https://doi.org/10.1214/aoms/1177728174
+[massart1990]: https://doi.org/10.1214/aop/1176990746
+[gneiting2007]: https://doi.org/10.1111/j.1467-9868.2007.00587.x
+[czado2009]: https://doi.org/10.1111/j.1541-0420.2009.01191.x
+[ramdas2017]: https://doi.org/10.3390/e19020047
+[yurdakul2020]: https://doi.org/10.21314/JRMV.2020.227
+[lin1991]: https://doi.org/10.1109/18.61115
+[cohen1988]: https://doi.org/10.4324/9780203771587
+[austin2009]: https://doi.org/10.1002/sim.3697
+[shannon1948]: https://doi.org/10.1002/j.1538-7305.1948.tb01338.x
+[miller1955]: https://www.semanticscholar.org/paper/922ef4c778a7145da54b0de3e8ef5240a8584cd7
+[paninski2003]: https://doi.org/10.1162/089976603321780272
+[chaoshen2003]: https://doi.org/10.1023/A:1026096204727
+[good1953]: https://doi.org/10.1093/biomet/40.3-4.237
+[hurlbert1971]: https://doi.org/10.2307/1934145
+[heck1975]: https://doi.org/10.2307/1934716
+[chan1983]: https://doi.org/10.1080/00031305.1983.10483115
+[pebay2008]: https://doi.org/10.2172/1028931
+[spearman1904]: https://doi.org/10.2307/1412159
+[fisher1915]: https://doi.org/10.2307/2331838
+[bergsma2013]: https://doi.org/10.1016/j.jkss.2012.10.002
+[treves1995]: https://doi.org/10.1162/neco.1995.7.2.399
+[horvitz1952]: https://doi.org/10.1080/01621459.1952.10483446
+[woodruff1971]: https://doi.org/10.1080/01621459.1971.10482279
+[korn1998]: https://www150.statcan.gc.ca/n1/en/catalogue/12-001-X19980024356
+[korn1998pdf]: https://www150.statcan.gc.ca/n1/pub/12-001-x/1998002/article/4356-eng.pdf
+[wilson1927]: https://doi.org/10.1080/01621459.1927.10502953
+[newcombe1998]: <https://doi.org/10.1002/(SICI)1097-0258(19980430)17:8%3C873::AID-SIM779%3E3.0.CO;2-I>
+[przyborowski1940]: https://doi.org/10.1093/biomet/31.3-4.313
+[clopper1934]: https://doi.org/10.1093/biomet/26.4.404
+[sweeney2002]: https://doi.org/10.1142/S0218488502001648
+[carlini2021]: https://arxiv.org/abs/2012.07805
+[gower1971]: https://doi.org/10.2307/2528823
+[podani1999]: https://doi.org/10.2307/1224438
+[platzer2021]: https://doi.org/10.3389/fdata.2021.679939
+[giomi2023]: https://arxiv.org/abs/2211.10459
+[naeem2020]: https://arxiv.org/abs/2002.09797
+[cohenkaplan2007]: https://doi.org/10.1145/1281100.1281133
+[madow1949]: https://doi.org/10.1214/aoms/1177729988
+[lopezpaz2017]: https://arxiv.org/abs/1610.06545
+[delong1988]: https://doi.org/10.2307/2531595
+[sunxu2014]: https://doi.org/10.1109/LSP.2014.2337313
+[woo2009]: https://doi.org/10.29012/jpc.v1i1.568
+[snoke2018]: https://doi.org/10.1111/rssa.12358
+[patki2016]: https://doi.org/10.1109/DSAA.2016.49
+[stadler2022]: https://arxiv.org/abs/2011.07018
+[ganev2023]: https://arxiv.org/abs/2312.05114
+[jordon2022]: https://arxiv.org/abs/2205.03257
+[linlucas2013]: https://doi.org/10.1287/isre.2013.0480
+[heule2013]: https://doi.org/10.1145/2452376.2452456
+[heule2013pdf]: https://research.google.com/pubs/archive/40671.pdf
+[bq-change-history]: https://docs.cloud.google.com/bigquery/docs/change-history
+[bq-as-of]: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#for_system_time_as_of
+[bq-time-travel]: https://docs.cloud.google.com/bigquery/docs/time-travel
+[bq-snapshots]: https://docs.cloud.google.com/bigquery/docs/table-snapshots-intro
+[bq-snapshots-create]: https://docs.cloud.google.com/bigquery/docs/table-snapshots-create
+[bq-jobs]: https://docs.cloud.google.com/bigquery/docs/information-schema-jobs
+[bq-approx]: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions
+[bq-hash]: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions
+[flex-templates]: https://docs.cloud.google.com/dataflow/docs/guides/templates/using-flex-templates
+[beam-36563]: https://github.com/apache/beam/issues/36563
+[sdmetrics]: https://docs.sdv.dev/sdmetrics
