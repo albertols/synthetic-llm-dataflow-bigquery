@@ -31,15 +31,30 @@ The registry is append-only events (D7):
     ───────────────────────  ─────────────────────────────────────────────
     SKIPPED                  no launch table can be evaluated (the plan's
                              `skip_reason`; `registry_seed`'s FINAL row)
+    FAILED                   the driver caught an exception (`failed_row`:
+                             no counts, no scores); or the pipeline ran
+                             but could evaluate NONE of the launch tables
+                             the plan meant it to (each failed on the
+                             driver or on a worker): the FINAL row keeps
+                             its counts — every row not_evaluated — and
+                             names each table's reason in `warnings`
     PARTIAL                  a launch table was not evaluated (skipped at
                              planning, unreadable or failing in the
-                             pipeline), a scope count mismatch, or a
-                             reference panel absent or unverified (its
-                             privacy block not evaluated)
+                             pipeline) while another was, a scope count
+                             mismatch, or a reference panel absent or
+                             unverified (its privacy block not evaluated)
     SUCCEEDED_WITH_WARNINGS  otherwise, with warnings (contaminated,
                              expired or unknown scopes, fallbacks, …)
     SUCCEEDED                otherwise
-    FAILED                   the driver caught an exception
+
+PARTIAL means a launch table or a whole metric block (the privacy panel)
+was not evaluated for a plan/driver-level reason: the plan skipped the
+table or has no verified panel for it, the driver could not set the
+table up, or the pipeline's own encode step failed its rows (the whole
+table then, by `guarded`). Transform-internal not_evaluated rows — a
+table or metric that Membership, Privacy or Relational could not compute
+and reported itself, as `not_evaluated` rows with the reason — show in
+the `metrics_not_evaluated` count only and do not change the status.
 
 A status describes the RUN, never the data: a FAIL metric leaves it
 SUCCEEDED (the counts and scores carry the verdict). Every row records
@@ -69,24 +84,63 @@ Metric rows the transforms do not own:
                                 Ruling R11); `headline_counts` leaves them
                                 out (R43)
 
-Determinism. The same plan and rows give byte-identical metric and
-profile rows. Integer counts merge exactly, but Moments and co-moments
-merge in floating point in the order the runner chooses (bundles,
-`BatchElements`' timing-sized batches, hot-key fan-out), so a rerun
-differs in the last ulps: up to about 1e-11 relative where a small delta
-cancels two near-equal correlations (measured on the acceptance run).
-Every float of a metric row and a profile payload is therefore written
-at `STABLE_DIGITS` = 9 significant digits and never finer than
-`STABLE_FLOOR` = 1e-10 absolute (every catalogue threshold is 1e-5 or
-more) — the census's rule (R21) applied to every row. A value whose
-merge noise straddles a rounding boundary can still differ, with a
-probability of about the noise over the step (1e-6 relative noise … 1e-4
-for the micro-epoch means), not the ulp noise of every value.
+Determinism, and what a row is graded on (Ruling R89). The same plan
+and rows give byte-identical metric and profile rows. Integer counts
+merge exactly, but Moments and co-moments merge in floating point in the
+order the runner chooses (bundles, `BatchElements`' timing-sized batches,
+hot-key fan-out), so a rerun differs in the last ulps: up to about 1e-11
+relative where a small delta cancels two near-equal correlations
+(measured on the acceptance run). What is written is therefore rounded —
+and rounded FIRST, so that nothing is graded on a value the row does not
+hold:
 
-`checked_ci` flags a producer's reversed interval (ci_low > ci_high) in
-`detail.ci_invalid` instead of letting the D5 coverage test silently read
-it as "not noise" (Task 14 review). A relationship row passes its edge's
-`detail["enforced"]` to `to_metric_row` (Ruling R42).
+    MetricValue ─► stable_metric ─► checked_ci ─► scoring.to_metric_row
+                   (round what is    (a reversed    (status and score read
+                    persisted)        interval is    the rounded fields;
+                                      no interval)   nothing rounds after)
+
+    stable_metric rounds   value, source_value, synthetic_value,
+                           baseline_value, noise_floor, ci_low, ci_high,
+                           sample_rate and every float of `detail`
+                           (`detail.ceiling` gates table.pmse_ratio)
+    to                     `STABLE_DIGITS` = 9 significant digits
+    and never finer than   `STABLE_FLOOR` = 1e-10 absolute (every
+                           catalogue threshold is 1e-5 or more), so the
+                           merge noise around an exact 0 is 0 — EXCEPT an
+                           integrity-family metric and a count-derived
+                           rate (value_kind share or count), which keep
+                           no absolute floor: a count over a count is
+                           exact and has no merge noise to hide, and one
+                           orphan in 3e10 rows must persist as > 0 beside
+                           its FAIL
+
+A persisted row scored again from its own fields gives the same status
+and score (the acceptance re-scores every row it writes); `score` is the
+score function of the rounded fields, written as computed. The registry's
+`overall_score`, `{family}_score` and `tables[].table_score` are rounded
+as their roll-up rows are (`model.*`, `table.overall_score`), so the two
+agree. A value whose merge noise straddles a rounding boundary can still
+differ between reruns — and with it, now consistently, its status when
+the boundary is a threshold — with a probability of about the noise over
+the step (1e-6 relative noise … 1e-4 for the micro-epoch means), not the
+ulp noise of every value.
+
+Profile payloads (`stable_profile`) round only what the moments make:
+`moments.{mean, std, skewness, kurtosis_excess}` and `corr_matrix.values`.
+Histogram edges are the plan's grid, quantiles and bounds are read off
+exact counts on that grid, counts and count ratios are exact: they
+persist as computed, so edges stay strictly increasing at any offset
+(epoch seconds, ids near 1e12) and still hash to the row's
+`edges_digest`.
+
+`checked_ci` treats a producer's reversed interval (ci_low > ci_high, a
+producer defect) as no interval at all before scoring: the bounds are
+dropped (reported in `detail.ci_reported`) and `detail.ci_invalid` says
+why, so the D5 coverage test answers `noise_check: unavailable` instead
+of reading the reversed bounds, and a metric that gates on its bound is
+`not_evaluated` instead of gated on a bound that is wrong (Task 14
+review). A relationship row passes its edge's `detail["enforced"]` to
+`to_metric_row` (Ruling R42).
 
 source_stats_drift (Ruling R62). The driver reads the generator's rows
 for (source table, reference digest, tier) once, behind an injectable
@@ -117,6 +171,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import math
 from collections import defaultdict
@@ -142,7 +197,7 @@ from sdfb_evaluation.scoring import (
     is_aggregate,
     to_metric_row,
 )
-from sdfb_evaluation.types import ColumnKind, Method, MetricValue
+from sdfb_evaluation.types import ColumnKind, Method, MetricValue, ProfileValue
 
 if TYPE_CHECKING:
   from sdfb_evaluation.context.plan import EvaluationPlan, TablePlan
@@ -174,6 +229,8 @@ __all__ = [
     "skipped_row",
     "source_stats_sql",
     "stable_floats",
+    "stable_metric",
+    "stable_profile",
     "summarize_rows",
 ]
 
@@ -195,6 +252,26 @@ _ROW_LEVELS = ("row", "table")
 STABLE_DIGITS = 9
 STABLE_FLOOR = 1e-10
 _FLOOR_PLACES = 10  # decimal places of STABLE_FLOOR
+# Exact by construction, so never floored: the integrity family and the
+# count-derived rates (a count over a count, or a count).
+_EXACT_FAMILY = "integrity"
+_EXACT_KINDS = frozenset({"share", "count"})
+# What `stable_metric` rounds of a MetricValue besides its detail: every
+# float `to_metric_row` grades on or writes.
+_MEASURED = ("value", "source_value", "synthetic_value", "baseline_value",
+             "noise_floor", "ci_low", "ci_high", "sample_rate")
+# The payload values a profile computes from floating-point (co-)moments.
+_MOMENT_FIELDS: Mapping[str, tuple[str, ...]] = {
+    "moments": ("mean", "std", "skewness", "kurtosis_excess"),
+    "corr_matrix": ("values",),
+}
+_MODEL_OVERALL, _TABLE_OVERALL = "model.overall_score", "table.overall_score"
+# What listing a malformed table plan's columns and pairs can raise.
+_PLAN_ERRORS = (IndexError, KeyError, TypeError, ValueError)
+_WITHHELD_CHARS = 300
+# The detail a failed table's rewritten row keeps: the edge's enforcement
+# (R42) and a failed table's note on the rows it could not list.
+_GUARD_KEEPS = ("enforced", "rows_withheld")
 _CELL_LEVELS = ("field", "column")
 _TABLE_ROLLUPS = tuple(f"table.{family}_score" for family in FAMILIES)
 _MODEL_ROLLUPS = tuple(f"model.{family}_score" for family in FAMILIES)
@@ -289,6 +366,9 @@ def final_event(
   """The FINAL event from a RUNNING row (`running_row`): the model's
   family scores, the headline counts (R37), each table's `table_score`
   (`per_table[name]["table_score"]`) and any warnings the run added.
+  Every score is rounded as its roll-up row is (`model.overall_score`,
+  `model.{family}_score`, `table.overall_score`), so the registry and
+  `evaluation_metrics` hold the same number.
 
   Raises:
     ValueError: a status that is not a FINAL status.
@@ -303,19 +383,21 @@ def final_event(
       event="FINAL",
       status=status,
       status_reason=status_reason,
-      overall_score=scores.get(OVERALL),
+      overall_score=_stable_as(_MODEL_OVERALL, scores.get(OVERALL)),
       metrics_total=counts.get("total", 0),
       metrics_pass=counts.get("pass", 0),
       metrics_warn=counts.get("warn", 0),
       metrics_fail=counts.get("fail", 0),
       metrics_not_evaluated=counts.get("not_evaluated", 0),
       metrics_info=counts.get("info", 0))
-  for family in FAMILIES:
-    row[f"{family}_score"] = scores.get(family)
+  for family, metric_id in zip(FAMILIES, _MODEL_ROLLUPS, strict=True):
+    row[f"{family}_score"] = _stable_as(metric_id, scores.get(family))
   row["tables"] = [{
       **entry, "table_score":
-          per_table.get(str(entry["name"]), {}).get("table_score",
-                                                    entry["table_score"])
+          _stable_as(
+              _TABLE_OVERALL,
+              per_table.get(str(entry["name"]), {}).get("table_score",
+                                                        entry["table_score"]))
   } for entry in seed["tables"]]
   row["warnings"] = list(dict.fromkeys([*seed["warnings"], *warnings]))
   return _ordered(row)
@@ -394,8 +476,15 @@ def plan_problems(plan: EvaluationPlan) -> list[str]:
 
 
 def evaluation_status(problems: Sequence[str],
-                      warnings: Sequence[str]) -> tuple[str, str | None]:
-  """(status, status_reason) of a run that finished (module docstring)."""
+                      warnings: Sequence[str],
+                      *,
+                      none_evaluated: bool = False) -> tuple[str, str | None]:
+  """(status, status_reason) of a run that finished (module docstring).
+  `none_evaluated`: the pipeline could evaluate none of the launch tables
+  the plan meant it to — the run FAILED, `problems` saying why."""
+  if none_evaluated:
+    reason = "no launch table could be evaluated: " + "; ".join(problems)
+    return "FAILED", reason[:_REASON_CHARS]
   if problems:
     return "PARTIAL", "; ".join(problems)[:_REASON_CHARS]
   if warnings:
@@ -426,67 +515,125 @@ class RowContext:
         digests={t.name: t.encoding_plan_digest for t in plan.tables})
 
 
-def _stable(x: float) -> float:
-  """`x` to `STABLE_DIGITS` significant digits, never finer than
-  `STABLE_FLOOR` (module docstring, Determinism)."""
+def _stable(x: float, *, floor: bool = True) -> float:
+  """`x` to `STABLE_DIGITS` significant digits and — with `floor` —
+  never finer than `STABLE_FLOOR` (module docstring, Determinism)."""
   if not math.isfinite(x):
     return x
   if x == 0:
     return 0.0  # -0.0 too: a sign of noise must not reach the row
   places = STABLE_DIGITS - 1 - math.floor(math.log10(abs(x)))
-  value = float(round(x, min(places, _FLOOR_PLACES)))
+  value = float(round(x, min(places, _FLOOR_PLACES) if floor else places))
   return value if value != 0 else 0.0
 
 
-def stable_floats(obj: Any) -> Any:
-  """`obj` with every float `_stable`, recursively (dicts and lists)."""
-  if isinstance(obj, float):
-    return _stable(obj)
+def stable_floats(obj: Any, *, floor: bool = True) -> Any:
+  """`obj` with every float `_stable`, recursively (dicts, lists and
+  tuples; numpy floats and arrays as Python values). `floor=False` keeps
+  no absolute floor (an exact, count-derived value)."""
+  if isinstance(obj, (float, np.floating)):
+    return _stable(float(obj), floor=floor)
+  if isinstance(obj, np.ndarray):
+    return stable_floats(obj.tolist(), floor=floor)
   if isinstance(obj, Mapping):
-    return {key: stable_floats(value) for key, value in obj.items()}
+    return {key: stable_floats(value, floor=floor) for key, value in obj.items()}
   if isinstance(obj, (list, tuple)):
-    return [stable_floats(item) for item in obj]
+    return [stable_floats(item, floor=floor) for item in obj]
   return obj
 
 
+@functools.cache
+def _exact_ids() -> frozenset[str]:
+  """The catalogue ids whose values are exact by construction (the
+  integrity family, the count-derived rates): rounded with no floor."""
+  return frozenset(
+      metric.id
+      for metric in load_catalogue().metrics
+      if metric.family == _EXACT_FAMILY or metric.value_kind in _EXACT_KINDS)
+
+
+def _stable_as(metric_id: str, value: Any) -> float | None:
+  """`value` as a `metric_id` row persists it (None stays None)."""
+  if value is None:
+    return None
+  return _stable(float(value), floor=metric_id not in _exact_ids())
+
+
+def stable_metric(mv: MetricValue) -> MetricValue:
+  """`mv` holding exactly what its row persists: every measured float
+  and every float of its detail rounded (module docstring) BEFORE it is
+  scored, so status and score are graded on the persisted values. An
+  integrity-family metric and a count-derived rate keep no absolute
+  floor: a nonzero one never rounds to 0."""
+  floor = mv.metric_id not in _exact_ids()
+  rounded: dict[str, Any] = {
+      name: _stable(float(value), floor=floor)
+      for name in _MEASURED
+      if (value := getattr(mv, name)) is not None
+  }
+  rounded["detail"] = stable_floats(mv.detail, floor=floor)
+  return dataclasses.replace(mv, **rounded)
+
+
+def stable_profile(pv: ProfileValue) -> ProfileValue:
+  """`pv` with its moment-derived payload values rounded
+  (`_MOMENT_FIELDS`: the only ones merge order can move). Everything
+  else — edges, quantiles, bounds, counts, count ratios — persists as
+  computed, so edges stay strictly increasing and match `edges_digest`."""
+  rounded = {
+      name: stable_floats(pv.payload[name])
+      for name in _MOMENT_FIELDS.get(pv.profile_kind, ())
+      if name in pv.payload
+  }
+  if not rounded:
+    return pv
+  return dataclasses.replace(pv, payload={**pv.payload, **rounded})
+
+
 def metric_row(mv: MetricValue, context: RowContext) -> dict[str, Any]:
-  """`scoring.to_metric_row` with the run's ids and the table's landing
-  and source, its floats run-stable (`stable_floats`); a relationship row
-  passes its edge's `enforced` (R42)."""
+  """The `evaluation_metrics` row of `mv`: rounded to what is persisted
+  (`stable_metric`), a reversed interval dropped (`checked_ci`), THEN
+  scored by `scoring.to_metric_row` with the run's ids and the table's
+  landing and source — so the row's status and score are the ones its own
+  fields give. A relationship row passes its edge's `enforced` (R42)."""
   landing, source = context.tables.get(mv.table, (None, None))
-  enforced = mv.detail.get("enforced", True)
-  row: dict[str, Any] = stable_floats(
-      to_metric_row(
-          mv,
-          evaluation_id=context.evaluation_id,
-          evaluated_at=context.evaluated_at,
-          landing_table=landing,
-          source_table=source,
-          enforced=enforced if isinstance(enforced, bool) else True))
-  return row
+  persisted = checked_ci(stable_metric(mv))
+  enforced = persisted.detail.get("enforced", True)
+  return to_metric_row(
+      persisted,
+      evaluation_id=context.evaluation_id,
+      evaluated_at=context.evaluated_at,
+      landing_table=landing,
+      source_table=source,
+      enforced=enforced if isinstance(enforced, bool) else True)
 
 
 def checked_ci(mv: MetricValue) -> MetricValue:
-  """`mv`, its detail flagging a reversed interval (both bounds finite,
-  ci_low > ci_high): a producer defect the D5 coverage test would
-  otherwise read as "not noise"."""
+  """`mv`, or — its interval reversed (both bounds finite, ci_low >
+  ci_high: a producer defect) — `mv` with no interval: the bounds are
+  dropped, reported in `detail.ci_reported`, and `detail.ci_invalid`
+  says why. Scoring then treats the row as one without an interval (the
+  noise check is unavailable; a metric gating on its bound is
+  not_evaluated) instead of reading bounds that are wrong."""
   low, high = mv.ci_low, mv.ci_high
   if (low is None or high is None or not math.isfinite(low) or
       not math.isfinite(high) or low <= high):
     return mv
   return dataclasses.replace(
       mv,
+      ci_low=None,
+      ci_high=None,
       detail={
-          **mv.detail, "ci_invalid":
-              ("reversed interval (ci_low > ci_high): a producer defect; "
-               "the noise check does not trust it")
+          **mv.detail,
+          "ci_invalid": ("reversed interval (ci_low > ci_high): a producer "
+                         "defect; scored as a row without an interval"),
+          "ci_reported": [low, high],
       })
 
 
 def _not_evaluated(mv: MetricValue, reason: str) -> MetricValue:
   detail: dict[str, Any] = {"reason": reason}
-  if "enforced" in mv.detail:
-    detail["enforced"] = mv.detail["enforced"]
+  detail.update((k, mv.detail[k]) for k in _GUARD_KEEPS if k in mv.detail)
   return MetricValue(
       metric_id=mv.metric_id,
       table=mv.table,
@@ -502,27 +649,35 @@ def _not_evaluated(mv: MetricValue, reason: str) -> MetricValue:
 def guarded(mv: MetricValue, failures: Mapping[str, str]) -> MetricValue:
   """`mv`, or — its table failed in the pipeline — the same metric and
   scope `not_evaluated` with the failure: rows computed from part of a
-  table's batches are never published."""
+  table's batches are never published. The rewritten row keeps its
+  edge's `enforced` and a `rows_withheld` note (`_GUARD_KEEPS`)."""
   reason = failures.get(mv.table)
   if reason is None:
     return mv
   return _not_evaluated(mv, reason)
 
 
-def failed_table_metrics(table: TablePlan, reason: str) -> list[MetricValue]:
-  """A table that failed on the driver (unreadable, unplannable): every
-  catalogue id the transforms own and `column.source_stats_drift`, per
-  applicable column (by kind) or planned pair, or once for a row/table
-  id, `not_evaluated` with `reason`. Its edges' rows come from the
-  relational pass and its row-count row from the plan, like any
-  table's."""
+def _failed_rows(table: TablePlan, reason: str,
+                 withheld: str | None) -> list[MetricValue]:
+  """`failed_table_metrics`' rows; with `withheld` only the row- and
+  table-level ones, each carrying it in `detail.rows_withheld`."""
   out: list[MetricValue] = []
   columns = table.columns
   for metric in load_catalogue().metrics:
     if metric.id not in _TRANSFORM_IDS and metric.id != _DRIFT_ID:
       continue
     scope: dict[str, Any] = {"encoding_plan_digest": table.encoding_plan_digest}
-    if metric.level in _CELL_LEVELS:
+    if metric.level in _ROW_LEVELS:
+      row = MetricValue.not_evaluated(metric.id, table.name, reason, **scope)
+      if withheld is not None:
+        row = dataclasses.replace(
+            row, detail={
+                **row.detail, "rows_withheld": withheld
+            })
+      out.append(row)
+    elif withheld is not None:
+      continue
+    elif metric.level in _CELL_LEVELS:
       out.extend(
           MetricValue.not_evaluated(
               metric.id,
@@ -543,10 +698,29 @@ def failed_table_metrics(table: TablePlan, reason: str) -> list[MetricValue]:
           for i, j in table.pairs
           if str(columns[i].kind) in metric.kinds and
           str(columns[j].kind) in metric.kinds)
-    elif metric.level in _ROW_LEVELS:
-      out.append(
-          MetricValue.not_evaluated(metric.id, table.name, reason, **scope))
   return out
+
+
+def failed_table_metrics(table: TablePlan, reason: str) -> list[MetricValue]:
+  """A table that failed on the driver (unreadable, unplannable): every
+  catalogue id the transforms own and `column.source_stats_drift`, per
+  applicable column (by kind) or planned pair, or once for a row/table
+  id, `not_evaluated` with `reason`. Its edges' rows come from the
+  relational pass and its row-count row from the plan, like any
+  table's.
+
+  Never raises on a plan too malformed to list its columns or pairs (a
+  pair index past the columns — the kind of plan that failed the table
+  in the first place): the row- and table-level rows are returned alone,
+  each saying in `detail.rows_withheld` that the column and pair rows
+  could not be listed and why."""
+  try:
+    return _failed_rows(table, reason, None)
+  except _PLAN_ERRORS as exc:
+    withheld = (
+        "the column and pair rows of this table could not be listed "
+        f"from its plan ({type(exc).__name__}: {exc})")[:_WITHHELD_CHARS]
+    return _failed_rows(table, reason, withheld)
 
 
 def row_count_metric(table: TablePlan) -> MetricValue:
@@ -672,7 +846,7 @@ def aggregate_metrics(summary: RowSummary,
       out.append(
           _rollup(metric_id, table, scores[family], digest,
                   f"no scored {family} metric", badge))
-    overall = "model.overall_score" if model else "table.overall_score"
+    overall = _MODEL_OVERALL if model else _TABLE_OVERALL
     out.append(
         _rollup(overall, table, scores[OVERALL], digest,
                 "no family score to average"))
@@ -689,28 +863,38 @@ def aggregate_metrics(summary: RowSummary,
 @dataclass(frozen=True)
 class RegistryContext:
   """What the pipeline's FINAL step needs (slim, pickled): the RUNNING
-  row it completes, the PARTIAL conditions and warnings the plan knows."""
+  row it completes, the PARTIAL conditions and warnings the plan knows,
+  and the launch tables the plan means the pipeline to evaluate."""
   seed: Mapping[str, Any]
   problems: tuple[str, ...]
   warnings: tuple[str, ...]
+  evaluated: tuple[str, ...] = ()
 
   @classmethod
   def from_plan(cls, plan: EvaluationPlan) -> RegistryContext:
     return cls(
         seed=running_row(plan),
         problems=tuple(plan_problems(plan)),
-        warnings=tuple(plan.warnings))
+        warnings=tuple(plan.warnings),
+        evaluated=tuple(t.name for t in plan.tables if t.evaluated))
 
   def final(self, summary: RowSummary, failures: Mapping[str, str], *,
             finished_at: str) -> dict[str, Any]:
     """The FINAL row once every metric write is committed; `failures`
-    are the tables the pipeline could not evaluate."""
+    are the tables the pipeline could not evaluate. When they are every
+    table it was meant to evaluate, the run FAILED (module docstring):
+    the reasons lead `status_reason` and are in `warnings`."""
     failed = [
         f"{table}: not evaluated — {reason}"
         for table, reason in sorted(failures.items())
     ]
-    status, reason = evaluation_status([*self.problems, *failed],
-                                       [*self.warnings, *failed])
+    none_evaluated = bool(self.evaluated) and all(
+        name in failures for name in self.evaluated)
+    problems = [*self.problems, *failed]
+    if none_evaluated:  # the failures lead the reason
+      problems = [*failed, *self.problems]
+    status, reason = evaluation_status(
+        problems, [*self.warnings, *failed], none_evaluated=none_evaluated)
     per_table = {
         table: {
             "table_score": scores.get(OVERALL)

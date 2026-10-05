@@ -58,6 +58,8 @@ from sdfb_evaluation.beam.assemble import (
     skipped_row,
     source_stats_sql,
     stable_floats,
+    stable_metric,
+    stable_profile,
     summarize_rows,
 )
 from sdfb_evaluation.beam.dense import DenseProfile, DenseSpec
@@ -66,13 +68,16 @@ from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.plan import PrepareStatement
 from sdfb_evaluation.scoring import MODEL_KEY, is_aggregate
-from sdfb_evaluation.types import MetricValue
+from sdfb_evaluation.types import MetricValue, ProfileValue
 
 from .acceptance_data import (
     EVALUATED_AT,
     SALT,
+    STATS_TABLE,
     USERS_FIELDS,
+    FakeStatsQuery,
     evaluation_plan,
+    rescored,
     scope_of,
     stats_rows,
     table_plan,
@@ -237,6 +242,11 @@ def test_status_rules():
   assert status == "SUCCEEDED_WITH_WARNINGS" and "1 warning" in reason
   status, reason = evaluation_status(["orders: not evaluated — x"], ["w"])
   assert status == "PARTIAL" and reason.startswith("orders")
+  status, reason = evaluation_status(["orders: not evaluated — x"], ["w"],
+                                     none_evaluated=True)
+  assert status == "FAILED"
+  assert reason == ("no launch table could be evaluated: orders: not "
+                    "evaluated — x")
 
 
 def test_plan_problems_name_each_partial_condition(users):
@@ -272,8 +282,79 @@ def test_plan_problems_name_each_partial_condition(users):
   assert not plan_problems(dataclasses.replace(plan, tables=(ok_but_warned,)))
 
 
-def test_registry_context_marks_pipeline_failures_partial(users):
+def test_every_launch_table_failing_is_a_failed_run(users):
+  """No launch table evaluated (none plan-skipped, all failed in the
+  pipeline): the FINAL row is FAILED, the reasons in warnings (M4)."""
   plan = _plan(users)
+  context = RegistryContext.from_plan(plan)
+  row = context.final(
+      summarize_rows([]), {"users": "the source side cannot be read"},
+      finished_at="2026-09-30T00:00:05.000000Z")
+  _check_registry(row)
+  assert row["status"] == "FAILED" and row["event"] == "FINAL"
+  assert row["status_reason"].startswith(
+      "no launch table could be evaluated: users: not evaluated — the "
+      "source side cannot be read")
+  assert any("cannot be read" in w for w in row["warnings"])
+  assert row["metrics_total"] == 0 and row["overall_score"] is None
+  # a plan-skipped table is not one the pipeline could have evaluated:
+  # with the only other table failing, nothing was evaluated at all
+  skipped = dataclasses.replace(
+      with_scope(plan.tables[0], status="empty", reason="no rows"),
+      name="people")
+  both = dataclasses.replace(plan, tables=(*plan.tables, skipped))
+  row = RegistryContext.from_plan(both).final(
+      summarize_rows([]), {"users": "the source side cannot be read"},
+      finished_at="2026-09-30T00:00:05.000000Z")
+  assert row["status"] == "FAILED"
+  assert "people: not evaluated" in row["status_reason"]
+
+
+def test_registry_scores_are_the_persisted_rollup_values(users):
+  """The registry's scores go through the rounding the roll-up rows get,
+  so `overall_score` equals the persisted `model.overall_score` (M6)."""
+  plan = _plan(users)
+  raw = 0.12345678912345
+  scores = {
+      family: raw
+      for family in ("fidelity", "privacy", "integrity", "diversity", "overall")
+  }
+  row = final_row(
+      plan,
+      scores, {"total": 0}, {"users": {
+          "table_score": raw
+      }},
+      finished_at="2026-09-30T00:00:05.000000Z",
+      status="SUCCEEDED",
+      status_reason=None)
+  context = RowContext("e1", EVALUATED_AT, {}, {})
+  persisted = metric_row(
+      MetricValue("model.overall_score", MODEL_KEY, raw), context)["value"]
+  assert row["overall_score"] == persisted == 0.123456789
+  assert row["integrity_score"] == row["fidelity_score"] == persisted
+  assert row["tables"][0]["table_score"] == persisted
+  # each score as ITS roll-up row is rounded (an integrity-family value
+  # keeps no absolute floor, the others do)
+  tiny = 1 / 3e10
+  row = final_row(
+      plan, {family: tiny for family in scores}, {"total": 0}, {},
+      finished_at="2026-09-30T00:00:05.000000Z",
+      status="SUCCEEDED",
+      status_reason=None)
+  for family in scores:
+    rollup = MetricValue(f"model.{family}_score", MODEL_KEY, tiny)
+    assert row[f"{family}_score"] == metric_row(rollup, context)["value"]
+  assert row["integrity_score"] > 0 and row["overall_score"] == 0.0
+
+
+def test_registry_context_marks_pipeline_failures_partial(users):
+  source, synthetic = users
+  plan = _plan(users)
+  twin = dataclasses.replace(
+      _users_plan(source, synthetic),
+      name="people",
+      landing_table="demo-project.thelook_synthetic.people")
+  plan = dataclasses.replace(plan, tables=(*plan.tables, twin))
   context = RegistryContext.from_plan(plan)
   summary = summarize_rows([])
   row = context.final(
@@ -312,7 +393,11 @@ def test_stable_floats_hide_merge_noise_only():
   assert stable_floats(-2.5000000001234) == -2.50000000
 
 
-def test_reversed_producer_ci_is_flagged_not_trusted():
+def test_reversed_producer_ci_is_treated_as_missing():
+  """A reversed interval (ci_low > ci_high) is a producer defect: it is
+  dropped before scoring (the noise check then says it had no CI, and a
+  CI-gated metric has nothing to gate on) and flagged with the reported
+  bounds (M3)."""
   reversed_ci = MetricValue(
       "column.null_rate_delta",
       "users",
@@ -323,15 +408,304 @@ def test_reversed_producer_ci_is_flagged_not_trusted():
       source_value=0.0,
       synthetic_value=0.3)
   flagged = checked_ci(reversed_ci)
-  assert "ci_invalid" in flagged.detail
+  assert flagged.ci_low is None and flagged.ci_high is None
+  assert flagged.detail["ci_invalid"].startswith("reversed interval")
+  assert flagged.detail["ci_reported"] == [0.4, 0.1]
   context = RowContext("e1", EVALUATED_AT, {"users": ("a.b.users", None)}, {})
-  row = metric_row(flagged, context)
+  row = metric_row(reversed_ci, context)  # metric_row checks it itself
+  assert row == metric_row(flagged, context)
+  assert row["status"] == "fail"
+  assert row["ci_low"] is None and row["ci_high"] is None
+  assert row["detail"]["noise_check"] == "unavailable"
+  assert row["detail"]["ci_reported"] == [0.4, 0.1]
+  # a proper interval covering the reference reads this FAIL as noise; a
+  # reversed one is no evidence either way, so the status stands and the
+  # row says the check was unavailable
+  covering = dataclasses.replace(reversed_ci, ci_low=0.0, ci_high=0.4)
+  assert metric_row(covering, context)["status"] == "pass"
+  lift = MetricValue(
+      "row.memorization_lift", "users", 3.0, ci_low=6.0, ci_high=2.0)
+  row = metric_row(lift, context)
+  assert row["status"] == "not_evaluated" and row["score"] is None
+  assert "ci_low missing" in row["detail"]["reason"]
   assert row["detail"]["ci_invalid"].startswith("reversed interval")
-  assert row["status"] == "fail"  # not read as noise
   fine = dataclasses.replace(reversed_ci, ci_low=0.1, ci_high=0.4)
   assert checked_ci(fine) is fine
   open_ended = dataclasses.replace(reversed_ci, ci_low=5.0, ci_high=None)
   assert checked_ci(open_ended) is open_ended
+
+
+@pytest.mark.parametrize(
+    ("metric_id", "raw", "persisted", "status"),
+    [
+        # the review's probes: either side of a fail threshold
+        ("column.null_rate_delta", 0.05 - 1e-12, 0.05, "fail"),
+        ("column.null_rate_delta", 0.05 + 1e-12, 0.05, "fail"),
+        # raw values short of a threshold by more than scoring's 1e-9
+        # relative tolerance that persist AS the threshold: the raw value
+        # reads the milder status, the persisted one the stricter
+        ("column.null_rate_delta", 0.02 - 4e-11, 0.02, "warn"),
+        ("column.ks", 0.2 - 4e-10, 0.2, "fail"),
+        ("column.ks", 0.1 - 4e-11, 0.1, "warn"),
+    ])
+def test_status_is_graded_on_the_persisted_value(metric_id, raw, persisted,
+                                                 status):
+  """A value within a rounding step of a threshold persists as the
+  threshold, and its status and score are the ones the persisted value
+  reads (inclusive: at the threshold is past it), not the raw one's
+  (I1)."""
+  context = RowContext("e1", EVALUATED_AT, {}, {})
+  mv = MetricValue(
+      metric_id,
+      "users",
+      raw,
+      column="age",
+      noise_floor=0.001 + 1e-13,
+      ci_low=raw - 0.01 + 1e-13,
+      ci_high=raw + 0.01 - 1e-13)
+  row = metric_row(mv, context)
+  assert row["value"] == persisted and row["status"] == status
+  metric = _CATALOGUE.get(metric_id)
+  assert persisted in (metric.warn, metric.fail)
+  again = rescored(row)
+  assert (again["status"], again["score"], again["value"],
+          again["detail"]) == (row["status"], row["score"], row["value"],
+                               row["detail"])
+
+
+def _near(rng: random.Random, anchor: float) -> float:
+  """`anchor` displaced by nothing, by merge noise or by a real amount."""
+  step = rng.choice((0.0, 1e-13, 1e-12, 4e-11, 3e-10, 1e-9, 1e-6, 1e-3, 0.03))
+  return anchor + rng.choice((-1, 1)) * step * rng.uniform(0.5, 1.0)
+
+
+def _probe(rng: random.Random, metric: Any) -> MetricValue:
+  """A measurement of `metric` near one of the values its status turns
+  on, with every field scoring can read."""
+  anchors = [
+      a for a in (metric.warn, metric.fail, metric.target, 0.0, 1.0)
+      if a is not None
+  ]
+  value = _near(rng, rng.choice(anchors))
+  width = rng.choice((0.0, 1e-12, 1e-4, 0.02, 0.5))
+  detail: dict[str, Any] = {}
+  if metric.id == "table.pmse_ratio":
+    detail["ceiling"] = _near(rng, rng.choice((metric.fail, 50.0)))
+  if metric.level == "relationship":
+    detail["enforced"] = rng.random() < 0.8
+  return MetricValue(
+      metric.id,
+      "users",
+      value,
+      column="age" if metric.level in ("field", "column", "pair") else None,
+      column_2="city" if metric.level == "pair" else None,
+      edge="users(a) -> users(b)" if metric.level == "relationship" else None,
+      source_value=_near(rng, rng.choice(anchors)),
+      synthetic_value=_near(rng, value),
+      baseline_value=rng.choice((None, _near(rng, 0.0))),
+      noise_floor=rng.choice((None, 0.0, 1e-12, 0.01, 0.2)),
+      ci_low=rng.choice((None, _near(rng, value - width))),
+      ci_high=rng.choice((None, _near(rng, value + width))),
+      column_kind=rng.choice((None, "text", "numeric", "categorical")),
+      detail=detail)
+
+
+def test_any_persisted_row_rescores_to_itself():
+  """The property behind I1, over every catalogue metric: a row as it is
+  persisted (through JSON), scored again from its own fields, gives the
+  same status, score, value and detail — including values a rounding
+  step away from a threshold and bounds that noise reverses."""
+  rng = random.Random(26)
+  context = RowContext("e1", EVALUATED_AT, {}, {})
+  seen: dict[str, int] = {}
+  for metric in _CATALOGUE.metrics:
+    for _ in range(60):
+      mv = _probe(rng, metric)
+      row = json.loads(json.dumps(metric_row(mv, context), allow_nan=False))
+      again = rescored(row)
+      assert (again["status"], again["score"], again["value"],
+              again["detail"]) == (row["status"], row["score"], row["value"],
+                                   row["detail"]), (mv, row)
+      seen[row["status"]] = seen.get(row["status"], 0) + 1
+  assert all(
+      seen.get(status, 0) > 50
+      for status in ("pass", "warn", "fail", "info", "not_evaluated")), seen
+
+
+def test_an_infinite_value_rescores_through_its_nonfinite_note():
+  """JSON has no infinity: an infinite gated value or bound persists NULL
+  with `detail.nonfinite`, which is what a re-scoring reads it back
+  from."""
+  context = RowContext("e1", EVALUATED_AT, {}, {})
+  lift = MetricValue("row.memorization_lift", "users", 7.0, ci_low=float("inf"))
+  psi = MetricValue("column.psi", "users", float("inf"), column="age")
+  for mv, field in ((lift, "ci_low"), (psi, "value")):
+    row = json.loads(json.dumps(metric_row(mv, context), allow_nan=False))
+    assert row["status"] == "fail" and row[field] is None
+    assert row["detail"]["nonfinite"] == "+inf" and row["score"] == 0.0
+    again = rescored(row)
+    assert (again["status"], again["score"], again["value"],
+            again["detail"]) == ("fail", 0.0, row["value"], row["detail"])
+
+
+def test_one_orphan_in_3e10_persists_and_fails():
+  """No absolute floor for an integrity metric or a count-derived rate:
+  a single orphan in 3e10 child rows stays > 0 and FAILs (I1)."""
+  context = RowContext("e1", EVALUATED_AT, {}, {})
+  orphans = MetricValue(
+      "relationship.orphan_rate",
+      "orders",
+      1 / 3e10,
+      edge="e",
+      detail={
+          "enforced": True,
+          "orphans": 1
+      })
+  row = metric_row(orphans, context)
+  assert row["value"] == 3.33333333e-11 and row["status"] == "fail"
+  assert row["score"] == 0.0
+  again = rescored(row)
+  assert (again["status"], again["score"]) == ("fail", 0.0)
+  # the other zero-tolerance keys, a count-derived rate of another family
+  # and an integrity value that is not a share: none is floored to 0
+  for metric_id in ("table.pk_duplicate_rate", "table.identity_duplicate_rate"):
+    row = metric_row(MetricValue(metric_id, "orders", 2 / 3e10), context)
+    assert row["value"] == 6.66666667e-11 and row["status"] == "fail"
+  for metric_id in ("row.exact_match_rate", "relationship.orphan_rate_source",
+                    "column.source_stats_drift"):
+    mv = MetricValue(metric_id, "orders", 1 / 3e10, column="a", edge="e")
+    assert metric_row(mv, context)["value"] == 3.33333333e-11, metric_id
+  # the rate's other fields and its detail are count-derived too
+  rate = MetricValue(
+      "row.exact_match_rate",
+      "orders",
+      1 / 3e10,
+      ci_low=1 / 7e11,
+      synthetic_value=1 / 3e10,
+      detail={"rate_reference": 1 / 3e10})
+  row = metric_row(rate, context)
+  assert row["ci_low"] > 0 and row["synthetic_value"] == 3.33333333e-11
+  assert row["detail"]["rate_reference"] == 3.33333333e-11
+  # a distance keeps the 1e-10 floor: merge noise around 0 is 0
+  noise = MetricValue(
+      "pair.pearson_delta", "orders", 3e-17, column="a", column_2="b")
+  assert metric_row(noise, context)["value"] == 0.0
+
+
+def test_stable_metric_rounds_every_gating_field():
+  mv = MetricValue(
+      "table.pmse_ratio",
+      "users",
+      2.99999999999,
+      source_value=0.1234567891234,
+      noise_floor=0.0333333333333,
+      ci_low=1.00000000004,
+      ci_high=5.1234567891,
+      baseline_value=1.1111111111111,
+      detail={
+          "ceiling": 9.99999999999,
+          "k": 7
+      })
+  out = stable_metric(mv)
+  assert out.value == 3.0 and out.detail["ceiling"] == 10.0
+  assert out.detail["k"] == 7 and out.ci_low == 1.0
+  assert out.source_value == 0.123456789 and out.noise_floor == 0.0333333333
+  assert out.ci_high == 5.12345679 and out.baseline_value == 1.11111111
+  assert stable_metric(out) == out  # a persisted value is a fixed point
+  # numpy values (a producer's arrays) are rounded like Python floats
+  numpy_detail = dataclasses.replace(
+      mv,
+      value=np.float64(2.99999999999),
+      detail={
+          "ceiling": np.float32(10.0),
+          "curve": np.array([0.1234567891234, 1e-17])
+      })
+  out = stable_metric(numpy_detail)
+  assert out.value == 3.0 and not isinstance(out.value, np.floating)
+  assert out.detail == {"ceiling": 10.0, "curve": [0.123456789, 0.0]}
+  empty = MetricValue.not_evaluated("table.pmse_ratio", "users", "no rows")
+  assert stable_metric(empty) == empty
+
+
+def test_profile_rounding_keeps_edges_quantiles_and_counts():
+  """Only moment-derived payload values are rounded: edges, quantiles and
+  counts are deterministic and persist as computed, so edges 3 s apart at
+  an epoch-seconds offset stay strictly increasing (I2)."""
+  edges = [1_758_000_400.0 + 3 * k for k in range(6)]
+  histogram = ProfileValue(
+      table="users",
+      profile_kind="histogram",
+      side="source",
+      column="created_at",
+      payload={
+          "edges": edges,
+          "counts": [1, 2, 3, 4, 5, 6, 7],
+          "below_mass": 0.1,
+          "unit": "epoch_seconds"
+      },
+      edges_digest="d" * 32)
+  assert stable_profile(histogram) is histogram
+  quantiles = dataclasses.replace(
+      histogram,
+      profile_kind="quantiles",
+      payload={
+          "probs": [0.1, 0.5],
+          "values": [1_758_000_401.123456, 1_758_000_402.654321]
+      })
+  assert stable_profile(quantiles) is quantiles
+  moments = dataclasses.replace(
+      histogram,
+      profile_kind="moments",
+      payload={
+          "n": 30,
+          "mean": 1_758_000_406.0000001,
+          "std": 3.14159265358979,
+          "skewness": 1e-17,
+          "kurtosis_excess": -1.2000000000001,
+          "min": 1_758_000_400.5,
+          "zeros": 0
+      })
+  out = stable_profile(moments).payload
+  assert out["std"] == 3.14159265 and out["skewness"] == 0.0
+  assert out["kurtosis_excess"] == -1.2 and out["min"] == 1_758_000_400.5
+  assert out["n"] == 30 and out["zeros"] == 0
+  assert out["mean"] == 1_758_000_410.0  # a moment: 9 significant digits
+  assert moments.payload["mean"] == 1_758_000_406.0000001  # not mutated
+  corr = dataclasses.replace(
+      histogram,
+      profile_kind="corr_matrix",
+      payload={
+          "columns": ["a", "b"],
+          "values": [[1.0, 0.12345678912], [0.12345678912, 1.0]],
+          "n": 9
+      })
+  assert stable_profile(corr).payload["values"][0][1] == 0.123456789
+  # every other kind persists as computed: narrow edges at a large offset
+  # (ids near 1e12, distances near 0) and count ratios
+  for kind, payload in (
+      ("histogram", {
+          "edges": [1e12 + k for k in range(4)],
+          "counts": [1, 1, 1, 1, 1]
+      }),
+      ("dcr_hist", {
+          "edges": [0.0, 1e-12, 2e-12],
+          "counts": [3, 4],
+          "n": 7
+      }),
+      ("topk", {
+          "items": [{
+              "label": "a",
+              "count": 1,
+              "share": 1 / 3e10
+          }]
+      }),
+      ("roc_curve", {
+          "points": [[0.1234567891234, 0.9876543219876]],
+          "auc": 0.7123456789123
+      }),
+  ):
+    kept = dataclasses.replace(histogram, profile_kind=kind, payload=payload)
+    assert stable_profile(kept) is kept
 
 
 def test_metric_row_passes_the_edge_enforcement():
@@ -370,6 +744,37 @@ def test_guard_rewrites_a_failed_tables_rows_keeping_their_scope():
       "reason": "encode failed",
       "enforced": False
   }
+  noted = dataclasses.replace(mv, detail={"rows_withheld": "why", "n": 3})
+  assert dict(guarded(noted, {
+      "orders": "encode failed"
+  }).detail) == {
+      "reason": "encode failed",
+      "rows_withheld": "why"
+  }
+
+
+def test_failed_table_rows_survive_a_malformed_plan(users):
+  """A plan malformed enough to fail the driver checks (a pair index
+  past the columns, paired with a numeric column so the pair metrics
+  reach for it) still yields rows: the table-level ones (M10)."""
+  age = [f["name"] for f in USERS_FIELDS].index("age")
+  table = dataclasses.replace(_users_plan(*users), pairs=((age, 99),))
+  rows = failed_table_metrics(table, "malformed plan")
+  assert rows and all(r.column is None for r in rows)
+  assert all(r.value is None for r in rows)
+  assert all(r.detail["reason"] == "malformed plan" for r in rows)
+  assert {r.metric_id for r in rows
+         } >= {"table.detection_auc", "row.memorization_lift"}
+  levels = {_CATALOGUE.get(r.metric_id).level for r in rows}
+  assert levels == {"row", "table"}
+  # the rows say what is missing and why (nothing is dropped silently)
+  for row in rows:
+    assert "IndexError" in row.detail["rows_withheld"]
+    assert "column and pair" in row.detail["rows_withheld"]
+  whole = failed_table_metrics(_users_plan(*users), "malformed plan")
+  assert {r.metric_id for r in rows
+         } == {r.metric_id for r in whole if r.column is None}
+  assert not any("rows_withheld" in r.detail for r in whole)
 
 
 def test_failed_table_rows_cover_every_owned_id_by_kind(users):
@@ -525,6 +930,61 @@ def test_stats_are_read_with_the_tables_digest_and_tier(users):
   assert len(age.deciles) == 9  # the ends (exact extremes) are never kept
   assert set(stats.columns) == {f["name"] for f in USERS_FIELDS}
   assert "`distinct`" in sql and "@reference_digest" in sql
+
+
+def test_stats_read_the_latest_row_of_the_launch_tier(users):
+  """An older row and another tier's row for the same (table, digest)
+  are never read: the driver asks for the launch's tier, and the query —
+  the SQL's clauses, which the fake answers row by row — keeps that tier
+  (a row without one counts as `sample`) and the latest row per column
+  (M12)."""
+  plan = _plan(users)
+  table = plan.tables[0]
+  assert table.panel is not None
+  sql = source_stats_sql(STATS_TABLE)
+  assert "IFNULL(stats_tier, 'sample') = @tier" in sql
+  assert "PARTITION BY `column` ORDER BY computed_at DESC) = 1" in sql
+  query = FakeStatsQuery(plan)
+  base = {
+      row["column"]: row for row in query(
+          source_stats_sql(STATS_TABLE), {
+              "table_fqn": table.source_table,
+              "reference_digest": table.reference_digest,
+              "tier": "sample"
+          })
+  }
+  query.add([
+      {
+          **base["age"], "null_fraction": 0.9,
+          "computed_at": "2026-09-01T00:00:00Z"
+      },
+      {
+          **base["gender"], "null_fraction": 0.5,
+          "computed_at": "2026-09-29T02:00:00Z"
+      },
+      {
+          **base["city"], "null_fraction": 0.7,
+          "stats_tier": "exact",
+          "computed_at": "2026-09-30T00:00:00Z"
+      },
+      {
+          **base["country"], "null_fraction": 0.3,
+          "stats_tier": None,
+          "computed_at": "2026-09-29T03:00:00Z"
+      },
+  ])
+  stats = read_source_stats(plan, query)["users"]
+  assert stats.columns["age"].null_fraction == base["age"]["null_fraction"]
+  assert stats.columns["gender"].null_fraction == 0.5
+  assert stats.columns["city"].null_fraction == base["city"]["null_fraction"]
+  assert stats.columns["country"].null_fraction == 0.3  # legacy: sample
+  params = {**plan.launch.params, "source_stats": "exact"}
+  exact = dataclasses.replace(
+      plan, launch=dataclasses.replace(plan.launch, params=params))
+  stats = read_source_stats(exact, query)["users"]
+  assert set(stats.columns) == {"city"}  # the one exact-tier row
+  assert stats.columns["city"].null_fraction == 0.7
+  assert query.calls[-1][1]["tier"] == "exact"
 
 
 @pytest.mark.parametrize(("params", "query", "words"), [

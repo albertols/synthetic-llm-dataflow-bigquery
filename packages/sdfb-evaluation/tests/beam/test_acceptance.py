@@ -26,10 +26,15 @@ rate; the DCR holdout share it cannot move past its gate (a copy fraction
 c moves the share by at most c / 2, the gate reads ci_low >= 0.60), so
 that metric's FAIL is proved on a heavy copier (30 % of R copies).
 
+The bad run is also specific: it FAILs nothing outside the scopes its
+defects touch. Every row either run persists re-scores to its own status
+and score, and its histogram edges match their digest (Ruling R89).
+
 Plus the brief's lifecycle and hygiene tests: a skipped registry row for
 an empty scope, every written row valid against its schema, the FINAL
 registry row written only after the metric sinks' load and copy jobs,
-degenerate columns never NaN, and a rerun byte-identical.
+degenerate columns never NaN, and a rerun byte-identical (the heavy
+copier's run, repeated).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -37,6 +42,8 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import itertools
 import json
 import math
 import re
@@ -46,6 +53,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import apache_beam as beam
+import numpy as np
 import pytest
 from apache_beam.options.pipeline_options import PipelineOptions
 
@@ -68,11 +76,12 @@ from .acceptance_data import (
     heavy_copies,
     launch_rows,
     plant_defects,
+    rescored,
     table_plan,
     with_scope,
 )
 
-pytestmark = pytest.mark.slow  # three full DirectRunner evaluations
+pytestmark = pytest.mark.slow  # two three-table and two one-table evaluations
 
 LABEL_KEY = b"acceptance-label-key-0123456789ab"
 _GATED_FAMILIES = ("fidelity", "privacy", "integrity")
@@ -247,7 +256,9 @@ def test_one_percent_copies_raise_the_holdout_share(good_run, bad_run):
   assert good["status"] == "pass"
 
 
-def test_heavy_memorization_fails_the_holdout_share(launch, tmp_path):
+def _heavy(launch: Mapping[str, Any], directory: Path) -> Outcome:
+  """The heavy copier (30 % of the users rows carry R records): users
+  alone, with the full R/H panel."""
   source = launch["source"]
   users = heavy_copies(source["users"], launch["good"]["users"])
   table = table_plan(
@@ -260,21 +271,188 @@ def test_heavy_memorization_fails_the_holdout_share(launch, tmp_path):
       panel_rows=2000)
   plan = evaluation_plan([table],
                          evaluation_id="ev_acc_heavy",
-                         label_key_uri=_key_file(tmp_path))
-  outcome = evaluate(plan, {
-      "source": {
-          "users": source["users"]
+                         label_key_uri=_key_file(directory))
+  return evaluate(
+      plan, {
+          "source": {
+              "users": source["users"]
+          },
+          "synthetic": {
+              "users": users
+          }
       },
-      "synthetic": {
-          "users": users
-      }
-  }, tmp_path / "out")
-  share = _one(outcome, "users", "row.dcr_train_holdout_share")
+      directory / "out",
+      stats_query=FakeStatsQuery(plan))
+
+
+@pytest.fixture(scope="module", name="heavy_run")
+def fixture_heavy_run(launch, tmp_path_factory) -> Outcome:
+  return _heavy(launch, tmp_path_factory.mktemp("heavy"))
+
+
+def test_heavy_memorization_fails_the_holdout_share(heavy_run):
+  share = _one(heavy_run, "users", "row.dcr_train_holdout_share")
   assert share["status"] == "fail", _describe([share])
   assert share["ci_low"] >= 0.6
   for metric_id in ("row.memorization_lift", "row.exact_match_rate_nonkey"):
-    row = _one(outcome, "users", metric_id)
+    row = _one(heavy_run, "users", metric_id)
     assert row["status"] == "fail", _describe([row])
+
+
+# Where the seven defects may FAIL a row; every other scope of the bad run
+# is untouched and must not (specificity, M11):
+#
+#   users        1-2 copy whole R / E records under fresh keys: privacy
+#                rows only (the row-level ones and the copied rare values
+#                of its fields); every marginal and every pair is kept
+#   orders       3 amount, 6 status, 7 delivery_note: those columns, the
+#                pairs holding one of them, and the table-level fidelity
+#                detectors (detection, pMSE, the correlation summaries)
+#   order_items  4 cost against sale_price, the marginal kept: the pairs
+#                holding cost and the table-level fidelity rows — never a
+#                column's own rows; 5 the orphan rate of its edge
+_ORDERS_DEFECT_COLUMNS = frozenset({"amount", "status", "delivery_note"})
+
+
+def _planted(row: Mapping[str, Any]) -> bool:
+  """Whether a planted defect explains a FAIL on `row`'s scope."""
+  table, level, family = row["table_name"], row["level"], row["family"]
+  columns = {row["column_name"], row["column_name_2"]}
+  detectors = level == "table" and family == "fidelity"
+  if table == "users":
+    return family == "privacy" and level in ("row", "field")
+  if table == "orders":
+    cells = level in ("field", "column", "pair")
+    return detectors or (cells and bool(columns & _ORDERS_DEFECT_COLUMNS))
+  if table == "order_items":
+    return (detectors or (level == "pair" and "cost" in columns) or
+            row["metric_id"] == "relationship.orphan_rate")
+  return False
+
+
+def test_bad_run_fails_only_what_it_planted(bad_run):
+  """Specificity: every FAIL of the bad run sits on a scope a planted
+  defect touches, in every family; and a roll-up FAILs only for a table
+  and family in which a measured row did."""
+  measured = [r for r in bad_run.metrics if not is_aggregate(r["metric_id"])]
+  failed = [r for r in measured if r["status"] == "fail"]
+  stray = [r for r in failed if not _planted(r)]
+  assert not stray, _describe(stray)
+  hit = {(r["table_name"], r["family"]) for r in failed}
+  for row in bad_run.metrics:
+    if not is_aggregate(row["metric_id"]) or row["status"] != "fail":
+      continue
+    table, family = row["table_name"], row["family"]
+    assert any(
+        table in (MODEL_KEY, t) and family in ("overall", f)
+        for t, f in hit), _describe([row])
+
+
+# Named scopes no defect touches — (table, a column, a pair or an edge
+# label): each is evaluated (it PASSes rows), so its lack of a FAIL above
+# is not the lack of a row.
+_UNTOUCHED: tuple[tuple[str, str | tuple[str, str]], ...] = (
+    ("users", "age"),
+    ("users", "city"),
+    ("users", "created_at"),
+    ("users", ("age", "created_at")),
+    ("users", ("country", "traffic_source")),
+    ("orders", "num_of_item"),
+    ("orders", "created_at"),
+    ("orders", ("num_of_item", "created_at")),
+    ("orders", "orders(user_id) -> users(id)"),
+    ("order_items", "sale_price"),
+    ("order_items", "cost"),  # permuted across rows: its marginal is kept
+    ("order_items", "status"),
+    ("order_items", "created_at"),
+    ("order_items", ("sale_price", "created_at")),
+)
+
+
+@pytest.mark.parametrize(
+    "untouched", _UNTOUCHED, ids=[f"{t}-{s}" for t, s in _UNTOUCHED])
+def test_bad_run_passes_the_scopes_it_did_not_touch(bad_run, untouched):
+  table, scope = untouched
+  rows = [r for r in bad_run.metrics if r["table_name"] == table]
+  if isinstance(scope, tuple):
+    rows = [
+        r for r in rows if r["level"] == "pair" and
+        {r["column_name"], r["column_name_2"]} == set(scope)
+    ]
+  elif "->" in scope:
+    rows = [r for r in rows if r["edge"] == scope]
+  else:
+    rows = [
+        r for r in rows
+        if r["level"] in ("field", "column") and r["column_name"] == scope
+    ]
+  if table == "users":  # defects 1-2's own consequence: copied field values
+    rows = [r for r in rows if r["family"] != "privacy"]
+  assert sum(r["status"] == "pass" for r in rows) >= 3, untouched
+  failed = [r for r in rows if r["status"] == "fail"]
+  assert not failed, _describe(failed)
+
+
+def test_every_persisted_row_rescores_to_its_status(good_run, bad_run):
+  """Status and score are graded on the values as persisted (I1): any
+  written metric row — measured or roll-up — scored again from its own
+  fields gives the same status, score, value and detail."""
+  statuses: set[str] = set()
+  for outcome in (good_run, bad_run):
+    for row in outcome.metrics:
+      again = rescored(row)
+      assert (again["status"], again["score"], again["value"],
+              again["detail"]) == (row["status"], row["score"], row["value"],
+                                   row["detail"]), _describe([row])
+      statuses.add(row["status"])
+  assert statuses == {"pass", "warn", "fail", "info", "not_evaluated"}
+
+
+def test_registry_scores_are_the_persisted_rollup_rows(good_run, bad_run):
+  for outcome in (good_run, bad_run):
+    [final] = outcome.registry
+    by_id = {
+        (r["table_name"], r["metric_id"]): r["value"]
+        for r in outcome.metrics
+        if is_aggregate(r["metric_id"])
+    }
+    for family in ("overall", "fidelity", "privacy", "integrity", "diversity"):
+      assert final[f"{family}_score"] == by_id[(MODEL_KEY,
+                                                f"model.{family}_score")]
+    for entry in final["tables"]:
+      assert entry["table_score"] == by_id[(entry["name"],
+                                            "table.overall_score")]
+
+
+def _digest(edges: Sequence[float], unit: str = "") -> str:
+  payload = unit.encode() + np.asarray(edges, dtype="<f8").tobytes()
+  return hashlib.blake2b(payload, digest_size=16).hexdigest()
+
+
+def test_persisted_edges_are_the_digested_edges(good_run, bad_run):
+  """Histogram edges persist as computed (I2): strictly increasing, and
+  they hash to the row's own `edges_digest` (dense: the unit and the
+  edges in the column's own unit, a timestamp's as whole microseconds;
+  nearest-neighbour distances: the edges). `test_pipeline` runs the
+  narrow ranges nine significant digits would merge."""
+  checked: dict[str, int] = {}
+  for outcome in (good_run, bad_run):
+    for row in outcome.profiles:
+      kind, payload = row["profile_kind"], row["payload"]
+      if kind not in ("histogram", "dcr_hist", "nndr_hist"):
+        continue
+      edges = payload["edges"]
+      assert all(a < b for a, b in itertools.pairwise(edges)), row
+      if kind != "histogram":
+        unit, digest = kind, _digest(edges)
+      elif payload["unit"] == "epoch_seconds":
+        unit = "epoch_micros"
+        digest = _digest(np.rint(np.asarray(edges) * 1e6), unit)
+      else:
+        unit, digest = "value", _digest(edges, "value")
+      assert digest == row["edges_digest"], (row["column_name"], kind)
+      checked[unit] = checked.get(unit, 0) + 1
+  assert set(checked) == {"value", "epoch_micros", "dcr_hist", "nndr_hist"}
 
 
 def test_bad_run_integrity_headline_and_registry(bad_run):
@@ -577,22 +755,53 @@ def test_degenerate_columns_never_nan(tmp_path):
     json.loads(line, parse_constant=_no_constant)  # no NaN / ±Infinity token
   _check_rows("evaluation_metrics", outcome.metrics)
   [final] = outcome.registry
-  assert final["status"] in ("SUCCEEDED", "SUCCEEDED_WITH_WARNINGS", "PARTIAL")
+  # `empty` has no reference panel (nothing to rank): the privacy block
+  # is not evaluated, so the run is PARTIAL for that reason alone
+  assert final["status"] == "PARTIAL"
+  assert final["status_reason"] == (
+      "empty: no reference panel — the reference-based privacy metrics are "
+      "not evaluated")
 
 
-@pytest.fixture(scope="module", name="bad_rerun")
-def fixture_bad_rerun(launch, tmp_path_factory) -> Outcome:
-  return _run(launch, "bad", tmp_path_factory.mktemp("bad_again"))
+@pytest.fixture(scope="module", name="heavy_rerun")
+def fixture_heavy_rerun(launch, tmp_path_factory) -> Outcome:
+  return _heavy(launch, tmp_path_factory.mktemp("heavy_again"))
 
 
-def test_rerun_is_deterministic(bad_run, bad_rerun):
+def test_rerun_is_deterministic(heavy_run, heavy_rerun):
   """The same plan and rows give byte-identical metric rows (sorted: the
-  shards' order is the runner's), profiles and flags."""
-  assert bad_run.lines == bad_rerun.lines
-  assert len(bad_run.lines) == len(bad_run.metrics) > 0
+  shards' order is the runner's), profiles and flags.
+
+  The pair is the heavy copier's one-table run, not a second three-table
+  bad run (a third of its cost): it still runs every transform that
+  merges floating point or samples — dense, census, membership, privacy
+  with the full panel, the source-stats drift — writes every profile
+  kind and the row flags; only the relational pass (integer counts) is
+  absent."""
+  assert heavy_run.lines == heavy_rerun.lines
+  assert len(heavy_run.lines) == len(heavy_run.metrics) > 0
 
   def canonical(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return sorted(json.dumps(r, sort_keys=True) for r in rows)
 
-  assert canonical(bad_run.profiles) == canonical(bad_rerun.profiles)
-  assert canonical(bad_run.flags) == canonical(bad_rerun.flags)
+  assert canonical(heavy_run.profiles) == canonical(heavy_rerun.profiles)
+  assert canonical(heavy_run.flags) == canonical(heavy_rerun.flags)
+  assert heavy_run.registry[0]["overall_score"] == heavy_rerun.registry[0][
+      "overall_score"]
+  # the pair is not trivially equal: the noisy producers all wrote
+  kinds = {row["profile_kind"] for row in heavy_run.profiles}
+  assert kinds >= {
+      "histogram", "quantiles", "moments", "corr_matrix", "contingency", "topk",
+      "shape_mix", "dcr_hist", "nndr_hist", "roc_curve"
+  }
+  assert heavy_run.flags
+  evaluated = {
+      row["metric_id"]
+      for row in heavy_run.metrics
+      if row["status"] in ("pass", "warn", "fail")
+  }
+  assert evaluated >= {
+      "column.smd", "pair.pearson_delta", "pair.spearman_delta",
+      "table.detection_auc", "row.dcr_train_holdout_share",
+      "row.memorization_lift", "column.source_stats_drift"
+  }
