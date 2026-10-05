@@ -26,7 +26,8 @@
       └─► Relational (+ Sources for parents)        │
     + table.row_count_ratio, a driver-failed table's rows
       ▼                                             ▼
-    MetricValue ─ Guard (a failed table's rows → not_evaluated,
+    MetricValue ─ Guard (a failed table's rows → not_evaluated: the
+      │           driver's failures as a constant, the workers' as
       │           AsDict(failures)) ─ metric_row (rounded to what is
       │           persisted, a reversed CI dropped, THEN scored) ─┐
       │                                                         │
@@ -92,12 +93,51 @@ leave no launch table evaluated (`assemble`'s status table); a
 transform's own not_evaluated rows only count. A worker's `MemoryError`
 is not a data error: it fails the bundle, which the runner retries.
 
-Runner defaults (`pipeline_options_defaults`): `save_main_session`
-False (every DoFn is importable), `max_cache_memory_usage_mb` sized to
-the side inputs a worker holds at once (Beam 2.74's default is 0: no
-side-input cache, so every bundle would re-read them) and at least 512;
-on Dataflow `--experiments=upload_graph` (a graph this wide exceeds the
-job-creation request limit).
+What the driver saw fail is a CONSTANT of the graph: the Guard and the
+FINAL step receive it as a plain argument, so no graded row of such a
+table can exist whatever a runner does with a side input. Only a
+worker's failure, unknown until the job runs, travels in the `failures`
+side input.
+
+Runners. That side input, the profile and flag filters, the FINAL row
+written after every sink signal and every side input inside the
+transforms (the label key, the panel sets, the parent key sets) rest on
+one contract of batch execution: a side input is COMPLETE before the
+step that reads it runs.
+
+    runner                              the contract
+    ──────────────────────────────────  ─────────────────────────────────
+    Dataflow (batch)                    holds
+    FnApiRunner (Beam's in-process      holds: a stage runs to completion
+      Python runner)                    before the stages reading it
+    Prism — what Beam's `DirectRunner`  does NOT hold (2.74, unchanged in
+      hands a batch pipeline to         2.76): a step is "ready" once its
+                                        side input's watermark has caught
+                                        up with its main input's
+                                        (`engine/elementmanager.go`,
+                                        `stageState.bundleReady`), and
+                                        both sit at the end-of-global-
+                                        window timestamp while a
+                                        GroupByKey's output is in flight
+                                        on each branch — the step then
+                                        runs with the side input as far as
+                                        it has got, possibly empty
+
+On Prism a failed table's `table.row_count_ratio` was published PASS
+and its roll-ups scored, in the runs where the failure map was still in
+its `CombinePerKey` while the relational rows left their `GroupByKey`.
+So a local run is in process: `pipeline_options_defaults` turns
+`DirectRunner` into `FnApiRunner`, and `build_evaluation_pipeline`
+refuses a pipeline whose runner is Beam's switching `DirectRunner` or
+`PrismRunner` rather than run with rows that may be wrong.
+
+Runner defaults (`pipeline_options_defaults`): the runner as above;
+`save_main_session` False (every DoFn is importable);
+`max_cache_memory_usage_mb` sized to the side inputs a worker holds at
+once (Beam 2.74's default is 0: no side-input cache, so every bundle
+would re-read them) and at least 512; on Dataflow
+`--experiments=upload_graph` (a graph this wide exceeds the job-creation
+request limit).
 
 `prepare_evaluation` runs the plan's DDL before the pipeline, with two
 degradations instead of a failed job: a source pin (snapshot clone)
@@ -211,6 +251,13 @@ _REFUSED = frozenset({400, 403, 404})
 _ENCODE_ERRORS: tuple[type[Exception], ...] = (ArithmeticError, IndexError,
                                                KeyError, TypeError, ValueError)
 _DATAFLOW = "dataflow"
+# Runners (module docstring). The in-process runner a local run uses, the
+# names Beam resolves to its switching DirectRunner, and the runner
+# classes that execute a batch pipeline on Prism.
+_LOCAL_RUNNER = "FnApiRunner"
+_PRISM = "prism"
+_PRISM_ROUTED = frozenset({"direct", "switchingdirect"})
+_PRISM_BACKED = frozenset({"SwitchingDirectRunner", "PrismRunner"})
 _METRICS_TABLE = "evaluation_metrics"
 _PROFILES_TABLE = "evaluation_profiles"
 _FLAGS_TABLE = "evaluation_row_flags"
@@ -286,6 +333,32 @@ def side_input_bytes(plan: EvaluationPlan) -> int:
   return int(total)
 
 
+def _runner_key(name: str) -> str:
+  """A runner name as Beam's `create_runner` matches it: the class name
+  without its module, lower case, without a trailing `runner`."""
+  return name.strip().rsplit(".", 1)[-1].lower().removesuffix("runner")
+
+
+def _checked_runner(p: beam.Pipeline) -> None:
+  """Refuse a pipeline that would run on Prism (module docstring,
+  Runners): its runner is Beam's switching `DirectRunner` — what the
+  name `DirectRunner` creates — or `PrismRunner`, or a subclass.
+
+  Raises:
+    ValueError: the pipeline's runner is backed by Prism.
+  """
+  runner = getattr(p, "runner", None)
+  if _PRISM_BACKED.isdisjoint(cls.__name__ for cls in type(runner).__mro__):
+    return
+  raise ValueError(
+      f"the evaluation pipeline cannot run on {type(runner).__name__}: Beam "
+      "runs it on Prism, which starts a step before its batch side input is "
+      "complete, so a failed table's rows could be published as evaluated. "
+      "Build the pipeline's options from pipeline_options_defaults(runner, "
+      f"plan), which runs a local evaluation on {_LOCAL_RUNNER}, or pass "
+      f"runner={_LOCAL_RUNNER!r}")
+
+
 def pipeline_options_defaults(runner: str,
                               plan: EvaluationPlan | None = None
                              ) -> dict[str, Any]:
@@ -294,11 +367,28 @@ def pipeline_options_defaults(runner: str,
   (`side_input_bytes`, 25 % headroom, at least `MIN_CACHE_MB`).
   `enable_data_sampling` is never among the experiments (R71).
 
+  The `runner` returned is the one to run on, not always the one asked
+  for: `DirectRunner` (any spelling Beam resolves to it) becomes
+  `FnApiRunner`, Beam's in-process Python runner, because Beam hands a
+  `DirectRunner` batch pipeline to Prism (module docstring, Runners).
+  Pass the dict as keywords to `PipelineOptions` together with an
+  explicit `flags` list — `PipelineOptions([], **defaults)` — since
+  `PipelineOptions(**defaults)` alone also parses `sys.argv`.
+
   Raises:
-    ValueError: an empty runner name.
+    ValueError: an empty runner name, or the Prism runner.
   """
   if not isinstance(runner, str) or not runner.strip():
     raise ValueError(f"runner: expected a runner name, got {runner!r}")
+  key = _runner_key(runner)
+  if key == _PRISM:
+    raise ValueError(
+        f"runner {runner!r}: the evaluator does not run on Prism, which "
+        "starts a step before its batch side input is complete; use "
+        f"DirectRunner (run in process, on {_LOCAL_RUNNER}) or "
+        "DataflowRunner")
+  if key in _PRISM_ROUTED:
+    runner = _LOCAL_RUNNER
   cache = MIN_CACHE_MB
   if plan is not None:
     wanted = math.ceil(side_input_bytes(plan) * _CACHE_HEADROOM / _MB)
@@ -613,18 +703,30 @@ def _flag_row(flag: RowFlag, context: RowContext) -> dict[str, Any]:
       evaluated_at=context.evaluated_at)
 
 
+def _guard(mv: MetricValue, known: Mapping[str, str],
+           failures: Mapping[str, str]) -> MetricValue:
+  """`assemble.guarded` against both failure sets: `known`, the tables
+  the driver had already seen fail when it built the graph — a constant
+  of this step, so nothing can deliver it late or incomplete — and then
+  the `failures` side input, which adds the tables a worker failed."""
+  return guarded(guarded(mv, known), failures)
+
+
 def _final_row(summary: RowSummary, registry: RegistryContext,
-               failures: Mapping[str, str], *signals:
+               known: Mapping[str, str], failures: Mapping[str, str], *signals:
                Iterable[Any]) -> dict[str, Any]:
   """The FINAL event, once every signal (the sinks' committed load and
-  copy jobs) is complete: they are read to the end so no runner can
-  schedule this step before them."""
+  copy jobs) is complete — a batch side input is, before the step
+  reading it runs, on every runner `_checked_runner` admits; each one is
+  read to its end all the same. The failed tables are the ones the
+  driver knew (`known`, a constant of the step) and the ones a worker
+  tagged (`failures`)."""
   for signal in signals:
     for _ in signal:
       pass
   evaluated_at = str(registry.seed["evaluated_at"])
-  return registry.final(
-      summary, dict(failures), finished_at=finish_time(evaluated_at))
+  failed = {**failures, **known}
+  return registry.final(summary, failed, finished_at=finish_time(evaluated_at))
 
 
 def _stamped(seed: Mapping[str, Any]) -> dict[str, Any]:
@@ -680,7 +782,11 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
   Returns the written PCollections: `metrics`, `profiles`, `flags`,
   `registry` and the per-table `failures` (table, reason); only
   `registry` for a skipped plan.
+
+  Raises:
+    ValueError: `p` would run on Prism (module docstring, Runners).
   """
+  _checked_runner(p)
   if plan.skip_reason is not None:
     return _skipped(p, plan, sinks)
   reads = _ReadOnce(sources)
@@ -758,7 +864,7 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
       p | "PlanMetrics" >> beam.Create(planned),
   )
               | "Metrics" >> beam.Flatten()
-              | "Guard" >> beam.Map(guarded, failure_map)
+              | "Guard" >> beam.Map(_guard, dict(failed), failure_map)
               | "MetricRows" >> beam.Map(metric_row, context))
   summary = measured | "Summary" >> beam.CombineGlobally(_SummaryCombineFn())
   metric_rows = (
@@ -783,7 +889,7 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
       *sinks.write(flag_rows, _FLAGS_TABLE),
   ]
   final = summary | "Final" >> beam.Map(
-      _final_row, RegistryContext.from_plan(plan), failure_map,
+      _final_row, RegistryContext.from_plan(plan), dict(failed), failure_map,
       *(beam.pvalue.AsIter(signal) for signal in signals))
   sinks.write(final, _REGISTRY_TABLE)
   return {
