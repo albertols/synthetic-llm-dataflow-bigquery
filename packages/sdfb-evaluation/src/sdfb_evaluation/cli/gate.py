@@ -11,31 +11,36 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""What a finished `sdfb-eval run` exits with (Rulings R88g, R90g).
+"""What a finished `sdfb-eval run` exits with (Rulings R88g, R90g, R93).
 
-    FINAL row                              exit
-    ─────────────────────────────────────  ────────────────────────────────
-    status FAILED                          3, whatever `--fail_on` says
-    any other status                       the `--fail_on` gate: 0, or 1
+    exit   meaning
+    ────   ──────────────────────────────────────────────────────────────
+    0      the evaluation finished and no gate tripped
+    1      the `--fail_on` gate tripped — and nothing else
+    2      a usage error: nothing was started (argparse, `cli.main`)
+    3      the evaluation failed: its FINAL row reads FAILED (here), or
+           the driver raised (`cli.main` maps that, after the FAILED row)
 
-    --fail_on   exit 1 when the run holds
-    ──────────  ──────────────────────────────────────────
-    none        never (the default)
-    fail        at least one metric at FAIL
-    warn        at least one metric at WARN or FAIL
+    FINAL status                 --fail_on none   --fail_on warn | fail
+    ───────────────────────────  ───────────────  ─────────────────────────
+    FAILED                       3                3
+    PARTIAL                      0                1: the gate cannot vouch
+                                                  for a launch table that
+                                                  was not evaluated
+    SKIPPED                      0                0: an empty scope is a
+                                                  planned outcome
+    SUCCEEDED[_WITH_WARNINGS]    0                by the metric counts:
+                                                  fail → any FAIL;
+                                                  warn → any WARN or FAIL
 
 A FINAL row can read FAILED without anything having raised: when no
 launch table could be evaluated, the pipeline writes that row itself and
 ends normally. `final_exit_code` therefore reads the row's status first
-— 3 is not a gate and `--fail_on none` does not mask it. (An evaluation
-that fails with an exception never gets here: the driver appends its
-FAILED row and re-raises.)
+— 3 is not a gate and `--fail_on none` does not mask it.
 
-The gate reads the DATA verdict only: the headline counts of the
-measured rows (aggregate `*_score` rows excluded, as in the registry's
-`metrics_*` columns). A run's own status is otherwise not a verdict on
-the data — a PARTIAL or SKIPPED run is reported on the summary line and
-does not trip it.
+The metric counts are the registry's own (`metrics_fail`, `metrics_warn`
+of the FINAL row): the headline counts of the measured rows, aggregate
+`*_score` rows excluded.
 
 `--thresholds_uri` changes what the GATE calls a warn or a fail, never
 what is stored: every `evaluation_metrics` row keeps the status the
@@ -81,6 +86,7 @@ FAIL_ON = ("none", "warn", "fail")
 EXIT_TRIPPED = 1
 EXIT_FAILED = 3  # 2 is argparse's usage error
 _FAILED = "FAILED"
+_PARTIAL = "PARTIAL"
 _KEYS = frozenset({"warn", "fail"})
 
 Thresholds = Mapping[str, tuple[float | None, float | None]]
@@ -227,13 +233,19 @@ def final_exit_code(final: Mapping[str, Any],
                     *,
                     gated: bool = True) -> int:
   """The exit code of a run whose FINAL registry row is `final` (module
-  docstring): 3 when it reads FAILED; otherwise the gate's 0 or 1, or 0
-  when the caller applies no gate (`gated=False`, the flex entry).
+  docstring): 3 when it reads FAILED; otherwise the gate's 0 or 1 — a
+  PARTIAL run trips an active gate whatever its counts — or 0 when the
+  caller applies no gate (`gated=False`, the flex entry).
 
   Raises:
     ValueError: `fail_on` is not none | warn | fail.
   """
   code = exit_code(fail_on, counts)  # validates fail_on either way
-  if final.get("status") == _FAILED:
+  status = final.get("status")
+  if status == _FAILED:
     return EXIT_FAILED
-  return code if gated else 0
+  if not gated:
+    return 0
+  if status == _PARTIAL and fail_on != "none":
+    return EXIT_TRIPPED
+  return code

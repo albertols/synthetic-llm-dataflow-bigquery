@@ -58,13 +58,7 @@ def main(argv: Sequence[str] | None = None, env: Env | None = None) -> int:
   (a local sink), 3 if the FINAL row reads FAILED."""
   flags = list(sys.argv[1:] if argv is None else argv)
   args, extras = parse_args(["run", *flags])
-  return driver.run(
-      args,
-      extras,
-      env,
-      wait=args.sink != "bq",
-      gated=False,
-      thresholds=args.thresholds)
+  return driver.run(args, extras, env, wait=args.sink != "bq", gated=False)
 
 
 if __name__ == "__main__":

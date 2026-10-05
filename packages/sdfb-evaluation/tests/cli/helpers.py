@@ -23,39 +23,37 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
-import json
-import math
-import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import apache_beam as beam
+from beam.test_acceptance import _check_rows as check_rows
 from unit.context.plan_fakes import PlanBq, thelook_rows
 
 from sdfb_evaluation.beam.assemble import final_row, finish_time
 from sdfb_evaluation.beam.io import InMemorySources
 from sdfb_evaluation.cli.driver import Env
-from sdfb_evaluation.schemas import load_schema
+from sdfb_evaluation.schemas import field_names, load_schema
 from sdfb_evaluation.scoring import to_metric_row
 from sdfb_evaluation.types import MetricValue
 
 NOW = datetime(2026, 9, 14, 8, 0, 0, tzinfo=UTC)  # plan_fakes.NOW
 REGISTRY = "evaluation_data_history"
-_TIMESTAMP_RE = re.compile(
-    r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)")
 
 
 class RecordingBq(PlanBq):
   """`PlanBq` (the planner's BigQuery over invented thelook rows) that
   also takes the driver's writes: `loads` records every `load_json`,
   `canned` answers a query by SQL substring before the planner's rules,
-  and `load_failures` raises instead of loading a table."""
+  `query_failures` raises for one instead, and `load_failures` raises
+  instead of loading a table."""
 
   def __init__(self, **kwargs: Any):
     super().__init__(source=thelook_rows(1), landing=thelook_rows(2), **kwargs)
     self.loads: list[tuple[str, list[dict]]] = []
     self.canned: list[tuple[str, Sequence[Mapping[str, Any]]]] = []
+    self.query_failures: dict[str, BaseException] = {}
     self.load_failures: dict[str, BaseException] = {}
 
   def load_json(self, fqn: str, rows: Sequence[Mapping[str, Any]],
@@ -73,6 +71,10 @@ class RecordingBq(PlanBq):
             params: Mapping[str, Any] | None = None,
             *,
             max_bytes: int | None = None) -> list[dict]:
+    for needle, exc in self.query_failures.items():
+      if needle in sql:
+        self.queries.append((sql, dict(params or {})))
+        raise exc
     for needle, rows in self.canned:
       if needle in sql:
         self.queries.append((sql, dict(params or {})))
@@ -96,13 +98,54 @@ def thelook_sources() -> InMemorySources:
   return InMemorySources(rows_by)
 
 
+class FakeResult:
+  """A local runner's pipeline result whose state the test controls:
+  `state` is what the runner says now; `wait_until_finish` raises
+  `error` (leaving `state` as it is) or moves to `final` and returns it.
+  It has no job id: the run cannot outlive the driver."""
+
+  def __init__(self,
+               state: str = "RUNNING",
+               *,
+               final: str | None = "DONE",
+               error: BaseException | None = None):
+    self.state = state
+    self.final = final
+    self.error = error
+    self.waits = 0
+    self.cancels = 0
+
+  def wait_until_finish(self) -> str | None:
+    self.waits += 1
+    if self.error is not None:
+      raise self.error
+    self.state = self.final or self.state
+    return self.final
+
+  def cancel(self) -> None:
+    self.cancels += 1
+
+
+class FakeJob(FakeResult):
+  """`FakeResult` of a submitted job (Dataflow): it has a job id and
+  goes on running whatever happens to the driver."""
+
+  def __init__(self, job: str = "2026-09-14_01_00_00-777", **kwargs: Any):
+    super().__init__(**kwargs)
+    self.job = job
+
+  def job_id(self) -> str:
+    return self.job
+
+
 def make_env(bq: Any,
              *,
-             execute: Callable[[Any, bool], str | None] | None = None,
+             submit: Callable[[Any], Any] | None = None,
              now: datetime = NOW,
              **overrides: Any) -> Env:
   """An `Env` over `bq`: a fixed clock, counting id tokens, in-memory
-  sources and a pipeline that is built but not run (unless `execute`)."""
+  sources and — unless `submit` says otherwise — a pipeline that is
+  built, never run, and reported DONE by a local `FakeResult`."""
   counter = itertools.count(1)
   env = Env(
       make_bq=lambda project: bq,
@@ -110,66 +153,21 @@ def make_env(bq: Any,
       now=lambda: now,
       token=lambda: f"{next(counter):08x}",
       make_sources=thelook_sources,
-      execute=execute or (lambda pipeline, wait: None))
+      submit=submit or (lambda pipeline: FakeResult()))
   return dataclasses.replace(env, **overrides)
-
-
-def _check_scalar(field: Mapping[str, Any], value: Any, name: str,
-                  ordered: bool) -> None:
-  kind = field["type"]
-  if kind == "RECORD":
-    assert isinstance(value, dict), name
-    names = [f["name"] for f in field["fields"]]
-    assert (list(value) if ordered else sorted(value)) == (names if ordered else
-                                                           sorted(names)), name
-    for sub in field["fields"]:
-      _check_value(sub, value[sub["name"]], f"{name}.", ordered)
-  elif kind == "STRING":
-    assert isinstance(value, str), name
-  elif kind == "INT64":
-    assert isinstance(value, int) and not isinstance(value, bool), name
-  elif kind == "FLOAT64":
-    assert isinstance(value, (int, float)) and not isinstance(value, bool)
-    assert math.isfinite(value), name
-  elif kind == "BOOL":
-    assert isinstance(value, bool), name
-  elif kind == "TIMESTAMP":
-    assert isinstance(value, str) and _TIMESTAMP_RE.fullmatch(value), name
-  elif kind == "JSON":
-    json.dumps(value)
-  else:
-    raise AssertionError(f"{name}: unchecked type {kind}")
-
-
-def _check_value(field: Mapping[str, Any], value: Any, where: str,
-                 ordered: bool) -> None:
-  name = where + field["name"]
-  if field.get("mode") == "REPEATED":
-    assert isinstance(value, list), name
-    for item in value:
-      _check_scalar(field, item, name, ordered)
-    return
-  if value is None:
-    assert field.get("mode") != "REQUIRED", f"{name} is REQUIRED"
-    return
-  _check_scalar(field, value, name, ordered)
 
 
 def check_row(table: str,
               row: Mapping[str, Any],
               *,
               ordered: bool = True) -> None:
-  """`row` is exactly `table`'s schema: its keys (in schema order unless
-  `ordered` is False: a local NDJSON line sorts them), every value of its
-  field's type, no REQUIRED field NULL, no non-finite float."""
-  fields = load_schema(table)
-  names = [f["name"] for f in fields]
+  """`row` is exactly `table`'s schema (the acceptance suite's validator:
+  the field names, every value of its field's type, no REQUIRED field
+  NULL, no non-finite float) and — `ordered`, a row the driver built —
+  its keys are in schema order (a local NDJSON line sorts them)."""
   if ordered:
-    assert list(row) == names, table
-  else:
-    assert sorted(row) == sorted(names), table
-  for field in fields:
-    _check_value(field, row[field["name"]], f"{table}.", ordered)
+    assert list(row) == list(field_names(table)), table
+  check_rows(table, [row])
 
 
 def ks_row(plan: Any, value: float) -> dict[str, Any]:
@@ -195,6 +193,7 @@ def tiny_pipeline(
     *,
     counts: Mapping[str, int] | None = None,
     status: str = "SUCCEEDED",
+    reason: str | None = None,
     write: bool = True,
     ks: Sequence[float] = ()) -> Callable[..., dict]:
   """A stand-in for `build_evaluation_pipeline` that writes only a FINAL
@@ -220,7 +219,7 @@ def tiny_pipeline(
         }), {},
         finished_at=finish_time(plan.evaluated_at),
         status=status,
-        status_reason=None)
+        status_reason=reason)
     final = p | "Final" >> beam.Create([row])
     kwargs["sinks"].write(final, REGISTRY)
     if ks:

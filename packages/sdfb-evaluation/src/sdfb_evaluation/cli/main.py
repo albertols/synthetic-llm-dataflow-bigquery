@@ -42,14 +42,24 @@ take the ids `run` printed.
     exit code   run                               the other commands
     ─────────   ────────────────────────────────  ───────────────────
     0           the evaluation finished           done
-    1           it finished and --fail_on tripped —
-    2           a usage error (nothing started)   a usage error
-    3           it finished, and its FINAL row    —
-                reads FAILED (no table could be
-                evaluated); --fail_on none does
-                not mask it
-    raises      an error stopped the evaluation: its FAILED row is
-                appended and the error propagates (a traceback, non-zero)
+    1           the --fail_on gate tripped,       —
+                and nothing else
+    2           a usage error: nothing was        a usage error
+                started (no registry row, no
+                DDL)
+    3           the evaluation failed: its        —
+                FINAL row reads FAILED, or the
+                driver raised (its FAILED row
+                is written first when the
+                driver owns the outcome, then
+                the traceback goes to stderr)
+
+A usage error is everything that can be told from the command line
+alone: the evaluator's own flags, the thresholds file, and Beam's
+arguments too (a malformed `--num_workers abc` is refused here, not
+after the RUNNING row). An interrupt (Ctrl-C) keeps its conventional
+behaviour and is not mapped to 3. An error in any other command
+propagates as it is.
 
 `plan --dry_run`: a plan never runs the prepare DDL and never writes a
 registry row, with or without the flag — `--dry_run` says so on the
@@ -59,9 +69,12 @@ scope's own reads go through. `--no_planning_snapshots` plans without
 them; those tables are then reported UNPLANNED.
 
 A boolean flag takes an optional value (`--allow_contaminated` or
-`--allow_contaminated=false`) and an empty value means "not given"
-(`--run_id=`), because a Dataflow flex template and Composer pass every
-parameter as `--name=value`.
+`--allow_contaminated=false`), and an empty value means "not given" for
+every flag of this command line — `--run_id=`, `--mode=`,
+`--sample_rows=`, `--output_dataset ""` — so the default applies: a
+Dataflow flex template and Composer pass every parameter as
+`--name=value`, the unset ones empty. (An empty value of a Beam argument
+is Beam's to read.)
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -69,17 +82,23 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
-import os
 import re
 import sys
+import traceback
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
+import yaml
+from apache_beam.options.pipeline_options import PipelineOptions
+
+from sdfb_evaluation.beam.label_key import is_label_key_uri
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.driver import Env
-from sdfb_evaluation.cli.gate import FAIL_ON, load_thresholds
+from sdfb_evaluation.cli.gate import EXIT_FAILED, FAIL_ON, load_thresholds
 from sdfb_evaluation.cli.planview import describe_plan, render_plan_text
 from sdfb_evaluation.context.bq import normalize_fqn
 from sdfb_evaluation.context.plan import TRIGGERS
@@ -101,7 +120,6 @@ __all__ = ["build_parser", "main", "parse_args", "public_run_flags"]
 _DEFAULT_DATASET = "synthetic_data_quality"
 _DEFAULT_RUNNER = "DirectRunner"
 _GLOB_CHARS = re.compile(r"[*?\[\]]")
-_SECRET_RE = re.compile(r"projects/[^/]+/secrets/[^/]+/versions/[^/]+")
 _TRUE = frozenset({"true", "1", "yes", "on"})
 _FALSE = frozenset({"false", "0", "no", "off"})
 _VIEW_RE = re.compile(r"CREATE OR REPLACE VIEW `([^`]+)`")
@@ -421,8 +439,6 @@ def _check_target(parser: argparse.ArgumentParser,
 def _check_planning(parser: argparse.ArgumentParser,
                     args: argparse.Namespace) -> None:
   _check_target(parser, args)
-  if not args.runner.strip():
-    parser.error("--runner needs a runner name")
   if args.mode is None:
     args.mode = driver.runner_defaults(args.runner)[0]
   try:
@@ -456,13 +472,27 @@ def _check_sink(parser: argparse.ArgumentParser,
                  "glob; choose another directory")
 
 
+def _beam_error(extras: Sequence[str]) -> str | None:
+  """What Beam's own parser says is wrong with `extras` (a value of the
+  wrong type, a missing value), or None. Beam reports it by printing a
+  usage text and exiting; here it becomes this command's usage error,
+  before anything is started."""
+  captured = io.StringIO()
+  try:
+    with contextlib.redirect_stderr(captured):
+      PipelineOptions(list(extras)).get_all_options()
+  except SystemExit:
+    lines = [line for line in captured.getvalue().splitlines() if line.strip()]
+    message = lines[-1] if lines else "not accepted by Beam"
+    return message.split("error: ", 1)[-1]
+  return None
+
+
 def _check_run(parser: argparse.ArgumentParser, args: argparse.Namespace,
                extras: list[str]) -> None:
   _check_planning(parser, args)
   _check_sink(parser, args)
-  uri = args.label_key_uri
-  if uri and not (_SECRET_RE.fullmatch(uri) or uri.startswith("gs://") or
-                  os.path.isabs(uri)):
+  if args.label_key_uri and not is_label_key_uri(args.label_key_uri):
     # the URI is never echoed: it names where the key lives
     parser.error("--label_key_uri must be a Secret Manager version "
                  "(projects/P/secrets/S/versions/V), a gs:// object or an "
@@ -470,6 +500,9 @@ def _check_run(parser: argparse.ArgumentParser, args: argparse.Namespace,
   if any(extra.split("=", 1)[0] == "--evaluation_id" for extra in extras):
     parser.error("--evaluation_id is not accepted: every attempt mints its "
                  "own evaluation_id (pass it to report / compare)")
+  refused = _beam_error(extras)
+  if refused is not None:
+    parser.error(f"Beam arguments: {refused}")
   if driver.forbidden_experiments(extras):
     parser.error("the experiment enable_data_sampling is refused: Dataflow "
                  "would sample pipeline elements, the label key among them, "
@@ -478,7 +511,7 @@ def _check_run(parser: argparse.ArgumentParser, args: argparse.Namespace,
   if args.thresholds_uri:
     try:
       args.thresholds = load_thresholds(args.thresholds_uri)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, yaml.YAMLError) as exc:
       parser.error(f"--thresholds_uri: {exc}")
 
 
@@ -530,13 +563,44 @@ _CHECKS: dict[str, Check] = {
 }
 
 
+def _own_flags(parser: argparse.ArgumentParser) -> frozenset[str]:
+  return frozenset(parser._option_string_actions)  # pylint: disable=protected-access  # argparse has no public list of a parser's options
+
+
+def _without_empty(argv: Sequence[str],
+                   commands: dict[str, argparse.ArgumentParser]) -> list[str]:
+  """`argv` without the flags of its own command that were given an
+  empty value (`--flag=`, or `--flag ""`): "not given", so the default
+  applies (module docstring). Beam's arguments are left as they are."""
+  command = next((token for token in argv if token in commands), None)
+  if command is None:
+    return list(argv)
+  own = _own_flags(commands[command])
+  kept: list[str] = []
+  skip = False
+  for index, token in enumerate(argv):
+    if skip:
+      skip = False
+      continue
+    name, equals, value = token.partition("=")
+    following = argv[index + 1] if index + 1 < len(argv) else None
+    if name in own and equals and not value.strip():
+      continue
+    if token in own and following is not None and not following.strip():
+      skip = True
+      continue
+    kept.append(token)
+  return kept
+
+
 def parse_args(
     argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
   """(the parsed arguments, the Beam arguments left for the pipeline),
   runner defaults applied. A usage error exits 2 (argparse's own
   `SystemExit`), before anything is started."""
   parser, commands = _subparsers()
-  args, extras = parser.parse_known_args(argv)
+  given = sys.argv[1:] if argv is None else argv
+  args, extras = parser.parse_known_args(_without_empty(given, commands))
   command = commands[args.command]
   if extras and args.command != "run":
     joined = " ".join(extras)
@@ -633,7 +697,15 @@ def _schemas(args: argparse.Namespace, env: Env) -> int:
 
 
 def _run(args: argparse.Namespace, extras: list[str], env: Env) -> int:
-  return driver.run(args, extras, env, thresholds=args.thresholds)
+  """`run`: the driver's exit code, or 3 when it raised (Ruling R93-5).
+  The driver has written the FAILED row by then, when the outcome is its
+  to write; the traceback goes to stderr. Exit 1 stays the gate's alone.
+  An interrupt is not an error of the evaluation: it propagates."""
+  try:
+    return driver.run(args, extras, env)
+  except Exception:  # pylint: disable=broad-exception-caught  # every failure of the evaluation maps to one exit code; the traceback is printed, nothing is hidden
+    traceback.print_exc()
+    return EXIT_FAILED
 
 
 _COMMANDS: dict[str, Callable[[argparse.Namespace, Env], int]] = {

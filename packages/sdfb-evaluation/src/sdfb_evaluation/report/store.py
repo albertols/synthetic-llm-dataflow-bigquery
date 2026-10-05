@@ -48,13 +48,19 @@ from typing import Any
 from sdfb_evaluation.context.bq import quote_fqn
 from sdfb_evaluation.schemas import TABLES
 
-__all__ = ["Evaluation", "read_bq", "read_local"]
+__all__ = ["Evaluation", "NoSuchEvaluationError", "read_bq", "read_local"]
 
 REGISTRY = "evaluation_data_history"
 METRICS = "evaluation_metrics"
 PROFILES = "evaluation_profiles"
 FLAGS = "evaluation_row_flags"
 _FINAL = "FINAL"
+
+
+class NoSuchEvaluationError(LookupError):
+  """The store was read and holds no registry row for the evaluation
+  (as opposed to a store that could not be read: BigQuery's own 404 is a
+  plain `LookupError`)."""
 
 
 @dataclass(frozen=True)
@@ -136,7 +142,7 @@ def read_bq(bq: Any,
   besides the registry.
 
   Raises:
-    LookupError: the registry has no row for `evaluation_id`.
+    NoSuchEvaluationError: the registry has no row for `evaluation_id`.
     ValueError: `project.dataset` is not a dataset reference.
   """
 
@@ -151,7 +157,7 @@ def read_bq(bq: Any,
   ])
   origin = f"{project}.{dataset}"
   if not events:
-    raise LookupError(
+    raise NoSuchEvaluationError(
         f"no registry row for evaluation {evaluation_id} in {origin}."
         f"{REGISTRY} (check --project / --output_dataset, or pass --local "
         "for a run written with --sink local_json)")
@@ -196,8 +202,8 @@ def read_local(directory: str, evaluation_id: str | None = None) -> Evaluation:
   """The evaluation written under `directory` (module docstring).
 
   Raises:
-    LookupError: no evaluation output there, no registry row, or rows of
-      several evaluations and no `evaluation_id` to choose one.
+    NoSuchEvaluationError: no evaluation output there, no registry row,
+      or rows of several evaluations and no `evaluation_id` to choose one.
   """
   root = directory
   nested = os.path.join(directory, evaluation_id or "")
@@ -205,7 +211,7 @@ def read_local(directory: str, evaluation_id: str | None = None) -> Evaluation:
     root = nested
   if not _is_evaluation_dir(root):
     wanted = f" for {evaluation_id}" if evaluation_id else ""
-    raise LookupError(
+    raise NoSuchEvaluationError(
         f"{directory} holds no evaluation output{wanted} (no {REGISTRY}/ "
         "directory): pass the evaluation's own directory, <--output_local>/"
         "<evaluation_id>, or the --output_local directory with "
@@ -214,13 +220,13 @@ def read_local(directory: str, evaluation_id: str | None = None) -> Evaluation:
   ids = sorted({str(e.get("evaluation_id")) for e in events})
   if evaluation_id is None:
     if len(ids) != 1:
-      raise LookupError(f"{root} holds registry rows of {len(ids)} "
-                        f"evaluations ({ids}); pass --evaluation_id")
+      raise NoSuchEvaluationError(f"{root} holds registry rows of {len(ids)} "
+                                  f"evaluations ({ids}); pass --evaluation_id")
     evaluation_id = ids[0]
   own = [e for e in events if e.get("evaluation_id") == evaluation_id]
   if not own:
-    raise LookupError(f"{root} has no registry row for evaluation "
-                      f"{evaluation_id} (it holds {ids})")
+    raise NoSuchEvaluationError(f"{root} has no registry row for evaluation "
+                                f"{evaluation_id} (it holds {ids})")
 
   def rows(name: str) -> list[dict[str, Any]]:
     return [

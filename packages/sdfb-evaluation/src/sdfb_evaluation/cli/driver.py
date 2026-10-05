@@ -12,7 +12,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """One evaluation, driven end to end: the registry events around the
-pipeline (D7), written by the driver.
+pipeline (D7), and who writes the one terminal row.
 
     mint evaluation_id  eval-<UTC yyyymmddThhmmssZ>-<8 hex>, fresh per
           │             attempt (temp tables carry it and collide for 24 h)
@@ -21,34 +21,57 @@ pipeline (D7), written by the driver.
           │      any exception: no plan exists, so a FAILED row is built
           │      from the arguments (`planning_failed_row`), then re-raised
           ▼
-    RUNNING row  ──────────────────────────────┐  the driver's own events:
-          ▼                                    │  a BigQuery load job, or —
-    prepare_evaluation (the plan's DDL;        │  `--sink local_json` — a
-          │  a refused pin degrades)           │  shard in the evaluation's
-          ▼                                    │  own directory
-    pipeline(options from the PREPARED plan)   │
+    RUNNING row         the driver's own events are a BigQuery load job,
+          ▼             or — `--sink local_json` — a shard in the
+    prepare_evaluation  evaluation's own directory
+          ▼
+    pipeline(options from the PREPARED plan) ─► submit ─► wait
           │  bq         the pipeline writes its rows and the FINAL row
           │  bq_client  local NDJSON, then one load job per table, the
           │             registry's FINAL row last
           │  local_json local NDJSON only
-          ▼                                    │
-    any exception ─► FAILED row ◄──────────────┘  then the exception is
-                                                  re-raised, never replaced
+          ▼
+    read the FINAL row back ─► exit code (`cli.gate`)
 
-Every evaluation therefore leaves a RUNNING row and a final one, or a
-FAILED row alone when planning never produced a plan. A FAILED row that
-cannot itself be written is reported on stderr and the original error
-still surfaces. `sdfb-eval run` waits for the pipeline, so its exit code
-can carry the `--fail_on` gate (`cli.gate`); the flex-template entry
-submits the Dataflow job and returns (a job that dies later leaves its
-RUNNING row to the orchestrator's failure callback).
+Exactly one terminal row, written by whoever owns the outcome (Ruling
+R93-3):
+
+    what happened                                 terminal row
+    ────────────────────────────────────────────  ─────────────────────────
+    the run completed                             the pipeline's FINAL
+    planning, RUNNING, prepare, graph             the driver's FAILED: no
+      construction or submission raised           job is running
+    the job ended in a state other than DONE      the driver's FAILED: the
+      (it failed, it was cancelled)               job will write nothing
+    the job ended DONE and the registry, read     the driver's FAILED ("the
+      back, holds no FINAL row                    job finished without a
+                                                  FINAL row")
+    an interrupt or a polling error while a       NOBODY's yet: the job
+      submitted job is still running              goes on and writes its
+                                                  own; it is never
+                                                  cancelled
+    the read-back itself failed                   none: a FINAL row may
+                                                  well exist
+
+A submitted job is one that outlives the driver: its result names a job
+id (Dataflow). While it is not known to be terminal — an unreadable
+state counts as running — the driver writes no terminal row: it prints
+the job id and how to read the result later, and re-raises. A local run
+(no job id) dies with the driver, so the driver closes it. Two
+contradicting terminal rows are worse than a RUNNING row that stays open
+(an orchestrator's failure callback closes that one).
+
+Every exception is re-raised after its row, never replaced; a FAILED row
+that cannot itself be written is reported on stderr and the original
+error still surfaces. `sdfb-eval run` waits, so its exit code can carry
+the `--fail_on` gate; the flex-template entry submits the Dataflow job
+and returns.
 
 Not every FAILED comes with an exception: when no launch table could be
 evaluated the pipeline itself writes a FINAL row reading FAILED and ends
-normally. So once the run is over the driver reads the FINAL row back —
-it needs it for the gate anyway — and a FAILED one exits 3
-(`cli.gate.final_exit_code`), with no second row and whatever
-`--fail_on` says.
+normally. The driver reads the FINAL row back anyway — the gate needs
+its counts — and a FAILED one exits 3 (`cli.gate.final_exit_code`), with
+no second row.
 
 Runner defaults: the DirectRunner evaluates samples and loads through
 the client (`--mode sampled --sink bq_client`); Dataflow reads every row
@@ -62,7 +85,18 @@ the monitoring UI, Ruling R68).
 
 The label key is never read here: `--label_key_uri` travels into the
 plan, a worker resolves it, the registry records only `operator` or
-`ephemeral`, and nothing this module prints or writes names the URI.
+`ephemeral`, and nothing this module prints or writes names the URI (an
+error message that quotes it is redacted before the registry's
+1,000-character cut).
+
+The free-text pools (`field.pool_memorization_lift`) are read here, per
+table, from the launch's `freetext_pools_table`. A read BigQuery REFUSES
+(`context.bq.is_refusal`) degrades with a warning; a transient error
+fails the run, as in `prepare_evaluation` (Ruling R89, M8).
+
+`--sink bq_client` without `--output_local` writes under a temporary
+directory: removed when the run ends without an error, kept (its path
+printed once on stderr) when it failed after writing something.
 
 `plan` builds the same plan and stops. Planning itself creates one kind
 of table (Ruling R57): the zero-byte, 24-hour start snapshot of an
@@ -110,6 +144,7 @@ from sdfb_evaluation.beam.io import (
     Sinks,
     Sources,
 )
+from sdfb_evaluation.beam.label_key import label_key_mode
 from sdfb_evaluation.beam.pipeline import (
     build_evaluation_pipeline,
     pipeline_options_defaults,
@@ -117,18 +152,23 @@ from sdfb_evaluation.beam.pipeline import (
 )
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.cli.fixture import Fixture, load_fixture
-from sdfb_evaluation.cli.gate import (
-    EXIT_FAILED,
-    final_exit_code,
-    gate_counts,
+from sdfb_evaluation.cli.gate import EXIT_FAILED, final_exit_code
+from sdfb_evaluation.context.bq import (
+    Bq,
+    BqApiError,
+    is_refusal,
+    normalize_fqn,
 )
-from sdfb_evaluation.context.bq import Bq, BqApiError, normalize_fqn
 from sdfb_evaluation.context.gcp import make_session
 from sdfb_evaluation.context.launch import LaunchContext, resolve_launch
 from sdfb_evaluation.context.plan import EvaluationPlan, Knobs, build_plan
 from sdfb_evaluation.context.relationships import RelModel, load_models
 from sdfb_evaluation.context.runs import runs_for
-from sdfb_evaluation.report.store import METRICS, REGISTRY, read_bq
+from sdfb_evaluation.report.store import (
+    REGISTRY,
+    NoSuchEvaluationError,
+    read_bq,
+)
 from sdfb_evaluation.schemas import load_schema
 from sdfb_evaluation.version import EVALUATOR_VERSION
 
@@ -136,7 +176,6 @@ __all__ = [
     "EVALUATION_ID_RE",
     "SINKS",
     "Env",
-    "execute_pipeline",
     "forbidden_experiments",
     "knobs_from_args",
     "launch_key",
@@ -147,6 +186,7 @@ __all__ = [
     "planning_failed_row",
     "run",
     "runner_defaults",
+    "submit_pipeline",
 ]
 
 EVALUATION_ID_RE = re.compile(r"eval-\d{8}T\d{6}Z-[0-9a-f]{8}")
@@ -157,10 +197,13 @@ _FORBIDDEN_EXPERIMENT = "enable_data_sampling"
 _DATAFLOW = "dataflow"
 _LOCAL = "local_json"
 _FINAL = "FINAL"
+_PARTIAL = "PARTIAL"
+_SKIPPED = "SKIPPED"
 _REDACTED = "<label key uri>"
 _COUNT_KEYS = ("total", "pass", "warn", "fail", "info", "not_evaluated")
 _SCORE_KEYS = ("overall", "fidelity", "privacy", "integrity", "diversity")
-_POOL_ERRORS = (BqApiError, PermissionError, LookupError, ValueError)
+_BQ_ERRORS = (BqApiError, PermissionError, LookupError)
+_NO_FINAL = "the job finished without a FINAL row"
 _NO_SNAPSHOTS = (
     "--no_planning_snapshots: planning creates no table, so this as_of_diff "
     "scope has no start snapshot to read; plan or run without the flag to "
@@ -183,23 +226,34 @@ def _pipeline(options: PipelineOptions) -> beam.Pipeline:
   return beam.Pipeline(options=options)
 
 
-def execute_pipeline(pipeline: beam.Pipeline, wait: bool) -> str | None:
-  """Run `pipeline`; with `wait`, block until it ends and raise unless it
-  ended DONE. Returns the runner's job id when it assigns one.
+def submit_pipeline(pipeline: beam.Pipeline) -> Any:
+  """Hand `pipeline` to its runner and return the runner's result. A
+  local runner has run it to its end by then (an error in it is raised
+  here); Dataflow has only accepted the job."""
+  return pipeline.run()
 
-  Raises:
-    RuntimeError: the pipeline ended in any state but DONE.
-  """
-  result = pipeline.run()
+
+def _job_id(result: Any) -> str | None:
+  """The id of the job `result` stands for, when the runner submitted
+  one that goes on without the driver (Dataflow); None for a local run."""
   job_id = getattr(result, "job_id", None)
-  job = str(job_id()) if callable(job_id) else None
-  if wait:
-    state = result.wait_until_finish()
-    if state is not None and state != PipelineState.DONE:
-      named = f" (job {job})" if job else ""
-      raise RuntimeError(f"the evaluation pipeline{named} ended in state "
-                         f"{state}, not DONE")
-  return job
+  value = job_id() if callable(job_id) else job_id
+  return str(value) if value else None
+
+
+def _last_state(result: Any) -> Any:
+  """The state the runner reports for `result` now, or None when it
+  cannot say (which is not "terminal")."""
+  try:
+    return result.state
+  except Exception:  # pylint: disable=broad-exception-caught  # an unreachable runner must read as "unknown", whatever it raised
+    return None
+
+
+def _still_running(job: str | None, state: Any) -> bool:
+  """Whether a submitted job may still be running: it has a job id and
+  its last known state is not terminal."""
+  return job is not None and not PipelineState.is_terminal(state)
 
 
 @dataclass
@@ -209,15 +263,16 @@ class Env:
   Application Default Credentials, made when a job id is resolved), the
   clock and the random half of an evaluation id, the pipeline's sources,
   how a pipeline is made from its options (on Dataflow, Beam validates
-  them against Cloud Storage right there) and how a built one is
-  executed."""
+  them against Cloud Storage right there) and how a built one is handed
+  to its runner (the result: `wait_until_finish()`, `state` and, for a
+  submitted job, `job_id()`)."""
   make_bq: Callable[[str], Any] = _default_bq
   session_factory: Callable[[str], Any] | None = None
   now: Callable[[], datetime] = _utc_now
   token: Callable[[], str] = _token
   make_sources: Callable[[], Sources] = BigQuerySources
   make_pipeline: Callable[[PipelineOptions], beam.Pipeline] = _pipeline
-  execute: Callable[[beam.Pipeline, bool], str | None] = execute_pipeline
+  submit: Callable[[beam.Pipeline], Any] = submit_pipeline
 
 
 def mint_evaluation_id(now: datetime, token: str) -> str:
@@ -544,16 +599,26 @@ def planning_failed_row(args: argparse.Namespace,
   return row
 
 
+def _redacted(exc: BaseException, uri: str | None) -> BaseException:
+  """`exc`, or — its message quotes the label key's URI — a stand-in of
+  the same class name whose message does not (and that still carries
+  `planning_ddl`). The registry's reason is cut at a fixed length, so
+  the URI has to go BEFORE the cut: afterwards a piece of it could be
+  left at the end."""
+  if not uri or uri not in str(exc):
+    return exc
+  stand_in: BaseException = type(
+      type(exc).__name__, (Exception,),
+      {"planning_ddl": getattr(exc, "planning_ddl", ())})(
+          str(exc).replace(uri, _REDACTED))
+  return stand_in
+
+
 def _failed(planned: EvaluationPlan, exc: BaseException,
             now: datetime | None) -> dict[str, Any]:
   """`assemble.failed_row`, the label key's URI kept out of the reason
   (an error may quote the secret's resource name)."""
-  row = failed_row(planned, exc, now=now)
-  uri = planned.label_key_uri
-  if uri:
-    row["status_reason"] = str(row["status_reason"]).replace(uri, _REDACTED)
-    row["warnings"] = [str(w).replace(uri, _REDACTED) for w in row["warnings"]]
-  return row
+  return failed_row(planned, _redacted(exc, planned.label_key_uri), now=now)
 
 
 # --------------------------------------------------------------------------
@@ -649,9 +714,15 @@ def _free_text_pools(
     planned: EvaluationPlan,
     bq: Any) -> tuple[dict[str, dict[str, FreeTextPool]] | None, list[str]]:
   """The launch's free-text pools per table (`census.read_pools`) and a
-  note for each table whose pools could not be read; None when the
-  launch names no pools table (`field.pool_memorization_lift` then says
-  so itself)."""
+  note for each table whose pools BigQuery refused to give; None when
+  the launch names no pools table (`field.pool_memorization_lift` then
+  says so itself).
+
+  Raises:
+    BqApiError: a read failed for a reason a retry may remove
+      (`context.bq.is_refusal` is False): the run fails instead of
+      publishing a pool metric that is missing by accident.
+  """
   params = planned.launch.params
   table = str(params.get("freetext_pools_table") or "").strip()
   if not table:
@@ -668,7 +739,10 @@ def _free_text_pools(
           reference_digest=entry.reference_digest,
           model_uri=str(params.get("model_uri") or ""),
           max_bytes=planned.budget.max_bytes_billed)
-    except _POOL_ERRORS as exc:
+    except (*_BQ_ERRORS, ValueError) as exc:
+      # ValueError: the launch names a table that is no table reference
+      if not isinstance(exc, ValueError) and not is_refusal(exc):
+        raise
       notes.append(f"{entry.name}: the free-text pools could not be read "
                    f"from {table} ({type(exc).__name__}: {exc}); "
                    "field.pool_memorization_lift is not evaluated")
@@ -715,6 +789,20 @@ def _summary(final: Mapping[str, Any], counts: Mapping[str, Any], where: str,
   return lines
 
 
+def _gate_line(final: Mapping[str, Any], counts: Mapping[str, Any],
+               fail_on: str, code: int) -> str:
+  """The summary's gate line of an active gate."""
+  failing, warning = counts.get("fail") or 0, counts.get("warn") or 0
+  outcome = "TRIPPED" if code else "passed"
+  line = (f"  gate (--fail_on {fail_on}): {outcome} — {failing} fail, "
+          f"{warning} warn")
+  if code and final.get("status") == _PARTIAL:
+    reason = final.get("status_reason") or "no reason recorded"
+    line += (f"; the run is PARTIAL ({reason}): the gate cannot vouch for a "
+             "launch table that was not evaluated")
+  return line
+
+
 @dataclass
 class _Run:
   """One `run`'s wiring: the attempt, where it writes and how it reads
@@ -736,11 +824,19 @@ class _Run:
       return str(self.directory)
     return f"{self.project}.{self.args.output_dataset}"
 
-  def execute(self, planned: EvaluationPlan, beam_args: Sequence[str],
-              wait: bool) -> tuple[str | None, dict[str, Any] | None]:
-    """Build and run the pipeline of the prepared plan; with `wait` and
-    a local sink, check its FINAL row and (`bq_client`) load the
-    outputs. Returns (job id, the FINAL row when it is local)."""
+  @property
+  def how_to_read(self) -> str:
+    """The command that reads this evaluation's result later."""
+    evaluation_id = self.attempt.evaluation_id
+    if self.args.sink == _LOCAL:
+      return f"sdfb-eval report --local {self.directory}"
+    dataset = self.args.output_dataset
+    return (f"sdfb-eval report --project {self.project} --evaluation_id "
+            f"{evaluation_id} --output_dataset {dataset}")
+
+  def submit(self, planned: EvaluationPlan, beam_args: Sequence[str]) -> Any:
+    """Build the pipeline of the prepared plan and hand it to its
+    runner; returns the runner's result."""
     args, fixture = self.args, self.fixture
     pools: dict[str, dict[str, FreeTextPool]] | None = None
     notes: list[str] = []
@@ -760,38 +856,104 @@ class _Run:
         sinks=self.sinks,
         stats_query=self.bq.query if fixture is None else None,
         pools=pools)
-    job = self.env.execute(pipeline, wait)
-    if not wait or args.sink == "bq":
-      return job, None
-    final = _local_final(self.sinks)
-    if isinstance(self.sinks, ClientLoadSinks):
-      self.sinks.load(self.bq)
-    return job, final
+    return self.env.submit(pipeline)
 
-  def verdict(
-      self, final: dict[str, Any] | None,
-      thresholds: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """(the FINAL row, the gate's counts), read back from the sink."""
-    args = self.args
+  def _close(self, planned: EvaluationPlan, exc: BaseException) -> None:
+    """The driver owns the outcome: append its FAILED row."""
+    self.registry.record_failure(_failed, planned, exc, self.env.now())
+
+  def _leave_running(self, job: str) -> None:
+    """A submitted job is still running: write nothing, say so."""
     evaluation_id = self.attempt.evaluation_id
-    if final is None:
+    print(
+        f"sdfb-eval: evaluation {evaluation_id} continues on "
+        f"{self.args.runner} as job {job}: it was not cancelled and no "
+        "terminal registry row was written (the job writes its own FINAL "
+        f"row). Read its result later with: {self.how_to_read}",
+        file=sys.stderr)
+
+  def wait(self, result: Any, planned: EvaluationPlan) -> None:
+    """Wait for `result` to end DONE (module docstring: who owns the
+    terminal row when it does not).
+
+    Raises:
+      RuntimeError: the run ended in a state other than DONE.
+      BaseException: whatever interrupted the wait, unchanged.
+    """
+    job = _job_id(result)
+    try:
+      state = result.wait_until_finish()
+    except BaseException as exc:
+      if _still_running(job, _last_state(result)):
+        self._leave_running(str(job))
+      else:
+        self._close(planned, exc)
+      raise
+    if state is None or state == PipelineState.DONE:
+      return
+    named = f" (job {job})" if job else ""
+    error = RuntimeError(f"the evaluation pipeline{named} ended in state "
+                         f"{state}, not DONE")
+    if _still_running(job, state):
+      self._leave_running(str(job))
+    else:
+      self._close(planned, error)
+    raise error
+
+  def collect(self, planned: EvaluationPlan) -> dict[str, Any]:
+    """The FINAL row of a run that ended DONE: a local sink's own file
+    (then, `bq_client`, the load jobs), or the registry read back.
+
+    Raises:
+      RuntimeError: there is no FINAL row (the driver appended FAILED),
+        or the registry could not be read (nothing was appended).
+    """
+    if self.args.sink != "bq":
+      try:
+        final = _local_final(self.sinks)
+        if isinstance(self.sinks, ClientLoadSinks):
+          self.sinks.load(self.bq)
+      except BaseException as exc:
+        self._close(planned, exc)
+        raise
+      return final
+    evaluation_id = self.attempt.evaluation_id
+    try:
       stored = read_bq(
           self.bq,
           project=self.project,
-          dataset=args.output_dataset,
+          dataset=self.args.output_dataset,
           evaluation_id=evaluation_id,
-          metrics=bool(thresholds))
-      if stored.final is None:
-        raise LookupError(
-            f"evaluation {evaluation_id}: the pipeline ended DONE, but "
-            f"{self.where}.{REGISTRY} holds no FINAL row for it")
-      final, rows = stored.final, stored.metrics
-    else:
-      assert isinstance(self.sinks, LocalJsonSinks)
-      rows = self.sinks.read_rows(METRICS) if thresholds else []
-    if thresholds:
-      return final, gate_counts(rows, thresholds)
-    return final, {key: final.get(f"metrics_{key}") or 0 for key in _COUNT_KEYS}
+          metrics=False)
+      found = stored.final
+    except NoSuchEvaluationError:
+      found = None
+    except Exception as exc:
+      raise RuntimeError(
+          f"evaluation {evaluation_id}: the job finished, but the registry "
+          f"could not be read ({type(exc).__name__}: {exc}). No registry row "
+          "was written: its FINAL row may be there. Read the result later "
+          f"with: {self.how_to_read}") from exc
+    if found is None:
+      error = RuntimeError(f"evaluation {evaluation_id}: {_NO_FINAL} in "
+                           f"{self.where}.{REGISTRY}")
+      self._close(planned, error)
+      raise error
+    return found
+
+  def discard_temporary(self, *, failed: bool) -> None:
+    """Remove the temporary directory — unless the run failed after
+    writing into it: then it holds the only copy of the outputs, and its
+    path is printed once on stderr."""
+    if not self.temporary:
+      return
+    wrote = any(files for _, _, files in os.walk(self.temporary))
+    if failed and wrote:
+      print("sdfb-eval: the local outputs were kept in "
+            f"{self.temporary}",
+            file=sys.stderr)
+      return
+    shutil.rmtree(self.temporary, ignore_errors=True)
 
 
 def _wiring(args: argparse.Namespace, env: Env) -> _Run:
@@ -834,28 +996,9 @@ def _wiring(args: argparse.Namespace, env: Env) -> _Run:
       temporary=temporary)
 
 
-def run(args: argparse.Namespace,
-        beam_args: Sequence[str],
-        env: Env | None = None,
-        *,
-        wait: bool = True,
-        gated: bool = True,
-        thresholds: Mapping[str, Any] | None = None) -> int:
-  """`sdfb-eval run`: one evaluation, start to registry (module
-  docstring). `wait=False` submits the pipeline and returns (the flex
-  entry on Dataflow); `gated=False` never applies `--fail_on`;
-  `thresholds` are the gate's overrides (`cli.gate.load_thresholds`).
-
-  Returns:
-    0; 1 when the `--fail_on` gate trips; 3 when the run ended without
-    an error but its FINAL row reads FAILED (no launch table could be
-    evaluated: the pipeline wrote that row itself, so none is added).
-
-  Raises:
-    Whatever stopped the evaluation, after its FAILED row was appended.
-  """
-  this = _wiring(args, env or Env())
-  attempt, registry = this.attempt, this.registry
+def _drive(this: _Run, beam_args: Sequence[str], wait: bool,
+           gated: bool) -> int:
+  args, attempt, registry = this.args, this.attempt, this.registry
   print(f"evaluation {attempt.evaluation_id}: planning "
         f"(mode {args.mode}, {args.runner}, sink {args.sink})")
   try:
@@ -876,12 +1019,13 @@ def run(args: argparse.Namespace,
     registry.append(running_row(planned), "driver-running")
     if this.fixture is None:
       planned = prepare_evaluation(planned, this.bq)
-    job, final = this.execute(planned, beam_args, wait)
-  except BaseException as exc:
+    result = this.submit(planned, beam_args)
+  except BaseException as exc:  # no job is running: the driver's to close
     registry.record_failure(_failed, planned, exc, this.env.now())
     raise
-  key_mode = "operator" if args.label_key_uri else "ephemeral"
+  key_mode = label_key_mode(args.label_key_uri)
   if not wait:
+    job = _job_id(result)
     named = f" as job {job}" if job else ""
     print(f"evaluation {attempt.evaluation_id}: submitted on {args.runner}"
           f"{named}, not waited for\n"
@@ -889,9 +1033,9 @@ def run(args: argparse.Namespace,
           f"  written to: {this.where} (the pipeline writes the FINAL row; "
           "--fail_on is not applied here)")
     return 0
-  final, counts = this.verdict(final, thresholds or {})
-  if this.temporary:
-    shutil.rmtree(this.temporary, ignore_errors=True)
+  this.wait(result, planned)
+  final = this.collect(planned)
+  counts = {key: final.get(f"metrics_{key}") or 0 for key in _COUNT_KEYS}
   lines = _summary(final, counts, this.where, key_mode)
   if args.sink == "bq_client" and args.output_local:
     lines.append(f"  local copy: {this.directory}")
@@ -903,10 +1047,38 @@ def run(args: argparse.Namespace,
   elif not gated:
     lines.append("  gate: --fail_on is not applied here")
   elif args.fail_on != "none":
-    failing, warning = counts.get("fail") or 0, counts.get("warn") or 0
-    outcome = "TRIPPED" if code else "passed"
-    regraded = " under --thresholds_uri" if thresholds else ""
-    lines.append(f"  gate (--fail_on {args.fail_on}): {outcome} — {failing} "
-                 f"fail, {warning} warn{regraded}")
+    lines.append(_gate_line(final, counts, args.fail_on, code))
   print("\n".join(lines))
+  if final.get("status") == _SKIPPED:
+    reason = final.get("status_reason") or "no reason recorded"
+    print(f"sdfb-eval: nothing was evaluated: {reason}", file=sys.stderr)
+  return code
+
+
+def run(args: argparse.Namespace,
+        beam_args: Sequence[str],
+        env: Env | None = None,
+        *,
+        wait: bool = True,
+        gated: bool = True) -> int:
+  """`sdfb-eval run`: one evaluation, start to registry (module
+  docstring). `wait=False` submits the pipeline and returns (the flex
+  entry on Dataflow); `gated=False` never applies `--fail_on`.
+
+  Returns:
+    0; 1 when the `--fail_on` gate trips; 3 when the run ended without
+    an error but its FINAL row reads FAILED (no launch table could be
+    evaluated: the pipeline wrote that row itself, so none is added).
+
+  Raises:
+    Whatever stopped the evaluation, after its FAILED row was appended
+    (when the driver owns the outcome: module docstring).
+  """
+  this = _wiring(args, env or Env())
+  try:
+    code = _drive(this, beam_args, wait, gated)
+  except BaseException:
+    this.discard_temporary(failed=True)
+    raise
+  this.discard_temporary(failed=False)
   return code

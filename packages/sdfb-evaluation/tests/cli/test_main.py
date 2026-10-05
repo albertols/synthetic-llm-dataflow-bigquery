@@ -11,11 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Tests for the `sdfb-eval` command line (Task 27) that need no real
-evaluation pipeline: the flag surface and its defaults, usage errors,
-planning (`plan`), the driver's registry events around a stand-in
-pipeline (`run`, the flex entry), the exit-code gate, `schemas` and
-`catalogue`. The real DirectRunner run is in `test_run.py`.
+"""Tests for the `sdfb-eval` command line (Task 27) short of running an
+evaluation: the flag surface and its defaults, usage errors (exit 2,
+nothing started), the pipeline options, planning (`plan`), `schemas` and
+`catalogue`. `run` as a driver is in `test_driver.py`, the real
+DirectRunner run in `test_run.py`.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -26,14 +26,11 @@ import dataclasses
 import json
 import re
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from apache_beam.options.pipeline_options import (
     DebugOptions,
     GoogleCloudOptions,
-    PipelineOptions,
     SetupOptions,
     StandardOptions,
     WorkerOptions,
@@ -52,14 +49,11 @@ from unit.context.plan_fakes import (
 )
 
 from sdfb_evaluation.beam import pipeline as beam_pipeline
-from sdfb_evaluation.cli import driver, gate, run_evaluation
+from sdfb_evaluation.beam.label_key import is_label_key_uri
+from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.main import main, parse_args, public_run_flags
-from sdfb_evaluation.context.bq import BqApiError
-from sdfb_evaluation.context.gcp import JobNotFoundError
 from sdfb_evaluation.context.plan import (
     Knobs,
-    PlanError,
-    PrepareStatement,
     build_plan,
 )
 from sdfb_evaluation.schemas import CLUSTERING, TABLES as EVAL_TABLES
@@ -67,46 +61,12 @@ from sdfb_evaluation.schemas import CLUSTERING, TABLES as EVAL_TABLES
 from .conftest import catalogue
 from .helpers import (
     NOW,
-    REGISTRY,
-    RecordingBq,
-    check_row,
     make_env,
-    tiny_pipeline,
 )
 
 REGION = "europe-west1"
 TARGET = ["--project", PROJECT, "--region", REGION, "--job_id", JOB_ID]
 LABEL_KEY_URI = "projects/demo-project/secrets/sdfb-eval-label/versions/3"
-
-
-@pytest.fixture(name="bq")
-def fixture_bq() -> RecordingBq:
-  return RecordingBq()
-
-
-@pytest.fixture(name="resolved")
-def fixture_resolved(monkeypatch, bq):
-  """The launch and models the CLI resolves, without the Dataflow and
-  Logging APIs: the invented thelook launch of `bq`'s rows. Returns the
-  calls `resolve_launch` received."""
-  calls: list[dict[str, Any]] = []
-
-  def resolve(**kwargs: Any):
-    calls.append(kwargs)
-    return thelook_launch(bq)
-
-  monkeypatch.setattr(driver, "resolve_launch", resolve)
-  monkeypatch.setattr(driver, "load_models", lambda uri: thelook_models())
-  return calls
-
-
-@pytest.fixture(name="stub")
-def fixture_stub(monkeypatch):
-  """`build_evaluation_pipeline` replaced by an empty pipeline: for runs
-  whose pipeline never executes (the real graph is `test_run.py`'s)."""
-  build = tiny_pipeline(write=False)
-  monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
-  return build
 
 
 def _usage_error(argv: list[str], capsys) -> str:
@@ -188,13 +148,106 @@ def test_run_flags_default_to_the_brief():
         (["--label_key_uri", "relative/key.bin"], "label_key_uri"),
         (["--run_id", "thelook-0913-a1b2c3"], "one of"),
         (["--mode", "approximate"], "mode"),
-        (["--runner", " "], "runner"),
         (["--fixture_dir", "/tmp/fixture"], "fixture_dir"),
         (["--fail_on", "error"], "fail_on"),
         (["--sample_rows", "0"], "sample_rows"),
     ])
 def test_run_usage_errors_exit_2(extra, needle, capsys):
   assert needle in _usage_error(["run", *TARGET, *extra], capsys)
+
+
+def test_a_malformed_beam_argument_is_a_usage_error_before_anything_starts(
+    bq, resolved, stub, capsys):
+  """Exit 2 always means nothing was started: no launch resolved, no
+  registry row, no DDL — also when the bad argument is one of Beam's."""
+  for extra in (["--num_workers",
+                 "abc"], ["--max_num_workers=many"], ["--temp_location"]):
+    with pytest.raises(SystemExit) as info:
+      main(["run", *TARGET, *extra], make_env(bq))
+    assert info.value.code == 2, extra
+    err = capsys.readouterr().err
+    assert "sdfb-eval run: error: Beam arguments:" in err
+    assert extra[0].split("=")[0] in err
+  assert resolved == [] and stub.built == []
+  assert bq.loads == [] and bq.executed == [] and bq.queries == []
+  # a well-formed Beam argument passes through untouched
+  _, extras = parse_args(["run", *TARGET, "--num_workers", "3"])
+  assert extras == ["--num_workers", "3"]
+
+
+def test_an_empty_value_means_the_flag_was_not_given():
+  """A flex template passes every parameter as `--name=value`, the unset
+  ones empty: text, choice, number and boolean flags alike fall back to
+  their default."""
+  baseline, _ = parse_args(["run", *TARGET])
+  empties = [
+      "--output_dataset=", "--temp_dataset=", "--relationships_uri=",
+      "--run_id=", "--tables=", "--label_key_uri=", "--thresholds_uri=",
+      "--output_local=", "--mode=", "--scope=", "--sink=", "--fail_on=",
+      "--trigger=", "--row_flags_source_keys=", "--runner=", "--sample_rows=",
+      "--privacy_sample_rows=", "--pair_max_columns=", "--max_bytes_billed=",
+      "--max_shuffle_gb=", "--allow_contaminated="
+  ]
+  args, extras = parse_args(["run", *TARGET, *empties])
+  assert vars(args) == vars(baseline) and extras == []
+  assert (args.output_dataset, args.mode, args.sample_rows,
+          args.runner) == ("synthetic_data_quality", "sampled", 200_000,
+                           "DirectRunner")
+  # the two-token form, and whitespace
+  args, extras = parse_args([
+      "run", *TARGET, "--output_dataset", "", "--sample_rows", " ", "--mode",
+      "", "--allow_contaminated", ""
+  ])
+  assert vars(args) == vars(baseline) and extras == []
+  # a value is still a value
+  args, _ = parse_args(
+      ["run", *TARGET, "--sample_rows=7", "--mode=exact", "--fail_on=warn"])
+  assert (args.sample_rows, args.mode, args.fail_on) == (7, "exact", "warn")
+  # an empty Beam argument is Beam's to read
+  _, extras = parse_args(["run", *TARGET, "--temp_location="])
+  assert extras == ["--temp_location="]
+  # the other commands follow the same rule
+  args, _ = parse_args([
+      "plan", *TARGET, "--format=", "--dry_run=", "--scope=", "--sample_rows="
+  ])
+  assert (args.format, args.dry_run, args.scope,
+          args.sample_rows) == ("text", False, "auto", 200_000)
+  args, _ = parse_args([
+      "report", "--project", PROJECT, "--evaluation_id", "eval-x", "--format=",
+      "--output_dataset=", "--out=", "--local="
+  ])
+  assert (args.format, args.output_dataset, args.out,
+          args.local) == ("md", "synthetic_data_quality", None, None)
+  args, _ = parse_args(
+      ["schemas", "--project", PROJECT, "--dataset=", "--apply="])
+  assert (args.dataset, args.apply) == ("synthetic_data_quality", False)
+
+
+def test_an_empty_required_value_is_still_missing(capsys):
+  err = _usage_error(
+      ["run", "--project=", "--job_id", JOB_ID, "--region", REGION], capsys)
+  assert "--project is required" in err
+  err = _usage_error(["schemas", "--project="], capsys)
+  assert "--project" in err
+
+
+def test_a_malformed_thresholds_file_is_a_usage_error(tmp_path, capsys):
+  path = tmp_path / "broken.yaml"
+  path.write_text("thresholds: {column.ks: [unclosed\n")
+  err = _usage_error(["run", *TARGET, "--thresholds_uri", str(path)], capsys)
+  assert "sdfb-eval run: error: --thresholds_uri:" in err
+  assert "Traceback" not in err
+
+
+def test_the_label_key_uri_forms_have_one_definition():
+  for uri in ("projects/demo-project/secrets/sdfb-eval-label/versions/3",
+              "gs://demo-bucket/keys/label.key", "/etc/sdfb/label.key"):
+    assert is_label_key_uri(uri)
+    args, _ = parse_args(["run", *TARGET, "--label_key_uri", uri])
+    assert args.label_key_uri == uri
+  for uri in ("relative/key.bin", "projects/demo-project/secrets/label",
+              "https://example.com/key"):
+    assert not is_label_key_uri(uri)
 
 
 def test_a_run_needs_exactly_one_target(capsys):
@@ -301,568 +354,6 @@ def test_options_carry_the_plan_sized_cache_and_keep_upload_graph(bq):
   with pytest.raises(ValueError, match="enable_data_sampling"):
     driver.pipeline_options(args, ["--experiments=enable_data_sampling"], plan,
                             "eval-x")
-
-
-def test_run_passes_the_prepared_plan_to_options_and_pipeline(
-    bq, resolved, monkeypatch, capsys):
-  seen: dict[str, Any] = {}
-  real_prepare, real_defaults = (driver.prepare_evaluation,
-                                 driver.pipeline_options_defaults)
-
-  def prepare(plan, client):
-    seen["prepared"] = real_prepare(plan, client)
-    return seen["prepared"]
-
-  def defaults(runner, plan=None):
-    seen["defaults_plan"] = plan
-    return real_defaults(runner, plan)
-
-  build = tiny_pipeline()
-  monkeypatch.setattr(driver, "prepare_evaluation", prepare)
-  monkeypatch.setattr(driver, "pipeline_options_defaults", defaults)
-  monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
-  executed: list[tuple[Any, bool]] = []
-
-  def execute(pipeline, wait):
-    executed.append((pipeline, wait))
-    return driver.execute_pipeline(pipeline, wait)
-
-  code = main(["run", *TARGET, "--label_key_uri", LABEL_KEY_URI],
-              make_env(bq, execute=execute))
-  assert code == 0
-  assert resolved[0]["job_id"] == JOB_ID
-  assert (resolved[0]["project"], resolved[0]["region"]) == (PROJECT, REGION)
-  assert len(build.built) == 1
-  built_plan, kwargs = build.built[0]
-  assert built_plan is seen["prepared"] is seen["defaults_plan"]
-  assert built_plan.label_key_uri == LABEL_KEY_URI
-  assert kwargs["stats_query"] == bq.query
-  assert len(executed) == 1
-  pipeline, wait = executed[0]
-  assert wait is True
-  cache = pipeline.options.view_as(WorkerOptions).max_cache_memory_usage_mb
-  assert cache == real_defaults("DirectRunner",
-                                built_plan)["max_cache_memory_usage_mb"]
-  assert pipeline.options.view_as(SetupOptions).save_main_session is False
-  capsys.readouterr()
-
-
-# --------------------------------------------------------------------------
-# run: the registry events around the pipeline
-# --------------------------------------------------------------------------
-def test_a_fresh_evaluation_id_per_attempt(bq, resolved, monkeypatch, capsys):
-  monkeypatch.setattr(driver, "build_evaluation_pipeline", tiny_pipeline())
-  env = make_env(bq, execute=driver.execute_pipeline)
-  assert main(["run", *TARGET], env) == 0
-  assert main(["run", *TARGET], env) == 0
-  ids = [row["evaluation_id"] for row in bq.registry_rows()]
-  first, second = ids[0], ids[-1]
-  assert first != second  # the same launch, the same second: two attempts
-  for evaluation_id in (first, second):
-    assert driver.EVALUATION_ID_RE.fullmatch(evaluation_id)
-    assert evaluation_id.startswith("eval-20260914T080000Z-")
-  assert ids == [first, first, second, second]  # RUNNING, FINAL each
-  # the temp tables an attempt creates carry its own id
-  created = [sql for sql, _ in bq.executed if sql.startswith("CREATE")]
-  assert any(first in sql for sql in created)
-  assert any(second in sql for sql in created)
-  assert len(resolved) == 2
-  out = capsys.readouterr().out
-  assert first in out and second in out
-  assert re.fullmatch(r"eval-\d{8}T\d{6}Z-[0-9a-f]{8}",
-                      driver.mint_evaluation_id(NOW, "0a1b2c3d"))
-  assert driver.mint_evaluation_id(driver.Env().now(),
-                                   driver.Env().token()) != (
-                                       driver.mint_evaluation_id(
-                                           driver.Env().now(),
-                                           driver.Env().token()))
-
-
-def test_run_writes_running_prepares_runs_then_loads_final_last(
-    bq, resolved, monkeypatch, capsys):
-  del resolved
-  monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts={
-                          "total": 3,
-                          "pass": 2,
-                          "warn": 1
-                      }))
-  code = main(["run", *TARGET], make_env(bq, execute=driver.execute_pipeline))
-  assert code == 0
-  running, final = bq.registry_rows()
-  for row in (running, final):
-    check_row(REGISTRY, row, ordered=row is running)
-  assert (running["event"], running["status"]) == ("RUNNING", "RUNNING")
-  assert (final["event"], final["status"]) == ("FINAL", "SUCCEEDED")
-  assert running["evaluation_id"] == final["evaluation_id"]
-  assert final["recorded_at"] > running["recorded_at"]
-  assert running["trigger"] == "cli" and running["runner"] == "DirectRunner"
-  assert running["mode"] == "sampled"  # the DirectRunner default
-  assert running["evaluation_params"]["label_key_mode"] == "ephemeral"
-  assert running["generation_job_id"] == JOB_ID
-  # RUNNING is loaded before any prepare DDL; the registry's FINAL last
-  kinds = [kind for kind, _ in bq.events]
-  first_load = kinds.index("load")
-  assert all(kind != "execute" for kind in kinds[:first_load])
-  assert "execute" in kinds[first_load:]
-  assert kinds[-1] == "load" and kinds.count("load") == 2
-  assert all(fqn == f"{QDS}.{REGISTRY}" for fqn, _ in bq.loads)
-  out = capsys.readouterr().out
-  assert final["evaluation_id"] in out and "SUCCEEDED" in out
-
-
-def test_a_driver_exception_writes_failed_then_reraises(bq, resolved, stub,
-                                                        capsys):
-  del resolved, stub
-
-  def explode(pipeline, wait):
-    del pipeline, wait
-    raise RuntimeError("worker pool exhausted in europe-west1")
-
-  with pytest.raises(RuntimeError, match="worker pool exhausted"):
-    main(["run", *TARGET, "--label_key_uri", LABEL_KEY_URI],
-         make_env(bq, execute=explode))
-  running, failed = bq.registry_rows()
-  check_row(REGISTRY, running)
-  check_row(REGISTRY, failed)
-  assert (running["event"], running["status"]) == ("RUNNING", "RUNNING")
-  assert (failed["event"], failed["status"]) == ("FINAL", "FAILED")
-  assert failed["status_reason"] == (
-      "RuntimeError: worker pool exhausted in europe-west1")
-  assert failed["evaluation_id"] == running["evaluation_id"]
-  assert failed["recorded_at"] > running["recorded_at"]
-  assert failed["finished_at"] == failed["recorded_at"]
-  assert failed["metrics_total"] is None and failed["overall_score"] is None
-  assert [t["name"] for t in failed["tables"]
-         ] == ["products", "users", "orders", "order_items"]
-  captured = capsys.readouterr()
-  assert LABEL_KEY_URI not in captured.out + captured.err
-
-
-def test_a_transient_prepare_error_writes_failed_then_propagates(
-    bq, resolved, stub, monkeypatch):
-  """R90(g): whatever `prepare_evaluation` raises sits inside the
-  driver's FAILED-then-re-raise path — one FAILED row, then the error."""
-  del resolved
-  # sampled mode with a small --sample_rows plans sample tables; their
-  # CTAS is no source pin, so its failure is never degraded
-  bq.execute_failures["FARM_FINGERPRINT"] = BqApiError(
-      "DDL: 503 backend error", status=503)
-  with pytest.raises(BqApiError, match="503 backend error"):
-    main(["run", *TARGET, "--sample_rows", "50"], make_env(bq))
-  running, failed = bq.registry_rows()
-  assert running["status"] == "RUNNING"
-  assert (failed["event"], failed["status"]) == ("FINAL", "FAILED")
-  assert failed["status_reason"].startswith("BqApiError: DDL: 503")
-  check_row(REGISTRY, failed)
-  assert stub.built == []  # the pipeline was never built
-  # the same for an error on the source pin itself (a transient one
-  # raises there instead of degrading the pin)
-  bq.execute_failures.clear()
-  bq.loads.clear()
-
-  def unavailable(plan, client):
-    del plan, client
-    raise BqApiError("DDL: 503 the source pin could not be created", status=503)
-
-  monkeypatch.setattr(driver, "prepare_evaluation", unavailable)
-  with pytest.raises(BqApiError, match="source pin"):
-    main(["run", *TARGET], make_env(bq))
-  assert [r["status"] for r in bq.registry_rows()] == ["RUNNING", "FAILED"]
-  assert stub.built == []
-
-
-def test_a_pipeline_that_ends_without_a_final_row_is_failed(bq, resolved, stub):
-  del resolved, stub
-  with pytest.raises(RuntimeError, match="FINAL"):
-    main(["run", *TARGET], make_env(bq))  # built, never run: no FINAL row
-  assert [r["status"] for r in bq.registry_rows()] == ["RUNNING", "FAILED"]
-
-
-def test_a_failed_row_that_cannot_be_written_never_hides_the_error(
-    bq, resolved, stub, capsys):
-  del resolved, stub
-
-  def explode(pipeline, wait):
-    del pipeline, wait
-    bq.load_failures[REGISTRY] = PermissionError("403 tables.updateData")
-    raise RuntimeError("the pipeline failed first")
-
-  with pytest.raises(RuntimeError, match="the pipeline failed first"):
-    main(["run", *TARGET], make_env(bq, execute=explode))
-  assert [r["status"] for r in bq.registry_rows()] == ["RUNNING"]
-  err = capsys.readouterr().err
-  assert "FAILED registry row could not be written" in err
-  assert "403 tables.updateData" in err
-
-
-def test_a_planning_failure_writes_a_schema_valid_failed_row(
-    bq, monkeypatch, capsys):
-
-  def missing(**kwargs: Any):
-    job_id, region = kwargs["job_id"], kwargs["region"]
-    raise JobNotFoundError(
-        f"Dataflow job {job_id} was not found in region {region}")
-
-  monkeypatch.setattr(driver, "resolve_launch", missing)
-  with pytest.raises(JobNotFoundError):
-    main(["run", *TARGET, "--mode", "exact", "--trigger", "agent"],
-         make_env(bq))
-  (row,) = bq.registry_rows()
-  check_row(REGISTRY, row)
-  assert (row["event"], row["status"]) == ("FINAL", "FAILED")
-  assert row["status_reason"].startswith("JobNotFoundError: Dataflow job")
-  assert driver.EVALUATION_ID_RE.fullmatch(row["evaluation_id"])
-  assert row["evaluated_at"] == "2026-09-14T08:00:00.000000Z"
-  assert row["recorded_at"] > row["evaluated_at"]
-  assert row["finished_at"] == row["recorded_at"]
-  assert (row["mode"], row["trigger"], row["runner"]) == ("exact", "agent",
-                                                          "DirectRunner")
-  assert row["generation_job_id"] == JOB_ID
-  assert row["generation_region"] == REGION
-  assert row["tables"] == [] and row["run_ids"] == []
-  assert row["params_source"] is None and row["bq_bytes_processed"] is None
-  assert row["evaluation_params"]["sample_rows"] == 200_000
-  assert row["evaluation_params"]["label_key_mode"] == "ephemeral"
-  assert row["catalogue_version"] == catalogue().version
-  assert len(row["evaluation_key"]) == 32
-  assert bq.executed == []  # nothing was prepared
-  capsys.readouterr()
-
-
-def test_a_plan_error_keeps_what_planning_created(bq, monkeypatch, capsys):
-  launch = thelook_launch(bq)
-  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
-  monkeypatch.setattr(driver, "load_models", lambda uri: thelook_models())
-  created = "CREATE SNAPSHOT TABLE `demo-project.synthetic_data_quality.s`"
-
-  def refuse(**kwargs: Any):
-    del kwargs
-    raise PlanError("orders: the as_of_diff start snapshot already exists",
-                    (PrepareStatement(created, {}),))
-
-  monkeypatch.setattr(driver, "build_plan", refuse)
-  with pytest.raises(PlanError):
-    main(["run", *TARGET], make_env(bq))
-  (row,) = bq.registry_rows()
-  check_row(REGISTRY, row)
-  assert row["status"] == "FAILED"
-  assert row["status_reason"].startswith("PlanError: orders")
-  assert f"planning created {created}" in row["warnings"]
-  # the launch did resolve: the row records it, under the planner's key
-  assert row["run_ids"] == list(launch.run_ids)
-  assert row["params_source"] == "jobs_labels+logs"
-  assert row["relationship_model"] == "thelook"
-  plan = build_plan(
-      launch=launch,
-      models=thelook_models(),
-      bq=bq,
-      knobs=Knobs(temp_dataset=QDS),
-      mode="sampled",
-      trigger="cli",
-      runner="DirectRunner",
-      now=NOW)
-  assert row["evaluation_key"] == plan.evaluation_key
-  capsys.readouterr()
-
-
-def test_label_key_uri_is_operator_mode_and_never_printed(
-    bq, resolved, monkeypatch, capsys):
-  del resolved
-  build = tiny_pipeline()
-  monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
-  code = main(["run", *TARGET, "--label_key_uri", LABEL_KEY_URI],
-              make_env(bq, execute=driver.execute_pipeline))
-  assert code == 0
-  assert len(build.built) == 1
-  assert build.built[0][0].label_key_uri == LABEL_KEY_URI
-  rows = bq.registry_rows()
-  assert [r["evaluation_params"]["label_key_mode"] for r in rows
-         ] == ["operator", "operator"]
-  assert LABEL_KEY_URI not in json.dumps(rows)
-  captured = capsys.readouterr()
-  assert LABEL_KEY_URI not in captured.out + captured.err
-  assert "label key: operator" in captured.out
-
-
-def test_local_json_keeps_every_event_under_the_evaluation_directory(
-    bq, resolved, monkeypatch, tmp_path, capsys):
-  del resolved
-  monkeypatch.setattr(driver, "build_evaluation_pipeline", tiny_pipeline())
-  out = tmp_path / "out"
-  env = make_env(bq, execute=driver.execute_pipeline)
-  argv = ["run", *TARGET, "--sink", "local_json", "--output_local", str(out)]
-  assert main(argv, env) == 0
-  assert bq.loads == []  # nothing goes to BigQuery
-  (directory,) = list(out.iterdir())
-  assert driver.EVALUATION_ID_RE.fullmatch(directory.name)  # <DIR>/<id>
-  lines = [
-      json.loads(line)
-      for path in sorted((directory / REGISTRY).glob("*.jsonl"))
-      for line in path.read_text().splitlines()
-  ]
-  assert sorted(r["status"] for r in lines) == ["RUNNING", "SUCCEEDED"]
-  for row in lines:
-    check_row(REGISTRY, row, ordered=False)
-    assert row["evaluation_id"] == directory.name
-  assert str(directory) in capsys.readouterr().out
-
-  def explode(pipeline, wait):
-    raise RuntimeError("boom")
-
-  env.execute = explode
-  with pytest.raises(RuntimeError, match="boom"):
-    main(argv, env)
-  failed_dir = next(d for d in out.iterdir() if d != directory)
-  statuses = sorted(
-      json.loads(line)["status"]
-      for path in (failed_dir / REGISTRY).glob("*.jsonl")
-      for line in path.read_text().splitlines())
-  assert statuses == ["FAILED", "RUNNING"]
-  capsys.readouterr()
-
-
-# --------------------------------------------------------------------------
-# the exit-code gate (R88g)
-# --------------------------------------------------------------------------
-def test_fail_on_exit_codes(bq, resolved, monkeypatch, capsys):
-  del resolved
-  counts = {"total": 4, "pass": 2, "warn": 1, "fail": 1}
-  assert gate.exit_code("none", counts) == 0
-  assert gate.exit_code("warn", counts) == 1
-  assert gate.exit_code("fail", counts) == 1
-  only_warn = {"total": 3, "pass": 2, "warn": 1, "fail": 0}
-  assert gate.exit_code("fail", only_warn) == 0
-  assert gate.exit_code("warn", only_warn) == 1
-  assert gate.exit_code("warn", {"total": 2, "pass": 2}) == 0
-  with pytest.raises(ValueError, match="fail_on"):
-    gate.exit_code("error", counts)
-  env = make_env(bq, execute=driver.execute_pipeline)
-  monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts=only_warn))
-  assert main(["run", *TARGET, "--fail_on", "fail"], env) == 0
-  assert main(["run", *TARGET, "--fail_on", "warn"], env) == 1
-  assert "gate (--fail_on warn): TRIPPED" in capsys.readouterr().out
-  # a run that FAILED never returns the gate's code: it raises
-  env.execute = lambda pipeline, wait: None  # never run: no FINAL row
-  with pytest.raises(RuntimeError):
-    main(["run", *TARGET, "--fail_on", "warn"], env)
-  capsys.readouterr()
-
-
-def _metric_row(metric_id: str, value: float, status: str, **extra: Any):
-  metric = catalogue().get(metric_id)
-  return {
-      "metric_id": metric_id,
-      "table_name": "orders",
-      "column_name": "amount",
-      "column_name_2": None,
-      "edge": None,
-      "column_kind": "numeric",
-      "value": value,
-      "source_value": None,
-      "synthetic_value": None,
-      "baseline_value": None,
-      "noise_floor": None,
-      "ci_low": None,
-      "ci_high": None,
-      "n_source": 5000,
-      "n_synthetic": 5000,
-      "method": "exact",
-      "sample_rate": None,
-      "status": status,
-      "threshold_warn": metric.warn,
-      "threshold_fail": metric.fail,
-      "detail": None,
-      **extra,
-  }
-
-
-def test_a_final_row_reading_failed_exits_3_whatever_fail_on_says(
-    bq, resolved, monkeypatch, capsys):
-  """R90(g): the pipeline can write FINAL = FAILED and end normally (no
-  launch table evaluated). `run` reads the row back: exit 3, no second
-  registry row, and `--fail_on none` does not mask it."""
-  del resolved
-  none_evaluated = {"total": 4, "not_evaluated": 4}
-  assert gate.final_exit_code({"status": "FAILED"}, "none", none_evaluated) == 3
-  assert gate.final_exit_code({"status": "FAILED"}, "warn", none_evaluated) == 3
-  assert gate.final_exit_code({"status": "FAILED"},
-                              "none",
-                              none_evaluated,
-                              gated=False) == 3
-  failing = {"total": 2, "pass": 1, "fail": 1}
-  for status in ("SUCCEEDED", "SUCCEEDED_WITH_WARNINGS", "PARTIAL", "SKIPPED"):
-    assert gate.final_exit_code({"status": status}, "none", failing) == 0
-    assert gate.final_exit_code({"status": status}, "fail", failing) == 1
-    assert gate.final_exit_code({"status": status},
-                                "fail",
-                                failing,
-                                gated=False) == 0
-  assert (gate.EXIT_TRIPPED, gate.EXIT_FAILED) == (1, 3)
-  monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts=none_evaluated, status="FAILED"))
-  env = make_env(bq, execute=driver.execute_pipeline)
-  assert main(["run", *TARGET, "--fail_on", "none"], env) == 3
-  # RUNNING, then the pipeline's own FINAL: the driver appends nothing
-  assert [(r["event"], r["status"]) for r in bq.registry_rows()
-         ] == [("RUNNING", "RUNNING"), ("FINAL", "FAILED")]
-  out = capsys.readouterr().out
-  assert "the evaluation finished FAILED: exit 3" in out
-  assert main(["run", *TARGET, "--fail_on", "warn"], env) == 3
-  assert "TRIPPED" not in capsys.readouterr().out  # 3 is not the gate
-  # the template entry applies no gate, and still reports the failure
-  assert run_evaluation.main(TARGET, env) == 3
-  assert len(bq.registry_rows()) == 6
-  capsys.readouterr()
-
-
-def test_thresholds_uri_regrades_the_gate_only(tmp_path):
-  ks = catalogue().get("column.ks")
-  rows = [
-      _metric_row("column.ks", ks.warn / 2, "pass"),
-      _metric_row("column.ks", ks.fail * 2, "fail", column_name="cost"),
-      _metric_row("table.overall_score", 0.9, "info", column_name=None),
-  ]
-  assert gate.gate_counts(rows, {}) == {
-      "total": 2,
-      "pass": 1,
-      "warn": 0,
-      "fail": 1,
-      "info": 0,
-      "not_evaluated": 0
-  }
-  path = tmp_path / "gate.yaml"
-  path.write_text(
-      "thresholds:\n"
-      f"  column.ks: {{warn: {ks.warn / 4}, fail: {ks.fail * 4}}}\n")
-  overrides = gate.load_thresholds(str(path))
-  assert overrides == {"column.ks": (ks.warn / 4, ks.fail * 4)}
-  strict = gate.gate_counts(rows, overrides)
-  assert (strict["pass"], strict["warn"], strict["fail"]) == (0, 2, 0)
-  assert rows[0]["status"] == "pass"  # the stored rows are never rewritten
-  with pytest.raises(ValueError, match="unknown status"):
-    gate.gate_counts([{**rows[0], "status": "maybe"}], {})
-  path.write_text("thresholds:\n  column.nope: {warn: 1, fail: 2}\n")
-  with pytest.raises(ValueError, match=r"column\.nope"):
-    gate.load_thresholds(str(path))
-  path.write_text("thresholds:\n  column.ks: {warn: lots}\n")
-  with pytest.raises(ValueError, match=r"column\.ks"):
-    gate.load_thresholds(str(path))
-  path.write_text("column.ks: 0.1\n")
-  with pytest.raises(ValueError, match="thresholds"):
-    gate.load_thresholds(str(path))
-
-
-def test_thresholds_uri_moves_the_gate_of_a_run_not_its_rows(
-    bq, resolved, monkeypatch, tmp_path, capsys):
-  del resolved
-  ks = catalogue().get("column.ks")
-  between = (ks.warn + ks.fail) / 2  # a WARN by the catalogue
-  counts = {"total": 1, "pass": 0, "warn": 1, "fail": 0}
-  monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts=counts, ks=[between]))
-  env = make_env(bq, execute=driver.execute_pipeline)
-  strict = tmp_path / "strict.yaml"
-  strict.write_text(f"thresholds:\n  column.ks: {{fail: {ks.warn}}}\n")
-  argv = ["run", *TARGET, "--fail_on", "fail"]
-  assert main(argv, env) == 0  # the catalogue: one WARN, no FAIL
-  capsys.readouterr()
-  assert main([*argv, "--thresholds_uri", str(strict)], env) == 1
-  out = capsys.readouterr().out
-  assert "TRIPPED — 1 fail, 0 warn under --thresholds_uri" in out
-  stored = [
-      row for fqn, rows in bq.loads if fqn.endswith(".evaluation_metrics")
-      for row in rows
-  ]
-  assert [r["status"] for r in stored] == ["warn", "warn"]  # both runs
-  assert all(r["threshold_fail"] == ks.fail for r in stored)
-  assert [
-      r["metrics_fail"] for r in bq.registry_rows() if r["event"] == "FINAL"
-  ] == [0, 0]
-  # a file that cannot be used is a usage error, before anything starts
-  loads = len(bq.loads)
-  strict.write_text("thresholds:\n  column.nope: {fail: 1}\n")
-  err = _usage_error([*argv, "--thresholds_uri", str(strict)], capsys)
-  assert "column.nope" in err
-  err = _usage_error(
-      [*argv, "--thresholds_uri",
-       str(tmp_path / "missing.yaml")], capsys)
-  assert "--thresholds_uri" in err
-  assert len(bq.loads) == loads
-
-
-# --------------------------------------------------------------------------
-# the flex-template entry (R88f)
-# --------------------------------------------------------------------------
-def test_flex_entry_does_not_wait_and_never_applies_fail_on(
-    bq, resolved, stub, capsys):
-  del resolved, stub
-  waits: list[bool] = []
-
-  def execute(pipeline, wait):
-    del pipeline
-    waits.append(wait)
-    return "2026-09-14_01_00_00-777"
-
-  argv = [
-      *TARGET, "--runner", "DataflowRunner", "--temp_location",
-      "gs://demo-bucket/tmp", "--fail_on", "fail", "--trigger", "composer"
-  ]
-  # Beam validates Dataflow options against Cloud Storage when a Pipeline
-  # is made: here the pipeline is only a holder of its options
-  made: list[PipelineOptions] = []
-
-  def make_pipeline(options):
-    made.append(options)
-    return SimpleNamespace(options=options)
-
-  env = make_env(bq, execute=execute, make_pipeline=make_pipeline)
-  assert run_evaluation.main(argv, env) == 0
-  assert waits == [False]
-  assert len(made) == 1
-  options = made[0]
-  assert options.view_as(StandardOptions).runner == "DataflowRunner"
-  assert options.view_as(DebugOptions).experiments == ["upload_graph"]
-  assert options.view_as(
-      GoogleCloudOptions).temp_location == "gs://demo-bucket/tmp"
-  (running,) = bq.registry_rows()  # FINAL is the pipeline's, on Dataflow
-  check_row(REGISTRY, running)
-  assert (running["status"], running["trigger"]) == ("RUNNING", "composer")
-  assert (running["runner"], running["mode"]) == ("DataflowRunner", "exact")
-  out = capsys.readouterr().out
-  assert "2026-09-14_01_00_00-777" in out
-  assert "--fail_on is not applied" in out
-  # the same arguments through `sdfb-eval run` wait for the job, then
-  # read its FINAL row back (here the job wrote none)
-  waits.clear()
-  bq.canned.append((REGISTRY, [running]))
-  with pytest.raises(LookupError, match="FINAL"):
-    main(["run", *argv], env)
-  assert waits == [True]
-  capsys.readouterr()
-
-
-def test_flex_entry_on_a_local_runner_still_loads_its_outputs(
-    bq, resolved, monkeypatch, capsys):
-  del resolved
-  monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts={
-                          "total": 1,
-                          "fail": 1
-                      }))
-  waits: list[bool] = []
-
-  def execute(pipeline, wait):
-    waits.append(wait)
-    return driver.execute_pipeline(pipeline, wait)
-
-  code = run_evaluation.main([*TARGET, "--fail_on", "fail"],
-                             make_env(bq, execute=execute))
-  assert code == 0  # never the gate's code
-  assert waits == [True]  # bq_client: the driver loads after the pipeline
-  assert [r["status"] for r in bq.registry_rows()] == ["RUNNING", "SUCCEEDED"]
-  assert "--fail_on is not applied here" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
