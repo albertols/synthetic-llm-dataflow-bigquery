@@ -28,13 +28,12 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 References:
   Lin, J. (1991), "Divergence Measures Based on the Shannon Entropy".
-    https://doi.org/10.1109/18.61115
   Hellinger, E. (1909), "Neue Begruendung der Theorie quadratischer Formen
     von unendlichvielen Veraenderlichen". https://doi.org/10.1515/crll.1909.136.210
   Yurdakul, B., Naranjo, J. (2020), "Statistical Properties of Population
-    Stability Index". https://doi.org/10.21314/JRMV.2020.227
+    Stability Index".
   Cohen, J. (1988), "Statistical Power Analysis for the Behavioral
-    Sciences", 2nd ed. https://doi.org/10.4324/9780203771587
+    Sciences", 2nd ed.
 """
 
 from __future__ import annotations

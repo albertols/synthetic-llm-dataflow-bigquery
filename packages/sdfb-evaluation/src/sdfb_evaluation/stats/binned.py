@@ -32,10 +32,9 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 References:
   Smirnov, N. (1948), "Table for Estimating the Goodness of Fit of
-    Empirical Distributions". https://doi.org/10.1214/aoms/1177730256
+    Empirical Distributions".
   Ramdas, A., Garcia Trillos, N., Cuturi, M. (2017), "On Wasserstein
     Two-Sample Testing and Related Families of Nonparametric Tests".
-    https://doi.org/10.3390/e19020047
   Czado, C., Gneiting, T., Held, L. (2009), "Predictive Model Assessment
     for Count Data" (the mid-distribution / non-randomized PIT that
     `pit_w1` uses to stay unbiased on discrete and binned columns).

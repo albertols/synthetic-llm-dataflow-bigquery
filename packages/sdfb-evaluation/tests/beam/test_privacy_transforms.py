@@ -161,7 +161,7 @@ def _key_file_reader(uri: str) -> bytes:
 
 def _run(tables: Sequence[Any], rows_by: Mapping[str, Mapping[str, list]],
          tmp_path: Path, **kwargs: Any) -> tuple[list, list, list, Any]:
-  """The Beam path on the DirectRunner: read, encode, privacy. The label
+  """The Beam path on the local runner (FnApiRunner): read, encode, privacy. The label
   key is an operator key read on a worker from a local file."""
   kwargs.setdefault("privacy_sample_rows", SAMPLE_ROWS)
   kwargs.setdefault("detection_sample_rows", DETECTION_ROWS)
@@ -248,7 +248,7 @@ def fixture_shifted_run() -> tuple[Any, dict, PrivacyResult]:
 
 @pytest.fixture(scope="module", name="beam_run")
 def fixture_beam_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
-  """One DirectRunner pass over the copies table and a clean twin, with
+  """One local-runner (FnApiRunner) pass over the copies table and a clean twin, with
   the index builds and nearest-neighbour batches counted."""
   copies, copies_rows = people(copies=800, n_synthetic=2200)
   clean, clean_rows = people(n_synthetic=2200, seed=41)
@@ -427,7 +427,7 @@ def test_small_or_unverified_not_evaluated(case):
 
 def test_shared_index_built_once_per_worker(beam_run):
   """The R/H index (Gower encodings and source codes) is built once per
-  table on the DirectRunner's single worker, however many
+  table on the local runner's (FnApiRunner) single worker, however many
   nearest-neighbour batches and the emitter use it."""
   assert beam_run["parts"]["people"] >= 2, beam_run["parts"]
   assert beam_run["parts"]["people_b"] >= 2, beam_run["parts"]

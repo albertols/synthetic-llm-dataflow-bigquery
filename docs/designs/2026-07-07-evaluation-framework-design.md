@@ -1381,8 +1381,9 @@ submitted, so the limit has not been hit.
 
 **CPU: the per-row pass and the fixed block.**
 
-**Claim:** on one laptop core every statistic outran the encoder, and the nearest-neighbour block is set by the sample knobs, not
-by the table.
+**Claim:** on one laptop core every statistic outran the encoder, and
+the nearest-neighbour block is set by the sample knobs, not by the
+table.
 
 ![Laptop micro-benchmarks: per-row stages and the neighbour search](assets/eval-cpu-budget.png)
 
