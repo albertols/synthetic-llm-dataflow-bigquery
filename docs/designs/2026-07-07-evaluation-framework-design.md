@@ -2126,7 +2126,9 @@ cited. A DOI was resolved through `doi.org` and its registered title,
 authors and year were read back; other links were fetched and their titles
 read. Exceptions are stated in the last column. In the code, sources are
 cited by author and year only; URLs live in this document and in the
-catalogue.
+catalogue. Three links remain in code by exception: the Hellinger (1909)
+DOI in `stats/distances.py`, which is not in this document's reference
+list, and two BigQuery reference pages in `schemas/__init__.py`.
 
 | Source | Used for | Fetch result |
 | --- | --- | --- |
