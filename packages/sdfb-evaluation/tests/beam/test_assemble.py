@@ -699,13 +699,36 @@ def test_profile_rounding_keeps_edges_quantiles_and_counts():
               "share": 1 / 3e10
           }]
       }),
-      ("roc_curve", {
-          "points": [[0.1234567891234, 0.9876543219876]],
-          "auc": 0.7123456789123
-      }),
   ):
     kept = dataclasses.replace(histogram, profile_kind=kind, payload=payload)
     assert stable_profile(kept) is kept
+
+
+def test_roc_payload_restates_its_metric_row_rounded_alike():
+  auc, lo, hi = 0.71234567891234, 0.61234567891234, 0.81234567891234
+  points = [[0.1234567891234, 0.9876543219876]]
+  context = RowContext("e1", EVALUATED_AT,
+                       {"orders": ("p.d.orders", "p.s.orders")}, {})
+  metric = metric_row(
+      MetricValue("table.detection_auc", "orders", auc, ci_low=lo, ci_high=hi),
+      context)
+  roc = ProfileValue(
+      "orders",
+      "roc_curve",
+      "both",
+      payload={
+          "points": points,
+          "auc": auc,
+          "ci_low": lo,
+          "ci_high": hi
+      },
+      n=10)
+  payload = stable_profile(roc).payload
+  assert (payload["auc"], payload["ci_low"],
+          payload["ci_high"]) == (metric["value"], metric["ci_low"],
+                                  metric["ci_high"])
+  assert payload["auc"] != auc
+  assert payload["points"] == points
 
 
 def test_metric_row_passes_the_edge_enforcement():

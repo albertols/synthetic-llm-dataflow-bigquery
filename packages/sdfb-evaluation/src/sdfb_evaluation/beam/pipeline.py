@@ -135,8 +135,9 @@ Runner defaults (`pipeline_options_defaults`): the runner as above;
 `save_main_session` False (every DoFn is importable);
 `max_cache_memory_usage_mb` sized to the side inputs a worker holds at
 once (Beam 2.74's default is 0: no side-input cache, so every bundle
-would re-read them) and at least 512; on Dataflow
-`--experiments=upload_graph` (a graph this wide exceeds the job-creation
+would re-read them) and at least 512 (it matters on Dataflow and has
+no effect on a local run, whose in-process runner's embedded worker has
+a fixed cache); on Dataflow `--experiments=upload_graph` (a graph this wide exceeds the job-creation
 request limit).
 
 `prepare_evaluation` runs the plan's DDL before the pipeline, with two
@@ -254,7 +255,7 @@ _DATAFLOW = "dataflow"
 # classes that execute a batch pipeline on Prism.
 _LOCAL_RUNNER = "FnApiRunner"
 _PRISM = "prism"
-_PRISM_ROUTED = frozenset({"direct", "switchingdirect"})
+_PRISM_ROUTED = frozenset({"direct", "switchingdirect", "testdirect"})
 _PRISM_BACKED = frozenset({"SwitchingDirectRunner", "PrismRunner"})
 _METRICS_TABLE = "evaluation_metrics"
 _PROFILES_TABLE = "evaluation_profiles"
@@ -342,6 +343,11 @@ def _checked_runner(p: beam.Pipeline) -> None:
   Runners): its runner is Beam's switching `DirectRunner` — what the
   name `DirectRunner` creates — or `PrismRunner`, or a subclass.
 
+  The check reads the class of `p.runner`, so it cannot detect a `p` that
+  is not a `Pipeline` and has no `runner` attribute (it is let through),
+  nor a `PortableRunner` whose job endpoint is a Prism server (the class
+  is not Prism's; the endpoint is not read).
+
   Raises:
     ValueError: the pipeline's runner is backed by Prism.
   """
@@ -362,7 +368,9 @@ def pipeline_options_defaults(runner: str,
                              ) -> dict[str, Any]:
   """The evaluator's `PipelineOptions` keyword defaults for `runner`
   (module docstring); with a plan the side-input cache is sized from it
-  (`side_input_bytes`, 25 % headroom, at least `MIN_CACHE_MB`).
+  (`side_input_bytes`, 25 % headroom, at least `MIN_CACHE_MB`) — a size
+  that matters on Dataflow and has no effect on a local run (the
+  in-process runner's embedded worker has a fixed cache).
   `enable_data_sampling` is never among the experiments (R71).
 
   The `runner` returned is the one to run on, not always the one asked

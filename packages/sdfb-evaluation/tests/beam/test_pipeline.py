@@ -182,7 +182,7 @@ def test_runner_defaults(small):
 
 @pytest.mark.parametrize("name", [
     "DirectRunner", "directrunner", "Direct", "SwitchingDirectRunner",
-    "apache_beam.runners.direct.direct_runner.DirectRunner"
+    "TestDirectRunner", "apache_beam.runners.direct.direct_runner.DirectRunner"
 ])
 def test_a_local_run_is_in_process(small, name):
   """Every name Beam resolves to its DirectRunner — which hands a batch
@@ -199,8 +199,27 @@ def test_a_local_run_is_in_process(small, name):
   assert set(out) == {"metrics", "profiles", "flags", "registry", "failures"}
 
 
+_ROUTED = sorted(pipeline_module._PRISM_ROUTED)  # pylint: disable=protected-access  # the whole set
+
+
+@pytest.mark.parametrize("key", _ROUTED)
+def test_every_prism_routed_name_defaults_to_a_runner_the_pipeline_accepts(
+    small, key):
+  """The two functions agree: a name the defaults reroute is never a name
+  the pipeline then refuses (`TestDirectRunner` was routed by Beam to
+  Prism but not by the defaults)."""
+  plan = evaluation_plan(
+      _tables(small)[:1], evaluation_id="ev_agree", label_key_uri=None)
+  for spelling in (key, key + "runner"):
+    defaults = pipeline_options_defaults(spelling, plan)
+    assert defaults["runner"] == "FnApiRunner", spelling
+    p = beam.Pipeline(options=PipelineOptions([], **defaults))
+    build_evaluation_pipeline(
+        p, plan, sources=InMemorySources({}), sinks=LocalJsonSinks("unused"))
+
+
 def test_tests_default_to_the_in_process_runner():
-  """`conftest.py`: a pipeline a test of this package builds without
+  """`tests/conftest.py`: a pipeline a test of this package builds without
   naming a runner is in process too, not on Prism."""
   assert type(beam.Pipeline().runner).__name__ == "FnApiRunner"
   assert type(BeamTestPipeline().runner).__name__ == "FnApiRunner"
@@ -533,7 +552,7 @@ def test_a_transient_preflight_failure_raises(small, error):
 
 
 # --------------------------------------------------------------------------
-# per-table failure isolation (DirectRunner)
+# per-table failure isolation (local runner, FnApiRunner)
 # --------------------------------------------------------------------------
 def _run(plan, rows_by: Mapping[tuple[str, str], list], out: Path,
          **kwargs: Any) -> LocalJsonSinks:
@@ -542,6 +561,41 @@ def _run(plan, rows_by: Mapping[tuple[str, str], list], out: Path,
     build_evaluation_pipeline(
         p, plan, sources=InMemorySources(rows_by), sinks=sinks, **kwargs)
   return sinks
+
+
+def _canonical(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+  return sorted(json.dumps(r, sort_keys=True) for r in rows)
+
+
+def test_a_three_table_rerun_is_deterministic(small, tmp_path):
+  """The module's three-table fixture, run twice: the relational pass, a
+  FLOAT64 column and the multi-table roll-up the one-table acceptance
+  rerun does not cover. Metric, profile and flag rows are byte-identical
+  (sorted: the shards' order is the runner's); the registry row differs
+  only in its timestamps."""
+  key = tmp_path / "label.key"  # an ephemeral key would differ per run
+  key.write_bytes(LABEL_KEY)
+  plan = evaluation_plan(
+      _tables(small), evaluation_id="ev_rerun", label_key_uri=str(key))
+  rows_by = {
+      (name, side): rows for side, by_table in small.items()
+      for name, rows in by_table.items()
+  }
+  first = _run(plan, rows_by, tmp_path / "one")
+  again = _run(plan, rows_by, tmp_path / "two")
+  for table in ("evaluation_metrics", "evaluation_profiles",
+                "evaluation_row_flags"):
+    rows = first.read_rows(table)
+    assert rows, table
+    assert _canonical(rows) == _canonical(again.read_rows(table)), table
+  [one], [two] = (first.read_rows("evaluation_data_history"),
+                  again.read_rows("evaluation_data_history"))
+  stamps = ("recorded_at", "finished_at")
+  assert {
+      k: v for k, v in one.items() if k not in stamps
+  } == {
+      k: v for k, v in two.items() if k not in stamps
+  }
 
 
 def test_a_failing_table_is_not_evaluated_and_the_run_continues(

@@ -19,6 +19,18 @@ host name or look for Google credentials. It is lifted only around a
 test marked `gcp`. The `no_network` fixture (autouse) fails a test whose
 code swallowed an attempt, and gives a test the list of attempts.
 
+The default Beam runner of the session is `FnApiRunner`, Beam's
+in-process Python runner, never the switching `DirectRunner`: a test
+that builds a pipeline without naming a runner (`TestPipeline()`,
+`beam.Pipeline()`) would otherwise hand a batch pipeline to Prism
+wherever the Prism binary is cached or can be downloaded, and Prism
+starts a step before its batch side input is complete
+(`sdfb_evaluation.beam.pipeline`, Runners) — every transform here reads
+side inputs. On `FnApiRunner` a stage runs to completion before the
+stages reading it, the batch contract Dataflow holds too. It is set
+here, at the package root, so every test directory gets it whatever the
+collection order.
+
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
 
@@ -30,9 +42,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from apache_beam.options.pipeline_options import StandardOptions
 from netguard import NetworkGuard
 
 _FIXTURES = Path(__file__).parent / "fixtures"
+IN_PROCESS_RUNNER = "FnApiRunner"
 
 
 @pytest.fixture(scope="session", autouse=True, name="network_guard")
@@ -57,6 +71,16 @@ def no_network(request: pytest.FixtureRequest,
     return
   yield network_guard.attempts
   network_guard.verify()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def in_process_default_runner() -> Iterator[None]:
+  """`StandardOptions.DEFAULT_RUNNER` is `FnApiRunner` for the session
+  (restored after it)."""
+  default = StandardOptions.DEFAULT_RUNNER
+  StandardOptions.DEFAULT_RUNNER = IN_PROCESS_RUNNER
+  yield
+  StandardOptions.DEFAULT_RUNNER = default
 
 
 @pytest.fixture

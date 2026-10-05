@@ -725,6 +725,22 @@ def test_a_polling_error_on_a_finished_job_does_not_fail_the_evaluation(
   assert "gate (--fail_on warn): TRIPPED" in captured.out
 
 
+def test_the_ignored_polling_error_warning_redacts_the_label_key_uri(
+    bq, resolved, stub, capsys):
+  """The warning prints the exception text: the label key's URI, when the
+  error quotes it, goes through the same redaction a failed row's reason
+  gets."""
+  del resolved, stub
+  bq.canned.append((REGISTRY, [_final()]))
+  polling = ConnectionError(f"polling failed reading {LABEL_KEY_URI}")
+  env = _dataflow_env(bq, FakeJob(state="DONE", error=polling))
+  assert main(["run", *DATAFLOW, "--label_key_uri", LABEL_KEY_URI], env) == 0
+  err = capsys.readouterr().err
+  assert "ConnectionError: polling failed reading" in err
+  assert "finished (DONE)" in err
+  assert LABEL_KEY_URI not in err
+
+
 def test_a_job_that_turns_done_after_its_wait_died_owns_its_final_row(
     bq, resolved, stub, capsys):
   """Beam's polling gave up while the job was RUNNING; by the time the

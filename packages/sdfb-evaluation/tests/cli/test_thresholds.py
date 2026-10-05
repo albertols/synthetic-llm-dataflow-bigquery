@@ -27,7 +27,9 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -242,12 +244,26 @@ def test_run_hands_the_overrides_to_the_pipeline_and_records_them(
   for row in rows:
     check_row(REGISTRY, row, ordered=row["status"] == "RUNNING")
   # RUNNING and FINAL alike: the URI and the digest of what it held
-  assert [_recorded(r) for r in rows[:2]] == [(path, digest)] * 2
+  name = os.path.basename(path)  # a local path is recorded by base name
+  assert [_recorded(r) for r in rows[:2]] == [(name, digest)] * 2
   assert [_recorded(r) for r in rows[2:4]] == [(None, None)] * 2
-  assert [_recorded(r) for r in rows[4:]] == [(path, digest)] * 2
+  assert [_recorded(r) for r in rows[4:]] == [(name, digest)] * 2
   # thresholds move no measured value: the same evaluation, by its key
   assert len({r["evaluation_key"] for r in rows}) == 1
   capsys.readouterr()
+
+
+def test_only_a_gcs_uri_is_recorded_whole():
+  held = argparse.Namespace(
+      thresholds_uri="/home/someone/private/limits.yaml", thresholds=OVERRIDES)
+  digest = thresholds_digest(OVERRIDES)
+  override = driver._override  # pylint: disable=protected-access  # the recorded form is the unit under test
+  assert override(held) == ("limits.yaml", digest)
+  held.thresholds_uri = "gs://bucket/dir/limits.yaml"
+  assert override(held) == ("gs://bucket/dir/limits.yaml", digest)
+  held.thresholds_uri = "limits.yaml"
+  assert override(held) == ("limits.yaml", digest)
+  assert override(argparse.Namespace()) == (None, None)
 
 
 def test_a_failed_evaluation_records_the_override_too(bq, resolved, stub,
@@ -255,7 +271,7 @@ def test_a_failed_evaluation_records_the_override_too(bq, resolved, stub,
                                                       capsys):
   del resolved, stub
   path = _file(tmp_path, GOOD)
-  wanted = (path, thresholds_digest(OVERRIDES))
+  wanted = (os.path.basename(path), thresholds_digest(OVERRIDES))
   argv = ["run", *TARGET, "--thresholds_uri", path]
 
   def refuse(pipeline):
@@ -428,7 +444,7 @@ def test_the_registry_of_an_overridden_run_counts_and_records_it(pair):
   assert overridden["fidelity_score"] > default["fidelity_score"]
   assert overridden["evaluation_key"] == default["evaluation_key"]
   assert overridden["catalogue_version"] == default["catalogue_version"]
-  wanted = (pair.uri, thresholds_digest(pair.overrides))
+  wanted = (os.path.basename(pair.uri), thresholds_digest(pair.overrides))
   assert [_recorded(e) for e in pair.overridden.events] == [wanted, wanted]
   assert [_recorded(e) for e in pair.default.events] == [(None, None)] * 2
 
@@ -481,6 +497,7 @@ def test_report_and_compare_show_the_override(bq, resolved, monkeypatch,
   env = make_env(bq, submit=write_stand_in)
   tight = {"column.ks": (0.01, 0.02)}
   path = _file(tmp_path, _yaml(tight))
+  recorded = os.path.basename(path)
   digest = thresholds_digest(tight)
   out = tmp_path / "out"
   directories: dict[str, Path] = {}
@@ -502,7 +519,7 @@ def test_report_and_compare_show_the_override(bq, resolved, monkeypatch,
   capsys.readouterr()
   assert main(["report", "--local", str(directories["tight"])]) == 0
   text = capsys.readouterr().out
-  assert f"| Thresholds | overridden by `{path}` (digest `{digest}`)" in text
+  assert f"| Thresholds | overridden by `{recorded}` (digest `{digest}`)" in text
   title = catalogue().get("column.ks").title
   assert f"### `column.ks` — {title}" in text
   assert ("warn 0.01 · fail 0.02 (this run's thresholds; the packaged "
@@ -514,7 +531,7 @@ def test_report_and_compare_show_the_override(bq, resolved, monkeypatch,
   (failing,) = document["failing"]
   assert (failing["metric_id"], failing["threshold_warn"],
           failing["threshold_fail"]) == ("column.ks", 0.01, 0.02)
-  assert _recorded(document["evaluation"]) == (path, digest)
+  assert _recorded(document["evaluation"]) == (recorded, digest)
   assert main(["report", "--local", str(directories["plain"])]) == 0
   text = capsys.readouterr().out
   assert "| Thresholds | the catalogue's |" in text
@@ -524,7 +541,7 @@ def test_report_and_compare_show_the_override(bq, resolved, monkeypatch,
   argv = ["compare", "--local", str(out), "--evaluation_ids"]
   assert main([*argv, f"{plain},{tight_id}"]) == 0
   text = capsys.readouterr().out
-  assert (f"thresholds differ (the catalogue's vs `{path}`, digest "
+  assert (f"thresholds differ (the catalogue's vs `{recorded}`, digest "
           f"`{digest}`)") in text
   assert main([*argv, f"{tight_id},{tight_id}"]) == 0
   assert "thresholds differ" not in capsys.readouterr().out

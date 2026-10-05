@@ -48,7 +48,8 @@ The registry is append-only events (D7):
     SUCCEEDED                otherwise
 
 PARTIAL means a launch table or a whole metric block (the privacy panel)
-was not evaluated for a plan/driver-level reason: the plan skipped the
+was not evaluated for a plan/driver-level reason, or — with every table
+evaluated — a scope `count_mismatch` (the table above lists both): the plan skipped the
 table or has no verified panel for it, the driver could not set the
 table up, or the pipeline's own encode step failed its rows (the whole
 table then, by `guarded`). Transform-internal not_evaluated rows — a
@@ -115,7 +116,9 @@ hold:
                            its FAIL
 
 A persisted row scored again from its own fields gives the same status
-and score (the acceptance re-scores every row it writes); `score` is the
+and score when its auxiliary fields are finite (a non-finite float is
+stored as null AFTER scoring, so such a row re-scores from less than
+it was scored on); the acceptance re-scores every row it writes; `score` is the
 score function of the rounded fields, written as computed. The registry's
 `overall_score`, `{family}_score` and `tables[].table_score` are rounded
 as their roll-up rows are (`model.*`, `table.overall_score`), so the two
@@ -184,6 +187,7 @@ import numpy as np
 
 from sdfb_evaluation.beam import census, dense, membership, privacy
 from sdfb_evaluation.beam.dense import DenseProfile, DenseSpec
+from sdfb_evaluation.beam.label_key import label_key_mode
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.context.bq import BqApiError, normalize_fqn, quote_fqn
 from sdfb_evaluation.schemas import load_schema
@@ -266,6 +270,11 @@ _MOMENT_FIELDS: Mapping[str, tuple[str, ...]] = {
     "moments": ("mean", "std", "skewness", "kurtosis_excess"),
     "corr_matrix": ("values",),
 }
+# The `roc_curve` payload restates the `table.detection_auc` metric's
+# value and interval; they round exactly as that row does (the curve's
+# points are edges and stay as computed).
+_ROC_METRIC = "table.detection_auc"
+_ROC_RESTATED = ("auc", "ci_low", "ci_high")
 _MODEL_OVERALL, _TABLE_OVERALL = "model.overall_score", "table.overall_score"
 # What listing a malformed table plan's columns and pairs can raise.
 _PLAN_ERRORS = (IndexError, KeyError, TypeError, ValueError)
@@ -320,7 +329,7 @@ def _seed(plan: EvaluationPlan) -> dict[str, Any]:
   row["evaluation_params"] = {
       **row["evaluation_params"],
       "label_key_mode":
-          "operator" if plan.label_key_uri else "ephemeral",
+          label_key_mode(plan.label_key_uri),
       "planning_ddl": [statement.sql for statement in plan.planning_ddl],
   }
   return row
@@ -584,7 +593,9 @@ def stable_metric(mv: MetricValue) -> MetricValue:
 
 def stable_profile(pv: ProfileValue) -> ProfileValue:
   """`pv` with its moment-derived payload values rounded
-  (`_MOMENT_FIELDS`: the only ones merge order can move). Everything
+  (`_MOMENT_FIELDS`: the only ones merge order can move) and the
+  `roc_curve` payload's restated `auc`, `ci_low`, `ci_high`, rounded as
+  the `table.detection_auc` row is. Everything
   else — edges, quantiles, bounds, counts, count ratios — persists as
   computed, so edges stay strictly increasing and match `edges_digest`."""
   rounded = {
@@ -592,6 +603,12 @@ def stable_profile(pv: ProfileValue) -> ProfileValue:
       for name in _MOMENT_FIELDS.get(pv.profile_kind, ())
       if name in pv.payload
   }
+  if pv.profile_kind == "roc_curve":
+    rounded.update({
+        name: _stable_as(_ROC_METRIC, pv.payload[name])
+        for name in _ROC_RESTATED
+        if name in pv.payload
+    })
   if not rounded:
     return pv
   return dataclasses.replace(pv, payload={**pv.payload, **rounded})
