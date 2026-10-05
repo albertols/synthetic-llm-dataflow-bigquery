@@ -168,17 +168,21 @@ generator's Terraform:
   the new modules. Metric tiers 2 and 3 (SDMetrics reports, SynthEval,
   Evidently) are dropped at runtime. Also dropped with the old design, each
   stated here because nothing else records it:
-  - The old `profile` module's stratified sampling and its per-stratum cap.
-    The new package samples with a deterministic bottom-k hash sample
+  - The old `profile` module's stratified row sampling and its per-stratum cap.
+    The new package samples rows with a deterministic bottom-k hash sample
     (`sampling/reservoir.py`, after [Cohen & Kaplan 2007](https://doi.org/10.1145/1281100.1281133)),
-    which is uniform, not stratified. The design gives no reason for the
-    change.
+    which is uniform over rows, not stratified. (The value sampling of the
+    census is a separate stratified design, design §4.6.) The design gives no
+    reason for the change.
   - The in-job lookup of the previous run for a run-versus-run PSI. Two stored
     evaluations are compared with `sdfb-eval compare`, a manual step, which
     gives the PSI only when both runs' histograms carry the same `edges_digest`.
   - The old diagnostic's "data structure" check (synthetic columns equal the
-    source columns): no replacement is named in the design, and none was found
-    in `context/plan.py` or `beam/encode.py`.
+    source columns). The evaluator scores only the columns both sides share,
+    records the one-sided columns in a plan note ("columns [...] exist on one
+    side only and are not compared", `context/plan.py`), and does not fail on
+    the difference; `beam/encode.py` fails only on a row that lacks a plan
+    column. A column-set mismatch is therefore reported, not gated.
   - The Evidently HTML drift report as a deliverable and the `--eval_tier`
     knob: the reports are markdown and JSON (`sdfb-eval report`, `compare`),
     and there are no tiers.
