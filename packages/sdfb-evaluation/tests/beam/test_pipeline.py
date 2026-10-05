@@ -12,10 +12,11 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """Tests for `sdfb_evaluation.beam.pipeline` (Task 26) beyond the
-acceptance: the runner defaults and side-input cache sizing, the prepare
-step's degradations (on a refusal only), per-table failure isolation on
-the DirectRunner, profile rows whose edges persist as computed, and the
-label key made once and kept out of the job graph.
+acceptance: the runner defaults (a local run is in process, never on
+Prism) and side-input cache sizing, the prepare step's degradations (on
+a refusal only), per-table failure isolation — with and without the
+failure side input —, profile rows whose edges persist as computed, and
+the label key made once and kept out of the job graph.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -27,8 +28,10 @@ import bz2
 import dataclasses
 import hashlib
 import itertools
+import json
 import math
 import random
+import sys
 import zlib
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -43,10 +46,12 @@ from apache_beam.options.pipeline_options import (
     DebugOptions,
     PipelineOptions,
     SetupOptions,
+    StandardOptions,
     WorkerOptions,
 )
 from apache_beam.portability import common_urns
 from apache_beam.portability.api import beam_runner_api_pb2
+from apache_beam.testing.test_pipeline import TestPipeline as BeamTestPipeline
 
 from sdfb_evaluation.beam import pipeline as pipeline_module
 from sdfb_evaluation.beam.assemble import stable_floats
@@ -134,16 +139,34 @@ def _tables(small: Mapping[str, Mapping[str, list]], **panels: int) -> list:
 # --------------------------------------------------------------------------
 # runner defaults
 # --------------------------------------------------------------------------
+def _options(plan: Any) -> PipelineOptions:
+  """A local run's options: the evaluator's defaults and an explicit,
+  empty command line — `PipelineOptions(**defaults)` alone also parses
+  `sys.argv`, which under pytest is pytest's."""
+  return PipelineOptions([], **pipeline_options_defaults("DirectRunner", plan))
+
+
+_SHOWN = ("table_name", "metric_id", "column_name", "edge", "status", "value",
+          "detail")
+
+
+def _describe(rows: Sequence[Mapping[str, Any]]) -> str:
+  """What each metric row measures, its status, value and detail, for an
+  assertion message."""
+  return "; ".join(json.dumps({key: row[key] for key in _SHOWN}) for row in rows)
+
+
 def test_runner_defaults(small):
   direct = pipeline_options_defaults("DirectRunner")
   assert direct == {
-      "runner": "DirectRunner",
+      "runner": "FnApiRunner",  # in process: DirectRunner would go to Prism
       "save_main_session": False,
       "max_cache_memory_usage_mb": MIN_CACHE_MB,
   }
   dataflow = pipeline_options_defaults("DataflowRunner")
+  assert dataflow["runner"] == "DataflowRunner"
   assert dataflow["experiments"] == ["upload_graph"]
-  options = PipelineOptions(**dataflow)
+  options = PipelineOptions([], **dataflow)
   assert options.view_as(SetupOptions).save_main_session is False
   assert options.view_as(WorkerOptions).max_cache_memory_usage_mb >= 512
   assert "enable_data_sampling" not in (
@@ -155,6 +178,77 @@ def test_runner_defaults(small):
   )["max_cache_memory_usage_mb"] == MIN_CACHE_MB  # a small plan: the floor
   with pytest.raises(ValueError, match="runner"):
     pipeline_options_defaults("")
+
+
+@pytest.mark.parametrize("name", [
+    "DirectRunner", "directrunner", "Direct", "SwitchingDirectRunner",
+    "apache_beam.runners.direct.direct_runner.DirectRunner"
+])
+def test_a_local_run_is_in_process(small, name):
+  """Every name Beam resolves to its DirectRunner — which hands a batch
+  pipeline to Prism — becomes the in-process FnApiRunner, and the
+  pipeline built from those options is accepted."""
+  plan = evaluation_plan(
+      _tables(small)[:1], evaluation_id="ev_local", label_key_uri=None)
+  defaults = pipeline_options_defaults(name, plan)
+  assert defaults["runner"] == "FnApiRunner"
+  p = beam.Pipeline(options=PipelineOptions([], **defaults))
+  assert type(p.runner).__name__ == "FnApiRunner"
+  out = build_evaluation_pipeline(
+      p, plan, sources=InMemorySources({}), sinks=LocalJsonSinks("unused"))
+  assert set(out) == {"metrics", "profiles", "flags", "registry", "failures"}
+
+
+def test_tests_default_to_the_in_process_runner():
+  """`conftest.py`: a pipeline a test of this package builds without
+  naming a runner is in process too, not on Prism."""
+  assert type(beam.Pipeline().runner).__name__ == "FnApiRunner"
+  assert type(BeamTestPipeline().runner).__name__ == "FnApiRunner"
+
+
+@pytest.mark.parametrize("name", [
+    "PrismRunner", "prism",
+    "apache_beam.runners.portability.prism_runner.PrismRunner"
+])
+def test_the_defaults_refuse_prism(name):
+  with pytest.raises(ValueError, match="Prism"):
+    pipeline_options_defaults(name)
+
+
+@pytest.mark.parametrize("runner", [
+    "DirectRunner", "SwitchingDirectRunner", "TestDirectRunner", "PrismRunner"
+])
+def test_the_pipeline_refuses_a_runner_backed_by_prism(small, runner):
+  """Prism starts a step before its batch side input is complete, so a
+  failed table's rows could be published as evaluated: a pipeline whose
+  runner Beam backs with Prism is refused when the graph is built, with
+  the way out — never run to produce rows that may be wrong."""
+  plan = evaluation_plan(
+      _tables(small)[:1], evaluation_id="ev_prism", label_key_uri=None)
+  p = beam.Pipeline(options=PipelineOptions([], runner=runner))
+  with pytest.raises(ValueError, match="Prism") as raised:
+    build_evaluation_pipeline(
+        p, plan, sources=InMemorySources({}), sinks=LocalJsonSinks("unused"))
+  message = str(raised.value)
+  assert "pipeline_options_defaults" in message and "FnApiRunner" in message
+  assert not p.transforms_stack[0].parts  # nothing was added to the graph
+
+
+def test_pytest_arguments_never_reach_beam(small, monkeypatch):
+  """`PipelineOptions(**kwargs)` without `flags` parses `sys.argv`; the
+  helpers pass an empty command line, so neither a flag Beam knows
+  (`--runner`) nor one it does not (`--tb=long`) can enter a run."""
+  monkeypatch.setattr(sys, "argv", [
+      "pytest", "tests/x.py::test_y", "-q", "--tb=long", "--runner=PrismRunner"
+  ])
+  plan = evaluation_plan(
+      _tables(small)[:1], evaluation_id="ev_argv", label_key_uri=None)
+  options = _options(plan)
+  assert options.view_as(StandardOptions).runner == "FnApiRunner"
+  everything = options.get_all_options(retain_unknown_options=True)
+  assert "tb" not in everything and "q" not in everything
+  leaky = PipelineOptions(**pipeline_options_defaults("DirectRunner", plan))
+  assert "tb" in leaky.get_all_options(retain_unknown_options=True)
 
 
 def test_cache_is_the_sum_of_the_broadcast_sets(small):
@@ -444,8 +538,7 @@ def test_a_transient_preflight_failure_raises(small, error):
 def _run(plan, rows_by: Mapping[tuple[str, str], list], out: Path,
          **kwargs: Any) -> LocalJsonSinks:
   sinks = LocalJsonSinks(str(out))
-  options = PipelineOptions(**pipeline_options_defaults("DirectRunner", plan))
-  with beam.Pipeline(options=options) as p:
+  with beam.Pipeline(options=_options(plan)) as p:
     build_evaluation_pipeline(
         p, plan, sources=InMemorySources(rows_by), sinks=sinks, **kwargs)
   return sinks
@@ -548,7 +641,8 @@ def test_every_table_failing_still_writes_rows_and_a_final_row(small, tmp_path):
   metrics = sinks.read_rows("evaluation_metrics")
   measured = [r for r in metrics if not is_aggregate(r["metric_id"])]
   assert {r["table_name"] for r in measured} == {"users", "orders"}
-  assert all(r["status"] == "not_evaluated" for r in measured)
+  graded = [r for r in measured if r["status"] != "not_evaluated"]
+  assert not graded, _describe(graded)
   assert all("cannot be read" in r["detail"]["reason"] for r in measured)
   model = [r for r in metrics if r["metric_id"] == "model.overall_score"]
   assert len(model) == 1 and model[0]["status"] == "not_evaluated"
@@ -560,7 +654,96 @@ def test_every_table_failing_still_writes_rows_and_a_final_row(small, tmp_path):
   assert sum("cannot be read" in w for w in registry[0]["warnings"]) == 2
   assert registry[0]["metrics_total"] == len(measured)
   assert registry[0]["metrics_not_evaluated"] == len(measured)
+  assert registry[0]["metrics_pass"] == 0
   assert registry[0]["overall_score"] is None
+  rollups = [r for r in metrics if is_aggregate(r["metric_id"])]
+  scored = [r for r in rollups if r["status"] != "not_evaluated"]
+  assert rollups and not scored, _describe(scored)
+
+
+def _never(_: Any) -> bool:
+  return False
+
+
+def _without_the_failure_map(monkeypatch: pytest.MonkeyPatch) -> None:
+  """Make the `failures` side input arrive EMPTY at every step that reads
+  it: what a runner serves when it starts a step before a side input is
+  complete. Prism did exactly that to the Guard, in some runs (the root
+  cause of the intermittent failure of the test above); here it is every
+  run. Every other side input is left alone."""
+  as_dict = beam.pvalue.AsDict
+
+  def nothing_yet(pcoll: beam.PCollection) -> Any:
+    if "FirstFailure" not in pcoll.producer.full_label:
+      return as_dict(pcoll)
+    return as_dict(pcoll | "NothingYet" >> beam.Filter(_never))
+
+  monkeypatch.setattr(beam.pvalue, "AsDict", nothing_yet)
+
+
+def test_driver_failures_hold_without_the_failure_side_input(
+    small, tmp_path, monkeypatch):
+  """Regression of the Prism race, made deterministic: with the failure
+  side input empty, a table the DRIVER saw fail still has no graded row
+  — its `table.row_count_ratio` and its edge's rows included —, its
+  roll-ups are not scored and the FINAL row is FAILED with the reasons:
+  what the driver knows is a constant of the graph, not a side input."""
+  _without_the_failure_map(monkeypatch)
+  plan = evaluation_plan(
+      _tables(small)[:2], evaluation_id="ev_none", label_key_uri=None)
+  sinks = _run(plan, {}, tmp_path / "out")
+  metrics = sinks.read_rows("evaluation_metrics")
+  measured = [r for r in metrics if not is_aggregate(r["metric_id"])]
+  assert {r["metric_id"] for r in measured} >= {
+      "table.row_count_ratio", "relationship.orphan_rate", "column.ks"
+  }
+  graded = [r for r in metrics if r["status"] != "not_evaluated"]
+  assert not graded, _describe(graded)
+  setup = [
+      r for r in measured if "could not be set up" in r["detail"]["reason"]
+  ]
+  assert len(setup) == len(measured)  # the driver's reason, on every row
+  [final] = sinks.read_rows("evaluation_data_history")
+  assert final["status"] == "FAILED"
+  assert final["status_reason"].startswith(
+      "no launch table could be evaluated: orders: not evaluated")
+  assert sum("cannot be read" in w for w in final["warnings"]) == 2
+  assert final["metrics_pass"] == 0
+  assert final["metrics_not_evaluated"] == len(measured)
+
+
+def test_one_driver_failure_holds_without_the_failure_side_input(
+    small, tmp_path, monkeypatch):
+  """The same with a healthy table beside the failed one: `orders`
+  cannot be read, so none of its rows is graded — not its row count, not
+  the rows the relational pass computes for its edge from the readable
+  parent and no child at all — while `users` is evaluated and the run is
+  PARTIAL naming `orders`."""
+  _without_the_failure_map(monkeypatch)
+  plan = evaluation_plan(
+      _tables(small)[:2], evaluation_id="ev_one", label_key_uri=None)
+  rows_by = {
+      ("users", side): small[side]["users"] for side in ("source", "synthetic")
+  }
+  sinks = _run(plan, rows_by, tmp_path / "out")
+  measured = [
+      r for r in sinks.read_rows("evaluation_metrics")
+      if not is_aggregate(r["metric_id"])
+  ]
+  orders = [r for r in measured if r["table_name"] == "orders"]
+  assert {
+      "table.row_count_ratio", "relationship.orphan_rate",
+      "relationship.parent_coverage"
+  } <= {r["metric_id"] for r in orders}
+  graded = [r for r in orders if r["status"] != "not_evaluated"]
+  assert not graded, _describe(graded)
+  assert all("could not be set up" in r["detail"]["reason"] for r in orders)
+  assert any(
+      r["table_name"] == "users" and r["status"] == "pass" for r in measured)
+  [final] = sinks.read_rows("evaluation_data_history")
+  assert final["status"] == "PARTIAL"
+  assert "orders: not evaluated" in final["status_reason"]
+  assert any("orders: not evaluated" in w for w in final["warnings"])
 
 
 # --------------------------------------------------------------------------
@@ -684,9 +867,7 @@ def test_label_key_made_once_and_never_in_the_graph(small, tmp_path):
       (name, side): rows for side, by_table in small.items()
       for name, rows in by_table.items()
   }
-  p = beam.Pipeline(
-      options=PipelineOptions(
-          **pipeline_options_defaults("DirectRunner", plan)))
+  p = beam.Pipeline(options=_options(plan))
   build_evaluation_pipeline(
       p,
       plan,
