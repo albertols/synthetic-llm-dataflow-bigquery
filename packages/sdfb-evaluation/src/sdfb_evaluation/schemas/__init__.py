@@ -132,6 +132,58 @@ def bq_mk_commands(project: str,
   return commands
 
 
+def _column_ddl(field: dict[str, Any], *, nested: bool = False) -> str:
+  """One field as a DDL column (or STRUCT field) definition: the name
+  between backticks (never a keyword clash), a RECORD as a STRUCT of its
+  sub-fields, REPEATED as an ARRAY, REQUIRED as `NOT NULL`, and the
+  description as `OPTIONS(description=…)` (a JSON string literal is a
+  valid GoogleSQL one)."""
+  kind = str(field["type"])
+  if kind == "RECORD":
+    members = ", ".join(
+        _column_ddl(sub, nested=True) for sub in field["fields"])
+    kind = f"STRUCT<{members}>"
+  mode = field.get("mode")
+  if mode == "REPEATED":
+    kind = f"ARRAY<{kind}>"
+  name = field["name"]
+  parts = [f"`{name}`", kind]
+  if mode == "REQUIRED":
+    parts.append("NOT NULL")
+  description = field.get("description")
+  if description and not nested:
+    parts.append(f"OPTIONS(description={json.dumps(description)})")
+  return " ".join(parts)
+
+
+def table_ddl(project: str,
+              dataset: str = "synthetic_data_quality") -> list[str]:
+  """`CREATE TABLE IF NOT EXISTS` statements for all four tables, in
+  `TABLES` order — the same tables `bq_mk_commands` provisions (schema,
+  partitioning, clustering, partition expiry), as DDL a BigQuery client
+  can run (`sdfb-eval schemas --apply`). An existing table is kept as it
+  is: never replaced, never altered. Every identifier is backtick-quoted;
+  sub-field descriptions of a RECORD stay in the `.schema.json` only.
+  """
+  statements = []
+  for table in TABLES:
+    field, partition_type, expiration_days = PARTITIONING[table]
+    columns = ",\n  ".join(_column_ddl(f) for f in load_schema(table))
+    partition = (f"DATE(`{field}`)" if partition_type == "DAY" else
+                 f"TIMESTAMP_TRUNC(`{field}`, {partition_type})")
+    lines = [
+        f"CREATE TABLE IF NOT EXISTS `{project}.{dataset}.{table}` (",
+        f"  {columns}", ")", f"PARTITION BY {partition}"
+    ]
+    clustering = CLUSTERING.get(table)
+    if clustering:
+      lines.append("CLUSTER BY " + ", ".join(f"`{c}`" for c in clustering))
+    if expiration_days is not None:
+      lines.append(f"OPTIONS(partition_expiration_days={expiration_days})")
+    statements.append("\n".join(lines))
+  return statements
+
+
 def view_sql(project: str, dataset: str) -> list[str]:
   """`views.sql`'s `CREATE OR REPLACE VIEW` statements, rendered for `project.dataset`."""
   rendered = _read("views.sql").replace("{project}",

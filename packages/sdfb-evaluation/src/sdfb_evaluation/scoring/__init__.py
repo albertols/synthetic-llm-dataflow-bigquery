@@ -85,6 +85,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import math
 from collections import defaultdict
@@ -117,6 +118,8 @@ INTEGRITY_FAIL = "integrity_fail"
 SCALAR_NOISE_METHODS = frozenset(
     {"ks_two_sample", "tvd_null", "jsd_null", "fisher_z", "mi_bias"})
 INTERVAL_NOISE_METHODS = frozenset({"wilson", "newcombe", "delong"})
+# A run's threshold overrides (Ruling R93-6): metric id -> (warn, fail).
+Thresholds = Mapping[str, tuple[float, float]]
 
 _PMSE_ID = "table.pmse_ratio"
 _ORPHAN_ID = "relationship.orphan_rate"
@@ -421,7 +424,8 @@ def to_metric_row(mv: MetricValue,
                   evaluated_at: datetime | str,
                   landing_table: str | None,
                   source_table: str | None,
-                  enforced: bool = True) -> dict[str, Any]:
+                  enforced: bool = True,
+                  thresholds: Thresholds | None = None) -> dict[str, Any]:
   """One `evaluation_metrics` row: exactly its fields, in schema order.
 
   `level`, `family`, `metric_version`, `value_kind`, the thresholds and
@@ -436,11 +440,19 @@ def to_metric_row(mv: MetricValue,
   Non-finite floats become `None` (`json_safe`), so the row can go straight
   to a BigQuery load job.
 
+  `thresholds` (`{metric id: (warn, fail)}`, Ruling R93-6) replaces the
+  catalogue's two thresholds for the metrics it names, for everything
+  this row derives from them: its status, its score and the
+  `threshold_warn` / `threshold_fail` it stores. None: the catalogue's.
+
   Raises:
     KeyError: `mv.metric_id` is not in the catalogue.
     ValueError: `evaluated_at` is a string that is not ISO-8601.
   """
   metric = _catalogue().get(mv.metric_id)
+  if thresholds and metric.id in thresholds:
+    warn, fail = thresholds[metric.id]
+    metric = dataclasses.replace(metric, warn=warn, fail=fail)
   assessment = _assess(metric, mv, enforced)
   detail = dict(mv.detail)
   detail.update(assessment.notes or {})

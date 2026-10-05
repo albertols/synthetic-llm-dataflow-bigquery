@@ -51,6 +51,7 @@ import apache_beam as beam
 __all__ = [
     "EPHEMERAL_KEY_BYTES",
     "LabelKey",
+    "is_label_key_uri",
     "label_key_mode",
     "read_label_key",
     "resolve_label_key",
@@ -68,6 +69,15 @@ def label_key_mode(uri: str | None) -> str:
   """`operator` for a key URI, `ephemeral` without one (the registry's
   `label_key_mode`; the key itself is never recorded)."""
   return "operator" if uri else "ephemeral"
+
+
+def is_label_key_uri(uri: str) -> bool:
+  """Whether `uri` is one of the three forms `read_label_key` reads (a
+  Secret Manager version, a `gs://` object, an absolute path) — for a
+  caller that must refuse a malformed one before anything runs."""
+  return bool(
+      _SECRET_RE.fullmatch(uri) or uri.startswith("gs://") or
+      os.path.isabs(uri))
 
 
 def _secret(name: str, session_factory: Callable[[str], Any]) -> bytes:

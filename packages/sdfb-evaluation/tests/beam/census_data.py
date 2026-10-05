@@ -33,13 +33,14 @@ from sdfb_evaluation.beam.census import CensusSpec, SideTotals
 from sdfb_evaluation.beam.dense import DenseProfile, DenseSpec
 from sdfb_evaluation.beam.encode import BatchEncoder, EncodedBatch
 from sdfb_evaluation.context.budget import Budget
+from sdfb_evaluation.context.offline import planning_stats
 from sdfb_evaluation.context.plan import (
     TablePlan,
     apply_planning,
     kinds_from_schema,
 )
 
-from .dense_data import planned_table, planning_stats
+from .dense_data import planned_table
 from .tables import make_panel, table_plan
 
 SALT = "c3n5" * 8

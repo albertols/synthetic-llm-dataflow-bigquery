@@ -15,7 +15,7 @@
 thelook-shaped `users` → `orders` → `order_items` tables, a faithful
 ("good") synthetic twin drawn from the same generator, a "bad" twin with
 seven planted defects, and the `EvaluationPlan` of each, planned by the
-real planner functions from the rows (`dense_data.planning_stats`).
+real planner functions from the rows (`context.offline.table_plan`).
 
     users (root)       id PK, email identity, first/last name, age,
                        gender, country, city (3 % NULL), traffic_source,
@@ -69,24 +69,20 @@ from typing import Any
 import numpy as np
 
 from sdfb_evaluation.catalogue import load_catalogue
+from sdfb_evaluation.context import offline
 from sdfb_evaluation.context.budget import Budget, predict_shuffle_gb
 from sdfb_evaluation.context.launch import LaunchContext
 from sdfb_evaluation.context.plan import (
     EvaluationPlan,
     Knobs,
     TablePlan,
-    apply_planning,
-    encoding_plan_digest,
-    kinds_from_schema,
-    select_pairs,
 )
 from sdfb_evaluation.context.reference import Panel
 from sdfb_evaluation.context.relationships import Edge
 from sdfb_evaluation.context.scope import ScopePlan
-from sdfb_evaluation.scoring import to_metric_row
+from sdfb_evaluation.scoring import Thresholds, to_metric_row
 from sdfb_evaluation.types import MetricValue
 
-from .dense_data import planning_stats
 from .tables import DATASET, PROJECT, SOURCE_DATASET
 
 SALT = "acce" * 8
@@ -536,37 +532,24 @@ def table_plan(name: str,
                panel_rows: int = 0,
                pair_max_columns: int = 20) -> TablePlan:
   """A launch table planned from both sides' rows by the planner's own
-  `apply_planning`/`select_pairs` (census exact: a 500 GB budget)."""
-  keys = frozenset(pk) | {c for e in edges for c in e.cols}
-  columns = apply_planning(
-      kinds_from_schema(fields, keys=keys, identity=identity),
-      planning_stats(fields, source_rows, keys),
-      planning_stats(fields, synthetic_rows, keys),
-      budget=_BUDGET)
-  pairs = select_pairs(columns, pair_max_columns)
-  landing = f"{PROJECT}.{DATASET}.{name}"
-  return TablePlan(
-      name=name,
-      landing_table=landing,
+  `apply_planning`/`select_pairs` (`context.offline.table_plan`; census
+  exact: a 500 GB budget)."""
+  return offline.table_plan(
+      name,
+      fields,
+      source_rows,
+      synthetic_rows,
+      landing_table=f"{PROJECT}.{DATASET}.{name}",
       source_table=f"{PROJECT}.{SOURCE_DATASET}.{name}",
-      run_id=f"run-acc-{name}",
+      budget=_BUDGET,
+      pk=pk,
+      identity=identity,
+      edges=edges,
       role=role,
-      pk=tuple(pk),
-      identity=tuple(identity),
-      edges=tuple(edges),
-      columns=tuple(columns),
-      scope=scope_of(landing, expected=len(synthetic_rows)),
-      source_read_table=f"{PROJECT}.{SOURCE_DATASET}.{name}",
-      source_pinned=False,
       panel=panel(source_rows, panel_rows) if panel_rows else None,
-      pairs=pairs,
-      encoding_plan_digest=encoding_plan_digest(columns, pairs, edges),
+      pair_max_columns=pair_max_columns,
+      run_id=f"run-acc-{name}",
       model="thelook_acceptance",
-      synthetic_read_table=landing,
-      rows_source=len(source_rows),
-      rows_synthetic=len(synthetic_rows),
-      sample_rate_source=1.0,
-      sample_rate_synthetic=1.0,
       reference_digest="d" * 64)
 
 
@@ -775,12 +758,15 @@ _MEASURED = ("value", "source_value", "synthetic_value", "baseline_value",
              "noise_floor", "ci_low", "ci_high")
 
 
-def rescored(row: Mapping[str, Any]) -> dict[str, Any]:
+def rescored(row: Mapping[str, Any],
+             *,
+             thresholds: Thresholds | None = None) -> dict[str, Any]:
   """A persisted `evaluation_metrics` row scored again by
   `scoring.to_metric_row` from nothing but its own fields, as any reader
   of the table can. JSON holds no infinity: a gated value that was
   infinite is persisted NULL with `detail.nonfinite` naming its sign,
-  and is read back from there."""
+  and is read back from there. `thresholds` are the run's overrides
+  (R93-6), for a row stored under them."""
   detail = dict(row["detail"] or {})
   measured = {name: row[name] for name in _MEASURED}
   sign = detail.get("nonfinite")
@@ -805,7 +791,8 @@ def rescored(row: Mapping[str, Any]) -> dict[str, Any]:
       evaluated_at=row["evaluated_at"],
       landing_table=row["landing_table"],
       source_table=row["source_table"],
-      enforced=enforced if isinstance(enforced, bool) else True)
+      enforced=enforced if isinstance(enforced, bool) else True,
+      thresholds=thresholds)
 
 
 def with_scope(table: TablePlan, *, status: str, reason: str) -> TablePlan:

@@ -192,6 +192,7 @@ from sdfb_evaluation.scoring import (
     INTEGRITY_FAIL,
     MODEL_KEY,
     OVERALL,
+    Thresholds,
     aggregate_scores,
     headline_counts,
     is_aggregate,
@@ -500,19 +501,25 @@ def evaluation_status(problems: Sequence[str],
 class RowContext:
   """What turns a `MetricValue` into an `evaluation_metrics` row (slim:
   pickled into the pipeline): the run's ids and each table's landing and
-  source table."""
+  source table. `thresholds` are the run's overrides of the catalogue's
+  (`scoring.to_metric_row`, Ruling R93-6), None for none."""
   evaluation_id: str
   evaluated_at: str
   tables: Mapping[str, tuple[str | None, str | None]]
   digests: Mapping[str, str]
+  thresholds: Thresholds | None = None
 
   @classmethod
-  def from_plan(cls, plan: EvaluationPlan) -> RowContext:
+  def from_plan(cls,
+                plan: EvaluationPlan,
+                *,
+                thresholds: Thresholds | None = None) -> RowContext:
     return cls(
         evaluation_id=plan.evaluation_id,
         evaluated_at=plan.evaluated_at,
         tables={t.name: (t.landing_table, t.source_table) for t in plan.tables},
-        digests={t.name: t.encoding_plan_digest for t in plan.tables})
+        digests={t.name: t.encoding_plan_digest for t in plan.tables},
+        thresholds=thresholds)
 
 
 def _stable(x: float, *, floor: bool = True) -> float:
@@ -605,7 +612,8 @@ def metric_row(mv: MetricValue, context: RowContext) -> dict[str, Any]:
       evaluated_at=context.evaluated_at,
       landing_table=landing,
       source_table=source,
-      enforced=enforced if isinstance(enforced, bool) else True)
+      enforced=enforced if isinstance(enforced, bool) else True,
+      thresholds=context.thresholds)
 
 
 def checked_ci(mv: MetricValue) -> MetricValue:
