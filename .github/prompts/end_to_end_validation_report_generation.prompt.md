@@ -62,6 +62,8 @@ inputs.
 | `ENGINE_LABEL=JOB_ID` | `b1_rag=<job_id>` (optional, repeatable) | stamps a readable engine name on the matching Dataflow result |
 | `ENGINE_LABEL=RUN_ID` | `b1_rag=<run_id>` (optional, repeatable) | pairs an engine label with its `run_id` so Step 1.5 fetches only that engine's rows from `LANDING_FQN` |
 | `RUN_ID_COL` | `run_id` | column in `LANDING_FQN` holding the salted run id; **required** by Step 1.5 whenever any `ENGINE_LABEL=RUN_ID` pair is given — without it the fetch is unfiltered and every engine's CSV would silently contain the same rows despite the per-engine labels |
+| `RUN_EVALUATION` | `auto` \| `yes` \| `no` (default `auto`) | Step 3.6: `auto` reads an existing evaluation for `JOB_IDS` and runs one only if the user agrees; `yes` runs one when none exists; `no` skips Step 3.6 |
+| `EVALUATION_ID` | `eval-20261005T101500Z-1a2b3c4d` (optional) | an evaluation already stored for the run (`sdfb-eval` prints it first); when given, Step 3.6 reads it instead of looking one up |
 | `FREETEXT_COLS` | `COL_A,COL_B,COL_C` | comma-separated free-text/STRING columns for Step 3.5's crosscheck (optional — discovered from the free-text subset found in Steps 2–3 if omitted) |
 
 If a param is unknown, discover it: `SCHEMA`/columns via the schema JSON or
@@ -310,6 +312,70 @@ files**: Step 6 folds them into `real/` + `oss/` and prunes them.
 
 ---
 
+## Step 3.6 — Statistical evaluation (OPTIONAL)
+
+Skip when `RUN_EVALUATION=no`. The standalone evaluator
+([ADR 0041](../../docs/adr/0041-evaluation-standalone-package.md),
+[`packages/sdfb-evaluation/README.md`](../../packages/sdfb-evaluation/README.md))
+scores the landed tables against the full source, per column, pair, table and
+edge. **It has not yet run on Google Cloud**: if a command below fails for a
+reason that looks like the first real run (a permission, a scope that cannot
+be placed, an unbuilt image), say so in the report instead of working around
+it. Do not use it as a gate on this validation; it is an input to Steps 4-5.
+
+1. **Look for an existing evaluation** of each job in `JOB_IDS` (read-only):
+
+   ```sql
+   SELECT evaluation_id, status, recorded_at
+   FROM `<QUALITY_DATASET>.evaluation_latest_per_job`
+   WHERE generation_job_id = '<JOB_ID>'
+   ```
+
+   (`QUALITY_DATASET` is `<project>.synthetic_data_quality`.) Use the
+   `EVALUATION_ID` input instead when it was given.
+
+2. **If absent and the user agrees** (ask first: it bills BigQuery bytes, and
+   it must happen before the source's and landing table's time-travel window
+   closes), run it, plan first:
+
+   ```bash
+   uv run --project packages/sdfb-evaluation sdfb-eval plan --dry_run \
+     --project <PROJECT> --region <REGION> --job_id <JOB_ID>
+   uv run --project packages/sdfb-evaluation sdfb-eval run --runner DirectRunner --mode sampled \
+     --project <PROJECT> --region <REGION> --job_id <JOB_ID>
+   ```
+
+   `--runner DirectRunner` runs on this machine (Beam's in-process runner, not
+   Prism). Exit codes: 0 finished, 1 the optional `--fail_on` gate (not used
+   here), 2 a usage error with nothing started, 3 the evaluation failed. A
+   failed evaluation does not change the generation run's verdict.
+
+3. **Export the evaluation** next to the other working files:
+
+   ```bash
+   uv run --project packages/sdfb-evaluation sdfb-eval report --project <PROJECT> \
+     --evaluation_id <EVALUATION_ID> --format json --out runs/<JOB_ID>/evaluation_metrics.json
+   uv run --project packages/sdfb-evaluation sdfb-eval report --project <PROJECT> \
+     --evaluation_id <EVALUATION_ID> --format md --out runs/<JOB_ID>/evaluation_report.md
+   ```
+
+4. **How to read it** (per metric row, never as a verdict on the data):
+   - The run `status` describes the evaluation (`SUCCEEDED`, `PARTIAL`, ...);
+     a `PARTIAL` or `SKIPPED` run says which table or block was not evaluated:
+     report that as a gap.
+   - **Baseline.** Each fidelity row's `baseline_value` is what a perfect copy
+     of the reference sample would score; judge `value` against it.
+   - **Noise floor.** A row is `WARN`/`FAIL` only when its value crosses the
+     threshold and exceeds its noise floor; no p-values.
+   - **Lifts** (`row.memorization_lift`, `row.exposure_lift`, value lifts):
+     matches to the reference sample over matches to the holdout, 1 is chance,
+     and status reads the **CI lower bound**. DCR/NNDR and the holdout share
+     are risk indicators, not guarantees.
+   - Compare with Step 3.5's numbers where both exist; a disagreement is a
+     finding to trace, not to average.
+
+---
+
 ## Step 4 — Diagnose defects and trace each to code
 
 For every anomaly: **evidence → root cause (file:symbol) → fix**. Check for:
@@ -371,11 +437,13 @@ For every anomaly: **evidence → root cause (file:symbol) → fix**. Check for:
   cost note (recommend a CPU-only rerun), never a lifecycle failure.
   `freetext_pool_binary_fallback` is the by-design COL_048-class route.
 
-> **Forward-looking**: this step hand-computes fidelity from the offline CSV
-> (Step 2) and live BQ (Step 3). Once `--enable-evaluation` lands (see
-> `docs/designs/2026-07-07-evaluation-framework-design.md`), pull the fidelity
-> numbers from `synthetic_data_quality.validation_data_history` instead of
-> recomputing them here.
+> **Pull fidelity/privacy from Step 3.6 when present.** This step
+> hand-computes fidelity from the offline CSV (Step 2) and live BQ (Step 3).
+> When Step 3.6 produced `runs/<JOB_ID>/evaluation_metrics.json`, take the
+> fidelity, privacy, integrity and diversity numbers from it (with their
+> baselines, noise floors and lifts) instead of recomputing them, and cite the
+> metric id (for example `column.ks`) in the finding. When Step 3.6 was
+> skipped or failed, keep the hand-computed numbers and say so.
 
 ---
 
@@ -393,6 +461,11 @@ Create `output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md`
 3.5. **Source vs synthetic statistics** — stats-diff + crosscheck headline
    numbers, each finding traced to a generation code area, feeding the
    backlog.
+3.6. **Statistical evaluation** — only when Step 3.6 ran: the evaluation
+   id and its run status, the failing metrics (value, baseline, noise floor,
+   lift lower bound) each traced to a generation code area, and any table or
+   block the evaluation did not cover. Say plainly that the evaluator has not
+   yet run on Google Cloud when this is its first real run.
 4. **Schema, gates & quality tables** — conformance, gate blind spots, `validation_runs`/`dlq`.
 5. **Dataflow execution insights** — per-job phase timings, engine milestones,
    resource/GPU seconds, and cost/value commentary.
@@ -516,6 +589,8 @@ python scripts/e2e/e2e_bundle_export.py \
   --metrics freetext_crosscheck=runs/<JOB_ID>/freetext_crosscheck_metrics.json \
   --doc stats_diff=runs/<JOB_ID>/stats_diff.md \
   --doc freetext_crosscheck_report=runs/<JOB_ID>/freetext_crosscheck_report.md \
+  --metrics evaluation=runs/<JOB_ID>/evaluation_metrics.json \
+  --doc evaluation_report=runs/<JOB_ID>/evaluation_report.md \
   $(for c in <CSVS>; do echo --csv $c; done) \
   --report output/end_to_end_validation_report_YYYY_MM_DD_HH_MM.md \
   --out-root runs \
@@ -530,10 +605,12 @@ python scripts/e2e/e2e_bundle_export.py \
 The `--metrics` labels name the `real/`+`oss/` files (`gcp=` →
 `gcp_metrics.json`, `offline=` → `offline_metrics.json`, `stats_diff=` →
 `stats_diff_metrics.json` …) — keep all four labels exactly as above or the
-release pipeline's artifact discovery will not find them. `--doc` moves the
-two markdown reports: verbatim into `real/<label>.md`, redacted into
+release pipeline's artifact discovery will not find them. The two `evaluation` lines are optional: add them only when Step 3.6 produced both
+files (the exporter copies and redacts extra labels). `--doc` moves the
+markdown reports: verbatim into `real/<label>.md`, redacted into
 `oss/<label>.md` (`stats_diff=` → `stats_diff.md`,
-`freetext_crosscheck_report=` → `freetext_crosscheck_report.md`).
+`freetext_crosscheck_report=` → `freetext_crosscheck_report.md`,
+`evaluation_report=` → `evaluation_report.md`; `evaluation=` → `evaluation_metrics.json`).
 
 `--csv` **registers** each sample CSV's header + values in the redaction
 mapping (so the report/doc redaction stays complete) but the CSV is **not**
@@ -617,7 +694,8 @@ landing its recommendations so they fold in.
    `e2e_gcp_metrics.json`, `stats_diff.json`/`.md`,
    `freetext_crosscheck_metrics.json`/`_report.md` are gone from the parent
    (pruned by Step 6) and no `*_sample.csv` exists inside `real/` or `oss/`.
-7. Print a one-line summary: report path + the single most important finding.
+7. When Step 3.6 ran: `real/evaluation_metrics.json` and `real/evaluation_report.md` exist, `oss/` carries the redacted pair, the parent-level copies were pruned, and every evaluation number quoted in the report matches `real/evaluation_metrics.json`.
+8. Print a one-line summary: report path + the single most important finding.
 
 ---
 
