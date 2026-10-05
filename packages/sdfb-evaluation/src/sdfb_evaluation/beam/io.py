@@ -127,6 +127,10 @@ _PANEL_SIDES = frozenset({Side.REFERENCE, Side.HOLDOUT})
 # Beam's default shard template (-SSSSS-of-NNNNN) after a write's prefix.
 _SHARD_SUFFIX = "-[0-9]*-of-[0-9]*.jsonl"
 _UNSAFE_PATH_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+# Beam's file sink writes under <dir>/beam-temp-<prefix name>-<uuid1 hex>
+# and removes it when it finalises; a pipeline that fails leaves it.
+_BEAM_TEMP = "beam-temp-"
+_BEAM_TEMP_ID = re.compile(r"[0-9a-f]{32}")
 _GLOB_CHARS = re.compile(r"[*?\[\]]")
 _SHOWN_FILES = 3
 
@@ -395,8 +399,11 @@ class LocalJsonSinks(Sinks):
   counter per instance), so two writes to one table never finalise onto
   the same file. `read_rows` reads only the prefixes this instance wrote,
   and `write` refuses a table directory that holds anything else — another
-  run's shards, or a crashed run's temp files — instead of mixing runs:
-  give each evaluation a fresh `out_dir`.
+  run's shards, or another run's temp files — instead of mixing runs:
+  give each evaluation a fresh `out_dir`. The temp directory Beam leaves
+  under one of THIS instance's prefixes, when its pipeline failed at run
+  time, is its own: the driver can still write its FAILED event
+  (`write_rows`) beside it.
   """
 
   def __init__(self, out_dir: str):
@@ -468,6 +475,15 @@ class LocalJsonSinks(Sinks):
         path for prefix in self._prefixes.get(table, ())
         for path in glob.glob(glob.escape(prefix) + _SHARD_SUFFIX))
 
+  def _own_leftover(self, table: str, name: str) -> bool:
+    """Whether `name` is the temp directory Beam's file sink made for one
+    of this instance's own writes: `beam-temp-<own prefix>-<32 hex>`."""
+    for prefix in self._prefixes.get(table, ()):
+      head = f"{_BEAM_TEMP}{os.path.basename(prefix)}-"
+      if name.startswith(head) and _BEAM_TEMP_ID.fullmatch(name[len(head):]):
+        return True
+    return False
+
   def _refuse_foreign(self, table: str) -> None:
     directory = self.table_dir(table)
     if not os.path.isdir(directory):
@@ -475,7 +491,8 @@ class LocalJsonSinks(Sinks):
     own = set(self._own_shards(table))
     foreign = sorted(
         name for name in os.listdir(directory)
-        if os.path.join(directory, name) not in own)
+        if os.path.join(directory, name) not in own and
+        not self._own_leftover(table, name))
     if foreign:
       shown = ", ".join(foreign[:_SHOWN_FILES])
       if len(foreign) > _SHOWN_FILES:

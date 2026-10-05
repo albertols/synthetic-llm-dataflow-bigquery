@@ -411,10 +411,54 @@ def test_the_label_key_uri_is_redacted_before_the_reason_is_cut(
   argv = ["run", *TARGET, "--label_key_uri", LABEL_KEY_URI]
   assert main(argv, make_env(bq, submit=explode)) == 3
   reason = bq.registry_rows()[-1]["status_reason"]
-  whole = f"RuntimeError: {padding} could not read <label key uri> (HTTP 403)"
-  assert len(whole) > 1000 and reason == whole[:1000]
-  assert "<label key uri>" in reason
-  assert "projects/" not in reason and "secrets" not in reason
+  assert len(reason) == 1000
+  assert reason.startswith("RuntimeError: xxxx")
+  assert reason.endswith("could not read <label key uri> (HTTP 403)")
+  for piece in ("projects", "demo-project/", "secrets", "sdfb-eval-label",
+                "versions"):
+    assert piece not in reason
+  capsys.readouterr()
+
+
+def test_a_cut_reason_keeps_the_line_that_names_the_failure(
+    bq, resolved, stub, capsys):
+  """A runner reports a worker's failure as a long traceback: the
+  registry's 1,000 characters hold its beginning and the line on which
+  Beam names the failing step (else the last line)."""
+  del resolved, stub
+  frames = "\n".join(
+      f'  File "worker_{i}.py", line {i}, in step' for i in range(60))
+  messages = [
+      ("Pipeline job-001 failed in state FAILED: bundle inst150 "
+       f"failed:Traceback (most recent call last):\n{frames}\n"
+       "ValueError: users: the FINAL step failed [while running 'Final']\n\n"
+       "During handling of the above exception, another exception "
+       f"occurred:\n\n{frames}\nRuntimeError: Bundle processing has "
+       "failed. Check prior failing response.\n"),
+      f"the launcher gave up:\n{frames}\nValueError: no such bucket",
+      "line one\nline two",
+  ]
+
+  def explode(pipeline):
+    del pipeline
+    raise RuntimeError(messages.pop(0))
+
+  env = make_env(bq, submit=explode)
+  assert main(["run", *TARGET], env) == 3
+  reason = bq.registry_rows()[-1]["status_reason"]
+  assert len(reason) == 1000
+  assert reason.startswith("RuntimeError: Pipeline job-001 failed in state")
+  assert reason.endswith(" […] ValueError: users: the FINAL step failed "
+                         "[while running 'Final']")
+  # no step named: the last line
+  assert main(["run", *TARGET], env) == 3
+  reason = bq.registry_rows()[-1]["status_reason"]
+  assert len(reason) == 1000
+  assert reason.endswith(" […] ValueError: no such bucket")
+  # a reason that fits is left exactly as it is
+  assert main(["run", *TARGET], env) == 3
+  assert bq.registry_rows()[-1]["status_reason"] == (
+      "RuntimeError: line one\nline two")
   capsys.readouterr()
 
 

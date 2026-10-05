@@ -162,14 +162,25 @@ Exit codes of `run`:
 
 | Code | Meaning |
 |---|---|
-| 0 | the evaluation finished |
-| 1 | it finished and `--fail_on` tripped: a metric at FAIL (`fail`), or at WARN or FAIL (`warn`) |
-| 2 | a usage error; nothing was started |
-| 3 | it finished, but its FINAL row reads FAILED: no table could be evaluated. `--fail_on none` does not mask it |
-| raises | an error stopped the evaluation: its FAILED row is appended, then the error propagates |
+| 0 | the evaluation finished and no gate tripped |
+| 1 | the `--fail_on` gate tripped, and nothing else |
+| 2 | a usage error: nothing was started (no registry row, no DDL). A malformed Beam argument or thresholds file is one too |
+| 3 | the evaluation failed: its FINAL row reads FAILED (no table could be evaluated), or the run raised an error. The FAILED row is written first, the traceback goes to stderr. `--fail_on none` does not mask it |
 
-`--fail_on` reads the data's verdict only, so a PARTIAL or SKIPPED run does
-not trip it (its status is on the summary line and in the registry).
+The `--fail_on` gate, by the status of the run:
+
+| Run status | `--fail_on none` | `--fail_on warn` or `fail` |
+|---|---|---|
+| SUCCEEDED, SUCCEEDED_WITH_WARNINGS | 0 | 1 if a metric is at FAIL (`fail`), or at WARN or FAIL (`warn`) |
+| PARTIAL | 0 | 1: the gate cannot vouch for a launch table that was not evaluated |
+| SKIPPED | 0 | 0: an empty scope is a planned outcome (one line on stderr says nothing was evaluated) |
+| FAILED | 3 | 3 |
+
+The registry holds exactly one terminal row per evaluation. If you
+interrupt `run` (Ctrl-C) while it waits for a Dataflow job, the job is not
+cancelled and the driver writes no row: the job goes on and writes its
+own. The command prints the job id and how to read the result later.
+
 `--thresholds_uri` points at a YAML file of the warn and fail thresholds
 the gate applies instead of the catalogue's:
 
@@ -185,8 +196,10 @@ two runs with the same `catalogue_version` stay comparable.
 
 **Not runnable from this repository yet.** Dataflow workers need this
 package installed, and the CPU worker image and flex template that provide
-it (`docker/Dockerfile`, `deploy/`) have not landed. What is already here
-is the command line itself:
+it (`packages/sdfb-evaluation/docker/Dockerfile` and
+`packages/sdfb-evaluation/deploy/`, this package's own, not the generator's
+GPU image at the repository root) have not landed. What is already here is
+the command line itself:
 
 - `sdfb-eval run --runner DataflowRunner` defaults to `--mode exact
   --sink bq` (the pipeline writes BigQuery itself, the FINAL row after

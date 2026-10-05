@@ -37,90 +37,45 @@ from typing import Any
 
 import pytest
 from beam.acceptance_data import (
-    ORDERS_FIELDS,
-    USER_EDGE,
-    USERS_FIELDS,
-    items_rows,
-    orders_rows,
-    plant_defects,
-    table_plan,
-    users_rows,
+    plant_defects,)
+from unit.context.plan_fakes import (
+    JOB_ID,
+    RUN_IDS,
+    TABLES,
+    thelook_launch,
+    thelook_models,
 )
-from beam.dense_data import planning_stats as memory_planning_stats
 
-from sdfb_evaluation.beam.io import LOAD_ORDER
+from sdfb_evaluation.beam import pipeline as beam_pipeline
+from sdfb_evaluation.beam.io import LOAD_ORDER, InMemorySources
 from sdfb_evaluation.cli import driver, gate
-from sdfb_evaluation.cli.fixture import load_fixture, planning_stats
 from sdfb_evaluation.cli.main import main
-from sdfb_evaluation.context.plan import Knobs
 from sdfb_evaluation.report import store
 from sdfb_evaluation.report.render import (
     NOT_COMPARABLE,
     WITHIN_NOISE,
+    render_json,
     render_markdown,
 )
 from sdfb_evaluation.schemas import load_schema
 from sdfb_evaluation.scoring import is_aggregate
 
 from .conftest import catalogue
-from .helpers import NOW, check_row
+from .helpers import (
+    FIXTURE_PROJECT as PROJECT,
+    NOW,
+    RecordingBq,
+    check_row,
+    fixture_rows,
+    make_env,
+    write_fixture,
+)
 
-PROJECT = "demo-project"
 DATASET = "synthetic_data_quality"
 USERS = 60
 PANEL = 30
 METRICS, PROFILES, REGISTRY = store.METRICS, store.PROFILES, store.REGISTRY
 SECOND_ID = "eval-20260914T090000Z-0badc0de"
-
-
-def _rows(seed: int, id_base: int) -> dict[str, list[dict[str, Any]]]:
-  users = users_rows(USERS, seed, id_base)
-  orders = orders_rows(users, seed + 1, 10 * id_base)
-  return {
-      "users": users,
-      "orders": orders,
-      "order_items": items_rows(orders, seed + 2, 100 * id_base),
-  }
-
-
-def _json_cell(value: Any) -> Any:
-  if isinstance(value, datetime):
-    return value.isoformat()
-  raise TypeError(type(value).__name__)
-
-
-def _write_fixture(directory: Path, source: Mapping[str, Sequence[dict]],
-                   synthetic: Mapping[str, Sequence[dict]]) -> None:
-  directory.mkdir()
-  manifest = {
-      "project":
-          PROJECT,
-      "params": {
-          "engine": "b1_rag"
-      },
-      "tables": [{
-          "name": "users",
-          "schema": list(USERS_FIELDS),
-          "pk": ["id"],
-          "identity": ["email"],
-          "panel_rows": PANEL,
-      }, {
-          "name": "orders",
-          "schema": list(ORDERS_FIELDS),
-          "pk": ["order_id"],
-          "edges": [{
-              "cols": ["user_id"],
-              "ref": "users",
-              "ref_cols": ["id"]
-          }],
-          "panel_rows": PANEL,
-      }],
-  }
-  (directory / "fixture.json").write_text(json.dumps(manifest))
-  for name in ("users", "orders"):
-    for side, rows in (("source", source), ("synthetic", synthetic)):
-      (directory / f"{name}.{side}.json").write_text(
-          json.dumps(rows[name], default=_json_cell))
 
 
 class _LoaderBq:
@@ -166,9 +121,10 @@ class _Ran:
 @pytest.fixture(scope="module", name="ran")
 def fixture_ran(tmp_path_factory) -> _Ran:
   tmp = tmp_path_factory.mktemp("cli_run")
-  source = _rows(seed=5, id_base=100_000)
-  synthetic = plant_defects(source, _rows(seed=6, id_base=500_000))
-  _write_fixture(tmp / "fixture", source, synthetic)
+  source = fixture_rows(USERS, seed=5, id_base=100_000)
+  synthetic = plant_defects(source,
+                            fixture_rows(USERS, seed=6, id_base=500_000))
+  write_fixture(tmp / "fixture", source, synthetic, panel=PANEL)
   bq = _LoaderBq()
   env = driver.Env(
       make_bq=lambda project: bq, now=lambda: NOW, token=lambda: "0badc0de")
@@ -181,6 +137,25 @@ def fixture_ran(tmp_path_factory) -> _Ran:
         str(tmp / "out"), "--fail_on", "fail"
     ], env)
   return _Ran(tmp, stdout.getvalue(), code, bq, source, synthetic)
+
+
+@pytest.fixture(scope="module", name="tiny")
+def fixture_tiny(tmp_path_factory) -> Path:
+  """The cheapest real pipeline: `users` alone, 12 rows a side."""
+  tmp = tmp_path_factory.mktemp("cli_tiny")
+  return write_fixture(
+      tmp / "fixture",
+      fixture_rows(12, seed=5, id_base=100_000),
+      fixture_rows(12, seed=6, id_base=500_000),
+      tables=("users",))
+
+
+def _registry_lines(directory: Path) -> list[dict]:
+  return [
+      json.loads(line)
+      for path in sorted((directory / REGISTRY).glob("*.jsonl"))
+      for line in path.read_text().splitlines()
+  ]
 
 
 # --------------------------------------------------------------------------
@@ -231,56 +206,60 @@ def test_run_over_fixtures_writes_every_table_and_trips_the_gate(ran):
   assert f"written to: {PROJECT}.{DATASET}" in ran.stdout
 
 
-def test_the_fixture_plan_is_the_planners_own(ran):
-  """The fixture's JSON round trip and its exact planning statistics
-  give the plan the test planner makes from the same rows in memory."""
-  fixture = load_fixture(str(ran.fixture))
-  users, orders = fixture.tables
-  assert users.source_rows == ran.source["users"]  # types survive JSON
-  assert orders.synthetic_rows == ran.synthetic["orders"]
-  keys = frozenset({"order_id", "user_id"})
-  assert planning_stats(ORDERS_FIELDS, orders.source_rows,
-                        keys) == memory_planning_stats(ORDERS_FIELDS,
-                                                       ran.source["orders"],
-                                                       keys)
-  plan = fixture.plan(
-      knobs=Knobs(),
-      mode="exact",
-      trigger="cli",
-      runner="DirectRunner",
-      now=NOW,
-      evaluation_id="eval-20260914T080000Z-0badc0de")
-  expected = [
-      table_plan(
-          "users",
-          USERS_FIELDS,
-          ran.source["users"],
-          ran.synthetic["users"],
-          pk=("id",),
-          identity=("email",),
-          role="root",
-          panel_rows=PANEL),
-      table_plan(
-          "orders",
-          ORDERS_FIELDS,
-          ran.source["orders"],
-          ran.synthetic["orders"],
-          pk=("order_id",),
-          edges=(USER_EDGE,),
-          role="driven",
-          panel_rows=PANEL),
+# a failed DirectRunner pipeline lets its worker threads die noisily
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_pipeline_failing_at_run_time_keeps_its_failed_row_locally(
+    tiny, tmp_path, monkeypatch, capsys):
+  """`--sink local_json`, the real pipeline, its FINAL step raising: Beam
+  leaves its temp directory beside the driver's RUNNING shard, and the
+  FAILED row must still land there (review item 1)."""
+
+  def explode(summary, registry, failures, *signals):
+    del summary, registry, failures, signals
+    raise RuntimeError("the FINAL step failed on a worker")
+
+  monkeypatch.setattr(beam_pipeline, "_final_row", explode)
+  out = tmp_path / "out"
+  argv = ["run", "--fixture_dir", str(tiny), "--output_local", str(out)]
+  assert main(argv) == 3
+  (directory,) = list(out.iterdir())
+  leftovers = [p.name for p in (directory / REGISTRY).iterdir() if p.is_dir()]
+  assert leftovers and all(n.startswith("beam-temp-") for n in leftovers)
+  rows = _registry_lines(directory)
+  assert sorted(r["status"] for r in rows) == ["FAILED", "RUNNING"]
+  failed = next(r for r in rows if r["status"] == "FAILED")
+  # Beam words the runner's error in more than one way: only its class
+  assert failed["status_reason"].startswith("RuntimeError: ")
+  check_row(REGISTRY, failed, ordered=False)
+  captured = capsys.readouterr()
+  assert "could not be written" not in captured.err
+  # and the evaluation reads back as FAILED
+  assert main(["report", "--local", str(directory)]) == 0
+  assert f"# Evaluation `{directory.name}` — FAILED" in capsys.readouterr().out
+
+
+def test_a_run_where_no_table_can_be_evaluated_exits_3(monkeypatch, capsys):
+  """The real pipeline writes FINAL = FAILED itself when no launch table
+  can be evaluated (here: no side of `users` can be read) and ends
+  normally; `run` reads that row and exits 3, adding none. Only the
+  FINAL status and the exit code are asserted here."""
+  bq = RecordingBq()
+  launch = thelook_launch(bq, tables=TABLES[:1], run_ids=RUN_IDS[:1])
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  monkeypatch.setattr(driver, "load_models", lambda uri: thelook_models())
+  env = make_env(
+      bq,
+      submit=driver.submit_pipeline,
+      make_sources=lambda: InMemorySources({}))
+  argv = [
+      "run", "--project", PROJECT, "--region", "europe-west1", "--job_id",
+      JOB_ID, "--fail_on", "none"
   ]
-  for planned, wanted in zip(plan.tables, expected, strict=True):
-    assert planned.columns == wanted.columns
-    assert planned.pairs == wanted.pairs
-    assert planned.encoding_plan_digest == wanted.encoding_plan_digest
-    assert planned.role == wanted.role
-    assert planned.panel.r_rows == wanted.panel.r_rows
-    assert planned.panel.h_rows == wanted.panel.h_rows
-  assert plan.skip_reason is None and not plan.prepare_sql
-  assert len(plan.evaluation_key) == 32 and plan.salt != plan.evaluation_key
-  with pytest.raises(ValueError, match=r"fixture\.json"):
-    load_fixture(str(ran.out))
+  assert main(argv, env) == 3
+  events = [(r["event"], r["status"]) for r in bq.registry_rows()]
+  assert events == [("RUNNING", "RUNNING"), ("FINAL", "FAILED")]
+  capsys.readouterr()
 
 
 def test_plan_of_a_fixture_touches_nothing(ran, capsys):
@@ -444,6 +423,33 @@ def test_a_running_only_evaluation_says_so(ran):
   assert "No FINAL event is recorded" in text
   assert "## Failing metrics (0 rows, 0 metrics)" in text
   assert "No metric is at FAIL." in text
+
+
+def test_report_survives_a_failing_metric_the_catalogue_does_not_know(ran):
+  """A stored evaluation can be older (or newer) than the packaged
+  catalogue: a failing id the catalogue lacks is listed with its rows
+  and a line saying so, never a KeyError."""
+  known = next(r for r in ran.stored.metrics
+               if r["status"] == "fail" and not is_aggregate(r["metric_id"]))
+  retired = {**known, "metric_id": "column.retired_metric"}
+  evaluation = store.Evaluation(
+      evaluation_id=ran.evaluation_id,
+      events=ran.stored.events,
+      metrics=[known, retired],
+      origin="memory")
+  text = render_markdown(evaluation)
+  assert "## Failing metrics (2 rows, 2 metrics)" in text
+  title = catalogue().get(known["metric_id"]).title
+  metric_id = known["metric_id"]
+  assert f"### `{metric_id}` — {title}" in text
+  assert "### `column.retired_metric` — not in the packaged catalogue" in text
+  assert text.index(f"`{metric_id}`") < text.index("`column.retired_metric`")
+  document = json.loads(render_json(evaluation))
+  listed = {g["metric_id"]: g for g in document["failing"]}
+  assert listed["column.retired_metric"]["title"] is None
+  assert listed["column.retired_metric"]["interpretation"] is None
+  assert len(listed["column.retired_metric"]["rows"]) == 1
+  assert listed[metric_id]["title"] == title
 
 
 def test_compare_reads_bigquery_with_profiles(ran, capsys):

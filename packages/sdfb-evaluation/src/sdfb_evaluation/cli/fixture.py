@@ -32,31 +32,12 @@ aware UTC `datetime` from ISO-8601 text, DATETIME / DATE / TIME from
 ISO text, NUMERIC and BIGNUMERIC a `Decimal` from text, BYTES from
 base64, RECORD and JSON as they are, a REPEATED column a list.
 
-There is no BigQuery to plan with, so the plan is made from the rows by
-the planner's own pure functions (`kinds_from_schema`, `apply_planning`,
-`select_pairs`, `encoding_plan_digest`) over the statistics the planning
-SELECT returns (`context.plan`'s module docstring), computed here
-exactly instead of approximately:
-
-    planning SELECT                         here
-    ──────────────────────────────────────  ──────────────────────────────
-    COUNTIF(x IS NULL), COUNTIF(TRIM = '')  counted
-    APPROX_COUNT_DISTINCT(x)                exact distinct canonical values
-    APPROX_QUANTILES(v, 1000), AVG,         numpy on the planning scale
-      STDDEV_POP, MIN, MAX                  (`canonical.numeric_value`),
-                                            quantiles by inverted CDF
-    APPROX_TOP_COUNT(x, k)                  exact counts, NULL a value
-    COUNTIF(TIME(x) = 00:00:00)             counted
-
-    scope            the landing rows as they are (`table`, ok)
-    source           the source rows, unpinned
-    panel (D3)       R = the first `panel_rows` source rows, H the next
-                     `panel_rows`; E and H_E their first 1,024; verified
-                     (the digest is computed from R itself)
-    launch           manual: no generation job, the fixture's `params`
-
-Nothing is billed, prepared or sampled; the pipeline reads the same
-rows through `InMemorySources`.
+There is no BigQuery to plan with: each table is planned from its rows
+by `context.offline` (the planning SELECT's statistics, exact; the
+planner's own functions on top), its role comes from the planner's
+`table_roles`, and the launch is a manual one — no generation job, the
+fixture's `params`. Nothing is billed, prepared or sampled; the pipeline
+reads the same rows through `InMemorySources`.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -66,57 +47,37 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import math
 import os
-from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
-import numpy as np
-
 from sdfb_evaluation.beam.io import InMemorySources
-from sdfb_evaluation.canonical import canonical_value, numeric_value
 from sdfb_evaluation.catalogue import load_catalogue
+from sdfb_evaluation.context import offline
 from sdfb_evaluation.context.bq import normalize_fqn
 from sdfb_evaluation.context.budget import predict_shuffle_gb
 from sdfb_evaluation.context.launch import LaunchContext
 from sdfb_evaluation.context.plan import (
-    GRID_POINTS,
     EvaluationPlan,
     Knobs,
     TablePlan,
-    apply_planning,
-    encoding_plan_digest,
-    kinds_from_schema,
-    select_pairs,
+    table_roles,
 )
-from sdfb_evaluation.context.reference import Panel, reference_digest
 from sdfb_evaluation.context.relationships import Edge
-from sdfb_evaluation.context.scope import ScopePlan
 from sdfb_evaluation.types import Side
 from sdfb_evaluation.version import EVALUATOR_VERSION
 
-__all__ = ["Fixture", "FixtureTable", "load_fixture", "planning_stats"]
+__all__ = ["Fixture", "FixtureTable", "load_fixture"]
 
 MANIFEST = "fixture.json"
-EXPOSURE_ROWS = 1024  # E: the prompt-exposed prefix of R (D3)
-_ATOM_TOP_K = 11  # APPROX_TOP_COUNT(v, 11): 10 atoms, NULL may take a slot
-_DICTIONARY_TOP_K = 255  # APPROX_TOP_COUNT(x, 255): 254 values, NULL a slot
-_NUMERIC = frozenset({
-    "INT64", "INTEGER", "FLOAT64", "FLOAT", "NUMERIC", "BIGNUMERIC", "DECIMAL",
-    "BIGDECIMAL"
-})
-_TEMPORAL = frozenset({"TIMESTAMP", "DATETIME", "DATE", "TIME"})
-_NESTED = frozenset({"RECORD", "STRUCT", "JSON"})
 _TABLE_KEYS = frozenset({
     "name", "schema", "pk", "identity", "edges", "panel_rows", "landing_table",
     "source_table"
 })
 _EDGE_KEYS = frozenset({"cols", "ref", "ref_cols", "enforced"})
-_GRID = np.linspace(0.0, 1.0, GRID_POINTS)
 
 
 def _timestamp(text: str) -> datetime:
@@ -171,93 +132,6 @@ def _typed_rows(fields: Sequence[Mapping[str, Any]], raw: Any,
   return [{
       str(f["name"]): _cell(f, row.get(f["name"])) for f in fields
   } for row in raw]
-
-
-# --------------------------------------------------------------------------
-# the planning statistics, exactly
-# --------------------------------------------------------------------------
-def _key(value: Any) -> str:
-  return repr(canonical_value(value))
-
-
-def _top(values: Sequence[Any], k: int) -> list[tuple[Any, int]]:
-  """APPROX_TOP_COUNT, exact: most frequent first, NULL counted."""
-  counts = Counter(_key(v) for v in values)
-  first: dict[str, Any] = {}
-  for value in values:
-    first.setdefault(_key(value), value)
-  ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:k]
-  return [(first[key], count) for key, count in ranked]
-
-
-def _planning_scale(value: Any) -> float | None:
-  reading = numeric_value(value)
-  if reading is None or not math.isfinite(reading):
-    return None
-  return reading
-
-
-def _numeric_stats(values: Sequence[Any]) -> dict[str, Any]:
-  scaled = [_planning_scale(v) for v in values]
-  finite = np.array([v for v in scaled if v is not None], dtype=float)
-  stats: dict[str, Any] = {"top": _top(scaled, _ATOM_TOP_K)}
-  if finite.size:
-    stats.update(
-        quantiles=np.quantile(finite, _GRID, method="inverted_cdf").tolist(),
-        mean=float(finite.mean()),
-        std=float(finite.std()),
-        min=float(finite.min()),
-        max=float(finite.max()))
-  return stats
-
-
-def _column_stats(field: Mapping[str, Any], values: Sequence[Any],
-                  is_key: bool) -> dict[str, Any]:
-  bq_type = str(field.get("type") or "").upper()
-  if str(field.get("mode") or "").upper() == "REPEATED" or bq_type in _NESTED:
-    return {"null": sum(1 for v in values if v is None or v == [])}
-  present = [v for v in values if v is not None]
-  stats: dict[str, Any] = {
-      "null": len(values) - len(present),
-      "distinct": len({_key(v) for v in present}),
-  }
-  if bq_type == "STRING":
-    stats["empty"] = sum(1 for v in present if v.strip() == "")
-  elif bq_type == "BYTES":
-    stats["empty"] = sum(1 for v in present if len(v) == 0)
-  if is_key:
-    return stats
-  if bq_type in _NUMERIC | _TEMPORAL:
-    stats.update(_numeric_stats(values))
-    if bq_type in ("TIMESTAMP", "DATETIME"):
-      stats["midnight"] = sum(
-          1 for v in present if isinstance(v, datetime) and v.time() == time(0))
-  elif bq_type in ("BOOL", "BOOLEAN"):
-    stats["top"] = _top(values, _DICTIONARY_TOP_K)
-  elif bq_type in ("STRING", "BYTES"):
-    stats["avg_len"] = (
-        sum(len(v) for v in present) / len(present) if present else None)
-    stats["top"] = _top(values, _DICTIONARY_TOP_K)
-  return stats
-
-
-def planning_stats(
-    fields: Sequence[Mapping[str, Any]],
-    rows: Sequence[Mapping[str, Any]],
-    keys: frozenset[str] = frozenset()
-) -> dict[str, Any]:
-  """`context.plan.parse_planning`'s shape for `rows` (`{"rows": n,
-  "columns": {name: {stat: value}}}`), computed exactly in Python
-  (module docstring). A `keys` column stops after its distinct count,
-  as the planning SELECT does."""
-  return {
-      "rows": len(rows),
-      "columns": {
-          str(f["name"]):
-              _column_stats(f, [r.get(f["name"]) for r in rows],
-                            str(f["name"]) in keys) for f in fields
-      },
-  }
 
 
 # --------------------------------------------------------------------------
@@ -352,44 +226,6 @@ def _table(directory: str, project: str, spec: Any) -> FixtureTable:
       synthetic_rows=sides[Side.SYNTHETIC.value])
 
 
-def _roles(tables: Sequence[FixtureTable]) -> dict[str, str]:
-  """root / driven / side_input / isolated, as the planner assigns them
-  from the enforced edges."""
-  names = {t.name for t in tables}
-  referenced = {
-      e.ref
-      for t in tables
-      for e in t.edges
-      if e.enforced and not e.external and e.ref in names
-  }
-  roles = {}
-  for table in tables:
-    enforced = [e for e in table.edges if e.enforced]
-    if any(not e.external and e.ref in names for e in enforced):
-      roles[table.name] = "driven"
-    elif enforced:
-      roles[table.name] = "side_input"
-    elif table.name in referenced:
-      roles[table.name] = "root"
-    else:
-      roles[table.name] = "isolated"
-  return roles
-
-
-def _panel(rows: Sequence[Mapping[str, Any]], n: int) -> Panel:
-  r_rows = [dict(row) for row in rows[:n]]
-  h_rows = [dict(row) for row in rows[n:2 * n]]
-  digest = reference_digest(r_rows)
-  return Panel(
-      r_rows=r_rows,
-      h_rows=h_rows,
-      e_n=min(len(r_rows), EXPOSURE_ROWS),
-      he_n=min(len(h_rows), EXPOSURE_ROWS),
-      digest=digest,
-      verified=True,
-      expected_digest=digest)
-
-
 @dataclass(frozen=True)
 class Fixture:
   """A fixture directory, loaded (module docstring)."""
@@ -408,56 +244,34 @@ class Fixture:
 
   def _table_plan(self, table: FixtureTable, role: str, knobs: Knobs,
                   evaluation_id: str) -> TablePlan:
-    keys = frozenset(table.pk) | {c for e in table.edges for c in e.cols}
-    columns = apply_planning(
-        kinds_from_schema(table.fields, keys=keys, identity=table.identity),
-        planning_stats(table.fields, table.source_rows, keys),
-        planning_stats(table.fields, table.synthetic_rows, keys),
-        budget=knobs.budget)
-    pairs = select_pairs(columns, knobs.pair_max_columns)
     panel = (
-        _panel(table.source_rows, table.panel_rows)
+        offline.panel_of(table.source_rows, table.panel_rows)
         if table.panel_rows else None)
-    landing = table.landing_table
-    return TablePlan(
-        name=table.name,
-        landing_table=landing,
+    return offline.table_plan(
+        table.name,
+        table.fields,
+        table.source_rows,
+        table.synthetic_rows,
+        landing_table=table.landing_table,
         source_table=table.source_table,
-        run_id=f"{evaluation_id}-{table.name}",
-        role=role,
+        budget=knobs.budget,
         pk=table.pk,
         identity=table.identity,
         edges=table.edges,
-        columns=tuple(columns),
-        scope=ScopePlan(
-            landing_table=landing,
-            mode="table",
-            status="ok",
-            reason="offline fixture: the landing rows as they are",
-            read_table=landing,
-            prepare_sql=(),
-            window=(None, None),
-            expected_rows=len(table.synthetic_rows),
-            read_expr=f"`{landing}`"),
-        source_read_table=table.source_table,
-        source_pinned=False,
+        role=role,
         panel=panel,
-        pairs=pairs,
-        encoding_plan_digest=encoding_plan_digest(columns, pairs, table.edges),
+        pair_max_columns=knobs.pair_max_columns,
+        run_id=f"{evaluation_id}-{table.name}",
         model="fixture",
-        synthetic_read_table=landing,
-        rows_source=len(table.source_rows),
-        rows_synthetic=len(table.synthetic_rows),
-        sample_rate_source=1.0,
-        sample_rate_synthetic=1.0,
-        reference_digest=panel.digest if panel is not None else None)
+        reference_digest=panel.digest if panel is not None else None,
+        scope_reason="offline fixture: the landing rows as they are")
 
   def plan(self, *, knobs: Knobs, mode: str, trigger: str, runner: str,
            now: datetime, evaluation_id: str) -> EvaluationPlan:
     """The fixture's `EvaluationPlan` (module docstring): every table
     planned from its rows, `evaluation_key` from the tables, the mode
     and the value knobs, `salt = blake2b(evaluation_key)`."""
-    roles = _roles(self.tables)
+    roles = table_roles({t.name: t.edges for t in self.tables})
     tables = tuple(
         self._table_plan(t, roles[t.name], knobs, evaluation_id)
         for t in self.tables)

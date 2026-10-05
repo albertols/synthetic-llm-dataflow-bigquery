@@ -185,6 +185,7 @@ __all__ = [
     "apply_planning",
     "build_plan",
     "encoding_plan_digest",
+    "evaluation_key",
     "kinds_from_schema",
     "parent_landing",
     "parse_planning",
@@ -193,12 +194,14 @@ __all__ = [
     "planning_sql",
     "select_pairs",
     "string_kind",
+    "table_roles",
 ]
 
 GRID_POINTS = 1001  # APPROX_QUANTILES(x, 1000)
 _QUANTILE_STEPS = GRID_POINTS - 1
 _ATOM_CANDIDATES = 10
-_ATOM_TOP_K = _ATOM_CANDIDATES + 1  # NULL may take a slot
+ATOM_TOP_K = _ATOM_CANDIDATES + 1  # NULL may take a slot
+_ATOM_TOP_K = ATOM_TOP_K
 _ATOM_MIN_COUNT = 2  # a value seen once is no point mass
 PAIR_GRID_CELLS = 10  # top-9 + other, or deciles
 _MIN_PAIR_DISTINCT = 2  # a constant column has no dependence
@@ -1293,6 +1296,38 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
 # --------------------------------------------------------------------------
 # build_plan
 # --------------------------------------------------------------------------
+def table_roles(edges_by_table: Mapping[str, Sequence[Edge]]) -> dict[str, str]:
+  """The role of each launch table among `edges_by_table` (table name →
+  its edges), from the ENFORCED edges only:
+
+      driven      an enforced edge into another table of the launch
+      side_input  enforced edges, all into tables outside it
+      root        no enforced edge, and a launch table references it
+      isolated    neither
+
+  (`standalone` and `external` are not derived from edges: the planner
+  sets them for a table without a model entry and a read-only parent.)
+  """
+  referenced = {
+      e.ref
+      for edges in edges_by_table.values()
+      for e in edges
+      if e.enforced and not e.external and e.ref in edges_by_table
+  }
+  roles = {}
+  for name, edges in edges_by_table.items():
+    enforced = [e for e in edges if e.enforced]
+    if any(not e.external and e.ref in edges_by_table for e in enforced):
+      roles[name] = "driven"
+    elif enforced:
+      roles[name] = "side_input"
+    elif name in referenced:
+      roles[name] = "root"
+    else:
+      roles[name] = "isolated"
+  return roles
+
+
 def _flag(value: Any, default: bool) -> bool:
   if value is None or value == "":
     return default
@@ -1544,25 +1579,11 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
 
   @staticmethod
   def _assign_roles(works: list[_Work], by_name: Mapping[str, _Work]) -> None:
-    referenced = {
-        e.ref
-        for w in works
-        for e in w.edges
-        if e.enforced and not e.external and e.ref in by_name
-    }
+    roles = table_roles({name: work.edges for name, work in by_name.items()})
     for work in works:
       work.key_cols = set(work.pk) | {c for e in work.edges for c in e.cols}
-      if work.role == "standalone":
-        continue
-      enforced = [e for e in work.edges if e.enforced]
-      if any(not e.external and e.ref in by_name for e in enforced):
-        work.role = "driven"
-      elif enforced:
-        work.role = "side_input"
-      elif work.name in referenced:
-        work.role = "root"
-      else:
-        work.role = "isolated"
+      if work.role != "standalone":
+        work.role = roles[work.name]
 
   def _read_only_parents(self, works: Sequence[_Work],
                          by_name: Mapping[str, _Work]) -> list[_Work]:
@@ -2118,6 +2139,21 @@ def _evaluation_key(launch: LaunchContext, catalogue_version: str, mode: str,
   }
   text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
   return hashlib.blake2b(text.encode(), digest_size=16).hexdigest()
+
+
+def evaluation_key(launch: LaunchContext, mode: str,
+                   knobs: Knobs | Mapping[str, Any]) -> str:
+  """The `evaluation_key` `build_plan` gives the evaluation of `launch`
+  under `mode` and `knobs`, with the packaged catalogue: for a caller
+  that has a resolved launch and no plan (a planning failure's registry
+  row carries the key the plan would have had).
+
+  Raises:
+    ValueError: a landing table that is not `project.dataset.table`, or
+      a bad knob.
+  """
+  knobs = knobs if isinstance(knobs, Knobs) else Knobs.from_mapping(knobs)
+  return _evaluation_key(launch, load_catalogue().version, mode, knobs)
 
 
 def _check_call(mode: str, trigger: str, runner: str) -> None:

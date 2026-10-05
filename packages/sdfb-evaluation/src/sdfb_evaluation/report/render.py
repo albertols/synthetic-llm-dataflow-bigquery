@@ -87,6 +87,8 @@ _PSI_ID = "column.psi"
 _REASONS_SHOWN = 20
 _SIGNIFICANT = 4
 _STATUS_ORDER = {"fail": 0, "warn": 1, "pass": 2, "info": 3, "not_evaluated": 4}
+_DESCRIBED = ("title", "level", "family", "direction", "threshold_warn",
+              "threshold_fail", "purpose", "interpretation", "pitfalls")
 
 RowKey = tuple[str, str, str | None, str | None, str | None]
 
@@ -179,14 +181,17 @@ def _by_status(evaluation: Evaluation, status: str) -> list[dict[str, Any]]:
 
 
 def _failing_groups(
-    evaluation: Evaluation,
-    catalogue: Catalogue) -> list[tuple[Metric, list[dict[str, Any]]]]:
-  """The FAIL rows grouped by metric, in catalogue order."""
+    evaluation: Evaluation, catalogue: Catalogue
+) -> list[tuple[str, Metric | None, list[dict[str, Any]]]]:
+  """The FAIL rows grouped by metric id, in catalogue order: (id, its
+  catalogue entry, its rows). A stored evaluation may hold an id the
+  packaged catalogue does not have (another catalogue version graded
+  it): its entry is None and it comes last, by name."""
   failing = _by_status(evaluation, "fail")
   order = {metric_id: i for i, metric_id in enumerate(catalogue.ids())}
-  ids = sorted({r["metric_id"] for r in failing},
-               key=lambda m: order.get(m, len(order)))
-  return [(catalogue.get(metric_id),
+  ids = sorted({str(r["metric_id"]) for r in failing},
+               key=lambda m: (order.get(m, len(order)), m))
+  return [(metric_id, catalogue.get(metric_id) if metric_id in order else None,
            [r
             for r in failing
             if r["metric_id"] == metric_id])
@@ -243,20 +248,34 @@ def _tables_section(evaluation: Evaluation) -> list[str]:
   ]
 
 
+def _explained(metric_id: str, metric: Metric | None,
+               catalogue: Catalogue) -> list[str]:
+  """The heading of one failing metric with the catalogue's own text —
+  or, for an id the packaged catalogue lacks, a line saying so."""
+  if metric is None:
+    return [
+        f"### `{metric_id}` — not in the packaged catalogue", "",
+        f"*The packaged catalogue ({catalogue.version}) has no entry for "
+        "this id: the evaluation was graded by another catalogue version "
+        "(the registry row names it). Its rows follow as stored.*", ""
+    ]
+  return [
+      f"### `{metric.id}` — {metric.title}", "", f"*{_thresholds(metric)}*", "",
+      f"- **Measures:** {_prose(metric.purpose)}",
+      f"- **A bad value means:** {_prose(metric.interpretation.bad)}",
+      f"- **A good value:** {_prose(metric.interpretation.good)}",
+      f"- **Pitfalls:** {_prose(metric.pitfalls)}", ""
+  ]
+
+
 def _failing_section(evaluation: Evaluation, catalogue: Catalogue) -> list[str]:
   groups = _failing_groups(evaluation, catalogue)
-  total = sum(len(rows) for _, rows in groups)
+  total = sum(len(rows) for _, _, rows in groups)
   lines = [f"## Failing metrics ({total} rows, {len(groups)} metrics)", ""]
   if not groups:
     return [*lines, "No metric is at FAIL.", ""]
-  for metric, rows in groups:
-    lines += [
-        f"### `{metric.id}` — {metric.title}", "", f"*{_thresholds(metric)}*",
-        "", f"- **Measures:** {_prose(metric.purpose)}",
-        f"- **A bad value means:** {_prose(metric.interpretation.bad)}",
-        f"- **A good value:** {_prose(metric.interpretation.good)}",
-        f"- **Pitfalls:** {_prose(metric.pitfalls)}", ""
-    ]
+  for metric_id, metric, rows in groups:
+    lines += _explained(metric_id, metric, catalogue)
     lines += _table(
         ("table", "scope", "value", "noise floor", "CI", "baseline", "source",
          "synthetic", "n source", "n synthetic", "method"),
@@ -335,28 +354,40 @@ def _dump(payload: Mapping[str, Any]) -> str:
       allow_nan=False) + "\n"
 
 
+def _failing_entry(metric_id: str, metric: Metric | None,
+                   rows: list[dict[str, Any]]) -> dict[str, Any]:
+  """One failing metric of the JSON report: the catalogue's text (every
+  field None for an id the packaged catalogue lacks) and its rows."""
+  if metric is None:
+    described: dict[str, Any] = dict.fromkeys(_DESCRIBED)
+  else:
+    described = {
+        "title": metric.title,
+        "level": metric.level,
+        "family": metric.family,
+        "direction": metric.direction,
+        "threshold_warn": metric.warn,
+        "threshold_fail": metric.fail,
+        "purpose": _prose(metric.purpose),
+        "interpretation": {
+            "good": _prose(metric.interpretation.good),
+            "bad": _prose(metric.interpretation.bad),
+        },
+        "pitfalls": _prose(metric.pitfalls),
+    }
+  return {"metric_id": metric_id, **described, "rows": rows}
+
+
 def render_json(evaluation: Evaluation,
                 catalogue: Catalogue | None = None) -> str:
   """The evaluation as one JSON document: the latest registry event,
   every event, the headline counts, each failing metric with its
   catalogue text, and every metric row."""
   catalogue = catalogue or load_catalogue()
-  failing = [{
-      "metric_id": metric.id,
-      "title": metric.title,
-      "level": metric.level,
-      "family": metric.family,
-      "direction": metric.direction,
-      "threshold_warn": metric.warn,
-      "threshold_fail": metric.fail,
-      "purpose": _prose(metric.purpose),
-      "interpretation": {
-          "good": _prose(metric.interpretation.good),
-          "bad": _prose(metric.interpretation.bad),
-      },
-      "pitfalls": _prose(metric.pitfalls),
-      "rows": rows,
-  } for metric, rows in _failing_groups(evaluation, catalogue)]
+  failing = [
+      _failing_entry(metric_id, metric, rows)
+      for metric_id, metric, rows in _failing_groups(evaluation, catalogue)
+  ]
   return _dump({
       "evaluation_id": evaluation.evaluation_id,
       "origin": evaluation.origin,

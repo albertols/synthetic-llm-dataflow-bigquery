@@ -23,11 +23,20 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 import apache_beam as beam
+from beam.acceptance_data import (
+    ORDERS_FIELDS,
+    USERS_FIELDS,
+    items_rows,
+    orders_rows,
+    users_rows,
+)
 from beam.test_acceptance import _check_rows as check_rows
 from unit.context.plan_fakes import PlanBq, thelook_rows
 
@@ -40,6 +49,73 @@ from sdfb_evaluation.types import MetricValue
 
 NOW = datetime(2026, 9, 14, 8, 0, 0, tzinfo=UTC)  # plan_fakes.NOW
 REGISTRY = "evaluation_data_history"
+FIXTURE_PROJECT = "demo-project"
+_FIXTURE_TABLES: dict[str, dict[str, Any]] = {
+    "users": {
+        "name": "users",
+        "schema": list(USERS_FIELDS),
+        "pk": ["id"],
+        "identity": ["email"],
+    },
+    "orders": {
+        "name": "orders",
+        "schema": list(ORDERS_FIELDS),
+        "pk": ["order_id"],
+        "edges": [{
+            "cols": ["user_id"],
+            "ref": "users",
+            "ref_cols": ["id"]
+        }],
+    },
+}
+
+
+def fixture_rows(users: int, seed: int,
+                 id_base: int) -> dict[str, list[dict[str, Any]]]:
+  """The acceptance generator's three tables for `users` invented
+  users (deterministic in `seed`)."""
+  people = users_rows(users, seed, id_base)
+  orders = orders_rows(people, seed + 1, 10 * id_base)
+  return {
+      "users": people,
+      "orders": orders,
+      "order_items": items_rows(orders, seed + 2, 100 * id_base),
+  }
+
+
+def _json_cell(value: Any) -> Any:
+  if isinstance(value, (datetime, date)):
+    return value.isoformat()
+  raise TypeError(type(value).__name__)
+
+
+def write_fixture(directory: Path,
+                  source: Mapping[str, Sequence[dict]],
+                  synthetic: Mapping[str, Sequence[dict]],
+                  *,
+                  tables: Sequence[str] = ("users", "orders"),
+                  panel: int = 0,
+                  specs: Mapping[str, Mapping[str, Any]] | None = None) -> Path:
+  """A `--fixture_dir` directory of `tables`, their rows JSON-typed,
+  `panel` reference rows each. `specs` are the tables' manifest entries
+  (default: the acceptance generator's `users` and `orders`)."""
+  directory.mkdir()
+  specs = specs or _FIXTURE_TABLES
+  manifest = {
+      "project": FIXTURE_PROJECT,
+      "params": {
+          "engine": "b1_rag"
+      },
+      "tables": [{
+          **specs[name], "panel_rows": panel
+      } for name in tables],
+  }
+  (directory / "fixture.json").write_text(json.dumps(manifest))
+  for name in tables:
+    for side, rows in (("source", source), ("synthetic", synthetic)):
+      (directory / f"{name}.{side}.json").write_text(
+          json.dumps(rows[name], default=_json_cell))
+  return directory
 
 
 class RecordingBq(PlanBq):

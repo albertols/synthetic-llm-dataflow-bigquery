@@ -507,22 +507,6 @@ def test_a_run_id_target_reads_validation_runs(bq, capsys):
   capsys.readouterr()
 
 
-def test_request_key_is_the_planners_key(bq):
-  launch = thelook_launch(bq)
-  knobs = Knobs(temp_dataset=QDS, sample_rows=1234)
-  plan = build_plan(
-      launch=launch,
-      models=thelook_models(),
-      bq=bq,
-      knobs=knobs,
-      mode="sampled",
-      trigger="cli",
-      runner="DirectRunner",
-      now=NOW)
-  assert driver.launch_key(launch, "sampled", knobs) == plan.evaluation_key
-  assert driver.launch_key(launch, "exact", knobs) != plan.evaluation_key
-
-
 # --------------------------------------------------------------------------
 # schemas, catalogue
 # --------------------------------------------------------------------------

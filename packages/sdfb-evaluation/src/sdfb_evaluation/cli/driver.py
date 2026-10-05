@@ -87,7 +87,8 @@ The label key is never read here: `--label_key_uri` travels into the
 plan, a worker resolves it, the registry records only `operator` or
 `ephemeral`, and nothing this module prints or writes names the URI (an
 error message that quotes it is redacted before the registry's
-1,000-character cut).
+1,000-character cut). A reason that is cut keeps, after its beginning,
+the line on which Beam names the failing step (else its last line).
 
 The free-text pools (`field.pool_memorization_lift`) are read here, per
 table, from the launch's `freetext_pools_table`. A read BigQuery REFUSES
@@ -157,11 +158,15 @@ from sdfb_evaluation.context.bq import (
     Bq,
     BqApiError,
     is_refusal,
-    normalize_fqn,
 )
 from sdfb_evaluation.context.gcp import make_session
 from sdfb_evaluation.context.launch import LaunchContext, resolve_launch
-from sdfb_evaluation.context.plan import EvaluationPlan, Knobs, build_plan
+from sdfb_evaluation.context.plan import (
+    EvaluationPlan,
+    Knobs,
+    build_plan,
+    evaluation_key,
+)
 from sdfb_evaluation.context.relationships import RelModel, load_models
 from sdfb_evaluation.context.runs import runs_for
 from sdfb_evaluation.report.store import (
@@ -178,7 +183,6 @@ __all__ = [
     "Env",
     "forbidden_experiments",
     "knobs_from_args",
-    "launch_key",
     "launch_request",
     "mint_evaluation_id",
     "pipeline_options",
@@ -200,6 +204,8 @@ _FINAL = "FINAL"
 _PARTIAL = "PARTIAL"
 _SKIPPED = "SKIPPED"
 _REDACTED = "<label key uri>"
+_CUT = " […] "
+_WHILE_RUNNING = "[while running "
 _COUNT_KEYS = ("total", "pass", "warn", "fail", "info", "not_evaluated")
 _SCORE_KEYS = ("overall", "fidelity", "privacy", "integrity", "diversity")
 _BQ_ERRORS = (BqApiError, PermissionError, LookupError)
@@ -483,27 +489,6 @@ def plan(args: argparse.Namespace,
   return planned, unplanned
 
 
-def launch_key(launch: LaunchContext, mode: str, knobs: Knobs) -> str:
-  """`evaluation_key` as `build_plan` derives it (generation job, run
-  ids, tables, catalogue and evaluator versions, mode, value knobs), for
-  a launch that resolved but could not be planned.
-
-  Raises:
-    ValueError: a landing table that is not `project.dataset.table`.
-  """
-  payload = {
-      "generation_job_id": launch.generation_job_id,
-      "run_ids": list(launch.run_ids),
-      "tables": [normalize_fqn(t) for t in launch.tables_in_order],
-      "catalogue_version": load_catalogue().version,
-      "evaluator_version": EVALUATOR_VERSION,
-      "mode": mode,
-      "knobs": knobs.key_dict(),
-  }
-  text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-  return hashlib.blake2b(text.encode(), digest_size=16).hexdigest()
-
-
 def _request_key(args: argparse.Namespace, knobs: Knobs) -> str:
   """The key of a request whose launch never resolved: the same recipe
   over the target as it was asked for."""
@@ -543,7 +528,10 @@ def planning_failed_row(args: argparse.Namespace,
   no tables, built from the arguments — the mode, trigger, runner and
   knobs asked for, the launch when it had resolved (else only what the
   target flags name), the error as the reason and, in the warnings, any
-  DDL planning had already run. What no plan measured stays NULL."""
+  DDL planning had already run. What no plan measured stays NULL. A
+  resolved launch gets the key its plan would have had
+  (`context.plan.evaluation_key`); an unresolved one a key of the request
+  as it was asked."""
   knobs = knobs_from_args(args, evaluation_id)
   resolved = launch is not None
   if launch is None:
@@ -567,7 +555,7 @@ def planning_failed_row(args: argparse.Namespace,
         writes=())
   try:
     key = (
-        launch_key(launch, args.mode, knobs) if resolved else _request_key(
+        evaluation_key(launch, args.mode, knobs) if resolved else _request_key(
             args, knobs))
   except ValueError:  # the malformed table name may be the failure itself
     key = _request_key(args, knobs)
@@ -614,11 +602,31 @@ def _redacted(exc: BaseException, uri: str | None) -> BaseException:
   return stand_in
 
 
+def _telling_line(message: str) -> str:
+  """The line of a long error message worth keeping when it is cut: the
+  last one on which Beam names the failing step (it appends `[while
+  running '<step>']` to the error itself), else the last line."""
+  lines = [line.strip() for line in message.splitlines() if line.strip()]
+  named = [line for line in lines if _WHILE_RUNNING in line]
+  return (named or lines)[-1]
+
+
 def _failed(planned: EvaluationPlan, exc: BaseException,
             now: datetime | None) -> dict[str, Any]:
-  """`assemble.failed_row`, the label key's URI kept out of the reason
-  (an error may quote the secret's resource name)."""
-  return failed_row(planned, _redacted(exc, planned.label_key_uri), now=now)
+  """`assemble.failed_row`, with two things a reader of the reason needs:
+  the label key's URI is out of it (an error may quote the secret's
+  resource name), and a reason the registry had to cut keeps, after its
+  beginning, the line that says what failed (`_telling_line`): a runner
+  reports a worker's failure as a traceback far longer than the cut."""
+  shaped = _redacted(exc, planned.label_key_uri)
+  row = failed_row(planned, shaped, now=now)
+  whole = f"{type(shaped).__name__}: {shaped}".rstrip()
+  reason = str(row["status_reason"])
+  if len(reason) < len(whole):
+    tail = _telling_line(whole)[-(len(reason) // 2):]
+    head = reason[:len(reason) - len(tail) - len(_CUT)]
+    row["status_reason"] = f"{head}{_CUT}{tail}"
+  return row
 
 
 # --------------------------------------------------------------------------
