@@ -38,7 +38,7 @@ from beam.acceptance_data import (
     orders_rows,
     users_rows,
 )
-from beam.test_acceptance import _check_rows as check_rows
+from beam.row_checks import check_rows
 from unit.context.plan_fakes import PlanBq, thelook_rows
 
 from sdfb_evaluation.beam.assemble import final_row, finish_time

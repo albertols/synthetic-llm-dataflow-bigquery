@@ -533,7 +533,7 @@ def test_a_transient_preflight_failure_raises(small, error):
 
 
 # --------------------------------------------------------------------------
-# per-table failure isolation (DirectRunner)
+# per-table failure isolation (local runner, FnApiRunner)
 # --------------------------------------------------------------------------
 def _run(plan, rows_by: Mapping[tuple[str, str], list], out: Path,
          **kwargs: Any) -> LocalJsonSinks:
@@ -542,6 +542,38 @@ def _run(plan, rows_by: Mapping[tuple[str, str], list], out: Path,
     build_evaluation_pipeline(
         p, plan, sources=InMemorySources(rows_by), sinks=sinks, **kwargs)
   return sinks
+
+
+def _canonical(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+  return sorted(json.dumps(r, sort_keys=True) for r in rows)
+
+
+def test_a_three_table_rerun_is_deterministic(small, tmp_path):
+  """The module's three-table fixture, run twice: the relational pass, a
+  FLOAT64 column and the multi-table roll-up the one-table acceptance
+  rerun does not cover. Metric, profile and flag rows are byte-identical
+  (sorted: the shards' order is the runner's); the registry row differs
+  only in its timestamps."""
+  key = tmp_path / "label.key"  # an ephemeral key would differ per run
+  key.write_bytes(LABEL_KEY)
+  plan = evaluation_plan(
+      _tables(small), evaluation_id="ev_rerun", label_key_uri=str(key))
+  rows_by = {(name, side): rows
+             for side, by_table in small.items()
+             for name, rows in by_table.items()}
+  first = _run(plan, rows_by, tmp_path / "one")
+  again = _run(plan, rows_by, tmp_path / "two")
+  for table in ("evaluation_metrics", "evaluation_profiles",
+                "evaluation_row_flags"):
+    rows = first.read_rows(table)
+    assert rows, table
+    assert _canonical(rows) == _canonical(again.read_rows(table)), table
+  [one], [two] = (first.read_rows("evaluation_data_history"),
+                  again.read_rows("evaluation_data_history"))
+  stamps = ("recorded_at", "finished_at")
+  assert {k: v for k, v in one.items() if k not in stamps} == {
+      k: v for k, v in two.items() if k not in stamps
+  }
 
 
 def test_a_failing_table_is_not_evaluated_and_the_run_continues(
