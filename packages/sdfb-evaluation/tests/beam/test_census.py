@@ -1266,3 +1266,234 @@ def test_unobserved_sampled_column_is_not_evaluated_never_fabricated():
                       mv) is Status.NOT_EVALUATED, metric_id
   # the sibling columns are untouched
   assert got[("column.novelty_mass", "email")].value is not None
+
+
+# --------------------------------------------------------------------------
+# sampled mode (Ruling R72; the final review's C1)
+# --------------------------------------------------------------------------
+_NEED_THE_SOURCE = ("field.category_adherence", "column.novelty_mass",
+                    "field.substantive_copy_rate", "field.shape_adherence")
+_NEED_THE_SYNTHETIC = ("column.coverage_mass", "column.distinct_ceiling_hit")
+
+
+def _row_sampled(table: Any,
+                 rows: Mapping[str, list],
+                 *,
+                 source: int = 1,
+                 synthetic: int = 1) -> tuple[Any, dict[str, list]]:
+  """What `--mode sampled` hands the census: the plan made from every row
+  (the planning scan precedes the sample) and carrying the row rates, the
+  pipeline reading every `source`-th / `synthetic`-th row of a side."""
+  plan = dataclasses.replace(
+      table,
+      sample_rate_source=1.0 / source if source > 1 else None,
+      sample_rate_synthetic=1.0 / synthetic if synthetic > 1 else None)
+  return plan, {
+      "source": rows["source"][::source],
+      "synthetic": rows["synthetic"][::synthetic]
+  }
+
+
+def _copied_notes(n: int = 1200) -> tuple[Any, dict[str, list]]:
+  """Invented free text: every other synthetic note is a verbatim source
+  note (the final review's probe; half the column copied)."""
+  words = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+           "hotel", "india", "juliet", "kilo", "lima", "mike", "november",
+           "oscar", "papa", "quebec", "romeo", "sierra", "tango")
+  fields = ({
+      "name": "id",
+      "type": "INT64",
+      "mode": "REQUIRED"
+  }, {
+      "name": "note",
+      "type": "STRING",
+      "mode": "NULLABLE"
+  })
+
+  def notes(seed: int, base: int) -> list[dict]:
+    rng = np.random.default_rng(seed)
+    return [{
+        "id": base + i,
+        "note": " ".join(words[int(w)] for w in rng.integers(0, 20, size=7))
+    } for i in range(n)]
+
+  source, synthetic = notes(1, 1), notes(2, 10**6)
+  rng = np.random.default_rng(9)
+  for i in range(0, n, 2):
+    synthetic[i]["note"] = source[int(rng.integers(0, n))]["note"]
+  table = planned_table(
+      "people", fields, source, synthetic, pk=("id",), pair_max_columns=0)
+  assert table.columns[1].kind.value == "text"
+  return table, {"source": source, "synthetic": synthetic}
+
+
+def test_a_copied_free_text_column_fails_the_copy_rate_when_read_in_full():
+  """Ruling R111: half of a free-text column copied verbatim from rare
+  source values is a copy rate of 0.5, FAIL, in an exact run."""
+  table, rows = _copied_notes()
+  copy = _by_key(_pure(table,
+                       rows).metrics)[("field.substantive_copy_rate", "note")]
+  assert copy.value == 0.5 and copy.method.value == "exact"
+  assert copy.detail["copies"] == 600 and copy.detail["substantive"] == 1200
+  assert status_for(_CATALOGUE.get(copy.metric_id), copy) is Status.FAIL
+
+
+def test_a_sampled_source_never_stores_the_copy_rate_as_exact():
+  """The final review's probe (C1): with the source read as a 10 % row
+  sample, nine copies in ten have no sampled twin — the rate read 0.046
+  `exact` where it is 0.5, and novelty turned from FAIL to PASS. Both need
+  every source row, so they are not evaluated (R72)."""
+  table, rows = _copied_notes()
+  exact = _by_key(_pure(table, rows).metrics)
+  novelty = _CATALOGUE.get("column.novelty_mass")
+  assert exact[(novelty.id, "note")].value == 0.5
+  assert status_for(novelty, exact[(novelty.id, "note")]) is Status.FAIL
+  plan, read = _row_sampled(table, rows, source=10)
+  got = _by_key(_pure(plan, read).metrics)
+  for metric_id in ("field.substantive_copy_rate", "column.novelty_mass"):
+    mv = got[(metric_id, "note")]
+    reason = mv.detail["reason"]
+    assert mv.value is None and mv.ci_low is None, metric_id
+    assert reason.startswith("sampled mode cannot measure"), reason
+    assert "the source side is a 0.1 row sample" in reason, reason
+    assert reason.endswith("run exact mode"), reason
+    assert mv.detail["sample_rates"] == {"source": 0.1}, metric_id
+    assert status_for(_CATALOGUE.get(metric_id),
+                      mv) is Status.NOT_EVALUATED, metric_id
+  # what the sample did see, never as a rate: fewer than the 600 copies
+  seen = got[("field.substantive_copy_rate", "note")].detail
+  assert 0 < seen["copies_in_sample"] < 200 and seen["substantive"] == 1200
+  assert got[("column.novelty_mass",
+              "note")].detail["matched_rows_lower_bound"] < 200
+
+
+def test_sampled_source_withholds_what_needs_every_source_row():
+  """R72 on the census: the metrics whose definition is the source's value
+  (or shape) SET are not evaluated on a source row sample; every other
+  row is a sample estimate over the rows read, marked as one."""
+  table, rows = users_table()
+  plan, read = _row_sampled(table, rows, source=4)
+  got = [  # the key column has no census: its rows say so, whatever the mode
+      mv for mv in _pure(plan, read).metrics if mv.column != "user_id"
+  ]
+  withheld = [mv for mv in got if mv.metric_id in _NEED_THE_SOURCE]
+  assert {mv.metric_id for mv in withheld} == set(_NEED_THE_SOURCE)
+  for mv in withheld:
+    reason = mv.detail["reason"]
+    assert mv.value is None, (mv.metric_id, mv.column)
+    assert reason.startswith("sampled mode cannot measure"), reason
+    assert reason.endswith("run exact mode"), reason
+    assert mv.detail["sample_rates"] == {"source": 0.25}
+  by_key = _by_key(got)
+  status = by_key[("field.category_adherence", "status")]
+  assert status.detail["matched_rows_lower_bound"] == sum(
+      r["status"] is not None for r in read["synthetic"])
+  assert by_key[("field.shape_adherence",
+                 "sku")].detail["adherent_lower_bound"] > 0
+  # the rest: evaluated on the rows read, never as exact
+  evaluated = [
+      mv for mv in got
+      if mv.metric_id not in _NEED_THE_SOURCE and mv.value is not None
+  ]
+  assert {mv.metric_id for mv in evaluated} >= {
+      "column.tvd", "column.jsd", "column.cohens_w", "column.top1_share_delta",
+      "column.coverage_mass", "column.entropy_ratio", "column.distinct_ratio",
+      "column.shape_head_tv"
+  }
+  for mv in got:
+    if mv.metric_id == "column.distinct_ceiling_hit":  # reads the synthetic
+      assert mv.method.value == "exact" and mv.sample_rate is None
+      continue
+    assert mv.method.value == "sample", (mv.metric_id, mv.column)
+    assert mv.sample_rate == 0.25, (mv.metric_id, mv.column)
+    assert mv.detail["sample_rates"] == {"source": 0.25}
+  # the noise reference is over the rows read, not the table's
+  tvd = by_key[("column.tvd", "status")]
+  n_read = sum(r["status"] is not None for r in read["source"])
+  assert tvd.n_source == n_read < 1100
+  full = _by_key(_pure(table, rows).metrics)[("column.tvd", "status")]
+  assert tvd.noise_floor > full.noise_floor
+
+
+def test_sampled_synthetic_withholds_coverage_and_the_pool_cap():
+  """R72, the other side: coverage needs the synthetic's value set and the
+  pool-cap hit its exact distinct count; the shares of the synthetic rows
+  read (adherence, novelty, the copy rate) are sample estimates."""
+  table, rows = users_table()
+  plan, read = _row_sampled(table, rows, synthetic=5)
+  got = [mv for mv in _pure(plan, read).metrics if mv.column != "user_id"]
+  withheld = [mv for mv in got if mv.metric_id in _NEED_THE_SYNTHETIC]
+  assert {mv.metric_id for mv in withheld} == set(_NEED_THE_SYNTHETIC)
+  for mv in withheld:
+    reason = mv.detail["reason"]
+    assert mv.value is None, (mv.metric_id, mv.column)
+    assert reason.startswith("sampled mode cannot measure"), reason
+    assert "the synthetic side is a 0.2 row sample" in reason, reason
+    assert reason.endswith("run exact mode"), reason
+  by_key = _by_key(got)
+  assert by_key[("column.coverage_mass",
+                 "status")].detail["covered_rows_lower_bound"] > 0
+  assert by_key[("column.distinct_ceiling_hit",
+                 "bio")].detail["distinct_syn_lower_bound"] == len(
+                     read["synthetic"])
+  for metric_id, column in (("field.category_adherence",
+                             "status"), ("column.novelty_mass", "city"),
+                            ("field.substantive_copy_rate",
+                             "bio"), ("field.shape_adherence", "sku")):
+    mv = by_key[(metric_id, column)]
+    assert mv.value is not None, metric_id
+    assert mv.method.value == "sample" and mv.sample_rate == 0.2, metric_id
+    assert mv.detail["sample_rates"] == {"synthetic": 0.2}, metric_id
+  adherence = by_key[("field.category_adherence", "status")]
+  assert adherence.n_synthetic == sum(
+      r["status"] is not None for r in read["synthetic"])
+  pool = [mv for mv in got if mv.metric_id == "field.pool_memorization_lift"]
+  assert pool and all(mv.method.value == "exact" for mv in pool)
+
+
+def test_both_sides_sampled_take_the_lower_rate_and_name_both():
+  table, rows = users_table()
+  plan, read = _row_sampled(table, rows, source=4, synthetic=2)
+  by_key = _by_key(_pure(plan, read).metrics)
+  tvd = by_key[("column.tvd", "status")]
+  assert tvd.method.value == "sample" and tvd.sample_rate == 0.25
+  assert tvd.detail["sample_rates"] == {"source": 0.25, "synthetic": 0.5}
+  # each withheld metric names the side it needs
+  assert "the source side" in by_key[("field.category_adherence",
+                                      "status")].detail["reason"]
+  assert "the synthetic side" in by_key[("column.coverage_mass",
+                                         "status")].detail["reason"]
+
+
+def test_a_row_sample_outranks_a_value_sample_and_keeps_its_rate():
+  """A value-sampled column of a row-sampled side: the row is a row
+  sample first (R72); the value-sample rate moves to `detail`."""
+  table, rows = users_table()
+  plan, read = _row_sampled(
+      with_census(table, sku=("value_sampled", 0.25)), rows, synthetic=2)
+  by_key = _by_key(_pure(plan, read).metrics)
+  distinct = by_key[("column.distinct_ratio", "sku")]
+  assert distinct.method.value == "sample" and distinct.sample_rate == 0.5
+  assert distinct.detail["value_sample_rate"] == 0.25
+  assert distinct.detail["estimator"] == "value_sampled"
+
+
+def test_profiles_of_a_sampled_side_say_so():
+  table, rows = users_table()
+  plan, read = _row_sampled(table, rows, source=4)
+  profiles = _pure(plan, read).profiles
+  assert {p.profile_kind for p in profiles} == {"topk", "shape_mix"}
+  for p in profiles:
+    if p.side == "source":
+      assert p.payload["sample_rate"] == 0.25, (p.profile_kind, p.column)
+    else:
+      assert "sample_rate" not in p.payload, (p.profile_kind, p.column)
+  exact = _pure(table, rows).profiles
+  assert all("sample_rate" not in p.payload for p in exact)
+
+
+def test_exact_mode_rows_are_unchanged_by_the_sampled_mode_rule():
+  table, rows = users_table()
+  for mv in _pure(table, rows).metrics:
+    assert mv.method.value == "exact" and mv.sample_rate is None
+    assert "sample_rates" not in mv.detail

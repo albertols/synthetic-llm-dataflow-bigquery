@@ -103,6 +103,16 @@ salted sample of each side above `--sample_rows` (200,000), writes local
 files, then loads them with one BigQuery load job per table, the
 registry's FINAL row last.
 
+A sampled run never stores a sample's number as exact. A row computed from
+a sampled side carries `method = sample` and its `sample_rate`, and its
+interval or noise floor uses the rows actually read. A metric that needs
+every row of a side is `not_evaluated` with the reason "sampled mode cannot
+measure …; run exact mode": the full-source match rates, the key and
+internal duplicate rates, the orphan and fan-out metrics of a sampled edge,
+and, per column, category and shape adherence, novelty, the substantive
+copy rate, coverage, the pool-cap hit and range coverage. Run `--mode
+exact` for those verdicts.
+
 `--runner DirectRunner` means "run it on this machine", and it is what the
 registry records. The pipeline itself runs on Beam's in-process
 `FnApiRunner`: Beam's own `DirectRunner` hands a batch pipeline to Prism,

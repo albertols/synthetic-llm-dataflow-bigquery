@@ -2429,3 +2429,118 @@ def test_union_left_counts_are_exact_in_any_merge_order():
   np.testing.assert_array_equal(
       np.cumsum(merged.union[0])[:-1], [(values <= e).sum() for e in edges])
   assert merged.union_left[0].sum() == merged.union[0].sum() == values.size
+
+
+# --------------------------------------------------------------------------
+# sampled mode (Ruling R72; the final review's C1)
+# --------------------------------------------------------------------------
+def _row_sampled(table: Any,
+                 rows_by: Mapping[str, list],
+                 *,
+                 source: int = 1,
+                 synthetic: int = 1) -> tuple[Any, dict[str, list]]:
+  """What `--mode sampled` hands the dense pass: the plan made from every
+  row and carrying the row rates, the pipeline reading every `source`-th
+  / `synthetic`-th row of a side (the panel sides are read in full)."""
+  plan = dataclasses.replace(
+      table,
+      sample_rate_source=1.0 / source if source > 1 else None,
+      sample_rate_synthetic=1.0 / synthetic if synthetic > 1 else None)
+  return plan, {
+      **rows_by,
+      "source": rows_by["source"][::source],
+      "synthetic": rows_by["synthetic"][::synthetic],
+  }
+
+
+def test_sampled_mode_never_stores_a_dense_row_as_exact():
+  """C1: every dense row that reads a row-sampled side is `method` =
+  sample with the rate — a value or not — and its sizes, interval and
+  noise floor are the rows READ, not the table's."""
+  table, rows_by = orders_table()
+  plan, read = _row_sampled(table, rows_by, source=5)
+  metrics, _ = _pure(plan, read)
+  assert {mv.metric_id for mv in metrics} == set(OWNED_METRIC_IDS)
+  for mv in metrics:
+    assert mv.method.value == "sample", (mv.metric_id, mv.column)
+    assert mv.sample_rate == 0.2, (mv.metric_id, mv.column)
+    assert mv.detail["sample_rates"] == {"source": 0.2}, mv.metric_id
+  by_key = _by_key(metrics)
+  n_read = len(_finite(read["source"], "amount"))
+  ks = by_key[("column.ks", "amount", None)]
+  assert ks.n_source == n_read < 700 and ks.detail["estimator"] == "binned"
+  assert ks.noise_floor == pytest.approx(
+      noise.noise_floor("ks_two_sample", n=n_read, m=ks.n_synthetic))
+  full = _by_key(_pure(table, rows_by)[0])[("column.ks", "amount", None)]
+  assert full.method.value == "binned" and ks.noise_floor > full.noise_floor
+  nulls = by_key[("column.null_rate_delta", "amount", None)]
+  assert nulls.n_source == len(read["source"]) == 600
+  lo, hi = noise.newcombe_diff_interval(
+      round(nulls.synthetic_value * nulls.n_synthetic), nulls.n_synthetic,
+      round(nulls.source_value * 600), 600)
+  assert (nulls.ci_low,
+          nulls.ci_high) == pytest.approx(noise.folded_abs_interval(lo, hi))
+
+
+@pytest.mark.parametrize(("sides", "named"), [({
+    "source": 4
+}, "source"), ({
+    "synthetic": 4
+}, "synthetic"), ({
+    "source": 2,
+    "synthetic": 4
+}, "source")])
+def test_range_coverage_needs_every_row_of_both_sides(sides, named):
+  """R72: a sample's extremes fall inside its side's range, so the range
+  coverage of a sampled side is not evaluated (as the relational pass
+  treats cardinality adherence)."""
+  table, rows_by = orders_table()
+  plan, read = _row_sampled(table, rows_by, **sides)
+  metrics, _ = _pure(plan, read)
+  rows = [mv for mv in metrics if mv.metric_id == "column.range_coverage"]
+  assert len(rows) >= 5
+  rates = {side: 1.0 / step for side, step in sides.items()}
+  for mv in rows:
+    reason = mv.detail["reason"]
+    assert mv.value is None, mv.column
+    assert reason.startswith("sampled mode cannot measure range coverage")
+    assert f"the {named} side is a {rates[named]:.3g} row sample" in reason
+    assert reason.endswith("run exact mode"), reason
+    assert mv.detail["sample_rates"] == rates, mv.column
+  # the exact run measures it
+  exact = [
+      mv for mv in _pure(table, rows_by)[0]
+      if mv.metric_id == "column.range_coverage"
+  ]
+  assert all(
+      mv.value is not None and mv.method.value == "exact" for mv in exact)
+
+
+def test_dense_profiles_of_a_sampled_side_say_so():
+  table, rows_by = orders_table()
+  plan, read = _row_sampled(table, rows_by, source=5, synthetic=2)
+  _, profiles = _pure(plan, read)
+  rates = {"source": 0.2, "synthetic": 0.5}
+  kinds = Counter()
+  for p in profiles:
+    if p.side in rates:
+      assert p.payload["sample_rate"] == rates[p.side], (p.profile_kind,
+                                                         p.column)
+      kinds[p.profile_kind] += 1
+    else:  # the panel sides are read in full
+      assert "sample_rate" not in p.payload, (p.profile_kind, p.side)
+  assert set(kinds) == {
+      "histogram", "quantiles", "moments", "temporal_mix", "length_hist",
+      "char_classes", "null_patterns", "corr_matrix", "contingency"
+  }
+  _, exact = _pure(table, rows_by)
+  assert all("sample_rate" not in p.payload for p in exact)
+
+
+def test_exact_mode_dense_rows_are_unchanged_by_the_sampled_mode_rule():
+  table, rows_by = orders_table()
+  metrics, _ = _pure(table, rows_by)
+  assert {mv.method.value for mv in metrics} == {"exact", "binned"}
+  for mv in metrics:
+    assert mv.sample_rate is None and "sample_rates" not in mv.detail
+    assert "estimator" not in mv.detail

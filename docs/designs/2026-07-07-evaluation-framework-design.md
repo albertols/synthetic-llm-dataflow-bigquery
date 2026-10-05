@@ -467,7 +467,7 @@ flowchart LR
   L[("🗄️ landing scope")]:::store --> LS[("🗄️ sample table<br/>same salt")]:::store
   SS --> P["🔀 pipeline reads<br/>the samples"]:::beam
   LS --> P
-  P --> M1["⚪ panel-based metrics<br/>method = sample"]:::data
+  P --> M1["⚪ estimates on the rows read<br/>method = sample, sample_rate"]:::data
   P --> M2["⚪ full-coverage metrics<br/>not_evaluated"]:::data
 ```
 
@@ -482,6 +482,28 @@ sampled are
 mode" and the observed lower bound in `detail` (R72). An integrity pass never comes from a sample. Rates and lifts that
 compare the panel with the rows read stay evaluated, with `method = sample`
 and the sampling rate on the row.
+
+The same rule holds for the per-column metrics (R72, R113). A metric
+defined by the value set of a side, or by an exact count or extreme of it,
+is `not_evaluated` when that side is a sample:
+
+| Metric | Needs in full | Why a sample cannot measure it |
+|---|---|---|
+| `field.category_adherence`, `column.novelty_mass` | the source | a synthetic value whose source rows were not sampled looks invented |
+| `field.substantive_copy_rate` | the source | a copy of an unsampled source value goes unseen, and a value's source count (the rare-below-10 rule) is thinned |
+| `field.shape_adherence` | the source | a synthetic shape whose source rows were not sampled looks unseen |
+| `column.coverage_mass` | the synthetic | a source value whose synthetic rows were not sampled looks uncovered |
+| `column.distinct_ceiling_hit` | the synthetic | the exact synthetic distinct count is not measured |
+| `column.range_coverage` | both sides | a sample's extremes fall inside its side's range |
+
+Every other per-column, pair and row-pattern metric that reads a sampled
+side is an estimate over the rows read: `method = sample`, `sample_rate` =
+the lowest rate among the sampled sides it reads, and
+`detail.sample_rates` names each side's rate. `n_source` and `n_synthetic`
+are the rows read, so every interval and noise floor is the sample's own.
+`field.range_adherence` stays evaluated because its bounds come from the
+planning scan, which reads the whole source before a sample is drawn. A
+profile of a sampled side carries `sample_rate` in its payload.
 
 ### 3.5 The reference panel: R, E, H and H_E
 

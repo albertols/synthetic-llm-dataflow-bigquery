@@ -94,6 +94,22 @@ V and NMI 0 on that side), while a constant SOURCE pair column is
 `not_evaluated`. No catalogue metric divides by the IQR, so a zero-IQR
 column with a real spread is evaluated in full.
 
+Sampled mode (Ruling R72, as in `beam.membership`): a side whose plan
+rate is below 1 was read as a row sample (`DenseSpec.rate_source` /
+`rate_synthetic`), and a `DenseProfile` counts the rows READ. Every
+metric row that reads such a side is an estimate over those rows:
+`method` = sample, `sample_rate` = the lowest rate among the sampled
+sides, `detail.sample_rates` naming each and `detail.estimator` keeping
+"binned" where it applied; its sizes, intervals and noise floors are the
+sample's own counts. One metric needs every row of both sides and is
+`not_evaluated` there with "sampled mode cannot measure …; run exact
+mode": `column.range_coverage` compares exact extremes, and a sample's
+extremes fall inside its side's range (the relational pass withholds
+`cardinality_adherence` for the same reason). `field.range_adherence`
+stays evaluated: its bounds are the planning grid's q0 and q1000, read
+from the whole source before any sample is drawn. A profile of a sampled
+side carries `sample_rate` in its payload.
+
 The null-pattern cap is a bottom-k over the priority (number of NULLs,
 pattern): keeping the 4096 lowest-priority patterns is order-free, so
 every retained count is exact (Ruling R34's argument) and the rest go to
@@ -175,6 +191,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import itertools
@@ -670,6 +687,11 @@ def _grid(j: int, column: ColumnPlan, layout: BatchLayout) -> _Grid:
       day_granularity=column.day_granularity)
 
 
+def _row_rate(rate: float | None) -> float:
+  """A side's plan row-sample rate (None or >= 1: read in full)."""
+  return 1.0 if rate is None or rate >= 1.0 else float(rate)
+
+
 @dataclass(frozen=True, eq=False)
 class DenseSpec:
   """What the dense pass needs of one `TablePlan`: the batch layout, each
@@ -683,6 +705,15 @@ class DenseSpec:
   strings: tuple[_String, ...]
   pair_columns: tuple[_PairColumn, ...]
   pairs: tuple[tuple[int, int], ...]
+  rate_source: float = 1.0
+  rate_synthetic: float = 1.0
+
+  def sample_rates(
+      self, sides: Sequence[str] = (_SOURCE, _SYNTHETIC)) -> dict[str, float]:
+    """The row-sample rates (< 1) of `sides`, by side (R72); empty when
+    each was read in full. The panel sides are always read in full."""
+    rates = {_SOURCE: self.rate_source, _SYNTHETIC: self.rate_synthetic}
+    return {side: rates[side] for side in sides if rates.get(side, 1.0) < 1.0}
 
   @classmethod
   def from_table(cls, table: TablePlan) -> DenseSpec:
@@ -712,7 +743,9 @@ class DenseSpec:
         grids=grids,
         strings=strings,
         pair_columns=tuple(_pair_column(j, columns[j], layout) for j in used),
-        pairs=tuple((local[a], local[b]) for a, b in table.pairs))
+        pairs=tuple((local[a], local[b]) for a, b in table.pairs),
+        rate_source=_row_rate(table.sample_rate_source),
+        rate_synthetic=_row_rate(table.sample_rate_synthetic))
 
 
 # --------------------------------------------------------------------------
@@ -1125,6 +1158,7 @@ class _Emitter:
       notes.setdefault(
           "baseline_reason", "undefined on the reference sample"
           if self.has_reference else "no reference sample (the R panel)")
+    method, rate = self._estimate(method, notes)
     self.rows.append(
         MetricValue(
             metric_id=metric_id,
@@ -1137,25 +1171,61 @@ class _Emitter:
             n_source=_count(sizes.n_source),
             n_synthetic=_count(sizes.n_synthetic),
             method=method,
+            sample_rate=rate,
             encoding_plan_digest=self.spec.encoding_plan_digest,
             detail=notes,
             **{
                 k: _plain(v) for k, v in fields.items()
             }))
 
-  def skip(self, metric_id: str, reason: str, scope: _Scope, *,
-           sizes: _Sizes) -> None:
+  def skip(self,
+           metric_id: str,
+           reason: str,
+           scope: _Scope,
+           *,
+           sizes: _Sizes,
+           detail: Mapping[str, Any] | None = None) -> None:
+    notes: dict[str, Any] = {"reason": reason, **(detail or {})}
+    method, rate = self._estimate(Method.EXACT, notes)
     self.rows.append(
-        MetricValue.not_evaluated(
-            metric_id,
-            self.spec.table,
-            reason,
+        MetricValue(
+            metric_id=metric_id,
+            table=self.spec.table,
+            value=None,
             column=scope.column,
             column_2=scope.column_2,
             column_kind=scope.kind,
             n_source=_count(sizes.n_source),
             n_synthetic=_count(sizes.n_synthetic),
-            encoding_plan_digest=self.spec.encoding_plan_digest))
+            method=method,
+            sample_rate=rate,
+            encoding_plan_digest=self.spec.encoding_plan_digest,
+            detail=notes))
+
+  def _estimate(self, method: Method,
+                notes: dict[str, Any]) -> tuple[Method, float | None]:
+    """A row's `(method, sample_rate)`: its own method unless a side was
+    read as a row sample — then `sample` at the lowest rate, `notes`
+    naming each sampled side's rate and keeping a binned estimator's
+    name (R72). Every dense metric reads both sides."""
+    rates = self.spec.sample_rates()
+    if not rates:
+      return method, None
+    notes["sample_rates"] = rates
+    if method is not Method.EXACT:
+      notes["estimator"] = method.value
+    return Method.SAMPLE, min(rates.values())
+
+  def sampled_extremes(self, what: str) -> str | None:
+    """Why a metric of exact extremes cannot be measured on this table's
+    row samples (R72), or None when both sides were read in full."""
+    rates = self.spec.sample_rates()
+    if not rates:
+      return None
+    side, rate = next(iter(rates.items()))  # the source first
+    return (f"sampled mode cannot measure {what}: the {side} side is a "
+            f"{rate:.3g} row sample, so its extremes fall inside the full "
+            "side's range; run exact mode")
 
 
 def _count(x: Any) -> int | None:
@@ -1435,7 +1505,9 @@ _CONSTANT_SOURCE = {
 def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
                     sizes: _Sizes) -> None:
   """smd, std_ratio and range_coverage (exact, from Moments) and, numeric,
-  zero_rate_delta. smd and std_ratio are not_evaluated when either side
+  zero_rate_delta. range_coverage compares each side's exact extremes, so
+  it is not_evaluated when a side was read as a row sample (R72). smd and
+  std_ratio are not_evaluated when either side
   holds fewer than RARE_COUNT values: their value with the synthetic's
   published moments would give the source's mean and std (R80.3). A
   reference with fewer than RARE_COUNT values withholds `baseline_value`
@@ -1455,6 +1527,12 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
       "column.range_coverage": (None, None),
   }
   for metric_id, fn in functions:
+    sampled = (
+        e.sampled_extremes("range coverage")
+        if metric_id == "column.range_coverage" else None)
+    if sampled is not None:  # R72: exact extremes need every row
+      e.skip(metric_id, sampled, scope, sizes=sizes)
+      continue
     if tiny and metric_id in _MOMENT_VALUE_IDS:
       e.skip(metric_id, NOT_EVALUATED_BELOW_K, scope, sizes=sizes)
       continue
@@ -2435,7 +2513,16 @@ def _profiles(spec: DenseSpec, present: Mapping[str, DenseProfile],
     out.extend(_null_pattern_profile(spec, p))
     out.extend(_corr_profiles(spec, p))
   out.extend(_contingency_profiles(spec, present, tvds, label_key))
-  return out
+  rates = spec.sample_rates()
+  if not rates:
+    return out
+  # R72: a profile of a row-sampled side says so in its payload
+  return [
+      dataclasses.replace(
+          value, payload={
+              **value.payload, "sample_rate": rates[value.side]
+          }) if value.side in rates else value for value in out
+  ]
 
 
 def _checked_key(label_key: Any) -> bytes:

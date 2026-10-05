@@ -152,6 +152,44 @@ temporal values collide by domain size; reusing a rare real category or
 identifier is not memorisation — Ruling R66). `detail.day_granularity`
 still records a temporal column's granularity.
 
+Sampled mode (Ruling R72, as in `beam.membership`): a side whose plan
+rate is below 1 was read as a row sample (`CensusSpec.rate_source` /
+`rate_synthetic`). A metric defined by the value SET of a side — or by
+an exact count of it — is `not_evaluated` there with "sampled mode
+cannot measure …; run exact mode", what the sample did see in `detail`
+(named `*_lower_bound` where it bounds the full count) and
+`detail.sample_rates`:
+
+    metric                        needs in full   why
+    ────────────────────────────  ──────────────  ────────────────────────
+    field.category_adherence,     the source      a synthetic value whose
+      column.novelty_mass                         source rows were not
+                                                  sampled looks invented
+    field.substantive_copy_rate   the source      a copy of an unsampled
+                                                  source value goes unseen
+                                                  and a value's source
+                                                  count (rare below 10) is
+                                                  thinned
+    field.shape_adherence         the source      a synthetic shape whose
+                                                  source rows were not
+                                                  sampled looks unseen
+    column.coverage_mass          the synthetic   a source value whose
+                                                  synthetic rows were not
+                                                  sampled looks uncovered
+    column.distinct_ceiling_hit   the synthetic   the exact synthetic
+                                                  distinct count is not
+                                                  measured
+
+Every other row that reads a sampled side is an estimate over the rows
+read: `method` = sample, `sample_rate` = the lowest rate among the
+sampled sides it reads, `detail.sample_rates` naming each (a
+value-sampled column's own rate moves to `detail.value_sample_rate`).
+Its totals are the dense pass's counts of the rows READ, so every
+interval and noise floor is the sample's. The lifts stay evaluated: R
+and H are thinned alike by a sample drawn on row content, so the ratio
+keeps its null; "rare" is then judged on the sample's counts. A profile
+of a sampled side carries `sample_rate` in its payload.
+
 References (author-year, R22): Horvitz & Thompson (1952); Woodruff
 (1971); Särndal, Swensson & Wretman (1992); Korn & Graubard (1998); Good
 (1953); Chao & Shen
@@ -205,6 +243,7 @@ if TYPE_CHECKING:
 __all__ = [
     "APPLIES_TO",
     "MAX_PREAGG_KEYS",
+    "NEEDS_FULL_SIDE",
     "OWNED_METRIC_IDS",
     "POOL_CAP",
     "RARE_COUNT",
@@ -303,6 +342,39 @@ _NONSUBSTANTIVE = 1
 _COPY_KINDS = frozenset(
     {_K.CATEGORICAL, _K.TEXT, _K.IDENTIFIER, _K.NUMERIC, _K.TEMPORAL})
 _NOVEL_KINDS = frozenset({_K.CATEGORICAL, _K.TEXT, _K.IDENTIFIER})
+
+# Sampled mode (module docstring, R72): the side each of these needs in
+# full, what a row sample of it cannot measure, and why.
+NEEDS_FULL_SIDE: Mapping[str, tuple[str, str, str]] = {
+    "field.category_adherence":
+        (_SOURCE, "category adherence",
+         "a synthetic value whose source rows were not sampled looks "
+         "invented"),
+    "column.novelty_mass":
+        (_SOURCE, "novelty", "a synthetic value whose source rows were not "
+         "sampled looks novel"),
+    "field.substantive_copy_rate":
+        (_SOURCE, "copies of rare source values",
+         "a copy of an unsampled source value goes unseen and a value's "
+         "source count (the rare-below-10 rule) is thinned"),
+    "field.shape_adherence": (_SOURCE, "shape adherence",
+                              "a synthetic shape whose source rows were not "
+                              "sampled looks unseen"),
+    "column.coverage_mass":
+        (_SYNTHETIC, "coverage", "a source value whose synthetic rows were not "
+         "sampled looks uncovered"),
+    "column.distinct_ceiling_hit":
+        (_SYNTHETIC, "a pool-cap hit", "the exact synthetic distinct count is "
+         "not measured"),
+}
+# The sides a metric reads, when not both (the pool lift counts the pool
+# against the panel and the source's rare values; the synthetic side
+# only has to exist).
+_BOTH_SIDES = (_SOURCE, _SYNTHETIC)
+_SIDES_READ: Mapping[str, tuple[str, ...]] = {
+    "field.pool_memorization_lift": (_SOURCE,),
+    "column.distinct_ceiling_hit": (_SYNTHETIC,),
+}
 
 # Where each owned id reaches: the catalogue's kinds, except column.jsd,
 # whose numeric/temporal side is the dense pass's (binned).
@@ -529,6 +601,11 @@ class CensusColumn:  # pylint: disable=too-many-instance-attributes  # one field
         head=frozenset(int(c) for c in column.census_head or ()))
 
 
+def _row_rate(rate: float | None) -> float:
+  """A side's plan row-sample rate (None or >= 1: read in full)."""
+  return 1.0 if rate is None or rate >= 1.0 else float(rate)
+
+
 @dataclass(frozen=True)
 class CensusSpec:  # pylint: disable=too-many-instance-attributes  # the per-table facts the census needs
   """What the census needs of one `TablePlan` — never its panel rows (the
@@ -542,10 +619,32 @@ class CensusSpec:  # pylint: disable=too-many-instance-attributes  # the per-tab
   panel_reason: str | None
   reference_rows: int
   rate_r: float | None
+  rate_source: float = 1.0
+  rate_synthetic: float = 1.0
 
   @property
   def censused(self) -> tuple[CensusColumn, ...]:
     return tuple(c for c in self.columns if c.censused)
+
+  def sample_rates(self,
+                   sides: Sequence[str] = _BOTH_SIDES) -> dict[str, float]:
+    """The row-sample rates (< 1) of `sides`, by side (R72); empty when
+    each was read in full."""
+    rates = {_SOURCE: self.rate_source, _SYNTHETIC: self.rate_synthetic}
+    return {side: rates[side] for side in sides if rates[side] < 1.0}
+
+  def sampled_reason(self, metric_id: str) -> str | None:
+    """Why `metric_id` cannot be measured on this table's row samples
+    (R72), or None when the side it needs in full was read in full."""
+    needs = NEEDS_FULL_SIDE.get(metric_id)
+    if needs is None:
+      return None
+    side, what, why = needs
+    rate = self.sample_rates((side,)).get(side)
+    if rate is None:
+      return None
+    return (f"sampled mode cannot measure {what}: the {side} side is a "
+            f"{rate:.3g} row sample, so {why}; run exact mode")
 
   @classmethod
   def from_table(cls, table: TablePlan) -> CensusSpec:
@@ -573,7 +672,9 @@ class CensusSpec:  # pylint: disable=too-many-instance-attributes  # the per-tab
         verified=panel is not None and bool(panel.verified),
         panel_reason=reason,
         reference_rows=n_r,
-        rate_r=rate_r)
+        rate_r=rate_r,
+        rate_source=_row_rate(table.sample_rate_source),
+        rate_synthetic=_row_rate(table.sample_rate_synthetic))
 
 
 @dataclass(frozen=True)
@@ -1529,7 +1630,7 @@ class _Emitter:
             **fields: Any) -> None:
     metric = _catalogue().get(metric_id)
     notes = dict(_sig(dict(detail or {})))
-    method = method or col.method
+    method, rate = self._estimate(metric_id, col, method, notes)
     if not metric.baseline:
       baseline = None
     elif baseline is None:
@@ -1547,7 +1648,7 @@ class _Emitter:
             n_source=sizes[0],
             n_synthetic=sizes[1],
             method=method,
-            sample_rate=(col.rate if method is Method.VALUE_SAMPLED else None),
+            sample_rate=rate,
             encoding_plan_digest=self.spec.encoding_plan_digest,
             detail=notes,
             **{
@@ -1560,20 +1661,55 @@ class _Emitter:
            reason: str,
            *,
            sizes: tuple[int | None, int | None] = (None, None),
-           method: Method | None = None) -> None:
-    method = method or col.method
+           method: Method | None = None,
+           detail: Mapping[str, Any] | None = None) -> None:
+    notes: dict[str, Any] = {"reason": reason, **(detail or {})}
+    method, rate = self._estimate(metric_id, col, method, notes)
     self.rows.append(
-        MetricValue.not_evaluated(
-            metric_id,
-            self.spec.table,
-            reason,
+        MetricValue(
+            metric_id=metric_id,
+            table=self.spec.table,
+            value=None,
             column=col.name,
             column_kind=col.kind.value,
             n_source=sizes[0],
             n_synthetic=sizes[1],
             method=method,
-            sample_rate=(col.rate if method is Method.VALUE_SAMPLED else None),
-            encoding_plan_digest=self.spec.encoding_plan_digest))
+            sample_rate=rate,
+            encoding_plan_digest=self.spec.encoding_plan_digest,
+            detail=notes))
+
+  def _estimate(self, metric_id: str, col: CensusColumn, method: Method | None,
+                notes: dict[str, Any]) -> tuple[Method, float | None]:
+    """A row's `(method, sample_rate)`: the column's own (exact, or
+    value-sampled at its rate) unless a side the metric reads is a row
+    sample — then `sample` at the lowest such rate, `notes` naming each
+    side's rate and keeping the value-sample rate (R72)."""
+    method = method or col.method
+    rates = self.spec.sample_rates(_SIDES_READ.get(metric_id, _BOTH_SIDES))
+    if not rates:
+      return method, (col.rate if method is Method.VALUE_SAMPLED else None)
+    notes["sample_rates"] = rates
+    if method is Method.VALUE_SAMPLED:
+      notes["estimator"] = method.value
+      notes["value_sample_rate"] = col.rate
+    return Method.SAMPLE, min(rates.values())
+
+  def withheld(self, metric_id: str, v: _View, **seen: Any) -> bool:
+    """Whether `metric_id` is withheld in sampled mode (R72) — then its
+    `not_evaluated` row is written here, with `seen` (what the sample
+    did observe; an exact census only: a value sample's counts are
+    partial twice over) in `detail`."""
+    reason = self.spec.sampled_reason(metric_id)
+    if reason is None:
+      return False
+    self.skip(
+        metric_id,
+        v.col,
+        reason,
+        sizes=v.pair,
+        detail=None if v.col.sampled else seen)
+    return True
 
 
 @dataclass
@@ -1690,6 +1826,9 @@ def _share_row(e: _Emitter, v: _View, metric_id: str, share: str,
 def _category_adherence(e: _Emitter, v: _View) -> None:
   metric_id = "field.category_adherence"
   acc = v.acc
+  if e.withheld(
+      metric_id, v, matched_rows_lower_bound=acc.n_syn - acc.novelty_syn):
+    return
   reason = v.missing()
   if not reason and not v.col.sampled and not acc.n_syn:
     reason = "no counted synthetic value"
@@ -1708,6 +1847,16 @@ def _category_adherence(e: _Emitter, v: _View) -> None:
 def _copy_rate(e: _Emitter, v: _View) -> None:
   metric_id = "field.substantive_copy_rate"
   acc = v.acc
+  # no bound here: a value rare in the source SAMPLE (count < 10) need
+  # not be rare in the source, and a copy's twin may be unsampled
+  if e.withheld(
+      metric_id,
+      v,
+      copies_in_sample=acc.copies_substantive,
+      substantive=acc.substantive_syn,
+      note=("copies counted against the source sample: neither bound of "
+            "the full count")):
+    return
   substantive = v.substantive_syn if v.col.sampled else acc.substantive_syn
   reason = v.missing() or (None if substantive else (
       "no substantive synthetic values (non-null, non-empty, not a "
@@ -1812,6 +1961,8 @@ def _top1(e: _Emitter, v: _View) -> None:
 
 def _coverage(e: _Emitter, v: _View) -> None:
   metric_id = "column.coverage_mass"
+  if e.withheld(metric_id, v, covered_rows_lower_bound=v.acc.coverage_mass_num):
+    return
   reason = v.missing()
   coverage = _bounded(v.summary["coverage_mass"])
   if reason or coverage is None:
@@ -1828,6 +1979,9 @@ def _coverage(e: _Emitter, v: _View) -> None:
 
 def _novelty(e: _Emitter, v: _View) -> None:
   metric_id = "column.novelty_mass"
+  if e.withheld(
+      metric_id, v, matched_rows_lower_bound=v.acc.n_syn - v.acc.novelty_syn):
+    return
   reason = v.missing()
   novelty = _bounded(v.summary["novelty_mass"])
   if reason or novelty is None:
@@ -1948,6 +2102,8 @@ def _distinct(e: _Emitter, v: _View, base: dict[str, Any] | None,
 
 def _ceiling(e: _Emitter, v: _View) -> None:
   metric_id = "column.distinct_ceiling_hit"
+  if e.withheld(metric_id, v, distinct_syn_lower_bound=v.acc.k_syn):
+    return
   if v.col.sampled:
     e.skip(
         metric_id,
@@ -2038,6 +2194,18 @@ def _shape_adherence(e: _Emitter, v: _View) -> None:
   metric_id = "field.shape_adherence"
   masks = v.masks
   sizes = (v.sizes.ne_src, v.sizes.ne_syn)
+  reason = e.spec.sampled_reason(metric_id)
+  if reason is not None:  # R72; the mask pass counts every value read
+    e.skip(
+        metric_id,
+        v.col,
+        reason,
+        sizes=sizes,
+        method=Method.EXACT,
+        detail={
+            "adherent_lower_bound": 0 if masks is None else masks.adherent_syn
+        })
+    return
   reason = v.missing_masked()
   counted = 0 if masks is None else masks.seen_syn - masks.long_syn
   if not reason and counted <= 0:
@@ -2196,6 +2364,13 @@ def _topk_items(v: _View, top: Sequence[tuple[int, int]], total: int,
   return items
 
 
+def _side_sample(spec: CensusSpec, side: str) -> dict[str, float]:
+  """A profile payload's `sample_rate` when its side was read as a row
+  sample (R72), else nothing."""
+  rate = spec.sample_rates((side,)).get(side)
+  return {} if rate is None else {"sample_rate": rate}
+
+
 def _topk_profiles(spec: CensusSpec, v: _View, totals: Mapping[str, SideTotals],
                    label_key: bytes) -> Iterator[ProfileValue]:
   distinct = v.distinct(matched=False)
@@ -2213,6 +2388,7 @@ def _topk_profiles(spec: CensusSpec, v: _View, totals: Mapping[str, SideTotals],
     }
     if v.col.sampled:
       payload["value_sample_rate"] = v.col.rate
+    payload.update(_side_sample(spec, side))
     yield ProfileValue(
         table=spec.table,
         profile_kind="topk",
@@ -2256,6 +2432,7 @@ def _shape_profiles(spec: CensusSpec, v: _View,
                 _tail_share((c[slot] for c in masks.head.values()), total),
             "head_floor":
                 SHAPE_HEAD_FLOOR,
+            **_side_sample(spec, side),
         },
         n=total)
 
