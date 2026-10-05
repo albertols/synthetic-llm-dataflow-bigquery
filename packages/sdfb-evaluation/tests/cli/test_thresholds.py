@@ -257,12 +257,13 @@ def test_only_a_gcs_uri_is_recorded_whole():
   held = argparse.Namespace(
       thresholds_uri="/home/someone/private/limits.yaml", thresholds=OVERRIDES)
   digest = thresholds_digest(OVERRIDES)
-  assert driver._override(held) == ("limits.yaml", digest)
+  override = driver._override  # pylint: disable=protected-access  # the recorded form is the unit under test
+  assert override(held) == ("limits.yaml", digest)
   held.thresholds_uri = "gs://bucket/dir/limits.yaml"
-  assert driver._override(held) == ("gs://bucket/dir/limits.yaml", digest)
+  assert override(held) == ("gs://bucket/dir/limits.yaml", digest)
   held.thresholds_uri = "limits.yaml"
-  assert driver._override(held) == ("limits.yaml", digest)
-  assert driver._override(argparse.Namespace()) == (None, None)
+  assert override(held) == ("limits.yaml", digest)
+  assert override(argparse.Namespace()) == (None, None)
 
 
 def test_a_failed_evaluation_records_the_override_too(bq, resolved, stub,

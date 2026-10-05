@@ -199,7 +199,10 @@ def test_a_local_run_is_in_process(small, name):
   assert set(out) == {"metrics", "profiles", "flags", "registry", "failures"}
 
 
-@pytest.mark.parametrize("key", sorted(pipeline_module._PRISM_ROUTED))
+_ROUTED = sorted(pipeline_module._PRISM_ROUTED)  # pylint: disable=protected-access  # the whole set
+
+
+@pytest.mark.parametrize("key", _ROUTED)
 def test_every_prism_routed_name_defaults_to_a_runner_the_pipeline_accepts(
     small, key):
   """The two functions agree: a name the defaults reroute is never a name
@@ -574,9 +577,10 @@ def test_a_three_table_rerun_is_deterministic(small, tmp_path):
   key.write_bytes(LABEL_KEY)
   plan = evaluation_plan(
       _tables(small), evaluation_id="ev_rerun", label_key_uri=str(key))
-  rows_by = {(name, side): rows
-             for side, by_table in small.items()
-             for name, rows in by_table.items()}
+  rows_by = {
+      (name, side): rows for side, by_table in small.items()
+      for name, rows in by_table.items()
+  }
   first = _run(plan, rows_by, tmp_path / "one")
   again = _run(plan, rows_by, tmp_path / "two")
   for table in ("evaluation_metrics", "evaluation_profiles",
@@ -587,7 +591,9 @@ def test_a_three_table_rerun_is_deterministic(small, tmp_path):
   [one], [two] = (first.read_rows("evaluation_data_history"),
                   again.read_rows("evaluation_data_history"))
   stamps = ("recorded_at", "finished_at")
-  assert {k: v for k, v in one.items() if k not in stamps} == {
+  assert {
+      k: v for k, v in one.items() if k not in stamps
+  } == {
       k: v for k, v in two.items() if k not in stamps
   }
 
