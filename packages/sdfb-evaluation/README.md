@@ -345,4 +345,21 @@ evaluation (matched on the launch target, the same trigger, and `recorded_at`
 at or after the DAG run's start), sets `event` FINAL, `status` FAILED, the
 reason and the times (and `evaluation_job_id` when the launch pushed it), and
 skips evaluations that already have a FINAL event. No match, no row. Two DAG
-runs overlapping on the same target can close each other's row.
+runs overlapping on the same target can close each other's row, and where two
+RUNNING rows exist for one evaluation only the latest is closed.
+
+Limits to know before the first launch:
+
+- A launch whose only target is `tables` (no `generation_job_id`, no `run_id`)
+  cannot be matched: the callback logs one warning and writes nothing, so a
+  failed job leaves its RUNNING row open.
+- The deploy workflow's substitution list must add `{{EVALUATOR_VERSION}}`;
+  without it the DAG carries the literal marker as its version and launches a
+  template that does not exist.
+- Unverified until a real launch: `maxWorkers` is passed as the rendered string
+  of `max_workers` (proto3 JSON should accept a numeric string for an int32;
+  native rendering DAG-wide would turn digit-only run ids into ints), the
+  deferrable wait semantics of the installed provider, the DML on real
+  BigQuery, `BigQueryInsertJobOperator.execute` inside a callback, the
+  trigger's conf reaching `context["params"]`, and the trigger rule when the
+  sensor is skipped.

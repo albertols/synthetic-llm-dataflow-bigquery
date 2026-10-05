@@ -208,8 +208,8 @@ def test_launch_parameters_are_metadata_names_from_params_or_constants():
   for key, value in zip(keys, parameters.values, strict=True):
     text = ast.unparse(value)
     refs = re.findall(r"params\.(\w+)", text)
-    is_constant = isinstance(value, ast.Constant) or not refs
-    assert refs or is_constant, key
+    # every value is a DAG Param reference or a plain string constant
+    assert refs or isinstance(value, ast.Constant), key
     assert set(refs) <= declared, (key, refs)
   assert _entry(parameters, "trigger") is not None
   assert "lower" in ast.unparse(_entry(parameters, "allow_contaminated"))
@@ -220,8 +220,16 @@ def test_nothing_the_launcher_owns_appears_anywhere_in_the_launch():
   start = _one(tree, "DataflowStartFlexTemplateOperator")
   launch = _entry(start, "launchParameter")
   everywhere = " ".join(_strings(launch))
-  for forbidden in ("sdk_container_image", "fail_on", "experiments"):
+  for forbidden in ("sdk_container_image", "fail_on"):
     assert forbidden not in everywhere
+  # no `experiments` template parameter; no data-sampling experiment anywhere
+  parameters = _entry(start, "parameters")
+  assert "experiments" not in {
+      k.value for k in parameters.keys if isinstance(k, ast.Constant)
+  }
+  additional = _entry(_entry(start, "environment"), "additionalExperiments")
+  assert isinstance(additional, ast.List)
+  assert not [s for s in _strings(additional) if "enable_data_sampling" in s]
   assert "sdk_container_image" not in ast.unparse(start)
   assert "fail_on" not in ast.unparse(start)
 
@@ -294,6 +302,17 @@ def test_failure_sql_is_one_insert_select_that_closes_a_running_row():
       r"AND closed\.event = 'FINAL'\)", sql)
   # only @-parameters carry values: no other interpolation placeholder
   assert set(re.findall(r"\{(\w+)\}", sql)) == {"registry"}
+
+
+def test_failure_sql_keeps_one_final_row_per_evaluation():
+  sql = _failure_sql(_tree(EVALUATION_DAG))
+  assert ("QUALIFY ROW_NUMBER() OVER ( PARTITION BY running.evaluation_id "
+          "ORDER BY running.recorded_at DESC) = 1") in sql
+
+
+def test_tables_only_launch_logs_a_warning_instead_of_closing_silently():
+  body = ast.unparse(_function(_tree(EVALUATION_DAG), "_close_running_row"))
+  assert "logging.warning" in body
 
 
 def test_failure_callback_binds_every_parameter_it_uses():

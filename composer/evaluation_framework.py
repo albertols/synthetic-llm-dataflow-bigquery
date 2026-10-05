@@ -25,7 +25,10 @@ opt-in `run_evaluation` task triggers it by that id.
 Substitution markers:
   {{EVALUATOR_VERSION}}       version of the sdfb-evaluation package whose
                               template `sdfb-evaluation-<version>-template.json`
-                              was built (deploy/build_flex_template.sh)
+                              was built (deploy/build_flex_template.sh).
+                              NEW: the deploy workflow's substitution list
+                              must add it; without it the DAG would carry the
+                              literal marker as its version.
   {{ENV}}                     dev | uat | prd
   {{GCS_DATAFLOW_STAGING}}    <env>-…-dataflow-staging bucket name
   {{GCS_DATAFLOW_TEMPLATES}}  <env>-…-dataflow-templates bucket name
@@ -127,6 +130,8 @@ WHERE running.event = 'RUNNING'
     SELECT 1 FROM `{registry}` AS closed
     WHERE closed.evaluation_id = running.evaluation_id
       AND closed.event = 'FINAL')
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY running.evaluation_id ORDER BY running.recorded_at DESC) = 1
 """
 
 
@@ -153,6 +158,9 @@ def _close_running_row(context):
               f"{project_id}.{dataset}.{_REGISTRY_TABLE}")
   target = params["generation_job_id"] or params["run_id"]
   if not target:
+    logging.warning(
+        "evaluation registry not updated: a launch targeted by tables only "
+        "has no generation_job_id or run_id to find its RUNNING row by")
     return
   launched = context["ti"].xcom_pull(task_ids="start_evaluation")
   job_id = launched.get("id", "") if isinstance(launched, dict) else ""

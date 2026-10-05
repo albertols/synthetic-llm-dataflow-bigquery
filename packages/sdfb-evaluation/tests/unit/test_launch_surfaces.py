@@ -78,14 +78,16 @@ def test_metadata_mirrors_every_public_run_flag() -> None:
 
 
 def test_metadata_leaves_launcher_supplied_flags_out() -> None:
-  names = {f"--{p['name']}" for p in _metadata()["parameters"]}
+  parameters = _metadata()["parameters"]
+  names = {"--" + p["name"] for p in parameters}
   assert not names & LAUNCHER_SUPPLIED
 
 
 def _run_choices() -> dict[str, tuple[str, ...]]:
   run = _subparsers()[1]["run"]
+  actions = run._actions  # pylint: disable=protected-access  # no public list
   return {
-      option[2:]: tuple(action.choices) for action in run._actions  # pylint: disable=protected-access  # argparse has no public list of options
+      option[2:]: tuple(action.choices) for action in actions
       if action.choices and action.help is not argparse.SUPPRESS
       for option in action.option_strings
       if option.startswith("--") and option != "--help"
