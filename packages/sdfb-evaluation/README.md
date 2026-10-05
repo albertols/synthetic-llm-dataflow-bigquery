@@ -294,10 +294,55 @@ uv run sdfb-eval run --runner DataflowRunner \
 
 ### 6. Composer
 
-**Not in this repository yet.** The evaluation DAG
-(`composer/evaluation_framework.py`) and the opt-in trigger from the
-generation DAG follow the flex template. What they will call is in place:
-the template entry above, with `--trigger composer` or `--trigger chained`
-recorded in the registry. One thing is theirs to do: a Dataflow job that
-dies after it was submitted leaves only its RUNNING row, and the DAG's
-failure callback has to close it with a FAILED row.
+**Not deployed and never run.** The DAG files below are checked only by
+static tests (`tests/unit/test_composer_dag.py` reads them with `ast`);
+Airflow has never parsed them and no Composer environment has run them.
+
+`composer/evaluation_framework.py` is the DAG `sdfb_evaluation_framework`
+(`schedule_interval=None`, manual or chained). It is a template: workflow 3
+substitutes `{{EVALUATOR_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}` and
+`{{GCS_DATAFLOW_TEMPLATES}}`; it reads the Variables `PROJECT_ID`, `REGION`,
+`SA_DATAFLOW` and `DATAFLOW_SUBNET` (optional `DATAFLOW_NETWORK_TAGS`). It
+launches `gs://<templates>/synthetic/sdfb-evaluation-<version>-template.json`.
+
+```mermaid
+flowchart LR
+  begin --> wait_gate --> wait_for_generation_job --> start_evaluation
+  begin --> start_evaluation
+```
+
+| Param | Default | Goes to |
+|---|---|---|
+| `generation_job_id` | empty | template `job_id`; the sensor's job |
+| `run_id`, `tables`, `landing_dataset`, `reference_dataset`, `relationships_uri` | empty | the template parameter of the same name |
+| `mode` | empty (`exact`, `sampled`) | template `mode` |
+| `allow_contaminated` | false | template `allow_contaminated` (lower-case) |
+| `output_dataset` | `synthetic_data_quality` | template `output_dataset`; the registry the callback writes |
+| `trigger` | `composer` (`chained`) | template `trigger` |
+| `wait_for_generation` | false | the `wait_gate` short-circuit |
+| `machine_type`, `max_workers` | `e2-standard-8`, 4 | the launch environment, not the template |
+
+Exactly one of `generation_job_id`, `run_id`, `tables` names the target; the
+launcher refuses otherwise. The DAG never passes `runner`, `project`,
+`region`, `sdk_container_image`, `experiments` or `fail_on`.
+
+With `wait_for_generation` true (and a `generation_job_id`) a deferrable
+`DataflowJobStatusSensor` waits for `JOB_STATE_DONE` first; with it false the
+gate skips the sensor and the launch still runs.
+
+**Chaining.** The generation DAG has an opt-in Param `run_evaluation`
+(default false). When true, after its launch it triggers this DAG with
+`conf={"generation_job_id": <the launched job's id>, "wait_for_generation":
+true, "trigger": "chained"}`. With it false its task chain and arguments are
+exactly as before.
+
+**Failure callback.** The launch task waits for the job (deferrably). The
+launcher writes the RUNNING registry row before submitting and mints the
+`evaluation_id`; a job that dies afterwards leaves only that row. The task's
+`on_failure_callback` closes it with one `INSERT ... SELECT` into
+`evaluation_data_history`: it copies the RUNNING row of this DAG run's
+evaluation (matched on the launch target, the same trigger, and `recorded_at`
+at or after the DAG run's start), sets `event` FINAL, `status` FAILED, the
+reason and the times (and `evaluation_job_id` when the launch pushed it), and
+skips evaluations that already have a FINAL event. No match, no row. Two DAG
+runs overlapping on the same target can close each other's row.
