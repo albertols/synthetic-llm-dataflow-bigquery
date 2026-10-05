@@ -156,6 +156,23 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 - `bigquery.readSessionUser` — the Storage Read API (`bigquery.readsessions.create`) for the per-column source-domain fetches ([ADR 0034](adr/0034-generation-throughput-single-barrier-shared-engines.md) D4). Without it the worker logs `source_values_arrow_fallback error=PermissionDenied` + `source_values_storage_api_disabled` once and pages the domain via REST (the 2026-08-29 run: 944k values in 5.5 min inside `DoFn.setup()`).
 - `storage.objectViewer` on the models bucket; `storage.objectAdmin` on staging/temp.
 
+### Evaluator (optional; a separate job after generation)
+
+> [ADR 0041](adr/0041-evaluation-standalone-package.md) · [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md). **Not yet run on Google Cloud**: the list below is what the code is written to need, taken from the design and BigQuery's documentation, not confirmed by a run. Nothing here is needed to generate.
+
+- **Tables and views** — create once with `uv run sdfb-eval schemas --project <PROJECT> --apply` (run from `packages/sdfb-evaluation`; it creates the four `evaluation_*` tables in `synthetic_data_quality` that are missing and replaces the views `evaluation_latest` and `evaluation_latest_per_job`; it never alters an existing table). The dataset must already exist.
+- **Image and template** — `PROJECT_ID=… REGION=… REPOSITORY=… TEMPLATES_BUCKET=… packages/sdfb-evaluation/deploy/build_flex_template.sh` builds the CPU image and the flex template (`gs://<templates>/synthetic/sdfb-evaluation-<VERSION>-template.json`). It needs `gcloud` and GCP access; neither has been built or launched yet.
+- **Composer** — the DAG `composer/evaluation_framework.py` is a template: the deploy workflow's marker substitution must add `{{EVALUATOR_VERSION}}` (beside `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}`, `{{GCS_DATAFLOW_TEMPLATES}}`), or the DAG launches a template that does not exist. Chaining from the generation DAG is off unless its `run_evaluation` parameter is true.
+- **IAM for the evaluator's identity** (the principal that runs `sdfb-eval`, or the Dataflow worker SA and the launcher SA of the template):
+  - `roles/bigquery.jobUser` — run queries and load jobs.
+  - `roles/bigquery.dataViewer` on the source and landing datasets.
+  - `roles/bigquery.dataEditor` on `synthetic_data_quality` — append to the four tables.
+  - `roles/bigquery.resourceViewer` — `INFORMATION_SCHEMA.JOBS_BY_PROJECT` (`jobs.listAll`), used to find which rows the generation job wrote.
+  - `roles/dataflow.viewer` and `roles/logging.viewer` — read the generation job and its labels.
+  - **Snapshots** — the source pin and the start snapshot of an append scope are table snapshots in the temporary dataset (`--temp_dataset`, default the output dataset). On the base table: `bigquery.tables.get`, `getData`, `createSnapshot`; on the dataset: `bigquery.datasets.get`; `bigquery.jobs.create`. On the temporary dataset: `bigquery.tables.create`, `updateData`. Setting the snapshot's expiry additionally needs `bigquery.tables.deleteSnapshot` (in `dataOwner`, `admin` and `studioAdmin`, not `dataEditor`). Without them the pin degrades to the unpinned source with a warning, or the scope is reported `unknown`.
+  - **Label key** — with `--label_key_uri` pointing at a Secret Manager version, the workers need `roles/secretmanager.secretAccessor` on that secret. Without the flag the key is random and lives for one run.
+- **Time travel** — evaluate a generation job while the source's and the landing table's time-travel window still covers it (a BigQuery dataset setting, seven days by default unless lowered). Past the window the source is read as it is now and a scope cannot be recovered. See [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) "Evaluate a run".
+
 ---
 
 ## ② Optional hardening

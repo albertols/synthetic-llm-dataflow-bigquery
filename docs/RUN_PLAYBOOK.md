@@ -509,6 +509,44 @@ source-derived values, and the sensitive-content gate
 (`scripts/dsg/precheck.py`) rejects any `**/evidence/**` path. Releases
 publish the aggregate report only.
 
+### 5a. Evaluate a run
+
+After a generation job lands, the statistical evaluator scores its tables against the source ([ADR 0041](adr/0041-evaluation-standalone-package.md), [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md)). **Not yet run on Google Cloud**; commands are as built and tested on invented data. Prerequisites (tables, IAM, image): [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator".
+
+**Do it soon: time travel is the deadline.** The evaluator recovers the job's rows and pins the source as it was when the job started, both through BigQuery time travel. Once the generation job's window is older than the table's time-travel window (less a one-hour margin), a scope is `expired` and the table is not evaluated, and the source is read as it is now. Evaluate the same day, and before anything else writes to the landing tables.
+
+```bash
+cd packages/sdfb-evaluation
+# 1. plan: nothing runs, no registry row; prints scope, panel, bytes, predicted shuffle
+uv run sdfb-eval plan --dry_run --project <PROJECT> --region <REGION> --job_id <JOB_ID>
+# 2. run (local, in-process Beam; --runner DirectRunner is the default spelling)
+uv run sdfb-eval run --project <PROJECT> --region <REGION> --job_id <JOB_ID>
+# 3. read it
+uv run sdfb-eval report --project <PROJECT> --evaluation_id <ID>
+```
+
+Exit codes of `run`: 0 finished and no gate tripped; 1 the optional `--fail_on` gate tripped; 2 a usage error, nothing started; 3 the evaluation failed. Evaluation never fails the generation run.
+
+How to read a row (each metric row is one unit, not a pass/fail verdict on the data):
+
+| Field | Read it as |
+| :-- | :-- |
+| `value` against `baseline_value` | The baseline is `metric(R, source)`: what a perfect copier of the reference sample would score. A generator is fine when it is near the baseline, not near zero |
+| noise floor / interval | A `WARN` or `FAIL` that sampling noise explains is reported `PASS`; compare a delta between runs only beyond both rows' noise (`sdfb-eval compare` marks `≈` inside it) |
+| lifts (`row.memorization_lift`, `row.exposure_lift`, value lifts) | Synthetic matches to the reference sample over matches to the equally sized holdout; 1 is chance. Status reads the confidence **lower bound** of the lift |
+| `row.dcr_train_holdout_share` | 0.5 is chance; a copy fraction f moves it by f/2. It cannot see one heavy copied cluster; the exact-copy metrics own that |
+| status of the run | `SUCCEEDED`, `PARTIAL` (a table or block not evaluated) and so on describe the evaluation, not the data |
+
+Latest result per generation job, for a script:
+
+```sql
+SELECT evaluation_id, status
+FROM `<PROJECT>.synthetic_data_quality.evaluation_latest_per_job`
+WHERE generation_job_id = '<JOB_ID>'
+```
+
+The privacy metrics are risk indicators, not guarantees. The same step inside the end-to-end validation report is Step 3.6 of [the prompt](../.github/prompts/end_to_end_validation_report_generation.prompt.md).
+
 ---
 
 ## 6. Stores, flags, and experiment hygiene

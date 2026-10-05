@@ -53,3 +53,8 @@ scripts/freetext_crosscheck.py
 # workers" caused the sdk-0-0 CrashLoopBackOff — it must not reappear in live
 # files (the ADR 0009 correction note, in docs/adr/, is excluded from the scan).
 irrelevant for workers
+
+# 2026-10-05 — the in-job evaluation proposal (one `validation_data_history`
+# table) was superseded by the standalone evaluator's `evaluation_data_history`
+# (ADR 0041, which may name the old table; docs/adr/ is excluded from the scan).
+validation_data_history
