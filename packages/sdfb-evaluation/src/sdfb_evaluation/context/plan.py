@@ -247,6 +247,13 @@ _NESTED_TYPES = frozenset(
 KNOWN_TYPES = (
     _NUMERIC_TYPES | _TEMPORAL_TYPES | _BOOL_TYPES | _STRING_TYPES
     | _NESTED_TYPES)
+# The same sets by their public names, for `context.offline`, which plans
+# from rows in memory and must read a type name as this module does.
+NUMERIC_TYPES = _NUMERIC_TYPES
+TEMPORAL_TYPES = _TEMPORAL_TYPES
+BOOL_TYPES = _BOOL_TYPES
+STRING_TYPES = _STRING_TYPES
+NESTED_TYPES = _NESTED_TYPES
 _PAIR_KINDS = frozenset({
     ColumnKind.NUMERIC, ColumnKind.TEMPORAL, ColumnKind.CATEGORICAL,
     ColumnKind.BOOLEAN

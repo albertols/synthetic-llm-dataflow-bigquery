@@ -78,6 +78,7 @@ __all__ = ["load_thresholds", "thresholds_digest"]
 _TOP = "thresholds"
 _BOUNDS = ("warn", "fail")
 _HIGHER = "higher_better"
+_SHOWN_CHARS = 40  # of a refused value, in the error
 
 
 def _read_text(uri: str) -> str:
@@ -92,11 +93,21 @@ def _read_text(uri: str) -> str:
 
 
 def _bound(metric_id: str, name: str, value: Any) -> float:
-  number = isinstance(value, (int, float)) and not isinstance(value, bool)
-  if not number or not math.isfinite(value) or value < 0:
+  """`value` as a float bound, or a `ValueError`: also for an integer
+  no float can hold (YAML integers have no size limit)."""
+  bound = math.nan
+  if isinstance(value, (int, float)) and not isinstance(value, bool):
+    try:
+      bound = float(value)
+    except OverflowError:
+      bound = math.inf
+  if not math.isfinite(bound) or bound < 0:
+    shown = repr(value)
+    if len(shown) > _SHOWN_CHARS:
+      shown = f"{shown[:_SHOWN_CHARS]}… ({len(shown)} characters)"
     raise ValueError(f"{metric_id}.{name}: expected a number, finite and 0 "
-                     f"or more, got {value!r}")
-  return float(value)
+                     f"or more, got {shown}")
+  return bound
 
 
 def _pair(metric: Metric, entry: Any) -> tuple[float, float]:

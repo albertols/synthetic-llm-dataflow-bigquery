@@ -26,6 +26,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from types import SimpleNamespace
@@ -423,6 +424,30 @@ def test_the_label_key_uri_is_redacted_before_the_reason_is_cut(
   capsys.readouterr()
 
 
+def test_the_label_key_uri_is_redacted_in_a_failed_rows_warnings(
+    bq, monkeypatch, stub, capsys):
+  """A warning the plan carries may quote the URI as an error message
+  can: the driver's FAILED row names it in neither."""
+  del stub
+  launch = dataclasses.replace(
+      thelook_launch(bq),
+      warnings=(f"the launch log names the key at {LABEL_KEY_URI}",))
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  monkeypatch.setattr(driver, "load_models", lambda uri: thelook_models())
+
+  def explode(pipeline):
+    del pipeline
+    raise RuntimeError("the runner refused the pipeline")
+
+  argv = ["run", *TARGET, "--label_key_uri", LABEL_KEY_URI]
+  assert main(argv, make_env(bq, submit=explode)) == 3
+  failed = bq.registry_rows()[-1]
+  assert failed["status"] == "FAILED"
+  assert "the launch log names the key at <label key uri>" in failed["warnings"]
+  assert LABEL_KEY_URI not in json.dumps(failed)
+  capsys.readouterr()
+
+
 def test_a_cut_reason_keeps_the_line_that_names_the_failure(
     bq, resolved, stub, capsys):
   """A runner reports a worker's failure as a long traceback: the
@@ -675,6 +700,110 @@ def test_a_local_run_that_dies_in_its_wait_is_closed_by_the_driver(
 
 
 # --------------------------------------------------------------------------
+# a finished job owns its FINAL row, whatever happened to the wait (R98-1)
+# --------------------------------------------------------------------------
+def _registry_reads(bq) -> int:
+  return sum(REGISTRY in sql for sql, _ in bq.queries)
+
+
+def test_a_polling_error_on_a_finished_job_does_not_fail_the_evaluation(
+    bq, resolved, stub, capsys):
+  """The wait raised, and the job, looked at again, is DONE: the
+  evaluation completed. The driver warns, reads the job's FINAL row back
+  and exits by the gate; it writes no row of its own."""
+  del resolved, stub
+  bq.canned.append((REGISTRY, [_final()]))
+  polling = ConnectionError("polling the job failed")
+  env = _dataflow_env(bq, FakeJob(state="DONE", error=polling))
+  assert main(["run", *DATAFLOW], env) == 0
+  assert main(["run", *DATAFLOW, "--fail_on", "warn"], env) == 1  # the gate's
+  assert _statuses(bq) == ["RUNNING", "RUNNING"]  # one per attempt, no FAILED
+  assert _registry_reads(bq) == 2
+  captured = capsys.readouterr()
+  assert captured.err.count("ConnectionError: polling the job failed") == 2
+  assert "finished (DONE)" in captured.err and "Traceback" not in captured.err
+  assert "gate (--fail_on warn): TRIPPED" in captured.out
+
+
+def test_a_job_that_turns_done_after_its_wait_died_owns_its_final_row(
+    bq, resolved, stub, capsys):
+  """Beam's polling gave up while the job was RUNNING; by the time the
+  driver looks again it is DONE."""
+  del resolved, stub
+  bq.canned.append((REGISTRY, [_final()]))
+  job = FakeJob(
+      state=["RUNNING", "DONE"],
+      error=AssertionError("Job did not reach to a terminal state"))
+  assert main(["run", *DATAFLOW, "--fail_on", "fail"], _dataflow_env(bq,
+                                                                     job)) == 0
+  assert _statuses(bq) == ["RUNNING"] and job.cancels == 0
+  assert _registry_reads(bq) == 1
+  err = capsys.readouterr().err
+  assert "AssertionError: Job did not reach to a terminal state" in err
+  assert "continues" not in err
+
+
+def test_a_polling_error_on_a_finished_job_without_a_final_row_is_failed(
+    bq, resolved, stub, capsys):
+  """DONE, and the read-back worked and found no FINAL row: that, and
+  not the polling error, is what the driver's FAILED row says."""
+  del resolved, stub
+  bq.canned.append((REGISTRY, []))
+  job = FakeJob(state="DONE", error=ConnectionError("polling the job failed"))
+  assert main(["run", *DATAFLOW], _dataflow_env(bq, job)) == 3
+  assert _statuses(bq) == ["RUNNING", "FAILED"]
+  reason = bq.registry_rows()[-1]["status_reason"]
+  assert "the job finished without a FINAL row" in reason
+  assert "polling the job failed" not in reason
+  capsys.readouterr()
+
+
+def test_an_interrupt_after_the_job_finished_writes_no_row(
+    bq, resolved, stub, capsys):
+  """Ctrl-C lands after the job ended DONE: its FINAL row is the
+  pipeline's. The driver writes nothing, does not read the registry,
+  says the job finished and how to read its result, and the interrupt
+  stays an interrupt."""
+  del resolved, stub
+  bq.canned.append((REGISTRY, [_final()]))
+  job = FakeJob(state="DONE", error=KeyboardInterrupt())
+  with pytest.raises(KeyboardInterrupt):
+    main(["run", *DATAFLOW], _dataflow_env(bq, job))
+  assert _statuses(bq) == ["RUNNING"]
+  assert _registry_reads(bq) == 0 and job.cancels == 0
+  captured = capsys.readouterr()
+  evaluation_id = bq.registry_rows()[0]["evaluation_id"]
+  assert f"job {job.job} finished (DONE)" in captured.err
+  assert "no registry row was written here" in captured.err
+  assert (f"sdfb-eval report --project {PROJECT} --evaluation_id "
+          f"{evaluation_id}") in captured.err
+  assert "continues" not in captured.err
+
+
+def test_a_local_run_found_done_is_the_pipelines_too(bq, resolved, stub,
+                                                     capsys):
+  """The same rule without a job id. An interrupt after a local
+  pipeline ended DONE appends no FAILED row (with a local sink the
+  pipeline's FINAL row is already on disk); an ordinary error goes on to
+  read that row, and its absence is what fails the run."""
+  del resolved, stub
+  done = FakeResult(state="DONE", error=KeyboardInterrupt())
+  with pytest.raises(KeyboardInterrupt):
+    main(["run", *TARGET], make_env(bq, submit=lambda pipeline: done))
+  assert _statuses(bq) == ["RUNNING"]
+  err = capsys.readouterr().err
+  assert "the pipeline finished (DONE)" in err
+  assert "were not loaded into BigQuery" in err
+  bq.loads.clear()
+  done = FakeResult(state="DONE", error=OSError("the wait broke"))
+  assert main(["run", *TARGET], make_env(bq, submit=lambda pipeline: done)) == 3
+  assert _statuses(bq) == ["RUNNING", "FAILED"]
+  reason = bq.registry_rows()[-1]["status_reason"]
+  assert "without writing a FINAL registry row" in reason
+  assert "OSError: the wait broke" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
 # exit codes and the gate (R93-5, R93-8)
 # --------------------------------------------------------------------------
 def test_fail_on_exit_codes(bq, resolved, monkeypatch, capsys):
@@ -907,6 +1036,23 @@ def test_a_failed_load_keeps_the_local_outputs_and_says_where(
   err = capsys.readouterr().err
   assert err.count(str(scratch / kept)) == 1
   assert list((scratch / kept).rglob("*.jsonl"))
+
+
+def test_a_run_that_fails_while_it_is_set_up_leaves_no_temporary_directory(
+    bq, resolved, stub, scratch, capsys):
+  """The temporary directory exists before the BigQuery client does: a
+  client that cannot be made must not leave it behind."""
+  del resolved, stub
+
+  def no_client(project: str):
+    raise PermissionError(f"no credentials for {project}")
+
+  assert main(["run", *TARGET], make_env(bq, make_bq=no_client)) == 3
+  assert _kept(scratch) == []
+  captured = capsys.readouterr()
+  assert "PermissionError: no credentials for" in captured.err
+  assert str(scratch) not in captured.out + captured.err
+  assert not bq.registry_rows()  # nothing to write a row with
 
 
 def test_a_run_that_wrote_nothing_keeps_no_temporary_directory(

@@ -13,14 +13,22 @@
 #  limitations under the License.
 """No test of this package reaches the network.
 
-A `NetworkGuard`, while installed, replaces the three ways Python code
-leaves the machine or goes looking for credentials:
+A `NetworkGuard`, while installed, replaces the ways Python code leaves
+the machine or goes looking for credentials:
 
     socket.socket.connect / connect_ex   a non-loopback address
-    socket.getaddrinfo                   a host name other than localhost
+    socket.socket.sendto / sendmsg       a datagram to one (UDP needs no
+                                         connection)
+    socket.getaddrinfo, gethostbyname,   a host name other than localhost,
+      gethostbyname_ex, gethostbyaddr    or the reverse lookup of an address
+                                         off this machine
     google.auth.default                  Application Default Credentials
                                          (Beam and the Google clients ask
                                          for them before their first call)
+
+It patches Python's `socket` module, so it sees what goes through it:
+not a C extension's own sockets (gRPC's core), a subprocess, or code
+that ran at import time, before the guard was installed.
 
 Each attempt is recorded and fails the test at once (`pytest.fail`, which
 `except Exception` does not catch); one that the code under test swallows
@@ -47,6 +55,8 @@ import pytest
 __all__ = ["NetworkGuard"]
 
 _LOCAL_NAMES = frozenset({"", "localhost"})
+_RESOLVERS = ("gethostbyname", "gethostbyname_ex", "gethostbyaddr")
+_SENDMSG_ADDRESS = 2  # sendmsg(buffers, ancdata, flags, address)
 
 
 def _is_local_host(host: Any) -> bool:
@@ -89,6 +99,7 @@ class NetworkGuard:
     if self._patch is not None:
       return
     connect, connect_ex = socket.socket.connect, socket.socket.connect_ex
+    sendto, sendmsg = socket.socket.sendto, socket.socket.sendmsg
     getaddrinfo = socket.getaddrinfo
     refuse = self._refuse
 
@@ -102,10 +113,35 @@ class NetworkGuard:
         refuse(f"connect_ex({address!r})")
       return connect_ex(sock, address)
 
+    def guarded_sendto(sock: socket.socket, data: Any, *args: Any) -> Any:
+      # sendto(data, address) or sendto(data, flags, address)
+      if args and not _is_local_address(args[-1]):
+        refuse(f"sendto({args[-1]!r})")
+      return sendto(sock, data, *args)
+
+    def guarded_sendmsg(sock: socket.socket, buffers: Any, *args: Any) -> Any:
+      # sendmsg(buffers[, ancdata[, flags[, address]]]); no address: the
+      # socket is connected, and `connect` was guarded
+      given = len(args) > _SENDMSG_ADDRESS
+      address = args[_SENDMSG_ADDRESS] if given else None
+      if address is not None and not _is_local_address(address):
+        refuse(f"sendmsg({address!r})")
+      return sendmsg(sock, buffers, *args)
+
     def guarded_getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
       if not _is_local_host(host):
         refuse(f"getaddrinfo({host!r})")
       return getaddrinfo(host, *args, **kwargs)
+
+    def resolver(name: str) -> Any:
+      resolve = getattr(socket, name)
+
+      def guarded(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if not _is_local_host(host):
+          refuse(f"{name}({host!r})")
+        return resolve(host, *args, **kwargs)
+
+      return guarded
 
     def no_credentials(*args: Any, **kwargs: Any) -> Any:
       del args, kwargs
@@ -114,7 +150,11 @@ class NetworkGuard:
     patch = pytest.MonkeyPatch()
     patch.setattr(socket.socket, "connect", guarded_connect)
     patch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    patch.setattr(socket.socket, "sendto", guarded_sendto)
+    patch.setattr(socket.socket, "sendmsg", guarded_sendmsg)
     patch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+    for name in _RESOLVERS:
+      patch.setattr(socket, name, resolver(name))
     patch.setattr(google.auth, "default", no_credentials)
     patch.setattr(google.auth._default, "default", no_credentials)  # pylint: disable=protected-access  # clients import it from here
     self._patch = patch

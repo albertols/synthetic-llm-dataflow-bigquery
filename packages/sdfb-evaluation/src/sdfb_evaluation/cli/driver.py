@@ -33,8 +33,9 @@ pipeline (D7), and who writes the one terminal row.
           ▼
     read the FINAL row back ─► exit code (`cli.gate`)
 
-Exactly one terminal row, written by whoever owns the outcome (Ruling
-R93-3):
+Never two terminal rows: the one there is, is written by whoever owns
+the outcome, and by nobody while that is not known (Rulings R93-3,
+R98-1):
 
     what happened                                 terminal row
     ────────────────────────────────────────────  ─────────────────────────
@@ -50,6 +51,14 @@ R93-3):
       submitted job is still running              goes on and writes its
                                                   own; it is never
                                                   cancelled
+    the wait raised and the run, looked at        the pipeline's FINAL
+      again, is DONE (Ruling R98-1)               (the run completed): a
+                                                  polling error is a
+                                                  warning and the driver
+                                                  reads the row back as
+                                                  usual; an interrupt
+                                                  writes nothing and says
+                                                  how to read the result
     the read-back itself failed                   none: a FINAL row may
                                                   well exist
 
@@ -59,7 +68,10 @@ state counts as running — the driver writes no terminal row: it prints
 the job id and how to read the result later, and re-raises. A local run
 (no job id) dies with the driver, so the driver closes it. Two
 contradicting terminal rows are worse than a RUNNING row that stays open
-(an orchestrator's failure callback closes that one).
+(an orchestrator's failure callback closes that one). For the same
+reason a run found DONE is never closed by the driver on the strength of
+a failed wait: FAILED is appended to a DONE run only after a read-back
+that worked and found no FINAL row.
 
 Every exception is re-raised after its row, never replaced; a FAILED row
 that cannot itself be written is reported on stderr and the original
@@ -641,12 +653,16 @@ def _telling_line(message: str) -> str:
 def _failed(planned: EvaluationPlan, exc: BaseException,
             now: datetime | None) -> dict[str, Any]:
   """`assemble.failed_row`, with two things a reader of the reason needs:
-  the label key's URI is out of it (an error may quote the secret's
-  resource name), and a reason the registry had to cut keeps, after its
-  beginning, the line that says what failed (`_telling_line`): a runner
-  reports a worker's failure as a traceback far longer than the cut."""
-  shaped = _redacted(exc, planned.label_key_uri)
+  the label key's URI is out of it and out of the warnings (an error, or
+  a warning made of one, may quote the secret's resource name), and a
+  reason the registry had to cut keeps, after its beginning, the line
+  that says what failed (`_telling_line`): a runner reports a worker's
+  failure as a traceback far longer than the cut."""
+  uri = planned.label_key_uri
+  shaped = _redacted(exc, uri)
   row = failed_row(planned, shaped, now=now)
+  if uri:  # a warning can quote it as an error can
+    row["warnings"] = [str(w).replace(uri, _REDACTED) for w in row["warnings"]]
   whole = f"{type(shaped).__name__}: {shaped}".rstrip()
   reason = str(row["status_reason"])
   if len(reason) < len(whole):
@@ -908,9 +924,27 @@ class _Run:
         f"row). Read its result later with: {self.how_to_read}",
         file=sys.stderr)
 
+  def _leave_finished(self, job: str | None) -> None:
+    """The run ended DONE and the wait was interrupted: its FINAL row
+    is the pipeline's. Write nothing, say where the result is."""
+    evaluation_id = self.attempt.evaluation_id
+    what = f"job {job}" if job else "the pipeline"
+    then = f"Read its result with: {self.how_to_read}"
+    if isinstance(self.sinks, ClientLoadSinks):
+      then = (f"Its outputs are in {self.directory} and were not loaded "
+              "into BigQuery")
+    print(
+        f"sdfb-eval: evaluation {evaluation_id}: {what} finished (DONE) "
+        "before the wait was interrupted: no registry row was written here "
+        f"(the pipeline writes its own FINAL row). {then}",
+        file=sys.stderr)
+
   def wait(self, result: Any, planned: EvaluationPlan) -> None:
     """Wait for `result` to end DONE (module docstring: who owns the
-    terminal row when it does not).
+    terminal row when it does not). A wait that raises on a run which,
+    looked at again, is DONE returns as if it had not raised when the
+    error is an ordinary one (a warning says so: the evaluation
+    completed); an interrupt is re-raised, with no row written.
 
     Raises:
       RuntimeError: the run ended in a state other than DONE.
@@ -920,7 +954,18 @@ class _Run:
     try:
       state = result.wait_until_finish()
     except BaseException as exc:
-      if _still_running(job, _last_state(result)):
+      state = _last_state(result)  # one look: it decides who owns the row
+      if state == PipelineState.DONE:
+        if not isinstance(exc, Exception):
+          self._leave_finished(job)
+          raise
+        what = f"job {job}" if job else "the pipeline"
+        print(
+            f"sdfb-eval: warning: the wait failed ({type(exc).__name__}: "
+            f"{exc}), but {what} finished (DONE): reading its result",
+            file=sys.stderr)
+        return
+      if _still_running(job, state):
         self._leave_running(str(job))
       else:
         self._close(planned, exc)
@@ -993,6 +1038,10 @@ class _Run:
 
 
 def _wiring(args: argparse.Namespace, env: Env) -> _Run:
+  """The run's wiring. A temporary output directory made here does not
+  outlive a failure of the rest (the BigQuery client that cannot be
+  made, for one): it is still empty, so it is removed before the error
+  goes on."""
   now = env.now()
   attempt = _Attempt(mint_evaluation_id(now, env.token()), now)
   fixture = load_fixture(args.fixture_dir) if args.fixture_dir else None
@@ -1004,21 +1053,26 @@ def _wiring(args: argparse.Namespace, env: Env) -> _Run:
     if not base:
       base = temporary = tempfile.mkdtemp(prefix="sdfb-eval-")
     directory = os.path.join(base, attempt.evaluation_id)
-  sinks: Sinks
-  if args.sink == "bq":
-    sinks = BigQuerySinks(project, args.output_dataset)
-  elif args.sink == "bq_client":
-    sinks = ClientLoadSinks(
-        str(directory), project=project, dataset=args.output_dataset)
-  else:
-    sinks = LocalJsonSinks(str(directory))
-  offline = fixture is not None and args.sink == _LOCAL
-  bq = None if offline else env.make_bq(project)
-  registry = _Registry(
-      sinks,
-      bq,
-      f"{project}.{args.output_dataset}.{REGISTRY}",
-      local=args.sink == _LOCAL)
+  try:
+    sinks: Sinks
+    if args.sink == "bq":
+      sinks = BigQuerySinks(project, args.output_dataset)
+    elif args.sink == "bq_client":
+      sinks = ClientLoadSinks(
+          str(directory), project=project, dataset=args.output_dataset)
+    else:
+      sinks = LocalJsonSinks(str(directory))
+    offline = fixture is not None and args.sink == _LOCAL
+    bq = None if offline else env.make_bq(project)
+    registry = _Registry(
+        sinks,
+        bq,
+        f"{project}.{args.output_dataset}.{REGISTRY}",
+        local=args.sink == _LOCAL)
+  except BaseException:
+    if temporary:
+      shutil.rmtree(temporary, ignore_errors=True)
+    raise
   return _Run(
       args=args,
       env=env,

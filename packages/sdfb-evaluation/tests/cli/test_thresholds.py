@@ -17,8 +17,10 @@ registry; what a real run stores under it, row by row, against the same
 run without it; and what `report` and `compare` say about it.
 
 The real pair is the cheapest real pipeline twice (`users` alone, 12
-rows a side, `age` shifted so that it fails for certain). Nothing here
-is real data.
+rows a side, `age` planted to fail for certain): once under the
+catalogue, once under a file that lifts every metric the first run
+failed — so the two runs differ in what the `--fail_on` gate exits with.
+Nothing here is real data.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -31,11 +33,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from beam.acceptance_data import rescored
+from beam.acceptance_data import USERS_FIELDS, rescored
 from unit.context.plan_fakes import JOB_ID, PROJECT
 
 from sdfb_evaluation.beam.assemble import RowContext, metric_row
-from sdfb_evaluation.cli import driver, run_evaluation
+from sdfb_evaluation.cli import driver, gate, run_evaluation
 from sdfb_evaluation.cli.main import main
 from sdfb_evaluation.cli.thresholds import load_thresholds, thresholds_digest
 from sdfb_evaluation.context.gcp import JobNotFoundError
@@ -63,9 +65,6 @@ thresholds:
   column.ks: {warn: 1, fail: 2}
 """
 OVERRIDES = {"column.ks": (1.0, 2.0), "row.coverage": (0.9, 0.8)}
-# the real pair: a KS distance never reaches 2, a mean never moves 100
-# standard deviations
-LOOSE = {"column.ks": (2.0, 3.0), "column.smd": (100.0, 200.0)}
 _GRADED = ("status", "score", "threshold_warn", "threshold_fail")
 _MEASURED = ("value", "source_value", "synthetic_value", "noise_floor",
              "ci_low", "ci_high", "n_source", "n_synthetic", "method")
@@ -154,6 +153,9 @@ def test_a_thresholds_file_is_read_normalised(tmp_path):
          "column.ks.fail: expected a number"),
         ("thresholds:\n  column.ks: {warn: -0.1, fail: 0.2}\n",
          "column.ks.warn: expected a number"),
+        # an integer no float can hold
+        ("thresholds:\n  column.ks: {warn: 0.1, fail: " + "9" * 400 + "}\n",
+         "column.ks.fail: expected a number"),
         # warn and fail in the wrong order for the direction
         ("thresholds:\n  column.ks: {warn: 0.3, fail: 0.2}\n",
          "column.ks is lower_better: expected warn <= fail"),
@@ -186,9 +188,13 @@ def test_a_bad_thresholds_file_stops_a_run_before_anything_starts(
   wrong_order = _file(tmp_path, _yaml({"column.ks": (0.3, 0.2)}), "order.yaml")
   unknown = _file(tmp_path, _yaml({"column.kolmogorov": (0.1, 0.2)}), "id.yaml")
   missing = str(tmp_path / "absent.yaml")
+  huge = _file(tmp_path,
+               "thresholds:\n  column.ks: {warn: 1, fail: " + "9" * 400 + "}\n",
+               "huge.yaml")
   for path, said in ((wrong_order, "expected warn <= fail"),
-                     (unknown, "is not a catalogue metric id"),
-                     (missing, "absent.yaml")):
+                     (unknown, "is not a catalogue metric id"), (missing,
+                                                                 "absent.yaml"),
+                     (huge, "column.ks.fail: expected a number")):
     argv = [*TARGET, "--thresholds_uri", path]
     for entry, flags in ((main, ["run", *argv]), (run_evaluation.main, argv)):
       with pytest.raises(SystemExit) as info:
@@ -279,35 +285,75 @@ def test_a_failed_evaluation_records_the_override_too(bq, resolved, stub,
 # --------------------------------------------------------------------------
 # a real run with an override, and the same run without it
 # --------------------------------------------------------------------------
+def _loosest(metric_id: str) -> tuple[float, float]:
+  """The loosest thresholds an override may give a metric: a share that
+  only fails at 0, a distance that never reaches a million."""
+  if catalogue().get(metric_id).direction == "higher_better":
+    return (0.001, 0.0)
+  return (1000000.0, 2000000.0)
+
+
 class _Pair:
   """The same evaluation run twice: `default` under the catalogue's
-  thresholds, `overridden` under `LOOSE`."""
+  thresholds, `overridden` under a file (`uri`) that gives every metric
+  with a FAIL row in the default run the loosest thresholds an override
+  may hold (`overrides`). `codes` are the two exit codes under
+  `--fail_on fail`.
+
+  The table is `users` without `street_address`: free text of which no
+  synthetic value is a source value scores exactly 0 on two
+  higher-is-better metrics, and no threshold of 0 or more lets a 0 pass.
+  It has 12 rows a side and a 6-row reference panel, so the run is not
+  PARTIAL and only its counts speak to the gate. `age` is planted: one
+  synthetic row at the source's youngest, the rest at its oldest."""
 
   def __init__(self, tmp: Path):
     source = fixture_rows(12, seed=5, id_base=100_000)
     synthetic = fixture_rows(12, seed=6, id_base=500_000)
-    for row in synthetic["users"]:
-      row["age"] += 1000  # no synthetic age is a source age
+    ages = sorted(row["age"] for row in source["users"])
+    for k, row in enumerate(synthetic["users"]):
+      row["age"] = ages[0] if k == 0 else ages[-1]
+    spec = {
+        "users": {
+            "name": "users",
+            "schema": [
+                f for f in USERS_FIELDS if f["name"] != "street_address"
+            ],
+            "pk": ["id"],
+            "identity": ["email"],
+        }
+    }
     fixture = write_fixture(
-        tmp / "fixture", source, synthetic, tables=("users",))
-    self.uri = _file(tmp, _yaml(LOOSE))
+        tmp / "fixture",
+        source,
+        synthetic,
+        tables=("users",),
+        panel=6,
+        specs=spec)
     self.codes: list[int] = []
-    stored: dict[str, store.Evaluation] = {}
-    for name, extra in (("default", []), ("overridden",
-                                          ["--thresholds_uri", self.uri])):
-      # one clock and one token: the two runs are the same evaluation
-      env = driver.Env(now=lambda: NOW, token=lambda: "0badc0de")
-      argv = [
-          "run", "--fixture_dir",
-          str(fixture), "--mode", "exact", "--fail_on", "fail",
-          "--output_local",
-          str(tmp / name), *extra
-      ]
-      self.codes.append(main(argv, env))
-      (directory,) = list((tmp / name).iterdir())
-      stored[name] = store.read_local(str(directory))
-    self.default = stored["default"]
-    self.overridden = stored["overridden"]
+    self.default = self._run(tmp, fixture, "default", [])
+    failing = sorted({
+        row["metric_id"]
+        for row in self.default.metrics
+        if row["status"] == "fail" and not is_aggregate(row["metric_id"])
+    })
+    self.overrides = {metric_id: _loosest(metric_id) for metric_id in failing}
+    self.uri = _file(tmp, _yaml(self.overrides))
+    self.overridden = self._run(tmp, fixture, "overridden",
+                                ["--thresholds_uri", self.uri])
+
+  def _run(self, tmp: Path, fixture: Path, name: str,
+           extra: list[str]) -> store.Evaluation:
+    # one clock and one token: the two runs are the same evaluation
+    env = driver.Env(now=lambda: NOW, token=lambda: "0badc0de")
+    argv = [
+        "run", "--fixture_dir",
+        str(fixture), "--mode", "exact", "--fail_on", "fail", "--output_local",
+        str(tmp / name), *extra
+    ]
+    self.codes.append(main(argv, env))
+    (directory,) = list((tmp / name).iterdir())
+    return store.read_local(str(directory))
 
 
 def _keyed(evaluation: store.Evaluation) -> dict[tuple, dict[str, Any]]:
@@ -329,7 +375,7 @@ def test_an_overridden_run_stores_its_thresholds_and_what_they_imply(
     pair, capsys):
   before, after = _keyed(pair.default), _keyed(pair.overridden)
   assert before.keys() == after.keys()
-  named = 0
+  lifted, untouched = 0, set()
   for key, row in after.items():
     was = before[key]
     metric_id = row["metric_id"]
@@ -337,31 +383,31 @@ def test_an_overridden_run_stores_its_thresholds_and_what_they_imply(
       continue
     # an override moves no measured value
     assert [row[k] for k in _MEASURED] == [was[k] for k in _MEASURED], key
-    if metric_id in LOOSE:
+    if metric_id in pair.overrides:
       # the override's thresholds on its rows, the catalogue's without it
       metric = catalogue().get(metric_id)
       assert (was["threshold_warn"],
               was["threshold_fail"]) == (metric.warn, metric.fail), key
       assert (row["threshold_warn"],
-              row["threshold_fail"]) == LOOSE[metric_id], key
-      assert row["status"] in ("pass", "not_evaluated"), key
-      named += 1
+              row["threshold_fail"]) == pair.overrides[metric_id], key
+      assert row["status"] != "fail", key
+      lifted += was["status"] == "fail"
     else:
       assert row == was, key  # nor any other metric's row
-  assert named > 2
-  # the planted shift: FAIL by the catalogue, PASS under the override
+      untouched.add(metric_id)
+  assert lifted == pair.default.final["metrics_fail"] > 10
+  assert len(pair.overrides) > 5 and len(untouched) > 5
+  # the planted ages: FAIL by the catalogue, PASS under the override
   ks = ("users", "column.ks", "age", None, None)
-  assert (before[ks]["value"], before[ks]["status"]) == (1.0, "fail")
+  assert before[ks]["value"] > 0.8 and before[ks]["status"] == "fail"
   assert after[ks]["status"] == "pass"
-  assert after[ks]["score"] == before[ks]["score"] == 0.0  # `complement`
+  assert after[ks]["score"] == before[ks]["score"] < 0.2  # `complement`
   smd = ("users", "column.smd", "age", None, None)
   assert (before[smd]["status"], before[smd]["score"]) == ("fail", 0.0)
   assert (after[smd]["status"], after[smd]["score"]) == ("pass", 1.0)
-  # the roll-ups follow the rows: a `linear` score moved, so fidelity did
+  # the roll-ups follow the rows: `linear` scores moved, so fidelity did
   fidelity = ("users", "table.fidelity_score", None, None, None)
   assert after[fidelity]["value"] > before[fidelity]["value"]
-  integrity = ("users", "table.integrity_score", None, None, None)
-  assert after[integrity] == before[integrity]
   capsys.readouterr()
 
 
@@ -377,19 +423,34 @@ def test_the_registry_of_an_overridden_run_counts_and_records_it(pair):
           r["status"] == status for r in measured), status
     for event in evaluation.events:
       check_row(REGISTRY, event, ordered=False)
-  flipped = sum(r["status"] == "fail" and r["metric_id"] in LOOSE
-                for r in pair.default.metrics)
-  assert flipped >= 2
-  assert overridden["metrics_fail"] == default["metrics_fail"] - flipped
+  assert default["metrics_fail"] > 10 and overridden["metrics_fail"] == 0
   assert overridden["metrics_total"] == default["metrics_total"]
   assert overridden["fidelity_score"] > default["fidelity_score"]
   assert overridden["evaluation_key"] == default["evaluation_key"]
   assert overridden["catalogue_version"] == default["catalogue_version"]
-  wanted = (pair.uri, thresholds_digest(LOOSE))
+  wanted = (pair.uri, thresholds_digest(pair.overrides))
   assert [_recorded(e) for e in pair.overridden.events] == [wanted, wanted]
   assert [_recorded(e) for e in pair.default.events] == [(None, None)] * 2
-  # the gate reads the stored counts (both runs still hold a FAIL)
-  assert pair.codes == [1, 1] and overridden["metrics_fail"] > 0
+
+
+def test_an_override_flips_the_exit_code_of_the_gate(pair):
+  """The gate grades nothing: it reads the FINAL row. The two FINAL rows
+  of the pair, one evaluation under two sets of thresholds, exit
+  differently under `--fail_on fail`."""
+  default, overridden = pair.default.final, pair.overridden.final
+  # neither run is PARTIAL (that alone would trip the gate): the counts decide
+  assert default["status"] == overridden["status"]
+  assert default["status"] in ("SUCCEEDED", "SUCCEEDED_WITH_WARNINGS")
+
+  def code(final: dict[str, Any], fail_on: str) -> int:
+    counts = {key: final[f"metrics_{key}"] for key in ("fail", "warn")}
+    return gate.final_exit_code(final, fail_on, counts)
+
+  assert (code(default, "fail"), code(overridden, "fail")) == (1, 0)
+  assert pair.codes == [1, 0]  # and what the two `run --fail_on fail` exited
+  assert (code(default, "none"), code(overridden, "none")) == (0, 0)
+  # WARN rows of metrics the file does not name still trip `--fail_on warn`
+  assert overridden["metrics_warn"] > 0 and code(overridden, "warn") == 1
 
 
 def test_a_stored_row_rescores_to_its_status_under_its_own_thresholds(pair):
@@ -408,7 +469,7 @@ def test_a_stored_row_rescores_to_its_status_under_its_own_thresholds(pair):
       row for row in pair.overridden.metrics
       if rescored(row)["status"] != row["status"]
   ]
-  assert {row["metric_id"] for row in moved} == set(LOOSE)
+  assert {row["metric_id"] for row in moved} == set(pair.overrides)
 
 
 # --------------------------------------------------------------------------

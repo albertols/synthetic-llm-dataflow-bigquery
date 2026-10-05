@@ -21,9 +21,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
-import os
 import socket
-import tempfile
 
 import google.auth
 import pytest
@@ -54,21 +52,71 @@ def test_looking_for_google_credentials_fails_the_test(no_network):
   no_network.clear()
 
 
-def test_loopback_and_unix_sockets_stay_open(no_network):
+def test_resolving_a_name_off_this_machine_fails_the_test(no_network):
+  """The older resolvers leave the machine as `getaddrinfo` does."""
+  for resolve in (socket.gethostbyname, socket.gethostbyname_ex):
+    with pytest.raises(pytest.fail.Exception, match=r"example\.com"):
+      resolve("example.com")
+  with pytest.raises(pytest.fail.Exception, match=r"192\.0\.2\.1"):
+    socket.gethostbyaddr(_ELSEWHERE[0])
+  assert no_network == [
+      "gethostbyname('example.com')", "gethostbyname_ex('example.com')",
+      "gethostbyaddr('192.0.2.1')"
+  ]
+  no_network.clear()
+  # this machine still answers for itself
+  assert socket.gethostbyname("127.0.0.1") == "127.0.0.1"
+  assert socket.gethostbyname("localhost")
+  assert socket.gethostbyname_ex("localhost")[2]
+  assert socket.gethostbyaddr("127.0.0.1")[0]
+  assert not no_network
+
+
+def test_a_datagram_off_this_machine_fails_the_test(no_network):
+  """UDP needs no connection: `sendto` and `sendmsg` name the address
+  themselves."""
+  with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+    with pytest.raises(pytest.fail.Exception, match=r"sendto.*192\.0\.2\.1"):
+      probe.sendto(b"x", _ELSEWHERE)
+    with pytest.raises(pytest.fail.Exception, match=r"sendto.*192\.0\.2\.1"):
+      probe.sendto(b"x", 0, _ELSEWHERE)  # the form with flags
+    with pytest.raises(pytest.fail.Exception, match=r"sendmsg.*192\.0\.2\.1"):
+      probe.sendmsg([b"x"], [], 0, _ELSEWHERE)
+  assert len(no_network) == 3
+  no_network.clear()
+  with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+    receiver.bind(("127.0.0.1", 0))
+    receiver.settimeout(5)
+    here = receiver.getsockname()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+      sender.sendto(b"one", here)
+      assert receiver.recv(16) == b"one"
+      sender.sendto(b"two", 0, here)
+      assert receiver.recv(16) == b"two"
+      sender.sendmsg([b"three"], [], 0, here)
+      assert receiver.recv(16) == b"three"
+      # connected (to loopback): no address goes with the datagram
+      sender.connect(here)
+      sender.sendmsg([b"four"])
+      assert receiver.recv(16) == b"four"
+  assert not no_network
+
+
+def test_loopback_and_unix_sockets_stay_open(no_network, tmp_path, monkeypatch):
   with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
     server.bind(("127.0.0.1", 0))
     server.listen(1)
     with socket.create_connection(server.getsockname(), timeout=5) as client:
       assert client.getpeername() == server.getsockname()
   assert socket.getaddrinfo("localhost", 0)
-  # a unix socket path is short by law (about 100 bytes): not tmp_path
-  with tempfile.TemporaryDirectory() as directory:
-    path = os.path.join(directory, "s")
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
-      server.bind(path)
-      server.listen(1)
-      with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.connect(path)
+  # a unix socket path is short by law (about 100 bytes) and a temporary
+  # directory's need not be: the socket is named from inside it
+  monkeypatch.chdir(tmp_path)
+  with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+    server.bind("guard.sock")
+    server.listen(1)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+      client.connect("guard.sock")
   assert not no_network
 
 

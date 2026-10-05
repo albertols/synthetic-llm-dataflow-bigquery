@@ -194,21 +194,35 @@ class FakeResult:
   It has no job id: the run cannot outlive the driver."""
 
   def __init__(self,
-               state: str = "RUNNING",
+               state: str | Sequence[str] = "RUNNING",
                *,
                final: str | None = "DONE",
                error: BaseException | None = None):
-    self.state = state
+    self._states = [state] if isinstance(state, str) else list(state)
     self.final = final
     self.error = error
     self.waits = 0
     self.cancels = 0
 
+  @property
+  def state(self) -> str:
+    """What the runner says now. Given several states, each read takes
+    the next one and the last one stays: a job that moves on between
+    two looks at it."""
+    if len(self._states) > 1:
+      return self._states.pop(0)
+    return self._states[0]
+
+  @state.setter
+  def state(self, value: str) -> None:
+    self._states = [value]
+
   def wait_until_finish(self) -> str | None:
     self.waits += 1
+    seen = self.state  # the runner's own last look, as its polling takes one
     if self.error is not None:
       raise self.error
-    self.state = self.final or self.state
+    self.state = self.final or seen
     return self.final
 
   def cancel(self) -> None:

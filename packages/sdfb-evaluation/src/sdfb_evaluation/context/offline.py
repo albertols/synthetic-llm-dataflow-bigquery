@@ -63,8 +63,13 @@ from sdfb_evaluation.canonical import canonical_value, numeric_value
 from sdfb_evaluation.context.budget import Budget
 from sdfb_evaluation.context.plan import (
     ATOM_TOP_K,
+    BOOL_TYPES,
     DICTIONARY_TOP_K,
     GRID_POINTS,
+    NESTED_TYPES,
+    NUMERIC_TYPES,
+    STRING_TYPES,
+    TEMPORAL_TYPES,
     TablePlan,
     apply_planning,
     encoding_plan_digest,
@@ -78,12 +83,6 @@ from sdfb_evaluation.context.scope import ScopePlan
 
 __all__ = ["panel_of", "planning_stats", "table_plan"]
 
-_NUMERIC = frozenset({
-    "INT64", "INTEGER", "FLOAT64", "FLOAT", "NUMERIC", "BIGNUMERIC", "DECIMAL",
-    "BIGDECIMAL"
-})
-_TEMPORAL = frozenset({"TIMESTAMP", "DATETIME", "DATE", "TIME"})
-_NESTED = frozenset({"RECORD", "STRUCT", "JSON"})
 _GRID = np.linspace(0.0, 1.0, GRID_POINTS)
 
 
@@ -126,7 +125,8 @@ def _numeric_stats(values: Sequence[Any]) -> dict[str, Any]:
 def _column_stats(field: Mapping[str, Any], values: Sequence[Any],
                   is_key: bool) -> dict[str, Any]:
   bq_type = str(field.get("type") or "").upper()
-  if str(field.get("mode") or "").upper() == "REPEATED" or bq_type in _NESTED:
+  repeated = str(field.get("mode") or "").upper() == "REPEATED"
+  if repeated or bq_type in NESTED_TYPES:  # the planner counts only NULLs
     return {"null": sum(1 for v in values if v is None or v == [])}
   present = [v for v in values if v is not None]
   stats: dict[str, Any] = {
@@ -139,14 +139,14 @@ def _column_stats(field: Mapping[str, Any], values: Sequence[Any],
     stats["empty"] = sum(1 for v in present if len(v) == 0)
   if is_key:
     return stats
-  if bq_type in _NUMERIC | _TEMPORAL:
+  if bq_type in NUMERIC_TYPES | TEMPORAL_TYPES:
     stats.update(_numeric_stats(values))
     if bq_type in ("TIMESTAMP", "DATETIME"):
       stats["midnight"] = sum(
           1 for v in present if isinstance(v, datetime) and v.time() == time(0))
-  elif bq_type in ("BOOL", "BOOLEAN"):
+  elif bq_type in BOOL_TYPES:
     stats["top"] = _top(values, DICTIONARY_TOP_K)
-  elif bq_type in ("STRING", "BYTES"):
+  elif bq_type in STRING_TYPES:
     stats["avg_len"] = (
         sum(len(v) for v in present) / len(present) if present else None)
     stats["top"] = _top(values, DICTIONARY_TOP_K)

@@ -47,6 +47,7 @@ from sdfb_evaluation.context.plan import (
     Knobs,
     build_plan,
     evaluation_key,
+    kinds_from_schema,
     planning_outputs,
     table_roles,
 )
@@ -207,6 +208,43 @@ def test_offline_statistics_have_the_planning_selects_shape(rows):
     assert given <= wanted, name
     assert wanted - given <= {"avg_len"}, name  # None for an all-NULL column
   assert set(stats["columns"]["order_id"]) == {"null", "distinct"}
+
+
+def test_offline_statistics_take_their_type_names_from_the_planner():
+  """One definition of which types are numbers, times, booleans, text
+  and not scalars at all: a type the planner counts only NULLs of
+  (`GEOGRAPHY`, `INTERVAL`, `RANGE` beside `RECORD` and `JSON`) gets no
+  other statistic here, and every alias is planned like its type."""
+  fields = [{
+      "name": name,
+      "type": bq_type,
+      "mode": "NULLABLE"
+  } for name, bq_type in (("spot", "GEOGRAPHY"), ("gap", "INTERVAL"),
+                          ("span", "RANGE"), ("blob", "JSON"), ("n", "INTEGER"),
+                          ("x", "FLOAT"), ("d", "DECIMAL"), ("flag", "BOOLEAN"),
+                          ("raw", "BYTES"))]
+  rows = [{
+      "spot": "POINT(1 2)",
+      "gap": "0-0 1 0:0:0",
+      "span": "[2026-01-01, 2026-02-01)",
+      "blob": {
+          "a": 1
+      },
+      "n": 3,
+      "x": 0.5,
+      "d": 2,
+      "flag": True,
+      "raw": b"ab",
+  },
+          dict.fromkeys(f["name"] for f in fields)]
+  stats = offline.planning_stats(fields, rows)["columns"]
+  asked: dict[str, set[str]] = {}
+  for output in planning_outputs(kinds_from_schema(fields, keys=())):
+    asked.setdefault(output.column, set()).add(output.stat)
+  for name in ("spot", "gap", "span", "blob"):
+    assert asked[name] == {"null"} and stats[name] == {"null": 1}, name
+  for name in ("n", "x", "d", "flag", "raw"):
+    assert set(stats[name]) == asked[name], name
 
 
 def test_a_malformed_fixture_says_what_is_wrong(directory, tmp_path):

@@ -171,7 +171,7 @@ Exit codes of `run`:
 | 0 | the evaluation finished and no gate tripped |
 | 1 | the `--fail_on` gate tripped, and nothing else |
 | 2 | a usage error: nothing was started (no registry row, no DDL). A malformed Beam argument, a thresholds file that does not validate and `--runner PrismRunner` are usage errors too |
-| 3 | the evaluation failed: its FINAL row reads FAILED (no table could be evaluated), or the run raised an error. The FAILED row is written first, the traceback goes to stderr. `--fail_on none` does not mask it |
+| 3 | the evaluation failed: its FINAL row reads FAILED (no table could be evaluated), or the command raised an error and its traceback is on stderr. The command appends a FAILED row first when the outcome is its own to record (the table below); it appends none while a submitted job is still running, or when the registry could not be read back. `--fail_on none` does not mask it |
 
 The `--fail_on` gate, by the status of the run:
 
@@ -182,10 +182,22 @@ The `--fail_on` gate, by the status of the run:
 | SKIPPED | 0 | 0: an empty scope is a planned outcome (one line on stderr says nothing was evaluated) |
 | FAILED | 3 | 3 |
 
-The registry holds exactly one terminal row per evaluation. If you
-interrupt `run` (Ctrl-C) while it waits for a Dataflow job, the job is not
-cancelled and the driver writes no row: the job goes on and writes its
-own. The command prints the job id and how to read the result later.
+The registry never holds two terminal rows for one evaluation: the row is
+written by whoever owns the outcome, and by nobody while that is not yet
+known.
+
+| What happened | The terminal row |
+|---|---|
+| the run completed | the pipeline's FINAL row |
+| planning, the prepare DDL or the submission raised | the command's FAILED row |
+| the job ended FAILED or CANCELLED | the command's FAILED row |
+| the job ended DONE and the registry, read back, holds no FINAL row | the command's FAILED row ("the job finished without a FINAL row") |
+| Ctrl-C, or an error while polling, and the Dataflow job is still running | none yet. The job is not cancelled: it goes on and writes its own. The command prints the job id and how to read the result later |
+| the wait failed, but the job had finished DONE | the pipeline's FINAL row. After a polling error the command warns and reads the result as usual (the evaluation completed); after Ctrl-C it writes nothing and prints how to read the result |
+| the job finished, and the registry could not be read back | none: the FINAL row may well be there. The command says the registry could not be read |
+
+So a RUNNING row without a terminal row means the job is still running, or
+that it died after the command had stopped watching it.
 
 #### Your own thresholds
 
