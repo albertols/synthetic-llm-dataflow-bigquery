@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -82,6 +83,8 @@ from sdfb_evaluation.context.plan import (
 from sdfb_evaluation.context.reference import Panel
 from sdfb_evaluation.context.relationships import Edge
 from sdfb_evaluation.context.scope import ScopePlan
+from sdfb_evaluation.scoring import to_metric_row
+from sdfb_evaluation.types import MetricValue
 
 from .dense_data import planning_stats
 from .tables import DATASET, PROJECT, SOURCE_DATASET
@@ -733,27 +736,76 @@ FIELDS_BY_TABLE = {
 
 class FakeStatsQuery:
   """The driver's `source_table_stats` read (`Bq.query`'s shape), served
-  from rows computed on each table's reference sample; `calls` records
-  every (sql, params)."""
+  from rows computed on each table's reference sample, answered as
+  `assemble.source_stats_sql` asks: the table and reference digest, the
+  tier (a row without one counts as `sample`) and the latest row per
+  column (`computed_at`). `add` stores more rows (older stats, another
+  tier); `calls` records every (sql, params)."""
 
   def __init__(self, plan: EvaluationPlan, **overrides: Any):
     self.calls: list[tuple[str, dict[str, Any]]] = []
-    self._rows: dict[str, list[dict[str, Any]]] = {}
+    self._rows: list[dict[str, Any]] = []
     for table in plan.tables:
       if table.panel is None or table.name not in FIELDS_BY_TABLE:
         continue
-      self._rows[str(table.source_table)] = stats_rows(
-          table, FIELDS_BY_TABLE[table.name], table.panel.r_rows, **overrides)
+      self._rows += stats_rows(table, FIELDS_BY_TABLE[table.name],
+                               table.panel.r_rows, **overrides)
+
+  def add(self, rows: Sequence[Mapping[str, Any]]) -> None:
+    self._rows += [dict(row) for row in rows]
 
   def __call__(self, sql: str, params: Mapping[str, Any],
                **kwargs: Any) -> list[dict[str, Any]]:
     del kwargs  # max_bytes: the stats table is tiny
     self.calls.append((sql, dict(params)))
-    rows = self._rows.get(str(params.get("table_fqn")), [])
-    return [
-        row for row in rows
-        if row["reference_digest"] == params.get("reference_digest")
-    ]
+    latest: dict[str, dict[str, Any]] = {}
+    for row in self._rows:
+      if (row["table_fqn"] != params.get("table_fqn") or
+          row["reference_digest"] != params.get("reference_digest") or
+          (row["stats_tier"] or "sample") != params.get("tier")):
+        continue
+      held = latest.get(row["column"])
+      if held is None or row["computed_at"] > held["computed_at"]:
+        latest[row["column"]] = row
+    return list(latest.values())
+
+
+# what a reader of evaluation_metrics has of a row's measurement
+_MEASURED = ("value", "source_value", "synthetic_value", "baseline_value",
+             "noise_floor", "ci_low", "ci_high")
+
+
+def rescored(row: Mapping[str, Any]) -> dict[str, Any]:
+  """A persisted `evaluation_metrics` row scored again by
+  `scoring.to_metric_row` from nothing but its own fields, as any reader
+  of the table can. JSON holds no infinity: a gated value that was
+  infinite is persisted NULL with `detail.nonfinite` naming its sign,
+  and is read back from there."""
+  detail = dict(row["detail"] or {})
+  measured = {name: row[name] for name in _MEASURED}
+  sign = detail.get("nonfinite")
+  if sign is not None:
+    metric = load_catalogue().get(row["metric_id"])
+    gated = "value"
+    if metric.uses_ci_bound:
+      gated = "ci_high" if metric.direction == "higher_better" else "ci_low"
+    measured[gated] = math.inf if sign == "+inf" else -math.inf
+  enforced = detail.get("enforced", True)
+  return to_metric_row(
+      MetricValue(
+          metric_id=row["metric_id"],
+          table=row["table_name"],
+          column=row["column_name"],
+          column_2=row["column_name_2"],
+          edge=row["edge"],
+          column_kind=row["column_kind"],
+          detail=detail,
+          **measured),
+      evaluation_id=row["evaluation_id"],
+      evaluated_at=row["evaluated_at"],
+      landing_table=row["landing_table"],
+      source_table=row["source_table"],
+      enforced=enforced if isinstance(enforced, bool) else True)
 
 
 def with_scope(table: TablePlan, *, status: str, reason: str) -> TablePlan:

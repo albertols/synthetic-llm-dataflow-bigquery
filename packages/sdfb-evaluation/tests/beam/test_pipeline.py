@@ -13,8 +13,9 @@
 #  limitations under the License.
 """Tests for `sdfb_evaluation.beam.pipeline` (Task 26) beyond the
 acceptance: the runner defaults and side-input cache sizing, the prepare
-step's degradations, per-table failure isolation on the DirectRunner, and
-the label key made once and kept out of the job graph.
+step's degradations (on a refusal only), per-table failure isolation on
+the DirectRunner, profile rows whose edges persist as computed, and the
+label key made once and kept out of the job graph.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -24,13 +25,18 @@ from __future__ import annotations
 import base64
 import bz2
 import dataclasses
+import hashlib
+import itertools
 import math
+import random
 import zlib
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import apache_beam as beam
+import numpy as np
 import pytest
 from apache_beam.internal import pickler
 from apache_beam.options.pipeline_options import (
@@ -42,7 +48,10 @@ from apache_beam.options.pipeline_options import (
 from apache_beam.portability import common_urns
 from apache_beam.portability.api import beam_runner_api_pb2
 
+from sdfb_evaluation.beam import pipeline as pipeline_module
+from sdfb_evaluation.beam.assemble import stable_floats
 from sdfb_evaluation.beam.io import InMemorySources, LocalJsonSinks
+from sdfb_evaluation.beam.membership import TABLE_ERRORS
 from sdfb_evaluation.beam.pipeline import (
     MIN_CACHE_MB,
     build_evaluation_pipeline,
@@ -50,10 +59,17 @@ from sdfb_evaluation.beam.pipeline import (
     prepare_evaluation,
     side_input_bytes,
 )
+from sdfb_evaluation.beam.relational import (
+    COGROUP,
+    SIDE_INPUT,
+    SIDE_INPUT_MAX_KEYS,
+    plan_edges,
+)
 from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.plan import SAMPLE_MODULUS, PrepareStatement
 from sdfb_evaluation.context.scope import pin_source, sampled_read
 from sdfb_evaluation.scoring import is_aggregate
+from sdfb_evaluation.types import Side
 
 from .acceptance_data import (
     ITEMS_FIELDS,
@@ -169,6 +185,69 @@ def test_cache_is_the_sum_of_the_broadcast_sets(small):
                                    large)["max_cache_memory_usage_mb"] == wanted
 
 
+def test_cache_counts_exactly_the_relational_side_input_joins(small):
+  """The estimate reads the relational pass's own edge plan
+  (`relational.plan_edges`: its parent resolution, its join switch and
+  the sides it does not evaluate), so a parent key set is budgeted
+  exactly when that pass broadcasts it (M9)."""
+  plan = evaluation_plan(
+      _tables(small), evaluation_id="ev_sets", label_key_uri=None)
+  users = plan.tables[0]
+
+  def planned(**changes: Any) -> Any:
+    parent = dataclasses.replace(users, **changes)
+    return dataclasses.replace(plan, tables=(parent, *plan.tables[1:]))
+
+  def orders_edge(variant: Any) -> Any:
+    """The synthetic side of orders → users as the relational pass plans it."""
+    [spec] = [s for s, _ in plan_edges(variant.tables) if s.child == "orders"]
+    return spec.synthetic
+
+  key_set = 8 * SIDE_INPUT_MAX_KEYS
+  at = planned(rows_synthetic=SIDE_INPUT_MAX_KEYS)
+  past = planned(rows_synthetic=SIDE_INPUT_MAX_KEYS + 1)
+  assert orders_edge(at).path == SIDE_INPUT
+  assert orders_edge(past).path == COGROUP
+  # one parent row past the switch: the join shuffles, the set is not held
+  assert side_input_bytes(at) - side_input_bytes(past) == key_set
+  # a side the pass does not evaluate (its parent cannot be read) builds
+  # no key set, whatever the parent's planned row count
+  unread = planned(
+      rows_synthetic=SIDE_INPUT_MAX_KEYS,
+      synthetic_read_table="",
+      scope=dataclasses.replace(
+          users.scope, read_table="", reason="tables.getData denied"))
+  assert "cannot be read" in str(orders_edge(unread).reason)
+  assert side_input_bytes(at) - side_input_bytes(unread) == key_set
+
+
+def test_encoding_memory_errors_fail_the_bundle(small):
+  """A data error on a worker makes the table not_evaluated; a
+  MemoryError is transient and must fail (and retry) the bundle (M12)."""
+  users = _tables(small)[0]
+  fn = pipeline_module._SafeEncodeFn(users, Side.SYNTHETIC, salt="s" * 32)  # pylint: disable=protected-access  # the DoFn under test
+  fn.setup()
+  good = list(fn.process(small["synthetic"]["users"][:5]))
+  assert len(good) == 1 and good[0].n == 5
+  broken = [{
+      k: v for k, v in r.items() if k != "age"
+  } for r in small["synthetic"]["users"][:5]]
+  [tagged] = list(fn.process(broken))
+  assert tagged.tag == "failed" and "age" in tagged.value[1]
+
+  class _Exhausted:
+
+    def encode(self, rows: Any) -> Any:
+      raise MemoryError("out of memory")
+
+  fn._encoder = _Exhausted()  # pylint: disable=protected-access  # simulate an OOM mid-encode
+  with pytest.raises(MemoryError):
+    list(fn.process(small["synthetic"]["users"][:5]))
+  # every other per-table data error still makes the table not_evaluated
+  caught = pipeline_module._ENCODE_ERRORS  # pylint: disable=protected-access  # the rule under test
+  assert set(caught) == set(TABLE_ERRORS) - {MemoryError}
+
+
 # --------------------------------------------------------------------------
 # prepare
 # --------------------------------------------------------------------------
@@ -176,8 +255,12 @@ class _FakeBq:
   """`Bq.execute`/`dry_run_bytes` over rules: a statement or dry run
   matching `refuse` raises BigQuery's error."""
 
-  def __init__(self, *, refuse: Sequence[str] = ()):
+  def __init__(self,
+               *,
+               refuse: Sequence[str] = (),
+               error: Exception | None = None):
     self.refuse = tuple(refuse)
+    self.error = error
     self.executed: list[str] = []
     self.dry_runs: list[str] = []
 
@@ -188,14 +271,14 @@ class _FakeBq:
               max_bytes: int | None = None) -> None:
     del params, max_bytes
     if any(word in sql for word in self.refuse):
-      raise BqApiError(f"400 cannot run: {sql[:40]}")
+      raise self.error or BqApiError(f"400 cannot run: {sql[:40]}", status=400)
     self.executed.append(sql)
 
   def dry_run_bytes(self, sql: str, params: Any = None) -> int:
     del params
     self.dry_runs.append(sql)
     if any(word in sql for word in self.refuse):
-      raise PermissionError("403 tables.getData denied")
+      raise self.error or PermissionError("403 tables.getData denied")
     return 0
 
 
@@ -269,6 +352,41 @@ def test_a_refused_pin_resamples_the_live_source(small):
   assert f"`{table.source_read_table}`" in prepared.prepare_sql[0].sql
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        BqApiError("400 cannot clone across regions", status=400),
+        BqApiError("403 not allowed", status=403),
+        BqApiError("404 not found", status=404),
+        PermissionError("403 snapshot denied"),  # the wrapper's 403
+        LookupError("404 dataset not found in location"),  # and its 404
+    ])
+def test_a_pin_refusal_degrades(small, error):
+  plan, _ = _pinned(small, sampled=False)
+  bq = _FakeBq(refuse=("CREATE SNAPSHOT",), error=error)
+  prepared = prepare_evaluation(plan, bq)
+  assert not prepared.tables[0].source_pinned
+  assert any(str(error) in w for w in prepared.warnings)
+
+
+@pytest.mark.parametrize("error", [
+    BqApiError("503 backend error", status=503),
+    BqApiError("500 internal error", status=500),
+    BqApiError("429 rate limited", status=429),
+    BqApiError("409 concurrent job", status=409),
+    BqApiError("transport failure", status=None),
+])
+def test_a_transient_pin_failure_raises(small, error):
+  """Only a refusal degrades a pin; a transient or unknown error fails
+  the preparation instead of silently switching the table to its live
+  source (M8)."""
+  plan, _ = _pinned(small, sampled=False)
+  bq = _FakeBq(refuse=("CREATE SNAPSHOT",), error=error)
+  with pytest.raises(BqApiError) as raised:
+    prepare_evaluation(plan, bq)
+  assert raised.value is error
+
+
 def test_other_prepare_failures_raise(small):
   plan, _ = _pinned(small, sampled=True)
   with pytest.raises(BqApiError):
@@ -294,6 +412,30 @@ def test_an_unreadable_read_only_parent_loses_that_side(small):
   parent = prepare_evaluation(plan, bq).tables[-1]
   assert parent.scope.read_table == "" and parent.synthetic_read_table == ""
   assert "cannot be read" in str(parent.scope.reason)
+
+
+@pytest.mark.parametrize("error", [
+    BqApiError("503 backend error", status=503),
+    BqApiError("429 rate limited", status=429),
+])
+def test_a_transient_preflight_failure_raises(small, error):
+  """The read-only parent's readability check drops a side only when
+  BigQuery refuses the read; a transient error fails the preparation
+  instead of silently losing the side's metrics (M8)."""
+  products = external_table("products", ({
+      "name": "id",
+      "type": "INT64",
+      "mode": "REQUIRED"
+  },))
+  plan = evaluation_plan([*_tables(small), products],
+                         evaluation_id="ev_ext",
+                         label_key_uri=None)
+  bq = _FakeBq(refuse=(str(products.source_read_table),), error=error)
+  with pytest.raises(BqApiError):
+    prepare_evaluation(plan, bq)
+  refused = BqApiError("400 not a table", status=400)
+  bq = _FakeBq(refuse=(str(products.source_read_table),), error=refused)
+  assert prepare_evaluation(plan, bq).tables[-1].source_read_table == ""
 
 
 # --------------------------------------------------------------------------
@@ -359,10 +501,47 @@ def test_a_failing_table_is_not_evaluated_and_the_run_continues(
   assert "order_items: not evaluated" in final["status_reason"]
 
 
+def test_a_malformed_table_plan_is_not_evaluated_and_the_run_continues(
+    small, tmp_path):
+  """A plan too malformed to build a table's specs (a pair naming a
+  column the table does not have) fails that table on the driver — and
+  listing its not_evaluated rows must not fail the job in turn: its
+  table-level rows are written, the other table is evaluated (M10)."""
+  users, orders = _tables(small)[:2]
+  items = [f["name"] for f in ORDERS_FIELDS].index("num_of_item")
+  broken = dataclasses.replace(orders, pairs=((items, 99),))
+  plan = evaluation_plan([users, broken],
+                         evaluation_id="ev_malformed",
+                         label_key_uri=None)
+  rows_by = {
+      (name, side): small[side][name] for name in ("users", "orders")
+      for side in ("source", "synthetic")
+  }
+  sinks = _run(plan, rows_by, tmp_path / "out")
+  metrics = [
+      r for r in sinks.read_rows("evaluation_metrics")
+      if not is_aggregate(r["metric_id"])
+  ]
+  assert any(
+      r["table_name"] == "users" and r["status"] == "pass" for r in metrics)
+  failed = [r for r in metrics if r["table_name"] == "orders"]
+  assert failed and all(r["status"] == "not_evaluated" for r in failed)
+  assert all("could not be set up" in r["detail"]["reason"] for r in failed)
+  owned = [r for r in failed if r["level"] in ("row", "table")]
+  assert {
+      "row.memorization_lift", "table.detection_auc", "table.row_count_ratio"
+  } <= {r["metric_id"] for r in owned}
+  withheld = [r for r in owned if "rows_withheld" in r["detail"]]
+  assert withheld and not any(r["column_name"] for r in withheld)
+  [final] = sinks.read_rows("evaluation_data_history")
+  assert final["status"] == "PARTIAL"
+  assert "orders: not evaluated" in final["status_reason"]
+
+
 def test_every_table_failing_still_writes_rows_and_a_final_row(small, tmp_path):
   """No table reaches a transform (no side can be read): every launch
   table is not_evaluated with the reason, the roll-ups say why they are
-  empty, and the FINAL row is PARTIAL."""
+  empty, and the FINAL row is FAILED with the reasons in warnings (M4)."""
   plan = evaluation_plan(
       _tables(small)[:2], evaluation_id="ev_none", label_key_uri=None)
   sinks = _run(plan, {}, tmp_path / "out")
@@ -375,8 +554,96 @@ def test_every_table_failing_still_writes_rows_and_a_final_row(small, tmp_path):
   assert len(model) == 1 and model[0]["status"] == "not_evaluated"
   registry = sinks.read_rows("evaluation_data_history")
   assert len(registry) == 1
-  assert registry[0]["status"] == "PARTIAL"
+  assert registry[0]["status"] == "FAILED" and registry[0]["event"] == "FINAL"
+  assert registry[0]["status_reason"].startswith(
+      "no launch table could be evaluated: orders: not evaluated")
+  assert sum("cannot be read" in w for w in registry[0]["warnings"]) == 2
   assert registry[0]["metrics_total"] == len(measured)
+  assert registry[0]["metrics_not_evaluated"] == len(measured)
+  assert registry[0]["overall_score"] is None
+
+
+# --------------------------------------------------------------------------
+# profile rows (I2)
+# --------------------------------------------------------------------------
+_NARROW_FIELDS: tuple[dict[str, str], ...] = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "seen_at",
+        "type": "TIMESTAMP",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "reading",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+)
+
+
+def _narrow_rows(n: int, base: int, seed: int) -> list[dict[str, Any]]:
+  """Timestamps inside one minute and readings one unit apart near 1e12:
+  narrow ranges at large offsets."""
+  rng = random.Random(seed)
+  start = datetime(2025, 9, 16, 12, tzinfo=UTC)
+  return [{
+      "id": base + i,
+      "seen_at": start + timedelta(milliseconds=rng.randrange(60_000)),
+      "reading": 1e12 + rng.randrange(40),
+  } for i in range(n)]
+
+
+def test_narrow_edges_at_a_large_offset_persist_as_computed(tmp_path):
+  """Histogram edges closer than nine significant digits can tell apart
+  (seconds apart at an epoch-seconds offset, units apart near 1e12) are
+  written as computed: strictly increasing, matching the row's
+  `edges_digest`; quantiles are not quantised either (I2)."""
+  source, synthetic = _narrow_rows(600, 1000, 1), _narrow_rows(600, 9000, 2)
+  events = table_plan("events", _NARROW_FIELDS, source, synthetic, pk=("id",))
+  plan = evaluation_plan([events],
+                         evaluation_id="ev_narrow",
+                         label_key_uri=None)
+  rows_by = {("events", "source"): source, ("events", "synthetic"): synthetic}
+  profiles = _run(plan, rows_by,
+                  tmp_path / "out").read_rows("evaluation_profiles")
+  histograms = {
+      (r["column_name"], r["side"]): r
+      for r in profiles
+      if r["profile_kind"] == "histogram"
+  }
+  assert set(histograms) == {(column, side)
+                             for column in ("seen_at", "reading")
+                             for side in ("source", "synthetic")}
+  for (column, _), row in histograms.items():
+    edges = row["payload"]["edges"]
+    assert len(edges) >= 5
+    assert all(a < b for a, b in itertools.pairwise(edges)), row
+    # the fixture bites: nine significant digits would merge these edges
+    assert len(set(stable_floats(edges))) < len(edges)
+    if column == "seen_at":  # digested as whole epoch microseconds
+      unit, digested = "epoch_micros", np.rint(np.asarray(edges) * 1e6)
+    else:
+      unit, digested = "value", np.asarray(edges)
+    digest = hashlib.blake2b(
+        unit.encode() + digested.astype("<f8").tobytes(),
+        digest_size=16).hexdigest()
+    assert digest == row["edges_digest"], column
+  quantiles = [r for r in profiles if r["profile_kind"] == "quantiles"]
+  assert {r["column_name"] for r in quantiles} == {"seen_at", "reading"}
+  for row in quantiles:
+    values = row["payload"]["values"]
+    assert values == sorted(values)
+    assert len(set(values)) > len(set(stable_floats(values)))
+  # the moments are rounded: nine significant digits, as the metric rows
+  for row in profiles:
+    if row["profile_kind"] == "moments":
+      payload = row["payload"]
+      for name in ("mean", "std", "skewness", "kurtosis_excess"):
+        assert payload[name] == stable_floats(payload[name]), (name, row)
 
 
 # --------------------------------------------------------------------------

@@ -27,7 +27,8 @@
     + table.row_count_ratio, a driver-failed table's rows
       ▼                                             ▼
     MetricValue ─ Guard (a failed table's rows → not_evaluated,
-      │           AsDict(failures)) ─ CheckCI ─ to_metric_row ──┐
+      │           AsDict(failures)) ─ metric_row (rounded to what is
+      │           persisted, a reversed CI dropped, THEN scored) ─┐
       │                                                         │
       └─► CombineGlobally(summary) ─► roll-up rows ─────────────┤
                     │                                           ▼
@@ -44,13 +45,33 @@ Privacy (their flags and labels) as `AsSingleton`; only its URI enters
 the graph, and `--experiments=enable_data_sampling` is never set (it
 would sample the key into the monitoring UI).
 
-The FINAL row waits for every write to commit (D7): `BigQuerySinks`
+The FINAL row waits for every write to commit (D7). `BigQuerySinks`
 returns `WriteToBigQuery`'s `destination_load_jobid_pairs` and
-`destination_copy_jobid_pairs`, which Beam 2.74 emits only once each
-load and copy job has finished (`TriggerLoadJobs.finish_bundle` and
-`TriggerCopyJobs.finish_bundle` wait on them); `LocalJsonSinks` returns
-its finalised files; the FINAL step reads every one as an `AsIter` side
-input, so it runs after them whatever the sink.
+`destination_copy_jobid_pairs`, `LocalJsonSinks` its finalised files,
+and the FINAL step reads every one of them as an `AsIter` side input.
+What the two job-id PCollections are in Beam 2.74 (read in the installed
+`apache_beam/io/gcp/bigquery_file_loads.py`):
+
+    PCollection   produced by                       relative to the wait
+    ────────────  ────────────────────────────────  ────────────────────
+    load pairs    `TriggerLoadJobs.process()`, its  yielded when the job
+                  ONGOING_JOBS tagged output        is SUBMITTED; the
+                                                    wait on it comes
+                                                    later, in
+                                                    `finish_bundle`
+    copy pairs    `TriggerCopyJobs.finish_bundle`,  yielded after the
+                  its main output (temp-table       wait on each job
+                  loads only: empty when a table
+                  loads in one partition)
+
+So a load pair is not, by itself, a finished load job. The ordering
+rests on two runner guarantees instead: a bundle's outputs are committed
+only when the bundle completes, `finish_bundle` included — the wait
+belongs to the bundle that yielded the pair, and a failed job raises
+there and fails that bundle — and a batch side input can be read only
+once its whole PCollection is computed (the side-input barrier). The
+FINAL step therefore cannot start before the bundles that submitted AND
+awaited every load and copy job are done.
 
 Failures stay per table (the run continues, nothing is dropped):
 
@@ -66,7 +87,10 @@ Failures stay per table (the run continues, nothing is dropped):
                                       handling (membership, privacy,
                                       relational)
 
-and each one makes the run PARTIAL with the reason.
+The first two make the run PARTIAL with the reason — FAILED when they
+leave no launch table evaluated (`assemble`'s status table); a
+transform's own not_evaluated rows only count. A worker's `MemoryError`
+is not a data error: it fails the bundle, which the runner retries.
 
 Runner defaults (`pipeline_options_defaults`): `save_main_session`
 False (every DoFn is importable), `max_cache_memory_usage_mb` sized to
@@ -81,7 +105,12 @@ BigQuery refuses — a source in another organisation or region — reads
 the source unpinned with a warning; and a read-only parent whose table
 cannot be read (a `LIMIT 0` dry run: `tables.get` succeeding does not
 mean `tables.getData` does) loses that side, so its edges say why
-instead of failing at DIRECT_READ.
+instead of failing at DIRECT_READ. Both degrade only on a REFUSAL — an
+HTTP 400, 403 or 404, which `context.bq` raises as `BqApiError(status=
+400)`, `PermissionError` and `LookupError`. Anything else (a 5xx, a 429,
+a conflict, an error with no status) may succeed on a retry, so it
+raises and the driver writes the FAILED row: a transient error never
+silently changes what the evaluation reads.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -104,7 +133,6 @@ from sdfb_evaluation.beam.assemble import (
     StatsQuery,
     TableStats,
     aggregate_metrics,
-    checked_ci,
     drift_metrics,
     failed_table_metrics,
     finish_time,
@@ -113,7 +141,7 @@ from sdfb_evaluation.beam.assemble import (
     read_source_stats,
     row_count_metric,
     skipped_row,
-    stable_floats,
+    stable_profile,
     summarize_rows,
 )
 from sdfb_evaluation.beam.census import (
@@ -138,7 +166,7 @@ from sdfb_evaluation.beam.membership import (
     flag_row,
 )
 from sdfb_evaluation.beam.privacy import Privacy
-from sdfb_evaluation.beam.relational import SIDE_INPUT_MAX_KEYS, Relational
+from sdfb_evaluation.beam.relational import SIDE_INPUT, Relational, plan_edges
 from sdfb_evaluation.context.bq import BqApiError, normalize_fqn, quote_fqn
 from sdfb_evaluation.context.budget import (
     SOURCE_SET_MAX_BYTES,
@@ -151,7 +179,6 @@ from sdfb_evaluation.context.plan import (
     EvaluationPlan,
     PrepareStatement,
     TablePlan,
-    parent_landing,
 )
 from sdfb_evaluation.context.scope import SourcePin, sampled_read
 from sdfb_evaluation.scoring import to_profile_row
@@ -175,6 +202,14 @@ _BATCHES, _FAILED = "batches", "failed"
 _PANEL_SIDES = (Side.REFERENCE, Side.HOLDOUT)
 _REASON_CHARS = 300
 _BQ_ERRORS = (BqApiError, PermissionError, LookupError)
+# The statuses with which BigQuery refuses a statement for good (bad
+# request, forbidden, not found); every other one may pass on a retry.
+_REFUSED = frozenset({400, 403, 404})
+# The data errors that make a table not_evaluated on a worker:
+# `TABLE_ERRORS` without MemoryError, which is the worker's state, not
+# the table's — it fails the bundle and the runner retries it.
+_ENCODE_ERRORS: tuple[type[Exception], ...] = (ArithmeticError, IndexError,
+                                               KeyError, TypeError, ValueError)
 _DATAFLOW = "dataflow"
 _METRICS_TABLE = "evaluation_metrics"
 _PROFILES_TABLE = "evaluation_profiles"
@@ -192,35 +227,21 @@ def _panel_sizes(table: TablePlan) -> tuple[int, int, int, int]:
   return len(panel.r_rows), len(panel.h_rows), panel.e_n, panel.he_n
 
 
-def _parent_of(child: TablePlan, index: int,
-               tables: Sequence[TablePlan]) -> TablePlan | None:
-  edge = child.edges[index]
-  if not edge.external:
-    launch = [t for t in tables if t.role != "external" and t.name == edge.ref]
-    if launch:
-      return launch[0]
-  landing = parent_landing(child.landing_table, edge)
-  return next((
-      t for t in tables if t.role == "external" and t.landing_table == landing),
-              None)
-
-
 def _relational_sets(tables: Sequence[TablePlan]) -> int:
-  """8 B per parent key of every side-input join (`beam.relational`: a
-  side with a planned row count up to SIDE_INPUT_MAX_KEYS), each distinct
-  (parent, side, referenced columns) once."""
-  seen: dict[tuple[str, int, tuple[str, ...]], float] = {}
-  for child in tables:
-    if not child.evaluated:
+  """8 B per parent key of every side-input join the relational pass
+  plans, each distinct (parent, side, referenced columns) set once. Read
+  from that pass's own edge plan (`relational.plan_edges`: its parent
+  resolution, its join switch, the sides it does not evaluate), so the
+  estimate holds a set exactly when the pass broadcasts one."""
+  seen: dict[tuple[str, Side, tuple[str, ...]], float] = {}
+  for spec, _ in plan_edges(tables):
+    if spec.reason is not None:
       continue
-    for index, edge in enumerate(child.edges):
-      parent = _parent_of(child, index, tables)
-      if parent is None:
-        continue
-      for side, known in enumerate((parent.rows_source, parent.rows_synthetic)):
-        rows = parent.rows_read[side]
-        if known is not None and rows <= SIDE_INPUT_MAX_KEYS:
-          seen[(parent.landing_table, side, tuple(edge.ref_cols))] = rows
+    for side in (Side.SOURCE, Side.SYNTHETIC):
+      planned = spec.side(side)
+      if (planned.reason is None and planned.path == SIDE_INPUT and
+          planned.parent is not None and planned.planned_keys is not None):
+        seen[(planned.parent, side, spec.ref_cols)] = planned.planned_keys
   return int(sum(seen.values()) * _HASH_BYTES)
 
 
@@ -337,12 +358,31 @@ def _creates(statement: PrepareStatement, table: str) -> bool:
   return statement.sql.startswith(f"CREATE TABLE `{table}`")
 
 
+def _refusal(exc: BaseException) -> bool:
+  """Whether BigQuery REFUSED the call (module docstring): a 403
+  (`PermissionError`), a 404 (`LookupError`) or a `BqApiError` carrying
+  one of `_REFUSED`. A 5xx, a 429, a conflict or an error with no status
+  is not a refusal: it may pass on a retry."""
+  if isinstance(exc, BqApiError):
+    return exc.status in _REFUSED
+  return isinstance(exc, (PermissionError, LookupError))
+
+
 def _readable(bq: Any, table: str) -> str | None:
-  """Why `table` cannot be read (a `LIMIT 0` dry run), or None."""
+  """Why `table` cannot be read (a `LIMIT 0` dry run BigQuery refuses, or
+  a name that is not a table), or None.
+
+  Raises:
+    BqApiError: the dry run failed for another reason (`_refusal`).
+  """
   try:
     bq.dry_run_bytes(f"SELECT 1 FROM {quote_fqn(normalize_fqn(table))} "
                      "LIMIT 0")
-  except (*_BQ_ERRORS, ValueError) as exc:
+  except ValueError as exc:
+    return f"{type(exc).__name__}: {exc}"[:_REASON_CHARS]
+  except _BQ_ERRORS as exc:
+    if not _refusal(exc):
+      raise
     return f"{type(exc).__name__}: {exc}"[:_REASON_CHARS]
   return None
 
@@ -376,8 +416,10 @@ def prepare_evaluation(plan: EvaluationPlan, bq: Any) -> EvaluationPlan:
   an unreadable read-only parent's side dropped, each with a warning.
 
   Raises:
-    BqApiError, PermissionError, LookupError: any other statement failed
-      (the driver then writes the FAILED row).
+    BqApiError, PermissionError, LookupError: any other statement failed,
+      or a pin's DDL or a parent's readability check failed without
+      being refused (`_refusal`: a transient error); the driver then
+      writes the FAILED row.
   """
   notes: list[str] = []
   tables = [
@@ -402,7 +444,7 @@ def prepare_evaluation(plan: EvaluationPlan, bq: Any) -> EvaluationPlan:
           max_bytes=plan.budget.max_bytes_billed)
     except _BQ_ERRORS as exc:
       owner = owners.get(statement.sql)
-      if owner is None:
+      if owner is None or not _refusal(exc):
         raise
       tables[owner], old, replacement = _unpinned(plan, tables[owner], exc)
       notes.append(tables[owner].warnings[-1])
@@ -453,8 +495,10 @@ class _ReadOnce(Sources):
 
 
 class _SafeEncodeFn(EncodeBatchFn):
-  """`EncodeBatchFn`, a data error tagged `failed` as (table, reason)
-  instead of failing the job (the table becomes not_evaluated)."""
+  """`EncodeBatchFn`, a data error (`_ENCODE_ERRORS`) tagged `failed` as
+  (table, reason) instead of failing the job (the table becomes
+  not_evaluated). A `MemoryError` is raised: the bundle fails and is
+  retried, never a permanent not_evaluated."""
 
   def __init__(self, table: TablePlan, side: Side, *, salt: str):
     super().__init__(table, side, salt=salt)
@@ -464,7 +508,7 @@ class _SafeEncodeFn(EncodeBatchFn):
   def process(self, rows: Sequence[Mapping[str, Any]]) -> Iterator[Any]:
     try:
       batches = list(super().process(rows))
-    except TABLE_ERRORS as exc:
+    except _ENCODE_ERRORS as exc:
       reason = (f"the {self._side_name} rows could not be encoded "
                 f"({type(exc).__name__}: {exc})")[:_REASON_CHARS]
       yield beam.pvalue.TaggedOutput(_FAILED, (self._table_name, reason))
@@ -554,12 +598,12 @@ def _unfailed(item: ProfileValue | RowFlag, failures: Mapping[str,
 
 
 def _profile_row(pv: ProfileValue, context: RowContext) -> dict[str, Any]:
-  row: dict[str, Any] = stable_floats(
-      to_profile_row(
-          pv,
-          evaluation_id=context.evaluation_id,
-          evaluated_at=context.evaluated_at))
-  return row
+  """The profile's row: only its moment-derived values rounded
+  (`assemble.stable_profile`); edges, quantiles and counts as computed."""
+  return to_profile_row(
+      stable_profile(pv),
+      evaluation_id=context.evaluation_id,
+      evaluated_at=context.evaluated_at)
 
 
 def _flag_row(flag: RowFlag, context: RowContext) -> dict[str, Any]:
@@ -715,7 +759,6 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
   )
               | "Metrics" >> beam.Flatten()
               | "Guard" >> beam.Map(guarded, failure_map)
-              | "CheckCI" >> beam.Map(checked_ci)
               | "MetricRows" >> beam.Map(metric_row, context))
   summary = measured | "Summary" >> beam.CombineGlobally(_SummaryCombineFn())
   metric_rows = (

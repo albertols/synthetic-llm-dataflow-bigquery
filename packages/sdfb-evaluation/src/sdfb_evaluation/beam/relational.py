@@ -226,6 +226,7 @@ __all__ = [
     "child_keys",
     "edge_outputs",
     "fanout_part",
+    "plan_edges",
     "summarize",
 ]
 
@@ -442,6 +443,41 @@ def _edge_spec(key: int, child: TablePlan, index: int, edge: Edge,
       source=_side_plan(Side.SOURCE, child, parent, edge, max_keys),
       synthetic=_side_plan(Side.SYNTHETIC, child, parent, edge,
                            max_keys)), parent
+
+
+def plan_edges(
+    tables: Sequence[TablePlan],
+    *,
+    side_input_max_keys: int = SIDE_INPUT_MAX_KEYS
+) -> list[tuple[EdgeSpec, TablePlan | None]]:
+  """Every foreign-key edge of every launch table as this pass plans it:
+  the edge's spec — the parent each side resolves to, the join each side
+  takes (`SidePlan.path`) and why a side or the whole edge is not
+  evaluated — and the parent's plan (None when the edge cannot be
+  evaluated at all). `Relational` builds its graph from this list and the
+  pipeline sizes the side-input cache from it, so the two cannot disagree
+  on which parent key sets are broadcast. An edge whose spec cannot be
+  built (`TABLE_ERRORS`) is planned not evaluated, with the reason."""
+  planned: list[tuple[EdgeSpec, TablePlan | None]] = []
+  for child in tables:
+    if child.role == "external":
+      continue
+    for index, edge in enumerate(child.edges):
+      key = len(planned)
+      try:
+        planned.append(
+            _edge_spec(key, child, index, edge, tables, side_input_max_keys))
+      except TABLE_ERRORS as exc:
+        planned.append((EdgeSpec(
+            key=key,
+            child=child.name,
+            index=index,
+            label=edge.label(child.name),
+            ref_cols=tuple(edge.ref_cols),
+            enforced=edge.enforced,
+            digest=child.encoding_plan_digest,
+            reason=_failure(exc)), None))
+  return planned
 
 
 # --------------------------------------------------------------------------
@@ -1237,30 +1273,13 @@ class Relational(beam.PTransform):
                side_input_max_keys: int = SIDE_INPUT_MAX_KEYS):
     super().__init__()
     self._sources = sources
-    self._parents: dict[str, TablePlan] = {}
-    specs: list[EdgeSpec] = []
-    for child in tables:
-      if child.role == "external":
-        continue
-      for index, edge in enumerate(child.edges):
-        key = len(specs)
-        try:
-          spec, parent = _edge_spec(key, child, index, edge, tables,
-                                    side_input_max_keys)
-        except TABLE_ERRORS as exc:
-          spec, parent = EdgeSpec(
-              key=key,
-              child=child.name,
-              index=index,
-              label=edge.label(child.name),
-              ref_cols=tuple(edge.ref_cols),
-              enforced=edge.enforced,
-              digest=child.encoding_plan_digest,
-              reason=_failure(exc)), None
-        specs.append(spec)
-        if parent is not None:
-          self._parents[parent.landing_table] = parent
-    self._specs = tuple(specs)
+    planned = plan_edges(tables, side_input_max_keys=side_input_max_keys)
+    self._parents: dict[str, TablePlan] = {
+        parent.landing_table: parent
+        for _, parent in planned
+        if parent is not None
+    }
+    self._specs = tuple(spec for spec, _ in planned)
 
   def _parent_keys(
       self, p: beam.Pipeline, live: Sequence[tuple[EdgeSpec, Side]],
