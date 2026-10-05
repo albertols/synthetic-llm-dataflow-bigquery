@@ -30,14 +30,14 @@ the code is written to do, not something observed.
 | Surface | State on 2026-10-05 |
 | --- | --- |
 | Statistics, planning, Beam transforms, the composed pipeline | Tested on a laptop, on invented data, with an in-process Beam runner and fake BigQuery clients |
-| `sdfb-eval` command line | Run on invented data only (JSON fixtures, local sinks). Never run against a real project |
+| `sdfb-eval` command line | Run on invented data only (JSON fixtures, fake clients, local sinks). Never run against a real project |
 | Scoping SQL: `APPENDS`, time travel, snapshot clones | Generated and unit-tested as text. Never executed by BigQuery |
 | CPU image and flex template | Files and static tests exist. The image has never been built and the template has never been launched |
 | Composer DAG | Read by `ast` in tests. Airflow has never parsed it |
 
 Figures: every figure in this document is a **CONCEPT** figure, a seeded
-simulation that shows how a mechanism behaves, except `eval-cpu-budget`,
-which carries laptop micro-benchmarks. None of them is a measurement of an
+simulation or a schematic that shows how a mechanism behaves, except
+`eval-cpu-budget`, which carries laptop micro-benchmarks. None of them is a measurement of an
 evaluation run, because no evaluation run exists yet. Each figure says which
 it is, in the image and in its caption.
 
@@ -189,7 +189,7 @@ flowchart TB
 
 | Module | What it owns |
 | --- | --- |
-| `context/` | Everything decided before a row is read: the launch (`launch`, `jobs`, `runs`, `gcp`), the relationship model mirror (`relationships`), the scope and the source pin (`scope`), the reference panel (`reference`), the plan and its budgets (`plan`, `budget`), planning from in-memory rows (`offline`) |
+| `context/` | Everything decided before a row is read: the launch (`launch`, `jobs`, `runs`, `gcp`), the relationship model mirror (`relationships`), the scope and the source pin (`scope`), the reference panel (`reference`), the plan and its budgets (`plan`, `budget`), planning from in-memory rows (`offline`), and the one wrapper every BigQuery call goes through (`bq`) |
 | `stats/`, `sampling/` | Pure numpy and scipy statistics and the bottom-k sampler. No Beam, no BigQuery |
 | `beam/` | The encoder, five transforms (`dense`, `census`, `membership`, `privacy`, `relational`), sources and sinks (`io`), the label key (`label_key`), assembly and the composed pipeline |
 | `scoring/` | Status, score and roll-ups, executed from the catalogue |
@@ -371,7 +371,7 @@ flowchart LR
 | `contaminated` | Another writer's commit may fall inside the window | Nothing, unless `--allow_contaminated` |
 | `expired` | The window is older than the table's [time-travel][bq-time-travel] window less a one-hour margin | Nothing |
 | `empty` | The job wrote nothing | Nothing |
-| `unknown` | The window cannot be placed: it ends after now, or the table was replaced | Nothing |
+| `unknown` | The window cannot be placed (it ends after now, for example), or the table's dry run failed, or its start snapshot was not allowed | Nothing |
 
 The current table is never read in place of a scope that cannot be
 recovered. The row count is always checked; a writer with no BigQuery job
@@ -470,11 +470,11 @@ distances. *Code:* `context/reference.py` (`REFERENCE_ORDER_BY`,
 `panel_sql`, `EXPOSURE_ROWS`).
 
 R is hashed again with the generator's digest and compared with the digest
-the generator recorded in `validation_runs`. When they differ, or the
-source could not be pinned and has changed, the panel is **unverified**:
-every metric that rests on R, E or H is `not_evaluated` with the reason,
-the metrics against the full source are still computed, and the run is
-`PARTIAL`. E is the first 1,024 ranks because those are the rows the
+the generator recorded in `validation_runs`. When they differ (the source
+changed before the pin, or could not be pinned), or when no digest was
+recorded, the panel is **unverified**: every metric that rests on R, E or
+H is `not_evaluated` with the reason, the metrics against the full source
+are still computed, and the run is `PARTIAL`. E is the first 1,024 ranks because those are the rows the
 retrieval engine embeds as row documents, which is what a prompt could have
 shown ([ADR 0019](../adr/0019-rag-population-scoped-to-consumers.md)).
 
@@ -510,8 +510,9 @@ A row of `evaluation_metrics` holds the value and what is needed to judge
 it without opening another table: the per-side statistics
 (`source_value`, `synthetic_value`), the floor (`baseline_value`), the
 sampling noise (`noise_floor`, or `ci_low` and `ci_high`), how it was
-computed (`method`, `sample_rate`, the digests of the grids used), the
-thresholds it was graded against, and `status` and `score`.
+computed (`method`, `sample_rate`, the digests of the encoding plan and
+feature set used), the thresholds it was graded against, and `status` and
+`score`.
 
 **Claim (D4):** a value is read against its baseline, not against zero,
 because a generator that read only R cannot be expected to score below
@@ -810,10 +811,11 @@ Pitfalls, each of which the catalogue repeats in the metric's own text:
 - **Pool-lift multiplicity.** `field.pool_memorization_lift` runs the test
   on the persisted free-text pool of the run
   ([ADR 0020](../adr/0020-freetext-pools-as-persisted-artifact.md)). Each
-  pooled column is its own test at an uncorrected 5 % level, a separate
-  family from the value lift, and a pool holds at most 512 values, so the
-  interval is wide and, with many pooled columns, an occasional false
-  alarm is expected. It is evaluated only when a pool for exactly this
+  pooled column is its own test at an uncorrected 5 % level: the pool
+  lifts are a separate family from the value lift, which is corrected
+  across columns, so with many pooled columns the intervals hold one by
+  one, not jointly. A pool holds at most 512 values, so each interval is
+  wide. The metric is evaluated only when a pool for exactly this
   reference digest and model is found.
 - **The exposure formula.** `row.exposure_lift` restricts the test to what
   a prompt could have shown: records of E that H lacks against records of
@@ -1286,10 +1288,10 @@ Three budgets, each with a place where it is enforced.
 queries, the panel query, the prepare DDL and, in sampled mode, the
 worst-case sample reads, and refuses the run above the cap before anything
 is billed. Columnar billing reads each column once, so splitting a wide
-table's planning into several statements costs what one would. An
-`as_of_diff` scope reads the table and its start snapshot once each, about
-twice the table's bytes. The registry stores the total in
-`bq_bytes_processed`.
+table's planning into several statements costs what one would. The panel
+query ranks the whole source once. An `as_of_diff` scope reads the table
+and its start snapshot once each, about twice the table's bytes. The
+registry stores the total in `bq_bytes_processed`.
 
 **Shuffle: `--max_shuffle_gb`.** The plan predicts the shuffle of what the
 pipeline will actually read and stores it in `predicted_shuffle_gb`:
@@ -1999,7 +2001,7 @@ should be replaced by what the first runs show.
 
 | Not built | Why |
 | --- | --- |
-| Train-on-synthetic, test-on-real utility | It needs a downstream task and labels per table. The detection and dependence metrics are the task-free proxy |
+| Train-on-synthetic, test-on-real utility (TSTR) | It needs a downstream task and labels per table. The detection and dependence metrics are the task-free proxy |
 | Embedding-based text quality scores such as MAUVE | They need an embedding model at evaluation time on a CPU job. Free text is measured by length, shape, character classes and copying |
 | Attack-based privacy: membership or attribute inference | These train attack models against the generator. The similarity metrics here are indicators, and a pass is not a guarantee ([Stadler, Oprisanu & Troncoso 2022][stadler2022]; [Ganev & De Cristofaro 2023][ganev2023]) |
 | Differential privacy accounting | The generator makes no differential-privacy claim, so there is no budget to account for |

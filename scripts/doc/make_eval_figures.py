@@ -89,11 +89,11 @@ import sys
 from pathlib import Path
 
 import matplotlib
-import yaml
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch, Rectangle
 
