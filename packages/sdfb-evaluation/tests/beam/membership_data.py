@@ -34,6 +34,7 @@ import numpy as np
 
 from sdfb_evaluation.beam.encode import BatchEncoder, EncodedBatch
 from sdfb_evaluation.context.budget import Budget
+from sdfb_evaluation.context.offline import planning_stats
 from sdfb_evaluation.context.plan import (
     TablePlan,
     apply_planning,
@@ -41,7 +42,6 @@ from sdfb_evaluation.context.plan import (
 )
 from sdfb_evaluation.context.reference import Panel
 
-from .dense_data import planning_stats
 from .tables import make_panel, table_plan
 
 SALT = "m3mb" * 8

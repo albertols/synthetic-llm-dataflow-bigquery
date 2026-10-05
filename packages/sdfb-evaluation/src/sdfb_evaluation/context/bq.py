@@ -36,6 +36,10 @@ missing resources as `LookupError` (HTTP 404) and every other API failure
 as `BqApiError`, so callers can degrade or add a remediation hint without
 importing `google.api_core`.
 
+`is_refusal` says which of those a caller may degrade on: BigQuery
+REFUSED the call (403, 404, or a 400), as opposed to a failure a retry
+may remove (a 5xx, a 429, a conflict, an error with no status).
+
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
 
@@ -48,7 +52,14 @@ from typing import Any, TypeVar
 
 from sdfb_evaluation.canonical import json_safe
 
-__all__ = ["Bq", "BqApiError", "normalize_fqn", "quote_fqn"]
+__all__ = [
+    "REFUSED_STATUSES",
+    "Bq",
+    "BqApiError",
+    "is_refusal",
+    "normalize_fqn",
+    "quote_fqn",
+]
 
 _PROJECT = r"[a-z][a-z0-9-]{4,28}[a-z0-9]"
 _DATASET = r"[A-Za-z0-9_]{1,1024}"
@@ -57,8 +68,11 @@ _FQN_RE = re.compile(rf"({_PROJECT})[.:]({_DATASET})\.({_TABLE})")
 
 # BigQuery's documented default when a dataset sets no time-travel window.
 _DEFAULT_TIME_TRAVEL_HOURS = 168
+_HTTP_BAD_REQUEST = 400
 _HTTP_FORBIDDEN = 403
 _HTTP_NOT_FOUND = 404
+REFUSED_STATUSES = frozenset(
+    {_HTTP_BAD_REQUEST, _HTTP_FORBIDDEN, _HTTP_NOT_FOUND})
 
 _T = TypeVar("_T")
 
@@ -78,6 +92,17 @@ class BqApiError(RuntimeError):
   def __init__(self, message: str, *, status: int | None = None) -> None:
     super().__init__(message)
     self.status = status
+
+
+def is_refusal(exc: BaseException) -> bool:
+  """Whether BigQuery REFUSED the call `exc` came from (module
+  docstring): a 403 (`PermissionError`), a 404 (`LookupError`) or a
+  `BqApiError` carrying one of `REFUSED_STATUSES`. A 5xx, a 429, a
+  conflict or an error with no status is not a refusal: it may pass on a
+  retry, so a caller must not degrade on it (Ruling R89, M8)."""
+  if isinstance(exc, BqApiError):
+    return exc.status in REFUSED_STATUSES
+  return isinstance(exc, (PermissionError, LookupError))
 
 
 def normalize_fqn(fqn: str) -> str:

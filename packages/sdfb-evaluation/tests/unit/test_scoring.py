@@ -759,6 +759,41 @@ def test_row_score_for_aggregate_is_its_value():
   assert row["score"] == 0.8
 
 
+def _graded(mv: MetricValue, thresholds: Any) -> tuple[Any, ...]:
+  row = to_metric_row(
+      mv,
+      evaluation_id="eval-0001",
+      evaluated_at=datetime(2026, 9, 28, 10, 0, tzinfo=UTC),
+      landing_table="demo-project.synthetic_data.orders",
+      source_table="demo-project.synthetic_source.orders",
+      thresholds=thresholds)
+  return (row["status"], row["score"], row["threshold_warn"],
+          row["threshold_fail"])
+
+
+def test_row_thresholds_override_the_catalogues_for_the_metrics_named():
+  """`to_metric_row(thresholds=)` (Ruling R93-6): the status, the score
+  and the two stored thresholds of a metric the mapping names are the
+  override's; every other metric, and None or {}, keeps the catalogue's."""
+  jsd = _mv("column.jsd", 0.075, column="status", noise_floor=0.0)
+  for nothing in (None, {}, {"column.ks": (0.9, 1.0)}):
+    assert _graded(jsd, nothing) == ("warn", pytest.approx(0.5), 0.05, 0.1)
+  assert _graded(jsd, {"column.jsd": (0.2, 0.4)}) == ("pass", 1.0, 0.2, 0.4)
+  assert _graded(jsd, {"column.jsd": (0.01, 0.05)}) == ("fail", 0.0, 0.01, 0.05)
+  # a `complement` score reads no threshold: only the status moves
+  ks = _mv("column.ks", 0.5, column="amount", noise_floor=0.0)
+  assert _graded(ks, None) == ("fail", 0.5, 0.1, 0.2)
+  assert _graded(ks, {"column.ks": (2.0, 3.0)}) == ("pass", 0.5, 2.0, 3.0)
+  # a roll-up is graded the same way
+  rollup = _mv("table.fidelity_score", 0.8)
+  assert _graded(rollup, {"table.fidelity_score":
+      (0.75, 0.5)}) == ("pass", 0.8, 0.75, 0.5)
+  # the zero-tolerance rule is the thresholds': an override lifts it
+  dup = _mv("table.pk_duplicate_rate", 0.001)
+  assert _graded(dup, None)[0] == "fail"
+  assert _graded(dup, {"table.pk_duplicate_rate": (0.01, 0.05)})[0] == "pass"
+
+
 # ---------------------------------------------------------------------------
 # aggregate_scores (Ruling R11)
 # ---------------------------------------------------------------------------
