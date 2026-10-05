@@ -24,6 +24,13 @@
 # builds; the launch flags (`--experiments=upload_graph` among them) are the
 # CLI's, not this script's.
 #
+# The image bakes its own coordinate (build argument
+# SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG), which the driver applies as the workers'
+# sdk_container_image when the launch gives none.
+#
+# `gcloud builds submit` uploads the repository root; there is no
+# .gcloudignore or .dockerignore there, so gcloud falls back to .gitignore.
+#
 # Environment (no defaults for the first four):
 #   PROJECT_ID        GCP project that builds and owns the image
 #   REGION            Artifact Registry and Cloud Build region
@@ -59,7 +66,7 @@ trap 'rm -f "${CONFIG}"' EXIT
 cat > "${CONFIG}" <<YAML
 steps:
   - name: gcr.io/cloud-builders/docker
-    args: ["build", "-f", "packages/sdfb-evaluation/docker/Dockerfile", "-t", "${IMAGE}", "."]
+    args: ["build", "-f", "packages/sdfb-evaluation/docker/Dockerfile", "--build-arg", "SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=${IMAGE}", "-t", "${IMAGE}", "."]
 images: ["${IMAGE}"]
 YAML
 

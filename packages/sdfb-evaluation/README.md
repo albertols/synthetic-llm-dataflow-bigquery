@@ -267,16 +267,19 @@ TEMPLATES_BUCKET=demo-bucket \
 
 `VERSION` is `EVALUATOR_VERSION` from `src/sdfb_evaluation/version.py`
 unless you set it. Launch the template with the same image as the workers'
-harness, passed as the Beam pipeline option `sdk_container_image`; the
-evaluator adds `--experiments=upload_graph` itself (an unset parameter reaches the CLI as an empty string, which it
-reads as "not given"):
+harness: the image knows its own coordinate (the build script bakes it in) and
+the evaluator applies it as `sdk_container_image` when the launch gives none;
+an explicit `--parameters sdk_container_image=...` overrides it. The evaluator
+adds `--experiments=upload_graph` itself, and the template launcher supplies
+the runner, project and region (they are not template parameters). An unset
+parameter reaches the CLI as an empty string, which it reads as "not given":
 
 ```bash
 gcloud dataflow flex-template run sdfb-evaluation-$(date +%s) \
   --project demo-project --region europe-west1 \
   --template-file-gcs-location \
     gs://demo-bucket/synthetic/sdfb-evaluation-<VERSION>-template.json \
-  --parameters project=demo-project,region=europe-west1,job_id=<GENERATION_JOB_ID>,sdk_container_image=<IMAGE> \
+  --parameters job_id=<GENERATION_JOB_ID> \
   --temp-location gs://demo-bucket/tmp
 ```
 

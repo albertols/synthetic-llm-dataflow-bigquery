@@ -1,6 +1,6 @@
 {
   "name": "sdfb-evaluation",
-  "description": "Evaluate landed synthetic BigQuery tables against their source and write the evaluation tables. Submits the Dataflow job and returns; read the result from the registry. Every parameter is optional here; the CLI checks that exactly one target is named.",
+  "description": "Evaluate landed synthetic BigQuery tables against their source and write the evaluation tables. Submits the Dataflow job and returns; read the result from the registry. Every parameter is optional here; the CLI checks that exactly one target is named. The template launcher supplies the runner, project and region itself.",
   "parameters": [
     {
       "name": "allow_contaminated",
@@ -9,7 +9,7 @@
       "paramType": "TEXT",
       "isOptional": true,
       "regexes": [
-        "^(true|false|1|0|yes|no|on|off)?$"
+        "^((?i:true|false|1|0|yes|no|on|off))?$"
       ]
     },
     {
@@ -118,23 +118,9 @@
       ]
     },
     {
-      "name": "project",
-      "label": "Project",
-      "helpText": "The GCP project of the evaluation.",
-      "paramType": "TEXT",
-      "isOptional": true
-    },
-    {
       "name": "reference_dataset",
       "label": "Reference dataset",
       "helpText": "With tables: the dataset (or project.dataset) of their sources, same table names.",
-      "paramType": "TEXT",
-      "isOptional": true
-    },
-    {
-      "name": "region",
-      "label": "Region",
-      "helpText": "The Dataflow region: where job_id ran, and where the evaluation runs.",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -169,13 +155,6 @@
       "name": "run_id",
       "label": "Generation run id",
       "helpText": "Target: the generation launch's base run id (validation_runs of output_dataset). Name exactly one of job_id, run_id, tables.",
-      "paramType": "TEXT",
-      "isOptional": true
-    },
-    {
-      "name": "runner",
-      "label": "Runner",
-      "helpText": "The Beam runner. The template launcher sets it to DataflowRunner itself; leave empty.",
       "paramType": "TEXT",
       "isOptional": true
     },

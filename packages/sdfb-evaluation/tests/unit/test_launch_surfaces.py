@@ -20,6 +20,7 @@ with the package, nothing is built and nothing reaches the network.
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
@@ -28,13 +29,14 @@ from pathlib import Path
 
 import pytest
 
-from sdfb_evaluation.cli.main import public_run_flags
+from sdfb_evaluation.cli.main import _flag, _subparsers, public_run_flags
 from sdfb_evaluation.version import EVALUATOR_VERSION
 
 PACKAGE = Path(__file__).resolve().parents[2]
 DOCKERFILE = PACKAGE / "docker" / "Dockerfile"
 METADATA = PACKAGE / "deploy" / "flex_template_metadata.json"
 BUILD_SCRIPT = PACKAGE / "deploy" / "build_flex_template.sh"
+ENTRYPOINT = PACKAGE / "docker" / "entrypoint.sh"
 
 
 def _dockerfile() -> str:
@@ -58,12 +60,77 @@ def _locked(name: str) -> str:
   return versions[0]
 
 
+# The template launcher passes these to the entry itself (the generator's
+# template declares none of them): the runner is DataflowRunner, project and
+# region are the launch's. A template parameter of the same name could
+# contradict it, in an order-dependent way (Ruling R97).
+LAUNCHER_SUPPLIED = frozenset({"--runner", "--project", "--region"})
+
+
 def test_metadata_mirrors_every_public_run_flag() -> None:
   names = [p["name"] for p in _metadata()["parameters"]]
   assert len(names) == len(set(names))
   flags = public_run_flags()
   assert flags, "no public flags: the parser changed shape"
-  assert sorted(f"--{n}" for n in names) == flags
+  assert set(flags) >= LAUNCHER_SUPPLIED
+  assert sorted(
+      f"--{n}" for n in names) == sorted(set(flags) - LAUNCHER_SUPPLIED)
+
+
+def test_metadata_leaves_launcher_supplied_flags_out() -> None:
+  names = {f"--{p['name']}" for p in _metadata()["parameters"]}
+  assert not names & LAUNCHER_SUPPLIED
+
+
+def _run_choices() -> dict[str, tuple[str, ...]]:
+  run = _subparsers()[1]["run"]
+  return {
+      option[2:]: tuple(action.choices) for action in run._actions  # pylint: disable=protected-access  # argparse has no public list of options
+      if action.choices and action.help is not argparse.SUPPRESS
+      for option in action.option_strings
+      if option.startswith("--") and option != "--help"
+  }
+
+
+def _regex(name: str) -> str:
+  (parameter,) = [p for p in _metadata()["parameters"] if p["name"] == name]
+  (pattern,) = parameter["regexes"]
+  return pattern
+
+
+@pytest.mark.parametrize("name", sorted(_run_choices()))
+def test_regex_of_a_choices_flag_admits_exactly_the_choices(name: str) -> None:
+  pattern = _regex(name)
+  for choice in (*_run_choices()[name], ""):
+    assert re.fullmatch(pattern, choice), (name, choice)
+  assert not re.fullmatch(pattern, "no-such-choice")
+
+
+def _boolean_flags() -> list[str]:
+  run = _subparsers()[1]["run"]
+  return sorted(action.option_strings[0][2:]
+                for action in run._actions  # pylint: disable=protected-access  # argparse has no public list of options
+                if action.type is _flag)
+
+
+def test_boolean_flags_exist() -> None:
+  assert "allow_contaminated" in _boolean_flags()
+
+
+@pytest.mark.parametrize("name", _boolean_flags())
+def test_boolean_regex_accepts_what_the_cli_parser_accepts(name: str) -> None:
+  pattern = _regex(name)
+  spellings = [
+      "", "true", "false", "True", "False", "TRUE", "FALSE", "1", "0", "yes",
+      "No", "ON", "off", "maybe", "2", "tru"
+  ]
+  for value in spellings:
+    try:
+      _flag(value)
+      accepted = True
+    except argparse.ArgumentTypeError:
+      accepted = False
+    assert bool(re.fullmatch(pattern, value)) == accepted, (name, value)
 
 
 def test_metadata_parameters_are_well_formed() -> None:
@@ -92,13 +159,62 @@ def test_flex_entry_file_exists() -> None:
 
 
 def test_dockerfile_copies_only_files_the_package_has() -> None:
-  copies = re.findall(r"^COPY (?!--from)(.+) \./?(?:\S*)$", _dockerfile(), re.M)
-  assert copies
+  copies = re.findall(r"^COPY (?!--from)(.+) \S+$", _dockerfile(), re.M)
+  assert len(copies) >= 3
   for line in copies:
     for source in line.split():
       prefix = "packages/sdfb-evaluation/"
       assert source.startswith(prefix), source
       assert (PACKAGE / source[len(prefix):]).exists(), source
+
+
+def test_entrypoint_is_the_dispatch_script() -> None:
+  text = _dockerfile()
+  entrypoint = re.search(r'^ENTRYPOINT \["([^"]+)"\]$', text, re.M)
+  assert entrypoint
+  copied = re.search(
+      r"^COPY (packages/sdfb-evaluation/docker/entrypoint\.sh) (\S+)$", text,
+      re.M)
+  assert copied and copied.group(2) == entrypoint.group(1)
+  assert (PACKAGE / "docker" / "entrypoint.sh").is_file()
+  assert f"chmod +x {entrypoint.group(1)}" in text
+
+
+def test_entrypoint_script_dispatches_by_the_fnapi_flags() -> None:
+  script = ENTRYPOINT.read_text(encoding="utf-8")
+  assert script.startswith("#!/bin/sh")
+  assert "exec /opt/apache/beam/boot" in script
+  assert "exec /opt/google/dataflow/python_template_launcher" in script
+  assert "ADR 0009" in script
+  result = subprocess.run(["sh", "-n", str(ENTRYPOINT)],
+                          capture_output=True,
+                          text=True,
+                          check=False)
+  assert result.returncode == 0, result.stderr
+
+
+def _discriminators(path: Path) -> set[str]:
+  return set(re.findall(r"--\w+=\*", path.read_text(encoding="utf-8")))
+
+
+def test_entrypoint_discriminator_equals_the_generators() -> None:
+  generator = PACKAGE.parents[1] / "docker" / "entrypoint.sh"
+  if not generator.is_file():  # the package stands alone as its own unit
+    pytest.skip("the repository-root entrypoint is not beside this package")
+  assert _discriminators(ENTRYPOINT) == _discriminators(generator)
+  assert len(_discriminators(ENTRYPOINT)) == 5
+
+
+def test_dockerfile_bakes_the_worker_image_and_the_script_passes_it() -> None:
+  text = _dockerfile()
+  assert 'ARG SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=""' in text
+  assert ("ENV SDFB_EVAL_SDK_CONTAINER_IMAGE="
+          "$SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG") in text
+  # declared after the dependency layers, so it never invalidates them
+  assert text.index("SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG") > text.rindex(
+      "RUN uv sync")
+  assert ("SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=${IMAGE}"
+          in BUILD_SCRIPT.read_text(encoding="utf-8"))
 
 
 def test_beam_sdk_tag_equals_locked_apache_beam() -> None:
@@ -126,10 +242,11 @@ def test_python_minor_matches_the_package() -> None:
 def test_bridge_and_pythonpath_use_the_template_layout() -> None:
   text = _dockerfile()
   pythonpath = _env("PYTHONPATH").split(":")
-  assert "/template/.venv/lib/python3.11/site-packages" in pythonpath
+  minor = (PACKAGE / ".python-version").read_text(encoding="utf-8").strip()
+  site = f"/template/.venv/lib/python{minor}/site-packages"
+  assert site in pythonpath
   assert "/template/src" in pythonpath
-  assert "site.addsitedir('/template/.venv/lib/python3.11/site-packages')" in (
-      text)
+  assert f"site.addsitedir('{site}')" in text
   assert "zz_sdfb_bridge.pth" in text
 
 
@@ -166,7 +283,7 @@ def test_version_is_readable_by_the_build_script_pattern() -> None:
   assert match and match.group(1) == EVALUATOR_VERSION
 
 
-@pytest.mark.parametrize("path", [DOCKERFILE, BUILD_SCRIPT])
+@pytest.mark.parametrize("path", [DOCKERFILE, BUILD_SCRIPT, ENTRYPOINT])
 def test_files_carry_the_licence_header(path: Path) -> None:
   assert "Licensed under the Apache License" in path.read_text(
       encoding="utf-8")[:900]

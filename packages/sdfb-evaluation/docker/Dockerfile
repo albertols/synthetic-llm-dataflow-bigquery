@@ -50,3 +50,18 @@ RUN SITE="$(python -c 'import site; print(site.getsitepackages()[0])')" \
 # Flex Template launcher contract. The entry submits the job and returns;
 # it does not wait for it and never applies --fail_on.
 ENV FLEX_TEMPLATE_PYTHON_PY_FILE="/template/src/sdfb_evaluation/cli/run_evaluation.py"
+
+# Worker harness image. The flex template's --image sets only the LAUNCHER;
+# workers boot whatever image the job names. The image carries its own pushed
+# coordinate (deploy/build_flex_template.sh passes it) and the driver applies
+# it as sdk_container_image when the launch gave none; an explicit value
+# wins. Declared late so it never invalidates the dependency layers above.
+ARG SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=""
+ENV SDFB_EVAL_SDK_CONTAINER_IMAGE=$SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG
+
+# Dispatch entrypoint: Dataflow appends the Beam boot flags to the image's
+# ENTRYPOINT for workers and runs it bare for the launcher, so one script
+# picks the binary (see docker/entrypoint.sh).
+COPY packages/sdfb-evaluation/docker/entrypoint.sh /opt/sdfb/entrypoint.sh
+RUN chmod +x /opt/sdfb/entrypoint.sh
+ENTRYPOINT ["/opt/sdfb/entrypoint.sh"]
