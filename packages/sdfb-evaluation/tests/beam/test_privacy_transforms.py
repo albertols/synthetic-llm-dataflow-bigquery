@@ -46,6 +46,7 @@ from apache_beam.portability import common_urns
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.testing.test_pipeline import TestPipeline as BeamTestPipeline
 from apache_beam.testing.util import assert_that
+from apache_beam.utils.shared import Shared
 
 from sdfb_evaluation.beam import census, dense, membership, privacy
 from sdfb_evaluation.beam.encode import EncodeSide, key_hash
@@ -585,6 +586,54 @@ def test_a_failing_table_does_not_fail_the_run(tmp_path, monkeypatch):
   assert sorted([mv for mv in metrics if mv.table == "people"],
                 key=lambda mv: mv.metric_id) == sorted(
                     pure.metrics, key=lambda mv: mv.metric_id)
+
+
+def _out_of_memory(*_args: Any, **_kwargs: Any) -> None:
+  raise MemoryError("Unable to allocate 3.2 GiB for an array")
+
+
+def _malformed(*_args: Any, **_kwargs: Any) -> None:
+  raise ValueError("a malformed batch (test)")
+
+
+def test_a_worker_memory_error_fails_the_bundle(monkeypatch):
+  """The final review's I3 (its probe): a MemoryError in the
+  nearest-neighbour DoFn or the sampling DoFn is raised, so the bundle
+  fails and is retried; it used to tag the privacy block `failed`, which
+  left a run without its privacy verdicts SUCCEEDED. A data error in the
+  same place still tags the block."""
+  table, rows = people(n_synthetic=300)
+  spec = PrivacySpec.from_table(
+      table,
+      salt=SALT,
+      privacy_sample_rows=SAMPLE_ROWS,
+      detection_sample_rows=SAMPLE_ROWS)
+  inputs = PanelInputs.from_table(table, spec)
+  batch = encode(table, "synthetic", rows["synthetic"])[0]
+  nearest = privacy.GowerNNFn(spec, Shared())
+  sampling = privacy._SamplePartsFn(spec)  # pylint: disable=protected-access  # the DoFn under test
+  monkeypatch.setattr(privacy, "gower_part", _malformed)
+  monkeypatch.setattr(privacy, "sample_parts", _malformed)
+  for tagged in (*nearest.process([], inputs), *sampling.process(batch)):
+    assert tagged.tag == "failed" and "malformed" in tagged.value[1]
+  monkeypatch.setattr(privacy, "gower_part", _out_of_memory)
+  monkeypatch.setattr(privacy, "sample_parts", _out_of_memory)
+  with pytest.raises(MemoryError):
+    list(nearest.process([], inputs))
+  with pytest.raises(MemoryError):
+    list(sampling.process(batch))
+
+
+@pytest.mark.parametrize("step",
+                         ["gower_part", "_privacy_rows", "_detection_rows"])
+def test_in_process_memory_errors_are_raised_as_on_a_worker(monkeypatch, step):
+  """The in-process path fails where the Beam path fails its bundle: the
+  nearest-neighbour search, the privacy block's rows and the classifier
+  all run on a worker."""
+  table, rows = people(n_synthetic=300)
+  monkeypatch.setattr(privacy, step, _out_of_memory)
+  with pytest.raises(MemoryError):
+    _pure(table, rows, privacy_sample_rows=300, detection_sample_rows=300)
 
 
 # --------------------------------------------------------------------------

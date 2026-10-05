@@ -84,7 +84,7 @@ from sdfb_evaluation.context.reference import Panel
 from sdfb_evaluation.schemas import load_schema
 from sdfb_evaluation.scoring import status_for, to_metric_row
 from sdfb_evaluation.stats import noise
-from sdfb_evaluation.types import Method, MetricValue, Status
+from sdfb_evaluation.types import Method, MetricValue, Side, Status
 
 from .membership_data import (
     CATALOG_PATTERNS,
@@ -1117,15 +1117,13 @@ def test_sampled_mode_withholds_verdicts_that_need_every_row():
     assert mv.detail["sample_rate"] == 0.25, metric_id
 
 
-@pytest.mark.parametrize("error", [ZeroDivisionError, MemoryError])
-def test_a_table_failing_on_a_worker_is_not_evaluated(monkeypatch, error):
-  """A data error — or running out of memory — while a table's metrics
-  are computed makes that table not_evaluated with the reason; nothing
-  raises."""
+def test_a_table_failing_on_a_worker_is_not_evaluated(monkeypatch):
+  """A data error while a table's metrics are computed makes that table
+  not_evaluated with the reason; nothing raises."""
   table, rows, _ = _people_with(copies=6)
 
   def broken(*_args: Any, **_kwargs: Any) -> None:
-    raise error("division by zero")
+    raise ZeroDivisionError("division by zero")
 
   monkeypatch.setattr(membership, "_lifts", broken)
   result = _pure(table, rows)
@@ -1133,7 +1131,68 @@ def test_a_table_failing_on_a_worker_is_not_evaluated(monkeypatch, error):
   assert {mv.metric_id for mv in result.metrics} == set(OWNED_METRIC_IDS)
   for mv in result.metrics:
     assert mv.value is None
-    assert error.__name__ in mv.detail["reason"]
+    assert "ZeroDivisionError" in mv.detail["reason"]
+
+
+def _out_of_memory(*_args: Any, **_kwargs: Any) -> None:
+  raise MemoryError("Unable to allocate 3.2 GiB for an array")
+
+
+def _malformed(*_args: Any, **_kwargs: Any) -> None:
+  raise ValueError("a malformed batch (test)")
+
+
+@pytest.mark.parametrize("step",
+                         ["key_counts", "batch_membership", "source_hashes"])
+def test_a_worker_memory_error_fails_the_bundle(monkeypatch, step):
+  """The final review's I3: running out of memory is the worker's state,
+  not the table's. On a worker it is raised — the bundle fails and the
+  runner retries it — where it used to become a permanent not_evaluated
+  block that left the run SUCCEEDED. A data error in the same place
+  still makes the table not_evaluated."""
+  table, rows, _ = _people_with(copies=6, n_source=400, n_synthetic=300)
+  spec = MembershipSpec.from_table(table, salt=SALT)
+  batches = encode_all(table, rows)
+  synthetic = next(b for b in batches if b.side is Side.SYNTHETIC)
+  source = next(b for b in batches if b.side is Side.SOURCE)
+  refs = PanelRefs.from_table(table, spec)
+
+  def run() -> list[Any]:
+    if step == "key_counts":
+      fn = membership.RowKeysFn({table.name: spec})
+      fn.start_bundle()
+      return list(fn.process(synthetic))
+    if step == "batch_membership":
+      return list(membership.MembershipFn(spec, 10).process(synthetic, refs))
+    return list(membership._SourceHashesFn(spec).process(source))  # pylint: disable=protected-access  # the DoFn under test
+
+  monkeypatch.setattr(membership, step, _malformed)
+  [tagged] = run()
+  assert tagged.tag == "failed" and "malformed" in tagged.value[1]
+  monkeypatch.setattr(membership, step, _out_of_memory)
+  with pytest.raises(MemoryError):
+    run()
+
+
+def test_memory_errors_split_by_where_they_happen(monkeypatch):
+  """In process, as in Beam: a memory error while the emit step computes
+  a table's rows is raised (a worker's), and one while the driver builds
+  the table's panel index makes the table not_evaluated (no retry can
+  change what the driver holds)."""
+  table, rows, _ = _people_with(copies=6, n_source=400, n_synthetic=300)
+  assert MemoryError in membership.TABLE_ERRORS
+  assert set(
+      membership.WORKER_ERRORS) == set(membership.TABLE_ERRORS) - {MemoryError}
+  with monkeypatch.context() as patch:
+    patch.setattr(membership, "_lifts", _out_of_memory)
+    with pytest.raises(MemoryError):
+      _pure(table, rows)
+  monkeypatch.setattr(membership.PanelIndex, "build",
+                      staticmethod(_out_of_memory))
+  result = _pure(table, rows)
+  assert {mv.metric_id for mv in result.metrics} == set(OWNED_METRIC_IDS)
+  assert all(mv.value is None and "MemoryError" in mv.detail["reason"]
+             for mv in result.metrics)
 
 
 def test_a_failing_table_does_not_fail_the_run(tmp_path, monkeypatch):

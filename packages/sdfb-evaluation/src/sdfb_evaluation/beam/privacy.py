@@ -204,11 +204,15 @@ of a side, so none is withheld; the read rate is also in
 `detail.sample_rate`, as the membership pass writes it.
 
 Failures stay per table and per block. A table whose spec cannot be
-built on the driver writes `not_evaluated` rows with the reason for
-every owned id; a Gower space that cannot be built, or a worker error in
-the sampling (both blocks) or the nearest-neighbour search (privacy
-only), makes those metrics `not_evaluated` with the reason and drops
-their flags; the other block, tables and the run carry on.
+built on the driver (`TABLE_ERRORS`) writes `not_evaluated` rows with
+the reason for every owned id; a Gower space that cannot be built, or a
+worker's data error (`WORKER_ERRORS`) in the sampling (both blocks) or
+the nearest-neighbour search (privacy only), makes those metrics
+`not_evaluated` with the reason and drops their flags; the other block,
+tables and the run carry on. A worker's `MemoryError` is not a data
+error: it is raised, so the bundle fails and the runner retries it — a
+privacy block lost to memory must not leave the run SUCCEEDED (Ruling
+R113).
 
 References (author-year, R22): Platzer & Reutterer (2021); Gower (1971);
 Naeem et al. (2020); Giomi et al. (2023); Lopez-Paz & Oquab (2017);
@@ -237,6 +241,7 @@ from apache_beam.utils.shared import Shared
 from sdfb_evaluation.beam.encode import BatchEncoder, BatchLayout, EncodedBatch
 from sdfb_evaluation.beam.membership import (
     TABLE_ERRORS,
+    WORKER_ERRORS,
     UNVERIFIED_REASON,
     RowFlag,
 )
@@ -286,6 +291,7 @@ __all__ = [
     "PRIVACY_METRIC_IDS",
     "TABLE_ERRORS",
     "UNVERIFIED_REASON",
+    "WORKER_ERRORS",
     "GowerNNFn",
     "NNIndex",
     "NNMergeFn",
@@ -1197,7 +1203,8 @@ def privacy_block(spec: PrivacySpec, inputs: PanelInputs,
                   failure: str | None) -> _Block:
   """The five row metrics, the DCR/NNDR histograms and the nearest-record
   flags of one table, or not_evaluated rows with the reason (a data error
-  here too: `TABLE_ERRORS`). `density` is the synthetic side's
+  here too: `WORKER_ERRORS`; this runs on a worker, so a `MemoryError`
+  is raised and the bundle retried). `density` is the synthetic side's
   `density_sample` (None: no synthetic side arrived).
 
   Raises:
@@ -1215,7 +1222,7 @@ def privacy_block(spec: PrivacySpec, inputs: PanelInputs,
   try:
     return _privacy_rows(spec, inputs, index_fn(), merged, density, label_key,
                          extra)
-  except TABLE_ERRORS as exc:
+  except WORKER_ERRORS as exc:
     return _Block(
         _skipped(spec, PRIVACY_METRIC_IDS, _failure("privacy", exc), extra))
 
@@ -1481,7 +1488,7 @@ def detection_block(spec: PrivacySpec, inputs: PanelInputs,
         _skipped(spec, DETECTION_METRIC_IDS, reason or _NO_SYNTHETIC, extra))
   try:
     return _detection_rows(spec, inputs, source, synthetic, extra)
-  except TABLE_ERRORS as exc:
+  except WORKER_ERRORS as exc:
     return _Block(
         _skipped(spec, DETECTION_METRIC_IDS, _failure("detection", exc), extra))
 
@@ -1659,8 +1666,10 @@ def privacy_outputs(table: TablePlan,
                     detection_sample_rows: int = 50_000,
                     row_flags_top_k: int = 100) -> PrivacyResult:
   """Both blocks of one table in one process, exactly as the Beam path
-  computes them. A data error (`TABLE_ERRORS`) makes the block it hits
-  not_evaluated, as in Beam.
+  computes them. An error while the spec and the panel inputs are built
+  (the driver's part, `TABLE_ERRORS`) or a data error in the rest (a
+  worker's part, `WORKER_ERRORS`) makes the block it hits not_evaluated,
+  as in Beam; a `MemoryError` in the worker's part is raised.
 
   Raises:
     ValueError: an empty `label_key`.
@@ -1685,7 +1694,7 @@ def privacy_outputs(table: TablePlan,
     for batch in batches:
       for side, part in sample_parts(spec, batch):
         accs[side] = combine.add_input(accs[side], part)
-  except TABLE_ERRORS as exc:
+  except WORKER_ERRORS as exc:
     failure = _failure("privacy", exc)
   samples = {side: combine.extract_output(acc) for side, acc in accs.items()}
   detection = detection_block(spec, inputs, {
@@ -1707,7 +1716,7 @@ def privacy_outputs(table: TablePlan,
       merged = merge_nn(
           gower_part(spec, inputs, index_fn(), records[i:i + NN_BATCH_ROWS])
           for i in range(0, len(records), NN_BATCH_ROWS))
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       nn_failure = _failure("privacy", exc)
   density = density_sample(spec, inputs.n_panel, samples[_SYNTHETIC])
   nearest = privacy_block(spec, inputs, index_fn, merged, density, label_key,
@@ -1737,7 +1746,7 @@ class _SamplePartsFn(beam.DoFn):
   def process(self, element: EncodedBatch) -> Iterator[Any]:
     try:
       parts = sample_parts(self._spec, element)
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       yield beam.pvalue.TaggedOutput(_FAILED,
                                      (_TABLE, _failure("privacy", exc)))
       return
@@ -1774,7 +1783,7 @@ class GowerNNFn(beam.DoFn):
       self._index = self._shared.acquire(
           functools.partial(build_nn_index, spec, inputs), tag=inputs.token)
       part = gower_part(spec, inputs, self._index, element)
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       yield beam.pvalue.TaggedOutput(_FAILED,
                                      (_PRIVACY, _failure("privacy", exc)))
       return

@@ -26,6 +26,7 @@ import json
 import pickle
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,7 @@ from apache_beam.testing.test_pipeline import TestPipeline as BeamTestPipeline
 from apache_beam.testing.util import assert_that
 
 from sdfb_evaluation.beam import relational
-from sdfb_evaluation.beam.encode import EncodeSide
+from sdfb_evaluation.beam.encode import BatchEncoder, EncodeSide
 from sdfb_evaluation.beam.io import InMemorySources
 from sdfb_evaluation.beam.relational import (
     COGROUP,
@@ -59,6 +60,7 @@ from .relational_data import (
     BUNDLE_EDGE,
     ITEMS_FIELDS,
     ORDER_EDGE,
+    ORDERS_FIELDS,
     PRODUCT_EDGE,
     PRODUCTS_FIELDS,
     SALT,
@@ -536,6 +538,77 @@ def test_ref_cols_other_than_the_pk_or_reordered_give_no_false_orphans(
           reference[metric_id].value), (edge, metric_id)
 
 
+def _orders_with_fk_type(bq_type: str) -> tuple[dict[str, str], ...]:
+  return tuple({
+      **field, "type": bq_type
+  } if field["name"] == "user_id" else field for field in ORDERS_FIELDS)
+
+
+def test_an_edge_across_type_families_is_not_evaluated(tmp_path):
+  """The final review's I2: `orders.user_id` NUMERIC referencing
+  `users.id` INT64. An integer 5 and a decimal 5 never hash alike, so
+  every child read as an orphan (orphan rate 1.0, FAIL — on the source
+  too) and the fan-out metrics passed on nothing. The edge is not
+  evaluated, with a reason naming both types; the hashing is unchanged."""
+  fanouts = [1, 2, 3] * 10
+  tables, rows_by = users_orders(fanouts, fanouts)
+  for side in SIDES:
+    for row in rows_by[("orders", side)]:
+      row["user_id"] = Decimal(row["user_id"])
+  tables[1] = counted(
+      launch_table(
+          "orders",
+          _orders_with_fk_type("NUMERIC"),
+          pk=("order_id",),
+          edges=(USER_EDGE,),
+          role="driven"), rows_by)
+  rows = _by_edge(_run(tables, rows_by, tmp_path))[USER_EDGE.label("orders")]
+  assert sorted(rows) == sorted(OWNED_METRIC_IDS)
+  for metric_id, mv in rows.items():
+    reason = mv.detail["reason"]
+    assert mv.value is None, (metric_id, mv.value)
+    assert "orders.user_id is NUMERIC" in reason, reason
+    assert "users.id is INT64" in reason, reason
+    assert _status(mv) is Status.NOT_EVALUATED, metric_id
+
+
+@pytest.mark.parametrize(
+    ("child_type", "parent_type", "same"), [("INT64", "INTEGER", True),
+                                            ("NUMERIC", "BIGNUMERIC", True),
+                                            ("FLOAT64", "FLOAT", True),
+                                            ("INT64", "NUMERIC", False),
+                                            ("INT64", "FLOAT64", False),
+                                            ("INT64", "STRING", False),
+                                            ("NUMERIC", "FLOAT64", False),
+                                            ("STRING", "BYTES", False),
+                                            ("DATE", "TIMESTAMP", False)])
+def test_key_type_families_follow_the_canonical_form(child_type, parent_type,
+                                                     same):
+  """Two key types match only when equal values share one canonical
+  form (`canonical.canonical_value`): the families the edge check reads."""
+  orders = launch_table(
+      "orders",
+      _orders_with_fk_type(child_type),
+      pk=("order_id",),
+      edges=(USER_EDGE,),
+      role="driven")
+  users = launch_table(
+      "users", ({
+          "name": "id",
+          "type": parent_type,
+          "mode": "REQUIRED"
+      },),
+      pk=("id",),
+      role="root")
+  [(spec, parent)] = relational.plan_edges([users, orders])
+  if same:
+    assert spec.reason is None and parent is users
+  else:
+    assert parent is None
+    assert f"orders.user_id is {child_type}" in spec.reason
+    assert f"users.id is {parent_type}" in spec.reason
+
+
 def test_sampled_mode_withholds_what_a_sample_biases(tmp_path):
   """A row-sampled side cannot support a metric that needs every row of
   it: a sampled child side hides orphans and thins every parent's fan-out;
@@ -652,6 +725,46 @@ def test_a_failing_edge_does_not_fail_the_run(tmp_path, monkeypatch):
   good = by_edge[USER_EDGE.label("orders")]
   assert good["relationship.orphan_rate"].value == 0.0
   assert good["relationship.fanout_mean_ratio"].value == pytest.approx(1.0)
+
+
+def test_a_worker_memory_error_fails_the_bundle(monkeypatch):
+  """The final review's I3: a MemoryError while a worker hashes an edge's
+  child or parent keys is raised (the bundle fails and is retried); it
+  used to make the edge not_evaluated for good. A data error in the same
+  place still does."""
+  tables, rows_by = users_orders([1, 2] * 10, [2, 1] * 10)
+  orders = tables[1]
+  batch = BatchEncoder.from_table(
+      orders, "synthetic", salt=SALT).encode(rows_by[("orders", "synthetic")])
+  label = USER_EDGE.label("orders")
+
+  def children() -> list[Any]:
+    fn = relational._ChildKeysFn({("orders", "synthetic"): [(0, 0, label, 7)]})  # pylint: disable=protected-access  # the DoFn under test
+    fn.start_bundle()
+    return list(fn.process(batch))
+
+  def parents() -> list[Any]:
+    fn = relational._ParentKeysFn(("id",), SIDE_INPUT, (7,))  # pylint: disable=protected-access  # the DoFn under test
+    return list(fn.process(rows_by[("users", "synthetic")]))
+
+  def malformed(*_args: Any, **_kwargs: Any) -> None:
+    raise ValueError("a malformed batch (test)")
+
+  def out_of_memory(*_args: Any, **_kwargs: Any) -> None:
+    raise MemoryError("Unable to allocate 3.2 GiB for an array")
+
+  monkeypatch.setattr(relational, "child_keys", malformed)
+  monkeypatch.setattr(relational, "key_hashes", malformed)
+  [(key, reason)] = children()
+  assert key == 7 and "malformed" in reason
+  [tagged] = parents()
+  assert tagged.tag == "failed" and tagged.value[0] == 7
+  monkeypatch.setattr(relational, "child_keys", out_of_memory)
+  monkeypatch.setattr(relational, "key_hashes", out_of_memory)
+  with pytest.raises(MemoryError):
+    children()
+  with pytest.raises(MemoryError):
+    parents()
 
 
 def test_unreadable_parents_and_skipped_children_are_explained(tmp_path):
