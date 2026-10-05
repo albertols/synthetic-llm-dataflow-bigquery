@@ -68,6 +68,7 @@ from .helpers import (
     check_row,
     make_env,
     tiny_pipeline,
+    write_stand_in,
 )
 
 REGION = "europe-west1"
@@ -137,8 +138,9 @@ def test_run_passes_the_prepared_plan_to_options_and_pipeline(
 
 
 def test_a_fresh_evaluation_id_per_attempt(bq, resolved, monkeypatch, capsys):
-  monkeypatch.setattr(driver, "build_evaluation_pipeline", tiny_pipeline())
-  env = make_env(bq, submit=driver.submit_pipeline)
+  monkeypatch.setattr(driver, "build_evaluation_pipeline",
+                      tiny_pipeline(fast=True))
+  env = make_env(bq, submit=write_stand_in)
   assert main(["run", *TARGET], env) == 0
   assert main(["run", *TARGET], env) == 0
   ids = [row["evaluation_id"] for row in bq.registry_rows()]
@@ -167,13 +169,14 @@ def test_a_fresh_evaluation_id_per_attempt(bq, resolved, monkeypatch, capsys):
 def test_run_writes_running_prepares_runs_then_loads_final_last(
     bq, resolved, monkeypatch, capsys):
   del resolved
-  monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts={
-                          "total": 3,
-                          "pass": 2,
-                          "warn": 1
-                      }))
-  code = main(["run", *TARGET], make_env(bq, submit=driver.submit_pipeline))
+  monkeypatch.setattr(
+      driver, "build_evaluation_pipeline",
+      tiny_pipeline(fast=True, counts={
+          "total": 3,
+          "pass": 2,
+          "warn": 1
+      }))
+  code = main(["run", *TARGET], make_env(bq, submit=write_stand_in))
   assert code == 0
   running, final = bq.registry_rows()
   for row in (running, final):
@@ -253,7 +256,7 @@ def test_an_interrupt_before_submission_is_failed_and_stays_an_interrupt(
 
 
 def test_a_transient_prepare_error_writes_failed_then_propagates(
-    bq, resolved, stub, monkeypatch, capsys):
+    bq, resolved, stub, capsys):
   """R90(g): whatever `prepare_evaluation` raises sits inside the
   driver's FAILED-then-re-raise path — one FAILED row, then the error."""
   del resolved
@@ -380,10 +383,10 @@ def test_a_plan_error_keeps_what_planning_created(bq, monkeypatch, capsys):
 def test_label_key_uri_is_operator_mode_and_never_printed(
     bq, resolved, monkeypatch, capsys):
   del resolved
-  build = tiny_pipeline()
+  build = tiny_pipeline(fast=True)
   monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
   code = main(["run", *TARGET, "--label_key_uri", LABEL_KEY_URI],
-              make_env(bq, submit=driver.submit_pipeline))
+              make_env(bq, submit=write_stand_in))
   assert code == 0
   assert len(build.built) == 1
   assert build.built[0][0].label_key_uri == LABEL_KEY_URI
@@ -686,9 +689,9 @@ def test_fail_on_exit_codes(bq, resolved, monkeypatch, capsys):
   assert gate.exit_code("warn", {"total": 2, "pass": 2}) == 0
   with pytest.raises(ValueError, match="fail_on"):
     gate.exit_code("error", counts)
-  env = make_env(bq, submit=driver.submit_pipeline)
+  env = make_env(bq, submit=write_stand_in)
   monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts=only_warn))
+                      tiny_pipeline(fast=True, counts=only_warn))
   assert main(["run", *TARGET, "--fail_on", "fail"], env) == 0
   assert main(["run", *TARGET, "--fail_on", "warn"], env) == 1
   assert "gate (--fail_on warn): TRIPPED" in capsys.readouterr().out
@@ -714,9 +717,10 @@ def test_a_final_row_reading_failed_exits_3_whatever_fail_on_says(
                                 failing,
                                 gated=False) == 0
   assert (gate.EXIT_TRIPPED, gate.EXIT_FAILED) == (1, 3)
-  monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts=none_evaluated, status="FAILED"))
-  env = make_env(bq, submit=driver.submit_pipeline)
+  monkeypatch.setattr(
+      driver, "build_evaluation_pipeline",
+      tiny_pipeline(fast=True, counts=none_evaluated, status="FAILED"))
+  env = make_env(bq, submit=write_stand_in)
   assert main(["run", *TARGET, "--fail_on", "none"], env) == 3
   # RUNNING, then the pipeline's own FINAL: the driver appends nothing
   assert [(r["event"], r["status"]) for r in bq.registry_rows()
@@ -745,8 +749,8 @@ def test_a_partial_run_trips_an_active_gate(bq, resolved, monkeypatch, capsys):
   assert gate.final_exit_code(partial, "fail", clean, gated=False) == 0
   monkeypatch.setattr(
       driver, "build_evaluation_pipeline",
-      tiny_pipeline(counts=clean, status="PARTIAL", reason=reason))
-  env = make_env(bq, submit=driver.submit_pipeline)
+      tiny_pipeline(fast=True, counts=clean, status="PARTIAL", reason=reason))
+  env = make_env(bq, submit=write_stand_in)
   assert main(["run", *TARGET], env) == 0
   assert "TRIPPED" not in capsys.readouterr().out
   assert main(["run", *TARGET, "--fail_on", "fail"], env) == 1
@@ -767,8 +771,8 @@ def test_a_skipped_run_does_not_trip_the_gate_and_says_so(
     assert gate.final_exit_code(skipped, fail_on, nothing) == 0
   monkeypatch.setattr(
       driver, "build_evaluation_pipeline",
-      tiny_pipeline(counts=nothing, status="SKIPPED", reason=reason))
-  env = make_env(bq, submit=driver.submit_pipeline)
+      tiny_pipeline(fast=True, counts=nothing, status="SKIPPED", reason=reason))
+  env = make_env(bq, submit=write_stand_in)
   assert main(["run", *TARGET, "--fail_on", "warn"], env) == 0
   captured = capsys.readouterr()
   lines = [
@@ -793,7 +797,7 @@ def fixture_pooled(monkeypatch, bq):
 
 def test_run_reads_the_free_text_pools_per_table(bq, pooled, monkeypatch,
                                                  capsys):
-  build = tiny_pipeline()
+  build = tiny_pipeline(fast=True)
   monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
   model_uri = pooled.params["model_uri"]
   bq.canned.append(("freetext_pools", [{
@@ -803,8 +807,7 @@ def test_run_reads_the_free_text_pools_per_table(bq, pooled, monkeypatch,
       "reference_digest": "ignored-by-the-fake",
       "model_uri": model_uri,
   }]))
-  assert main(["run", *TARGET], make_env(bq,
-                                         submit=driver.submit_pipeline)) == 0
+  assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
   pools = build.built[0][1]["pools"]
   assert sorted(pools) == ["order_items", "orders", "users"]
   assert pools["orders"] == {
@@ -830,10 +833,9 @@ def test_run_reads_the_free_text_pools_per_table(bq, pooled, monkeypatch,
 def test_a_launch_without_a_pools_table_reads_none(bq, resolved, monkeypatch,
                                                    capsys):
   del resolved
-  build = tiny_pipeline()
+  build = tiny_pipeline(fast=True)
   monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
-  assert main(["run", *TARGET], make_env(bq,
-                                         submit=driver.submit_pipeline)) == 0
+  assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
   assert build.built[0][1]["pools"] is None
   assert not [sql for sql, _ in bq.queries if "freetext_pools" in sql]
   capsys.readouterr()
@@ -844,12 +846,11 @@ def test_refused_pools_degrade_with_a_warning(bq, pooled, monkeypatch, capsys):
   pools — `field.pool_memorization_lift` says so itself — and the plan
   the pipeline runs carries the warning into the FINAL row."""
   del pooled
-  build = tiny_pipeline()
+  build = tiny_pipeline(fast=True)
   monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
   bq.query_failures["freetext_pools"] = PermissionError(
       "query: 403 tables.getData denied")
-  assert main(["run", *TARGET], make_env(bq,
-                                         submit=driver.submit_pipeline)) == 0
+  assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
   plan, kwargs = build.built[0]
   assert kwargs["pools"] is None
   notes = [w for w in plan.warnings if "free-text pools" in w]
@@ -884,9 +885,9 @@ def _kept(scratch) -> list[str]:
 def test_the_temporary_directory_goes_with_a_successful_run(
     bq, resolved, monkeypatch, scratch, capsys):
   del resolved
-  monkeypatch.setattr(driver, "build_evaluation_pipeline", tiny_pipeline())
-  assert main(["run", *TARGET], make_env(bq,
-                                         submit=driver.submit_pipeline)) == 0
+  monkeypatch.setattr(driver, "build_evaluation_pipeline",
+                      tiny_pipeline(fast=True))
+  assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
   assert _kept(scratch) == []
   captured = capsys.readouterr()
   assert str(scratch) not in captured.out + captured.err
@@ -897,11 +898,10 @@ def test_a_failed_load_keeps_the_local_outputs_and_says_where(
   """The pipeline ran and its files are the only copy of the result."""
   del resolved
   monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(ks=[0.01]))
+                      tiny_pipeline(fast=True, ks=[0.01]))
   bq.load_failures["evaluation_metrics"] = BqApiError(
       "load into evaluation_metrics: 503", status=503)
-  assert main(["run", *TARGET], make_env(bq,
-                                         submit=driver.submit_pipeline)) == 3
+  assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 3
   assert _statuses(bq) == ["RUNNING", "FAILED"]
   (kept,) = _kept(scratch)
   err = capsys.readouterr().err
@@ -971,12 +971,12 @@ def test_flex_entry_on_a_local_runner_still_loads_its_outputs(
     bq, resolved, monkeypatch, capsys):
   del resolved
   monkeypatch.setattr(driver, "build_evaluation_pipeline",
-                      tiny_pipeline(counts={
+                      tiny_pipeline(fast=True, counts={
                           "total": 1,
                           "fail": 1
                       }))
   code = run_evaluation.main([*TARGET, "--fail_on", "fail"],
-                             make_env(bq, submit=driver.submit_pipeline))
+                             make_env(bq, submit=write_stand_in))
   assert code == 0  # never the gate's code
   # bq_client: the driver waited, then loaded the outputs
   assert _statuses(bq) == ["RUNNING", "SUCCEEDED"]

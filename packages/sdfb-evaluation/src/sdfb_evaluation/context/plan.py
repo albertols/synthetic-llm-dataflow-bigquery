@@ -1124,7 +1124,10 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
   key (Rulings R64, R68: a Secret Manager version, `gs://` object or
   local path — never the key itself), None for an ephemeral key; the
   pipeline resolves it on a worker and the registry records only the
-  mode.
+  mode. `thresholds_uri` and `thresholds_digest` record a run graded
+  under its own thresholds (Ruling R93-6: the file's URI and the digest
+  of the overrides it held), None for the catalogue's; the registry
+  carries both in `evaluation_params`.
   """
   evaluation_id: str
   evaluation_key: str
@@ -1147,6 +1150,8 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
   evaluator_version: str = EVALUATOR_VERSION
   temp_dataset: str = ""
   label_key_uri: str | None = None
+  thresholds_uri: str | None = None
+  thresholds_digest: str | None = None
 
   @property
   def budget(self) -> Budget:
@@ -1227,6 +1232,8 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
             "mode": self.mode,
             "trigger": self.trigger,
             "runner": self.runner,
+            "thresholds_uri": self.thresholds_uri,
+            "thresholds_digest": self.thresholds_digest,
         },
         "overall_score":
             None,

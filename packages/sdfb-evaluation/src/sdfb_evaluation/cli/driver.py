@@ -90,6 +90,13 @@ error message that quotes it is redacted before the registry's
 1,000-character cut). A reason that is cut keeps, after its beginning,
 the line on which Beam names the failing step (else its last line).
 
+`--thresholds_uri` (`cli.thresholds`, Ruling R93-6): the overrides the
+file held arrive validated in `args.thresholds`. They go to the
+pipeline, which grades and stores every metric row under them, and the
+plan — so every registry row, a FAILED one included — records the URI
+and the overrides' digest in `evaluation_params`. The gate is unchanged:
+it reads the registry's counts, which are counts of the stored rows.
+
 The free-text pools (`field.pool_memorization_lift`) are read here, per
 table, from the launch's `freetext_pools_table`. A read BigQuery REFUSES
 (`context.bq.is_refusal`) degrades with a warning; a transient error
@@ -154,6 +161,7 @@ from sdfb_evaluation.beam.pipeline import (
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.cli.fixture import Fixture, load_fixture
 from sdfb_evaluation.cli.gate import EXIT_FAILED, final_exit_code
+from sdfb_evaluation.cli.thresholds import thresholds_digest
 from sdfb_evaluation.context.bq import (
     Bq,
     BqApiError,
@@ -515,6 +523,16 @@ def _rfc3339(moment: datetime) -> str:
   return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _override(args: argparse.Namespace) -> tuple[str | None, str | None]:
+  """What a plan records of `--thresholds_uri` (module docstring): the
+  URI and the digest of the overrides it held, (None, None) without it."""
+  uri = getattr(args, "thresholds_uri", None)
+  if not uri:
+    return None, None
+  held = getattr(args, "thresholds", None) or {}
+  return str(uri), thresholds_digest(held)
+
+
 def planning_failed_row(args: argparse.Namespace,
                         *,
                         evaluation_id: str,
@@ -533,6 +551,7 @@ def planning_failed_row(args: argparse.Namespace,
   (`context.plan.evaluation_key`); an unresolved one a key of the request
   as it was asked."""
   knobs = knobs_from_args(args, evaluation_id)
+  thresholds_uri, digest = _override(args)
   resolved = launch is not None
   if launch is None:
     launch = LaunchContext(
@@ -579,7 +598,9 @@ def planning_failed_row(args: argparse.Namespace,
       catalogue_version=load_catalogue().version,
       temp_dataset=knobs.temp_dataset or
       f"{project or args.project}.{knobs.output_dataset}",
-      label_key_uri=args.label_key_uri)
+      label_key_uri=args.label_key_uri,
+      thresholds_uri=thresholds_uri,
+      thresholds_digest=digest)
   row = _failed(stub, exc, now)
   row.update(bq_bytes_processed=None, predicted_shuffle_gb=None)
   if not resolved:
@@ -863,7 +884,8 @@ class _Run:
                  if fixture is None else fixture.sources()),
         sinks=self.sinks,
         stats_query=self.bq.query if fixture is None else None,
-        pools=pools)
+        pools=pools,
+        thresholds=getattr(args, "thresholds", None) or None)
     return self.env.submit(pipeline)
 
   def _close(self, planned: EvaluationPlan, exc: BaseException) -> None:
@@ -1022,7 +1044,12 @@ def _drive(this: _Run, beam_args: Sequence[str], wait: bool,
         project=this.project,
         now=this.env.now())
     raise
-  planned = dataclasses.replace(planned, label_key_uri=args.label_key_uri)
+  thresholds_uri, digest = _override(args)
+  planned = dataclasses.replace(
+      planned,
+      label_key_uri=args.label_key_uri,
+      thresholds_uri=thresholds_uri,
+      thresholds_digest=digest)
   try:
     registry.append(running_row(planned), "driver-running")
     if this.fixture is None:

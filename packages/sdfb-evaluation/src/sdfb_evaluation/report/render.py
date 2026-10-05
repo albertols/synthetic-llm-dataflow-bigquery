@@ -26,6 +26,14 @@ to look an id up. WARN rows, the reasons behind not_evaluated rows and
 the run's warnings follow. The JSON form carries the same, plus every
 metric row, for agents and the E2E bundle.
 
+Thresholds are read from the stored rows, never assumed: a run under
+`--thresholds_uri` grades and stores against its own (Ruling R93-6). The
+header says which thresholds graded the run (the registry's
+`evaluation_params.thresholds_uri` / `thresholds_digest`), a failing
+metric shows the warn and fail its rows carry — and the packaged
+catalogue's beside them when they differ — and a comparison of two runs
+graded against different thresholds says so.
+
 A comparison is noise-aware. Rows are joined on (table, metric, column,
 second column, edge) and the delta B - A is judged against what the two
 rows say about their own sampling noise:
@@ -157,15 +165,46 @@ def _interval(row: Mapping[str, Any]) -> str:
   return f"[{_num(low)}, {_num(high)}]"
 
 
-def _thresholds(metric: Metric) -> str:
+def _graded_against(metric: Metric,
+                    rows: Sequence[Mapping[str, Any]]) -> tuple[Any, Any]:
+  """The (warn, fail) the stored `rows` of `metric` were graded against:
+  the ones they carry (one evaluation grades a metric against one pair),
+  the catalogue's when there is no row."""
+  if not rows:
+    return metric.warn, metric.fail
+  return rows[0].get("threshold_warn"), rows[0].get("threshold_fail")
+
+
+def _thresholds(metric: Metric, rows: Sequence[Mapping[str, Any]]) -> str:
   parts = [metric.family, metric.level, metric.direction.replace("_", " ")]
   if metric.target is not None:
     parts.append(f"target {_num(metric.target)}")
-  parts.append(f"warn {_num(metric.warn)}")
-  parts.append(f"fail {_num(metric.fail)}")
+  warn, fail = _graded_against(metric, rows)
+  graded = f"fail {_num(fail)}"
+  if (warn, fail) != (metric.warn, metric.fail):
+    graded += (" (this run's thresholds; the packaged catalogue has warn "
+               f"{_num(metric.warn)}, fail {_num(metric.fail)})")
+  parts += [f"warn {_num(warn)}", graded]
   if metric.uses_ci_bound:
     parts.append("gated on its confidence bound")
   return " · ".join(parts)
+
+
+def _override(row: Mapping[str, Any]) -> tuple[Any, Any]:
+  """The threshold override a registry row records: (URI, digest), both
+  None for a run graded by the catalogue (or stored before overrides
+  were recorded)."""
+  params = row.get("evaluation_params") or {}
+  return params.get("thresholds_uri"), params.get("thresholds_digest")
+
+
+def _graded_by(row: Mapping[str, Any], override: str) -> str:
+  """Which thresholds graded the run of registry row `row`: the
+  catalogue's, or `override` filled with the URI and the digest."""
+  uri, digest = _override(row)
+  if uri is None and digest is None:
+    return "the catalogue's"
+  return override.format(uri=_code(uri), digest=_code(digest))
 
 
 # --------------------------------------------------------------------------
@@ -221,6 +260,7 @@ def _header(evaluation: Evaluation) -> list[str]:
       ("Run ids", ", ".join(row.get("run_ids") or ()) or None),
       ("Relationship model", row.get("relationship_model")),
       ("Evaluator / catalogue", versions),
+      ("Thresholds", _graded_by(row, "overridden by {uri} (digest {digest})")),
       ("Read from", evaluation.origin),
   ]
   facts += [
@@ -248,10 +288,11 @@ def _tables_section(evaluation: Evaluation) -> list[str]:
   ]
 
 
-def _explained(metric_id: str, metric: Metric | None,
-               catalogue: Catalogue) -> list[str]:
-  """The heading of one failing metric with the catalogue's own text —
-  or, for an id the packaged catalogue lacks, a line saying so."""
+def _explained(metric_id: str, metric: Metric | None, catalogue: Catalogue,
+               rows: Sequence[Mapping[str, Any]]) -> list[str]:
+  """The heading of one failing metric with the catalogue's own text
+  and the thresholds its `rows` were graded against — or, for an id the
+  packaged catalogue lacks, a line saying so."""
   if metric is None:
     return [
         f"### `{metric_id}` — not in the packaged catalogue", "",
@@ -260,7 +301,8 @@ def _explained(metric_id: str, metric: Metric | None,
         "(the registry row names it). Its rows follow as stored.*", ""
     ]
   return [
-      f"### `{metric.id}` — {metric.title}", "", f"*{_thresholds(metric)}*", "",
+      f"### `{metric.id}` — {metric.title}", "",
+      f"*{_thresholds(metric, rows)}*", "",
       f"- **Measures:** {_prose(metric.purpose)}",
       f"- **A bad value means:** {_prose(metric.interpretation.bad)}",
       f"- **A good value:** {_prose(metric.interpretation.good)}",
@@ -275,7 +317,7 @@ def _failing_section(evaluation: Evaluation, catalogue: Catalogue) -> list[str]:
   if not groups:
     return [*lines, "No metric is at FAIL.", ""]
   for metric_id, metric, rows in groups:
-    lines += _explained(metric_id, metric, catalogue)
+    lines += _explained(metric_id, metric, catalogue, rows)
     lines += _table(
         ("table", "scope", "value", "noise floor", "CI", "baseline", "source",
          "synthetic", "n source", "n synthetic", "method"),
@@ -357,17 +399,19 @@ def _dump(payload: Mapping[str, Any]) -> str:
 def _failing_entry(metric_id: str, metric: Metric | None,
                    rows: list[dict[str, Any]]) -> dict[str, Any]:
   """One failing metric of the JSON report: the catalogue's text (every
-  field None for an id the packaged catalogue lacks) and its rows."""
+  field None for an id the packaged catalogue lacks), the thresholds its
+  rows were graded against, and its rows."""
   if metric is None:
     described: dict[str, Any] = dict.fromkeys(_DESCRIBED)
   else:
+    warn, fail = _graded_against(metric, rows)
     described = {
         "title": metric.title,
         "level": metric.level,
         "family": metric.family,
         "direction": metric.direction,
-        "threshold_warn": metric.warn,
-        "threshold_fail": metric.fail,
+        "threshold_warn": warn,
+        "threshold_fail": fail,
         "purpose": _prose(metric.purpose),
         "interpretation": {
             "good": _prose(metric.interpretation.good),
@@ -569,6 +613,11 @@ def _comparability(a: Evaluation, b: Evaluation) -> list[str]:
     if first.get(field) != second.get(field):
       notes.append(f"{field} differs ({first.get(field)} vs "
                    f"{second.get(field)}): {why}")
+  if _override(first) != _override(second):
+    graded = " vs ".join(
+        _graded_by(row, "{uri}, digest {digest}") for row in (first, second))
+    notes.append(f"thresholds differ ({graded}): statuses and scores were "
+                 "graded against different thresholds")
   if first.get("generation_job_id") != second.get("generation_job_id"):
     notes.append("the two runs evaluate different generation jobs")
   elif first.get("evaluation_key") == second.get("evaluation_key"):

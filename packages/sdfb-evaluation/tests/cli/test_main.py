@@ -167,7 +167,7 @@ def test_a_malformed_beam_argument_is_a_usage_error_before_anything_starts(
     assert info.value.code == 2, extra
     err = capsys.readouterr().err
     assert "sdfb-eval run: error: Beam arguments:" in err
-    assert extra[0].split("=")[0] in err
+    assert extra[0].split("=", maxsplit=1)[0] in err
   assert resolved == [] and stub.built == []
   assert bq.loads == [] and bq.executed == [] and bq.queries == []
   # a well-formed Beam argument passes through untouched

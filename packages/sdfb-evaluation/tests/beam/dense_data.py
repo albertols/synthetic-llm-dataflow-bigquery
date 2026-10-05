@@ -14,11 +14,12 @@
 """Test tables for the dense accumulators: invented thelook-shaped rows,
 planned the way the planning scan would plan them.
 
-`planned_table` computes, in Python, the statistics the planning SELECT
-returns (`COUNTIF(NULL)`, `APPROX_QUANTILES(v, 1000)`, `APPROX_TOP_COUNT`,
-…, exact here) and hands them to the real `apply_planning` and
-`select_pairs`, so kinds, grids, atoms, dictionaries and pairs are the
-planner's own. Nothing here is real data.
+`planned_table` takes the statistics the planning SELECT returns
+(`COUNTIF(NULL)`, `APPROX_QUANTILES(v, 1000)`, `APPROX_TOP_COUNT`, …)
+from `context.offline.planning_stats` — exact, from the rows in memory —
+and hands them to the real `apply_planning` and `select_pairs`, so
+kinds, grids, atoms, dictionaries and pairs are the planner's own.
+Nothing here is real data.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -26,8 +27,6 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import dataclasses
-import math
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
@@ -35,8 +34,8 @@ from typing import Any
 
 import numpy as np
 
-from sdfb_evaluation.canonical import canonical_value, numeric_value
 from sdfb_evaluation.context.budget import Budget
+from sdfb_evaluation.context.offline import planning_stats
 from sdfb_evaluation.context.plan import (
     TablePlan,
     apply_planning,
@@ -47,89 +46,7 @@ from sdfb_evaluation.context.reference import Panel
 
 from .tables import make_panel, table_plan
 
-_NUMERIC = {"INT64", "FLOAT64", "NUMERIC", "BIGNUMERIC"}
-_TEMPORAL = {"TIMESTAMP", "DATETIME", "DATE", "TIME"}
-_GRID = np.linspace(0.0, 1.0, 1001)
 _BUDGET = Budget(max_shuffle_gb=500.0, max_bytes_billed=1 << 40)
-
-
-def _key(value: Any) -> str:
-  return repr(canonical_value(value))
-
-
-def _top(values: Sequence[Any], k: int) -> list[tuple[Any, int]]:
-  """APPROX_TOP_COUNT, exact: most frequent first, NULL counted."""
-  counts = Counter(_key(v) for v in values)
-  first = {}
-  for v in values:
-    first.setdefault(_key(v), v)
-  ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:k]
-  return [(first[key], count) for key, count in ranked]
-
-
-def _planning_scale(value: Any) -> float | None:
-  reading = numeric_value(value)
-  if reading is None or not math.isfinite(reading):
-    return None
-  return reading
-
-
-def _midnight(value: Any) -> bool:
-  return isinstance(value, datetime) and value.time() == time(0)
-
-
-def _column_stats(field: Mapping[str, Any], values: Sequence[Any],
-                  is_key: bool) -> dict[str, Any]:
-  bq_type = field["type"]
-  if field.get("mode") == "REPEATED" or bq_type in ("RECORD", "JSON"):
-    return {"null": sum(1 for v in values if v is None or v == [])}
-  present = [v for v in values if v is not None]
-  stats: dict[str, Any] = {
-      "null": len(values) - len(present),
-      "distinct": len({_key(v) for v in present}),
-  }
-  if bq_type == "STRING":
-    stats["empty"] = sum(1 for v in present if v.strip() == "")
-  if bq_type == "BYTES":
-    stats["empty"] = sum(1 for v in present if len(v) == 0)
-  if is_key:
-    return stats
-  if bq_type in _NUMERIC | _TEMPORAL:
-    scaled = [_planning_scale(v) for v in values]
-    finite = np.array([v for v in scaled if v is not None], dtype=float)
-    if finite.size:
-      stats["quantiles"] = np.quantile(
-          finite, _GRID, method="inverted_cdf").tolist()
-      stats["mean"] = float(finite.mean())
-      stats["std"] = float(finite.std())
-      stats["min"] = float(finite.min())
-      stats["max"] = float(finite.max())
-    stats["top"] = _top(scaled, 11)
-    if bq_type in ("TIMESTAMP", "DATETIME"):
-      stats["midnight"] = sum(1 for v in present if _midnight(v))
-  elif bq_type == "BOOL":
-    stats["top"] = _top(values, 255)
-  elif bq_type in ("STRING", "BYTES"):
-    stats["avg_len"] = (
-        sum(len(v) for v in present) / len(present) if present else None)
-    stats["top"] = _top(values, 255)
-  return stats
-
-
-def planning_stats(
-    fields: Sequence[Mapping[str, Any]],
-    rows: Sequence[Mapping[str, Any]],
-    keys: frozenset[str] = frozenset()
-) -> dict[str, Any]:
-  """`parse_planning`'s shape for `rows`, computed exactly in Python."""
-  return {
-      "rows": len(rows),
-      "columns": {
-          f["name"]:
-              _column_stats(f, [r[f["name"]] for r in rows], f["name"] in keys)
-          for f in fields
-      },
-  }
 
 
 def planned_table(name: str,

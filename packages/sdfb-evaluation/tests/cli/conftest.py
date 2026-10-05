@@ -15,7 +15,7 @@
 
 The packaged catalogue is immutable, and parsing its YAML takes about a
 quarter of a second; a CLI run asks for it several times (the planner,
-the registry rows, the gate, the renderers). `cached_catalogue` parses
+the registry rows, the thresholds file, the renderers). `cached_catalogue` parses
 it once for the whole session, which keeps these tests inside their
 60-second budget (Ruling R88i).
 
@@ -38,13 +38,13 @@ from unit.context.plan_fakes import thelook_launch, thelook_models
 
 from sdfb_evaluation.beam import assemble
 from sdfb_evaluation.catalogue import Catalogue, load_catalogue
-from sdfb_evaluation.cli import driver, fixture, gate, main
+from sdfb_evaluation.cli import driver, fixture, main, thresholds
 from sdfb_evaluation.context import plan
 from sdfb_evaluation.report import render
 
 from .helpers import RecordingBq, tiny_pipeline
 
-_MODULES = (assemble, driver, fixture, gate, main, plan, render)
+_MODULES = (assemble, driver, fixture, main, plan, render, thresholds)
 
 
 @functools.cache

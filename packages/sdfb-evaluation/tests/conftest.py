@@ -35,8 +35,8 @@ from netguard import NetworkGuard
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 
-@pytest.fixture(scope="session", autouse=True)
-def network_guard() -> Iterator[NetworkGuard]:
+@pytest.fixture(scope="session", autouse=True, name="network_guard")
+def fixture_network_guard() -> Iterator[NetworkGuard]:
   """The session's guard, installed before any other fixture runs."""
   guard = NetworkGuard()
   guard.install()
@@ -45,9 +45,8 @@ def network_guard() -> Iterator[NetworkGuard]:
 
 
 @pytest.fixture(autouse=True)
-def no_network(
-    request: pytest.FixtureRequest, network_guard: NetworkGuard
-) -> Iterator[list[str]]:  # pylint: disable=redefined-outer-name  # pytest injects the fixture by this name
+def no_network(request: pytest.FixtureRequest,
+               network_guard: NetworkGuard) -> Iterator[list[str]]:
   """The network attempts of this test (none allowed): any still in the
   list when the test ends fails it, including one a higher-scoped
   fixture made while it was set up. A `gcp` test runs unguarded."""

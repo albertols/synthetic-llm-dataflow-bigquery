@@ -168,6 +168,7 @@ from sdfb_evaluation.beam.membership import (
 from sdfb_evaluation.beam.privacy import Privacy
 from sdfb_evaluation.beam.relational import SIDE_INPUT, Relational, plan_edges
 from sdfb_evaluation.context.bq import BqApiError, normalize_fqn, quote_fqn
+from sdfb_evaluation.context.bq import is_refusal
 from sdfb_evaluation.context.budget import (
     SOURCE_SET_MAX_BYTES,
     source_set_arrays,
@@ -181,7 +182,7 @@ from sdfb_evaluation.context.plan import (
     TablePlan,
 )
 from sdfb_evaluation.context.scope import SourcePin, sampled_read
-from sdfb_evaluation.scoring import to_profile_row
+from sdfb_evaluation.scoring import Thresholds, to_profile_row
 from sdfb_evaluation.types import MetricValue, ProfileValue, Side
 
 __all__ = [
@@ -202,9 +203,6 @@ _BATCHES, _FAILED = "batches", "failed"
 _PANEL_SIDES = (Side.REFERENCE, Side.HOLDOUT)
 _REASON_CHARS = 300
 _BQ_ERRORS = (BqApiError, PermissionError, LookupError)
-# The statuses with which BigQuery refuses a statement for good (bad
-# request, forbidden, not found); every other one may pass on a retry.
-_REFUSED = frozenset({400, 403, 404})
 # The data errors that make a table not_evaluated on a worker:
 # `TABLE_ERRORS` without MemoryError, which is the worker's state, not
 # the table's — it fails the bundle and the runner retries it.
@@ -359,13 +357,11 @@ def _creates(statement: PrepareStatement, table: str) -> bool:
 
 
 def _refusal(exc: BaseException) -> bool:
-  """Whether BigQuery REFUSED the call (module docstring): a 403
-  (`PermissionError`), a 404 (`LookupError`) or a `BqApiError` carrying
-  one of `_REFUSED`. A 5xx, a 429, a conflict or an error with no status
-  is not a refusal: it may pass on a retry."""
-  if isinstance(exc, BqApiError):
-    return exc.status in _REFUSED
-  return isinstance(exc, (PermissionError, LookupError))
+  """Whether BigQuery REFUSED the call (module docstring): the one
+  rule of `context.bq.is_refusal` — a 400, 403 or 404. A 5xx, a 429, a
+  conflict or an error with no status is not a refusal: it may pass on
+  a retry."""
+  return is_refusal(exc)
 
 
 def _readable(bq: Any, table: str) -> str | None:
@@ -665,15 +661,18 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
     sinks: Sinks,
     stats_query: StatsQuery | None = None,
     label_key_reader: Reader | None = None,
-    pools: Mapping[str, Mapping[str, FreeTextPool]] | None = None
-) -> dict[str, beam.PCollection]:
+    pools: Mapping[str, Mapping[str, FreeTextPool]] | None = None,
+    thresholds: Thresholds | None = None) -> dict[str, beam.PCollection]:
   """Compose the whole evaluation of `plan` on `p` (module docstring).
 
   `stats_query` reads the generator's source_table_stats on the driver
   (`Bq.query`'s shape; None: `column.source_stats_drift` is
   not_evaluated with that reason); `label_key_reader` replaces the
   worker's key reader (tests); `pools` are the free-text pools
-  (`census.read_pools`, per table). The RUNNING row is the driver's
+  (`census.read_pools`, per table); `thresholds` are the run's overrides
+  of the catalogue's warn and fail (`{metric id: (warn, fail)}`, Ruling
+  R93-6): every metric row of a named metric is graded, scored and
+  stored under them, roll-ups included. The RUNNING row is the driver's
   (`assemble.running_row`); a plan with nothing to evaluate writes only
   its FINAL SKIPPED row.
 
@@ -747,7 +746,7 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
       mv for name, reason in sorted(failed.items())
       for mv in failed_table_metrics(by_name[name], reason)
   ]
-  context = RowContext.from_plan(plan)
+  context = RowContext.from_plan(plan, thresholds=thresholds)
   measured = ((
       dense_out["metrics"],
       census_out["metrics"],

@@ -48,7 +48,7 @@ from unit.context.plan_fakes import (
 
 from sdfb_evaluation.beam import pipeline as beam_pipeline
 from sdfb_evaluation.beam.io import LOAD_ORDER, InMemorySources
-from sdfb_evaluation.cli import driver, gate
+from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.main import main
 from sdfb_evaluation.report import store
 from sdfb_evaluation.report.render import (
@@ -275,25 +275,6 @@ def test_plan_of_a_fixture_touches_nothing(ran, capsys):
   assert document["prepare_sql"] == [] and document["planning_ddl"] == []
   assert document["tables"][1]["edges"] == ["orders(user_id) -> users(id)"]
   assert document["tables"][0]["panel"]["reference_n"] == PANEL
-
-
-def test_thresholds_regrade_the_stored_rows_of_a_real_run(ran):
-  measured = [r for r in ran.stored.metrics if not is_aggregate(r["metric_id"])]
-  stored = gate.gate_counts(measured, {})
-  final = ran.stored.final
-  assert stored["fail"] == final["metrics_fail"]
-  assert stored["total"] == final["metrics_total"]
-  ks_fails = sum(
-      r["metric_id"] == "column.ks" and r["status"] == "fail" for r in measured)
-  assert ks_fails >= 1
-  # a KS distance cannot reach 2: under these thresholds no KS row fails
-  relaxed = gate.gate_counts(measured, {"column.ks": (2.0, 3.0)})
-  assert relaxed["fail"] == stored["fail"] - ks_fails
-  assert relaxed["total"] == stored["total"]
-  # the catalogue's own thresholds reproduce every stored KS status
-  ks = catalogue().get("column.ks")
-  same = gate.gate_counts(measured, {"column.ks": (ks.warn, ks.fail)})
-  assert same == stored
 
 
 # --------------------------------------------------------------------------

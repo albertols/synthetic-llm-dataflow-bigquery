@@ -50,6 +50,7 @@ from sdfb_evaluation.types import MetricValue
 NOW = datetime(2026, 9, 14, 8, 0, 0, tzinfo=UTC)  # plan_fakes.NOW
 REGISTRY = "evaluation_data_history"
 FIXTURE_PROJECT = "demo-project"
+_STAND_IN = "stand_in_rows"  # `tiny_pipeline(fast=True)`'s rows, on its pipeline
 _FIXTURE_TABLES: dict[str, dict[str, Any]] = {
     "users": {
         "name": "users",
@@ -246,10 +247,10 @@ def check_row(table: str,
   check_rows(table, [row])
 
 
-def ks_row(plan: Any, value: float) -> dict[str, Any]:
+def ks_row(plan: Any, value: float, thresholds: Any = None) -> dict[str, Any]:
   """One `evaluation_metrics` row of `plan`: `column.ks` of
-  orders.num_of_item at `value`, graded by the catalogue (no noise
-  floor, so the value alone decides)."""
+  orders.num_of_item at `value`, graded by the catalogue or the run's
+  `thresholds` (no noise floor, so the value alone decides)."""
   return to_metric_row(
       MetricValue(
           metric_id="column.ks",
@@ -262,22 +263,34 @@ def ks_row(plan: Any, value: float) -> dict[str, Any]:
       evaluation_id=plan.evaluation_id,
       evaluated_at=plan.evaluated_at,
       landing_table=None,
-      source_table=None)
+      source_table=None,
+      thresholds=thresholds)
 
 
-def tiny_pipeline(
-    *,
-    counts: Mapping[str, int] | None = None,
-    status: str = "SUCCEEDED",
-    reason: str | None = None,
-    write: bool = True,
-    ks: Sequence[float] = ()) -> Callable[..., dict]:
+def write_stand_in(pipeline: Any) -> FakeResult:
+  """`Env.submit` for a `tiny_pipeline(fast=True)`: the stand-in's rows
+  go through the run's own sinks now, no Beam run, and the run is DONE."""
+  for sinks, table, rows in getattr(pipeline, _STAND_IN, ()):
+    sinks.write_rows(rows, table, label="stand-in")
+  return FakeResult()
+
+
+def tiny_pipeline(*,
+                  counts: Mapping[str, int] | None = None,
+                  status: str = "SUCCEEDED",
+                  reason: str | None = None,
+                  write: bool = True,
+                  ks: Sequence[float] = (),
+                  fast: bool = False) -> Callable[..., dict]:
   """A stand-in for `build_evaluation_pipeline` that writes only a FINAL
   registry row with `counts` through the run's own sinks (and one
-  `ks_row` per value of `ks`): the driver's whole path, in a pipeline
-  that takes a second. `built` on the returned function records each
-  call's (plan, keyword arguments); `write=False` builds an empty
-  pipeline (for a run whose pipeline is never executed)."""
+  `ks_row` per value of `ks`, graded with the `thresholds` the driver
+  hands over): the driver's whole path, in a pipeline that takes half a
+  second. `built` on the returned function records each call's (plan,
+  keyword arguments); `write=False` builds an empty pipeline (for a run
+  whose pipeline is never executed). `fast=True` leaves Beam out: the
+  same rows reach the same sinks when the test's `Env.submit` is
+  `write_stand_in` (a test about the driver, not about the runner)."""
   built: list[tuple[Any, dict[str, Any]]] = []
 
   def build(p: beam.Pipeline, plan: Any, **kwargs: Any) -> dict:
@@ -296,12 +309,19 @@ def tiny_pipeline(
         finished_at=finish_time(plan.evaluated_at),
         status=status,
         status_reason=reason)
-    final = p | "Final" >> beam.Create([row])
-    kwargs["sinks"].write(final, REGISTRY)
+    rows = {REGISTRY: [row]}
     if ks:
-      metrics = p | "Metrics" >> beam.Create([ks_row(plan, v) for v in ks])
-      kwargs["sinks"].write(metrics, "evaluation_metrics")
-    return {"registry": final}
+      graded = [ks_row(plan, v, kwargs.get("thresholds")) for v in ks]
+      rows["evaluation_metrics"] = graded
+    sinks = kwargs["sinks"]
+    if fast:
+      setattr(p, _STAND_IN, [(sinks, t, found) for t, found in rows.items()])
+      return {}
+    written = {}
+    for table, found in rows.items():
+      written[table] = p | table >> beam.Create(found)
+      sinks.write(written[table], table)
+    return {"registry": written[REGISTRY]}
 
   build.built = built  # type: ignore[attr-defined]
   return build

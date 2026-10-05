@@ -91,14 +91,14 @@ import traceback
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
-import yaml
 from apache_beam.options.pipeline_options import PipelineOptions
 
 from sdfb_evaluation.beam.label_key import is_label_key_uri
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.driver import Env
-from sdfb_evaluation.cli.gate import EXIT_FAILED, FAIL_ON, load_thresholds
+from sdfb_evaluation.cli.gate import EXIT_FAILED, FAIL_ON
+from sdfb_evaluation.cli.thresholds import load_thresholds
 from sdfb_evaluation.cli.planview import describe_plan, render_plan_text
 from sdfb_evaluation.context.bq import normalize_fqn
 from sdfb_evaluation.context.plan import TRIGGERS
@@ -282,8 +282,9 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
   group.add_argument(
       "--thresholds_uri",
       type=_text,
-      help="YAML of warn/fail thresholds the --fail_on gate applies "
-      "instead of the catalogue's (stored statuses are never changed)")
+      help="YAML of warn/fail thresholds that override the catalogue's "
+      "for the whole run: stored statuses and scores, roll-ups and the "
+      "--fail_on gate (thresholds: {metric id: {warn: W, fail: F}})")
   group.add_argument(
       "--fail_on",
       choices=FAIL_ON,
@@ -511,7 +512,7 @@ def _check_run(parser: argparse.ArgumentParser, args: argparse.Namespace,
   if args.thresholds_uri:
     try:
       args.thresholds = load_thresholds(args.thresholds_uri)
-    except (ValueError, OSError, yaml.YAMLError) as exc:
+    except (ValueError, OSError) as exc:
       parser.error(f"--thresholds_uri: {exc}")
 
 
@@ -703,7 +704,7 @@ def _run(args: argparse.Namespace, extras: list[str], env: Env) -> int:
   An interrupt is not an error of the evaluation: it propagates."""
   try:
     return driver.run(args, extras, env)
-  except Exception:  # pylint: disable=broad-exception-caught  # every failure of the evaluation maps to one exit code; the traceback is printed, nothing is hidden
+  except Exception:  # pylint: disable=broad-exception-caught  # one exit code for every failure; the traceback is printed
     traceback.print_exc()
     return EXIT_FAILED
 

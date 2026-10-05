@@ -116,7 +116,7 @@ class NetworkGuard:
     patch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
     patch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
     patch.setattr(google.auth, "default", no_credentials)
-    patch.setattr(google.auth._default, "default", no_credentials)  # pylint: disable=protected-access  # the module the clients import the function from
+    patch.setattr(google.auth._default, "default", no_credentials)  # pylint: disable=protected-access  # clients import it from here
     self._patch = patch
 
   def remove(self) -> None:
