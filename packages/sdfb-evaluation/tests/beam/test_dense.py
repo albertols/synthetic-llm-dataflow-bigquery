@@ -119,7 +119,7 @@ def _pure(
 
 
 def _collect(pcoll: beam.PCollection, path: Path, label: str) -> None:
-  """Pickle a PCollection's elements to `path` (DirectRunner, in process)."""
+  """Pickle a PCollection's elements to `path` (local runner, in process)."""
 
   def dump(actual: Sequence[Any]) -> None:
     path.write_bytes(pickle.dumps(list(actual)))
@@ -129,7 +129,7 @@ def _collect(pcoll: beam.PCollection, path: Path, label: str) -> None:
 
 def _run(tables: Sequence[Any], rows_by: Mapping[str, Mapping[str, list]],
          tmp_path: Path) -> tuple[list[MetricValue], list[ProfileValue], dict]:
-  """The Beam path on the DirectRunner: read, encode, dense."""
+  """The Beam path on the local runner (FnApiRunner): read, encode, dense."""
   sources = InMemorySources({
       (t.name, side): rows_by[t.name][side] for t in tables
       for side in ("source", "synthetic")
@@ -461,7 +461,7 @@ def _with_invalid_amounts(rows: list[dict]) -> list[dict]:
 
 @pytest.fixture(scope="module", name="orders_run")
 def fixture_orders_run(tmp_path_factory: pytest.TempPathFactory) -> tuple:
-  """One DirectRunner pass over the orders table, shared by the tests that
+  """One local-runner (FnApiRunner) pass over the orders table, shared by the tests that
   only read its output (six synthetic amounts are non-finite)."""
   table, rows_by = orders_table()
   rows_by["synthetic"] = _with_invalid_amounts(rows_by["synthetic"])

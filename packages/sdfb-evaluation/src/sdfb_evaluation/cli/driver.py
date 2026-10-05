@@ -112,7 +112,8 @@ the line on which Beam names the failing step (else its last line).
 file held arrive validated in `args.thresholds`. They go to the
 pipeline, which grades and stores every metric row under them, and the
 plan — so every registry row, a FAILED one included — records the URI
-and the overrides' digest in `evaluation_params`. The gate is unchanged:
+(a `gs://` one as given, any other only as its file's base name) and the
+overrides' digest in `evaluation_params`. The gate is unchanged:
 it reads the registry's counts, which are counts of the stored rows.
 
 The free-text pools (`field.pool_memorization_lift`) are read here, per
@@ -546,12 +547,17 @@ def _rfc3339(moment: datetime) -> str:
 
 def _override(args: argparse.Namespace) -> tuple[str | None, str | None]:
   """What a plan records of `--thresholds_uri` (module docstring): the
-  URI and the digest of the overrides it held, (None, None) without it."""
+  URI and the digest of the overrides it held, (None, None) without it.
+  A `gs://` URI is recorded as given; any other value only as its file's
+  base name, so a home-directory path never reaches BigQuery (the digest
+  identifies the content)."""
   uri = getattr(args, "thresholds_uri", None)
   if not uri:
     return None, None
   held = getattr(args, "thresholds", None) or {}
-  return str(uri), thresholds_digest(held)
+  uri = str(uri)
+  recorded = uri if uri.startswith("gs://") else os.path.basename(uri)
+  return recorded, thresholds_digest(held)
 
 
 def planning_failed_row(args: argparse.Namespace,
@@ -975,9 +981,10 @@ class _Run:
           self._leave_finished(job)
           raise
         what = f"job {job}" if job else "the pipeline"
+        shown = _redacted(exc, planned.label_key_uri)  # as a failed row's
         print(
-            f"sdfb-eval: warning: the wait failed ({type(exc).__name__}: "
-            f"{exc}), but {what} finished (DONE): reading its result",
+            f"sdfb-eval: warning: the wait failed ({type(shown).__name__}: "
+            f"{shown}), but {what} finished (DONE): reading its result",
             file=sys.stderr)
         return
       if _still_running(job, state):

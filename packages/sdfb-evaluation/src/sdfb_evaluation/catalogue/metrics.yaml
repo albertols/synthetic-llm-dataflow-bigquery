@@ -72,8 +72,10 @@
 #                 none         = v when 0 <= v <= 1, else null (a roll-up
 #                                score is its own score).
 #                 A row whose WARN or FAIL D5 attributes to sampling noise
-#                 is scored at its noise reference (normally 1, Ruling
-#                 R40); every other row keeps the function's score.
+#                 is scored at its noise reference, score_value(metric,
+#                 reference) (Ruling R40): status and score stay coupled, so
+#                 an effect within sampling resolution is no effect for
+#                 either; every other row keeps the function's score.
 #   noise_floor   the method sizing sampling noise: ks_two_sample | wilson |
 #                 newcombe | tvd_null | jsd_null | fisher_z | mi_bias |
 #                 rate_ratio | delong | none (D5, Ruling R41). The scalar
@@ -87,8 +89,9 @@
 #                 matched n (D5).
 #   baseline      the row also stores baseline_value = metric(R, source): the
 #                 floor a perfect copier of the reference sample scores (D4).
-#   uses_ci_bound status AND score read the CI bound (ci_low) instead of the
-#                 value (Rulings R1, R12).
+#   uses_ci_bound status AND score read the CI bound instead of the value:
+#                 ci_low for a lower-is-better metric, ci_high for a
+#                 higher-is-better one (Rulings R1, R12).
 #   formula       KaTeX, standard macros only.
 #   purpose / interpretation / pitfalls / references
 #                 popover text for a data engineer; references are https links

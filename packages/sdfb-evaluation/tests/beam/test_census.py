@@ -122,7 +122,7 @@ def _run(
     *,
     pools: Mapping[str, Mapping[str, FreeTextPool]] | None = None
 ) -> tuple[list[MetricValue], list[ProfileValue], dict]:
-  """The Beam path on the DirectRunner: read, encode, dense, census."""
+  """The Beam path on the local runner (FnApiRunner): read, encode, dense, census."""
   sources = InMemorySources({
       (table.name, side): rows for side, rows in rows_by.items()
   })
@@ -222,7 +222,7 @@ def _counts(rows: Sequence[Mapping[str, Any]], name: str) -> Counter:
 
 @pytest.fixture(scope="module", name="users_run")
 def fixture_users_run(tmp_path_factory: pytest.TempPathFactory) -> tuple:
-  """One DirectRunner pass over the users table, shared by the tests that
+  """One local-runner (FnApiRunner) pass over the users table, shared by the tests that
   only read its output; `sku` is value-sampled (R67's head/tail design)
   so the Beam path is held to the in-process one there too."""
   table, rows = users_table()

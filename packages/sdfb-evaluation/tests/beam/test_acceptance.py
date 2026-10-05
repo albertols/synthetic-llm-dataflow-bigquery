@@ -13,7 +13,7 @@
 #  limitations under the License.
 """The planted-defect acceptance of the whole evaluator (Task 26): the
 composed pipeline (`beam.pipeline.build_evaluation_pipeline`) on the
-DirectRunner with `LocalJsonSinks`, over the invented thelook-shaped
+local runner (FnApiRunner) with `LocalJsonSinks`, over the invented thelook-shaped
 launch of `acceptance_data`.
 
     good synthetic (same generator) ─► no FAIL on any fidelity, privacy
@@ -46,7 +46,6 @@ import hashlib
 import itertools
 import json
 import math
-import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,7 +56,6 @@ import numpy as np
 import pytest
 from apache_beam.options.pipeline_options import PipelineOptions
 
-from sdfb_evaluation import schemas
 from sdfb_evaluation.beam.io import InMemorySources, LocalJsonSinks, Sinks
 from sdfb_evaluation.beam.pipeline import (
     build_evaluation_pipeline,
@@ -80,13 +78,12 @@ from .acceptance_data import (
     table_plan,
     with_scope,
 )
+from .row_checks import check_rows
 
 pytestmark = pytest.mark.slow  # two three-table and two one-table evaluations
 
 LABEL_KEY = b"acceptance-label-key-0123456789ab"
 _GATED_FAMILIES = ("fidelity", "privacy", "integrity")
-_TIMESTAMP_RE = re.compile(
-    r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)")
 _CATALOGUE = load_catalogue()
 
 
@@ -112,7 +109,8 @@ def evaluate(plan: EvaluationPlan,
              *,
              stats_query: Any = None,
              sinks: Sinks | None = None) -> Outcome:
-  """One evaluation on the DirectRunner with the runner defaults;
+  """One evaluation on the local runner (FnApiRunner) with the runner
+  defaults;
   `rows` maps side → table → rows."""
   sources = InMemorySources({
       (name, side): table_rows for side, by_table in rows.items()
@@ -494,62 +492,16 @@ def test_empty_scope_writes_skipped_registry_row(launch, tmp_path):
   assert row["metrics_total"] == 0 and row["metrics_fail"] == 0
   assert row["finished_at"] and row["recorded_at"] >= row["evaluated_at"]
   assert row["evaluation_params"]["label_key_mode"] == "ephemeral"
-  _check_rows("evaluation_data_history", outcome.registry)
-
-
-def _check_scalar(field: Mapping[str, Any], value: Any, name: str) -> None:
-  kind = field["type"]
-  if kind == "RECORD":  # NDJSON lines are key-sorted: compare the names
-    assert isinstance(value, dict), name
-    assert set(value) == {f["name"] for f in field["fields"]}, name
-    for sub in field["fields"]:
-      _check_value(sub, value[sub["name"]], f"{name}.")
-  elif kind == "STRING":
-    assert isinstance(value, str), name
-  elif kind == "INT64":
-    assert isinstance(value, int) and not isinstance(value, bool), name
-  elif kind == "FLOAT64":
-    assert isinstance(value, (int, float)) and not isinstance(value, bool)
-    assert math.isfinite(value), name
-  elif kind == "BOOL":
-    assert isinstance(value, bool), name
-  elif kind == "TIMESTAMP":
-    assert isinstance(value, str) and _TIMESTAMP_RE.fullmatch(value), name
-  elif kind == "JSON":
-    json.dumps(value, allow_nan=False)
-  else:
-    raise AssertionError(f"{name}: unchecked type {kind}")
-
-
-def _check_value(field: Mapping[str, Any], value: Any, where: str) -> None:
-  name = where + field["name"]
-  if field.get("mode") == "REPEATED":
-    assert isinstance(value, list), name
-    for item in value:
-      _check_scalar(field, item, name)
-    return
-  if value is None:
-    assert field.get("mode") != "REQUIRED", f"{name} is REQUIRED"
-    return
-  _check_scalar(field, value, name)
-
-
-def _check_rows(table: str, rows: Sequence[Mapping[str, Any]]) -> None:
-  fields = schemas.load_schema(table)
-  names = {f["name"] for f in fields}
-  for row in rows:
-    assert set(row) == names, (table, sorted(set(row) ^ names))
-    for field in fields:
-      _check_value(field, row[field["name"]], f"{table}.")
+  check_rows("evaluation_data_history", outcome.registry)
 
 
 def test_all_rows_validate_against_schemas(good_run, bad_run):
   for outcome in (good_run, bad_run):
     assert outcome.metrics and outcome.profiles and outcome.flags
-    _check_rows("evaluation_metrics", outcome.metrics)
-    _check_rows("evaluation_profiles", outcome.profiles)
-    _check_rows("evaluation_row_flags", outcome.flags)
-    _check_rows("evaluation_data_history", outcome.registry)
+    check_rows("evaluation_metrics", outcome.metrics)
+    check_rows("evaluation_profiles", outcome.profiles)
+    check_rows("evaluation_row_flags", outcome.flags)
+    check_rows("evaluation_data_history", outcome.registry)
     catalogue_ids = set(_CATALOGUE.ids())
     assert {row["metric_id"] for row in outcome.metrics} <= catalogue_ids
     for row in outcome.metrics:
@@ -567,7 +519,7 @@ def test_all_rows_validate_against_schemas(good_run, bad_run):
 
 class _OrderLog:
   """An append-only event log shared by the fake sinks' DoFns (the
-  DirectRunner runs them in this process)."""
+  local runner (FnApiRunner) runs them in this process)."""
 
   def __init__(self, path: Path):
     self.path = str(path)
@@ -755,7 +707,7 @@ def test_degenerate_columns_never_nan(tmp_path):
       assert row["detail"]["reason"], row
   for line in outcome.lines:
     json.loads(line, parse_constant=_no_constant)  # no NaN / ±Infinity token
-  _check_rows("evaluation_metrics", outcome.metrics)
+  check_rows("evaluation_metrics", outcome.metrics)
   [final] = outcome.registry
   # `empty` has no reference panel (nothing to rank): the privacy block
   # is not evaluated, so the run is PARTIAL for that reason alone
@@ -775,11 +727,13 @@ def test_rerun_is_deterministic(heavy_run, heavy_rerun):
   shards' order is the runner's), profiles and flags.
 
   The pair is the heavy copier's one-table run, not a second three-table
-  bad run (a third of its cost): it still runs every transform that
-  merges floating point or samples — dense, census, membership, privacy
-  with the full panel, the source-stats drift — writes every profile
-  kind and the row flags; only the relational pass (integer counts) is
-  absent."""
+  bad run (a third of its cost). It covers the transforms that merge
+  floating point or sample — dense, census, membership, privacy with the
+  full panel, the source-stats drift — every profile kind and the row
+  flags. It does NOT cover the relational pass (integer counts), the
+  FLOAT64 column or the multi-table roll-up:
+  `test_pipeline.py::test_a_three_table_rerun_is_deterministic` reruns
+  the three-table case."""
   assert heavy_run.lines == heavy_rerun.lines
   assert len(heavy_run.lines) == len(heavy_run.metrics) > 0
 

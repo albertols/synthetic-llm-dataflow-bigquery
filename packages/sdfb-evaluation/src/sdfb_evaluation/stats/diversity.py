@@ -46,21 +46,18 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 References:
   Shannon, C. (1948), "A Mathematical Theory of Communication".
-    https://doi.org/10.1002/j.1538-7305.1948.tb01338.x
   Good, I.J. (1953), "The Population Frequencies of Species and the
-    Estimation of Population Parameters". https://doi.org/10.1093/biomet/40.3-4.237
+    Estimation of Population Parameters".
   Miller, G.A. (1955), "Note on the Bias of Information Estimates", in
     H. Quastler (ed.), Information Theory in Psychology: Problems and
     Methods, pp. 95-100 (the primary source for `miller_madow_bits`'s
-    correction term). https://www.semanticscholar.org/paper/922ef4c778a7145da54b0de3e8ef5240a8584cd7
+    correction term).
   Paninski, L. (2003), "Estimation of Entropy and Mutual Information" (a
     secondary source restating Miller's bias term in modern notation).
-    https://doi.org/10.1162/089976603321780272
   Chao, A., Shen, T-J. (2003), "Nonparametric Estimation of Shannon's Index
     of Diversity when there are Unseen Species in Sample".
-    https://doi.org/10.1023/A:1026096204727
   Hurlbert, S. (1971), "The Nonconcept of Species Diversity: A Critique and
-    Alternative Parameters". https://doi.org/10.2307/1934145
+    Alternative Parameters".
 """
 
 from __future__ import annotations

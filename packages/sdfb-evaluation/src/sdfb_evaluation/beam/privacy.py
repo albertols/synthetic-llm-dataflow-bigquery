@@ -346,9 +346,11 @@ _GOWER_CODED = frozenset({
 })
 _INT_TYPES = frozenset({"INT64", "INTEGER"})
 _NUM, _BOOL, _TEXT = "num", "bool", "text"  # a payload cell's batch block
-# The prefilter keeps about 2k + 100 rows per side; the k rows the samples
-# read lie below its rate unless the kept count falls ~sqrt(k / 2) standard
-# deviations short (module docstring).
+# The per-key prefilter keeps about 2k + 100 keys per side; the k keys the
+# samples read lie below its rate unless the kept count falls ~sqrt(k / 2)
+# standard deviations short (module docstring). It is OFF — every row is
+# kept (`_prefilter_limit` returns None) — when the side's key bound K is
+# at most 2k + 100 (the rate reaches 1) or unknown.
 _PREFILTER_FACTOR = 2
 _PREFILTER_SLACK = 100
 _TWO_64 = 2**64

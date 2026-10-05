@@ -37,6 +37,13 @@ uv run python scripts/dsg/headers.py        # licence headers — expect no outp
 uv run python scripts/doc/sync_design_refs.py   # `Design:` docstring lines vs docs/DESIGN.md — expect no output (`--fix` rewrites)
 ```
 
+Evaluator (standalone, not a workspace member — ADR 0041; always give the explicit test path, a bare `pytest` picks up the root config):
+
+```bash
+uv run --project packages/sdfb-evaluation pytest packages/sdfb-evaluation/tests -q -m "not gcp"
+uv run --project packages/sdfb-evaluation mypy packages/sdfb-evaluation/src   # hard CI gate — expect 0 errors
+```
+
 Python is **Google style, 2-space indent** (yapf `--style yapf`, pylint with
 `dsg/pylintrc`, the Dataflow Solution Guides' config). Format with
 `uv run yapf -i -r --style yapf <paths>`; add a pylint pragma only for an
@@ -52,6 +59,9 @@ packages/sdfb-beam/    imports sdfb-core; adds apache-beam[gcp], pandera, whylog
                        Optional extras: [gpu] (vllm+torch), [embedding] (faiss+transformers),
                                         [library] (sdgx — B.2 candidate).
 packages/sdfb-tests/   imports both; pytest + hypothesis + DirectRunner fixtures.
+packages/sdfb-evaluation/  STANDALONE (own lock, Python 3.11, excluded from the uv workspace, ADR 0041):
+                       imports none of the three above. A separate CPU job that scores landed
+                       tables against the source -> `synthetic_data_quality.evaluation_*`.
 ```
 
 Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the other way. Engines live in `sdfb-core` (pure-Python); only the DoFn wrappers and the `ModelClient` implementations live in `sdfb-beam`.
@@ -62,6 +72,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `packages/sdfb-beam/src/sdfb_beam/pipeline.py` — `build_pipeline()` composer.
 - `packages/sdfb-beam/src/sdfb_beam/ddl/cli.py` — DDL extractor CLI.
 - `scripts/extract_ddl.py`, `scripts/hello_synthetic_mlx.py` — runnable entry shims (image build/push live in CI, see [ADR 0008](docs/adr/0008-ci-driven-builds.md)).
+- `packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py` — `sdfb-eval` (`plan`, `run`, `report`, `compare`, `catalogue`, `schemas`); the metric catalogue is `catalogue/metrics.yaml`.
 - Scripts follow a `scripts/<scope>/` layout (`doc/`, `e2e/`, `release/`) — convention in [`scripts/README.md`](scripts/README.md); new scripts never land at the root.
 
 ## What lives where in `.claude/`
@@ -74,6 +85,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `validation-mode-a.md` — three lines of defense, DLQ, whylogs merge
 - `reference-data.md` — live BQ SELECT + canonical provenance digest
 - `gpu-dockerfile.md` — L4 + vLLM custom-container recipe
+- `evaluation-framework/SKILL.md` — running and reading `sdfb-eval`, extending the metric catalogue
 - `gcp-project-ops.md` / `gcp-e2e-run.md` / `gcp-cost-audit.md` — personal-GCP E2E layer (bootstrap/run/cost; see `public_cloud/deploy/gcp/`)
 
 `.claude/agents/` — bounded sub-agent definitions (use the `Agent` tool with `subagent_type` matching the file's `name:`). Each agent owns one concern; do not let them sprawl.

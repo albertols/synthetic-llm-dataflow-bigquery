@@ -42,9 +42,9 @@ History note: the 2026-07 engine-fix/E2E-tooling cycle and the 2026-08 fidelity/
 
 **Remaining themes**:
 - **Relational follow-through** — the M4 Dataflow acceptance launch for ADRs 0036–0038; transcribe the full production-shaped model into `config/relationships/`; level-parallel scheduling; ADR 0033's next cold-launch gate; CPU/GPU worker split for the generate stage (10M: ~9 busy GPU-minutes of 272 billed). The co-partitioned join for parents beyond the 100k key cap is no longer the plan for a **driven** child — the fan-out keys it instead (ADR 0036), and ADR 0037 uses a co-partitioned `CoGroupByKey` for conditional edges; the join survives only as the documented escape hatch for a shape the fan-out cannot key.
-- **Evaluation framework merge** — Tier 1/2/3 metrics (`ws3-eval-framework` branch): KS/Wasserstein, TV, PSI/JSD, DCR/NNDR, SDMetrics reports, memorization identifiers — into the run contract.
+- **sdfb-evaluation (ADR 0041)** — the standalone evaluator (fidelity, privacy, integrity, diversity; four `evaluation_*` tables; a separate CPU job) is built and reviewed on a laptop. Open: the first run on Google Cloud (design §11 criteria 5-13), then the optional Composer chaining and a DSG unit of its own.
 - **Synthetic Platform GUI ([ADR 0042](adr/0042-self-hosted-platform-gui.md))** — a local-first TypeScript app under `gui/` (Cloud Run behind IAP optional) that reads evaluation, validation, source-stats and RAG data through named, read-only, bytes-capped BigQuery queries, with a complete mock mode. Its types are generated from the Python-side schemas; it is not part of the DSG donation.
-- **Mode B validation pipeline** — GX 1.x Checkpoint + Soda Core scan + SDMetrics fidelity + Evidently drift report; results to `synthetic_data_quality.*`, artifacts to GCS.
+- **Mode B validation pipeline** — GX 1.x Checkpoint + Soda Core scan (structural data quality); results to `synthetic_data_quality.*`, artifacts to GCS. Statistical fidelity and privacy are `sdfb-evaluation`, not Mode B.
 - **Constrained-decoding fallback chain** — `outlines` / `lm-format-enforcer` for schema edge cases that beat vLLM's guided JSON.
 - **Reference snapshot pattern** — cached parquet under `gs://{project}-dataflow/reference/{table}/sample.parquet` as a deterministic alternative to live SELECT.
 - **PII allow-list** — mask / format-template sensitive columns before they touch embeddings or validation reports.
@@ -65,7 +65,7 @@ History note: the 2026-07 engine-fix/E2E-tooling cycle and the 2026-08 fidelity/
 - **Run metadata schema v2** — full audit trail, signed-URL report links, OpenLineage-compatible structure (without taking the OpenLineage dependency).
 - **Multi-region** — at least `us-central1` parity with `europe-west3`.
 - **Quota-aware autoscaling** — pipeline reads quota before requesting workers, fails gracefully.
-- **B.1 / B.2 head-to-head report** — fidelity (SDMetrics), cost-per-1k-rows, throughput, suitability matrix per column shape.
+- **B.1 / B.2 head-to-head report** — fidelity (read from `sdfb-evaluation`, ADR 0041), cost-per-1k-rows, throughput, suitability matrix per column shape.
 - **B.3 candidates** — diffusion-based tabular or GAN-only engines if research warrants.
 - **Documentation site** — render `docs/` as a static site (mdBook / Docusaurus); not in lieu of the markdown source.
 

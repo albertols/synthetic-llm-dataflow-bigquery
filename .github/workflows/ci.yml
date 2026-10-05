@@ -87,6 +87,13 @@ jobs:
         # only its holder line, so both trees keep the same line numbers.
         run: uv run python scripts/dsg/headers.py
 
+      - name: Evaluation catalogue table
+        # The metric tables of the evaluation design document are generated
+        # from the evaluator's catalogue YAML (read with PyYAML; the
+        # evaluator itself is not installed here). A catalogue change
+        # without a re-render, or a hand edit of the block, fails.
+        run: uv run python scripts/doc/render_eval_catalogue.py --check
+
       - name: Design references
         # Every shipped module that cites an ADR names the docs/DESIGN.md
         # section to read, and every cited ADR has a row in that document.
@@ -102,7 +109,7 @@ jobs:
 
       - name: Doc / code drift check
         # Fails the build if any string in `.github/drift-check.txt` still
-        # appears in a tracked file outside `docs/adr/` (where historical
+        # appears in a tracked file outside `docs/adr/` and `docs/releases/` (where historical
         # references are allowed). See `.claude/skills/refactor-cleanup.md`
         # for the workflow when you delete or rename anything.
         run: |
@@ -118,14 +125,14 @@ jobs:
               echo "drift-check.txt has only comments — nothing to enforce."
               exit 0
           fi
-          # Scan every text source. Exclude docs/adr (history may reference
+          # Scan every text source. Exclude docs/adr and docs/releases (history may reference
           # removed names) and the patterns file itself.
           HITS=$(grep -rnHF -f "$GREP_FILE" \
               --include='*.md' --include='*.yaml' --include='*.yml' \
               --include='*.py' --include='*.toml' --include='*.sh' \
               --include='*.json' --include='*.txt' \
               --exclude-dir=.venv --exclude-dir=.git \
-              --exclude-dir=__pycache__ --exclude-dir=adr \
+              --exclude-dir=__pycache__ --exclude-dir=adr --exclude-dir=releases \
               --exclude='drift-check.txt' --exclude='initial_prompt.md' \
               . || true)
           if [[ -n "$HITS" ]]; then

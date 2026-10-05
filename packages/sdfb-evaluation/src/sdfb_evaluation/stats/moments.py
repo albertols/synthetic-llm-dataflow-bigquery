@@ -29,7 +29,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 Reference: Pebay, P. (2008), "Formulas for Robust, One-Pass Parallel
 Computation of Covariances and Arbitrary-Order Statistical Moments",
-Sandia Report SAND2008-6212. https://doi.org/10.2172/1028931
+Sandia Report SAND2008-6212.
 """
 
 from __future__ import annotations

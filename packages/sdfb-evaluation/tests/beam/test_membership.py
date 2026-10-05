@@ -132,7 +132,7 @@ def _collect(pcoll: beam.PCollection, path: Path, label: str) -> None:
 
 def _run(table: Any, rows_by: Mapping[str, list], tmp_path: Path,
          **kwargs: Any) -> tuple[list[MetricValue], list[RowFlag]]:
-  """The Beam path on the DirectRunner: read, encode, membership."""
+  """The Beam path on the local runner (FnApiRunner): read, encode, membership."""
   sources = InMemorySources({
       (table.name, side): rows for side, rows in rows_by.items()
   })
@@ -467,7 +467,7 @@ def test_flags_never_carry_values(tmp_path):
 # --------------------------------------------------------------------------
 @pytest.fixture(scope="module", name="copies_run")
 def fixture_copies_run(tmp_path_factory: pytest.TempPathFactory) -> tuple:
-  """One DirectRunner pass (side-input mode) over a people table with
+  """One local-runner (FnApiRunner) pass (side-input mode) over a people table with
   every planted defect, shared by the tests that only read its output."""
   table, rows, donors = _people_with(
       copies=15,

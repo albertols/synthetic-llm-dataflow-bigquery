@@ -1,7 +1,7 @@
 # sdfb-evaluation
 
 Standalone statistical evaluation of synthetic BigQuery tables against their
-live source: fidelity, privacy, and utility, computed with Apache Beam and
+live source: fidelity, privacy, integrity, and diversity, computed with Apache Beam and
 written to BigQuery (`synthetic_data_quality.*`).
 
 This package is **not** a workspace member of the root
