@@ -1009,12 +1009,12 @@ metrics:
     n_dependent: false
     baseline: false
     uses_ci_bound: false
-    formula: '\delta = \max\left( \lvert \Delta p_{null} \rvert, \lvert \Delta \bar{H} \rvert, \lvert \Delta p_{top1} \rvert \right)'
-    purpose: "Largest difference between the evaluator's exact source profile and the source_table_stats row the generator used (null fraction, normalized entropy, top-1 share). It checks that the generator was steered by the same source the evaluation compares against."
+    formula: '\delta = \max\left( \lvert \Delta p_{null} \rvert,\, \max_{i=1}^{9} \operatorname{dist}\left( \frac{i}{10}, \left[ F^{-}_{src}(d_i), F_{src}(d_i) \right] \right),\, \frac{\lvert D_{gen} - D_{src} \rvert}{\max(D_{gen}, D_{src})} \right)'
+    purpose: "Largest difference between the source_table_stats row the generator used and the evaluator's own dense profile of the source (Ruling R62): the null fraction; for a numeric column, how far the evaluator's source CDF puts the generator's nine inner deciles d_i from their ranks i/10; and, on the exact stats tier, the relative distinct-count difference. It checks that the generator was steered by the same source the evaluation compares against."
     interpretation:
       good: "Under 0.05: the generator's view of the source matches the source evaluated today."
       bad: "At or above 0.15: the generator used stale or tier-limited stats, so fidelity gaps on this column may not be the generator's fault."
-    pitfalls: "It audits the generator's input, not its output: a drift here explains fidelity failures rather than being one."
+    pitfalls: "It audits the generator's input, not its output: a drift here explains fidelity failures rather than being one. On the sample tier the distinct count is not compared (it is bounded by the reference sample), and the deciles carry the sample's own noise (about 0.02 at 1,000 rows); temporal and non-numeric columns compare the null fraction only. With no stats row (tier off, no stats table, no reference digest) it is not evaluated, with the reason."
     references:
       - {label: "ADR 0022 — stats-driven generation", url: "https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/docs/adr/0022-stats-driven-generation.md"}
 
