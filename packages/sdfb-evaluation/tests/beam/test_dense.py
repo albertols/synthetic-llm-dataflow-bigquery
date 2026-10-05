@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import bz2
 import dataclasses
+import itertools
 import json
 import math
 import pickle
@@ -2257,9 +2258,18 @@ def test_kept_range_is_one_contiguous_count_based_interval():
 
 
 def _publishable(n: int) -> list[float]:
-  return [
-      q for q in _PROBS if q * n >= RARE_COUNT and (1 - q) * n >= RARE_COUNT
-  ]
+  """R69 and R113 re-derived for a side of n values: k of them at or
+  beyond each probability, and neighbouring probabilities k / n apart,
+  going up from the lowest (in whole percents, exactly)."""
+  cents: list[int] = []
+  for c in range(1, 100):
+    q = round(c / 100, 2)
+    if q * n < RARE_COUNT or (1 - q) * n < RARE_COUNT:
+      continue
+    if cents and (c - cents[-1]) * n < RARE_COUNT * 100:
+      continue
+    cents.append(c)
+  return [round(c / 100, 2) for c in cents]
 
 
 def test_moment_metrics_are_not_evaluated_below_the_count_floor():
@@ -2544,3 +2554,192 @@ def test_exact_mode_dense_rows_are_unchanged_by_the_sampled_mode_rule():
   for mv in metrics:
     assert mv.sample_rate is None and "sample_rates" not in mv.detail
     assert "estimator" not in mv.detail
+
+
+# --------------------------------------------------------------------------
+# published grid values are k source records apart (Ruling R113, I5)
+# --------------------------------------------------------------------------
+_STAFF_FIELDS = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "salary",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "bonus",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "dept",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+)
+_SIDE_NAMES = ("source", "synthetic", "reference", "holdout")
+
+
+def _staff_rows(n: int, seed: int, base: int) -> list[dict]:
+  """Invented staff: lognormal salaries (every value its own record), a
+  bonus that follows the salary and a three-value department."""
+  rng = random.Random(seed)
+  rows = []
+  for i in range(n):
+    salary = round(rng.lognormvariate(10.5, 0.4), 2)
+    rows.append({
+        "id": base + i,
+        "salary": salary,
+        "bonus": round(salary * rng.uniform(0.01, 0.2), 2),
+        "dept": rng.choice(["a", "b", "c"]),
+    })
+  return rows
+
+
+def _staff(n: int, **kwargs: Any) -> tuple[Any, dict[str, list]]:
+  source, synthetic = _staff_rows(n, 1, 1), _staff_rows(n, 2, 100_000)
+  reference, holdout = source[:n // 4], source[n // 4:n // 2]
+  table = planned_table(
+      "staff",
+      _STAFF_FIELDS,
+      source,
+      synthetic,
+      pk=("id",),
+      panel=make_panel(reference, holdout),
+      **kwargs)
+  return table, {
+      "source": source,
+      "synthetic": synthetic,
+      "reference": reference,
+      "holdout": holdout
+  }
+
+
+def _records_between(values: np.ndarray, edges: Sequence[float]) -> list[int]:
+  """Source records in each bin the published `edges` cut, right-closed
+  as the histogram counts them: `(-inf, e0], (e0, e1], …, (e_last, inf)`."""
+  ordered = np.sort(values)
+  at_or_below = np.searchsorted(ordered, np.asarray(edges), side="right")
+  return np.diff(np.concatenate(([0], at_or_below, [ordered.size]))).tolist()
+
+
+def _unspaced(monkeypatch: pytest.MonkeyPatch) -> None:
+  """The publication step as it was before R113: every kept edge and
+  every tail-safe probability."""
+  monkeypatch.setattr(dense, "_spaced", lambda kept, below: kept)
+  monkeypatch.setattr(dense, "_QUANTILE_GAP", 0)
+
+
+@pytest.mark.parametrize(("n", "edges_before", "max_edges"), [(120, 85, 11),
+                                                              (795, 97, 78)])
+def test_small_columns_publish_grid_values_k_source_records_apart(
+    n, edges_before, max_edges, monkeypatch):
+  """The final review's I5. A 120-row column published 85 histogram edges
+  and 83 quantile values, each an exact source record: 71 % of the column
+  in clear, one record to a bin. Now no two published edges are closer
+  than k = 10 source records, a dropped edge's bins merge (counts stay
+  sums, on every side), and quantile probabilities are at least k / n
+  apart. The metrics are computed on the full grid, as before."""
+  table, rows_by = _staff(n)
+  metrics, profiles = _pure(table, rows_by)
+  source = _finite(rows_by["source"], "salary")
+  histograms = {
+      side:
+          next(
+              p
+              for p in profiles
+              if (p.profile_kind, p.side, p.column) == ("histogram", side,
+                                                        "salary"))
+      for side in _SIDE_NAMES
+  }
+  edges = histograms["source"].payload["edges"]
+  between = _records_between(source, edges)
+  assert 2 <= len(edges) <= max_edges < edges_before
+  assert min(between[:-1]) >= RARE_COUNT, between  # no thin bin between edges
+  ordered = np.sort(source)  # R69 at the ends: k records at or beyond each
+  assert np.count_nonzero(ordered >= edges[-1]) >= RARE_COUNT
+  assert len(set(edges) & set(source.tolist())) <= n / RARE_COUNT
+  assert histograms["source"].payload["counts"] == between
+  for side, histogram in histograms.items():  # the same edges on every side
+    values = _finite(rows_by[side], "salary")
+    assert histogram.payload["edges"] == edges, side
+    assert histogram.payload["counts"] == _records_between(values, edges), side
+    assert sum(histogram.payload["counts"]) == values.size, side
+    assert histogram.edges_digest == histograms["source"].edges_digest
+  assert histograms["source"].edges_digest == dense._edges_digest(  # pylint: disable=protected-access  # the digest is of the published edges
+      np.asarray(edges), "value")
+  # quantile probabilities: k of the side's own records apart
+  seen = 0
+  for p in profiles:
+    if p.profile_kind != "quantiles":
+      continue
+    probs = p.payload["probs"]
+    gaps = [round((b - a) * 100) * p.n for a, b in itertools.pairwise(probs)]
+    assert all(gap >= RARE_COUNT * 100 for gap in gaps), (p.side, p.column)
+    assert probs[0] * p.n >= RARE_COUNT <= (1 - probs[-1]) * p.n
+    assert len(probs) <= p.n / RARE_COUNT, (p.side, p.column, len(probs))
+    seen += 1
+  assert seen >= 4
+  # the publication step only: the metrics do not move
+  with monkeypatch.context() as patch:
+    _unspaced(patch)
+    metrics_before, profiles_before = _pure(table, rows_by)
+  assert metrics == metrics_before
+  before = next(
+      p for p in profiles_before
+      if (p.profile_kind, p.side, p.column) == ("histogram", "source",
+                                                "salary"))
+  assert len(before.payload["edges"]) == edges_before
+  assert min(before.payload["counts"]) < RARE_COUNT
+
+
+def test_a_large_column_is_published_as_before(monkeypatch):
+  """At 2,000 rows a percentile bin holds about 20 source records: all 99
+  edges and all 99 quantile probabilities stay, on the source and the
+  synthetic side — the payloads are the ones published before R113."""
+  table, rows_by = _staff(2000)
+  _, profiles = _pure(table, rows_by)
+  with monkeypatch.context() as patch:
+    _unspaced(patch)
+    _, before = _pure(table, rows_by)
+  kinds = ("histogram", "quantiles")
+  now = [
+      p for p in profiles
+      if p.profile_kind in kinds and p.side in ("source", "synthetic")
+  ]
+  assert now == [
+      p for p in before
+      if p.profile_kind in kinds and p.side in ("source", "synthetic")
+  ]
+  histogram = _payload(profiles, "histogram", "source", "salary")
+  assert len(histogram["edges"]) == 99 and min(histogram["counts"]) >= 19
+  assert len(_payload(profiles, "quantiles", "source", "salary")["probs"]) == 99
+  # the 500-row panel sides: the same edges, quantiles 10 of 500 apart
+  reference = _payload(profiles, "quantiles", "reference", "salary")
+  assert reference["probs"] == [round(c / 100, 2) for c in range(2, 99, 2)]
+
+
+def test_pair_axis_edges_are_k_source_records_apart():
+  """A contingency axis shows decile edges: on a 60-row column they are
+  6 source records apart, so every other one is shown and the bins
+  between merge — each interior group then holds at least k source
+  records (the cells themselves are counts below k by design)."""
+  table, rows_by = _staff(60)
+  _, profiles = _pure(table, rows_by)
+  axes = [
+      p for p in profiles
+      if p.profile_kind == "contingency" and p.side == "source" and
+      {p.column, p.payload["column_y"]} == {"salary", "bonus"}
+  ]
+  assert len(axes) == 1
+  payload = axes[0].payload
+  counts = np.asarray(payload["counts"])
+  for labels, marginal in ((payload["x_labels"], counts.sum(axis=1)),
+                           (payload["y_labels"], counts.sum(axis=0))):
+    assert labels[-1] == "NULL" and 3 <= len(labels) <= 6, labels
+    assert marginal[:-1].min() >= RARE_COUNT, (labels, marginal)
+  assert int(counts.sum()) == 60

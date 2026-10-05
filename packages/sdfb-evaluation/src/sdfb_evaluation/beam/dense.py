@@ -121,7 +121,8 @@ Units: every temporal value is in UNIX microseconds (R54), so metric
 values and details on temporal columns are micros; profile payloads
 follow the GUI contract (R27) and carry temporal values in epoch seconds
 (TIME: seconds since midnight, drawn on 1970-01-01), labelled by `unit`.
-Profile payloads are bounded: 100 histogram bins, 99 quantiles, ≤ 4096
+Profile payloads are bounded: at most 100 histogram bins and 99
+quantiles (fewer on a small column, see the count rule), ≤ 4096
 null patterns, contingency tables for the 5 most divergent pairs only,
 and a KEYED hashed label `h:<8 hex>` (`canonical.hashed_label`, R64) for
 every dictionary value D6 keeps out of a payload.
@@ -146,9 +147,19 @@ alike, and every interior edge stays (an interior point is no extreme;
 R69 protects extremes). In sampled mode the sample's counts are a lower
 bound of the full source's, so the rule stays safe. A common end atom
 qualifies, a lone extreme never does.
-  - Histogram and pair-axis edges are the profile edges that rule keeps;
-    the same edges serve every side, as they all come from the source
-    grid, and a dropped edge's two bins merge.
+  - Histogram and pair-axis edges are the profile edges that rule keeps,
+    THINNED for publication (Ruling R113): going up from the first kept
+    edge, an edge is published only once at least k source records lie
+    in the bin since the last published one, so no two published edges
+    are closer than k source records apart (`_spaced`; the pair axis
+    thins its decile edges the same way). On a column of a few hundred
+    rows the plan's percentiles are single source records one or two
+    apart — unthinned, a 120-row column published 85 of its 120 values.
+    The same edges serve every side, as they all come from the source
+    grid, and a dropped edge's two bins merge (counts stay sums);
+    `edges_digest` is the digest of the edges published. This is the
+    publication step only: every metric is computed on the full plan
+    grid.
   - Every side's quantiles and bounds are inverted from its own exact CDF
     at the kept union edges (right- and left-closed twins, merged across
     the dropped edges): a p inside an edge's jump is that edge, a p
@@ -160,7 +171,9 @@ qualifies, a lone extreme never does.
     of that side's non-null values below the first / above the last kept
     edge, so the GUI can say how much of a wider synthetic lies outside
     the source's publishable range. A quantile payload also keeps only
-    the p with p * n >= k and (1 - p) * n >= k, and bounds need
+    the p with p * n >= k and (1 - p) * n >= k, neighbouring p at least
+    k / n apart (R113: k of the side's own values between two published
+    quantiles; n >= 1,000 keeps all 99 percentiles), and bounds need
     n * 0.005 >= k (n the side's own).
   - With no evaluated source value in a column (no source side, or a
     NULL column), the kept edges are exactly the synthetic grid's own
@@ -334,6 +347,10 @@ _MIN_CORRELATION_ROWS = 3
 _MIN_OCCUPIED = 2  # rows/columns a joint table needs for an association
 _MICROS_PER_SECOND = 1e6
 _QUANTILE_PROBS = tuple(round(p / 100, 2) for p in range(1, 100))
+# R113: two published quantile probabilities are at least this many of the
+# side's own records apart (k; compared in basis points, exactly)
+_QUANTILE_GAP = 10
+_BASIS_POINTS = 10_000
 _INNER_DECILE_PROBS = tuple(k / 10 for k in range(1, 10))
 # R65/R71: every side's profile shows these quantiles, never its exact
 # min/max (each a single record's value)
@@ -2073,11 +2090,36 @@ def _kept_edges(right: np.ndarray, left: np.ndarray) -> np.ndarray:
   return kept
 
 
+def _spaced(kept: np.ndarray, below: np.ndarray) -> np.ndarray:
+  """The kept edges thinned for publication (Ruling R113): the first kept
+  edge, then each next one once at least RARE_COUNT source records lie in
+  the bin since the last published edge — `below[i]` is the source's
+  exact count(x <= edge i), so the bin (last, e] holds `below[i] -
+  below[last]`. No two published edges are then closer than k source
+  records apart: on a small column the plan's grid points are single
+  source records a record or two apart, and publishing them all would
+  publish most of the column. A dropped edge's two bins merge (counts
+  stay sums). Greedy from the left over publishable counts only, as the
+  kept range is, so every side shares the result and a rerun repeats it;
+  a column whose bins already hold k source records is unchanged."""
+  out = np.zeros(kept.size, dtype=bool)
+  last: int | None = None
+  for i in np.flatnonzero(kept).tolist():
+    count = int(below[i])
+    if last is None or count - last >= RARE_COUNT:
+      out[i] = True
+      last = count
+  return out
+
+
 def _published(p: DenseProfile, gi: int) -> np.ndarray:
-  """The profile (histogram, pair-axis) edges `_kept_edges` keeps on the
-  source profile `p`; the same mask serves every side, whose edges all
-  come from the source grid."""
-  return _kept_edges(p.profile[gi], p.profile_left[gi])
+  """The profile (histogram) edges published for the source profile `p`:
+  those `_kept_edges` keeps, thinned so that neighbouring ones are at
+  least k source records apart (`_spaced`); the same mask serves every
+  side, whose edges all come from the source grid. The publication step
+  only: no metric reads it."""
+  right = p.profile[gi]
+  return _spaced(_kept_edges(right, p.profile_left[gi]), np.cumsum(right)[:-1])
 
 
 def _kept_union(src: DenseProfile, gi: int) -> np.ndarray:
@@ -2188,11 +2230,24 @@ def _merged(counts: np.ndarray, kept: np.ndarray) -> np.ndarray:
 
 
 def _tail_safe(probs: Sequence[float], n: int) -> list[float]:
-  """The quantile probabilities with at least RARE_COUNT of the side's n
-  values at or beyond them, in either tail (R69)."""
-  return [
-      q for q in probs if q * n >= RARE_COUNT and (1.0 - q) * n >= RARE_COUNT
-  ]
+  """The quantile probabilities a side of n values may publish: at least
+  RARE_COUNT of its values at or beyond each, in either tail (R69), and
+  neighbouring ones at least `_QUANTILE_GAP` of its values apart — a
+  spacing of k / n in probability, greedy from the lowest (Ruling R113:
+  on a 120-value column the 99 percentiles are 1.2 records apart, so
+  publishing them all publishes most of the column). The gap is compared
+  in basis points, exactly; n >= 1,000 keeps every percentile."""
+  out: list[float] = []
+  last: int | None = None
+  for q in probs:
+    if q * n < RARE_COUNT or (1.0 - q) * n < RARE_COUNT:
+      continue
+    at = round(q * _BASIS_POINTS)
+    if last is not None and (at - last) * n < _QUANTILE_GAP * _BASIS_POINTS:
+      continue
+    out.append(q)
+    last = at
+  return out
 
 
 def _grid_profiles(spec: DenseSpec, p: DenseProfile,
@@ -2413,18 +2468,26 @@ def _edge_labels(edges: Sequence[float], kind: ColumnKind) -> list[str]:
   return [repr(e) for e in values]
 
 
-def _decile_kept(column: _PairColumn, grid: _Grid,
-                 profile_kept: np.ndarray) -> np.ndarray:
-  """The pair axis's decile edges that R69 lets a label show: each is a
-  profile edge, published or not with it."""
+def _decile_kept(column: _PairColumn, grid: _Grid, src: DenseProfile,
+                 gi: int) -> np.ndarray:
+  """The pair axis's decile edges a label may show: each is a profile
+  edge, kept by the count rule with it (R69) — and, among the deciles so
+  kept, thinned like the histogram's edges so that neighbouring ones are
+  at least k source records apart (`_spaced`, Ruling R113: the deciles of
+  a column of fewer than 100 values are closer than that)."""
   kept = np.zeros(column.deciles.size, dtype=bool)
   if not grid.profile.size:
     return kept
+  right = src.profile[gi]
+  profile_kept = _kept_edges(right, src.profile_left[gi])
+  profile_below = np.cumsum(right)[:-1]
   index = np.searchsorted(grid.profile, column.deciles)
   found = index < grid.profile.size
   found[found] = grid.profile[index[found]] == column.deciles[found]
   kept[found] = profile_kept[index[found]]
-  return kept
+  below = np.zeros(column.deciles.size, dtype=np.int64)
+  below[found] = profile_below[index[found]]
+  return _spaced(kept, below)
 
 
 def _axis(column: _PairColumn, literals: Mapping[int, str], label_key: bytes,
@@ -2473,7 +2536,7 @@ def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
     if not column.grid:
       return None
     gi = grid_of[column.j]
-    return _decile_kept(column, spec.grids[gi], _published(src, gi))
+    return _decile_kept(column, spec.grids[gi], src, gi)
 
   top = sorted(tvds, key=lambda k: (-tvds[k], k))[:CONTINGENCY_TOP_PAIRS]
   for k in sorted(top):

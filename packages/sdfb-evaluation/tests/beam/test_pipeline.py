@@ -75,6 +75,8 @@ from sdfb_evaluation.beam.relational import (
 from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.plan import SAMPLE_MODULUS, PrepareStatement
 from sdfb_evaluation.context.scope import pin_source, sampled_read
+from sdfb_evaluation.report.render import compare
+from sdfb_evaluation.report.store import read_local
 from sdfb_evaluation.scoring import is_aggregate
 from sdfb_evaluation.types import Side
 
@@ -883,6 +885,54 @@ def test_narrow_edges_at_a_large_offset_persist_as_computed(tmp_path):
       payload = row["payload"]
       for name in ("mean", "std", "skewness", "kurtosis_excess"):
         assert payload[name] == stable_floats(payload[name]), (name, row)
+
+
+def _salaries(n: int, seed: int, base: int) -> list[dict[str, Any]]:
+  rng = random.Random(seed)
+  return [{
+      "id": base + i,
+      "seen_at": None,
+      "reading": round(rng.lognormvariate(10.5, 0.4), 2),
+  } for i in range(n)]
+
+
+def test_compare_reads_psi_across_two_runs_of_a_small_column(tmp_path):
+  """Ruling R113 (I5): a 120-row column publishes its histogram on edges
+  thinned to k source records apart. The thinning reads the source's
+  counts only, so two runs over the same source — here with two
+  different synthetic sides — publish the same edges under the same
+  `edges_digest`, and `compare` computes their PSI."""
+  source = _salaries(120, 1, 1000)
+  stored = []
+  for name, seed in (("one", 2), ("two", 3)):
+    synthetic = _salaries(120, seed, 9000)
+    table = table_plan("events", _NARROW_FIELDS, source, synthetic, pk=("id",))
+    plan = evaluation_plan([table],
+                           evaluation_id=f"ev_small_{name}",
+                           label_key_uri=None)
+    rows_by = {("events", "source"): source, ("events", "synthetic"): synthetic}
+    _run(plan, rows_by, tmp_path / name)
+    stored.append(read_local(str(tmp_path / name)))
+  histograms = [{
+      (r["column_name"], r["side"]): r
+      for r in run.profiles
+      if r["profile_kind"] == "histogram"
+  }
+                for run in stored]
+  for side in ("source", "synthetic"):
+    one, two = (h[("reading", side)] for h in histograms)
+    edges = one["payload"]["edges"]
+    assert 2 <= len(edges) <= 12 and edges == two["payload"]["edges"], side
+    assert one["edges_digest"] == two["edges_digest"], side
+  assert min(histograms[0][("reading", "source")]["payload"]["counts"]) >= 10
+  drift = {
+      (r["column"], r["side"]): r for r in compare(*stored)["profiles"]["rows"]
+  }
+  assert drift[("reading", "source")]["psi"] == 0  # the same source rows
+  synthetic = drift[("reading", "synthetic")]
+  assert synthetic["psi"] is not None and synthetic["psi"] > 0
+  assert synthetic["edges_digest_a"] == synthetic["edges_digest_b"]
+  assert not synthetic["note"].startswith("not comparable")
 
 
 # --------------------------------------------------------------------------
