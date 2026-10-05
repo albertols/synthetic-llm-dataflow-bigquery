@@ -21,7 +21,9 @@ docs/designs/2026-07-07-evaluation-framework-design.md. numpy and matplotlib
 only: the root environment carries no scipy, so the few distribution
 functions the figures need (Clopper-Pearson, DeLong, the hypergeometric
 rarefaction) are written out below. Nothing is imported from
-`packages/sdfb-evaluation`; each figure names the code it illustrates.
+`packages/sdfb-evaluation`; each figure names the code it illustrates, and
+the warn and fail thresholds drawn are read from its metric catalogue
+(`catalogue/metrics.yaml`, with PyYAML), so no threshold is typed here.
 
 Two kinds of figure (the visual-first-documentation skill):
 
@@ -81,11 +83,13 @@ prints the palette separation on every run.
 from __future__ import annotations
 
 import argparse
+import functools
 import math
 import sys
 from pathlib import Path
 
 import matplotlib
+import yaml
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -93,7 +97,11 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch, Rectangle
 
-ASSETS = Path(__file__).resolve().parents[2] / "docs" / "designs" / "assets"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+ASSETS = _REPO_ROOT / "docs" / "designs" / "assets"
+CATALOGUE = (
+    _REPO_ROOT / "packages" / "sdfb-evaluation" / "src" / "sdfb_evaluation" /
+    "catalogue" / "metrics.yaml")
 
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 INK, MUTED, GRID, SURFACE = "#1c2530", "#5b6672", "#dfe4ea", "#ffffff"
@@ -144,7 +152,8 @@ ALPHA = 0.05  # every interval and floor below is two-sided 95 %, as the code's
 # that mass around 0. A source grid has no point inside the smear, however
 # fine it is; the synthetic side's own grid does. 11-point (decile) grids
 # keep the bins wide enough to draw; the bracket at the evaluator's 1,001
-# points a side is computed too and printed in each panel.
+# points a side (`context.plan.GRID_POINTS`) is computed too and printed in
+# each panel.
 BRACKET_ROWS = 4_000
 BRACKET_ATOM_SHARE, BRACKET_SMEAR_SIGMA = 0.40, 0.25
 BRACKET_GRID_POINTS, BRACKET_FULL_GRID = 11, 1_001
@@ -153,7 +162,6 @@ BRACKET_GRID_POINTS, BRACKET_FULL_GRID = 11, 1_001
 # KS statistics are simulated where a laptop can sort the rows (not at 90M).
 FLOOR_SIZES = (1_000, 10_000, 1_000_000, 90_000_000)
 FLOOR_SIMULATED = {1_000: 400, 10_000: 200, 1_000_000: 12}  # n -> replicates
-KS_WARN, KS_FAIL = 0.10, 0.20  # column.ks thresholds, shown as context
 
 # eval-baseline. A 200k-row source, a 10k-row reference sample R, and a
 # generator that only ever read R (it resamples R's quantile function).
@@ -168,7 +176,6 @@ BASELINE_SHIFT_SIGMAS = 0.6
 ENTROPY_VALUES, ENTROPY_ZIPF = 500_000, 0.8
 ENTROPY_SOURCE_ROWS, ENTROPY_SYNTH_ROWS = 10_000, 2_000_000
 ENTROPY_REPLICATES = 24
-ENTROPY_WARN, ENTROPY_FAIL = 0.10, 0.25  # column.entropy_ratio, |v - 1|
 
 # eval-rarefied-duplicates. Row contents drawn from 300k records with Zipf
 # weights; the source holds 100k rows, both generators write 1M. The
@@ -178,7 +185,8 @@ DUP_SOURCE_ROWS, DUP_SYNTH_ROWS = 100_000, 1_000_000
 DUP_REPEATER_RECORDS = 30_000
 
 # eval-sets-rhe. n is the launch's reference sample size (10,000 here);
-# 1,024 is the number of row documents a prompt can be built from.
+# 1,024 is the number of row documents a prompt can be built from
+# (`context.reference.EXPOSURE_ROWS`).
 PANEL_N, PANEL_EXPOSED = 10_000, 1_024
 
 # eval-memorization-lift. 9,800 exclusive records on each side (a 10k panel
@@ -193,14 +201,12 @@ LIFT_SCENARIOS = (
     ("dense domain + 300 copied records", 0.05, 300),
     ("sparse domain + 100 copied records", 0.0005, 100),
 )
-LIFT_WARN, LIFT_FAIL = 2.0, 5.0
 
 # eval-holdout-dcr. R and H are 2,000 rows each of one 4-D mixture; the
 # synthetic table is 4,000 rows of which a fraction are exact copies of R
 # rows. The geometry panel draws a 2-D toy of the same construction.
 DCR_PANEL_ROWS, DCR_SYNTH_ROWS, DCR_DIMS = 2_000, 4_000, 4
 DCR_COPY_FRACTIONS = (0.0, 0.01, 0.05, 0.10, 0.20, 0.30, 0.50)
-DCR_WARN, DCR_FAIL = 0.55, 0.60
 DCR_CALLOUT_FRACTION = 0.01  # the copy fraction the acceptance run plants
 DCR_TOY_POINTS, DCR_TOY_SYNTH, DCR_TOY_COPIES = 26, 16, 6
 
@@ -210,18 +216,19 @@ DCR_TOY_POINTS, DCR_TOY_SYNTH, DCR_TOY_COPIES = 26, 16, 6
 # the picture. Two sample sizes show the interval's width.
 C2ST_DELTAS = (("faithful generator", 0.0), ("detectable generator", 1.8))
 C2ST_SIZES = (5_000, 100)
-AUC_WARN, AUC_FAIL, AUC_CHANCE = 0.70, 0.85, 0.5
+AUC_CHANCE = 0.5  # table.detection_auc's noise reference: cannot tell
 
 # eval-fanout. 20k parents; a quarter have no child, the rest 1 + a
 # negative-binomial count. The collapsed generator gives EVERY parent the
 # source's mean number of children.
 FANOUT_PARENTS, FANOUT_CHILDLESS = 20_000, 0.25
 FANOUT_NB_R, FANOUT_NB_P = 2, 0.4
-FANOUT_CAP = 50  # relationship.fanout_tvd bins: 0 .. 49 and >= 50
+FANOUT_CAP = 50  # `beam.relational.FANOUT_CAP`: bins 0 .. 49 and >= 50
 FANOUT_SHOWN = 13
 
 # eval-count-rule. 2,000 source values and their 1,001-point grid: a grid
 # point every two records, so the outermost points sit on single records.
+# k = 10 is the evaluator's `RARE_COUNT` (`beam.dense`, `beam.census`).
 RULE_ROWS, RULE_GRID, RULE_K = 2_000, 1_001, 10
 RULE_SHOWN = 28  # records drawn at each tail
 
@@ -245,6 +252,20 @@ MEASURED_NN = ((6, 5.1), (30, 30.4), (50, 41.1))
 MEASURED_NN_QUERY, MEASURED_NN_REFERENCE = 50_000, 20_000
 MEASURED_NN_NS_PER_OP = 0.84  # ns per (query, reference, feature), d = 50
 MEASURED_DETECTION_SECONDS = 9.4  # 50,000 rows a class, 6 features, clean
+
+
+# --------------------------------------------------------------------------
+# thresholds: the catalogue's, read at run time and never retyped here
+@functools.cache
+def _catalogue() -> dict:
+  with CATALOGUE.open(encoding="utf-8") as handle:
+    return {m["id"]: m for m in yaml.safe_load(handle)["metrics"]}
+
+
+def _gate(metric_id: str) -> tuple[float, float]:
+  """(warn, fail) of `metric_id` in the evaluator's metric catalogue."""
+  thresholds = _catalogue()[metric_id]["thresholds"]
+  return float(thresholds["warn"]), float(thresholds["fail"])
 
 
 # --------------------------------------------------------------------------
@@ -825,13 +846,14 @@ def fig_noise_floor():
         xytext=(8, 10),
         color=INK,
         fontsize=9)
-  _threshold(ax, KS_WARN, "column.ks warn 0.10")
-  _threshold(ax, KS_FAIL, "column.ks fail 0.20")
+  warn, fail = _gate("column.ks")
+  _threshold(ax, warn, f"column.ks warn {warn:.2f}")
+  _threshold(ax, fail, f"column.ks fail {fail:.2f}")
   # where the floor meets the warn threshold: floor(n) = warn
-  crossing = -math.log(ALPHA / 2.0) / KS_WARN**2
+  crossing = -math.log(ALPHA / 2.0) / warn**2
   ax.annotate(
       f"below n = {crossing:,.0f} the floor is above\nthe warn threshold",
-      (crossing, KS_WARN),
+      (crossing, warn),
       textcoords="offset points",
       xytext=(-6, 40),
       color=INK,
@@ -931,8 +953,9 @@ def fig_baseline():
           color=MUTED,
           fontsize=9,
           va="center")
-  _threshold(ax, KS_WARN, "warn 0.10", axis="x")
-  _threshold(ax, KS_FAIL, "fail 0.20", axis="x")
+  warn, fail = _gate("column.ks")
+  _threshold(ax, warn, f"warn {warn:.2f}", axis="x")
+  _threshold(ax, fail, f"fail {fail:.2f}", axis="x")
   ax.set_xscale("log")
   ax.set_xlim(2e-3, 1.0)
   ax.set_ylim(-0.7, len(rows) - 0.3)
@@ -1036,8 +1059,9 @@ def fig_matched_n_entropy():
         fontsize=9.5,
         va="center")
   ax.axvline(1.0, color=INK, linewidth=1.0)
-  ax.axvspan(1 - ENTROPY_WARN, 1 + ENTROPY_WARN, color=WASH, zorder=0)
-  for bound, text in ((1 + ENTROPY_WARN, "warn"), (1 + ENTROPY_FAIL, "fail")):
+  warn, fail = _gate("column.entropy_ratio")  # distances from the target, 1
+  ax.axvspan(1 - warn, 1 + warn, color=WASH, zorder=0)
+  for bound, text in ((1 + warn, "warn"), (1 + fail, "fail")):
     _threshold(ax, bound, f"{text} {bound:.2f}", axis="x")
   ax.text(
       0.98,
@@ -1233,12 +1257,13 @@ def fig_memorization_lift():
   `beam.membership`, `row.memorization_lift`)."""
   seed = SEEDS["eval-memorization-lift"]
   rng = np.random.default_rng(seed)
+  warn, fail = _gate("row.memorization_lift")
   left, right, drawn = [], [], []
   for label, chance, copied in reversed(LIFT_SCENARIOS):
     m_h = int(rng.binomial(LIFT_EXCLUSIVE, chance))
     m_r = int(rng.binomial(LIFT_EXCLUSIVE - copied, chance)) + copied
     ratio, lo, hi = _rate_ratio(m_r, LIFT_EXCLUSIVE, m_h, LIFT_EXCLUSIVE)
-    status = "FAIL" if lo >= LIFT_FAIL else "WARN" if lo >= LIFT_WARN else "PASS"
+    status = "FAIL" if lo >= fail else "WARN" if lo >= warn else "PASS"
     left.append(
         f"{label}\n{m_r:,} R-only and {m_h:,} H-only records reproduced")
     right.append(f"ci_low {lo:.2f}\n{status}")
@@ -1280,8 +1305,8 @@ def fig_memorization_lift():
         zorder=5,
         label="ci_low: the value status reads" if first else None)
   ax.axvline(1.0, color=INK, linewidth=1.0)
-  _threshold(ax, LIFT_WARN, "warn 2", axis="x")
-  _threshold(ax, LIFT_FAIL, "fail 5", axis="x")
+  _threshold(ax, warn, f"warn {warn:g}", axis="x")
+  _threshold(ax, fail, f"fail {fail:g}", axis="x")
   ax.set_xscale("log")
   ax.set_xlim(x_min, x_max * 1.3)
   ax.set_ylim(-0.7, len(drawn) - 0.25)
@@ -1510,8 +1535,9 @@ def _dcr_share_panel(ax, rng):
               "color": CONTEXT,
               "linewidth": 1.0
           })
-  _threshold(ax, DCR_WARN, "warn 0.55")
-  _threshold(ax, DCR_FAIL, "fail 0.60")
+  warn, fail = _gate("row.dcr_train_holdout_share")
+  _threshold(ax, warn, f"warn {warn:.2f}")
+  _threshold(ax, fail, f"fail {fail:.2f}")
   ax.set_xlim(-0.02, 0.54)
   ax.set_ylim(0.44, 0.80)
   _style(ax, grid_axis="both")
@@ -1573,6 +1599,7 @@ def fig_c2st():
       facecolor=SURFACE,
       gridspec_kw={"width_ratios": (1, 1.25)})
   colors = {"faithful generator": AQUA, "detectable generator": ORANGE}
+  warn, fail = _gate("table.detection_auc")
   left, right, drawn = [], [], []
   ax = axes[0]
   ax.plot([0, 1], [0, 1], color=CONTEXT, linewidth=1.2)
@@ -1582,7 +1609,7 @@ def fig_c2st():
       synthetic = rng.normal(delta, 1.0, size)
       auc, se = _delong(synthetic, source)
       lo, hi = max(0.0, auc - 1.959964 * se), min(1.0, auc + 1.959964 * se)
-      verdict = "FAIL" if auc >= AUC_FAIL else "WARN" if auc >= AUC_WARN else "PASS"
+      verdict = "FAIL" if auc >= fail else "WARN" if auc >= warn else "PASS"
       note = "covers" if lo <= AUC_CHANCE <= hi else "clears"
       left.append(f"{name}\n{size:,} rows per class")
       right.append(
@@ -1617,8 +1644,8 @@ def fig_c2st():
     ax.plot([lo, hi], [y, y], color=color, linewidth=3)
     _dot(ax, auc, y, color, zorder=4)
   ax.axvline(AUC_CHANCE, color=INK, linewidth=1.0)
-  _threshold(ax, AUC_WARN, "warn 0.70", axis="x")
-  _threshold(ax, AUC_FAIL, "fail 0.85", axis="x")
+  _threshold(ax, warn, f"warn {warn:.2f}", axis="x")
+  _threshold(ax, fail, f"fail {fail:.2f}", axis="x")
   ax.set_xlim(0.39, 1.0)
   ax.set_ylim(-0.7, len(drawn) - 0.3)
   _style(ax, grid_axis="x")
