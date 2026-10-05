@@ -32,7 +32,9 @@
       LocalJsonSinks   NDJSON shards <out_dir>/<table>/<NNNN>-<label>-*.jsonl,
                        one prefix per write → (files,); `read_rows` reads
                        only this instance's prefixes, and a table directory
-                       holding another run's files is refused
+                       holding another run's files is refused; `write_rows`
+                       is the driver's own write (a registry event, written
+                       at once as one shard of its own prefix)
       ClientLoadSinks  LocalJsonSinks, then — after the pipeline, driver-side
                        — `load(bq)`: one `Bq.load_json` job per table, the
                        registry (evaluation_data_history) last
@@ -435,6 +437,31 @@ class LocalJsonSinks(Sinks):
         | f"{label}/Files#{self._writes}" >> beam.io.WriteToText(
             prefix, file_name_suffix=".jsonl"))
     return (files,)
+
+  def write_rows(self, rows: Sequence[Mapping[str, Any]], table: str, *,
+                 label: str) -> str:
+    """Driver-side: write `rows` to `table` NOW, as one finished shard
+    under its own prefix (the registry's RUNNING and FAILED events, which
+    the driver writes around the pipeline). The shard is this instance's
+    own, so `read_rows` returns it and a later `write` to the same table
+    is not refused. Returns the file.
+
+    Raises:
+      ValueError: `table` is not an evaluation table, or its directory
+        holds files this instance did not write.
+      TypeError: a row is not JSON-serialisable.
+    """
+    self._refuse_foreign(table)
+    self._writes += 1
+    slug = _UNSAFE_PATH_CHARS.sub("_", label).strip("_") or "write"
+    prefix = os.path.join(self.table_dir(table), f"{self._writes:04d}-{slug}")
+    lines = [json_line(row, table) for row in rows]
+    os.makedirs(self.table_dir(table), exist_ok=True)
+    path = f"{prefix}-00000-of-00001.jsonl"
+    with open(path, "w", encoding="utf-8") as shard:
+      shard.writelines(f"{line}\n" for line in lines)
+    self._prefixes.setdefault(table, []).append(prefix)
+    return path
 
   def _own_shards(self, table: str) -> list[str]:
     return sorted(
