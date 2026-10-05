@@ -233,25 +233,30 @@ RULE_ROWS, RULE_GRID, RULE_K = 2_000, 1_001, 10
 RULE_SHOWN = 28  # records drawn at each tail
 
 # --- MEASURED (typed once; laptop micro-benchmarks, not a Dataflow run) ----
-# Reported by the implementation tasks while each transform was built
+# INTERIM: laptop micro-benchmarks recorded while the package was built
 # (2026-09/10), on one Intel i5-6267U core (2.9 GHz) with single-threaded
-# numpy. They size the design; they are not evidence of a cloud run, and the
-# raw timings were not kept as a committed evidence bundle. A floor on the
-# dense pass is pinned by
-# packages/sdfb-evaluation/tests/beam/test_dense.py::test_throughput_8192_by_30_batch.
+# numpy. They size the design; they are not a committed evidence bundle and
+# not a cloud run, and the first Dataflow run is to replace them. A reader
+# can reproduce the dense-pass row with
+#   pytest packages/sdfb-evaluation/tests/beam/test_dense.py::test_throughput_8192_by_30_batch -s
+# (the other rows have no committed command).
 MEASURED_STAGES = (
-    # stage, rows/s per core, rows/s of ENCODING the same batch, the batch
+    # stage, rows/s per core, the encoder's rows/s (dense profile and census:
+    # same batch; membership: the encoder's general rate from another task's
+    # notes), the batch
     ("dense profile", 56_700, 8_000, "8,192 x 30 columns, 190 pairs"),
     ("value census", 94_000, 30_000, "8,192 rows, 9 census columns"),
     ("membership", 657_000, 7_300, "R = H = 10,000, 6 non-key columns"),
 )
 # Exact Gower nearest neighbours of 50,000 synthetic rows against R and H
 # (10,000 rows each): (feature columns, seconds). d = 6 and 30 were timed on
-# 4 busy cores, d = 50 single-threaded.
+# 4 cores at a load average of 6-10, d = 50 single-threaded.
 MEASURED_NN = ((6, 5.1), (30, 30.4), (50, 41.1))
 MEASURED_NN_QUERY, MEASURED_NN_REFERENCE = 50_000, 20_000
 MEASURED_NN_NS_PER_OP = 0.84  # ns per (query, reference, feature), d = 50
-MEASURED_DETECTION_SECONDS = 9.4  # 50,000 rows a class, 6 features, clean
+# 50,000 rows a class, 6 features, clean table with early stopping, timed at
+# the same load average of 6-10.
+MEASURED_DETECTION_SECONDS = 9.4
 
 
 # --------------------------------------------------------------------------
@@ -361,7 +366,7 @@ def _row_labels(ax, left, right=None):
 def _save(fig, name, *, kind="concept", seed=None, pad=1.6):
   """Stamp what kind of figure this is into the image, then write it."""
   if kind == "measured":
-    stamp = ("MEASURED on one laptop core (implementation micro-benchmarks)"
+    stamp = ("MEASURED on one laptop core (interim micro-benchmarks)"
              " - not a Dataflow run")
   elif seed is None:
     stamp = "CONCEPT figure: a schematic - no data, not a measured run"
@@ -1848,7 +1853,7 @@ def fig_cpu_budget():
         encode,
         height=0.28,
         color=CONTEXT,
-        label="encoding the same batch" if first else None)
+        label="the encoder (membership: its general rate)" if first else None)
     ax.text(
         rate * 1.12,
         y + 0.17,
@@ -1869,7 +1874,7 @@ def fig_cpu_budget():
   _style(ax, grid_axis="x")
   _row_labels(ax, [f"{stage}\n{batch}" for stage, _, _, batch in stages])
   _title(ax, "Per-row pass: every statistic outruns the encoder",
-         "rows per second on one core; each pair timed on its own batch")
+         "rows per second on one core; interim laptop figures")
   ax.set_xlabel("rows per second per core (log scale)", color=MUTED, fontsize=9)
   _legend(ax, loc="lower right")
 

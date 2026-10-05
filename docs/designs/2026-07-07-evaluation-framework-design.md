@@ -169,7 +169,7 @@ flowchart TB
   subgraph EVAL["packages/sdfb-evaluation: own lock, own venv"]
     CTX["⚙️ context<br/>launch, scope, plan"]:::cpu
     BEAM["🔀 beam<br/>transforms, pipeline"]:::beam
-    STATS["⚙️ stats, sampling<br/>pure numpy"]:::cpu
+    STATS["⚙️ stats, sampling<br/>numpy, scipy"]:::cpu
     SCORE["⚙️ scoring<br/>catalogue rules"]:::cpu
     CAT["📄 catalogue<br/>metrics.yaml"]:::store
     SCH["📄 schemas<br/>4 tables, 2 views"]:::store
@@ -190,7 +190,7 @@ flowchart TB
 | Module | What it owns |
 | --- | --- |
 | `context/` | Everything decided before a row is read: the launch (`launch`, `jobs`, `runs`, `gcp`), the relationship model mirror (`relationships`), the scope and the source pin (`scope`), the reference panel (`reference`), the plan and its budgets (`plan`, `budget`), planning from in-memory rows (`offline`), and the one wrapper every BigQuery call goes through (`bq`) |
-| `stats/`, `sampling/` | Pure numpy and scipy statistics and the bottom-k sampler. No Beam, no BigQuery |
+| `stats/`, `sampling/` | numpy and scipy statistics (the detection test also uses scikit-learn) and the bottom-k sampler. No Beam, no BigQuery |
 | `beam/` | The encoder, five transforms (`dense`, `census`, `membership`, `privacy`, `relational`), sources and sinks (`io`), the label key (`label_key`), assembly and the composed pipeline |
 | `scoring/` | Status, score and roll-ups, executed from the catalogue |
 | `catalogue/`, `schemas/` | The two contracts: every metric, and the four tables with their two views |
@@ -245,7 +245,7 @@ flowchart TD
 
 | Source | Answers | Lost when |
 | --- | --- | --- |
-| 1. Job labels in [`INFORMATION_SCHEMA.JOBS`][bq-jobs] | Which tables the job committed rows to, when, and how many. Beam labels every load and copy job it submits with the Dataflow job id | The evaluator lacks `roles/bigquery.resourceViewer` on the project |
+| 1. Job labels in [`INFORMATION_SCHEMA.JOBS`][bq-jobs] | Which tables the job committed rows to, when, and how many. Per Beam's source, every load and copy job it submits is labelled with the Dataflow job id (never observed by this package) | The evaluator lacks `roles/bigquery.resourceViewer` on the project |
 | 2. The launcher's `launch_config` log entry | Every launch argument, the table order, the run ids | Log retention has passed, or the launch predates the entry |
 | 3. The Dataflow job's display parameters | The launch arguments | The job is past Dataflow's retention |
 | 4. `validation_runs` | Run ids (`<base>-NN-<table>`), reference digests, valid row counts | The table is not read |
@@ -351,6 +351,21 @@ another. That start snapshot is the one table planning creates. `sdfb-eval
 plan --no_planning_snapshots` plans without it and reports such tables as
 unplanned.
 
+**`--no_planning_snapshots`: one panel for each side of the flag.**
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  subgraph OFF["flag absent"]
+    A1["⚙️ plan an<br/>as_of_diff table"]:::cpu --> A2[("🗄️ zero-byte start<br/>snapshot, 24 h")]:::store --> A3["⚙️ scope planned,<br/>the table is evaluated"]:::cpu
+  end
+  subgraph ON["flag set"]
+    B1["⚙️ plan an<br/>as_of_diff table"]:::cpu --> B2["⚪ DDL refused,<br/>nothing created"]:::data --> B3["⚪ scope unknown,<br/>reported UNPLANNED"]:::data
+  end
+```
+
 Every other writer is placed against the job's window, and the scope ends
 in one of six statuses:
 
@@ -366,18 +381,37 @@ flowchart LR
 
 | `scope_status` | When | What is read |
 | --- | --- | --- |
-| `ok` | The rows read equal the rows the job committed | The scope |
+| `ok` | The rows read agree with the rows the job committed: equal below 1,000 rows, within 0.5 % above (at 10 M rows, 50,000 rows off is still `ok`) | The scope |
 | `count_mismatch` | The rows read differ from the job's committed output rows, or from the sum of `validation_runs.valid_count` | The scope; the run is `PARTIAL` |
 | `contaminated` | Another writer's commit may fall inside the window | Nothing, unless `--allow_contaminated` |
 | `expired` | The window is older than the table's [time-travel][bq-time-travel] window less a one-hour margin | Nothing |
 | `empty` | The job wrote nothing | Nothing |
-| `unknown` | The window cannot be placed (it ends after now, for example), or the table's dry run failed, or its start snapshot was not allowed | Nothing |
+| `unknown`, cannot be placed | The window cannot be placed (it ends after now, for example), or the table's dry run failed, or its start snapshot was not allowed | Nothing |
+| `unknown`, read and flagged | An overwrite launch with no labelled write found (`JOBS` denied, or past retention), or a scope with no count to check against | The whole current table, with a warning; the run ends `SUCCEEDED_WITH_WARNINGS` |
 
-The current table is never read in place of a scope that cannot be
-recovered. The row count is always checked; a writer with no BigQuery job
-of its own, such as a streaming insert, is invisible to the JOBS view, and
-the count check is the only guard there. *Code:* `context/scope.py`
+A scope that cannot be placed reads nothing. The one case where the current
+table is read without a recovered scope is the second `unknown` row: an
+overwrite launch that lost source 1 (below) reads the whole table, because
+writes after the job cannot be ruled out, and says so. The row count is
+checked whenever a count is known, within the tolerance above; a writer
+with no BigQuery job of its own, such as a streaming insert, is invisible
+to the JOBS view, and the count check is the only guard there. *Code:* `context/scope.py`
 (`resolve_scope`, `ScopePlan.verify`), `context/jobs.py::foreign_writes`.
+
+**`--allow_contaminated`: one panel for each side of the flag.**
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  subgraph OFF["flag absent"]
+    A1["⚪ another writer<br/>inside the window"]:::data --> A2["⚪ status contaminated"]:::data --> A3["⚪ nothing read,<br/>table skipped"]:::data
+  end
+  subgraph ON["flag set"]
+    B1["⚪ another writer<br/>inside the window"]:::data --> B2["⚪ status contaminated,<br/>warning"]:::data --> B3[("🗄️ the window's rows<br/>read, with the other<br/>writer's")]:::store --> B4["⚙️ evaluated; run ends<br/>SUCCEEDED_WITH_WARNINGS"]:::cpu
+  end
+```
 
 Unverified until the first GCP run: whether `APPENDS` returns exactly the
 job's rows on a load-only window, whether it also returns copy-job rows,
@@ -442,7 +476,8 @@ row's JSON text falls under a rate, so the same rows are kept for the same
 salt and identical rows are kept together. A sample cannot support a
 verdict that needs every row of a side. In sampled mode the full-source
 match rates, the key duplicate rates, internal duplicates, and the orphan
-rates and fan-out metrics of an edge whose child side was sampled are
+rates and fan-out metrics of an edge whose child side or parent side was
+sampled are
 `not_evaluated` with the reason "sampled mode cannot measure …; run exact
 mode" and the observed lower bound in `detail` (R72). An integrity pass never comes from a sample. Rates and lifts that
 compare the panel with the rows read stay evaluated, with `method = sample`
@@ -552,7 +587,11 @@ difference means nothing; far above it, it means something at every size.
 `sqrt(ln(2/α)/(2n))` of the truth with probability 1 − α
 ([Dvoretzky, Kiefer & Wolfowitz 1956][dkw1956], with the tight constant of
 [Massart 1990][massart1990]). *Code:* `stats/noise.py::ks_critical`,
-`dkw_epsilon`; `scoring.status_for`, step 9.
+`dkw_epsilon`; `scoring.status_for`, step 9. The DKW band is the one
+drawn, for the reference sample alone, in
+[the reference-sample scaling design](2026-07-24-reference-sample-scaling.md)
+(`assets/sampling-error-dkw.png`); this figure redraws it beside the
+two-sample KS floor.
 
 Each noise method of the catalogue is one such estimate:
 
@@ -780,7 +819,12 @@ back in the synthetic table, and the same for the holdout. In a dense
 domain both counts are large and equal: many exact matches, no lift. Copy
 a hundred reference records on top and the first count runs away from the
 second. With a handful of events the estimate swings, so the verdict
-reads the cautious end of the interval. *Formally:* with exclusive sets
+reads the cautious end of the interval. The third row is the limit of
+this: 300 copied records on top of about 480 chance hits lift the ratio
+to about 1.7, and its lower bound, about 1.5, stays under the warn line of
+2, so that table passes. The lifts see a small copy fraction only where
+chance hits are few; in a dense domain a few hundred copies hide among the
+chance hits. *Formally:* with exclusive sets
 `R∖H` and `H∖R` and m_S the distinct exclusive records of S reproduced,
 `lift = (m_R/|R∖H|) / (m_H/|H∖R|)`; conditional on `m_R + m_H`, m_R is
 binomial under equal rates ([Przyborowski & Wilenski 1940][przyborowski1940]),
@@ -864,7 +908,7 @@ coin, so 1 % of copies moves the share from 0.500 to 0.505.
 *Formally:* `share = mean(1[d_R < d_H] + ½·1[d_R = d_H])` on equal-size R
 and H ([Platzer & Reutterer 2021][platzer2021]); with a fraction f of exact
 copies the expectation is `½ + f/2`. Status reads the lower confidence
-bound. *Code:* `stats/privacy.py`, `beam/privacy.py::PrivacyEmitFn`.
+bound. *Code:* `stats/privacy.py`, `beam/privacy.py::_PrivacyEmitFn`.
 
 Pitfalls:
 
@@ -909,7 +953,7 @@ the interval shows how much. *Formally:* the classifier two-sample test of
 [Lopez-Paz & Oquab 2017][lopezpaz2017]; the metric is the out-of-fold ROC
 AUC, with the interval of [DeLong, DeLong & Clarke-Pearson 1988][delong1988]
 computed from midranks ([Sun & Xu 2014][sunxu2014]). *Code:*
-`stats/detection.py::c2st_auc`, `featurize`; `beam/privacy.py::DetectionFn`.
+`stats/detection.py::c2st_auc`, `featurize`; `beam/privacy.py::_DetectionFn`.
 
 Keys are never features: they differ between the tables by construction.
 An AUC under 0.5 is noise, not "more real than real", and a flexible
@@ -1048,7 +1092,10 @@ Two channels are accepted and documented: the adherent count of
 `field.range_adherence` and of `relationship.cardinality_adherence` can pin
 a source extreme when values are dense integers. Row flags carry keys only,
 never an attribute value: the synthetic row's own key, and a keyed hash of
-the matched source record's key (`source_key` is always NULL).
+the matched source record's key (`source_key` is always NULL). The
+synthetic key is the synthetic table's own key in clear, not hashed, so
+for a whole-row copy (keys included) it is the copied source row's key in
+clear. That is a third disclosure channel, documented in the code.
 
 ### 4.10 The catalogue
 
@@ -1287,8 +1334,9 @@ Three budgets, each with a place where it is enforced.
 **BigQuery bytes: `--max_bytes_billed`.** The planner dry-runs the planning
 queries, the panel query, the prepare DDL and, in sampled mode, the
 worst-case sample reads, and refuses the run above the cap before anything
-is billed. Columnar billing reads each column once, so splitting a wide
-table's planning into several statements costs what one would. The panel
+is billed. Per BigQuery's documented billing model, columnar billing reads each
+column once, so splitting a wide table's planning into several statements
+is expected to cost what one would; no dry run has reached BigQuery. The panel
 query ranks the whole source once. An `as_of_diff` scope reads the table
 and its start snapshot once each, about twice the table's bytes. The
 registry stores the total in `bq_bytes_processed`.
@@ -1327,25 +1375,31 @@ Beam 2.74 keeps no side-input cache by default, so every bundle would
 re-read them. The evaluator sets `max_cache_memory_usage_mb` to the sum of
 the side inputs a worker may hold at once, with 25 % headroom and at least
 512 MB. The Gower search charges 64 MB per chunk. On Dataflow the
-experiment `upload_graph` is always set, because a graph this wide exceeds
-the job-creation request limit.
+experiment `upload_graph` is always set, because a graph this wide is
+expected to exceed the job-creation request limit. No job has been
+submitted, so the limit has not been hit.
 
 **CPU: the per-row pass and the fixed block.**
 
-**Claim:** on one laptop core every statistic outran the encoder on the
-same batch, and the nearest-neighbour block is set by the sample knobs, not
+**Claim:** on one laptop core every statistic outran the encoder, and the nearest-neighbour block is set by the sample knobs, not
 by the table.
 
 ![Laptop micro-benchmarks: per-row stages and the neighbour search](assets/eval-cpu-budget.png)
 
-*MEASURED figure: laptop micro-benchmarks reported while each transform was
-built, one Intel i5-6267U core. Not a Dataflow run, and the raw timings
-were not kept as a committed evidence bundle.* Left: each stage against
-the encoding of the very batch it was timed on (the three batches differ,
-so compare within a pair, not across). Right: the exact Gower search of
-the default `--privacy_sample_rows` against R and H, with a per-operation
-model fitted at 50 feature columns; the point at 30 columns was timed on a
-busy machine. *Code:* `beam/encode.py`, `beam/dense.py`, `beam/census.py`,
+*MEASURED figure, interim: laptop micro-benchmarks recorded while each
+transform was built, one Intel i5-6267U core. Not a Dataflow run and not a
+committed evidence bundle; the first Dataflow run is to replace it.* Left:
+each stage against the encoder's rate (the dense profile and the census
+were timed with the encoder on the same batch; for membership, 7,300 rows/s
+is the encoder's general rate from another task's notes, not that batch, so
+read the third pair as an order of magnitude). Right: the exact Gower
+search of the default `--privacy_sample_rows` against R and H, with a
+per-operation model fitted at 50 feature columns; the points at 6 and 30
+columns and the 9.4 s detection figure were timed on 4 cores at a load
+average of 6 to 10, the 50-column point single-threaded. A reader can
+reproduce the dense-pass row with `pytest
+packages/sdfb-evaluation/tests/beam/test_dense.py::test_throughput_8192_by_30_batch -s`.
+*Code:* `beam/encode.py`, `beam/dense.py`, `beam/census.py`,
 `beam/membership.py`, `stats/privacy.py::gower_knn`. A floor on the dense
 pass is pinned by `tests/beam/test_dense.py::test_throughput_8192_by_30_batch`.
 
@@ -1400,7 +1454,9 @@ rows. Two details make that true:
   gives the same status and score. Integrity metrics and count-derived
   rates keep no absolute floor: one orphan in thirty billion rows must
   persist as more than 0 beside its FAIL.
-- **Only what moments make is rounded in profiles.** Histogram edges,
+- **Only what moments make is rounded in profiles.** The one exception
+  is the `roc_curve` payload, whose restated AUC and interval are rounded
+  like the `table.detection_auc` row. Histogram edges,
   quantiles and counts persist as computed, so edges stay strictly
   increasing and still hash to the row's `edges_digest`.
 
@@ -1726,7 +1782,7 @@ flowchart TB
   subgraph YES["flag set"]
     Y1[("📄 thresholds file")]:::store --> Y2{"valid?"}:::cpu
     Y2 -- "no" --> Y3["⚪ exit 2<br/>nothing started"]:::data
-    Y2 -- "yes" --> Y4["🔀 named metrics graded<br/>and stored against the file"]:::beam --> Y5[("🗄️ registry: uri and<br/>digest of the overrides")]:::store
+    Y2 -- "yes" --> Y4["🔀 named metrics graded<br/>and stored against the file"]:::beam --> Y5[("🗄️ registry: uri (base name<br/>if local) and digest")]:::store
   end
 ```
 
@@ -1817,8 +1873,8 @@ What they are written to do:
 - The template's parameters are exactly the public flags of `sdfb-eval
   run`, minus runner, project and region, which the template launcher
   supplies (R97). A test compares the metadata with the parser itself. An
-  unset parameter reaches the command line as an empty string, which
-  every flag reads as "not given".
+  unset parameter is expected to reach the command line as an empty
+  string, which every flag reads as "not given".
 - The image carries its own dispatch entrypoint: Dataflow appends the
   worker's boot flags to the image's entrypoint and does not override it
   ([ADR 0009](../adr/0009-single-flex-template-image.md)), so one image
@@ -1830,7 +1886,8 @@ What they are written to do:
   never applies `--fail_on`.
 
 Unverified until a build and a launch: the entrypoint dispatch, the baked
-worker image, and the launcher supplying project and region.
+worker image, the launcher supplying project and region, and an unset
+parameter reaching the command line as an empty string.
 
 ### 8.3 Composer
 
@@ -1860,7 +1917,9 @@ flowchart LR
 
 - **Parameters** map one to one onto template parameters, each from a DAG
   parameter or a constant. The DAG never passes runner, project, region,
-  the worker image, experiments or `fail_on` (R99). `trigger` is
+  the worker image, experiments or `fail_on` as template parameters (R99).
+  Its launch environment does pass `additionalExperiments`
+  (`use_runner_v2`, `enable_secure_boot` and the network-tag experiments). `trigger` is
   `composer` for a manual run and `chained` when the generation DAG
   starts it.
 - **Chaining is opt-in.** The generation DAG has a parameter
@@ -1941,7 +2000,7 @@ file (D2).
 **Planted defects.** The acceptance test runs the composed pipeline on an
 invented three-table launch (`users`, `orders`, `order_items`) twice: once
 against a faithful twin drawn from the same generator, which must fail
-nothing, and once against a twin with seven defects:
+no fidelity, privacy or integrity check, and once against a twin with seven defects:
 
 | # | Planted | Must fail |
 | --- | --- | --- |
@@ -2050,11 +2109,12 @@ is relieved by direct labels.
 | Count rule | `assets/eval-count-rule.png` | An edge is published only with 10 source records on each side | CONCEPT | 20 |
 | CPU budget | `assets/eval-cpu-budget.png` | Encoding bounds the per-row pass; the neighbour block is fixed by the sample knobs | MEASURED, laptop | — |
 
-`eval-cpu-budget` is the only figure with measured numbers. They are typed
-once, in the script's `MEASURED` block, with where they came from: one
-laptop core, timings reported while the transforms were built. They are
-not from a committed evidence bundle and should be replaced by a real
-run's numbers when one exists. Diagrams are inline mermaid, in the
+`eval-cpu-budget` is the only figure with measured numbers, and it is
+interim: laptop micro-benchmarks recorded while the package was built, not
+a committed evidence bundle, to be replaced by the first Dataflow run. The
+numbers are typed once, in the script's `MEASURED` block, with where they
+came from: one laptop core. One command reproduces the dense-pass row:
+`pytest packages/sdfb-evaluation/tests/beam/test_dense.py::test_throughput_8192_by_30_batch -s`. Diagrams are inline mermaid, in the
 repository's house classes: orange for Beam code, blue for stores, green
 for CPU work, gray for plain values.
 
