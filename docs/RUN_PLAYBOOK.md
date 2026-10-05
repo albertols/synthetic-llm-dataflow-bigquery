@@ -513,7 +513,7 @@ publish the aggregate report only.
 
 After a generation job lands, the statistical evaluator scores its tables against the source ([ADR 0041](adr/0041-evaluation-standalone-package.md), [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md)). **Not yet run on Google Cloud**; commands are as built and tested on invented data. Prerequisites (tables, IAM, image): [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator".
 
-**Do it soon: time travel is the deadline.** The evaluator recovers the job's rows and pins the source as it was when the job started, both through BigQuery time travel. Once the generation job's window is older than the table's time-travel window (less a one-hour margin), a scope is `expired` and the table is not evaluated, and the source is read as it is now. Evaluate the same day, and before anything else writes to the landing tables.
+**Do it soon: time travel is the deadline.** The evaluator recovers the job's rows and pins the source as it was when the job started, both through BigQuery time travel. Once the generation job's write window is older than the landing table's time-travel window (less a one-hour margin), that table's scope is `expired` and it is not evaluated (design §3.2). Separately, within the source's own window the source is pinned as of the job's create time; outside it, or when the create time is unknown, the source is read as it is now and the plan says so (design §3.3). Evaluate the same day, and before anything else writes to the landing tables.
 
 ```bash
 cd packages/sdfb-evaluation

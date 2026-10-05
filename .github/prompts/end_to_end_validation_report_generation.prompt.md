@@ -334,7 +334,7 @@ it. Do not use it as a gate on this validation; it is an input to Steps 4-5.
    (`QUALITY_DATASET` is `<project>.synthetic_data_quality`.) Use the
    `EVALUATION_ID` input instead when it was given.
 
-2. **If absent and the user agrees** (ask first: it bills BigQuery bytes, and
+2. **If absent and the user agrees** (with `RUN_EVALUATION=auto`, ask first; `yes` is the user's standing agreement and waives the question, `no` never reaches this point. It bills BigQuery bytes, and
    it must happen before the source's and landing table's time-travel window
    closes), run it, plan first:
 
@@ -576,7 +576,8 @@ MUST NOT spend tokens re-deriving it:
 
 The report + metrics + sample CSVs contain the real project / dataset / table
 / column names and sampled data values. Fold **everything** (four metrics
-JSONs, both crosscheck/stats markdown reports, the report) into the two
+JSONs, both crosscheck/stats markdown reports, the report, and the optional
+evaluation pair of Step 3.6) into the two
 sibling folders with `scripts/e2e/e2e_bundle_export.py` (generic — the
 mapping is derived from the artifacts, so it works for any table /
 environment):
@@ -604,7 +605,7 @@ python scripts/e2e/e2e_bundle_export.py \
 
 The `--metrics` labels name the `real/`+`oss/` files (`gcp=` →
 `gcp_metrics.json`, `offline=` → `offline_metrics.json`, `stats_diff=` →
-`stats_diff_metrics.json` …) — keep all four labels exactly as above or the
+`stats_diff_metrics.json` …) — keep all four labels exactly as above (the `evaluation` label of Step 3.6 is a fifth, optional one) or the
 release pipeline's artifact discovery will not find them. The two `evaluation` lines are optional: add them only when Step 3.6 produced both
 files (the exporter copies and redacts extra labels). `--doc` moves the
 markdown reports: verbatim into `real/<label>.md`, redacted into
@@ -685,7 +686,7 @@ landing its recommendations so they fold in.
    real project / dataset / table / column names (Dataflow job ids and job
    names are the deliberate exception — they stay verbatim).
 5. `runs/<JOB_ID>/` matches the finished-folder tree exactly:
-   the sample CSVs at the parent level, `real/` with the four metrics JSONs +
+   the sample CSVs at the parent level, `real/` with the four metrics JSONs (plus `evaluation_metrics.json` and `evaluation_report.md` when Step 3.6 ran) +
    `stats_diff.md` + `freetext_crosscheck_report.md` + `report.md` +
    `mapping.json` + `_full_report.md`, and `oss/` with the same set minus
    `mapping.json`. Each `_full_report.md` opens with a ToC that lists every

@@ -317,7 +317,7 @@ Synthetic-data concepts **as implemented here** — every term is backed by code
 - **Noise floor** — the sampling noise a metric value carries at its sample size. A metric fails only when it crosses its threshold *and* exceeds this floor; no p-values are reported.
 - **Memorization lift** — how much more often synthetic rows match the reference sample R than the equally sized holdout H (`row.memorization_lift`). Chance matches fall on both, so only copying lifts the ratio; status reads the lift's confidence lower bound.
 - **Exposure set** — the first 1,024 reference rows in the generator's own order, the ones whose row documents can reach a prompt; `row.exposure_lift` is the same lift measured on them.
-- **Matched n** — computing a size-dependent metric (entropy, distinct count, coverage, DCR, density, detection AUC) on equal sample sizes for both sides, so a faithful generator scores 1.
+- **Matched n** — computing a size-dependent metric (entropy, distinct count, coverage, DCR, density, detection AUC) on equal sample sizes for both sides, so a faithful generator scores at each metric's target (1 for the ratio metrics, 0.5 for a detection AUC).
 - **Determinism / seeding** — all sampling flows from `blake2b(run_id, batch_id)`-derived seeds: same inputs → same synthetic output, distinct batches → distinct draws.
 
 ### Relational concepts

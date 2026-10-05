@@ -74,7 +74,7 @@
 - docs: report prompt must extract fallback error=, vLLM lifecycle milestones, B.1 phase timings
 - docs: refresh e2e report prompt for milestone contract; cross-link playbook + specs
 - docs: fix misattributed fidelity citation; pin DCR/NNDR to tree-based kNN
-- docs: evaluation framework design spec (tiered metrics, one history table)
+- docs: evaluation framework design spec (tiered metrics, validation_data_history)
 - docs: RAG layer design spec (BQ rag_chunks + VECTOR_SEARCH, idempotent embed job)
 - docs: fix RUN_PLAYBOOK machine-type guidance contradiction
 - docs: RUN_PLAYBOOK — GPU verdict, run matrix, Dataflow options, report recipe

@@ -1,5 +1,6 @@
 # Doc-drift patterns — strings that MUST NOT appear in any tracked file
-# outside `docs/adr/` (where they are allowed for historical context).
+# outside `docs/adr/` and `docs/releases/` (where they are allowed for
+# historical context: decisions and release reports are records).
 #
 # Add an entry whenever you delete or rename a file, symbol, or image tag
 # that the rest of the repo might still reference. CI enforces this on
@@ -56,5 +57,6 @@ irrelevant for workers
 
 # 2026-10-05 — the in-job evaluation proposal (one `validation_data_history`
 # table) was superseded by the standalone evaluator's `evaluation_data_history`
-# (ADR 0041, which may name the old table; docs/adr/ is excluded from the scan).
+# (ADR 0041 and release reports may name the old table; docs/adr/ and
+# docs/releases/ are excluded from the scan).
 validation_data_history

@@ -524,6 +524,7 @@ measured number of its own. Regenerate with
 | `designs/assets/throughput-where-time-went.png` | `scripts/doc/make_throughput_figures.py` | evidence (`MEASURED` block) |
 | `designs/assets/relationships-scenarios.png` | `scripts/doc/make_relationships_figures.py` | concept |
 | `designs/assets/relationships-flags.png` | `scripts/doc/make_relationships_figures.py` | concept, one panel per mode |
+| `designs/assets/eval-levels.png`, `designs/assets/eval-noise-floor.png` | `scripts/doc/make_eval_figures.py` | concept |
 
 ## 11. Evaluation (sdfb-evaluation)
 

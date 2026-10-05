@@ -166,7 +166,22 @@ generator's Terraform:
 - The old in-job evaluation code (`sdfb_core/evaluation/`, the branch
   `ws3-eval-framework`) is retired by a later task, with its salvage mapped to
   the new modules. Metric tiers 2 and 3 (SDMetrics reports, SynthEval,
-  Evidently) are dropped at runtime.
+  Evidently) are dropped at runtime. Also dropped with the old design, each
+  stated here because nothing else records it:
+  - The old `profile` module's stratified sampling and its per-stratum cap.
+    The new package samples with a deterministic bottom-k hash sample
+    (`sampling/reservoir.py`, after [Cohen & Kaplan 2007](https://doi.org/10.1145/1281100.1281133)),
+    which is uniform, not stratified. The design gives no reason for the
+    change.
+  - The in-job lookup of the previous run for a run-versus-run PSI. Two stored
+    evaluations are compared with `sdfb-eval compare`, a manual step, which
+    gives the PSI only when both runs' histograms carry the same `edges_digest`.
+  - The old diagnostic's "data structure" check (synthetic columns equal the
+    source columns): no replacement is named in the design, and none was found
+    in `context/plan.py` or `beam/encode.py`.
+  - The Evidently HTML drift report as a deliverable and the `--eval_tier`
+    knob: the reports are markdown and JSON (`sdfb-eval report`, `compare`),
+    and there are no tiers.
 - **Unverified until the first GCP run:** the scoping SQL on real BigQuery,
   snapshot creation with the evaluator's roles, the image build and the
   dispatch entrypoint, a template launch, the shuffle prediction against a
@@ -179,9 +194,9 @@ generator's Terraform:
 | :-- | :-- |
 | **The in-job branch** (the 2026-07-07 proposal) | Couples evaluation cost and failure to generation, limits metrics to one worker's memory, and measures fidelity only against the generator's own sample. See Context |
 | **A fourth uv workspace member** | Breaks the image build and the DSG unit, and forces the evaluator's Python and Beam pins onto the generator (D1) |
-| **SDMetrics at runtime** | A pandas-based library on the runtime path, with its own definitions and no noise floor or mergeable accumulators. Several metric names follow [SDMetrics](https://docs.sdv.dev/sdmetrics); no SDMetrics code runs |
-| **SQL-only pushdown** | BigQuery SQL is used where it is enough (planning: counts, grids, dictionaries), but the exact nearest-neighbour search, the detection classifier and the per-row hash passes are not standard SQL, and splitting a metric across two engines would split its sampling too. One Beam graph encodes each row once |
-| **Beam `ApproximateQuantiles`** | Planning takes a fixed 1,001-point grid per side from [`APPROX_QUANTILES`](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions) and the Beam pass counts every row exactly against it: two passes replace a sort, counts merge exactly, and a histogram's `edges_digest` lets two runs be compared. A combiner that builds its own approximate quantiles inside the job would make the edges depend on how the runner bundles and merges |
+| **SDMetrics at runtime** | Built instead: statistics in numpy and scipy, with the lock holding no pandas and no synthetic-data metrics library (design [§9](../designs/2026-07-07-evaluation-framework-design.md#9-packaging-and-the-dsg-unit)). Several metric names follow [SDMetrics](https://docs.sdv.dev/sdmetrics); no SDMetrics code runs (design [§4.3](../designs/2026-07-07-evaluation-framework-design.md#43-distributions-on-a-fixed-grid)). The design gives no further reason for not using it; the ws3 branch used it on a pandas frame (Context) |
+| **SQL-only pushdown** | Built instead: BigQuery SQL for planning (counts, quantile grids, dictionaries, one aggregate scan per table side) and one Beam graph for the per-row pass, which encodes each row once (design [§5.1](../designs/2026-07-07-evaluation-framework-design.md#51-planning-before-a-row-is-read), [§5.2](../designs/2026-07-07-evaluation-framework-design.md#52-the-graph)). The design does not state why SQL alone was rejected. Reasoning of this ADR, not measured: an exact Gower nearest-neighbour search and a classifier are not expressible in standard BigQuery SQL |
+| **Beam `ApproximateQuantiles`** | The first plan considered it; the build replaced it with a planning-time grid. Built instead: planning asks BigQuery for a 1,001-point grid per side ([`APPROX_QUANTILES`](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions)) and the Beam pass counts every row exactly against that fixed grid. The design's reason: "A column of a hundred million rows cannot be sorted in a Beam combiner, and it does not need to be"; two passes, plan then count, replace a sort (design [§4.3](../designs/2026-07-07-evaluation-framework-design.md#43-distributions-on-a-fixed-grid)). No other reason is recorded |
 | **A gate inside generation** | Evaluation is post-hoc by decision; the generation job keeps its own blocker rules |
 | **p-values** | At scale everything is significant; each row carries a noise floor instead (D5) |
 
