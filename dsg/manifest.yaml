@@ -89,6 +89,9 @@ exclude:
   - packages/sdfb-tests/tests/unit/scripts/test_make_release_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redact*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redaction.py
+  # Renders the standalone evaluator's metric catalogue into its design
+  # document: the catalogue, the document and scripts/doc/ all stay here.
+  - packages/sdfb-tests/tests/unit/scripts/test_render_eval_catalogue.py
   - packages/sdfb-tests/tests/unit/scripts/test_source_synthetic_stats_diff.py
   - packages/sdfb-tests/tests/unit/public_cloud/**
   # Root side of packages/sdfb-evaluation's two-sided golden parity test
