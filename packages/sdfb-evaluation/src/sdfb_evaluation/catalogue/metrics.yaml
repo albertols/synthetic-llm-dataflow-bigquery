@@ -1552,7 +1552,7 @@ metrics:
     interpretation:
       good: "0: every primary key is unique."
       bad: "Any value above 0 fails: joins on this key fan out and downstream counts double."
-    pitfalls: "Only keys declared in the relationship model are checked; a table without a declared key is NOT_EVALUATED, not clean."
+    pitfalls: "Only keys declared in the relationship model are checked; a table without a declared key is NOT_EVALUATED, not clean. Keys are compared by a 64-bit hash and the threshold is zero, so one hash collision between two different keys reads as a duplicate and fails. Among n rows that happens with probability about n^2 / 2^65: 0.03 % at 100 million rows, about 0.4 % at 365 million and about 3 % at 1 billion. On a table that large, confirm a rate of a couple of rows with a GROUP BY on the key before calling it a generator defect."
     references:
       - {label: "ADR 0036 — parent-driven fan-out generation", url: "https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/docs/adr/0036-parent-driven-fanout-generation.md"}
       - {label: "config/thresholds.yml — pk.duplicate", url: "https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/config/thresholds.yml"}

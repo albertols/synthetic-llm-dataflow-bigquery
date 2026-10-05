@@ -210,7 +210,7 @@ own lock, and asserts that none of those modules can be found.
 | D3 | **The reference sets come from the generator's own order.** R, E, H and H_E are prefixes of one ranking of the source by row fingerprint (§3.5) | The generator's reference sample is the first n rows of that ranking. The next n rows are a holdout drawn the same way, so chance matches fall on R and H alike, and a ratio between them does not depend on how dense the value domain is | `context/reference.py` |
 | D4 | **Fidelity is measured against the full source, as the job saw it.** The source is pinned by time travel at the job's create time while that is possible. Every fidelity row also stores `baseline_value = metric(R, source)` | A generator that read only the reference sample cannot be expected to beat the sample's own distance from the source. The baseline is that floor (§4.2) | `context/scope.py::pin_source`, `baseline: true` in the catalogue |
 | D5 | **Status reads effect sizes and sampling noise.** A metric warns or fails only when its value crosses the threshold and that crossing is not explained by noise. Lifts and the holdout share gate on a confidence bound. No p-value is reported. Metrics whose raw value depends on sample size are computed at matched n | A fixed threshold is wrong at small n, where noise crosses it, and a significance test is wrong at large n, where everything is significant | `scoring.status_for`, `stats/noise.py` |
-| D6 | **Outputs honour the literal policy.** A value is written literally only when its column has at most 50 distinct source values ([ADR 0022](../adr/0022-stats-driven-generation.md)) and the value occurs at least 10 times in the source. Everything else is a keyed hash label. Source keys in row flags are keyed hashes | The evaluation tables are read more widely than the source. A value held by a handful of records is a quasi-identifier ([Sweeney 2002][sweeney2002]) | `context/plan.py` (`literal_ok`), `canonical.hashed_label`, `beam/label_key.py` |
+| D6 | **Outputs honour the literal policy.** A value is written literally only when its column has at most 50 distinct source values ([ADR 0022](../adr/0022-stats-driven-generation.md)) and the value occurs at least 10 times in the source. Everything else is a keyed hash label. Source keys in row flags are keyed hashes. The same k = 10 spaces the numeric values a profile publishes (§4.9: at least 10 source records beyond an edge and between two published edges) | The evaluation tables are read more widely than the source. A value held by a handful of records is a quasi-identifier ([Sweeney 2002][sweeney2002]) | `context/plan.py` (`literal_ok`), `canonical.hashed_label`, `beam/label_key.py` |
 | D7 | **The registry is append-only events.** A run writes a `RUNNING` row and exactly one terminal row; a view picks the last event per evaluation. The terminal row is written after the metric tables' load and copy jobs have finished | A registry row that says a run finished must imply that its metrics are readable. With events only appended, every state a run went through stays on record | `beam/assemble.py`, `beam/pipeline.py`, `schemas/views.sql` |
 
 ## 3. What gets evaluated: context, scope, panel
@@ -436,7 +436,10 @@ warning: an HTTP 400, 403 or 404, as a clone across organisations or
 regions would give. Any other error (a 5xx, a 429, a conflict) may succeed
 on a retry, so it fails the run with a `FAILED` registry row rather than
 silently changing what the evaluation reads (R89). The same rule holds for
-a read-only parent that cannot be read and for the free-text pools read.
+a read-only parent that cannot be read, for the free-text pools read and
+for the read of the generator's source statistics behind
+`column.source_stats_drift` (R113): a refusal leaves the metric
+`not_evaluated` with the reason, any other error fails the run.
 *Code:* `beam/pipeline.py::prepare_evaluation`, `context/bq.py::is_refusal`.
 
 ### 3.4 `--mode`: exact or sampled
@@ -807,6 +810,11 @@ values would dominate the shuffle, so the plan gives each census column a
 share of `--max_shuffle_gb` and **value-samples** the columns that do not
 fit (§5.3).
 
+A top-k list keeps at most 50 values a side (`census.TOPK_ITEMS`, the
+literal policy's column cap, D6). The size is a constant, not a flag: every
+knob enters the evaluation key, so a knob that changed nothing would still
+change the salt and every sample (R113).
+
 Value sampling is a stratified design (R67). The source's and the
 synthetic side's top values are a certainty stratum, always counted; the
 tail is sampled by value hash, a value entering when its hash falls under
@@ -829,6 +837,18 @@ foreign-key columns, so a record copied under a fresh id still matches.
 Both are raw rates. A table with a few low-cardinality columns collides
 with its source by chance, so a raw rate cannot tell chance from copying.
 The lifts can.
+
+**Pitfall: two absolute rates fail by chance on a narrow table.**
+`row.exact_match_rate_nonkey` and `row.near_match_rate` are graded against
+fixed thresholds (warn 0.001, fail 0.01), whatever the table's width. With
+few non-key columns a fresh row equals a source row in all of them, or in
+all but one, by coincidence: in a check on invented rows with two non-key
+columns (not a measurement of a run) the near-match rate was 0.996 and the
+non-key exact-match rate 1.2 %, both FAIL, with nothing copied. The FAIL is
+the safe direction and stays as built; whether these two rates should gate
+on narrow tables is a privacy policy left to the operator (R113). The
+calibrated signal is the lifts below, which compare R with the holdout:
+read a FAIL of either rate next to its lift.
 
 **Claim (D3):** chance hits R and H alike, so only copying lifts the
 ratio, and status reads the interval's lower bound.
@@ -1012,6 +1032,14 @@ from [Patki, Wedge & Veeramachaneni 2016][patki2016]. *Code:*
 
 Rules a reader needs:
 
+- **Key columns of one type family (R113).** Key tuples are compared by
+  the hash of their canonical values, and an `INT64` 5, a `NUMERIC` 5 and a
+  `FLOAT64` 5 have different canonical forms. An edge whose child column
+  and referenced column are of different type families (integer, decimal,
+  float, string, …) would read every child as an orphan on both sides, so
+  every metric of that edge is `not_evaluated` with a reason naming both
+  columns and their types. Cast one side, or correct the relationship
+  model.
 - **The mean ratio is a ratio of row counts (R82).**
   `fanout_mean_ratio = (n_child/n_parent)_syn / (n_child/n_parent)_src`,
   where n_child is every child row read, matched, orphaned or with a NULL
@@ -1045,7 +1073,8 @@ Rules a reader needs:
 ### 4.9 What the outputs may reveal
 
 The evaluation tables describe the source. Three rules bound what they can
-say about any one record.
+say about any one record, and the channels they leave open are listed at
+the end of this section.
 
 **Literals (D6).** A top-k label is the value itself only when the column's
 source top list covers every non-NULL row with at most 50 values, each
@@ -1085,7 +1114,8 @@ its URI.
 *CONCEPT figure (seeded simulation, seed 20; not a measurement of a run).*
 *Intuition:* the outermost points of a quantile grid sit on single
 records. A point is safe to show only when a crowd of records lies on each
-side of it. *Formally:* an edge e is kept if and only if at least k = 10
+side of it, and two shown points are safe together only when a crowd lies
+between them. *Formally:* an edge e is kept if and only if at least k = 10
 source records satisfy `x ≤ e` and at least k satisfy `x ≥ e`; both counts
 are monotone in e, so the kept edges form one contiguous range, and a
 quantile outside it is withheld, never clamped to the nearest kept edge.
@@ -1093,13 +1123,56 @@ The threshold is the k of k-anonymity ([Sweeney 2002][sweeney2002]) that
 the repository already uses for rare values. *Code:* `beam/dense.py`
 (`RARE_COUNT`, the right- and left-closed counts), `beam/census.py`.
 
+**What is published, exactly (R113).** The kept range says where a value
+may be shown. Inside it, the persisted profile never places two grid
+values closer than k source records apart:
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  G["⚪ plan grid<br/>100 bins, 1,001 points"]:::data --> M["🔀 every metric<br/>computed on the full grid"]:::beam
+  G --> K["⚪ kept range<br/>k source records<br/>on each side"]:::data
+  K --> T["⚪ thinned<br/>k source records between<br/>neighbouring edges"]:::data
+  T --> H[("🗄️ histogram payload<br/>merged bins, counts are sums<br/>edges_digest of these edges")]:::store
+  K --> Q["⚪ quantile probabilities<br/>k / n apart"]:::data --> P[("🗄️ quantiles payload")]:::store
+```
+
+- **Histogram edges.** Going up from the first kept edge, an edge is
+  published only once at least k source records lie in the bin since the
+  last published one. A dropped edge's two bins merge, so every side's
+  counts stay sums over the same edges, and `edges_digest` is the digest
+  of the edges published.
+- **Pair axes.** The decile edges a contingency axis shows are thinned the
+  same way.
+- **Quantiles.** A side publishes a probability p only when `p · n ≥ k`,
+  `(1 − p) · n ≥ k` and p is at least `k / n` above the last published
+  one, with n the side's own count. From 1,000 values on, all 99
+  percentiles pass this rule.
+
+The thinning is a publication step only: no metric reads it. On a column
+of a few hundred rows the plan's grid points are single source records one
+or two apart, so without it the payloads list most of the column:
+
+| Source rows | Histogram edges before | Histogram edges now | Fewest source records between two edges, before → now | Quantile probabilities (source side) before → now |
+| ---: | ---: | ---: | --- | --- |
+| 120 | 85 (71 % of the column's values) | 11 (9 %) | 1 → 10 | 83 → 10 |
+| 795 | 97 | 49 | 7 → 15 | 97 → 49 |
+| 2,000 | 99 | 99 | 19 → 19 | 99 → 99 |
+
+*Worked example on invented data (seeded lognormal values; not a
+measurement of a run). The 120- and 795-row rows are pinned by
+`tests/beam/test_dense.py::test_small_columns_publish_grid_values_k_source_records_apart`,
+the 2,000-row row by `test_a_large_column_is_published_as_before`.*
+
 The rule was reached in steps, each closing a channel the previous one
 left open:
 
 ```mermaid
 flowchart LR
   classDef data fill:#6b7280,color:#fff,stroke:#4b5563
-  A["⚪ R65<br/>no exact min or max<br/>of the source"]:::data --> B["⚪ R69<br/>k = 10 records<br/>beyond any bound"]:::data --> C["⚪ R71<br/>every side, the<br/>synthetic one too"]:::data --> D["⚪ R74, R77<br/>both sides of an edge<br/>withheld, never clamped"]:::data --> E["⚪ R80<br/>fewer than k values:<br/>metric not evaluated"]:::data
+  A["⚪ R65<br/>no exact min or max<br/>of the source"]:::data --> B["⚪ R69<br/>k = 10 records<br/>beyond any bound"]:::data --> C["⚪ R71<br/>every side, the<br/>synthetic one too"]:::data --> D["⚪ R74, R77<br/>both sides of an edge<br/>withheld, never clamped"]:::data --> E["⚪ R80<br/>fewer than k values:<br/>metric not evaluated"]:::data --> F["⚪ R113<br/>k records between<br/>two published values"]:::data
 ```
 
 | Step | What it closed |
@@ -1109,15 +1182,43 @@ flowchart LR
 | R71 | A generator that clamps to the source range publishes the source extreme through the **synthetic** side. Every side gets the same treatment |
 | R74, R77 | Which edges are kept depends only on publishable counts, never on a value or on which grid contributed the edge. The rule is symmetric, and each payload carries `below_mass` and `above_mass` so a reader still sees how much lies outside. A side with fewer than 10 values has its moments withheld: a handful of values is determined by them |
 | R80 | A metric's value together with the synthetic side's published moments would give back the source's mean and deviation. `column.smd` and `column.std_ratio` are not evaluated when either side holds fewer than 10 values |
+| R113 | Inside the kept range the grid of a small column is still one record to a point: a 120-row column published 85 of its 120 values as histogram edges. Published edges are at least 10 source records apart, and quantile probabilities at least 10 of the side's records apart |
 
-Two channels are accepted and documented: the adherent count of
-`field.range_adherence` and of `relationship.cardinality_adherence` can pin
-a source extreme when values are dense integers. Row flags carry keys only,
-never an attribute value: the synthetic row's own key, and a keyed hash of
-the matched source record's key (`source_key` is always NULL). The
-synthetic key is the synthetic table's own key in clear, not hashed, so
-for a whole-row copy (keys included) it is the copied source row's key in
-clear. That is a third disclosure channel, documented in the code.
+**Accepted channels.** Four channels are accepted and documented.
+
+1. **The range adherence count.** The adherent count of
+   `field.range_adherence` can pin a source extreme when values are dense
+   integers.
+2. **The cardinality adherence count.** The adherent count of
+   `relationship.cardinality_adherence` can pin the source's smallest or
+   largest fan-out in the same way (§4.8).
+3. **Row flag keys.** Row flags carry keys only, never an attribute value:
+   the synthetic row's own key, and a keyed hash of the matched source
+   record's key (`source_key` is always NULL). The synthetic key is the
+   synthetic table's own key in clear, not hashed, so for a whole-row copy
+   (keys included) it is the copied source row's key in clear.
+4. **The reference panel travels in the job graph (R113).** The R and H
+   rows of every table, up to 2n source rows in clear, are read on the
+   driver and embedded in the pipeline (`beam.Create` in `beam/io.py`);
+   the panel inputs of the privacy pass travel the same way. Whoever can
+   read the Dataflow job can read them, and with the `upload_graph`
+   experiment the graph is also an object under the job's staging
+   location. Restrict that bucket to the evaluator's service account and
+   its operators and give it a lifecycle rule; see
+   [`DEPLOYMENT_PREREQUISITES.md`](../DEPLOYMENT_PREREQUISITES.md).
+
+**Counts below k, by design.** The count rule governs which grid VALUES
+are published. These payloads and rows still store a count that can be
+below k = 10, and are kept:
+
+| Where | What is stored | Why it is kept |
+| --- | --- | --- |
+| `topk` items | the count of a value shown under a keyed hash label | the label hides the value (D6); a literal label needs at least 10 source rows |
+| `null_patterns` | the count of each pattern of NULL columns | a pattern names columns, never a value |
+| `contingency` cells | the count of each cell of two binned or hashed axes | the axes are published under the rules above; a cell locates no record on its own |
+| `length_hist` | the count at every string length; its two ends are the column's exact minimum and maximum length | a length is not a value; the ends are stated here as a known exception to the extremes rule |
+| histogram bins of the panel and synthetic sides | each side's own count in a bin of at least 10 source records | the edges are the source's; a side's count says how many of ITS rows fall there |
+| `column.null_rate_delta`, `column.empty_rate_delta`, `column.zero_rate_delta` | a rate and its n, so rate × n is the count of NULL, empty or zero cells | the count names no row and no value other than NULL, empty or zero |
 
 ### 4.10 The catalogue
 
@@ -1349,6 +1450,12 @@ becomes a written row with a reason.
 | A batch fails to encode on a worker | Every metric row the table produced is rewritten `not_evaluated`; its profiles and flags are dropped |
 | Inside a transform | That transform's own rows for the table, edge or block are `not_evaluated`; the other tables and the run carry on |
 
+These are DATA errors: a malformed row, a degenerate count. A worker that
+runs out of memory is not one. Its `MemoryError` is raised, so the bundle
+fails and the runner retries it, in the encoder and inside every transform
+(R113). Swallowed, it would become a permanent `not_evaluated` block that
+leaves the run `SUCCEEDED` with, for example, its privacy verdicts missing.
+
 ### 5.3 Cost model
 
 Three budgets, each with a place where it is enforced.
@@ -1568,10 +1675,16 @@ open, so the driver never cancels a submitted job and never closes one it
 cannot see the end of (R93). When the wait fails but the job is found
 `DONE`, the pipeline's own row stands: after a polling error the driver
 warns and reads the result as usual; after an interrupt it writes nothing
-and prints how to read the result (R98). A `RUNNING` row with no terminal
-row therefore means the job is still running, or died after the command
-stopped watching; an orchestrator's failure callback closes that one
-(§8.3).
+and prints how to read the result (R98). A job that ended in another state
+may have loaded its `FINAL` row before it was cancelled, so the driver reads
+the registry back before it appends `FAILED`, and appends nothing when a
+`FINAL` row is there or the read fails (R113). A launch handed to Dataflow
+as a template (`--template_location`, which is how a flex-template launcher
+runs the entry) has no job id and nothing to wait for: the driver ends 0 and
+leaves the `RUNNING` row for the job to close (R113). A `RUNNING` row with
+no terminal row therefore means the job is still running, or died after the
+command stopped watching; an orchestrator's failure callback closes that
+one once the job is in a terminal state other than done (§8.3).
 
 ### 6.3 Four queries
 
@@ -1935,7 +2048,9 @@ flowchart LR
   end
   G2 -- "true: trigger with<br/>the job id" --> B
   ST --> L["⚙️ launcher: RUNNING row<br/>then submit"]:::cpu --> JOB["🔀 evaluation job"]:::beam --> FIN[("🗄️ FINAL row")]:::store
-  ST -. "task fails" .-> CB["⚙️ failure callback<br/>one INSERT SELECT"]:::cpu --> FAILED[("🗄️ FINAL row<br/>status FAILED")]:::store
+  ST -. "task fails" .-> CB{"⚙️ failure callback<br/>job state?"}:::cpu
+  CB -- "no job id, or FAILED,<br/>CANCELLED, UPDATED, DRAINED" --> FAILED[("🗄️ FINAL row<br/>status FAILED<br/>one INSERT SELECT")]:::store
+  CB -- "running, done<br/>or not readable" --> OPEN["⚪ nothing written:<br/>the job writes FINAL"]:::data
   M["⚪ manual trigger"]:::data --> B
 ```
 
@@ -1947,14 +2062,22 @@ flowchart LR
   `composer` for a manual run and `chained` when the generation DAG
   starts it.
 - **Chaining is opt-in.** The generation DAG has a parameter
-  `run_evaluation`, false by default. With it false its task chain and
-  arguments are unchanged.
-- **The failure callback closes the open row.** The launcher writes the
-  `RUNNING` row and mints the id, so a job that dies afterwards leaves
-  only that row. The callback appends a `FAILED` row with one `INSERT …
-  SELECT` that copies the `RUNNING` row of this DAG run's evaluation,
-  matched on the launch target, the trigger and the DAG run's start time,
-  and skips any evaluation that already has a final event.
+  `run_evaluation`, false by default, and two tasks after its launch that
+  read it (a short-circuit gate and the trigger). With it false the gate
+  skips the trigger; the launch and its arguments are unchanged.
+- **The failure callback closes the open row, when the job cannot.** The
+  launcher writes the `RUNNING` row and mints the id, so a job that dies
+  afterwards leaves only that row. A task can also fail on the Airflow
+  side while its job runs on, and a `FAILED` row written then would be
+  followed by the job's own `FINAL` row. So the callback reads the job's
+  state first (the provider's Dataflow hook, with the job id the launch
+  pushed) and writes only when the job is in a terminal state other than
+  done, or when there is no job id because the launch itself failed;
+  otherwise it logs that the job is still running and writes nothing
+  (R113). The row is one `INSERT … SELECT` that copies the `RUNNING` row
+  of this DAG run's evaluation, matched on the launch target, the trigger
+  and the DAG run's start time, and skips any evaluation that already has
+  a final event.
 - **Limits.** Two DAG runs overlapping on the same target can close each
   other's row. A launch whose only target is `tables` cannot be matched,
   so a failed job leaves its row open and the callback logs a warning. The
@@ -1962,8 +2085,9 @@ flowchart LR
   file.
 
 Unverified until a real environment: the deferrable wait, the DML, the
-callback's operator call, and how the trigger's configuration reaches the
-task. The README lists them.
+callback's operator call, the job id in XCom and the hook's job read that
+the callback's state check relies on, and how the trigger's configuration
+reaches the task. The README lists them.
 
 ### 8.4 The validation prompt, agents and a GUI
 

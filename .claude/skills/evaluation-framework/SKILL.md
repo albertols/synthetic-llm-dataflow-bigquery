@@ -49,6 +49,13 @@ evidence exists.
   matched n. In `compare`, `≈` means the delta is inside both rows' noise.
 - **Lifts.** Memorization, exposure and value lifts are matches to R over matches to the holdout H; 1 is chance,
   and status reads the confidence **lower bound**. The holdout share is 0.5 at chance.
+- **Narrow tables.** `row.near_match_rate` and `row.exact_match_rate_nonkey` are absolute rates against fixed
+  thresholds: with few non-key columns they FAIL by chance, with nothing copied. Read them next to their lifts,
+  which are the calibrated signal.
+- **Sampled mode.** A row computed from a sampled side carries `method = sample` and `sample_rate`, over the rows
+  read. A metric that needs every row of a side is `not_evaluated` ("sampled mode cannot measure …; run exact
+  mode"): match and duplicate rates, a sampled edge's orphans and fan-out, and per column the adherence, novelty,
+  copy-rate, coverage, pool-cap and range-coverage metrics. Use `--mode exact` for those verdicts.
 - Privacy metrics are risk indicators, not guarantees. Outputs honour the literal policy: values appear literally
   only for at most 50 distinct source values seen at least 10 times; the rest are keyed hashes.
 
@@ -76,6 +83,9 @@ that must match the generator is mirrored and pinned by the two-sided golden fil
 - The holdout share cannot tell one heavy copied cluster from split noise; the exact-copy metrics own that case.
 - The detection baseline is taken at n = |R| (`baseline_n`).
 - An orphan rate whose rate x n is below k reveals sums only; the design (§4.9) says what is published and what is withheld.
+- On a column of a few hundred rows the histogram and quantile payloads are coarse by design: published edges are
+  at least 10 source records apart (design §4.9). The metrics still use the full grid.
+- An edge whose key columns differ in type family (`INT64` against `NUMERIC`) is `not_evaluated`, not 100 % orphans.
 - A scope whose window was contaminated by another writer reads nothing unless `--allow_contaminated`.
 - BigQuery's `APPROX_*` aggregates are estimates: two plannings may differ slightly; metrics are deterministic for
   a given plan.

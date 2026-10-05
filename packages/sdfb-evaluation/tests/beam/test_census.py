@@ -1327,6 +1327,58 @@ def _copied_notes(n: int = 1200) -> tuple[Any, dict[str, list]]:
   return table, {"source": source, "synthetic": synthetic}
 
 
+def test_a_collapsed_value_pool_fails_the_distinct_ratio():
+  """Ruling R111: a free-text column the generator filled from a pool of
+  40 values, against 3,000 distinct source values, has a distinct ratio
+  of 40 / 3,000 = 0.013 at matched n — FAIL (the diversity collapse the
+  metric exists for), with the entropy ratio falling with it."""
+  n, pool_size = 3000, 40
+  fields = ({
+      "name": "id",
+      "type": "INT64",
+      "mode": "REQUIRED"
+  }, {
+      "name": "motto",
+      "type": "STRING",
+      "mode": "NULLABLE"
+  })
+  words = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+           "hotel", "india", "juliet", "kilo", "lima", "mike", "november",
+           "oscar", "papa", "quebec", "romeo", "sierra", "tango")
+
+  def motto(rng: np.random.Generator) -> str:
+    return " ".join(words[int(w)] for w in rng.integers(0, 20, size=7))
+
+  rng = np.random.default_rng(1)
+  source = [{"id": i, "motto": motto(rng)} for i in range(n)]
+  pool = [motto(np.random.default_rng(100 + k)) for k in range(pool_size)]
+  synthetic = [{
+      "id": 10**6 + i,
+      "motto": pool[i % pool_size]
+  } for i in range(n)]
+  distinct_src = len({r["motto"] for r in source})
+  assert distinct_src == n and len(set(pool)) == pool_size
+  table = planned_table(
+      "people", fields, source, synthetic, pk=("id",), pair_max_columns=0)
+  assert table.columns[1].kind.value == "text"
+  by_key = _by_key(
+      _pure(table, {
+          "source": source,
+          "synthetic": synthetic
+      }).metrics)
+  ratio = by_key[("column.distinct_ratio", "motto")]
+  assert ratio.value == pytest.approx(pool_size / n) == pytest.approx(
+      0.0133, abs=1e-4)
+  assert (ratio.source_value, ratio.synthetic_value) == (n, pool_size)
+  assert (ratio.n_source, ratio.n_synthetic) == (n, n)  # matched n: all rows
+  assert ratio.detail["distinct_syn"] == pool_size
+  assert status_for(_CATALOGUE.get(ratio.metric_id), ratio) is Status.FAIL
+  entropy = by_key[("column.entropy_ratio", "motto")]
+  assert entropy.value == pytest.approx(
+      math.log2(pool_size) / math.log2(n), abs=0.01)
+  assert status_for(_CATALOGUE.get(entropy.metric_id), entropy) is Status.FAIL
+
+
 def test_a_copied_free_text_column_fails_the_copy_rate_when_read_in_full():
   """Ruling R111: half of a free-text column copied verbatim from rare
   source values is a copy rate of 0.5, FAIL, in an exact run."""

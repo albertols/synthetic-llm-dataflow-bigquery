@@ -129,7 +129,6 @@ PROFILE_KINDS: tuple[str, ...] = (
     "null_patterns",
     "corr_matrix",
     "contingency",
-    "fanout_hist",
     "dcr_hist",
     "nndr_hist",
     "roc_curve",

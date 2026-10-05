@@ -2634,10 +2634,16 @@ def _unspaced(monkeypatch: pytest.MonkeyPatch) -> None:
   monkeypatch.setattr(dense, "_QUANTILE_GAP", 0)
 
 
-@pytest.mark.parametrize(("n", "edges_before", "max_edges"), [(120, 85, 11),
-                                                              (795, 97, 78)])
+# (source rows, histogram edges before / now, fewest source records between
+# two edges before / now, source-side quantile probabilities before / now):
+# the worked example of the design's §4.9, pinned here
+_SMALL_COLUMNS = ((120, (85, 11), (1, 10), (83, 10)), (795, (97, 49), (7, 15),
+                                                       (97, 49)))
+
+
+@pytest.mark.parametrize(("n", "n_edges", "fewest", "n_probs"), _SMALL_COLUMNS)
 def test_small_columns_publish_grid_values_k_source_records_apart(
-    n, edges_before, max_edges, monkeypatch):
+    n, n_edges, fewest, n_probs, monkeypatch):
   """The final review's I5. A 120-row column published 85 histogram edges
   and 83 quantile values, each an exact source record: 71 % of the column
   in clear, one record to a bin. Now no two published edges are closer
@@ -2658,8 +2664,9 @@ def test_small_columns_publish_grid_values_k_source_records_apart(
   }
   edges = histograms["source"].payload["edges"]
   between = _records_between(source, edges)
-  assert 2 <= len(edges) <= max_edges < edges_before
-  assert min(between[:-1]) >= RARE_COUNT, between  # no thin bin between edges
+  assert len(edges) == n_edges[1] <= n / RARE_COUNT
+  # no thin bin between two published edges
+  assert min(between[:-1]) == fewest[1] >= RARE_COUNT, between
   ordered = np.sort(source)  # R69 at the ends: k records at or beyond each
   assert np.count_nonzero(ordered >= edges[-1]) >= RARE_COUNT
   assert len(set(edges) & set(source.tolist())) <= n / RARE_COUNT
@@ -2684,6 +2691,8 @@ def test_small_columns_publish_grid_values_k_source_records_apart(
     assert len(probs) <= p.n / RARE_COUNT, (p.side, p.column, len(probs))
     seen += 1
   assert seen >= 4
+  assert len(_payload(profiles, "quantiles", "source",
+                      "salary")["probs"]) == n_probs[1]
   # the publication step only: the metrics do not move
   with monkeypatch.context() as patch:
     _unspaced(patch)
@@ -2693,8 +2702,12 @@ def test_small_columns_publish_grid_values_k_source_records_apart(
       p for p in profiles_before
       if (p.profile_kind, p.side, p.column) == ("histogram", "source",
                                                 "salary"))
-  assert len(before.payload["edges"]) == edges_before
-  assert min(before.payload["counts"]) < RARE_COUNT
+  assert len(before.payload["edges"]) == n_edges[0]
+  assert min(_records_between(source,
+                              before.payload["edges"])[:-1]) == fewest[0]
+  assert len(
+      _payload(profiles_before, "quantiles", "source",
+               "salary")["probs"]) == n_probs[0]
 
 
 def test_a_large_column_is_published_as_before(monkeypatch):
