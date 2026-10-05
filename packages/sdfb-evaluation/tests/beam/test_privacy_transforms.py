@@ -590,10 +590,10 @@ def test_a_failing_table_does_not_fail_the_run(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 # the maths it consumes, and the handoffs
 # --------------------------------------------------------------------------
-def _space(table: Any, *, salt: str = SALT) -> Any:
+def _space(table: Any, *, salt: str | None = None) -> Any:
   spec = PrivacySpec.from_table(
       table,
-      salt=salt,
+      salt=salt or SALT,
       privacy_sample_rows=SAMPLE_ROWS,
       detection_sample_rows=SAMPLE_ROWS)
   inputs = PanelInputs.from_table(table, spec)

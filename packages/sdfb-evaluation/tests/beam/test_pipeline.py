@@ -182,7 +182,7 @@ def test_runner_defaults(small):
 
 @pytest.mark.parametrize("name", [
     "DirectRunner", "directrunner", "Direct", "SwitchingDirectRunner",
-    "apache_beam.runners.direct.direct_runner.DirectRunner"
+    "TestDirectRunner", "apache_beam.runners.direct.direct_runner.DirectRunner"
 ])
 def test_a_local_run_is_in_process(small, name):
   """Every name Beam resolves to its DirectRunner — which hands a batch
@@ -199,8 +199,24 @@ def test_a_local_run_is_in_process(small, name):
   assert set(out) == {"metrics", "profiles", "flags", "registry", "failures"}
 
 
+@pytest.mark.parametrize("key", sorted(pipeline_module._PRISM_ROUTED))
+def test_every_prism_routed_name_defaults_to_a_runner_the_pipeline_accepts(
+    small, key):
+  """The two functions agree: a name the defaults reroute is never a name
+  the pipeline then refuses (`TestDirectRunner` was routed by Beam to
+  Prism but not by the defaults)."""
+  plan = evaluation_plan(
+      _tables(small)[:1], evaluation_id="ev_agree", label_key_uri=None)
+  for spelling in (key, key + "runner"):
+    defaults = pipeline_options_defaults(spelling, plan)
+    assert defaults["runner"] == "FnApiRunner", spelling
+    p = beam.Pipeline(options=PipelineOptions([], **defaults))
+    build_evaluation_pipeline(
+        p, plan, sources=InMemorySources({}), sinks=LocalJsonSinks("unused"))
+
+
 def test_tests_default_to_the_in_process_runner():
-  """`conftest.py`: a pipeline a test of this package builds without
+  """`tests/conftest.py`: a pipeline a test of this package builds without
   naming a runner is in process too, not on Prism."""
   assert type(beam.Pipeline().runner).__name__ == "FnApiRunner"
   assert type(BeamTestPipeline().runner).__name__ == "FnApiRunner"

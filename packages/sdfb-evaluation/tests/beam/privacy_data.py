@@ -157,9 +157,10 @@ def encode(table: TablePlan,
            rows: Sequence[Mapping[str, Any]],
            *,
            chunk: int = 997,
-           salt: str = SALT) -> list[EncodedBatch]:
-  """`rows` of one side as encoded batches, as `EncodeSide` makes them."""
-  encoder = BatchEncoder.from_table(table, side, salt=salt)
+           salt: str | None = None) -> list[EncodedBatch]:
+  """`rows` of one side as encoded batches, as `EncodeSide` makes them
+  (`salt` None: the module's `SALT`, read at call time)."""
+  encoder = BatchEncoder.from_table(table, side, salt=salt or SALT)
   return [
       encoder.encode(rows[start:start + chunk])
       for start in range(0, len(rows), chunk)
@@ -170,7 +171,7 @@ def encode_all(table: TablePlan,
                rows_by: Mapping[str, Sequence[Mapping[str, Any]]],
                *,
                chunk: int = 997,
-               salt: str = SALT) -> list[EncodedBatch]:
+               salt: str | None = None) -> list[EncodedBatch]:
   return [
       batch for side, rows in rows_by.items()
       for batch in encode(table, side, rows, chunk=chunk, salt=salt)
