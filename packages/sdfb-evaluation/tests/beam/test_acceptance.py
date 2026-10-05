@@ -119,7 +119,8 @@ def evaluate(plan: EvaluationPlan,
       for name, table_rows in by_table.items()
   })
   sinks = sinks or LocalJsonSinks(str(out_dir))
-  options = PipelineOptions(**pipeline_options_defaults("DirectRunner", plan))
+  options = PipelineOptions([],
+                            **pipeline_options_defaults("DirectRunner", plan))
   with beam.Pipeline(options=options) as p:
     build_evaluation_pipeline(
         p, plan, sources=sources, sinks=sinks, stats_query=stats_query)
@@ -621,7 +622,8 @@ def test_registry_final_after_metric_writes(launch, tmp_path):
                          label_key_uri=None)
   log = _OrderLog(tmp_path / "events.log")
   sinks = _FakeWriteResultSinks(log)
-  options = PipelineOptions(**pipeline_options_defaults("DirectRunner", plan))
+  options = PipelineOptions([],
+                            **pipeline_options_defaults("DirectRunner", plan))
   with beam.Pipeline(options=options) as p:
     out = build_evaluation_pipeline(
         p,
