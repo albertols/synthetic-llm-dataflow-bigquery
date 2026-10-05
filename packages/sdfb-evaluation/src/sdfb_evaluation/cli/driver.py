@@ -384,7 +384,6 @@ def knobs_from_args(args: argparse.Namespace, evaluation_id: str) -> Knobs:
       privacy_sample_rows=args.privacy_sample_rows,
       detection_sample_rows=args.detection_sample_rows,
       pair_max_columns=args.pair_max_columns,
-      topk_profile=args.topk_profile,
       row_flags_top_k=args.row_flags_top_k,
       row_flags_source_keys=args.row_flags_source_keys,
       max_bytes_billed=args.max_bytes_billed,

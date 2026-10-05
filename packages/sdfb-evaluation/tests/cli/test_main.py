@@ -48,6 +48,7 @@ from unit.context.plan_fakes import (
     thelook_models,
 )
 
+from sdfb_evaluation.beam import census
 from sdfb_evaluation.beam import pipeline as beam_pipeline
 from sdfb_evaluation.beam.label_key import is_label_key_uri
 from sdfb_evaluation.cli import driver
@@ -103,8 +104,7 @@ def test_run_flags_default_to_the_brief():
   args, _ = parse_args(["run", *TARGET])
   assert (args.sample_rows, args.privacy_sample_rows,
           args.detection_sample_rows) == (200_000, 50_000, 50_000)
-  assert (args.pair_max_columns, args.topk_profile,
-          args.row_flags_top_k) == (20, 1000, 100)
+  assert (args.pair_max_columns, args.row_flags_top_k) == (20, 100)
   assert args.row_flags_source_keys == "hashed"
   assert args.max_bytes_billed == 1_099_511_627_776
   assert args.max_shuffle_gb == 500.0
@@ -121,13 +121,33 @@ def test_run_flags_default_to_the_brief():
       "--tables", "--reference_dataset", "--landing_dataset", "--mode",
       "--scope", "--allow_contaminated", "--sample_rows",
       "--privacy_sample_rows", "--detection_sample_rows", "--pair_max_columns",
-      "--topk_profile", "--row_flags_top_k", "--row_flags_source_keys",
-      "--max_bytes_billed", "--max_shuffle_gb", "--output_dataset",
-      "--temp_dataset", "--sink", "--output_local", "--thresholds_uri",
-      "--fail_on", "--trigger", "--label_key_uri", "--runner"
+      "--row_flags_top_k", "--row_flags_source_keys", "--max_bytes_billed",
+      "--max_shuffle_gb", "--output_dataset", "--temp_dataset", "--sink",
+      "--output_local", "--thresholds_uri", "--fail_on", "--trigger",
+      "--label_key_uri", "--runner"
   } == set(flags)
   assert "--fixture_dir" not in flags  # hidden
   assert "--evaluation_id" not in flags  # minted, never passed (R88c)
+
+
+def test_the_top_k_size_is_a_constant_not_a_knob():
+  """Ruling R113 (I7): `--topk_profile` did nothing — the census keeps
+  `TOPK_ITEMS` values a profile — yet it was a knob of the evaluation
+  key, so changing it changed the salt and every sample for no effect.
+  It is gone from the flags, the knobs, the key and the template."""
+  args, _ = parse_args(["run", *TARGET])
+  assert not hasattr(args, "topk_profile")
+  assert "--topk_profile" not in public_run_flags()
+  knobs = driver.knobs_from_args(args, "eval-20260914T080000Z-00000001")
+  assert "topk_profile" not in knobs.to_dict()
+  assert "topk_profile" not in knobs.key_dict()
+  with pytest.raises(TypeError):
+    Knobs(topk_profile=1000)  # pylint: disable=unexpected-keyword-arg  # the removed knob
+  metadata = json.loads(
+      (Path(driver.__file__).resolve().parents[3] / "deploy" /
+       "flex_template_metadata.json").read_text(encoding="utf-8"))
+  assert "topk_profile" not in {p["name"] for p in metadata["parameters"]}
+  assert census.TOPK_ITEMS == 50
 
 
 @pytest.mark.parametrize(

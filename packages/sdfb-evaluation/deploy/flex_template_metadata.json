@@ -210,16 +210,6 @@
       "isOptional": true
     },
     {
-      "name": "topk_profile",
-      "label": "Top-k profile",
-      "helpText": "Values kept in a top-k profile. Empty: 1000.",
-      "paramType": "TEXT",
-      "isOptional": true,
-      "regexes": [
-        "^[0-9]*$"
-      ]
-    },
-    {
       "name": "trigger",
       "label": "Trigger",
       "helpText": "What started the evaluation, recorded in the registry. Empty: cli.",

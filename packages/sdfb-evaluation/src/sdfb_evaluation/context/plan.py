@@ -903,14 +903,15 @@ class Knobs:  # pylint: disable=too-many-instance-attributes  # one field per CL
 
   Every knob except `max_bytes_billed`, `output_dataset`, `temp_dataset`
   and `evaluation_id` (which change no metric value) enters
-  `evaluation_key`. `temp_dataset` (`project.dataset`) defaults to
-  `<bq project>.<output_dataset>`.
+  `evaluation_key`, and so the salt and every sample: a knob must change
+  a result to be one (the top-k profile size is the constant
+  `census.TOPK_ITEMS`, Ruling R113). `temp_dataset` (`project.dataset`)
+  defaults to `<bq project>.<output_dataset>`.
   """
   sample_rows: int = 200_000
   privacy_sample_rows: int = 50_000
   detection_sample_rows: int = 50_000
   pair_max_columns: int = 20
-  topk_profile: int = 1000
   row_flags_top_k: int = 100
   row_flags_source_keys: str = "hashed"
   max_bytes_billed: int = 1 << 40
@@ -923,7 +924,7 @@ class Knobs:  # pylint: disable=too-many-instance-attributes  # one field per CL
 
   def __post_init__(self) -> None:
     for name in ("sample_rows", "privacy_sample_rows", "detection_sample_rows",
-                 "topk_profile", "row_flags_top_k"):
+                 "row_flags_top_k"):
       _positive_int(name, getattr(self, name))
     _positive_int("pair_max_columns", self.pair_max_columns, minimum=0)
     Budget(  # validates both caps
