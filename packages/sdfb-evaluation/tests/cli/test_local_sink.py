@@ -28,6 +28,8 @@ import pytest
 
 from sdfb_evaluation.beam.io import LocalJsonSinks
 
+from .helpers import local_pipeline
+
 REGISTRY = "evaluation_data_history"
 
 
@@ -54,7 +56,7 @@ def test_the_drivers_rows_frame_a_pipeline_that_fails_at_run_time(
   sinks = LocalJsonSinks(str(tmp_path))
   sinks.write_rows([{"status": "RUNNING"}], REGISTRY, label="driver-running")
   with pytest.raises(
-      RuntimeError, match="a worker failed"), beam.Pipeline() as p:
+      RuntimeError, match="a worker failed"), local_pipeline() as p:
     final = (
         p | beam.Create([{
             "status": "SUCCEEDED"
@@ -94,5 +96,5 @@ def test_another_runs_temp_directory_is_still_refused(tmp_path: Path):
     with pytest.raises(ValueError, match="another run"):
       sinks.write_rows([{"status": "FAILED"}], REGISTRY, label="again")
     with pytest.raises(ValueError, match="another run"):
-      sinks.write(beam.Pipeline() | beam.Create([]), REGISTRY)
+      sinks.write(local_pipeline() | beam.Create([]), REGISTRY)
     foreign.rmdir()

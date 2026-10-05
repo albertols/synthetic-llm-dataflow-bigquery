@@ -103,6 +103,12 @@ salted sample of each side above `--sample_rows` (200,000), writes local
 files, then loads them with one BigQuery load job per table, the
 registry's FINAL row last.
 
+`--runner DirectRunner` means "run it on this machine", and it is what the
+registry records. The pipeline itself runs on Beam's in-process
+`FnApiRunner`: Beam's own `DirectRunner` hands a batch pipeline to Prism,
+which can start a step before its side input is complete, so the evaluator
+does not run on Prism and refuses `--runner PrismRunner` as a usage error.
+
 ```mermaid
 flowchart TB
   subgraph S1["--sink bq_client · DirectRunner default"]
@@ -164,7 +170,7 @@ Exit codes of `run`:
 |---|---|
 | 0 | the evaluation finished and no gate tripped |
 | 1 | the `--fail_on` gate tripped, and nothing else |
-| 2 | a usage error: nothing was started (no registry row, no DDL). A malformed Beam argument or thresholds file is one too |
+| 2 | a usage error: nothing was started (no registry row, no DDL). A malformed Beam argument, a thresholds file that does not validate and `--runner PrismRunner` are usage errors too |
 | 3 | the evaluation failed: its FINAL row reads FAILED (no table could be evaluated), or the run raised an error. The FAILED row is written first, the traceback goes to stderr. `--fail_on none` does not mask it |
 
 The `--fail_on` gate, by the status of the run:
@@ -181,16 +187,51 @@ interrupt `run` (Ctrl-C) while it waits for a Dataflow job, the job is not
 cancelled and the driver writes no row: the job goes on and writes its
 own. The command prints the job id and how to read the result later.
 
-`--thresholds_uri` points at a YAML file of the warn and fail thresholds
-the gate applies instead of the catalogue's:
+#### Your own thresholds
+
+The catalogue owns the default warn and fail thresholds. `--thresholds_uri`
+(a local path or a `gs://` object) overrides them for the metrics a YAML
+file names, for the whole run:
 
 ```yaml
 thresholds:
   column.ks: {warn: 0.05, fail: 0.10}
+  row.coverage: {warn: 0.90, fail: 0.80}
 ```
 
-It moves the gate only. Stored rows always carry the catalogue's status, so
-two runs with the same `catalogue_version` stay comparable.
+```mermaid
+flowchart LR
+  F["📄 thresholds file"]:::store --> V{"valid?"}:::beam
+  V -- "no" --> X["exit 2<br/>nothing started"]:::bad
+  V -- "yes" --> R["🔀 every metric row of a<br/>named metric: status, score,<br/>threshold_warn, threshold_fail"]:::beam
+  R --> U["roll-up scores<br/>and registry counts"]:::store
+  U --> G["--fail_on gate"]:::beam
+  V -- "yes" --> P[("🗄️ registry<br/>evaluation_params:<br/>thresholds_uri,<br/>thresholds_digest")]:::store
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef bad   fill:#c0392b,color:#fff,stroke:#8e2a20
+```
+
+| Without the flag | With it |
+|---|---|
+| every row is graded against the catalogue | the rows of each named metric are graded, scored and stored against the file's `warn` and `fail`; the other metrics keep the catalogue's |
+| `evaluation_params.thresholds_uri` and `thresholds_digest` are NULL | both are set: the file's URI and a digest of the overrides it held |
+
+The stored `status`, `score`, `threshold_warn` and `threshold_fail` are the
+override's, so the roll-up scores, the registry's counts and the `--fail_on`
+gate follow from them: nothing is graded twice. Measured values do not
+change, so the `evaluation_key` does not either. `report` names the file
+and its digest and shows the thresholds a failing metric was graded
+against; `compare` says when two runs were graded against different
+thresholds.
+
+The file is checked before anything starts. Each entry names a metric id of
+the catalogue (`sdfb-eval catalogue --format md` lists them) and gives both
+`warn` and `fail`, each a finite number of 0 or more, in the order of the
+metric's direction: `warn <= fail` for a lower-is-better or target metric
+(a target metric's thresholds are distances from its target),
+`warn >= fail` (and not both 0) for a higher-is-better one. A metric the catalogue only
+reports (it has no thresholds) cannot be given a gate.
 
 ### 5. Dataflow
 

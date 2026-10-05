@@ -77,8 +77,14 @@ Runner defaults: the DirectRunner evaluates samples and loads through
 the client (`--mode sampled --sink bq_client`); Dataflow reads every row
 and writes from the pipeline (`--mode exact --sink bq`). The pipeline
 options come from `pipeline_options_defaults(runner, prepared plan)` —
-the side-input cache is sized from the plan that will actually run —
-with the operator's Beam arguments underneath: their experiments are
+the side-input cache is sized from the plan that will actually run, and
+the RUNNER is the one it returns: `--runner DirectRunner` is what the
+operator says and the registry records, while the pipeline runs on
+Beam's in-process `FnApiRunner` (Beam's own `DirectRunner` hands a batch
+pipeline to Prism, which `build_evaluation_pipeline` refuses). Every
+`PipelineOptions` here is built over the explicit list of Beam arguments
+the operator gave, never over `sys.argv` — with those arguments
+underneath the defaults: their experiments are
 kept, `upload_graph` is always among them on Dataflow, and
 `enable_data_sampling` is refused (it would sample the label key into
 the monitoring UI, Ruling R68).

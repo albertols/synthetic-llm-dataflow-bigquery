@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions
 from beam.acceptance_data import (
     ORDERS_FIELDS,
     USERS_FIELDS,
@@ -42,6 +43,7 @@ from unit.context.plan_fakes import PlanBq, thelook_rows
 
 from sdfb_evaluation.beam.assemble import final_row, finish_time
 from sdfb_evaluation.beam.io import InMemorySources
+from sdfb_evaluation.beam.pipeline import pipeline_options_defaults
 from sdfb_evaluation.cli.driver import Env
 from sdfb_evaluation.schemas import field_names, load_schema
 from sdfb_evaluation.scoring import to_metric_row
@@ -164,6 +166,16 @@ class RecordingBq(PlanBq):
         row for fqn, rows in self.loads if fqn.endswith(f".{REGISTRY}")
         for row in rows
     ]
+
+
+def local_pipeline() -> beam.Pipeline:
+  """A pipeline for a test that runs one itself, on the runner the
+  evaluator runs a local evaluation on: the options are the evaluator's
+  defaults for `DirectRunner` over an explicit, empty argument list — so
+  never Prism (what Beam's own `DirectRunner` hands a batch pipeline to)
+  and never `sys.argv`."""
+  defaults = pipeline_options_defaults("DirectRunner")
+  return beam.Pipeline(options=PipelineOptions([], **defaults))
 
 
 def thelook_sources() -> InMemorySources:

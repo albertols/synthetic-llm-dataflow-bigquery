@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from apache_beam.options.pipeline_options import StandardOptions
 from beam.acceptance_data import (
     plant_defects,)
 from unit.context.plan_fakes import (
@@ -98,12 +99,14 @@ class _Ran:
   """What the module's one run left behind."""
 
   def __init__(self, tmp: Path, stdout: str, code: int, bq: _LoaderBq,
-               source: Mapping[str, list], synthetic: Mapping[str, list]):
+               source: Mapping[str, list], synthetic: Mapping[str, list],
+               pipelines: Sequence[Any]):
     self.fixture = tmp / "fixture"
     self.out = tmp / "out"
     self.stdout = stdout
     self.code = code
     self.bq = bq
+    self.pipelines = pipelines
     self.source = source
     self.synthetic = synthetic
     (self.directory,) = list(self.out.iterdir())
@@ -126,8 +129,18 @@ def fixture_ran(tmp_path_factory) -> _Ran:
                             fixture_rows(USERS, seed=6, id_base=500_000))
   write_fixture(tmp / "fixture", source, synthetic, panel=PANEL)
   bq = _LoaderBq()
+  pipelines: list[Any] = []
+  make = driver.Env().make_pipeline  # the driver's own, recorded
+
+  def make_pipeline(options):
+    pipelines.append(make(options))
+    return pipelines[-1]
+
   env = driver.Env(
-      make_bq=lambda project: bq, now=lambda: NOW, token=lambda: "0badc0de")
+      make_bq=lambda project: bq,
+      now=lambda: NOW,
+      token=lambda: "0badc0de",
+      make_pipeline=make_pipeline)
   stdout = io.StringIO()
   with contextlib.redirect_stdout(stdout):
     code = main([
@@ -136,7 +149,7 @@ def fixture_ran(tmp_path_factory) -> _Ran:
         "--output_local",
         str(tmp / "out"), "--fail_on", "fail"
     ], env)
-  return _Ran(tmp, stdout.getvalue(), code, bq, source, synthetic)
+  return _Ran(tmp, stdout.getvalue(), code, bq, source, synthetic, pipelines)
 
 
 @pytest.fixture(scope="module", name="tiny")
@@ -204,6 +217,24 @@ def test_run_over_fixtures_writes_every_table_and_trips_the_gate(ran):
   assert ran.evaluation_id in ran.stdout
   assert "gate (--fail_on fail): TRIPPED" in ran.stdout
   assert f"written to: {PROJECT}.{DATASET}" in ran.stdout
+
+
+def test_a_local_run_is_in_process_and_recorded_as_asked(ran):
+  """`--runner DirectRunner` (the default): the real pipeline was built
+  on the runner the evaluator's defaults give — not on Beam's own
+  `DirectRunner`, which is Prism and which the pipeline refuses — while
+  the registry records the runner as the operator named it."""
+  (pipeline,) = ran.pipelines
+  assert type(pipeline.runner).__name__ == "FnApiRunner"
+  wanted = beam_pipeline.pipeline_options_defaults("DirectRunner")["runner"]
+  assert pipeline.options.view_as(StandardOptions).runner == wanted
+  assert [
+      row["runner"]
+      for _, rows in ran.bq.loads
+      for row in rows
+      if "runner" in row
+  ] == ["DirectRunner"] * 2
+  assert "DirectRunner" in ran.stdout and "Prism" not in ran.stdout
 
 
 # a failed DirectRunner pipeline lets its worker threads die noisily

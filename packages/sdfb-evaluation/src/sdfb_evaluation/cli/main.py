@@ -55,9 +55,19 @@ take the ids `run` printed.
                 the traceback goes to stderr)
 
 A usage error is everything that can be told from the command line
-alone: the evaluator's own flags, the thresholds file, and Beam's
-arguments too (a malformed `--num_workers abc` is refused here, not
-after the RUNNING row). An interrupt (Ctrl-C) keeps its conventional
+alone: the evaluator's own flags, the thresholds file, the runner (the
+evaluation does not run on Prism: `--runner PrismRunner` is refused),
+and Beam's arguments too (a malformed `--num_workers abc` is refused
+here, not after the RUNNING row).
+
+`--runner DirectRunner` (the default) is the operator's word for "run
+it here", and what the registry records. The pipeline itself runs on
+the runner `pipeline_options_defaults` returns for it — Beam's
+in-process `FnApiRunner`, because Beam hands a `DirectRunner` batch
+pipeline to Prism, which starts a step before its side input is
+complete. Pipeline options are always built from the Beam arguments
+given on this command line, as an explicit list: never from `sys.argv`
+behind the caller's back. An interrupt (Ctrl-C) keeps its conventional
 behaviour and is not mapped to 3. An error in any other command
 propagates as it is.
 
@@ -94,6 +104,7 @@ from typing import Any, Protocol
 from apache_beam.options.pipeline_options import PipelineOptions
 
 from sdfb_evaluation.beam.label_key import is_label_key_uri
+from sdfb_evaluation.beam.pipeline import pipeline_options_defaults
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.driver import Env
@@ -440,6 +451,10 @@ def _check_target(parser: argparse.ArgumentParser,
 def _check_planning(parser: argparse.ArgumentParser,
                     args: argparse.Namespace) -> None:
   _check_target(parser, args)
+  try:  # a runner the evaluation refuses (Prism) is refused here
+    pipeline_options_defaults(args.runner)
+  except ValueError as exc:
+    parser.error(f"--runner: {exc}")
   if args.mode is None:
     args.mode = driver.runner_defaults(args.runner)[0]
   try:

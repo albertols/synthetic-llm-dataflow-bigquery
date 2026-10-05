@@ -356,6 +356,49 @@ def test_options_carry_the_plan_sized_cache_and_keep_upload_graph(bq):
                             "eval-x")
 
 
+def test_a_local_run_takes_its_runner_from_the_defaults(bq, monkeypatch):
+  """`--runner DirectRunner` is the operator's word and the registry's;
+  the pipeline runs on the runner `pipeline_options_defaults` returns
+  (Beam hands a `DirectRunner` batch pipeline to Prism, which the
+  evaluation refuses). The operator's Beam arguments are the only flags
+  parsed: never `sys.argv`."""
+  plan = _big_plan(bq)
+  monkeypatch.setattr("sys.argv", ["sdfb-eval", "--runner", "PrismRunner"])
+  for spelling in ([], ["--runner", "DirectRunner"], ["--runner", "direct"],
+                   ["--runner", "SwitchingDirectRunner"]):
+    args, beam_args = parse_args(["run", *TARGET, *spelling])
+    wanted = beam_pipeline.pipeline_options_defaults(args.runner, plan)
+    assert wanted["runner"] == "FnApiRunner"
+    options = driver.pipeline_options(args, beam_args, plan, "eval-x")
+    assert options.view_as(StandardOptions).runner == "FnApiRunner"
+    # the pipeline the driver makes of them is one the evaluation admits
+    pipeline = driver.Env().make_pipeline(options)
+    assert type(pipeline.runner).__name__ == "FnApiRunner"
+    beam_pipeline._checked_runner(pipeline)  # pylint: disable=protected-access  # the refusal itself
+  # what the operator asked for is kept as asked
+  assert args.runner == "SwitchingDirectRunner"
+  args, beam_args = parse_args(["run", *TARGET, "--runner", "FnApiRunner"])
+  options = driver.pipeline_options(args, beam_args, plan, "eval-x")
+  assert options.view_as(StandardOptions).runner == "FnApiRunner"
+
+
+@pytest.mark.parametrize("spelling", [
+    "PrismRunner", "prism",
+    "apache_beam.runners.portability.prism_runner.PrismRunner"
+])
+def test_the_prism_runner_is_a_usage_error_before_anything_starts(
+    spelling, bq, resolved, stub, capsys):
+  for command in ("run", "plan"):
+    with pytest.raises(SystemExit) as info:
+      main([command, *TARGET, "--runner", spelling], make_env(bq))
+    assert info.value.code == 2
+    err = capsys.readouterr().err
+    assert f"sdfb-eval {command}: error: " in err
+    assert "does not run on Prism" in err and "DirectRunner" in err
+  assert not resolved and not stub.built
+  assert not bq.loads and not bq.executed and not bq.queries
+
+
 # --------------------------------------------------------------------------
 # plan
 # --------------------------------------------------------------------------
