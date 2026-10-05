@@ -1,0 +1,254 @@
+{
+  "name": "sdfb-evaluation",
+  "description": "Evaluate landed synthetic BigQuery tables against their source and write the evaluation tables. Submits the Dataflow job and returns; read the result from the registry. Every parameter is optional here; the CLI checks that exactly one target is named.",
+  "parameters": [
+    {
+      "name": "allow_contaminated",
+      "label": "Allow contaminated scope",
+      "helpText": "Evaluate a scope another writer touched; it stays marked `contaminated`. Empty or false: refuse it.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(true|false|1|0|yes|no|on|off)?$"
+      ]
+    },
+    {
+      "name": "detection_sample_rows",
+      "label": "Detection sample rows",
+      "helpText": "Rows per side in the detection (C2ST) sample. Empty: 50000.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "fail_on",
+      "label": "Fail-on status",
+      "helpText": "Exit 1 when a metric is at this status or worse: none, warn or fail. Empty: none. No effect on a template launch: the template entry never applies it (it submits the job and returns). Read the statuses from the registry instead.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(none|warn|fail)?$"
+      ]
+    },
+    {
+      "name": "job_id",
+      "label": "Generation job id",
+      "helpText": "Target: the generation job's Dataflow id. Needs region. Name exactly one of job_id, run_id, tables.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "label_key_uri",
+      "label": "Label key URI",
+      "helpText": "The operator's label key: a Secret Manager version (projects/P/secrets/S/versions/V) or a gs:// object. Empty: the key is ephemeral.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "landing_dataset",
+      "label": "Landing dataset",
+      "helpText": "With tables: the dataset (or project.dataset) the tables landed in.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "max_bytes_billed",
+      "label": "Max bytes billed",
+      "helpText": "BigQuery bytes the evaluation may process. Empty: 1099511627776 (1 TiB).",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "max_shuffle_gb",
+      "label": "Max shuffle GB",
+      "helpText": "Shuffle the value census may use before it is value-sampled. Empty: 500.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^([0-9]+(\\.[0-9]+)?)?$"
+      ]
+    },
+    {
+      "name": "mode",
+      "label": "Mode",
+      "helpText": "exact: read every row; sampled: a salted sample above sample_rows. Empty: exact on Dataflow.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(exact|sampled)?$"
+      ]
+    },
+    {
+      "name": "output_dataset",
+      "label": "Output dataset",
+      "helpText": "The dataset of the four evaluation tables. Empty: synthetic_data_quality.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "output_local",
+      "label": "Local output directory",
+      "helpText": "Only with the bq_client or local_json sinks, which need a local runner; no effect with the bq sink on Dataflow.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "pair_max_columns",
+      "label": "Pair max columns",
+      "helpText": "Columns whose pairs are compared, per table. Empty: 20.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "privacy_sample_rows",
+      "label": "Privacy sample rows",
+      "helpText": "Rows of the nearest-neighbour privacy sample. Empty: 50000.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "project",
+      "label": "Project",
+      "helpText": "The GCP project of the evaluation.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "reference_dataset",
+      "label": "Reference dataset",
+      "helpText": "With tables: the dataset (or project.dataset) of their sources, same table names.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "region",
+      "label": "Region",
+      "helpText": "The Dataflow region: where job_id ran, and where the evaluation runs.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "relationships_uri",
+      "label": "Relationships URI",
+      "helpText": "The relationship model file or directory (gs://), when the launch's own records name none.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "row_flags_source_keys",
+      "label": "Row flags source keys",
+      "helpText": "Row flags carry the matched source key as a keyed hash only. Empty: hashed.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(hashed)?$"
+      ]
+    },
+    {
+      "name": "row_flags_top_k",
+      "label": "Row flags top-k",
+      "helpText": "Row flags kept per check and table. Empty: 100.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "run_id",
+      "label": "Generation run id",
+      "helpText": "Target: the generation launch's base run id (validation_runs of output_dataset). Name exactly one of job_id, run_id, tables.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "runner",
+      "label": "Runner",
+      "helpText": "The Beam runner. The template launcher sets it to DataflowRunner itself; leave empty.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "sample_rows",
+      "label": "Sample rows",
+      "helpText": "Sampled mode: rows read per side of a table larger than this. Empty: 200000.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "scope",
+      "label": "Scope",
+      "helpText": "How the job's landing rows are isolated. Empty: auto.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(auto|table|as_of|appends|as_of_diff|manual)?$"
+      ]
+    },
+    {
+      "name": "sink",
+      "label": "Sink",
+      "helpText": "bq: the pipeline loads BigQuery (the template default on Dataflow). bq_client and local_json write local files and need a local runner. Empty: bq.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(bq|bq_client|local_json)?$"
+      ]
+    },
+    {
+      "name": "tables",
+      "label": "Tables",
+      "helpText": "Target: landing table names, comma-separated, parents first. Needs landing_dataset and reference_dataset. Name exactly one of job_id, run_id, tables.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "temp_dataset",
+      "label": "Temp dataset",
+      "helpText": "Where the expiring scope, pin and sample tables go. Empty: output_dataset.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "thresholds_uri",
+      "label": "Thresholds URI",
+      "helpText": "YAML (gs://) of warn/fail thresholds that override the catalogue's for the run: statuses, scores and roll-ups.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "topk_profile",
+      "label": "Top-k profile",
+      "helpText": "Values kept in a top-k profile. Empty: 1000.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^[0-9]*$"
+      ]
+    },
+    {
+      "name": "trigger",
+      "label": "Trigger",
+      "helpText": "What started the evaluation, recorded in the registry. Empty: cli.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(cli|composer|chained|agent)?$"
+      ]
+    }
+  ]
+}

@@ -235,12 +235,12 @@ reports (it has no thresholds) cannot be given a gate.
 
 ### 5. Dataflow
 
-**Not runnable from this repository yet.** Dataflow workers need this
-package installed, and the CPU worker image and flex template that provide
-it (`packages/sdfb-evaluation/docker/Dockerfile` and
-`packages/sdfb-evaluation/deploy/`, this package's own, not the generator's
-GPU image at the repository root) have not landed. What is already here is
-the command line itself:
+The CPU image (`packages/sdfb-evaluation/docker/Dockerfile`, Python 3.11 on
+the Beam 2.74.0 SDK image) and the flex template metadata
+(`packages/sdfb-evaluation/deploy/flex_template_metadata.json`, one optional
+parameter per `run` flag) are in this repository, with the script that
+builds them. **The image has not been built and the template has not been
+launched yet**: that happens on the GPU/GCP machine, not on a laptop.
 
 - `sdfb-eval run --runner DataflowRunner` defaults to `--mode exact
   --sink bq` (the pipeline writes BigQuery itself, the FINAL row after
@@ -248,12 +248,39 @@ the command line itself:
   decides the exit code.
 - On Dataflow the evaluator always sets `--experiments=upload_graph` and
   sizes the workers' side-input cache from the plan; your own Beam
-  arguments are kept.
+  arguments are kept. `enable_data_sampling` is refused.
 - The template's entry point, `src/sdfb_evaluation/cli/run_evaluation.py`,
   takes the same flags as `run`, submits the job and returns without
-  waiting, and never applies `--fail_on`.
+  waiting, and never applies `--fail_on` (the parameter is accepted, and
+  has no effect on a template launch).
 
-Once the image exists, a run from the command line will look like this:
+Build the image and the template (needs `gcloud` and GCP access; set the
+four variables, no defaults are baked in):
+
+```bash
+PROJECT_ID=demo-project REGION=europe-west1 REPOSITORY=demo-repo \
+TEMPLATES_BUCKET=demo-bucket \
+  packages/sdfb-evaluation/deploy/build_flex_template.sh
+# image:    europe-west1-docker.pkg.dev/demo-project/demo-repo/sdfb-evaluation:<VERSION>
+# template: gs://demo-bucket/synthetic/sdfb-evaluation-<VERSION>-template.json
+```
+
+`VERSION` is `EVALUATOR_VERSION` from `src/sdfb_evaluation/version.py`
+unless you set it. Launch the template with the same image as the workers'
+harness, passed as the Beam pipeline option `sdk_container_image`; the
+evaluator adds `--experiments=upload_graph` itself (an unset parameter reaches the CLI as an empty string, which it
+reads as "not given"):
+
+```bash
+gcloud dataflow flex-template run sdfb-evaluation-$(date +%s) \
+  --project demo-project --region europe-west1 \
+  --template-file-gcs-location \
+    gs://demo-bucket/synthetic/sdfb-evaluation-<VERSION>-template.json \
+  --parameters project=demo-project,region=europe-west1,job_id=<GENERATION_JOB_ID>,sdk_container_image=<IMAGE> \
+  --temp-location gs://demo-bucket/tmp
+```
+
+From the command line, without the template:
 
 ```bash
 uv run sdfb-eval run --runner DataflowRunner \
