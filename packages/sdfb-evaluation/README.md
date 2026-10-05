@@ -247,12 +247,12 @@ reports (it has no thresholds) cannot be given a gate.
 
 ### 5. Dataflow
 
-**Not runnable from this repository yet.** Dataflow workers need this
-package installed, and the CPU worker image and flex template that provide
-it (`packages/sdfb-evaluation/docker/Dockerfile` and
-`packages/sdfb-evaluation/deploy/`, this package's own, not the generator's
-GPU image at the repository root) have not landed. What is already here is
-the command line itself:
+The CPU image (`packages/sdfb-evaluation/docker/Dockerfile`, Python 3.11 on
+the Beam 2.74.0 SDK image) and the flex template metadata
+(`packages/sdfb-evaluation/deploy/flex_template_metadata.json`, one optional
+parameter per `run` flag) are in this repository, with the script that
+builds them. **The image has not been built and the template has not been
+launched yet**: that happens on the GPU/GCP machine, not on a laptop.
 
 - `sdfb-eval run --runner DataflowRunner` defaults to `--mode exact
   --sink bq` (the pipeline writes BigQuery itself, the FINAL row after
@@ -260,12 +260,42 @@ the command line itself:
   decides the exit code.
 - On Dataflow the evaluator always sets `--experiments=upload_graph` and
   sizes the workers' side-input cache from the plan; your own Beam
-  arguments are kept.
+  arguments are kept. `enable_data_sampling` is refused.
 - The template's entry point, `src/sdfb_evaluation/cli/run_evaluation.py`,
   takes the same flags as `run`, submits the job and returns without
-  waiting, and never applies `--fail_on`.
+  waiting, and never applies `--fail_on` (the parameter is accepted, and
+  has no effect on a template launch).
 
-Once the image exists, a run from the command line will look like this:
+Build the image and the template (needs `gcloud` and GCP access; set the
+four variables, no defaults are baked in):
+
+```bash
+PROJECT_ID=demo-project REGION=europe-west1 REPOSITORY=demo-repo \
+TEMPLATES_BUCKET=demo-bucket \
+  packages/sdfb-evaluation/deploy/build_flex_template.sh
+# image:    europe-west1-docker.pkg.dev/demo-project/demo-repo/sdfb-evaluation:<VERSION>
+# template: gs://demo-bucket/synthetic/sdfb-evaluation-<VERSION>-template.json
+```
+
+`VERSION` is `EVALUATOR_VERSION` from `src/sdfb_evaluation/version.py`
+unless you set it. Launch the template with the same image as the workers'
+harness: the image knows its own coordinate (the build script bakes it in) and
+the evaluator applies it as `sdk_container_image` when the launch gives none;
+an explicit `--parameters sdk_container_image=...` overrides it. The evaluator
+adds `--experiments=upload_graph` itself, and the template launcher supplies
+the runner, project and region (they are not template parameters). An unset
+parameter reaches the CLI as an empty string, which it reads as "not given":
+
+```bash
+gcloud dataflow flex-template run sdfb-evaluation-$(date +%s) \
+  --project demo-project --region europe-west1 \
+  --template-file-gcs-location \
+    gs://demo-bucket/synthetic/sdfb-evaluation-<VERSION>-template.json \
+  --parameters job_id=<GENERATION_JOB_ID> \
+  --temp-location gs://demo-bucket/tmp
+```
+
+From the command line, without the template:
 
 ```bash
 uv run sdfb-eval run --runner DataflowRunner \
@@ -276,10 +306,72 @@ uv run sdfb-eval run --runner DataflowRunner \
 
 ### 6. Composer
 
-**Not in this repository yet.** The evaluation DAG
-(`composer/evaluation_framework.py`) and the opt-in trigger from the
-generation DAG follow the flex template. What they will call is in place:
-the template entry above, with `--trigger composer` or `--trigger chained`
-recorded in the registry. One thing is theirs to do: a Dataflow job that
-dies after it was submitted leaves only its RUNNING row, and the DAG's
-failure callback has to close it with a FAILED row.
+**Not deployed and never run.** The DAG files below are checked only by
+static tests (`tests/unit/test_composer_dag.py` reads them with `ast`);
+Airflow has never parsed them and no Composer environment has run them.
+
+`composer/evaluation_framework.py` is the DAG `sdfb_evaluation_framework`
+(`schedule_interval=None`, manual or chained). It is a template: workflow 3
+substitutes `{{EVALUATOR_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}` and
+`{{GCS_DATAFLOW_TEMPLATES}}`; it reads the Variables `PROJECT_ID`, `REGION`,
+`SA_DATAFLOW` and `DATAFLOW_SUBNET` (optional `DATAFLOW_NETWORK_TAGS`). It
+launches `gs://<templates>/synthetic/sdfb-evaluation-<version>-template.json`.
+
+```mermaid
+flowchart LR
+  begin --> wait_gate --> wait_for_generation_job --> start_evaluation
+  begin --> start_evaluation
+```
+
+| Param | Default | Goes to |
+|---|---|---|
+| `generation_job_id` | empty | template `job_id`; the sensor's job |
+| `run_id`, `tables`, `landing_dataset`, `reference_dataset`, `relationships_uri` | empty | the template parameter of the same name |
+| `mode` | empty (`exact`, `sampled`) | template `mode` |
+| `allow_contaminated` | false | template `allow_contaminated` (lower-case) |
+| `output_dataset` | `synthetic_data_quality` | template `output_dataset`; the registry the callback writes |
+| `trigger` | `composer` (`chained`) | template `trigger` |
+| `wait_for_generation` | false | the `wait_gate` short-circuit |
+| `machine_type`, `max_workers` | `e2-standard-8`, 4 | the launch environment, not the template |
+
+Exactly one of `generation_job_id`, `run_id`, `tables` names the target; the
+launcher refuses otherwise. The DAG never passes `runner`, `project`,
+`region`, `sdk_container_image`, `experiments` or `fail_on`.
+
+With `wait_for_generation` true (and a `generation_job_id`) a deferrable
+`DataflowJobStatusSensor` waits for `JOB_STATE_DONE` first; with it false the
+gate skips the sensor and the launch still runs.
+
+**Chaining.** The generation DAG has an opt-in Param `run_evaluation`
+(default false). When true, after its launch it triggers this DAG with
+`conf={"generation_job_id": <the launched job's id>, "wait_for_generation":
+true, "trigger": "chained"}`. With it false its task chain and arguments are
+exactly as before.
+
+**Failure callback.** The launch task waits for the job (deferrably). The
+launcher writes the RUNNING registry row before submitting and mints the
+`evaluation_id`; a job that dies afterwards leaves only that row. The task's
+`on_failure_callback` closes it with one `INSERT ... SELECT` into
+`evaluation_data_history`: it copies the RUNNING row of this DAG run's
+evaluation (matched on the launch target, the same trigger, and `recorded_at`
+at or after the DAG run's start), sets `event` FINAL, `status` FAILED, the
+reason and the times (and `evaluation_job_id` when the launch pushed it), and
+skips evaluations that already have a FINAL event. No match, no row. Two DAG
+runs overlapping on the same target can close each other's row, and where two
+RUNNING rows exist for one evaluation only the latest is closed.
+
+Limits to know before the first launch:
+
+- A launch whose only target is `tables` (no `generation_job_id`, no `run_id`)
+  cannot be matched: the callback logs one warning and writes nothing, so a
+  failed job leaves its RUNNING row open.
+- The deploy workflow's substitution list must add `{{EVALUATOR_VERSION}}`;
+  without it the DAG carries the literal marker as its version and launches a
+  template that does not exist.
+- Unverified until a real launch: `maxWorkers` is passed as the rendered string
+  of `max_workers` (proto3 JSON should accept a numeric string for an int32;
+  native rendering DAG-wide would turn digit-only run ids into ints), the
+  deferrable wait semantics of the installed provider, the DML on real
+  BigQuery, `BigQueryInsertJobOperator.execute` inside a callback, the
+  trigger's conf reaching `context["params"]`, and the trigger rule when the
+  sensor is skipped.

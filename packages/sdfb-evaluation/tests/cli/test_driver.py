@@ -1127,3 +1127,43 @@ def test_flex_entry_on_a_local_runner_still_loads_its_outputs(
   # bq_client: the driver waited, then loaded the outputs
   assert _statuses(bq) == ["RUNNING", "SUCCEEDED"]
   assert "--fail_on is not applied here" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# the worker image the image bakes (R97)
+# --------------------------------------------------------------------------
+def _options(argv, monkeypatch, baked=None):
+  if baked is None:
+    monkeypatch.delenv("SDFB_EVAL_SDK_CONTAINER_IMAGE", raising=False)
+  else:
+    monkeypatch.setenv("SDFB_EVAL_SDK_CONTAINER_IMAGE", baked)
+  args, extras = parse_args(["run", *argv])
+  return driver.pipeline_options(args, extras, None, "20260101t000000z-abcd")
+
+
+def test_baked_worker_image_is_applied_on_dataflow(monkeypatch):
+  options = _options(DATAFLOW, monkeypatch, baked="r/sdfb-evaluation:1")
+  assert options.view_as(
+      WorkerOptions).sdk_container_image == "r/sdfb-evaluation:1"
+
+
+def test_explicit_worker_image_wins(monkeypatch):
+  options = _options([*DATAFLOW, "--sdk_container_image", "r/other:2"],
+                     monkeypatch,
+                     baked="r/sdfb-evaluation:1")
+  assert options.view_as(WorkerOptions).sdk_container_image == "r/other:2"
+
+
+def test_worker_image_is_untouched_on_a_local_runner(monkeypatch, caplog):
+  with caplog.at_level("WARNING"):
+    options = _options(TARGET, monkeypatch, baked="r/sdfb-evaluation:1")
+  assert options.view_as(WorkerOptions).sdk_container_image is None
+  assert not caplog.records
+
+
+def test_missing_worker_image_on_dataflow_warns_once(monkeypatch, caplog):
+  with caplog.at_level("WARNING"):
+    options = _options(DATAFLOW, monkeypatch)
+  assert options.view_as(WorkerOptions).sdk_container_image is None
+  (record,) = caplog.records
+  assert "stock Beam SDK image" in record.getMessage()

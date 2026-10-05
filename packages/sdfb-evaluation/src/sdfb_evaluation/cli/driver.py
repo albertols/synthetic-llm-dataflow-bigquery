@@ -140,6 +140,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -224,6 +225,8 @@ SINKS = ("bq", "bq_client", "local_json")
 _TOKEN_RE = re.compile(r"[0-9a-f]{8}")
 _TOKEN_BYTES = 4
 _FORBIDDEN_EXPERIMENT = "enable_data_sampling"
+_WORKER_IMAGE_ENV = "SDFB_EVAL_SDK_CONTAINER_IMAGE"
+_LOGGER = logging.getLogger(__name__)
 _DATAFLOW = "dataflow"
 _LOCAL = "local_json"
 _FINAL = "FINAL"
@@ -724,6 +727,18 @@ def pipeline_options(args: argparse.Namespace, beam_args: Sequence[str],
     overrides["region"] = args.region
   if is_dataflow(args.runner) and not user.view_as(GoogleCloudOptions).job_name:
     overrides["job_name"] = f"sdfb-{evaluation_id.lower()}"
+  if is_dataflow(
+      args.runner) and not user.view_as(WorkerOptions).sdk_container_image:
+    # The image bakes its own pushed coordinate (docker/Dockerfile); an
+    # explicit --sdk_container_image wins.
+    baked = os.environ.get(_WORKER_IMAGE_ENV)
+    if baked:
+      overrides["sdk_container_image"] = baked
+    else:
+      _LOGGER.warning(
+          "Neither --sdk_container_image nor %s is set: Dataflow workers will "
+          "boot the stock Beam SDK image and fail to import sdfb_evaluation.",
+          _WORKER_IMAGE_ENV)
   return PipelineOptions(flags, **overrides)
 
 

@@ -64,6 +64,8 @@ from __future__ import annotations
 from airflow import models
 from airflow.models import Variable
 from airflow.models.param import Param
+from airflow.operators.python import ShortCircuitOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.google.cloud.operators.dataflow import (
     DataflowStartFlexTemplateOperator,)
 from airflow.utils.dates import days_ago
@@ -450,6 +452,14 @@ default_dag_params = {
             "rebuild and no BigQuery metadata edit — it is the ONLY "
             "source of relational truth.",
         ),
+    "run_evaluation":
+        Param(
+            default=False,
+            type="boolean",
+            description="Opt-in: after the generation job is submitted, trigger "
+            "the sdfb_evaluation_framework DAG for it (it waits for the job to "
+            "finish, then evaluates). False (default): nothing changes.",
+        ),
     "pool_seed_strategy":
         Param(
             default="centroid",
@@ -464,6 +474,12 @@ default_dag_params = {
         ),
 }
 
+
+def _run_evaluation_enabled(params, **_):
+  """Gate for the opt-in evaluation trigger."""
+  return bool(params["run_evaluation"])
+
+
 with models.DAG(
     dag_id=dag_id,
     start_date=days_ago(1),
@@ -473,7 +489,7 @@ with models.DAG(
     tags=["SYNTHETIC", "Dataflow", env_name.upper()],
     params=default_dag_params,
 ) as dag:
-  DataflowStartFlexTemplateOperator(
+  start_sdfb = DataflowStartFlexTemplateOperator(
       task_id=f"start_{app_name}",
       project_id=project_id,
       location=region,
@@ -653,3 +669,26 @@ with models.DAG(
       do_xcom_push=True,
       wait_until_finished=False,
   )
+
+  # Opt-in chaining (run_evaluation, default False): with it off the gate
+  # skips the trigger and the DAG behaves exactly as before. The launch above
+  # does not wait, so its XCom holds the job id the evaluation DAG waits on.
+  run_evaluation_gate = ShortCircuitOperator(
+      task_id="run_evaluation_gate",
+      python_callable=_run_evaluation_enabled,
+  )
+
+  trigger_evaluation = TriggerDagRunOperator(
+      task_id="trigger_evaluation",
+      trigger_dag_id="sdfb_evaluation_framework",
+      conf={
+          "generation_job_id":
+              "{{ ti.xcom_pull(task_ids='start_sdfb')['id'] }}",
+          "wait_for_generation":
+              True,
+          "trigger":
+              "chained",
+      },
+  )
+
+  start_sdfb >> run_evaluation_gate >> trigger_evaluation  # pylint: disable=pointless-statement  # Airflow dependency operator
