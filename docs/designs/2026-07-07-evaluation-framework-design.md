@@ -9,9 +9,9 @@
 >   generation pipeline, three metric tiers and one history table. None of
 >   that was merged. The evaluator is now a standalone package and a
 >   separate job, and it writes four tables.
-> - **Decision record:** ADR 0041, "evaluation is a standalone package and a
->   separate job". The code cites it; the record itself is written with the
->   repository-documentation task and is not in this tree yet.
+> - **Decision record:**
+>   [ADR 0041](../adr/0041-evaluation-standalone-package.md), "evaluation is
+>   a standalone package and a separate job". The code cites it.
 > - **Companions:** the [package README](../../packages/sdfb-evaluation/README.md)
 >   (how to run it), [ADR 0022](../adr/0022-stats-driven-generation.md)
 >   (source statistics and the literal policy),
@@ -1667,7 +1667,8 @@ before comparing its scores with another's.
 stability index between the two runs' stored histograms of a column,
 given only when both carry the same `edges_digest`. The same digest means
 the same bin edges, so the counts line up bin for bin; different digests
-are reported as not comparable and nothing is re-binned.
+are reported as not comparable and nothing is re-binned. This replaces the
+previous-run lookup of the retired in-job design.
 
 ## 7. Scoring
 
@@ -1944,10 +1945,12 @@ task. The README lists them.
 
 ### 8.4 The validation prompt, agents and a GUI
 
-- **The end-to-end validation prompt** still derives fidelity by hand from
-  exported files. A step that looks up or runs the evaluation for a job
-  and folds `sdfb-eval report` into the evidence bundle is planned and is
-  not in this tree.
+- **The end-to-end validation prompt** has an optional Step 3.6 that
+  looks up the evaluation of a job (or, if the user agrees, runs one) and
+  folds `sdfb-eval report` into the evidence bundle; its fidelity step
+  takes the numbers from there when present
+  ([the prompt](../../.github/prompts/end_to_end_validation_report_generation.prompt.md)).
+  The step has not been exercised against a real evaluation.
 - **Agents** read an evaluation through `sdfb-eval report --format json`,
   which carries every metric row, the failing metrics with the catalogue's
   explanations, and the run's warnings. No agent definition in

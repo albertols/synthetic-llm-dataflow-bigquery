@@ -109,7 +109,7 @@ jobs:
 
       - name: Doc / code drift check
         # Fails the build if any string in `.github/drift-check.txt` still
-        # appears in a tracked file outside `docs/adr/` (where historical
+        # appears in a tracked file outside `docs/adr/` and `docs/releases/` (where historical
         # references are allowed). See `.claude/skills/refactor-cleanup.md`
         # for the workflow when you delete or rename anything.
         run: |
@@ -125,14 +125,14 @@ jobs:
               echo "drift-check.txt has only comments — nothing to enforce."
               exit 0
           fi
-          # Scan every text source. Exclude docs/adr (history may reference
+          # Scan every text source. Exclude docs/adr and docs/releases (history may reference
           # removed names) and the patterns file itself.
           HITS=$(grep -rnHF -f "$GREP_FILE" \
               --include='*.md' --include='*.yaml' --include='*.yml' \
               --include='*.py' --include='*.toml' --include='*.sh' \
               --include='*.json' --include='*.txt' \
               --exclude-dir=.venv --exclude-dir=.git \
-              --exclude-dir=__pycache__ --exclude-dir=adr \
+              --exclude-dir=__pycache__ --exclude-dir=adr --exclude-dir=releases \
               --exclude='drift-check.txt' --exclude='initial_prompt.md' \
               . || true)
           if [[ -n "$HITS" ]]; then

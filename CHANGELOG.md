@@ -9,6 +9,8 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ## [Unreleased]
 
 ### 🚀 Added
+- `packages/sdfb-evaluation` ([ADR 0041](docs/adr/0041-evaluation-standalone-package.md)): a standalone evaluator (its own lock and Python 3.11 pin, excluded from the uv workspace) that scores landed tables against the full source in a separate CPU job and writes `evaluation_data_history`, `evaluation_metrics`, `evaluation_profiles` and `evaluation_row_flags` plus two views to `synthetic_data_quality`. The `sdfb-eval` command (`plan`, `run`, `report`, `compare`, `catalogue`, `schemas`), a flex-template entry, a Composer DAG (`composer/evaluation_framework.py`, chaining from the generation DAG opt-in) and one metric catalogue as the single source of truth. Built and reviewed on a laptop with invented data; **not yet run on Google Cloud**.
+- `.claude/skills/evaluation-framework/SKILL.md`: when to run the evaluator, reading baselines, noise floors and lifts, extending the catalogue.
 
 ### 🔧 Changed
 
@@ -19,6 +21,8 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🗑️ Removed
 
 ### 📗 Docs
+- ADR 0041 and `docs/DESIGN.md` §11 (Evaluation); the evaluation design document rewritten for the code as built; `README.md` (quickstart, glossary: baseline, noise floor, memorization lift, exposure set, matched n), `docs/ROADMAP.md`, `docs/DEPLOYMENT_PREREQUISITES.md` (evaluator IAM, image, template), `docs/RUN_PLAYBOOK.md` ("Evaluate a run") and article 10 unblocked. The old in-job evaluation proposal (`ws3-eval-framework`) is superseded.
+- The end-to-end validation prompt gains an optional Step 3.6, statistical evaluation, folded into the evidence bundle.
 
 ## [v0.5.3] — 2026-09-21
 
