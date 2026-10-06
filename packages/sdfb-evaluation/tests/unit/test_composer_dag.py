@@ -418,8 +418,8 @@ def test_the_callback_reads_the_job_state_before_it_inserts():
   assert "logging." in ast.unparse(decision) and "still" in ast.unparse(
       decision)
   (call,) = [
-      n for n in ast.walk(decision.test)
-      if isinstance(n, ast.Call) and ast.unparse(n.func) == "_callback_closes_row"
+      n for n in ast.walk(decision.test) if isinstance(n, ast.Call) and
+      ast.unparse(n.func) == "_callback_closes_row"
   ]
   assert [ast.unparse(a) for a in call.args] == ["job_id", "state"]
   insert = _one(callback, "BigQueryInsertJobOperator")

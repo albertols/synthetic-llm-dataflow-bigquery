@@ -1274,10 +1274,10 @@ def test_unobserved_sampled_column_is_not_evaluated_never_fabricated():
 # --------------------------------------------------------------------------
 _NEED_BOTH = ("column.distinct_ratio", "column.entropy_ratio")
 _NEED_THE_SOURCE = ("field.category_adherence", "column.novelty_mass",
-                    "field.substantive_copy_rate", "field.shape_adherence"
-                   ) + _NEED_BOTH
-_NEED_THE_SYNTHETIC = ("column.coverage_mass",
-                       "column.distinct_ceiling_hit") + _NEED_BOTH
+                    "field.substantive_copy_rate", "field.shape_adherence",
+                    *_NEED_BOTH)
+_NEED_THE_SYNTHETIC = ("column.coverage_mass", "column.distinct_ceiling_hit",
+                       *_NEED_BOTH)
 
 
 def _row_sampled(table: Any,
@@ -1424,10 +1424,9 @@ def test_a_row_sample_never_answers_the_diversity_ratios():
   assert status_for(
       _CATALOGUE.get("column.distinct_ratio"),
       exact[("column.distinct_ratio", "motto")]) is Status.FAIL
-  for kinds, tenth in (("both", (10, 10)), ("source", (10, 1)),
-                       ("synthetic", (1, 10))):
-    plan, read = _row_sampled(
-        table, rows, source=tenth[0], synthetic=tenth[1])
+  for kinds, tenth in (("both", (10, 10)), ("source", (10, 1)), ("synthetic",
+                                                                 (1, 10))):
+    plan, read = _row_sampled(table, rows, source=tenth[0], synthetic=tenth[1])
     got = _by_key(_pure(plan, read).metrics)
     for metric_id in ("column.distinct_ratio", "column.entropy_ratio"):
       mv = got[(metric_id, "motto")]

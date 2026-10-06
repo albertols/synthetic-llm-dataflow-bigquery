@@ -2835,8 +2835,9 @@ def _published_source_records(profiles: Sequence[ProfileValue],
   ]
   labels: set[float] = set()
   for axis in axes:
-    names = (axis.payload["x_labels"]
-             if axis.payload["column_x"] == column else axis.payload["y_labels"])
+    names = (
+        axis.payload["x_labels"]
+        if axis.payload["column_x"] == column else axis.payload["y_labels"])
     for label in names:
       for number in re.findall(r"-?\d+(?:\.\d+)?(?:e[+-]?\d+)?", label):
         labels.add(float(number))
@@ -2860,11 +2861,12 @@ def test_one_column_publishes_one_k_spaced_set_of_source_values(n):
   found = _published_source_records(profiles, source, "salary", "bonus")
   edges = found["histogram"]
   union: set[float] = set()
-  for kind, values in found.items():
+  for kind, shown in found.items():
+    values = shown
     if kind == "axis":  # the labels print 6 significant digits at most
       values = {
           float(source[np.argmin(np.abs(source - v))])
-          for v in values
+          for v in shown
           if np.min(np.abs(source - v)) <= 1e-5 * abs(v)
       }
       assert values <= edges or not values, (kind, sorted(values - edges))
@@ -2875,11 +2877,11 @@ def test_one_column_publishes_one_k_spaced_set_of_source_values(n):
       # from the edges and counts: it equals a source record only by chance
       # (one in the 2,000-row reference at p = 0.4, 5 ranks from an edge),
       # reveals none, and is left out of the union of records
-      for v in values - edges:
+      for v in shown - edges:
         assert min(edges) < v < max(edges), (kind, v)
-      values = values & edges
+      values = shown & edges
     else:
-      assert values <= edges, (kind, sorted(values - edges))
+      assert shown <= edges, (kind, sorted(shown - edges))
     union |= values
   assert edges <= union
   ranks = [int(np.searchsorted(source, v, side="right")) for v in sorted(union)]
