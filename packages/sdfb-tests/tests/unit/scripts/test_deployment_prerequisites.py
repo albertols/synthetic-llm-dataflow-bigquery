@@ -371,18 +371,28 @@ def _schema(name):
   return json.loads((_EVAL_SCHEMAS / f"{name}.schema.json").read_text())
 
 
-def _live_table(name, *, drop=(), retype=None, partitioned=True, cluster=True):
+def _live_table(name,
+                *,
+                drop=(),
+                retype=None,
+                partitioned=True,
+                cluster=True,
+                expiration_days="package"):
   """A live table equal to the committed schema file, then bent on request."""
   consts = _mod.eval_constants(_EVAL_PKG)
   specs = [dict(s) for s in _schema(name) if s["name"] not in drop]
   for spec in specs:
     if retype and spec["name"] == retype[0]:
       spec["type"] = retype[1]
-  field, kind, _ = consts["partitioning"][name]
+  field, kind, package_days = consts["partitioning"][name]
+  days = package_days if expiration_days == "package" else expiration_days
   return SimpleNamespace(
       table_type="TABLE",
       schema=[_live_field(s) for s in specs],
-      time_partitioning=(SimpleNamespace(field=field, type_=kind)
+      time_partitioning=(SimpleNamespace(
+          field=field,
+          type_=kind,
+          expiration_ms=None if days is None else int(days * 86400000))
                          if partitioned else None),
       clustering_fields=list(consts["clustering"][name]) if cluster else None)
 
@@ -692,3 +702,70 @@ def test_step13_config_artifacts_missing_or_unparseable_is_action(
   assert "views.sql" in by["13a"].resource
   assert "evaluation_metrics.schema.json" in by["13a"].resource
   assert "restore the committed evaluator files" in by["13a"].action
+
+
+def test_step13_row_flag_retention_compared_with_the_package(monkeypatch):
+  """evaluation_row_flags expires after a package-set number of days (a
+    privacy retention rule): no expiration or a longer one is an ACTION, a
+    shorter one is fine, a table the package gives none is not checked."""
+  consts = _mod.eval_constants(_EVAL_PKG)
+  days = consts["partitioning"]["evaluation_row_flags"][2]
+  assert days, "the package must name a row-flag retention"
+  assert consts["partitioning"]["evaluation_metrics"][2] is None
+
+  def bq(**bent):
+    return _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned(**bent))
+
+  _, by = _run13(monkeypatch,
+                 bq(evaluation_row_flags={"expiration_days": None}))
+  assert by["13f"].status == _mod.ACTION
+  assert "no partition expiration" in by["13f"].resource
+  assert str(days) in by["13f"].resource
+  assert "bq update --time_partitioning_expiration" in by["13f"].action
+  _, by = _run13(monkeypatch,
+                 bq(evaluation_row_flags={"expiration_days": days + 90}))
+  assert by["13f"].status == _mod.ACTION
+  assert str(days + 90) in by["13f"].resource
+  _, by = _run13(monkeypatch,
+                 bq(evaluation_row_flags={"expiration_days": days - 30}))
+  assert by["13f"].status == _mod.OK
+  assert "shorter" in by["13f"].resource
+  _, by = _run13(monkeypatch, bq(evaluation_metrics={"expiration_days": 5}))
+  assert by["13d"].status == _mod.OK  # package names none: not checked
+  assert "shorter" not in by["13d"].resource
+
+
+def test_step13_label_key_local_path(monkeypatch, tmp_path):
+  bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
+  key = tmp_path / "label.key"
+  key.write_bytes(b"super-secret-bytes")
+  opened = []
+  real_open = open
+  monkeypatch.setattr(
+      "builtins.open", lambda f, *a, **k:
+      (opened.append(str(f)), real_open(f, *a, **k))[1])
+  _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri", str(key))
+  assert by["13k"].status == _mod.OK
+  assert "every Dataflow worker" in by["13k"].resource
+  assert "super-secret-bytes" not in by["13k"].resource
+  assert str(key) not in opened  # existence and os.access only
+  _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri",
+                 str(tmp_path / "missing.key"))
+  assert by["13k"].status == _mod.ACTION
+  key.chmod(0)
+  try:
+    _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri", str(key))
+    # root can read anything; everyone else gets the unreadable ACTION
+    assert by["13k"].status in (_mod.ACTION, _mod.OK)
+  finally:
+    key.chmod(0o600)
+
+
+def test_step13_label_key_relative_or_other_form_names_the_three_forms(
+    monkeypatch):
+  bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
+  for bad in ("keys/label.key", "s3://b/k", "projects/p/secrets/s"):
+    _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri", bad)
+    assert by["13k"].status == _mod.ACTION, bad
+    for form in ("gs://", "projects/P/secrets/S/versions/V", "absolute"):
+      assert form in by["13k"].action, (bad, form)

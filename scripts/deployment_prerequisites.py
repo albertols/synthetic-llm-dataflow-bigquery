@@ -67,14 +67,16 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
                        provisioned → SKIP with the `sdfb-eval schemas --apply`
                        command; a HALF-provisioned set, or a present table that
                        drifted from the committed schema file (column, type,
-                       mode, partitioning, clustering) → ACTION, because the
+                       mode, partitioning, partition expiration where the package
+                       sets one, clustering) → ACTION, because the
                        evaluator's load job would fail. Sub-steps: 13a the
                        committed evaluator files · 13b the evaluation dataset
                        (+ the temp dataset when it is the same) · 13c-13f the
                        four `evaluation_*` tables · 13g-13h the two views ·
                        13i a distinct temp dataset · 13j the flex template
                        object (--templates-bucket) · 13k the optional label
-                       key. The package is read as DATA (files and `ast`),
+                       key (gs:// object, absolute local path, or Secret
+                       Manager version; never read). The package is read as DATA (files and `ast`),
                        never imported; when it is not in this tree the whole
                        step is ONE SKIP. `--require-evaluation` makes every
                        "absent → SKIP" an ACTION; `--evaluation-dataset ""`
@@ -113,6 +115,7 @@ import argparse
 import ast
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -226,6 +229,8 @@ _BQ_TYPE_ALIASES = {
 }
 # PARTITIONING values are (field, DAY | MONTH, expiration days or None).
 _PARTITIONING_ARITY = 3
+_SECONDS_PER_DAY = 86400
+_MS_PER_DAY = 86400 * 1000
 _SECRET_VERSION = re.compile(
     r"^projects/([^/]+)/secrets/([^/]+)/versions/([^/]+)$")
 
@@ -993,9 +998,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
   p.add_argument(
       "--evaluation-label-key-uri",
       default="",
-      help="The evaluator's --label_key_uri: a gs:// object or a Secret "
-      "Manager version projects/P/secrets/S/versions/V. Optional; empty = a "
-      "random key per run (hashed labels not stable across runs).")
+      help="The evaluator's --label_key_uri, one of three forms: a gs:// "
+      "object, a Secret Manager version projects/P/secrets/S/versions/V, or "
+      "an absolute local path (local runs only: it must exist on every "
+      "Dataflow worker too). Optional; empty = a random key per run (hashed "
+      "labels not stable across runs).")
   p.add_argument(
       "--require-evaluation",
       action="store_true",
@@ -1442,7 +1449,9 @@ def _eval_table_contract(ctx: Ctx, step: str, label: str, link: str, live,
         f"align the table with {schema_ref}: the evaluator's load job fails "
         "on a missing or mistyped column. Columns can be added with "
         "`bq update`; partitioning cannot be altered in place (recreate "
-        "the table, it only holds evaluation rows)")
+        "the table, it only holds evaluation rows). A partition expiration "
+        "is set with `bq update --time_partitioning_expiration SECONDS "
+        "<table>` (a privacy retention rule for row flags)")
   else:
     cols = len(want) if want else len(live.schema)
     detail = " · ".join([
@@ -1457,7 +1466,7 @@ def _eval_layout(live, name: str, consts: dict, issues: list[str],
   if consts["partitioning"] is None or name not in consts["partitioning"]:
     notes.append("partitioning not compared (constant not readable)")
   else:
-    want_field, kind, _ = consts["partitioning"][name]
+    want_field, kind, want_days = consts["partitioning"][name]
     part = getattr(live, "time_partitioning", None)
     got_field = getattr(part, "field", None)
     got_kind = getattr(part, "type_", None)
@@ -1466,6 +1475,8 @@ def _eval_layout(live, name: str, consts: dict, issues: list[str],
     elif got_field != want_field or (got_kind and got_kind != kind):
       issues.append(f"partitioned {got_kind or '?'} on {got_field} "
                     f"(want {kind} on {want_field})")
+    if part is not None and want_days is not None:
+      _eval_retention(part, want_days, issues, notes)
   if consts["clustering"] is None or name not in consts["clustering"]:
     notes.append("clustering not compared (constant not readable)")
   else:
@@ -1473,6 +1484,27 @@ def _eval_layout(live, name: str, consts: dict, issues: list[str],
     got = list(getattr(live, "clustering_fields", None) or [])
     if got != want:
       issues.append(f"clustering {got or 'none'} (want {want})")
+
+
+def _eval_retention(part, want_days: int, issues: list[str],
+                    notes: list[str]) -> None:
+  """Partition expiration (a privacy retention rule) against the package's
+    days: none or longer is an ACTION, shorter is fine."""
+  ms = getattr(part, "expiration_ms", None)
+  remedy = (f"`bq update --time_partitioning_expiration "
+            f"{want_days * _SECONDS_PER_DAY} <table>`")
+  if ms is None:
+    issues.append(f"no partition expiration (package: {want_days} days; "
+                  f"set it with {remedy})")
+  else:
+    got_days = ms / _MS_PER_DAY
+    shown = f"{got_days:g}"
+    if got_days > want_days:
+      issues.append(f"partition expiration {shown} days (package: "
+                    f"{want_days} days; shorten it with {remedy})")
+    elif got_days < want_days:
+      notes.append(f"retention {shown} days (shorter than the package's "
+                   f"{want_days}, fine)")
 
 
 def _eval_template(ctx: Ctx, pkg: Path) -> None:
@@ -1534,9 +1566,23 @@ def _eval_label_key(ctx: Ctx) -> None:
         f"`gcloud secrets versions describe {version} --secret={secret} "
         f"--project={proj}`; the evaluator's workers need "
         "`roles/secretmanager.secretAccessor` on it")
+  elif os.path.isabs(uri):
+    # Existence and permission only: the key's content is never opened.
+    if os.path.isfile(uri) and os.access(uri, os.R_OK):
+      ctx.add(
+          "13k", label, OK,
+          f"`{uri}` — exists and is readable; the path must also exist on "
+          "every Dataflow worker, so this suits local runs")
+    else:
+      ctx.add(
+          "13k", label, ACTION, f"`{uri}` — missing or not readable",
+          "create the key file or fix its permissions, or use a gs:// "
+          "object or Secret Manager version for Dataflow runs")
   else:
-    ctx.add("13k", label, ACTION, f"`{uri}` — not a gs:// object or a Secret "
-            "Manager version", "use gs://…, or projects/P/secrets/S/versions/V")
+    ctx.add(
+        "13k", label, ACTION, f"`{uri}` — not an accepted form",
+        "use one of: gs://BUCKET/OBJECT, projects/P/secrets/S/versions/V, or "
+        "an absolute local path")
 
 
 def main(argv: list[str] | None = None) -> int:
