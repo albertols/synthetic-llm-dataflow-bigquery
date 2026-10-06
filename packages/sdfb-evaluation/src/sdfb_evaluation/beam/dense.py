@@ -2282,6 +2282,10 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
     kept = _published(src, gi)
     safe = _kept_range(grid, src, gi)
     edges = grid.profile[kept]
+    # One published set per column (Ruling R116): every exact source value
+    # a payload can show is one of these histogram edges. A column with no
+    # evaluated source value publishes none (its grid is the synthetic's).
+    grid_mask = np.isin(grid.union, edges) if src.union[gi].sum() else safe
     unit = "epoch_seconds" if grid.kind is _TEMPORAL else "value"
     scale = grid.scale
 
@@ -2311,16 +2315,17 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
         table=spec.table,
         side=p.side,
         column=grid.name)
-    probs, values = _side_quantiles(grid, p, gi, safe,
+    probs, values = _side_quantiles(grid, p, gi, grid_mask,
                                     _tail_safe(_QUANTILE_PROBS, m.n))
+    quantile_below, quantile_above = _tail_masses(p, gi, grid_mask)
     if probs and np.isfinite(values).all():  # the GUI's values are numbers
       yield ProfileValue(
           profile_kind="quantiles",
           payload={
               "probs": probs,
               "values": [scaled(v) for v in values],
-              "below_mass": below_mass,
-              "above_mass": above_mass,
+              "below_mass": quantile_below,
+              "above_mass": quantile_above,
               "unit": unit,
           },
           n=m.n,
@@ -2494,39 +2499,57 @@ def _edge_labels(edges: Sequence[float], kind: ColumnKind) -> list[str]:
 
 
 def _decile_kept(column: _PairColumn, grid: _Grid, src: DenseProfile,
-                 gi: int) -> np.ndarray:
-  """The pair axis's decile edges a label may show: each is a profile
-  edge, kept by the count rule with it (R69) — and, among the deciles so
-  kept, thinned like the histogram's edges so that neighbouring ones are
-  at least k source records apart (`_spaced`, Ruling R113: the deciles of
-  a column of fewer than 100 values are closer than that)."""
+                 gi: int) -> tuple[np.ndarray, np.ndarray]:
+  """`(kept, shown)`: the pair axis's decile cuts a label may show, and the
+  value each is labelled with. A cut is a decile that is a profile edge kept
+  by the count rule (R69); it is labelled with the nearest PUBLISHED
+  histogram edge at or below it (Ruling R116: the axis publishes no source
+  value the histogram does not), and when several cuts fall on one edge only
+  the lowest is kept — so the labels are k source records apart because the
+  published edges are, and a column of fewer than 100 values gets a coarser
+  axis. The cut's counts are the decile's, so a label may name an edge up
+  to one bin below the cut. `shown[i]` is meaningful where `kept[i]`."""
   kept = np.zeros(column.deciles.size, dtype=bool)
+  shown = np.full(column.deciles.size, np.nan)
   if not grid.profile.size:
-    return kept
+    return kept, shown
   right = src.profile[gi]
   profile_kept = _kept_edges(right, src.profile_left[gi])
-  profile_below = np.cumsum(right)[:-1]
   index = np.searchsorted(grid.profile, column.deciles)
   found = index < grid.profile.size
   found[found] = grid.profile[index[found]] == column.deciles[found]
   kept[found] = profile_kept[index[found]]
+  published = grid.profile[_published(src, gi)]
+  at = np.searchsorted(published, column.deciles, side="right") - 1
+  kept &= at >= 0  # no published edge at or below: the cut merges
   below = np.zeros(column.deciles.size, dtype=np.int64)
-  below[found] = profile_below[index[found]]
-  return _spaced(kept, below)
+  below[found] = np.cumsum(right)[:-1][index[found]]
+  kept = _spaced(kept, below)  # the cuts themselves k records apart
+  last = -1
+  for i in np.flatnonzero(kept).tolist():
+    if at[i] == last:  # a lower cut already sits on this edge
+      kept[i] = False
+    else:
+      last = int(at[i])
+      shown[i] = published[last]
+  return kept, shown
 
 
-def _axis(column: _PairColumn, literals: Mapping[int, str], label_key: bytes,
-          kept: np.ndarray | None) -> tuple[list[list[int]], list[str]]:
+def _axis(
+    column: _PairColumn, literals: Mapping[int, str], label_key: bytes,
+    kept: tuple[np.ndarray, np.ndarray] | None
+) -> tuple[list[list[int]], list[str]]:
   """The pair-grid slot groups an axis shows and their labels: decile bins
   merged across the edges R69 withholds; D6 for dictionary values (a
   literal only where `literal_ok`, else a keyed hashed label, R64)."""
   if column.grid:
     assert kept is not None
-    shown = np.flatnonzero(kept)
+    cut, labelled = kept
+    shown = np.flatnonzero(cut)
     if not shown.size:
       return [list(range(column.deciles.size + 1)),
               [PAIR_BINS]], ["any", "NULL"]
-    edges = _edge_labels(column.deciles[shown].tolist(), column.kind)
+    edges = _edge_labels(labelled[shown].tolist(), column.kind)
     starts = [0, *(int(k) + 1 for k in shown), column.deciles.size + 1]
     groups = [list(range(a, b)) for a, b in itertools.pairwise(starts)]
     labels = [f"<= {edges[0]}"]
@@ -2557,7 +2580,7 @@ def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
   literals = _merge_literals(src.literals, syn.literals)
   grid_of = {g.j: gi for gi, g in enumerate(spec.grids)}
 
-  def kept(column: _PairColumn) -> np.ndarray | None:
+  def kept(column: _PairColumn) -> tuple[np.ndarray, np.ndarray] | None:
     if not column.grid:
       return None
     gi = grid_of[column.j]
