@@ -18,8 +18,8 @@ Loaded via importlib (the script is not a package module). Offline-only: the
 BigQuery surface is a fake injected through the module's `bq_client`
 indirection — no GCP credentials, no network.
 
-Design: docs/DESIGN.md §5 Fidelity
-(ADR 0020).
+Design: docs/DESIGN.md §5 Fidelity; §11 Evaluation (sdfb-evaluation)
+(ADR 0020, 0041).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -317,3 +317,378 @@ def test_step11_opt_out_is_skip():
   (result,) = ctx.results
   assert result.status == _mod.SKIP
   assert "omitted" in result.resource
+
+
+# --------------------------------------------------------------------------- #
+# step 13 — evaluation (sdfb-evaluation, ADR 0041)
+# --------------------------------------------------------------------------- #
+_EVAL_PKG = _REPO_ROOT / "packages" / "sdfb-evaluation"
+_EVAL_SCHEMAS = _EVAL_PKG / "src" / "sdfb_evaluation" / "schemas"
+_EVAL_TABLES = ("evaluation_data_history", "evaluation_metrics",
+                "evaluation_profiles", "evaluation_row_flags")
+_EVAL_VIEWS = ("evaluation_latest", "evaluation_latest_per_job")
+_EVAL_DS = "p.synthetic_data_quality"
+_BASE_ARGV = ["--project", "p", "--source-table", "p.raw.t"]
+
+
+class _FakeBlob:
+
+  def __init__(self, present):
+    self._present = present
+
+  def exists(self):
+    return self._present
+
+
+class _FakeGCS:
+  """Just enough of google.cloud.storage.Client: blob(...).exists()."""
+
+  def __init__(self, objects=()):
+    self._objects = set(objects)
+    self.asked = []
+
+  def bucket(self, name):
+    return SimpleNamespace(blob=lambda path: self._blob(f"gs://{name}/{path}"))
+
+  def _blob(self, uri):
+    self.asked.append(uri)
+    return _FakeBlob(uri in self._objects)
+
+
+def _eval_ctx(*extra):
+  return _mod.Ctx(args=_mod.parse_args([*_BASE_ARGV, *extra]))
+
+
+def _live_field(spec):
+  return SimpleNamespace(
+      name=spec["name"],
+      field_type=spec["type"],
+      mode=spec.get("mode", "NULLABLE"),
+      fields=[_live_field(s) for s in spec.get("fields", [])])
+
+
+def _schema(name):
+  return json.loads((_EVAL_SCHEMAS / f"{name}.schema.json").read_text())
+
+
+def _live_table(name, *, drop=(), retype=None, partitioned=True, cluster=True):
+  """A live table equal to the committed schema file, then bent on request."""
+  consts = _mod.eval_constants(_EVAL_PKG)
+  specs = [dict(s) for s in _schema(name) if s["name"] not in drop]
+  for spec in specs:
+    if retype and spec["name"] == retype[0]:
+      spec["type"] = retype[1]
+  field, kind, _ = consts["partitioning"][name]
+  return SimpleNamespace(
+      table_type="TABLE",
+      schema=[_live_field(s) for s in specs],
+      time_partitioning=(SimpleNamespace(field=field, type_=kind)
+                         if partitioned else None),
+      clustering_fields=list(consts["clustering"][name]) if cluster else None)
+
+
+def _provisioned(**bent):
+  tables = {
+      f"{_EVAL_DS}.{n}": _live_table(n, **bent.get(n, {})) for n in _EVAL_TABLES
+  }
+  tables.update({
+      f"{_EVAL_DS}.{v}": SimpleNamespace(table_type="VIEW", schema=[])
+      for v in _EVAL_VIEWS
+  })
+  return tables
+
+
+def _run13(monkeypatch, bq, *extra, gcs=None):
+  _patch_bq(monkeypatch, bq)
+  monkeypatch.setattr(_mod, "gcs_client", lambda: (gcs or _FakeGCS(), None))
+  ctx = _eval_ctx(*extra)
+  _mod.step13_evaluation(ctx)
+  return ctx, {r.step: r for r in ctx.results}
+
+
+def test_parse_args_evaluation_defaults_and_opt_out():
+  args = _mod.parse_args(_BASE_ARGV)
+  assert args.evaluation_dataset == _EVAL_DS
+  assert args.evaluation_temp_dataset == ""
+  assert args.evaluation_label_key_uri == ""
+  assert args.require_evaluation is False
+  args = _mod.parse_args(
+      [*_BASE_ARGV, "--validation-runs-table", "q.dq.validation_runs"])
+  assert args.evaluation_dataset == "q.dq"
+  args = _mod.parse_args([
+      *_BASE_ARGV, "--evaluation-dataset", "", "--evaluation-temp-dataset",
+      "tmp", "--evaluation-label-key-uri", "gs://b/k", "--require-evaluation"
+  ])
+  assert args.evaluation_dataset == ""
+  assert args.evaluation_temp_dataset == "p.tmp"
+  assert args.evaluation_label_key_uri == "gs://b/k"
+  assert args.require_evaluation is True
+
+
+def test_step13_package_absent_is_one_skip(monkeypatch, tmp_path):
+  monkeypatch.setattr(_mod, "EVAL_PACKAGE_DIR", tmp_path / "no-such-package")
+  ctx, _ = _run13(monkeypatch, _FakeBQ(), "--require-evaluation")
+  (result,) = ctx.results
+  assert result.status == _mod.SKIP
+  assert result.step == "13"
+  assert "not in this tree" in result.resource
+
+
+def test_step13_empty_dataset_opts_out_with_one_skip(monkeypatch):
+  ctx, _ = _run13(monkeypatch, _FakeBQ(), "--evaluation-dataset", "")
+  (result,) = ctx.results
+  assert result.status == _mod.SKIP
+  assert "omitted" in result.resource
+
+
+def test_step13_nothing_provisioned_skips_with_create_command(monkeypatch):
+  ctx, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}))
+  assert by["13a"].status == _mod.OK
+  assert by["13b"].status == _mod.OK
+  assert "temp dataset" in by["13b"].resource  # folded in
+  assert "13i" not in by
+  for step in ("13c", "13d", "13e", "13f", "13g", "13h"):
+    assert by[step].status == _mod.SKIP, step
+    assert ("sdfb-eval schemas --project p --dataset synthetic_data_quality "
+            "--apply") in by[step].resource
+  assert not any(r.status == _mod.ACTION for r in ctx.results)
+
+
+def test_step13_require_evaluation_turns_absent_into_action(monkeypatch):
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}),
+                 "--require-evaluation")
+  for step in ("13c", "13d", "13e", "13f", "13g", "13h"):
+    assert by[step].status == _mod.ACTION, step
+    assert "sdfb-eval schemas" in by[step].action
+
+
+def test_step13_half_provisioned_is_action_for_the_absent(monkeypatch):
+  tables = {f"{_EVAL_DS}.evaluation_metrics": _live_table("evaluation_metrics")}
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13d"].status == _mod.OK  # evaluation_metrics
+  for step in ("13c", "13e", "13f", "13g", "13h"):
+    assert by[step].status == _mod.ACTION, step
+    assert "half-provisioned" in by[step].resource
+
+
+def test_step13_tables_without_views_is_half_provisioned(monkeypatch):
+  tables = {
+      k: v
+      for k, v in _provisioned().items()
+      if k.rsplit(".", 1)[1] in _EVAL_TABLES
+  }
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13g"].status == _mod.ACTION
+  assert by["13h"].status == _mod.ACTION
+
+
+def test_step13_all_present_and_correct_is_all_ok(monkeypatch):
+  ctx, by = _run13(monkeypatch,
+                   _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned()))
+  for step in ("13a", "13b", "13c", "13d", "13e", "13f", "13g", "13h"):
+    assert by[step].status == _mod.OK, (step, by[step].resource)
+  assert not any(r.status == _mod.ACTION for r in ctx.results)
+
+
+def test_step13_missing_column_is_action_naming_it(monkeypatch):
+  tables = _provisioned(evaluation_metrics={"drop": ("table_name",)})
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13d"].status == _mod.ACTION
+  assert "table_name" in by["13d"].resource
+  assert by["13c"].status == _mod.OK
+
+
+def test_step13_wrong_type_is_action_naming_it(monkeypatch):
+  tables = _provisioned(
+      evaluation_profiles={"retype": ("evaluated_at", "DATE")})
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13e"].status == _mod.ACTION
+  assert "evaluated_at" in by["13e"].resource
+  assert "DATE" in by["13e"].resource
+
+
+def test_step13_record_subfield_missing_is_action(monkeypatch):
+  tables = _provisioned()
+  table = tables[f"{_EVAL_DS}.evaluation_data_history"]
+  record = next(f for f in table.schema if f.name == "tables")
+  record.fields = [f for f in record.fields if f.name != "role"]
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13c"].status == _mod.ACTION
+  assert "tables.role" in by["13c"].resource
+
+
+def test_step13_sql_type_aliases_and_extra_columns_are_fine(monkeypatch):
+  tables = _provisioned()
+  table = tables[f"{_EVAL_DS}.evaluation_metrics"]
+  for f in table.schema:  # the live API reports INTEGER / FLOAT / BOOLEAN
+    f.field_type = {
+        "INT64": "INTEGER",
+        "FLOAT64": "FLOAT",
+        "BOOL": "BOOLEAN"
+    }.get(f.field_type, f.field_type)
+  table.schema.append(_live_field({"name": "extra", "type": "STRING"}))
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13d"].status == _mod.OK
+
+
+def test_step13_partitioning_and_clustering_mismatch_are_actions(monkeypatch):
+  tables = _provisioned(
+      evaluation_data_history={"partitioned": False},
+      evaluation_metrics={"cluster": False})
+  tables[f"{_EVAL_DS}.evaluation_profiles"].time_partitioning = SimpleNamespace(
+      field="evaluation_id", type_="DAY")
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13c"].status == _mod.ACTION
+  assert "not partitioned" in by["13c"].resource
+  assert by["13d"].status == _mod.ACTION
+  assert "clustering" in by["13d"].resource
+  assert by["13e"].status == _mod.ACTION
+  assert "evaluation_id" in by["13e"].resource
+  assert by["13f"].status == _mod.OK
+
+
+def test_step13_unreadable_constants_skip_the_comparison(monkeypatch):
+  tables = _provisioned()  # built while the constants are still readable
+  # drifted partitioning is not noticed, and the line says so
+  tables[f"{_EVAL_DS}.evaluation_metrics"].time_partitioning = None
+  monkeypatch.setattr(
+      _mod, "eval_constants", lambda pkg: {
+          "tables": None,
+          "partitioning": None,
+          "clustering": None
+      })
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13d"].status == _mod.OK
+  assert "not compared" in by["13d"].resource
+
+
+def test_step13_view_that_is_a_table_is_action(monkeypatch):
+  tables = _provisioned()
+  tables[f"{_EVAL_DS}.evaluation_latest"] = SimpleNamespace(
+      table_type="TABLE", schema=[])
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
+  assert by["13g"].status == _mod.ACTION
+  assert "not a view" in by["13g"].resource
+  assert by["13h"].status == _mod.OK
+
+
+def test_step13_dataset_missing_is_action_and_objects_not_checked(monkeypatch):
+  _, by = _run13(monkeypatch, _FakeBQ())
+  assert by["13b"].status == _mod.ACTION
+  assert by["13c"].status == _mod.SKIP
+  assert "13b" in by["13c"].resource
+
+
+def test_step13_temp_dataset_same_is_folded_into_13b(monkeypatch):
+  _, by = _run13(monkeypatch,
+                 _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned()),
+                 "--evaluation-temp-dataset", "synthetic_data_quality")
+  assert "13i" not in by
+  assert "temp dataset" in by["13b"].resource
+
+
+def test_step13_temp_dataset_different_is_checked(monkeypatch):
+  tables = _provisioned()
+  _, by = _run13(monkeypatch,
+                 _FakeBQ(datasets={_EVAL_DS, "p.eval_tmp"}, tables=tables),
+                 "--evaluation-temp-dataset", "eval_tmp")
+  assert by["13i"].status == _mod.OK
+  assert "temp dataset" not in by["13b"].resource
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables),
+                 "--evaluation-temp-dataset", "eval_tmp")
+  assert by["13i"].status == _mod.ACTION
+  assert "eval_tmp" in by["13i"].resource
+
+
+def test_step13_template_present_absent_and_no_bucket(monkeypatch):
+  bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
+  version = _mod.eval_version(_EVAL_PKG)
+  assert version
+  uri = f"gs://b/synthetic/sdfb-evaluation-{version}-template.json"
+  gcs = _FakeGCS(objects={uri})
+  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b", gcs=gcs)
+  assert by["13j"].status == _mod.OK
+  assert uri in gcs.asked
+  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b")
+  assert by["13j"].status == _mod.SKIP
+  assert "not built yet" in by["13j"].resource
+  assert "build_flex_template.sh" in by["13j"].resource
+  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b",
+                 "--require-evaluation")
+  assert by["13j"].status == _mod.ACTION
+  _, by = _run13(monkeypatch, bq)
+  assert by["13j"].status == _mod.SKIP
+  assert "--templates-bucket" in by["13j"].resource
+
+
+def test_step13_label_key_variants(monkeypatch):
+  bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
+  _, by = _run13(monkeypatch, bq)
+  assert by["13k"].status == _mod.SKIP
+  assert "optional" in by["13k"].resource
+  assert "not stable across runs" in by["13k"].resource
+  key = "gs://b/keys/label.key"
+  _, by = _run13(
+      monkeypatch,
+      bq,
+      "--evaluation-label-key-uri",
+      key,
+      gcs=_FakeGCS(objects={key}))
+  assert by["13k"].status == _mod.OK
+  _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri", key)
+  assert by["13k"].status == _mod.ACTION
+  secret = "projects/p/secrets/label-key/versions/3"
+  gcs = _FakeGCS()
+  _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri", secret, gcs=gcs)
+  assert by["13k"].status == _mod.SKIP
+  assert "not verified here" in by["13k"].resource
+  assert "gcloud secrets versions describe 3 --secret=label-key --project=p" \
+      in by["13k"].resource
+  assert not gcs.asked  # a secret name never touches GCS
+  assert "label.key" not in by["13k"].resource
+
+
+def test_step13_no_bq_client_skips_every_bq_line(monkeypatch):
+  monkeypatch.setattr(_mod, "bq_client", lambda project: (None, "no creds"))
+  monkeypatch.setattr(_mod, "gcs_client", lambda: (None, "no creds"))
+  ctx = _eval_ctx()
+  _mod.step13_evaluation(ctx)
+  assert not any(r.status == _mod.ACTION for r in ctx.results)
+  assert {r.step for r in ctx.results} >= {"13a", "13b", "13c", "13h"}
+
+
+def test_committed_evaluator_files_match_what_step13_reads():
+  """The contract check reads these files: a rename or a reshaped schema
+    must fail here, not silently turn the check into a no-op."""
+  for name in _EVAL_TABLES:
+    fields = _schema(name)
+    assert isinstance(fields, list) and fields
+    assert all({"name", "type"} <= set(f) for f in fields), name
+  record = next(
+      f for f in _schema("evaluation_data_history") if f["type"] == "RECORD")
+  assert record["fields"] and all("name" in s for s in record["fields"])
+  sql = (_EVAL_SCHEMAS / "views.sql").read_text()
+  assert all(v in sql for v in _EVAL_VIEWS)
+  assert (_EVAL_PKG / "src" / "sdfb_evaluation" / "catalogue" /
+          "metrics.yaml").is_file()
+  consts = _mod.eval_constants(_EVAL_PKG)
+  assert consts["tables"] == _EVAL_TABLES
+  assert set(consts["partitioning"]) == set(_EVAL_TABLES)
+  assert set(consts["clustering"]) == set(_EVAL_TABLES)
+  assert _mod.eval_version(_EVAL_PKG)
+  assert _mod.EVAL_TABLES == _EVAL_TABLES
+  assert _mod.EVAL_VIEWS == _EVAL_VIEWS
+
+
+def test_step13_config_artifacts_missing_or_unparseable_is_action(
+    monkeypatch, tmp_path):
+  pkg = tmp_path / "sdfb-evaluation"
+  schemas = pkg / "src" / "sdfb_evaluation" / "schemas"
+  schemas.mkdir(parents=True)
+  (schemas / "evaluation_metrics.schema.json").write_text("{not json")
+  monkeypatch.setattr(_mod, "EVAL_PACKAGE_DIR", pkg)
+  _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}))
+  assert by["13a"].status == _mod.ACTION
+  assert "views.sql" in by["13a"].resource
+  assert "evaluation_metrics.schema.json" in by["13a"].resource
+  assert "restore the committed evaluator files" in by["13a"].action
