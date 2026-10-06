@@ -990,20 +990,25 @@ class _Run:
     loaded its FINAL row before it failed or was cancelled, so the
     registry is read back first: FAILED is appended only when it holds
     no FINAL row, and nothing when the read-back fails (a FINAL row may
-    well exist) — never two terminal rows (Ruling R113)."""
+    well exist) — never two terminal rows (Ruling R113). What is printed
+    of an error goes through the label key's redaction, as a failed
+    row's reason does."""
     if job is None or self.args.sink != "bq":
       self._close(planned, exc)
       return
     evaluation_id = self.attempt.evaluation_id
+    uri = planned.label_key_uri
+    ended = (f"job {job} ended without completing "
+             f"({type(exc).__name__}: {_redacted(exc, uri)})")
     try:
       found = self._read_final()
     except Exception as read_exc:  # pylint: disable=broad-exception-caught  # any read failure means "unknown": write nothing
       print(
-          f"sdfb-eval: evaluation {evaluation_id}: job {job} ended without "
-          f"completing ({type(exc).__name__}: {exc}), and the registry could "
-          f"not be read ({type(read_exc).__name__}: {read_exc}). No registry "
-          "row was written: its FINAL row may be there. Read the result "
-          f"later with: {self.how_to_read}",
+          f"sdfb-eval: evaluation {evaluation_id}: {ended}, and the registry "
+          f"could not be read ({type(read_exc).__name__}: "
+          f"{_redacted(read_exc, uri)}). No registry row was written: its "
+          "FINAL row may be there. Read the result later with: "
+          f"{self.how_to_read}",
           file=sys.stderr)
       return
     if found is None:
@@ -1011,10 +1016,9 @@ class _Run:
       return
     status = found.get("status")
     print(
-        f"sdfb-eval: evaluation {evaluation_id}: job {job} ended without "
-        f"completing ({type(exc).__name__}: {exc}), but the registry already "
-        f"holds a FINAL row ({status}): no further row was written. Read it "
-        f"with: {self.how_to_read}",
+        f"sdfb-eval: evaluation {evaluation_id}: {ended}, but the registry "
+        f"already holds a FINAL row ({status}): no further row was written. "
+        f"Read it with: {self.how_to_read}",
         file=sys.stderr)
 
   def _leave_running(self, job: str) -> None:

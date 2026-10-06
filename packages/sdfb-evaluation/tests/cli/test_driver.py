@@ -656,6 +656,27 @@ def test_a_job_cancelled_after_its_final_row_is_not_closed_twice(
   capsys.readouterr()
 
 
+def test_the_late_cancel_notice_redacts_the_label_key_uri(
+    bq, resolved, stub, capsys):
+  """The notice quotes the job's error: the label key's URI in it goes
+  through the redaction a failed row's reason gets (the traceback that
+  follows is the error's own)."""
+  del resolved, stub
+  bq.canned.append((REGISTRY, [_final()]))
+  job = FakeJob(
+      state="FAILED",
+      error=RuntimeError(f"the job failed reading {LABEL_KEY_URI}"))
+  env = _dataflow_env(bq, job)
+  assert main(["run", *DATAFLOW, "--label_key_uri", LABEL_KEY_URI], env) == 3
+  assert _statuses(bq) == ["RUNNING"]
+  (notice,) = [
+      line for line in capsys.readouterr().err.splitlines()
+      if "already holds a FINAL row" in line
+  ]
+  assert LABEL_KEY_URI not in notice
+  assert "the job failed reading <label key uri>" in notice
+
+
 def test_a_terminal_job_whose_registry_cannot_be_read_is_not_closed(
     bq, resolved, stub, capsys):
   """M1, the other half: the read-back errors, so a FINAL row may well
