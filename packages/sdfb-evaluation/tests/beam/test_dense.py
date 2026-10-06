@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import bz2
 import dataclasses
+import itertools
 import json
 import math
 import pickle
@@ -1646,8 +1647,15 @@ def test_synthetic_quantiles_never_land_on_a_source_extreme():
   below = np.count_nonzero(syn < kept[0]) / syn.size
   assert below > 0.01
   assert quantiles.payload["probs"][0] > below
-  assert math.isclose(quantiles.payload["below_mass"], below)
   assert all(v >= kept[0] for v in quantiles.payload["values"])
+  # the quantiles are inverted over the published histogram edges (R116),
+  # whose first sits at or above the first kept union edge: the withheld
+  # mass is the share below it
+  published = _published_edges(profiles, "x")
+  assert published[0] >= kept[0]
+  below_published = np.count_nonzero(syn < published[0]) / syn.size
+  assert quantiles.payload["probs"][0] > below_published >= below
+  assert math.isclose(quantiles.payload["below_mass"], below_published)
 
 
 def test_a_generator_clamping_to_the_source_range_shows_no_source_extreme():
@@ -1733,8 +1741,9 @@ def test_no_source_tail_value_on_any_side_property(n, shape, monkeypatch):
   metrics, profiles = _pure(table, rows_by)
   assert not _leaks(metrics, profiles, rows_by, ("x", "y", "t"), tail=True)
   # R74.6: and what every side does publish is accurate to one kept bin
+  # (the quantiles interpolate over the published histogram edges, R116)
   for name in ("x", "y", "t"):
-    kept = _kept_of(_union_of(table, name), _finite(source, name))
+    kept = _published_edges(profiles, name)
     for side, rows in rows_by.items():
       _assert_within_one_bin(
           profiles,
@@ -1742,7 +1751,8 @@ def test_no_source_tail_value_on_any_side_property(n, shape, monkeypatch):
           name,
           _finite(rows, name),
           kept,
-          scale=1e-6 if name == "t" else 1.0)
+          scale=1e-6 if name == "t" else 1.0,
+          published=True)
 
 
 # --------------------------------------------------------------------------
@@ -1788,6 +1798,14 @@ def _payload(profiles: Sequence[ProfileValue], kind: str, side: str,
       if p.profile_kind == kind and p.side == side and p.column == column)
 
 
+def _published_edges(profiles: Sequence[ProfileValue],
+                     column: str) -> np.ndarray:
+  """The histogram edges the source side publishes for `column`, in the
+  payload's units: the one set every exact value of the column's quantiles
+  comes from (Ruling R116)."""
+  return np.asarray(_payload(profiles, "histogram", "source", column)["edges"])
+
+
 def _bin_of(edges: np.ndarray, x: float) -> int:
   return int(np.searchsorted(edges, x, side="left"))  # bin (e_{i-1}, e_i]
 
@@ -1807,12 +1825,15 @@ def _assert_within_one_bin(profiles: Sequence[ProfileValue],
                            column: str,
                            values: np.ndarray,
                            kept: np.ndarray,
-                           scale: float = 1.0) -> int:
+                           scale: float = 1.0,
+                           published: bool = False) -> int:
   """Every published quantile and bound of (side, column) lies in the same
   or an adjacent kept union bin as the true quantile of `values` (R74.6):
   the quantile function `_true_quantile`, which is what a CDF inverted at
   the edges targets — numpy's default linear method interpolates between
-  two order statistics, which can straddle an edge. Returns how many
+  two order statistics, which can straddle an edge. With `published`,
+  `kept` is the published histogram edges (R116) in the payload's units,
+  already scaled: a quantile is interpolated over those. Returns how many
   were checked."""
   shown: list[tuple[float, float | None]] = []
   for p in profiles:
@@ -1821,7 +1842,7 @@ def _assert_within_one_bin(profiles: Sequence[ProfileValue],
       shown += list(zip(p.payload["probs"], p.payload["values"], strict=True))
   histogram = _payload(profiles, "histogram", side, column)
   shown += [(0.005, histogram["min"]), (0.995, histogram["max"])]
-  edges = kept * scale
+  edges = kept if published else kept * scale
   checked = 0
   for prob, value in shown:
     if value is None:
@@ -1857,20 +1878,29 @@ def test_quantiles_follow_each_side_within_one_bin_never_clamped(
   ordered = np.sort(src)
   assert kept[0] >= ordered[RARE_COUNT - 1] and kept[-1] <= ordered[-RARE_COUNT]
   low_share, high_share = _shares_within(syn, kept)
-  expected = [q for q in _PROBS if low_share < q <= high_share]
+  # the quantiles are inverted over the published histogram edges (R116):
+  # a subset of the kept ones, so they span a probability range inside
+  published = _published_edges(profiles, "x")
+  pub_low, pub_high = _shares_within(syn, published)
+  expected = [q for q in _PROBS if pub_low < q <= pub_high]
   quantiles = _quantiles_or_none(profiles, "synthetic", "x")
   assert (quantiles["probs"] if quantiles else []) == expected
   histogram = _payload(profiles, "histogram", "synthetic", "x")
-  for payload in (histogram, quantiles or {}):
-    assert math.isclose(payload["below_mass"], low_share)
-    assert math.isclose(payload["above_mass"], 1.0 - high_share)
+  assert math.isclose(histogram["below_mass"], low_share)
+  assert math.isclose(histogram["above_mass"], 1.0 - high_share)
+  if quantiles:
+    assert math.isclose(quantiles["below_mass"], pub_low)
+    assert math.isclose(quantiles["above_mass"], 1.0 - pub_high)
   shown = list(quantiles["values"]) if quantiles else []
+  assert all(published[0] <= v <= published[-1] for v in shown)
   shown += [v for v in (histogram["min"], histogram["max"]) if v is not None]
   assert all(kept[0] <= v <= kept[-1] for v in shown)
   bounds = [q for q in (0.005, 0.995) if low_share < q <= high_share]
-  assert _assert_within_one_bin(profiles, "synthetic", "x", syn,
-                                kept) == len(expected) + len(bounds)
-  assert _assert_within_one_bin(profiles, "source", "x", src, kept) >= 0
+  assert _assert_within_one_bin(
+      profiles, "synthetic", "x", syn, published,
+      published=True) == len(expected) + len(bounds)
+  assert _assert_within_one_bin(
+      profiles, "source", "x", src, published, published=True) >= 0
   assert not _leaks(metrics, profiles, rows_by, ("x",), tail=True)
   if sd_syn > 10:  # a wider synthetic: out-of-range mass, not values
     assert histogram["below_mass"] > 0.05 and histogram["above_mass"] > 0.05
@@ -1927,7 +1957,13 @@ def test_a_clamping_generator_has_its_tails_withheld_not_clamped():
   assert quantiles["probs"][0] > low_pile
   assert quantiles["probs"][-1] <= high_pile
   assert all(kept[0] <= v <= kept[-1] for v in quantiles["values"])
-  assert _assert_within_one_bin(profiles, "synthetic", "x", syn, kept) > 50
+  assert _assert_within_one_bin(
+      profiles,
+      "synthetic",
+      "x",
+      syn,
+      _published_edges(profiles, "x"),
+      published=True) > 50
   histogram = _payload(profiles, "histogram", "synthetic", "x")
   assert histogram["min"] is None and histogram["max"] is None
   assert not _leaks(metrics, profiles, rows_by, ("x",), tail=True)
@@ -2249,17 +2285,31 @@ def test_kept_range_is_one_contiguous_count_based_interval():
     shown += [v for v in (histogram["min"], histogram["max"]) if v is not None]
     assert shown and all(first <= v <= last for v in shown), side
     low_share, high_share = _shares_within(values, expected)
-    assert (quantiles["probs"] if quantiles else []) == [
-        q for q in _publishable(values.size) if low_share < q <= high_share
-    ]
     assert math.isclose(histogram["below_mass"], low_share)
     assert math.isclose(histogram["above_mass"], 1.0 - high_share)
+    # the quantiles are inverted over the published edges, a subset of
+    # the kept ones (R116)
+    published = _published_edges(profiles, "x")
+    assert set(published) <= set(expected.tolist())
+    pub_low, pub_high = _shares_within(values, published)
+    assert (quantiles["probs"] if quantiles else []) == [
+        q for q in _publishable(values.size) if pub_low < q <= pub_high
+    ]
 
 
 def _publishable(n: int) -> list[float]:
-  return [
-      q for q in _PROBS if q * n >= RARE_COUNT and (1 - q) * n >= RARE_COUNT
-  ]
+  """R69 and R113 re-derived for a side of n values: k of them at or
+  beyond each probability, and neighbouring probabilities k / n apart,
+  going up from the lowest (in whole percents, exactly)."""
+  cents: list[int] = []
+  for c in range(1, 100):
+    q = round(c / 100, 2)
+    if q * n < RARE_COUNT or (1 - q) * n < RARE_COUNT:
+      continue
+    if cents and (c - cents[-1]) * n < RARE_COUNT * 100:
+      continue
+    cents.append(c)
+  return [round(c / 100, 2) for c in cents]
 
 
 def test_moment_metrics_are_not_evaluated_below_the_count_floor():
@@ -2429,3 +2479,509 @@ def test_union_left_counts_are_exact_in_any_merge_order():
   np.testing.assert_array_equal(
       np.cumsum(merged.union[0])[:-1], [(values <= e).sum() for e in edges])
   assert merged.union_left[0].sum() == merged.union[0].sum() == values.size
+
+
+# --------------------------------------------------------------------------
+# sampled mode (Ruling R72; the final review's C1)
+# --------------------------------------------------------------------------
+def _row_sampled(table: Any,
+                 rows_by: Mapping[str, list],
+                 *,
+                 source: int = 1,
+                 synthetic: int = 1) -> tuple[Any, dict[str, list]]:
+  """What `--mode sampled` hands the dense pass: the plan made from every
+  row and carrying the row rates, the pipeline reading every `source`-th
+  / `synthetic`-th row of a side (the panel sides are read in full)."""
+  plan = dataclasses.replace(
+      table,
+      sample_rate_source=1.0 / source if source > 1 else None,
+      sample_rate_synthetic=1.0 / synthetic if synthetic > 1 else None)
+  return plan, {
+      **rows_by,
+      "source": rows_by["source"][::source],
+      "synthetic": rows_by["synthetic"][::synthetic],
+  }
+
+
+def test_sampled_mode_never_stores_a_dense_row_as_exact():
+  """C1: every dense row that reads a row-sampled side is `method` =
+  sample with the rate — a value or not — and its sizes, interval and
+  noise floor are the rows READ, not the table's."""
+  table, rows_by = orders_table()
+  plan, read = _row_sampled(table, rows_by, source=5)
+  metrics, _ = _pure(plan, read)
+  assert {mv.metric_id for mv in metrics} == set(OWNED_METRIC_IDS)
+  for mv in metrics:
+    if mv.metric_id == "field.type_validity":  # its value reads the
+      assert mv.method.value == "exact" and mv.sample_rate is None  # synthetic
+      assert "sample_rates" not in mv.detail
+      continue
+    assert mv.method.value == "sample", (mv.metric_id, mv.column)
+    assert mv.sample_rate == 0.2, (mv.metric_id, mv.column)
+    assert mv.detail["sample_rates"] == {"source": 0.2}, mv.metric_id
+  by_key = _by_key(metrics)
+  n_read = len(_finite(read["source"], "amount"))
+  ks = by_key[("column.ks", "amount", None)]
+  assert ks.n_source == n_read < 700 and ks.detail["estimator"] == "binned"
+  assert ks.noise_floor == pytest.approx(
+      noise.noise_floor("ks_two_sample", n=n_read, m=ks.n_synthetic))
+  full = _by_key(_pure(table, rows_by)[0])[("column.ks", "amount", None)]
+  assert full.method.value == "binned" and ks.noise_floor > full.noise_floor
+  nulls = by_key[("column.null_rate_delta", "amount", None)]
+  assert nulls.n_source == len(read["source"]) == 600
+  lo, hi = noise.newcombe_diff_interval(
+      round(nulls.synthetic_value * nulls.n_synthetic), nulls.n_synthetic,
+      round(nulls.source_value * 600), 600)
+  assert (nulls.ci_low,
+          nulls.ci_high) == pytest.approx(noise.folded_abs_interval(lo, hi))
+
+
+def test_type_validity_never_passes_from_a_synthetic_row_sample():
+  """The re-review's probe (R116 item 2): 6 NaN in 3,000 synthetic FLOAT64
+  cells is 0.998, FAIL in an exact run; a 1/10 synthetic sample holding
+  none of them scored 1.0 PASS, stamped `sample`. An integrity pass never
+  comes from a sample: not evaluated. A sampled source alone does not
+  touch it: its value is the full synthetic side's, and not a sample."""
+  n = 3000
+  rng = random.Random(1)
+  src = [{"id": i, "x": rng.gauss(0, 1)} for i in range(n)]
+  rng = random.Random(2)
+  syn = [{
+      "id": 10**6 + i,
+      "x": float("nan") if i % 500 == 5 else rng.gauss(0, 1)
+  } for i in range(n)]
+  fields = ({
+      "name": "id",
+      "type": "INT64",
+      "mode": "REQUIRED"
+  }, {
+      "name": "x",
+      "type": "FLOAT64",
+      "mode": "NULLABLE"
+  })
+  table = planned_table("t", fields, src, syn, pk=("id",))
+  rows_by = {"source": src, "synthetic": syn}
+  validity = _CATALOGUE.get("field.type_validity")
+
+  def get(metrics: list[MetricValue]) -> MetricValue:
+    return _by_key(metrics)[("field.type_validity", "x", None)]
+
+  exact = get(_pure(table, rows_by)[0])
+  assert exact.value == pytest.approx(0.998) and exact.method.value == "exact"
+  assert status_for(validity, exact) is Status.FAIL
+  assert exact.detail["invalid"] == 6
+  # i % 500 == 5 is never a multiple of 10, so the 1/10 sample misses all six
+  plan, read = _row_sampled(table, rows_by, synthetic=10)
+  sampled = get(_pure(plan, read)[0])
+  reason = sampled.detail["reason"]
+  assert sampled.value is None
+  assert status_for(validity, sampled) is Status.NOT_EVALUATED
+  assert reason.startswith("sampled mode cannot measure type validity")
+  assert "the synthetic side is a 0.1 row sample" in reason
+  assert reason.endswith("run exact mode")
+  assert sampled.detail["invalid_in_sample"] == 0
+  # a source sample alone: evaluated on the full synthetic side, not stamped
+  plan, read = _row_sampled(table, rows_by, source=10)
+  source_only = get(_pure(plan, read)[0])
+  assert source_only.value == pytest.approx(0.998)
+  assert source_only.method.value == "exact" and source_only.sample_rate is None
+  assert "sample_rates" not in source_only.detail
+  assert status_for(validity, source_only) is Status.FAIL
+
+
+@pytest.mark.parametrize(("sides", "named"), [({
+    "source": 4
+}, "source"), ({
+    "synthetic": 4
+}, "synthetic"), ({
+    "source": 2,
+    "synthetic": 4
+}, "source")])
+def test_range_coverage_needs_every_row_of_both_sides(sides, named):
+  """R72: a sample's extremes fall inside its side's range, so the range
+  coverage of a sampled side is not evaluated (as the relational pass
+  treats cardinality adherence)."""
+  table, rows_by = orders_table()
+  plan, read = _row_sampled(table, rows_by, **sides)
+  metrics, _ = _pure(plan, read)
+  rows = [mv for mv in metrics if mv.metric_id == "column.range_coverage"]
+  assert len(rows) >= 5
+  rates = {side: 1.0 / step for side, step in sides.items()}
+  for mv in rows:
+    reason = mv.detail["reason"]
+    assert mv.value is None, mv.column
+    assert reason.startswith("sampled mode cannot measure range coverage")
+    assert f"the {named} side is a {rates[named]:.3g} row sample" in reason
+    assert reason.endswith("run exact mode"), reason
+    assert mv.detail["sample_rates"] == rates, mv.column
+  # the exact run measures it
+  exact = [
+      mv for mv in _pure(table, rows_by)[0]
+      if mv.metric_id == "column.range_coverage"
+  ]
+  assert all(
+      mv.value is not None and mv.method.value == "exact" for mv in exact)
+
+
+def test_dense_profiles_of_a_sampled_side_say_so():
+  table, rows_by = orders_table()
+  plan, read = _row_sampled(table, rows_by, source=5, synthetic=2)
+  _, profiles = _pure(plan, read)
+  rates = {"source": 0.2, "synthetic": 0.5}
+  kinds = Counter()
+  for p in profiles:
+    if p.side in rates:
+      assert p.payload["sample_rate"] == rates[p.side], (p.profile_kind,
+                                                         p.column)
+      kinds[p.profile_kind] += 1
+    else:  # the panel sides are read in full
+      assert "sample_rate" not in p.payload, (p.profile_kind, p.side)
+  assert set(kinds) == {
+      "histogram", "quantiles", "moments", "temporal_mix", "length_hist",
+      "char_classes", "null_patterns", "corr_matrix", "contingency"
+  }
+  _, exact = _pure(table, rows_by)
+  assert all("sample_rate" not in p.payload for p in exact)
+
+
+def test_exact_mode_dense_rows_are_unchanged_by_the_sampled_mode_rule():
+  table, rows_by = orders_table()
+  metrics, _ = _pure(table, rows_by)
+  assert {mv.method.value for mv in metrics} == {"exact", "binned"}
+  for mv in metrics:
+    assert mv.sample_rate is None and "sample_rates" not in mv.detail
+    assert "estimator" not in mv.detail
+
+
+# --------------------------------------------------------------------------
+# published grid values are k source records apart (Ruling R113, I5)
+# --------------------------------------------------------------------------
+_STAFF_FIELDS = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "salary",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "bonus",
+        "type": "FLOAT64",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "dept",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+)
+_SIDE_NAMES = ("source", "synthetic", "reference", "holdout")
+
+
+def _staff_rows(n: int, seed: int, base: int) -> list[dict]:
+  """Invented staff: lognormal salaries (every value its own record), a
+  bonus that follows the salary and a three-value department."""
+  rng = random.Random(seed)
+  rows = []
+  for i in range(n):
+    salary = round(rng.lognormvariate(10.5, 0.4), 2)
+    rows.append({
+        "id": base + i,
+        "salary": salary,
+        "bonus": round(salary * rng.uniform(0.01, 0.2), 2),
+        "dept": rng.choice(["a", "b", "c"]),
+    })
+  return rows
+
+
+def _staff(n: int, **kwargs: Any) -> tuple[Any, dict[str, list]]:
+  source, synthetic = _staff_rows(n, 1, 1), _staff_rows(n, 2, 100_000)
+  reference, holdout = source[:n // 4], source[n // 4:n // 2]
+  table = planned_table(
+      "staff",
+      _STAFF_FIELDS,
+      source,
+      synthetic,
+      pk=("id",),
+      panel=make_panel(reference, holdout),
+      **kwargs)
+  return table, {
+      "source": source,
+      "synthetic": synthetic,
+      "reference": reference,
+      "holdout": holdout
+  }
+
+
+def _records_between(values: np.ndarray, edges: Sequence[float]) -> list[int]:
+  """Source records in each bin the published `edges` cut, right-closed
+  as the histogram counts them: `(-inf, e0], (e0, e1], …, (e_last, inf)`."""
+  ordered = np.sort(values)
+  at_or_below = np.searchsorted(ordered, np.asarray(edges), side="right")
+  return np.diff(np.concatenate(([0], at_or_below, [ordered.size]))).tolist()
+
+
+def _unspaced(monkeypatch: pytest.MonkeyPatch) -> None:
+  """The publication step as it was before R113: every kept edge and
+  every tail-safe probability."""
+  monkeypatch.setattr(dense, "_spaced", lambda kept, below: kept)
+  monkeypatch.setattr(dense, "_QUANTILE_GAP", 0)
+
+
+# (source rows, histogram edges before / now, fewest source records between
+# two edges before / now, source-side quantile probabilities before / now):
+# the worked example of the design's §4.9, pinned here
+_SMALL_COLUMNS = ((120, (85, 11), (1, 10), (83, 10)), (795, (97, 49), (7, 15),
+                                                       (97, 49)))
+
+
+@pytest.mark.parametrize(("n", "n_edges", "fewest", "n_probs"), _SMALL_COLUMNS)
+def test_small_columns_publish_grid_values_k_source_records_apart(
+    n, n_edges, fewest, n_probs, monkeypatch):
+  """The final review's I5. A 120-row column published 85 histogram edges
+  and 83 quantile values, each an exact source record: 71 % of the column
+  in clear, one record to a bin. Now no two published edges are closer
+  than k = 10 source records, a dropped edge's bins merge (counts stay
+  sums, on every side), and quantile probabilities are at least k / n
+  apart. The metrics are computed on the full grid, as before."""
+  table, rows_by = _staff(n)
+  metrics, profiles = _pure(table, rows_by)
+  source = _finite(rows_by["source"], "salary")
+  histograms = {
+      side:
+          next(
+              p
+              for p in profiles
+              if (p.profile_kind, p.side, p.column) == ("histogram", side,
+                                                        "salary"))
+      for side in _SIDE_NAMES
+  }
+  edges = histograms["source"].payload["edges"]
+  between = _records_between(source, edges)
+  assert len(edges) == n_edges[1] <= n / RARE_COUNT
+  # no thin bin between two published edges
+  assert min(between[:-1]) == fewest[1] >= RARE_COUNT, between
+  ordered = np.sort(source)  # R69 at the ends: k records at or beyond each
+  assert np.count_nonzero(ordered >= edges[-1]) >= RARE_COUNT
+  assert len(set(edges) & set(source.tolist())) <= n / RARE_COUNT
+  assert histograms["source"].payload["counts"] == between
+  for side, histogram in histograms.items():  # the same edges on every side
+    values = _finite(rows_by[side], "salary")
+    assert histogram.payload["edges"] == edges, side
+    assert histogram.payload["counts"] == _records_between(values, edges), side
+    assert sum(histogram.payload["counts"]) == values.size, side
+    assert histogram.edges_digest == histograms["source"].edges_digest
+  digest = dense._edges_digest  # pylint: disable=protected-access  # the digest under test
+  assert histograms["source"].edges_digest == digest(
+      np.asarray(edges), "value")  # of the edges published
+  # quantile probabilities: k of the side's own records apart
+  seen = 0
+  for p in profiles:
+    if p.profile_kind != "quantiles":
+      continue
+    probs = p.payload["probs"]
+    gaps = [round((b - a) * 100) * p.n for a, b in itertools.pairwise(probs)]
+    assert all(gap >= RARE_COUNT * 100 for gap in gaps), (p.side, p.column)
+    assert probs[0] * p.n >= RARE_COUNT <= (1 - probs[-1]) * p.n
+    assert len(probs) <= p.n / RARE_COUNT, (p.side, p.column, len(probs))
+    seen += 1
+  assert seen >= 4
+  assert len(_payload(profiles, "quantiles", "source",
+                      "salary")["probs"]) == n_probs[1]
+  # the publication step only: the metrics do not move
+  with monkeypatch.context() as patch:
+    _unspaced(patch)
+    metrics_before, profiles_before = _pure(table, rows_by)
+  assert metrics == metrics_before
+  before = next(
+      p for p in profiles_before
+      if (p.profile_kind, p.side, p.column) == ("histogram", "source",
+                                                "salary"))
+  assert len(before.payload["edges"]) == n_edges[0]
+  assert min(_records_between(source,
+                              before.payload["edges"])[:-1]) == fewest[0]
+  assert len(
+      _payload(profiles_before, "quantiles", "source",
+               "salary")["probs"]) == n_probs[0]
+
+
+def _published_source_records(profiles: Sequence[ProfileValue],
+                              source: np.ndarray, column: str,
+                              pair_other: str) -> dict[str, set[float]]:
+  """Every exact source value the persisted profiles of `column` show, by
+  payload: histogram edges, the quantile values of every side that equals a
+  source record, the histogram's own p0.5 / p99.5 and the pair axis's
+  labels (read back as numbers, and as the source record nearest them)."""
+  known = set(source.tolist())
+  found: dict[str, set[float]] = {}
+  for p in profiles:
+    if p.column != column:
+      continue
+    if p.profile_kind == "histogram" and p.side == "source":
+      found["histogram"] = set(p.payload["edges"])
+      found["bounds"] = {
+          v for v in (p.payload["min"], p.payload["max"]) if v in known
+      }
+    if p.profile_kind == "quantiles":
+      found.setdefault(f"quantiles:{p.side}", set()).update(
+          v for v in p.payload["values"] if v in known)
+  axes = [
+      p for p in profiles
+      if p.profile_kind == "contingency" and p.side == "source" and
+      {p.column, p.payload["column_y"]} == {column, pair_other}
+  ]
+  labels: set[float] = set()
+  for axis in axes:
+    names = (
+        axis.payload["x_labels"]
+        if axis.payload["column_x"] == column else axis.payload["y_labels"])
+    for label in names:
+      for number in re.findall(r"-?\d+(?:\.\d+)?(?:e[+-]?\d+)?", label):
+        labels.add(float(number))
+  found["axis"] = labels
+  return found
+
+
+@pytest.mark.parametrize("n", (120, 795, 2000))
+def test_one_column_publishes_one_k_spaced_set_of_source_values(n):
+  """The re-review's i5_union probe (Ruling R116 item 3). Each payload was
+  k source records apart on its own, not together: at 120 rows the
+  histogram edges (ranks 10, 20, …), the source quantile values (11, 22, …)
+  and the pair axis's decile labels (12, 24, …) published 28 records with
+  every neighbour gap below k; at 795 rows the reference and holdout
+  quantiles added 28 to the 49 edges, at 2,000 rows 166 records at a gap of
+  one. Now the quantile values and the axis labels come from the published
+  histogram edges, so the union of everything exact is the edges."""
+  table, rows_by = _staff(n)
+  _, profiles = _pure(table, rows_by)
+  source = np.sort(_finite(rows_by["source"], "salary"))
+  found = _published_source_records(profiles, source, "salary", "bonus")
+  edges = found["histogram"]
+  union: set[float] = set()
+  for kind, shown in found.items():
+    values = shown
+    if kind == "axis":  # the labels print 6 significant digits at most
+      values = {
+          float(source[np.argmin(np.abs(source - v))])
+          for v in shown
+          if np.min(np.abs(source - v)) <= 1e-5 * abs(v)
+      }
+      assert values <= edges or not values, (kind, sorted(values - edges))
+    elif kind == "bounds":
+      continue  # p0.5 / p99.5 at n >= 2,000: not in the ruled set, see the report
+    elif kind.startswith("quantiles"):
+      # a value that is not an edge was interpolated inside a published bin
+      # from the edges and counts: it equals a source record only by chance
+      # (one in the 2,000-row reference at p = 0.4, 5 ranks from an edge),
+      # reveals none, and is left out of the union of records
+      for v in shown - edges:
+        assert min(edges) < v < max(edges), (kind, v)
+      values = shown & edges
+    else:
+      assert shown <= edges, (kind, sorted(shown - edges))
+    union |= values
+  assert edges <= union
+  ranks = [int(np.searchsorted(source, v, side="right")) for v in sorted(union)]
+  gaps = [b - a for a, b in itertools.pairwise(ranks)]
+  assert gaps and min(gaps) >= RARE_COUNT, (n, min(gaps), len(union))
+  assert len(union) <= n / RARE_COUNT
+  # the axis names no edge the histogram does not
+  assert found["axis"], "the axis kept at least one cut"
+
+
+def test_the_pair_axis_labels_are_published_edges_on_a_small_column():
+  """120 rows: the deciles (ranks 12, 24, …) are not histogram edges (ranks
+  10, 20, …). Each cut is labelled with the nearest published edge at or
+  below it, two cuts on one edge keep the lower, and the axis is coarser."""
+  table, rows_by = _staff(120)
+  _, profiles = _pure(table, rows_by)
+  edges = _payload(profiles, "histogram", "source", "salary")["edges"]
+  (axis,) = [
+      p.payload
+      for p in profiles
+      if p.profile_kind == "contingency" and p.side == "source" and
+      {p.column, p.payload["column_y"]} == {"salary", "bonus"}
+  ]
+  labels = (
+      axis["x_labels"] if axis["column_x"] == "salary" else axis["y_labels"])
+  numbers = [
+      float(n)
+      for label in labels[:-1]
+      for n in re.findall(r"-?\d+(?:\.\d+)?(?:e[+-]?\d+)?", label)
+  ]
+  assert numbers and all(
+      any(math.isclose(v, e, rel_tol=1e-5) for e in edges) for v in numbers)
+  assert len(set(numbers)) == len(labels) - 2  # one number per cut
+  # published edges are 10 apart, so at most 11 edges and fewer cuts
+
+
+def test_compare_still_finds_two_runs_of_the_same_data_comparable():
+  """`edges_digest` is the digest of the published edges, and the quantile
+  step does not touch them: two runs of the same data digest alike."""
+  table, rows_by = _staff(795)
+  _, first = _pure(table, rows_by)
+  _, second = _pure(table, rows_by)
+  digests = {
+      (p.side, p.column): p.edges_digest
+      for p in first
+      if p.profile_kind == "histogram"
+  }
+  assert digests and digests == {
+      (p.side, p.column): p.edges_digest
+      for p in second
+      if p.profile_kind == "histogram"
+  }
+  edges = _payload(first, "histogram", "source", "salary")["edges"]
+  assert digests[("source", "salary")] == dense._edges_digest(  # pylint: disable=protected-access  # the digest under test
+      np.asarray(edges), "value")
+
+
+def test_a_large_column_is_published_as_before(monkeypatch):
+  """At 2,000 rows a percentile bin holds about 20 source records: all 99
+  edges and all 99 quantile probabilities stay, on the source and the
+  synthetic side — the payloads are the ones published before R113."""
+  table, rows_by = _staff(2000)
+  _, profiles = _pure(table, rows_by)
+  with monkeypatch.context() as patch:
+    _unspaced(patch)
+    _, before = _pure(table, rows_by)
+  kinds = ("histogram", "quantiles")
+  now = [
+      p for p in profiles
+      if p.profile_kind in kinds and p.side in ("source", "synthetic")
+  ]
+  assert now == [
+      p for p in before
+      if p.profile_kind in kinds and p.side in ("source", "synthetic")
+  ]
+  histogram = _payload(profiles, "histogram", "source", "salary")
+  assert len(histogram["edges"]) == 99 and min(histogram["counts"]) >= 19
+  assert len(_payload(profiles, "quantiles", "source", "salary")["probs"]) == 99
+  # the 500-row panel sides: the same edges, quantiles 10 of 500 apart
+  reference = _payload(profiles, "quantiles", "reference", "salary")
+  assert reference["probs"] == [round(c / 100, 2) for c in range(2, 99, 2)]
+
+
+def test_pair_axis_edges_are_k_source_records_apart():
+  """A contingency axis shows decile edges: on a 60-row column they are
+  6 source records apart, so every other one is shown and the bins
+  between merge — each interior group then holds at least k source
+  records (the cells themselves are counts below k by design)."""
+  table, rows_by = _staff(60)
+  _, profiles = _pure(table, rows_by)
+  axes = [
+      p for p in profiles
+      if p.profile_kind == "contingency" and p.side == "source" and
+      {p.column, p.payload["column_y"]} == {"salary", "bonus"}
+  ]
+  assert len(axes) == 1
+  payload = axes[0].payload
+  counts = np.asarray(payload["counts"])
+  for labels, marginal in ((payload["x_labels"], counts.sum(axis=1)),
+                           (payload["y_labels"], counts.sum(axis=0))):
+    assert labels[-1] == "NULL" and 3 <= len(labels) <= 6, labels
+    assert marginal[:-1].min() >= RARE_COUNT, (labels, marginal)
+  assert int(counts.sum()) == 60

@@ -135,6 +135,14 @@ source table, leaves only the metrics that need the source side
 the synthetic orphan rate is still measured against the parent's
 landing table.
 
+Key types (Ruling R113): key tuples are compared by the hash of their
+canonical values (`encode.key_hash`), and equal values of two type
+families have different canonical forms — an INT64 5, a NUMERIC 5 and a
+FLOAT64 5 never hash alike. An edge whose child column and referenced
+column are of different families (`_KEY_FAMILIES`) would read every
+child as an orphan, on both sides, so every metric of that edge is
+`not_evaluated` with a reason naming both columns and their types.
+
 Sampled mode (Ruling R72, as in `beam.membership`): a side whose plan
 rate is below 1 was read as a row sample. A metric that needs every row
 of a side it reads is `not_evaluated` with "sampled mode cannot measure
@@ -162,12 +170,14 @@ A parent row sample alone leaves each sampled parent's fan-out exact, so
 the fan-out shape stays evaluated there, with `method` = sample and the
 parent rate as `sample_rate`.
 
-Failures stay per edge (`TABLE_ERRORS`, as in `beam.membership`): an
-edge whose spec cannot be built or whose parent cannot be read on the
-driver, or whose keys raise a data error on a worker, writes
-`not_evaluated` rows with the reason for every owned id; the other edges
-and the pipeline carry on. Nothing is dropped silently: an unreadable
-side, an unknown parent and a skipped child table are all
+Failures stay per edge (as in `beam.membership`): an edge whose spec
+cannot be built or whose parent cannot be read on the driver
+(`TABLE_ERRORS`), or whose keys raise a data error on a worker
+(`WORKER_ERRORS`), writes `not_evaluated` rows with the reason for every
+owned id; the other edges and the pipeline carry on. A worker's
+`MemoryError` is not a data error: it is raised, so the bundle fails and
+the runner retries it (Ruling R113). Nothing is dropped silently: an
+unreadable side, an unknown parent and a skipped child table are all
 `not_evaluated` rows with a reason.
 
 References (author-year, R22): ISO/IEC 9075 (1992), SQL's referential
@@ -197,7 +207,7 @@ from sdfb_evaluation.beam.encode import (
     key_hashes,
 )
 from sdfb_evaluation.beam.dense import RARE_COUNT
-from sdfb_evaluation.beam.membership import TABLE_ERRORS
+from sdfb_evaluation.beam.membership import TABLE_ERRORS, WORKER_ERRORS
 from sdfb_evaluation.canonical import NULL_CODE
 from sdfb_evaluation.context.plan import parent_landing
 from sdfb_evaluation.stats import noise
@@ -217,6 +227,7 @@ __all__ = [
     "SIDE_INPUT",
     "SIDE_INPUT_MAX_KEYS",
     "TABLE_ERRORS",
+    "WORKER_ERRORS",
     "EdgeSpec",
     "EdgeSummary",
     "FanoutAcc",
@@ -278,6 +289,22 @@ _EXTREMES_NOTE = ("the source's exact [min, max] fan-out (each one parent's "
                   "fan-outs are dense integers — accepted, as R65 accepts it "
                   "for field.range_adherence")
 _BELOW_K = f"fewer than k parents on a side (k = {RARE_COUNT})"
+# The canonical form a key part is hashed by (`canonical.canonical_value`;
+# `encode.key_hash` hashes canonical values): equal values of two types
+# hash alike only inside one family — an INT64 5 is the int 5, a NUMERIC
+# 5 the text "5", a FLOAT64 5 the float 5.0. A type not listed is its own
+# family (STRING, BYTES, DATE, TIME).
+_KEY_FAMILIES: Mapping[str, str] = {
+    **dict.fromkeys(
+        ("INT64", "INTEGER", "INT", "SMALLINT", "BIGINT", "TINYINT", "BYTEINT"),
+        "integer"),
+    **dict.fromkeys(("NUMERIC", "BIGNUMERIC", "DECIMAL", "BIGDECIMAL"),
+                    "decimal"),
+    **dict.fromkeys(("FLOAT64", "FLOAT"), "float"),
+    **dict.fromkeys(("BOOL", "BOOLEAN"), "boolean"),
+    # a naive DATETIME is read as UTC, so both are one UTC instant's text
+    **dict.fromkeys(("TIMESTAMP", "DATETIME"), "instant"),
+}
 
 
 def _failure(exc: BaseException) -> str:
@@ -405,6 +432,34 @@ def _side_plan(side: Side, child: TablePlan, parent: TablePlan, edge: Edge,
   return dataclasses.replace(plan, reason=why)
 
 
+def _key_family(bq_type: str) -> str:
+  name = bq_type.upper()
+  return _KEY_FAMILIES.get(name, name)
+
+
+def _type_mismatch(child: TablePlan, parent: TablePlan,
+                   edge: Edge) -> str | None:
+  """Why this edge's key tuples can never match (Ruling R113), or None: a
+  child column and the column it references are of different type
+  families, so equal values hash apart and every child would read as an
+  orphan (the fan-out metrics then pass on nothing). The first such pair
+  is named with both types. A column the plan does not hold is left to
+  the side plans, which say so."""
+  child_types = {c.name: c.bq_type for c in child.columns}
+  parent_types = {c.name: c.bq_type for c in parent.columns}
+  for col, ref_col in zip(edge.cols, edge.ref_cols, strict=True):
+    a, b = child_types.get(col), parent_types.get(ref_col)
+    if a is None or b is None or _key_family(a) == _key_family(b):
+      continue
+    return (f"the key columns differ in type: {child.name}.{col} is "
+            f"{a.upper()} and {parent.name}.{ref_col} is {b.upper()}. Key "
+            f"tuples are compared by canonical value, and a {_key_family(a)} "
+            f"never equals a {_key_family(b)}, so every child would read as "
+            "an orphan: the edge is not evaluated (cast one side to the "
+            "other's type, or correct the relationship model)")
+  return None
+
+
 def _edge_spec(key: int, child: TablePlan, index: int, edge: Edge,
                tables: Sequence[TablePlan],
                max_keys: int) -> tuple[EdgeSpec, TablePlan | None]:
@@ -437,6 +492,9 @@ def _edge_spec(key: int, child: TablePlan, index: int, edge: Edge,
           spec,
           reason=(f"the parent {landing} is not in the evaluation plan (not a "
                   "launch table, not a read-only parent)")), None
+  mismatch = _type_mismatch(child, parent, edge)
+  if mismatch is not None:
+    return dataclasses.replace(spec, reason=mismatch), None
   return dataclasses.replace(
       spec,
       parent_role="external" if parent.role == "external" else "launch",
@@ -1063,7 +1121,7 @@ class _ChildKeysFn(beam.DoFn):
           raise ValueError(f"{element.table}: fk_hash column {index} is edge "
                            f"{found!r}, expected {label!r}")
         codes, counts, nulls = child_keys(element, index)
-      except TABLE_ERRORS as exc:
+      except WORKER_ERRORS as exc:
         yield key, _failure(exc)
         continue
       self._pending.setdefault(t, []).append((codes, counts))
@@ -1104,7 +1162,7 @@ class _ParentKeysFn(beam.DoFn):
   def process(self, element: Sequence[Mapping[str, Any]]) -> Iterator[Any]:
     try:
       codes = key_hashes(element, self._ref_cols)
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       reason = _failure(exc)
       for key in self._keys:
         yield beam.pvalue.TaggedOutput(_FAILED, (key, reason))
@@ -1146,7 +1204,7 @@ class _KeySetCountFn(beam.DoFn):
   def process(self, element: np.ndarray) -> Iterator[Any]:
     try:
       _check_set_size(int(element.size), self._planned)
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       reason = _failure(exc)
       for key in self._keys:
         yield beam.pvalue.TaggedOutput(_FAILED, (key, reason))
@@ -1172,7 +1230,7 @@ class _MatchFn(beam.DoFn):
                        dtype=np.int64).view(np.uint64)
       counts = np.array([count for _, count in element], dtype=np.int64)
       yield fanout_part(counts, _member(key_set, codes))
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       yield beam.pvalue.TaggedOutput(_FAILED, (self._key, _failure(exc)))
 
 
@@ -1196,7 +1254,7 @@ class _JoinFn(beam.DoFn):
       has_parent = parent_rows > 0
       part = fanout_part(children, has_parent)
       yield dataclasses.replace(part, parents=int(has_parent.sum()))
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       yield beam.pvalue.TaggedOutput(_FAILED, (self._key, _failure(exc)))
 
 
@@ -1230,7 +1288,7 @@ def _emit_edge(item: tuple[int, Iterable[tuple[str, Any]]],
     return edge_outputs(spec, {
         side: summarize(acc) for side, acc in accs.items()
     })
-  except TABLE_ERRORS as exc:
+  except WORKER_ERRORS as exc:
     return _failed_metrics(spec, _failure(exc))
 
 

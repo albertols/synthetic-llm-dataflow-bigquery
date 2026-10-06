@@ -43,7 +43,14 @@ R98-1):
     planning, RUNNING, prepare, graph             the driver's FAILED: no
       construction or submission raised           job is running
     the job ended in a state other than DONE      the driver's FAILED: the
-      (it failed, it was cancelled)               job will write nothing
+      (it failed, it was cancelled) and the       job will write nothing
+      registry, read back, holds no FINAL row
+    the job ended in a state other than DONE      the pipeline's FINAL: it
+      after it loaded its FINAL row (cancelled    is there already, so the
+      late)                                       driver appends nothing
+    the runner built the job and did not submit   NOBODY's yet: the
+      it (`--template_location`, a flex-          launcher submits the job,
+      template launch)                            which writes its own
     the job ended DONE and the registry, read     the driver's FAILED ("the
       back, holds no FINAL row                    job finished without a
                                                   FINAL row")
@@ -66,7 +73,18 @@ A submitted job is one that outlives the driver: its result names a job
 id (Dataflow). While it is not known to be terminal — an unreadable
 state counts as running — the driver writes no terminal row: it prints
 the job id and how to read the result later, and re-raises. A local run
-(no job id) dies with the driver, so the driver closes it. Two
+(no job id) dies with the driver, so the driver closes it. A submitted
+job that ended in a state other than DONE may have loaded its FINAL row
+first, so the driver reads the registry back before it appends FAILED
+and appends nothing when a FINAL row is there, or when the read-back
+itself fails (Ruling R113).
+
+A template launch hands the job over instead of submitting it: with
+`--template_location` — which is how a flex-template launcher runs the
+entry — Beam's DataflowRunner returns a result with no job (`has_job`
+false, and a `job_id()` that raises). There is no job id and nothing to
+wait for: the driver leaves its RUNNING row for the job to close and
+ends 0, whether or not it was asked to wait (Ruling R113). Two
 contradicting terminal rows are worse than a RUNNING row that stays open
 (an orchestrator's failure callback closes that one). For the same
 reason a run found DONE is never closed by the driver on the strength of
@@ -269,9 +287,22 @@ def submit_pipeline(pipeline: beam.Pipeline) -> Any:
   return pipeline.run()
 
 
+def _handed_over(result: Any) -> bool:
+  """Whether the runner built the job without submitting it: Beam's
+  DataflowRunner returns a result with no job (`has_job` false) when
+  `--template_location` is set, which is how a flex-template launcher
+  runs the entry. The launcher submits the job; nothing ran here and
+  there is nothing to wait for. A local result has no `has_job`."""
+  return getattr(result, "has_job", True) is False
+
+
 def _job_id(result: Any) -> str | None:
   """The id of the job `result` stands for, when the runner submitted
-  one that goes on without the driver (Dataflow); None for a local run."""
+  one that goes on without the driver (Dataflow); None for a local run
+  and for a job handed over as a template (`_handed_over`: its
+  `job_id()` raises)."""
+  if _handed_over(result):
+    return None
   job_id = getattr(result, "job_id", None)
   value = job_id() if callable(job_id) else job_id
   return str(value) if value else None
@@ -353,7 +384,6 @@ def knobs_from_args(args: argparse.Namespace, evaluation_id: str) -> Knobs:
       privacy_sample_rows=args.privacy_sample_rows,
       detection_sample_rows=args.detection_sample_rows,
       pair_max_columns=args.pair_max_columns,
-      topk_profile=args.topk_profile,
       row_flags_top_k=args.row_flags_top_k,
       row_flags_source_keys=args.row_flags_source_keys,
       max_bytes_billed=args.max_bytes_billed,
@@ -935,6 +965,62 @@ class _Run:
     """The driver owns the outcome: append its FAILED row."""
     self.registry.record_failure(_failed, planned, exc, self.env.now())
 
+  def _read_final(self) -> dict[str, Any] | None:
+    """This evaluation's FINAL row, read back from the registry table
+    (None: it holds none).
+
+    Raises:
+      Exception: the registry could not be read.
+    """
+    try:
+      stored = read_bq(
+          self.bq,
+          project=self.project,
+          dataset=self.args.output_dataset,
+          evaluation_id=self.attempt.evaluation_id,
+          metrics=False)
+    except NoSuchEvaluationError:
+      return None
+    return stored.final
+
+  def _close_ended(self, planned: EvaluationPlan, job: str | None,
+                   exc: BaseException) -> None:
+    """The run ended in a state other than DONE. A local run is the
+    driver's to close. A submitted job that writes to BigQuery may have
+    loaded its FINAL row before it failed or was cancelled, so the
+    registry is read back first: FAILED is appended only when it holds
+    no FINAL row, and nothing when the read-back fails (a FINAL row may
+    well exist) — never two terminal rows (Ruling R113). What is printed
+    of an error goes through the label key's redaction, as a failed
+    row's reason does."""
+    if job is None or self.args.sink != "bq":
+      self._close(planned, exc)
+      return
+    evaluation_id = self.attempt.evaluation_id
+    uri = planned.label_key_uri
+    ended = (f"job {job} ended without completing "
+             f"({type(exc).__name__}: {_redacted(exc, uri)})")
+    try:
+      found = self._read_final()
+    except Exception as read_exc:  # pylint: disable=broad-exception-caught  # any read failure means "unknown": write nothing
+      print(
+          f"sdfb-eval: evaluation {evaluation_id}: {ended}, and the registry "
+          f"could not be read ({type(read_exc).__name__}: "
+          f"{_redacted(read_exc, uri)}). No registry row was written: its "
+          "FINAL row may be there. Read the result later with: "
+          f"{self.how_to_read}",
+          file=sys.stderr)
+      return
+    if found is None:
+      self._close(planned, exc)
+      return
+    status = found.get("status")
+    print(
+        f"sdfb-eval: evaluation {evaluation_id}: {ended}, but the registry "
+        f"already holds a FINAL row ({status}): no further row was written. "
+        f"Read it with: {self.how_to_read}",
+        file=sys.stderr)
+
   def _leave_running(self, job: str) -> None:
     """A submitted job is still running: write nothing, say so."""
     evaluation_id = self.attempt.evaluation_id
@@ -967,6 +1053,9 @@ class _Run:
     error is an ordinary one (a warning says so: the evaluation
     completed); an interrupt is re-raised, with no row written.
 
+    A run that ended in another state is closed through `_close_ended`
+    (a submitted job's registry is read back first).
+
     Raises:
       RuntimeError: the run ended in a state other than DONE.
       BaseException: whatever interrupted the wait, unchanged.
@@ -990,7 +1079,7 @@ class _Run:
       if _still_running(job, state):
         self._leave_running(str(job))
       else:
-        self._close(planned, exc)
+        self._close_ended(planned, job, exc)
       raise
     if state is None or state == PipelineState.DONE:
       return
@@ -1000,7 +1089,7 @@ class _Run:
     if _still_running(job, state):
       self._leave_running(str(job))
     else:
-      self._close(planned, error)
+      self._close_ended(planned, job, error)
     raise error
 
   def collect(self, planned: EvaluationPlan) -> dict[str, Any]:
@@ -1022,15 +1111,7 @@ class _Run:
       return final
     evaluation_id = self.attempt.evaluation_id
     try:
-      stored = read_bq(
-          self.bq,
-          project=self.project,
-          dataset=self.args.output_dataset,
-          evaluation_id=evaluation_id,
-          metrics=False)
-      found = stored.final
-    except NoSuchEvaluationError:
-      found = None
+      found = self._read_final()
     except Exception as exc:
       raise RuntimeError(
           f"evaluation {evaluation_id}: the job finished, but the registry "
@@ -1141,6 +1222,14 @@ def _drive(this: _Run, beam_args: Sequence[str], wait: bool,
     registry.record_failure(_failed, planned, exc, this.env.now())
     raise
   key_mode = label_key_mode(args.label_key_uri)
+  if _handed_over(result):  # a template launch: nothing ran, nothing to wait
+    print(f"evaluation {attempt.evaluation_id}: handed to {args.runner} as a "
+          "template (the launcher submits the job; no job id is known "
+          "here), not waited for\n"
+          f"  label key: {key_mode}\n"
+          f"  written to: {this.where} (the RUNNING row stays open until "
+          "the job writes the FINAL row; --fail_on is not applied here)")
+    return 0
   if not wait:
     job = _job_id(result)
     named = f" as job {job}" if job else ""

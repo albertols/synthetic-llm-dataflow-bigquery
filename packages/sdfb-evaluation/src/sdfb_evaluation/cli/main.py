@@ -144,7 +144,6 @@ _COUNT_FLAGS = (
     ("--detection_sample_rows", 50_000,
      "rows per side in the detection (C2ST) sample"),
     ("--pair_max_columns", 20, "columns whose pairs are compared, per table"),
-    ("--topk_profile", 1000, "values kept in a top-k profile"),
     ("--row_flags_top_k", 100, "row flags kept per check and table"),
 )
 

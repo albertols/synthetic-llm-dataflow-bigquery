@@ -166,7 +166,8 @@ dense profile of the source:
 
 The value is the largest available component (the catalogue's formula).
 With no stats (tier off, no stats table, no reference digest, no row, a
-read error) every column is not_evaluated with the reason.
+read BigQuery refused) every column is not_evaluated with the reason; a
+read error a retry may remove fails the run instead (`read_source_stats`).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -189,7 +190,12 @@ from sdfb_evaluation.beam import census, dense, membership, privacy
 from sdfb_evaluation.beam.dense import DenseProfile, DenseSpec
 from sdfb_evaluation.beam.label_key import label_key_mode
 from sdfb_evaluation.catalogue import load_catalogue
-from sdfb_evaluation.context.bq import BqApiError, normalize_fqn, quote_fqn
+from sdfb_evaluation.context.bq import (
+    BqApiError,
+    is_refusal,
+    normalize_fqn,
+    quote_fqn,
+)
 from sdfb_evaluation.schemas import load_schema
 from sdfb_evaluation.scoring import (
     FAMILIES,
@@ -1031,8 +1037,15 @@ def read_source_stats(plan: EvaluationPlan,
                       query: StatsQuery | None) -> dict[str, TableStats]:
   """The generator's source_table_stats of every evaluated table, read on
   the driver through `query` (`Bq.query`'s shape: `query(sql, params,
-  max_bytes=…)`; a fake in tests). A table without stats gets the reason;
-  a read error never fails the run."""
+  max_bytes=…)`; a fake in tests). A table without stats gets the reason,
+  as does one whose read BigQuery REFUSES (`context.bq.is_refusal`) or
+  whose stats rows are malformed.
+
+  Raises:
+    BqApiError: a read failed for a reason a retry may remove (a 5xx, a
+      429, no status): the run fails instead of publishing a drift check
+      that is missing by accident, as for pins and pools (Ruling R113).
+  """
   params = plan.launch.params
   tier_raw = params.get("source_stats")
   tier = str(tier_raw).strip().lower() if tier_raw not in (None, "") else None
@@ -1058,6 +1071,8 @@ def read_source_stats(plan: EvaluationPlan,
           max_bytes=plan.budget.max_bytes_billed)
       columns = {str(row["column"]): _column_stats(row) for row in rows}
     except _STATS_ERRORS as exc:
+      if isinstance(exc, BqApiError) and not is_refusal(exc):
+        raise
       out[table.name] = TableStats(
           tier=tier,
           reason=(f"source_table_stats could not be read "

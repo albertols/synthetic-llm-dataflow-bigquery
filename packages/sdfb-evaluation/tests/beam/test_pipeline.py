@@ -53,6 +53,8 @@ from apache_beam.portability import common_urns
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.testing.test_pipeline import TestPipeline as BeamTestPipeline
 
+from sdfb_evaluation.beam import census as census_module
+from sdfb_evaluation.beam import dense as dense_module
 from sdfb_evaluation.beam import pipeline as pipeline_module
 from sdfb_evaluation.beam.assemble import stable_floats
 from sdfb_evaluation.beam.io import InMemorySources, LocalJsonSinks
@@ -73,6 +75,8 @@ from sdfb_evaluation.beam.relational import (
 from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.plan import SAMPLE_MODULUS, PrepareStatement
 from sdfb_evaluation.context.scope import pin_source, sampled_read
+from sdfb_evaluation.report.render import compare
+from sdfb_evaluation.report.store import read_local
 from sdfb_evaluation.scoring import is_aggregate
 from sdfb_evaluation.types import Side
 
@@ -881,6 +885,177 @@ def test_narrow_edges_at_a_large_offset_persist_as_computed(tmp_path):
       payload = row["payload"]
       for name in ("mean", "std", "skewness", "kurtosis_excess"):
         assert payload[name] == stable_floats(payload[name]), (name, row)
+
+
+def _salaries(n: int, seed: int, base: int) -> list[dict[str, Any]]:
+  rng = random.Random(seed)
+  return [{
+      "id": base + i,
+      "seen_at": None,
+      "reading": round(rng.lognormvariate(10.5, 0.4), 2),
+  } for i in range(n)]
+
+
+def test_compare_reads_psi_across_two_runs_of_a_small_column(tmp_path):
+  """Ruling R113 (I5): a 120-row column publishes its histogram on edges
+  thinned to k source records apart. The thinning reads the source's
+  counts only, so two runs over the same source — here with two
+  different synthetic sides — publish the same edges under the same
+  `edges_digest`, and `compare` computes their PSI."""
+  source = _salaries(120, 1, 1000)
+  stored = []
+  for name, seed in (("one", 2), ("two", 3)):
+    synthetic = _salaries(120, seed, 9000)
+    table = table_plan("events", _NARROW_FIELDS, source, synthetic, pk=("id",))
+    plan = evaluation_plan([table],
+                           evaluation_id=f"ev_small_{name}",
+                           label_key_uri=None)
+    rows_by = {("events", "source"): source, ("events", "synthetic"): synthetic}
+    _run(plan, rows_by, tmp_path / name)
+    stored.append(read_local(str(tmp_path / name)))
+  histograms = [{
+      (r["column_name"], r["side"]): r
+      for r in run.profiles
+      if r["profile_kind"] == "histogram"
+  }
+                for run in stored]
+  for side in ("source", "synthetic"):
+    one, two = (h[("reading", side)] for h in histograms)
+    edges = one["payload"]["edges"]
+    assert 2 <= len(edges) <= 12 and edges == two["payload"]["edges"], side
+    assert one["edges_digest"] == two["edges_digest"], side
+  assert min(histograms[0][("reading", "source")]["payload"]["counts"]) >= 10
+  drift = {
+      (r["column"], r["side"]): r for r in compare(*stored)["profiles"]["rows"]
+  }
+  assert drift[("reading", "source")]["psi"] == 0  # the same source rows
+  synthetic = drift[("reading", "synthetic")]
+  assert synthetic["psi"] is not None and synthetic["psi"] > 0
+  assert synthetic["edges_digest_a"] == synthetic["edges_digest_b"]
+  assert not synthetic["note"].startswith("not comparable")
+
+
+# --------------------------------------------------------------------------
+# sampled mode (Ruling R72; the final review's C1)
+# --------------------------------------------------------------------------
+_PEOPLE_FIELDS: tuple[dict[str, str], ...] = (
+    {
+        "name": "id",
+        "type": "INT64",
+        "mode": "REQUIRED"
+    },
+    {
+        "name": "note",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "age",
+        "type": "INT64",
+        "mode": "NULLABLE"
+    },
+)
+_NOTE_WORDS = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+               "hotel", "india", "juliet", "kilo", "lima", "mike", "november",
+               "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform",
+               "victor", "whiskey", "xray", "yankee", "zulu")
+
+
+def _people(n: int, seed: int, base: int) -> list[dict[str, Any]]:
+  rng = random.Random(seed)
+  return [{
+      "id": base + i,
+      "note": " ".join(rng.choice(_NOTE_WORDS) for _ in range(7)),
+      "age": rng.randint(18, 80),
+  } for i in range(n)]
+
+
+def _stored(sinks: LocalJsonSinks, column: str | None) -> dict[str, dict]:
+  return {
+      row["metric_id"]: row
+      for row in sinks.read_rows("evaluation_metrics")
+      if row["column_name"] == column and not is_aggregate(row["metric_id"])
+  }
+
+
+def test_sampled_mode_never_stores_a_sample_as_exact(tmp_path):
+  """The final review's probe, end to end. Half the synthetic notes are
+  verbatim source notes: an exact run stores a copy rate of 0.5 and a
+  novelty of 0.5, both FAIL. With the plan's source rate at 0.1 (every
+  tenth source row read) the same pipeline used to store 0.046 as an
+  `exact` copy rate and turn novelty into a PASS. Now what needs every
+  source row is not_evaluated with the R72 reason, and every other dense
+  and census row is `method` = sample with the rate, over the rows read."""
+  n = 1500
+  source, synthetic = _people(n, 1, 1), _people(n, 2, 100_000)
+  rng = random.Random(9)
+  for i in range(0, n, 2):
+    synthetic[i]["note"] = source[rng.randrange(n)]["note"]
+  people = table_plan(
+      "people", _PEOPLE_FIELDS, source, synthetic, pk=("id",), panel_rows=150)
+  runs = {}
+  for name, rate in (("exact", None), ("sampled", 0.1)):
+    table = dataclasses.replace(people, sample_rate_source=rate)
+    plan = evaluation_plan([table],
+                           evaluation_id=f"ev_{name}",
+                           label_key_uri=None)
+    rows_by = {
+        ("people", "source"): source if rate is None else source[::10],
+        ("people", "synthetic"): synthetic,
+    }
+    runs[name] = _run(plan, rows_by, tmp_path / name)
+  exact, sampled = _stored(runs["exact"],
+                           "note"), _stored(runs["sampled"], "note")
+  for metric_id in ("field.substantive_copy_rate", "column.novelty_mass"):
+    row = exact[metric_id]
+    assert (row["value"], row["status"], row["method"]) == (0.5, "fail",
+                                                            "exact"), row
+    row = sampled[metric_id]
+    reason = row["detail"]["reason"]
+    assert row["value"] is None and row["status"] == "not_evaluated", row
+    assert reason.startswith("sampled mode cannot measure"), reason
+    assert "the source side is a 0.1 row sample" in reason, reason
+    assert reason.endswith("run exact mode"), reason
+  # every dense and census row of the sampled run: a sample, never exact
+  owned = set(dense_module.OWNED_METRIC_IDS) | set(
+      census_module.OWNED_METRIC_IDS)
+  rows = [
+      r for r in runs["sampled"].read_rows("evaluation_metrics")
+      if r["metric_id"] in owned
+  ]
+  assert len(rows) > 30
+  for row in rows:
+    if row["metric_id"] == "column.distinct_ceiling_hit":  # synthetic only
+      assert row["method"] == "exact" and row["sample_rate"] is None
+      continue
+    if row["metric_id"] == "field.type_validity":  # its value is synthetic's
+      assert row["method"] == "exact" and row["sample_rate"] is None
+      continue
+    assert row["method"] == "sample", row
+    assert row["sample_rate"] == 0.1, row
+    assert row["detail"]["sample_rates"] == {"source": 0.1}, row
+    assert row["n_source"] is None or row["n_source"] <= n // 10, row
+  nulls = _stored(runs["sampled"], "age")["column.null_rate_delta"]
+  assert (nulls["n_source"], nulls["n_synthetic"]) == (n // 10, n)
+  # the exact run's rows carry no sample
+  assert all(r["method"] != "sample" and r["sample_rate"] is None
+             for r in runs["exact"].read_rows("evaluation_metrics")
+             if r["metric_id"] in owned)
+  # the full-source match rate was already withheld (membership, R72)
+  assert _stored(runs["sampled"],
+                 None)["row.exact_match_rate"]["status"] == "not_evaluated"
+  # profiles of the sampled side say so; the synthetic side's do not
+  kinds = {"histogram", "quantiles", "moments", "length_hist", "topk"}
+  profiles = [
+      r for r in runs["sampled"].read_rows("evaluation_profiles")
+      if r["profile_kind"] in kinds
+  ]
+  assert {r["profile_kind"] for r in profiles} == kinds
+  for row in profiles:
+    if row["side"] == "source":
+      assert row["payload"]["sample_rate"] == 0.1, row
+    elif row["side"] == "synthetic":
+      assert "sample_rate" not in row["payload"], row
 
 
 # --------------------------------------------------------------------------

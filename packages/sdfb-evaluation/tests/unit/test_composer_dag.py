@@ -323,6 +323,127 @@ def test_failure_callback_binds_every_parameter_it_uses():
   assert used <= set(_strings(_function(tree, "_close_running_row")))
 
 
+# The final review's I4: the callback closes a row only when the job cannot.
+_NOT_DONE_TERMINAL = {
+    "JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_UPDATED",
+    "JOB_STATE_DRAINED"
+}
+_MAY_STILL_WRITE = ("JOB_STATE_RUNNING", "JOB_STATE_PENDING",
+                    "JOB_STATE_QUEUED", "JOB_STATE_CANCELLING",
+                    "JOB_STATE_DRAINING", "JOB_STATE_STOPPED",
+                    "JOB_STATE_UNKNOWN", "JOB_STATE_DONE")
+
+
+def _pure(tree: ast.Module, *names: str) -> dict:
+  """The named module-level constants and functions of the DAG, executed
+  on their own: they import nothing, so a pure decision can be called
+  without Airflow (the file itself is never imported)."""
+  body = [
+      n for n in tree.body
+      if (isinstance(n, ast.FunctionDef) and n.name in names) or
+      (isinstance(n, ast.Assign) and any(
+          isinstance(t, ast.Name) and t.id in names for t in n.targets))
+  ]
+  assert len(body) == len(names), names
+  scope: dict = {}
+  code = compile(
+      ast.Module(body=body, type_ignores=[]), str(EVALUATION_DAG), "exec")
+  exec(code, scope)  # pylint: disable=exec-used  # two pure definitions of a file Airflow alone can import
+  return scope
+
+
+def test_the_callback_closes_a_row_only_when_the_job_cannot():
+  """A task can fail on the Airflow side while its Dataflow job runs on:
+  a FAILED row written then is followed by the job's own FINAL — two
+  terminal rows, and in one ordering FAILED is the latest for a run that
+  succeeded. FAILED is written only for a job in a terminal state other
+  than done, or when the launch pushed no job id (no job runs)."""
+  scope = _pure(
+      _tree(EVALUATION_DAG), "_ENDED_NOT_DONE", "_callback_closes_row")
+  assert set(scope["_ENDED_NOT_DONE"]) == _NOT_DONE_TERMINAL
+  closes = scope["_callback_closes_row"]
+  for state in _NOT_DONE_TERMINAL:
+    assert closes("2026-09-14_01_00_00-777", state) is True, state
+  for state in (*_MAY_STILL_WRITE, None):  # None: the state was not read
+    assert closes("2026-09-14_01_00_00-777", state) is False, state
+  # no job id: the state was never read, so nothing is written, whatever
+  # state is passed (a failed task pushes no return value to XCom)
+  for state in (None, "JOB_STATE_RUNNING", *_NOT_DONE_TERMINAL):
+    assert closes("", state) is False, state
+    assert closes(None, state) is False, state
+
+
+def test_the_job_id_comes_from_the_return_value_then_the_launch_config():
+  scope = _pure(_tree(EVALUATION_DAG), "_launched_job_id")
+  found = scope["_launched_job_id"]
+  assert found({"id": "A"}, {"job_id": "B"}) == "A"  # the return value first
+  assert found(None, {"job_id": "B"}) == "B"  # a failed task: only the config
+  assert found({"id": ""}, {"job_id": "B"}) == "B"
+  assert found({}, None) == "" and found(None, None) == ""
+  assert found("not a dict", 7) == "" and found({"id": 5}, {"job_id": 6}) == ""
+
+
+def test_the_callback_reads_the_job_state_before_it_inserts():
+  tree = _tree(EVALUATION_DAG)
+  callback = _function(tree, "_close_running_row")
+  body = ast.unparse(callback)
+  assert "xcom_pull(task_ids='start_evaluation')" in body
+  # the fallback key the launch operator pushes before it can fail
+  assert "key='dataflow_job_config'" in body
+  # the decision's arguments are the pulled id and the state read for it
+  (assign_id,) = [
+      n for n in ast.walk(callback)
+      if isinstance(n, ast.Assign) and n.targets[0].id == "job_id"
+  ]
+  assert "_launched_job_id(" in ast.unparse(assign_id.value)
+  (assign_state,) = [
+      n for n in ast.walk(callback)
+      if isinstance(n, ast.Assign) and n.targets[0].id == "state"
+  ]
+  assert ast.unparse(assign_state.value) == "_job_state(job_id)"
+  (no_id,) = [
+      n for n in ast.walk(callback)
+      if isinstance(n, ast.If) and ast.unparse(n.test) == "not job_id"
+  ]
+  assert isinstance(no_id.body[-1], ast.Return) and no_id.body[-1].value is None
+  assert "logging.warning" in ast.unparse(no_id)
+  (decision,) = [
+      n for n in ast.walk(callback)
+      if isinstance(n, ast.If) and "_callback_closes_row" in ast.unparse(n.test)
+  ]
+  assert isinstance(decision.test, ast.UnaryOp)  # `if not closes: return`
+  assert isinstance(decision.test.op, ast.Not)
+  assert isinstance(decision.body[-1], ast.Return)
+  assert decision.body[-1].value is None  # nothing is written
+  assert "logging." in ast.unparse(decision) and "still" in ast.unparse(
+      decision)
+  (call,) = [
+      n for n in ast.walk(decision.test) if isinstance(n, ast.Call) and
+      ast.unparse(n.func) == "_callback_closes_row"
+  ]
+  assert [ast.unparse(a) for a in call.args] == ["job_id", "state"]
+  insert = _one(callback, "BigQueryInsertJobOperator")
+  # no id is checked, then the state read, then decided, before any write
+  assert no_id.end_lineno < assign_state.lineno < decision.lineno
+  assert decision.end_lineno < insert.lineno
+
+
+def test_the_job_state_comes_from_the_dataflow_hook_and_never_raises():
+  reader = _function(_tree(EVALUATION_DAG), "_job_state")
+  body = ast.unparse(reader)
+  assert "from airflow.providers.google.cloud.hooks.dataflow import DataflowHook" in body
+  get_job = _one(reader, "get_job")
+  assert {k.arg for k in get_job.keywords
+         } == {"job_id", "project_id", "location"}
+  assert not get_job.args  # the hook's project fallback takes keywords only
+  assert "currentState" in _strings(reader)
+  # an unreadable state is "unknown" (None), which closes nothing
+  (guard,) = [n for n in ast.walk(reader) if isinstance(n, ast.Try)]
+  (handler,) = guard.handlers
+  assert isinstance(handler.body[-1], ast.Return)
+  assert ast.literal_eval(handler.body[-1].value) is None
+
+
 # --------------------------------------------------------------------------- #
 # The generation DAG's opt-in trigger
 # --------------------------------------------------------------------------- #

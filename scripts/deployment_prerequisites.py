@@ -61,6 +61,26 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
                        (SKIP, never ACTION). A PRESENT-but-drifted table IS
                        an ACTION — the driver's write_rows load job would
                        fail mid-launch. Pass --source-stats-table "" to omit.
+ 13. Evaluation       — the standalone evaluator `packages/sdfb-evaluation`
+                       (ADR 0041; `sdfb-eval`), a SEPARATE job after generation.
+                       OPTIONAL BY DESIGN like steps 10 and 11: nothing
+                       provisioned → SKIP with the `sdfb-eval schemas --apply`
+                       command; a HALF-provisioned set, or a present table that
+                       drifted from the committed schema file (column, type,
+                       mode, partitioning, partition expiration where the package
+                       sets one, clustering) → ACTION, because the
+                       evaluator's load job would fail. Sub-steps: 13a the
+                       committed evaluator files · 13b the evaluation dataset
+                       (+ the temp dataset when it is the same) · 13c-13f the
+                       four `evaluation_*` tables · 13g-13h the two views ·
+                       13i a distinct temp dataset · 13j the flex template
+                       object (--templates-bucket) · 13k the optional label
+                       key (gs:// object, absolute local path, or Secret
+                       Manager version; never read). The package is read as DATA (files and `ast`),
+                       never imported; when it is not in this tree the whole
+                       step is ONE SKIP. `--require-evaluation` makes every
+                       "absent → SKIP" an ACTION; `--evaluation-dataset ""`
+                       omits the step.
 
 Exit code: 0 when no ACTION items (KO=0), 1 when any ACTION (KO). SKIP (could not
 verify — offline / no creds / missing lib) never fails the run but is surfaced.
@@ -73,9 +93,13 @@ Usage:
         --templates-bucket my-proj-dataflow-templates \\
         --ddl-uri gs://my-proj-dataflow/ddl/customers_ddl.json \\
         --rag-chunks-table my-proj.synthetic_rag.rag_chunks
+    # a deployment that also evaluates (ADR 0041) adds:
+    #   --require-evaluation \\
+    #   --evaluation-label-key-uri projects/my-proj/secrets/eval-key/versions/1
 
-Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
-(ADR 0020, 0021, 0032).
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration;
+§11 Evaluation (sdfb-evaluation)
+(ADR 0020, 0021, 0032, 0041).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -88,8 +112,11 @@ Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuratio
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.util
 import json
+import os
+import re
 import subprocess
 import sys
 import warnings
@@ -184,6 +211,28 @@ SOURCE_STATS_MIN_COLUMNS = [
     "profiler_version",
     "computed_at",
 ]
+
+# Step 13 — the standalone evaluator (ADR 0041). Its package is NEVER imported
+# (its own lock and Python pin); every fact below is read from its files as
+# data. A copy of the repository may not contain the package at all.
+EVAL_PACKAGE_DIR = REPO_ROOT / "packages" / "sdfb-evaluation"
+EVAL_TABLES = ("evaluation_data_history", "evaluation_metrics",
+               "evaluation_profiles", "evaluation_row_flags")
+EVAL_VIEWS = ("evaluation_latest", "evaluation_latest_per_job")
+_EVAL_BUILD_SCRIPT = "packages/sdfb-evaluation/deploy/build_flex_template.sh"
+# The live API reports the legacy type names; the schema files use the SQL ones.
+_BQ_TYPE_ALIASES = {
+    "INT64": "INTEGER",
+    "FLOAT64": "FLOAT",
+    "BOOL": "BOOLEAN",
+    "STRUCT": "RECORD",
+}
+# PARTITIONING values are (field, DAY | MONTH, expiration days or None).
+_PARTITIONING_ARITY = 3
+_SECONDS_PER_DAY = 86400
+_MS_PER_DAY = 86400 * 1000
+_SECRET_VERSION = re.compile(
+    r"^projects/([^/]+)/secrets/([^/]+)/versions/([^/]+)$")
 
 
 @dataclass
@@ -936,6 +985,30 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
       "Optional by design — absent, stats land as milestone "
       "+ JSON artifact only.")
   p.add_argument(
+      "--evaluation-dataset",
+      default=None,
+      help="Dataset of the evaluator's four tables and two views (step 13, "
+      "ADR 0041): a dataset id or project.dataset. Default the dataset of "
+      "--validation-runs-table; pass '' to omit step 13.")
+  p.add_argument(
+      "--evaluation-temp-dataset",
+      default="",
+      help="The evaluator's --temp_dataset (snapshots and pinned copies). "
+      "Default '' = the evaluation dataset.")
+  p.add_argument(
+      "--evaluation-label-key-uri",
+      default="",
+      help="The evaluator's --label_key_uri, one of three forms: a gs:// "
+      "object, a Secret Manager version projects/P/secrets/S/versions/V, or "
+      "an absolute local path (local runs only: it must exist on every "
+      "Dataflow worker too). Optional; empty = a random key per run (hashed "
+      "labels not stable across runs).")
+  p.add_argument(
+      "--require-evaluation",
+      action="store_true",
+      help="Treat an unprovisioned evaluation layer (tables, views, flex "
+      "template) as ACTION instead of SKIP.")
+  p.add_argument(
       "--models-dir",
       default=str(REPO_ROOT / "models"),
       help="Local weights root (default ./models).")
@@ -974,7 +1047,18 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     args.freetext_pools_table = f"{args.project}.synthetic_rag.freetext_pools"
   if args.source_stats_table is None:
     args.source_stats_table = f"{args.project}.synthetic_rag.source_table_stats"
+  # Step 13: dataset ids become project.dataset; '' stays '' (opt-out / same).
+  if args.evaluation_dataset is None:
+    args.evaluation_dataset = args.validation_runs_table.rsplit(".", 1)[0]
+  args.evaluation_dataset = _qualify_dataset(args.evaluation_dataset,
+                                             args.project)
+  args.evaluation_temp_dataset = _qualify_dataset(args.evaluation_temp_dataset,
+                                                  args.project)
   return args
+
+
+def _qualify_dataset(value: str, project: str) -> str:
+  return value if not value or "." in value else f"{project}.{value}"
 
 
 def step12_relationships(ctx: Ctx) -> None:
@@ -1063,6 +1147,444 @@ def _load_registry(uri: str):
   return load_relationship_registry(uri)
 
 
+# --------------------------------------------------------------------------- #
+# step 13 — evaluation (sdfb-evaluation, ADR 0041)
+# --------------------------------------------------------------------------- #
+def _eval_src(pkg: Path) -> Path:
+  return pkg / "src" / "sdfb_evaluation"
+
+
+def _read_literal(path: Path, name: str):
+  """The literal value assigned to module-level `name` in `path`, or None."""
+  try:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+  except (OSError, SyntaxError, ValueError):
+    return None
+  for node in tree.body:
+    if isinstance(node, ast.Assign) and len(node.targets) == 1:
+      target, value = node.targets[0], node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+      target, value = node.target, node.value
+    else:
+      continue
+    if isinstance(target, ast.Name) and target.id == name:
+      try:
+        return ast.literal_eval(value)
+      except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return None
+  return None
+
+
+def eval_constants(pkg: Path) -> dict:
+  """TABLES / PARTITIONING / CLUSTERING of the package's `schemas/__init__.py`.
+
+    Read with `ast`, never imported. An entry is None when it cannot be read
+    as a literal of the expected shape: the comparison that needs it is then
+    skipped (and the result line says so), never failed.
+    """
+  init = _eval_src(pkg) / "schemas" / "__init__.py"
+  tables = _read_literal(init, "TABLES")
+  partitioning = _read_literal(init, "PARTITIONING")
+  clustering = _read_literal(init, "CLUSTERING")
+  if not (isinstance(tables, tuple) and
+          all(isinstance(t, str) for t in tables)):
+    tables = None
+  if not (isinstance(partitioning, dict) and all(
+      isinstance(v, tuple) and len(v) == _PARTITIONING_ARITY
+      for v in partitioning.values())):
+    partitioning = None
+  if not (isinstance(clustering, dict) and
+          all(isinstance(v, tuple) for v in clustering.values())):
+    clustering = None
+  return {
+      "tables": tables,
+      "partitioning": partitioning,
+      "clustering": clustering
+  }
+
+
+def eval_version(pkg: Path) -> str | None:
+  try:
+    text = (_eval_src(pkg) / "version.py").read_text(encoding="utf-8")
+  except OSError:
+    return None
+  match = re.search(r'^EVALUATOR_VERSION\s*=\s*["\']([^"\']+)["\']', text,
+                    re.MULTILINE)
+  return match.group(1) if match else None
+
+
+def step13_evaluation(ctx: Ctx) -> None:
+  """ADR 0041 — the standalone evaluator's tables, views and config.
+
+    Optional by design, like steps 10 and 11: evaluation is a separate job an
+    operator opts into, so a layer that is simply not provisioned yet is SKIP
+    (ACTION under `--require-evaluation`). Never SKIP: a half-provisioned
+    set, and a present table whose columns, partitioning or clustering
+    drifted from the committed schema file (the evaluator's load job would
+    fail). The four tables and two views are ONE provisioning unit
+    (`sdfb-eval schemas --apply` creates them together): any one present
+    makes an absent one an ACTION.
+    """
+  a = ctx.args
+  pkg = EVAL_PACKAGE_DIR
+  if not pkg.is_dir():
+    ctx.add(
+        "13", "Evaluation (sdfb-evaluation)", SKIP,
+        "the evaluator package (packages/sdfb-evaluation) is not in this "
+        "tree — evaluation checks omitted")
+    return
+  if not a.evaluation_dataset:
+    ctx.add("13", "Evaluation (sdfb-evaluation)", SKIP,
+            "--evaluation-dataset '' — check omitted")
+    return
+  schemas = _eval_config_files(ctx, pkg)
+  client, reason = bq_client(a.project)
+  not_found: type[Exception] = Exception
+  if client is not None:
+    from google.api_core.exceptions import NotFound
+    not_found = NotFound
+  blocked = _eval_dataset(ctx, client, not_found, reason)
+  _eval_registry(ctx, client, not_found, pkg, schemas, blocked)
+  _eval_temp_dataset(ctx, client, not_found, reason)
+  _eval_template(ctx, pkg)
+  _eval_label_key(ctx)
+
+
+def _eval_config_files(ctx: Ctx, pkg: Path) -> dict:
+  """13a — the committed evaluator files exist; returns each parsed schema
+    (None when unparseable) for the contract checks."""
+  src = _eval_src(pkg)
+  tables = eval_constants(pkg)["tables"] or EVAL_TABLES
+  schemas: dict = {}
+  bad: list[str] = []
+  for name in tables:
+    path = src / "schemas" / f"{name}.schema.json"
+    try:
+      fields = json.loads(path.read_text(encoding="utf-8"))
+      if not (isinstance(fields, list) and fields and all(
+          isinstance(f, dict) and "name" in f and "type" in f for f in fields)):
+        raise ValueError("not a JSON list of fields")
+      schemas[name] = fields
+    except OSError:
+      schemas[name] = None
+      bad.append(f"{flink(path)} missing")
+    except ValueError as e:
+      schemas[name] = None
+      bad.append(f"{flink(path)} unparseable ({short(str(e), 60)})")
+  for path in (src / "schemas" / "views.sql",
+               src / "catalogue" / "metrics.yaml"):
+    if not path.is_file():
+      bad.append(f"{flink(path)} missing")
+  if bad:
+    ctx.add("13a", "Evaluator config artifacts", ACTION, " · ".join(bad),
+            "restore the committed evaluator files")
+  else:
+    ctx.add(
+        "13a", "Evaluator config artifacts", OK,
+        f"{flink(src / 'schemas')} — {len(tables)} schema files · views.sql "
+        "· catalogue/metrics.yaml")
+  return schemas
+
+
+def _eval_dataset(ctx: Ctx, client, not_found, reason: str) -> str:
+  """13b — the evaluation dataset (and the temp dataset when it is the same).
+
+    Returns "" when the dataset is usable, else why the objects in it were
+    not checked."""
+  a = ctx.args
+  proj, ds = a.evaluation_dataset.split(".", 1)
+  link = bq_dataset_link(proj, ds)
+  same = a.evaluation_temp_dataset in ("", a.evaluation_dataset)
+  note = " · also the evaluator's temp dataset (--temp_dataset)" if same else ""
+  if client is None:
+    ctx.add("13b", f"Evaluation dataset · {ds}", SKIP, f"{link} — {reason}")
+    return reason
+  try:
+    client.get_dataset(a.evaluation_dataset)
+  except not_found:
+    ctx.add(
+        "13b", f"Evaluation dataset · {ds}", ACTION,
+        f"{link} — not found{note}",
+        f"create dataset `{ds}` in the pipeline region (`sdfb-eval schemas` "
+        "needs it to exist)")
+    return "dataset missing (13b)"
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    ctx.add("13b", f"Evaluation dataset · {ds}", SKIP,
+            f"{link} — {short(f'{type(e).__name__}: {e}')}")
+    return "dataset not verified (13b)"
+  ctx.add("13b", f"Evaluation dataset · {ds}", OK, f"{link}{note}")
+  return ""
+
+
+def _eval_temp_dataset(ctx: Ctx, client, not_found, reason: str) -> None:
+  """13i — a temp dataset DIFFERENT from the evaluation dataset must exist
+    (the same one is covered by 13b)."""
+  a = ctx.args
+  if a.evaluation_temp_dataset in ("", a.evaluation_dataset):
+    return
+  proj, ds = a.evaluation_temp_dataset.split(".", 1)
+  link = bq_dataset_link(proj, ds)
+  name = f"Evaluation temp dataset · {ds}"
+  if client is None:
+    ctx.add("13i", name, SKIP, f"{link} — {reason}")
+    return
+  try:
+    client.get_dataset(a.evaluation_temp_dataset)
+    ctx.add("13i", name, OK, link)
+  except not_found:
+    ctx.add(
+        "13i", name, ACTION, f"{link} — not found",
+        f"create dataset `{ds}`: the evaluator writes its source pins and "
+        "snapshots there (--temp_dataset)")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    ctx.add("13i", name, SKIP, f"{link} — {short(f'{type(e).__name__}: {e}')}")
+
+
+def _eval_registry(ctx: Ctx, client, not_found, pkg: Path, schemas: dict,
+                   blocked: str) -> None:
+  """13c-13h — the four tables and two views."""
+  a = ctx.args
+  proj, ds = a.evaluation_dataset.split(".", 1)
+  consts = eval_constants(pkg)
+  tables = consts["tables"] or EVAL_TABLES
+  objects = [(n, False) for n in tables] + [(v, True) for v in EVAL_VIEWS]
+  found: dict = {}
+  if not blocked:
+    for name, _ in objects:
+      try:
+        found[name] = ("ok", client.get_table(f"{a.evaluation_dataset}.{name}"))
+      except not_found:
+        found[name] = ("absent", None)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        found[name] = ("error", short(f"{type(e).__name__}: {e}"))
+  provisioned = any(state == "ok" for state, _ in found.values())
+  create = f"uv run sdfb-eval schemas --project {proj} --dataset {ds} --apply"
+  for i, (name, is_view) in enumerate(objects):
+    step = f"13{chr(ord('c') + i)}"
+    label = f"Evaluation {'view' if is_view else 'table'} · {name}"
+    fqn = f"{a.evaluation_dataset}.{name}"
+    link = bq_table_link(fqn)
+    state, live = found.get(name, ("blocked", blocked))
+    if state in ("blocked", "error"):
+      ctx.add(step, label, SKIP, f"{link} — {live}")
+    elif state == "absent":
+      _eval_absent(ctx, step, label, link, create, provisioned)
+    elif is_view:
+      kind = getattr(live, "table_type", None)
+      if kind == "VIEW":
+        ctx.add(step, label, OK, link)
+      else:
+        ctx.add(step, label, ACTION, f"{link} — not a view (it is a {kind})",
+                f"drop `{fqn}` and re-run `{create}` (it replaces the views)")
+    else:
+      _eval_table_contract(ctx, step, label, link, live, name,
+                           schemas.get(name), consts)
+
+
+def _eval_absent(ctx: Ctx, step: str, label: str, link: str, create: str,
+                 provisioned: bool) -> None:
+  if provisioned:
+    ctx.add(
+        step, label, ACTION,
+        f"{link} — not found while other evaluation objects exist "
+        "(half-provisioned)",
+        f"run `{create}` from packages/sdfb-evaluation: it creates the "
+        "missing tables, keeps the existing ones and replaces the views")
+  elif ctx.args.require_evaluation:
+    ctx.add(
+        step, label, ACTION, f"{link} — not found",
+        f"run `{create}` from packages/sdfb-evaluation "
+        "(--require-evaluation: the evaluation layer must exist)")
+  else:
+    ctx.add(
+        step, label, SKIP,
+        f"{link} — not found; evaluation is not provisioned yet (optional). "
+        f"To enable: `{create}` (from packages/sdfb-evaluation)")
+
+
+def _bq_type(kind) -> str:
+  kind = str(kind).upper()
+  return _BQ_TYPE_ALIASES.get(kind, kind)
+
+
+def _eval_table_contract(ctx: Ctx, step: str, label: str, link: str, live,
+                         name: str, want, consts: dict) -> None:
+  """A present table against its committed schema file, partitioning and
+    clustering. Extra live columns are fine."""
+  issues: list[str] = []
+  notes: list[str] = []
+  if want is None:
+    notes.append("columns not compared (schema file unusable, see 13a)")
+  else:
+    live_by_name = {f.name: f for f in live.schema}
+    missing: list[str] = []
+    wrong: list[str] = []
+    for spec in want:
+      got = live_by_name.get(spec["name"])
+      if got is None:
+        missing.append(spec["name"])
+        continue
+      want_type = _bq_type(spec["type"])
+      want_mode = spec.get("mode") or "NULLABLE"
+      if _bq_type(got.field_type) != want_type:
+        wrong.append(f"{spec['name']} is {_bq_type(got.field_type)} "
+                     f"(want {want_type})")
+      if (got.mode or "NULLABLE") != want_mode:
+        wrong.append(f"{spec['name']} mode {got.mode or 'NULLABLE'} "
+                     f"(want {want_mode})")
+      if want_type == "RECORD":
+        have = {s.name for s in (got.fields or [])}
+        missing += [
+            f"{spec['name']}.{sub['name']}" for sub in spec.get("fields", [])
+            if sub["name"] not in have
+        ]
+    if missing:
+      issues.append("missing columns: " + ", ".join(missing))
+    issues += wrong
+  _eval_layout(live, name, consts, issues, notes)
+  schema_ref = f"packages/sdfb-evaluation/.../schemas/{name}.schema.json"
+  if issues:
+    ctx.add(
+        step, label, ACTION, f"{link} — " + " · ".join(issues),
+        f"align the table with {schema_ref}: the evaluator's load job fails "
+        "on a missing or mistyped column. Columns can be added with "
+        "`bq update`; partitioning cannot be altered in place (recreate "
+        "the table, it only holds evaluation rows). A partition expiration "
+        "is set with `bq update --time_partitioning_expiration SECONDS "
+        "<table>` (a privacy retention rule for row flags)")
+  else:
+    cols = len(want) if want else len(live.schema)
+    detail = " · ".join([
+        f"{cols} cols", *(notes or ["partitioning and clustering as committed"])
+    ])
+    ctx.add(step, label, OK, f"{link} — {detail}")
+
+
+def _eval_layout(live, name: str, consts: dict, issues: list[str],
+                 notes: list[str]) -> None:
+  """Partitioning (field, type) and clustering against the package constants."""
+  if consts["partitioning"] is None or name not in consts["partitioning"]:
+    notes.append("partitioning not compared (constant not readable)")
+  else:
+    want_field, kind, want_days = consts["partitioning"][name]
+    part = getattr(live, "time_partitioning", None)
+    got_field = getattr(part, "field", None)
+    got_kind = getattr(part, "type_", None)
+    if part is None:
+      issues.append(f"not partitioned (want {kind} on {want_field})")
+    elif got_field != want_field or (got_kind and got_kind != kind):
+      issues.append(f"partitioned {got_kind or '?'} on {got_field} "
+                    f"(want {kind} on {want_field})")
+    if part is not None and want_days is not None:
+      _eval_retention(part, want_days, issues, notes)
+  if consts["clustering"] is None or name not in consts["clustering"]:
+    notes.append("clustering not compared (constant not readable)")
+  else:
+    want = list(consts["clustering"][name])
+    got = list(getattr(live, "clustering_fields", None) or [])
+    if got != want:
+      issues.append(f"clustering {got or 'none'} (want {want})")
+
+
+def _eval_retention(part, want_days: int, issues: list[str],
+                    notes: list[str]) -> None:
+  """Partition expiration (a privacy retention rule) against the package's
+    days: none or longer is an ACTION, shorter is fine."""
+  ms = getattr(part, "expiration_ms", None)
+  remedy = (f"`bq update --time_partitioning_expiration "
+            f"{want_days * _SECONDS_PER_DAY} <table>`")
+  if ms is None:
+    issues.append(f"no partition expiration (package: {want_days} days; "
+                  f"set it with {remedy})")
+  else:
+    got_days = ms / _MS_PER_DAY
+    shown = f"{got_days:g}"
+    if got_days > want_days:
+      issues.append(f"partition expiration {shown} days (package: "
+                    f"{want_days} days; shorten it with {remedy})")
+    elif got_days < want_days:
+      notes.append(f"retention {shown} days (shorter than the package's "
+                   f"{want_days}, fine)")
+
+
+def _eval_template(ctx: Ctx, pkg: Path) -> None:
+  """13j — the evaluator's flex template object for the committed version."""
+  a = ctx.args
+  label = "Evaluator flex template"
+  if not a.templates_bucket:
+    ctx.add("13j", label, SKIP, "no --templates-bucket given")
+    return
+  version = eval_version(pkg)
+  if version is None:
+    ctx.add("13j", label, SKIP,
+            "EVALUATOR_VERSION not readable from version.py")
+    return
+  bucket = bucket_of(a.templates_bucket)
+  uri = f"gs://{bucket}/synthetic/sdfb-evaluation-{version}-template.json"
+  link = gcs_link(uri, a.project)
+  client, reason = gcs_client()
+  if client is None:
+    ctx.add("13j", label, SKIP, f"{link} — {reason}")
+    return
+  build = (f"PROJECT_ID=… REGION=… REPOSITORY=… TEMPLATES_BUCKET={bucket} "
+           f"{_EVAL_BUILD_SCRIPT}")
+  try:
+    exists = client.bucket(bucket).blob(prefix_of(uri)).exists()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    ctx.add("13j", label, SKIP, f"{link} — {short(f'{type(e).__name__}: {e}')}")
+    return
+  if exists:
+    ctx.add("13j", label, OK, link)
+  elif a.require_evaluation:
+    ctx.add("13j", label, ACTION, f"{link} — not found", f"build it: `{build}`")
+  else:
+    ctx.add("13j", label, SKIP,
+            f"{link} — not built yet (optional). To build: `{build}`")
+
+
+def _eval_label_key(ctx: Ctx) -> None:
+  """13k — the optional label key. Existence only: the key's content is
+    never read or printed."""
+  a = ctx.args
+  label = "Evaluator label key"
+  uri = a.evaluation_label_key_uri
+  if not uri:
+    ctx.add(
+        "13k", label, SKIP,
+        "no --evaluation-label-key-uri — optional: the key is random per "
+        "run, so hashed row-flag and profile labels are not stable across runs")
+  elif uri.startswith("gs://"):
+    _gcs_object(
+        ctx, "13k", label, uri, a.project,
+        "upload the key object, or drop --evaluation-label-key-uri (random "
+        "per-run key)")
+  elif _SECRET_VERSION.match(uri):
+    proj, secret, version = _SECRET_VERSION.match(uri).groups()
+    ctx.add(
+        "13k", label, SKIP,
+        f"`{uri}` — Secret Manager version not verified here. Check: "
+        f"`gcloud secrets versions describe {version} --secret={secret} "
+        f"--project={proj}`; the evaluator's workers need "
+        "`roles/secretmanager.secretAccessor` on it")
+  elif os.path.isabs(uri):
+    # Existence and permission only: the key's content is never opened.
+    if os.path.isfile(uri) and os.access(uri, os.R_OK):
+      ctx.add(
+          "13k", label, OK,
+          f"`{uri}` — exists and is readable; the path must also exist on "
+          "every Dataflow worker, so this suits local runs")
+    else:
+      ctx.add(
+          "13k", label, ACTION, f"`{uri}` — missing or not readable",
+          "create the key file or fix its permissions, or use a gs:// "
+          "object or Secret Manager version for Dataflow runs")
+  else:
+    ctx.add(
+        "13k", label, ACTION, f"`{uri}` — not an accepted form",
+        "use one of: gs://BUCKET/OBJECT, projects/P/secrets/S/versions/V, or "
+        "an absolute local path")
+
+
 def main(argv: list[str] | None = None) -> int:
   warnings.filterwarnings("ignore", message=".*quota project.*")
   args = parse_args(argv)
@@ -1070,8 +1592,8 @@ def main(argv: list[str] | None = None) -> int:
   for step in (step1_source_ddl, step2_landing_schema, step3_local_weights,
                step4_bq_tables, step5_staging_bucket, step6_templates_bucket,
                step7_bq_datasets, step8_others, step9_rag_layer,
-               step10_freetext_pools, step11_source_stats,
-               step12_relationships):
+               step10_freetext_pools, step11_source_stats, step12_relationships,
+               step13_evaluation):
     step(ctx)
 
   stamp = datetime.now(UTC)

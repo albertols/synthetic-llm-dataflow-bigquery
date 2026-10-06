@@ -40,6 +40,7 @@ from apache_beam.options.pipeline_options import (
     StandardOptions,
     WorkerOptions,
 )
+from apache_beam.runners.dataflow.dataflow_runner import DataflowPipelineResult
 from unit.context.plan_fakes import (
     JOB_ID,
     PROJECT,
@@ -607,9 +608,11 @@ def test_a_job_whose_state_cannot_be_read_is_treated_as_running(
 
 
 def test_a_job_that_failed_is_closed_by_the_driver(bq, resolved, stub, capsys):
-  """The job is terminal and not DONE: it will never write a FINAL row,
-  so the driver does."""
+  """The job is terminal and not DONE, and the registry, read back,
+  holds only the RUNNING row: the job will never write a FINAL row, so
+  the driver does."""
   del resolved, stub
+  bq.canned.append((REGISTRY, [_final(event="RUNNING", status="RUNNING")]))
   job = FakeJob(
       state="FAILED",
       error=RuntimeError("Dataflow pipeline failed. State: FAILED"))
@@ -628,6 +631,63 @@ def test_a_job_that_failed_is_closed_by_the_driver(bq, resolved, stub, capsys):
   reason = bq.registry_rows()[-1]["status_reason"]
   assert "CANCELLED" in reason and job.job in reason
   capsys.readouterr()
+
+
+def test_a_job_cancelled_after_its_final_row_is_not_closed_twice(
+    bq, resolved, stub, capsys):
+  """The final review's M1: a job cancelled (or failed) after its FINAL
+  load already holds its terminal row. The driver reads the registry
+  back before it appends FAILED, and appends nothing when a FINAL row is
+  there — never two terminal rows."""
+  del resolved, stub
+  bq.canned.append((REGISTRY, [_final()]))
+  job = FakeJob(state="RUNNING", final="CANCELLED")
+  assert main(["run", *DATAFLOW], _dataflow_env(bq, job)) == 3
+  assert _statuses(bq) == ["RUNNING"]
+  err = capsys.readouterr().err
+  assert "CANCELLED" in err and "already holds a FINAL row" in err
+  # the same when the wait raises on the terminal state
+  bq.loads.clear()
+  job = FakeJob(
+      state="FAILED",
+      error=RuntimeError("Dataflow pipeline failed. State: FAILED"))
+  assert main(["run", *DATAFLOW], _dataflow_env(bq, job)) == 3
+  assert _statuses(bq) == ["RUNNING"]
+  capsys.readouterr()
+
+
+def test_the_late_cancel_notice_redacts_the_label_key_uri(
+    bq, resolved, stub, capsys):
+  """The notice quotes the job's error: the label key's URI in it goes
+  through the redaction a failed row's reason gets (the traceback that
+  follows is the error's own)."""
+  del resolved, stub
+  bq.canned.append((REGISTRY, [_final()]))
+  job = FakeJob(
+      state="FAILED",
+      error=RuntimeError(f"the job failed reading {LABEL_KEY_URI}"))
+  env = _dataflow_env(bq, job)
+  assert main(["run", *DATAFLOW, "--label_key_uri", LABEL_KEY_URI], env) == 3
+  assert _statuses(bq) == ["RUNNING"]
+  (notice,) = [
+      line for line in capsys.readouterr().err.splitlines()
+      if "already holds a FINAL row" in line
+  ]
+  assert LABEL_KEY_URI not in notice
+  assert "the job failed reading <label key uri>" in notice
+
+
+def test_a_terminal_job_whose_registry_cannot_be_read_is_not_closed(
+    bq, resolved, stub, capsys):
+  """M1, the other half: the read-back errors, so a FINAL row may well
+  exist — the driver writes nothing, as elsewhere."""
+  del resolved, stub
+  bq.query_failures[REGISTRY] = PermissionError("403 tables.getData denied")
+  job = FakeJob(state="RUNNING", final="CANCELLED")
+  assert main(["run", *DATAFLOW], _dataflow_env(bq, job)) == 3
+  assert _statuses(bq) == ["RUNNING"]
+  err = capsys.readouterr().err
+  assert "the registry could not be read" in err and "CANCELLED" in err
 
 
 def test_a_wait_that_returns_before_the_job_ends_writes_no_row(
@@ -1143,6 +1203,48 @@ def test_flex_entry_on_a_local_runner_still_loads_its_outputs(
   # bq_client: the driver waited, then loaded the outputs
   assert _statuses(bq) == ["RUNNING", "SUCCEEDED"]
   assert "--fail_on is not applied here" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# a template launch: the runner builds the job, the launcher submits it
+# --------------------------------------------------------------------------
+def _template_result() -> DataflowPipelineResult:
+  """What Beam's DataflowRunner returns when `--template_location` is set
+  — how a flex-template launcher runs the entry: a result with no job."""
+  return DataflowPipelineResult(None, runner=None)
+
+
+def test_a_template_launch_has_no_job_id():
+  """The final review's I1: `job_id()` of the job-less result raises."""
+  result = _template_result()
+  assert result.has_job is False
+  with pytest.raises(AttributeError):
+    result.job_id()
+  assert driver._job_id(result) is None  # pylint: disable=protected-access  # the helper under test
+
+
+@pytest.mark.parametrize("entry", ["flex", "run"])
+def test_a_template_launch_is_handed_to_dataflow_and_leaves_running(
+    bq, resolved, stub, capsys, entry):
+  """The launch was handed to Dataflow: no job id, nothing to wait for.
+  The driver writes no terminal row (the RUNNING row stays for the job
+  to close) and ends 0 — it used to crash after writing RUNNING."""
+  del resolved, stub
+  env = make_env(
+      bq, submit=lambda pipeline: _template_result(), make_pipeline=_holder)
+  argv = [*DATAFLOW, "--fail_on", "fail", "--trigger", "composer"]
+  if entry == "flex":
+    assert run_evaluation.main(argv, env) == 0
+  else:
+    assert main(["run", *argv], env) == 0
+  (running,) = bq.registry_rows()
+  check_row(REGISTRY, running)
+  assert (running["event"], running["status"]) == ("RUNNING", "RUNNING")
+  assert not [s for s, _ in bq.queries if REGISTRY in s]  # no read-back
+  captured = capsys.readouterr()
+  assert "handed to DataflowRunner as a template" in captured.out
+  assert "--fail_on is not applied" in captured.out
+  assert "Traceback" not in captured.err
 
 
 # --------------------------------------------------------------------------

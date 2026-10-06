@@ -94,6 +94,26 @@ V and NMI 0 on that side), while a constant SOURCE pair column is
 `not_evaluated`. No catalogue metric divides by the IQR, so a zero-IQR
 column with a real spread is evaluated in full.
 
+Sampled mode (Ruling R72, as in `beam.membership`): a side whose plan
+rate is below 1 was read as a row sample (`DenseSpec.rate_source` /
+`rate_synthetic`), and a `DenseProfile` counts the rows READ. Every
+metric row that reads such a side is an estimate over those rows:
+`method` = sample, `sample_rate` = the lowest rate among the sampled
+sides, `detail.sample_rates` naming each and `detail.estimator` keeping
+"binned" where it applied; its sizes, intervals and noise floors are the
+sample's own counts. One metric needs every row of both sides and is
+`not_evaluated` there with "sampled mode cannot measure …; run exact
+mode": `column.range_coverage` compares exact extremes, and a sample's
+extremes fall inside its side's range (the relational pass withholds
+`cardinality_adherence` for the same reason). So is `field.type_validity`
+when the SYNTHETIC side is a sample (an integrity pass never comes from a
+sample: the invalid cells may all lie outside the rows read); a sampled
+source alone leaves it evaluated on the full synthetic side, unstamped.
+`field.range_adherence`
+stays evaluated: its bounds are the planning grid's q0 and q1000, read
+from the whole source before any sample is drawn. A profile of a sampled
+side carries `sample_rate` in its payload.
+
 The null-pattern cap is a bottom-k over the priority (number of NULLs,
 pattern): keeping the 4096 lowest-priority patterns is order-free, so
 every retained count is exact (Ruling R34's argument) and the rest go to
@@ -105,7 +125,8 @@ Units: every temporal value is in UNIX microseconds (R54), so metric
 values and details on temporal columns are micros; profile payloads
 follow the GUI contract (R27) and carry temporal values in epoch seconds
 (TIME: seconds since midnight, drawn on 1970-01-01), labelled by `unit`.
-Profile payloads are bounded: 100 histogram bins, 99 quantiles, ≤ 4096
+Profile payloads are bounded: at most 100 histogram bins and 99
+quantiles (fewer on a small column, see the count rule), ≤ 4096
 null patterns, contingency tables for the 5 most divergent pairs only,
 and a KEYED hashed label `h:<8 hex>` (`canonical.hashed_label`, R64) for
 every dictionary value D6 keeps out of a payload.
@@ -130,9 +151,19 @@ alike, and every interior edge stays (an interior point is no extreme;
 R69 protects extremes). In sampled mode the sample's counts are a lower
 bound of the full source's, so the rule stays safe. A common end atom
 qualifies, a lone extreme never does.
-  - Histogram and pair-axis edges are the profile edges that rule keeps;
-    the same edges serve every side, as they all come from the source
-    grid, and a dropped edge's two bins merge.
+  - Histogram and pair-axis edges are the profile edges that rule keeps,
+    THINNED for publication (Ruling R113): going up from the first kept
+    edge, an edge is published only once at least k source records lie
+    in the bin since the last published one, so no two published edges
+    are closer than k source records apart (`_spaced`; the pair axis
+    thins its decile edges the same way). On a column of a few hundred
+    rows the plan's percentiles are single source records one or two
+    apart — unthinned, a 120-row column published 85 of its 120 values.
+    The same edges serve every side, as they all come from the source
+    grid, and a dropped edge's two bins merge (counts stay sums);
+    `edges_digest` is the digest of the edges published. This is the
+    publication step only: every metric is computed on the full plan
+    grid.
   - Every side's quantiles and bounds are inverted from its own exact CDF
     at the kept union edges (right- and left-closed twins, merged across
     the dropped edges): a p inside an edge's jump is that edge, a p
@@ -144,7 +175,9 @@ qualifies, a lone extreme never does.
     of that side's non-null values below the first / above the last kept
     edge, so the GUI can say how much of a wider synthetic lies outside
     the source's publishable range. A quantile payload also keeps only
-    the p with p * n >= k and (1 - p) * n >= k, and bounds need
+    the p with p * n >= k and (1 - p) * n >= k, neighbouring p at least
+    k / n apart (R113: k of the side's own values between two published
+    quantiles; n >= 1,000 keeps all 99 percentiles), and bounds need
     n * 0.005 >= k (n the side's own).
   - With no evaluated source value in a column (no source side, or a
     NULL column), the kept edges are exactly the synthetic grid's own
@@ -175,6 +208,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import itertools
@@ -317,6 +351,10 @@ _MIN_CORRELATION_ROWS = 3
 _MIN_OCCUPIED = 2  # rows/columns a joint table needs for an association
 _MICROS_PER_SECOND = 1e6
 _QUANTILE_PROBS = tuple(round(p / 100, 2) for p in range(1, 100))
+# R113: two published quantile probabilities are at least this many of the
+# side's own records apart (k; compared in basis points, exactly)
+_QUANTILE_GAP = 10
+_BASIS_POINTS = 10_000
 _INNER_DECILE_PROBS = tuple(k / 10 for k in range(1, 10))
 # R65/R71: every side's profile shows these quantiles, never its exact
 # min/max (each a single record's value)
@@ -670,6 +708,11 @@ def _grid(j: int, column: ColumnPlan, layout: BatchLayout) -> _Grid:
       day_granularity=column.day_granularity)
 
 
+def _row_rate(rate: float | None) -> float:
+  """A side's plan row-sample rate (None or >= 1: read in full)."""
+  return 1.0 if rate is None or rate >= 1.0 else float(rate)
+
+
 @dataclass(frozen=True, eq=False)
 class DenseSpec:
   """What the dense pass needs of one `TablePlan`: the batch layout, each
@@ -683,6 +726,15 @@ class DenseSpec:
   strings: tuple[_String, ...]
   pair_columns: tuple[_PairColumn, ...]
   pairs: tuple[tuple[int, int], ...]
+  rate_source: float = 1.0
+  rate_synthetic: float = 1.0
+
+  def sample_rates(
+      self, sides: Sequence[str] = (_SOURCE, _SYNTHETIC)) -> dict[str, float]:
+    """The row-sample rates (< 1) of `sides`, by side (R72); empty when
+    each was read in full. The panel sides are always read in full."""
+    rates = {_SOURCE: self.rate_source, _SYNTHETIC: self.rate_synthetic}
+    return {side: rates[side] for side in sides if rates.get(side, 1.0) < 1.0}
 
   @classmethod
   def from_table(cls, table: TablePlan) -> DenseSpec:
@@ -712,7 +764,9 @@ class DenseSpec:
         grids=grids,
         strings=strings,
         pair_columns=tuple(_pair_column(j, columns[j], layout) for j in used),
-        pairs=tuple((local[a], local[b]) for a, b in table.pairs))
+        pairs=tuple((local[a], local[b]) for a, b in table.pairs),
+        rate_source=_row_rate(table.sample_rate_source),
+        rate_synthetic=_row_rate(table.sample_rate_synthetic))
 
 
 # --------------------------------------------------------------------------
@@ -1116,6 +1170,7 @@ class _Emitter:
             baseline: float | None = None,
             method: Method = Method.EXACT,
             detail: Mapping[str, Any] | None = None,
+            reads: Sequence[str] = (_SOURCE, _SYNTHETIC),
             **fields: float | str | None) -> None:
     metric = _catalogue().get(metric_id)
     notes = dict(detail or {})
@@ -1125,6 +1180,7 @@ class _Emitter:
       notes.setdefault(
           "baseline_reason", "undefined on the reference sample"
           if self.has_reference else "no reference sample (the R panel)")
+    method, rate = self._estimate(method, notes, reads)
     self.rows.append(
         MetricValue(
             metric_id=metric_id,
@@ -1137,25 +1193,68 @@ class _Emitter:
             n_source=_count(sizes.n_source),
             n_synthetic=_count(sizes.n_synthetic),
             method=method,
+            sample_rate=rate,
             encoding_plan_digest=self.spec.encoding_plan_digest,
             detail=notes,
             **{
                 k: _plain(v) for k, v in fields.items()
             }))
 
-  def skip(self, metric_id: str, reason: str, scope: _Scope, *,
-           sizes: _Sizes) -> None:
+  def skip(self,
+           metric_id: str,
+           reason: str,
+           scope: _Scope,
+           *,
+           sizes: _Sizes,
+           detail: Mapping[str, Any] | None = None) -> None:
+    notes: dict[str, Any] = {"reason": reason, **(detail or {})}
+    method, rate = self._estimate(Method.EXACT, notes)
     self.rows.append(
-        MetricValue.not_evaluated(
-            metric_id,
-            self.spec.table,
-            reason,
+        MetricValue(
+            metric_id=metric_id,
+            table=self.spec.table,
+            value=None,
             column=scope.column,
             column_2=scope.column_2,
             column_kind=scope.kind,
             n_source=_count(sizes.n_source),
             n_synthetic=_count(sizes.n_synthetic),
-            encoding_plan_digest=self.spec.encoding_plan_digest))
+            method=method,
+            sample_rate=rate,
+            encoding_plan_digest=self.spec.encoding_plan_digest,
+            detail=notes))
+
+  def _estimate(
+      self,
+      method: Method,
+      notes: dict[str, Any],
+      reads: Sequence[str] = (_SOURCE, _SYNTHETIC)
+  ) -> tuple[Method, float | None]:
+    """A row's `(method, sample_rate)`: its own method unless a side it
+    `reads` was read as a row sample — then `sample` at the lowest rate,
+    `notes` naming each sampled side's rate and keeping a binned
+    estimator's name (R72). The dense metrics read both sides, except
+    `field.type_validity`, whose value reads the synthetic side only
+    (`field.range_adherence`'s value does too, its bounds being the
+    planning grid's; it keeps the both-sides stamp, a conservative one)."""
+    rates = self.spec.sample_rates(reads)
+    if not rates:
+      return method, None
+    notes["sample_rates"] = rates
+    if method is not Method.EXACT:
+      notes["estimator"] = method.value
+    return Method.SAMPLE, min(rates.values())
+
+  def sampled_extremes(self, what: str) -> str | None:
+    """Why a metric of exact extremes cannot be measured on this table's
+    row samples (R72), or None when both sides were read in full."""
+    rates = self.spec.sample_rates()
+    if not rates:
+      return None
+    side, rate = next(iter(rates.items()))  # the source first
+    return (f"sampled mode cannot measure {what}: the {side} side is a "
+            f"{rate:.3g} row sample, so its extremes fall inside the full "
+            "side's range; run exact mode")
 
 
 def _count(x: Any) -> int | None:
@@ -1198,6 +1297,7 @@ def _column_basics(e: _Emitter, spec: DenseSpec, s: _Sides) -> None:
   """field.type_validity and column.null_rate_delta, every column."""
   grid_of = {g.j: gi for gi, g in enumerate(spec.grids)}
   ref = s.ref
+  syn_rate = spec.sample_rates((_SYNTHETIC,)).get(_SYNTHETIC)
   for j, name in enumerate(spec.layout.columns):
     scope = _Scope(name, None, spec.layout.kinds[j].value)
     _share_delta(e, "column.null_rate_delta", scope,
@@ -1220,6 +1320,21 @@ def _column_basics(e: _Emitter, spec: DenseSpec, s: _Sides) -> None:
           scope,
           sizes=sizes)
       continue
+    if syn_rate is not None:
+      # an integrity pass never comes from a sample (R72): the invalid
+      # cells may all be outside the rows read
+      e.skip(
+          "field.type_validity",
+          "sampled mode cannot measure type validity: the synthetic side "
+          f"is a {syn_rate:.3g} row sample, so invalid cells it did not "
+          "read go unseen; run exact mode",
+          scope,
+          sizes=sizes,
+          detail={
+              "invalid_in_sample": invalid(s.syn),
+              "note": "the sample's count, not the table's"
+          })
+      continue
     bad = invalid(s.syn)
     rule = ("a non-finite FLOAT64 value (NaN, ±Inf) is invalid"
             if spec.layout.bq_types[j] in _FLOAT_TYPES else
@@ -1234,6 +1349,7 @@ def _column_basics(e: _Emitter, spec: DenseSpec, s: _Sides) -> None:
             "invalid": bad,
             "rule": rule
         },
+        reads=(_SYNTHETIC,),
         sizes=sizes)
 
 
@@ -1435,7 +1551,9 @@ _CONSTANT_SOURCE = {
 def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
                     sizes: _Sizes) -> None:
   """smd, std_ratio and range_coverage (exact, from Moments) and, numeric,
-  zero_rate_delta. smd and std_ratio are not_evaluated when either side
+  zero_rate_delta. range_coverage compares each side's exact extremes, so
+  it is not_evaluated when a side was read as a row sample (R72). smd and
+  std_ratio are not_evaluated when either side
   holds fewer than RARE_COUNT values: their value with the synthetic's
   published moments would give the source's mean and std (R80.3). A
   reference with fewer than RARE_COUNT values withholds `baseline_value`
@@ -1455,6 +1573,12 @@ def _moment_metrics(e: _Emitter, gi: int, grid: _Grid, s: _Sides, scope: _Scope,
       "column.range_coverage": (None, None),
   }
   for metric_id, fn in functions:
+    sampled = (
+        e.sampled_extremes("range coverage")
+        if metric_id == "column.range_coverage" else None)
+    if sampled is not None:  # R72: exact extremes need every row
+      e.skip(metric_id, sampled, scope, sizes=sizes)
+      continue
     if tiny and metric_id in _MOMENT_VALUE_IDS:
       e.skip(metric_id, NOT_EVALUATED_BELOW_K, scope, sizes=sizes)
       continue
@@ -1995,11 +2119,36 @@ def _kept_edges(right: np.ndarray, left: np.ndarray) -> np.ndarray:
   return kept
 
 
+def _spaced(kept: np.ndarray, below: np.ndarray) -> np.ndarray:
+  """The kept edges thinned for publication (Ruling R113): the first kept
+  edge, then each next one once at least RARE_COUNT source records lie in
+  the bin since the last published edge — `below[i]` is the source's
+  exact count(x <= edge i), so the bin (last, e] holds `below[i] -
+  below[last]`. No two published edges are then closer than k source
+  records apart: on a small column the plan's grid points are single
+  source records a record or two apart, and publishing them all would
+  publish most of the column. A dropped edge's two bins merge (counts
+  stay sums). Greedy from the left over publishable counts only, as the
+  kept range is, so every side shares the result and a rerun repeats it;
+  a column whose bins already hold k source records is unchanged."""
+  out = np.zeros(kept.size, dtype=bool)
+  last: int | None = None
+  for i in np.flatnonzero(kept).tolist():
+    count = int(below[i])
+    if last is None or count - last >= RARE_COUNT:
+      out[i] = True
+      last = count
+  return out
+
+
 def _published(p: DenseProfile, gi: int) -> np.ndarray:
-  """The profile (histogram, pair-axis) edges `_kept_edges` keeps on the
-  source profile `p`; the same mask serves every side, whose edges all
-  come from the source grid."""
-  return _kept_edges(p.profile[gi], p.profile_left[gi])
+  """The profile (histogram) edges published for the source profile `p`:
+  those `_kept_edges` keeps, thinned so that neighbouring ones are at
+  least k source records apart (`_spaced`); the same mask serves every
+  side, whose edges all come from the source grid. The publication step
+  only: no metric reads it."""
+  right = p.profile[gi]
+  return _spaced(_kept_edges(right, p.profile_left[gi]), np.cumsum(right)[:-1])
 
 
 def _kept_union(src: DenseProfile, gi: int) -> np.ndarray:
@@ -2110,11 +2259,24 @@ def _merged(counts: np.ndarray, kept: np.ndarray) -> np.ndarray:
 
 
 def _tail_safe(probs: Sequence[float], n: int) -> list[float]:
-  """The quantile probabilities with at least RARE_COUNT of the side's n
-  values at or beyond them, in either tail (R69)."""
-  return [
-      q for q in probs if q * n >= RARE_COUNT and (1.0 - q) * n >= RARE_COUNT
-  ]
+  """The quantile probabilities a side of n values may publish: at least
+  RARE_COUNT of its values at or beyond each, in either tail (R69), and
+  neighbouring ones at least `_QUANTILE_GAP` of its values apart — a
+  spacing of k / n in probability, greedy from the lowest (Ruling R113:
+  on a 120-value column the 99 percentiles are 1.2 records apart, so
+  publishing them all publishes most of the column). The gap is compared
+  in basis points, exactly; n >= 1,000 keeps every percentile."""
+  out: list[float] = []
+  last: int | None = None
+  for q in probs:
+    if q * n < RARE_COUNT or (1.0 - q) * n < RARE_COUNT:
+      continue
+    at = round(q * _BASIS_POINTS)
+    if last is not None and (at - last) * n < _QUANTILE_GAP * _BASIS_POINTS:
+      continue
+    out.append(q)
+    last = at
+  return out
 
 
 def _grid_profiles(spec: DenseSpec, p: DenseProfile,
@@ -2124,6 +2286,10 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
     kept = _published(src, gi)
     safe = _kept_range(grid, src, gi)
     edges = grid.profile[kept]
+    # One published set per column (Ruling R116): every exact source value
+    # a payload can show is one of these histogram edges. A column with no
+    # evaluated source value publishes none (its grid is the synthetic's).
+    grid_mask = np.isin(grid.union, edges) if src.union[gi].sum() else safe
     unit = "epoch_seconds" if grid.kind is _TEMPORAL else "value"
     scale = grid.scale
 
@@ -2153,16 +2319,17 @@ def _grid_profiles(spec: DenseSpec, p: DenseProfile,
         table=spec.table,
         side=p.side,
         column=grid.name)
-    probs, values = _side_quantiles(grid, p, gi, safe,
+    probs, values = _side_quantiles(grid, p, gi, grid_mask,
                                     _tail_safe(_QUANTILE_PROBS, m.n))
+    quantile_below, quantile_above = _tail_masses(p, gi, grid_mask)
     if probs and np.isfinite(values).all():  # the GUI's values are numbers
       yield ProfileValue(
           profile_kind="quantiles",
           payload={
               "probs": probs,
               "values": [scaled(v) for v in values],
-              "below_mass": below_mass,
-              "above_mass": above_mass,
+              "below_mass": quantile_below,
+              "above_mass": quantile_above,
               "unit": unit,
           },
           n=m.n,
@@ -2335,32 +2502,58 @@ def _edge_labels(edges: Sequence[float], kind: ColumnKind) -> list[str]:
   return [repr(e) for e in values]
 
 
-def _decile_kept(column: _PairColumn, grid: _Grid,
-                 profile_kept: np.ndarray) -> np.ndarray:
-  """The pair axis's decile edges that R69 lets a label show: each is a
-  profile edge, published or not with it."""
+def _decile_kept(column: _PairColumn, grid: _Grid, src: DenseProfile,
+                 gi: int) -> tuple[np.ndarray, np.ndarray]:
+  """`(kept, shown)`: the pair axis's decile cuts a label may show, and the
+  value each is labelled with. A cut is a decile that is a profile edge kept
+  by the count rule (R69); it is labelled with the nearest PUBLISHED
+  histogram edge at or below it (Ruling R116: the axis publishes no source
+  value the histogram does not), and when several cuts fall on one edge only
+  the lowest is kept — so the labels are k source records apart because the
+  published edges are, and a column of fewer than 100 values gets a coarser
+  axis. The cut's counts are the decile's, so a label may name an edge up
+  to one bin below the cut. `shown[i]` is meaningful where `kept[i]`."""
   kept = np.zeros(column.deciles.size, dtype=bool)
+  shown = np.full(column.deciles.size, np.nan)
   if not grid.profile.size:
-    return kept
+    return kept, shown
+  right = src.profile[gi]
+  profile_kept = _kept_edges(right, src.profile_left[gi])
   index = np.searchsorted(grid.profile, column.deciles)
   found = index < grid.profile.size
   found[found] = grid.profile[index[found]] == column.deciles[found]
   kept[found] = profile_kept[index[found]]
-  return kept
+  published = grid.profile[_published(src, gi)]
+  at = np.searchsorted(published, column.deciles, side="right") - 1
+  kept &= at >= 0  # no published edge at or below: the cut merges
+  below = np.zeros(column.deciles.size, dtype=np.int64)
+  below[found] = np.cumsum(right)[:-1][index[found]]
+  kept = _spaced(kept, below)  # the cuts themselves k records apart
+  last = -1
+  for i in np.flatnonzero(kept).tolist():
+    if at[i] == last:  # a lower cut already sits on this edge
+      kept[i] = False
+    else:
+      last = int(at[i])
+      shown[i] = published[last]
+  return kept, shown
 
 
-def _axis(column: _PairColumn, literals: Mapping[int, str], label_key: bytes,
-          kept: np.ndarray | None) -> tuple[list[list[int]], list[str]]:
+def _axis(
+    column: _PairColumn, literals: Mapping[int, str], label_key: bytes,
+    kept: tuple[np.ndarray, np.ndarray] | None
+) -> tuple[list[list[int]], list[str]]:
   """The pair-grid slot groups an axis shows and their labels: decile bins
   merged across the edges R69 withholds; D6 for dictionary values (a
   literal only where `literal_ok`, else a keyed hashed label, R64)."""
   if column.grid:
     assert kept is not None
-    shown = np.flatnonzero(kept)
+    cut, labelled = kept
+    shown = np.flatnonzero(cut)
     if not shown.size:
       return [list(range(column.deciles.size + 1)),
               [PAIR_BINS]], ["any", "NULL"]
-    edges = _edge_labels(column.deciles[shown].tolist(), column.kind)
+    edges = _edge_labels(labelled[shown].tolist(), column.kind)
     starts = [0, *(int(k) + 1 for k in shown), column.deciles.size + 1]
     groups = [list(range(a, b)) for a, b in itertools.pairwise(starts)]
     labels = [f"<= {edges[0]}"]
@@ -2391,11 +2584,11 @@ def _contingency_profiles(spec: DenseSpec, sides: Mapping[str, DenseProfile],
   literals = _merge_literals(src.literals, syn.literals)
   grid_of = {g.j: gi for gi, g in enumerate(spec.grids)}
 
-  def kept(column: _PairColumn) -> np.ndarray | None:
+  def kept(column: _PairColumn) -> tuple[np.ndarray, np.ndarray] | None:
     if not column.grid:
       return None
     gi = grid_of[column.j]
-    return _decile_kept(column, spec.grids[gi], _published(src, gi))
+    return _decile_kept(column, spec.grids[gi], src, gi)
 
   top = sorted(tvds, key=lambda k: (-tvds[k], k))[:CONTINGENCY_TOP_PAIRS]
   for k in sorted(top):
@@ -2435,7 +2628,16 @@ def _profiles(spec: DenseSpec, present: Mapping[str, DenseProfile],
     out.extend(_null_pattern_profile(spec, p))
     out.extend(_corr_profiles(spec, p))
   out.extend(_contingency_profiles(spec, present, tvds, label_key))
-  return out
+  rates = spec.sample_rates()
+  if not rates:
+    return out
+  # R72: a profile of a row-sampled side says so in its payload
+  return [
+      dataclasses.replace(
+          value, payload={
+              **value.payload, "sample_rate": rates[value.side]
+          }) if value.side in rates else value for value in out
+  ]
 
 
 def _checked_key(label_key: Any) -> bytes:

@@ -202,9 +202,11 @@ metric `not_evaluated` with `UNVERIFIED_REASON` and the panel's own
 reason; the full-source metrics are still computed.
 
 Failures stay per table. A table whose spec or panel cannot be built on
-the driver, or whose batches raise a data error on a worker
-(`TABLE_ERRORS`), writes `not_evaluated` rows with the reason for every
-owned id and no flags; the other tables and the pipeline carry on.
+the driver (`TABLE_ERRORS`), or whose batches raise a data error on a
+worker (`WORKER_ERRORS`), writes `not_evaluated` rows with the reason for
+every owned id and no flags; the other tables and the pipeline carry on.
+A worker's `MemoryError` is not a data error: it is raised, so the
+bundle fails and the runner retries it (Ruling R113).
 
 References (author-year, R22): Przyborowski & Wilenski (1940); Clopper &
 Pearson (1934); Wilson (1927); Newcombe (1998); Hurlbert (1971); Heck,
@@ -270,6 +272,7 @@ __all__ = [
     "SOURCE_SET_MAX_BYTES",
     "TABLE_ERRORS",
     "UNVERIFIED_REASON",
+    "WORKER_ERRORS",
     "DuplicateExcess",
     "KeyCountsCombineFn",
     "KeyStats",
@@ -322,11 +325,18 @@ UNVERIFIED_REASON = "reference sample not verified"
 KEY_BUCKET_CODES = 1 << 23
 MAX_BUCKET_BITS = 10
 FLUSH_CODES = 1 << 18  # codes a RowKeysFn holds before it flushes
-# The data errors a table's membership can raise (a malformed panel row, a
-# degenerate count): they make that table not_evaluated, never the run fail.
+# The errors that make a table not_evaluated on the DRIVER, never the run
+# fail: a data error (a malformed panel row, a degenerate count) or a
+# panel the driver cannot hold — no retry changes what the driver holds.
 TABLE_ERRORS: tuple[type[Exception],
                     ...] = (ArithmeticError, IndexError, KeyError, MemoryError,
                             TypeError, ValueError)
+# The same on a WORKER, without MemoryError: that is the worker's state,
+# not the table's. It is raised, so the bundle fails and the runner
+# retries it (`beam.pipeline`'s contract, Ruling R113) — swallowed, it
+# was a permanent not_evaluated block that left the run SUCCEEDED.
+WORKER_ERRORS: tuple[type[Exception], ...] = (ArithmeticError, IndexError,
+                                              KeyError, TypeError, ValueError)
 _FLUSH_PER_BUCKET = 256  # flush no sooner than this many codes per bucket
 # a record class whose P(X = 1) is below this adds nothing measurable to
 # the null variance (a record held ~33 times its expected share or more)
@@ -1535,7 +1545,7 @@ class RowKeysFn(beam.DoFn):
       raise ValueError(f"no membership spec for table {element.table!r}")
     try:
       parts, totals = key_counts(spec, element)
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       yield beam.pvalue.TaggedOutput(_FAILED, (spec.table, _failure(exc)))
       return
     if element.side in _COUNTED_SIDES:
@@ -2284,33 +2294,36 @@ def membership_outputs(
     row_flags_top_k: int = 100,
     panel_max_bytes: int = PANEL_SET_MAX_BYTES,
     source_set_max_bytes: int = SOURCE_SET_MAX_BYTES) -> MembershipResult:
-  """The whole membership pass of one table in one process. A data error
-  (`TABLE_ERRORS`) makes the table not_evaluated, as in Beam."""
-  try:
-    return _membership_outputs(
-        table,
-        batches,
-        salt=salt,
-        label_key=label_key,
-        top_k=row_flags_top_k,
-        panel_max_bytes=panel_max_bytes,
-        source_set_max_bytes=source_set_max_bytes)
-  except TABLE_ERRORS as exc:
+  """The whole membership pass of one table in one process. As in Beam,
+  an error while the spec and the panel index are built (the driver's
+  part, `TABLE_ERRORS`) or a data error in the rest (a worker's part,
+  `WORKER_ERRORS`) makes the table not_evaluated; a `MemoryError` in the
+  worker's part is raised."""
+
+  def failed(exc: Exception) -> MembershipResult:
     return MembershipResult(
         _failed_metrics(table.name, table.encoding_plan_digest, _failure(exc)),
         [])
 
+  try:
+    spec = MembershipSpec.from_table(
+        table,
+        salt=salt,
+        panel_max_bytes=panel_max_bytes,
+        source_set_max_bytes=source_set_max_bytes)
+    index = PanelIndex.build(spec, PanelRefs.from_table(table, spec))
+  except TABLE_ERRORS as exc:
+    return failed(exc)
+  try:
+    return _membership_outputs(
+        table, spec, index, batches, label_key=label_key, top_k=row_flags_top_k)
+  except WORKER_ERRORS as exc:
+    return failed(exc)
 
-def _membership_outputs(table: TablePlan, batches: Iterable[EncodedBatch], *,
-                        salt: str, label_key: bytes, top_k: int,
-                        panel_max_bytes: int,
-                        source_set_max_bytes: int) -> MembershipResult:
-  spec = MembershipSpec.from_table(
-      table,
-      salt=salt,
-      panel_max_bytes=panel_max_bytes,
-      source_set_max_bytes=source_set_max_bytes)
-  index = PanelIndex.build(spec, PanelRefs.from_table(table, spec))
+
+def _membership_outputs(table: TablePlan, spec: MembershipSpec,
+                        index: PanelIndex, batches: Iterable[EncodedBatch], *,
+                        label_key: bytes, top_k: int) -> MembershipResult:
   batches = [b for b in batches if b.table == table.name]
   sources = None
   if spec.source_mode == SIDE_INPUT:
@@ -2376,7 +2389,7 @@ class MembershipFn(beam.DoFn):
           functools.partial(PanelIndex.build, spec, refs), tag=refs.token)
       acc, candidates = batch_membership(spec, self._index, sources, element,
                                          self._top_k)
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       yield beam.pvalue.TaggedOutput(_FAILED, (spec.table, _failure(exc)))
       return
     yield spec.table, acc
@@ -2397,7 +2410,7 @@ class _SourceHashesFn(beam.DoFn):
       return
     try:
       yield source_hashes(self._spec, element)
-    except TABLE_ERRORS as exc:
+    except WORKER_ERRORS as exc:
       yield beam.pvalue.TaggedOutput(_FAILED, (self._spec.table, _failure(exc)))
 
 
@@ -2468,7 +2481,7 @@ def _emit_table(item: tuple[str, Iterable[tuple[str, Any]]],
     return _failed_metrics(table, digests[table], sorted(reasons)[0])
   try:
     return list(table_outputs(spec, stats[table], acc, keys))
-  except TABLE_ERRORS as exc:
+  except WORKER_ERRORS as exc:
     reason = _failure(exc)
     out: list[Any] = _failed_metrics(table, spec.encoding_plan_digest, reason)
     return [*out, beam.pvalue.TaggedOutput(_FAILED, (table, reason))]

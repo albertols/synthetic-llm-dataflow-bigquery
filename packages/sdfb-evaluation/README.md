@@ -103,6 +103,17 @@ salted sample of each side above `--sample_rows` (200,000), writes local
 files, then loads them with one BigQuery load job per table, the
 registry's FINAL row last.
 
+A sampled run never stores a sample's number as exact. A row computed from
+a sampled side carries `method = sample` and its `sample_rate`, and its
+interval or noise floor uses the rows actually read. A metric that needs
+every row of a side is `not_evaluated` with the reason "sampled mode cannot
+measure …; run exact mode": the full-source match rates, the key and
+internal duplicate rates, the orphan and fan-out metrics of a sampled edge,
+and, per column, category and shape adherence, novelty, the substantive
+copy rate, coverage, the pool-cap hit, range coverage, the distinct and
+entropy ratios (a row sample thins repeats), and type validity when the
+synthetic side is the sample. Run `--mode exact` for those verdicts.
+
 `--runner DirectRunner` means "run it on this machine", and it is what the
 registry records. The pipeline itself runs on Beam's in-process
 `FnApiRunner`: Beam's own `DirectRunner` hands a batch pipeline to Prism,
@@ -132,7 +143,7 @@ it). The other flags, with their defaults:
 |---|---|
 | mode and scope | `--mode exact\|sampled`, `--scope auto\|table\|as_of\|appends\|as_of_diff\|manual`, `--allow_contaminated` |
 | sampling | `--sample_rows 200000`, `--privacy_sample_rows 50000`, `--detection_sample_rows 50000` |
-| limits | `--pair_max_columns 20`, `--topk_profile 1000`, `--row_flags_top_k 100`, `--row_flags_source_keys hashed` |
+| limits | `--pair_max_columns 20`, `--row_flags_top_k 100`, `--row_flags_source_keys hashed` |
 | budgets | `--max_bytes_billed 1099511627776`, `--max_shuffle_gb 500` |
 | output | `--output_dataset synthetic_data_quality`, `--temp_dataset` (default: the output dataset), `--sink`, `--output_local DIR` |
 | control | `--fail_on none\|warn\|fail`, `--thresholds_uri Y`, `--trigger cli`, `--label_key_uri U` |
@@ -145,6 +156,15 @@ Row flags and profile labels are hashed with a label key. Without
 Secret Manager version `projects/P/secrets/S/versions/V`, a `gs://` object
 or an absolute path) labels are stable across runs. A worker reads the
 key; the registry records only `operator` or `ephemeral`.
+
+The key stays out of the job graph, but source rows do not: the reference
+panel of every table (the R and H rows, up to twice `reference_rows_limit`
+source rows, in clear) is embedded in the pipeline. On Dataflow the graph
+is also uploaded to the job's staging location, so treat that bucket as
+holding source data: restrict who can read it and expire its objects with a
+lifecycle rule
+([`DEPLOYMENT_PREREQUISITES.md`](../../docs/DEPLOYMENT_PREREQUISITES.md),
+design §4.9).
 
 ### 4. Read the result
 
@@ -163,6 +183,19 @@ delta `≈` when it lies inside the two rows' own sampling noise, and gives
 the population stability index between the two runs' histograms only where
 both carry the same `edges_digest` (the same bin edges); otherwise it says
 `not comparable`.
+
+**Two absolute match rates fail by chance on a narrow table.**
+`row.near_match_rate` and `row.exact_match_rate_nonkey` are raw shares
+graded against fixed thresholds (warn 0.001, fail 0.01). On a table with
+few non-key columns, or only low-cardinality ones, fresh rows equal a
+source row in all columns, or in all but one, by coincidence: in a check
+on invented rows with two non-key columns the near-match rate was 0.996 and
+the non-key exact-match rate 1.2 %, both FAIL, with no copying at all. That
+FAIL is the safe direction and it is kept. The calibrated signal is the
+lifts: `row.memorization_lift` and `row.near_match_lift` compare the
+reference sample with a holdout the generator never read, so chance hits
+both alike and only copying lifts them above 1. Read a FAIL of either rate
+next to its lift before calling it memorization.
 
 Exit codes of `run`:
 
@@ -190,7 +223,9 @@ known.
 |---|---|
 | the run completed | the pipeline's FINAL row |
 | planning, the prepare DDL or the submission raised | the command's FAILED row |
-| the job ended FAILED or CANCELLED | the command's FAILED row |
+| the job ended FAILED or CANCELLED and the registry, read back, holds no FINAL row | the command's FAILED row |
+| the job ended FAILED or CANCELLED after it had loaded its FINAL row (cancelled late) | the pipeline's FINAL row: the command reads the registry back first and appends nothing |
+| the launch was handed to Dataflow as a template (`--template_location`, which is how a flex-template launcher runs the entry): there is no job id and nothing to wait for | none from the command: it ends 0 and the RUNNING row stays open until the job writes its FINAL row |
 | the job ended DONE and the registry, read back, holds no FINAL row | the command's FAILED row ("the job finished without a FINAL row") |
 | Ctrl-C, or an error while polling, and the Dataflow job is still running | none yet. The job is not cancelled: it goes on and writes its own. The command prints the job id and how to read the result later |
 | the wait failed, but the job had finished DONE | the pipeline's FINAL row. After a polling error the command warns and reads the result as usual (the evaluation completed); after Ctrl-C it writes nothing and prints how to read the result |
@@ -343,22 +378,51 @@ With `wait_for_generation` true (and a `generation_job_id`) a deferrable
 gate skips the sensor and the launch still runs.
 
 **Chaining.** The generation DAG has an opt-in Param `run_evaluation`
-(default false). When true, after its launch it triggers this DAG with
+(default false) and two tasks after its launch that read it:
+`run_evaluation_gate` (a short-circuit) and `trigger_evaluation`. When the
+Param is true the trigger starts this DAG with
 `conf={"generation_job_id": <the launched job's id>, "wait_for_generation":
-true, "trigger": "chained"}`. With it false its task chain and arguments are
-exactly as before.
+true, "trigger": "chained"}`. With it false the gate skips the trigger: the
+generation DAG's graph is two tasks longer than before, and the launch and
+its arguments are unchanged.
 
 **Failure callback.** The launch task waits for the job (deferrably). The
 launcher writes the RUNNING registry row before submitting and mints the
 `evaluation_id`; a job that dies afterwards leaves only that row. The task's
-`on_failure_callback` closes it with one `INSERT ... SELECT` into
-`evaluation_data_history`: it copies the RUNNING row of this DAG run's
-evaluation (matched on the launch target, the same trigger, and `recorded_at`
-at or after the DAG run's start), sets `event` FINAL, `status` FAILED, the
-reason and the times (and `evaluation_job_id` when the launch pushed it), and
-skips evaluations that already have a FINAL event. No match, no row. Two DAG
-runs overlapping on the same target can close each other's row, and where two
-RUNNING rows exist for one evaluation only the latest is closed.
+`on_failure_callback` closes it, but only when the job cannot close it
+itself. A task can fail on the Airflow side (a deferral timeout, a lost
+trigger) while its Dataflow job runs on and later writes its own FINAL row,
+so the callback first reads the job's state through the provider's
+`DataflowHook.get_job`, with the job id the launch pushed to XCom (the
+task's return value, else the `dataflow_job_config` entry the operator
+pushes before it can fail). With no job id it writes nothing:
+
+```mermaid
+flowchart LR
+  F["⚠️ start_evaluation failed"]:::bad --> X{"job id<br/>in XCom?"}:::beam
+  X -- "no: state never read" --> N0["📄 one warning,<br/>nothing written"]:::data
+  X -- "yes" --> S{"job state"}:::beam
+  S -- "FAILED, CANCELLED,<br/>UPDATED, DRAINED" --> W[("🗄️ FAILED row<br/>INSERT ... SELECT")]:::store
+  S -- "running, done,<br/>or not readable" --> N["📄 one warning,<br/>nothing written:<br/>the job writes FINAL"]:::data
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+  classDef bad   fill:#c0392b,color:#fff,stroke:#8e2a20
+```
+
+The row itself is one `INSERT ... SELECT` into `evaluation_data_history`: it
+copies the RUNNING row of this DAG run's evaluation (matched on the launch
+target, the same trigger, and `recorded_at` at or after the DAG run's
+start), sets `event` FINAL, `status` FAILED, the reason and the times (and
+`evaluation_job_id`), and skips evaluations that
+already have a FINAL event. No match, no row. Two DAG runs overlapping on
+the same target can close each other's row, and where two RUNNING rows exist
+for one evaluation only the latest is closed. A job left running by a failed
+task keeps its RUNNING row open until it writes FINAL; if it then dies, no
+callback runs again and the row stays open. So does a job that dies after
+launch while no job id reached XCom: a RUNNING row left open is the lesser
+harm than a FAILED row on a run that succeeds (a launch that failed itself
+has its FAILED row from the launcher, or never wrote RUNNING).
 
 Limits to know before the first launch:
 
@@ -375,3 +439,12 @@ Limits to know before the first launch:
   BigQuery, `BigQueryInsertJobOperator.execute` inside a callback, the
   trigger's conf reaching `context["params"]`, and the trigger rule when the
   sensor is skipped.
+- Also unverified until Composer, for the callback's job-state check: that a
+  failed deferrable launch has pushed the job to XCom by the time the
+  callback runs (as `{"job_id": ...}` under the key `dataflow_job_config`;
+  the key and shape are unverified against a real provider, and the return
+  value's `id` is most likely absent for a task that raised), that `DataflowHook().get_job(job_id=, project_id=,
+  location=)` of the installed provider returns the job with `currentState`,
+  and that the hook can be built inside a callback with the default
+  connection. If the job id is missing, or the state cannot be read, the callback
+  writes nothing.

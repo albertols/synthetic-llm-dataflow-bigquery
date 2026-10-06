@@ -1019,7 +1019,10 @@ def test_stats_read_the_latest_row_of_the_launch_tier(users):
         "source_stats": "exact"
     }, _Query(), "no --source_stats_table"),
     (None, None, "no BigQuery reader"),
-    (None, _Query(error=BqApiError("403 denied")), "could not be read"),
+    (None, _Query(error=PermissionError("403 denied")), "could not be read"),
+    (None, _Query(error=LookupError("404 not found")), "could not be read"),
+    (None, _Query(error=BqApiError("400 invalid query", status=400)),
+     "could not be read"),
     (None, _Query(), "no source_table_stats row"),
 ])
 def test_missing_stats_have_a_reason(users, params, query, words):
@@ -1030,6 +1033,22 @@ def test_missing_stats_have_a_reason(users, params, query, words):
   stats = read_source_stats(plan, query)["users"]
   assert stats.reason is not None and words in stats.reason
   assert not stats.columns
+
+
+@pytest.mark.parametrize("error", [
+    BqApiError("503 backend error", status=503),
+    BqApiError("429 rate limit exceeded", status=429),
+    BqApiError("409 conflict", status=409),
+    BqApiError("the connection was reset"),
+])
+def test_a_transient_stats_read_error_is_raised(users, error):
+  """The final review's M2: only a read BigQuery REFUSES degrades the
+  drift check (`context.bq.is_refusal`, as pins and pools do). An error a
+  retry may remove is raised — the run fails instead of publishing a
+  drift check that is missing by accident."""
+  with pytest.raises(BqApiError) as caught:
+    read_source_stats(_plan(users), _Query(error=error))
+  assert caught.value is error
 
 
 def test_stats_need_a_reference_digest(users):
