@@ -366,9 +366,21 @@ def test_the_callback_closes_a_row_only_when_the_job_cannot():
     assert closes("2026-09-14_01_00_00-777", state) is True, state
   for state in (*_MAY_STILL_WRITE, None):  # None: the state was not read
     assert closes("2026-09-14_01_00_00-777", state) is False, state
-  # no job id in XCom: the launch itself failed, as before
-  for state in (None, "JOB_STATE_RUNNING"):
-    assert closes("", state) is True
+  # no job id: the state was never read, so nothing is written, whatever
+  # state is passed (a failed task pushes no return value to XCom)
+  for state in (None, "JOB_STATE_RUNNING", *_NOT_DONE_TERMINAL):
+    assert closes("", state) is False, state
+    assert closes(None, state) is False, state
+
+
+def test_the_job_id_comes_from_the_return_value_then_the_launch_config():
+  scope = _pure(_tree(EVALUATION_DAG), "_launched_job_id")
+  found = scope["_launched_job_id"]
+  assert found({"id": "A"}, {"job_id": "B"}) == "A"  # the return value first
+  assert found(None, {"job_id": "B"}) == "B"  # a failed task: only the config
+  assert found({"id": ""}, {"job_id": "B"}) == "B"
+  assert found({}, None) == "" and found(None, None) == ""
+  assert found("not a dict", 7) == "" and found({"id": 5}, {"job_id": 6}) == ""
 
 
 def test_the_callback_reads_the_job_state_before_it_inserts():
@@ -376,6 +388,25 @@ def test_the_callback_reads_the_job_state_before_it_inserts():
   callback = _function(tree, "_close_running_row")
   body = ast.unparse(callback)
   assert "xcom_pull(task_ids='start_evaluation')" in body
+  # the fallback key the launch operator pushes before it can fail
+  assert "key='dataflow_job_config'" in body
+  # the decision's arguments are the pulled id and the state read for it
+  (assign_id,) = [
+      n for n in ast.walk(callback)
+      if isinstance(n, ast.Assign) and n.targets[0].id == "job_id"
+  ]
+  assert "_launched_job_id(" in ast.unparse(assign_id.value)
+  (assign_state,) = [
+      n for n in ast.walk(callback)
+      if isinstance(n, ast.Assign) and n.targets[0].id == "state"
+  ]
+  assert ast.unparse(assign_state.value) == "_job_state(job_id)"
+  (no_id,) = [
+      n for n in ast.walk(callback)
+      if isinstance(n, ast.If) and ast.unparse(n.test) == "not job_id"
+  ]
+  assert isinstance(no_id.body[-1], ast.Return) and no_id.body[-1].value is None
+  assert "logging.warning" in ast.unparse(no_id)
   (decision,) = [
       n for n in ast.walk(callback)
       if isinstance(n, ast.If) and "_callback_closes_row" in ast.unparse(n.test)
@@ -386,9 +417,15 @@ def test_the_callback_reads_the_job_state_before_it_inserts():
   assert decision.body[-1].value is None  # nothing is written
   assert "logging." in ast.unparse(decision) and "still" in ast.unparse(
       decision)
-  assert "_job_state(job_id)" in body
+  (call,) = [
+      n for n in ast.walk(decision.test)
+      if isinstance(n, ast.Call) and ast.unparse(n.func) == "_callback_closes_row"
+  ]
+  assert [ast.unparse(a) for a in call.args] == ["job_id", "state"]
   insert = _one(callback, "BigQueryInsertJobOperator")
-  assert decision.end_lineno < insert.lineno  # the state is read first
+  # no id is checked, then the state read, then decided, before any write
+  assert no_id.end_lineno < assign_state.lineno < decision.lineno
+  assert decision.end_lineno < insert.lineno
 
 
 def test_the_job_state_comes_from_the_dataflow_hook_and_never_raises():

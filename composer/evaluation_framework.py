@@ -158,12 +158,31 @@ def _wait_for_generation(params, **_):
 def _callback_closes_row(job_id, state):
   """Whether the failure callback writes the FAILED row.
 
-  With no job id (the launch itself failed: no job runs) it always does.
-  With one, only when the job ended in a terminal state other than done;
-  a job still running, a job that is done and a state that could not be
-  read (None) all leave the row to the job.
+  Only when a job id is known and the job ended in a terminal state other
+  than done. With no id the state was never read, so nothing is written: a
+  launch that failed has already got its FAILED row from the launcher (or
+  never wrote RUNNING), and a RUNNING row left open is the lesser harm than
+  a FAILED row on a run that went on to succeed. A job still running, a job
+  that is done and a state that could not be read (None) leave the row to
+  the job.
   """
-  return not job_id or state in _ENDED_NOT_DONE
+  return bool(job_id) and state in _ENDED_NOT_DONE
+
+
+def _launched_job_id(launched, job_config):
+  """The launched Dataflow job's id, or "" when neither XCom entry has it.
+
+  `launched` is the task's return value (`{"id": ...}`; Airflow pushes it
+  only when the task returned, which a failed task has not). `job_config` is
+  the entry the launch operator pushes under `dataflow_job_config` before
+  it can fail (`{"job_id": ...}`); that key and shape are unverified against
+  a real provider.
+  """
+  for entry, key in ((launched, "id"), (job_config, "job_id")):
+    value = entry.get(key) if isinstance(entry, dict) else None
+    if isinstance(value, str) and value:
+      return value
+  return ""
 
 
 def _job_state(job_id):
@@ -185,8 +204,9 @@ def _job_state(job_id):
 def _close_running_row(context):
   """on_failure_callback: close this DAG run's RUNNING row with FAILED.
 
-  Nothing is written while the launched job may still write its own FINAL
-  row (`_callback_closes_row`): never two terminal rows for one evaluation.
+  Nothing is written without a job id, nor while the launched job may still
+  write its own FINAL row (`_callback_closes_row`): never two terminal rows
+  for one evaluation, and never FAILED with the job's state unread.
   """
   import logging
   import re
@@ -208,9 +228,18 @@ def _close_running_row(context):
         "evaluation registry not updated: a launch targeted by tables only "
         "has no generation_job_id or run_id to find its RUNNING row by")
     return
-  launched = context["ti"].xcom_pull(task_ids="start_evaluation")
-  job_id = launched.get("id", "") if isinstance(launched, dict) else ""
-  state = _job_state(job_id) if job_id else None
+  ti = context["ti"]
+  job_id = _launched_job_id(
+      ti.xcom_pull(task_ids="start_evaluation"),
+      ti.xcom_pull(task_ids="start_evaluation", key="dataflow_job_config"))
+  if not job_id:
+    logging.warning(
+        "evaluation registry not updated: no Dataflow job id in XCom, so the "
+        "job's state was not read. A launch that failed has its own FAILED "
+        "row (or never wrote RUNNING); a RUNNING row is left open rather "
+        "than closed over a job that may have succeeded")
+    return
+  state = _job_state(job_id)
   if not _callback_closes_row(job_id, state):
     logging.warning(
         "evaluation registry not updated: Dataflow job %s is in state %s, "

@@ -392,14 +392,16 @@ launcher writes the RUNNING registry row before submitting and mints the
 itself. A task can fail on the Airflow side (a deferral timeout, a lost
 trigger) while its Dataflow job runs on and later writes its own FINAL row,
 so the callback first reads the job's state through the provider's
-`DataflowHook.get_job`, with the job id the launch pushed to XCom:
+`DataflowHook.get_job`, with the job id the launch pushed to XCom (the
+task's return value, else the `dataflow_job_config` entry the operator
+pushes before it can fail). With no job id it writes nothing:
 
 ```mermaid
 flowchart LR
   F["⚠️ start_evaluation failed"]:::bad --> X{"job id<br/>in XCom?"}:::beam
-  X -- "no: the launch itself failed" --> W[("🗄️ FAILED row<br/>INSERT ... SELECT")]:::store
+  X -- "no: state never read" --> N0["📄 one warning,<br/>nothing written"]:::data
   X -- "yes" --> S{"job state"}:::beam
-  S -- "FAILED, CANCELLED,<br/>UPDATED, DRAINED" --> W
+  S -- "FAILED, CANCELLED,<br/>UPDATED, DRAINED" --> W[("🗄️ FAILED row<br/>INSERT ... SELECT")]:::store
   S -- "running, done,<br/>or not readable" --> N["📄 one warning,<br/>nothing written:<br/>the job writes FINAL"]:::data
   classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
@@ -411,12 +413,15 @@ The row itself is one `INSERT ... SELECT` into `evaluation_data_history`: it
 copies the RUNNING row of this DAG run's evaluation (matched on the launch
 target, the same trigger, and `recorded_at` at or after the DAG run's
 start), sets `event` FINAL, `status` FAILED, the reason and the times (and
-`evaluation_job_id` when the launch pushed it), and skips evaluations that
+`evaluation_job_id`), and skips evaluations that
 already have a FINAL event. No match, no row. Two DAG runs overlapping on
 the same target can close each other's row, and where two RUNNING rows exist
 for one evaluation only the latest is closed. A job left running by a failed
 task keeps its RUNNING row open until it writes FINAL; if it then dies, no
-callback runs again and the row stays open.
+callback runs again and the row stays open. So does a job that dies after
+launch while no job id reached XCom: a RUNNING row left open is the lesser
+harm than a FAILED row on a run that succeeds (a launch that failed itself
+has its FAILED row from the launcher, or never wrote RUNNING).
 
 Limits to know before the first launch:
 
@@ -434,9 +439,11 @@ Limits to know before the first launch:
   trigger's conf reaching `context["params"]`, and the trigger rule when the
   sensor is skipped.
 - Also unverified until Composer, for the callback's job-state check: that a
-  failed deferrable launch has pushed the job (and its `id`) to XCom by the
-  time the callback runs, that `DataflowHook().get_job(job_id=, project_id=,
+  failed deferrable launch has pushed the job to XCom by the time the
+  callback runs (as `{"job_id": ...}` under the key `dataflow_job_config`;
+  the key and shape are unverified against a real provider, and the return
+  value's `id` is most likely absent for a task that raised), that `DataflowHook().get_job(job_id=, project_id=,
   location=)` of the installed provider returns the job with `currentState`,
   and that the hook can be built inside a callback with the default
-  connection. If the job id is missing the callback behaves as before (it
-  writes FAILED); if the state cannot be read it writes nothing.
+  connection. If the job id is missing, or the state cannot be read, the callback
+  writes nothing.
