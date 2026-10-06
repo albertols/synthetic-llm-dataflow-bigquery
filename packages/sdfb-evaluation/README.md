@@ -346,8 +346,8 @@ static tests (`tests/unit/test_composer_dag.py` reads them with `ast`);
 Airflow has never parsed them and no Composer environment has run them.
 
 `composer/evaluation_framework.py` is the DAG `sdfb_evaluation_framework`
-(`schedule_interval=None`, manual or chained). It is a template: workflow 3
-substitutes `{{EVALUATOR_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}` and
+(`schedule_interval=None`, manual). It is a template: the import workflow
+substitutes `{{PROJECT_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}` and
 `{{GCS_DATAFLOW_TEMPLATES}}`; it reads the Variables `PROJECT_ID`, `REGION`,
 `SA_DATAFLOW` and `DATAFLOW_SUBNET` (optional `DATAFLOW_NETWORK_TAGS`). It
 launches `gs://<templates>/synthetic/sdfb-evaluation-<version>-template.json`.
@@ -429,9 +429,6 @@ Limits to know before the first launch:
 - A launch whose only target is `tables` (no `generation_job_id`, no `run_id`)
   cannot be matched: the callback logs one warning and writes nothing, so a
   failed job leaves its RUNNING row open.
-- The deploy workflow's substitution list must add `{{EVALUATOR_VERSION}}`;
-  without it the DAG carries the literal marker as its version and launches a
-  template that does not exist.
 - Unverified until a real launch: `maxWorkers` is passed as the rendered string
   of `max_workers` (proto3 JSON should accept a numeric string for an int32;
   native rendering DAG-wide would turn digit-only run ids into ints), the

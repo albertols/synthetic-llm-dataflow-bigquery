@@ -11,12 +11,22 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Static tests for the Composer DAG (Task 29) and its opt-in trigger.
+"""Static tests for the two Composer DAGs that launch an evaluation.
+
+    composer/synthetic_beam_bigquery.py   the generation DAG: with
+                                          `run_evaluation` it waits for its
+                                          own job and launches the evaluation
+                                          itself (Ruling R118)
+    composer/evaluation_framework.py      the standalone DAG: one evaluation
+                                          per run, for a job id, a run id or
+                                          tables (Task 29)
+
+Both launch from the repository's ONE template, with `sdfb_job=evaluation`.
 
 Airflow is not a dependency here, so the DAG files are read with ``ast`` and
-never imported. The files live at the repository root (``composer/``); when
-the package is copied out as a standalone unit they are absent and the whole
-module skips.
+never imported; a pure function of a DAG is executed on its own. The files
+live at the repository root (``composer/``); when the package is copied out
+as a standalone unit they are absent and the whole module skips.
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -137,14 +148,59 @@ def _flat(text: str) -> str:
   return " ".join(text.split())
 
 
+def _launch(tree: ast.Module, variable: str) -> ast.Call:
+  """The flex-template launch assigned to `variable` at DAG level."""
+  (call,) = [
+      n.value
+      for n in ast.walk(tree)
+      if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and
+      _name(n.value.func) == "DataflowStartFlexTemplateOperator" and
+      [t.id for t in n.targets if isinstance(t, ast.Name)] == [variable]
+  ]
+  return call
+
+
+def _value(tree: ast.Module, node: ast.expr):
+  """`node` as a Python value; a name is read from its one module-level
+  assignment (the DAG types a value once and uses it twice)."""
+  if isinstance(node, ast.Name):
+    (assigned,) = [
+        n.value for n in tree.body if isinstance(n, ast.Assign) and
+        [t.id for t in n.targets if isinstance(t, ast.Name)] == [node.id]
+    ]
+    node = assigned
+  return ast.literal_eval(node)
+
+
+def _variables(tree: ast.Module) -> set[str]:
+  return {
+      ast.literal_eval(c.args[0])
+      for c in _calls(tree, "get")
+      if isinstance(c.func, ast.Attribute) and
+      isinstance(c.func.value, ast.Name) and c.func.value.id == "Variable"
+  }
+
+
+def _markers(path: Path) -> set[str]:
+  return set(re.findall(r"\{\{([A-Z_]+)\}\}", path.read_text(encoding="utf-8")))
+
+
+def _main_metadata_names() -> set[str]:
+  return {
+      p["name"] for p in json.loads(MAIN_METADATA.read_text(
+          encoding="utf-8"))["parameters"]
+  }
+
+
 # --------------------------------------------------------------------------- #
 # The evaluation DAG
 # --------------------------------------------------------------------------- #
 
 
 def test_dag_id_and_manual_schedule():
-  dag = _one(_tree(EVALUATION_DAG), "DAG")
-  assert ast.literal_eval(_kw(dag, "dag_id")) == "sdfb_evaluation_framework"
+  tree = _tree(EVALUATION_DAG)
+  dag = _one(tree, "DAG")
+  assert _value(tree, _kw(dag, "dag_id")) == "sdfb_evaluation_framework"
   assert ast.literal_eval(_kw(dag, "schedule_interval")) is None
 
 
@@ -182,18 +238,84 @@ def test_wait_for_generation_is_a_deferrable_sensor_behind_a_short_circuit():
       start, "trigger_rule")) == "none_failed_min_one_success")
 
 
-def test_launch_points_at_the_evaluator_template():
-  tree = _tree(EVALUATION_DAG)
+def _assigned(tree: ast.Module, name: str) -> ast.expr:
+  (value,) = [
+      n.value for n in tree.body if isinstance(n, ast.Assign) and
+      [t.id for t in n.targets if isinstance(t, ast.Name)] == [name]
+  ]
+  return value
+
+
+def test_launch_points_at_the_one_template_the_generation_dag_launches():
+  """No evaluator template to build and no marker of its own: the path is
+  the generation DAG's, typed the same way from {{PROJECT_VERSION}}."""
+  tree, generation = _tree(EVALUATION_DAG), _tree(GENERATION_DAG)
   start = _one(tree, "DataflowStartFlexTemplateOperator")
   spec = ast.unparse(_entry(start, "containerSpecGcsPath"))
-  assert "templates_path" in spec and "synthetic/" in spec
-  (template,) = [
-      n.value for n in tree.body if isinstance(n, ast.Assign) and
-      [t.id for t in n.targets if isinstance(t, ast.Name)] == ["flex_template"]
-  ]
-  assert ast.unparse(template).startswith("f'sdfb-evaluation-{")
-  assert ast.unparse(template).endswith("-template.json'")
-  assert "flex_template" in spec
+  assert spec == ast.unparse(
+      _entry(_launch(generation, "start_sdfb"), "containerSpecGcsPath"))
+  assert "flex_template" in spec and "synthetic/" in spec
+  for name in ("flex_template", "project_version", "templates_path"):
+    assert ast.unparse(_assigned(tree, name)) == ast.unparse(
+        _assigned(generation, name)), name
+  assert ast.unparse(_assigned(
+      tree, "flex_template")) == "f'sdfb-{project_version}-template.json'"
+  assert ast.literal_eval(_assigned(
+      tree, "project_version")) == "{{" + "PROJECT_VERSION" + "}}"
+
+
+def test_the_import_workflow_needs_no_marker_it_does_not_already_substitute():
+  markers = _markers(EVALUATION_DAG)
+  assert markers == {
+      "PROJECT_VERSION", "ENV", "GCS_DATAFLOW_STAGING", "GCS_DATAFLOW_TEMPLATES"
+  }
+  assert markers <= _GENERATION_MARKERS
+  assert _variables(_tree(EVALUATION_DAG)) == _HOUSE_VARIABLES
+
+
+def test_the_evaluator_version_marker_is_gone_from_the_repository():
+  """Nothing substitutes it any more, and an unsubstituted marker would be
+  the DAG's version. Decision records and release reports keep their
+  history, as for every removed name (.github/drift-check.txt)."""
+  marker = "{{" + "EVALUATOR_VERSION" + "}}"  # spelled apart: this file is scanned
+  listed = subprocess.run(
+      ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+      capture_output=True,
+      check=False)
+  if listed.returncode != 0:
+    pytest.skip("not a git checkout: the tracked files cannot be listed")
+  history = ("docs/adr/", "docs/releases/", ".github/drift-check.txt")
+  holders = []
+  for name in listed.stdout.decode().split("\0"):
+    path = REPO_ROOT / name
+    if not name or name.startswith(history) or not path.is_file():
+      continue
+    if marker.encode() in path.read_bytes():
+      holders.append(name)
+  assert not holders
+  patterns = (REPO_ROOT / ".github" /
+              "drift-check.txt").read_text(encoding="utf-8").splitlines()
+  assert marker in patterns
+
+
+def test_header_says_how_to_launch_from_an_evaluator_only_template():
+  docstring = ast.get_docstring(_tree(EVALUATION_DAG)) or ""
+  for said in ("flex_template", "sdfb-evaluation-", "build_flex_template.sh",
+               "sdfb_job"):
+    assert said in docstring, said
+
+
+def test_evaluation_dag_is_valid_python_once_its_markers_are_substituted():
+  text = _as_imported(EVALUATION_DAG, PROJECT_VERSION="latest")
+  assert not re.search(r"\{\{[A-Z_]+\}\}", text)
+  compile(text, str(EVALUATION_DAG), "exec")
+  prefix = _pure(
+      ast.parse(text),
+      "app_name",
+      "project_version",
+      "_job_name_prefix",
+      path=EVALUATION_DAG)["_job_name_prefix"]
+  assert prefix == "sdfb-evaluation-vlatest"
 
 
 def test_launch_parameters_are_metadata_names_from_params_or_constants():
@@ -205,16 +327,32 @@ def test_launch_parameters_are_metadata_names_from_params_or_constants():
   assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
   names = {p["name"] for p in json.loads(METADATA.read_text())["parameters"]}
   assert set(keys) <= names
+  # ... and of the one template this DAG launches from by default
+  assert set(keys) <= _main_metadata_names()
   assert not set(keys) & set(_NEVER_PASSED)
   declared = set(_params(tree))
   for key, value in zip(keys, parameters.values, strict=True):
-    text = ast.unparse(value)
-    refs = re.findall(r"params\.(\w+)", text)
-    # every value is a DAG Param reference or a plain string constant
-    assert refs or isinstance(value, ast.Constant), key
+    refs = re.findall(r"params\.(\w+)", ast.unparse(value))
+    # every value is a DAG Param reference or a string constant (typed in
+    # place, or once at module level)
+    assert refs or isinstance(_value(tree, value), str), key
     assert set(refs) <= declared, (key, refs)
   assert _entry(parameters, "trigger") is not None
   assert "lower" in ast.unparse(_entry(parameters, "allow_contaminated"))
+
+
+def test_launch_selects_the_evaluator_and_sizes_the_shared_images_disk():
+  tree = _tree(EVALUATION_DAG)
+  parameters = _entry(
+      _one(tree, "DataflowStartFlexTemplateOperator"), "parameters")
+  # the one image's entry runs generation unless told otherwise
+  assert _value(tree, _entry(parameters, "sdfb_job")) == "evaluation"
+  # the same number the generation DAG's chained evaluation passes
+  disk = _value(tree, _entry(parameters, "disk_size_gb"))
+  generation = _tree(GENERATION_DAG)
+  assert disk == _value(
+      generation,
+      _entry(_launch(generation, "trigger_evaluation"), "disk_size_gb"))
 
 
 def test_nothing_the_launcher_owns_appears_anywhere_in_the_launch():
@@ -480,50 +618,6 @@ _GPU_ONLY = ("accelerator", "nvidia", "reservation",
              "params.client_type", "g2-standard", "n1-standard")
 
 
-def _launch(tree: ast.Module, variable: str) -> ast.Call:
-  """The flex-template launch assigned to `variable` at DAG level."""
-  (call,) = [
-      n.value
-      for n in ast.walk(tree)
-      if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and
-      _name(n.value.func) == "DataflowStartFlexTemplateOperator" and
-      [t.id for t in n.targets if isinstance(t, ast.Name)] == [variable]
-  ]
-  return call
-
-
-def _value(tree: ast.Module, node: ast.expr):
-  """`node` as a Python value; a name is read from its one module-level
-  assignment (the DAG types a value once and uses it twice)."""
-  if isinstance(node, ast.Name):
-    (assigned,) = [
-        n.value for n in tree.body if isinstance(n, ast.Assign) and
-        [t.id for t in n.targets if isinstance(t, ast.Name)] == [node.id]
-    ]
-    node = assigned
-  return ast.literal_eval(node)
-
-
-def _variables(tree: ast.Module) -> set[str]:
-  return {
-      ast.literal_eval(c.args[0])
-      for c in _calls(tree, "get")
-      if isinstance(c.func, ast.Attribute) and
-      isinstance(c.func.value, ast.Name) and c.func.value.id == "Variable"
-  }
-
-
-def _markers(path: Path) -> set[str]:
-  return set(re.findall(r"\{\{([A-Z_]+)\}\}", path.read_text(encoding="utf-8")))
-
-
-def _main_metadata_names() -> set[str]:
-  return {
-      p["name"] for p in json.loads(MAIN_METADATA.read_text(
-          encoding="utf-8"))["parameters"]
-  }
-
-
 def test_generation_dag_opt_in_param_defaults_off():
   param = _params(_tree(GENERATION_DAG))["run_evaluation"]
   assert ast.literal_eval(_kw(param, "default")) is False
@@ -560,7 +654,9 @@ def test_generation_dag_triggers_no_other_dag():
   the header, as the path that closes a RUNNING row)."""
   tree = _tree(GENERATION_DAG)
   assert not _calls(tree, "TriggerDagRunOperator")
-  dag_id = ast.literal_eval(_kw(_one(_tree(EVALUATION_DAG), "DAG"), "dag_id"))
+  evaluation = _tree(EVALUATION_DAG)
+  dag_id = _value(evaluation, _kw(_one(evaluation, "DAG"), "dag_id"))
+  assert dag_id
   text = GENERATION_DAG.read_text(encoding="utf-8")
   for absent in ("TriggerDagRunOperator", "trigger_dagrun", dag_id):
     assert absent not in text, absent

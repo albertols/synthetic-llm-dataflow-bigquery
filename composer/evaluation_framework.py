@@ -11,24 +11,40 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Airflow DAG — launch the sdfb-evaluation Flex Template.
+"""Airflow DAG — evaluate a generation run (the optional, standalone path).
 
-Runs in an Airflow/Cloud Composer environment. This file is the *template*:
-workflow `3_import_dag.yaml` runs `sed` over it at deploy time to substitute
-build-time values. Runtime values (the evaluation target, the mode, the
-worker shape) come from Airflow DAG params — operators never re-import the
-DAG to change them.
+Runs in an Airflow/Cloud Composer environment. This file is a *template*:
+the deploy workflow's `sed` substitutes build-time values at import. Runtime
+values (the evaluation target, the mode, the worker shape) come from Airflow
+DAG params — operators never re-import the DAG to change them.
 
-The DAG id is fixed (`sdfb_evaluation_framework`): the generation DAG's
-opt-in `run_evaluation` task triggers it by that id.
+The deployment does not need this DAG to evaluate a run: the generation DAG
+(`composer/synthetic_beam_bigquery.py`) evaluates its own run when
+`run_evaluation` is True. Import this one to evaluate a run that has already
+finished (by job id, by run id, or by tables), and to have a launch that
+waits for its job and closes the registry row when the job dies.
 
-Substitution markers:
-  {{EVALUATOR_VERSION}}       version of the sdfb-evaluation package whose
-                              template `sdfb-evaluation-<version>-template.json`
-                              was built (deploy/build_flex_template.sh).
-                              NEW: the deploy workflow's substitution list
-                              must add it; without it the DAG would carry the
-                              literal marker as its version.
+One image, one template (ADR 0041, amendment of 2026-10-06). The evaluation
+launches from the SAME Flex Template as generation,
+`sdfb-<PROJECT_VERSION>-template.json`, and passes the template parameter
+`sdfb_job=evaluation`, which selects the evaluator's entry in the image.
+Nothing else is built for it.
+
+    To launch from an evaluator-only template instead (one built by
+    `packages/sdfb-evaluation/deploy/build_flex_template.sh` on the same
+    image), change ONE constant below:
+
+        flex_template = "sdfb-evaluation-<version>-template.json"
+
+    The launch body stays as it is: that template declares the same
+    parameters, `sdfb_job` among them.
+
+The DAG id is fixed (`sdfb_evaluation_framework`).
+
+Substitution markers (all of them are ones the import workflow already
+substitutes for the generation DAG; run the same substitution on this file):
+  {{PROJECT_VERSION}}         project version the template was built for
+                              (`sdfb-<version>-template.json`)
   {{ENV}}                     dev | uat | prd
   {{GCS_DATAFLOW_STAGING}}    <env>-…-dataflow-staging bucket name
   {{GCS_DATAFLOW_TEMPLATES}}  <env>-…-dataflow-templates bucket name
@@ -80,7 +96,7 @@ from airflow.utils.dates import days_ago
 # -----------------------------------------------------------------------------
 bucket_path = "{{GCS_DATAFLOW_STAGING}}"  # …-dataflow-staging
 templates_path = "{{GCS_DATAFLOW_TEMPLATES}}"  # …-dataflow-templates
-evaluator_version = "{{EVALUATOR_VERSION}}"
+project_version = "{{PROJECT_VERSION}}"
 env_name = "{{ENV}}"
 
 # -----------------------------------------------------------------------------
@@ -96,9 +112,18 @@ network_tags = Variable.get("DATAFLOW_NETWORK_TAGS", default_var="").strip()
 
 app_domain = "synthetic"
 app_name = "sdfb"
-flex_template = f"sdfb-evaluation-{evaluator_version}-template.json"
+DAG_ID = "sdfb_evaluation_framework"
+# The ONE template of the deployment, the generation DAG's own (header: how
+# to point this at an evaluator-only template instead).
+flex_template = f"sdfb-{project_version}-template.json"
 # Dataflow job names: lowercase, digits, hyphens only.
-_job_name_prefix = f"{app_name}-evaluation-v{evaluator_version.replace('.', '-').lower()}"
+_job_name_prefix = f"{app_name}-evaluation-v{project_version.replace('.', '-').lower()}"
+# The workers run the image the template was built on. The shared image is
+# multi-GB (it carries the generator's GPU libraries) and Dataflow's 25 GB
+# default boot disk overflows while a worker unpacks it; the evaluator pins
+# no disk size, so the launch passes Beam's own --disk_size_gb. 200 is what
+# the generator pins for its own workers on that image.
+EVALUATION_WORKER_DISK_GB = "200"
 
 network_tag_experiments = ([
     f"use_network_tags={network_tags}",
@@ -301,8 +326,8 @@ default_dag_params = {
         Param(
             default="",
             type="string",
-            description="Target: the generation job's Dataflow id (the chained "
-            "trigger passes it). Empty when targeting by run_id or tables.",
+            description="Target: the generation job's Dataflow id. Empty when "
+            "targeting by run_id or tables.",
         ),
     "run_id":
         Param(
@@ -366,8 +391,8 @@ default_dag_params = {
             type="string",
             enum=["composer", "chained"],
             description="What started the evaluation, recorded in the "
-            "registry: composer = a manual run, chained = the generation "
-            "DAG's run_evaluation trigger.",
+            "registry: composer = a manual run of this DAG, chained = a run "
+            "started for a generation that has just finished.",
         ),
     "wait_for_generation":
         Param(
@@ -393,7 +418,7 @@ default_dag_params = {
 }
 
 with models.DAG(
-    dag_id="sdfb_evaluation_framework",
+    dag_id=DAG_ID,
     start_date=days_ago(1),
     schedule_interval=None,
     catchup=False,
@@ -444,17 +469,23 @@ with models.DAG(
                   "additionalUserLabels": {
                       "app": app_name,
                       "env": env_name,
-                      "dag": "sdfb_evaluation_framework",
+                      "dag": DAG_ID,
                   },
                   "machineType": "{{ params.machine_type }}",
                   "maxWorkers": "{{ params.max_workers }}",
                   "workerRegion": region,
               },
-              # Names are the flex template's (deploy/flex_template_metadata.json).
-              # The launcher supplies runner, project and region itself; the image
-              # carries its worker image coordinate; fail_on and experiments are
-              # never passed.
+              # Names are the flex template's (docker/flex_template_metadata.json;
+              # the evaluator's own deploy/flex_template_metadata.json declares
+              # the same ones). The launcher supplies runner, project and region
+              # itself; the image carries its worker image coordinate; fail_on
+              # and experiments are never passed.
               "parameters": {
+                  # The image's one entry runs generation unless told otherwise.
+                  "sdfb_job":
+                      "evaluation",
+                  "disk_size_gb":
+                      EVALUATION_WORKER_DISK_GB,
                   "job_id":
                       "{{ params.generation_job_id }}",
                   "run_id":
