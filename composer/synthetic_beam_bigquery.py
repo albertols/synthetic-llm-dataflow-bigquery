@@ -50,6 +50,29 @@ engine, batch_size, similarity, client_type) + Airflow Variables for infra
 DATAFLOW_NETWORK_TAGS) — changeable without re-importing. client_type=fake
 selects a CPU smoke (no L4) — see below.
 
+Opt-in evaluation (`run_evaluation`, default False), chained in THIS DAG::
+
+    start_sdfb ─► run_evaluation_gate ─► wait_for_generation ─► trigger_evaluation
+    (launch,      (skips the rest         (reschedule-mode        (launch, SAME
+     no wait)      unless opted in)        sensor on the job)      template)
+
+With `run_evaluation` False the gate skips everything after the generation
+launch: the DAG runs `start_sdfb` and nothing else, as before. With it True
+the sensor waits for the generation job to reach JOB_STATE_DONE (it fails
+when the job fails or is cancelled) and `trigger_evaluation` launches the
+evaluation as a second, CPU-only Dataflow job from the same Flex Template,
+with the template parameter `sdfb_job=evaluation` (one image, one template,
+one DAG import; ADR 0041's amendment of 2026-10-06). No other DAG is
+triggered, and no marker or Airflow Variable is added for it. The sensor is
+not deferrable, so no triggerer is needed.
+
+`trigger_evaluation` submits the job and does not wait: the evaluation job
+writes its own FINAL registry row. A job that dies after it was launched
+leaves its RUNNING row open; `composer/evaluation_framework.py`, the
+standalone DAG, is the path that waits for the job and closes that row.
+
+None of this has been parsed or run by Airflow.
+
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -65,9 +88,10 @@ from airflow import models
 from airflow.models import Variable
 from airflow.models.param import Param
 from airflow.operators.python import ShortCircuitOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.google.cloud.operators.dataflow import (
     DataflowStartFlexTemplateOperator,)
+from airflow.providers.google.cloud.sensors.dataflow import (
+    DataflowJobStatusSensor,)
 from airflow.utils.dates import days_ago
 
 # -----------------------------------------------------------------------------
@@ -158,6 +182,28 @@ network_tag_experiments = ([
     f"use_network_tags={network_tags}",
     f"use_network_tags_for_flex_templates={network_tags}",
 ] if network_tags else [])
+
+# -----------------------------------------------------------------------------
+# Opt-in evaluation (run_evaluation). Nothing below is used unless the gate
+# lets the run through.
+# -----------------------------------------------------------------------------
+# The generation job's id: `start_sdfb` does not wait, so its XCom holds it.
+generation_job_id = "{{ ti.xcom_pull(task_ids='start_sdfb')['id'] }}"
+# The evaluation job's name. The launch appends the run's timestamp; capped
+# so the whole name stays inside Dataflow's 63 characters.
+_evaluation_job_base = f"{app_name}-evaluation-v{project_version.replace('.', '-').lower()}"
+evaluation_job_name = _evaluation_job_base[:38].rstrip("-")
+# How the sensor waits: one status read every two minutes, for at most a day
+# (the longest generation runs take hours). Between reads the task is
+# rescheduled and holds no worker slot.
+GENERATION_POKE_SECONDS = 120
+GENERATION_TIMEOUT_SECONDS = 86400
+# The evaluation job's workers run the SAME image as the generation job's. It
+# is multi-GB (torch, vLLM, the CUDA libraries) and Dataflow's 25 GB default
+# boot disk overflows while a worker unpacks it; the generator pins 200 GB
+# for its own workers in run_pipeline.py, the evaluator pins nothing, so this
+# launch says it (Beam's own --disk_size_gb, passed through the template).
+EVALUATION_WORKER_DISK_GB = "200"
 # -----------------------------------------------------------------------------
 # DAG params — runtime-overridable on every trigger.
 # Using Param objects so {{ params.X }} resolves to the VALUE, not the definition.
@@ -456,9 +502,42 @@ default_dag_params = {
         Param(
             default=False,
             type="boolean",
-            description="Opt-in: after the generation job is submitted, trigger "
-            "the sdfb_evaluation_framework DAG for it (it waits for the job to "
-            "finish, then evaluates). False (default): nothing changes.",
+            description="Opt-in: after the generation job finishes, evaluate "
+            "it. This DAG waits for the job, then launches the evaluation as "
+            "a second, CPU-only Dataflow job from the same template. False "
+            "(default): nothing changes, the DAG only launches generation.",
+        ),
+    "evaluation_mode":
+        Param(
+            default="",
+            type="string",
+            enum=["", "exact", "sampled"],
+            description="Only with run_evaluation. exact reads every row; "
+            "sampled reads a salted sample of the larger tables. Empty: the "
+            "evaluator's default (exact on Dataflow).",
+        ),
+    "evaluation_machine_type":
+        Param(
+            default="e2-standard-8",
+            type="string",
+            description="Only with run_evaluation. Worker machine type of the "
+            "evaluation job (CPU; the evaluator needs no GPU).",
+        ),
+    "evaluation_max_workers":
+        Param(
+            default=4,
+            type="integer",
+            minimum=1,
+            description="Only with run_evaluation. maxWorkers of the "
+            "evaluation job.",
+        ),
+    "evaluation_output_dataset":
+        Param(
+            default="synthetic_data_quality",
+            type="string",
+            description="Only with run_evaluation. The dataset of the four "
+            "evaluation_* tables (dataset or project.dataset); the evaluator "
+            "also reads this launch's validation_runs there.",
         ),
     "pool_seed_strategy":
         Param(
@@ -476,7 +555,7 @@ default_dag_params = {
 
 
 def _run_evaluation_enabled(params, **_):
-  """Gate for the opt-in evaluation trigger."""
+  """Gate for the opt-in evaluation: False skips every task after it."""
   return bool(params["run_evaluation"])
 
 
@@ -671,24 +750,82 @@ with models.DAG(
   )
 
   # Opt-in chaining (run_evaluation, default False): with it off the gate
-  # skips the trigger and the DAG behaves exactly as before. The launch above
-  # does not wait, so its XCom holds the job id the evaluation DAG waits on.
+  # skips every task below and the DAG behaves exactly as before. The launch
+  # above does not wait, so its XCom holds the job id the sensor waits on.
   run_evaluation_gate = ShortCircuitOperator(
       task_id="run_evaluation_gate",
       python_callable=_run_evaluation_enabled,
   )
 
-  trigger_evaluation = TriggerDagRunOperator(
-      task_id="trigger_evaluation",
-      trigger_dag_id="sdfb_evaluation_framework",
-      conf={
-          "generation_job_id":
-              "{{ ti.xcom_pull(task_ids='start_sdfb')['id'] }}",
-          "wait_for_generation":
-              True,
-          "trigger":
-              "chained",
-      },
+  # The landed tables are evaluated, so the generation job must be done. A
+  # job that failed or was cancelled fails this task (the sensor raises on a
+  # terminal state it does not expect) and nothing is evaluated. Not
+  # deferrable, stated: the environment may have no triggerer.
+  wait_for_generation = DataflowJobStatusSensor(
+      task_id="wait_for_generation",
+      job_id=generation_job_id,
+      expected_statuses={"JOB_STATE_DONE"},
+      project_id=project_id,
+      location=region,
+      deferrable=False,
+      mode="reschedule",
+      poke_interval=GENERATION_POKE_SECONDS,
+      timeout=GENERATION_TIMEOUT_SECONDS,
   )
 
-  start_sdfb >> run_evaluation_gate >> trigger_evaluation  # pylint: disable=pointless-statement  # Airflow dependency operator
+  # The evaluation: a second Dataflow job from the SAME template as the
+  # generation above. `sdfb_job` selects the evaluator's entry in the image;
+  # the job id names what to evaluate (the evaluator reads the launch's own
+  # records for the rest, the relationship models included). Submitted and not
+  # waited for, like the generation: the job writes its own FINAL row.
+  trigger_evaluation = DataflowStartFlexTemplateOperator(
+      task_id="trigger_evaluation",
+      project_id=project_id,
+      location=region,
+      body={
+          "launchParameter": {
+              "containerSpecGcsPath":
+                  f"gs://{templates_path}/synthetic/{flex_template}",
+              "jobName":
+                  f"{evaluation_job_name}-{{{{ ts_nodash | lower }}}}",
+              "environment": {
+                  "tempLocation": f"gs://{bucket_path}/temp/",
+                  "stagingLocation": f"gs://{bucket_path}/staging",
+                  "subnetwork": subnetwork,
+                  "ipConfiguration": "WORKER_IP_PRIVATE",
+                  "serviceAccountEmail": service_account,
+                  # A CPU job: no accelerator, no reservation, no
+                  # SDK-container pin. The evaluator adds its own
+                  # launch experiments.
+                  "additionalExperiments": [
+                      "use_runner_v2",
+                      "enable_secure_boot",
+                      *network_tag_experiments,
+                  ],
+                  "additionalUserLabels": {
+                      "app": app_name,
+                      "env": env_name,
+                      "dag": dag_id,
+                  },
+                  "machineType": "{{ params.evaluation_machine_type }}",
+                  "maxWorkers": "{{ params.evaluation_max_workers }}",
+                  "workerRegion": region,
+              },
+              # Names are the template's (docker/flex_template_metadata.json).
+              # The launcher supplies runner, project and region itself and
+              # the image carries its worker image coordinate.
+              "parameters": {
+                  "sdfb_job": "evaluation",
+                  "job_id": generation_job_id,
+                  "trigger": "chained",
+                  "mode": "{{ params.evaluation_mode }}",
+                  "output_dataset": "{{ params.evaluation_output_dataset }}",
+                  "disk_size_gb": EVALUATION_WORKER_DISK_GB,
+              },
+          }
+      },
+      do_xcom_push=True,
+      wait_until_finished=False,
+  )
+
+  start_sdfb >> run_evaluation_gate >> wait_for_generation >> trigger_evaluation  # pylint: disable=pointless-statement  # Airflow chain

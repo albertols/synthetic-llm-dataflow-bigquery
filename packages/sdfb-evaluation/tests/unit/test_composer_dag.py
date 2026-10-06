@@ -33,6 +33,8 @@ REPO_ROOT = PACKAGE.parents[1]
 EVALUATION_DAG = REPO_ROOT / "composer" / "evaluation_framework.py"
 GENERATION_DAG = REPO_ROOT / "composer" / "synthetic_beam_bigquery.py"
 METADATA = PACKAGE / "deploy" / "flex_template_metadata.json"
+# The repository's ONE template: both DAGs launch from it.
+MAIN_METADATA = REPO_ROOT / "docker" / "flex_template_metadata.json"
 
 if not (EVALUATION_DAG.parent.is_dir() and GENERATION_DAG.is_file()):
   pytest.skip(
@@ -334,7 +336,7 @@ _MAY_STILL_WRITE = ("JOB_STATE_RUNNING", "JOB_STATE_PENDING",
                     "JOB_STATE_UNKNOWN", "JOB_STATE_DONE")
 
 
-def _pure(tree: ast.Module, *names: str) -> dict:
+def _pure(tree: ast.Module, *names: str, path: Path = EVALUATION_DAG) -> dict:
   """The named module-level constants and functions of the DAG, executed
   on their own: they import nothing, so a pure decision can be called
   without Airflow (the file itself is never imported)."""
@@ -346,8 +348,7 @@ def _pure(tree: ast.Module, *names: str) -> dict:
   ]
   assert len(body) == len(names), names
   scope: dict = {}
-  code = compile(
-      ast.Module(body=body, type_ignores=[]), str(EVALUATION_DAG), "exec")
+  code = compile(ast.Module(body=body, type_ignores=[]), str(path), "exec")
   exec(code, scope)  # pylint: disable=exec-used  # two pure definitions of a file Airflow alone can import
   return scope
 
@@ -445,8 +446,82 @@ def test_the_job_state_comes_from_the_dataflow_hook_and_never_raises():
 
 
 # --------------------------------------------------------------------------- #
-# The generation DAG's opt-in trigger
+# The generation DAG's opt-in evaluation, chained inside the DAG itself
 # --------------------------------------------------------------------------- #
+#
+#   start_sdfb >> run_evaluation_gate >> wait_for_generation >> trigger_evaluation
+#
+# One import of composer/synthetic_beam_bigquery.py is all the deployment
+# needs: the evaluation is launched by this DAG, from the SAME template as the
+# generation, with `sdfb_job=evaluation` (Ruling R118). The gate is off by
+# default, and then only `start_sdfb` runs, as before.
+
+_JOB_ID_XCOM = "{{ ti.xcom_pull(task_ids='start_sdfb')['id'] }}"
+_CHAIN = [
+    "start_sdfb", "run_evaluation_gate", "wait_for_generation",
+    "trigger_evaluation"
+]
+# What workflow 3 substitutes at import. It refuses a file in which any other
+# {{UPPERCASE}} marker is left, so a new one would break the import.
+_GENERATION_MARKERS = {
+    "DAG_VERSION", "ENGINE", "ENV", "GCS_DATAFLOW_STAGING",
+    "GCS_DATAFLOW_TEMPLATES", "GPU", "PROJECT_VERSION", "SDFB_DDL_URI",
+    "SDFB_DEFAULT_TABLE_FQN", "SDFB_DLQ_TABLE", "SDFB_EMBEDDER_URI",
+    "SDFB_FREETEXT_POOLS_TABLE", "SDFB_LANDING_TABLE", "SDFB_MODEL_URI",
+    "SDFB_RAG_CHUNKS_TABLE", "SDFB_SOURCE_STATS_TABLE",
+    "SDFB_VALIDATION_RUNS_TABLE", "WRITE_DISPOSITION"
+}
+_HOUSE_VARIABLES = {
+    "PROJECT_ID", "REGION", "DATAFLOW_SUBNET", "SA_DATAFLOW",
+    "DATAFLOW_NETWORK_TAGS"
+}
+_GPU_ONLY = ("accelerator", "nvidia", "reservation",
+             "no_use_multiple_sdk_containers", "params.gpu",
+             "params.client_type", "g2-standard", "n1-standard")
+
+
+def _launch(tree: ast.Module, variable: str) -> ast.Call:
+  """The flex-template launch assigned to `variable` at DAG level."""
+  (call,) = [
+      n.value
+      for n in ast.walk(tree)
+      if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and
+      _name(n.value.func) == "DataflowStartFlexTemplateOperator" and
+      [t.id for t in n.targets if isinstance(t, ast.Name)] == [variable]
+  ]
+  return call
+
+
+def _value(tree: ast.Module, node: ast.expr):
+  """`node` as a Python value; a name is read from its one module-level
+  assignment (the DAG types a value once and uses it twice)."""
+  if isinstance(node, ast.Name):
+    (assigned,) = [
+        n.value for n in tree.body if isinstance(n, ast.Assign) and
+        [t.id for t in n.targets if isinstance(t, ast.Name)] == [node.id]
+    ]
+    node = assigned
+  return ast.literal_eval(node)
+
+
+def _variables(tree: ast.Module) -> set[str]:
+  return {
+      ast.literal_eval(c.args[0])
+      for c in _calls(tree, "get")
+      if isinstance(c.func, ast.Attribute) and
+      isinstance(c.func.value, ast.Name) and c.func.value.id == "Variable"
+  }
+
+
+def _markers(path: Path) -> set[str]:
+  return set(re.findall(r"\{\{([A-Z_]+)\}\}", path.read_text(encoding="utf-8")))
+
+
+def _main_metadata_names() -> set[str]:
+  return {
+      p["name"] for p in json.loads(MAIN_METADATA.read_text(
+          encoding="utf-8"))["parameters"]
+  }
 
 
 def test_generation_dag_opt_in_param_defaults_off():
@@ -455,40 +530,234 @@ def test_generation_dag_opt_in_param_defaults_off():
   assert ast.literal_eval(_kw(param, "type")) == "boolean"
 
 
-def test_generation_dag_trigger_sits_behind_the_short_circuit():
+def test_generation_dag_chain_is_four_tasks_of_this_dag():
+  tree = _tree(GENERATION_DAG)
+  assert _chains(tree) == [_CHAIN]
+  task_ids = {}
+  for node in ast.walk(tree):
+    if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+      continue
+    if [k for k in node.value.keywords if k.arg == "task_id"]:
+      (target,) = node.targets
+      assert isinstance(target, ast.Name)
+      task_ids[target.id] = ast.unparse(_kw(node.value, "task_id"))
+  assert task_ids == {
+      "start_sdfb": "f'start_{app_name}'",
+      "run_evaluation_gate": "'run_evaluation_gate'",
+      "wait_for_generation": "'wait_for_generation'",
+      "trigger_evaluation": "'trigger_evaluation'",
+  }
+  (app_name,) = [
+      n.value for n in tree.body if isinstance(n, ast.Assign) and
+      [t.id for t in n.targets if isinstance(t, ast.Name)] == ["app_name"]
+  ]
+  assert ast.literal_eval(app_name) == "sdfb"  # the XCom pulls 'start_sdfb'
+
+
+def test_generation_dag_triggers_no_other_dag():
+  """No second DAG import: nothing here imports a trigger operator or
+  names the standalone evaluation DAG's id (its file is named once, in
+  the header, as the path that closes a RUNNING row)."""
+  tree = _tree(GENERATION_DAG)
+  assert not _calls(tree, "TriggerDagRunOperator")
+  dag_id = ast.literal_eval(_kw(_one(_tree(EVALUATION_DAG), "DAG"), "dag_id"))
+  text = GENERATION_DAG.read_text(encoding="utf-8")
+  for absent in ("TriggerDagRunOperator", "trigger_dagrun", dag_id):
+    assert absent not in text, absent
+  code = ast.unparse(ast.Module(body=tree.body[1:],
+                                type_ignores=[]))  # without the header
+  assert "evaluation_framework" not in code
+
+
+def test_generation_dag_gate_is_the_opt_in_short_circuit():
   tree = _tree(GENERATION_DAG)
   gate = _one(tree, "ShortCircuitOperator")
-  assert "run_evaluation" in ast.unparse(
-      _function(tree,
-                _kw(gate, "python_callable").id))  # type: ignore[attr-defined]
-  trigger = _one(tree, "TriggerDagRunOperator")
-  assert (ast.literal_eval(_kw(
-      trigger, "trigger_dag_id")) == "sdfb_evaluation_framework")
-  conf = _kw(trigger, "conf")
-  assert isinstance(conf, ast.Dict)
-  entries = {
-      k.value: v
-      for k, v in zip(conf.keys, conf.values, strict=True)
-      if isinstance(k, ast.Constant)
+  callable_name = _kw(gate, "python_callable")
+  assert isinstance(callable_name, ast.Name)
+  enabled = _pure(tree, callable_name.id, path=GENERATION_DAG)[callable_name.id]
+  assert enabled({"run_evaluation": False}) is False
+  assert enabled({"run_evaluation": True}) is True
+  # the default: a skipped gate skips EVERYTHING downstream of it
+  assert {k.arg for k in gate.keywords} == {"task_id", "python_callable"}
+  sensor = _one(tree, "DataflowJobStatusSensor")
+  trigger = _launch(tree, "trigger_evaluation")
+  for downstream in (sensor, trigger):
+    assert "trigger_rule" not in {k.arg for k in downstream.keywords}
+
+
+def test_generation_dag_waits_in_reschedule_mode_and_needs_no_triggerer():
+  tree = _tree(GENERATION_DAG)
+  sensor = _one(tree, "DataflowJobStatusSensor")
+  assert ast.literal_eval(_kw(sensor,
+                              "expected_statuses")) == {"JOB_STATE_DONE"}
+  assert ast.literal_eval(_kw(sensor, "mode")) == "reschedule"
+  # stated, so a deployment-wide `default_deferrable` cannot turn it on
+  assert ast.literal_eval(_kw(sensor, "deferrable")) is False
+  assert _value(tree, _kw(sensor, "poke_interval")) >= 60
+  hours = _value(tree, _kw(sensor, "timeout")) / 3600
+  assert 12 <= hours <= 48  # long enough for a generation run, and finite
+  assert _value(tree, _kw(sensor, "job_id")) == _JOB_ID_XCOM
+  start = _launch(tree, "start_sdfb")
+  for keyword in ("project_id", "location"):
+    assert ast.unparse(_kw(sensor, keyword)) == ast.unparse(_kw(start, keyword))
+
+
+def test_trigger_evaluation_launches_from_the_generation_template():
+  tree = _tree(GENERATION_DAG)
+  start, trigger = _launch(tree, "start_sdfb"), _launch(tree,
+                                                        "trigger_evaluation")
+  assert ast.unparse(_entry(trigger, "containerSpecGcsPath")) == ast.unparse(
+      _entry(start, "containerSpecGcsPath"))
+  for keyword in ("project_id", "location"):
+    assert ast.unparse(_kw(trigger,
+                           keyword)) == ast.unparse(_kw(start, keyword))
+  # as the generation launch: submitted, not waited for. The evaluation job
+  # writes its own FINAL row.
+  assert ast.literal_eval(_kw(trigger, "wait_until_finished")) is False
+  assert ast.literal_eval(_kw(trigger, "do_xcom_push")) is True
+  assert "deferrable" not in {k.arg for k in trigger.keywords}
+  # its own job name, not the generation job's
+  assert ast.unparse(_entry(trigger, "jobName")) != ast.unparse(
+      _entry(start, "jobName"))
+  assert "evaluation" in ast.unparse(_entry(trigger, "jobName"))
+
+
+def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
+  tree = _tree(GENERATION_DAG)
+  parameters = _entry(_launch(tree, "trigger_evaluation"), "parameters")
+  assert isinstance(parameters, ast.Dict)
+  keys = [k.value for k in parameters.keys if isinstance(k, ast.Constant)]
+  assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
+  values = dict(zip(keys, parameters.values, strict=True))
+  assert set(values) == {
+      "sdfb_job", "job_id", "trigger", "mode", "output_dataset", "disk_size_gb"
   }
-  assert set(entries) == {"generation_job_id", "wait_for_generation", "trigger"}
-  assert ast.literal_eval(entries["generation_job_id"]) == (
-      "{{ ti.xcom_pull(task_ids='start_sdfb')['id'] }}")
-  assert ast.literal_eval(entries["wait_for_generation"]) is True
-  assert ast.literal_eval(entries["trigger"]) == "chained"
-  assert _chains(tree) == [[
-      "start_sdfb", "run_evaluation_gate", "trigger_evaluation"
-  ]]
+  assert _value(tree, values["sdfb_job"]) == "evaluation"
+  assert _value(tree, values["job_id"]) == _JOB_ID_XCOM
+  assert _value(tree, values["trigger"]) == "chained"
+  assert _value(tree, values["mode"]) == "{{ params.evaluation_mode }}"
+  assert _value(
+      tree,
+      values["output_dataset"]) == "{{ params.evaluation_output_dataset }}"
+  # the same image as generation: the same boot disk, and for the reason
+  # run_pipeline pins it (the evaluator pins none)
+  assert int(_value(tree, values["disk_size_gb"])) >= 100
+  # every key is a parameter of the ONE template, and of the evaluator's own
+  assert set(values) <= _main_metadata_names()
+  assert set(values) <= {
+      p["name"] for p in json.loads(METADATA.read_text())["parameters"]
+  }
+  assert not set(values) & set(_NEVER_PASSED)
+  declared = set(_params(tree))
+  for key, value in values.items():
+    refs = re.findall(r"params\.(\w+)", str(_value(tree, value)))
+    assert set(refs) <= declared, (key, refs)
+
+
+def test_trigger_evaluation_is_a_cpu_job_in_the_generation_jobs_network():
+  tree = _tree(GENERATION_DAG)
+  start, trigger = _launch(tree, "start_sdfb"), _launch(tree,
+                                                        "trigger_evaluation")
+  ours, theirs = _entry(trigger, "environment"), _entry(start, "environment")
+  for key in ("tempLocation", "stagingLocation", "subnetwork",
+              "ipConfiguration", "serviceAccountEmail", "workerRegion",
+              "additionalUserLabels"):
+    assert ast.unparse(_entry(ours, key)) == ast.unparse(_entry(theirs,
+                                                                key)), key
+  experiments = _entry(ours, "additionalExperiments")
+  assert isinstance(experiments, ast.List)
+  assert [e.value for e in experiments.elts if isinstance(e, ast.Constant)
+         ] == ["use_runner_v2", "enable_secure_boot"]
+  (starred,) = [e for e in experiments.elts if isinstance(e, ast.Starred)]
+  assert ast.unparse(starred.value) == "network_tag_experiments"
+  assert ast.unparse(starred.value) in ast.unparse(
+      _entry(theirs, "additionalExperiments"))
+  launch = ast.unparse(_entry(trigger, "launchParameter"))
+  for gpu_only in (*_GPU_ONLY, "enable_data_sampling", "sdk_container_image",
+                   "fail_on"):
+    assert gpu_only not in launch, gpu_only
+  assert ast.literal_eval(_entry(
+      ours, "machineType")) == "{{ params.evaluation_machine_type }}"
+  assert ast.literal_eval(_entry(
+      ours, "maxWorkers")) == "{{ params.evaluation_max_workers }}"
+
+
+def test_generation_dag_gains_four_evaluation_params_and_nothing_else():
+  params = _params(_tree(GENERATION_DAG))
+  about_evaluation = {n for n in params if "evaluation" in n}
+  assert about_evaluation == {
+      "run_evaluation", "evaluation_mode", "evaluation_machine_type",
+      "evaluation_max_workers", "evaluation_output_dataset"
+  }
+
+  def default(name: str):
+    return ast.literal_eval(_kw(params[name], "default"))
+
+  assert default("evaluation_mode") == ""  # the evaluator's own default
+  assert ast.literal_eval(_kw(params["evaluation_mode"],
+                              "enum")) == ["", "exact", "sampled"]
+  assert default("evaluation_machine_type") == "e2-standard-8"
+  assert default("evaluation_max_workers") == 4
+  assert ast.literal_eval(_kw(params["evaluation_max_workers"],
+                              "type")) == "integer"
+  assert default("evaluation_output_dataset") == "synthetic_data_quality"
+
+
+def test_generation_dag_needs_no_new_marker_and_no_new_variable():
+  assert _markers(GENERATION_DAG) == _GENERATION_MARKERS
+  assert _variables(_tree(GENERATION_DAG)) == _HOUSE_VARIABLES
+
+
+def _as_imported(path: Path, **values: str) -> str:
+  """The DAG file as workflow 3 leaves it: every {{MARKER}} replaced (the
+  ones not named get a placeholder)."""
+  return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), "x"),
+                path.read_text(encoding="utf-8"))
+
+
+def test_generation_dag_is_valid_python_once_its_markers_are_substituted():
+  text = _as_imported(GENERATION_DAG, PROJECT_VERSION="0.5.3")
+  assert not re.search(r"\{\{[A-Z_]+\}\}", text)  # the workflow's own check
+  compile(text, str(GENERATION_DAG), "exec")
+
+
+@pytest.mark.parametrize("version,expected", [
+    ("latest", "sdfb-evaluation-vlatest"),
+    ("0.5.3", "sdfb-evaluation-v0-5-3"),
+    ("Feature-Branch-With-A-Long-Name-0a1b2c3",
+     "sdfb-evaluation-vfeature-branch-with-a"),
+])
+def test_evaluation_job_name_is_a_dataflow_job_name(version, expected):
+  """Lowercase letters, digits and hyphens, and short enough that the
+  run's timestamp (16 characters with its hyphen) and the suffix the
+  operator may append (9) still fit Dataflow's 63."""
+  tree = ast.parse(_as_imported(GENERATION_DAG, PROJECT_VERSION=version))
+  name = _pure(
+      tree,
+      "app_name",
+      "project_version",
+      "_evaluation_job_base",
+      "evaluation_job_name",
+      path=GENERATION_DAG)["evaluation_job_name"]
+  assert name == expected
+  assert re.fullmatch(r"[a-z][-a-z0-9]*[a-z0-9]", name)
+  assert len(name) + 16 + 9 <= 63
+  job_name = _entry(_launch(tree, "trigger_evaluation"), "jobName")
+  assert ast.unparse(job_name) == (
+      "f'{evaluation_job_name}-{{{{ ts_nodash | lower }}}}'")
 
 
 def test_generation_dag_default_path_is_unchanged():
+  """With `run_evaluation` False the gate skips the rest, so the default
+  path is `start_sdfb` alone. Its call is pinned whole, against the commit
+  before this chain, in the generator's own surface test
+  (packages/sdfb-tests/tests/unit/docker/test_launch_surfaces.py); here:
+  nothing is upstream of it and nothing of the evaluation is inside it."""
   tree = _tree(GENERATION_DAG)
-  # Still one launch operator, named as before, still not waiting, and
-  # nothing is upstream of it: the new tasks only hang off its end.
-  start = _one(tree, "DataflowStartFlexTemplateOperator")
+  start = _launch(tree, "start_sdfb")
   assert ast.unparse(_kw(start, "task_id")) == "f'start_{app_name}'"
   assert ast.literal_eval(_kw(start, "wait_until_finished")) is False
   assert ast.literal_eval(_kw(start, "do_xcom_push")) is True
-  assert {b for _, b in _edges(tree)
-         } == {"run_evaluation_gate", "trigger_evaluation"}
-  assert "evaluation" not in ast.unparse(_entry(start, "launchParameter"))
+  assert {b for _, b in _edges(tree)} == set(_CHAIN[1:])
+  launch = ast.unparse(_entry(start, "launchParameter"))
+  assert "evaluation" not in launch and "sdfb_job" not in launch

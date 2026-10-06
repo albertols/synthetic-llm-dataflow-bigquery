@@ -396,6 +396,15 @@
       ]
     },
     {
+      "name": "disk_size_gb",
+      "label": "Worker disk size (GB)",
+      "helpText": "Beam's own --disk_size_gb, handed to Beam unchanged by either job: the workers' boot disk. Generation: leave it out; the launcher pins 200, because this image is multi-GB and Dataflow's 25 GB default overflows while a worker unpacks it. Evaluation: the evaluator pins nothing, so a launch on this image passes 200 (the Composer DAGs do). Never pass it empty; Beam refuses an empty number.",
+      "isOptional": true,
+      "regexes": [
+        "^[1-9][0-9]*$"
+      ]
+    },
+    {
       "name": "allow_contaminated",
       "label": "Evaluation: Allow contaminated scope",
       "helpText": "Evaluation only. Evaluate a scope another writer touched; it stays marked `contaminated`. Empty or false: refuse it.",

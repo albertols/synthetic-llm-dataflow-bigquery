@@ -74,6 +74,11 @@ _UNDECLARED = frozenset({"pool_pattern_guidance"})
 # The names both jobs use. Each appears once in the template.
 _SHARED = frozenset({"relationships_uri", "run_id", "thresholds_uri"})
 _SELECTOR = "sdfb_job"
+# Beam's own option, declared so a launch may pass it: both entries hand
+# what they do not parse to Beam. The evaluation job runs on this same
+# multi-GB image and its entry pins no boot disk (`run_pipeline` pins its
+# own), so an evaluation launch has to say it.
+_BEAM_PASSTHROUGH = frozenset({"disk_size_gb"})
 
 
 def _metadata_param(name: str) -> dict:
@@ -290,6 +295,7 @@ def test_the_template_is_the_generator_the_selector_and_the_evaluator():
   generator = generator_flags() - _UNDECLARED
   evaluator = set(_evaluator_parameters()) - {_SELECTOR}
   assert generator & evaluator == _SHARED
+  assert evaluator >= _BEAM_PASSTHROUGH and not generator & _BEAM_PASSTHROUGH
   assert set(_parameters()) == generator | {_SELECTOR} | evaluator
   assert generator_flags() >= _UNDECLARED, "an undeclared flag is gone"
 
@@ -343,7 +349,8 @@ def test_evaluator_parameters_keep_their_own_regexes():
 
 def test_evaluator_only_parameters_say_so():
   template = _parameters()
-  for name in set(_evaluator_parameters()) - _SHARED - {_SELECTOR}:
+  theirs = set(_evaluator_parameters()) - _SHARED - {_SELECTOR}
+  for name in theirs - _BEAM_PASSTHROUGH:
     assert template[name]["helpText"].startswith("Evaluation only"), name
   for name in generator_flags() - _UNDECLARED - _SHARED:
     assert not template[name]["helpText"].startswith("Evaluation"), name
@@ -359,6 +366,30 @@ def test_a_shared_name_says_what_it_means_for_each_job():
     # could only refuse a value one of the entries accepts.
     assert "regexes" not in template[name], name
   assert "different" in template["thresholds_uri"]["helpText"].lower()
+
+
+def test_the_worker_disk_is_declared_for_both_jobs_and_never_empty():
+  """`run_pipeline` keeps an explicit `--disk_size_gb` and otherwise pins
+    its own; the evaluator pins none. The value goes to Beam, which reads
+    an integer: the pattern refuses the empty string."""
+  from apache_beam.options.pipeline_options import (
+      PipelineOptions,
+      WorkerOptions,
+  )
+  from sdfb_beam.cli import run_pipeline
+
+  template = _parameters()
+  for name in _BEAM_PASSTHROUGH:
+    text = template[name]["helpText"]
+    assert "Generation:" in text and "Evaluation:" in text, name
+  (pattern,) = template["disk_size_gb"]["regexes"]
+  assert re.fullmatch(pattern, "200") and not re.fullmatch(pattern, "")
+  # the number an evaluation launch on this image passes is the generator's
+  pinned = run_pipeline._DEFAULT_WORKER_DISK_GB  # pylint: disable=protected-access
+  assert str(pinned) in template["disk_size_gb"]["helpText"]
+  explicit = PipelineOptions(["--disk_size_gb=64"])
+  run_pipeline.configure_pipeline_options(explicit, "DataflowRunner", "r1")
+  assert explicit.view_as(WorkerOptions).disk_size_gb == 64
 
 
 def test_the_selector_admits_exactly_the_dispatchers_two_jobs():

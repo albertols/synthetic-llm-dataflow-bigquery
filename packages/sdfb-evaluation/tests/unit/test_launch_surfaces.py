@@ -28,7 +28,10 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.options.pipeline_options import (
+    PipelineOptions,
+    WorkerOptions,
+)
 
 from sdfb_evaluation.cli.main import (
     _flag,
@@ -78,6 +81,12 @@ LAUNCHER_SUPPLIED = frozenset({"--runner", "--project", "--region"})
 # image selects the evaluator with it (Ruling R118).
 SELECTOR = "--sdfb_job"
 
+# Not flags of the CLI either: Beam's own options, which `run` hands to Beam
+# unchanged. They are declared so a launch may pass them. The worker boot
+# disk is the one a launch on the shared image must pass: that image is
+# multi-GB and Dataflow's default disk overflows while a worker unpacks it.
+BEAM_PASSTHROUGH = frozenset({"--disk_size_gb"})
+
 
 def test_metadata_mirrors_every_public_run_flag_plus_the_selector() -> None:
   names = [p["name"] for p in _metadata()["parameters"]]
@@ -85,10 +94,9 @@ def test_metadata_mirrors_every_public_run_flag_plus_the_selector() -> None:
   flags = public_run_flags()
   assert flags, "no public flags: the parser changed shape"
   assert set(flags) >= LAUNCHER_SUPPLIED
-  assert SELECTOR not in flags
-  assert sorted(
-      f"--{n}" for n in names) == sorted((set(flags) - LAUNCHER_SUPPLIED)
-                                         | {SELECTOR})
+  assert SELECTOR not in flags and not BEAM_PASSTHROUGH & set(flags)
+  declared = (set(flags) - LAUNCHER_SUPPLIED) | {SELECTOR} | BEAM_PASSTHROUGH
+  assert sorted(f"--{n}" for n in names) == sorted(declared)
 
 
 def test_the_selector_is_optional_and_admits_the_two_jobs() -> None:
@@ -114,6 +122,27 @@ def test_the_selector_is_harmless_where_the_cli_is_the_entry() -> None:
   assert args.job_id == "J"
   assert extras == [f"{SELECTOR}=evaluation"]
   assert "sdfb_job" not in PipelineOptions(extras).get_all_options()
+
+
+def test_the_worker_disk_is_beams_own_option_and_never_empty() -> None:
+  """`disk_size_gb` reaches Beam as it is given; Beam reads an integer, so
+  the pattern refuses the empty string a template passes for "unset"."""
+  args, extras = parse_args([
+      "run", "--job_id", "J", "--project", "p", "--region", "r", "--runner",
+      "DataflowRunner", "--disk_size_gb=200"
+  ])
+  assert not hasattr(args, "disk_size_gb")
+  assert PipelineOptions(extras).view_as(WorkerOptions).disk_size_gb == 200
+  pattern = _regex("disk_size_gb")
+  assert re.fullmatch(pattern, "200") and re.fullmatch(pattern, "25")
+  for refused in ("", "0", "200GB", "-1"):
+    assert not re.fullmatch(pattern, refused), refused
+  with pytest.raises(SystemExit) as raised:
+    parse_args([
+        "run", "--job_id", "J", "--project", "p", "--region", "r",
+        "--disk_size_gb="
+    ])
+  assert raised.value.code == 2
 
 
 def test_the_shared_template_declares_this_metadata_whole() -> None:
