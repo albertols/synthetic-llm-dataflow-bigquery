@@ -60,11 +60,11 @@ jobs:
         run: uv run ruff check .
 
       - name: Yapf (Google style, as the Dataflow Solution Guides)
-        run: uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg
+        run: uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg docker
 
       - name: Pylint (dsg/pylintrc, vendored from the Dataflow Solution Guides)
         # On the Python DSG CI uses: pylint's findings differ between 3.11 and 3.14.
-        run: uv run --no-project --python 3.14 --with "pylint>=4,<5" python -m pylint --rcfile dsg/pylintrc --ignore=.venv,venv,.gradle,build,bin,third_party packages scripts composer public_cloud dsg
+        run: uv run --no-project --python 3.14 --with "pylint>=4,<5" python -m pylint --rcfile dsg/pylintrc --ignore=.venv,venv,.gradle,build,bin,third_party packages scripts composer public_cloud dsg docker
 
       - name: DSG overlay shell syntax
         run: for f in dsg/pipeline/scripts/*.sh; do bash -n "$f"; done

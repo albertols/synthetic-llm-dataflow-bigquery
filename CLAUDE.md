@@ -30,8 +30,8 @@ uv sync --group dev
 uv run pytest -m "not gpu and not gcp" -q   # expect all green
 uv run ruff check .
 uv run mypy packages/sdfb-core/src          # hard CI gate — expect 0 errors
-uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg   # expect no output
-uv run pylint --rcfile dsg/pylintrc packages scripts composer public_cloud dsg  # expect 10.00/10
+uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg docker   # expect no output
+uv run pylint --rcfile dsg/pylintrc packages scripts composer public_cloud dsg docker  # expect 10.00/10
 uv run python scripts/dsg/precheck.py       # sensitive-content gate — expect 0 findings
 uv run python scripts/dsg/headers.py        # licence headers — expect no output (`--fix` inserts)
 uv run python scripts/doc/sync_design_refs.py   # `Design:` docstring lines vs docs/DESIGN.md — expect no output (`--fix` rewrites)
@@ -73,6 +73,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `packages/sdfb-beam/src/sdfb_beam/ddl/cli.py` — DDL extractor CLI.
 - `scripts/extract_ddl.py`, `scripts/hello_synthetic_mlx.py` — runnable entry shims (image build/push live in CI, see [ADR 0008](docs/adr/0008-ci-driven-builds.md)).
 - `packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py` — `sdfb-eval` (`plan`, `run`, `report`, `compare`, `catalogue`, `schemas`); the metric catalogue is `catalogue/metrics.yaml`.
+- `docker/flex_entry.py` — the flex template's entry: dispatches on `--sdfb_job` to generation or evaluation.
 - Scripts follow a `scripts/<scope>/` layout (`doc/`, `e2e/`, `release/`) — convention in [`scripts/README.md`](scripts/README.md); new scripts never land at the root.
 
 ## What lives where in `.claude/`

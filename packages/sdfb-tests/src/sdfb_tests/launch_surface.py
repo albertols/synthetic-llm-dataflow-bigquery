@@ -49,7 +49,7 @@ def generator_parser() -> argparse.ArgumentParser:
     try:
       run_pipeline.parse_args([])
     except _CapturedError as captured:
-      (parser,) = captured.args
+      parser = captured.args[0]
       return parser
   raise AssertionError(
       "run_pipeline.parse_args no longer parses with parse_known_args")
