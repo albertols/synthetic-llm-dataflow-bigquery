@@ -1166,6 +1166,7 @@ class _Emitter:
             baseline: float | None = None,
             method: Method = Method.EXACT,
             detail: Mapping[str, Any] | None = None,
+            reads: Sequence[str] = (_SOURCE, _SYNTHETIC),
             **fields: float | str | None) -> None:
     metric = _catalogue().get(metric_id)
     notes = dict(detail or {})
@@ -1175,7 +1176,7 @@ class _Emitter:
       notes.setdefault(
           "baseline_reason", "undefined on the reference sample"
           if self.has_reference else "no reference sample (the R panel)")
-    method, rate = self._estimate(method, notes)
+    method, rate = self._estimate(method, notes, reads)
     self.rows.append(
         MetricValue(
             metric_id=metric_id,
@@ -1219,13 +1220,20 @@ class _Emitter:
             encoding_plan_digest=self.spec.encoding_plan_digest,
             detail=notes))
 
-  def _estimate(self, method: Method,
-                notes: dict[str, Any]) -> tuple[Method, float | None]:
-    """A row's `(method, sample_rate)`: its own method unless a side was
-    read as a row sample — then `sample` at the lowest rate, `notes`
-    naming each sampled side's rate and keeping a binned estimator's
-    name (R72). Every dense metric reads both sides."""
-    rates = self.spec.sample_rates()
+  def _estimate(
+      self,
+      method: Method,
+      notes: dict[str, Any],
+      reads: Sequence[str] = (_SOURCE, _SYNTHETIC)
+  ) -> tuple[Method, float | None]:
+    """A row's `(method, sample_rate)`: its own method unless a side it
+    `reads` was read as a row sample — then `sample` at the lowest rate,
+    `notes` naming each sampled side's rate and keeping a binned
+    estimator's name (R72). The dense metrics read both sides, except
+    `field.type_validity`, whose value reads the synthetic side only
+    (`field.range_adherence`'s value does too, its bounds being the
+    planning grid's; it keeps the both-sides stamp, a conservative one)."""
+    rates = self.spec.sample_rates(reads)
     if not rates:
       return method, None
     notes["sample_rates"] = rates
@@ -1285,6 +1293,7 @@ def _column_basics(e: _Emitter, spec: DenseSpec, s: _Sides) -> None:
   """field.type_validity and column.null_rate_delta, every column."""
   grid_of = {g.j: gi for gi, g in enumerate(spec.grids)}
   ref = s.ref
+  syn_rate = spec.sample_rates((_SYNTHETIC,)).get(_SYNTHETIC)
   for j, name in enumerate(spec.layout.columns):
     scope = _Scope(name, None, spec.layout.kinds[j].value)
     _share_delta(e, "column.null_rate_delta", scope,
@@ -1307,6 +1316,21 @@ def _column_basics(e: _Emitter, spec: DenseSpec, s: _Sides) -> None:
           scope,
           sizes=sizes)
       continue
+    if syn_rate is not None:
+      # an integrity pass never comes from a sample (R72): the invalid
+      # cells may all be outside the rows read
+      e.skip(
+          "field.type_validity",
+          "sampled mode cannot measure type validity: the synthetic side "
+          f"is a {syn_rate:.3g} row sample, so invalid cells it did not "
+          "read go unseen; run exact mode",
+          scope,
+          sizes=sizes,
+          detail={
+              "invalid_in_sample": invalid(s.syn),
+              "note": "the sample's count, not the table's"
+          })
+      continue
     bad = invalid(s.syn)
     rule = ("a non-finite FLOAT64 value (NaN, ±Inf) is invalid"
             if spec.layout.bq_types[j] in _FLOAT_TYPES else
@@ -1321,6 +1345,7 @@ def _column_basics(e: _Emitter, spec: DenseSpec, s: _Sides) -> None:
             "invalid": bad,
             "rule": rule
         },
+        reads=(_SYNTHETIC,),
         sizes=sizes)
 
 

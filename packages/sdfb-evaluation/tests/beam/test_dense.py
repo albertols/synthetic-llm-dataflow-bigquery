@@ -2472,6 +2472,10 @@ def test_sampled_mode_never_stores_a_dense_row_as_exact():
   metrics, _ = _pure(plan, read)
   assert {mv.metric_id for mv in metrics} == set(OWNED_METRIC_IDS)
   for mv in metrics:
+    if mv.metric_id == "field.type_validity":  # its value reads the
+      assert mv.method.value == "exact" and mv.sample_rate is None  # synthetic
+      assert "sample_rates" not in mv.detail
+      continue
     assert mv.method.value == "sample", (mv.metric_id, mv.column)
     assert mv.sample_rate == 0.2, (mv.metric_id, mv.column)
     assert mv.detail["sample_rates"] == {"source": 0.2}, mv.metric_id
@@ -2490,6 +2494,59 @@ def test_sampled_mode_never_stores_a_dense_row_as_exact():
       round(nulls.source_value * 600), 600)
   assert (nulls.ci_low,
           nulls.ci_high) == pytest.approx(noise.folded_abs_interval(lo, hi))
+
+
+def test_type_validity_never_passes_from_a_synthetic_row_sample():
+  """The re-review's probe (R116 item 2): 6 NaN in 3,000 synthetic FLOAT64
+  cells is 0.998, FAIL in an exact run; a 1/10 synthetic sample holding
+  none of them scored 1.0 PASS, stamped `sample`. An integrity pass never
+  comes from a sample: not evaluated. A sampled source alone does not
+  touch it: its value is the full synthetic side's, and not a sample."""
+  n = 3000
+  rng = random.Random(1)
+  src = [{"id": i, "x": rng.gauss(0, 1)} for i in range(n)]
+  rng = random.Random(2)
+  syn = [{
+      "id": 10**6 + i,
+      "x": float("nan") if i % 500 == 5 else rng.gauss(0, 1)
+  } for i in range(n)]
+  fields = ({
+      "name": "id",
+      "type": "INT64",
+      "mode": "REQUIRED"
+  }, {
+      "name": "x",
+      "type": "FLOAT64",
+      "mode": "NULLABLE"
+  })
+  table = planned_table("t", fields, src, syn, pk=("id",))
+  rows_by = {"source": src, "synthetic": syn}
+  validity = _CATALOGUE.get("field.type_validity")
+
+  def get(metrics: list[MetricValue]) -> MetricValue:
+    return _by_key(metrics)[("field.type_validity", "x", None)]
+
+  exact = get(_pure(table, rows_by)[0])
+  assert exact.value == pytest.approx(0.998) and exact.method.value == "exact"
+  assert status_for(validity, exact) is Status.FAIL
+  assert exact.detail["invalid"] == 6
+  # i % 500 == 5 is never a multiple of 10, so the 1/10 sample misses all six
+  plan, read = _row_sampled(table, rows_by, synthetic=10)
+  sampled = get(_pure(plan, read)[0])
+  reason = sampled.detail["reason"]
+  assert sampled.value is None
+  assert status_for(validity, sampled) is Status.NOT_EVALUATED
+  assert reason.startswith("sampled mode cannot measure type validity")
+  assert "the synthetic side is a 0.1 row sample" in reason
+  assert reason.endswith("run exact mode")
+  assert sampled.detail["invalid_in_sample"] == 0
+  # a source sample alone: evaluated on the full synthetic side, not stamped
+  plan, read = _row_sampled(table, rows_by, source=10)
+  source_only = get(_pure(plan, read)[0])
+  assert source_only.value == pytest.approx(0.998)
+  assert source_only.method.value == "exact" and source_only.sample_rate is None
+  assert "sample_rates" not in source_only.detail
+  assert status_for(validity, source_only) is Status.FAIL
 
 
 @pytest.mark.parametrize(("sides", "named"), [({
