@@ -28,8 +28,14 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from apache_beam.options.pipeline_options import PipelineOptions
 
-from sdfb_evaluation.cli.main import _flag, _subparsers, public_run_flags
+from sdfb_evaluation.cli.main import (
+    _flag,
+    _subparsers,
+    parse_args,
+    public_run_flags,
+)
 from sdfb_evaluation.version import EVALUATOR_VERSION
 
 PACKAGE = Path(__file__).resolve().parents[2]
@@ -66,15 +72,67 @@ def _locked(name: str) -> str:
 # contradict it, in an order-dependent way (Ruling R97).
 LAUNCHER_SUPPLIED = frozenset({"--runner", "--project", "--region"})
 
+# Not a flag of the CLI: the selector the shared image's entry
+# (docker/flex_entry.py at the repository root) reads and removes before
+# the CLI sees the arguments. A template built from this metadata on that
+# image selects the evaluator with it (Ruling R118).
+SELECTOR = "--sdfb_job"
 
-def test_metadata_mirrors_every_public_run_flag() -> None:
+
+def test_metadata_mirrors_every_public_run_flag_plus_the_selector() -> None:
   names = [p["name"] for p in _metadata()["parameters"]]
   assert len(names) == len(set(names))
   flags = public_run_flags()
   assert flags, "no public flags: the parser changed shape"
   assert set(flags) >= LAUNCHER_SUPPLIED
+  assert SELECTOR not in flags
   assert sorted(
-      f"--{n}" for n in names) == sorted(set(flags) - LAUNCHER_SUPPLIED)
+      f"--{n}" for n in names) == sorted((set(flags) - LAUNCHER_SUPPLIED)
+                                         | {SELECTOR})
+
+
+def test_the_selector_is_optional_and_admits_the_two_jobs() -> None:
+  (selector,) = [
+      p for p in _metadata()["parameters"] if p["name"] == SELECTOR[2:]
+  ]
+  assert selector["isOptional"] is True
+  (pattern,) = selector["regexes"]
+  for value in ("evaluation", "generation", ""):
+    assert re.fullmatch(pattern, value), value
+  assert not re.fullmatch(pattern, "both")
+  assert "evaluation" in selector["helpText"]
+
+
+def test_the_selector_is_harmless_where_the_cli_is_the_entry() -> None:
+  """On the standalone image `run_evaluation.py` is the entry and nothing
+  removes the selector: it must stay a Beam argument Beam itself drops,
+  never a usage error of this CLI."""
+  args, extras = parse_args([
+      "run", "--job_id", "J", "--project", "p", "--region", "r", "--runner",
+      "DataflowRunner", f"{SELECTOR}=evaluation"
+  ])
+  assert args.job_id == "J"
+  assert extras == [f"{SELECTOR}=evaluation"]
+  assert "sdfb_job" not in PipelineOptions(extras).get_all_options()
+
+
+def test_the_shared_template_declares_this_metadata_whole() -> None:
+  """The repository's one template (docker/flex_template_metadata.json)
+  carries every parameter here under the same name and pattern, so the
+  same launch body works against either template."""
+  shared = PACKAGE.parents[1] / "docker" / "flex_template_metadata.json"
+  if not shared.is_file():  # the package stands alone as its own unit
+    pytest.skip("the repository-root template metadata is not beside this "
+                "package")
+  template = {
+      p["name"]: p
+      for p in json.loads(shared.read_text(encoding="utf-8"))["parameters"]
+  }
+  for parameter in _metadata()["parameters"]:
+    name = parameter["name"]
+    assert name in template, name
+    assert template[name].get("regexes") == parameter.get("regexes"), name
+    assert template[name].get("isOptional") is True, name
 
 
 def test_metadata_leaves_launcher_supplied_flags_out() -> None:

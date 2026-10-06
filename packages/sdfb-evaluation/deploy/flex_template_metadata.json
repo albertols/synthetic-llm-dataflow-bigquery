@@ -179,6 +179,16 @@
       ]
     },
     {
+      "name": "sdfb_job",
+      "label": "Job kind",
+      "helpText": "Pass evaluation when this template is built on the repository's shared image (docker/Dockerfile): its one entry runs generation unless this says evaluation. On the standalone evaluator image (packages/sdfb-evaluation/docker/Dockerfile) the entry is the evaluator itself and the value has no effect.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(generation|evaluation)?$"
+      ]
+    },
+    {
       "name": "sink",
       "label": "Sink",
       "helpText": "bq: the pipeline loads BigQuery (the template default on Dataflow). bq_client and local_json write local files and need a local runner. Empty: bq.",
