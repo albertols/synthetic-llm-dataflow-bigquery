@@ -420,15 +420,16 @@ def _check_run(tmp_path: Path,
   for stub in (stubs / "python", venv / "python"):
     stub.write_text(_PYTHON_STUB)
     stub.chmod(0o755)
-  done = subprocess.run(["sh", "-c", command],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        env={
-                            "PATH": f"{stubs}:/usr/bin:/bin",
-                            "PYTHONPATH": "/the/image/pythonpath",
-                            "STUB_DIR": str(stubs)
-                        })
+  done = subprocess.run(
+      ["sh", "-c", command],
+      capture_output=True,
+      text=True,
+      check=False,
+      env={
+          "PATH": f"{stubs}:/usr/bin:/bin",
+          "PYTHONPATH": "/the/image/pythonpath",
+          "STUB_DIR": str(stubs)
+      })
   return done, (stubs / "calls").read_text().splitlines()
 
 

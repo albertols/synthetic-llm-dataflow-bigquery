@@ -1086,7 +1086,10 @@ def test_the_new_tasks_pass_only_arguments_the_working_launch_or_airflow_has():
   sensor's; task_id and python_callable are Airflow's.
   """
   tree = _tree(GENERATION_DAG)
-  names = lambda call: {k.arg for k in call.keywords}  # pylint: disable=unnecessary-lambda-assignment
+
+  def names(call):
+    return {k.arg for k in call.keywords}
+
   assert names(_one(tree,
                     "ShortCircuitOperator")) == {"task_id", "python_callable"}
   assert names(_one(tree, "DataflowJobStatusSensor")) == {
@@ -1217,7 +1220,10 @@ def test_the_evaluation_dataset_defaults_to_the_validation_runs_dataset(
   tree = _tree(GENERATION_DAG)
   default = _kw(_params(tree)["evaluation_output_dataset"], "default")
   assert isinstance(default, ast.Name)
-  names = {"validation_runs_table", "_validation_runs_parts", default.id}
+  names = {
+      "validation_runs_table", "_QUALIFIED_TABLE_PARTS",
+      "_validation_runs_parts", default.id
+  }
   body = [
       n for n in tree.body if isinstance(n, ast.Assign) and any(
           isinstance(t, ast.Name) and t.id in names for t in n.targets)
