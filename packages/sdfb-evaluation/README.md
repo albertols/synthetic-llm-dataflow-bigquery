@@ -413,7 +413,7 @@ flowchart LR
 | `run_evaluation` | false | the `run_evaluation_gate` short-circuit |
 | `evaluation_mode` | empty (`exact`, `sampled`) | template `mode`; empty is the evaluator's default |
 | `evaluation_machine_type`, `evaluation_max_workers` | `e2-standard-8`, 4 | the evaluation launch's environment |
-| `evaluation_output_dataset` | `synthetic_data_quality` | template `output_dataset` |
+| `evaluation_output_dataset` | the dataset of the DAG's validation-runs table (`synthetic_data_quality` when that value is not `project.dataset.table`) | template `output_dataset` |
 
 - `wait_for_generation` is a `DataflowJobStatusSensor` on the job id the
   launch pushed to XCom, in **reschedule mode**: it reads the job's state
@@ -433,6 +433,22 @@ flowchart LR
   FINAL row. **A chained evaluation that dies after it was launched leaves
   its RUNNING row open**; nothing in this DAG closes it. Run the standalone
   DAG for that job to get an evaluation whose row is closed either way.
+- **Run slot.** With `run_evaluation` true a run of this DAG stays running
+  until the generation job ends (hours), and the DAG has `max_active_runs=1`:
+  every later trigger queues behind it, so launches of this DAG run one
+  generation at a time. `max_active_runs` is the knob; raising it lets several
+  generation jobs run at once (GPU quota). It is not changed here.
+- **Relationship models.** The evaluator follows what the generation did.
+  When the launch loaded a model (its launcher log has `relationships_loaded`,
+  which names the model and its sha) the evaluator loads the same URI and
+  raises if the files are not readable from where it runs. When the recorded
+  URI holds only sample models and the launch logged no `relationships_loaded`
+  (the generator logged `relationships_absent` and generated each table
+  alone), the evaluator evaluates without relationships: no relational
+  metrics, and one plan warning naming the URI, which reaches the registry
+  row's `warnings`. An adjusted model (ADR 0038) is loaded from where the
+  launch wrote it, as before. First-deploy check: when a model is expected,
+  the generation launcher log says `relationships_loaded`.
 - With `run_evaluation` false the gate skips every task after the launch,
   and the launch and its arguments are what they were before the chain: a
   test pins the operator's whole call.

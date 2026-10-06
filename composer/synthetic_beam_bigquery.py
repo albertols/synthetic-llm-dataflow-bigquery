@@ -67,6 +67,12 @@ amendment of 2026-10-06). No other DAG is triggered, and no marker or Airflow
 Variable is added for it. The sensor is not deferrable, so no triggerer is
 needed.
 
+Run slot: with `run_evaluation` true a run of this DAG stays running until the
+generation job ends (the sensor waits for it, hours), and the DAG has
+`max_active_runs=1`, so every later trigger queues behind it: launches run one
+generation at a time. `max_active_runs` is the knob; raising it lets several
+generation jobs run at once (mind the GPU quota). It is unchanged here.
+
 `trigger_evaluation` submits the job and does not wait: the evaluation job
 writes its own FINAL registry row. A job that dies after it was launched
 leaves its RUNNING row open; `composer/evaluation_framework.py`, the
@@ -512,8 +518,11 @@ default_dag_params = {
             type="boolean",
             description="Opt-in: after the generation job finishes, evaluate "
             "it. This DAG waits for the job, then launches the evaluation as "
-            "a second, CPU-only Dataflow job from the same template. False "
-            "(default): nothing changes, the DAG only launches generation.",
+            "a second, CPU-only Dataflow job from the same template. While it "
+            "waits the run holds the DAG's only active-run slot "
+            "(max_active_runs=1): with this on, launches of this DAG run "
+            "one generation at a time. False (default): nothing changes, "
+            "the DAG only launches generation.",
         ),
     "evaluation_mode":
         Param(
