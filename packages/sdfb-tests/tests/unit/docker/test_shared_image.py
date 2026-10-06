@@ -300,6 +300,31 @@ def test_the_bridge_adds_the_venv_then_the_evaluator_source():
   assert _bridge().endswith("\n")
 
 
+# Runtime noise on a child interpreter's stderr that is not ours: gRPC prints
+# these when the process forks while its threads are alive (`fork_posix.cc`,
+# `ev_poll_posix.cc`; seen in this repository's full-suite logs). A bad `.pth`
+# line is a Python traceback or message and carries neither.
+_STDERR_NOISE = ("fork_posix.cc", "ev_poll_posix.cc")
+
+
+def _own_stderr(text: str) -> str:
+  """`text` without the lines of known runtime noise (`_STDERR_NOISE`)."""
+  return "\n".join(line for line in text.splitlines()
+                   if not any(noise in line for noise in _STDERR_NOISE))
+
+
+def test_known_grpc_fork_noise_is_dropped_and_anything_else_is_kept():
+  noise = ("I1006 21:11:31.586576 2233243 ev_poll_posix.cc:593] FD from fork "
+           "parent still in poll list: fd(27, generation: 1)\n"
+           "E1006 21:11:31.587 1 fork_posix.cc:70] Other threads are "
+           "currently calling into gRPC, skipping fork() handlers\n")
+  assert not _own_stderr(noise)
+  assert not _own_stderr("")
+  assert _own_stderr(noise + "Error processing line 1 of x.pth\n") == (
+      "Error processing line 1 of x.pth")
+  assert _own_stderr("Traceback (most recent call last):\n") != ""
+
+
 def _path_after_bridge(site_dir: Path, bridge: str) -> list[str]:
   (site_dir / "zz_sdfb_bridge.pth").write_text(bridge, encoding="utf-8")
   script = ("import json, site, sys; "
@@ -308,7 +333,8 @@ def _path_after_bridge(site_dir: Path, bridge: str) -> list[str]:
                            capture_output=True,
                            text=True,
                            check=True)
-  assert not process.stderr, process.stderr  # a bad .pth line prints there
+  # a bad .pth line prints there
+  assert not _own_stderr(process.stderr), process.stderr
   return json.loads(process.stdout)
 
 
