@@ -1033,8 +1033,10 @@ def test_generation_dag_waits_in_reschedule_mode_and_needs_no_triggerer():
   assert ast.literal_eval(_kw(sensor,
                               "expected_statuses")) == {"JOB_STATE_DONE"}
   assert ast.literal_eval(_kw(sensor, "mode")) == "reschedule"
-  # stated, so a deployment-wide `default_deferrable` cannot turn it on
-  assert ast.literal_eval(_kw(sensor, "deferrable")) is False
+  # `deferrable` is a constructor argument only newer Google providers have:
+  # passing it would take the whole DAG down on an older one. Not deferrable
+  # is the default, so it is not passed at all.
+  assert "deferrable" not in {k.arg for k in sensor.keywords}
   assert _value(tree, _kw(sensor, "poke_interval")) >= 60
   hours = _value(tree, _kw(sensor, "timeout")) / 3600
   assert 12 <= hours <= 48  # long enough for a generation run, and finite
@@ -1042,6 +1044,26 @@ def test_generation_dag_waits_in_reschedule_mode_and_needs_no_triggerer():
   start = _launch(tree, "start_sdfb")
   for keyword in ("project_id", "location"):
     assert ast.unparse(_kw(sensor, keyword)) == ast.unparse(_kw(start, keyword))
+
+
+def test_the_new_tasks_pass_only_arguments_the_working_launch_or_airflow_has():
+  """No new task may use a constructor argument start_sdfb does not have.
+
+  The sensor's own (job_id, expected_statuses) are the provider sensor's
+  long-standing arguments; mode, poke_interval and timeout are the base
+  sensor's; task_id and python_callable are Airflow's.
+  """
+  tree = _tree(GENERATION_DAG)
+  names = lambda call: {k.arg for k in call.keywords}  # pylint: disable=unnecessary-lambda-assignment
+  assert names(_one(tree, "ShortCircuitOperator")) == {
+      "task_id", "python_callable"
+  }
+  assert names(_one(tree, "DataflowJobStatusSensor")) == {
+      "task_id", "job_id", "expected_statuses", "project_id", "location",
+      "mode", "poke_interval", "timeout"
+  }
+  assert names(_launch(tree, "trigger_evaluation")) == names(
+      _launch(tree, "start_sdfb"))
 
 
 def test_trigger_evaluation_launches_from_the_generation_template():

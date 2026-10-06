@@ -763,14 +763,14 @@ with models.DAG(
   # (the provider's sensor raises on a terminal state it was not told to
   # expect; not verified against the installed provider). If it did not, the
   # task would fail at its timeout: either way nothing is evaluated. Not
-  # deferrable, stated: the environment may have no triggerer.
+  # deferrable (the default; `deferrable` is not passed, as older providers
+  # lack that argument), so the environment needs no triggerer.
   wait_for_generation = DataflowJobStatusSensor(
       task_id="wait_for_generation",
       job_id=generation_job_id,
       expected_statuses={"JOB_STATE_DONE"},
       project_id=project_id,
       location=region,
-      deferrable=False,
       mode="reschedule",
       poke_interval=GENERATION_POKE_SECONDS,
       timeout=GENERATION_TIMEOUT_SECONDS,
