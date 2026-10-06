@@ -1055,9 +1055,8 @@ def test_the_new_tasks_pass_only_arguments_the_working_launch_or_airflow_has():
   """
   tree = _tree(GENERATION_DAG)
   names = lambda call: {k.arg for k in call.keywords}  # pylint: disable=unnecessary-lambda-assignment
-  assert names(_one(tree, "ShortCircuitOperator")) == {
-      "task_id", "python_callable"
-  }
+  assert names(_one(tree,
+                    "ShortCircuitOperator")) == {"task_id", "python_callable"}
   assert names(_one(tree, "DataflowJobStatusSensor")) == {
       "task_id", "job_id", "expected_statuses", "project_id", "location",
       "mode", "poke_interval", "timeout"

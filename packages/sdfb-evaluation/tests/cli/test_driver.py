@@ -54,6 +54,7 @@ from sdfb_evaluation.cli import driver, gate, run_evaluation
 from sdfb_evaluation.cli.main import main, parse_args
 from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.gcp import JobNotFoundError
+from sdfb_evaluation.context.relationships import RelationshipError
 from sdfb_evaluation.context.plan import (
     Knobs,
     PlanError,
@@ -379,6 +380,59 @@ def test_a_plan_error_keeps_what_planning_created(bq, monkeypatch, capsys):
       runner="DirectRunner",
       now=NOW)
   assert row["evaluation_key"] == plan.evaluation_key
+  capsys.readouterr()
+
+
+# --------------------------------------------------------------------------
+# the relationship model follows what the generation did (R120-2)
+# --------------------------------------------------------------------------
+def _samples_only(tmp_path) -> str:
+  """A folder holding documentation samples only: the generator logs
+  `relationships_absent` for it and generates without relationships."""
+  folder = tmp_path / "relationships"
+  folder.mkdir()
+  (folder / "example_orders.yaml").write_text("model: example\n")
+  return str(folder)
+
+
+def test_a_launch_that_loaded_no_model_is_evaluated_without_relationships(
+    bq, monkeypatch, tmp_path, capsys):
+  folder = _samples_only(tmp_path)
+  launch = thelook_launch(
+      bq, relationships_uri=folder, model_name=None, model_sha=None)
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  planned, _ = driver.plan(parse_args(["plan", *TARGET])[0], make_env(bq))
+  assert planned.models == ()
+  assert all(t.edges == () for t in planned.tables)
+  assert not any(t.role != "standalone" for t in planned.tables)
+  (note,) = [w for w in planned.warnings if "loaded no relationship model" in w]
+  assert folder in note and "no model file" in note
+  assert any(
+      "relationships are off for this launch" in w for w in planned.warnings)
+  seed = planned.registry_seed()
+  check_row(REGISTRY, seed)
+  assert note in seed["warnings"] and seed["relationship_model"] is None
+  capsys.readouterr()
+
+
+def test_a_launch_that_loaded_a_model_whose_files_are_missing_still_raises(
+    bq, monkeypatch, tmp_path, capsys):
+  folder = _samples_only(tmp_path)
+  launch = thelook_launch(
+      bq, relationships_uri=folder, model_name="thelook", model_sha="abc123")
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  with pytest.raises(RelationshipError) as info:
+    driver.plan(parse_args(["plan", *TARGET])[0], make_env(bq))
+  assert folder in str(info.value) and "no model files there" in str(info.value)
+  assert "thelook" in str(info.value) and "abc123" in str(info.value)
+  capsys.readouterr()
+
+
+def test_the_normal_case_loads_the_recorded_model(bq, resolved, capsys):
+  del resolved
+  planned, _ = driver.plan(parse_args(["plan", *TARGET])[0], make_env(bq))
+  assert planned.models
+  assert not any("loaded no relationship model" in w for w in planned.warnings)
   capsys.readouterr()
 
 
