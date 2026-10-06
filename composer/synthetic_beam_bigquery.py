@@ -199,6 +199,13 @@ evaluation_job_name = _evaluation_job_base[:38].rstrip("-")
 # rescheduled and holds no worker slot.
 GENERATION_POKE_SECONDS = 120
 GENERATION_TIMEOUT_SECONDS = 86400
+# Default of the `evaluation_output_dataset` param: the dataset of the
+# validation-runs table above (`project.dataset.table`), so a deployment whose
+# quality dataset has another name needs no extra setting.
+_validation_runs_parts = validation_runs_table.split(".")
+evaluation_output_dataset_default = (
+    _validation_runs_parts[1]
+    if len(_validation_runs_parts) == 3 else "synthetic_data_quality")
 # The evaluation job's workers run the SAME image as the generation job's. It
 # is multi-GB (torch, vLLM, the CUDA libraries) and Dataflow's 25 GB default
 # boot disk overflows while a worker unpacks it; the generator pins 200 GB
@@ -534,7 +541,7 @@ default_dag_params = {
         ),
     "evaluation_output_dataset":
         Param(
-            default="synthetic_data_quality",
+            default=evaluation_output_dataset_default,
             type="string",
             description="Only with run_evaluation. The dataset of the four "
             "evaluation_* tables (dataset or project.dataset); the evaluator "

@@ -1195,7 +1195,43 @@ def test_generation_dag_gains_four_evaluation_params_and_nothing_else():
   assert default("evaluation_max_workers") == 4
   assert ast.literal_eval(_kw(params["evaluation_max_workers"],
                               "type")) == "integer"
-  assert default("evaluation_output_dataset") == "synthetic_data_quality"
+  # the quality dataset of the DAG's own validation-runs table, read in
+  # Python: no new marker (the executed test below)
+  assert _kw(params["evaluation_output_dataset"],
+             "default") is not None and isinstance(
+                 _kw(params["evaluation_output_dataset"], "default"), ast.Name)
+
+
+@pytest.mark.parametrize("table,dataset", [
+    ("proj.quality_ds.validation_runs", "quality_ds"),
+    ("proj.synthetic_data_quality.validation_runs", "synthetic_data_quality"),
+    ("quality_ds.validation_runs", "synthetic_data_quality"),
+    ("{{SDFB_VALIDATION_RUNS_TABLE}}", "synthetic_data_quality"),
+    ("", "synthetic_data_quality"),
+])
+def test_the_evaluation_dataset_defaults_to_the_validation_runs_dataset(
+    table, dataset):
+  """The default of `evaluation_output_dataset` is the dataset part of the
+  DAG's `{{SDFB_VALIDATION_RUNS_TABLE}}` value (`project.dataset.table`),
+  and `synthetic_data_quality` when the value has not three parts."""
+  tree = _tree(GENERATION_DAG)
+  default = _kw(_params(tree)["evaluation_output_dataset"], "default")
+  assert isinstance(default, ast.Name)
+  names = {"validation_runs_table", "_validation_runs_parts", default.id}
+  body = [
+      n for n in tree.body if isinstance(n, ast.Assign) and any(
+          isinstance(t, ast.Name) and t.id in names for t in n.targets)
+  ]
+  scope: dict = {}
+  for node in body:  # the table marker's own assignment, as the import sets it
+    if node.targets[0].id == "validation_runs_table":
+      scope["validation_runs_table"] = table
+      continue
+    exec(  # pylint: disable=exec-used  # a pure module-level assignment of the DAG file
+        compile(
+            ast.Module(body=[node], type_ignores=[]), str(GENERATION_DAG),
+            "exec"), scope)
+  assert scope[default.id] == dataset
 
 
 def test_generation_dag_needs_no_new_marker_and_no_new_variable():
