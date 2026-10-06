@@ -2677,8 +2677,9 @@ def test_small_columns_publish_grid_values_k_source_records_apart(
     assert histogram.payload["counts"] == _records_between(values, edges), side
     assert sum(histogram.payload["counts"]) == values.size, side
     assert histogram.edges_digest == histograms["source"].edges_digest
-  assert histograms["source"].edges_digest == dense._edges_digest(  # pylint: disable=protected-access  # the digest is of the published edges
-      np.asarray(edges), "value")
+  digest = dense._edges_digest  # pylint: disable=protected-access  # the digest under test
+  assert histograms["source"].edges_digest == digest(
+      np.asarray(edges), "value")  # of the edges published
   # quantile probabilities: k of the side's own records apart
   seen = 0
   for p in profiles:

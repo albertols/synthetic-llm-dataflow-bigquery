@@ -335,8 +335,8 @@ TABLE_ERRORS: tuple[type[Exception],
 # not the table's. It is raised, so the bundle fails and the runner
 # retries it (`beam.pipeline`'s contract, Ruling R113) — swallowed, it
 # was a permanent not_evaluated block that left the run SUCCEEDED.
-WORKER_ERRORS: tuple[type[Exception], ...] = tuple(
-    error for error in TABLE_ERRORS if error is not MemoryError)
+WORKER_ERRORS: tuple[type[Exception], ...] = (ArithmeticError, IndexError,
+                                              KeyError, TypeError, ValueError)
 _FLUSH_PER_BUCKET = 256  # flush no sooner than this many codes per bucket
 # a record class whose P(X = 1) is below this adds nothing measurable to
 # the null variance (a record held ~33 times its expected share or more)

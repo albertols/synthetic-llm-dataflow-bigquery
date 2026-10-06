@@ -1009,11 +1009,12 @@ class _Run:
     if found is None:
       self._close(planned, exc)
       return
+    status = found.get("status")
     print(
         f"sdfb-eval: evaluation {evaluation_id}: job {job} ended without "
         f"completing ({type(exc).__name__}: {exc}), but the registry already "
-        f"holds a FINAL row ({found.get('status')}): no further row was "
-        f"written. Read it with: {self.how_to_read}",
+        f"holds a FINAL row ({status}): no further row was written. Read it "
+        f"with: {self.how_to_read}",
         file=sys.stderr)
 
   def _leave_running(self, job: str) -> None:
