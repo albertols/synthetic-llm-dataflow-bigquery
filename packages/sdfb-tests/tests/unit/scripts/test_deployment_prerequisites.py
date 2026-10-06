@@ -344,11 +344,13 @@ class _FakeBlob:
 
 
 class _FakeGCS:
-  """Just enough of google.cloud.storage.Client: blob(...).exists()."""
+  """Just enough of google.cloud.storage.Client: blob(...).exists() and
+    list_blobs(bucket, prefix=..., max_results=...)."""
 
   def __init__(self, objects=()):
     self._objects = set(objects)
     self.asked = []
+    self.listed = []
 
   def bucket(self, name):
     return SimpleNamespace(blob=lambda path: self._blob(f"gs://{name}/{path}"))
@@ -356,6 +358,13 @@ class _FakeGCS:
   def _blob(self, uri):
     self.asked.append(uri)
     return _FakeBlob(uri in self._objects)
+
+  def list_blobs(self, bucket, prefix="", max_results=None):
+    self.listed.append((bucket, prefix))
+    names = sorted(uri[len(f"gs://{bucket}/"):]
+                   for uri in self._objects
+                   if uri.startswith(f"gs://{bucket}/{prefix}"))
+    return [SimpleNamespace(name=name) for name in names[:max_results]]
 
 
 def _eval_ctx(*extra):
@@ -613,25 +622,118 @@ def test_step13_temp_dataset_different_is_checked(monkeypatch):
   assert "eval_tmp" in by["13i"].resource
 
 
-def test_step13_template_present_absent_and_no_bucket(monkeypatch):
+def _run13j(monkeypatch, *names, extra=("--templates-bucket", "b")):
+  """Step 13 on a fully provisioned dataset, with `names` as the objects
+    under gs://b/synthetic/; returns (the 13j row, the fake GCS)."""
   bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
+  gcs = _FakeGCS(objects={f"gs://b/synthetic/{name}" for name in names})
+  _, by = _run13(monkeypatch, bq, *extra, gcs=gcs)
+  return by["13j"], gcs
+
+
+def _main_template():
+  version = _mod.generator_version(_REPO_ROOT)
+  assert version, "packages/sdfb-beam/pyproject.toml names no version"
+  return f"sdfb-{version}-template.json"
+
+
+def test_generator_version_is_the_one_the_template_is_named_after(tmp_path):
+  """The template build names the object after the sdfb-beam package's
+    version (a release) or `latest` (a development build)."""
+  package = tmp_path / "packages" / "sdfb-beam"
+  package.mkdir(parents=True)
+  (package / "pyproject.toml"
+  ).write_text('[project]\nname = "sdfb-beam"\nversion = "1.2.3"\n')
+  assert _mod.generator_version(tmp_path) == "1.2.3"
+  assert _mod.generator_version(tmp_path / "nowhere") is None
+  assert _mod.generator_version(_REPO_ROOT)
+
+
+def test_step13_template_is_the_one_template_of_the_deployment(monkeypatch):
+  """One image and one template serve generation and evaluation (ADR
+    0041's amendment): the object 13j wants is the generation template."""
+  row, gcs = _run13j(monkeypatch, _main_template())
+  assert row.status == _mod.OK
+  assert _main_template() in row.resource
+  assert "sdfb_job=evaluation" in row.resource
+  assert f"gs://b/synthetic/{_main_template()}" in gcs.asked
+  assert not gcs.listed  # found by name: the bucket is not listed
+
+
+def test_step13_template_development_pointer_is_enough(monkeypatch):
+  row, _ = _run13j(monkeypatch, "sdfb-latest-template.json")
+  assert row.status == _mod.OK
+  assert "sdfb-latest-template.json" in row.resource
+  assert "sdfb_job=evaluation" in row.resource
+
+
+def test_step13_template_evaluator_only_is_also_enough(monkeypatch):
   version = _mod.eval_version(_EVAL_PKG)
   assert version
-  uri = f"gs://b/synthetic/sdfb-evaluation-{version}-template.json"
-  gcs = _FakeGCS(objects={uri})
-  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b", gcs=gcs)
-  assert by["13j"].status == _mod.OK
-  assert uri in gcs.asked
-  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b")
+  name = f"sdfb-evaluation-{version}-template.json"
+  row, _ = _run13j(monkeypatch, name)
+  assert row.status == _mod.OK
+  assert name in row.resource and "evaluator-only" in row.resource
+
+
+def test_step13_template_names_the_main_one_when_both_exist(monkeypatch):
+  evaluator = f"sdfb-evaluation-{_mod.eval_version(_EVAL_PKG)}-template.json"
+  row, _ = _run13j(monkeypatch, evaluator, _main_template())
+  assert row.status == _mod.OK
+  assert _main_template() in row.resource
+  assert "evaluator-only" not in row.resource
+
+
+def test_step13_template_of_another_version_is_found_and_named(monkeypatch):
+  """A development build names its template after the branch and commit,
+    which this script cannot know: any sdfb-*-template.json counts, and
+    the row says which it found."""
+  row, gcs = _run13j(monkeypatch, "sdfb-feature-x-0a1b2c3-template.json",
+                     "sdfb-feature-y-4d5e6f7-template.json", "sdfb-notes.txt",
+                     "other-template.json")
+  assert row.status == _mod.OK
+  assert "sdfb-feature-x-0a1b2c3-template.json" in row.resource
+  assert "1 more" in row.resource
+  assert "sdfb-notes.txt" not in row.resource
+  assert "other-template.json" not in row.resource
+  assert gcs.listed == [("b", "synthetic/sdfb-")]
+
+
+def test_step13_template_found_is_existence_only_and_says_so(monkeypatch):
+  """An image built before the evaluator was added cannot run it, and a
+    template object does not say which image it was built on."""
+  row, _ = _run13j(monkeypatch, _main_template())
+  assert "existence only" in row.resource
+
+
+def test_step13_template_absent_and_no_bucket(monkeypatch):
+  row, gcs = _run13j(monkeypatch, "sdfb-notes.txt")
+  assert row.status == _mod.SKIP
+  assert "not built yet" in row.resource
+  # what to build: the deployment's one template; the other is optional
+  assert "docker/flex_template_metadata.json" in row.resource
+  assert "build_flex_template.sh" in row.resource
+  assert gcs.listed == [("b", "synthetic/sdfb-")]
+  row, _ = _run13j(
+      monkeypatch, extra=("--templates-bucket", "b", "--require-evaluation"))
+  assert row.status == _mod.ACTION
+  assert "docker/flex_template_metadata.json" in row.action
+  row, _ = _run13j(monkeypatch, extra=())
+  assert row.status == _mod.SKIP
+  assert "--templates-bucket" in row.resource
+
+
+def test_step13_template_unreadable_bucket_is_skip(monkeypatch):
+
+  class _Denied(_FakeGCS):
+
+    def _blob(self, uri):
+      raise PermissionError("403 on " + uri)
+
+  bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
+  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b", gcs=_Denied())
   assert by["13j"].status == _mod.SKIP
-  assert "not built yet" in by["13j"].resource
-  assert "build_flex_template.sh" in by["13j"].resource
-  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b",
-                 "--require-evaluation")
-  assert by["13j"].status == _mod.ACTION
-  _, by = _run13(monkeypatch, bq)
-  assert by["13j"].status == _mod.SKIP
-  assert "--templates-bucket" in by["13j"].resource
+  assert "PermissionError" in by["13j"].resource
 
 
 def test_step13_label_key_variants(monkeypatch):
