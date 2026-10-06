@@ -2045,7 +2045,7 @@ def _entropy(e: _Emitter, v: _View, base: dict[str, Any] | None,
       metric_id,
       v,
       sample_ratio=None if v.entropy is None else v.entropy["entropy_ratio"],
-      note=("the ratio of the rows read, not the table's")):
+      note="the ratio of the rows read, not the table's"):
     return
   reason = v.missing_matched() or v.ht_problem
   ent = v.entropy
@@ -2091,7 +2091,7 @@ def _distinct(e: _Emitter, v: _View, base: dict[str, Any] | None,
       sample_ratio=v.summary["distinct_ratio"],
       distinct_src_in_sample=round(v.distinct(matched=False)[0]),
       distinct_syn_in_sample=round(v.distinct(matched=False)[1]),
-      note=("the ratio and counts of the rows read, not the table's")):
+      note="the ratio and counts of the rows read, not the table's"):
     return
   ratio = v.summary["distinct_ratio"]
   reason = v.missing_matched()
