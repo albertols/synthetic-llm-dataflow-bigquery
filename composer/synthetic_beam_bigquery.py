@@ -58,13 +58,14 @@ Opt-in evaluation (`run_evaluation`, default False), chained in THIS DAG::
 
 With `run_evaluation` False the gate skips everything after the generation
 launch: the DAG runs `start_sdfb` and nothing else, as before. With it True
-the sensor waits for the generation job to reach JOB_STATE_DONE (it fails
-when the job fails or is cancelled) and `trigger_evaluation` launches the
-evaluation as a second, CPU-only Dataflow job from the same Flex Template,
-with the template parameter `sdfb_job=evaluation` (one image, one template,
-one DAG import; ADR 0041's amendment of 2026-10-06). No other DAG is
-triggered, and no marker or Airflow Variable is added for it. The sensor is
-not deferrable, so no triggerer is needed.
+the sensor waits for the generation job to reach JOB_STATE_DONE (a job that
+fails or is cancelled fails the sensor, at once or at its one-day timeout)
+and `trigger_evaluation` launches the evaluation as a second, CPU-only
+Dataflow job from the same Flex Template, with the template parameter
+`sdfb_job=evaluation` (one image, one template, one DAG import; ADR 0041's
+amendment of 2026-10-06). No other DAG is triggered, and no marker or Airflow
+Variable is added for it. The sensor is not deferrable, so no triggerer is
+needed.
 
 `trigger_evaluation` submits the job and does not wait: the evaluation job
 writes its own FINAL registry row. A job that dies after it was launched
@@ -758,8 +759,10 @@ with models.DAG(
   )
 
   # The landed tables are evaluated, so the generation job must be done. A
-  # job that failed or was cancelled fails this task (the sensor raises on a
-  # terminal state it does not expect) and nothing is evaluated. Not
+  # job that failed or was cancelled is expected to fail this task at once
+  # (the provider's sensor raises on a terminal state it was not told to
+  # expect; not verified against the installed provider). If it did not, the
+  # task would fail at its timeout: either way nothing is evaluated. Not
   # deferrable, stated: the environment may have no triggerer.
   wait_for_generation = DataflowJobStatusSensor(
       task_id="wait_for_generation",

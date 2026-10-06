@@ -500,7 +500,8 @@ start a job's run twice.
 The runs go **one after another**: the DAG has `max_active_runs=1`. That is
 the knob for evaluating several jobs at once. Raising it to N means up to N
 evaluation Dataflow jobs at the same time, each with its own workers, and
-two runs on the same target can then close each other's registry row.
+two runs on the same target can then close each other's registry row. Like
+the rest of the DAG, the fan-out has not been parsed or run by Airflow.
 
 **Failure callback.** The launch task waits for the job (deferrably). The
 launcher writes the RUNNING registry row before submitting and mints the
