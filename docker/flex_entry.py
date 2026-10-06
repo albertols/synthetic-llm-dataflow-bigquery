@@ -73,6 +73,11 @@ def split_selector(argv: Sequence[str]) -> tuple[str, list[str]]:
   The job is `generation` when the selector is absent or its value is
   empty; given twice, the last one counts.
 
+  The selector is recognised anywhere in `argv` (after a `--` too) and its
+  value is stripped from what is passed on. That is harmless: the template
+  launcher emits single `--name=value` tokens, so no other flag's value can
+  be mistaken for it.
+
   Raises:
     ValueError: the selector has no value (it is the last argument, or
       another flag follows it).

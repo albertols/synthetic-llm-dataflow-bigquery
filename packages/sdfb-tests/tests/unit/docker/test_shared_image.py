@@ -368,9 +368,15 @@ def test_the_build_imports_the_evaluators_entry_modules_in_both_contexts():
   for module in _ENTRY_MODULES:
     assert module in check, module
   # the launcher's context (ENV PYTHONPATH) and the worker's (the bridge
-  # alone: Beam's worker venv drops PYTHONPATH)
-  assert len(re.findall(r"python -c ", check)) == 2
+  # alone: Beam's worker venv drops PYTHONPATH), then the image's own venv
+  # interpreter, which no base-image package can satisfy
+  assert len(re.findall(r"python -c ", check)) == 3
   assert "PYTHONPATH= python -c " in check
+  assert "PYTHONPATH= /workspace/.venv/bin/python -c " in check
+  for package in _SCIENCE:
+    assert package in check, package
+  # each context prints where it found them
+  assert "__version__" in check and "__file__" in check
   assert " else " in check and check.rstrip().endswith("fi")
   # after everything it depends on is in place
   position = final.index(check)
@@ -379,13 +385,16 @@ def test_the_build_imports_the_evaluators_entry_modules_in_both_contexts():
   assert position > _index(final, r"zz_sdfb_bridge\.pth")
 
 
+_SCIENCE = ("numpy", "scipy", "sklearn")
+
 _PYTHON_STUB = """#!/bin/sh
-# Stands in for the image's `python`: records how it was called, then
-# succeeds or fails as the test asked for this call.
-calls="$(dirname "$0")/calls"
+# Stands in for an interpreter of the image (the global `python`, or the
+# venv's): records which one and how it was called, then succeeds or fails
+# as the test asked for this call.
+calls="$STUB_DIR/calls"
 count=$(( $(wc -l < "$calls") + 1 ))
-echo "PYTHONPATH=${PYTHONPATH-<unset>} $*" >> "$calls"
-[ "$count" != "$(cat "$(dirname "$0")/fail_at")" ]
+echo "$0 PYTHONPATH=${PYTHONPATH-<unset>} $*" >> "$calls"
+[ "$count" != "$(cat "$STUB_DIR/fail_at")" ]
 """
 
 
@@ -406,15 +415,19 @@ def _check_run(tmp_path: Path,
   stubs.mkdir()
   (stubs / "calls").write_text("")
   (stubs / "fail_at").write_text(str(fail_at))
-  (stubs / "python").write_text(_PYTHON_STUB)
-  (stubs / "python").chmod(0o755)
+  venv = tmp_path / "workspace" / ".venv" / "bin"
+  venv.mkdir(parents=True)
+  for stub in (stubs / "python", venv / "python"):
+    stub.write_text(_PYTHON_STUB)
+    stub.chmod(0o755)
   done = subprocess.run(["sh", "-c", command],
                         capture_output=True,
                         text=True,
                         check=False,
                         env={
                             "PATH": f"{stubs}:/usr/bin:/bin",
-                            "PYTHONPATH": "/the/image/pythonpath"
+                            "PYTHONPATH": "/the/image/pythonpath",
+                            "STUB_DIR": str(stubs)
                         })
   return done, (stubs / "calls").read_text().splitlines()
 
@@ -424,14 +437,24 @@ def test_the_check_imports_once_per_context_when_the_evaluator_is_there(
   done, calls = _check_run(tmp_path, evaluator=True)
   assert done.returncode == 0, done.stderr
   imports = "import " + ", ".join(_ENTRY_MODULES)
-  assert calls == [
-      f"PYTHONPATH=/the/image/pythonpath -c {imports}",  # the launcher's
-      f"PYTHONPATH= -c {imports}",  # the worker's: the bridge alone
+  stubs, venv = f"{tmp_path}/bin/python", f"{tmp_path}/workspace/.venv/bin/python"
+  assert [c.split(" -c ")[0] for c in calls] == [
+      f"{stubs} PYTHONPATH=/the/image/pythonpath",  # the launcher's
+      f"{stubs} PYTHONPATH=",  # the worker's: the bridge alone
+      f"{venv} PYTHONPATH=",  # the image's own interpreter
   ]
+  launcher, worker, own = (c.split(" -c ", 1)[1] for c in calls)
+  assert launcher.startswith(imports) and worker.startswith(imports)
+  assert not own.startswith(imports)  # the entry modules are not on its path
+  for call in (launcher, worker, own):
+    for package in _SCIENCE:  # each context imports them ...
+      assert package in call
+  for call in (launcher, worker):  # ... and says which version and file
+    assert "__version__" in call and "__file__" in call
 
 
-@pytest.mark.parametrize("fail_at", [1, 2])
-def test_a_failed_import_in_either_context_fails_the_build(tmp_path, fail_at):
+@pytest.mark.parametrize("fail_at", [1, 2, 3])
+def test_a_failed_import_in_any_context_fails_the_build(tmp_path, fail_at):
   done, calls = _check_run(tmp_path, evaluator=True, fail_at=fail_at)
   assert done.returncode != 0
   assert len(calls) == fail_at

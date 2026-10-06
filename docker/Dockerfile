@@ -163,20 +163,30 @@ RUN SITE="$(python -c 'import site; print(site.getsitepackages()[0])')" \
         > "${SITE}/zz_sdfb_bridge.pth" \
     && echo "Wrote worker bridge .pth -> ${SITE}/zz_sdfb_bridge.pth"
 
-# Build-time check. The evaluator runs on the GENERATOR's environment, and two
-# of its dependencies (scipy, scikit-learn) are there only through an extra of
-# the `uv sync` line above. When this tree has the evaluator, both contexts
-# must import its two entry modules now, so an image that lost something the
-# evaluator needs fails at BUILD, not at the first evaluation launch:
+# Build-time check. The evaluator runs on the GENERATOR's environment, and three
+# of its dependencies (numpy, scipy, scikit-learn) are there only through the
+# `uv sync` line above (scipy and scikit-learn through an extra). When this tree
+# has the evaluator, the image must import its two entry modules now, so an
+# image that lost something the evaluator needs fails at BUILD, not at the first
+# evaluation launch:
 #   - the launcher's: ENV PYTHONPATH as set above;
-#   - the worker's:   PYTHONPATH empty, the bridge .pth alone.
-# Without the evaluator the step only says so.
+#   - the worker's:   PYTHONPATH empty, the bridge .pth alone;
+#   - the venv's own: `/workspace/.venv/bin/python`, PYTHONPATH empty. The
+#     first two run the base image's global interpreter, which may ship those
+#     packages itself; this one cannot be satisfied by the base image, so an
+#     image built without the extra fails whatever the base holds.
+# Each prints the version and file of numpy, scipy and scikit-learn it
+# resolved, so the first build log shows what a worker will import. Without the
+# evaluator the step only says so.
 RUN if [ -d /workspace/packages/sdfb-evaluation/src/sdfb_evaluation ]; then \
-      echo "sdfb-evaluation: importing its entry modules (launcher context)" \
-      && python -c "import sdfb_evaluation.cli.run_evaluation, sdfb_evaluation.beam.pipeline" \
+      SHOW='import numpy, scipy, sklearn; [print("  " + m.__name__ + " " + m.__version__ + " " + m.__file__) for m in (numpy, scipy, sklearn)]' \
+      && echo "sdfb-evaluation: importing its entry modules (launcher context)" \
+      && python -c "import sdfb_evaluation.cli.run_evaluation, sdfb_evaluation.beam.pipeline; ${SHOW}" \
       && echo "sdfb-evaluation: importing its entry modules (worker context)" \
-      && PYTHONPATH= python -c "import sdfb_evaluation.cli.run_evaluation, sdfb_evaluation.beam.pipeline" \
-      && echo "sdfb-evaluation: importable in both contexts"; \
+      && PYTHONPATH= python -c "import sdfb_evaluation.cli.run_evaluation, sdfb_evaluation.beam.pipeline; ${SHOW}" \
+      && echo "sdfb-evaluation: importing numpy, scipy, scikit-learn (the image's own venv)" \
+      && PYTHONPATH= /workspace/.venv/bin/python -c "${SHOW}" \
+      && echo "sdfb-evaluation: importable in both contexts and in the image's own venv"; \
     else \
       echo "no packages/sdfb-evaluation in the build context: this image runs generation only"; \
     fi
