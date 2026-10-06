@@ -438,15 +438,18 @@ flowchart LR
   every later trigger queues behind it, so launches of this DAG run one
   generation at a time. `max_active_runs` is the knob; raising it lets several
   generation jobs run at once (GPU quota). It is not changed here.
-- **Relationship models.** The evaluator follows what the generation did.
-  When the launch loaded a model (its launcher log has `relationships_loaded`,
-  which names the model and its sha) the evaluator loads the same URI and
-  raises if the files are not readable from where it runs. When the recorded
-  URI holds only sample models and the launch logged no `relationships_loaded`
-  (the generator logged `relationships_absent` and generated each table
-  alone), the evaluator evaluates without relationships: no relational
-  metrics, and one plan warning naming the URI, which reaches the registry
-  row's `warnings`. An adjusted model (ADR 0038) is loaded from where the
+- **Relationship models.** The evaluator follows what the generation did,
+  by where the URI came from and whether the launch's log was read.
+  An explicit `--relationships_uri` that resolves to no model file always
+  raises. For the URI the generation job's own record names: when the log was
+  read and shows no model loaded (the generator logged `relationships_absent`
+  and generated each table alone) the evaluator evaluates without
+  relationships, with one plan warning naming the URI; when the log could not
+  be read it does the same and the warning says whether a model was loaded is
+  unknown; when the record shows a model was loaded (`relationships_loaded`
+  names the model and its sha) and its files are not readable from where the
+  evaluator runs, it raises, naming the model, its sha and the URI. The
+  warning reaches the registry row's `warnings`. An adjusted model (ADR 0038) is loaded from where the
   launch wrote it, as before. First-deploy check: when a model is expected,
   the generation launcher log says `relationships_loaded`.
 - With `run_evaluation` false the gate skips every task after the launch,

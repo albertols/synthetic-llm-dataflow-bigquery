@@ -460,18 +460,29 @@ _NO_MODEL_FILES = "no model files there"
 
 
 def _models(
-    launch: LaunchContext) -> tuple[tuple[RelModel, ...], LaunchContext]:
+    launch: LaunchContext,
+    *,
+    explicit_uri: str | None = None
+) -> tuple[tuple[RelModel, ...], LaunchContext]:
   """The model the launch applied, and the launch to plan with: the
   adjusted copy when it adjusted one (ADR 0038), else the one it loaded;
   none when relationships were off.
 
-  The evaluator follows what the generation did. When the recorded URI
-  holds no model file AND the launch's own record shows it loaded none
-  (no model name or sha from `relationships_loaded`: the generator logged
-  `relationships_absent` and went on without relationships), the launch is
-  evaluated without them, with a note. When the record shows a model WAS
-  loaded and its files cannot be found, that is a real mismatch and the
-  error stands, naming both."""
+  The evaluator follows what the generation did, and what decides is
+  where the URI came from and whether the launch's log was read (R121):
+
+  - the URI is the operator's own `--relationships_uri` (`explicit_uri`)
+    and it resolves to no model file: raises, always;
+  - the URI is the generation job's record and the log was read and shows
+    no model loaded (the generator logged `relationships_absent`): the
+    launch is evaluated without relationships, with a note;
+  - the same with the log unread (`model_adjusted` is None exactly when no
+    milestones were read): evaluated without relationships, the note says
+    that whether a model was loaded is unknown;
+  - the record shows a model WAS loaded and its files cannot be found:
+    raises, naming the model, its sha and the URI.
+
+  An adjusted model's errors are never softened."""
   adjusted = launch.adjusted_model_uri if launch.model_adjusted else None
   uri = adjusted or launch.relationships_uri
   if not uri:
@@ -479,7 +490,8 @@ def _models(
   try:
     return tuple(load_models(uri)), launch
   except RelationshipError as exc:
-    if adjusted or _NO_MODEL_FILES not in str(exc):
+    if adjusted or _NO_MODEL_FILES not in str(exc) or (explicit_uri and
+                                                       explicit_uri == uri):
       raise
     if launch.model_name or launch.model_sha:
       name, sha = launch.model_name or "?", launch.model_sha or "?"
@@ -487,9 +499,15 @@ def _models(
           f"{exc}. The launch's log shows it loaded the relationship model "
           f"{name} (sha {sha}), which is not readable from where the "
           "evaluator runs") from exc
-  note = (f"the launch recorded relationships_uri {uri} but its log shows it "
-          "loaded no relationship model (there was no model file there): "
-          "evaluated without relationships, as the generation ran")
+  if launch.model_adjusted is None:
+    note = (f"the launch's log could not be read, so whether it loaded a "
+            f"relationship model is unknown, and the recorded "
+            f"relationships_uri {uri} holds no model file where the "
+            "evaluator runs: evaluated without relationships")
+  else:
+    note = (f"the launch recorded relationships_uri {uri} but its log shows "
+            "it loaded no relationship model (there was no model file "
+            "there): evaluated without relationships, as the generation ran")
   return (), dataclasses.replace(
       launch, relationships_uri=None, warnings=(*launch.warnings, note))
 
@@ -545,7 +563,8 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
   if getattr(args, "no_planning_snapshots", False):
     planning_bq = _ReadOnlyPlanning(bq)
     attempt.refused = planning_bq.refused
-  models, attempt.launch = _models(attempt.launch)
+  models, attempt.launch = _models(
+      attempt.launch, explicit_uri=getattr(args, "relationships_uri", None))
   return build_plan(
       launch=attempt.launch,
       models=models,

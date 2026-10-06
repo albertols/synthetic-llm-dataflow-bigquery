@@ -415,6 +415,49 @@ def test_a_launch_that_loaded_no_model_is_evaluated_without_relationships(
   capsys.readouterr()
 
 
+def test_a_log_that_could_not_be_read_is_said_to_be_unread(
+    bq, monkeypatch, tmp_path, capsys):
+  folder = _samples_only(tmp_path)
+  launch = thelook_launch(
+      bq,
+      relationships_uri=folder,
+      model_name=None,
+      model_sha=None,
+      model_adjusted=None)  # no milestones: the launch log was not read
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  planned, _ = driver.plan(parse_args(["plan", *TARGET])[0], make_env(bq))
+  assert planned.models == ()
+  (note,) = [w for w in planned.warnings if "could not be read" in w]
+  assert "unknown" in note and folder in note
+  assert not any("its log shows it loaded no" in w for w in planned.warnings)
+  seed = planned.registry_seed()
+  check_row(REGISTRY, seed)
+  assert note in seed["warnings"]
+  capsys.readouterr()
+
+
+@pytest.mark.parametrize("log_read", [False, True])
+def test_an_explicit_uri_that_resolves_to_nothing_still_raises(
+    bq, monkeypatch, tmp_path, capsys, log_read):
+  """A hand-named target (no log: `params_source` manual, nothing on
+  record) and a job whose record named no URI both carry the operator's
+  `--relationships_uri`: it must resolve."""
+  folder = _samples_only(tmp_path)
+  launch = thelook_launch(
+      bq,
+      relationships_uri=folder,
+      model_name=None,
+      model_sha=None,
+      model_adjusted=False if log_read else None,
+      params_source="jobs_labels+logs" if log_read else "manual")
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  args = parse_args(["plan", *TARGET, "--relationships_uri", folder])[0]
+  with pytest.raises(RelationshipError) as info:
+    driver.plan(args, make_env(bq))
+  assert folder in str(info.value) and "no model files there" in str(info.value)
+  capsys.readouterr()
+
+
 def test_a_launch_that_loaded_a_model_whose_files_are_missing_still_raises(
     bq, monkeypatch, tmp_path, capsys):
   folder = _samples_only(tmp_path)
