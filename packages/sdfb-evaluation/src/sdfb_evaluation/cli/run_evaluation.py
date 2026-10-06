@@ -15,8 +15,12 @@
 
 The template launcher runs this file with the template's parameters as
 `--name=value` flags plus Beam's own (`--runner=DataflowRunner`,
-`--project`, `--region`, `--temp_location`, …). It is `sdfb-eval run`
-with two differences (Ruling R88f):
+`--project`, `--region`, `--temp_location`, …). That is literally so in
+the package's standalone image; in the repository's one image the
+launcher's file is a dispatcher at the repository root
+(`docker/flex_entry.py`) that calls `main` here with the same flags when
+the launch passes `sdfb_job=evaluation`. It is `sdfb-eval run` with two
+differences (Ruling R88f):
 
     sdfb-eval run                      this entry
     ─────────────────────────────────  ─────────────────────────────────

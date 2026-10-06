@@ -12,11 +12,27 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-# The evaluator's CPU image: the Dataflow flex template LAUNCHER and, via
-# --sdk_container_image, the WORKER harness. Build context is the repository
-# root (see deploy/build_flex_template.sh). Python 3.11 and Beam 2.74.0 must
-# match packages/sdfb-evaluation/pyproject.toml and uv.lock; the unit test
-# tests/unit/test_launch_surfaces.py checks both.
+# The evaluator's STANDALONE CPU image: the Dataflow flex template LAUNCHER
+# and, via --sdk_container_image, the WORKER harness.
+#
+# This repository's deployment does not build it. The deployment uses one
+# image for generation and evaluation, docker/Dockerfile at the repository
+# root, which carries this package's source and runs it on the generator's
+# environment. This file is for the package copied out as a unit of its own:
+# a small image with the evaluator on its own lock and nothing else.
+#
+# No script builds it. From the repository root (the build context):
+#
+#   docker build -f packages/sdfb-evaluation/docker/Dockerfile \
+#     --build-arg SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=<the coordinate it is pushed to> \
+#     -t <the same coordinate> .
+#
+# then deploy/build_flex_template.sh builds a template from the pushed image.
+# Here the template's entry is the evaluator itself (run_evaluation.py below),
+# not the shared image's dispatcher.
+#
+# Python 3.11 and Beam 2.74.0 must match packages/sdfb-evaluation/pyproject.toml
+# and uv.lock; the unit test tests/unit/test_launch_surfaces.py checks both.
 FROM apache/beam_python3.11_sdk:2.74.0
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.15 /uv /uvx /bin/
@@ -53,9 +69,9 @@ ENV FLEX_TEMPLATE_PYTHON_PY_FILE="/template/src/sdfb_evaluation/cli/run_evaluati
 
 # Worker harness image. The flex template's --image sets only the LAUNCHER;
 # workers boot whatever image the job names. The image carries its own pushed
-# coordinate (deploy/build_flex_template.sh passes it) and the driver applies
-# it as sdk_container_image when the launch gave none; an explicit value
-# wins. Declared late so it never invalidates the dependency layers above.
+# coordinate (the build argument of the command in the header) and the driver
+# applies it as sdk_container_image when the launch gave none; an explicit
+# value wins. Declared late so it never invalidates the dependency layers above.
 ARG SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=""
 ENV SDFB_EVAL_SDK_CONTAINER_IMAGE=$SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG
 

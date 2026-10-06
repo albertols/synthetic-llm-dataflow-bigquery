@@ -326,6 +326,11 @@ def test_step11_opt_out_is_skip():
 # step 13 — evaluation (sdfb-evaluation, ADR 0041)
 # --------------------------------------------------------------------------- #
 _EVAL_PKG = _REPO_ROOT / "packages" / "sdfb-evaluation"
+# A copy of the repository without the evaluator (the one that ships) has no
+# package for step 13 to read: the tests that go through the real package skip.
+needs_evaluator = pytest.mark.skipif(
+    not _EVAL_PKG.is_dir(),
+    reason="packages/sdfb-evaluation is not part of this tree")
 _EVAL_SCHEMAS = _EVAL_PKG / "src" / "sdfb_evaluation" / "schemas"
 _EVAL_TABLES = ("evaluation_data_history", "evaluation_metrics",
                 "evaluation_profiles", "evaluation_row_flags")
@@ -344,11 +349,13 @@ class _FakeBlob:
 
 
 class _FakeGCS:
-  """Just enough of google.cloud.storage.Client: blob(...).exists()."""
+  """Just enough of google.cloud.storage.Client: blob(...).exists() and
+    list_blobs(bucket, prefix=..., max_results=...)."""
 
   def __init__(self, objects=()):
     self._objects = set(objects)
     self.asked = []
+    self.listed = []
 
   def bucket(self, name):
     return SimpleNamespace(blob=lambda path: self._blob(f"gs://{name}/{path}"))
@@ -356,6 +363,13 @@ class _FakeGCS:
   def _blob(self, uri):
     self.asked.append(uri)
     return _FakeBlob(uri in self._objects)
+
+  def list_blobs(self, bucket, prefix="", max_results=None):
+    self.listed.append((bucket, prefix))
+    names = sorted(uri[len(f"gs://{bucket}/"):]
+                   for uri in self._objects
+                   if uri.startswith(f"gs://{bucket}/{prefix}"))
+    return [SimpleNamespace(name=name) for name in names[:max_results]]
 
 
 def _eval_ctx(*extra):
@@ -454,6 +468,7 @@ def test_step13_empty_dataset_opts_out_with_one_skip(monkeypatch):
   assert "omitted" in result.resource
 
 
+@needs_evaluator
 def test_step13_nothing_provisioned_skips_with_create_command(monkeypatch):
   ctx, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}))
   assert by["13a"].status == _mod.OK
@@ -467,6 +482,7 @@ def test_step13_nothing_provisioned_skips_with_create_command(monkeypatch):
   assert not any(r.status == _mod.ACTION for r in ctx.results)
 
 
+@needs_evaluator
 def test_step13_require_evaluation_turns_absent_into_action(monkeypatch):
   _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}),
                  "--require-evaluation")
@@ -475,6 +491,7 @@ def test_step13_require_evaluation_turns_absent_into_action(monkeypatch):
     assert "sdfb-eval schemas" in by[step].action
 
 
+@needs_evaluator
 def test_step13_half_provisioned_is_action_for_the_absent(monkeypatch):
   tables = {f"{_EVAL_DS}.evaluation_metrics": _live_table("evaluation_metrics")}
   _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
@@ -484,6 +501,7 @@ def test_step13_half_provisioned_is_action_for_the_absent(monkeypatch):
     assert "half-provisioned" in by[step].resource
 
 
+@needs_evaluator
 def test_step13_tables_without_views_is_half_provisioned(monkeypatch):
   tables = {
       k: v
@@ -495,6 +513,7 @@ def test_step13_tables_without_views_is_half_provisioned(monkeypatch):
   assert by["13h"].status == _mod.ACTION
 
 
+@needs_evaluator
 def test_step13_all_present_and_correct_is_all_ok(monkeypatch):
   ctx, by = _run13(monkeypatch,
                    _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned()))
@@ -503,6 +522,7 @@ def test_step13_all_present_and_correct_is_all_ok(monkeypatch):
   assert not any(r.status == _mod.ACTION for r in ctx.results)
 
 
+@needs_evaluator
 def test_step13_missing_column_is_action_naming_it(monkeypatch):
   tables = _provisioned(evaluation_metrics={"drop": ("table_name",)})
   _, by = _run13(monkeypatch, _FakeBQ(datasets={_EVAL_DS}, tables=tables))
@@ -511,6 +531,7 @@ def test_step13_missing_column_is_action_naming_it(monkeypatch):
   assert by["13c"].status == _mod.OK
 
 
+@needs_evaluator
 def test_step13_wrong_type_is_action_naming_it(monkeypatch):
   tables = _provisioned(
       evaluation_profiles={"retype": ("evaluated_at", "DATE")})
@@ -520,6 +541,7 @@ def test_step13_wrong_type_is_action_naming_it(monkeypatch):
   assert "DATE" in by["13e"].resource
 
 
+@needs_evaluator
 def test_step13_record_subfield_missing_is_action(monkeypatch):
   tables = _provisioned()
   table = tables[f"{_EVAL_DS}.evaluation_data_history"]
@@ -530,6 +552,7 @@ def test_step13_record_subfield_missing_is_action(monkeypatch):
   assert "tables.role" in by["13c"].resource
 
 
+@needs_evaluator
 def test_step13_sql_type_aliases_and_extra_columns_are_fine(monkeypatch):
   tables = _provisioned()
   table = tables[f"{_EVAL_DS}.evaluation_metrics"]
@@ -544,6 +567,7 @@ def test_step13_sql_type_aliases_and_extra_columns_are_fine(monkeypatch):
   assert by["13d"].status == _mod.OK
 
 
+@needs_evaluator
 def test_step13_partitioning_and_clustering_mismatch_are_actions(monkeypatch):
   tables = _provisioned(
       evaluation_data_history={"partitioned": False},
@@ -560,6 +584,7 @@ def test_step13_partitioning_and_clustering_mismatch_are_actions(monkeypatch):
   assert by["13f"].status == _mod.OK
 
 
+@needs_evaluator
 def test_step13_unreadable_constants_skip_the_comparison(monkeypatch):
   tables = _provisioned()  # built while the constants are still readable
   # drifted partitioning is not noticed, and the line says so
@@ -575,6 +600,7 @@ def test_step13_unreadable_constants_skip_the_comparison(monkeypatch):
   assert "not compared" in by["13d"].resource
 
 
+@needs_evaluator
 def test_step13_view_that_is_a_table_is_action(monkeypatch):
   tables = _provisioned()
   tables[f"{_EVAL_DS}.evaluation_latest"] = SimpleNamespace(
@@ -585,6 +611,7 @@ def test_step13_view_that_is_a_table_is_action(monkeypatch):
   assert by["13h"].status == _mod.OK
 
 
+@needs_evaluator
 def test_step13_dataset_missing_is_action_and_objects_not_checked(monkeypatch):
   _, by = _run13(monkeypatch, _FakeBQ())
   assert by["13b"].status == _mod.ACTION
@@ -592,6 +619,7 @@ def test_step13_dataset_missing_is_action_and_objects_not_checked(monkeypatch):
   assert "13b" in by["13c"].resource
 
 
+@needs_evaluator
 def test_step13_temp_dataset_same_is_folded_into_13b(monkeypatch):
   _, by = _run13(monkeypatch,
                  _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned()),
@@ -600,6 +628,7 @@ def test_step13_temp_dataset_same_is_folded_into_13b(monkeypatch):
   assert "temp dataset" in by["13b"].resource
 
 
+@needs_evaluator
 def test_step13_temp_dataset_different_is_checked(monkeypatch):
   tables = _provisioned()
   _, by = _run13(monkeypatch,
@@ -613,27 +642,126 @@ def test_step13_temp_dataset_different_is_checked(monkeypatch):
   assert "eval_tmp" in by["13i"].resource
 
 
-def test_step13_template_present_absent_and_no_bucket(monkeypatch):
+def _run13j(monkeypatch, *names, extra=("--templates-bucket", "b"), gcs=None):
+  """Step 13 on a fully provisioned dataset, with `names` as the objects
+    under gs://b/synthetic/; returns (the 13j row, the fake GCS)."""
   bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
-  version = _mod.eval_version(_EVAL_PKG)
-  assert version
-  uri = f"gs://b/synthetic/sdfb-evaluation-{version}-template.json"
-  gcs = _FakeGCS(objects={uri})
-  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b", gcs=gcs)
-  assert by["13j"].status == _mod.OK
-  assert uri in gcs.asked
-  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b")
-  assert by["13j"].status == _mod.SKIP
-  assert "not built yet" in by["13j"].resource
-  assert "build_flex_template.sh" in by["13j"].resource
-  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b",
-                 "--require-evaluation")
-  assert by["13j"].status == _mod.ACTION
-  _, by = _run13(monkeypatch, bq)
-  assert by["13j"].status == _mod.SKIP
-  assert "--templates-bucket" in by["13j"].resource
+  gcs = gcs or _FakeGCS(objects={f"gs://b/synthetic/{name}" for name in names})
+  _, by = _run13(monkeypatch, bq, *extra, gcs=gcs)
+  return by["13j"], gcs
 
 
+def _main_template():
+  version = _mod.generator_version(_REPO_ROOT)
+  assert version, "packages/sdfb-beam/pyproject.toml names no version"
+  return f"sdfb-{version}-template.json"
+
+
+def test_generator_version_is_the_one_the_template_is_named_after(tmp_path):
+  """The template build names the object after the sdfb-beam package's
+    version (a release) or `latest` (a development build)."""
+  package = tmp_path / "packages" / "sdfb-beam"
+  package.mkdir(parents=True)
+  (package / "pyproject.toml"
+  ).write_text('[project]\nname = "sdfb-beam"\nversion = "1.2.3"\n')
+  assert _mod.generator_version(tmp_path) == "1.2.3"
+  assert _mod.generator_version(tmp_path / "nowhere") is None
+  assert _mod.generator_version(_REPO_ROOT)
+
+
+@needs_evaluator
+def test_step13_template_is_the_one_template_of_the_deployment(monkeypatch):
+  """One image and one template serve generation and evaluation (ADR
+    0041's amendment): the object 13j wants is the generation template."""
+  row, gcs = _run13j(monkeypatch, _main_template())
+  assert row.status == _mod.OK
+  assert _main_template() in row.resource
+  assert "sdfb_job=evaluation" in row.resource
+  assert f"gs://b/synthetic/{_main_template()}" in gcs.asked
+  assert not gcs.listed  # found by name: the bucket is not listed
+
+
+@needs_evaluator
+def test_step13_template_development_pointer_is_enough(monkeypatch):
+  row, _ = _run13j(monkeypatch, "sdfb-latest-template.json")
+  assert row.status == _mod.OK
+  assert "sdfb-latest-template.json" in row.resource
+  assert "sdfb_job=evaluation" in row.resource
+
+
+@needs_evaluator
+def test_step13_template_evaluator_only_is_also_enough(monkeypatch):
+  name = f"sdfb-evaluation-{_mod.eval_version(_EVAL_PKG)}-template.json"
+  row, _ = _run13j(monkeypatch, name)
+  assert row.status == _mod.OK
+  assert name in row.resource and "evaluator-only" in row.resource
+
+
+@needs_evaluator
+def test_step13_template_names_the_main_one_when_both_exist(monkeypatch):
+  evaluator = f"sdfb-evaluation-{_mod.eval_version(_EVAL_PKG)}-template.json"
+  row, _ = _run13j(monkeypatch, evaluator, _main_template())
+  assert row.status == _mod.OK
+  assert _main_template() in row.resource
+  assert "evaluator-only" not in row.resource
+
+
+@needs_evaluator
+def test_step13_template_of_another_version_is_found_and_named(monkeypatch):
+  """A development build names its template after the branch and commit,
+    which this script cannot know: any sdfb-*-template.json counts, and
+    the row says which it found."""
+  row, gcs = _run13j(monkeypatch, "sdfb-feature-x-0a1b2c3-template.json",
+                     "sdfb-feature-y-4d5e6f7-template.json", "sdfb-notes.txt",
+                     "other-template.json")
+  assert row.status == _mod.OK
+  assert "sdfb-feature-x-0a1b2c3-template.json" in row.resource
+  assert "1 more" in row.resource
+  assert "sdfb-notes.txt" not in row.resource
+  assert "other-template.json" not in row.resource
+  assert gcs.listed == [("b", "synthetic/sdfb-")]
+
+
+@needs_evaluator
+def test_step13_template_found_is_existence_only_and_says_so(monkeypatch):
+  """An image built before the evaluator was added cannot run it, and a
+    template object does not say which image it was built on."""
+  row, _ = _run13j(monkeypatch, _main_template())
+  assert "existence only" in row.resource
+
+
+@needs_evaluator
+def test_step13_template_absent_and_no_bucket(monkeypatch):
+  row, gcs = _run13j(monkeypatch, "sdfb-notes.txt")
+  assert row.status == _mod.SKIP
+  assert "not built yet" in row.resource
+  # what to build: the deployment's one template; the other is optional
+  assert "docker/flex_template_metadata.json" in row.resource
+  assert "build_flex_template.sh" in row.resource
+  assert gcs.listed == [("b", "synthetic/sdfb-")]
+  row, _ = _run13j(
+      monkeypatch, extra=("--templates-bucket", "b", "--require-evaluation"))
+  assert row.status == _mod.ACTION
+  assert "docker/flex_template_metadata.json" in row.action
+  row, _ = _run13j(monkeypatch, extra=())
+  assert row.status == _mod.SKIP
+  assert "--templates-bucket" in row.resource
+
+
+@needs_evaluator
+def test_step13_template_unreadable_bucket_is_skip(monkeypatch):
+
+  class _Denied(_FakeGCS):
+
+    def _blob(self, uri):
+      raise PermissionError("403 on " + uri)
+
+  row, _ = _run13j(monkeypatch, gcs=_Denied())
+  assert row.status == _mod.SKIP
+  assert "PermissionError" in row.resource
+
+
+@needs_evaluator
 def test_step13_label_key_variants(monkeypatch):
   bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
   _, by = _run13(monkeypatch, bq)
@@ -661,6 +789,7 @@ def test_step13_label_key_variants(monkeypatch):
   assert "label.key" not in by["13k"].resource
 
 
+@needs_evaluator
 def test_step13_no_bq_client_skips_every_bq_line(monkeypatch):
   monkeypatch.setattr(_mod, "bq_client", lambda project: (None, "no creds"))
   monkeypatch.setattr(_mod, "gcs_client", lambda: (None, "no creds"))
@@ -670,6 +799,7 @@ def test_step13_no_bq_client_skips_every_bq_line(monkeypatch):
   assert {r.step for r in ctx.results} >= {"13a", "13b", "13c", "13h"}
 
 
+@needs_evaluator
 def test_committed_evaluator_files_match_what_step13_reads():
   """The contract check reads these files: a rename or a reshaped schema
     must fail here, not silently turn the check into a no-op."""
@@ -707,6 +837,7 @@ def test_step13_config_artifacts_missing_or_unparseable_is_action(
   assert "restore the committed evaluator files" in by["13a"].action
 
 
+@needs_evaluator
 def test_step13_row_flag_retention_compared_with_the_package(monkeypatch):
   """evaluation_row_flags expires after a package-set number of days (a
     privacy retention rule): no expiration or a longer one is an ACTION, a
@@ -770,6 +901,7 @@ def _watch_opens(monkeypatch, target):
   return touched
 
 
+@needs_evaluator
 def test_step13_label_key_local_path(monkeypatch, tmp_path):
   bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
   key = tmp_path / "label.key"
@@ -800,6 +932,7 @@ def test_watch_opens_would_catch_a_read(monkeypatch, tmp_path):
 @pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0,
     reason="root can read a mode-000 file")
+@needs_evaluator
 def test_step13_label_key_unreadable_local_path_is_action(
     monkeypatch, tmp_path):
   bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
@@ -825,6 +958,7 @@ def _run_main(monkeypatch, tmp_path, *extra):
   return _mod.main([*_BASE_ARGV, "--report-dir", str(tmp_path), *extra])
 
 
+@needs_evaluator
 def test_main_exit_code_default_is_unchanged_by_step13(monkeypatch, tmp_path,
                                                        capsys):
   assert _run_main(monkeypatch, tmp_path) == 0
@@ -833,11 +967,13 @@ def test_main_exit_code_default_is_unchanged_by_step13(monkeypatch, tmp_path,
   assert "| 13c |" in report  # step 13 did run, as SKIPs
 
 
+@needs_evaluator
 def test_main_exit_code_require_evaluation_fails_on_unprovisioned(
     monkeypatch, tmp_path):
   assert _run_main(monkeypatch, tmp_path, "--require-evaluation") == 1
 
 
+@needs_evaluator
 def test_step13_label_key_relative_or_other_form_names_the_three_forms(
     monkeypatch):
   bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())

@@ -11,24 +11,40 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Airflow DAG — launch the sdfb-evaluation Flex Template.
+"""Airflow DAG — evaluate a generation run (the optional, standalone path).
 
-Runs in an Airflow/Cloud Composer environment. This file is the *template*:
-workflow `3_import_dag.yaml` runs `sed` over it at deploy time to substitute
-build-time values. Runtime values (the evaluation target, the mode, the
-worker shape) come from Airflow DAG params — operators never re-import the
-DAG to change them.
+Runs in an Airflow/Cloud Composer environment. This file is a *template*:
+the deploy workflow's `sed` substitutes build-time values at import. Runtime
+values (the evaluation target, the mode, the worker shape) come from Airflow
+DAG params — operators never re-import the DAG to change them.
 
-The DAG id is fixed (`sdfb_evaluation_framework`): the generation DAG's
-opt-in `run_evaluation` task triggers it by that id.
+The deployment does not need this DAG to evaluate a run: the generation DAG
+(`composer/synthetic_beam_bigquery.py`) evaluates its own run when
+`run_evaluation` is True. Import this one to evaluate a run that has already
+finished (by job id, by run id, or by tables), and to have a launch that
+waits for its job and closes the registry row when the job dies.
 
-Substitution markers:
-  {{EVALUATOR_VERSION}}       version of the sdfb-evaluation package whose
-                              template `sdfb-evaluation-<version>-template.json`
-                              was built (deploy/build_flex_template.sh).
-                              NEW: the deploy workflow's substitution list
-                              must add it; without it the DAG would carry the
-                              literal marker as its version.
+One image, one template (ADR 0041, amendment of 2026-10-06). The evaluation
+launches from the SAME Flex Template as generation,
+`sdfb-<PROJECT_VERSION>-template.json`, and passes the template parameter
+`sdfb_job=evaluation`, which selects the evaluator's entry in the image.
+Nothing else is built for it.
+
+    To launch from an evaluator-only template instead (one built by
+    `packages/sdfb-evaluation/deploy/build_flex_template.sh` on the same
+    image), change ONE constant below:
+
+        flex_template = "sdfb-evaluation-<version>-template.json"
+
+    The launch body stays as it is: that template declares the same
+    parameters, `sdfb_job` among them.
+
+The DAG id is fixed (`sdfb_evaluation_framework`).
+
+Substitution markers (all of them are ones the import workflow already
+substitutes for the generation DAG; run the same substitution on this file):
+  {{PROJECT_VERSION}}         project version the template was built for
+                              (`sdfb-<version>-template.json`)
   {{ENV}}                     dev | uat | prd
   {{GCS_DATAFLOW_STAGING}}    <env>-…-dataflow-staging bucket name
   {{GCS_DATAFLOW_TEMPLATES}}  <env>-…-dataflow-templates bucket name
@@ -39,10 +55,34 @@ DATAFLOW_NETWORK_TAGS).
 
 Task graph::
 
-    begin ─► wait_gate ─► wait_for_generation_job ─► start_evaluation
-      └───────────────────────────────────────────────────▲
-    (wait_for_generation false: the gate skips the sensor, begin still
+    begin ─► fan_out ─► wait_gate ─► wait_for_generation_job ─► start_evaluation
+                └──────────────────────────────────────────────────▲
+    (wait_for_generation false: the gate skips the sensor, fan_out still
     reaches the launch.)
+
+Several generation jobs in one go: give `generation_job_ids` (a list) on one
+manual run. `fan_out`, the first task, then starts one run of THIS DAG per
+id (each with that id as its `generation_job_id` and the run's other params
+unchanged) and skips the rest of its own run. Every job is so evaluated by
+its own run, one Dataflow job per id, on the single-target path above: the
+sensor, the launch and the failure callback never see a list. Without the
+list `fan_out` passes and the run is the single-target run it always was.
+
+    generation_job_ids   generation_job_id    what the run does
+    ───────────────────  ───────────────────  ──────────────────────────────
+    empty                empty or one id      evaluates its one target
+    one id or more       empty or one id      starts one run per id (the
+                                              list, then the single id;
+                                              blanks and repeats dropped)
+                                              and evaluates nothing itself
+
+The runs go one after another: `max_active_runs` is 1. That is the knob for
+evaluating several jobs at once; raising it to N means up to N evaluation
+Dataflow jobs running at the same time, each with its own workers (quota and
+cost), and two runs on the same target can then close each other's registry
+row (see `_close_running_row`).
+
+Like the rest of this DAG, the fan-out has not been parsed or run by Airflow.
 
 The launcher writes the RUNNING registry row, mints the evaluation id and
 submits the job; the pipeline writes the FINAL row. A job that dies after
@@ -80,7 +120,7 @@ from airflow.utils.dates import days_ago
 # -----------------------------------------------------------------------------
 bucket_path = "{{GCS_DATAFLOW_STAGING}}"  # …-dataflow-staging
 templates_path = "{{GCS_DATAFLOW_TEMPLATES}}"  # …-dataflow-templates
-evaluator_version = "{{EVALUATOR_VERSION}}"
+project_version = "{{PROJECT_VERSION}}"
 env_name = "{{ENV}}"
 
 # -----------------------------------------------------------------------------
@@ -96,9 +136,18 @@ network_tags = Variable.get("DATAFLOW_NETWORK_TAGS", default_var="").strip()
 
 app_domain = "synthetic"
 app_name = "sdfb"
-flex_template = f"sdfb-evaluation-{evaluator_version}-template.json"
+DAG_ID = "sdfb_evaluation_framework"
+# The ONE template of the deployment, the generation DAG's own (header: how
+# to point this at an evaluator-only template instead).
+flex_template = f"sdfb-{project_version}-template.json"
 # Dataflow job names: lowercase, digits, hyphens only.
-_job_name_prefix = f"{app_name}-evaluation-v{evaluator_version.replace('.', '-').lower()}"
+_job_name_prefix = f"{app_name}-evaluation-v{project_version.replace('.', '-').lower()}"
+# The workers run the image the template was built on. The shared image is
+# multi-GB (it carries the generator's GPU libraries) and Dataflow's 25 GB
+# default boot disk overflows while a worker unpacks it; the evaluator pins
+# no disk size, so the launch passes Beam's own --disk_size_gb. 200 is what
+# the generator pins for its own workers on that image.
+EVALUATION_WORKER_DISK_GB = "200"
 
 network_tag_experiments = ([
     f"use_network_tags={network_tags}",
@@ -148,6 +197,87 @@ _ENDED_NOT_DONE = frozenset({
     "JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_UPDATED",
     "JOB_STATE_DRAINED"
 })
+
+
+def _fan_out_confs(params):
+  """The runs to start for a run that names a list of generation jobs: one
+  conf per job id, or none.
+
+  The ids are `generation_job_ids` followed by `generation_job_id` when it is
+  set, blanks dropped, a repeated id kept once, in that order. With no id in
+  the list there is nothing to fan out and the result is empty: the run is a
+  single-target run (by `generation_job_id`, `run_id` or `tables`). Otherwise
+  each conf is the run's params with `generation_job_id` set to its one id
+  and `generation_job_ids` emptied, so the run it starts never fans out again.
+
+  A list together with `run_id` or `tables` is refused with one message
+  (ValueError): each child run would otherwise start and its launcher refuse
+  two targets.
+  """
+  listed = [
+      str(job_id or "").strip()
+      for job_id in params["generation_job_ids"] or []
+  ]
+  if not any(listed):
+    return []
+  other = [
+      name for name in ("run_id", "tables") if str(params[name] or "").strip()
+  ]
+  if other:
+    raise ValueError(
+        f"generation_job_ids names {len([i for i in listed if i])} job(s) and "
+        f"{' and '.join(other)} is also set: a run has one target. Empty "
+        f"{' and '.join(other)}, or leave generation_job_ids empty.")
+  job_ids = []
+  for job_id in (*listed, str(params["generation_job_id"] or "").strip()):
+    if job_id and job_id not in job_ids:
+      job_ids.append(job_id)
+  shared = {name: params[name] for name in params}
+  return [{
+      **shared, "generation_job_id": job_id,
+      "generation_job_ids": []
+  } for job_id in job_ids]
+
+
+def _fan_out_run_id(job_id, ts_nodash):
+  """The id of the run started for `job_id`: it names the job and the
+  parent run's logical date, so it is unique within the parent run and the
+  same when the parent's task runs again."""
+  return f"fan_out__{ts_nodash}__{job_id}"
+
+
+def _fan_out(params, **context):
+  """The run's first decision (ShortCircuit): True to go on as a
+  single-target run, False once it has started one run of this DAG per
+  listed job id, which skips every other task of this run.
+
+  A run id Airflow already has means this task ran before and started that
+  run then: it is left alone and the remaining ids are still started.
+  """
+  confs = _fan_out_confs(params)
+  if not confs:
+    return True
+  import logging
+
+  from airflow.api.common.trigger_dag import trigger_dag
+  from airflow.exceptions import DagRunAlreadyExists
+
+  for conf in confs:
+    run_id = _fan_out_run_id(conf["generation_job_id"], context["ts_nodash"])
+    try:
+      # Airflow's own function (what TriggerDagRunOperator calls), not an
+      # operator executed inside a callable. Microseconds are kept so that
+      # runs started in the same second get distinct logical dates.
+      trigger_dag(
+          dag_id=DAG_ID,
+          run_id=run_id,
+          conf=conf,
+          replace_microseconds=False,
+      )
+    except DagRunAlreadyExists:
+      logging.info("evaluation run %s already exists: not started again",
+                   run_id)
+  return False
 
 
 def _wait_for_generation(params, **_):
@@ -211,8 +341,7 @@ def _close_running_row(context):
   import logging
   import re
 
-  from airflow.providers.google.cloud.operators.bigquery import (
-      BigQueryInsertJobOperator,)
+  from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
 
   params = context["params"]
   dataset = str(params["output_dataset"])
@@ -262,8 +391,10 @@ def _close_running_row(context):
         },
     }
 
-  BigQueryInsertJobOperator(
-      task_id="close_running_row",
+  # The hook, not an operator executed inside a callable. UNVERIFIED against
+  # the installed provider: `insert_job(configuration=, project_id=)` and the
+  # job's `result()` are written from the operator's documented behaviour.
+  job = BigQueryHook().insert_job(
       project_id=project_id,
       configuration={
           "query": {
@@ -288,21 +419,34 @@ def _close_running_row(context):
               ],
           }
       },
-  ).execute(context)
+  )
+  job.result()
 
 
 # -----------------------------------------------------------------------------
 # DAG params — runtime-overridable on every trigger. Exactly one target
 # (generation_job_id | run_id | tables) must be non-empty; the launcher refuses
 # otherwise. Empty means "not given" for the optional template parameters.
+# `generation_job_ids` is not a target of a launch: it makes the run start one
+# single-target run per id (header).
 # -----------------------------------------------------------------------------
 default_dag_params = {
     "generation_job_id":
         Param(
             default="",
             type="string",
-            description="Target: the generation job's Dataflow id (the chained "
-            "trigger passes it). Empty when targeting by run_id or tables.",
+            description="Target: the generation job's Dataflow id. Empty when "
+            "targeting by run_id or tables.",
+        ),
+    "generation_job_ids":
+        Param(
+            default=[],
+            type="array",
+            items={"type": "string"},
+            description="Several generation jobs' Dataflow ids. Each id is "
+            "evaluated by its own run of this DAG, one Dataflow job per id, "
+            "one after another; this run only starts them. Leave run_id and "
+            "tables empty with it.",
         ),
     "run_id":
         Param(
@@ -366,8 +510,8 @@ default_dag_params = {
             type="string",
             enum=["composer", "chained"],
             description="What started the evaluation, recorded in the "
-            "registry: composer = a manual run, chained = the generation "
-            "DAG's run_evaluation trigger.",
+            "registry: composer = a manual run of this DAG, chained = a run "
+            "started for a generation that has just finished.",
         ),
     "wait_for_generation":
         Param(
@@ -393,7 +537,7 @@ default_dag_params = {
 }
 
 with models.DAG(
-    dag_id="sdfb_evaluation_framework",
+    dag_id=DAG_ID,
     start_date=days_ago(1),
     schedule_interval=None,
     catchup=False,
@@ -403,6 +547,14 @@ with models.DAG(
     params=default_dag_params,
 ) as dag:
   begin = EmptyOperator(task_id="begin")
+
+  # Several job ids: start one run per id and skip the rest of this one.
+  # The default downstream handling is wanted here: returning False skips
+  # EVERY task below, the launch included, whatever its trigger rule.
+  fan_out = ShortCircuitOperator(
+      task_id="fan_out",
+      python_callable=_fan_out,
+  )
 
   wait_gate = ShortCircuitOperator(
       task_id="wait_gate",
@@ -444,17 +596,23 @@ with models.DAG(
                   "additionalUserLabels": {
                       "app": app_name,
                       "env": env_name,
-                      "dag": "sdfb_evaluation_framework",
+                      "dag": DAG_ID,
                   },
                   "machineType": "{{ params.machine_type }}",
                   "maxWorkers": "{{ params.max_workers }}",
                   "workerRegion": region,
               },
-              # Names are the flex template's (deploy/flex_template_metadata.json).
-              # The launcher supplies runner, project and region itself; the image
-              # carries its worker image coordinate; fail_on and experiments are
-              # never passed.
+              # Names are the flex template's (docker/flex_template_metadata.json;
+              # the evaluator's own deploy/flex_template_metadata.json declares
+              # the same ones). The launcher supplies runner, project and region
+              # itself; the image carries its worker image coordinate; fail_on
+              # and experiments are never passed.
               "parameters": {
+                  # The image's one entry runs generation unless told otherwise.
+                  "sdfb_job":
+                      "evaluation",
+                  "disk_size_gb":
+                      EVALUATION_WORKER_DISK_GB,
                   "job_id":
                       "{{ params.generation_job_id }}",
                   "run_id":
@@ -483,10 +641,11 @@ with models.DAG(
       wait_until_finished=True,
       deferrable=True,
       do_xcom_push=True,
-      # The sensor branch may be skipped; the launch needs begin's success.
+      # The sensor branch may be skipped; the launch needs fan_out's success.
       trigger_rule="none_failed_min_one_success",
       on_failure_callback=_close_running_row,
   )
 
-  begin >> wait_gate >> wait_for_generation_job >> start_evaluation  # pylint: disable=pointless-statement  # Airflow dependency operator
-  begin >> start_evaluation  # pylint: disable=pointless-statement  # Airflow dependency operator
+  begin >> fan_out  # pylint: disable=pointless-statement  # Airflow dependency operator
+  fan_out >> wait_gate >> wait_for_generation_job >> start_evaluation  # pylint: disable=pointless-statement  # Airflow chain
+  fan_out >> start_evaluation  # pylint: disable=pointless-statement  # Airflow dependency operator

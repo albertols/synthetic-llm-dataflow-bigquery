@@ -60,3 +60,11 @@ irrelevant for workers
 # (ADR 0041 and release reports may name the old table; docs/adr/ and
 # docs/releases/ are excluded from the scan).
 validation_data_history
+
+# 2026-10-06 — one image, one template (ADR 0041's amendment). The standalone
+# evaluation DAG launches from the generation template and reads the marker
+# the import workflow already substitutes ({{PROJECT_VERSION}}); the marker
+# that named an evaluator template of its own is gone. Nothing substitutes it,
+# so a file that still carries it would launch a template named after the
+# literal marker.
+{{EVALUATOR_VERSION}}

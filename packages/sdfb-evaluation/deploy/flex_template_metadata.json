@@ -23,6 +23,16 @@
       ]
     },
     {
+      "name": "disk_size_gb",
+      "label": "Worker disk size (GB)",
+      "helpText": "Beam's own --disk_size_gb, handed to Beam unchanged: the workers' boot disk. Omit it for Dataflow's default (25 GB with Dataflow Shuffle), which fits the standalone evaluator image. On the repository's shared image (docker/Dockerfile, multi-GB with the GPU libraries) pass 200, the size the generator pins for its own workers: the default overflows while a worker unpacks that image. Never pass it empty; Beam refuses an empty number.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^[1-9][0-9]*$"
+      ]
+    },
+    {
       "name": "fail_on",
       "label": "Fail-on status",
       "helpText": "Exit 1 when a metric is at this status or worse: none, warn or fail. Empty: none. No effect on a template launch: the template entry never applies it (it submits the job and returns). Read the statuses from the registry instead.",
@@ -176,6 +186,16 @@
       "isOptional": true,
       "regexes": [
         "^(auto|table|as_of|appends|as_of_diff|manual)?$"
+      ]
+    },
+    {
+      "name": "sdfb_job",
+      "label": "Job kind",
+      "helpText": "Pass evaluation when this template is built on the repository's shared image (docker/Dockerfile): its one entry runs generation unless this says evaluation. On the standalone evaluator image (packages/sdfb-evaluation/docker/Dockerfile) the entry is the evaluator itself and the value has no effect.",
+      "paramType": "TEXT",
+      "isOptional": true,
+      "regexes": [
+        "^(generation|evaluation)?$"
       ]
     },
     {

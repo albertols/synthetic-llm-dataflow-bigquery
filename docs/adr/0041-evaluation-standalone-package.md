@@ -1,6 +1,6 @@
 # ADR 0041 — Evaluation is a standalone package and a separate job
 
-**Status:** ACCEPTED (2026-10-05) — **built and reviewed on a laptop; not yet run on Google Cloud.** The statistics, planning, Beam transforms and the composed pipeline are tested on invented data with an in-process Beam runner and fake BigQuery clients. The `sdfb-eval` command line has run on invented data only. The scoping SQL (`APPENDS`, time travel, snapshot clones) has been generated and unit-tested as text and never executed by BigQuery. The CPU image has never been built, the flex template never launched, and the Composer DAG never parsed by Airflow. The acceptance gate still open is the first run on GCP (criteria 5-13 of the design's §11).
+**Status:** ACCEPTED (2026-10-05) — **built and reviewed on a laptop; not yet run on Google Cloud.** The statistics, planning, Beam transforms and the composed pipeline are tested on invented data with an in-process Beam runner and fake BigQuery clients. The `sdfb-eval` command line has run on invented data only. The scoping SQL (`APPENDS`, time travel, snapshot clones) has been generated and unit-tested as text and never executed by BigQuery. The CPU image has never been built, the flex template never launched, and the Composer DAG never parsed by Airflow. The acceptance gate still open is the first run on GCP (criteria 5-13 of the design's §11). **Amended 2026-10-06:** the evaluator has no image, template or DAG import of its own any more; see [the amendment](#amendment-2026-10-06-one-image-one-template) at the end.
 **Design:** [`2026-07-07-evaluation-framework-design.md`](../designs/2026-07-07-evaluation-framework-design.md) · section [§11 of `DESIGN.md`](../DESIGN.md#11-evaluation-sdfb-evaluation)
 **Package:** [`packages/sdfb-evaluation/`](../../packages/sdfb-evaluation/README.md) (evaluator `0.1.0`, metric catalogue `1.0.0`)
 **Relies on:** [ADR 0001](0001-no-managed-gcp-services.md) (no managed GCP services) · [ADR 0009](0009-single-flex-template-image.md) (dispatch entrypoint) · [ADR 0022](0022-stats-driven-generation.md) (the literal policy) · [ADR 0032](0032-relationships-as-config.md) (relationship model) · [ADR 0040](0040-dsg-donation-golden-source-sync.md) (the DSG manifest)
@@ -132,7 +132,7 @@ readable.
 and flex template (`packages/sdfb-evaluation/deploy/build_flex_template.sh`),
 launched by `sdfb-eval run`, by the template, or by a Composer DAG
 (`composer/evaluation_framework.py`) that the generation DAG may trigger,
-opt-in and off by default. A local run executes on Beam's in-process
+opt-in and off by default. *(Amended 2026-10-06, see [the amendment](#amendment-2026-10-06-one-image-one-template).)* A local run executes on Beam's in-process
 `FnApiRunner`; `--runner DirectRunner` is the user-facing spelling. Beam 2.74's
 `DirectRunner` hands a batch pipeline to Prism, which could start a step before
 its side input was complete in this package's tests (see
@@ -162,7 +162,7 @@ generator's Terraform:
 
 - The generation job, its image, its tests and the DSG unit are unchanged. The
   generator and the evaluator evolve independently, at the price of the
-  mirrors of D2, which a golden file keeps honest.
+  mirrors of D2, which a golden file keeps honest. *(Amended 2026-10-06, see [the amendment](#amendment-2026-10-06-one-image-one-template).)*
 - Evaluation can be re-run on a past generation job while the source's
   time-travel window and the landing table's history allow it; after that the
   source is read as it is now and the plan says so.
@@ -202,6 +202,7 @@ generator's Terraform:
   dispatch entrypoint, a template launch, the shuffle prediction against a
   real job, the Composer deferrable wait and failure callback, and the
   deploy workflow substituting `{{EVALUATOR_VERSION}}` into the DAG.
+  *(Amended 2026-10-06, see [the amendment](#amendment-2026-10-06-one-image-one-template).)*
 
 ## Alternatives rejected
 
@@ -214,6 +215,163 @@ generator's Terraform:
 | **Beam `ApproximateQuantiles`** | The first plan considered it; the build replaced it with a planning-time grid. Built instead: planning asks BigQuery for a 1,001-point grid per side ([`APPROX_QUANTILES`](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions)) and the Beam pass counts every row exactly against that fixed grid. The design's reason: "A column of a hundred million rows cannot be sorted in a Beam combiner, and it does not need to be"; two passes, plan then count, replace a sort (design [§4.3](../designs/2026-07-07-evaluation-framework-design.md#43-distributions-on-a-fixed-grid)). No other reason is recorded |
 | **A gate inside generation** | Evaluation is post-hoc by decision; the generation job keeps its own blocker rules |
 | **p-values** | At scale everything is significant; each row carries a noise floor instead (D5) |
+
+## Amendment (2026-10-06): one image, one template
+
+**Status of the amendment:** built and tested on a laptop. The image has not
+been built, the template has not been launched, and Airflow has parsed neither
+DAG. Everything below about a build, a launch or a DAG run describes what the
+files are written to do.
+
+**Claim:** the deployment's three existing actions (build the image, build the
+template, import the generation DAG) are enough to generate and to evaluate.
+Evaluation stays a separate package and a separate job; what it loses is an
+image, a template and a DAG import of its own.
+
+**Why.** Two reasons, both about the deployment and neither about the
+statistics:
+
+1. The deployment has three actions and must need no fourth. The first design
+   (above, "A separate CPU job") needed a second image build, a second template
+   build and a second DAG import with a marker of its own.
+2. The generation job records `relationships_uri=config/relationships`, a
+   folder inside the generator's image, and the evaluator reuses the recorded
+   value. In an image of its own that folder does not exist, so planning a
+   relational launch would fail. The shared image carries the folder.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph BUILD["🏗️ the three actions, unchanged"]
+    A1["⚙️ 1 build image<br/>docker/Dockerfile"]:::cpu --> IMG[("📄 one image<br/>generator + evaluator")]:::store
+    IMG --> A2["⚙️ 2 build template"]:::cpu --> TPL[("📄 one template<br/>sdfb-VERSION")]:::store
+    A3["⚙️ 3 import DAG"]:::cpu --> DAG["⚪ generation DAG"]:::data
+  end
+  DAG --> L1["⚪ launch<br/>no sdfb_job"]:::data --> ENTRY
+  DAG --> L2["⚪ launch<br/>sdfb_job=evaluation"]:::data --> ENTRY
+  TPL -.-> ENTRY{"⚙️ flex_entry.py<br/>reads sdfb_job"}:::cpu
+  ENTRY -- "generation" --> GEN["🔀 generation job<br/>GPU workers"]:::beam
+  ENTRY -- "evaluation" --> EVAL["🔀 evaluation job<br/>CPU workers"]:::beam
+```
+
+*One image and one template serve two jobs; the template parameter `sdfb_job`
+picks the entry. Implemented in `docker/flex_entry.py::main`.*
+
+| | Before this amendment | Now |
+| :-- | :-- | :-- |
+| Image | the generator's, and a CPU image for the evaluator | one, `docker/Dockerfile`: it also carries the evaluator's source, which runs on the environment `uv sync` installs for the generator |
+| Entry | each image ran its own file | one dispatcher, `docker/flex_entry.py`, which reads `sdfb_job` and calls the generator's or the evaluator's `main` |
+| Template | one per image | one, whose metadata declares the generator's parameters, `sdfb_job` and the evaluator's; every parameter is optional |
+| Orchestration | the generation DAG triggered a second DAG | the generation DAG waits for its own job and launches the evaluation itself; the second DAG is optional |
+
+**What did not change.** The package is still a standalone project with its own
+`pyproject.toml` and `uv.lock` for development and CI (D1), and neither side
+imports the other (D2): the dispatcher is the only file that names both. The
+evaluation is still a separate Dataflow job after generation, on CPU workers,
+that never gates or fails the generation run. The four tables, the two views,
+the registry's events (D7) and the command line are untouched.
+
+**A1. One image.** `docker/Dockerfile` copies the evaluator's `src` through a
+throwaway [build stage](https://docs.docker.com/build/building/multi-stage/)
+that copies `packages/` and looks for the directory in shell, so the same file
+builds in a tree without the evaluator (the DSG copy has none; the image then
+runs generation only). There is no second `uv sync` and no second virtualenv.
+The source is made importable the way the generator's is: last on the
+launcher's `PYTHONPATH`, and as a path line of the worker bridge `.pth`
+([`site`](https://docs.python.org/3/library/site.html) adds such a line only
+when the directory exists). The existing build argument also sets the
+evaluator's worker-image variable, so its workers run this same image
+([custom containers](https://docs.cloud.google.com/dataflow/docs/guides/build-container-image)).
+
+**A2. One environment, checked.** The evaluator runs on the generator's
+dependency versions, not on its own lock's. Two of its dependencies, scipy and
+scikit-learn, are in the image only because an extra of the generator installs
+them. Three things turn that into a checked fact: a test that every dependency
+the evaluator declares is in the root lock inside its range; a test that the
+extras named on the image's `uv sync` line still reach each of them in the
+lock's dependency graph; and a build step that imports the evaluator's two
+entry modules in the launcher's context and in the worker's, so an image that
+lost one fails at build and not at the first evaluation launch
+(`packages/sdfb-tests/tests/unit/docker/test_shared_image.py`).
+
+**A3. One template, every parameter optional.** A launch for one job cannot be
+made to supply the other's parameters, so the template requires none
+([Flex Template metadata](https://docs.cloud.google.com/dataflow/docs/guides/templates/configuring-flex-templates)).
+What a job needs is refused by its own argument parser, in the launcher. The
+three names both jobs use (`relationships_uri`, `run_id`, `thresholds_uri`)
+appear once; `run_id` loses its pattern, because both parsers take any text
+and an evaluation may pass it empty.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph OFF["run_evaluation = False, the default"]
+    S1["🔀 start_sdfb<br/>launch, no wait"]:::beam --> G1{"🛡️ gate"}:::cpu --> X1["∅ nothing else runs<br/>as before"]:::data
+  end
+  subgraph ON["run_evaluation = True"]
+    S2["🔀 start_sdfb<br/>launch, no wait"]:::beam --> G2{"🛡️ gate"}:::cpu
+    G2 --> W["⚙️ wait_for_generation<br/>reschedule sensor"]:::cpu
+    W --> T["🔀 trigger_evaluation<br/>same template<br/>sdfb_job=evaluation"]:::beam
+  end
+```
+
+*The two modes of the generation DAG's `run_evaluation` parameter
+(`composer/synthetic_beam_bigquery.py`).*
+
+**A4. The chain is inside the generation DAG.** `start_sdfb >>
+run_evaluation_gate >> wait_for_generation >> trigger_evaluation`. The wait is
+a sensor in [reschedule mode](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/sensors.html),
+which holds no worker slot between two reads of the job's state and needs no
+triggerer; it is stated as not deferrable because the environment may have
+none. `trigger_evaluation` launches the same template with
+`sdfb_job=evaluation` and the generation job's id, as a CPU job in the
+generation job's network, and does not wait. It also passes Beam's own
+[`disk_size_gb`](https://docs.cloud.google.com/dataflow/docs/reference/pipeline-options):
+the evaluation job's workers unpack the same multi-GB image and the evaluator
+pins no boot disk, where the generator pins one for itself.
+
+**A5. The standalone DAG is the optional path.** `composer/evaluation_framework.py`
+launches from the same template, reads the marker the import workflow already
+substitutes for the generation DAG, and keeps what the chain does not have: a
+launch that waits for its job and a failure callback that closes the registry
+row. It accepts a list of generation job ids and then starts one run of itself
+per id, so the per-job path is the reviewed one. The evaluator's CPU
+`Dockerfile` stays for the package copied out as a unit of its own, and its
+build script now builds only a template from an existing image.
+
+**Costs.**
+
+- The evaluation job's workers pull and unpack the large GPU image: a slower
+  start than a small CPU image, and a 200 GB boot disk per worker.
+- The evaluator runs on the generator's versions. They are inside its declared
+  ranges and guarded as in A2; the evaluator's own suite was also run once on
+  the root lock's versions on a laptop and passed. On a worker, packages the
+  Beam base image installs globally come ahead of the image's virtualenv on the
+  path, as they always have for the generator: which numpy, scipy and
+  scikit-learn a worker imports is unverified until a real job.
+- The template no longer refuses a generation launch that lacks a required
+  parameter: the launcher does, a moment later, and the launch's job fails
+  there.
+- A chained evaluation that dies after it was launched leaves its `RUNNING`
+  row open. Nothing in the generation DAG closes it; a run of the standalone
+  DAG for the same job is the path that does.
+- The copy that ships to the Dataflow Solution Guides has a `Dockerfile` and a
+  template metadata that mention an evaluator it does not ship.
+
+**Unverified until a real build, launch and Airflow parse:** the image build
+with and without the evaluator's directory; the import check in both contexts;
+the dispatcher under the template launcher; a template with every parameter
+optional; the sensor's behaviour when the generation job fails or is
+cancelled (the provider's source was not available to read); `maxWorkers`
+rendered as a string; the boot disk reaching the evaluation job's workers; the
+standalone DAG re-triggering itself.
 
 ## Sources
 

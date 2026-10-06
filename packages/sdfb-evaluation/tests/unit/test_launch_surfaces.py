@@ -11,25 +11,49 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Tests for the launch surfaces (Task 28): the CPU Dataflow image, the
-flex template metadata and the build script.
+"""Tests for the launch surfaces (Task 28): the standalone CPU Dataflow
+image, the flex template metadata and the template build script.
 
-Static checks only: the files are read and compared with each other and
-with the package, nothing is built and nothing reaches the network.
+The repository's deployment uses ONE image for generation and evaluation
+(`docker/Dockerfile` at the repository root, Ruling R118); the files here
+are the surface of the evaluator as a unit of its own:
+
+    file                                  what it is now
+    ────────────────────────────────────  ──────────────────────────────────
+    docker/Dockerfile                     the standalone CPU image, for the
+                                          package copied out on its own
+    deploy/flex_template_metadata.json    the parameters of an
+                                          evaluator-only template (the
+                                          shared template declares them all)
+    deploy/build_flex_template.sh         builds that template from an
+                                          EXISTING image; it builds no image
+
+Static checks, plus the build script run against a recording `gcloud`:
+nothing is built and nothing reaches the network.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import tomllib
 from pathlib import Path
 
 import pytest
+from apache_beam.options.pipeline_options import (
+    PipelineOptions,
+    WorkerOptions,
+)
 
-from sdfb_evaluation.cli.main import _flag, _subparsers, public_run_flags
+from sdfb_evaluation.cli.main import (
+    _flag,
+    _subparsers,
+    parse_args,
+    public_run_flags,
+)
 from sdfb_evaluation.version import EVALUATOR_VERSION
 
 PACKAGE = Path(__file__).resolve().parents[2]
@@ -66,15 +90,93 @@ def _locked(name: str) -> str:
 # contradict it, in an order-dependent way (Ruling R97).
 LAUNCHER_SUPPLIED = frozenset({"--runner", "--project", "--region"})
 
+# Not a flag of the CLI: the selector the shared image's entry
+# (docker/flex_entry.py at the repository root) reads and removes before
+# the CLI sees the arguments. A template built from this metadata on that
+# image selects the evaluator with it (Ruling R118).
+SELECTOR = "--sdfb_job"
 
-def test_metadata_mirrors_every_public_run_flag() -> None:
+# Not flags of the CLI either: Beam's own options, which `run` hands to Beam
+# unchanged. They are declared so a launch may pass them. The worker boot
+# disk is the one a launch on the shared image must pass: that image is
+# multi-GB and Dataflow's default disk overflows while a worker unpacks it.
+BEAM_PASSTHROUGH = frozenset({"--disk_size_gb"})
+
+
+def test_metadata_mirrors_every_public_run_flag_plus_the_selector() -> None:
   names = [p["name"] for p in _metadata()["parameters"]]
   assert len(names) == len(set(names))
   flags = public_run_flags()
   assert flags, "no public flags: the parser changed shape"
   assert set(flags) >= LAUNCHER_SUPPLIED
-  assert sorted(
-      f"--{n}" for n in names) == sorted(set(flags) - LAUNCHER_SUPPLIED)
+  assert SELECTOR not in flags and not BEAM_PASSTHROUGH & set(flags)
+  declared = (set(flags) - LAUNCHER_SUPPLIED) | {SELECTOR} | BEAM_PASSTHROUGH
+  assert sorted(f"--{n}" for n in names) == sorted(declared)
+
+
+def test_the_selector_is_optional_and_admits_the_two_jobs() -> None:
+  (selector,) = [
+      p for p in _metadata()["parameters"] if p["name"] == SELECTOR[2:]
+  ]
+  assert selector["isOptional"] is True
+  (pattern,) = selector["regexes"]
+  for value in ("evaluation", "generation", ""):
+    assert re.fullmatch(pattern, value), value
+  assert not re.fullmatch(pattern, "both")
+  assert "evaluation" in selector["helpText"]
+
+
+def test_the_selector_is_harmless_where_the_cli_is_the_entry() -> None:
+  """On the standalone image `run_evaluation.py` is the entry and nothing
+  removes the selector: it must stay a Beam argument Beam itself drops,
+  never a usage error of this CLI."""
+  args, extras = parse_args([
+      "run", "--job_id", "J", "--project", "p", "--region", "r", "--runner",
+      "DataflowRunner", f"{SELECTOR}=evaluation"
+  ])
+  assert args.job_id == "J"
+  assert extras == [f"{SELECTOR}=evaluation"]
+  assert "sdfb_job" not in PipelineOptions(extras).get_all_options()
+
+
+def test_the_worker_disk_is_beams_own_option_and_never_empty() -> None:
+  """`disk_size_gb` reaches Beam as it is given; Beam reads an integer, so
+  the pattern refuses the empty string a template passes for "unset"."""
+  args, extras = parse_args([
+      "run", "--job_id", "J", "--project", "p", "--region", "r", "--runner",
+      "DataflowRunner", "--disk_size_gb=200"
+  ])
+  assert not hasattr(args, "disk_size_gb")
+  assert PipelineOptions(extras).view_as(WorkerOptions).disk_size_gb == 200
+  pattern = _regex("disk_size_gb")
+  assert re.fullmatch(pattern, "200") and re.fullmatch(pattern, "25")
+  for refused in ("", "0", "200GB", "-1"):
+    assert not re.fullmatch(pattern, refused), refused
+  with pytest.raises(SystemExit) as raised:
+    parse_args([
+        "run", "--job_id", "J", "--project", "p", "--region", "r",
+        "--disk_size_gb="
+    ])
+  assert raised.value.code == 2
+
+
+def test_the_shared_template_declares_this_metadata_whole() -> None:
+  """The repository's one template (docker/flex_template_metadata.json)
+  carries every parameter here under the same name and pattern, so the
+  same launch body works against either template."""
+  shared = PACKAGE.parents[1] / "docker" / "flex_template_metadata.json"
+  if not shared.is_file():  # the package stands alone as its own unit
+    pytest.skip("the repository-root template metadata is not beside this "
+                "package")
+  template = {
+      p["name"]: p
+      for p in json.loads(shared.read_text(encoding="utf-8"))["parameters"]
+  }
+  for parameter in _metadata()["parameters"]:
+    name = parameter["name"]
+    assert name in template, name
+    assert template[name].get("regexes") == parameter.get("regexes"), name
+    assert template[name].get("isOptional") is True, name
 
 
 def test_metadata_leaves_launcher_supplied_flags_out() -> None:
@@ -207,16 +309,19 @@ def test_entrypoint_discriminator_equals_the_generators() -> None:
   assert len(_discriminators(ENTRYPOINT)) == 5
 
 
-def test_dockerfile_bakes_the_worker_image_and_the_script_passes_it() -> None:
+def test_dockerfile_bakes_the_worker_image_and_says_how_to_build_it() -> None:
   text = _dockerfile()
   assert 'ARG SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=""' in text
   assert ("ENV SDFB_EVAL_SDK_CONTAINER_IMAGE="
           "$SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG") in text
   # declared after the dependency layers, so it never invalidates them
-  assert text.index("SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG") > text.rindex(
+  assert text.index('ARG SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=""') > text.rindex(
       "RUN uv sync")
-  assert ("SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=${IMAGE}"
-          in BUILD_SCRIPT.read_text(encoding="utf-8"))
+  # no script builds this image any more: the header says how, with the
+  # build argument that makes the workers run the same image
+  header = text[:text.index("\nFROM ")]
+  assert "docker build" in header
+  assert "--build-arg SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=" in header
 
 
 def test_beam_sdk_tag_equals_locked_apache_beam() -> None:
@@ -257,25 +362,131 @@ def test_image_never_enables_data_sampling() -> None:
     assert "enable_data_sampling" not in path.read_text(encoding="utf-8")
 
 
-def test_build_script_is_valid_shell_with_env_inputs_only() -> None:
+def _script_code() -> str:
   text = BUILD_SCRIPT.read_text(encoding="utf-8")
-  assert "set -euo pipefail" in text
-  for name in ("PROJECT_ID", "REGION", "REPOSITORY", "TEMPLATES_BUCKET"):
-    assert f': "${{{name}:?' in text, name
-  assert "gcloud builds submit" in text
-  assert "gcloud dataflow flex-template build" in text
-  assert "--sdk-language PYTHON" in text
-  assert "--sdk_container_image" in text  # the header says how workers run
-  assert "sdfb-evaluation-${VERSION}-template.json" in text
-  assert "version.py" in text
-  code = "\n".join(
+  return "\n".join(
       line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_build_script_builds_a_template_and_no_image() -> None:
+  text = BUILD_SCRIPT.read_text(encoding="utf-8")
+  code = _script_code()
+  assert "set -euo pipefail" in code
+  for name in ("IMAGE", "PROJECT_ID", "TEMPLATES_BUCKET"):
+    assert f': "${{{name}:?' in code, name
+  for gone in ("gcloud builds submit", "docker build", "cloudbuild",
+               "REPOSITORY", "SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG"):
+    assert gone not in code, gone
+  assert "gcloud dataflow flex-template build" in code
+  assert '--image "${IMAGE}"' in code
+  assert "--sdk-language PYTHON" in code
+  assert "deploy/flex_template_metadata.json" in code
+  assert "sdfb-evaluation-${VERSION}-template.json" in code
+  assert "version.py" in code
   assert "upload_graph" not in code  # the CLI owns launch flags
+  assert "--sdk_container_image" in text  # the header says how workers run
   result = subprocess.run(["bash", "-n", str(BUILD_SCRIPT)],
                           capture_output=True,
                           text=True,
                           check=False)
   assert result.returncode == 0, result.stderr
+
+
+def test_build_script_says_the_launch_must_select_the_evaluator() -> None:
+  """A template built on the shared image runs that image's dispatcher,
+  which runs generation unless the launch passes the selector."""
+  header = BUILD_SCRIPT.read_text(encoding="utf-8").split("set -euo")[0]
+  assert "sdfb_job=evaluation" in header
+  assert "disk_size_gb" in header
+  assert "sdfb_job=evaluation" in _script_code()  # printed after the build
+
+
+_GCLOUD_STUB = """#!/bin/sh
+printf '%s\\n' "$@" > "$(dirname "$0")/gcloud.args"
+"""
+
+
+def _run_build_script(tmp_path: Path,
+                      **env: str) -> tuple[subprocess.CompletedProcess, list]:
+  """The script as committed, with `gcloud` replaced by a recorder."""
+  stubs = tmp_path / "bin"
+  stubs.mkdir()
+  (stubs / "gcloud").write_text(_GCLOUD_STUB, encoding="utf-8")
+  (stubs / "gcloud").chmod(0o755)
+  result = subprocess.run(
+      ["bash", str(BUILD_SCRIPT)],
+      capture_output=True,
+      text=True,
+      check=False,
+      cwd=tmp_path,
+      env={
+          "PATH": os.pathsep.join([str(stubs), os.environ["PATH"]]),
+          **env
+      })
+  recorded = stubs / "gcloud.args"
+  calls = recorded.read_text(
+      encoding="utf-8").splitlines() if recorded.is_file() else []
+  return result, calls
+
+
+def test_build_script_runs_one_template_build_for_the_given_image(
+    tmp_path: Path) -> None:
+  image = "region-docker.pkg.dev/demo-project/demo-repo/sdfb-python:1.2.3"
+  result, calls = _run_build_script(
+      tmp_path,
+      IMAGE=image,
+      PROJECT_ID="demo-project",
+      TEMPLATES_BUCKET="demo-bucket")
+  assert result.returncode == 0, result.stderr
+  template = ("gs://demo-bucket/synthetic/"
+              f"sdfb-evaluation-{EVALUATOR_VERSION}-template.json")
+  # the one gcloud call of the script (the recorder keeps the last)
+  assert calls == [
+      "dataflow", "flex-template", "build", template, "--project",
+      "demo-project", "--image", image, "--sdk-language", "PYTHON",
+      "--metadata-file",
+      str(METADATA)
+  ]
+  assert f"template: {template}" in result.stdout
+  assert f"image:    {image}" in result.stdout
+  assert "sdfb_job=evaluation" in result.stdout
+
+
+def test_build_script_takes_the_version_from_the_environment(
+    tmp_path: Path) -> None:
+  result, calls = _run_build_script(
+      tmp_path,
+      IMAGE="any/image:tag",
+      PROJECT_ID="demo-project",
+      TEMPLATES_BUCKET="demo-bucket",
+      VERSION="9.9.9")
+  assert result.returncode == 0, result.stderr
+  assert calls[3] == ("gs://demo-bucket/synthetic/"
+                      "sdfb-evaluation-9.9.9-template.json")
+
+
+@pytest.mark.parametrize("missing", ["IMAGE", "PROJECT_ID", "TEMPLATES_BUCKET"])
+def test_build_script_refuses_to_start_without_an_input(tmp_path: Path,
+                                                        missing: str) -> None:
+  env = {
+      "IMAGE": "any/image:tag",
+      "PROJECT_ID": "demo-project",
+      "TEMPLATES_BUCKET": "demo-bucket"
+  }
+  del env[missing]
+  result, calls = _run_build_script(tmp_path, **env)
+  assert result.returncode != 0
+  assert missing in result.stderr
+  assert not calls  # nothing was built
+
+
+@pytest.mark.parametrize("path", [DOCKERFILE, BUILD_SCRIPT])
+def test_both_files_say_the_deployment_uses_the_one_image(path: Path) -> None:
+  # the header as prose: comment markers and line breaks folded away
+  head = " ".join(
+      path.read_text(encoding="utf-8")[:2600].replace("#", " ").split())
+  assert "one image for generation and evaluation" in head
+  assert "docker/Dockerfile at the repository root" in head
 
 
 def test_version_is_readable_by_the_build_script_pattern() -> None:

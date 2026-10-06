@@ -13,28 +13,39 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-# Build the evaluator's CPU image with Cloud Build, push it to Artifact
-# Registry and build the Dataflow flex template that points at it.
+# Build an EVALUATOR-ONLY Dataflow flex template from an existing image.
+# This script builds no image.
+#
+# This repository's deployment does not need it. The deployment builds one
+# image for generation and evaluation (docker/Dockerfile at the repository
+# root) and one template from it, and that template runs both jobs: an
+# evaluation launch passes the parameter sdfb_job=evaluation. Use this script
+# only for a second template that declares the evaluator's parameters alone
+# (deploy/flex_template_metadata.json), built on
+#   - that same shared image, or
+#   - the standalone CPU image of this package (docker/Dockerfile here), for
+#     the package copied out as a unit of its own.
 #
 # The template path is
 #   gs://${TEMPLATES_BUCKET}/synthetic/sdfb-evaluation-${VERSION}-template.json
 #
-# Workers use the SAME image: launch the template with the Beam argument
-# `--sdk_container_image=<IMAGE>` (README, "Dataflow"). This script only
-# builds; the launch flags (`--experiments=upload_graph` among them) are the
-# CLI's, not this script's.
+# Launching it:
+#   - Always pass sdfb_job=evaluation. On the shared image the template's
+#     entry is a dispatcher (docker/flex_entry.py at the repository root) that
+#     runs GENERATION unless the launch says otherwise. On the standalone
+#     image the entry is the evaluator itself and the parameter has no effect.
+#   - On the shared image also pass disk_size_gb=200: that image is multi-GB
+#     and Dataflow's default worker disk overflows while a worker unpacks it.
+#   - Workers use the SAME image as the launcher. The image carries its own
+#     coordinate and the driver applies it as the workers'
+#     sdk_container_image when the launch gives none; an explicit
+#     `--sdk_container_image=<IMAGE>` wins (README, "Dataflow").
+# This script only builds the template; the launch flags
+# (`--experiments=upload_graph` among them) are the CLI's, not this script's.
 #
-# The image bakes its own coordinate (build argument
-# SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG), which the driver applies as the workers'
-# sdk_container_image when the launch gives none.
-#
-# `gcloud builds submit` uploads the repository root; there is no
-# .gcloudignore or .dockerignore there, so gcloud falls back to .gitignore.
-#
-# Environment (no defaults for the first four):
-#   PROJECT_ID        GCP project that builds and owns the image
-#   REGION            Artifact Registry and Cloud Build region
-#   REPOSITORY        Artifact Registry Docker repository
+# Environment (no defaults for the first three):
+#   IMAGE             the pushed image the template launches, full coordinate
+#   PROJECT_ID        GCP project the template build runs in
 #   TEMPLATES_BUCKET  GCS bucket (name only) that holds the template file
 #   VERSION           optional; default: EVALUATOR_VERSION in
 #                     src/sdfb_evaluation/version.py
@@ -42,13 +53,11 @@
 # Run from anywhere on a machine with gcloud; it needs GCP access.
 set -euo pipefail
 
+: "${IMAGE:?set IMAGE: the pushed image to build the template from (this script builds none)}"
 : "${PROJECT_ID:?set PROJECT_ID}"
-: "${REGION:?set REGION}"
-: "${REPOSITORY:?set REPOSITORY}"
 : "${TEMPLATES_BUCKET:?set TEMPLATES_BUCKET}"
 
 PACKAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPO_ROOT="$(cd "${PACKAGE_DIR}/../.." && pwd)"
 
 if [[ -z "${VERSION:-}" ]]; then
   VERSION="$(sed -n 's/^EVALUATOR_VERSION = "\(.*\)"$/\1/p' \
@@ -56,24 +65,7 @@ if [[ -z "${VERSION:-}" ]]; then
 fi
 : "${VERSION:?could not read EVALUATOR_VERSION}"
 
-IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/sdfb-evaluation:${VERSION}"
 TEMPLATE="gs://${TEMPLATES_BUCKET}/synthetic/sdfb-evaluation-${VERSION}-template.json"
-
-# The Docker build context is the repository root; the Dockerfile lives in
-# the package, so Cloud Build reads a cloudbuild config naming it.
-CONFIG="$(mktemp)"
-trap 'rm -f "${CONFIG}"' EXIT
-cat > "${CONFIG}" <<YAML
-steps:
-  - name: gcr.io/cloud-builders/docker
-    args: ["build", "-f", "packages/sdfb-evaluation/docker/Dockerfile", "--build-arg", "SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=${IMAGE}", "-t", "${IMAGE}", "."]
-images: ["${IMAGE}"]
-YAML
-
-gcloud builds submit "${REPO_ROOT}" \
-  --project "${PROJECT_ID}" \
-  --region "${REGION}" \
-  --config "${CONFIG}"
 
 gcloud dataflow flex-template build "${TEMPLATE}" \
   --project "${PROJECT_ID}" \
@@ -83,3 +75,4 @@ gcloud dataflow flex-template build "${TEMPLATE}" \
 
 echo "image:    ${IMAGE}"
 echo "template: ${TEMPLATE}"
+echo "launch:   pass sdfb_job=evaluation (and disk_size_gb=200 on the shared image)"
