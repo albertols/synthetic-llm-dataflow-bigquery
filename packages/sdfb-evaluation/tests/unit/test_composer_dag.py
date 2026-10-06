@@ -874,7 +874,7 @@ def test_a_list_with_another_target_fails_fast_with_one_message(
       call()
     message = str(info.value)
     assert "generation_job_ids" in message and name in message
-  assert triggered == []  # not one child run was started
+  assert not triggered  # not one child run was started
 
 
 def test_the_job_id_alone_or_blank_list_with_another_target_is_not_refused():

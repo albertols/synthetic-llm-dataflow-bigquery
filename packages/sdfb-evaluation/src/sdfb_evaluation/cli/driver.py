@@ -481,12 +481,12 @@ def _models(
   except RelationshipError as exc:
     if adjusted or _NO_MODEL_FILES not in str(exc):
       raise
-    recorded = launch.model_name or launch.model_sha
-    if recorded:
+    if launch.model_name or launch.model_sha:
+      name, sha = launch.model_name or "?", launch.model_sha or "?"
       raise RelationshipError(
           f"{exc}. The launch's log shows it loaded the relationship model "
-          f"{launch.model_name or '?'} (sha {launch.model_sha or '?'}), "
-          "which is not readable from where the evaluator runs") from exc
+          f"{name} (sha {sha}), which is not readable from where the "
+          "evaluator runs") from exc
   note = (f"the launch recorded relationships_uri {uri} but its log shows it "
           "loaded no relationship model (there was no model file there): "
           "evaluated without relationships, as the generation ran")
