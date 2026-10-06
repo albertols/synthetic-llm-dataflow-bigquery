@@ -321,6 +321,7 @@ _TAIL = "<tail>"
 _MASK_LABEL = "sdfb:shape-mask"
 _COUNTED_SIDES = frozenset({Side.SOURCE, Side.SYNTHETIC})
 _SOURCE, _SYNTHETIC = Side.SOURCE.value, Side.SYNTHETIC.value
+_EITHER = "either"  # NEEDS_FULL_SIDE: needs both sides in full
 _VALUES, _MASKS, _LITERALS = "values", "masks", "literals"
 _SUBSTANTIVE = "substantive"
 _METRICS, _PROFILES = "metrics", "profiles"
@@ -366,6 +367,12 @@ NEEDS_FULL_SIDE: Mapping[str, tuple[str, str, str]] = {
     "column.distinct_ceiling_hit":
         (_SYNTHETIC, "a pool-cap hit", "the exact synthetic distinct count is "
          "not measured"),
+    # defined at m = min(n_src, n_syn): a row sample thins repeats and the
+    # ratio drifts toward 1, whichever side was sampled
+    "column.distinct_ratio":
+        (_EITHER, "the distinct ratio", "thinned repeats pull it toward 1"),
+    "column.entropy_ratio":
+        (_EITHER, "the entropy ratio", "thinned repeats pull it toward 1"),
 }
 # The sides a metric reads, when not both (the pool lift counts the pool
 # against the panel and the source's rare values; the synthetic side
@@ -640,11 +647,13 @@ class CensusSpec:  # pylint: disable=too-many-instance-attributes  # the per-tab
     if needs is None:
       return None
     side, what, why = needs
-    rate = self.sample_rates((side,)).get(side)
-    if rate is None:
+    rates = self.sample_rates(_BOTH_SIDES if side == _EITHER else (side,))
+    if not rates:
       return None
-    return (f"sampled mode cannot measure {what}: the {side} side is a "
-            f"{rate:.3g} row sample, so {why}; run exact mode")
+    where = " and ".join(
+        f"the {s} side is a {r:.3g} row sample" for s, r in rates.items())
+    return (f"sampled mode cannot measure {what}: {where}, so {why}; "
+            "run exact mode")
 
   @classmethod
   def from_table(cls, table: TablePlan) -> CensusSpec:
@@ -2028,6 +2037,12 @@ def _entropy(e: _Emitter, v: _View, base: dict[str, Any] | None,
              base_reason: str | None) -> None:
   metric_id = "column.entropy_ratio"
   sizes = (v.sizes.n_src_m, v.sizes.n_syn_m)
+  if e.withheld(
+      metric_id,
+      v,
+      sample_ratio=None if v.entropy is None else v.entropy["entropy_ratio"],
+      note=("the ratio of the rows read, not the table's")):
+    return
   reason = v.missing_matched() or v.ht_problem
   ent = v.entropy
   if not reason and ent is not None and ent["entropy_ratio"] is None:
@@ -2066,6 +2081,14 @@ def _distinct(e: _Emitter, v: _View, base: dict[str, Any] | None,
               base_reason: str | None) -> None:
   metric_id = "column.distinct_ratio"
   sizes = (v.sizes.n_src_m, v.sizes.n_syn_m)
+  if e.withheld(
+      metric_id,
+      v,
+      sample_ratio=v.summary["distinct_ratio"],
+      distinct_src_in_sample=round(v.distinct(matched=False)[0]),
+      distinct_syn_in_sample=round(v.distinct(matched=False)[1]),
+      note=("the ratio and counts of the rows read, not the table's")):
+    return
   ratio = v.summary["distinct_ratio"]
   reason = v.missing_matched()
   if not reason and ratio is None:

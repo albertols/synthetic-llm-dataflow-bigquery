@@ -25,6 +25,7 @@ import hashlib
 import json
 import math
 import pickle
+import random
 import time as clock
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -1271,9 +1272,12 @@ def test_unobserved_sampled_column_is_not_evaluated_never_fabricated():
 # --------------------------------------------------------------------------
 # sampled mode (Ruling R72; the final review's C1)
 # --------------------------------------------------------------------------
+_NEED_BOTH = ("column.distinct_ratio", "column.entropy_ratio")
 _NEED_THE_SOURCE = ("field.category_adherence", "column.novelty_mass",
-                    "field.substantive_copy_rate", "field.shape_adherence")
-_NEED_THE_SYNTHETIC = ("column.coverage_mass", "column.distinct_ceiling_hit")
+                    "field.substantive_copy_rate", "field.shape_adherence"
+                   ) + _NEED_BOTH
+_NEED_THE_SYNTHETIC = ("column.coverage_mass",
+                       "column.distinct_ceiling_hit") + _NEED_BOTH
 
 
 def _row_sampled(table: Any,
@@ -1379,6 +1383,71 @@ def test_a_collapsed_value_pool_fails_the_distinct_ratio():
   assert status_for(_CATALOGUE.get(entropy.metric_id), entropy) is Status.FAIL
 
 
+def test_a_row_sample_never_answers_the_diversity_ratios():
+  """The re-review's probe (R116 item 1): a 6,000-row text column filled
+  from a 6,000-value pool scores 0.633 FAIL in an exact run; read as a
+  1/10 row sample of either side it scored 0.945 / 0.978 / 0.926 PASS
+  (thinned repeats pull the ratio toward 1). Defined at m = min(n_src,
+  n_syn), both ratios need both sides in full: not_evaluated, with the
+  sample's own ratio and counts under names that are not the table's."""
+  words = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+           "hotel", "india", "juliet", "kilo", "lima", "mike", "november",
+           "oscar", "papa", "quebec", "romeo", "sierra", "tango")
+
+  def motto(rng: Any) -> str:
+    return " ".join(words[rng.randrange(20)] for _ in range(8))
+
+  n = 6000
+  rng = random.Random(1)
+  source = [{"id": i, "motto": motto(rng)} for i in range(n)]
+  pool = [motto(random.Random(10_000 + k)) for k in range(n)]
+  rng = random.Random(2)
+  synthetic = [{"id": 10**6 + i, "motto": rng.choice(pool)} for i in range(n)]
+  fields = ({
+      "name": "id",
+      "type": "INT64",
+      "mode": "REQUIRED"
+  }, {
+      "name": "motto",
+      "type": "STRING",
+      "mode": "NULLABLE"
+  })
+  table = planned_table(
+      "people", fields, source, synthetic, pk=("id",), pair_max_columns=0)
+  rows = {"source": source, "synthetic": synthetic}
+  exact = _by_key(_pure(table, rows).metrics)
+  for metric_id in ("column.distinct_ratio", "column.entropy_ratio"):
+    mv = exact[(metric_id, "motto")]
+    assert mv.method.value == "exact" and mv.value is not None
+  assert exact[("column.distinct_ratio", "motto")].value == pytest.approx(
+      0.633, abs=0.01)
+  assert status_for(
+      _CATALOGUE.get("column.distinct_ratio"),
+      exact[("column.distinct_ratio", "motto")]) is Status.FAIL
+  for kinds, tenth in (("both", (10, 10)), ("source", (10, 1)),
+                       ("synthetic", (1, 10))):
+    plan, read = _row_sampled(
+        table, rows, source=tenth[0], synthetic=tenth[1])
+    got = _by_key(_pure(plan, read).metrics)
+    for metric_id in ("column.distinct_ratio", "column.entropy_ratio"):
+      mv = got[(metric_id, "motto")]
+      reason = mv.detail["reason"]
+      assert mv.value is None, (kinds, metric_id)
+      assert status_for(_CATALOGUE.get(metric_id),
+                        mv) is Status.NOT_EVALUATED, (kinds, metric_id)
+      assert reason.startswith("sampled mode cannot measure"), reason
+      assert reason.endswith("run exact mode"), reason
+      assert "row sample" in reason
+      assert "sample_ratio" in mv.detail, (kinds, metric_id)
+    seen = got[("column.distinct_ratio", "motto")].detail
+    assert 0 < seen["distinct_src_in_sample"] <= 600 or kinds == "synthetic"
+    assert 0 < seen["distinct_syn_in_sample"] <= 600 or kinds == "source"
+    assert "distinct_src" not in seen and "distinct_syn" not in seen
+  assert set(census.NEEDS_FULL_SIDE) >= {
+      "column.distinct_ratio", "column.entropy_ratio"
+  }
+
+
 def test_a_copied_free_text_column_fails_the_copy_rate_when_read_in_full():
   """Ruling R111: half of a free-text column copied verbatim from rare
   source values is a copy rate of 0.5, FAIL, in an exact run."""
@@ -1449,8 +1518,7 @@ def test_sampled_source_withholds_what_needs_every_source_row():
   ]
   assert {mv.metric_id for mv in evaluated} >= {
       "column.tvd", "column.jsd", "column.cohens_w", "column.top1_share_delta",
-      "column.coverage_mass", "column.entropy_ratio", "column.distinct_ratio",
-      "column.shape_head_tv"
+      "column.coverage_mass", "column.shape_head_tv"
   }
   for mv in got:
     if mv.metric_id == "column.distinct_ceiling_hit":  # reads the synthetic
