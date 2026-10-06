@@ -209,6 +209,10 @@ def _fan_out_confs(params):
   single-target run (by `generation_job_id`, `run_id` or `tables`). Otherwise
   each conf is the run's params with `generation_job_id` set to its one id
   and `generation_job_ids` emptied, so the run it starts never fans out again.
+
+  A list together with `run_id` or `tables` is refused with one message
+  (ValueError): each child run would otherwise start and its launcher refuse
+  two targets.
   """
   listed = [
       str(job_id or "").strip()
@@ -216,6 +220,14 @@ def _fan_out_confs(params):
   ]
   if not any(listed):
     return []
+  other = [
+      name for name in ("run_id", "tables") if str(params[name] or "").strip()
+  ]
+  if other:
+    raise ValueError(
+        f"generation_job_ids names {len([i for i in listed if i])} job(s) and "
+        f"{' and '.join(other)} is also set: a run has one target. Empty "
+        f"{' and '.join(other)}, or leave generation_job_ids empty.")
   job_ids = []
   for job_id in (*listed, str(params["generation_job_id"] or "").strip()):
     if job_id and job_id not in job_ids:
@@ -247,19 +259,21 @@ def _fan_out(params, **context):
     return True
   import logging
 
+  from airflow.api.common.trigger_dag import trigger_dag
   from airflow.exceptions import DagRunAlreadyExists
-  from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
   for conf in confs:
     run_id = _fan_out_run_id(conf["generation_job_id"], context["ts_nodash"])
     try:
-      TriggerDagRunOperator(
-          task_id="trigger_evaluation_run",
-          trigger_dag_id=DAG_ID,
-          trigger_run_id=run_id,
+      # Airflow's own function (what TriggerDagRunOperator calls), not an
+      # operator executed inside a callable. Microseconds are kept so that
+      # runs started in the same second get distinct logical dates.
+      trigger_dag(
+          dag_id=DAG_ID,
+          run_id=run_id,
           conf=conf,
-          wait_for_completion=False,
-      ).execute(context)
+          replace_microseconds=False,
+      )
     except DagRunAlreadyExists:
       logging.info("evaluation run %s already exists: not started again",
                    run_id)
@@ -327,8 +341,7 @@ def _close_running_row(context):
   import logging
   import re
 
-  from airflow.providers.google.cloud.operators.bigquery import (
-      BigQueryInsertJobOperator,)
+  from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
 
   params = context["params"]
   dataset = str(params["output_dataset"])
@@ -378,8 +391,10 @@ def _close_running_row(context):
         },
     }
 
-  BigQueryInsertJobOperator(
-      task_id="close_running_row",
+  # The hook, not an operator executed inside a callable. UNVERIFIED against
+  # the installed provider: `insert_job(configuration=, project_id=)` and the
+  # job's `result()` are written from the operator's documented behaviour.
+  job = BigQueryHook().insert_job(
       project_id=project_id,
       configuration={
           "query": {
@@ -404,7 +419,8 @@ def _close_running_row(context):
               ],
           }
       },
-  ).execute(context)
+  )
+  job.result()
 
 
 # -----------------------------------------------------------------------------

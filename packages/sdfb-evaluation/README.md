@@ -551,18 +551,23 @@ Limits to know before the first launch:
   proto3 JSON should accept a numeric string for an int32; native rendering
   DAG-wide would turn digit-only run ids into ints), the deferrable wait
   semantics of the installed provider, the DML on real BigQuery,
-  `BigQueryInsertJobOperator.execute` inside a callback, a trigger's conf
+  `BigQueryHook().insert_job(configuration=, project_id=)` and the job's
+  `result()` in the failure callback (written from the operator's documented
+  behaviour; the provider was not available to read), a trigger's conf
   reaching `context["params"]`, and the trigger rule when the sensor is
   skipped.
 - Unverified until Composer, for the generation DAG's chain: that the
   reschedule-mode sensor fails when the generation job ends in a state other
   than done (the provider's source was not available to read), and that
   `disk_size_gb` reaches the evaluation job's workers.
-- Unverified until Composer, for the fan-out: `TriggerDagRunOperator.execute`
-  called inside a task's callable (the same pattern as the callback's
-  operator), an array param in the trigger form, and the started runs
-  queueing behind `max_active_runs`. It relies on Airflow 2's operator, as
-  the rest of the file does.
+- Unverified until Composer, for the fan-out: `airflow.api.common.trigger_dag.
+  trigger_dag(dag_id=, run_id=, conf=, replace_microseconds=False)` called
+  inside a task's callable (Airflow 2's function, which the trigger operator
+  itself calls; `replace_microseconds=False` keeps two runs started in one
+  second from sharing a logical date), the `DagRunAlreadyExists` it raises
+  for a run id that exists, an array param in the trigger form, and the
+  started runs queueing behind `max_active_runs`. A list of job ids together
+  with `run_id` or `tables` fails the first task with one message.
 - Also unverified until Composer, for the callback's job-state check: that a
   failed deferrable launch has pushed the job to XCom by the time the
   callback runs (as `{"job_id": ...}` under the key `dataflow_job_config`;

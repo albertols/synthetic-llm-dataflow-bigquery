@@ -429,7 +429,10 @@ def test_failure_callback_is_wired_on_the_launch():
   callback = _kw(start, "on_failure_callback")
   assert isinstance(callback, ast.Name)
   body = ast.unparse(_function(tree, callback.id))
-  assert "BigQueryInsertJobOperator" in body
+  # the statement runs through the hook: an operator is never executed inside
+  # a callable (recent Airflow versions warn about or refuse it)
+  assert "BigQueryHook" in body and "BigQueryInsertJobOperator" not in body
+  assert ".execute(" not in body
   # the Param-derived dataset is validated before it is part of SQL text
   assert "fullmatch" in body
   # the job only completes inside Airflow's view when the launch waits
@@ -578,7 +581,7 @@ def test_the_callback_reads_the_job_state_before_it_inserts():
       ast.unparse(n.func) == "_callback_closes_row"
   ]
   assert [ast.unparse(a) for a in call.args] == ["job_id", "state"]
-  insert = _one(callback, "BigQueryInsertJobOperator")
+  insert = _one(callback, "insert_job")
   # no id is checked, then the state read, then decided, before any write
   assert no_id.end_lineno < assign_state.lineno < decision.lineno
   assert decision.end_lineno < insert.lineno
@@ -793,35 +796,31 @@ class _AlreadyExistsError(Exception):
 def _stub_airflow(monkeypatch,
                   triggered: list,
                   existing: frozenset = frozenset()):
-  """A recording `TriggerDagRunOperator` under Airflow's module names: the
-  callable imports it only when it has runs to trigger."""
+  """A recording `trigger_dag` under Airflow's module names: the callable
+  imports it only when it has runs to trigger."""
 
-  class TriggerDagRunOperator:
-
-    def __init__(self, **kwargs):
-      self.kwargs = kwargs
-
-    def execute(self, context):
-      if self.kwargs["trigger_run_id"] in existing:
-        raise _AlreadyExistsError(self.kwargs["trigger_run_id"])
-      triggered.append((self.kwargs, context))
+  def trigger_dag(**kwargs):
+    if kwargs["run_id"] in existing:
+      raise _AlreadyExistsError(kwargs["run_id"])
+    triggered.append(kwargs)
 
   exceptions = types.ModuleType("airflow.exceptions")
   exceptions.DagRunAlreadyExists = _AlreadyExistsError  # type: ignore[attr-defined]
-  trigger = types.ModuleType("airflow.operators.trigger_dagrun")
-  trigger.TriggerDagRunOperator = TriggerDagRunOperator  # type: ignore[attr-defined]
+  trigger = types.ModuleType("airflow.api.common.trigger_dag")
+  trigger.trigger_dag = trigger_dag  # type: ignore[attr-defined]
   for name, module in (("airflow", types.ModuleType("airflow")),
-                       ("airflow.exceptions",
-                        exceptions), ("airflow.operators",
-                                      types.ModuleType("airflow.operators")),
-                       ("airflow.operators.trigger_dagrun", trigger)):
+                       ("airflow.exceptions", exceptions),
+                       ("airflow.api", types.ModuleType("airflow.api")),
+                       ("airflow.api.common",
+                        types.ModuleType("airflow.api.common")),
+                       ("airflow.api.common.trigger_dag", trigger)):
     monkeypatch.setitem(sys.modules, name, module)
 
 
 def test_with_no_list_the_callable_passes_and_never_reaches_for_airflow(
     monkeypatch):
-  for name in ("airflow", "airflow.exceptions", "airflow.operators",
-               "airflow.operators.trigger_dagrun"):
+  for name in ("airflow", "airflow.exceptions", "airflow.api",
+               "airflow.api.common", "airflow.api.common.trigger_dag"):
     monkeypatch.setitem(sys.modules, name, None)  # any import would raise
   fan_out = _fan_out_scope()["_fan_out"]
   assert fan_out({
@@ -843,19 +842,53 @@ def test_with_a_list_the_callable_triggers_this_dag_once_per_id_and_stops(
   tree = _tree(EVALUATION_DAG)
   own_id = _value(tree, _kw(_one(tree, "DAG"), "dag_id"))
   expected = scope["_fan_out_confs"](params)
-  for (kwargs, passed), conf, job_id in zip(
-      triggered, expected, [_A, _B], strict=True):
-    assert kwargs["trigger_dag_id"] == own_id == scope["DAG_ID"]
-    assert kwargs["wait_for_completion"] is False
+  for kwargs, conf, job_id in zip(triggered, expected, [_A, _B], strict=True):
+    assert kwargs["dag_id"] == own_id == scope["DAG_ID"]
     assert kwargs["conf"] == conf and conf["generation_job_id"] == job_id
-    assert kwargs["trigger_run_id"] == scope["_fan_out_run_id"](
-        job_id, "20261006T101500")
-    assert passed["ts_nodash"] == "20261006T101500"
-    assert set(kwargs) == {
-        "task_id", "trigger_dag_id", "trigger_run_id", "conf",
-        "wait_for_completion"
-    }
-  assert len({kwargs["trigger_run_id"] for kwargs, _ in triggered}) == 2
+    assert kwargs["run_id"] == scope["_fan_out_run_id"](job_id,
+                                                        "20261006T101500")
+    # two runs started in one second must not collide on the logical date
+    assert kwargs["replace_microseconds"] is False
+    assert set(kwargs) == {"dag_id", "run_id", "conf", "replace_microseconds"}
+  assert len({kwargs["run_id"] for kwargs in triggered}) == 2
+
+
+def test_the_callable_executes_no_operator_and_imports_airflows_function():
+  body = ast.unparse(_function(_tree(EVALUATION_DAG), "_fan_out"))
+  assert "TriggerDagRunOperator" not in body and ".execute(" not in body
+  assert "from airflow.api.common.trigger_dag import trigger_dag" in body
+
+
+@pytest.mark.parametrize("name,value", [("run_id", "r-1"),
+                                        ("tables", "ds.a,ds.b")])
+def test_a_list_with_another_target_fails_fast_with_one_message(
+    monkeypatch, name, value):
+  triggered: list = []
+  _stub_airflow(monkeypatch, triggered)
+  scope = _fan_out_scope()
+  params = {**_PARAMS, "generation_job_ids": [_A, _B], name: value}
+  for call in (lambda: scope["_fan_out_confs"]
+               (params), lambda: scope["_fan_out"]
+               (params, ts_nodash="20261006T101500")):
+    with pytest.raises(ValueError) as info:
+      call()
+    message = str(info.value)
+    assert "generation_job_ids" in message and name in message
+  assert triggered == []  # not one child run was started
+
+
+def test_the_job_id_alone_or_blank_list_with_another_target_is_not_refused():
+  scope = _fan_out_scope()
+  assert scope["_fan_out_confs"]({
+      **_PARAMS, "generation_job_ids": ["", " "],
+      "run_id": "r-1"
+  }) == []
+  assert [
+      c["generation_job_id"] for c in scope["_fan_out_confs"]({
+          **_PARAMS, "generation_job_ids": [_A],
+          "generation_job_id": _B
+      })
+  ] == [_A, _B]
 
 
 def test_a_cleared_fan_out_does_not_evaluate_a_job_twice(monkeypatch):
@@ -868,8 +901,7 @@ def test_a_cleared_fan_out_does_not_evaluate_a_job_twice(monkeypatch):
   _stub_airflow(monkeypatch, triggered, existing=frozenset({already}))
   params = {**_PARAMS, "generation_job_ids": [_A, _B]}
   assert scope["_fan_out"](params, ts_nodash="20261006T101500") is False
-  assert [kwargs["conf"]["generation_job_id"] for kwargs, _ in triggered
-         ] == [_B]
+  assert [kwargs["conf"]["generation_job_id"] for kwargs in triggered] == [_B]
 
 
 def test_with_no_list_the_graph_is_the_one_before_the_fan_out():
