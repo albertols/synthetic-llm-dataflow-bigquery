@@ -112,10 +112,13 @@ The same k = 10 bounds the numeric values a profile publishes: a histogram edge
 or a quantile is published only with at least 10 source records at or beyond it
 on each side, two published histogram edges are at least 10 source records
 apart, and two published quantile probabilities are at least 10 of that side's
-records apart. Counts are not values: a profile may still store a count below
-10 (top-k items under hashed labels, null patterns, contingency cells, length
-histograms, and a rate with its n). The design's §4.9 lists every such place
-and the four disclosure channels that are accepted.
+records apart. For one column the exact source values it publishes (histogram
+edges, the quantile values of every side, the pair axis's labels) come from
+that one set of edges. Counts are not values: a profile may still store a
+count below 10 (top-k items under hashed labels, null patterns, contingency
+cells, length histograms, calendar and shape mixes, a rate or a tail mass with
+its n). The design's §4.9 lists those places and the four disclosure channels
+that are accepted.
 
 **D7 — The registry is append-only events.** A run writes a `RUNNING` row and
 exactly one terminal row (`SUCCEEDED`, `SUCCEEDED_WITH_WARNINGS`, `PARTIAL`,

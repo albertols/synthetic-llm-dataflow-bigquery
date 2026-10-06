@@ -482,7 +482,13 @@ match rates, the key duplicate rates, internal duplicates, and the orphan
 rates and fan-out metrics of an edge whose child side or parent side was
 sampled are
 `not_evaluated` with the reason "sampled mode cannot measure …; run exact
-mode" and the observed lower bound in `detail` (R72). An integrity pass never comes from a sample. Rates and lifts that
+mode" and the observed lower bound in `detail` (R72). An integrity pass
+never comes from a sample, with one stated exception: `field.type_validity`
+is `not_evaluated` when the synthetic side is a sample, and
+`column.source_stats_drift` (integrity) is not withheld. It compares the
+generator's stats row with the evaluator's profile of the source, so under
+a sampled source it is stored as an estimate (`method = sample`, with the
+rate) and can pass; it audits the generator's input, never the output. Rates and lifts that
 compare the panel with the rows read stay evaluated, with `method = sample`
 and the sampling rate on the row.
 
@@ -496,6 +502,8 @@ is `not_evaluated` when that side is a sample:
 | `field.substantive_copy_rate` | the source | a copy of an unsampled source value goes unseen, and a value's source count (the rare-below-10 rule) is thinned |
 | `field.shape_adherence` | the source | a synthetic shape whose source rows were not sampled looks unseen |
 | `column.coverage_mass` | the synthetic | a source value whose synthetic rows were not sampled looks uncovered |
+| `column.distinct_ratio`, `column.entropy_ratio` | both sides | defined at m = min(n_src, n_syn); a row sample thins repeats and the ratio drifts toward 1, whichever side was sampled (`detail` keeps the sample's `sample_ratio` and distinct counts, named so they are not read as the table's) |
+| `field.type_validity` | the synthetic | the invalid cells may all lie outside the rows read (a sampled source alone leaves it evaluated on the full synthetic side, and not stamped `sample`) |
 | `column.distinct_ceiling_hit` | the synthetic | the exact synthetic distinct count is not measured |
 | `column.range_coverage` | both sides | a sample's extremes fall inside its side's range |
 
@@ -1123,9 +1131,12 @@ The threshold is the k of k-anonymity ([Sweeney 2002][sweeney2002]) that
 the repository already uses for rare values. *Code:* `beam/dense.py`
 (`RARE_COUNT`, the right- and left-closed counts), `beam/census.py`.
 
-**What is published, exactly (R113).** The kept range says where a value
-may be shown. Inside it, the persisted profile never places two grid
-values closer than k source records apart:
+**What is published, exactly (R113, R116).** The kept range says where a
+value may be shown. Inside it, everything the persisted profiles of one
+column publish that is an exact source value (the histogram edges, the
+quantile values of the source, reference and holdout sides, and the pair
+axis's labels) comes from one set, the published histogram edges, and no
+two of those are closer than k source records apart:
 
 ```mermaid
 flowchart LR
@@ -1136,7 +1147,8 @@ flowchart LR
   G --> K["⚪ kept range<br/>k source records<br/>on each side"]:::data
   K --> T["⚪ thinned<br/>k source records between<br/>neighbouring edges"]:::data
   T --> H[("🗄️ histogram payload<br/>merged bins, counts are sums<br/>edges_digest of these edges")]:::store
-  K --> Q["⚪ quantile probabilities<br/>k / n apart"]:::data --> P[("🗄️ quantiles payload")]:::store
+  T --> Q["⚪ quantiles inverted<br/>over these edges only<br/>probabilities k / n apart"]:::data --> P[("🗄️ quantiles payload")]:::store
+  T --> X["⚪ pair-axis labels<br/>the nearest of these edges<br/>at or below each decile"]:::data --> C[("🗄️ contingency payload")]:::store
 ```
 
 - **Histogram edges.** Going up from the first kept edge, an edge is
@@ -1144,12 +1156,24 @@ flowchart LR
   last published one. A dropped edge's two bins merge, so every side's
   counts stay sums over the same edges, and `edges_digest` is the digest
   of the edges published.
-- **Pair axes.** The decile edges a contingency axis shows are thinned the
-  same way.
+- **Pair axes.** Each decile cut a contingency axis shows is labelled with
+  the nearest published histogram edge at or below it; two cuts on one edge
+  keep the lower, and cuts are k source records apart, so a small column
+  gets a coarser axis. The cell counts are the decile's, so a label may name
+  an edge up to one bin below its cut.
 - **Quantiles.** A side publishes a probability p only when `p · n ≥ k`,
   `(1 − p) · n ≥ k` and p is at least `k / n` above the last published
-  one, with n the side's own count. From 1,000 values on, all 99
-  percentiles pass this rule.
+  one, with n the side's own count; its value is inverted over the
+  published histogram edges, on every side alike (the synthetic one
+  included). From 1,000 values on, all 99 percentiles pass this rule. A
+  value interpolated inside a bin is computed from published edges and
+  counts; it can equal a source record only by chance, and reveals none.
+  The `below_mass` and `above_mass` of a quantiles payload are the shares
+  outside the published edges.
+- **Not in the set.** The p0.5 and p99.5 bounds of a histogram payload
+  (published from 2,000 values on) are interpolated over the kept union
+  edges: each is at least k records from the end of the column (R69), and
+  not necessarily k from a published edge.
 
 The thinning is a publication step only: no metric reads it. On a column
 of a few hundred rows the plan's grid points are single source records one
@@ -1161,10 +1185,24 @@ or two apart, so without it the payloads list most of the column:
 | 795 | 97 | 49 | 7 → 15 | 97 → 49 |
 | 2,000 | 99 | 99 | 19 → 19 | 99 → 99 |
 
+Taken across payloads (R116), the exact source records one column
+publishes (edges, the exact values among the source, reference and holdout
+quantiles, and the records nearest the pair-axis labels) were, on the same
+invented columns:
+
+| Source rows | Records published before the union rule | Records now | Fewest source records between two of them, before → now |
+| ---: | ---: | ---: | --- |
+| 120 | 29 (24 %) | 11 (9 %) | 1 → 10 |
+| 795 | 77 | 49 | 1 → 15 |
+| 2,000 | 166 | 99 | 1 → 19 |
+
 *Worked example on invented data (seeded lognormal values; not a
-measurement of a run). The 120- and 795-row rows are pinned by
+measurement of a run). The 120- and 795-row rows of the first table are
+pinned by
 `tests/beam/test_dense.py::test_small_columns_publish_grid_values_k_source_records_apart`,
-the 2,000-row row by `test_a_large_column_is_published_as_before`.*
+its 2,000-row row by `test_a_large_column_is_published_as_before`, and the
+second table by
+`test_one_column_publishes_one_k_spaced_set_of_source_values`.*
 
 The rule was reached in steps, each closing a channel the previous one
 left open:
@@ -1183,6 +1221,7 @@ flowchart LR
 | R74, R77 | Which edges are kept depends only on publishable counts, never on a value or on which grid contributed the edge. The rule is symmetric, and each payload carries `below_mass` and `above_mass` so a reader still sees how much lies outside. A side with fewer than 10 values has its moments withheld: a handful of values is determined by them |
 | R80 | A metric's value together with the synthetic side's published moments would give back the source's mean and deviation. `column.smd` and `column.std_ratio` are not evaluated when either side holds fewer than 10 values |
 | R113 | Inside the kept range the grid of a small column is still one record to a point: a 120-row column published 85 of its 120 values as histogram edges. Published edges are at least 10 source records apart, and quantile probabilities at least 10 of the side's records apart |
+| R116 | Each payload was k apart on its own, not together: at 120 rows the edges, the source quantile values and the pair-axis labels published 29 records, every neighbour gap below k. The quantile values and the labels now come from the published edges, so one column publishes one set |
 
 **Accepted channels.** Four channels are accepted and documented.
 
@@ -1219,6 +1258,9 @@ below k = 10, and are kept:
 | `length_hist` | the count at every string length; its two ends are the column's exact minimum and maximum length | a length is not a value; the ends are stated here as a known exception to the extremes rule |
 | histogram bins of the panel and synthetic sides | each side's own count in a bin of at least 10 source records | the edges are the source's; a side's count says how many of ITS rows fall there |
 | `column.null_rate_delta`, `column.empty_rate_delta`, `column.zero_rate_delta` | a rate and its n, so rate × n is the count of NULL, empty or zero cells | the count names no row and no value other than NULL, empty or zero |
+| `temporal_mix` | the count of rows in each weekday, month and hour | a calendar part is not a record's value; the counts are of a small closed set |
+| `shape_mix` | the count of each shape item on each side | a mask with fewer than 10 source rows is shown under a keyed hash label, so the count names no pattern; a shape is a pattern of character classes, not a value |
+| histogram and quantiles payloads | `below_mass` and `above_mass`, so × n is the count of values outside the published edges | the share names no value; it says how much lies beyond the published range |
 
 ### 4.10 The catalogue
 

@@ -110,8 +110,9 @@ every row of a side is `not_evaluated` with the reason "sampled mode cannot
 measure …; run exact mode": the full-source match rates, the key and
 internal duplicate rates, the orphan and fan-out metrics of a sampled edge,
 and, per column, category and shape adherence, novelty, the substantive
-copy rate, coverage, the pool-cap hit and range coverage. Run `--mode
-exact` for those verdicts.
+copy rate, coverage, the pool-cap hit, range coverage, the distinct and
+entropy ratios (a row sample thins repeats), and type validity when the
+synthetic side is the sample. Run `--mode exact` for those verdicts.
 
 `--runner DirectRunner` means "run it on this machine", and it is what the
 registry records. The pipeline itself runs on Beam's in-process

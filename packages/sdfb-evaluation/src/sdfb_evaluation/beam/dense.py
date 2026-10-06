@@ -105,7 +105,11 @@ sample's own counts. One metric needs every row of both sides and is
 `not_evaluated` there with "sampled mode cannot measure …; run exact
 mode": `column.range_coverage` compares exact extremes, and a sample's
 extremes fall inside its side's range (the relational pass withholds
-`cardinality_adherence` for the same reason). `field.range_adherence`
+`cardinality_adherence` for the same reason). So is `field.type_validity`
+when the SYNTHETIC side is a sample (an integrity pass never comes from a
+sample: the invalid cells may all lie outside the rows read); a sampled
+source alone leaves it evaluated on the full synthetic side, unstamped.
+`field.range_adherence`
 stays evaluated: its bounds are the planning grid's q0 and q1000, read
 from the whole source before any sample is drawn. A profile of a sampled
 side carries `sample_rate` in its payload.

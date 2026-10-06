@@ -179,6 +179,10 @@ cannot measure …; run exact mode", what the sample did see in `detail`
     column.distinct_ceiling_hit   the synthetic   the exact synthetic
                                                   distinct count is not
                                                   measured
+    column.distinct_ratio,        both sides      defined at m = min(n_src,
+      column.entropy_ratio                        n_syn); a row sample
+                                                  thins repeats and the
+                                                  ratio drifts toward 1
 
 Every other row that reads a sampled side is an estimate over the rows
 read: `method` = sample, `sample_rate` = the lowest rate among the
