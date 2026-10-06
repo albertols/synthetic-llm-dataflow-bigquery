@@ -11,16 +11,27 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🚀 Added
 - `packages/sdfb-evaluation` ([ADR 0041](docs/adr/0041-evaluation-standalone-package.md)): a standalone evaluator (its own lock and Python 3.11 pin, excluded from the uv workspace) that scores landed tables against the full source in a separate CPU job and writes `evaluation_data_history`, `evaluation_metrics`, `evaluation_profiles` and `evaluation_row_flags` plus two views to `synthetic_data_quality`. The `sdfb-eval` command (`plan`, `run`, `report`, `compare`, `catalogue`, `schemas`), a flex-template entry, a Composer DAG (`composer/evaluation_framework.py`, chaining from the generation DAG opt-in) and one metric catalogue as the single source of truth. A sampled run never stores a sample's number as exact: a row computed from a sampled side says `method = sample` with its rate, and a metric that needs every row of a side is `not_evaluated` with the reason. A profile's histogram edges are at least 10 source records apart and its quantiles at least 10 of that side's records apart. The registry holds one terminal row per evaluation, whoever writes it (the pipeline, the command or the Composer callback). Built and reviewed on a laptop with invented data; **not yet run on Google Cloud**.
 - `.claude/skills/evaluation-framework/SKILL.md`: when to run the evaluator, reading baselines, noise floors and lifts, extending the catalogue.
+- **One image, one template, one DAG import for generation and evaluation** ([ADR 0041, amendment of 2026-10-06](docs/adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)). `docker/Dockerfile` also carries the evaluator's source (through a build stage that tolerates its absence, so a tree without `packages/sdfb-evaluation` still builds), on the generator's environment; a build step imports the evaluator's entry modules so a missing dependency fails the build. The template's entry is a dispatcher, [`docker/flex_entry.py`](docker/flex_entry.py): the template parameter `sdfb_job=evaluation` runs the evaluator, and a launch without it is a generation launch, as before. Not built or launched yet.
+- The generation DAG evaluates its own run when `run_evaluation` is true: `start_sdfb >> run_evaluation_gate >> wait_for_generation >> trigger_evaluation`. The wait is a reschedule-mode sensor (no triggerer needed); the evaluation is a second, CPU-only launch of the same template. New params `evaluation_mode`, `evaluation_machine_type`, `evaluation_max_workers`, `evaluation_output_dataset`; no new marker and no new Airflow Variable. With `run_evaluation` false the DAG does what it did.
+- The standalone evaluation DAG accepts `generation_job_ids`, a list: it starts one run of itself per job id (one Dataflow job each, one after another) and leaves the per-job path as it was.
+- `disk_size_gb`, Beam's own worker boot disk, is a declared template parameter: an evaluation launch on the shared multi-GB image passes 200, the size the generator pins for itself.
 
 ### 🔧 Changed
+- `docker/flex_template_metadata.json` declares the generator's parameters, `sdfb_job` and the evaluator's, and **every parameter is optional**: a launch for one job cannot be made to supply the other's. A generation launch that lacks a required flag is now refused by the generator's own argument parser in the launcher, not by the Dataflow API. `run_id` no longer carries a pattern (both jobs take any text there).
+- `composer/evaluation_framework.py` launches from the generation template and reads the marker the import workflow already substitutes for the generation DAG; it needs no marker of its own.
+- `packages/sdfb-evaluation/deploy/build_flex_template.sh` builds only an evaluator-only template from an existing image (`IMAGE=…`); it builds no image. The package's CPU `Dockerfile` stays for the package as a unit of its own.
+- Preflight step 13j looks for the deployment's one template (`sdfb-<version>-template.json` or `sdfb-latest-template.json`), an evaluator-only template, or any `sdfb-*-template.json`, and names what it found.
+- The generation launcher's log lines carry the logger name `sdfb_beam.cli.run_pipeline` where they carried `__main__`: the launch now enters through the dispatcher.
 
 ### ⚡ Performance
 
 ### 🐛 Fixed
 
 ### 🗑️ Removed
+- The generation DAG's `TriggerDagRunOperator` on the evaluation DAG, and the evaluator-version marker of the evaluation DAG: nothing substitutes it any more.
 
 ### 📗 Docs
+- One image, one template: the amendment to ADR 0041, the design document's §8.2 and §8.3, `docs/DESIGN.md` §1 and §11, `docs/DEPLOYMENT_PREREQUISITES.md` (Evaluator, step 13j), `docs/RUN_PLAYBOOK.md` ("Evaluate a run": the three launch paths), the evaluator README (sections 5 and 6) and the evaluation skill card.
 - ADR 0041 and `docs/DESIGN.md` §11 (Evaluation); the evaluation design document rewritten for the code as built; `README.md` (quickstart, glossary: baseline, noise floor, memorization lift, exposure set, matched n), `docs/ROADMAP.md`, `docs/DEPLOYMENT_PREREQUISITES.md` (evaluator IAM, image, template), `docs/RUN_PLAYBOOK.md` ("Evaluate a run") and article 10 unblocked. The old in-job evaluation proposal (`ws3-eval-framework`) is superseded.
 - The end-to-end validation prompt gains an optional Step 3.6, statistical evaluation, folded into the evidence bundle.
 

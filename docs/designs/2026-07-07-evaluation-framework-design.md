@@ -32,8 +32,8 @@ the code is written to do, not something observed.
 | Statistics, planning, Beam transforms, the composed pipeline | Tested on a laptop, on invented data, with an in-process Beam runner and fake BigQuery clients |
 | `sdfb-eval` command line | Run on invented data only (JSON fixtures, fake clients, local sinks). Never run against a real project |
 | Scoping SQL: `APPENDS`, time travel, snapshot clones | Generated and unit-tested as text. Never executed by BigQuery |
-| CPU image and flex template | Files and static tests exist. The image has never been built and the template has never been launched |
-| Composer DAG | Read by `ast` in tests. Airflow has never parsed it |
+| The image and the flex template (one of each, shared with the generator since 2026-10-06, §8.2) | Files and static tests exist. The image has never been built with the evaluator in it and the template has never been launched for an evaluation |
+| Composer DAGs (the generation DAG's opt-in chain, and the standalone DAG) | Read by `ast` in tests; their pure functions are executed. Airflow has never parsed either |
 
 Figures: every figure in this document is a **CONCEPT** figure, a seeded
 simulation or a schematic that shows how a mechanism behaves, except
@@ -2042,36 +2042,14 @@ flowchart TB
   end
 ```
 
-### 8.2 Dataflow: the image and the flex template
+### 8.2 Dataflow: one image and one flex template, shared with the generator
 
-**Not built, not launched.** The CPU image
-(`packages/sdfb-evaluation/docker/Dockerfile`, on the Beam 2.74.0 Python
-3.11 SDK image) and the template metadata are files with static tests.
-What they are written to do:
-
-- The template's parameters are exactly the public flags of `sdfb-eval
-  run`, minus runner, project and region, which the template launcher
-  supplies (R97). A test compares the metadata with the parser itself. An
-  unset parameter is expected to reach the command line as an empty
-  string, which every flag reads as "not given".
-- The image carries its own dispatch entrypoint: Dataflow appends the
-  worker's boot flags to the image's entrypoint and does not override it
-  ([ADR 0009](../adr/0009-single-flex-template-image.md)), so one image
-  serves the [flex-template][flex-templates] launcher and the workers. The
-  package keeps its own copy of the script, because it must stand alone.
-- The worker image's coordinate is baked into the image by the build
-  script and applied when the launch gives none.
-- The template entry submits the job and returns. It does not wait and
-  never applies `--fail_on`.
-
-Unverified until a build and a launch: the entrypoint dispatch, the baked
-worker image, the launcher supplying project and region, and an unset
-parameter reaching the command line as an empty string.
-
-### 8.3 Composer
-
-**Not deployed and never run.** `composer/evaluation_framework.py` is read
-by `ast` in tests; Airflow has never parsed it.
+**Not built, not launched.** Since 2026-10-06 the evaluator has no image
+and no template of its own in this repository's deployment
+([ADR 0041, amendment](../adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)):
+the generator's image carries the evaluator's source, and the generator's
+template launches both jobs. The files are tested statically and their
+shell steps are run as committed; nothing has been built.
 
 ```mermaid
 flowchart LR
@@ -2080,33 +2058,161 @@ flowchart LR
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
-  subgraph GEN["generation DAG, opt-in"]
-    G1["🔀 generation job<br/>launched"]:::beam --> G2{"run_evaluation?"}:::cpu
+  subgraph G["sdfb_job absent or generation"]
+    P1["⚪ launch parameters"]:::data --> E1{"⚙️ flex_entry.py"}:::cpu
+    E1 --> R1["🔀 run_pipeline.main<br/>generation job"]:::beam
   end
-  subgraph EV["DAG sdfb_evaluation_framework"]
-    B["⚙️ begin"]:::cpu --> W{"wait_gate"}:::cpu
-    W -- "wait_for_generation" --> S["⚙️ sensor: job<br/>reached DONE"]:::cpu --> ST
-    B --> ST["🔀 start_evaluation<br/>launch the template"]:::beam
+  subgraph E["sdfb_job = evaluation"]
+    P2["⚪ launch parameters"]:::data --> E2{"⚙️ flex_entry.py"}:::cpu
+    E2 --> R2["🔀 run_evaluation.main<br/>evaluation job"]:::beam
   end
-  G2 -- "true: trigger with<br/>the job id" --> B
+  IMG[("📄 one image<br/>one template")]:::store -.-> E1
+  IMG -.-> E2
+```
+
+*The two values of the template parameter `sdfb_job`. The selector is
+removed and every other parameter reaches the chosen entry unchanged
+(`docker/flex_entry.py::split_selector`, `::main`).*
+
+What the files are written to do:
+
+- **The image** (`docker/Dockerfile` at the repository root) takes the
+  evaluator's `src` through a build stage that tolerates its absence, so
+  the same file builds in a tree without the package. The evaluator is
+  not installed: it has no virtualenv of its own and runs on what `uv
+  sync` installs for the generator. Its source is last on the launcher's
+  `PYTHONPATH` and a path line of the worker bridge `.pth`. A build step
+  imports the evaluator's two entry modules in both contexts, so an image
+  that lost a dependency the evaluator needs fails at build.
+- **The entry** is a dispatcher, `docker/flex_entry.py`. Without
+  `sdfb_job` it calls the generator's `main` with the launch's arguments,
+  as when that file was the entry itself; with `sdfb_job=evaluation` it
+  calls the evaluator's. It imports only the entry it runs. An unknown
+  value, or `evaluation` on an image built without the package, is a
+  usage error (exit 2) and nothing starts.
+- **The template's parameters** (`docker/flex_template_metadata.json`) are
+  the generator's, `sdfb_job`, and the evaluator's. The evaluator's are
+  exactly the public flags of `sdfb-eval run`, minus runner, project and
+  region, which the template launcher supplies (R97), plus two names that
+  are not flags of the command: `sdfb_job` and Beam's own `disk_size_gb`.
+  A test compares the metadata with the parser itself. Every parameter
+  is optional: what a job requires is refused by its own parser, in the
+  launcher. An unset parameter is expected to reach the command line as
+  an empty string, which every flag of the evaluator reads as "not given".
+- **The workers' boot disk.** The evaluation job's workers unpack the same
+  multi-GB image as the generation job's. The generator pins a 200 GB
+  boot disk for its own workers in code; the evaluator pins none, so an
+  evaluation launch on this image passes `disk_size_gb=200`, which the
+  evaluator hands to Beam like any Beam argument. Both DAGs do.
+- **The worker image's coordinate** is baked into the image from the
+  build argument the generator already uses, and applied when the launch
+  gives none.
+- **The dispatch entrypoint** is the generator's: Dataflow appends the
+  worker's boot flags to the image's entrypoint and does not override it
+  ([ADR 0009](../adr/0009-single-flex-template-image.md)), so one image
+  serves the [flex-template][flex-templates] launcher and the workers.
+- **The template entry** submits the job and returns. It does not wait
+  and never applies `--fail_on`.
+
+The package still holds a CPU `Dockerfile`, a copy of the entrypoint
+script and its own template metadata: they are the surface of the
+package copied out as a unit of its own (§9). Its build script builds
+only an evaluator-only template from an existing image.
+
+Unverified until a build and a launch: the build with and without the
+evaluator's directory, the import check in both contexts, the dispatcher
+under the template launcher, the entrypoint dispatch, the baked worker
+image, the boot disk reaching the workers, the launcher supplying project
+and region, an unset parameter reaching the command line as an empty
+string, and which numpy, scipy and scikit-learn a worker imports (the
+Beam base image's global packages come ahead of the image's virtualenv on
+a worker's path, as they do for the generator).
+
+### 8.3 Composer
+
+**Not deployed and never run.** Both DAG files are read by `ast` in
+tests and their pure functions are executed; Airflow has never parsed
+either.
+
+**The generation DAG evaluates its own run** when its parameter
+`run_evaluation` is true. Nothing else has to be imported.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  S["🔀 start_sdfb<br/>launch, no wait"]:::beam --> G{"🛡️ run_evaluation_gate"}:::cpu
+  G -- "false, the default" --> X["∅ the rest is skipped<br/>as before"]:::data
+  G -- "true" --> W["⚙️ wait_for_generation<br/>job reached DONE"]:::cpu
+  W --> T["🔀 trigger_evaluation<br/>same template<br/>sdfb_job=evaluation"]:::beam
+  T --> L["⚙️ launcher: RUNNING row<br/>then submit"]:::cpu --> JOB["🔀 evaluation job<br/>CPU workers"]:::beam --> FIN[("🗄️ FINAL row")]:::store
+  W -. "job failed<br/>or cancelled" .-> F["⚠️ task fails<br/>nothing evaluated"]:::data
+```
+
+- **The wait** is a sensor on the generation job's id (from the launch
+  task's XCom) in reschedule mode: between two reads of the job's state
+  the task holds no worker slot, and no triggerer is needed. It is
+  stated as not deferrable. It reads the state every two minutes for at
+  most a day.
+- **The launch** is a second launch of the generation template, with
+  `sdfb_job=evaluation`, `job_id` (the generation job), `trigger=chained`
+  and the boot disk; it is a CPU job in the generation job's subnetwork,
+  under the same service account. It does not wait: the evaluation job
+  writes its own `FINAL` row.
+- **Four new parameters**, all read only when `run_evaluation` is true:
+  `evaluation_mode` (empty: the evaluator's default), `evaluation_machine_type`
+  (`e2-standard-8`), `evaluation_max_workers` (4) and
+  `evaluation_output_dataset` (`synthetic_data_quality`). No new
+  substitution marker and no new Airflow Variable.
+- **With `run_evaluation` false** the gate skips every task after the
+  launch. The launch itself is unchanged: a test pins the operator's whole
+  call to its shape before the chain existed.
+- **A chained evaluation that dies after launch leaves its `RUNNING` row
+  open.** Nothing in this DAG closes it. The standalone DAG below is the
+  path that waits for its job and closes the row.
+
+**The standalone DAG** (`composer/evaluation_framework.py`, DAG id
+`sdfb_evaluation_framework`) is optional: it evaluates a run that has
+already finished, by job id, run id or tables. It launches from the same
+template (the marker it reads is one the import workflow already
+substitutes) and passes `sdfb_job=evaluation`.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  M["⚪ manual run"]:::data --> B["⚙️ begin"]:::cpu --> FO{"🛡️ fan_out<br/>a list of job ids?"}:::cpu
+  FO -- "yes: one run of<br/>this DAG per id" --> M
+  FO -- "no" --> W{"wait_gate"}:::cpu
+  W -- "wait_for_generation" --> S["⚙️ sensor: job<br/>reached DONE"]:::cpu --> ST
+  FO -- "no" --> ST["🔀 start_evaluation<br/>launch the template"]:::beam
   ST --> L["⚙️ launcher: RUNNING row<br/>then submit"]:::cpu --> JOB["🔀 evaluation job"]:::beam --> FIN[("🗄️ FINAL row")]:::store
   ST -. "task fails" .-> CB{"⚙️ failure callback<br/>job state?"}:::cpu
-  CB -- "no job id, or FAILED,<br/>CANCELLED, UPDATED, DRAINED" --> FAILED[("🗄️ FINAL row<br/>status FAILED<br/>one INSERT SELECT")]:::store
-  CB -- "running, done<br/>or not readable" --> OPEN["⚪ nothing written:<br/>the job writes FINAL"]:::data
-  M["⚪ manual trigger"]:::data --> B
+  CB -- "FAILED, CANCELLED,<br/>UPDATED, DRAINED" --> FAILED[("🗄️ FINAL row<br/>status FAILED<br/>one INSERT SELECT")]:::store
+  CB -- "no job id, running,<br/>done or not readable" --> OPEN["⚪ nothing written"]:::data
 ```
 
 - **Parameters** map one to one onto template parameters, each from a DAG
   parameter or a constant. The DAG never passes runner, project, region,
   the worker image, experiments or `fail_on` as template parameters (R99).
   Its launch environment does pass `additionalExperiments`
-  (`use_runner_v2`, `enable_secure_boot` and the network-tag experiments). `trigger` is
-  `composer` for a manual run and `chained` when the generation DAG
-  starts it.
-- **Chaining is opt-in.** The generation DAG has a parameter
-  `run_evaluation`, false by default, and two tasks after its launch that
-  read it (a short-circuit gate and the trigger). With it false the gate
-  skips the trigger; the launch and its arguments are unchanged.
+  (`use_runner_v2`, `enable_secure_boot` and the network-tag experiments).
+  `trigger` is `composer` for a manual run.
+- **Several jobs in one go.** `generation_job_ids` is a list. With an id
+  in it, the first task starts one run of this same DAG per id (the
+  list, then the single `generation_job_id`; blanks and repeats dropped;
+  each run gets the other parameters unchanged and an empty list) and
+  skips the rest of its own run. Every job is so evaluated by its own
+  run on the single-job path, which the sensor, the launch and the
+  callback never see as a list. The runs go one after another, because
+  the DAG allows one active run; raising that limit runs several
+  evaluation jobs at the same time.
 - **The failure callback closes the open row, when the job cannot.** The
   launcher writes the `RUNNING` row and mints the id, so a job that dies
   afterwards leaves only that row. A task can also fail on the Airflow
@@ -2114,22 +2220,22 @@ flowchart LR
   followed by the job's own `FINAL` row. So the callback reads the job's
   state first (the provider's Dataflow hook, with the job id the launch
   pushed) and writes only when the job is in a terminal state other than
-  done, or when there is no job id because the launch itself failed;
-  otherwise it logs that the job is still running and writes nothing
-  (R113). The row is one `INSERT … SELECT` that copies the `RUNNING` row
-  of this DAG run's evaluation, matched on the launch target, the trigger
-  and the DAG run's start time, and skips any evaluation that already has
-  a final event.
+  done; with no job id, or a job still running, it logs and writes
+  nothing (R113). The row is one `INSERT … SELECT` that copies the
+  `RUNNING` row of this DAG run's evaluation, matched on the launch
+  target, the trigger and the DAG run's start time, and skips any
+  evaluation that already has a final event.
 - **Limits.** Two DAG runs overlapping on the same target can close each
   other's row. A launch whose only target is `tables` cannot be matched,
-  so a failed job leaves its row open and the callback logs a warning. The
-  deploy workflow must substitute the evaluator version into the DAG
-  file.
+  so a failed job leaves its row open and the callback logs a warning.
 
-Unverified until a real environment: the deferrable wait, the DML, the
-callback's operator call, the job id in XCom and the hook's job read that
-the callback's state check relies on, and how the trigger's configuration
-reaches the task. The README lists them.
+Unverified until a real environment: the reschedule-mode sensor and what
+it does when the generation job fails or is cancelled (the provider's
+source was not available to read), the deferrable wait of the standalone
+DAG, the DML, the callback's operator call, the job id in XCom and the
+hook's job read that the callback's state check relies on, a worker count
+rendered as a string, how a trigger's configuration reaches the task, and
+the DAG re-triggering itself. The README lists them.
 
 ### 8.4 The validation prompt, agents and a GUI
 
@@ -2157,6 +2263,13 @@ and no synthetic-data metrics library; scipy and scikit-learn double as
 test oracles (§10). CI has a separate job that installs the package from
 its own lock, checks that no generator module is importable, type-checks
 it and runs its tests.
+
+That lock serves development and CI. In the repository's image (§8.2) the
+evaluator runs on the generator's environment, which holds the
+generator's libraries too; the evaluator imports none of them. A test of
+the generator's suite keeps the two in step: every dependency the
+evaluator declares must be in the root lock inside its range and
+installed by the extras the image names.
 
 The Dataflow Solution Guides replica is built from a manifest
 ([ADR 0040](../adr/0040-dsg-donation-golden-source-sync.md)). The current
@@ -2240,10 +2353,11 @@ a test, a registry column, a command's exit code.
 | 7 | On an append launch, `APPENDS` or the two-state difference returns exactly the job's rows | `scope_status = ok`, never `count_mismatch` | Pending |
 | 8 | The source pin and the start snapshot are created with the evaluator's roles | no pin warning in `warnings` | Pending |
 | 9 | The reference digest matches: `tables[].reference_verified` is true | registry row | Pending |
-| 10 | The image builds, a worker boots through the dispatch entrypoint, and a template launch runs with the launcher's project and region | a Dataflow job that reaches DONE | Pending |
+| 10 | The one image builds with the evaluator in it, a worker boots through the dispatch entrypoint, and a template launch with `sdfb_job=evaluation` runs with the launcher's project and region | a Dataflow job that reaches DONE | Pending |
 | 11 | On Dataflow the `FINAL` row is recorded after the metric tables' load jobs finished | `recorded_at` of the row against the load jobs' end times in the JOBS view | Pending |
 | 12 | Predicted shuffle is within a factor of two of the job's shuffled bytes | `predicted_shuffle_gb` against the job's metrics | Pending |
-| 13 | A job killed after launch has its `RUNNING` row closed by the Composer callback | a `FAILED` final row for that `evaluation_id` | Pending |
+| 13 | A job killed after launch by the standalone DAG has its `RUNNING` row closed by the Composer callback | a `FAILED` final row for that `evaluation_id` | Pending |
+| 14 | A generation DAG run with `run_evaluation` true waits for its job and launches the evaluation from the same template | an evaluation row whose `trigger` is `chained` and whose `generation_job_id` is that run's job | Pending |
 
 Criterion 12's factor is a first target, not a measured tolerance; it
 should be replaced by what the first runs show.

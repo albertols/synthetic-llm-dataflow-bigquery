@@ -527,6 +527,27 @@ uv run sdfb-eval report --project <PROJECT> --evaluation_id <ID>
 
 Exit codes of `run`: 0 finished and no gate tripped; 1 the optional `--fail_on` gate tripped; 2 a usage error, nothing started; 3 the evaluation failed. Evaluation never fails the generation run.
 
+**From Composer or the template, with nothing extra deployed.** One image and one template serve both jobs ([ADR 0041, amendment](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)); the template parameter `sdfb_job=evaluation` selects the evaluator. None of the three paths has been run yet.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  A["⚪ generation DAG<br/>run_evaluation = true"]:::data --> W["⚙️ waits for its job"]:::cpu --> J["🔀 evaluation job<br/>CPU workers"]:::beam
+  B["⚪ standalone DAG<br/>job id or a list"]:::data --> J
+  C["⚪ gcloud<br/>sdfb_job=evaluation"]:::data --> J
+```
+
+| Path | Do this | Use it when |
+| :-- | :-- | :-- |
+| The generation DAG | trigger it with `run_evaluation` true (optionally `evaluation_mode`, `evaluation_machine_type`, `evaluation_max_workers`, `evaluation_output_dataset`) | you want the run evaluated as soon as it lands. The task `trigger_evaluation` submits the job and does not wait: read the result from the registry |
+| The standalone DAG `sdfb_evaluation_framework` (optional import) | trigger it with `generation_job_id`, or `generation_job_ids` for several jobs (one run and one Dataflow job per id, one after another) | the run already finished, or you want the launch to wait for the job and close the registry row if the job dies |
+| The template, by hand | `gcloud dataflow flex-template run … --template-file-gcs-location gs://<templates>/synthetic/sdfb-<VERSION>-template.json --parameters sdfb_job=evaluation,job_id=<JOB_ID>,disk_size_gb=200 --worker-machine-type e2-standard-8` | no Composer at hand |
+
+Before the first one: the four tables exist (`sdfb-eval schemas --apply`) and the service account the launch uses has the evaluator's roles ([`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator"; preflight step 13). A chained evaluation that dies after launch leaves its `RUNNING` row open; a standalone-DAG run for the same job gives one whose row is closed either way.
+
 How to read a row (each metric row is one unit, not a pass/fail verdict on the data):
 
 | Field | Read it as |

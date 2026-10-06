@@ -11,9 +11,16 @@ and [`docs/DESIGN.md` §11](../../../docs/DESIGN.md#11-evaluation-sdfb-evaluatio
 [`packages/sdfb-evaluation/README.md`](../../../packages/sdfb-evaluation/README.md) (the source of truth for every flag).
 
 **State: built and reviewed on a laptop with invented data. Nothing has run on Google Cloud**: the image is
-unbuilt, the template unlaunched, the Composer DAG never parsed by Airflow, the scoping SQL never executed by
-BigQuery. Never write that an evaluation "was run", and never quote a cloud measurement, until the first run's
-evidence exists.
+unbuilt with the evaluator in it, the template unlaunched for an evaluation, neither Composer DAG parsed by
+Airflow, the scoping SQL never executed by BigQuery. Never write that an evaluation "was run", and never quote a
+cloud measurement, until the first run's evidence exists.
+
+**One image, one template, one DAG import** (ADR 0041, amendment of 2026-10-06). The evaluator has no image or
+template of its own: `docker/Dockerfile` carries its source, `docker/flex_entry.py` dispatches on the template
+parameter `sdfb_job` (absent = generation, `evaluation` = this package), and the generation DAG evaluates its
+own run when `run_evaluation` is true. The package keeps its own lock for development and CI only; in the image
+it runs on the generator's environment. Never add an import between the two sides: the dispatcher is the only
+file that names both.
 
 ## When to run it
 
@@ -31,7 +38,8 @@ evidence exists.
 | `sdfb-eval plan --dry_run …` | scope, panel, bytes and predicted shuffle; no registry row |
 | `sdfb-eval run …` | one evaluation; exit 0 ok, 1 the optional `--fail_on` gate, 2 usage (nothing started), 3 evaluation failed |
 | `sdfb-eval report` / `compare` / `catalogue` / `schemas` | read a stored run (markdown or `--format json`), compare two, print the catalogue, create the tables |
-| flex template, Composer DAG `sdfb_evaluation_framework` | the same job, launched without a laptop (unbuilt and unrun) |
+| the generation DAG with `run_evaluation` true | the same job, chained after the run: waits for the generation job, then launches the generation template with `sdfb_job=evaluation` (unparsed and unrun) |
+| the template with `sdfb_job=evaluation,disk_size_gb=200`; the optional DAG `sdfb_evaluation_framework` (`generation_job_id`, or `generation_job_ids` for several) | the same job, for a run that already finished; the standalone DAG waits for its job and closes the registry row (unbuilt and unrun) |
 | BigQuery | `evaluation_data_history` (events), `evaluation_metrics`, `evaluation_profiles`, `evaluation_row_flags`; views `evaluation_latest`, `evaluation_latest_per_job` |
 | E2E validation prompt | optional Step 3.6 folds the report into the evidence bundle |
 
@@ -91,4 +99,10 @@ that must match the generator is mirrored and pinned by the two-sided golden fil
   a given plan.
 - A temporal column's mean keeps 9 significant digits of an epoch value (about ten seconds).
 - Beam arguments are passed through; the experiment `enable_data_sampling` is refused.
+- On the shared image an evaluation launch must pass `sdfb_job=evaluation` (else it is a generation launch) and
+  `disk_size_gb=200` (the image is multi-GB; the evaluator pins no boot disk). Both DAGs do.
+- A chained evaluation (`trigger=chained`, from the generation DAG) is not waited for: if its job dies after
+  launch the `RUNNING` row stays open. Only the standalone DAG closes such a row.
+- A change of the evaluator's dependencies must stay inside what the root `uv.lock` holds and the image's extras
+  install: `packages/sdfb-tests/tests/unit/docker/test_shared_image.py` fails otherwise.
 - Do not propose Vertex AI, Dataplex, Looker or an external LLM API for any of this.

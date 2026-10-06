@@ -54,6 +54,9 @@ flowchart LR
   is built in CI, never on a laptop ([ADR 0008](adr/0008-ci-driven-builds.md)), and pulled from Artifact
   Registry ([ADR 0015](adr/0015-worker-image-via-artifact-registry.md)). Launcher and workers therefore share one Python version,
   pinned once in `.python-version`.
+- **One image and one template serve two jobs** ([ADR 0041](adr/0041-evaluation-standalone-package.md), amendment of 2026-10-06). The
+  template's entry is a dispatcher, `docker/flex_entry.py`: without the parameter `sdfb_job` a launch is a generation launch, as
+  before; `sdfb_job=evaluation` runs the evaluator (§11) when the image was built from a tree that has it.
 - All sinks use BigQuery `FILE_LOADS`: the job is batch-shaped.
 
 Code: [`sdfb_beam/pipeline.py::build_pipeline`](../packages/sdfb-beam/src/sdfb_beam/pipeline.py).
@@ -573,6 +576,28 @@ reported ([ADR 0041](adr/0041-evaluation-standalone-package.md) D5).
 | D5 | Status by effect size against a noise floor, at matched n |
 | D6 | Literal values only for at most 50 distinct source values seen at least 10 times; otherwise keyed hashes |
 | D7 | The registry is append-only events; the final row is written after the metric loads |
+
+**On Dataflow it has no image or template of its own.** The generator's image
+carries the evaluator's source, which runs on the generator's environment, and
+the generator's template launches it. Neither package imports the other; the
+dispatcher is the only file that names both.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  T[("📄 one template<br/>one image")]:::store --> E{"⚙️ flex_entry.py<br/>reads sdfb_job"}:::cpu
+  E -- "absent" --> G["🔀 generation job<br/>GPU workers"]:::beam
+  E -- "evaluation" --> V["🔀 evaluation job<br/>CPU workers"]:::beam
+  G -. "job id, when the<br/>DAG is opted in" .-> V
+```
+
+*Not built, not launched.* The Composer DAG of the generator, where a
+deployment has one, chains the two when its `run_evaluation` parameter is true;
+it and the evaluator package stay in the source repository.
 
 Four tables in `synthetic_data_quality` (`evaluation_data_history`,
 `evaluation_metrics`, `evaluation_profiles`, `evaluation_row_flags`) and two

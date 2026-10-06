@@ -161,9 +161,24 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 > [ADR 0041](adr/0041-evaluation-standalone-package.md) · [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md). **Not yet run on Google Cloud**: the list below is what the code is written to need, taken from the design and BigQuery's documentation, not confirmed by a run. Nothing here is needed to generate.
 
 - **Tables and views** — create once with `uv run sdfb-eval schemas --project <PROJECT> --apply` (run from `packages/sdfb-evaluation`; it creates the four `evaluation_*` tables in `synthetic_data_quality` that are missing and replaces the views `evaluation_latest` and `evaluation_latest_per_job`; it never alters an existing table). The dataset must already exist. Step 13 of the preflight checks all of this (`--require-evaluation` makes an unprovisioned layer an ACTION).
-- **Image and template** — `PROJECT_ID=… REGION=… REPOSITORY=… TEMPLATES_BUCKET=… packages/sdfb-evaluation/deploy/build_flex_template.sh` builds the CPU image and the flex template (`gs://<templates>/synthetic/sdfb-evaluation-<VERSION>-template.json`). It needs `gcloud` and GCP access; neither has been built or launched yet.
-- **Composer** — nothing to import beyond the generation DAG: with its `run_evaluation` parameter true it waits for its own job and launches the evaluation itself, from the same template. The standalone DAG `composer/evaluation_framework.py` is optional (evaluate a run that already finished); it is a template with the markers the import workflow already substitutes (`{{PROJECT_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}`, `{{GCS_DATAFLOW_TEMPLATES}}`), so run the same substitution on it.
-- **IAM for the evaluator's identity** (the principal that runs `sdfb-eval`; which service accounts a template launch and its workers use is unconfirmed until a launch):
+- **Image and template: nothing of its own.** One image and one template serve generation and evaluation ([ADR 0041, amendment of 2026-10-06](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)). The image built from `docker/Dockerfile` carries the evaluator's source, and the template built from it with `docker/flex_template_metadata.json` launches the evaluator when a launch passes `sdfb_job=evaluation` (and `disk_size_gb=200`: the evaluation job's workers unpack the same multi-GB image, and the evaluator pins no boot disk). The deployment's own build and template steps are therefore all it takes; neither has been run with the evaluator in the image yet. Optional, for a template that declares the evaluator's parameters alone: `IMAGE=… PROJECT_ID=… TEMPLATES_BUCKET=… packages/sdfb-evaluation/deploy/build_flex_template.sh` builds one from an existing image (it builds no image).
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  B["⚙️ build image<br/>docker/Dockerfile"]:::cpu --> I[("📄 one image")]:::store --> T[("📄 one template")]:::store
+  T --> E{"⚙️ sdfb_job"}:::cpu
+  E -- "absent" --> G["🔀 generation job<br/>GPU workers"]:::beam
+  E -- "evaluation" --> V["🔀 evaluation job<br/>CPU workers"]:::beam
+  D["⚪ generation DAG<br/>run_evaluation"]:::data -.-> E
+```
+
+- **Composer: nothing to import beyond the generation DAG.** With its parameter `run_evaluation` true, `composer/synthetic_beam_bigquery.py` waits for its own job (a sensor in reschedule mode; no triggerer needed) and launches the evaluation itself, from the same template, as a CPU job under the generation job's service account. It adds no marker and no Airflow Variable. With `run_evaluation` false (the default) the DAG does what it did. The standalone DAG `composer/evaluation_framework.py` is optional: it evaluates a run that already finished (one job id, a list of job ids, a run id or tables), waits for its job and closes the registry row when the job dies. It is a template with markers the import workflow already substitutes (`{{PROJECT_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}`, `{{GCS_DATAFLOW_TEMPLATES}}`): run the same substitution on it. Neither DAG has been parsed by Airflow.
+- **IAM for the evaluator's identity** (the principal that runs `sdfb-eval`; for the generation DAG's chained evaluation that is the Dataflow service account the DAG launches both jobs with, `SA_DATAFLOW`, so these roles go to it. Which identity the launcher and the workers each act as is unconfirmed until a launch):
   - `roles/bigquery.jobUser` — run queries and load jobs.
   - `roles/bigquery.dataViewer` on the source and landing datasets.
   - `roles/bigquery.dataEditor` on `synthetic_data_quality` — append to the four tables.
