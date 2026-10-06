@@ -30,9 +30,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 _SCRIPT = Path(__file__).parents[5] / "scripts" / "deployment_prerequisites.py"
 _spec = importlib.util.spec_from_file_location("deployment_prerequisites",
@@ -735,30 +738,104 @@ def test_step13_row_flag_retention_compared_with_the_package(monkeypatch):
   assert "shorter" not in by["13d"].resource
 
 
+def _watch_opens(monkeypatch, target):
+  """Record every attempt to open `target` through any Python-level door:
+    builtins.open, io.open, Path.open / read_text / read_bytes, os.open."""
+  import builtins
+  import io
+
+  touched = []
+
+  def spy(real):
+
+    def wrapper(file, *args, **kwargs):
+      if str(file) == str(target):
+        touched.append(real.__name__)
+      return real(file, *args, **kwargs)
+
+    return wrapper
+
+  monkeypatch.setattr(builtins, "open", spy(builtins.open))
+  monkeypatch.setattr(io, "open", spy(io.open))
+  monkeypatch.setattr(os, "open", spy(os.open))
+  for name in ("open", "read_text", "read_bytes"):
+    real = getattr(Path, name)
+
+    def method(self, *args, _real=real, _name=name, **kwargs):
+      if str(self) == str(target):
+        touched.append(f"Path.{_name}")
+      return _real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, name, method)
+  return touched
+
+
 def test_step13_label_key_local_path(monkeypatch, tmp_path):
   bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
   key = tmp_path / "label.key"
   key.write_bytes(b"super-secret-bytes")
-  opened = []
-  real_open = open
-  monkeypatch.setattr(
-      "builtins.open", lambda f, *a, **k:
-      (opened.append(str(f)), real_open(f, *a, **k))[1])
+  touched = _watch_opens(monkeypatch, key)
   _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri", str(key))
   assert by["13k"].status == _mod.OK
   assert "every Dataflow worker" in by["13k"].resource
   assert "super-secret-bytes" not in by["13k"].resource
-  assert str(key) not in opened  # existence and os.access only
+  assert not touched, f"the key file was opened: {touched}"  # isfile/access only
   _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri",
                  str(tmp_path / "missing.key"))
   assert by["13k"].status == _mod.ACTION
+
+
+def test_watch_opens_would_catch_a_read(monkeypatch, tmp_path):
+  """The spy itself must be able to fail, or the test above proves nothing."""
+  key = tmp_path / "label.key"
+  key.write_bytes(b"x")
+  touched = _watch_opens(monkeypatch, key)
+  key.read_text()
+  with open(key, "rb"):
+    pass
+  assert "Path.read_text" in touched
+  assert "open" in touched
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root can read a mode-000 file")
+def test_step13_label_key_unreadable_local_path_is_action(
+    monkeypatch, tmp_path):
+  bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
+  key = tmp_path / "label.key"
+  key.write_bytes(b"x")
   key.chmod(0)
   try:
     _, by = _run13(monkeypatch, bq, "--evaluation-label-key-uri", str(key))
-    # root can read anything; everyone else gets the unreadable ACTION
-    assert by["13k"].status in (_mod.ACTION, _mod.OK)
   finally:
     key.chmod(0o600)
+  assert by["13k"].status == _mod.ACTION
+  assert "not readable" in by["13k"].resource
+
+
+def _run_main(monkeypatch, tmp_path, *extra):
+  """`main()` end to end with every step but 13 replaced by a no-op: the
+    exit code and the report come from main's own code."""
+  for name in dir(_mod):
+    if name.startswith("step") and name != "step13_evaluation":
+      monkeypatch.setattr(_mod, name, lambda ctx: None)
+  _patch_bq(monkeypatch, _FakeBQ(datasets={_EVAL_DS}))
+  monkeypatch.setattr(_mod, "gcs_client", lambda: (_FakeGCS(), None))
+  return _mod.main([*_BASE_ARGV, "--report-dir", str(tmp_path), *extra])
+
+
+def test_main_exit_code_default_is_unchanged_by_step13(monkeypatch, tmp_path,
+                                                       capsys):
+  assert _run_main(monkeypatch, tmp_path) == 0
+  assert "0 ACTION" in capsys.readouterr().out
+  report = next(tmp_path.glob("deployment_prerequisites_*.md")).read_text()
+  assert "| 13c |" in report  # step 13 did run, as SKIPs
+
+
+def test_main_exit_code_require_evaluation_fails_on_unprovisioned(
+    monkeypatch, tmp_path):
+  assert _run_main(monkeypatch, tmp_path, "--require-evaluation") == 1
 
 
 def test_step13_label_key_relative_or_other_form_names_the_three_forms(
