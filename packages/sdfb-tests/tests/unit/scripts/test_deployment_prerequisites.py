@@ -622,11 +622,14 @@ def test_step13_temp_dataset_different_is_checked(monkeypatch):
   assert "eval_tmp" in by["13i"].resource
 
 
-def _run13j(monkeypatch, *names, extra=("--templates-bucket", "b")):
+def _run13j(monkeypatch, *names, extra=("--templates-bucket", "b"), gcs=None):
   """Step 13 on a fully provisioned dataset, with `names` as the objects
     under gs://b/synthetic/; returns (the 13j row, the fake GCS)."""
+  if not _EVAL_PKG.is_dir():  # a copy of the repository without the evaluator
+    pytest.skip("packages/sdfb-evaluation is not part of this tree: step 13 "
+                "is one SKIP and has no 13j row")
   bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
-  gcs = _FakeGCS(objects={f"gs://b/synthetic/{name}" for name in names})
+  gcs = gcs or _FakeGCS(objects={f"gs://b/synthetic/{name}" for name in names})
   _, by = _run13(monkeypatch, bq, *extra, gcs=gcs)
   return by["13j"], gcs
 
@@ -668,9 +671,7 @@ def test_step13_template_development_pointer_is_enough(monkeypatch):
 
 
 def test_step13_template_evaluator_only_is_also_enough(monkeypatch):
-  version = _mod.eval_version(_EVAL_PKG)
-  assert version
-  name = f"sdfb-evaluation-{version}-template.json"
+  name = f"sdfb-evaluation-{_mod.eval_version(_EVAL_PKG)}-template.json"
   row, _ = _run13j(monkeypatch, name)
   assert row.status == _mod.OK
   assert name in row.resource and "evaluator-only" in row.resource
@@ -730,10 +731,9 @@ def test_step13_template_unreadable_bucket_is_skip(monkeypatch):
     def _blob(self, uri):
       raise PermissionError("403 on " + uri)
 
-  bq = _FakeBQ(datasets={_EVAL_DS}, tables=_provisioned())
-  _, by = _run13(monkeypatch, bq, "--templates-bucket", "b", gcs=_Denied())
-  assert by["13j"].status == _mod.SKIP
-  assert "PermissionError" in by["13j"].resource
+  row, _ = _run13j(monkeypatch, gcs=_Denied())
+  assert row.status == _mod.SKIP
+  assert "PermissionError" in row.resource
 
 
 def test_step13_label_key_variants(monkeypatch):
