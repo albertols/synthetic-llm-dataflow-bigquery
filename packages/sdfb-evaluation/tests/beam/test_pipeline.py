@@ -1028,6 +1028,9 @@ def test_sampled_mode_never_stores_a_sample_as_exact(tmp_path):
     if row["metric_id"] == "column.distinct_ceiling_hit":  # synthetic only
       assert row["method"] == "exact" and row["sample_rate"] is None
       continue
+    if row["metric_id"] == "field.type_validity":  # its value is synthetic's
+      assert row["method"] == "exact" and row["sample_rate"] is None
+      continue
     assert row["method"] == "sample", row
     assert row["sample_rate"] == 0.1, row
     assert row["detail"]["sample_rates"] == {"source": 0.1}, row
