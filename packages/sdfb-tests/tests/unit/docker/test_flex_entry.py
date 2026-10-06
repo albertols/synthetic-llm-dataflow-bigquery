@@ -76,6 +76,25 @@ def _entry():
   return _load()
 
 
+@pytest.fixture(autouse=True)
+def _evaluator_modules_as_found():
+  """What a test imports under `sdfb_evaluation` does not outlive it. Some
+    tests here import a stand-in package from a temporary folder; left in
+    `sys.modules` it would shadow the real evaluator for every later test of
+    the session. monkeypatch restores the entries a test removed, not the
+    ones its imports added."""
+  before = {
+      name: module
+      for name, module in sys.modules.items()
+      if name.split(".")[0] == "sdfb_evaluation"
+  }
+  yield
+  for name in [m for m in sys.modules if m.split(".")[0] == "sdfb_evaluation"]:
+    if name not in before:
+      del sys.modules[name]
+  sys.modules.update(before)
+
+
 @pytest.fixture(name="calls")
 def _calls(monkeypatch):
   """Both entries replaced by stubs that record their arguments and return
@@ -231,6 +250,20 @@ def test_a_missing_dependency_of_the_evaluator_is_not_hidden(
   with pytest.raises(ModuleNotFoundError) as raised:
     entry.main(["--sdfb_job=evaluation"])
   assert raised.value.name == "sdfb_no_such_package"
+
+
+def test_no_stand_in_evaluator_is_left_for_later_tests():
+  """The tests above import stand-in `sdfb_evaluation` packages. One left in
+    `sys.modules` shadows the real evaluator for every later test of the
+    session that imports it. Runs after them, in file order."""
+  real = _REPO_ROOT / "packages" / "sdfb-evaluation" / "src"
+  left = {
+      name: getattr(module, "__file__", None)
+      for name, module in sys.modules.items()
+      if name.split(".")[0] == "sdfb_evaluation"
+  }
+  assert all(
+      path and Path(path).is_relative_to(real) for path in left.values()), left
 
 
 # --------------------------------------------------------------------------
