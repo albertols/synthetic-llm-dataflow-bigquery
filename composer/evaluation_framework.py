@@ -55,10 +55,34 @@ DATAFLOW_NETWORK_TAGS).
 
 Task graph::
 
-    begin ─► wait_gate ─► wait_for_generation_job ─► start_evaluation
-      └───────────────────────────────────────────────────▲
-    (wait_for_generation false: the gate skips the sensor, begin still
+    begin ─► fan_out ─► wait_gate ─► wait_for_generation_job ─► start_evaluation
+                └──────────────────────────────────────────────────▲
+    (wait_for_generation false: the gate skips the sensor, fan_out still
     reaches the launch.)
+
+Several generation jobs in one go: give `generation_job_ids` (a list) on one
+manual run. `fan_out`, the first task, then starts one run of THIS DAG per
+id (each with that id as its `generation_job_id` and the run's other params
+unchanged) and skips the rest of its own run. Every job is so evaluated by
+its own run, one Dataflow job per id, on the single-target path above: the
+sensor, the launch and the failure callback never see a list. Without the
+list `fan_out` passes and the run is the single-target run it always was.
+
+    generation_job_ids   generation_job_id    what the run does
+    ───────────────────  ───────────────────  ──────────────────────────────
+    empty                empty or one id      evaluates its one target
+    one id or more       empty or one id      starts one run per id (the
+                                              list, then the single id;
+                                              blanks and repeats dropped)
+                                              and evaluates nothing itself
+
+The runs go one after another: `max_active_runs` is 1. That is the knob for
+evaluating several jobs at once; raising it to N means up to N evaluation
+Dataflow jobs running at the same time, each with its own workers (quota and
+cost), and two runs on the same target can then close each other's registry
+row (see `_close_running_row`).
+
+Like the rest of this DAG, the fan-out has not been parsed or run by Airflow.
 
 The launcher writes the RUNNING registry row, mints the evaluation id and
 submits the job; the pipeline writes the FINAL row. A job that dies after
@@ -173,6 +197,73 @@ _ENDED_NOT_DONE = frozenset({
     "JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_UPDATED",
     "JOB_STATE_DRAINED"
 })
+
+
+def _fan_out_confs(params):
+  """The runs to start for a run that names a list of generation jobs: one
+  conf per job id, or none.
+
+  The ids are `generation_job_ids` followed by `generation_job_id` when it is
+  set, blanks dropped, a repeated id kept once, in that order. With no id in
+  the list there is nothing to fan out and the result is empty: the run is a
+  single-target run (by `generation_job_id`, `run_id` or `tables`). Otherwise
+  each conf is the run's params with `generation_job_id` set to its one id
+  and `generation_job_ids` emptied, so the run it starts never fans out again.
+  """
+  listed = [
+      str(job_id or "").strip()
+      for job_id in params["generation_job_ids"] or []
+  ]
+  if not any(listed):
+    return []
+  job_ids = []
+  for job_id in (*listed, str(params["generation_job_id"] or "").strip()):
+    if job_id and job_id not in job_ids:
+      job_ids.append(job_id)
+  shared = {name: params[name] for name in params}
+  return [{
+      **shared, "generation_job_id": job_id,
+      "generation_job_ids": []
+  } for job_id in job_ids]
+
+
+def _fan_out_run_id(job_id, ts_nodash):
+  """The id of the run started for `job_id`: it names the job and the
+  parent run's logical date, so it is unique within the parent run and the
+  same when the parent's task runs again."""
+  return f"fan_out__{ts_nodash}__{job_id}"
+
+
+def _fan_out(params, **context):
+  """The run's first decision (ShortCircuit): True to go on as a
+  single-target run, False once it has started one run of this DAG per
+  listed job id, which skips every other task of this run.
+
+  A run id Airflow already has means this task ran before and started that
+  run then: it is left alone and the remaining ids are still started.
+  """
+  confs = _fan_out_confs(params)
+  if not confs:
+    return True
+  import logging
+
+  from airflow.exceptions import DagRunAlreadyExists
+  from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+
+  for conf in confs:
+    run_id = _fan_out_run_id(conf["generation_job_id"], context["ts_nodash"])
+    try:
+      TriggerDagRunOperator(
+          task_id="trigger_evaluation_run",
+          trigger_dag_id=DAG_ID,
+          trigger_run_id=run_id,
+          conf=conf,
+          wait_for_completion=False,
+      ).execute(context)
+    except DagRunAlreadyExists:
+      logging.info("evaluation run %s already exists: not started again",
+                   run_id)
+  return False
 
 
 def _wait_for_generation(params, **_):
@@ -320,6 +411,8 @@ def _close_running_row(context):
 # DAG params — runtime-overridable on every trigger. Exactly one target
 # (generation_job_id | run_id | tables) must be non-empty; the launcher refuses
 # otherwise. Empty means "not given" for the optional template parameters.
+# `generation_job_ids` is not a target of a launch: it makes the run start one
+# single-target run per id (header).
 # -----------------------------------------------------------------------------
 default_dag_params = {
     "generation_job_id":
@@ -328,6 +421,16 @@ default_dag_params = {
             type="string",
             description="Target: the generation job's Dataflow id. Empty when "
             "targeting by run_id or tables.",
+        ),
+    "generation_job_ids":
+        Param(
+            default=[],
+            type="array",
+            items={"type": "string"},
+            description="Several generation jobs' Dataflow ids. Each id is "
+            "evaluated by its own run of this DAG, one Dataflow job per id, "
+            "one after another; this run only starts them. Leave run_id and "
+            "tables empty with it.",
         ),
     "run_id":
         Param(
@@ -429,6 +532,14 @@ with models.DAG(
 ) as dag:
   begin = EmptyOperator(task_id="begin")
 
+  # Several job ids: start one run per id and skip the rest of this one.
+  # The default downstream handling is wanted here: returning False skips
+  # EVERY task below, the launch included, whatever its trigger rule.
+  fan_out = ShortCircuitOperator(
+      task_id="fan_out",
+      python_callable=_fan_out,
+  )
+
   wait_gate = ShortCircuitOperator(
       task_id="wait_gate",
       python_callable=_wait_for_generation,
@@ -514,10 +625,11 @@ with models.DAG(
       wait_until_finished=True,
       deferrable=True,
       do_xcom_push=True,
-      # The sensor branch may be skipped; the launch needs begin's success.
+      # The sensor branch may be skipped; the launch needs fan_out's success.
       trigger_rule="none_failed_min_one_success",
       on_failure_callback=_close_running_row,
   )
 
-  begin >> wait_gate >> wait_for_generation_job >> start_evaluation  # pylint: disable=pointless-statement  # Airflow dependency operator
-  begin >> start_evaluation  # pylint: disable=pointless-statement  # Airflow dependency operator
+  begin >> fan_out  # pylint: disable=pointless-statement  # Airflow dependency operator
+  fan_out >> wait_gate >> wait_for_generation_job >> start_evaluation  # pylint: disable=pointless-statement  # Airflow chain
+  fan_out >> start_evaluation  # pylint: disable=pointless-statement  # Airflow dependency operator
