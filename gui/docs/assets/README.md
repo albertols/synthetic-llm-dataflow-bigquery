@@ -6,7 +6,7 @@ one carries is the caption where [`gui/README.md`](../../README.md) shows it.
 
 ## How they were made
 
-Captured on 2026-09-29 at commit `16b4294` (`feat/gui-synthetic-platform`),
+Captured on 2026-10-07 at commit `e832464` (`interim-evaluation-and-gui`),
 Playwright 1.63.0 driving the installed Google Chrome 150 (`channel: "chrome"`),
 dark colour scheme:
 
@@ -29,7 +29,7 @@ GUI_SHOTS_DIR=/path/to/scratch npx playwright test -g screenshots --workers=2
   to their file names.
 - **Crop and compression.** Each capture below was cropped to the box given
   and reduced to a 256-colour palette with Pillow (from the root uv
-  workspace env; this worktree's is `.venv-gui`), no dithering:
+  workspace env), no dithering:
 
   ```python
   from PIL import Image

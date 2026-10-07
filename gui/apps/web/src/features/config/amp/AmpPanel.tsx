@@ -19,7 +19,7 @@ import { KnobControl } from "./KnobControl";
 
 const ALL = "all";
 
-/** Phones start on one channel (84 knobs are a long scroll at 390 px); wider screens see the whole console. */
+/** Phones start on one channel (every knob is a long scroll at 390 px); wider screens see the whole console. */
 function defaultChannel(): string {
   const narrow = typeof window !== "undefined" && window.matchMedia?.("(max-width: 639px)").matches;
   return narrow ? (CHANNELS[0]?.id ?? ALL) : ALL;
