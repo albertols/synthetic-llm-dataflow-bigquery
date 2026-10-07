@@ -254,6 +254,41 @@ function keyText(value: unknown): string {
     : JSON.stringify(value);
 }
 
+/**
+ * What the evaluator recorded about a flagged row, in words: its `detail`, whose keys depend on
+ * the check — `full_row` (exact copy), `differs_in` (near copy), `nndr` / `holdout_distance` /
+ * `multiplicity` (nearest record), `p_synthetic` / `multiplicity` (detectable).
+ */
+export function flagNote(flag: Pick<RowFlag, "check" | "detail" | "score">): string {
+  const raw = flag.detail;
+  const detail = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+  const copies =
+    typeof detail.multiplicity === "number" && detail.multiplicity > 1
+      ? ` · ${formatCount(detail.multiplicity)} identical rows`
+      : "";
+  switch (flag.check as string) {
+    case "exact_copy":
+      if (detail.full_row === true) return "whole row, key included";
+      return detail.full_row === false ? "non-key columns" : MISSING;
+    case "near_copy":
+      return typeof detail.differs_in === "string" ? `differs in ${detail.differs_in}` : MISSING;
+    case "nearest_record": {
+      const parts = [
+        typeof detail.nndr === "number" ? `NNDR ${fmtSig(detail.nndr)}` : null,
+        typeof detail.holdout_distance === "number" ? `nearest holdout ${fmtSig(detail.holdout_distance)}` : null,
+      ].filter((part): part is string => part !== null);
+      return parts.length ? `${parts.join(" · ")}${copies}` : MISSING;
+    }
+    case "detectable": {
+      // A detectable row has no distance: the classifier's probability is its one number.
+      const p = typeof detail.p_synthetic === "number" ? detail.p_synthetic : flag.score;
+      return p === null ? MISSING : `p(synthetic) ${fmtSig(p)}${copies}`;
+    }
+    default:
+      return MISSING;
+  }
+}
+
 function FlaggedRows({ flags, table }: { flags: RowFlag[]; table?: string }) {
   const [all, setAll] = useState(false);
   const rows = flags.filter((f) => !table || f.table_name === table);
@@ -282,6 +317,7 @@ function FlaggedRows({ flags, table }: { flags: RowFlag[]; table?: string }) {
                   <TableHead scope="col" className="text-right">
                     Distance
                   </TableHead>
+                  <TableHead scope="col">Recorded</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -299,6 +335,7 @@ function FlaggedRows({ flags, table }: { flags: RowFlag[]; table?: string }) {
                     </TableCell>
                     <TableCell className="text-xs">{f.source_set ?? MISSING}</TableCell>
                     <TableCell className="text-right font-mono text-xs tabular-nums">{fmtSig(f.distance)}</TableCell>
+                    <TableCell className="text-xs whitespace-nowrap text-text-2">{flagNote(f)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

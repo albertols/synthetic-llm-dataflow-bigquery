@@ -4,6 +4,7 @@
  * floor, lifts gated on ci_low, documented edges INFO, not_evaluated with its
  * reason — and that profiles load only when a drawer opens.
  */
+import type { RowFlag } from "@contracts/api";
 import { configure, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -13,7 +14,7 @@ import { buildGraph } from "./lib/graph";
 import { findings, headline, interpretRow } from "./lib/interpret";
 import { columnSummaries, countStatuses, countsTotal, familyCards } from "./lib/model";
 import { explainStatus, readingOf } from "./lib/reading";
-import { countsDetail, evaluation, metric, profile, richDetail, tableEntry } from "./test/fixtures";
+import { countsDetail, evaluation, flag, metric, profile, richDetail, tableEntry } from "./test/fixtures";
 import { pageOf, renderAt, stubApi } from "./test/harness";
 
 // The first render lazy-loads the route chunk and the concept batch: give async queries room.
@@ -252,6 +253,103 @@ describe("the run view", () => {
     const flags = screen.getAllByRole("region", { name: /^Flagged rows/ }).at(-1)!;
     // The evaluator's keyed-hash label, whole: `h:` and eight hex digits.
     expect(within(flags).getAllByText("h:0123abcd")).toHaveLength(2);
+  });
+
+  it("reads a flagged row as the evaluator writes it: the key, the hash, the distance and its detail", async () => {
+    // Three rows an offline run of the evaluator wrote (`sdfb-eval run --fixture_dir`, invented thelook
+    // rows with half of the synthetic side copied from the source), with the evaluation's own ids
+    // replaced; the fourth has the shape `beam/privacy.py` gives a detectable row (none was flagged there).
+    const real: Partial<RowFlag>[] = [
+      {
+        check: "exact_copy",
+        rank: 1,
+        synthetic_key: { order_id: 10212 },
+        source_key_hash: "h:97e4cc53",
+        source_set: "E",
+        distance: 0.0,
+        score: 1.0,
+        detail: { full_row: true },
+      },
+      {
+        check: "near_copy",
+        rank: 1,
+        synthetic_key: { order_id: 54387 },
+        source_key_hash: "h:28253258",
+        source_set: "R",
+        distance: 0.2,
+        score: 0.8,
+        detail: { differs_in: "created_at" },
+      },
+      {
+        check: "nearest_record",
+        rank: 1,
+        synthetic_key: { order_id: 12431 },
+        source_key_hash: "h:4c62fd40",
+        source_set: "R",
+        distance: 0.0,
+        score: 1.0,
+        detail: { holdout_distance: 0.20552501678466797, multiplicity: 1, nndr: 0.0 },
+      },
+      {
+        check: "detectable",
+        rank: 1,
+        synthetic_key: { order_id: 70001 },
+        source_key_hash: null,
+        source_set: null,
+        distance: null,
+        score: 0.97,
+        detail: { p_synthetic: 0.97, multiplicity: 3 },
+      },
+    ];
+    const detail = richDetail();
+    detail.flags = real.map((f) => flag({ table_name: "orders", ...f }));
+    stubRun(detail);
+    renderAt("/evaluation/eval-t001?tab=privacy");
+    const region = (await screen.findAllByRole("region", { name: /^Flagged rows/ })).at(-1)!;
+    const cells = (name: string) =>
+      within(within(region).getByText(name).closest("tr")!)
+        .getAllByRole("cell")
+        .map((cell) => cell.textContent);
+    expect(cells("exact copy")).toEqual([
+      "exact copy",
+      "1",
+      "orders",
+      "order_id=10212",
+      "h:97e4cc53",
+      "E",
+      "0",
+      "whole row, key included",
+    ]);
+    expect(cells("near copy")).toEqual([
+      "near copy",
+      "1",
+      "orders",
+      "order_id=54387",
+      "h:28253258",
+      "R",
+      "0.2",
+      "differs in created_at",
+    ]);
+    expect(cells("nearest record")).toEqual([
+      "nearest record",
+      "1",
+      "orders",
+      "order_id=12431",
+      "h:4c62fd40",
+      "R",
+      "0",
+      "NNDR 0 · nearest holdout 0.206",
+    ]);
+    expect(cells("detectable")).toEqual([
+      "detectable",
+      "1",
+      "orders",
+      "order_id=70001",
+      "—",
+      "—",
+      "—",
+      "p(synthetic) 0.97 · 3 identical rows",
+    ]);
   });
 
   it("shows documented edges as INFO next to the source orphan rate", async () => {

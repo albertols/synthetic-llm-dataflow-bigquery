@@ -82,6 +82,25 @@ describe("mock rows validate against the generated contracts", { timeout: 60_000
     expectAll("dlq", data.dlq, (r) => dlqRowSchema.safeParse(r));
     expectAll("fk_fanout_stats", data.fanoutStats, (r) => fkFanoutStatsRowSchema.safeParse(r));
     expect(data.flags.every((f) => f.source_key === null)).toBe(true);
+    // The evaluator's shape per check: the keyed-hash label, and the detail keys its producers write.
+    const keys: Record<string, string[]> = {
+      exact_copy: ["full_row"],
+      near_copy: ["differs_in"],
+      nearest_record: ["holdout_distance", "multiplicity", "nndr"],
+    };
+    for (const check of Object.keys(keys))
+      expect(
+        data.flags.some((f) => f.check === check),
+        check,
+      ).toBe(true);
+    for (const f of data.flags) {
+      expect(f.source_key_hash, f.check).toMatch(/^h:[0-9a-f]{8}$/);
+      expect(Object.keys(f.detail as object).sort(), f.check).toEqual(keys[f.check]);
+      expect(f.score, f.check).toBeCloseTo(1 - f.distance!, 12);
+    }
+    // A near copy differs from a reference record in exactly one non-key column: distance 1 / k.
+    for (const f of data.flags.filter((x) => x.check === "near_copy"))
+      expect(1 / f.distance!).toBeCloseTo(Math.round(1 / f.distance!), 9);
   });
 
   it("source-table stats and their profiler entries", () => {

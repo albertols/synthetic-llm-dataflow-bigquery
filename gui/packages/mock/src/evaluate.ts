@@ -1410,7 +1410,7 @@ export class TableEvaluator {
         { edges, counts: histogram(nnHold, edges), p5: p5(nnHold), p50: quantiles(nnHold, [0.5])[0]!, n: H.length },
         { n: H.length, edges },
       );
-      this.flagRows(synR, synRows);
+      this.flagRows(synR, synH, synRows, columns);
     }
     // PRDC density and coverage (Naeem et al. 2020) with k = 5 on the same panel.
     const k = 5;
@@ -1442,17 +1442,47 @@ export class TableEvaluator {
     });
   }
 
-  flagRows(synR: (readonly [number, number])[], S: readonly Row[]) {
+  /**
+   * The non-key column a row differs in from a reference record it otherwise equals (the
+   * evaluator's near copy: every non-key column but exactly one); null for an exact copy of a
+   * reference record, which is never a near copy, and for a row that copies none.
+   */
+  private nearCopyColumn(row: Row, columns: readonly ColumnDef[]): string | null {
+    let found: string | null = null;
+    for (const record of this.ctx.reference) {
+      let differs: string | null = null;
+      let count = 0;
+      for (const column of columns) {
+        if ((row[column.name] ?? null) === (record[column.name] ?? null)) continue;
+        differs = column.name;
+        count += 1;
+        if (count > 1) break;
+      }
+      if (count === 0) return null;
+      if (count === 1) found ??= differs;
+    }
+    return found;
+  }
+
+  /**
+   * Row flags in the evaluator's shape: an exact copy at distance 0 with `full_row` (false here:
+   * the mock's copies keep a fresh key), a near copy at distance 1 / k non-key columns with the
+   * column it `differs_in`, and the nearest records with their NNDR, the distance to the nearest
+   * holdout record and their multiplicity.
+   */
+  flagRows(
+    synR: (readonly [number, number])[],
+    synH: (readonly [number, number])[],
+    S: readonly Row[],
+    columns: readonly ColumnDef[],
+  ) {
     const pk = this.ctx.table.columns.find((c) => c.role === "pk")?.name;
     const order = synR.map(([d], i) => [d, i] as const).sort((a, b) => a[0] - b[0]);
-    const exact = order.filter(([d]) => d === 0).slice(0, 12);
-    const near = order.filter(([d]) => d > 0 && d < 0.12).slice(0, 12);
     const push = (
       check: EvaluationRowFlagsRow["check"],
-      list: (readonly [number, number])[],
-      set: EvaluationRowFlagsRow["source_set"],
+      list: { i: number; distance: number; detail: Record<string, unknown> }[],
     ) =>
-      list.forEach(([d, i], rank) =>
+      list.forEach(({ i, distance, detail }, rank) =>
         this.result.flags.push({
           evaluation_id: this.ctx.spec.id,
           evaluated_at: this.ctx.evaluatedAt,
@@ -1463,15 +1493,37 @@ export class TableEvaluator {
           // The evaluator's keyed-hash label: `h:` and eight hex digits; the key itself is never written.
           source_key_hash: `h:${sha256Hex(`key:${this.ctx.spec.id}\u001f${this.ctx.table.name}\u001f${i}`).slice(0, 8)}`,
           source_key: null,
-          source_set: set,
-          distance: d,
-          score: 1 - d,
-          detail: { panel_index: i },
+          source_set: "R",
+          distance,
+          score: 1 - distance,
+          detail: detail as EvaluationRowFlagsRow["detail"],
         }),
       );
-    push("exact_copy", exact, "R");
-    push("near_copy", near, "R");
-    push("nearest_record", order.slice(0, 5), "R");
+    push(
+      "exact_copy",
+      order
+        .filter(([d]) => d === 0)
+        .slice(0, 12)
+        .map(([, i]) => ({ i, distance: 0, detail: { full_row: false } })),
+    );
+    push(
+      "near_copy",
+      S.map((row, i) => ({ i, column: this.nearCopyColumn(row, columns) }))
+        .filter((x): x is { i: number; column: string } => x.column !== null)
+        .slice(0, 12)
+        .map(({ i, column }) => ({ i, distance: 1 / columns.length, detail: { differs_in: column } })),
+    );
+    push(
+      "nearest_record",
+      order.slice(0, 5).map(([d, i]) => {
+        const second = synR[i]![1];
+        return {
+          i,
+          distance: d,
+          detail: { holdout_distance: synH[i]![0], nndr: second > 0 ? d / second : 1, multiplicity: 1 },
+        };
+      }),
+    );
   }
 
   // ----------------------------------------------------------------- table --
