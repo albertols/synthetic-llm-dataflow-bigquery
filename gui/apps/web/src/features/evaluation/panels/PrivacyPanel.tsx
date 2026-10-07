@@ -290,7 +290,10 @@ function FlaggedRows({ flags, table }: { flags: RowFlag[]; table?: string }) {
                     <TableCell className="text-right text-xs tabular-nums">{f.rank}</TableCell>
                     <TableCell className="font-mono text-xs">{f.table_name}</TableCell>
                     <TableCell className="font-mono text-xs whitespace-nowrap">{keyText(f.synthetic_key)}</TableCell>
-                    <TableCell className="font-mono text-xs text-text-2" title="keyed hash of the matched source record">
+                    <TableCell
+                      className="font-mono text-xs text-text-2"
+                      title="keyed hash of the matched source record"
+                    >
                       {f.source_key_hash ?? MISSING}
                     </TableCell>
                     <TableCell className="text-xs">{f.source_set ?? MISSING}</TableCell>

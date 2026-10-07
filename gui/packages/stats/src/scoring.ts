@@ -268,8 +268,7 @@ export function assess(metric: ScoringMetric, reading: MetricReading, options: S
       ...base,
     };
   const copyInfo = metric.id === COPY_RATE_ID ? copyRateInfoReason(reading.columnKind) : null;
-  if (copyInfo !== null)
-    return { status: "info", notes: { reason: copyInfo }, scoreAt: null, target: null, ...base };
+  if (copyInfo !== null) return { status: "info", notes: { reason: copyInfo }, scoreAt: null, target: null, ...base };
   const { warn, fail } = metric.thresholds;
   if (warn === null && fail === null) return { status: "info", notes: null, scoreAt: null, target: null, ...base };
   let target: number | null = null;

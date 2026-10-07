@@ -233,7 +233,8 @@ export class TableEvaluator {
       n_source: reading.nSource === undefined ? this.ctx.nSource : reading.nSource,
       n_synthetic: reading.nSynthetic === undefined ? this.ctx.nSynthetic : reading.nSynthetic,
       method:
-        reading.method ?? (rowSample ? "sample" : (catalogue.estimator.split("/")[0] as EvaluationMetricsRow["method"])),
+        reading.method ??
+        (rowSample ? "sample" : (catalogue.estimator.split("/")[0] as EvaluationMetricsRow["method"])),
       sample_rate: reading.sampleRate === undefined ? this.ctx.sampleRate : reading.sampleRate,
       encoding_plan_digest: this.ctx.encodingPlanDigest,
       feature_set_digest: reading.featureSetDigest ?? null,

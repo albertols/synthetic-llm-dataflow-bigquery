@@ -215,7 +215,7 @@ export const STAGES: readonly Stage[] = [
     phase: "evaluate",
     summary: "A separate job measures what landed against the live source.",
     quote: {
-      text: "Standalone statistical evaluation of synthetic BigQuery tables against their live source: fidelity, privacy, and utility, computed with Apache Beam and written to BigQuery (`synthetic_data_quality.*`).",
+      text: "Standalone statistical evaluation of synthetic BigQuery tables against their live source: fidelity, privacy, integrity, and diversity, computed with Apache Beam and written to BigQuery (`synthetic_data_quality.*`).",
       source: "packages/sdfb-evaluation/README.md",
     },
     concept: "intro:evaluation-job",

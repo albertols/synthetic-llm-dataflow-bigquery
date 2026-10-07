@@ -34,7 +34,7 @@ export const concepts = defineConcepts([
     id: "eval:scope",
     title: "Evaluation scope",
     purpose:
-      "Which synthetic rows belong to this launch. Landing rows carry no run id, so the evaluator recovers them from the write disposition and the job's own commit window: the whole landing table (table), a snapshot at the window end (as_of), the rows appended in the window (appends), the table at the window end minus a snapshot of its start when copy jobs landed the rows (as_of_diff), or the table as it is now (manual). The scope check says whether that slice is clean.",
+      "Which synthetic rows belong to this launch: landing rows carry no run id, so the evaluator recovers them from the write disposition and the job's own commit window — the whole landing table (table), a snapshot at the window end (as_of), the rows appended in the window (appends), the table at the window end minus a snapshot of its start when copy jobs landed the rows (as_of_diff), or the table as it is now (manual). The scope check says whether that slice is clean.",
     interpretation: {
       good: "Scope OK: the rows in scope are exactly this launch's rows.",
       bad: "Contaminated (another run's rows share the table), count mismatch (rows ≠ rows expected), expired (the snapshot aged out) or empty: the numbers describe a different slice than the launch.",
@@ -368,7 +368,7 @@ export const concepts = defineConcepts([
     id: "eval:fanout",
     title: "Fan-out",
     purpose:
-      "Children per parent along a foreign key: how many orders each user has. The evaluator compares the source and synthetic distributions (every parent at or above the cap in one last bin) and stores the distances: the fan-out TVD and W1, the mean ratio, the childless-parent share and the parent coverage. It publishes no fan-out histogram.",
+      "Children per parent along a foreign key: how many orders each user has. The evaluator compares the source and synthetic distributions and stores the distances (fan-out TVD and W1, the mean ratio, the childless-parent share, the parent coverage), not the histograms.",
     interpretation: {
       good: "Fan-out TVD within its noise floor, mean ratio near 1, childless-parent share unchanged.",
       bad: "A childless-parent share that drops to 0: every synthetic parent got a child the source's parents often lack.",

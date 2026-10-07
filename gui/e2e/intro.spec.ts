@@ -126,7 +126,9 @@ test("How it works quotes DESIGN.md with figures that load and carry provenance"
   await expect(cards.first()).toContainText(
     "one Dataflow job reads a bounded sample, touches the GPU a bounded number of times, and writes validated rows; nothing leaves the project.",
   );
-  await expect(page.locator("article[data-section='11']")).toContainText("Not in DESIGN.md yet");
+  await expect(page.locator("article[data-section='11']")).toContainText(
+    "evaluation is a separate CPU job, after generation, that scores each unit of the synthetic data against the full source",
+  );
 
   await renderEverything(page);
   const images = page.locator("#how-it-works img");

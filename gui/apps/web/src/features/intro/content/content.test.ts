@@ -1,7 +1,7 @@
 /**
  * The INTRO copy is copied, not written: every quote, caption and ADR title
  * must still be in the repository file it came from. When DESIGN.md changes
- * (a claim reworded, §11 landing), this suite fails and names the card.
+ * (a claim reworded, a section added), this suite fails and names the card.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -70,11 +70,10 @@ describe("How it works cards", () => {
     for (const heading of headings) {
       const card = DESIGN_SECTIONS.find((section) => section.number === heading.n);
       expect(card, `§${heading.n} "${heading.title}" has no card`).toBeDefined();
-      expect(card?.status, `§${heading.n} landed in DESIGN.md: quote its Claim and drop "pending"`).toBe("published");
       expect(card?.title).toBe(heading.title);
       expect(card?.anchor).toBe(slug(`${heading.n}. ${heading.title}`));
     }
-    for (const card of DESIGN_SECTIONS.filter((c) => c.status === "published")) {
+    for (const card of DESIGN_SECTIONS) {
       expect(
         headings.some((h) => h.n === card.number),
         `§${card.number} is not in DESIGN.md`,

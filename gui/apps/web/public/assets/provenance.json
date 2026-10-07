@@ -80,7 +80,7 @@
       "sha256": "2261f6fa52ffff06b8dcd1f9a9407d0f2993f9875c3cfafc2d0126bc7ceb9911",
       "bytes": 81734,
       "generator": null,
-      "documentedIn": "docs/designs/2026-07-24-reference-sample-scaling.md"
+      "documentedIn": "docs/designs/2026-07-07-evaluation-framework-design.md"
     },
     {
       "file": "rare-category-coverage.png",
@@ -219,19 +219,27 @@
       "documentedIn": "docs/designs/2026-07-07-rag-layer-design.md"
     },
     {
+      "file": "eval-noise-floor.png",
+      "source": "docs/designs/assets/eval-noise-floor.png",
+      "sha256": "2df770b9688bd62cf859a45614443b611ce9f0e97d1440a3ce6ec2f6df7e7afc",
+      "bytes": 190953,
+      "generator": null,
+      "documentedIn": "docs/DESIGN.md"
+    },
+    {
       "file": "eval-dcr-nndr.png",
       "source": "docs/designs/assets/eval-dcr-nndr.png",
-      "sha256": "14172f481c6829f7ed156af9b13d6f4c766ba860de35fe7e83a5700f786e3609",
-      "bytes": 104798,
-      "generator": "scripts/doc/make_eval_figures.py",
+      "sha256": "0894609839495ed4aeeee2e74314e057f8f7465b9ae5f3fdbbb1967dff94da81",
+      "bytes": 100732,
+      "generator": null,
       "documentedIn": "docs/designs/2026-07-07-evaluation-framework-design.md"
     },
     {
       "file": "eval-ks-vs-wasserstein.png",
       "source": "docs/designs/assets/eval-ks-vs-wasserstein.png",
-      "sha256": "bccc6f6853e8c144275694545a9c8caaa1892d21c3a5b4238170f4e4f301a251",
-      "bytes": 122469,
-      "generator": "scripts/doc/make_eval_figures.py",
+      "sha256": "250de4f78994c041887ad1aa4a2b19b13ea3b28548fdd5e7d805a00854db4b70",
+      "bytes": 111860,
+      "generator": null,
       "documentedIn": "docs/designs/2026-07-07-evaluation-framework-design.md"
     },
     {

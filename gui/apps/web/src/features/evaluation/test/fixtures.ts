@@ -175,7 +175,7 @@ export function flag(overrides: Partial<RowFlag> = {}): RowFlag {
     check: "near_copy",
     rank: 1,
     synthetic_key: { id: 5_000_001 },
-    source_key_hash: "0123456789abcdef0123456789abcdef",
+    source_key_hash: "h:0123abcd",
     source_key: null,
     source_set: "R",
     distance: 0.0003,

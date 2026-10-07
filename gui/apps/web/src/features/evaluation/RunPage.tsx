@@ -388,9 +388,7 @@ function RunPageContent() {
           ) : null}
         </TabsContent>
         <TabsContent value="relational">
-          {tab === "relational" ? (
-            <RelationalPanel graph={derived.graph} table={table} />
-          ) : null}
+          {tab === "relational" ? <RelationalPanel graph={derived.graph} table={table} /> : null}
         </TabsContent>
         <TabsContent value="params">{tab === "params" ? <ParamsPanel evaluation={evaluation} /> : null}</TabsContent>
       </Tabs>

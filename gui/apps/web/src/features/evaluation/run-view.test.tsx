@@ -250,8 +250,8 @@ describe("the run view", () => {
     expect(within(lifts).getByText(/undefined · ci_low 0 · open above · m_R\/m_H 0\/0/)).toBeInTheDocument();
     expect(within(lifts).getByText(/not evaluated — reference not verified/)).toBeInTheDocument();
     const flags = screen.getAllByRole("region", { name: /^Flagged rows/ }).at(-1)!;
-    expect(within(flags).getAllByText("0123456789ab…")).toHaveLength(2);
-    expect(within(flags).queryByText("0123456789abcdef0123456789abcdef")).toBeNull();
+    // The evaluator's keyed-hash label, whole: `h:` and eight hex digits.
+    expect(within(flags).getAllByText("h:0123abcd")).toHaveLength(2);
   });
 
   it("shows documented edges as INFO next to the source orphan rate", async () => {

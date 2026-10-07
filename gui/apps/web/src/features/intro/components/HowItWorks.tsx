@@ -9,7 +9,6 @@ import { useState, type ReactNode } from "react";
 
 import { InfoHint } from "@/components/InfoHint";
 import { Mermaid } from "@/components/Mermaid";
-import { StatusPill } from "@/components/StatusPill";
 import {
   Dialog,
   DialogContent,
@@ -64,23 +63,16 @@ export function HowItWorks() {
 
 function DesignCard({ section }: { section: DesignSection }) {
   const headingId = `design-s${section.number}`;
-  const pending = section.status === "pending";
-  const adrs = pending ? [] : adrsForSection(section.number);
+  const adrs = adrsForSection(section.number);
   return (
     <article
       aria-labelledby={headingId}
       data-section={section.number}
-      className={cn(
-        "flex h-full flex-col overflow-hidden rounded-lg border bg-surface-1",
-        pending ? "border-dashed border-border-strong" : "border-border",
-      )}
+      className="flex h-full flex-col overflow-hidden rounded-lg border border-border bg-surface-1"
     >
       <SectionVisualSlot section={section} />
       <div className="flex flex-1 flex-col gap-3 p-5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="font-mono text-xs font-semibold text-accent-text">§{section.number}</span>
-          {pending ? <StatusPill status="pending" tone="neutral" label="Not in DESIGN.md yet" size="sm" /> : null}
-        </div>
+        <span className="font-mono text-xs font-semibold text-accent-text">§{section.number}</span>
         <h3 id={headingId} className="-mt-1 text-base leading-snug font-semibold text-text-1">
           {section.title}
         </h3>
@@ -96,19 +88,13 @@ function DesignCard({ section }: { section: DesignSection }) {
             <InlineCode text={section.quote.text} />
           </p>
         </blockquote>
-        {pending ? (
-          <p className="text-xs text-text-3">
-            §11 lands with the evaluation package and its ADR 0041; until then this card quotes the package README.
-          </p>
-        ) : null}
         {adrs.length ? <AdrChips numbers={adrs.map((a) => a.number)} /> : null}
-        {pending ? <AdrChips numbers={["0041"]} /> : null}
         <div className="mt-auto flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-3 text-sm">
-          {pending ? (
-            <ExternalAnchor href={quoteSourceUrl(section.quote, section)}>Read the package README</ExternalAnchor>
-          ) : (
-            <ExternalAnchor href={designUrl(section.anchor)}>Read §{section.number} in DESIGN.md</ExternalAnchor>
-          )}
+          <ExternalAnchor href={quoteSourceUrl(section.quote, section)}>
+            {section.quote.source === "DESIGN.md"
+              ? `Read §${section.number} in DESIGN.md`
+              : `Read ${section.quote.source}`}
+          </ExternalAnchor>
           {section.explore ? (
             <TargetLink
               to={section.explore.target}

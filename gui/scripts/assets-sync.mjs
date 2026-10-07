@@ -52,6 +52,8 @@ export const ASSETS = [
   "docs/designs/assets/prefix-vs-kcenter-coverage.png",
   "docs/designs/assets/embedding-geometry-topk.png",
   "docs/designs/assets/centroid-vs-perquery.png",
+  // DESIGN.md §11 (the INTRO card of the evaluation).
+  "docs/designs/assets/eval-noise-floor.png",
   // Evaluation (EVALUATION tab).
   "docs/designs/assets/eval-dcr-nndr.png",
   "docs/designs/assets/eval-ks-vs-wasserstein.png",

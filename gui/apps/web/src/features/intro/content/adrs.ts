@@ -208,6 +208,12 @@ export const ADRS: readonly AdrRef[] = [
     file: "0040-dsg-donation-golden-source-sync.md",
   },
   {
+    number: "0041",
+    section: 11,
+    title: "Evaluation is a standalone package and a separate job",
+    file: "0041-evaluation-standalone-package.md",
+  },
+  {
     number: "0042",
     section: 12,
     title: "A self-hosted GUI; managed dashboards stay out",
