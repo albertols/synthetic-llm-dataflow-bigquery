@@ -102,6 +102,17 @@ describe("the storyline", { timeout: 60_000 }, () => {
         status,
       ).toBe(1);
     expect(count((r) => r.runner === "DirectRunner" && r.mode === "sampled")).toBe(1);
+    // A sampled run never stores a sample's number as exact (Ruling R72): its measured rows say
+    // `sample` with the rate. Roll-ups are computed from rows, never a sample.
+    const sampledRun = rows.find((r) => r.mode === "sampled")!;
+    const sampledRows = metricsOf(sampledRun.evaluation_id).filter((m) => !isAggregateMetric(m.metric_id));
+    expect(sampledRows.length).toBeGreaterThan(100);
+    for (const m of sampledRows) {
+      expect(m.method, m.metric_id).toBe("sample");
+      expect(m.sample_rate, m.metric_id).toBeLessThan(1);
+    }
+    for (const m of data.metrics.filter((x) => isAggregateMetric(x.metric_id)))
+      expect([m.method, m.sample_rate], `${m.evaluation_id} ${m.metric_id}`).toEqual(["exact", null]);
     expect(count((r) => r.tables.some((t) => t.reference_verified === false))).toBe(1);
     const unverified = rows.find((r) => r.tables.some((t) => t.reference_verified === false))!;
     const lifts = metricsOf(unverified.evaluation_id).filter((m) => m.metric_id.endsWith("memorization_lift"));

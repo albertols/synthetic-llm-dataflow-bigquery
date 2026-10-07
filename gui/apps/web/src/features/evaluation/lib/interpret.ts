@@ -125,6 +125,9 @@ export function interpretRow(row: MetricRow, referenceN?: number | null, orphanS
         : `; the source's own orphan rate is ${fmtMetric(orphanSource, "share")}`;
     return `${name} ${value} on ${scope} is informational: the edge is documented (enforced: false), so it never fails${source}.`;
   }
+  if (reading.ungated && row.status === "info") {
+    return `${name} ${value} on ${scope} is informational: the copy rate is gated only on free text, and this column is ${row.column_kind}.`;
+  }
   const parts = [noisePhrase(reading), baselinePhrase(reading, referenceN)].filter((p): p is string => !!p);
   const ci = ciPhrase(reading);
   const middle = parts.length ? ` is ${parts.join(" and ")}` : "";

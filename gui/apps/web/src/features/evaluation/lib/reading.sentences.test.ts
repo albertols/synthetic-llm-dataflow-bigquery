@@ -147,6 +147,42 @@ describe("R42 in the edge views: only the orphan rate of a documented edge is IN
   });
 });
 
+describe("R66 in the views: a copy rate is gated only on free text", () => {
+  const reason =
+    "domain-size collision: a numeric or temporal column meets a dense source by domain size, not by copying; " +
+    "reported, not gated (field.value_memorization_lift is the fair test)";
+  const copyRate = (column_kind: MetricRow["column_kind"], status: MetricRow["status"], detail: MetricRow["detail"]) =>
+    metric("field.substantive_copy_rate", {
+      column_name: "age",
+      column_kind,
+      value: 0.4,
+      ci_low: 0.39,
+      ci_high: 0.41,
+      noise_floor_method: "wilson",
+      status,
+      score: status === "info" ? null : 0,
+      detail,
+    });
+
+  it("a numeric column's rate past fail is INFO, explained with the evaluator's reason, never as a FAIL", () => {
+    const row = copyRate("numeric", "info", { copies: 40, reason });
+    expect(ruleStatus(row)).toBe("info");
+    expect(readingOf(row).ungated).toBe(reason);
+    expect(explainStatus(row)).toBe(`INFO on a numeric column, whatever the rate — ${reason}.`);
+    expect(interpretRow(row)).toMatch(
+      /is informational: the copy rate is gated only on free text, and this column is numeric\.$/,
+    );
+    expect(interpretRow(row)).not.toMatch(/no thresholds/);
+  });
+
+  it("the same rate on a free-text column is gated and explained as a FAIL", () => {
+    const row = copyRate("text", "fail", { copies: 40 });
+    expect(ruleStatus(row)).toBe("fail");
+    expect(readingOf(row).ungated).toBeNull();
+    expect(explainStatus(row)).toMatch(/→ FAIL\./);
+  });
+});
+
 describe("rule sentences print the digits the comparison needs", () => {
   it("never 'value 100% ≤ warn 100%'", () => {
     const row = metric("field.type_validity", { value: 0.99985, status: "warn", score: 0.85 });

@@ -35,6 +35,7 @@ import {
   fisherZDeltaFloor,
   foldedAbsInterval,
   histogram,
+  isAggregateMetric,
   jsdBits,
   jsdNullExpectationBits,
   ksBracket,
@@ -205,7 +206,8 @@ export class TableEvaluator {
       },
       { enforced: reading.enforced ?? true },
     );
-    const { sampleRate } = this.ctx;
+    // A roll-up is computed from rows, not read from a table: never a sample.
+    const sampleRate = isAggregateMetric(id) ? null : this.ctx.sampleRate;
     const rowSample = sampleRate !== null && sampleRate < 1;
     const row: EvaluationMetricsRow = {
       evaluation_id: this.ctx.spec.id,
@@ -237,10 +239,10 @@ export class TableEvaluator {
       ci_high: scored.ci_high,
       n_source: reading.nSource === undefined ? this.ctx.nSource : reading.nSource,
       n_synthetic: reading.nSynthetic === undefined ? this.ctx.nSynthetic : reading.nSynthetic,
-      method:
-        reading.method ??
-        (rowSample ? "sample" : (catalogue.estimator.split("/")[0] as EvaluationMetricsRow["method"])),
-      sample_rate: reading.sampleRate === undefined ? this.ctx.sampleRate : reading.sampleRate,
+      method: rowSample
+        ? "sample"
+        : (reading.method ?? (catalogue.estimator.split("/")[0] as EvaluationMetricsRow["method"])),
+      sample_rate: reading.sampleRate === undefined ? sampleRate : reading.sampleRate,
       encoding_plan_digest: this.ctx.encodingPlanDigest,
       feature_set_digest: reading.featureSetDigest ?? null,
       detail: scored.detail as EvaluationMetricsRow["detail"],
