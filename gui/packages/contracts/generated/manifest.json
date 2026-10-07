@@ -14,13 +14,13 @@
     "config/bq_schema/synthetic_rag/source_table_stats.schema.json": "9ad24ef739e151fc54353d41f8fd1772fb077c0860c40b03cc08e451c23b5864",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/views.sql": "a66589e18f037ecdd397b91b3500dfb893fc2ba37befc1d5a9cf18b0281ef29c",
     "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml": "5fdbb6913a669a7f01f4be579a7bba9161d4eacfb63dfd7353e63d8ca9c89642",
-    "gui/packages/contracts/generated/knobs.json": "b830af9dd542be34f6ff832114dfbe780c8d01a264ed79e3140351ed68fc3478",
-    "gui/packages/contracts/generated/relationships.json": "e3a1255333a3c1f36f6398fa61fb5ca55b78efedc95fb5a6a6a68f9b5865f079",
-    "gui/packages/contracts/generated/dlq_rules.json": "a5c2ee06fb6fb2908e12c0a0f04c9f9b72d39fb890b7b910a4169d029bd5c843",
-    "gui/packages/contracts/generated/golden/great_serialize.json": "72dae74592f7e1e61442eefb82ecef5724a3f49bfe1e7f8e00c7cff27853a324",
-    "gui/packages/contracts/generated/golden/hashing_embedder.json": "295094807dbc93a649bb63dcc1dcccf6d702a9f4294be2f8c0ba30d6179dd6da",
-    "gui/packages/contracts/generated/golden/retrieval.json": "0c91e8c07bccf3f7c5fb3d046ccc7fddb3a66fdd3ea43975ee6f3f15b85769f2",
-    "gui/packages/contracts/generated/golden/scoring.json": "bfc8f4292f629ce5dde7e135c5128242a22a555adec1fcc83af6f4e7dc4e13fb"
+    "gui/packages/contracts/generated/knobs.json": "53f02ee0902282051e90a51feee51ce914c198b64c40f038c9d55584f4ba4fae",
+    "gui/packages/contracts/generated/relationships.json": "a0bb70a3b8eeb48483a4723667fd8f449db53ccfdd5a84f2ad1afb49a5326511",
+    "gui/packages/contracts/generated/dlq_rules.json": "d62c3b4e0748db995a3f2a743dd9fa6148915b8fcecb874795d3cda0c17afd4d",
+    "gui/packages/contracts/generated/golden/great_serialize.json": "e1dbe4d9b93cca7877afa89f2560f20f97118bc165f859c7a87248c1c6af3c19",
+    "gui/packages/contracts/generated/golden/hashing_embedder.json": "7b0b3c3654fdfddc608f6004269b65e752fc007711e8be08dd63e574b9ca80a0",
+    "gui/packages/contracts/generated/golden/retrieval.json": "c9996802599f3a56073703f18839cd0f74dd9c32b27da73889fab45511a306f8",
+    "gui/packages/contracts/generated/golden/scoring.json": "2cb5768b889a68b34a08614d9c386c6b53aaa33daf369560becc32c2b8da2184"
   },
   "outputs": [
     "schemas.ts",

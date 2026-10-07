@@ -89,7 +89,6 @@ export type KnobId =
   | "eval_privacy_sample_rows"
   | "eval_detection_sample_rows"
   | "eval_pair_max_columns"
-  | "eval_topk_profile"
   | "eval_row_flags_top_k"
   | "eval_row_flags_source_keys"
   | "eval_max_bytes_billed"
@@ -156,7 +155,7 @@ export const knobs: KnobsFile = {
       ],
       "cli_flag": "--reference_rows_limit",
       "flex_param": "reference_rows_limit",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:281",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:284",
       "source_token": "\"--reference_rows_limit\"",
       "related_adrs": [
         "0005",
@@ -187,7 +186,7 @@ export const knobs: KnobsFile = {
         "exact"
       ],
       "help": "Compute per-column source_table_stats from the reference sample (driver-side, zero DAG cost). exact adds ONE aggregate scan of the live table (HLL distinct, deciles, top-k; ADR 0022) and feeds exact distinct into free-text pool sizing. off disables entirely.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:519",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:522",
       "source_token": "\"--source_stats\"",
       "related_adrs": [
         "0022"
@@ -327,7 +326,7 @@ export const knobs: KnobsFile = {
       "composer_default": "{{ENGINE}}",
       "flex_param": "engine",
       "help": "Engine name registered in ENGINE_REGISTRY",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:366",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:369",
       "source_token": "\"--engine\"",
       "related_adrs": [
         "0006"
@@ -351,7 +350,7 @@ export const knobs: KnobsFile = {
       "composer_default": "1000",
       "flex_param": "num_rows",
       "required": true,
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:314",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:317",
       "source_token": "\"--num_rows\"",
       "related_adrs": [],
       "docs": []
@@ -371,7 +370,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--similarity",
       "composer_param": "similarity",
       "flex_param": "similarity",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:345",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:348",
       "source_token": "\"--similarity\"",
       "related_adrs": [],
       "docs": []
@@ -392,7 +391,7 @@ export const knobs: KnobsFile = {
       "composer_param": "seed",
       "flex_param": "seed",
       "help": "Explicit base RNG seed (int). Empty = derive per (run_id, batch_id) — never replays across runs because run_id is salted per trigger.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:347",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:350",
       "source_token": "\"--seed\"",
       "related_adrs": [],
       "docs": []
@@ -413,7 +412,7 @@ export const knobs: KnobsFile = {
       "composer_param": "batch_size",
       "flex_param": "batch_size",
       "help": "Rows per element. Left at the default, this scales with --num_rows toward ~1,000 elements (never below the default). Pass an explicit value to pin it.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:339",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:342",
       "source_token": "\"--batch_size\"",
       "related_adrs": [],
       "docs": [
@@ -722,7 +721,7 @@ export const knobs: KnobsFile = {
         "all"
       ],
       "help": "Shape-preserving expander for free-text columns (2026-08-05 spec C3). off = pool draws only (distinct capped at pool size). identifiers (default) = code-like columns expand from their observed shape mix. all = also mutate digit runs inside texty pool draws. Never adds an LLM call. Mode-by-mode panels, guarantees and trade-offs: docs/designs/2026-08-05-freetext-expansion-modes.md",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:491",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:494",
       "source_token": "\"--freetext_expansion\"",
       "related_adrs": [],
       "docs": [
@@ -750,7 +749,7 @@ export const knobs: KnobsFile = {
         "kcenter_rotate"
       ],
       "help": "How the 8 free-text prompt seeds are chosen. centroid = control (densest region, today). kcenter = seeds span the column's modes. kcenter_rotate = re-seeded per ladder attempt (forfeits vLLM prefix caching by design).",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:471",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:474",
       "source_token": "\"--pool_seed_strategy\"",
       "related_adrs": [],
       "docs": [
@@ -777,7 +776,7 @@ export const knobs: KnobsFile = {
         "off"
       ],
       "help": "Attach per-column llm_prompt_constraint (parsed from column-description JSON) to pool prompts (spec C5). Prefix-cache-safe constant suffix.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:503",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:506",
       "source_token": "\"--prompt_constraints\"",
       "related_adrs": [
         "0024"
@@ -807,7 +806,7 @@ export const knobs: KnobsFile = {
         "full"
       ],
       "help": "Log each built pool prompt as a freetext_pool_prompt milestone (ADR 0024). 'redacted' elides seed exemplars; 'full' logs verbatim prompts at WARNING — reference values reach Dataflow logs, debug runs only.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:510",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:513",
       "source_token": "\"--prompt_debug\"",
       "related_adrs": [
         "0024"
@@ -826,7 +825,7 @@ export const knobs: KnobsFile = {
       ],
       "cli_flag": "--pool_pattern_guidance",
       "help": "true/false (bare flag = true). Constrain identifier-ish free-text pool completions at decode time with a charset/length regex (vLLM structured-output items.pattern). Opt-in until T4 throughput is confirmed; the post-hoc format gate protects pools either way.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:480",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:483",
       "source_token": "\"--pool_pattern_guidance\"",
       "related_adrs": [],
       "docs": []
@@ -848,7 +847,7 @@ export const knobs: KnobsFile = {
       "composer_default": "true",
       "flex_param": "build_pool_layer",
       "help": "true/false (bare flag = true). Build free-text pools in their own branch and persist them to --freetext_pools_table (skipped if this reference_digest + model_uri is already present). Without it pools are inferred inside every worker process's setup().",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:396",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:399",
       "source_token": "\"--build_pool_layer\"",
       "related_adrs": [
         "0020"
@@ -1005,7 +1004,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--embedder_uri",
       "flex_param": "embedder_uri",
       "help": "gs://<bucket>/synthetic/models/embedders/<model>/<version>/ for the B.1 RAG embedder (optional; empty → HashingEmbedder)",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:374",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:377",
       "source_token": "\"--embedder_uri\"",
       "related_adrs": [],
       "docs": []
@@ -1027,7 +1026,7 @@ export const knobs: KnobsFile = {
       "composer_default": "true",
       "flex_param": "build_rag_layer",
       "help": "true/false (bare flag = true). Populate synthetic_rag.rag_chunks from this run's reference sample (skipped if the reference_digest is already present for this embedder id+version). String-valued so the Flex Template/DAG chain can pass --build_rag_layer=true.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:379",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:382",
       "source_token": "\"--build_rag_layer\"",
       "related_adrs": [
         "0017",
@@ -1049,7 +1048,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--env",
       "flex_param": "env",
       "help": "Environment tier selecting thresholds (dev|uat|prd)",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:583",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:586",
       "source_token": "\"--env\"",
       "related_adrs": [],
       "docs": []
@@ -1075,7 +1074,7 @@ export const knobs: KnobsFile = {
         "streaming"
       ],
       "help": "exact = divert every duplicate to the DLQ behind ONE full-row shuffle barrier (default; PK/identity resolved from key-only groups, ADR 0034). exact_chained = the pre-ADR-0034 three-barrier chain (row digest -> PK -> identity), kept for A/B runs. streaming = land rows as they are generated and MEASURE the duplicate rate instead of removing it, so no GroupByKey barrier sits between generation and BigQuery. In streaming mode duplicate rows LAND — the run is still marked FAILED_BLOCKER, so re-run with --write_disposition=overwrite.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:413",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:416",
       "source_token": "\"--uniqueness_mode\"",
       "related_adrs": [
         "0034"
@@ -1103,7 +1102,7 @@ export const knobs: KnobsFile = {
         "streaming"
       ],
       "help": "Uniqueness mode for a DRIVEN child without identity columns (ADR 0036): its PK is unique by construction, so `streaming` measures duplicates without the landing-path barrier.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:447",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:450",
       "source_token": "\"--driven_uniqueness_mode\"",
       "related_adrs": [
         "0036"
@@ -1131,7 +1130,7 @@ export const knobs: KnobsFile = {
         "overwrite"
       ],
       "help": "Landing-table write mode. append = WRITE_APPEND (default, today's behavior); overwrite = WRITE_TRUNCATE (FILE_LOADS-compatible). DLQ, validation_runs and rag_chunks always append.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:292",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:295",
       "source_token": "\"--write_disposition\"",
       "related_adrs": [],
       "docs": []
@@ -1264,7 +1263,7 @@ export const knobs: KnobsFile = {
       "composer_param": "generate_fk_relationships",
       "flex_param": "generate_fk_relationships",
       "help": "true (default): declared relationships are honored — a launch expands to the table's whole FK component (parents first) and children sample landed parent keys; tables with no declared relationships behave exactly as false (zero friction). false: isolated generation — declared edges ignored LOUDLY, FK columns use marginals. ADR 0029.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:540",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:543",
       "source_token": "\"--generate_fk_relationships\"",
       "related_adrs": [
         "0029"
@@ -1287,7 +1286,7 @@ export const knobs: KnobsFile = {
       "composer_param": "relationships_uri",
       "flex_param": "relationships_uri",
       "help": "Where the relational models live (ADR 0032): a folder or a single YAML file, local or gs://. Default: the config/relationships folder packaged in the image. Point it at gs://... to change PK/FK without rebuilding — this is the ONLY source of relational truth; table descriptions are never read for it.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:568",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:571",
       "source_token": "\"--relationships_uri\"",
       "related_adrs": [
         "0032"
@@ -1316,7 +1315,7 @@ export const knobs: KnobsFile = {
         "sequential_jobs"
       ],
       "help": "How a multi-table plan executes (ADR 0030). single_job (default): every planned table in ONE Dataflow job — one worker fleet, one vLLM ignition, in-DAG FK key handoff. sequential_jobs: one job per table, parents first (fallback / debugging).",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:558",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:561",
       "source_token": "\"--multi_table_mode\"",
       "related_adrs": [
         "0030"
@@ -1341,7 +1340,7 @@ export const knobs: KnobsFile = {
         "stop"
       ],
       "help": "What a MEASURED contradiction between the relationship model and the SOURCE does (ADR 0038). adjust (default) = drop the declared `pk:` the full-source fan-out proves is not a key, announce it in the MODEL ADJUSTED banner, emit the effective model as YAML, and carry on — the landing table then reproduces the source's key-repeat share, and that table's pk.duplicate stops counting toward the BLOCKER gate. stop = refuse the launch, exactly as before ADR 0038. Model SELF-contradictions (unknown columns, two `drives: true` edges, an ambiguous role) and the ADR 0035 capacity gate stop under BOTH settings.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:454",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:457",
       "source_token": "\"--on_model_conflict\"",
       "related_adrs": [
         "0035",
@@ -1363,7 +1362,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--fk_candidate_cap",
       "flex_param": "fk_candidate_cap",
       "help": "ADR 0037: Top-M candidates kept per SHARED value on a CONDITIONAL edge (an edge sharing columns with the driving edge — a diamond branch). A hot shared key never carries more than M parent candidates into a request; the engine wraps only when a key's fan-out outruns the list it was handed. Raising it widens the per-key choice and LOWERS keys_per_batch to keep a request under ~100k candidate values.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:435",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:438",
       "source_token": "\"--fk_candidate_cap\"",
       "related_adrs": [
         "0037"
@@ -1439,7 +1438,7 @@ export const knobs: KnobsFile = {
         "constant"
       ],
       "comment": "ADR 0037 §7 — a fan-out request carries `keys_per_batch * M` candidate tuples per conditional edge; `keys_per_batch` is lowered so the whole request stays under this many values, whatever the cap is set to.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:198",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:201",
       "source_token": "_MAX_CONDITIONAL_VALUES_PER_REQUEST",
       "related_adrs": [
         "0037"
@@ -1466,7 +1465,7 @@ export const knobs: KnobsFile = {
         "mlx",
         "fake"
       ],
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:591",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:594",
       "source_token": "\"--client_type\"",
       "related_adrs": [
         "0014"
@@ -1495,7 +1494,7 @@ export const knobs: KnobsFile = {
         "bfloat16"
       ],
       "help": "vLLM --dtype override. auto = checkpoint dtype (bf16 for Gemma/Qwen). float16 is REQUIRED on T4 for fp16-safe bf16 checkpoints (Qwen); refused for gemma-family models (fp16 Gemma emits empty output)",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:593",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:596",
       "source_token": "\"--vllm_dtype\"",
       "related_adrs": [],
       "docs": []
@@ -1516,7 +1515,7 @@ export const knobs: KnobsFile = {
       "composer_param": "vllm_max_model_len",
       "flex_param": "vllm_max_model_len",
       "help": "vLLM --max-model-len cap. Without it vLLM sizes the KV cache for the checkpoint's NATIVE context (Qwen3-2507: 262K → 36GiB KV, kills the T4 EngineCore at startup). 8192 fits every registry model/GPU pairing and dwarfs the synthesis prompts. Empty = no cap (native context).",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:601",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:604",
       "source_token": "\"--vllm_max_model_len\"",
       "related_adrs": [],
       "docs": []
@@ -1542,7 +1541,7 @@ export const knobs: KnobsFile = {
         "fixed"
       ],
       "help": "auto (default) = a fleet sized by --initial_workers stays that size (autoscaling_algorithm=NONE), otherwise Dataflow's THROUGHPUT_BASED. fixed = same pin, and --initial_workers is required. throughput = always let Dataflow scale (the 2026-09-07/08 multi runs lost ~4 min per job to mid-job scale-downs between the parent and child stages, ADR 0034 D9).",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:316",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:319",
       "source_token": "\"--autoscaling\"",
       "related_adrs": [
         "0034"
@@ -1565,7 +1564,7 @@ export const knobs: KnobsFile = {
       "composer_param": "initial_workers",
       "flex_param": "initial_workers",
       "help": "Initial Dataflow worker count (ADR 0034). Empty = Dataflow's own default: the 2026-08-29 R6 pair started on 2 workers and autoscaled to 4 only ~4 min into the first generate stage, so C_TABLE ran 8 min at a quarter of its steady-state rate. A scale run starts at its max_num_workers. Pinned from the launcher like disk_size_gb; an explicit Beam --num_workers on the launch wins.",
-      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:328",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:331",
       "source_token": "\"--initial_workers\"",
       "related_adrs": [
         "0034"
@@ -1583,7 +1582,7 @@ export const knobs: KnobsFile = {
         "composer"
       ],
       "composer_param": "gpu",
-      "source": "composer/synthetic_beam_bigquery.py:246",
+      "source": "composer/synthetic_beam_bigquery.py:309",
       "source_token": "\"gpu\"",
       "related_adrs": [],
       "docs": []
@@ -1599,7 +1598,7 @@ export const knobs: KnobsFile = {
         "composer"
       ],
       "composer_param": "sdk_containers",
-      "source": "composer/synthetic_beam_bigquery.py:308",
+      "source": "composer/synthetic_beam_bigquery.py:371",
       "source_token": "\"sdk_containers\"",
       "related_adrs": [
         "0034"
@@ -1611,20 +1610,24 @@ export const knobs: KnobsFile = {
       "channel": "evaluation",
       "group": "Evaluator",
       "label": "Evaluation mode",
-      "value": "exact",
+      "value": null,
       "unit": null,
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--mode",
+      "flex_param": "mode",
       "choices": [
         "exact",
         "sampled"
       ],
-      "help": "exact scans every row; sampled evaluates Bernoulli samples of sample_rows per side.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "help": "read every row, or a salted sample above --sample_rows (default: sampled on the DirectRunner, exact on Dataflow)",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:233",
+      "source_token": "\"--mode\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1637,13 +1640,17 @@ export const knobs: KnobsFile = {
       "value": 200000,
       "unit": "rows",
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--sample_rows",
-      "help": "Rows per side in sampled mode.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "flex_param": "sample_rows",
+      "help": "sampled mode: rows read per side of a table larger than this",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:140",
+      "source_token": "\"--sample_rows\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1656,13 +1663,17 @@ export const knobs: KnobsFile = {
       "value": 50000,
       "unit": "rows",
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--privacy_sample_rows",
-      "help": "Synthetic rows the Gower nearest-neighbour privacy checks read.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "flex_param": "privacy_sample_rows",
+      "help": "rows of the nearest-neighbour privacy sample",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:142",
+      "source_token": "\"--privacy_sample_rows\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1675,13 +1686,17 @@ export const knobs: KnobsFile = {
       "value": 50000,
       "unit": "rows",
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--detection_sample_rows",
-      "help": "Rows per side the classifier two-sample test reads.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "flex_param": "detection_sample_rows",
+      "help": "rows per side in the detection (C2ST) sample",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:144",
+      "source_token": "\"--detection_sample_rows\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1694,32 +1709,17 @@ export const knobs: KnobsFile = {
       "value": 20,
       "unit": "columns",
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--pair_max_columns",
-      "help": "Columns whose pairs feed the correlation and contingency metrics.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
-      "docs": [
-        "docs/designs/2026-07-07-evaluation-framework-design.md"
-      ]
-    },
-    {
-      "id": "eval_topk_profile",
-      "channel": "evaluation",
-      "group": "Evaluator",
-      "label": "Top-k profile size",
-      "value": 1000,
-      "unit": "values",
-      "settable_via": [
-        "cli"
+      "flex_param": "pair_max_columns",
+      "help": "columns whose pairs are compared, per table",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:146",
+      "source_token": "\"--pair_max_columns\"",
+      "related_adrs": [
+        "0041"
       ],
-      "cli_flag": "--topk_profile",
-      "help": "Values kept in each top-k profile (metrics still use every value).",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1732,13 +1732,17 @@ export const knobs: KnobsFile = {
       "value": 100,
       "unit": "rows",
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--row_flags_top_k",
-      "help": "Rows kept per privacy check in evaluation_row_flags.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "flex_param": "row_flags_top_k",
+      "help": "row flags kept per check and table",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:147",
+      "source_token": "\"--row_flags_top_k\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1751,17 +1755,20 @@ export const knobs: KnobsFile = {
       "value": "hashed",
       "unit": null,
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--row_flags_source_keys",
+      "flex_param": "row_flags_source_keys",
       "choices": [
-        "hashed",
-        "raw"
+        "hashed"
       ],
-      "help": "hashed stores a salted hash of the matched source key; raw stores the key itself.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "help": "row flags carry the matched source key as a keyed hash only (raw keys are never written)",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:251",
+      "source_token": "\"--row_flags_source_keys\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1774,13 +1781,17 @@ export const knobs: KnobsFile = {
       "value": 1099511627776,
       "unit": "bytes",
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--max_bytes_billed",
-      "help": "maximumBytesBilled on every evaluator query.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "flex_param": "max_bytes_billed",
+      "help": "BigQuery bytes the evaluation may process (default 1 TiB)",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:257",
+      "source_token": "\"--max_bytes_billed\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1793,13 +1804,17 @@ export const knobs: KnobsFile = {
       "value": 500,
       "unit": "GB",
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--max_shuffle_gb",
-      "help": "Predicted Beam shuffle above which the evaluator refuses to launch.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "flex_param": "max_shuffle_gb",
+      "help": "shuffle the value census may use before it is value-sampled",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:262",
+      "source_token": "\"--max_shuffle_gb\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1812,20 +1827,25 @@ export const knobs: KnobsFile = {
       "value": "auto",
       "unit": null,
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--scope",
+      "flex_param": "scope",
       "choices": [
         "auto",
         "table",
         "as_of",
         "appends",
+        "as_of_diff",
         "manual"
       ],
-      "help": "Which synthetic rows count: the whole table, a snapshot, the rows the run appended, or a manual window.",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "help": "how the job's landing rows are isolated (default auto)",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:238",
+      "source_token": "\"--scope\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -1838,13 +1858,17 @@ export const knobs: KnobsFile = {
       "value": false,
       "unit": null,
       "settable_via": [
-        "cli"
+        "cli",
+        "flex"
       ],
       "cli_flag": "--allow_contaminated",
-      "help": "Evaluate a table whose scope check found rows from other runs instead of refusing it (the registry still records scope_status=contaminated).",
-      "source": "planned",
-      "source_token": null,
-      "related_adrs": [],
+      "flex_param": "allow_contaminated",
+      "help": "evaluate a scope another writer touched; it stays `contaminated`",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:242",
+      "source_token": "\"--allow_contaminated\"",
+      "related_adrs": [
+        "0041"
+      ],
       "docs": [
         "docs/designs/2026-07-07-evaluation-framework-design.md"
       ]
@@ -3060,7 +3084,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "d050836ab240e9d49e75bcb0c26828f6d3fba228",
+    "commit": "ce9528eba70ebaf83ed1e4b863b8349271de59da",
     "dirty": []
   }
 };

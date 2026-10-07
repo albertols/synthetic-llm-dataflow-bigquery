@@ -37,9 +37,10 @@ value is None or infinite (R38), the zero-tolerance integrity rule and the
 `integrity_fail` badge (R39), noise-downgraded rows scored at the reference
 (R40), the noise method dispatch — scalar floors, interval coverage, no CI
 (R41), documented edges (R42), infinities, NaN, the pMSE ceiling and
-aggregate ids left out of the headline counts (R43), and edge-reference
-interval metrics that realistic Wilson intervals never downgrade (R45).
-Non-finite inputs are written as the strings "+inf", "-inf" and "nan".
+aggregate ids left out of the headline counts (R43), edge-reference
+interval metrics that realistic Wilson intervals never downgrade (R45), and
+the copy rate gated only on a free-text column, INFO on every other kind
+(R66). Non-finite inputs are written as the strings "+inf", "-inf" and "nan".
 
 Design: docs/DESIGN.md §12 Platform GUI
 (ADR 0042).
@@ -58,6 +59,11 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[2]
 _EVAL_SRC = REPO / "packages" / "sdfb-evaluation" / "src"
 _EVALUATED_AT = "2026-09-28T12:00:00+00:00"
+# The golden files' `python` stamp: the minor version only. What they hold
+# (float repr, `str.isspace()`'s Unicode tables) is fixed within a minor, and
+# the patch is whatever the machine resolved "3.11" to, so stamping it made
+# every file differ between a laptop and CI with nothing else changed.
+PYTHON = ".".join(platform.python_version_tuple()[:2])
 _INF = math.inf
 _NAN = math.nan
 
@@ -105,6 +111,7 @@ def _case(rule: str,
           source: float | None = None,
           detail: dict[str, Any] | None = None,
           enforced: bool = True,
+          kind: str | None = None,
           table: str = "users") -> dict[str, Any]:
   return {
       "rule": rule,
@@ -118,6 +125,7 @@ def _case(rule: str,
       "source_value": source,
       "detail": detail or {},
       "enforced": enforced,
+      "column_kind": kind,
   }
 
 
@@ -475,6 +483,56 @@ CASES: tuple[dict[str, Any], ...] = (
         "row.memorization_lift",
         _INF,
         ci=(6.1, _INF)),
+    # --- R66 (appended): the copy rate is gated only on free text; every
+    # other column kind is INFO with the reason, whatever the rate.
+    _case(
+        "R66",
+        "copy rate past fail on a free-text column: gated, FAIL",
+        "field.substantive_copy_rate",
+        0.002,
+        ci=(0.001295, 0.003087),
+        kind="text"),
+    _case(
+        "R66",
+        "the same rate on a numeric column: INFO, a domain-size collision",
+        "field.substantive_copy_rate",
+        0.002,
+        ci=(0.001295, 0.003087),
+        kind="numeric"),
+    _case(
+        "R66",
+        "a temporal column collides by domain size too: INFO",
+        "field.substantive_copy_rate",
+        0.4,
+        ci=(0.39, 0.41),
+        kind="temporal"),
+    _case(
+        "R66",
+        "a categorical column: INFO, gated only on free text",
+        "field.substantive_copy_rate",
+        0.002,
+        ci=(0.001295, 0.003087),
+        kind="categorical"),
+    _case(
+        "R66",
+        "an identifier column: INFO, gated only on free text",
+        "field.substantive_copy_rate",
+        0.002,
+        ci=(0.001295, 0.003087),
+        kind="identifier"),
+    _case(
+        "R66",
+        "no value on a numeric column: not evaluated comes before INFO",
+        "field.substantive_copy_rate",
+        None,
+        kind="numeric"),
+    _case(
+        "R66",
+        "only the copy rate: another metric on a numeric column stays gated",
+        "column.ks",
+        0.25,
+        floor=0.02,
+        kind="numeric"),
 )
 
 # (metric, value, target): the five score functions straight, including the
@@ -522,6 +580,7 @@ def _metric_value(types: ModuleType, case: dict[str, Any]) -> Any:
       noise_floor=case["noise_floor"],
       ci_low=case["ci_low"],
       ci_high=case["ci_high"],
+      column_kind=case["column_kind"],
       detail=case["detail"])
 
 
@@ -611,6 +670,7 @@ def scoring_golden() -> dict[str, Any]:
             "source_value": _enc(case["source_value"]),
             "detail": case["detail"],
             "enforced": case["enforced"],
+            "column_kind": case["column_kind"],
         },
         "row": {
             key: _round(row[key])
@@ -632,7 +692,7 @@ def scoring_golden() -> dict[str, Any]:
   return {
       "generated_by": "scripts/gui/export_golden_fixtures.py",
       "cases_from": "scripts/gui/export_scoring_golden.py",
-      "python": platform.python_version(),
+      "python": PYTHON,
       "source": "packages/sdfb-evaluation/src/sdfb_evaluation/scoring/"
                 "__init__.py (to_metric_row, status_for, score_value, "
                 "aggregate_scores, headline_counts)",

@@ -1,6 +1,6 @@
 {
  "generated_by": "scripts/gui/export_golden_fixtures.py",
- "python": "3.11.15",
+ "python": "3.11",
  "source": "packages/sdfb-core/src/sdfb_core/rag/serialize.py (serialize_row)",
  "column_order": [
   "order_id",

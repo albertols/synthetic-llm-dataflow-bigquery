@@ -137,9 +137,6 @@ def test_values_are_imported_from_code_not_retyped(knobs):
 def test_every_source_points_at_the_line_it_claims(knobs):
   for knob in knobs["knobs"]:
     source = knob["source"]
-    if source == "planned":
-      assert knob["channel"] == "evaluation", knob["id"]
-      continue
     line = _line_of(source)
     needle = knob.get("source_token")
     assert needle and needle in line, (knob["id"], source, line)
@@ -158,40 +155,111 @@ def test_cli_knobs_carry_their_launch_surfaces(knobs):
   assert by_id["vllm_dtype"]["composer_default"] == "float16"
 
 
-def test_evaluation_channel_is_planned_until_the_cli_exists(
-    knobs_module, knobs):
+def _schema_vocabulary(table: str, *path: str) -> list[str]:
+  """A field's closed vocabulary, from its description in the evaluator's
+  BigQuery schema (`a | b | c`): the evaluator's own second statement of it."""
+  fields = json.loads(
+      (_REPO / "packages" / "sdfb-evaluation" / "src" / "sdfb_evaluation" /
+       "schemas" / f"{table}.schema.json").read_text(encoding="utf-8"))
+  for name in path:
+    field = next(f for f in fields if f["name"] == name)
+    fields = field.get("fields", [])
+  return [part.split()[0] for part in field["description"].split(" | ")]
+
+
+def test_evaluation_channel_is_the_evaluator_cli(knobs_module, knobs):
   evaluation = [k for k in knobs["knobs"] if k["channel"] == "evaluation"]
   ids = {k["id"] for k in evaluation}
   assert {
       "eval_mode", "eval_sample_rows", "eval_privacy_sample_rows",
       "eval_detection_sample_rows", "eval_pair_max_columns",
-      "eval_topk_profile", "eval_row_flags_top_k", "eval_row_flags_source_keys",
+      "eval_row_flags_top_k", "eval_row_flags_source_keys",
       "eval_max_bytes_billed", "eval_max_shuffle_gb", "eval_scope",
       "eval_allow_contaminated"
   } == ids
+  cli = knobs_module.EVAL_CLI.relative_to(_REPO).as_posix()
+  for knob in evaluation:
+    assert knob["source"].rsplit(":", 1)[0] == cli, knob["id"]
+    assert knob["help"], knob["id"]
+    assert knob["flex_param"] == knob["cli_flag"][2:], knob["id"]
   by_id = _by_id(knobs)
   assert by_id["eval_max_bytes_billed"]["value"] == 1_099_511_627_776
-  if not knobs_module.EVAL_CLI.exists():
-    assert all(k["source"] == "planned" for k in evaluation)
+  # No argparse default: the runner decides (the help text says how).
+  assert by_id["eval_mode"]["value"] is None
+  assert by_id["eval_mode"]["choices"] == _schema_vocabulary(
+      "evaluation_data_history", "mode")
+  # `choices=("auto", *SCOPE_MODES)`: a name imported from another module.
+  assert by_id["eval_scope"]["choices"] == [
+      "auto",
+      *_schema_vocabulary("evaluation_data_history", "tables", "scope_mode")
+  ]
+  assert by_id["eval_scope"]["help"].endswith("(default auto)")
+  # Raw source keys are never written: one choice, and no flag to change it.
+  assert by_id["eval_row_flags_source_keys"]["choices"] == ["hashed"]
 
 
-def test_evaluation_channel_reads_the_cli_by_ast_when_present(
+def test_evaluation_channel_reads_every_way_the_cli_declares_a_flag(
     knobs_module, tmp_path):
+  declared = {
+      "mode", "scope", "sample_rows", "pair_max_columns", "allow_contaminated"
+  }
+  rest = [
+      name for name, _, _ in knobs_module._EVAL_FLAGS if name not in declared
+  ]
   cli = tmp_path / "main.py"
   cli.write_text(
       "import argparse\n"
+      "_MODES = ('table', 'manual')\n"
+      "_COUNT_FLAGS = (\n"
+      "    ('--sample_rows', 123456, 'rows per side'),\n"
+      "    ('--pair_max_columns', 7, 'columns'),\n"
+      ")\n"
+      "def _boolean(parser, name, help_text):\n"
+      "  parser.add_argument(name, nargs='?', const=True, default=False)\n"
       "def build():\n"
       "  p = argparse.ArgumentParser()\n"
-      "  p.add_argument('--sample_rows', type=int, default=123456)\n"
-      "  p.add_argument('--mode', default='sampled', choices=['exact', "
-      "'sampled'])\n"
+      "  p.add_argument(\n"
+      "      '--mode', choices=('exact', 'sampled'), help='every row, or '\n"
+      "      'a sample')\n"
+      "  p.add_argument('--scope', choices=('auto', *_MODES), default='auto',\n"
+      "                 help='rows in scope (default %(default)s)')\n"
+      "  _boolean(p, '--allow_contaminated', 'evaluate it anyway')\n"
+      "  for name, default, help_text in _COUNT_FLAGS:\n"
+      "    p.add_argument(name, type=int, default=default, help=help_text)\n" +
+      "".join(f"  p.add_argument('--{name}', default=1)\n" for name in rest) +
       "  return p\n",
       encoding="utf-8")
   entries = {k["id"]: k for k in knobs_module.eval_knobs(cli)}
-  assert entries["eval_sample_rows"]["value"] == 123456
-  assert entries["eval_sample_rows"]["source"].endswith("main.py:4")
-  assert entries["eval_mode"]["choices"] == ["exact", "sampled"]
-  assert entries["eval_pair_max_columns"]["source"] == "planned"
+  assert set(entries) == {
+      f"eval_{name}" for name, _, _ in knobs_module._EVAL_FLAGS
+  }
+  mode = entries["eval_mode"]
+  assert (mode["value"], mode["choices"]) == (None, ["exact", "sampled"])
+  assert mode["help"] == "every row, or a sample"
+  # The line that holds the flag, not the line the call starts on.
+  assert mode["source"].endswith("main.py:12")
+  scope = entries["eval_scope"]
+  assert scope["choices"] == ["auto", "table", "manual"]
+  assert scope["help"] == "rows in scope (default auto)"
+  rows = entries["eval_sample_rows"]
+  assert (rows["value"], rows["help"]) == (123456, "rows per side")
+  assert rows["source"].endswith("main.py:4")
+  contaminated = entries["eval_allow_contaminated"]
+  assert contaminated["value"] is False
+  assert contaminated["help"] == "evaluate it anyway"
+  assert contaminated["source"].endswith("main.py:16")
+
+
+def test_a_flag_the_evaluator_dropped_fails_the_export(knobs_module, tmp_path):
+  cli = tmp_path / "main.py"
+  cli.write_text(
+      "import argparse\n"
+      "p = argparse.ArgumentParser()\n" +
+      "".join(f"p.add_argument('--{name}', default=1)\n"
+              for name, _, _ in knobs_module._EVAL_FLAGS[1:]),
+      encoding="utf-8")
+  with pytest.raises(LookupError, match="--mode is not a flag"):
+    knobs_module.eval_knobs(cli)
 
 
 def test_docs_differ_annotations_are_verified_in_code(knobs):
@@ -237,7 +305,7 @@ def test_check_ignores_line_shifts_but_not_values(knobs_module, tmp_path):
   assert knobs_module.main(["--check", "--out-dir", str(tmp_path)]) == 0
   path = tmp_path / "knobs.json"
   doc = json.loads(path.read_text(encoding="utf-8"))
-  knob = next(k for k in doc["knobs"] if k["source"] != "planned")
+  knob = doc["knobs"][0]
   file, line = knob["source"].rsplit(":", 1)
   knob["source"] = f"{file}:{int(line) + 7}"
   doc["exported_from"] = {"commit": "0" * 40, "dirty": []}

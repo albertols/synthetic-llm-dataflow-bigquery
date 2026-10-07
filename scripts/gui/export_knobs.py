@@ -32,9 +32,10 @@ Three more sections:
   vanished fails the export, so a stale "Docs differ" note cannot ship.
 - `measured`: the `MEASURED` blocks of the throughput figure scripts, loaded
   with importlib, with the block header as provenance.
-- the EVALUATION channel: read from `sdfb_evaluation/cli/main.py` by AST
-  (never imported) when that file exists; until then the plan-documented
-  knob list with `source: "planned"` (GUI Ruling G2).
+- the EVALUATION channel: the flags of `sdfb-eval plan|run`, read from
+  `sdfb_evaluation/cli/main.py` by AST (never imported: the evaluator is a
+  standalone project, ADR 0041). Default, choices, help text and line are
+  the CLI's own; a listed flag the CLI no longer has fails the export.
 
 Two sibling files, same run:
 
@@ -141,39 +142,20 @@ CHANNELS = (
      "The standalone evaluator (sdfb-evaluation) and its budgets."),
 )
 
-# (knob id suffix, default, choices, unit, label, purpose) — the evaluator's
-# plan-documented flags, used until its CLI exists (Ruling G2).
-_PLANNED_EVAL = (
-    ("mode", "exact", ["exact", "sampled"], None, "Evaluation mode",
-     "exact scans every row; sampled evaluates Bernoulli samples of "
-     "sample_rows per side."),
-    ("sample_rows", 200_000, None, "rows", "Sample rows per side",
-     "Rows per side in sampled mode."),
-    ("privacy_sample_rows", 50_000, None, "rows", "Privacy sample rows",
-     "Synthetic rows the Gower nearest-neighbour privacy checks read."),
-    ("detection_sample_rows", 50_000, None, "rows", "Detection sample rows",
-     "Rows per side the classifier two-sample test reads."),
-    ("pair_max_columns", 20, None, "columns", "Pair columns cap",
-     "Columns whose pairs feed the correlation and contingency metrics."),
-    ("topk_profile", 1000, None, "values", "Top-k profile size",
-     "Values kept in each top-k profile (metrics still use every value)."),
-    ("row_flags_top_k", 100, None, "rows", "Flagged rows per check",
-     "Rows kept per privacy check in evaluation_row_flags."),
-    ("row_flags_source_keys", "hashed", ["hashed",
-                                         "raw"], None, "Flagged source keys",
-     "hashed stores a salted hash of the matched source key; raw stores "
-     "the key itself."),
-    ("max_bytes_billed", 1_099_511_627_776, None, "bytes", "BigQuery bytes cap",
-     "maximumBytesBilled on every evaluator query."),
-    ("max_shuffle_gb", 500, None, "GB", "Shuffle budget",
-     "Predicted Beam shuffle above which the evaluator refuses to launch."),
-    ("scope", "auto", ["auto", "table", "as_of", "appends",
-                       "manual"], None, "Evaluation scope",
-     "Which synthetic rows count: the whole table, a snapshot, the rows the "
-     "run appended, or a manual window."),
-    ("allow_contaminated", False, None, None, "Allow contaminated scopes",
-     "Evaluate a table whose scope check found rows from other runs instead "
-     "of refusing it (the registry still records scope_status=contaminated)."),
+# (flag, unit, label) — the `sdfb-eval plan|run` flags the EVALUATION channel
+# shows. Default, choices, help text and line come from the evaluator's CLI.
+_EVAL_FLAGS = (
+    ("mode", None, "Evaluation mode"),
+    ("sample_rows", "rows", "Sample rows per side"),
+    ("privacy_sample_rows", "rows", "Privacy sample rows"),
+    ("detection_sample_rows", "rows", "Detection sample rows"),
+    ("pair_max_columns", "columns", "Pair columns cap"),
+    ("row_flags_top_k", "rows", "Flagged rows per check"),
+    ("row_flags_source_keys", None, "Flagged source keys"),
+    ("max_bytes_billed", "bytes", "BigQuery bytes cap"),
+    ("max_shuffle_gb", "GB", "Shuffle budget"),
+    ("scope", None, "Evaluation scope"),
+    ("allow_contaminated", None, "Allow contaminated scopes"),
 )
 
 # ---------------------------------------------------------------- helpers --
@@ -996,42 +978,98 @@ def _serving() -> list[dict[str, Any]]:
   ]
 
 
+def _eval_cli_flags(
+    tree: ast.Module) -> dict[str, tuple[int, dict[str, ast.expr]]]:
+  """flag → (line of its own string, its argparse keywords as AST nodes).
+
+  The evaluator's CLI declares a flag in three ways, all read here: an
+  `add_argument` call, `_boolean(parser, flag, help)` (a boolean with an
+  optional value, default False), and a `(flag, default, help)` row of
+  `_COUNT_FLAGS`, which a loop adds.
+  """
+  found: dict[str, tuple[int, dict[str, ast.expr]]] = {}
+
+  def declare(flag: ast.expr, keywords: dict[str, ast.expr]) -> None:
+    if isinstance(flag, ast.Constant) and str(flag.value).startswith("--"):
+      found[str(flag.value)[2:]] = (flag.lineno, keywords)
+
+  for node in ast.walk(tree):
+    if isinstance(node, ast.Call) and node.args:
+      if (isinstance(node.func, ast.Attribute) and
+          node.func.attr == "add_argument"):
+        declare(node.args[0], {k.arg: k.value for k in node.keywords if k.arg})
+      elif (isinstance(node.func, ast.Name) and node.func.id == "_boolean" and
+            len(node.args) == 3):
+        declare(node.args[1], {
+            "default": ast.Constant(False),
+            "help": node.args[2]
+        })
+    elif (isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple) and
+          any(
+              isinstance(target, ast.Name) and target.id == "_COUNT_FLAGS"
+              for target in node.targets)):
+      for row in node.value.elts:
+        if isinstance(row, ast.Tuple) and len(row.elts) == 3:
+          declare(row.elts[0], {"default": row.elts[1], "help": row.elts[2]})
+  return found
+
+
+def _eval_cli_names(tree: ast.Module, cli_path: Path) -> dict[str, Any]:
+  """The literal constants a flag of the CLI may name: the module's own and
+  those it imports from its package (`from sdfb_evaluation.x import A as B`)."""
+  names = _module_constants(tree)
+  package = cli_path.resolve().parents[1]
+  for node in tree.body:
+    if not isinstance(node, ast.ImportFrom) or not node.module:
+      continue
+    head, _, rest = node.module.partition(".")
+    module = package.joinpath(*rest.split(".")).with_suffix(".py")
+    if head != package.name or not rest or not module.is_file():
+      continue
+    constants = _module_constants(_tree(module))
+    for alias in node.names:
+      if alias.name in constants:
+        names[alias.asname or alias.name] = constants[alias.name]
+  return names
+
+
+def _literal(node: ast.expr, names: dict[str, Any]) -> Any:
+  """`ast.literal_eval`, which also reads a name in `names` and `*name`
+  inside a tuple or a list (`choices=("auto", *SCOPE_MODES)`)."""
+  if isinstance(node, ast.Name) and node.id in names:
+    return names[node.id]
+  if isinstance(node, (ast.Tuple, ast.List)):
+    out: list[Any] = []
+    for item in node.elts:
+      if isinstance(item, ast.Starred):
+        out.extend(_literal(item.value, names))
+      else:
+        out.append(_literal(item, names))
+    return out
+  return ast.literal_eval(node)
+
+
 def eval_knobs(cli_path: Path = EVAL_CLI) -> list[dict[str, Any]]:
-  """The EVALUATION channel: the evaluator CLI by AST, else the plan list."""
-  found: dict[str, tuple[Any, list[str] | None, int]] = {}
-  if cli_path.is_file():
-    tree = ast.parse(
-        cli_path.read_text(encoding="utf-8"), filename=str(cli_path))
-    for node in ast.walk(tree):
-      if (isinstance(node, ast.Call) and
-          isinstance(node.func, ast.Attribute) and
-          node.func.attr == "add_argument" and node.args and
-          isinstance(node.args[0], ast.Constant)):
-        name = str(node.args[0].value).lstrip("-")
-        default: Any = None
-        choices: list[str] | None = None
-        for keyword in node.keywords:
-          try:
-            if keyword.arg == "default":
-              default = ast.literal_eval(keyword.value)
-            elif keyword.arg == "choices":
-              choices = list(ast.literal_eval(keyword.value))
-          except ValueError:
-            continue
-        found[name] = (default, choices, node.lineno)
+  """The EVALUATION channel: the evaluator CLI's flags, read by AST."""
+  tree = _tree(cli_path)
+  flags = _eval_cli_flags(tree)
+  names = _eval_cli_names(tree, cli_path)
+  try:
+    path = _rel(cli_path)
+  except ValueError:
+    path = cli_path.as_posix()
   out = []
-  for name, planned_default, planned_choices, unit, label, purpose in (
-      _PLANNED_EVAL):
-    source, token = "planned", None
-    default, choices = planned_default, planned_choices
-    if name in found:
-      default, found_choices, line = found[name]
-      choices = found_choices or planned_choices
-      try:
-        source = f"{cli_path.resolve().relative_to(REPO).as_posix()}:{line}"
-      except ValueError:
-        source = f"{cli_path.as_posix()}:{line}"
-      token = f"--{name}"
+  for name, unit, label in _EVAL_FLAGS:
+    if name not in flags:
+      raise LookupError(
+          f"--{name} is not a flag of {path}: the evaluator changed; "
+          "re-verify the EVALUATION channel (_EVAL_FLAGS)")
+    line, keywords = flags[name]
+    default, choices, help_text = (
+        _literal(keywords[key], names) if key in keywords else None
+        for key in ("default", "choices", "help"))
+    help_text = " ".join(str(help_text or "").split())
+    in_flex = name in _flex_params()
     out.append(
         _knob(
             id=f"eval_{name}",
@@ -1040,13 +1078,15 @@ def eval_knobs(cli_path: Path = EVAL_CLI) -> list[dict[str, Any]]:
             label=label,
             value=default,
             unit=unit,
-            settable_via=["cli"],
+            settable_via=["cli", "flex"] if in_flex else ["cli"],
             cli_flag=f"--{name}",
+            flex_param=name if in_flex else None,
             choices=choices,
-            help=purpose,
-            source=source,
-            source_token=token,
-            related_adrs=[],
+            # argparse fills %(default)s in when it prints a help text.
+            help=help_text.replace("%(default)s", str(default)),
+            source=f"{path}:{line}",
+            source_token=f'"--{name}"',
+            related_adrs=["0041"],
             docs=["docs/designs/2026-07-07-evaluation-framework-design.md"],
         ))
   return out

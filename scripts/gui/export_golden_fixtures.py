@@ -42,8 +42,11 @@ they return into `gui/packages/contracts/generated/golden/`:
   how the evaluator imports into this env (its `src` on `sys.path`).
 
 Floats are rounded to 12 decimals: the TS tests compare vectors to 1e-6 and
-the integer parts (buckets, counts, picks) exactly. `--check` exits 1 when a
-committed file differs from a fresh export.
+the integer parts (buckets, counts, picks) exactly. Every number is integer
+arithmetic, SHA-256 or correctly rounded IEEE 754 (`+ - * /`, `sqrt`,
+`math.fsum`), so a file is the same on any machine; its `python` stamp is
+the minor version, never the patch. `--check` exits 1 when a committed file
+differs from a fresh export, and prints the first line that differs.
 
 Design: docs/DESIGN.md §12 Platform GUI
 (ADR 0042).
@@ -55,7 +58,6 @@ import argparse
 import datetime as dt
 import decimal
 import json
-import platform
 import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -391,7 +393,7 @@ def _hashing() -> dict[str, Any]:
   small = embedding.HashingEmbedder(dim=16, seed=7)
   return {
       "generated_by": "scripts/gui/export_golden_fixtures.py",
-      "python": platform.python_version(),
+      "python": export_scoring_golden.PYTHON,
       "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py "
                 "(HashingEmbedder)",
       "dim": dim,
@@ -411,7 +413,7 @@ def _great() -> dict[str, Any]:
       "generated_by":
           "scripts/gui/export_golden_fixtures.py",
       "python":
-          platform.python_version(),
+          export_scoring_golden.PYTHON,
       "source":
           "packages/sdfb-core/src/sdfb_core/rag/serialize.py "
           "(serialize_row)",
@@ -502,7 +504,7 @@ def _retrieval() -> dict[str, Any]:
     cases.extend(_retrieval_cases(name, vectors, ks))
   return {
       "generated_by": "scripts/gui/export_golden_fixtures.py",
-      "python": platform.python_version(),
+      "python": export_scoring_golden.PYTHON,
       "source": "packages/sdfb-core/src/sdfb_core/rag/retrieval.py "
                 "(centroid over _PyExactIPIndex, retrieve_kcenter_k)",
       "note": "kcenter_rotate starts at (attempt * k) mod n, as "
@@ -526,6 +528,19 @@ def render(doc: dict[str, Any]) -> str:
   return json.dumps(doc, indent=1, ensure_ascii=False) + "\n"
 
 
+def _first_difference(committed: str, fresh: str) -> str:
+  """The first line where a committed file and a fresh export part, so a
+  failed `--check` on another machine says what differs there."""
+  if not committed:
+    return "  the committed file is missing"
+  old, new = committed.split("\n"), fresh.split("\n")
+  line = next((i for i, (a, b) in enumerate(zip(old, new)) if a != b),
+              min(len(old), len(new)))
+  return "\n".join(f"  line {line + 1}, {side}: " +
+                   (lines[line][:200] if line < len(lines) else "(no line)")
+                   for side, lines in (("committed", old), ("fresh", new)))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
   parser.add_argument(
@@ -541,13 +556,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.check:
       current = path.read_text(encoding="utf-8") if path.is_file() else ""
       if current != text:
-        drift.append(path)
+        drift.append((path, _first_difference(current, text)))
       continue
     args.out_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-  for path in drift:
+  for path, difference in drift:
     print(
-        f"{path}: drift — re-run scripts/gui/export_golden_fixtures.py",
+        f"{path}: drift — re-run scripts/gui/export_golden_fixtures.py\n"
+        f"{difference}",
         file=sys.stderr)
   return 1 if drift else 0
 
