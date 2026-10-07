@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import { catalogue, catalogueById, type MetricId } from "@contracts/generated/catalogue";
 import golden from "@contracts/generated/golden/scoring.json";
+import { vocabularies } from "@contracts/generated/schemas";
 
 import {
   aggregateScores,
@@ -57,6 +58,18 @@ describe("scoring.ts matches sdfb_evaluation.scoring (golden/scoring.json)", () 
       expect(rules).toContain(rule);
     const statuses = new Set(golden.cases.map((c) => c.row.status));
     expect([...statuses].sort()).toEqual(["fail", "info", "not_evaluated", "pass", "warn"]);
+  });
+
+  it("R66: a copy-rate case for every column kind the evaluator's schema names", () => {
+    const copyRate = golden.cases.filter(
+      (c) => c.rule === "R66" && c.input.metric_id === "field.substantive_copy_rate",
+    );
+    expect([...new Set(copyRate.map((c) => c.input.column_kind))].sort()).toEqual(
+      [...vocabularies["evaluation_metrics.column_kind"]].sort(),
+    );
+    // Only free text is gated: every other kind with a value is INFO.
+    for (const c of copyRate.filter((x) => x.input.value !== null))
+      expect(c.row.status, `${c.id} ${c.input.column_kind}`).toBe(c.input.column_kind === "text" ? "fail" : "info");
   });
 
   it("status: every case", () => {

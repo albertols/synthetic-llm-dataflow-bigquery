@@ -533,6 +533,20 @@ CASES: tuple[dict[str, Any], ...] = (
         0.25,
         floor=0.02,
         kind="numeric"),
+    _case(
+        "R66",
+        "a boolean column: INFO, gated only on free text",
+        "field.substantive_copy_rate",
+        0.002,
+        ci=(0.001295, 0.003087),
+        kind="boolean"),
+    _case(
+        "R66",
+        "a nested column: INFO, gated only on free text",
+        "field.substantive_copy_rate",
+        0.002,
+        ci=(0.001295, 0.003087),
+        kind="nested"),
 )
 
 # (metric, value, target): the five score functions straight, including the

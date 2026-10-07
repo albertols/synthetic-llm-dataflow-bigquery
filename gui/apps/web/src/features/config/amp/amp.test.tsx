@@ -29,11 +29,11 @@ const meter = (label: string) => {
   return term.closest("div")!.querySelector("dd")!.textContent;
 };
 
-// The amp renders every knob (83 of them): jsdom needs more than the default 5 s per test.
+// The amp renders every knob of knobs.json: jsdom needs more than the default 5 s per test.
 describe("the pipeline amp", { timeout: 30_000 }, () => {
   it("renders every knobs.json knob, one slider per turnable knob and none for constants", () => {
     render(<Harness />);
-    // role queries walk the whole 84-knob tree; a selector is enough to count.
+    // role queries walk the whole tree of knobs; a selector is enough to count.
     const sliders = document.querySelectorAll('[role="slider"]');
     const turnable = KNOBS.filter((k) => ["dial", "selector"].includes(kindOf(k)));
     expect(sliders).toHaveLength(turnable.length);

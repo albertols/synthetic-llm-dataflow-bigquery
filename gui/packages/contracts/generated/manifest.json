@@ -20,7 +20,7 @@
     "gui/packages/contracts/generated/golden/great_serialize.json": "e1dbe4d9b93cca7877afa89f2560f20f97118bc165f859c7a87248c1c6af3c19",
     "gui/packages/contracts/generated/golden/hashing_embedder.json": "7b0b3c3654fdfddc608f6004269b65e752fc007711e8be08dd63e574b9ca80a0",
     "gui/packages/contracts/generated/golden/retrieval.json": "c9996802599f3a56073703f18839cd0f74dd9c32b27da73889fab45511a306f8",
-    "gui/packages/contracts/generated/golden/scoring.json": "c7f13e347beafc27d34ea18793bf6b722d03a56ce20dbbf2405d1f03eb94db86"
+    "gui/packages/contracts/generated/golden/scoring.json": "fee752811ea84e374e9d56ac050dcb9099845df1865dcc3424a3702ce9e48aa6"
   },
   "outputs": [
     "schemas.ts",

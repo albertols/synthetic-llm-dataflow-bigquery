@@ -2361,6 +2361,62 @@
     "source_value": null,
     "detail": null
    }
+  },
+  {
+   "id": "s88",
+   "rule": "R66",
+   "note": "a boolean column: INFO, gated only on free text",
+   "input": {
+    "metric_id": "field.substantive_copy_rate",
+    "value": 0.002,
+    "ci_low": 0.001295,
+    "ci_high": 0.003087,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true,
+    "column_kind": "boolean"
+   },
+   "row": {
+    "status": "info",
+    "score": null,
+    "value": 0.002,
+    "ci_low": 0.001295,
+    "ci_high": 0.003087,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "gated only on free text (Ruling R66): reusing a rare real category or identifier is not evidence of memorisation; reported, not gated (field.value_memorization_lift is the gated signal)"
+    }
+   }
+  },
+  {
+   "id": "s89",
+   "rule": "R66",
+   "note": "a nested column: INFO, gated only on free text",
+   "input": {
+    "metric_id": "field.substantive_copy_rate",
+    "value": 0.002,
+    "ci_low": 0.001295,
+    "ci_high": 0.003087,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {},
+    "enforced": true,
+    "column_kind": "nested"
+   },
+   "row": {
+    "status": "info",
+    "score": null,
+    "value": 0.002,
+    "ci_low": 0.001295,
+    "ci_high": 0.003087,
+    "noise_floor": null,
+    "source_value": null,
+    "detail": {
+     "reason": "gated only on free text (Ruling R66): reusing a rare real category or identifier is not evidence of memorisation; reported, not gated (field.value_memorization_lift is the gated signal)"
+    }
+   }
   }
  ],
  "score_values": [
