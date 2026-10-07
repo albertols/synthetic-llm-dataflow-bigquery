@@ -34,7 +34,7 @@ dependencies = [
 sdfb-eval = "sdfb_evaluation.cli.main:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "hypothesis>=6.100", "mypy>=1.11", "types-PyYAML", "types-requests"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3", "hypothesis>=6.100", "mypy>=1.11", "types-PyYAML", "types-requests"]
 
 [tool.uv]
 # Beam 2.74 → envoy-data-plane → betterproto==2.0.0b6 (pre-release): same pin as the root workspace.
@@ -51,6 +51,16 @@ packages = ["src/sdfb_evaluation"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = ["gcp: requires live GCP credentials", "slow: takes >5s"]
+# A test that hangs fails instead of blocking the run (pytest-timeout). The
+# slowest test, a module fixture included, takes about 60 s on a slow laptop;
+# 300 s leaves room for a loaded machine. The method is "thread" because a hang
+# inside native code (a classifier's fit) never returns to the interpreter, so
+# a signal could not interrupt it: the watchdog prints every thread's stack and
+# ends the session. faulthandler prints the stacks a little earlier even when
+# the interpreter lock is held.
+timeout = 300
+timeout_method = "thread"
+faulthandler_timeout = 240
 
 [tool.mypy]
 python_version = "3.11"

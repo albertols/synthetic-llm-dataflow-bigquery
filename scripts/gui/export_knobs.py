@@ -556,6 +556,7 @@ def _generation() -> list[dict[str, Any]]:
           channel="generation",
           group="Sampler",
           label="Retries per batch",
+          # pylint: disable-next=unsubscriptable-object  # pydantic's model_fields is a dict
           value=fields["max_retries"].default,
           unit="retries",
           settable_via=["constant"],

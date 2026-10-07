@@ -88,6 +88,10 @@ that must match the generator is mirrored and pinned by the two-sided golden fil
 
 ## Pitfalls
 
+- The package has its own environment. With the root environment active in the shell, `uv` warns that `VIRTUAL_ENV`
+  does not match: run `env -u VIRTUAL_ENV uv run …`, and never pass `--active` (it would install the evaluator's
+  dependencies into the root environment). A test that hangs fails after 300 s (`pytest-timeout`) and prints every
+  thread's stack.
 - The holdout share cannot tell one heavy copied cluster from split noise; the exact-copy metrics own that case.
 - The detection baseline is taken at n = |R| (`baseline_n`).
 - An orphan rate whose rate x n is below k reveals sums only; the design (§4.9) says what is published and what is withheld.

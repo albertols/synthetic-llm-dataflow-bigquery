@@ -558,6 +558,7 @@ class EncodeBatchFn(beam.DoFn):
     self._encoder = BatchEncoder(
         self._layout, self._side, salt=self._salt, subsample_rate=self._rate)
 
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, rows: Sequence[Mapping[str,
                                            Any]]) -> Iterator[EncodedBatch]:
     if not rows:

@@ -53,7 +53,7 @@ describes the run, not the data: a run whose metrics fail still SUCCEEDED.
 ```bash
 cd packages/sdfb-evaluation
 uv sync --frozen
-uv run pytest -q -m "not gcp"
+uv run pytest -q -m "not gcp"   # about 5 to 15 minutes; a test that hangs fails after 300 s
 
 # prints the four `bq mk` commands and the two view statements
 uv run sdfb-eval schemas --project demo-project
@@ -63,6 +63,13 @@ uv run sdfb-eval schemas --project demo-project --apply
 
 The dataset (`synthetic_data_quality` unless `--dataset` says otherwise)
 must exist. The commands below read Application Default Credentials.
+
+This package has its own environment (`packages/sdfb-evaluation/.venv`). If
+your shell has the repository root's environment active, `uv` warns that
+`VIRTUAL_ENV` does not match and ignores it. Run the commands as
+`env -u VIRTUAL_ENV uv run …` to silence the warning. Never pass `--active`
+here: it would install this package's dependencies into the root
+environment.
 
 ### 2. Plan first (nothing runs)
 
