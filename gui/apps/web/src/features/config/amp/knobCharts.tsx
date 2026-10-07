@@ -69,7 +69,7 @@ export function specFor(id: string, settings: Record<string, KnobValue>, inputs:
     case "eval_sample_rows":
     case "eval_privacy_sample_rows":
     case "eval_detection_sample_rows":
-      return dkwChart(num(settings[id] ?? null, 200_000), "the planned sample");
+      return dkwChart(num(settings[id] ?? null, 200_000), "the evaluation sample");
     case "source_stats": {
       const s = inputs.nonEmptyShare;
       return {

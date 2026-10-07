@@ -12,7 +12,6 @@ import type { EChartsOption } from "echarts";
 import type {
   CorrMatrixPayload,
   DistanceHistPayload,
-  FanoutHistPayload,
   HistogramPayload,
   QuantilesPayload,
   RocCurvePayload,
@@ -412,49 +411,6 @@ export function pairedHistogram(
       series: [
         { type: "bar", name: a.name, encode: { x: "distance", y: a.name }, itemStyle: { color: tokens.slots[1] } },
         { type: "bar", name: b.name, encode: { x: "distance", y: b.name }, itemStyle: { color: tokens.slots[2] } },
-      ],
-    },
-  };
-}
-
-export function fanoutChart(
-  source: FanoutHistPayload | null | undefined,
-  synthetic: FanoutHistPayload | null | undefined,
-  tokens: ChartTokens,
-): ChartSpec | null {
-  if (!source || !synthetic) return null;
-  const values = [...new Set([...source.fanout, ...synthetic.fanout])].sort((a, b) => a - b);
-  if (!values.length) return null;
-  const share = (p: FanoutHistPayload) => {
-    const total = sum(p.counts);
-    const map = new Map(p.fanout.map((f, i) => [f, total ? (p.counts[i] ?? 0) / total : 0]));
-    return (v: number) => map.get(v) ?? 0;
-  };
-  const s = share(source);
-  const y = share(synthetic);
-  const cap = Math.max(source.capped_at, synthetic.capped_at);
-  const label = (v: number) => (v >= cap ? `≥ ${cap}` : String(v));
-  return {
-    data: values.map((v) => ({ children: label(v), source: round(s(v)), synthetic: round(y(v)) })),
-    option: {
-      legend: { top: 0, left: 0 },
-      grid: { left: 8, right: 12, top: 36, bottom: 8, containLabel: true },
-      tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, valueFormatter: (v) => fmtShare(Number(v)) },
-      xAxis: { type: "category", name: "children per parent", nameLocation: "middle", nameGap: 26 },
-      yAxis: percentAxis,
-      series: [
-        {
-          type: "bar",
-          name: SIDE_NAME.source,
-          encode: { x: "children", y: "source" },
-          itemStyle: { color: tokens.slots[0] },
-        },
-        {
-          type: "bar",
-          name: SIDE_NAME.synthetic,
-          encode: { x: "children", y: "synthetic" },
-          itemStyle: { color: tokens.slots[1] },
-        },
       ],
     },
   };

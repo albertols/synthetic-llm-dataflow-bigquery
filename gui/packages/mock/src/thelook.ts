@@ -514,7 +514,7 @@ export const EDGES: EdgeDef[] = [
 /** The model's `ref`: an external parent keeps its landing dataset. */
 export const edgeRef = (e: EdgeDef) => (e.external ? `${LANDING_DATASET}.${e.parent}` : e.parent);
 
-/** The evaluator's edge label (contracts `formatEdge`): `child.col+col->parent.col+col`. */
+/** The evaluator's edge label (contracts `formatEdge`): `child(col,col) -> parent(col,col)`. */
 export const edgeLabel = (e: EdgeDef) => formatEdge(e.child, { cols: e.cols, ref: edgeRef(e), ref_cols: e.parentCols });
 
 /** The registry's edge role (RelationshipRegistry.edge_roles), plus `documented` for enforced: false. */

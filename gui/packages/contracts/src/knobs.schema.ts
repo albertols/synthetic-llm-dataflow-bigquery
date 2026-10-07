@@ -14,7 +14,7 @@ export const knobValueSchema: z.ZodType<KnobValue> = z.lazy(() =>
   ]),
 );
 
-const sourceSchema = z.union([z.literal("planned"), z.string().regex(/^[\w./-]+:\d+$/)]);
+const sourceSchema = z.string().regex(/^[\w./-]+:\d+$/);
 
 export const knobSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]*$/),
@@ -33,7 +33,7 @@ export const knobSchema = z.object({
   help: z.string().optional(),
   comment: z.string().optional(),
   source: sourceSchema,
-  source_token: z.string().nullable(),
+  source_token: z.string().min(1),
   related_adrs: z.array(z.string().regex(/^\d{4}$/)),
   docs: z.array(z.string()),
 });

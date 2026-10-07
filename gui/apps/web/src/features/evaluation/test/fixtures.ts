@@ -261,13 +261,13 @@ export function richDetail(): EvaluationDetail {
     }),
     metric("relationship.orphan_rate", {
       table_name: "orders",
-      edge: "orders.user_id->users.id",
+      edge: "orders(user_id) -> users(id)",
       value: 0,
       detail: { orphans: 0, enforced: true, role: "driving" },
     }),
     metric("relationship.orphan_rate", {
       table_name: "orders",
-      edge: "orders.buyer_id->users.id",
+      edge: "orders(buyer_id) -> users(id)",
       value: 0.02,
       score: null,
       status: "info",
@@ -275,7 +275,7 @@ export function richDetail(): EvaluationDetail {
     }),
     metric("relationship.orphan_rate_source", {
       table_name: "orders",
-      edge: "orders.buyer_id->users.id",
+      edge: "orders(buyer_id) -> users(id)",
       value: 0.015,
       score: 0,
       status: "info",

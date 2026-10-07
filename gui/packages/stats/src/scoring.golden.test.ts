@@ -40,6 +40,7 @@ function reading(c: Case): MetricReading {
     noiseFloor: num(i.noise_floor),
     sourceValue: num(i.source_value),
     detail: i.detail,
+    columnKind: i.column_kind,
   };
 }
 
@@ -52,7 +53,8 @@ describe("scoring.ts matches sdfb_evaluation.scoring (golden/scoring.json)", () 
     expect(golden.generated_by).toBe("scripts/gui/export_golden_fixtures.py");
     expect(golden.cases.length).toBeGreaterThanOrEqual(60);
     const rules = new Set(golden.cases.map((c) => c.rule));
-    for (const rule of ["R9", "R26", "R38", "R39", "R40", "R41", "R42", "R43", "R45"]) expect(rules).toContain(rule);
+    for (const rule of ["R9", "R26", "R38", "R39", "R40", "R41", "R42", "R43", "R45", "R66"])
+      expect(rules).toContain(rule);
     const statuses = new Set(golden.cases.map((c) => c.row.status));
     expect([...statuses].sort()).toEqual(["fail", "info", "not_evaluated", "pass", "warn"]);
   });

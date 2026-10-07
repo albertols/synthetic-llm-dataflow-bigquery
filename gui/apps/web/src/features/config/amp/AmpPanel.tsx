@@ -67,7 +67,6 @@ export function AmpPanel({
   const counts = {
     turnable: KNOBS.filter((k) => ["dial", "selector"].includes(kindOf(k))).length,
     screws: KNOBS.filter((k) => kindOf(k) === "screw").length,
-    planned: KNOBS.filter((k) => kindOf(k) === "planned").length,
   };
 
   return (
@@ -88,7 +87,7 @@ export function AmpPanel({
           <p className="text-xs text-text-3">
             {KNOBS.length} knobs · {CHANNELS.length} channels · values from the code at{" "}
             <code className="font-mono text-text-2">{CODE_REF_SHORT}</code> · {counts.turnable} turnable ·{" "}
-            {counts.screws} fixed screws · {counts.planned} planned
+            {counts.screws} fixed screws
           </p>
         </div>
         <Legend />
@@ -242,7 +241,6 @@ function Legend() {
     { label: "fixed screw", d: <ScrewGlyph /> },
     { label: "readout", d: <ReadoutGlyph /> },
     { label: "jack", d: <JackGlyph /> },
-    { label: "planned", d: <PlannedGlyph /> },
   ];
   return (
     <ul className="flex flex-wrap items-center gap-x-3 gap-y-1" aria-label="Panel parts">
@@ -286,13 +284,6 @@ function ReadoutGlyph() {
     <svg viewBox="0 0 16 16" className={glyph} aria-hidden="true">
       <rect x="1" y="4.5" width="14" height="7" rx="1.5" fill="var(--bg)" stroke="var(--border-strong)" />
       <line x1="4" y1="8" x2="12" y2="8" stroke="var(--accent-text)" strokeWidth="1.5" />
-    </svg>
-  );
-}
-function PlannedGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" className={glyph} aria-hidden="true">
-      <circle cx="8" cy="8" r="6.5" fill="var(--surface-2)" stroke="var(--control-border)" strokeDasharray="2 2" />
     </svg>
   );
 }

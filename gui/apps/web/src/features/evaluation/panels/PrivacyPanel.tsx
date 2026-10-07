@@ -256,7 +256,6 @@ function keyText(value: unknown): string {
 function FlaggedRows({ flags, table }: { flags: RowFlag[]; table?: string }) {
   const [all, setAll] = useState(false);
   const rows = flags.filter((f) => !table || f.table_name === table);
-  const rawKeys = rows.some((f) => f.source_key !== null);
   const shown = all ? rows : rows.slice(0, 25);
   return (
     <section aria-labelledby="flags-title" className="grid gap-3">
@@ -265,12 +264,6 @@ function FlaggedRows({ flags, table }: { flags: RowFlag[]; table?: string }) {
         <InfoHint concept="eval:row-flags" />
         <span className="ml-2 text-xs font-normal text-text-3">{rows.length} rows · keys only</span>
       </h2>
-      {rawKeys ? (
-        <Callout tone="warn" title="Raw source keys were stored">
-          This evaluation ran with raw source keys (--row_flags_source_keys=raw). The GUI still shows only the salted
-          hash.
-        </Callout>
-      ) : null}
       {rows.length ? (
         <>
           <TableContainer aria-label="Flagged rows" className="max-h-[28rem]">
@@ -297,8 +290,8 @@ function FlaggedRows({ flags, table }: { flags: RowFlag[]; table?: string }) {
                     <TableCell className="text-right text-xs tabular-nums">{f.rank}</TableCell>
                     <TableCell className="font-mono text-xs">{f.table_name}</TableCell>
                     <TableCell className="font-mono text-xs whitespace-nowrap">{keyText(f.synthetic_key)}</TableCell>
-                    <TableCell className="font-mono text-xs text-text-2" title="salted hash of the matched source key">
-                      {f.source_key_hash ? `${f.source_key_hash.slice(0, 12)}…` : MISSING}
+                    <TableCell className="font-mono text-xs text-text-2" title="keyed hash of the matched source record">
+                      {f.source_key_hash ?? MISSING}
                     </TableCell>
                     <TableCell className="text-xs">{f.source_set ?? MISSING}</TableCell>
                     <TableCell className="text-right font-mono text-xs tabular-nums">{fmtSig(f.distance)}</TableCell>

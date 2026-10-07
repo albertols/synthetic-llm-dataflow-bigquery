@@ -14,6 +14,7 @@
  */
 import type { MetricRow } from "@contracts/api";
 import {
+  copyRateInfoReason,
   INTERVAL_NOISE_METHODS,
   noiseReference,
   reached,
@@ -72,6 +73,11 @@ export interface Reading {
   kind: string | null;
   /** The orphan rate of a documented edge (enforced: false): INFO, never FAIL (R42). */
   documented: boolean;
+  /**
+   * The copy rate of a column that is not free text: reported, never gated (R66). The evaluator's
+   * own reason (detail.reason), or the rule's when the row carries none.
+   */
+  ungated: string | null;
   usesCi: boolean;
 }
 
@@ -165,7 +171,15 @@ function scorerReading(row: MetricRow, gateSource: GateSource): MetricReading {
     noiseFloor: row.noise_floor,
     sourceValue: row.source_value,
     detail: detailOf(row),
+    columnKind: row.column_kind,
   };
+}
+
+/** Why a copy rate is INFO whatever its value, or null when it is gated (its column is free text). */
+function ungatedReason(row: MetricRow): string | null {
+  if (row.metric_id !== "field.substantive_copy_rate") return null;
+  const rule = copyRateInfoReason(row.column_kind);
+  return rule === null ? null : (reasonOf(row) ?? rule);
 }
 
 export function readingOf(row: MetricRow): Reading {
@@ -216,6 +230,7 @@ export function readingOf(row: MetricRow): Reading {
     reason: reasonOf(row),
     kind: row.value_kind,
     documented: isDocumentedEdge(row),
+    ungated: ungatedReason(row),
     usesCi,
   };
 }
@@ -316,6 +331,9 @@ export function explainStatus(row: MetricRow, reading: Reading = readingOf(row))
   }
   if (reading.documented) {
     return "Documented edge (enforced: false): the launch does not enforce it, so its orphan rate is reported as INFO, never as a FAIL.";
+  }
+  if (reading.ungated && row.status === "info") {
+    return `INFO on a ${row.column_kind} column, whatever the rate — ${reading.ungated}.`;
   }
   const { warn, fail, gate } = reading;
   let text: string;

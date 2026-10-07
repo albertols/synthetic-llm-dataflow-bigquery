@@ -2,12 +2,15 @@
  * `evaluation_profiles.payload` and `evaluation_metrics.detail`, per kind.
  *
  * The BigQuery column is `JSON` (the generated row schema says `z.json()`), so
- * the evaluator owns the exact shape. These schemas are the GUI's reading of
- * the evaluation plan (profiles honour the D6 literal policy: a value is a
- * literal only when its column has ≤ 50 source-distinct values and the value
- * a source count ≥ 10; otherwise it is a hashed label `h:<8 hex>`). The mock
- * produces exactly these shapes; a live payload that does not parse must be
- * shown as "profile unavailable", never crash a chart: use `parseProfile`.
+ * the evaluator owns the exact shape: its producers (`beam/dense.py`,
+ * `beam/census.py`, `beam/privacy.py`) write the shapes below (Ruling R27).
+ * Profiles honour the D6 literal policy: a value is a literal only when its
+ * column has ≤ 50 source-distinct values and the value a source count ≥ 10;
+ * otherwise it is a keyed-hash label `h:<8 hex>`. A payload may carry keys
+ * these schemas do not list (a histogram's `below_mass` / `above_mass` /
+ * `extremes`, for one); they are ignored. The mock produces exactly these
+ * shapes; a live payload that does not parse must be shown as "profile
+ * unavailable", never crash a chart: use `parseProfile`.
  *
  * Bins follow the evaluator's `bin_counts`: `edges` are interior edges and
  * `counts` has `edges.length + 1` entries, (-inf, e0], (e0, e1], …, (e_last, +inf).
@@ -21,7 +24,7 @@ const share = z.number().min(0).max(1);
 export const histogramPayloadSchema = z.object({
   edges: z.array(z.number()),
   counts: z.array(count),
-  /** Observed extremes, to draw the open-ended tail bins. */
+  /** The side's extremes, to draw the open-ended tail bins; null when the count rule withholds them. */
   min: z.number().nullable(),
   max: z.number().nullable(),
   nulls: count,
@@ -105,17 +108,6 @@ export const contingencyPayloadSchema = z.object({
   counts: z.array(z.array(count)),
 });
 
-export const fanoutHistPayloadSchema = z.object({
-  /** Children per parent: fanout[i] children observed counts[i] times; the last value is ≥ capped_at. */
-  fanout: z.array(z.int().nonnegative()),
-  counts: z.array(count),
-  capped_at: z.int().positive(),
-  parents: count,
-  children: count,
-  mean: z.number().nonnegative(),
-  zero_child_share: share,
-});
-
 /** Distance to closest record (Gower, 0..1) or NNDR histograms: side "synthetic" = syn→R, "holdout" = H→R. */
 export const distanceHistPayloadSchema = z.object({
   edges: z.array(z.number()),
@@ -158,7 +150,6 @@ export const profilePayloadSchemas = {
   null_patterns: nullPatternsPayloadSchema,
   corr_matrix: corrMatrixPayloadSchema,
   contingency: contingencyPayloadSchema,
-  fanout_hist: fanoutHistPayloadSchema,
   dcr_hist: distanceHistPayloadSchema,
   nndr_hist: distanceHistPayloadSchema,
   roc_curve: rocCurvePayloadSchema,
@@ -170,7 +161,6 @@ export type ProfilePayload<K extends ProfileKind> = z.infer<(typeof profilePaylo
 export type HistogramPayload = ProfilePayload<"histogram">;
 export type QuantilesPayload = ProfilePayload<"quantiles">;
 export type TopkPayload = ProfilePayload<"topk">;
-export type FanoutHistPayload = ProfilePayload<"fanout_hist">;
 export type DistanceHistPayload = ProfilePayload<"dcr_hist">;
 export type RocCurvePayload = ProfilePayload<"roc_curve">;
 export type CorrMatrixPayload = ProfilePayload<"corr_matrix">;

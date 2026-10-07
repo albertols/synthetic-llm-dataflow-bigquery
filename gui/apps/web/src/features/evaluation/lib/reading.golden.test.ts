@@ -19,7 +19,8 @@ function rowOf(c: (typeof golden.cases)[number]): MetricRow {
   const meta = catalogueById[c.input.metric_id as MetricId];
   return metric(c.input.metric_id, {
     table_name: "users",
-    edge: meta.level === "relationship" ? "orders.user_id->users.id" : null,
+    column_kind: c.input.column_kind as MetricRow["column_kind"],
+    edge: meta.level === "relationship" ? "orders(user_id) -> users(id)" : null,
     value: c.row.value,
     ci_low: c.row.ci_low,
     ci_high: c.row.ci_high,
@@ -52,6 +53,8 @@ describe("explanations re-read the evaluator's rule (golden/scoring.json)", () =
       else if (detail.nonfinite) expect(text, c.id).toMatch(/past the bad side .* → FAIL/);
       else if (c.input.metric_id === "relationship.orphan_rate" && c.row.status === "info")
         expect(text, c.id).toMatch(/^Documented edge/);
+      else if (c.rule === "R66" && c.row.status === "info")
+        expect(text, c.id).toBe(`INFO on a ${c.input.column_kind} column, whatever the rate — ${detail.reason}.`);
       else if (c.row.status !== "info") expect(text, c.id).toMatch(new RegExp(`→ ${c.row.status.toUpperCase()}`));
     }
   });

@@ -8,14 +8,13 @@
  *   port      settable free-form value (a URI, a flag string) → a jack, not turnable here
  *   screw     constant → a fixed screw (a code edit changes it)
  *   readout   derived → an LED readout
- *   planned   the evaluator CLI does not exist yet (Ruling G2) → dimmed, not turnable
  */
 import type { Knob, KnobChannel, KnobValue } from "@contracts/knobs";
 import { knobs as knobsFile } from "@contracts/generated/knobs";
 
 import { formatBytes, formatCount, formatNumber } from "@/lib/format";
 
-export type KnobKind = "dial" | "selector" | "port" | "screw" | "readout" | "planned";
+export type KnobKind = "dial" | "selector" | "port" | "screw" | "readout";
 
 export const KNOBS: readonly Knob[] = knobsFile.knobs;
 export const CHANNELS: readonly KnobChannel[] = knobsFile.channels;
@@ -58,10 +57,6 @@ export function measured(id: string) {
   return found;
 }
 
-export function isPlanned(k: Knob): boolean {
-  return k.source === "planned";
-}
-
 export function isSettable(k: Knob): boolean {
   return k.settable_via.some((via) => via === "cli" || via === "composer" || via === "flex");
 }
@@ -93,7 +88,6 @@ export function choicesOf(k: Knob): string[] | null {
 }
 
 export function kindOf(k: Knob): KnobKind {
-  if (isPlanned(k)) return "planned";
   if (k.settable_via.includes("constant")) return "screw";
   if (k.settable_via.includes("derived")) return "readout";
   if (!isSettable(k)) return "screw";
@@ -119,8 +113,10 @@ export function positions(k: Knob, current: KnobValue): { values: KnobValue[]; i
     return { values, index: index >= 0 ? index : 0 };
   }
   if (kind === "selector") {
-    const values = choicesOf(k) ?? [];
-    const index = values.indexOf(asText(current));
+    const choices: KnobValue[] = choicesOf(k) ?? [];
+    // A default that is none of the choices (eval_mode: unset, the runner decides) is a position of its own.
+    const values = choices.includes(asText(k.value)) ? choices : [k.value, ...choices];
+    const index = values.findIndex((v) => asText(v) === asText(current));
     return { values, index: index >= 0 ? index : 0 };
   }
   return null;

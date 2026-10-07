@@ -41,10 +41,10 @@ export interface Knob {
   help?: string;
   /** The comment block above a constant (or a function docstring). */
   comment?: string;
-  /** "repo/relative/path.py:LINE", or "planned" (EVALUATION channel before the evaluator CLI exists). */
+  /** "repo/relative/path.py:LINE": where the value is defined. */
   source: string;
   /** The text the exporter's test finds on the `source` line. */
-  source_token: string | null;
+  source_token: string;
   /** ADR numbers ("0022") cited by the help text, the comment block or the exporter. */
   related_adrs: string[];
   /** Repo-relative docs paths. */

@@ -8,7 +8,6 @@
  *                    "fixed constant" — there is nothing to turn.
  *   readout          a derived value's LED readout (button → sheet).
  *   port             a jack for a free-form flag (button → sheet).
- *   planned          a dimmed dial whose CLI is not shipped (button → sheet).
  *
  * Every part carries a visible text label: the panel never relies on a
  * pictogram (see gui/BRANDING.md, the amp's trade-dress rule).
@@ -36,7 +35,6 @@ export type KnobControlProps = {
 
 /** Accessible description of how a knob can be set. */
 export function settableText(k: Knob, kind: KnobKind = kindOf(k)): string {
-  if (kind === "planned") return "Planned: the evaluator CLI is not shipped yet.";
   if (kind === "screw") return "Fixed constant: not settable, change it in code.";
   if (kind === "readout") return "Derived from other settings: not settable directly.";
   const via = k.settable_via.map((v) => SETTABLE_LABEL[v] ?? v).join(", ");
@@ -54,10 +52,7 @@ export function KnobControl({ knob: k, value, onChange, onOpen, live = false }: 
     <div
       data-knob={k.id}
       data-kind={kind}
-      className={cn(
-        "group/knob relative flex w-[6.25rem] shrink-0 flex-col sm:w-[7.25rem] items-center gap-1.5 rounded-lg px-1.5 pt-2 pb-2.5 text-center",
-        kind === "planned" && "opacity-80",
-      )}
+      className="group/knob relative flex w-[6.25rem] shrink-0 flex-col items-center gap-1.5 rounded-lg px-1.5 pt-2 pb-2.5 text-center sm:w-[7.25rem]"
     >
       {kind === "dial" || kind === "selector" ? (
         <Rotary
@@ -98,27 +93,21 @@ export function KnobControl({ knob: k, value, onChange, onOpen, live = false }: 
         details.
       </span>
       <span className="flex flex-wrap justify-center gap-0.5" aria-hidden="true">
-        {kind === "planned" ? (
-          <Chip tone="planned">planned</Chip>
-        ) : (
-          k.settable_via.map((via) => <Chip key={via}>{SETTABLE_LABEL[via] ?? via}</Chip>)
-        )}
+        {k.settable_via.map((via) => (
+          <Chip key={via}>{SETTABLE_LABEL[via] ?? via}</Chip>
+        ))}
         {live ? <Chip tone="live">scenario</Chip> : null}
       </span>
     </div>
   );
 }
 
-function Chip({ children, tone }: { children: string; tone?: "planned" | "live" }) {
+function Chip({ children, tone }: { children: string; tone?: "live" }) {
   return (
     <span
       className={cn(
         "rounded-[3px] border px-1 text-[9px] leading-[14px] font-semibold tracking-wide uppercase",
-        tone === "planned"
-          ? "border-dashed border-control-border text-text-2"
-          : tone === "live"
-            ? "border-accent/50 text-accent-text"
-            : "border-border-strong text-text-3",
+        tone === "live" ? "border-accent/50 text-accent-text" : "border-border-strong text-text-3",
       )}
     >
       {children}
@@ -253,7 +242,7 @@ function Rotary({ knob: k, kind, values, index, labelId, descId, onChange, onOpe
   );
 }
 
-/** Screws, readouts, jacks and planned dials: not turnable, text-labelled next to them. */
+/** Screws, readouts and jacks: not turnable, text-labelled next to them. */
 function FixedPart({ kind, value }: { kind: KnobKind; value: string }) {
   if (kind === "screw")
     return (
@@ -282,26 +271,11 @@ function FixedPart({ kind, value }: { kind: KnobKind; value: string }) {
         </text>
       </svg>
     );
-  if (kind === "port")
-    return (
-      <svg viewBox="0 0 64 64" className="size-16" aria-hidden="true">
-        <circle cx="32" cy="32" r="14" fill="var(--surface-3)" stroke="var(--control-border)" strokeWidth="1.5" />
-        <circle cx="32" cy="32" r="6" fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1.5" />
-      </svg>
-    );
-  // planned: a dial outline with a dashed ring, no pointer.
+  // port: a jack.
   return (
     <svg viewBox="0 0 64 64" className="size-16" aria-hidden="true">
-      <circle
-        cx="32"
-        cy="32"
-        r="22"
-        fill="var(--surface-2)"
-        stroke="var(--control-border)"
-        strokeWidth="1.5"
-        strokeDasharray="3 3"
-      />
-      <circle cx="32" cy="32" r="3" fill="var(--control-border)" />
+      <circle cx="32" cy="32" r="14" fill="var(--surface-3)" stroke="var(--control-border)" strokeWidth="1.5" />
+      <circle cx="32" cy="32" r="6" fill="var(--bg)" stroke="var(--border-strong)" strokeWidth="1.5" />
     </svg>
   );
 }

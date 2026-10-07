@@ -50,6 +50,10 @@ export const ADRS: Readonly<Record<string, { file: string; title: string }>> = {
   "0036": { file: "0036-parent-driven-fanout-generation.md", title: "Parent-driven fan-out generation" },
   "0037": { file: "0037-multi-parent-children.md", title: "Multi-parent children" },
   "0038": { file: "0038-measured-conflicts-adjust-the-model.md", title: "Measured conflicts adjust the model" },
+  "0041": {
+    file: "0041-evaluation-standalone-package.md",
+    title: "Evaluation is a standalone package and a separate job",
+  },
 };
 
 export const adrLink = (number: string): ConceptLink | null => {
@@ -630,65 +634,64 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
   },
   // -------------------------------------------------------------- EVALUATION
   eval_mode: {
-    purpose: "Planned evaluator flag: exact scans every row; sampled evaluates Bernoulli samples per side.",
-    up: "exact: no sampling error on the synthetic side, full-table cost.",
-    down: "sampled: cheaper, with intervals as wide as the sample.",
+    purpose:
+      "exact reads every row of both sides; sampled reads a salted row sample of each table larger than --sample_rows. Unset, the runner decides: sampled on the DirectRunner, exact on Dataflow.",
+    up: "exact: no sampling error, every metric evaluated, full-table cost.",
+    down: "sampled: cheaper, with floors and intervals as wide as the sample; metrics that need every row of a side are not evaluated.",
   },
   eval_sample_rows: {
-    purpose: "Planned: rows per side in sampled mode.",
+    purpose: "Sampled mode: the rows read per side of a table larger than this. A smaller table is read in full.",
     up: "Tighter noise floors (1/√n), more bytes scanned.",
     down: "Cheaper, wider floors.",
     formula: "\\varepsilon(2\\times10^5) \\approx 0.0030",
   },
   eval_privacy_sample_rows: {
-    purpose: "Planned: synthetic rows the Gower nearest-neighbour privacy checks read.",
+    purpose: "Rows of the nearest-neighbour privacy sample: the distance-to-closest-record and NNDR checks.",
     up: "Rarer copies become detectable; nearest-neighbour cost grows quadratically.",
     down: "Faster, less sensitive privacy checks.",
   },
   eval_detection_sample_rows: {
-    purpose: "Planned: rows per side the classifier two-sample test reads.",
+    purpose: "Rows per side in the detection sample: the classifier two-sample test.",
     up: "A tighter AUC interval.",
     down: "A wider AUC interval.",
   },
   eval_pair_max_columns: {
-    purpose: "Planned: columns whose pairs feed the correlation and contingency metrics.",
+    purpose: "Columns whose pairs are compared, per table: the correlation and contingency metrics.",
     up: "Quadratically more pairs.",
     down: "Joint structure checked on fewer columns.",
   },
-  eval_topk_profile: {
-    purpose: "Planned: values kept in each top-k profile (metrics still use every value).",
-    up: "Bigger profile rows.",
-    down: "Smaller profiles; the metric values do not change.",
-  },
   eval_row_flags_top_k: {
-    purpose: "Planned: rows kept per privacy check in evaluation_row_flags.",
+    purpose: "Row flags kept per check and table in evaluation_row_flags.",
     up: "More flagged rows to inspect.",
     down: "Fewer rows stored.",
   },
   eval_row_flags_source_keys: {
-    purpose: "Planned: hashed stores a salted hash of a matched source key; raw stores the key itself.",
-    up: "raw exposes source keys in a results table.",
-    down: "hashed (default) lines keys up without revealing them.",
+    purpose:
+      "How a row flag names the matched source record: as a keyed hash only. hashed is the one value; raw source keys are never written.",
+    up: "No other value: the flag exists so a launch states the policy.",
+    down: "hashed lines a source record up across the checks of one evaluation without revealing its key.",
   },
   eval_max_bytes_billed: {
-    purpose: "Planned: maximumBytesBilled on every evaluator query.",
+    purpose:
+      "BigQuery bytes the evaluation may process. The planner adds up its dry runs and refuses the evaluation before anything is billed.",
     up: "Bigger tables can be evaluated; a mistake costs more.",
-    down: "Queries over the cap are refused before they run.",
+    down: "An evaluation over the cap is refused at planning.",
   },
   eval_max_shuffle_gb: {
-    purpose: "Planned: the predicted Beam shuffle above which the evaluator refuses to launch.",
-    up: "Bigger evaluations run.",
-    down: "More launches refused.",
+    purpose:
+      "Beam shuffle the value census may use. Above it, high-cardinality columns are value-sampled instead of counted exactly; nothing is refused.",
+    up: "More columns keep an exact census.",
+    down: "More columns are value-sampled (their rows say method = value_sampled).",
   },
   eval_scope: {
     purpose:
-      "Planned: which synthetic rows count — the whole table, a snapshot, the rows the run appended, or a manual window.",
-    up: "Wider scopes mix runs.",
-    down: "Narrower scopes isolate one run's rows.",
+      "How the job's landing rows are isolated: auto picks from the write disposition and the job's commit window (table, as_of, appends, as_of_diff); manual reads the table as it is now.",
+    up: "manual: whatever the table holds now, other runs' rows included.",
+    down: "auto: only the rows this job wrote, checked against its committed row count.",
   },
   eval_allow_contaminated: {
-    purpose: "Planned: evaluate a table whose scope check found rows from other runs instead of refusing it.",
-    up: "true evaluates anyway (the registry still records contaminated).",
+    purpose: "Evaluate a scope another writer touched instead of refusing it.",
+    up: "true evaluates anyway; the scope stays marked contaminated.",
     down: "false (default) refuses a contaminated scope.",
   },
 };
@@ -696,10 +699,8 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
 function knobConcept(k: (typeof knobsFile.knobs)[number]): Concept {
   const guide = knobGuides[k.id as KnobId];
   const links: ConceptLink[] = [];
-  if (k.source !== "planned") {
-    const match = /^(.*?):(\d+)$/.exec(k.source);
-    links.push(code(`Code — ${k.source}`, match?.[1] ?? k.source, match?.[2] ? Number(match[2]) : undefined));
-  }
+  const match = /^(.*?):(\d+)$/.exec(k.source);
+  links.push(code(`Code — ${k.source}`, match?.[1] ?? k.source, match?.[2] ? Number(match[2]) : undefined));
   for (const number of k.related_adrs) {
     const link = adrLink(number);
     if (link) links.push(link);
@@ -943,13 +944,6 @@ const configConcepts: Concept[] = [
       "How a knob can be changed: a launcher CLI flag, a Composer DAG param, a Flex Template param, or not at all (a code constant or a derived value).",
     interpretation: { tip: "A Composer default can differ from the CLI default; the sheet shows both." },
     links: [code("docker/flex_template_metadata.json", "docker/flex_template_metadata.json")],
-  },
-  {
-    id: "config:planned",
-    title: "Planned knob",
-    purpose:
-      "An evaluator flag documented by the evaluation plan whose CLI does not exist at the exported commit. Its default is the plan's, and the exporter will read it from code once it ships.",
-    links: [doc("Evaluation framework design", "docs/designs/2026-07-07-evaluation-framework-design.md")],
   },
   {
     id: "config:stats-tier",

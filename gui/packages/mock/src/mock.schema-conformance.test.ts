@@ -20,6 +20,7 @@ import {
   ragChunksRowSchema,
   sourceTableStatsRowSchema,
   validationRunsRowSchema,
+  vocabularies,
   type MetricId,
 } from "@synthetic-platform/contracts";
 
@@ -69,6 +70,10 @@ describe("mock rows validate against the generated contracts", { timeout: 60_000
     expectAll("payloads", data.profiles, (r) => profilePayloadSchemas[r.profile_kind].safeParse(r.payload));
     const kinds = new Set(data.profiles.map((p) => p.profile_kind));
     for (const kind of Object.keys(profilePayloadSchemas)) expect(kinds.has(kind as never), kind).toBe(true);
+    // One payload contract per kind the evaluator's schema names, and none it does not.
+    expect(Object.keys(profilePayloadSchemas).sort()).toEqual(
+      [...vocabularies["evaluation_profiles.profile_kind"]].sort(),
+    );
   });
 
   it("row flags, validation runs, the DLQ and fan-out stats", () => {

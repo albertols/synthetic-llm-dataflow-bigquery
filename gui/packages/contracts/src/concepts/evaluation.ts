@@ -34,7 +34,7 @@ export const concepts = defineConcepts([
     id: "eval:scope",
     title: "Evaluation scope",
     purpose:
-      "Which synthetic rows belong to this launch: the whole landing table, an as-of window or the rows appended since the last evaluation. The scope check says whether that slice is clean.",
+      "Which synthetic rows belong to this launch. Landing rows carry no run id, so the evaluator recovers them from the write disposition and the job's own commit window: the whole landing table (table), a snapshot at the window end (as_of), the rows appended in the window (appends), the table at the window end minus a snapshot of its start when copy jobs landed the rows (as_of_diff), or the table as it is now (manual). The scope check says whether that slice is clean.",
     interpretation: {
       good: "Scope OK: the rows in scope are exactly this launch's rows.",
       bad: "Contaminated (another run's rows share the table), count mismatch (rows ≠ rows expected), expired (the snapshot aged out) or empty: the numbers describe a different slice than the launch.",
@@ -63,12 +63,12 @@ export const concepts = defineConcepts([
     id: "eval:sampled-mode",
     title: "Sampled mode",
     purpose:
-      "The evaluator read a sample of each side instead of every row, at the sample rates shown per table. Every noise floor and interval is computed at the sampled n.",
+      "The evaluator read a salted row sample of each table larger than --sample_rows instead of every row, at the sample rates shown per table. A metric computed from a sampled side says method = sample with its rate, never exact, and its noise floor or interval is computed at the sampled n.",
     interpretation: {
       tip: "Sampled floors are wider: a difference that is ≈ here may be real at full scale. Re-run in exact mode before a release decision.",
     },
     pitfalls:
-      "n-dependent metrics (entropy, distinct ratio, detection AUC) are computed at matched n; compare them only with runs at the same n.",
+      "A metric that needs every row of a side (duplicate keys, orphans, exact matches against the full source, the distinct and entropy ratios, type validity) is not evaluated on a row sample; its row says why and to run exact mode. Never read that as a pass.",
     links: [catalogueLink],
   },
   {
@@ -234,9 +234,9 @@ export const concepts = defineConcepts([
     id: "eval:row-flags",
     title: "Flagged rows",
     purpose:
-      "The most extreme synthetic rows per check (exact copy, near copy, nearest record, detectable), identified by their synthetic keys. Source keys are salted hashes unless the evaluator was run with raw keys.",
+      "The most extreme synthetic rows per check (exact copy, near copy, nearest record, detectable), identified by their synthetic keys. The matched source record is a keyed hash (h: and eight hex digits); raw source keys are never written.",
     interpretation: {
-      tip: "Look up a flagged synthetic key in the landing table; the hash lets two evaluations agree on the same source row without exposing it.",
+      tip: "Look up a flagged synthetic key in the landing table. The hash names one source record within an evaluation; two evaluations agree on it only when both ran with the operator's label key (--label_key_uri), because the default key is ephemeral.",
     },
     links: [{ label: "evaluation_row_flags schema", url: `${SCHEMAS}/evaluation_row_flags.schema.json`, kind: "code" }],
   },
@@ -299,7 +299,7 @@ export const concepts = defineConcepts([
     id: "eval:matched-n",
     title: "Why matched n",
     purpose:
-      "Entropy and distinct counts grow with the number of rows read, so a 90-million-row synthetic table always looks more diverse than a 100,000-row source. The evaluator subsamples both sides to the same n before comparing.",
+      "Entropy and distinct counts grow with the number of rows read, so a 90-million-row synthetic table always looks more diverse than a 100,000-row source. The evaluator compares both sides at the same n, the smaller side's row count.",
     formula: "\\hat H_{\\mathrm{plug\\text{-}in}}(n) \\approx H - \\frac{K - 1}{2n}",
     interpretation: {
       good: "Ratio near 1 at matched n: the generator reproduces the source's diversity.",
@@ -319,7 +319,7 @@ export const concepts = defineConcepts([
     id: "eval:hashed-labels",
     title: "Hashed labels (literal policy D6)",
     purpose:
-      "A category is shown literally only when its column has at most 50 source-distinct values and the value occurs at least 10 times in the source. Everything else is a salted hash h:xxxxxxxx, so rare values never leave the evaluator.",
+      "A category is shown literally only when its column has at most 50 source-distinct values and the value occurs at least 10 times in the source. Everything else is a keyed hash h:xxxxxxxx, so rare values never leave the evaluator.",
     interpretation: { tip: "Hashes are stable within an evaluation, so source and synthetic bars still line up." },
     links: [{ label: "GUI data contracts — payload shapes", url: CONTRACTS, kind: "docs" }],
   },
@@ -368,10 +368,10 @@ export const concepts = defineConcepts([
     id: "eval:fanout",
     title: "Fan-out",
     purpose:
-      "Children per parent along a foreign key: how many orders each user has. The histogram's last bar collects every parent at or above the cap.",
+      "Children per parent along a foreign key: how many orders each user has. The evaluator compares the source and synthetic distributions (every parent at or above the cap in one last bin) and stores the distances: the fan-out TVD and W1, the mean ratio, the childless-parent share and the parent coverage. It publishes no fan-out histogram.",
     interpretation: {
-      good: "Source and synthetic bars match, including the zero-child bar.",
-      bad: "A missing zero bar: every synthetic parent got a child the source's parents often lack.",
+      good: "Fan-out TVD within its noise floor, mean ratio near 1, childless-parent share unchanged.",
+      bad: "A childless-parent share that drops to 0: every synthetic parent got a child the source's parents often lack.",
     },
     links: [{ label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" }],
   },
@@ -379,7 +379,7 @@ export const concepts = defineConcepts([
     id: "eval:info-status",
     title: "INFO and other statuses",
     purpose:
-      "An INFO row is measured but not graded: the metric has no thresholds (Wasserstein in column units, fan-out W1, the source's own orphan rate), or it is the orphan rate of a documented foreign key (enforced: false). INFO rows count in every total, never pass or fail, and carry no score.",
+      "An INFO row is measured but not graded: the metric has no thresholds (Wasserstein in column units, fan-out W1, the source's own orphan rate), it is the orphan rate of a documented foreign key (enforced: false), or it is the copy rate of a column that is not free text (numeric and temporal values collide with a dense source by domain size, and reusing a rare real category or identifier is not evidence of memorization). INFO rows count in every total, never pass or fail, and carry no score.",
     interpretation: {
       tip: "“Other status” counts rows whose status is newer than this GUI's vocabulary; they are shown as plain text wherever they appear. Every breakdown here adds up to its total.",
     },

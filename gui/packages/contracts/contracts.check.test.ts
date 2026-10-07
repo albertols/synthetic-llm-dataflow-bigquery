@@ -195,9 +195,9 @@ describe("generated contracts", () => {
     expect(thelook?.generation_order).toEqual(["users", "orders", "order_items"]);
     const items = thelook?.tables.find((t) => t.name === "order_items");
     expect(items?.fk.map((e) => [formatEdge("order_items", e), e.role])).toEqual([
-      ["order_items.order_id+user_id->orders.order_id+user_id", "driving"],
-      ["order_items.user_id->users.id", "implied"],
-      ["order_items.product_id->synthetic_data.products.id", "external"],
+      ["order_items(order_id,user_id) -> orders(order_id,user_id)", "driving"],
+      ["order_items(user_id) -> users(id)", "implied"],
+      ["order_items(product_id) -> synthetic_data.products(id)", "external"],
     ]);
   });
 
@@ -217,16 +217,16 @@ describe("generated contracts", () => {
 describe("edge labels", () => {
   it("round-trip the evaluator form, composite and external parents included", () => {
     for (const label of [
-      "orders.user_id->users.id",
-      "order_items.order_id+user_id->orders.order_id+user_id",
-      "order_items.product_id->synthetic_data.products.id",
+      "orders(user_id) -> users(id)",
+      "order_items(order_id,user_id) -> orders(order_id,user_id)",
+      "order_items(product_id) -> synthetic_data.products(id)",
     ]) {
       const ref = parseEdge(label);
       expect(ref).not.toBeNull();
       if (!ref?.child || !ref.parentCols) throw new Error(label);
       expect(formatEdge(ref.child, { cols: ref.cols, ref: ref.parent, ref_cols: ref.parentCols })).toBe(label);
     }
-    expect(parseEdge("order_items.product_id->synthetic_data.products.id")).toEqual({
+    expect(parseEdge("order_items(product_id) -> synthetic_data.products(id)")).toEqual({
       child: "order_items",
       cols: ["product_id"],
       parent: "synthetic_data.products",
@@ -241,17 +241,26 @@ describe("edge labels", () => {
       parent: "orders",
       parentCols: null,
     });
-    for (const bad of ["", "users", "a.b->c", "a.x+y->b.z", "a.b->c.d->e.f", "a.b -> ", "(a b)->c"])
+    for (const bad of [
+      "",
+      "users",
+      "a(b) -> c",
+      "a(x,y) -> b(z)",
+      "a(b) -> c(d) -> e(f)",
+      "a(b) -> ",
+      "(a b)->c",
+      "orders.user_id->users.id",
+    ])
       expect(parseEdge(bad), bad).toBeNull();
   });
 
   it("resolve against the model, a widened driving edge included", () => {
     const thelook = relationships.models.find((m) => m.model === "gcp_public_thelook");
     if (!thelook) throw new Error("no thelook model");
-    expect(findEdge(thelook, "order_items.user_id->users.id")?.edge.role).toBe("implied");
+    expect(findEdge(thelook, "order_items(user_id) -> users(id)")?.edge.role).toBe("implied");
     expect(findEdge(thelook, "(order_id,user_id)->orders")?.table.name).toBe("order_items");
-    expect(findEdge(thelook, "orders.user_id->users.id")?.edge.role).toBe("driving");
-    expect(findEdge(thelook, "orders.user_id->customers.id")).toBeNull();
+    expect(findEdge(thelook, "orders(user_id) -> users(id)")?.edge.role).toBe("driving");
+    expect(findEdge(thelook, "orders(user_id) -> customers(id)")).toBeNull();
   });
 });
 

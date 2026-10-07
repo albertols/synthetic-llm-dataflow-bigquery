@@ -103,7 +103,7 @@ describe("the R45 'never downgraded' note is for Wilson metrics at an edge refer
 });
 
 describe("R42 in the edge views: only the orphan rate of a documented edge is INFO", () => {
-  const edge = "orders.buyer_id->users.id";
+  const edge = "orders(buyer_id) -> users(id)";
   const documented = { enforced: false, role: "documented" };
   const orphan = metric("relationship.orphan_rate", {
     table_name: "orders",

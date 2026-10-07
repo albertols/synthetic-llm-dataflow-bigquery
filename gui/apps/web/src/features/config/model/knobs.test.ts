@@ -36,19 +36,29 @@ describe("the knob model (knobs.json is the truth)", () => {
     for (const number of cited) expect(ADRS[number], `ADR ${number}`).toBeDefined();
   });
 
-  it("classifies constants as screws, derived values as readouts and the evaluator flags as planned", () => {
+  it("classifies constants as screws, derived values as readouts and every flag as a dial, a selector or a jack", () => {
     for (const k of KNOBS) {
       const kind = kindOf(k);
-      if (k.source === "planned") expect(kind, k.id).toBe("planned");
-      else if (k.settable_via.includes("constant")) expect(kind, k.id).toBe("screw");
+      if (k.settable_via.includes("constant")) expect(kind, k.id).toBe("screw");
       else if (k.settable_via.includes("derived")) expect(kind, k.id).toBe("readout");
       else expect(["dial", "selector", "port"], k.id).toContain(kind);
     }
     expect(kindOf(knob("free_text_pool_max"))).toBe("screw");
     expect(kindOf(knob("reference_rows_limit"))).toBe("dial");
     expect(kindOf(knob("source_stats"))).toBe("selector");
-    expect(kindOf(knob("eval_mode"))).toBe("planned");
-    expect(knobsFile.knobs.filter((k) => k.channel === "evaluation").every((k) => k.source === "planned")).toBe(true);
+    // The evaluator's flags are read from its CLI like any other: none is a placeholder.
+    expect(kindOf(knob("eval_scope"))).toBe("selector");
+    expect(kindOf(knob("eval_sample_rows"))).toBe("port");
+    for (const k of knobsFile.knobs.filter((k) => k.channel === "evaluation"))
+      expect(k.source, k.id).toMatch(/^packages\/sdfb-evaluation\/src\/sdfb_evaluation\/cli\/main\.py:\d+$/);
+  });
+
+  it("a selector whose default is none of its choices starts on a position of its own", () => {
+    const mode = knob("eval_mode");
+    expect(mode.value).toBeNull();
+    expect(positions(mode, mode.value)).toEqual({ values: [null, "exact", "sampled"], index: 0 });
+    expect(positions(mode, "sampled")?.index).toBe(2);
+    expect(positions(knob("source_stats"), "exact")).toEqual({ values: ["off", "sample", "exact"], index: 2 });
   });
 
   it("dial detents include the code default and any typed value", () => {

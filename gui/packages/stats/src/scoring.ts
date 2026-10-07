@@ -1,7 +1,7 @@
 /**
  * Catalogue-driven score, status and roll-ups: an exact port of the
  * evaluator's `sdfb_evaluation.scoring` (metrics.yaml header, Rulings R9–R12,
- * R26, R33, R37–R43, R45), pinned to it case by case by
+ * R26, R33, R37–R43, R45, R66), pinned to it case by case by
  * `scoring.golden.test.ts` (golden/scoring.json, written by the Python). The
  * evaluator's `status` / `score` columns are authoritative; the mock uses this
  * to write the rows the evaluator would, and the EVALUATION tab re-reads the
@@ -15,7 +15,11 @@
  * 2. `table.pmse_ratio` without detail.ceiling, or with a ceiling below the
  *    fail threshold → not_evaluated (R33, R43);
  * 3. `relationship.orphan_rate` on a documented edge (enforced: false) →
- *    INFO; fan-out metrics stay graded (R42);
+ *    INFO; fan-out metrics stay graded (R42). Likewise
+ *    `field.substantive_copy_rate` is gated only on a `text` column and INFO
+ *    on every other kind (R66): numeric and temporal values collide with a
+ *    dense source by domain size, and reusing a rare real category or
+ *    identifier is not evidence of memorisation;
  * 4. no thresholds → INFO;
  * 5. a target metric reads x = |g − target| (the catalogue's target, or the
  *    row's source_value when that is null); x = g otherwise;
@@ -68,6 +72,8 @@ export interface MetricReading {
   sourceValue?: number | null;
   /** The producer's detail (reason, pMSE ceiling …). */
   detail?: Readonly<Record<string, unknown>> | null;
+  /** The column's kind (`evaluation_metrics.column_kind`); the copy rate is gated only on "text" (R66). */
+  columnKind?: string | null;
 }
 
 export interface ScoringOptions {
@@ -101,6 +107,14 @@ export const INTERVAL_NOISE_METHODS: ReadonlySet<string> = new Set(["wilson", "n
 
 const PMSE_ID = "table.pmse_ratio";
 const ORPHAN_ID = "relationship.orphan_rate";
+const COPY_RATE_ID = "field.substantive_copy_rate";
+// The evaluator's own sentences (`_DOMAIN_COLLISION_REASON`, `_FREE_TEXT_ONLY_REASON`), character for character.
+const DOMAIN_COLLISION_REASON =
+  "domain-size collision: a numeric or temporal column meets a dense source by domain size, not by copying; " +
+  "reported, not gated (field.value_memorization_lift is the fair test)";
+const FREE_TEXT_ONLY_REASON =
+  "gated only on free text (Ruling R66): reusing a rare real category or identifier is not evidence of " +
+  "memorisation; reported, not gated (field.value_memorization_lift is the gated signal)";
 const REL_TOL = 1e-9;
 
 const clip01 = (x: number) => Math.min(1, Math.max(0, x));
@@ -216,6 +230,15 @@ function reasonOf(reading: MetricReading): string | null {
     : JSON.stringify(reason);
 }
 
+/**
+ * Why a copy rate is reported as INFO, or null when it is gated (Python `_copy_rate_info_reason`):
+ * only a `text` column, or one with no kind given, is gated (R66).
+ */
+export function copyRateInfoReason(columnKind: string | null | undefined): string | null {
+  if (columnKind === null || columnKind === undefined || columnKind === "text") return null;
+  return columnKind === "numeric" || columnKind === "temporal" ? DOMAIN_COLLISION_REASON : FREE_TEXT_ONLY_REASON;
+}
+
 /** The full status decision (Python `_assess`), in the order the module comment lists. */
 export function assess(metric: ScoringMetric, reading: MetricReading, options: ScoringOptions = {}): Assessment {
   const enforced = options.enforced ?? true;
@@ -244,6 +267,9 @@ export function assess(metric: ScoringMetric, reading: MetricReading, options: S
       target: null,
       ...base,
     };
+  const copyInfo = metric.id === COPY_RATE_ID ? copyRateInfoReason(reading.columnKind) : null;
+  if (copyInfo !== null)
+    return { status: "info", notes: { reason: copyInfo }, scoreAt: null, target: null, ...base };
   const { warn, fail } = metric.thresholds;
   if (warn === null && fail === null) return { status: "info", notes: null, scoreAt: null, target: null, ...base };
   let target: number | null = null;

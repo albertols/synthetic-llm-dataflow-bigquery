@@ -574,7 +574,7 @@ def _metric_value(types: ModuleType, case: dict[str, Any]) -> Any:
       column="email" if case["metric_id"].startswith(
           ("field.", "column.")) else None,
       column_2="country" if case["metric_id"].startswith("pair.") else None,
-      edge="orders.user_id->users.id"
+      edge="orders(user_id) -> users(id)"
       if case["metric_id"].startswith("relationship.") else None,
       source_value=case["source_value"],
       noise_floor=case["noise_floor"],

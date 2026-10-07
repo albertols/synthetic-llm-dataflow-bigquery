@@ -2643,7 +2643,7 @@
     "family": "integrity",
     "metric_id": "relationship.orphan_rate",
     "column_name": null,
-    "edge": "orders.user_id->users.id",
+    "edge": "orders(user_id) -> users(id)",
     "status": "fail",
     "score": 0.0
    },
@@ -2653,7 +2653,7 @@
     "family": "integrity",
     "metric_id": "relationship.orphan_rate",
     "column_name": null,
-    "edge": "orders.user_id->users.id",
+    "edge": "orders(user_id) -> users(id)",
     "status": "info",
     "score": null
    },
@@ -2663,7 +2663,7 @@
     "family": "fidelity",
     "metric_id": "relationship.fanout_tvd",
     "column_name": null,
-    "edge": "orders.user_id->users.id",
+    "edge": "orders(user_id) -> users(id)",
     "status": "fail",
     "score": 0.7
    },

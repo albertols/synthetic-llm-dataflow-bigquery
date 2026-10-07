@@ -203,7 +203,7 @@ describe("metrics recompute from the profiles with packages/stats", { timeout: 6
     }
   });
 
-  it("column.tvd from full top-k profiles, and relationship.fanout_tvd from fan-out histograms", () => {
+  it("column.tvd from full top-k profiles", () => {
     let checked = 0;
     for (const m of data.metrics.filter((x) => x.metric_id === "column.tvd")) {
       const src = profile(m, "topk", "source", { column: m.column_name }) as {
@@ -221,11 +221,6 @@ describe("metrics recompute from the profiles with packages/stats", { timeout: 6
       checked += 1;
     }
     expect(checked).toBeGreaterThan(50);
-    for (const m of data.metrics.filter((x) => x.metric_id === "relationship.fanout_tvd").slice(0, 100)) {
-      const src = profile(m, "fanout_hist", "source", { edge: m.edge });
-      const syn = profile(m, "fanout_hist", "synthetic", { edge: m.edge });
-      expect(m.value!).toBeCloseTo(tvd(src.counts as number[], syn.counts as number[])!, 10);
-    }
   });
 
   it("detection AUC equals its ROC profile; corr_rms_delta equals the matrices", () => {
@@ -264,6 +259,7 @@ describe("metrics recompute from the profiles with packages/stats", { timeout: 6
         noiseFloor: m.noise_floor,
         sourceValue: m.source_value,
         detail: m.status === "not_evaluated" && typeof detail.reason === "string" ? detail : producer,
+        columnKind: m.column_kind,
       };
       const scored = scoreRow(metric, reading, { enforced: detail.enforced !== false });
       const where = `${m.evaluation_id} ${m.metric_id} ${m.table_name}.${m.column_name ?? m.edge ?? ""}`;
@@ -316,7 +312,7 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
     // Labels are the evaluator's form; an external parent keeps its dataset.
     for (const edge of EDGES) expect(parseEdge(edgeLabel(edge))?.child).toBe(edge.child);
     expect(EDGES.filter((e) => e.external).map(edgeLabel)).toEqual([
-      "order_items.product_id->synthetic_data.products.id",
+      "order_items(product_id) -> synthetic_data.products(id)",
     ]);
   });
 

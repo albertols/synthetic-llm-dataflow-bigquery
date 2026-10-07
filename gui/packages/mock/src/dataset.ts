@@ -124,26 +124,8 @@ function relationship(ev: TableEvaluator, edge: EdgeDef, spec: EvalSpec, rng: Ra
   const hs = fanoutCounts(rng, edge.fanout, parentsSource);
   const shares = edge.fanout.map((s, i) => s * (1 + spec.quality.drift * (i - 2) * 0.5));
   const hy = fanoutCounts(rng, shares, parentsSynthetic);
-  const fanout = edge.fanout.map((_, i) => i);
+  // The evaluator publishes no fan-out histogram: the comparison is in the edge's metrics.
   const mean = (h: number[]) => h.reduce((acc, c, i) => acc + c * i, 0) / Math.max(sum(h), 1);
-  for (const [side, h, n] of [
-    ["source", hs, parentsSource],
-    ["synthetic", hy, parentsSynthetic],
-  ] as const)
-    ev.profile(
-      "fanout_hist",
-      side,
-      {
-        fanout,
-        counts: h,
-        capped_at: fanout.length - 1,
-        parents: n,
-        children: h.reduce((acc, c, i) => acc + c * i, 0),
-        mean: mean(h),
-        zero_child_share: h[0]! / n,
-      },
-      { edge: label, n },
-    );
   const children = hy.reduce((acc, c, i) => acc + c * i, 0);
   const sourceChildren = sum(hs.map((c, i) => c * i));
   // Enforced edges orphan only when the external key pool lags (quality.orphanShare); the

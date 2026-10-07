@@ -8,8 +8,10 @@
  * package, and status, score and the detail notes are what the evaluator's
  * `to_metric_row` would write (`scoreRow`, the golden-pinned port of
  * `sdfb_evaluation.scoring`). Interval-method metrics carry their CI (Wilson,
- * a folded Newcombe, DeLong) and no scalar floor, as the evaluator's producers
- * do (Ruling R41). `mock.storyline.test.ts` recomputes metrics from the profiles.
+ * Newcombe — folded for an absolute difference — and DeLong) and no scalar
+ * floor, as the evaluator's producers do (Ruling R41). A row of a table read
+ * as a row sample says `method = sample` with its rate, never `exact` (Ruling
+ * R72). `mock.storyline.test.ts` recomputes metrics from the profiles.
  */
 import {
   catalogueById,
@@ -194,9 +196,12 @@ export class TableEvaluator {
         noiseFloor: roundKeep(reading.noiseFloor),
         sourceValue: roundKeep(reading.sourceValue),
         detail: reading.detail ?? null,
+        columnKind: reading.column?.kind ?? null,
       },
       { enforced: reading.enforced ?? true },
     );
+    const { sampleRate } = this.ctx;
+    const rowSample = sampleRate !== null && sampleRate < 1;
     const row: EvaluationMetricsRow = {
       evaluation_id: this.ctx.spec.id,
       evaluated_at: this.ctx.evaluatedAt,
@@ -227,7 +232,8 @@ export class TableEvaluator {
       ci_high: scored.ci_high,
       n_source: reading.nSource === undefined ? this.ctx.nSource : reading.nSource,
       n_synthetic: reading.nSynthetic === undefined ? this.ctx.nSynthetic : reading.nSynthetic,
-      method: reading.method ?? (catalogue.estimator.split("/")[0] as EvaluationMetricsRow["method"]),
+      method:
+        reading.method ?? (rowSample ? "sample" : (catalogue.estimator.split("/")[0] as EvaluationMetricsRow["method"])),
       sample_rate: reading.sampleRate === undefined ? this.ctx.sampleRate : reading.sampleRate,
       encoding_plan_digest: this.ctx.encodingPlanDigest,
       feature_set_digest: reading.featureSetDigest ?? null,
@@ -1154,6 +1160,8 @@ export class TableEvaluator {
         column2: b,
         value: contingencyTvd(ts, ty),
         baseline: 0,
+        // The null TVD expectation over the joint cells (the catalogue's tvd_null).
+        noiseFloor: tvdNullExpectation(ts.flat(), n, sum(ty.flat())),
         nSource: n,
         nSynthetic: sum(ty.flat()),
         method: "sample",
@@ -1289,13 +1297,22 @@ export class TableEvaluator {
       nSynthetic: nPrivacy,
     });
     lift("row.near_match_lift", q.nearLeak, nReference);
-    const dupShare = (rows: readonly Row[]) => {
-      const keys = rows.map((r) => columns.map((c) => String(r[c.name])).join("\u001f"));
-      return 1 - new Set(keys).size / Math.max(keys.length, 1);
-    };
+    /** Rows whose non-key content another row already holds. */
+    const duplicates = (rows: readonly Row[]) =>
+      rows.length - new Set(rows.map((r) => columns.map((c) => String(r[c.name])).join("\u001f"))).size;
+    const dupShare = (rows: readonly Row[]) => duplicates(rows) / Math.max(rows.length, 1);
     const sourceDup = memo(this.ctx.source, "dup", () => dupShare(this.ctx.source));
+    // A signed difference of two shares: Newcombe's interval, unfolded (the catalogue's newcombe).
+    const [dupLow, dupHigh] = newcombe(
+      duplicates(this.ctx.synthetic),
+      this.ctx.synthetic.length,
+      memo(this.ctx.source, "dupRows", () => duplicates(this.ctx.source)),
+      this.ctx.source.length,
+    );
     this.metric("row.internal_duplicate_excess", {
       value: dupShare(this.ctx.synthetic) - sourceDup,
+      ciLow: dupLow,
+      ciHigh: dupHigh,
       baseline: memo(this.ctx.reference, "dup", () => dupShare(this.ctx.reference)) - sourceDup,
       nSource: this.ctx.source.length,
       nSynthetic: this.ctx.synthetic.length,
@@ -1435,7 +1452,8 @@ export class TableEvaluator {
           check,
           rank: rank + 1,
           synthetic_key: pk ? { [pk]: S[i]![pk] ?? null } : null,
-          source_key_hash: sha256Hex(`salt:${this.ctx.spec.id}\u001f${this.ctx.table.name}\u001f${i}`).slice(0, 32),
+          // The evaluator's keyed-hash label: `h:` and eight hex digits; the key itself is never written.
+          source_key_hash: `h:${sha256Hex(`key:${this.ctx.spec.id}\u001f${this.ctx.table.name}\u001f${i}`).slice(0, 8)}`,
           source_key: null,
           source_set: set,
           distance: d,

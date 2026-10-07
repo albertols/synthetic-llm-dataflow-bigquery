@@ -96,10 +96,10 @@ export interface DlqRulesFile {
 }
 
 /**
- * A parsed edge label. The evaluator's `edge` column reads `child.col->parent.col`
- * (composite keys join columns with `+`; an external parent keeps its dataset:
- * `order_items.product_id->synthetic_data.products.id`). The launcher logs
- * `(col,col)->parent`, which has no child and no parent columns.
+ * A parsed edge label. The evaluator's `edge` column reads `child(col) -> parent(col)`
+ * (its `Edge.label`; composite keys join columns with a comma, and an external parent
+ * keeps its dataset: `order_items(product_id) -> synthetic_data.products(id)`). The
+ * launcher logs `(col,col)->parent`, which has no child and no parent columns.
  */
 export interface EdgeRef {
   child: string | null;
@@ -110,11 +110,12 @@ export interface EdgeRef {
 
 const NAME = /^[A-Za-z_][\w$-]*$/;
 
-function splitQualified(side: string): { table: string; cols: string[] } | null {
-  const dot = side.lastIndexOf(".");
-  if (dot <= 0 || dot === side.length - 1) return null;
-  const table = side.slice(0, dot);
-  const cols = side.slice(dot + 1).split("+");
+/** `table(col,col)`: a table (dataset-qualified or not) and its key columns. */
+function splitKeyed(side: string): { table: string; cols: string[] } | null {
+  const match = /^([^()\s]+)\(([^()]+)\)$/.exec(side);
+  if (!match) return null;
+  const table = match[1]!;
+  const cols = match[2]!.split(",").map((c) => c.trim());
   if (!table.split(".").every((part) => NAME.test(part)) || !cols.every((c) => NAME.test(c))) return null;
   return { table, cols };
 }
@@ -131,15 +132,15 @@ export function parseEdge(label: string): EdgeRef | null {
     if (!cols.every((c) => NAME.test(c)) || !right.split(".").every((part) => NAME.test(part))) return null;
     return { child: null, cols, parent: right, parentCols: null };
   }
-  const child = splitQualified(left);
-  const parent = splitQualified(right);
+  const child = splitKeyed(left);
+  const parent = splitKeyed(right);
   if (!child || !parent || child.cols.length !== parent.cols.length) return null;
   return { child: child.table, cols: child.cols, parent: parent.table, parentCols: parent.cols };
 }
 
-/** The evaluator's label for an edge of `child`. */
+/** The evaluator's label for an edge of `child` (Python `Edge.label`). */
 export function formatEdge(child: string, edge: Pick<RelationEdge, "cols" | "ref" | "ref_cols">): string {
-  return `${child}.${edge.cols.join("+")}->${edge.ref}.${edge.ref_cols.join("+")}`;
+  return `${child}(${edge.cols.join(",")}) -> ${edge.ref}(${edge.ref_cols.join(",")})`;
 }
 
 /** The model edge a label names (either form), with its child table; null when the model has none. */

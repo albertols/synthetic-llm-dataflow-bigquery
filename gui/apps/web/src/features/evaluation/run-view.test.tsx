@@ -148,14 +148,14 @@ describe("reading a metric row", () => {
   it("reports a documented edge as INFO, never FAIL, and not_evaluated with its reason", () => {
     const detail = richDetail();
     const documented = detail.metrics.find(
-      (m) => m.edge === "orders.buyer_id->users.id" && m.metric_id === "relationship.orphan_rate",
+      (m) => m.edge === "orders(buyer_id) -> users(id)" && m.metric_id === "relationship.orphan_rate",
     )!;
     expect(explainStatus(documented)).toMatch(/Documented edge \(enforced: false\).*INFO, never as a FAIL/);
     const skipped = detail.metrics.find((m) => m.metric_id === "row.memorization_lift")!;
     expect(explainStatus(skipped)).toBe(
       "Not evaluated: reference not verified: R and H are not the generator's sample.",
     );
-    const edge = buildGraph(detail).edges.find((e) => e.label === "orders.buyer_id->users.id")!;
+    const edge = buildGraph(detail).edges.find((e) => e.label === "orders(buyer_id) -> users(id)")!;
     expect(edge.documented).toBe(true);
     expect(edge.status).toBe("info");
   });
@@ -258,7 +258,7 @@ describe("the run view", () => {
     stubRun();
     renderAt("/evaluation/eval-t001?tab=relational");
     const table = await screen.findByRole("region", { name: "Orphan rate per foreign key" });
-    const documented = within(table).getByText("orders.buyer_id->users.id").closest("tr")!;
+    const documented = within(table).getByText("orders(buyer_id) -> users(id)").closest("tr")!;
     expect(within(documented as HTMLElement).getByText("Info · documented")).toBeInTheDocument();
     expect(within(documented as HTMLElement).getByText("1.5%")).toBeInTheDocument();
     expect(within(table).queryByText("Fail")).toBeNull();

@@ -497,7 +497,7 @@ types, and checks that `assertReadOnly` rejects anything that writes.
 resolve it through `/api/relationships`. Real models are gitignored or on GCS
 and never served, so when the name is not listed, rebuild the graph from the
 metric rows' `edge` labels with `parseEdge` (`@contracts/relational`; it reads
-the evaluator's `child.col+col->parent.col+col` and the launcher's
+the evaluator's `child(col,col) -> parent(col,col)` and the launcher's
 `(col,col)->parent`). `formatEdge` / `findEdge` go the other way. Edge roles:
 driving, implied, conditional, independent, external, **documented**
 (`enforced: false` — its `relationship.orphan_rate` is `info`, compared with

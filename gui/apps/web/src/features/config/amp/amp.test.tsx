@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { KNOBS, kindOf } from "../model/knobs";
+import { KNOBS, kindOf, knob } from "../model/knobs";
 import { ScenarioProvider } from "../model/state";
 import { AmpPanel } from "./AmpPanel";
 import { KnobSheet } from "./KnobSheet";
@@ -29,7 +29,7 @@ const meter = (label: string) => {
   return term.closest("div")!.querySelector("dd")!.textContent;
 };
 
-// The amp renders all 84 knobs: jsdom needs more than the default 5 s per test.
+// The amp renders every knob (83 of them): jsdom needs more than the default 5 s per test.
 describe("the pipeline amp", { timeout: 30_000 }, () => {
   it("renders every knobs.json knob, one slider per turnable knob and none for constants", () => {
     render(<Harness />);
@@ -122,9 +122,12 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     let sheet = await screen.findByRole("dialog", { name: "Reference rows (n)" });
     expect(within(sheet).getByText("--reference_rows_limit")).toBeInTheDocument();
     expect(within(sheet).getByTestId("knob-sheet-value")).toHaveTextContent("10,000 rows");
-    expect(within(sheet).getByRole("link", { name: /run_pipeline\.py:281/ })).toHaveAttribute(
+    // The line is the exporter's, read from knobs.json: a Python edit above the flag moves it.
+    const [path, line] = knob("reference_rows_limit").source.split(":");
+    expect(path).toBe("packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py");
+    expect(within(sheet).getByRole("link", { name: new RegExp(`run_pipeline\\.py:${line}`) })).toHaveAttribute(
       "href",
-      expect.stringMatching(/\/blob\/[0-9a-f]{40}\/packages\/sdfb-beam\/src\/sdfb_beam\/cli\/run_pipeline\.py#L281$/),
+      expect.stringMatching(new RegExp(`/blob/[0-9a-f]{40}/${path}#L${line}$`)),
     );
     expect(within(sheet).getByRole("figure", { name: /DKW band/ })).toBeInTheDocument();
     await user.keyboard("{Escape}");
@@ -137,7 +140,7 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     expect(within(sheet).getByText(/Docs differ: similarity means different things/)).toBeInTheDocument();
   });
 
-  it("shows a constant's sheet as not settable, and a planned knob as planned", async () => {
+  it("shows a constant's sheet as not settable, and an evaluator flag with its launch surfaces", async () => {
     const user = userEvent.setup();
     render(<Harness channel="free_text" />);
     await user.click(screen.getByRole("button", { name: /^Pool cap: 512 values$/ }));
@@ -147,8 +150,13 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("radio", { name: "EVALUATION" }));
 
-    const planned = screen.getByRole("button", { name: /^Evaluation mode: exact$/ });
-    expect(planned).toHaveAccessibleDescription(/Planned: the evaluator CLI is not shipped yet/);
+    // --mode has no default of its own (the runner decides), so the switch starts on "unset".
+    const mode = screen.getByRole("slider", { name: "Evaluation mode" });
+    expect(mode).toHaveAttribute("aria-valuetext", "unset");
+    expect(mode).toHaveAccessibleDescription(/Settable via CLI, Flex\./);
+    mode.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(mode).toHaveAttribute("aria-valuetext", "exact");
   });
 
   it("a reset returns to the ACTIVE preset, not the default one", async () => {

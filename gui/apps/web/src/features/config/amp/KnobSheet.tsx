@@ -102,18 +102,11 @@ function KnobSheetBody({ knob: k }: { knob: Knob }) {
         <SheetDescription>{guide.purpose}</SheetDescription>
         <div className="flex flex-wrap items-center gap-1.5 pt-1">
           <code className="rounded-sm bg-surface-3 px-1.5 py-0.5 font-mono text-xs text-text-1">{k.id}</code>
-          {kind === "planned" ? (
-            <span className="inline-flex items-center gap-0.5">
-              <Badge variant="outline">planned</Badge>
-              <InfoHint concept="config:planned" />
-            </span>
-          ) : (
-            k.settable_via.map((via) => (
-              <Badge key={via} variant={via === "constant" || via === "derived" ? "neutral" : "info"}>
-                {SETTABLE_LABEL[via] ?? via}
-              </Badge>
-            ))
-          )}
+          {k.settable_via.map((via) => (
+            <Badge key={via} variant={via === "constant" || via === "derived" ? "neutral" : "info"}>
+              {SETTABLE_LABEL[via] ?? via}
+            </Badge>
+          ))}
           {live ? <Badge variant="accent">feeds the scenario</Badge> : null}
         </div>
       </SheetHeader>
@@ -221,16 +214,10 @@ function KnobSheetBody({ knob: k }: { knob: Knob }) {
       ) : null}
 
       <Section title="Where it lives">
-        {k.source === "planned" ? (
-          <p className="text-sm text-text-2">
-            Not in code yet: the evaluator CLI is planned, so this default comes from the evaluation plan.
-          </p>
-        ) : (
-          <p className="text-sm text-text-2">
-            <CodeLink source={k.source} />{" "}
-            <span className="text-text-3">(at {CODE_REF_SHORT}, the commit knobs.json was exported from)</span>
-          </p>
-        )}
+        <p className="text-sm text-text-2">
+          <CodeLink source={k.source} />{" "}
+          <span className="text-text-3">(at {CODE_REF_SHORT}, the commit knobs.json was exported from)</span>
+        </p>
       </Section>
 
       {k.related_adrs.length || k.docs.length || guide.formula || guide.refs?.length ? (
