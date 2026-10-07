@@ -97,8 +97,9 @@ Follow the dataviz method: pick the form first, colour last.
   operator's own governed reference data, shown to that operator by a
   loopback-only server; show them where they explain a view (a hovered point,
   a nearest-neighbour list). Source row keys (`source_pk`) never reach the
-  browser, and flagged rows show hashed keys unless the evaluator stored
-  literals under D6. Nothing on screen is written back or exported by the GUI.
+  browser, and flagged rows name the matched source record by a keyed hash
+  only (`h:` and eight hex digits): the evaluator never writes a raw source
+  key. Nothing on screen is written back or exported by the GUI.
 - **Values newer than the contract.** A status, level, kind or side the
   contract does not list yet arrives as plain text (the response lists it in
   `warnings`): render it neutral (`StatusPill` falls back to a neutral pill

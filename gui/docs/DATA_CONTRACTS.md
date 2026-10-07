@@ -104,12 +104,15 @@ SERVING, EVALUATION), `knobs` (`id`, `channel`, `group`, `label`, `value`,
 `unit`, `settable_via` ⊆ cli / composer / flex / constant / derived,
 `cli_flag`, `composer_param` + `composer_default` when it differs,
 `flex_param`, `choices`, `help` (argparse), `comment` (the code comment above a
-constant), `source` = `path:LINE` or `planned`, `related_adrs`, `docs`),
+constant), `source` = `path:LINE`, `related_adrs`, `docs`),
 `annotations` (docs-vs-code: `docs_say`, `code_does`, `evidence[]` with
 `path:line` + the verbatim excerpt), `measured_sources` and `measured` (the
 figure scripts' MEASURED constants with their block header). The EVALUATION
-channel is `source: "planned"` until `sdfb_evaluation/cli/main.py` exists
-(Ruling G2): its values then come from that file's argparse by AST.
+channel is the flags of `sdfb-eval plan|run`, read from
+`sdfb_evaluation/cli/main.py` by AST (the evaluator is a standalone project the
+root env does not install): default, choices, help text and line are the
+CLI's own, a flag the flex template declares is `flex`, and a listed flag the
+CLI no longer has fails the export.
 
 Every exported file carries `exported_from: { commit, dirty }` — the commit
 its `path:LINE` links resolve at (link to the source at that ref, not at
@@ -154,6 +157,13 @@ What it shows today:
 | `great_serialize.json`  | `sdfb_core.rag.serialize.serialize_row`                                | `serializeGreat`, `pyFloatRepr`, `pyStr`                                   | the text, exactly                                                |
 | `retrieval.json`        | `retrieve_centroid_top_k` (pure index), `retrieve_kcenter_k`           | `centroidTopK`, `kcenter`, `kcenterRotate`, `selectSeedExamples`           | the picks, exactly (duplicates and a collapsed matrix)           |
 | `scoring.json`          | `sdfb_evaluation.scoring` (`to_metric_row`, roll-ups, headline counts) | `scoreRow`, `scoreValue`, `statusFor`, `aggregateScores`, `headlineCounts` | status, score and detail notes exactly; scores to 1e-12 relative |
+
+A golden file is the same on every machine: its numbers are integer arithmetic,
+SHA-256 or correctly rounded IEEE 754 operations, and its `python` stamp is the
+minor version (`3.11`), never the patch. The patch is whatever a machine
+resolves `3.11` to (a laptop's uv and CI's differ), and a stamp that carried it
+made `--check` fail in CI with nothing else changed. A failed `--check` prints
+the first line that differs.
 
 ## The `metrics_info` identity
 
@@ -323,7 +333,9 @@ Fetched rows are cached in memory (LRU) and never persisted.
   `users.city` (`column.distinct_ceiling_hit` = 1) and e-mails leak from the
   reference sample (memorization lifts FAIL); weeks 5–8: the exact tier and
   identifier expansion, no leak, fidelity up. Edge cases: `eval-0003` sampled
-  on the DirectRunner, `eval-0014` FAILED, `eval-0017` PARTIAL (scope
+  on the DirectRunner (its rows say `method = sample` with the rate; the mock
+  still grades every metric there, where the evaluator withholds those that
+  need every row of a side), `eval-0014` FAILED, `eval-0017` PARTIAL (scope
   `count_mismatch`), `eval-0024` SKIPPED (empty appends scope), `eval-0027`
   PARTIAL (reference not verified: privacy `not_evaluated`), `eval-0032` the
   200-column table, `eval-0040` still RUNNING (no FINAL event); scope notes

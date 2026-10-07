@@ -538,8 +538,10 @@ key) is never selected nor sent.
   (interior `edges`, `counts.length = edges.length + 1`), quantiles, topk
   (labels `h:<8 hex>` unless literal under D6), length_hist, shape_mix,
   char_classes, temporal_mix, null_patterns, corr_matrix, contingency,
-  fanout_hist, dcr_hist / nndr_hist (side `synthetic` = syn→R, `holdout` = H→R),
-  roc_curve, moments.
+  dcr_hist / nndr_hist (side `synthetic` = syn→R, `holdout` = H→R),
+  roc_curve, moments. One contract per kind the schema names
+  (`mock.schema-conformance.test.ts` holds the two lists equal); the
+  evaluator publishes no fan-out histogram, only the edge's metrics.
 - Metric maths for views (noise floors, KS bracket, PIT-W1, scores, statuses,
   DKW, rarefaction, collision odds …) come from `@synthetic-platform/stats`;
   never re-derive them in a tab.
@@ -666,13 +668,13 @@ TypeScript, and the mirror must reproduce Python's output case for case._
   chosen to hit every scoring ruling in both directions: inclusive thresholds
   and the 1e-9 tolerance, target metrics, CI-bound lifts, the zero-tolerance
   integrity rule, noise downgrades, the noise-method dispatch, documented edges,
-  infinities and NaN, the pMSE ceiling, and aggregate ids left out of the
-  headline counts. `export_golden_fixtures.py` runs them through
+  infinities and NaN, the pMSE ceiling, aggregate ids left out of the
+  headline counts, and the copy rate gated only on a free-text column (R66). `export_golden_fixtures.py` runs them through
   `sdfb_evaluation.scoring` (`to_metric_row`, `status_for`, `score_value`,
   `aggregate_scores`, `headline_counts`) and writes
-  `packages/contracts/generated/golden/scoring.json`: 80 cases at `16b4294`
-  (`node -p 'require("./packages/contracts/generated/golden/scoring.json").cases.length'`),
-  plus score-function values and one roll-up.
+  `packages/contracts/generated/golden/scoring.json`: its cases
+  (`node -p 'require("./packages/contracts/generated/golden/scoring.json").cases.length'`
+  counts them), plus score-function values and one roll-up.
 - **The replay.** `packages/stats/src/scoring.golden.test.ts` feeds every case
   to `scoring.ts` and asserts the same status, score, detail notes and stored
   numbers (scores to a 1e-12 relative tolerance). `reading.golden.test.ts`
