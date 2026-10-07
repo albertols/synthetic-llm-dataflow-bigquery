@@ -20,8 +20,9 @@
 The Synthetic Platform GUI (ADR 0042) re-implements three small pieces of
 `sdfb_core.rag` in TypeScript so the RAG tab can run them in the browser,
 and mirrors the evaluator's scoring rules for the mock and the EVALUATION
-tab's explanations. This script runs the Python originals and writes what
-they return into `gui/packages/contracts/generated/golden/`:
+tab's explanations, and its run-to-run compare rule for the compare view.
+This script runs the Python originals and writes what they return into
+`gui/packages/contracts/generated/golden/`:
 
 - `hashing_embedder.json`: `HashingEmbedder` over 40 strings chosen to hit
   the whitespace set `str.split()` uses (`\\x1c`-`\\x1f`, `\\x85`, NBSP,
@@ -40,6 +41,10 @@ they return into `gui/packages/contracts/generated/golden/`:
   detail notes, JSON-safe row numbers, roll-ups and headline counts) over
   the hand-picked cases in `export_scoring_golden.py`, which also explains
   how the evaluator imports into this env (its `src` on `sys.path`).
+- `compare.json`: the verdict `sdfb-eval compare` gives a pair of metric rows
+  (`sdfb_evaluation.report.render.compare`: equal, within noise, worse,
+  better, changed, nothing to judge) over the pairs in
+  `export_compare_golden.py`, which the GUI's compare view must reproduce.
 
 Floats are rounded to 12 decimals: the TS tests compare vectors to 1e-6 and
 the integer parts (buckets, counts, picks) exactly. Every number is integer
@@ -69,6 +74,7 @@ from sdfb_core.rag.index import _PyExactIPIndex  # pylint: disable=protected-acc
 # The sibling `export_scoring_golden` import needs its sys.path entry first.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import export_scoring_golden  # sibling import; path must be set up first  # pylint: disable=wrong-import-position
+import export_compare_golden  # sibling import; path must be set up first  # pylint: disable=wrong-import-position
 
 REPO = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO / "gui" / "packages" / "contracts" / "generated" / "golden"
@@ -521,6 +527,7 @@ def build() -> dict[str, dict[str, Any]]:
       "great_serialize": _great(),
       "retrieval": _retrieval(),
       "scoring": export_scoring_golden.scoring_golden(),
+      "compare": export_compare_golden.compare_golden(),
   }
 
 

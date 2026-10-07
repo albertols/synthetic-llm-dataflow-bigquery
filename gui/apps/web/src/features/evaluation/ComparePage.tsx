@@ -5,8 +5,9 @@
  * encoding plans — a prominent banner when not)? how do the families move
  * (radar, Pareto, trend small multiples with noise and threshold bands)?
  * which parameters go with which scores (parallel coordinates)? and metric
- * by metric, A against B, with every delta below the noise floor shown as
- * "≈" and never judged better or worse.
+ * by metric, A against B, with every delta the two rows' own sampling noise
+ * explains shown as "≈" and never judged better or worse (the rule of
+ * `sdfb-eval compare`, lib/compare.ts).
  */
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { ArrowLeftRight, GitCompareArrows, X } from "lucide-react";
@@ -312,7 +313,17 @@ function diffPriority(r: DiffRow): number {
   return verdict === "unjudged" ? 3 : 4;
 }
 
-/** |Δ| in units of the larger of the noise floor and the warn threshold, so metrics of different scales rank together. */
+/**
+ * What the delta was judged against, in the words `sdfb-eval compare` prints: the two floors
+ * combined, the two confidence intervals, or nothing.
+ */
+function judgedAgainst(diff: DiffResult, kind: string | null): string {
+  if (diff.delta === null) return MISSING;
+  if (diff.noise === "floor") return `floor ${fmtMetric(diff.floor, kind)}`;
+  return diff.noise === "ci_overlap" ? "CI overlap" : "no noise floor";
+}
+
+/** |Δ| in units of the larger of the combined noise floor and the warn threshold, so metrics of different scales rank together. */
 function relativeChange(r: DiffRow): number {
   const { a, b, delta, floor } = r.diff;
   if (delta === null) return 0;
@@ -454,7 +465,9 @@ function ABDiff({
                 Δ (B − A)
               </TableHead>
               <TableHead scope="col" className="text-right">
-                Noise floor
+                <span className="inline-flex items-center gap-0.5">
+                  Judged against <InfoHint concept="eval:approx" />
+                </span>
               </TableHead>
               <TableHead scope="col">Verdict</TableHead>
               <TableHead scope="col">Status A → B</TableHead>
@@ -490,8 +503,8 @@ function ABDiff({
                     {diff.verdict === "approx" ? <span className="text-text-3">≈ </span> : null}
                     {fmtDelta(diff.delta, metric.value_kind)}
                   </TableCell>
-                  <TableCell className="text-right font-mono text-xs text-text-2 tabular-nums">
-                    {fmtMetric(diff.floor, metric.value_kind)}
+                  <TableCell className="text-right font-mono text-xs whitespace-nowrap text-text-2 tabular-nums">
+                    {judgedAgainst(diff, metric.value_kind)}
                   </TableCell>
                   <TableCell className="text-xs whitespace-nowrap">
                     <span
@@ -541,7 +554,7 @@ function ABDiff({
         </Table>
       </TableContainer>
       {!shown.length ? (
-        <p className="text-sm text-text-2">No metric changed beyond its noise floor between A and B.</p>
+        <p className="text-sm text-text-2">No metric changed beyond its sampling noise between A and B.</p>
       ) : null}
       {shown.length > limit ? (
         <Button variant="secondary" size="sm" className="justify-self-start" onClick={() => setLimit((l) => l + 100)}>
@@ -707,7 +720,7 @@ function ComparePageContent() {
       eyebrow="Evaluation"
       title="Compare evaluations"
       concept="eval:comparable"
-      description="Scores, metrics and parameters side by side. Deltas below the noise floor read ≈; runs measured with a different catalogue, evaluator or encoding plan are flagged, never judged."
+      description="Scores, metrics and parameters side by side. A delta inside the two runs' own sampling noise reads ≈; runs measured with a different catalogue, evaluator or encoding plan are flagged, never judged."
     />
   );
 

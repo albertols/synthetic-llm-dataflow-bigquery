@@ -439,8 +439,11 @@ export const concepts = defineConcepts([
     id: "eval:approx",
     title: "≈ (within noise)",
     purpose:
-      "A difference between two runs smaller than the larger of their noise floors, or two confidence intervals that overlap. It cannot be told apart from sampling noise, so it is shown as ≈, never as better or worse.",
-    formula: "|v_B - v_A| \\le \\max(\\varepsilon_A, \\varepsilon_B) \\Rightarrow \\approx",
+      "A difference between two runs that their own sampling noise explains: within the two rows' noise floors combined or, for a metric that carries confidence intervals instead, between two intervals that overlap. It is shown as ≈, never as better or worse, by the rule sdfb-eval compare applies.",
+    formula: "|v_B - v_A| \\le \\sqrt{\\varepsilon_A^2 + \\varepsilon_B^2} \\Rightarrow \\approx",
+    interpretation: {
+      tip: "Both rows must carry a floor (the two estimates' noise is independent, so the floors add in quadrature); then the floors decide alone. Without two floors, all four interval bounds must be stored and finite. With neither, the row reads “no noise floor” and its delta is judged by the metric's direction.",
+    },
     diagram: "core:noise-floor",
     links: [
       { label: "Massart 1990 — DKW", url: "https://doi.org/10.1214/aop/1176990746", kind: "paper" },

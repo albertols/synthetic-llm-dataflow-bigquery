@@ -245,7 +245,8 @@ by hand.
 **Exporters** (`scripts/gui/*`, Python). `export_knobs.py` writes
 `knobs.json`, `relationships.json` and `dlq_rules.json`;
 `export_golden_fixtures.py` writes `golden/*.json` (the scoring cases come from
-`export_scoring_golden.py`). They run from the repository root in the root uv
+`export_scoring_golden.py`, the compare pairs from `export_compare_golden.py`).
+They run from the repository root in the root uv
 workspace env, the one `uv sync --group dev` makes, which is what CI's
 `exports` job uses. A worktree that must not share `.venv` points uv at its own
 env, as this branch did:
@@ -257,8 +258,9 @@ cd gui && npm run contracts:sync
 ```
 
 The evaluator (`packages/sdfb-evaluation`) is a separate uv project that the
-root env does not install; `export_scoring_golden.py` imports its scoring
-module from source and needs only numpy and PyYAML.
+root env does not install; `export_scoring_golden.py` and
+`export_compare_golden.py` import its scoring and report modules from source
+and need only numpy and PyYAML.
 
 **Screenshots.** `GUI_SHOTS_DIR=/path/to/dir npx playwright test -g screenshots`
 runs the screenshot tests in every spec, at both widths

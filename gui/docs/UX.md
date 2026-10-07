@@ -69,7 +69,10 @@ Follow the dataviz method: pick the form first, colour last.
   `null`, `not_evaluated`, empty profiles, one run, 200 columns — renders a
   labelled empty state or a scrolling table, never a `NaN` axis.
 - **Noise floor**: wherever a metric has one, show it (band or marker) and say
-  "≈" for differences below it.
+  "≈" for a difference it explains. Between two runs that is the rule of
+  `sdfb-eval compare`: within the two rows' floors combined
+  (`√(floor_A² + floor_B²)`), else two stored confidence intervals that
+  overlap, else no "≈" at all.
 
 ## 3-D — DeckFrame
 

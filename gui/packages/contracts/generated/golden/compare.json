@@ -1,0 +1,593 @@
+{
+ "generated_by": "scripts/gui/export_golden_fixtures.py",
+ "cases_from": "scripts/gui/export_compare_golden.py",
+ "python": "3.11",
+ "source": "packages/sdfb-evaluation/src/sdfb_evaluation/report/render.py (compare: _delta, _noise, _direction)",
+ "encoding": "non-finite inputs are the strings '+inf', '-inf', 'nan'; `noise` is what the delta was judged against ('floor <the hypotenuse of the two floors, 4 significant digits>', 'CI overlap', 'no noise floor'), null without a delta",
+ "verdicts": {
+  "=": "the two values are equal",
+  "≈": "within noise",
+  "worse": "by the catalogue's direction",
+  "better": "by the catalogue's direction",
+  "changed": "no direction to judge by",
+  "n/a": "a side has no finite value"
+ },
+ "cases": [
+  {
+   "id": "c01",
+   "note": "equal values read = whatever the floors",
+   "metric_id": "column.ks",
+   "a": {
+    "value": 0.1,
+    "noise_floor": 0.02,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.1,
+    "noise_floor": 0.02,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.0,
+    "noise": "floor 0.02828",
+    "verdict": "="
+   }
+  },
+  {
+   "id": "c02",
+   "note": "a delta under both floors: within noise",
+   "metric_id": "column.ks",
+   "a": {
+    "value": 0.1,
+    "noise_floor": 0.02,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.11,
+    "noise_floor": 0.02,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.01,
+    "noise": "floor 0.02828",
+    "verdict": "≈"
+   }
+  },
+  {
+   "id": "c03",
+   "note": "a delta between the larger floor and the hypotenuse: within noise (a max-of-floors rule would judge it)",
+   "metric_id": "column.ks",
+   "a": {
+    "value": 0.1,
+    "noise_floor": 0.03,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.145,
+    "noise_floor": 0.04,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.045,
+    "noise": "floor 0.05",
+    "verdict": "≈"
+   }
+  },
+  {
+   "id": "c04",
+   "note": "a delta exactly on the hypotenuse (3, 4, 5): within noise, inclusive",
+   "metric_id": "column.wasserstein",
+   "a": {
+    "value": 10.0,
+    "noise_floor": 3.0,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 15.0,
+    "noise_floor": 4.0,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 5.0,
+    "noise": "floor 5",
+    "verdict": "≈"
+   }
+  },
+  {
+   "id": "c05",
+   "note": "a delta just past the hypotenuse, lower is better: worse",
+   "metric_id": "column.wasserstein",
+   "a": {
+    "value": 10.0,
+    "noise_floor": 3.0,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 15.5,
+    "noise_floor": 4.0,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 5.5,
+    "noise": "floor 5",
+    "verdict": "worse"
+   }
+  },
+  {
+   "id": "c06",
+   "note": "the same delta the other way: better",
+   "metric_id": "column.wasserstein",
+   "a": {
+    "value": 15.5,
+    "noise_floor": 3.0,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 10.0,
+    "noise_floor": 4.0,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": -5.5,
+    "noise": "floor 5",
+    "verdict": "better"
+   }
+  },
+  {
+   "id": "c07",
+   "note": "both floors overrule overlapping intervals: judged, not within noise",
+   "metric_id": "column.ks",
+   "a": {
+    "value": 0.1,
+    "noise_floor": 0.02,
+    "ci_low": 0.05,
+    "ci_high": 0.25,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.2,
+    "noise_floor": 0.02,
+    "ci_low": 0.08,
+    "ci_high": 0.3,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.1,
+    "noise": "floor 0.02828",
+    "verdict": "worse"
+   }
+  },
+  {
+   "id": "c08",
+   "note": "one floor missing, a delta under the other, no intervals: no noise information, judged (a one-floor rule would read within noise)",
+   "metric_id": "column.ks",
+   "a": {
+    "value": 0.1,
+    "noise_floor": 0.02,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.11,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.01,
+    "noise": "no noise floor",
+    "verdict": "worse"
+   }
+  },
+  {
+   "id": "c09",
+   "note": "one floor missing, four finite bounds that overlap: within noise by the intervals",
+   "metric_id": "column.null_rate_delta",
+   "a": {
+    "value": 0.03,
+    "noise_floor": 0.02,
+    "ci_low": 0.0,
+    "ci_high": 0.06,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.04,
+    "noise_floor": null,
+    "ci_low": 0.01,
+    "ci_high": 0.07,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.01,
+    "noise": "CI overlap",
+    "verdict": "≈"
+   }
+  },
+  {
+   "id": "c10",
+   "note": "a NaN floor is no floor",
+   "metric_id": "column.ks",
+   "a": {
+    "value": 0.1,
+    "noise_floor": "nan",
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.11,
+    "noise_floor": 0.02,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.01,
+    "noise": "no noise floor",
+    "verdict": "worse"
+   }
+  },
+  {
+   "id": "c11",
+   "note": "no floors, intervals that overlap: within noise",
+   "metric_id": "row.dcr_train_holdout_share",
+   "a": {
+    "value": 0.52,
+    "noise_floor": null,
+    "ci_low": 0.5,
+    "ci_high": 0.54,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.55,
+    "noise_floor": null,
+    "ci_low": 0.53,
+    "ci_high": 0.57,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.03,
+    "noise": "CI overlap",
+    "verdict": "≈"
+   }
+  },
+  {
+   "id": "c12",
+   "note": "no floors, intervals that touch at one point: within noise, inclusive",
+   "metric_id": "row.dcr_train_holdout_share",
+   "a": {
+    "value": 0.52,
+    "noise_floor": null,
+    "ci_low": 0.5,
+    "ci_high": 0.54,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.56,
+    "noise_floor": null,
+    "ci_low": 0.54,
+    "ci_high": 0.58,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.04,
+    "noise": "CI overlap",
+    "verdict": "≈"
+   }
+  },
+  {
+   "id": "c13",
+   "note": "no floors, intervals apart: judged",
+   "metric_id": "row.dcr_train_holdout_share",
+   "a": {
+    "value": 0.52,
+    "noise_floor": null,
+    "ci_low": 0.5,
+    "ci_high": 0.54,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.62,
+    "noise_floor": null,
+    "ci_low": 0.58,
+    "ci_high": 0.66,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.1,
+    "noise": "CI overlap",
+    "verdict": "worse"
+   }
+  },
+  {
+   "id": "c14",
+   "note": "an open interval (no upper bound) is no interval: judged (reading the missing bound as infinity would overlap)",
+   "metric_id": "row.memorization_lift",
+   "a": {
+    "value": 3.0,
+    "noise_floor": null,
+    "ci_low": 0.5,
+    "ci_high": 12.0,
+    "status": "pass"
+   },
+   "b": {
+    "value": 1.1,
+    "noise_floor": null,
+    "ci_low": 0.4,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": -1.9,
+    "noise": "no noise floor",
+    "verdict": "better"
+   }
+  },
+  {
+   "id": "c15",
+   "note": "a non-finite bound is no bound: judged",
+   "metric_id": "row.memorization_lift",
+   "a": {
+    "value": 3.0,
+    "noise_floor": null,
+    "ci_low": 0.5,
+    "ci_high": 12.0,
+    "status": "pass"
+   },
+   "b": {
+    "value": 1.1,
+    "noise_floor": null,
+    "ci_low": 0.4,
+    "ci_high": "+inf",
+    "status": "pass"
+   },
+   "python": {
+    "delta": -1.9,
+    "noise": "no noise floor",
+    "verdict": "better"
+   }
+  },
+  {
+   "id": "c16",
+   "note": "a value missing on one side: nothing to judge",
+   "metric_id": "row.memorization_lift",
+   "a": {
+    "value": null,
+    "noise_floor": null,
+    "ci_low": 0.0,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 1.1,
+    "noise_floor": null,
+    "ci_low": 0.4,
+    "ci_high": 2.0,
+    "status": "pass"
+   },
+   "python": {
+    "delta": null,
+    "noise": null,
+    "verdict": "n/a"
+   }
+  },
+  {
+   "id": "c17",
+   "note": "a non-finite value: nothing to judge",
+   "metric_id": "column.psi",
+   "a": {
+    "value": "+inf",
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.2,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": null,
+    "noise": null,
+    "verdict": "n/a"
+   }
+  },
+  {
+   "id": "c18",
+   "note": "higher is better: a rise is better",
+   "metric_id": "field.type_validity",
+   "a": {
+    "value": 0.99,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.995,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.005,
+    "noise": "no noise floor",
+    "verdict": "better"
+   }
+  },
+  {
+   "id": "c19",
+   "note": "higher is better: a drop is worse",
+   "metric_id": "column.range_coverage",
+   "a": {
+    "value": 0.95,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.8,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": -0.15,
+    "noise": "no noise floor",
+    "verdict": "worse"
+   }
+  },
+  {
+   "id": "c20",
+   "note": "a target metric: closer to the target is better",
+   "metric_id": "column.std_ratio",
+   "a": {
+    "value": 1.3,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.95,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": -0.35,
+    "noise": "no noise floor",
+    "verdict": "better"
+   }
+  },
+  {
+   "id": "c21",
+   "note": "a target metric: farther from the target is worse",
+   "metric_id": "column.std_ratio",
+   "a": {
+    "value": 1.05,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 1.3,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.25,
+    "noise": "no noise floor",
+    "verdict": "worse"
+   }
+  },
+  {
+   "id": "c22",
+   "note": "a target metric: the same distance on the other side reads better",
+   "metric_id": "column.std_ratio",
+   "a": {
+    "value": 0.5,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 1.5,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 1.0,
+    "noise": "no noise floor",
+    "verdict": "better"
+   }
+  },
+  {
+   "id": "c23",
+   "note": "a target metric without a catalogue target: changed, no direction",
+   "metric_id": "column.novelty_mass",
+   "a": {
+    "value": 0.2,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.3,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.1,
+    "noise": "no noise floor",
+    "verdict": "changed"
+   }
+  },
+  {
+   "id": "c24",
+   "note": "a metric this catalogue does not know: changed, no direction",
+   "metric_id": "column.not_in_this_catalogue",
+   "a": {
+    "value": 0.2,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "b": {
+    "value": 0.3,
+    "noise_floor": null,
+    "ci_low": null,
+    "ci_high": null,
+    "status": "pass"
+   },
+   "python": {
+    "delta": 0.1,
+    "noise": "no noise floor",
+    "verdict": "changed"
+   }
+  }
+ ]
+}

@@ -461,6 +461,36 @@ def test_retrieval_golden_matches_python_picks(golden_module):
     assert case["picks"] == expected, case
 
 
+def test_compare_golden_holds_the_evaluators_own_verdicts(golden_module):
+  import math
+
+  doc = golden_module.build()["compare"]
+  render = sys.modules["sdfb_evaluation.report.render"]
+  catalogue = render.load_catalogue()
+  known = set(catalogue.ids())
+  decode = {"+inf": math.inf, "-inf": -math.inf, "nan": math.nan}
+
+  def row(side: dict) -> dict:
+    return {
+        key: value if key == "status" else decode.get(value, value)
+        for key, value in side.items()
+    }
+
+  # Each pair alone through the function `compare` judges a pair with.
+  for case in doc["cases"]:
+    metric_id = case["metric_id"]
+    entry = render._delta(
+        ("users", metric_id, case["id"], None, None), row(case["a"]),
+        row(case["b"]),
+        catalogue.get(metric_id) if metric_id in known else None)
+    assert (entry["verdict"], entry["noise"]) == (case["python"]["verdict"],
+                                                  case["python"]["noise"]), case
+  assert {c["python"]["verdict"] for c in doc["cases"]} == set(doc["verdicts"])
+  # Judged against both floors, the intervals, nothing, or not judged at all.
+  assert {(c["python"]["noise"] or "none").split()[0] for c in doc["cases"]
+         } == {"floor", "CI", "no", "none"}
+
+
 def test_golden_check_detects_drift(golden_module, tmp_path):
   assert golden_module.main(["--out-dir", str(tmp_path)]) == 0
   assert golden_module.main(["--check", "--out-dir", str(tmp_path)]) == 0

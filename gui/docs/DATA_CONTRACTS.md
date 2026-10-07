@@ -42,6 +42,7 @@ exporters in `scripts/gui/` write the JSON that `gen.mjs` then types.
 | the DLQ envelopes of `sdfb_beam/dofns`, `dlq.normalize_dlq_record`, `config/thresholds.yml`                                             | `export_knobs.py`           | `generated/dlq_rules.json` → `dlqRules.ts`                           | `dlqRules`, `dlqRuleById`, `DlqRuleId`                                                                                                  |
 | `sdfb_core.rag` (`HashingEmbedder`, `serialize_row`, retrieval)                                                                         | `export_golden_fixtures.py` | `generated/golden/{hashing_embedder,great_serialize,retrieval}.json` | test fixtures, imported as JSON by the golden tests                                                                                     |
 | `sdfb_evaluation.scoring`, over the cases in `export_scoring_golden.py`                                                                 | `export_golden_fixtures.py` | `generated/golden/scoring.json`                                      | test fixtures ([scoring parity](ARCHITECTURE.md#scoring-parity-python--typescript))                                                     |
+| `sdfb_evaluation.report.render.compare`, over the pairs in `export_compare_golden.py`                                                   | `export_golden_fixtures.py` | `generated/golden/compare.json`                                      | test fixtures ([compare parity](ARCHITECTURE.md#compare-parity-python--typescript))                                                     |
 | every input above                                                                                                                       | `gen.mjs`                   | `generated/manifest.json`                                            | the sha256 of each input, so a hand edit of an exported file is drift too                                                               |
 
 The API contract (`src/api.ts`), the payload parsers (`src/payloads.ts`) and
@@ -151,12 +152,18 @@ What it shows today:
 
 ## Golden fixtures
 
-| File                    | Python original                                                        | TS port (packages/stats)                                                   | Pinned                                                           |
-| :---------------------- | :--------------------------------------------------------------------- | :------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `hashing_embedder.json` | `sdfb_core.rag.embedding.HashingEmbedder`                              | `hashingEmbed`, `pySplit`, `hashingBucket`                                 | tokens, uint64-modulo buckets and signs exact; values 1e-6       |
-| `great_serialize.json`  | `sdfb_core.rag.serialize.serialize_row`                                | `serializeGreat`, `pyFloatRepr`, `pyStr`                                   | the text, exactly                                                |
-| `retrieval.json`        | `retrieve_centroid_top_k` (pure index), `retrieve_kcenter_k`           | `centroidTopK`, `kcenter`, `kcenterRotate`, `selectSeedExamples`           | the picks, exactly (duplicates and a collapsed matrix)           |
-| `scoring.json`          | `sdfb_evaluation.scoring` (`to_metric_row`, roll-ups, headline counts) | `scoreRow`, `scoreValue`, `statusFor`, `aggregateScores`, `headlineCounts` | status, score and detail notes exactly; scores to 1e-12 relative |
+| File                    | Python original                                                            | TS port (packages/stats)                                                   | Pinned                                                           |
+| :---------------------- | :------------------------------------------------------------------------- | :------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `hashing_embedder.json` | `sdfb_core.rag.embedding.HashingEmbedder`                                  | `hashingEmbed`, `pySplit`, `hashingBucket`                                 | tokens, uint64-modulo buckets and signs exact; values 1e-6       |
+| `great_serialize.json`  | `sdfb_core.rag.serialize.serialize_row`                                    | `serializeGreat`, `pyFloatRepr`, `pyStr`                                   | the text, exactly                                                |
+| `retrieval.json`        | `retrieve_centroid_top_k` (pure index), `retrieve_kcenter_k`               | `centroidTopK`, `kcenter`, `kcenterRotate`, `selectSeedExamples`           | the picks, exactly (duplicates and a collapsed matrix)           |
+| `scoring.json`          | `sdfb_evaluation.scoring` (`to_metric_row`, roll-ups, headline counts)     | `scoreRow`, `scoreValue`, `statusFor`, `aggregateScores`, `headlineCounts` | status, score and detail notes exactly; scores to 1e-12 relative |
+| `compare.json`          | `sdfb_evaluation.report.render.compare` (`_delta`, `_noise`, `_direction`) | `diffMetric`, `noiseOf` (apps/web `lib/compare.ts`)                        | the verdict of every pair, and what its delta was judged against |
+
+`compare.json` holds pairs of metric rows with the verdict `sdfb-eval compare`
+(`sdfb_evaluation.report.render.compare`) gives each; the compare view's
+`diffMetric` must give the same one
+([compare parity](ARCHITECTURE.md#compare-parity-python--typescript)).
 
 A golden file is the same on every machine: its numbers are integer arithmetic,
 SHA-256 or correctly rounded IEEE 754 operations, and its `python` stamp is the

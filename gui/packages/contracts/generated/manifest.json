@@ -17,6 +17,7 @@
     "gui/packages/contracts/generated/knobs.json": "53f02ee0902282051e90a51feee51ce914c198b64c40f038c9d55584f4ba4fae",
     "gui/packages/contracts/generated/relationships.json": "a0bb70a3b8eeb48483a4723667fd8f449db53ccfdd5a84f2ad1afb49a5326511",
     "gui/packages/contracts/generated/dlq_rules.json": "d62c3b4e0748db995a3f2a743dd9fa6148915b8fcecb874795d3cda0c17afd4d",
+    "gui/packages/contracts/generated/golden/compare.json": "b62612b541a150ee447e7ee7275df5a963aab5c1126c8781e3d4c1eddb4636b0",
     "gui/packages/contracts/generated/golden/great_serialize.json": "e1dbe4d9b93cca7877afa89f2560f20f97118bc165f859c7a87248c1c6af3c19",
     "gui/packages/contracts/generated/golden/hashing_embedder.json": "7b0b3c3654fdfddc608f6004269b65e752fc007711e8be08dd63e574b9ca80a0",
     "gui/packages/contracts/generated/golden/retrieval.json": "c9996802599f3a56073703f18839cd0f74dd9c32b27da73889fab45511a306f8",

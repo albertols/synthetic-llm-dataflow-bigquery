@@ -352,7 +352,9 @@ function FeedbackComponents() {
         </Banner>
       ) : null}
       <div className="grid gap-3 md:grid-cols-2">
-        <Callout tone="info">Metrics below the noise floor read as “≈” in comparisons.</Callout>
+        <Callout tone="info">
+          A difference inside the two runs&apos; combined noise floor reads as “≈” in comparisons.
+        </Callout>
         <Callout tone="warn" title="Sampled evaluation">
           Row-level metrics ran on a 10% sample; their intervals are wider.
         </Callout>

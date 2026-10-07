@@ -687,6 +687,47 @@ TypeScript, and the mirror must reproduce Python's output case for case._
   change to the evaluator's scorer that the golden does not match fails; the
   TS tests then fail until `scoring.ts` follows.
 
+### Compare parity (Python → TypeScript)
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  PY["⚙️ sdfb-eval compare<br/>report.render.compare"]:::cpu
+  CASES["⚙️ export_compare_golden.py<br/>pairs of metric rows"]:::cpu
+  GOLD[("📄 golden/compare.json<br/>pairs + Python's verdicts")]:::store
+  TS["⚙️ lib/compare.ts<br/>diffMetric · noiseOf"]:::cpu
+
+  CASES --> PY -->|"export_golden_fixtures.py"| GOLD
+  GOLD -->|"compare.golden.test.ts"| TS
+```
+
+_The same two runs never read "≈" in the compare view and "worse" in
+`sdfb-eval compare`: the view applies the evaluator's rule, and a golden file
+written by the Python holds it to that._
+
+The verdict of one metric row of run A against the row with the same key of
+run B, in the evaluator's order (`report/render.py`: `_delta`, `_noise`,
+`_direction`):
+
+| Step | Both rows have                      | Verdict                                                                     |
+| :--- | :---------------------------------- | :-------------------------------------------------------------------------- |
+| 1    | not two finite values               | nothing to judge                                                            |
+| 2    | equal values                        | same, before any noise reading                                              |
+| 3a   | a finite `noise_floor` each         | "≈" iff `\|Δ\| ≤ √(floor_A² + floor_B²)`; the intervals are not consulted   |
+| 3b   | else four finite CI bounds          | "≈" iff the two intervals overlap (touching counts)                         |
+| 3c   | else                                | no noise information: never "≈" (the table says "no noise floor")           |
+| 4    | a delta that noise does not explain | better or worse by the catalogue's direction; not judged when it gives none |
+
+A stored `NULL` bound (a lift's open upper bound) is no bound, and one floor is
+no floor. The view adds two things the command reports as notes instead: a
+`not_evaluated` row has no verdict, and across different catalogue, evaluator
+or encoding-plan versions the direction is not judged ("≈" and "same" still
+are). `scripts/gui/export_compare_golden.py` lists the pairs, on each branch
+and its boundaries; CI's `exports` job fails when the evaluator's rule and
+the golden part, and `compare.golden.test.ts` until `compare.ts` follows.
+
 ### Content-Security-Policy (notes; the BFF does not send one yet)
 
 The BFF sets `x-content-type-options`, `referrer-policy` and

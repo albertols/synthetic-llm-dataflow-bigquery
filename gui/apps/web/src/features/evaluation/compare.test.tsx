@@ -1,7 +1,9 @@
 /**
- * The compare view's two promises: a delta below the noise floor (or between
- * overlapping CIs) reads "≈" and is never judged; runs with a different
- * catalogue, evaluator or encoding plan are flagged "not comparable".
+ * The compare view's two promises: a delta the two rows' own sampling noise
+ * explains (within their floors combined, or between overlapping CIs) reads
+ * "≈" and is never judged; runs with a different catalogue, evaluator or
+ * encoding plan are flagged "not comparable". The verdicts themselves are held
+ * to `sdfb-eval compare` by lib/compare.golden.test.ts.
  */
 import { configure, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -49,15 +51,21 @@ const ks = (a: MetricCell | null, b: MetricCell | null) => ({
 });
 
 describe("noise-aware diff", () => {
-  it("reads a delta at or below the larger noise floor as ≈", () => {
+  it("reads a delta within the two floors combined (their hypotenuse) as ≈", () => {
     expect(diffMetric(ks(cell(0.03, { noise_floor: 0.01 }), cell(0.045, { noise_floor: 0.02 })), 0, 1).verdict).toBe(
       "approx",
     );
     expect(diffMetric(ks(cell(0.03, { noise_floor: 0.02 }), cell(0.05, { noise_floor: 0.01 })), 0, 1)).toMatchObject({
       verdict: "approx",
       basis: "noise_floor",
-      floor: 0.02,
+      noise: "floor",
+      floor: Math.hypot(0.02, 0.01),
     });
+  });
+
+  it("needs both floors: with one missing and no intervals there is no noise to read", () => {
+    const oneFloor = diffMetric(ks(cell(0.03, { noise_floor: 0.02 }), cell(0.04)), 0, 1);
+    expect(oneFloor).toMatchObject({ verdict: "worse", basis: "direction", noise: "none", floor: null });
   });
 
   it("judges a delta beyond the floor by the metric's direction", () => {
@@ -83,14 +91,23 @@ describe("noise-aware diff", () => {
     expect(diffMetric(target, 0, 1).verdict).toBe("better");
   });
 
-  it("reads overlapping confidence intervals as ≈ even without a floor", () => {
-    const lift = {
+  it("reads overlapping confidence intervals as ≈ without floors, and an open interval as no interval", () => {
+    const lift = (b: MetricCell) => ({
       metric_id: "row.memorization_lift",
       table_name: "users",
       level: "row" as const,
-      cells: [cell(3, { ci_low: 0.5, ci_high: 12 }), cell(1.1, { ci_low: 0.4, ci_high: null })],
-    };
-    expect(diffMetric(lift, 0, 1)).toMatchObject({ verdict: "approx", basis: "ci_overlap" });
+      cells: [cell(3, { ci_low: 0.5, ci_high: 12 }), b],
+    });
+    expect(diffMetric(lift(cell(1.1, { ci_low: 0.4, ci_high: 2.5 })), 0, 1)).toMatchObject({
+      verdict: "approx",
+      basis: "ci_overlap",
+      noise: "ci_overlap",
+    });
+    // No upper bound stored: four finite bounds are needed, so the delta is judged by direction.
+    expect(diffMetric(lift(cell(1.1, { ci_low: 0.4, ci_high: null })), 0, 1)).toMatchObject({
+      verdict: "better",
+      noise: "none",
+    });
   });
 
   it("flags different encoding plans and versions and never judges them", () => {
