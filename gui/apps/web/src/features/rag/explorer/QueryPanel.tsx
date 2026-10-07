@@ -87,7 +87,7 @@ export function QueryPanel({
             value={text}
             onChange={(event) => setText(event.target.value)}
             placeholder={canEmbed ? "e.g. city is Pine" : "text to find"}
-            className="h-9 min-w-0 flex-1 rounded-md border border-control-border bg-surface-1 px-3 text-sm text-text-1 placeholder:text-text-3 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus-ring"
+            className="h-9 w-full min-w-0 flex-1 rounded-md border border-control-border bg-surface-1 px-3 text-sm text-text-1 placeholder:text-text-3 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus-ring"
             autoComplete="off"
             spellCheck={false}
           />
