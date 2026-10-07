@@ -29,6 +29,7 @@ import {
 import {
   canonicalTimestamp,
   dlqRuleById,
+  LIFT_COUNT_KEYS,
   isCanonicalTimestamp,
   parseEdge,
   snapshotKey,
@@ -107,6 +108,8 @@ describe("the storyline", { timeout: 60_000 }, () => {
     expect(lifts.length).toBeGreaterThan(0);
     expect(lifts.every((m) => m.status === "not_evaluated")).toBe(true);
     const wide = rows.find((r) => r.tables.some((t) => t.name === "user_features"))!;
+    // No relationship model, so no model entry for the table: the evaluator's `standalone` role.
+    expect([wide.relationship_model, wide.tables.map((t) => t.role)]).toEqual([null, ["standalone"]]);
     expect(
       new Set(
         metricsOf(wide.evaluation_id)
@@ -383,8 +386,10 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
     }
     // … and one with copies only in R stores NULL too (Python's rate_ratio gives +∞), gated on ci_low > 0.
     const holdoutZero = lifts.filter((m) => {
-      const d = detailOf(m) as { copies_r?: number; copies_h?: number };
-      return d.copies_h === 0 && (d.copies_r ?? 0) > 0;
+      // The two event counts sit under the producer's keys for that lift (copies_*, events_*).
+      const [reference, holdout] = LIFT_COUNT_KEYS[m.metric_id as keyof typeof LIFT_COUNT_KEYS];
+      const d = detailOf(m) as Record<string, number | undefined>;
+      return d[holdout] === 0 && (d[reference] ?? 0) > 0;
     });
     expect(holdoutZero.length).toBeGreaterThan(0);
     for (const m of holdoutZero) {

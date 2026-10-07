@@ -176,7 +176,7 @@ describe("degenerate runs", () => {
     await user.click(screen.getByRole("button", { name: "Show 50 more" }));
     expect(within(table).getAllByRole("rowheader")).toHaveLength(100);
     expect(calls.some((u) => u.pathname.endsWith("/profiles"))).toBe(false);
-    // Roll-ups exist for a single isolated table.
+    // Roll-ups exist for a single standalone table.
     expect(rollups("user_features").length).toBe(10);
   });
 });

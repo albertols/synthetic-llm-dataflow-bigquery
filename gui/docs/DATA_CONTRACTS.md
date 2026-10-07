@@ -315,7 +315,8 @@ Fetched rows are cached in memory (LRU) and never persisted.
   `relationship.orphan_rate_source`. Invented, so not in
   `relationships.json`: the BFF serves it from `/api/relationships` in mock
   mode. Project `demo-project`: sources in `synthetic_source`, landings in
-  `synthetic_data`. Plus `user_features`, an isolated 200-column table.
+  `synthetic_data`. Plus `user_features`, a 200-column table launched alone
+  with no relationship model (role `standalone`).
 - **Identifiers as the pipeline writes them:** per-table run ids
   `<base>-00-users`, `<base>-01-orders`, `<base>-02-order_items`
   (`run_pipeline.plan_launch`; the one-table launch keeps `<base>`); reference

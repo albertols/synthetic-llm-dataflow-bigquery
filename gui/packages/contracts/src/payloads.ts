@@ -175,10 +175,22 @@ export function parseProfile<K extends ProfileKind>(kind: K, payload: unknown): 
 }
 
 /**
+ * The detail keys that hold a lift's two event counts, the reference side first: what the
+ * evaluator's producers write (value and pool lifts count copied values, row lifts count
+ * reproduced records, the exposure lift those of the exposed set E and its holdout half).
+ */
+export const LIFT_COUNT_KEYS = {
+  "field.value_memorization_lift": ["copies_r", "copies_h"],
+  "field.pool_memorization_lift": ["copies_r", "copies_h"],
+  "row.memorization_lift": ["events_r", "events_h"],
+  "row.near_match_lift": ["events_r", "events_h"],
+  "row.exposure_lift": ["events_e", "events_he"],
+} as const;
+
+/**
  * `evaluation_metrics.detail`: every key optional, unknown keys kept. The
  * common ones: `reason` (why not_evaluated), `d_hi` (the KS bracket's upper
- * end), `tail_mass_*`, `copies`/`expected` (lifts: the rate-ratio counts),
- * `matched_n`, `chao_shen`.
+ * end), the lifts' event counts (`LIFT_COUNT_KEYS`), `matched_n`.
  */
 export const metricDetailSchema = z
   .object({

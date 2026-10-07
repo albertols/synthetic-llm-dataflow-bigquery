@@ -15,6 +15,7 @@
  */
 import {
   catalogueById,
+  LIFT_COUNT_KEYS,
   type CatalogueMetric,
   type EvaluationMetricsRow,
   type EvaluationProfilesRow,
@@ -153,12 +154,16 @@ function memo<T>(owner: object, key: string, compute: () => T): T {
  * A lift's reading as the evaluator's `rate_ratio` returns it (Ruling R38): with no copies on
  * either side the ratio is undefined (None) and the interval (0, ∞); with copies only in R the
  * ratio is +∞ — both store value NULL (json_safe) while status gates on ci_low. No zero
- * correction: the point estimate is what Python writes, not a smoothed stand-in.
+ * correction: the point estimate is what Python writes, not a smoothed stand-in. The two event
+ * counts go to the detail under the producer's own keys (`LIFT_COUNT_KEYS`).
  */
-function liftReading(m1: number, t1: number, m2: number, t2: number) {
+type LiftId = keyof typeof LIFT_COUNT_KEYS;
+
+function liftReading(id: LiftId, m1: number, t1: number, m2: number, t2: number) {
   const r = rateRatio(m1, t1, m2, t2, 0.05);
   const value = m1 + m2 === 0 ? null : m2 === 0 ? Number.POSITIVE_INFINITY : r.ratio;
-  return { value, ciLow: r.lo, ciHigh: r.hi, detail: { copies_r: m1, copies_h: m2 } };
+  const [reference, holdout] = LIFT_COUNT_KEYS[id];
+  return { value, ciLow: r.lo, ciHigh: r.hi, detail: { [reference]: m1, [holdout]: m2 } };
 }
 
 /** detail.reason for a pair statistic that is undefined on a side (a constant column there). */
@@ -981,7 +986,7 @@ export class TableEvaluator {
 
   /** A rate-ratio lift (R vs H) on counts over the whole synthetic side. */
   privacyLift(
-    id: MetricId,
+    id: LiftId,
     column: ColumnDef | undefined,
     rateR: number,
     rateH: number,
@@ -996,7 +1001,7 @@ export class TableEvaluator {
     const m2 = rng.poisson(n * (rateH + CHANCE_MATCH));
     if (commonValues && m1 + m2 === 0)
       return this.notEvaluated(id, "no rare source values: every value is shared by ≥ 10 source rows", { column });
-    return this.metric(id, { column, ...liftReading(m1, nReference, m2, nReference), nSynthetic: n });
+    return this.metric(id, { column, ...liftReading(id, m1, nReference, m2, nReference), nSynthetic: n });
   }
 
   // ---------------------------------------------------------------- pairs --
@@ -1282,12 +1287,12 @@ export class TableEvaluator {
       ...wilsonCi(exactNonKey, nPrivacy),
       nSynthetic: nPrivacy,
     });
-    const lift = (id: MetricId, rateR: number, sizeR: number) => {
+    const lift = (id: LiftId, rateR: number, sizeR: number) => {
       if (!referenceVerified)
         return this.notEvaluated(id, "reference not verified: R and H are not the generator's sample");
       const m1 = rng.poisson(nPrivacy * (rateR + CHANCE_MATCH * 10));
       const m2 = rng.poisson(nPrivacy * CHANCE_MATCH * 10);
-      return this.metric(id, { ...liftReading(m1, sizeR, m2, sizeR), nSynthetic: nPrivacy });
+      return this.metric(id, { ...liftReading(id, m1, sizeR, m2, sizeR), nSynthetic: nPrivacy });
     };
     lift("row.memorization_lift", q.rowLeak, nReference);
     lift("row.exposure_lift", q.exposureLeak * (nReference / 1024), 1024);

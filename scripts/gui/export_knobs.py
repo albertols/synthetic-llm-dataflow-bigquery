@@ -157,6 +157,10 @@ _EVAL_FLAGS = (
     ("scope", None, "Evaluation scope"),
     ("allow_contaminated", None, "Allow contaminated scopes"),
 )
+# How the evaluator's CLI spells two of its flag declarations:
+# `_boolean(parser, flag, help)` and a `(flag, default, help)` row.
+_BOOLEAN_ARGS = 3
+_COUNT_ROW = 3
 
 # ---------------------------------------------------------------- helpers --
 
@@ -999,7 +1003,7 @@ def _eval_cli_flags(
           node.func.attr == "add_argument"):
         declare(node.args[0], {k.arg: k.value for k in node.keywords if k.arg})
       elif (isinstance(node.func, ast.Name) and node.func.id == "_boolean" and
-            len(node.args) == 3):
+            len(node.args) == _BOOLEAN_ARGS):
         declare(node.args[1], {
             "default": ast.Constant(False),
             "help": node.args[2]
@@ -1009,7 +1013,7 @@ def _eval_cli_flags(
               isinstance(target, ast.Name) and target.id == "_COUNT_FLAGS"
               for target in node.targets)):
       for row in node.value.elts:
-        if isinstance(row, ast.Tuple) and len(row.elts) == 3:
+        if isinstance(row, ast.Tuple) and len(row.elts) == _COUNT_ROW:
           declare(row.elts[0], {"default": row.elts[1], "help": row.elts[2]})
   return found
 

@@ -534,8 +534,9 @@ def _first_difference(committed: str, fresh: str) -> str:
   if not committed:
     return "  the committed file is missing"
   old, new = committed.split("\n"), fresh.split("\n")
-  line = next((i for i, (a, b) in enumerate(zip(old, new)) if a != b),
-              min(len(old), len(new)))
+  line = next(
+      (i for i, (a, b) in enumerate(zip(old, new, strict=False)) if a != b),
+      min(len(old), len(new)))
   return "\n".join(f"  line {line + 1}, {side}: " +
                    (lines[line][:200] if line < len(lines) else "(no line)")
                    for side, lines in (("committed", old), ("fresh", new)))

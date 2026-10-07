@@ -343,7 +343,8 @@ function tableEntry(spec: EvalSpec, table: TableDef, runIds: Map<string, string>
     landing_table: table.role === "external" ? landingFqn(table.name) : landingFqn(table.name),
     source_table: sourceFqn(table.name),
     run_id: runIds.get(table.name) ?? null,
-    role: table.role,
+    // A launch with no relationship model has no entry for its table: the evaluator calls it standalone.
+    role: spec.relational ? table.role : "standalone",
     scope_mode: empty ? "appends" : "table",
     scope_status: empty ? "empty" : mismatch ? "count_mismatch" : (note?.status ?? "ok"),
     scope_ok: !empty && !mismatch && !note,

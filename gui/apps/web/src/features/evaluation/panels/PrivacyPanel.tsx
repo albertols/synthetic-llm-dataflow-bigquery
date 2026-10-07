@@ -9,7 +9,7 @@
 import { useMemo, useState } from "react";
 
 import type { EvaluationRecord, MetricRow, ProfileRow, RowFlag } from "@contracts/api";
-import { parseProfile } from "@contracts/payloads";
+import { LIFT_COUNT_KEYS, parseProfile } from "@contracts/payloads";
 
 import { Callout } from "@/components/Callout";
 import { ChartFrame } from "@/components/ChartFrame";
@@ -39,11 +39,12 @@ export function liftRows(metrics: readonly MetricRow[], table?: string): Interva
     .filter((m) => (LIFT_METRICS as readonly string[]).includes(m.metric_id) && (!table || m.table_name === table))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || (b.ci_low ?? -1) - (a.ci_low ?? -1))
     .map((m) => {
-      const detail = (m.detail ?? {}) as { copies_r?: number; copies_h?: number };
+      const detail = (m.detail ?? {}) as Record<string, unknown>;
+      const [reference, holdout] = (LIFT_COUNT_KEYS as Record<string, readonly [string, string]>)[m.metric_id] ?? [];
+      const mR = reference ? detail[reference] : undefined;
+      const mH = holdout ? detail[holdout] : undefined;
       const counts =
-        detail.copies_r !== undefined && detail.copies_h !== undefined
-          ? ` · m_R/m_H ${formatCount(detail.copies_r)}/${formatCount(detail.copies_h)}`
-          : "";
+        typeof mR === "number" && typeof mH === "number" ? ` · m_R/m_H ${formatCount(mR)}/${formatCount(mH)}` : "";
       const skipped = m.status === "not_evaluated";
       // A NULL value — undefined (no copies) or infinite (none in the holdout) — still gates on ci_low (Ruling R38).
       const point = m.value === null ? undefinedValueText({ ciLow: m.ci_low }).split(":")[0]! : `${fmtSig(m.value)}×`;

@@ -233,7 +233,7 @@ export function richDetail(): EvaluationDetail {
       ci_low: 0.03,
       ci_high: null,
       noise_floor_method: "rate_ratio",
-      detail: { copies_r: 1, copies_h: 0 },
+      detail: { events_r: 1, events_h: 0 },
     }),
     // No copies on either side: the lift is undefined, but its CI (0, ∞) gates on ci_low 0 → PASS (R38).
     metric("row.exposure_lift", {
@@ -241,7 +241,7 @@ export function richDetail(): EvaluationDetail {
       ci_low: 0,
       ci_high: null,
       noise_floor_method: "rate_ratio",
-      detail: { copies_r: 0, copies_h: 0 },
+      detail: { events_e: 0, events_he: 0 },
     }),
     metric("row.memorization_lift", {
       value: null,
@@ -331,7 +331,7 @@ export function wideDetail(columns = 200): EvaluationDetail {
     evaluation: evaluation({
       evaluation_id: "eval-wide",
       relationship_model: "user_features_model",
-      tables: [tableEntry("user_features", { role: "isolated" })],
+      tables: [tableEntry("user_features", { role: "standalone" })],
     }),
     events: [],
     metrics,

@@ -437,7 +437,7 @@ export const products: TableDef = {
   },
 };
 
-/** The invented 200-column table (isolated: no relationship model). */
+/** The invented 200-column table (launched alone, with no relationship model: `standalone` in the registry). */
 export const WIDE_COLUMNS = 200;
 export const userFeatures: TableDef = {
   name: "user_features",
