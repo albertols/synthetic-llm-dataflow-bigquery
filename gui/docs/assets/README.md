@@ -6,7 +6,7 @@ one carries is the caption where [`gui/README.md`](../../README.md) shows it.
 
 ## How they were made
 
-Captured on 2026-10-07 at commit `e832464` (`interim-evaluation-and-gui`),
+Captured on 2026-10-07 at commit `9d4f140` (`interim-evaluation-and-gui`),
 Playwright 1.63.0 driving the installed Google Chrome 150 (`channel: "chrome"`),
 dark colour scheme:
 
