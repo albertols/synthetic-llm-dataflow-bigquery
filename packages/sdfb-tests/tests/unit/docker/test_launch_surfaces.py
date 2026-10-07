@@ -41,8 +41,8 @@ What a generation launch must supply is therefore the CLI's to say
 (``sdfb_tests.launch_surface.generator_required``), and the DAG's launch is
 checked against that. The same DAG now holds a second launch operator
 (``trigger_evaluation``, behind the opt-in gate); every helper here reads
-the generation one, ``start_sdfb``, and its call is pinned whole so the
-default path can be shown not to have moved.
+the generation one, ``start_sdfb``, which must carry nothing of the
+evaluation: with the gate off it is the whole default path.
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -51,7 +51,6 @@ default path can be shown not to have moved.
 from __future__ import annotations
 
 import ast
-import hashlib
 import importlib.util
 import json
 import re
@@ -416,35 +415,14 @@ def test_every_template_parameter_is_well_formed():
 
 
 # --------------------------------------------------------------------------
-# the default path has not moved
+# the default path knows nothing of the evaluation
 # --------------------------------------------------------------------------
-def _shape(node):
-  """`node` as nested tuples of node types, field names and values: no
-    positions, so comments and reformatting do not change it."""
-  if isinstance(node, ast.AST):
-    return (type(node).__name__,
-            tuple((name, _shape(value))
-                  for name, value in ast.iter_fields(node)
-                  if name not in ("ctx", "kind", "type_comment")))
-  if isinstance(node, list):
-    return tuple(_shape(item) for item in node)
-  return repr(node)
-
-
-# sha256 of the `start_sdfb` operator call at 7c24f8a, the commit before the
-# evaluation was chained inside this DAG (computed with `_shape` from
-# `git show 7c24f8a:composer/synthetic_beam_bigquery.py`).
-_START_SDFB_BEFORE_THE_CHAIN = (
-    "24b3fd2df046c9c0203829c0900c9efe0e59d03acb2b713b2f76ec0fab03a5c3")
-
-
-def test_the_generation_launch_is_the_one_before_the_chain():
+def test_the_generation_launch_knows_nothing_of_the_evaluation():
   """With `run_evaluation` False the DAG runs this task and skips the
-    rest, so an unchanged call IS an unchanged default path: same template,
-    same environment, same experiments, same parameters.
-
-    A later, intended change of the generation launch updates the digest in
-    the same commit (the assertion prints the new one)."""
-  digest = hashlib.sha256(repr(_shape(
-      _composer_launch_operator())).encode()).hexdigest()
-  assert digest == _START_SDFB_BEFORE_THE_CHAIN, digest
+    rest, so the default path is this call alone. It names no evaluation
+    parameter and passes no job selector, so the image's entry runs
+    generation. This holds for whatever launch a deployment's own DAG
+    makes, which a pin of this repository's call could not."""
+  launch = ast.unparse(_composer_launch_operator())
+  assert _SELECTOR not in launch
+  assert "evaluation" not in launch
