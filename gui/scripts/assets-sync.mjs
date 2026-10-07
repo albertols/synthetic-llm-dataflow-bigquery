@@ -82,15 +82,18 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-/** DESIGN.md §10 maps committed figures to the script that draws them. */
-function designGenerators() {
+/**
+ * DESIGN.md §10 maps committed figures to the script that draws them. A row's first cell
+ * lists one figure or several (`a.png`, `b.png`): each of them takes the row's script.
+ * @param {string} [design] the document's markdown (default: docs/DESIGN.md)
+ */
+export function designGenerators(design = readFileSync(join(REPO, "docs/DESIGN.md"), "utf8")) {
   /** @type {Map<string, string>} */
   const map = new Map();
-  const design = readFileSync(join(REPO, "docs/DESIGN.md"), "utf8");
-  for (const match of design.matchAll(/^\| `([^`]+\.(?:png|gif))` \| `([^`]+)`/gm)) {
-    const [, figure = "", script = ""] = match;
+  for (const row of design.matchAll(/^\| ([^|]+) \| `([^`]+)`/gm)) {
+    const [, figures = "", script = ""] = row;
     const generator = script.startsWith("scripts/") ? script : `docs/${script}`;
-    map.set(`docs/${figure}`, generator);
+    for (const [, figure = ""] of figures.matchAll(/`([^`]+\.(?:png|gif))`/g)) map.set(`docs/${figure}`, generator);
   }
   return map;
 }
@@ -117,12 +120,20 @@ function listMarkdown(dir) {
 }
 
 /**
+ * The script that writes a figure no DESIGN.md row maps: it names the file, or it names the
+ * figure by its stem as a string of its own and adds the extension itself
+ * (`_save(fig, "eval-dcr-nndr")` → `f"{name}.png"`).
  * @param {string} file
  * @param {readonly string[]} scripts
+ * @param {(script: string) => string} [read] a script's text (default: the file in the repository)
  */
-function scriptThatWrites(file, scripts) {
+export function scriptThatWrites(file, scripts, read = (script) => readFileSync(join(REPO, script), "utf8")) {
   const name = basename(file);
-  return scripts.find((script) => readFileSync(join(REPO, script), "utf8").includes(name));
+  const stem = name.replace(/\.[^.]+$/, "");
+  return scripts.find((script) => {
+    const text = read(script);
+    return text.includes(name) || text.includes(`"${stem}"`) || text.includes(`'${stem}'`);
+  });
 }
 
 export function buildProvenance() {

@@ -223,7 +223,7 @@
       "source": "docs/designs/assets/eval-noise-floor.png",
       "sha256": "2df770b9688bd62cf859a45614443b611ce9f0e97d1440a3ce6ec2f6df7e7afc",
       "bytes": 190953,
-      "generator": null,
+      "generator": "scripts/doc/make_eval_figures.py",
       "documentedIn": "docs/DESIGN.md"
     },
     {
@@ -231,7 +231,7 @@
       "source": "docs/designs/assets/eval-dcr-nndr.png",
       "sha256": "0894609839495ed4aeeee2e74314e057f8f7465b9ae5f3fdbbb1967dff94da81",
       "bytes": 100732,
-      "generator": null,
+      "generator": "scripts/doc/make_eval_figures.py",
       "documentedIn": "docs/designs/2026-07-07-evaluation-framework-design.md"
     },
     {
@@ -239,7 +239,7 @@
       "source": "docs/designs/assets/eval-ks-vs-wasserstein.png",
       "sha256": "250de4f78994c041887ad1aa4a2b19b13ea3b28548fdd5e7d805a00854db4b70",
       "bytes": 111860,
-      "generator": null,
+      "generator": "scripts/doc/make_eval_figures.py",
       "documentedIn": "docs/designs/2026-07-07-evaluation-framework-design.md"
     },
     {
