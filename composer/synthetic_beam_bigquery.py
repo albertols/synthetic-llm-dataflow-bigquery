@@ -586,6 +586,9 @@ with models.DAG(
     tags=["SYNTHETIC", "Dataflow", env_name.upper()],
     params=default_dag_params,
 ) as dag:
+  # The launch's parameters are kept one pair per line by hand, so the
+  # formatter is off for this one statement (it would split each pair in two).
+  # yapf: disable
   start_sdfb = DataflowStartFlexTemplateOperator(
       task_id=f"start_{app_name}",
       project_id=project_id,
@@ -689,44 +692,25 @@ with models.DAG(
                   **({
                       "source_stats_table": _SOURCE_STATS_TABLE
                   } if _SOURCE_STATS_TABLE else {}),
-                  "source_stats":
-                      "{{ params.source_stats }}",
-                  "freetext_expansion":
-                      "{{ params.freetext_expansion }}",
-                  "prompt_constraints":
-                      "{{ params.prompt_constraints }}",
-                  "prompt_debug":
-                      "{{ params.prompt_debug }}",
-                  "fk_parent_landing":
-                      "{{ params.fk_parent_landing }}",
-                  "generate_fk_relationships":
-                      "{{ params.generate_fk_relationships }}",
-                  "relationships_uri":
-                      "{{ params.relationships_uri }}",
-                  "multi_table_mode":
-                      "{{ params.multi_table_mode }}",
-                  "uniqueness_mode":
-                      "{{ params.uniqueness_mode }}",
-                  "pool_seed_strategy":
-                      "{{ params.pool_seed_strategy }}",
-                  "reference_table":
-                      "{{ params.table_fqn }}",
-                  "reference_rows_limit":
-                      "10000",
-                  "landing_table":
-                      "{{SDFB_LANDING_TABLE}}",
-                  "dlq_table":
-                      "{{SDFB_DLQ_TABLE}}",
-                  "num_rows":
-                      "{{ params.num_rows }}",
-                  "initial_workers":
-                      "{{ params.initial_workers }}",
-                  "autoscaling":
-                      "{{ params.autoscaling }}",
-                  "batch_size":
-                      "{{ params.batch_size }}",
-                  "similarity":
-                      "{{ params.similarity }}",
+                  "source_stats": "{{ params.source_stats }}",
+                  "freetext_expansion": "{{ params.freetext_expansion }}",
+                  "prompt_constraints": "{{ params.prompt_constraints }}",
+                  "prompt_debug": "{{ params.prompt_debug }}",
+                  "fk_parent_landing": "{{ params.fk_parent_landing }}",
+                  "generate_fk_relationships": "{{ params.generate_fk_relationships }}",
+                  "relationships_uri": "{{ params.relationships_uri }}",
+                  "multi_table_mode": "{{ params.multi_table_mode }}",
+                  "uniqueness_mode": "{{ params.uniqueness_mode }}",
+                  "pool_seed_strategy": "{{ params.pool_seed_strategy }}",
+                  "reference_table": "{{ params.table_fqn }}",
+                  "reference_rows_limit": "10000",
+                  "landing_table": "{{SDFB_LANDING_TABLE}}",
+                  "dlq_table": "{{SDFB_DLQ_TABLE}}",
+                  "num_rows": "{{ params.num_rows }}",
+                  "initial_workers": "{{ params.initial_workers }}",
+                  "autoscaling": "{{ params.autoscaling }}",
+                  "batch_size": "{{ params.batch_size }}",
+                  "similarity": "{{ params.similarity }}",
                   # Salted per trigger: retriggering the same logical date
                   # reuses dag_run.run_id, and seed=None derives batch seeds
                   # from run_id — identical run_id replayed identical data
@@ -766,6 +750,7 @@ with models.DAG(
       do_xcom_push=True,
       wait_until_finished=False,
   )
+  # yapf: enable
 
   # Opt-in chaining (run_evaluation, default False): with it off the gate
   # skips every task below and the DAG behaves exactly as before. The launch
