@@ -75,19 +75,19 @@ export const evaluationDataHistoryRowSchema = z.object({
       source_table: z.string().nullable(),
       /** Generation run id for this table. */
       run_id: z.string().nullable(),
-      /** root | driven | side_input | isolated | external */
-      role: z.enum(["root","driven","side_input","isolated","external"]).nullable(),
-      /** table | as_of | appends | manual */
-      scope_mode: z.enum(["table","as_of","appends","manual"]).nullable(),
+      /** root | driven | side_input | isolated | standalone | external */
+      role: z.enum(["root","driven","side_input","isolated","standalone","external"]).nullable(),
+      /** table | as_of | appends | as_of_diff | manual */
+      scope_mode: z.enum(["table","as_of","appends","as_of_diff","manual"]).nullable(),
       /** ok | count_mismatch | contaminated | expired | empty | unknown */
       scope_status: z.enum(["ok","count_mismatch","contaminated","expired","empty","unknown"]).nullable(),
       /** True if the scope check passed. */
       scope_ok: z.boolean().nullable(),
       /** Human-readable reason for a non-ok scope_status. */
       scope_reason: z.string().nullable(),
-      /** Start of the appends/as_of scope window. */
+      /** Start of the appends/as_of/as_of_diff scope window. */
       window_start: z.iso.datetime({ offset: true }).nullable(),
-      /** End of the appends/as_of scope window. */
+      /** End of the appends/as_of/as_of_diff scope window. */
       window_end: z.iso.datetime({ offset: true }).nullable(),
       /** FOR SYSTEM_TIME AS OF pin used to read the source table. */
       source_snapshot_ts: z.iso.datetime({ offset: true }).nullable(),
@@ -272,8 +272,8 @@ export const evaluationProfilesRowSchema = z.object({
   column_name: z.string().nullable(),
   /** FK edge this profile is scoped to, if relationship-level. */
   edge: z.string().nullable(),
-  /** histogram | quantiles | topk | length_hist | shape_mix | char_classes | temporal_mix | null_patterns | corr_matrix | contingency | fanout_hist | dcr_hist | nndr_hist | roc_curve | moments */
-  profile_kind: z.enum(["histogram","quantiles","topk","length_hist","shape_mix","char_classes","temporal_mix","null_patterns","corr_matrix","contingency","fanout_hist","dcr_hist","nndr_hist","roc_curve","moments"]),
+  /** histogram | quantiles | topk | length_hist | shape_mix | char_classes | temporal_mix | null_patterns | corr_matrix | contingency | dcr_hist | nndr_hist | roc_curve | moments */
+  profile_kind: z.enum(["histogram","quantiles","topk","length_hist","shape_mix","char_classes","temporal_mix","null_patterns","corr_matrix","contingency","dcr_hist","nndr_hist","roc_curve","moments"]),
   /** source | synthetic | reference | holdout | both */
   side: z.enum(["source","synthetic","reference","holdout","both"]),
   /** Number of rows/values the profile was computed over. */
@@ -299,11 +299,11 @@ export const evaluationRowFlagsRowSchema = z.object({
   check: z.enum(["exact_copy","near_copy","nearest_record","detectable"]),
   /** Rank of this flagged row within its check (1 = most extreme). */
   rank: z.int(),
-  /** synthetic PK/identity tuple */
+  /** The synthetic row's handle: its primary-key tuple, else its identity tuple, as JSON (NULL when the table declares neither). It is the synthetic table's own key, so for a full-row copy it equals the copied source row's key. */
   synthetic_key: z.json().nullable(),
-  /** salted hash of the matched source key; raw only with --row_flags_source_keys=raw */
+  /** Keyed hash (the evaluation's label key, h:<8 hex>) of the matched source record: its primary-key hash, else its identity hash, else its record hash; NULL for a full-source copy whose source key is not known. */
   source_key_hash: z.string().nullable(),
-  /** NULL unless raw keys were requested */
+  /** Always NULL: raw source keys are never written. */
   source_key: z.json().nullable(),
   /** R | E | H | source */
   source_set: z.enum(["R","E","H","source"]).nullable(),
@@ -488,8 +488,8 @@ export const vocabularies = {
   "evaluation_data_history.trigger": ["cli","composer","chained","agent"],
   "evaluation_data_history.mode": ["exact","sampled"],
   "evaluation_data_history.params_source": ["jobs_labels+logs","logs","dataflow_params","manual"],
-  "evaluation_data_history.tables.role": ["root","driven","side_input","isolated","external"],
-  "evaluation_data_history.tables.scope_mode": ["table","as_of","appends","manual"],
+  "evaluation_data_history.tables.role": ["root","driven","side_input","isolated","standalone","external"],
+  "evaluation_data_history.tables.scope_mode": ["table","as_of","appends","as_of_diff","manual"],
   "evaluation_data_history.tables.scope_status": ["ok","count_mismatch","contaminated","expired","empty","unknown"],
   "evaluation_data_history.source_stats_tier": ["sample","exact"],
   "evaluation_data_history.env": ["dev","uat","prd"],
@@ -500,7 +500,7 @@ export const vocabularies = {
   "evaluation_metrics.column_kind": ["numeric","temporal","categorical","boolean","text","identifier","nested"],
   "evaluation_metrics.noise_floor_method": ["ks_two_sample","wilson","newcombe","tvd_null","jsd_null","fisher_z","mi_bias","rate_ratio","delong"],
   "evaluation_metrics.method": ["exact","binned","sketch","sample","value_sampled"],
-  "evaluation_profiles.profile_kind": ["histogram","quantiles","topk","length_hist","shape_mix","char_classes","temporal_mix","null_patterns","corr_matrix","contingency","fanout_hist","dcr_hist","nndr_hist","roc_curve","moments"],
+  "evaluation_profiles.profile_kind": ["histogram","quantiles","topk","length_hist","shape_mix","char_classes","temporal_mix","null_patterns","corr_matrix","contingency","dcr_hist","nndr_hist","roc_curve","moments"],
   "evaluation_profiles.side": ["source","synthetic","reference","holdout","both"],
   "evaluation_row_flags.check": ["exact_copy","near_copy","nearest_record","detectable"],
   "evaluation_row_flags.source_set": ["R","E","H","source"],

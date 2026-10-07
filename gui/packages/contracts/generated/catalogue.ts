@@ -134,7 +134,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "boolean"
     ],
     "value_kind": "share",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "higher_better",
     "target": 1,
     "range": [
@@ -157,11 +157,26 @@ export const catalogue: readonly CatalogueMetric[] = [
       "good": "Above 0.99 the generator stays inside the source vocabulary.",
       "bad": "At or below 0.95, 1 value in 20 or more is an invented category (a typo, a hallucinated label, a format drift); the value census lists the top offenders."
     },
-    "pitfalls": "A column that emits only the most common category still scores 1.0: adherence says nothing about proportions (read column.tvd for that).",
+    "pitfalls": "A column that emits only the most common category still scores 1.0: adherence says nothing about proportions (read column.tvd for that). On a value-sampled column the interval treats values, not rows, as the sampled units (the same stratified interval as field.substantive_copy_rate).",
     "references": [
       {
         "label": "SDMetrics — CategoryAdherence",
         "url": "https://docs.sdv.dev/sdmetrics/data-metrics/diagnostic/categoryadherence",
+        "kind": "docs"
+      },
+      {
+        "label": "Horvitz & Thompson 1952 — sampling without replacement from a finite universe",
+        "url": "https://doi.org/10.1080/01621459.1952.10483446",
+        "kind": "paper"
+      },
+      {
+        "label": "Woodruff 1971 — approximating the variance of a complicated estimate",
+        "url": "https://doi.org/10.1080/01621459.1971.10482279",
+        "kind": "paper"
+      },
+      {
+        "label": "Korn & Graubard 1998 — intervals for proportions with small expected counts from survey data (Survey Methodology 24(2))",
+        "url": "https://www150.statcan.gc.ca/n1/pub/12-001-x/1998002/article/4356-eng.pdf",
         "kind": "docs"
       }
     ]
@@ -287,9 +302,9 @@ export const catalogue: readonly CatalogueMetric[] = [
     "purpose": "Share of substantive synthetic values (non-null, non-empty, not a 0001-/9999- date sentinel) that equal a RARE source value, one held by fewer than 10 source rows. Frequent values are k-anonymous category mass; rare ones copied verbatim look like memorization.",
     "interpretation": {
       "good": "Below 1e-4 (100 per million) copies are within coincidental-collision noise.",
-      "bad": "At or above 1e-3, rare source strings (names, free text, identifiers) are being reproduced; check field.value_memorization_lift to see whether they come from the rows the generator read."
+      "bad": "At or above 1e-3 on a free-text column, rare source strings are being reproduced; check field.value_memorization_lift to see whether they come from the rows the generator read."
     },
-    "pitfalls": "Numeric and day-granularity temporal columns collide with a dense source by domain size, not by copying, so they report INFO only; the lift metrics are the fair test there.",
+    "pitfalls": "Gated only on free text (kind text), where the rule comes from. Every other kind reports INFO only: numeric and temporal values collide with a dense source by domain size, and reusing a rare real category or identifier is not evidence of memorization; field.value_memorization_lift (reference vs holdout) is the gated test there. On a value-sampled column the most frequent values are counted exactly and only the hash-sampled rest is uncertain: the interval is a Clopper-Pearson interval for the sampled rest's rate on its effective number of sampled values (Korn & Graubard), with the exact part added back as a known constant, so values, not rows, are the sampled units and a sample without a copy still bounds the rate.",
     "references": [
       {
         "label": "Sweeney 2002 — k-anonymity",
@@ -305,6 +320,21 @@ export const catalogue: readonly CatalogueMetric[] = [
         "label": "config/thresholds.yml — freetext.copy_fraction",
         "url": "https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/master/config/thresholds.yml",
         "kind": "code"
+      },
+      {
+        "label": "Horvitz & Thompson 1952 — sampling without replacement from a finite universe",
+        "url": "https://doi.org/10.1080/01621459.1952.10483446",
+        "kind": "paper"
+      },
+      {
+        "label": "Woodruff 1971 — approximating the variance of a complicated estimate",
+        "url": "https://doi.org/10.1080/01621459.1971.10482279",
+        "kind": "paper"
+      },
+      {
+        "label": "Korn & Graubard 1998 — intervals for proportions with small expected counts from survey data (Survey Methodology 24(2))",
+        "url": "https://www150.statcan.gc.ca/n1/pub/12-001-x/1998002/article/4356-eng.pdf",
+        "kind": "docs"
       }
     ]
   },
@@ -322,7 +352,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "temporal"
     ],
     "value_kind": "ratio",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "lower_better",
     "target": 1,
     "range": [
@@ -345,7 +375,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "good": "CI lower bound below 2: no evidence of a 2× or larger lift. Smaller copying is not ruled out, and few hits give a wide interval.",
       "bad": "CI lower bound at 5 or more: reference-only rare values reappear at five times the holdout rate or more; the generator is copying what it read."
     },
-    "pitfalls": "With few rare exclusive values the interval is wide and the point estimate swings, so status reads the CI lower bound (Bonferroni-corrected over the m columns tested); no hits on either side gives no ratio.",
+    "pitfalls": "With few rare exclusive values the interval is wide and the point estimate swings, so status reads the CI lower bound (Bonferroni-corrected over the m columns tested); no hits on either side gives no ratio. A generator that draws empirical categoricals from R reproduces rare R-only values, so it FAILs by construction unless its source k-anonymity scrub (ADR 0027) removed the rare values first: a FAIL means rare sample values leaked, which is what the metric exists to show.",
     "references": [
       {
         "label": "Przyborowski & Wilenski 1940 — comparing two Poisson counts",
@@ -369,7 +399,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "text"
     ],
     "value_kind": "ratio",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "lower_better",
     "target": 1,
     "range": [
@@ -392,7 +422,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "good": "CI lower bound below 2: no evidence that the pool favours rare values the LLM was shown by 2× or more. Smaller copying is not ruled out, and few hits give a wide interval.",
       "bad": "CI lower bound at 5 or more: the LLM writes rare reference values into the pool; every row drawn from it inherits the copy."
     },
-    "pitfalls": "Only evaluated when a pool for exactly this reference digest and model is found; a pool holds at most 512 values, so the interval is wide.",
+    "pitfalls": "Only evaluated when a pool for exactly this reference digest and model is found; a pool holds at most 512 values, so the interval is wide. Each pooled column is its own test at an uncorrected alpha of 0.05 (the pool lifts are a separate family from the value lift, which carries the Bonferroni correction across columns).",
     "references": [
       {
         "label": "ADR 0020 — free-text pools as a persisted artifact",
@@ -745,7 +775,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "boolean"
     ],
     "value_kind": "bits",
-    "estimator": "exact/binned",
+    "estimator": "exact/binned/value_sampled",
     "direction": "lower_better",
     "target": null,
     "range": [
@@ -788,7 +818,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "boolean"
     ],
     "value_kind": "distance",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "lower_better",
     "target": null,
     "range": [
@@ -1176,7 +1206,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "boolean"
     ],
     "value_kind": "distance",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "lower_better",
     "target": null,
     "range": [
@@ -1219,7 +1249,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "boolean"
     ],
     "value_kind": "distance",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "lower_better",
     "target": null,
     "range": [
@@ -1262,7 +1292,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "boolean"
     ],
     "value_kind": "share",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "higher_better",
     "target": null,
     "range": [
@@ -1306,7 +1336,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "identifier"
     ],
     "value_kind": "share",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "target",
     "target": null,
     "range": [
@@ -1351,7 +1381,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "identifier"
     ],
     "value_kind": "ratio",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "target",
     "target": 1,
     "range": [
@@ -1405,7 +1435,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "identifier"
     ],
     "value_kind": "ratio",
-    "estimator": "exact",
+    "estimator": "exact/value_sampled",
     "direction": "target",
     "target": 1,
     "range": [
@@ -1652,13 +1682,13 @@ export const catalogue: readonly CatalogueMetric[] = [
     "n_dependent": false,
     "baseline": false,
     "uses_ci_bound": false,
-    "formula": "\\delta = \\max\\left( \\lvert \\Delta p_{null} \\rvert, \\lvert \\Delta \\bar{H} \\rvert, \\lvert \\Delta p_{top1} \\rvert \\right)",
-    "purpose": "Largest difference between the evaluator's exact source profile and the source_table_stats row the generator used (null fraction, normalized entropy, top-1 share). It checks that the generator was steered by the same source the evaluation compares against.",
+    "formula": "\\delta = \\max\\left( \\lvert \\Delta p_{null} \\rvert,\\, \\max_{i=1}^{9} \\operatorname{dist}\\left( \\frac{i}{10}, \\left[ F^{-}_{src}(d_i), F_{src}(d_i) \\right] \\right),\\, \\frac{\\lvert D_{gen} - D_{src} \\rvert}{\\max(D_{gen}, D_{src})} \\right)",
+    "purpose": "Largest difference between the source_table_stats row the generator used and the evaluator's own dense profile of the source (Ruling R62): the null fraction; for a numeric column, how far the evaluator's source CDF puts the generator's nine inner deciles d_i from their ranks i/10; and, on the exact stats tier, the relative distinct-count difference. It checks that the generator was steered by the same source the evaluation compares against.",
     "interpretation": {
       "good": "Under 0.05: the generator's view of the source matches the source evaluated today.",
       "bad": "At or above 0.15: the generator used stale or tier-limited stats, so fidelity gaps on this column may not be the generator's fault."
     },
-    "pitfalls": "It audits the generator's input, not its output: a drift here explains fidelity failures rather than being one.",
+    "pitfalls": "It audits the generator's input, not its output: a drift here explains fidelity failures rather than being one. On the sample tier the distinct count is not compared (it is bounded by the reference sample), and the deciles carry the sample's own noise (about 0.02 at 1,000 rows); temporal and non-numeric columns compare the null fraction only. With no stats row (tier off, no stats table, no reference digest) it is not evaluated, with the reason.",
     "references": [
       {
         "label": "ADR 0022 — stats-driven generation",
@@ -1874,7 +1904,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "source": "heuristic"
     },
     "score": "complement",
-    "noise_floor": "none",
+    "noise_floor": "tvd_null",
     "n_dependent": false,
     "baseline": true,
     "uses_ci_bound": false,
@@ -1884,7 +1914,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "good": "Under 0.10: the pair's joint distribution matches.",
       "bad": "At or above 0.20: combinations are wrong, e.g. valid cities paired with the wrong countries."
     },
-    "pitfalls": "Values outside the source dictionary are pooled into one bin, so rare combinations are invisible.",
+    "pitfalls": "Values outside the source dictionary are pooled into one bin, so rare combinations are invisible. Many sparse cells carry a sampling floor even for a perfect generator (the noise floor is the null TVD expectation over the joint cells); read it with the baseline.",
     "references": [
       {
         "label": "SDMetrics — ContingencySimilarity",
@@ -1998,13 +2028,13 @@ export const catalogue: readonly CatalogueMetric[] = [
     "n_dependent": false,
     "baseline": false,
     "uses_ci_bound": true,
-    "formula": "\\operatorname{lift} = \\frac{m_R / \\lvert R \\rvert}{m_H / \\lvert H \\rvert}",
-    "purpose": "Non-key exact matches per row to the reference sample R the generator read, over matches per row to an equal-size holdout H it never saw (digests exclusive to each set). Chance hits both alike, so only copying lifts it above 1.",
+    "formula": "\\operatorname{lift} = \\frac{m_R / \\lvert R \\cap \\bar{H} \\rvert}{m_H / \\lvert H \\cap \\bar{R} \\rvert}, \\quad m_S = \\text{distinct exclusive records of } S \\text{ the synthetic side reproduces}",
+    "purpose": "The share of the non-key records only the reference sample R holds (the generator read R) that the synthetic side reproduces exactly, over the same share for the records only an equal-size holdout H holds (it never saw H). Chance hits both alike, so only copying lifts it above 1.",
     "interpretation": {
       "good": "CI lower bound below 2: no evidence of a 2× or larger lift for the rows the generator read. Smaller copying is not ruled out, and few matches give a wide interval.",
       "bad": "CI lower bound at 5 or more: reference rows come back at five times the holdout rate or more; the generator memorizes."
     },
-    "pitfalls": "With very few matches on either side the ratio is unstable, and undefined when both are 0; status reads the CI lower bound for that reason.",
+    "pitfalls": "With very few matches on either side the ratio is unstable, and undefined when both are 0; status reads the CI lower bound for that reason. A record reproduced many times counts once (its copies are not independent events, and counting rows would make the interval far too narrow on skewed tables); the row counts are in the detail.",
     "references": [
       {
         "label": "Przyborowski & Wilenski 1940 — comparing two Poisson counts",
@@ -2043,8 +2073,8 @@ export const catalogue: readonly CatalogueMetric[] = [
     "n_dependent": false,
     "baseline": false,
     "uses_ci_bound": true,
-    "formula": "\\operatorname{lift}_E = \\frac{m_E / \\lvert E \\rvert}{m_{H_E} / \\lvert H_E \\rvert}",
-    "purpose": "The same lift restricted to the 1,024 reference rows actually placed in prompts as row documents, against 1,024 matching holdout rows. It isolates copying caused by prompt exposure.",
+    "formula": "\\operatorname{lift}_E = \\frac{m_E / \\lvert E \\cap \\bar{H} \\rvert}{m_{H_E} / \\lvert H_E \\cap \\bar{R} \\rvert}, \\quad m_S = \\text{distinct exclusive records of } S \\text{ reproduced}",
+    "purpose": "The same lift restricted to the 1,024 reference rows actually placed in prompts as row documents (E, its records H lacks) against the 1,024 matching holdout rows (H_E, its records R lacks). It isolates copying caused by prompt exposure; the detail's unexposed lift compares the exclusive records outside E and H_E (or says why it cannot, when every exclusive record of a half is exposed).",
     "interpretation": {
       "good": "CI lower bound below 2: no evidence that prompt exposure raises copying 2× or more. Smaller effects are not ruled out, and few matches give a wide interval.",
       "bad": "CI lower bound at 5 or more: rows shown to the LLM come back verbatim at five times the holdout rate or more."
@@ -2088,8 +2118,8 @@ export const catalogue: readonly CatalogueMetric[] = [
     "n_dependent": false,
     "baseline": false,
     "uses_ci_bound": false,
-    "formula": "\\operatorname{NMR} = \\frac{1}{n_{syn}} \\sum_i \\mathbf{1}\\left[ \\exists x \\in R, \\exists j : h_{-j}(y_i) = h_{-j}(x) \\right]",
-    "purpose": "Share of synthetic rows equal to a reference row in all non-key columns but at most one, found with leave-one-column-out hashes. It catches a copied record with a single field perturbed.",
+    "formula": "\\operatorname{NMR} = \\frac{1}{n_{syn}} \\sum_i \\mathbf{1}\\left[ \\exists x \\in R, \\exists j : h_{-j}(y_i) = h_{-j}(x) \\text{ and } h_{nk}(y_i) \\notin h_{nk}(R \\cup H) \\right]",
+    "purpose": "Share of synthetic rows equal to a reference row in every non-key column but exactly one (found with leave-one-column-out hashes, checked cell by cell), never counting an exact match of a reference or holdout record. It catches a copied record with a single field perturbed.",
     "interpretation": {
       "good": "Below 1e-3: near-copies are rare.",
       "bad": "At or above 1e-2: 1 row in 100 or more is a reference record with one field changed, a copy exact matching misses."
@@ -2128,8 +2158,8 @@ export const catalogue: readonly CatalogueMetric[] = [
     "n_dependent": false,
     "baseline": false,
     "uses_ci_bound": true,
-    "formula": "\\operatorname{lift}_{near} = \\frac{m^{near}_R / \\lvert R \\rvert}{m^{near}_H / \\lvert H \\rvert}",
-    "purpose": "Near matches per row to the reference sample over near matches per row to the holdout. Near 1 means near-copies occur only at chance level.",
+    "formula": "\\operatorname{lift}_{near} = \\frac{m^{near}_R / \\lvert L_R \\cap \\bar{L}_H \\rvert}{m^{near}_H / \\lvert L_H \\cap \\bar{L}_R \\rvert}, \\quad L_S = \\text{leave-one-out keys of } S \\text{, per column}",
+    "purpose": "The share of the leave-one-column-out keys only the reference sample holds (at the same column) that a verified near match reproduces, over the same share for the holdout's exclusive keys. Near 1 means near-copies occur only at chance level.",
     "interpretation": {
       "good": "CI lower bound below 2: no evidence of a 2× or larger near-copy lift. Smaller copying is not ruled out, and few near matches give a wide interval.",
       "bad": "CI lower bound at 5 or more: rows the generator read come back with one field changed at five times the holdout rate or more."
@@ -2164,18 +2194,39 @@ export const catalogue: readonly CatalogueMetric[] = [
       "source": "heuristic"
     },
     "score": "linear",
-    "noise_floor": "none",
+    "noise_floor": "newcombe",
     "n_dependent": true,
     "baseline": true,
     "uses_ci_bound": false,
-    "formula": "\\Delta_{dup} = d^{(m)}_{syn} - d^{(m)}_{src}, \\quad d^{(m)} = \\frac{1}{m} \\sum_{i=1}^{m} \\mathbf{1}\\left[ c\\left( h_{nk}(x_i) \\right) \\ge 2 \\right]",
-    "purpose": "Share of rows whose non-key content appears at least twice, synthetic minus source, both on matched subsamples of m = min(n_src, n_syn) rows. Positive values mean the generator repeats itself more than the source does.",
+    "formula": "\\Delta_{dup} = \\frac{\\operatorname{E}[D_m]_{syn} - \\operatorname{E}[D_m]_{src}}{m}, \\quad \\operatorname{E}[D_m] = \\sum_{c} f_c \\left( \\frac{c\\,m}{N} - \\Pr(X_c = 1) \\right), \\quad m = \\min(n_{src}, n_{syn})",
+    "purpose": "Share of rows whose non-key content appears at least twice, synthetic minus source, both at matched n (m = min(n_src, n_syn) rows with content): the larger side is rarefied exactly from its frequency of frequencies (f_c records held c times among its N rows; X_c, a record's rows in an m-row subsample, is hypergeometric) and the smaller side counts as observed. Positive values mean the generator repeats itself more than the source does.",
     "interpretation": {
       "good": "Under 0.01: at most 1 % more repetition than in the source.",
       "bad": "At 0.05 or above: 5 % or more extra rows are internal duplicates, a sign of a small sampling pool or mode collapse."
     },
-    "pitfalls": "Duplicate shares grow with the number of rows compared, which is why both sides use the same m; the value still depends on m, so compare runs of similar size.",
-    "references": []
+    "pitfalls": "Duplicate shares grow with the number of rows compared, which is why both sides are rarefied to the same m; the value still depends on m, so compare runs of similar size. Rows of one duplicate group are not independent draws: the interval is Newcombe's on Korn & Graubard effective counts with ONE effective n for both sides, from the pooled rows' duplicate share at m and the null variance of the duplicate count of an m-row subset of both sides' rows pooled (exact, multivariate hypergeometric), so a faithful generator's difference is read as noise while a 2-3x repeating generator still fails. Rows with no non-key content are left out; a row-sampled side (sampled mode) is not evaluated.",
+    "references": [
+      {
+        "label": "Hurlbert 1971 — rarefaction and the nonconcept of diversity",
+        "url": "https://doi.org/10.2307/1934145",
+        "kind": "paper"
+      },
+      {
+        "label": "Heck, van Belle & Simberloff 1975 — explicit calculation of the rarefaction diversity measurement",
+        "url": "https://doi.org/10.2307/1934716",
+        "kind": "paper"
+      },
+      {
+        "label": "Newcombe 1998 — interval for a difference of proportions",
+        "url": "https://doi.org/10.1002/(SICI)1097-0258(19980430)17:8%3C873::AID-SIM779%3E3.0.CO;2-I",
+        "kind": "paper"
+      },
+      {
+        "label": "Korn & Graubard 1998 — intervals for proportions with small expected counts from survey data (Survey Methodology 24(2))",
+        "url": "https://www150.statcan.gc.ca/n1/pub/12-001-x/1998002/article/4356-eng.pdf",
+        "kind": "docs"
+      }
+    ]
   },
   {
     "id": "row.dcr_train_holdout_share",
@@ -2502,7 +2553,7 @@ export const catalogue: readonly CatalogueMetric[] = [
       "good": "0: every primary key is unique.",
       "bad": "Any value above 0 fails: joins on this key fan out and downstream counts double."
     },
-    "pitfalls": "Only keys declared in the relationship model are checked; a table without a declared key is NOT_EVALUATED, not clean.",
+    "pitfalls": "Only keys declared in the relationship model are checked; a table without a declared key is NOT_EVALUATED, not clean. Keys are compared by a 64-bit hash and the threshold is zero, so one hash collision between two different keys reads as a duplicate and fails. Among n rows that happens with probability about n^2 / 2^65: 0.03 % at 100 million rows, about 0.4 % at 365 million and about 3 % at 1 billion. On a table that large, confirm a rate of a couple of rows with a GROUP BY on the key before calling it a generator defect.",
     "references": [
       {
         "label": "ADR 0036 — parent-driven fan-out generation",
