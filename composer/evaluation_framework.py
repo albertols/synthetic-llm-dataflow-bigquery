@@ -613,7 +613,7 @@ with models.DAG(
                       "evaluation",
                   "disk_size_gb":
                       EVALUATION_WORKER_DISK_GB,
-                  "job_id":
+                  "generation_job_id":
                       "{{ params.generation_job_id }}",
                   "run_id":
                       "{{ params.run_id }}",

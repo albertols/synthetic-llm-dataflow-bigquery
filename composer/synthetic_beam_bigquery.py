@@ -821,7 +821,7 @@ with models.DAG(
               # the image carries its worker image coordinate.
               "parameters": {
                   "sdfb_job": "evaluation",
-                  "job_id": generation_job_id,
+                  "generation_job_id": generation_job_id,
                   "trigger": "chained",
                   "mode": "{{ params.evaluation_mode }}",
                   "output_dataset": "{{ params.evaluation_output_dataset }}",

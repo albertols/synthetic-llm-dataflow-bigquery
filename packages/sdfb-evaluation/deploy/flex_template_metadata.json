@@ -43,9 +43,9 @@
       ]
     },
     {
-      "name": "job_id",
+      "name": "generation_job_id",
       "label": "Generation job id",
-      "helpText": "Target: the generation job's Dataflow id. Needs region. Name exactly one of job_id, run_id, tables.",
+      "helpText": "Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
       "paramType": "TEXT",
       "isOptional": true
     },

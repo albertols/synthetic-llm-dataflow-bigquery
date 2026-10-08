@@ -196,7 +196,13 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       help="the Dataflow region: where --job_id ran, and where the "
       "evaluation runs on Dataflow")
   group.add_argument(
-      "--job_id", type=_text, help="the generation job's Dataflow id")
+      "--generation_job_id",
+      "--job_id",
+      dest="job_id",
+      type=_text,
+      help="the generation job's Dataflow id; a template launch passes it "
+      "as --generation_job_id, because the template launcher does not pass "
+      "a parameter named job_id (ADR 0041)")
   group.add_argument(
       "--run_id",
       type=_text,
@@ -408,12 +414,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def public_run_flags() -> list[str]:
   """Every non-hidden flag of `sdfb-eval run`, sorted (the flex
-  template's metadata lists exactly these)."""
+  template's metadata lists exactly these). A flag with an alias is listed
+  under its first name, the template's (`--generation_job_id`, not the
+  `--job_id` a direct command line may also use)."""
   run = _subparsers()[1]["run"]
-  return sorted(option for action in run._actions  # pylint: disable=protected-access  # argparse has no public list of a parser's options
-                if action.help is not argparse.SUPPRESS
-                for option in action.option_strings
-                if option.startswith("--") and option != "--help")
+  return sorted(
+      action.option_strings[0]
+      for action in run._actions  # pylint: disable=protected-access  # argparse has no public list of a parser's options
+      if action.help is not argparse.SUPPRESS and action.option_strings and
+      action.option_strings[0].startswith("--"))
 
 
 # --------------------------------------------------------------------------

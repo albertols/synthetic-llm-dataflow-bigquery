@@ -1286,6 +1286,33 @@ def test_flex_entry_does_not_wait_and_never_applies_fail_on(
   capsys.readouterr()
 
 
+def test_flex_entry_given_a_template_launchs_arguments_plans_that_job(
+    bq, resolved, stub, capsys):
+  """What the launcher really sends: the template's parameters as
+  `--name=value` (the unset ones empty, the generation job as
+  `--generation_job_id` because a parameter named `job_id` is dropped),
+  its own `--runner`, `--project`, `--region` and `--template_location`,
+  and Beam's `--temp_location`. `--sdfb_job` is already gone."""
+  del stub
+  env = make_env(
+      bq, submit=lambda pipeline: _template_result(), make_pipeline=_holder)
+  argv = [
+      "--runner=DataflowRunner", f"--project={PROJECT}", f"--region={REGION}",
+      "--job_name=sdfb-eval-chained",
+      "--template_location=gs://demo-bucket/staging/template",
+      "--temp_location=gs://demo-bucket/tmp", "--trigger=chained",
+      "--output_dataset=synthetic_data_quality", "--mode=",
+      f"--generation_job_id={JOB_ID}", "--run_id=", "--tables=",
+      "--disk_size_gb=200"
+  ]
+  assert run_evaluation.main(argv, env) == 0
+  assert resolved[0]["job_id"] == JOB_ID
+  (running,) = bq.registry_rows()
+  assert (running["generation_job_id"], running["trigger"]) == (JOB_ID,
+                                                                "chained")
+  capsys.readouterr()
+
+
 def test_flex_entry_on_a_local_runner_still_loads_its_outputs(
     bq, resolved, monkeypatch, capsys):
   del resolved

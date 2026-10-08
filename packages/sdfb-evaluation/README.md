@@ -355,7 +355,7 @@ gcloud dataflow flex-template run sdfb-evaluation-$(date +%s) \
   --project demo-project --region europe-west1 \
   --template-file-gcs-location \
     gs://demo-bucket/synthetic/sdfb-<VERSION>-template.json \
-  --parameters sdfb_job=evaluation,job_id=<GENERATION_JOB_ID>,disk_size_gb=200 \
+  --parameters sdfb_job=evaluation,generation_job_id=<GENERATION_JOB_ID>,disk_size_gb=200 \
   --worker-machine-type e2-standard-8 \
   --temp-location gs://demo-bucket/tmp
 ```

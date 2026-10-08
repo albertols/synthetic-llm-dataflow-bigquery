@@ -344,6 +344,8 @@ def test_launch_parameters_are_metadata_names_from_params_or_constants():
   assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
   names = {p["name"] for p in json.loads(METADATA.read_text())["parameters"]}
   assert set(keys) <= names
+  # the launcher drops a template parameter named `job_id`
+  assert "generation_job_id" in keys and "job_id" not in keys
   # ... and of the one template this DAG launches from by default
   assert set(keys) <= _main_metadata_names()
   assert not set(keys) & set(_NEVER_PASSED)
@@ -1128,10 +1130,11 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
   values = dict(zip(keys, parameters.values, strict=True))
   assert set(values) == {
-      "sdfb_job", "job_id", "trigger", "mode", "output_dataset", "disk_size_gb"
+      "sdfb_job", "generation_job_id", "trigger", "mode", "output_dataset",
+      "disk_size_gb"
   }
   assert _value(tree, values["sdfb_job"]) == "evaluation"
-  assert _value(tree, values["job_id"]) == _JOB_ID_XCOM
+  assert _value(tree, values["generation_job_id"]) == _JOB_ID_XCOM
   assert _value(tree, values["trigger"]) == "chained"
   assert _value(tree, values["mode"]) == "{{ params.evaluation_mode }}"
   assert _value(

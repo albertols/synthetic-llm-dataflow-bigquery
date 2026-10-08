@@ -30,6 +30,7 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### ⚡ Performance
 
 ### 🐛 Fixed
+- A chained or standalone evaluation launch reached the evaluator without its target: the Flex Template launcher drops a template parameter named `job_id`. The template parameter is now `generation_job_id` (`--job_id` still works on a direct command line); a test keeps template parameters clear of the names the launcher owns ([ADR 0041](docs/adr/0041-evaluation-standalone-package.md), note of 2026-10-08).
 
 ### 🗑️ Removed
 - The generation DAG's `TriggerDagRunOperator` on the evaluation DAG, and the evaluator-version marker of the evaluation DAG: nothing substitutes it any more.

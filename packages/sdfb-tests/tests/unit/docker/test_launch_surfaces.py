@@ -78,6 +78,14 @@ _SELECTOR = "sdfb_job"
 # multi-GB image and its entry pins no boot disk (`run_pipeline` pins its
 # own), so an evaluation launch has to say it.
 _BEAM_PASSTHROUGH = frozenset({"disk_size_gb"})
+# The names the Flex Template Python launcher owns: it supplies the first
+# five itself (https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates,
+# "Failed to read the job file") and drops a template parameter of the same
+# name; `job_id` is not documented but was dropped the same way on
+# 2026-10-08 ("Skipping dissallowed override: job_id"), which is why the
+# evaluation's template parameter is `generation_job_id`.
+_LAUNCHER_OWNED = frozenset(
+    {"job_id", "job_name", "runner", "project", "region", "template_location"})
 
 
 def _metadata_param(name: str) -> dict:
@@ -297,6 +305,21 @@ def test_the_template_is_the_generator_the_selector_and_the_evaluator():
   assert evaluator >= _BEAM_PASSTHROUGH and not generator & _BEAM_PASSTHROUGH
   assert set(_parameters()) == generator | {_SELECTOR} | evaluator
   assert generator_flags() >= _UNDECLARED, "an undeclared flag is gone"
+
+
+@pytest.mark.parametrize(
+    "path", [_METADATA, _EVALUATOR_METADATA], ids=["shared", "evaluator"])
+def test_no_template_parameter_has_a_name_the_launcher_owns(path: Path):
+  """The launcher drops such a parameter before the entry sees it, so the
+    launch runs without it and fails (or worse, does not) far from here."""
+  if not path.is_file():
+    pytest.skip(f"{path.name} is not part of this tree")
+  assert not set(_parameters(path)) & _LAUNCHER_OWNED
+
+
+def test_the_evaluations_target_job_is_generation_job_id():
+  for parameters in (_parameters(), _evaluator_parameters()):
+    assert "generation_job_id" in parameters and "job_id" not in parameters
 
 
 def test_every_template_parameter_is_optional():

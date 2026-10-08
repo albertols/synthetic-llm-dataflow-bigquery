@@ -117,14 +117,14 @@ def test_run_flags_default_to_the_brief():
   assert knobs == Knobs(evaluation_id="eval-20260914T080000Z-00000001")
   flags = public_run_flags()
   assert {
-      "--project", "--region", "--job_id", "--run_id", "--relationships_uri",
-      "--tables", "--reference_dataset", "--landing_dataset", "--mode",
-      "--scope", "--allow_contaminated", "--sample_rows",
-      "--privacy_sample_rows", "--detection_sample_rows", "--pair_max_columns",
-      "--row_flags_top_k", "--row_flags_source_keys", "--max_bytes_billed",
-      "--max_shuffle_gb", "--output_dataset", "--temp_dataset", "--sink",
-      "--output_local", "--thresholds_uri", "--fail_on", "--trigger",
-      "--label_key_uri", "--runner"
+      "--project", "--region", "--generation_job_id", "--run_id",
+      "--relationships_uri", "--tables", "--reference_dataset",
+      "--landing_dataset", "--mode", "--scope", "--allow_contaminated",
+      "--sample_rows", "--privacy_sample_rows", "--detection_sample_rows",
+      "--pair_max_columns", "--row_flags_top_k", "--row_flags_source_keys",
+      "--max_bytes_billed", "--max_shuffle_gb", "--output_dataset",
+      "--temp_dataset", "--sink", "--output_local", "--thresholds_uri",
+      "--fail_on", "--trigger", "--label_key_uri", "--runner"
   } == set(flags)
   assert "--fixture_dir" not in flags  # hidden
   assert "--evaluation_id" not in flags  # minted, never passed (R88c)
@@ -268,6 +268,28 @@ def test_the_label_key_uri_forms_have_one_definition():
   for uri in ("relative/key.bin", "projects/demo-project/secrets/label",
               "https://example.com/key"):
     assert not is_label_key_uri(uri)
+
+
+@pytest.mark.parametrize("command", ["plan", "run"])
+def test_generation_job_id_is_the_job_id_under_the_templates_name(
+    command, capsys):
+  """The template launcher drops a parameter named `job_id`, so a template
+  launch names the generation job `--generation_job_id`: the same argument."""
+  rest = ["--project", PROJECT, "--region", REGION]
+  by_old_name, _ = parse_args([command, *rest, "--job_id", JOB_ID])
+  by_new_name, _ = parse_args([command, *rest, "--generation_job_id", JOB_ID])
+  assert vars(by_new_name) == vars(by_old_name)
+  assert by_new_name.job_id == JOB_ID
+  by_template, _ = parse_args([command, *rest, f"--generation_job_id={JOB_ID}"])
+  assert vars(by_template) == vars(by_old_name)
+  # an empty value is "not given", so the usage error is today's
+  err = _usage_error([command, *rest, "--generation_job_id="], capsys)
+  assert "name exactly one of --job_id, --run_id, --tables" in err
+  assert "(given: none)" in err
+  # with another target named, the empty one is simply absent
+  args, _ = parse_args(
+      [command, *rest, "--generation_job_id=", "--run_id", "base"])
+  assert (args.job_id, args.run_id) == (None, "base")
 
 
 def test_a_run_needs_exactly_one_target(capsys):

@@ -2158,7 +2158,7 @@ flowchart LR
   stated as not deferrable. It reads the state every two minutes for at
   most a day.
 - **The launch** is a second launch of the generation template, with
-  `sdfb_job=evaluation`, `job_id` (the generation job), `trigger=chained`
+  `sdfb_job=evaluation`, `generation_job_id` (the generation job), `trigger=chained`
   and the boot disk; it is a CPU job in the generation job's subnetwork,
   under the same service account. It does not wait: the evaluation job
   writes its own `FINAL` row.

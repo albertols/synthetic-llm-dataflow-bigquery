@@ -373,6 +373,20 @@ cancelled (the provider's source was not available to read); `maxWorkers`
 rendered as a string; the boot disk reaching the evaluation job's workers; the
 standalone DAG re-triggering itself.
 
+**Note (2026-10-08): the template's name for the generation job is
+`generation_job_id`.** The first chained launch reached the evaluator without
+its target: the Flex Template Python launcher logged `Skipping dissallowed
+override: job_id` and ran the entry with no `--job_id`, so the evaluator
+refused to start (exit 2). The launcher owns a few option names for Python
+([the documented five are `runner`, `project`, `job_name`, `template_location`
+and `region`](https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates));
+`job_id` is not among them, and the log line is the evidence that it is dropped
+too. A template launch therefore names the generation job
+`generation_job_id`, in both metadata files and in both DAGs. In the CLI it is
+a second option string of the same argument, so `--job_id` still works, and is
+still the name the documents use, for a direct command line. A test now holds
+every template parameter clear of the six names.
+
 ## Sources
 
 [Lin, Lucas & Shmueli 2013](https://doi.org/10.1287/isre.2013.0480) (p-values at scale) ·
