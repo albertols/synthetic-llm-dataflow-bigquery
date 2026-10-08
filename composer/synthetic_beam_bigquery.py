@@ -74,32 +74,33 @@ generation at a time. `max_active_runs` is the knob; raising it lets several
 generation jobs run at once (mind the GPU quota). It is unchanged here.
 
 `trigger_evaluation` evaluates what the launch generated: the launched table
-(`seed_table`, the last part of `table_fqn`) and its enabled component in the
-relationship model (`relationships_uri`), or that table alone when the model
-does not name it, the folder holds no model file, or
-`generate_fk_relationships` is "false" (the launch then passes no model). The
-landed tables are read from `landing_dataset` (the generation's own) under
-their sources' names, and compared with the tables of `reference_dataset`
-(the `source_dataset` param, else the dataset of `table_fqn`). The evaluation
-therefore reads neither the job's log, BigQuery job labels nor
-`validation_runs`, and the service account needs no `roles/logging.viewer`
-and no `roles/bigquery.resourceViewer`. The launch also passes the generation
-job's id as the launch's IDENTITY: the evaluator reads the Dataflow job
-resource and nothing else about it, so the registry row carries the job id and
-its start and end (and `evaluation_latest_per_job` lists the run); that read
-needs `roles/dataflow.viewer`, and without it the evaluation goes on with a
-warning and no window. The cost: the launch's own record of its tables, run
-ids and reference digest, and a model the launch adjusted (ADR 0038), are not
-seen. With a window the source is pinned as of the job's create time (a
-snapshot clone, within the source's time-travel window).
+(`seed_table`) and its enabled group of tables in the relationship model, or
+that table alone; each landed table is read whole and compared with the table
+of the same name in the source dataset. The comments inside its `parameters`
+say, for every parameter, where the value comes from and what the evaluator
+does with it, and the block above the operator lists the evaluator's options
+this DAG leaves at their defaults. In short:
 
-The evaluation passes `scope=manual`, so it reads each landing table WHOLE:
-with this DAG's `write_disposition` "overwrite" that is exactly this launch's
-rows, with "append" it includes the rows of earlier launches. It passes the
-generation's `reference_rows_limit`, so the reference panel behind the privacy
-metrics is planned. A landing table named differently from its source (a
-custom `SDFB_LANDING_TABLE` name) is not found: the evaluation looks for the
-source's name in the landing dataset.
+- It reads neither the generation job's log, BigQuery job labels nor
+  `validation_runs`, so its service account needs no `roles/logging.viewer`
+  and no `roles/bigquery.resourceViewer`. The generation job's id is passed as
+  the launch's identity: the evaluator reads the Dataflow job resource and
+  nothing else about it (needs `roles/dataflow.viewer`; without it the run
+  goes on with a warning and no window).
+- `scope=manual` reads each landing table WHOLE: with this DAG's
+  `write_disposition` "overwrite" that is this launch's rows, with "append"
+  it also includes the rows of earlier launches.
+- `reference_rows_limit` limits nothing that is compared. It is the size of
+  the sample the generator learned from, passed so the evaluator can rebuild
+  that sample for the row-level privacy metrics. As this DAG stands those
+  metrics come out "not evaluated": the rebuilt sample can only be trusted
+  when it matches the digest in the generator's `validation_runs` row, which
+  this path does not read. Every other metric is evaluated on all rows.
+- A landing table named differently from its source (a custom
+  `SDFB_LANDING_TABLE` name) is not found: the evaluation looks for the
+  source's name in the landing dataset.
+- What stays lost: the launch's own record of its tables, run ids and
+  reference digest, and a model the launch adjusted (ADR 0038).
 
 `trigger_evaluation` submits the job and does not wait: the evaluation job
 writes its own FINAL registry row. A job that dies after it was launched
@@ -545,63 +546,66 @@ default_dag_params = {
         Param(
             default=False,
             type="boolean",
-            description="Opt-in: after the generation job finishes, evaluate "
-            "what it generated: the launched table's enabled component in "
-            "the relationship model, or that table alone (no model names it, "
-            "or generate_fk_relationships is false), the landed tables under "
-            "their sources' names in the landing dataset, read whole (with "
-            "write_disposition append that includes earlier launches' rows). "
-            "This DAG waits for "
-            "the job, then launches the evaluation as "
-            "a second, CPU-only Dataflow job from the same template. While it "
-            "waits the run holds the DAG's only active-run slot "
-            "(max_active_runs=1): with this on, launches of this DAG run "
-            "one generation at a time. False (default): nothing changes, "
-            "the DAG only launches generation.",
+            description="Opt-in, off by default. False: the DAG only launches "
+            "generation, as before. True: after the generation job reaches "
+            "DONE this DAG launches the evaluator as a second, CPU-only "
+            "Dataflow job from the same template. It evaluates the launched "
+            "table and, with generate_fk_relationships true, the rest of "
+            "its group of tables in the relationship model; each landed "
+            "table is read whole (with write_disposition append that "
+            "includes earlier launches' rows). While it waits the run holds "
+            "the DAG's only active-run slot (max_active_runs=1), so launches "
+            "of this DAG then run one generation at a time.",
         ),
     "evaluation_mode":
         Param(
             default="",
             type="string",
             enum=["", "exact", "sampled"],
-            description="Only with run_evaluation. exact reads every row; "
-            "sampled reads a salted sample of the larger tables. Empty: the "
-            "evaluator's default (exact on Dataflow).",
+            description="Only with run_evaluation. exact: every row of both "
+            "sides is compared. sampled: a salted sample of a side that has "
+            "more rows than the evaluator's sample_rows (200000). Empty "
+            "(default): the evaluator's choice, exact on Dataflow.",
         ),
     "evaluation_machine_type":
         Param(
             default="e2-standard-8",
             type="string",
-            description="Only with run_evaluation. Worker machine type of the "
-            "evaluation job (CPU; the evaluator needs no GPU).",
+            description="Only with run_evaluation. Machine type of the "
+            "evaluation job's workers. CPU only: the evaluator needs no GPU. "
+            "Default e2-standard-8.",
         ),
     "evaluation_max_workers":
         Param(
             default=4,
             type="integer",
             minimum=1,
-            description="Only with run_evaluation. maxWorkers of the "
-            "evaluation job.",
+            description="Only with run_evaluation. Upper bound on the number "
+            "of workers the evaluation job may use (Dataflow maxWorkers). "
+            "Default 4.",
         ),
     "source_dataset":
         Param(
             default="",
             type="string",
             description="Only with run_evaluation. The dataset (or "
-            "project.dataset) holding the SOURCE tables the evaluation "
-            "compares the landed ones against: the launched table and, with "
-            "generate_fk_relationships true, the rest of its component in "
-            "the relationship model, each under the name it landed with in "
-            "the landing dataset (a landing table named differently from its "
-            "source is not found). Empty: the dataset of table_fqn.",
+            "project.dataset) holding the SOURCE tables the landed ones are "
+            "compared with: the launched table and, with "
+            "generate_fk_relationships true, the rest of its group of "
+            "tables, each under the name it landed with in the landing "
+            "dataset (a landing table named differently from its source is "
+            "not found). Empty (default): the dataset of table_fqn.",
         ),
     "evaluation_output_dataset":
         Param(
             default=evaluation_output_dataset_default,
             type="string",
-            description="Only with run_evaluation. The dataset of the four "
-            "evaluation_* tables (dataset or project.dataset); the evaluator "
-            "also reads this launch's validation_runs there.",
+            description="Only with run_evaluation. The dataset (or "
+            "project.dataset) that receives the four evaluation_* tables, and "
+            "where the evaluator keeps the expiring tables it makes while it "
+            "runs (source snapshots, scopes, samples). The service account "
+            "needs write access there. Default: the dataset of the "
+            "validation-runs table, else synthetic_data_quality.",
         ),
     "pool_seed_strategy":
         Param(
@@ -827,10 +831,41 @@ with models.DAG(
   # The evaluation: a second Dataflow job from the SAME template as the
   # generation above. `sdfb_job` selects the evaluator's entry in the image.
   # What to evaluate is named by the launched table and the relationship model
-  # and read whole (scope manual). The job id is only the launch's identity:
-  # the evaluator reads the Dataflow job for its window, never the job's log.
-  # Submitted and not waited for, like the generation: the job writes its own
-  # FINAL row.
+  # and read whole (scope manual). Submitted and not waited for, like the
+  # generation: the job writes its own FINAL row.
+  #
+  # Evaluator options this launch does NOT pass (each keeps its default).
+  # The template accepts them; add one to `parameters` below to change it.
+  # The full list is the "Evaluation only" entries of
+  # docker/flex_template_metadata.json (and `sdfb-eval run --help`, in
+  # packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py):
+  #   sample_rows 200000           sampled mode only: a side with more rows
+  #                                than this is read as a salted sample
+  #   privacy_sample_rows 50000    rows of the nearest-neighbour privacy sample
+  #   detection_sample_rows 50000  rows per side of the real-vs-synthetic
+  #                                classifier (detection) sample
+  #   pair_max_columns 20          columns whose pairs are compared, per table
+  #   row_flags_top_k 100          row flags kept per check and table
+  #   row_flags_source_keys hashed the matched source key is written as a keyed
+  #                                hash only (the one accepted value)
+  #   max_bytes_billed 1 TiB       BigQuery bytes the evaluation may process
+  #   max_shuffle_gb 500           shuffle the value census may use before it
+  #                                is value-sampled
+  #   temp_dataset                 where the expiring scope, snapshot and
+  #                                sample tables go; empty: output_dataset
+  #   sink bq                      the pipeline loads BigQuery itself (the
+  #                                other sinks need a local runner)
+  #   allow_contaminated false     refuse a scope another writer touched
+  #   thresholds_uri               a gs:// YAML of warn/fail thresholds that
+  #                                override the catalogue's; empty: catalogue
+  #   label_key_uri                Secret Manager version or gs:// object for
+  #                                the row-flag label key; empty: random, for
+  #                                one run
+  #   fail_on none                 no effect on a template launch (the entry
+  #                                submits and returns); read the statuses
+  #                                from the registry
+  # Not passed because they are other ways to name a launch: run_id and
+  # tables (alternatives to seed_table).
   trigger_evaluation = DataflowStartFlexTemplateOperator(
       task_id="trigger_evaluation",
       project_id=project_id,
@@ -841,25 +876,37 @@ with models.DAG(
                   f"gs://{templates_path}/synthetic/{flex_template}",
               "jobName":
                   f"{evaluation_job_name}-{{{{ ts_nodash | lower }}}}",
+              # How Dataflow runs the job (not the evaluator's arguments).
               "environment": {
+                  # Dataflow's scratch and staging locations; the staging
+                  # bucket also receives the job graph, which embeds the
+                  # reference panel rows of every table.
                   "tempLocation": f"gs://{bucket_path}/temp/",
                   "stagingLocation": f"gs://{bucket_path}/staging",
+                  # The generation job's network, with private worker IPs.
                   "subnetwork": subnetwork,
                   "ipConfiguration": "WORKER_IP_PRIVATE",
+                  # The generation job's service account (Variable
+                  # SA_DATAFLOW): it needs the evaluator's roles.
                   "serviceAccountEmail": service_account,
                   # A CPU job: no accelerator, no reservation, no
                   # SDK-container pin. The evaluator adds its own
-                  # launch experiments.
+                  # launch experiments. use_runner_v2 and enable_secure_boot
+                  # are the generation job's; the network tags are the
+                  # DATAFLOW_NETWORK_TAGS Variable, as for generation.
                   "additionalExperiments": [
                       "use_runner_v2",
                       "enable_secure_boot",
                       *network_tag_experiments,
                   ],
+                  # Labels on the Dataflow job, to find it in billing and the
+                  # console.
                   "additionalUserLabels": {
                       "app": app_name,
                       "env": env_name,
                       "dag": dag_id,
                   },
+                  # DAG params evaluation_machine_type / evaluation_max_workers
                   "machineType": "{{ params.evaluation_machine_type }}",
                   "maxWorkers": "{{ params.evaluation_max_workers }}",
                   "workerRegion": region,
@@ -868,42 +915,95 @@ with models.DAG(
               # The launcher supplies runner, project and region itself and
               # the image carries its worker image coordinate.
               "parameters": {
+                  # Selects the evaluator inside the shared image; without it
+                  # the same template would start a generation job.
                   "sdfb_job":
                       "evaluation",
-                  # The launched table and the relationship model name the
-                  # tables, the landing dataset is the generation's own, the
-                  # source dataset a param. The job id is the launch's
-                  # identity: the evaluator reads the Dataflow job for its
-                  # window and nothing else about it (no log).
+                  # The generation job's Dataflow id: the same expression the
+                  # wait sensor uses (the XCom `id` of start_sdfb). It is the
+                  # launch's IDENTITY, not a source of tables: the evaluator
+                  # reads the Dataflow job resource (id, name, region, start
+                  # and end) and nothing else about the job, never its log.
+                  # The row keeps the id and the window, so the run is listed
+                  # in the view evaluation_latest_per_job. The window also
+                  # pins each source table as of the job's create time (a
+                  # snapshot, within the table's time-travel window). If the
+                  # job cannot be read (no roles/dataflow.viewer, or past
+                  # retention) the run goes on with a warning and no window.
                   "generation_job_id":
                       generation_job_id,
+                  # The launched table: the last part of the DAG param
+                  # table_fqn. It names the tables to evaluate: with a
+                  # relationship model, this table and its enabled group;
+                  # else this table alone.
                   "seed_table":
                       "{{ params.table_fqn.rsplit('.', 1)[-1] }}",
-                  # an isolated generation (false) is evaluated as one table
+                  # The relationship model, the DAG param of the same name
+                  # (default: the config/relationships folder packaged in the
+                  # image). The evaluator reads the seed's enabled group of
+                  # tables from it, parents first. A folder with no model
+                  # file, or no model naming the seed, evaluates the seed
+                  # alone (with a warning). Empty when the DAG param
+                  # generate_fk_relationships is "false": an isolated
+                  # generation is evaluated as one table.
                   "relationships_uri":
                       "{{ params.relationships_uri "
                       "if params.generate_fk_relationships == 'true' "
                       "else '' }}",
-                  # the dataset of the generation's landing table, whatever
-                  # table name that placeholder ends in
+                  # Where the synthetic tables landed: the project.dataset of
+                  # the generation's landing table (marker SDFB_LANDING_TABLE,
+                  # whatever table name it ends in). Each table is read as
+                  # <landing_dataset>.<its source name>, so a landing table
+                  # named differently from its source is not found.
                   "landing_dataset":
                       "{{ '{{SDFB_LANDING_TABLE}}'.rsplit('.', 1)[0] }}",
+                  # Where the SOURCE tables are: the DAG param source_dataset,
+                  # else the dataset of table_fqn. Each synthetic table is
+                  # compared with the table of the same name here.
                   "reference_dataset":
                       "{{ params.source_dataset or params.table_fqn.rsplit('.', 1)[0] }}",
-                  # a hand-named target has no write disposition to derive a
-                  # scope from: each landing table is read whole
+                  # How the landing rows are isolated. A named table has no
+                  # write disposition to derive a scope from (auto would plan
+                  # every table as "not evaluated"), so manual: each landing
+                  # table is read WHOLE. With write_disposition overwrite
+                  # that is this launch's rows; with append it also holds
+                  # earlier launches' rows.
                   "scope":
                       "manual",
-                  # the generation's reference sample size (start_sdfb passes
-                  # the same value): it sizes the privacy panel
+                  # The size of the sample the generator learned from (the
+                  # `reference_rows_limit` start_sdfb passes: SELECT ... LIMIT
+                  # N on the reference table). It limits NOTHING that is
+                  # compared: in exact mode every landed row is compared with
+                  # every source row. The evaluator uses it to rebuild that
+                  # sample (R) and an equal-size holdout (H) from the source,
+                  # for the row-level privacy metrics (nearest-record
+                  # distances, density, coverage, memorization and exposure
+                  # lifts). Each of R and H needs at least 2000 rows, and the
+                  # value must equal the generation's. Today those metrics
+                  # come out "not evaluated" on this path: the rebuilt sample
+                  # is only trusted when its digest equals the one in the
+                  # generator's validation_runs row, and this launch does not
+                  # read that table. Every other metric is unaffected.
                   "reference_rows_limit":
                       "10000",
+                  # Recorded in the registry row: what started the
+                  # evaluation (cli | composer | chained | agent).
                   "trigger":
                       "chained",
+                  # The DAG param evaluation_mode. Empty: exact on Dataflow
+                  # (every row of both sides); sampled: a salted sample of a
+                  # side with more rows than sample_rows (200000).
                   "mode":
                       "{{ params.evaluation_mode }}",
+                  # The DAG param evaluation_output_dataset: where the four
+                  # evaluation_* tables are written, and (unless temp_dataset
+                  # is set) the evaluator's expiring scope, snapshot and
+                  # sample tables.
                   "output_dataset":
                       "{{ params.evaluation_output_dataset }}",
+                  # Beam's own --disk_size_gb, passed through: the workers'
+                  # boot disk in GB. The evaluation runs on the generation's
+                  # multi-GB image and the evaluator pins no disk of its own.
                   "disk_size_gb":
                       EVALUATION_WORKER_DISK_GB,
               },
