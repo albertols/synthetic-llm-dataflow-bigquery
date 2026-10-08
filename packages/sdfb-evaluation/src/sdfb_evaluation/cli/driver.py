@@ -216,6 +216,7 @@ from sdfb_evaluation.context.plan import (
 from sdfb_evaluation.context.relationships import (
     RelationshipError,
     RelModel,
+    component,
     generation_order,
     load_models,
 )
@@ -474,21 +475,51 @@ def _table_problems(bq: Any, name: str, landing: str, source: str) -> list[str]:
   return problems
 
 
-def _derive_targets(args: argparse.Namespace, bq: Any) -> None:
-  """`--relationships_uri` alone names the tables (module docstring): sets
-  `args.tables` to the model's enabled tables, parents first, after
+def _seed_tables(args: argparse.Namespace) -> tuple[list[str], list[str]]:
+  """(tables, notes) of `--seed_table`: what a launch of that table
+  generated (the generator's rule, `relationships.component`) — its
+  enabled component, parents first, or the table alone when no model names
+  it, the models are off, or the URI holds no model file. That last case
+  clears `args.relationships_uri` (the plan is made without one) and says
+  so in a note; any other model error raises."""
+  seed = args.seed_table
+  if not args.relationships_uri:
+    return [seed], []
+  try:
+    models = load_models(args.relationships_uri)
+  except RelationshipError as exc:
+    if _NO_MODEL_FILES not in str(exc):
+      raise
+    note = (f"relationships_uri {args.relationships_uri} holds no model "
+            f"file: {seed} was evaluated alone, as a launch generates a "
+            "table no model names")
+    args.relationships_uri = None
+    return [seed], [note]
+  return list(generation_order(models, component(models, seed))), []
+
+
+def _derive_targets(args: argparse.Namespace, bq: Any) -> list[str]:
+  """`--seed_table`, or `--relationships_uri` alone, names the tables
+  (module docstring): sets `args.tables` — the seed's component
+  (`_seed_tables`), or all the model's enabled tables, parents first — after
   checking each landing table against its source twin in
-  `--reference_dataset`. Any other target is left alone.
+  `--reference_dataset`. Any other target is left alone. Returns the notes
+  the plan should carry.
 
   Raises:
-    RelationshipError: the URI holds no usable model.
+    RelationshipError: the URI holds no usable model (for `--seed_table`
+      only a model that is malformed).
     TargetCheckError: the model enables no table, or a table fails the
       check (every problem is listed).
   """
+  seed = getattr(args, "seed_table", None)
   if (args.tables or args.job_id or args.run_id or args.fixture_dir or
-      not args.relationships_uri):
-    return
-  names = derived_tables(load_models(args.relationships_uri))
+      not (seed or args.relationships_uri)):
+    return []
+  if seed:
+    names, notes = _seed_tables(args)
+  else:
+    names, notes = derived_tables(load_models(args.relationships_uri)), []
   if not names:
     raise TargetCheckError(
         f"{args.relationships_uri}: the relationship model enables no table")
@@ -503,6 +534,7 @@ def _derive_targets(args: argparse.Namespace, bq: Any) -> None:
         "the tables of the relationship model cannot be evaluated: " +
         "; ".join(problems))
   args.tables = names
+  return notes
 
 
 def _resolve(args: argparse.Namespace, env: Env, bq: Any) -> LaunchContext:
@@ -634,8 +666,11 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
         runner=args.runner,
         now=attempt.now,
         evaluation_id=attempt.evaluation_id)
-  _derive_targets(args, bq)
+  notes = _derive_targets(args, bq)
   attempt.launch = _resolve(args, env, bq)
+  if notes:
+    attempt.launch = dataclasses.replace(
+        attempt.launch, warnings=(*attempt.launch.warnings, *notes))
   planning_bq = bq
   if getattr(args, "no_planning_snapshots", False):
     planning_bq = _ReadOnlyPlanning(bq)
@@ -689,6 +724,9 @@ def _request_key(args: argparse.Namespace, knobs: Knobs) -> str:
           "job_id": args.job_id,
           "run_id": args.run_id,
           "tables": list(args.tables or ()),
+          **({
+              "seed_table": args.seed_table
+          } if getattr(args, "seed_table", None) else {}),
           "landing_dataset": args.landing_dataset,
           "reference_dataset": args.reference_dataset,
           "relationships_uri": args.relationships_uri,

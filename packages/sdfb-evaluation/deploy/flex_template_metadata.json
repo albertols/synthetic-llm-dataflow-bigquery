@@ -45,7 +45,7 @@
     {
       "name": "generation_job_id",
       "label": "Generation job id",
-      "helpText": "Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
+      "helpText": "Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -59,7 +59,7 @@
     {
       "name": "landing_dataset",
       "label": "Landing dataset",
-      "helpText": "With tables: the dataset (or project.dataset) the tables landed in.",
+      "helpText": "With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) the tables landed in.",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -130,14 +130,14 @@
     {
       "name": "reference_dataset",
       "label": "Reference dataset",
-      "helpText": "With tables: the dataset (or project.dataset) of their sources, same table names.",
+      "helpText": "With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) of their sources, same table names.",
       "paramType": "TEXT",
       "isOptional": true
     },
     {
       "name": "relationships_uri",
       "label": "Relationships URI",
-      "helpText": "The relationship model file or directory (gs://), when the launch's own records name none.",
+      "helpText": "The relationship model file or directory (gs://). Given alone (with landing_dataset and reference_dataset) it names the tables: every enabled table of the model, parents first. With seed_table it names the model the seed's component is read from; a URI that holds no model file evaluates the seed alone, with a warning. By generation_job_id it is read only when the launch's own records name none.",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -164,7 +164,7 @@
     {
       "name": "run_id",
       "label": "Generation run id",
-      "helpText": "Target: the generation launch's base run id (validation_runs of output_dataset). Name exactly one of job_id, run_id, tables.",
+      "helpText": "Target: the generation launch's base run id (validation_runs of output_dataset). Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone.",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -209,9 +209,16 @@
       ]
     },
     {
+      "name": "seed_table",
+      "label": "Seed table",
+      "helpText": "Target: the table a launch targeted; evaluates what that launch generated: its enabled component in the relationship model (relationships_uri), or the table alone when no model names it or none is given. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
       "name": "tables",
       "label": "Tables",
-      "helpText": "Target: landing table names, comma-separated, parents first. Needs landing_dataset and reference_dataset. Name exactly one of job_id, run_id, tables.",
+      "helpText": "Target: landing table names, comma-separated, parents first. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone.",
       "paramType": "TEXT",
       "isOptional": true
     },

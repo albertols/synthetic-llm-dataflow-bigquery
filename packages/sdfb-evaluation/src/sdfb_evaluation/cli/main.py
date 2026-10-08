@@ -215,6 +215,13 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       "and pass --relationships_uri alone to evaluate every enabled table "
       "of the relationship model, parents first)")
   group.add_argument(
+      "--seed_table",
+      type=_text,
+      help="the table a launch targeted: evaluate what that launch "
+      "generated, which is its enabled component in the relationship model "
+      "(--relationships_uri), or the table alone when no model names it or "
+      "none is given. Needs --landing_dataset and --reference_dataset")
+  group.add_argument(
       "--landing_dataset",
       type=_text,
       help="with --tables: the dataset (or project.dataset) they landed in")
@@ -436,7 +443,8 @@ def _check_target(parser: argparse.ArgumentParser,
   targets = [
       flag for flag, value in (("--job_id", args.job_id), ("--run_id",
                                                            args.run_id),
-                               ("--tables", args.tables)) if value
+                               ("--tables", args.tables),
+                               ("--seed_table", args.seed_table)) if value
   ]
   if args.fixture_dir:
     if targets:
@@ -445,20 +453,22 @@ def _check_target(parser: argparse.ArgumentParser,
   derived = not targets and bool(args.relationships_uri)
   if len(targets) != 1 and not derived:
     given = ", ".join(targets) or "none"
-    parser.error("name exactly one of --job_id, --run_id, --tables, or "
-                 f"--relationships_uri alone (given: {given})")
+    parser.error("name exactly one of --job_id, --run_id, --tables, "
+                 "--seed_table, or --relationships_uri alone "
+                 f"(given: {given})")
   if not args.project:
     parser.error("--project is required")
   if args.job_id and not args.region:
     parser.error("--job_id needs --region: a Dataflow job is only visible "
                  "in the region it ran in")
   datasets = (args.landing_dataset, args.reference_dataset)
-  if (args.tables or derived) and not all(datasets):
-    parser.error("--tables, or --relationships_uri alone, needs "
-                 "--landing_dataset and --reference_dataset")
-  if not (args.tables or derived) and any(datasets):
+  named = bool(args.tables or args.seed_table or derived)
+  if named and not all(datasets):
+    parser.error("--tables, --seed_table, or --relationships_uri alone, "
+                 "needs --landing_dataset and --reference_dataset")
+  if not named and any(datasets):
     parser.error("--landing_dataset and --reference_dataset apply to "
-                 "--tables, or to --relationships_uri alone, only")
+                 "--tables, --seed_table, or --relationships_uri alone, only")
 
 
 def _check_planning(parser: argparse.ArgumentParser,

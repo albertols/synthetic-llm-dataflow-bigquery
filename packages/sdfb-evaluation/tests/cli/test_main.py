@@ -119,7 +119,7 @@ def test_run_flags_default_to_the_brief():
   flags = public_run_flags()
   assert {
       "--project", "--region", "--generation_job_id", "--run_id",
-      "--relationships_uri", "--tables", "--reference_dataset",
+      "--relationships_uri", "--tables", "--seed_table", "--reference_dataset",
       "--landing_dataset", "--mode", "--scope", "--allow_contaminated",
       "--sample_rows", "--privacy_sample_rows", "--detection_sample_rows",
       "--pair_max_columns", "--row_flags_top_k", "--row_flags_source_keys",
@@ -636,6 +636,151 @@ def test_relationships_uri_alone_needs_both_datasets(capsys):
   assert "--landing_dataset and --reference_dataset" in err
   err = _usage_error(["run", "--project", PROJECT], capsys)
   assert "name exactly one of" in err
+
+
+OTHER_YAML = """
+model: other
+tables:
+  alpha:
+    pk: [id]
+  beta:
+    pk: [id]
+    fk:
+      - {cols: [a], ref: alpha, ref_cols: [id]}
+"""
+
+
+def _seed_args(seed: str, uri: str | None, *extra: str):
+  argv = [
+      "plan", "--project", PROJECT, "--seed_table", seed, "--landing_dataset",
+      "thelook_synthetic", "--reference_dataset", SRC, *extra
+  ]
+  if uri is not None:
+    argv += ["--relationships_uri", uri]
+  args, _ = parse_args(argv)
+  return args
+
+
+def _seed_plan(bq, seed: str, uri: str | None, *extra: str):
+  planned, _ = driver.plan(_seed_args(seed, uri, *extra), make_env(bq))
+  return planned
+
+
+def _evaluated(planned) -> list[str]:
+  return [t.name for t in planned.tables if t.role != "external"]
+
+
+def _two_groups(tmp_path: Path) -> str:
+  folder = tmp_path / "models"
+  folder.mkdir()
+  (folder / "thelook.yaml").write_text(MODEL_YAML)
+  (folder / "other.yaml").write_text(OTHER_YAML)
+  return str(folder)
+
+
+def test_a_seed_table_is_a_target_with_both_datasets(capsys):
+  base = ["run", "--project", PROJECT, "--seed_table", "orders"]
+  datasets = ["--landing_dataset", "d", "--reference_dataset", "s"]
+  args, _ = parse_args([*base, *datasets])
+  assert args.seed_table == "orders"
+  for other in (["--tables", "orders"], ["--run_id", "r1"],
+                ["--job_id", JOB_ID, "--region", "europe-west1"],
+                ["--generation_job_id", JOB_ID, "--region", "europe-west1"]):
+    err = _usage_error([*base, *datasets, *other], capsys)
+    assert "name exactly one of" in err and "--seed_table" in err
+  err = _usage_error(base, capsys)
+  assert "--landing_dataset and --reference_dataset" in err
+  err = _usage_error([*base, "--landing_dataset", "d"], capsys)
+  assert "--landing_dataset and --reference_dataset" in err
+  # the datasets alone are no target
+  err = _usage_error(["run", "--project", PROJECT, *datasets], capsys)
+  assert "name exactly one of" in err
+
+
+def test_a_seed_evaluates_only_its_component_parents_first(bq, tmp_path):
+  folder = _two_groups(tmp_path)
+  assert _evaluated(_seed_plan(bq, "orders", folder)) == [
+      "users", "orders", "order_items"
+  ]
+  # another table of the same component: the same launch
+  assert _evaluated(_seed_plan(bq, "users", folder)) == [
+      "users", "orders", "order_items"
+  ]
+
+
+def test_a_seed_no_model_names_is_evaluated_alone(bq, tmp_path):
+  model = tmp_path / "other.yaml"
+  model.write_text(OTHER_YAML)  # a model, but not one that names `users`
+  assert _evaluated(_seed_plan(bq, "users", str(model))) == ["users"]
+
+
+def test_a_disabled_seed_is_evaluated_alone(bq, tmp_path):
+  model = tmp_path / "thelook.yaml"
+  model.write_text(MODEL_YAML.replace("  orders:\n", "  orders:\n    enabled: false\n"))
+  assert _evaluated(_seed_plan(bq, "orders", str(model))) == ["orders"]
+
+
+def test_a_seed_without_a_relationships_uri_is_evaluated_alone(bq):
+  planned = _seed_plan(bq, "orders", None)
+  assert _evaluated(planned) == ["orders"]
+  assert planned.launch.relationships_uri is None
+
+
+def test_a_uri_with_no_model_file_evaluates_the_seed_alone_and_says_so(
+    bq, tmp_path):
+  """The repository's default folder holds samples only, which a scan
+  skips: a single-table launch is still evaluated."""
+  empty = tmp_path / "samples"
+  empty.mkdir()
+  (empty / "example_model.yaml").write_text(MODEL_YAML)
+  planned = _seed_plan(bq, "orders", str(empty))
+  assert _evaluated(planned) == ["orders"]
+  assert planned.launch.relationships_uri is None
+  (note,) = [w for w in planned.warnings if "no model file" in w]
+  assert str(empty) in note and "alone" in note
+  assert note in planned.registry_seed()["warnings"]
+
+
+def test_a_malformed_model_still_raises_for_a_seed(bq, tmp_path):
+  model = tmp_path / "broken.yaml"
+  model.write_text("""
+model: broken
+tables:
+  orders:
+    pk: [order_id]
+    fk:
+      - {cols: [user_id], ref: nobody, ref_cols: [id]}
+""")
+  with pytest.raises(relationships.RelationshipError):
+    _seed_plan(bq, "orders", str(model))
+
+
+def test_a_uri_with_no_model_file_still_raises_for_every_other_target(
+    bq, tmp_path):
+  empty = tmp_path / "samples"
+  empty.mkdir()
+  args, _ = parse_args(_derived_argv(empty))
+  with pytest.raises(relationships.RelationshipError, match="no model files"):
+    driver.plan(args, make_env(bq))
+  args, _ = parse_args([
+      "plan", "--project", PROJECT, "--tables", "users", "--landing_dataset",
+      "thelook_synthetic", "--reference_dataset", SRC, "--relationships_uri",
+      str(empty), "--scope", "manual"
+  ])
+  with pytest.raises(relationships.RelationshipError, match="no model files"):
+    driver.plan(args, make_env(bq))
+
+
+def test_the_check_lists_every_problem_of_the_seeds_tables_only(bq, tmp_path):
+  folder = _two_groups(tmp_path)  # alpha and beta have no tables at all
+  del bq.tables[f"{DS}.orders"]
+  bq.tables[f"{DS}.users"]["numRows"] = 0
+  with pytest.raises(driver.TargetCheckError) as raised:
+    _seed_plan(bq, "orders", folder)
+  message = str(raised.value)
+  assert "orders: the landing table" in message
+  assert "users: the landing table is empty" in message
+  assert "alpha" not in message and "beta" not in message
 
 
 def test_a_run_id_target_reads_validation_runs(bq, capsys):

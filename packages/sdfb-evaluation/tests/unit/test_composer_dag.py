@@ -1130,14 +1130,20 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
   values = dict(zip(keys, parameters.values, strict=True))
   assert set(values) == {
-      "sdfb_job", "relationships_uri", "landing_dataset", "reference_dataset",
-      "trigger", "mode", "output_dataset", "disk_size_gb"
+      "sdfb_job", "seed_table", "relationships_uri", "landing_dataset",
+      "reference_dataset", "trigger", "mode", "output_dataset", "disk_size_gb"
   }
   assert _value(tree, values["sdfb_job"]) == "evaluation"
-  # the tables come from the model, not from the job: no log read, no lookup
+  # the tables come from the launched table and the model, not from the job:
+  # no log read, no lookup
   assert "generation_job_id" not in values and "job_id" not in values
-  assert _value(tree,
-                values["relationships_uri"]) == "{{ params.relationships_uri }}"
+  seed = _value(tree, values["seed_table"])
+  assert "params.table_fqn" in seed and "rsplit('.', 1)[-1]" in seed
+  uri = _value(tree, values["relationships_uri"])
+  assert "params.relationships_uri" in uri
+  # an isolated generation is evaluated as one table: no model
+  assert "params.generate_fk_relationships == 'true'" in uri
+  assert uri.endswith("else '' }}")
   assert "SDFB_LANDING_TABLE" in _value(tree, values["landing_dataset"])
   source = _value(tree, values["reference_dataset"])
   assert "params.source_dataset" in source and "params.table_fqn" in source

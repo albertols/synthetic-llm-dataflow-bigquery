@@ -73,13 +73,18 @@ generation job ends (the sensor waits for it, hours), and the DAG has
 generation at a time. `max_active_runs` is the knob; raising it lets several
 generation jobs run at once (mind the GPU quota). It is unchanged here.
 
-`trigger_evaluation` names the tables from the relationship model
-(`relationships_uri`) and says where they are: `landing_dataset` is the
-generation's own, `reference_dataset` the `source_dataset` param (else the
-dataset of `table_fqn`). The evaluation therefore reads neither the job's log
-nor BigQuery job labels, and the service account needs no
-`roles/logging.viewer`; the cost is that the registry row carries no
-generation window and no link to the generation job.
+`trigger_evaluation` evaluates what the launch generated: the launched table
+(`seed_table`, the last part of `table_fqn`) and its enabled component in the
+relationship model (`relationships_uri`), or that table alone when the model
+does not name it, the folder holds no model file, or
+`generate_fk_relationships` is "false" (the launch then passes no model). The
+landed tables are read from `landing_dataset` (the generation's own) under
+their sources' names, and compared with the tables of `reference_dataset`
+(the `source_dataset` param, else the dataset of `table_fqn`). The evaluation
+therefore reads neither the job's log nor BigQuery job labels, and the service
+account needs no `roles/logging.viewer`. The cost: the registry row carries
+no generation window and no link to the generation job, and a model the
+launch adjusted (ADR 0038) is not seen.
 
 `trigger_evaluation` submits the job and does not wait: the evaluation job
 writes its own FINAL registry row. A job that dies after it was launched
@@ -526,7 +531,11 @@ default_dag_params = {
             default=False,
             type="boolean",
             description="Opt-in: after the generation job finishes, evaluate "
-            "it. This DAG waits for the job, then launches the evaluation as "
+            "what it generated: the launched table's enabled component in "
+            "the relationship model, or that table alone (no model names it, "
+            "or generate_fk_relationships is false), the landed tables under "
+            "their sources' names in the landing dataset. This DAG waits for "
+            "the job, then launches the evaluation as "
             "a second, CPU-only Dataflow job from the same template. While it "
             "waits the run holds the DAG's only active-run slot "
             "(max_active_runs=1): with this on, launches of this DAG run "
@@ -563,9 +572,10 @@ default_dag_params = {
             type="string",
             description="Only with run_evaluation. The dataset (or "
             "project.dataset) holding the SOURCE tables the evaluation "
-            "compares the landed ones against; every table of the "
-            "relationship model must have its source there under the same "
-            "name. Empty: the dataset of table_fqn.",
+            "compares the landed ones against: the launched table and, with "
+            "generate_fk_relationships true, the rest of its component in "
+            "the relationship model, each under the name it landed with in "
+            "the landing dataset. Empty: the dataset of table_fqn.",
         ),
     "evaluation_output_dataset":
         Param(
@@ -840,11 +850,15 @@ with models.DAG(
               "parameters": {
                   "sdfb_job":
                       "evaluation",
-                  # No job lookup, so no read of the job's log: the
-                  # relationship model names the tables, the landing dataset
-                  # is the generation's own, the source dataset a param.
+                  # No job lookup, so no read of the job's log: the launched
+                  # table and the relationship model name the tables, the
+                  # landing dataset is the generation's own, the source
+                  # dataset a param.
+                  "seed_table":
+                      "{{ params.table_fqn.rsplit('.', 1)[-1] }}",
+                  # an isolated generation (false) is evaluated as one table
                   "relationships_uri":
-                      "{{ params.relationships_uri }}",
+                      "{{ params.relationships_uri if params.generate_fk_relationships == 'true' else '' }}",
                   # the dataset of the generation's landing table, whatever
                   # table name that placeholder ends in
                   "landing_dataset":
