@@ -858,7 +858,9 @@ with models.DAG(
                       "{{ params.table_fqn.rsplit('.', 1)[-1] }}",
                   # an isolated generation (false) is evaluated as one table
                   "relationships_uri":
-                      "{{ params.relationships_uri if params.generate_fk_relationships == 'true' else '' }}",
+                      "{{ params.relationships_uri "
+                      "if params.generate_fk_relationships == 'true' "
+                      "else '' }}",
                   # the dataset of the generation's landing table, whatever
                   # table name that placeholder ends in
                   "landing_dataset":

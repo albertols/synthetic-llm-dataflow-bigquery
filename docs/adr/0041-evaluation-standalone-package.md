@@ -387,6 +387,27 @@ a second option string of the same argument, so `--job_id` still works, and is
 still the name the documents use, for a direct command line. A test now holds
 every template parameter clear of the six names.
 
+**Note (2026-10-08, second): the chained evaluation names its tables from the
+launched table and the relationship model.** The second chained launch could
+not resolve its launch: reading the generation job's Cloud Logging entries
+returned HTTP 403 (the deployment's service account has no
+`roles/logging.viewer`), and nothing else could resolve the launch without the
+log. The labelled BigQuery writes need a BigQuery location that only the log
+or a landing table gives, and `validation_runs` needs the launch's
+`validation_runs_table`, which only the log gives. So the generation DAG's
+`trigger_evaluation` no longer passes the job. It passes `seed_table` (the
+launched table), `relationships_uri` (empty when `generate_fk_relationships`
+is false), `landing_dataset` and `reference_dataset`, and the evaluator
+(`--seed_table`) evaluates what that launch generated: the table's enabled
+component in the model, parents first, or the table alone when no model names
+it or the folder holds no model file (a warning says so). The generator's own
+rule is mirrored by `relationships.component`. The cost: the registry row has
+no generation window and no job link (the view `evaluation_latest_per_job`
+lists only rows with one), and a model the launch adjusted under
+[ADR 0038](0038-measured-conflicts-adjust-the-model.md) is not seen. Runs
+named by job id (`--job_id`, the standalone DAG) are unchanged and still need
+the job roles.
+
 ## Sources
 
 [Lin, Lucas & Shmueli 2013](https://doi.org/10.1287/isre.2013.0480) (p-values at scale) ·

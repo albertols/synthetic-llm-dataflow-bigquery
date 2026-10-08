@@ -684,8 +684,8 @@ def test_a_seed_table_is_a_target_with_both_datasets(capsys):
   args, _ = parse_args([*base, *datasets])
   assert args.seed_table == "orders"
   for other in (["--tables", "orders"], ["--run_id", "r1"],
-                ["--job_id", JOB_ID, "--region", "europe-west1"],
-                ["--generation_job_id", JOB_ID, "--region", "europe-west1"]):
+                ["--job_id", JOB_ID, "--region", "europe-west1"
+                ], ["--generation_job_id", JOB_ID, "--region", "europe-west1"]):
     err = _usage_error([*base, *datasets, *other], capsys)
     assert "name exactly one of" in err and "--seed_table" in err
   err = _usage_error(base, capsys)
@@ -699,13 +699,11 @@ def test_a_seed_table_is_a_target_with_both_datasets(capsys):
 
 def test_a_seed_evaluates_only_its_component_parents_first(bq, tmp_path):
   folder = _two_groups(tmp_path)
-  assert _evaluated(_seed_plan(bq, "orders", folder)) == [
-      "users", "orders", "order_items"
-  ]
+  assert _evaluated(_seed_plan(bq, "orders",
+                               folder)) == ["users", "orders", "order_items"]
   # another table of the same component: the same launch
-  assert _evaluated(_seed_plan(bq, "users", folder)) == [
-      "users", "orders", "order_items"
-  ]
+  assert _evaluated(_seed_plan(bq, "users",
+                               folder)) == ["users", "orders", "order_items"]
 
 
 def test_a_seed_no_model_names_is_evaluated_alone(bq, tmp_path):
@@ -716,7 +714,8 @@ def test_a_seed_no_model_names_is_evaluated_alone(bq, tmp_path):
 
 def test_a_disabled_seed_is_evaluated_alone(bq, tmp_path):
   model = tmp_path / "thelook.yaml"
-  model.write_text(MODEL_YAML.replace("  orders:\n", "  orders:\n    enabled: false\n"))
+  model.write_text(
+      MODEL_YAML.replace("  orders:\n", "  orders:\n    enabled: false\n"))
   assert _evaluated(_seed_plan(bq, "orders", str(model))) == ["orders"]
 
 

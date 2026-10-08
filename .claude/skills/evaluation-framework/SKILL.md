@@ -38,7 +38,7 @@ file that names both.
 | `sdfb-eval plan --dry_run …` | scope, panel, bytes and predicted shuffle; no registry row |
 | `sdfb-eval run …` | one evaluation; exit 0 ok, 1 the optional `--fail_on` gate, 2 usage (nothing started), 3 evaluation failed |
 | `sdfb-eval report` / `compare` / `catalogue` / `schemas` | read a stored run (markdown or `--format json`), compare two, print the catalogue, create the tables |
-| the generation DAG with `run_evaluation` true | the same job, chained after the run: waits for the generation job, then launches the generation template with `sdfb_job=evaluation` (unparsed and unrun) |
+| the generation DAG with `run_evaluation` true | the same job, chained after the run: waits for the generation job, then launches the generation template with `sdfb_job=evaluation`, the launched table (`seed_table`), `relationships_uri` and the landing and source datasets: it evaluates what the launch generated and reads no job log (unparsed and unrun) |
 | the template with `sdfb_job=evaluation,generation_job_id=<ID>,disk_size_gb=200` (not `job_id`: the launcher drops that name); the optional DAG `sdfb_evaluation_framework` (`generation_job_id`, or `generation_job_ids` for several) | the same job, for a run that already finished; the standalone DAG waits for its job and closes the registry row (unbuilt and unrun) |
 | BigQuery | `evaluation_data_history` (events), `evaluation_metrics`, `evaluation_profiles`, `evaluation_row_flags`; views `evaluation_latest`, `evaluation_latest_per_job` |
 | E2E validation prompt | optional Step 3.6 folds the report into the evidence bundle |
@@ -105,7 +105,7 @@ that must match the generator is mirrored and pinned by the two-sided golden fil
 - Beam arguments are passed through; the experiment `enable_data_sampling` is refused.
 - On the shared image an evaluation launch must pass `sdfb_job=evaluation` (else it is a generation launch) and
   `disk_size_gb=200` (the image is multi-GB; the evaluator pins no boot disk). Both DAGs do.
-- A chained evaluation (`trigger=chained`, from the generation DAG) is not waited for: if its job dies after
+- A chained evaluation (`trigger=chained`, from the generation DAG) names its tables with `--seed_table` (its enabled component in the model, else the table alone) and not a job id: its row has no generation window and no job link (absent from `evaluation_latest_per_job`), and a model the launch adjusted is not seen. It is not waited for: if its job dies after
   launch the `RUNNING` row stays open. Only the standalone DAG closes such a row.
 - A change of the evaluator's dependencies must stay inside what the root `uv.lock` holds and the image's extras
   install: `packages/sdfb-tests/tests/unit/docker/test_shared_image.py` fails otherwise.

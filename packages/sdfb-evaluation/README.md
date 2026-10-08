@@ -95,11 +95,13 @@ A target is exactly one of:
 | a generation Dataflow job | `--job_id J --region R` |
 | a launch by its base run id | `--run_id B` (read from `validation_runs` in `--output_dataset`) |
 | tables named by hand | `--tables users,orders --landing_dataset L --reference_dataset D` |
+| what a launch of one table generated | `--seed_table T --landing_dataset L --reference_dataset D` (with `--relationships_uri`: T's enabled component, parents first; T alone when no model names it, none is given, or the URI holds no model file, which the plan's warnings say) |
+| every enabled table of a model | `--relationships_uri M --landing_dataset L --reference_dataset D` alone |
 
 `--relationships_uri` (a file or directory, local or `gs://`, for example
 `config/relationships/gcp_public_fk_example.yaml`) may accompany any of
 them; it supplies the relationship model when the launch's own records name
-none. A hand-named target carries no write disposition, so pass
+none, and with `--seed_table` it is where the seed's component is read. A hand-named target carries no write disposition, so pass
 `--scope manual` to evaluate the tables as they are now.
 
 ### 3. Run on the DirectRunner
@@ -429,16 +431,19 @@ flowchart LR
   job that fails or is cancelled is expected to fail the sensor, and nothing
   is evaluated.
 - `trigger_evaluation` launches the same template as `start_sdfb` with
-  `sdfb_job=evaluation`, `relationships_uri`, `landing_dataset` (the
-  generation's own), `reference_dataset` (the `source_dataset` param, else the
-  dataset of `table_fqn`), `trigger=chained`, the mode, the output dataset
-  and `disk_size_gb=200`. The tables are the model's enabled tables, parents
-  first, checked against their sources before the job starts; nothing reads
-  the generation job's log, so the registry row has no generation window and
-  no link to that job. It is a CPU job (no
+  `sdfb_job=evaluation`, `seed_table` (the last part of `table_fqn`),
+  `relationships_uri` (empty when `generate_fk_relationships` is false),
+  `landing_dataset` (the generation's own), `reference_dataset` (the
+  `source_dataset` param, else the dataset of `table_fqn`), `trigger=chained`,
+  the mode, the output dataset and `disk_size_gb=200`. The tables are what
+  the launch generated: the seed's enabled component in the model, parents
+  first, or the seed alone, checked against their sources before the job
+  starts; nothing reads the generation job's log, so the registry row has no
+  generation window and no link to that job, and a model the launch adjusted
+  (ADR 0038) is not seen. It is a CPU job (no
   accelerator) in the generation job's subnetwork, under the same service
-  account, which therefore needs the evaluator's roles
-  ([`DEPLOYMENT_PREREQUISITES.md`](../../docs/DEPLOYMENT_PREREQUISITES.md)).
+  account, which therefore needs the evaluator's roles, but not the three
+  that read a job ([`DEPLOYMENT_PREREQUISITES.md`](../../docs/DEPLOYMENT_PREREQUISITES.md)).
   The relationship models are read from `relationships_uri`; the default
   folder is in the same image.
 - It submits the job and does not wait: the evaluation job writes its own

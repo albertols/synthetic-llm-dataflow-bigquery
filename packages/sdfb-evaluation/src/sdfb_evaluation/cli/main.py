@@ -443,8 +443,9 @@ def _check_target(parser: argparse.ArgumentParser,
   targets = [
       flag for flag, value in (("--job_id", args.job_id), ("--run_id",
                                                            args.run_id),
-                               ("--tables", args.tables),
-                               ("--seed_table", args.seed_table)) if value
+                               ("--tables", args.tables), ("--seed_table",
+                                                           args.seed_table))
+      if value
   ]
   if args.fixture_dir:
     if targets:

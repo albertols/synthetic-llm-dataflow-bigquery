@@ -719,19 +719,20 @@ def plan(args: argparse.Namespace,
 def _request_key(args: argparse.Namespace, knobs: Knobs) -> str:
   """The key of a request whose launch never resolved: the same recipe
   over the target as it was asked for."""
+  request = {
+      "job_id": args.job_id,
+      "run_id": args.run_id,
+      "tables": list(args.tables or ()),
+      "landing_dataset": args.landing_dataset,
+      "reference_dataset": args.reference_dataset,
+      "relationships_uri": args.relationships_uri,
+      "fixture_dir": args.fixture_dir,
+  }
+  # absent unless given: the key of every earlier request is unchanged
+  if getattr(args, "seed_table", None):
+    request["seed_table"] = args.seed_table
   payload = {
-      "unresolved_request": {
-          "job_id": args.job_id,
-          "run_id": args.run_id,
-          "tables": list(args.tables or ()),
-          **({
-              "seed_table": args.seed_table
-          } if getattr(args, "seed_table", None) else {}),
-          "landing_dataset": args.landing_dataset,
-          "reference_dataset": args.reference_dataset,
-          "relationships_uri": args.relationships_uri,
-          "fixture_dir": args.fixture_dir,
-      },
+      "unresolved_request": request,
       "catalogue_version": load_catalogue().version,
       "evaluator_version": EVALUATOR_VERSION,
       "mode": args.mode,

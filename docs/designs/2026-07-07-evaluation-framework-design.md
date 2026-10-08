@@ -2019,8 +2019,9 @@ scope is a planned outcome.
 | `sdfb-eval catalogue` | The catalogue as JSON or markdown |
 | `sdfb-eval schemas` | The four tables and two views: print, or create |
 
-A target is exactly one of a generation job id, a base run id, or tables
-named by hand. An `evaluation_id` is minted fresh per attempt and never
+A target is exactly one of a generation job id, a base run id, tables
+named by hand, a seed table (the table a launch targeted: evaluate what that
+launch generated) or a relationship model alone (all its enabled tables). An `evaluation_id` is minted fresh per attempt and never
 passed in, because temporary tables carry it and a retry within 24 hours
 would collide. The [README](../../packages/sdfb-evaluation/README.md) has
 the flags and their defaults.
@@ -2158,14 +2159,18 @@ flowchart LR
   stated as not deferrable. It reads the state every two minutes for at
   most a day.
 - **The launch** is a second launch of the generation template, with
-  `sdfb_job=evaluation`, `generation_job_id` (the generation job), `trigger=chained`
-  and the boot disk; it is a CPU job in the generation job's subnetwork,
+  `sdfb_job=evaluation`, `seed_table` (the launched table), `relationships_uri`
+  (empty when `generate_fk_relationships` is false), `landing_dataset`,
+  `reference_dataset` (the `source_dataset` parameter), `trigger=chained`
+  and the boot disk; it reads no job log, so the registry row has no generation
+  window and no job link and a model the launch adjusted is not seen; it is a CPU job in the generation job's subnetwork,
   under the same service account. It does not wait: the evaluation job
   writes its own `FINAL` row.
-- **Four new parameters**, all read only when `run_evaluation` is true:
+- **Five new parameters**, all read only when `run_evaluation` is true:
   `evaluation_mode` (empty: the evaluator's default), `evaluation_machine_type`
   (`e2-standard-8`), `evaluation_max_workers` (4) and
-  `evaluation_output_dataset` (`synthetic_data_quality`). No new
+  `evaluation_output_dataset` (`synthetic_data_quality`) and `source_dataset`
+  (the dataset of the source tables; empty: that of `table_fqn`). No new
   substitution marker and no new Airflow Variable.
 - **With `run_evaluation` false** the gate skips every task after the
   launch. The launch itself is unchanged: a test pins the operator's whole
@@ -2357,7 +2362,7 @@ a test, a registry column, a command's exit code.
 | 11 | On Dataflow the `FINAL` row is recorded after the metric tables' load jobs finished | `recorded_at` of the row against the load jobs' end times in the JOBS view | Pending |
 | 12 | Predicted shuffle is within a factor of two of the job's shuffled bytes | `predicted_shuffle_gb` against the job's metrics | Pending |
 | 13 | A job killed after launch by the standalone DAG has its `RUNNING` row closed by the Composer callback | a `FAILED` final row for that `evaluation_id` | Pending |
-| 14 | A generation DAG run with `run_evaluation` true waits for its job and launches the evaluation from the same template | an evaluation row whose `trigger` is `chained` and whose `generation_job_id` is that run's job | Pending |
+| 14 | A generation DAG run with `run_evaluation` true waits for its job and launches the evaluation from the same template | an evaluation row whose `trigger` is `chained` and whose tables are the launched table's component | Pending |
 
 Criterion 12's factor is a first target, not a measured tolerance; it
 should be replaced by what the first runs show.

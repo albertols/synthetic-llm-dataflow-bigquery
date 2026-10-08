@@ -593,11 +593,13 @@ flowchart LR
   T[("📄 one template<br/>one image")]:::store --> E{"⚙️ flex_entry.py<br/>reads sdfb_job"}:::cpu
   E -- "absent" --> G["🔀 generation job<br/>GPU workers"]:::beam
   E -- "evaluation" --> V["🔀 evaluation job<br/>CPU workers"]:::beam
-  G -. "job id, when the<br/>DAG is opted in" .-> V
+  G -. "launched table, when the<br/>DAG is opted in" .-> V
 ```
 
 *Not built, not launched.* The Composer DAG of the generator, where a
-deployment has one, chains the two when its `run_evaluation` parameter is true;
+deployment has one, chains the two when its `run_evaluation` parameter is true
+(the evaluation is given the launched table and the relationship model, not the
+job, so it reads no job log);
 it and the evaluator package stay in the source repository.
 
 Four tables in `synthetic_data_quality` (`evaluation_data_history`,
