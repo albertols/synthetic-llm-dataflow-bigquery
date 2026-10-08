@@ -95,6 +95,7 @@ A target is exactly one of:
 | a generation Dataflow job | `--job_id J --region R` |
 | a launch by its base run id | `--run_id B` (read from `validation_runs` in `--output_dataset`) |
 | tables named by hand | `--tables users,orders --landing_dataset L --reference_dataset D` |
+| what a launch of one table generated, with the job that ran it | `--seed_table T --generation_job_id J --region R --landing_dataset L --reference_dataset D` (the job id only says which job the row belongs to and gives its window: only the Dataflow job is read) |
 | what a launch of one table generated | `--seed_table T --landing_dataset L --reference_dataset D` (with `--relationships_uri`: T's enabled component, parents first; T alone when no model names it, none is given, or the URI holds no model file, which the plan's warnings say) |
 | every enabled table of a model | `--relationships_uri M --landing_dataset L --reference_dataset D` alone |
 
@@ -437,7 +438,7 @@ flowchart LR
   job that fails or is cancelled is expected to fail the sensor, and nothing
   is evaluated.
 - `trigger_evaluation` launches the same template as `start_sdfb` with
-  `sdfb_job=evaluation`, `scope=manual`, `reference_rows_limit` (the
+  `sdfb_job=evaluation`, `generation_job_id`, `scope=manual`, `reference_rows_limit` (the
   generation's own value), `seed_table` (the last part of `table_fqn`),
   `relationships_uri` (empty when `generate_fk_relationships` is false),
   `landing_dataset` (the generation's own), `reference_dataset` (the
@@ -446,9 +447,14 @@ flowchart LR
   the launch generated: the seed's enabled component in the model, parents
   first, or the seed alone, each read with its source before the job starts
   (a table that cannot be read is skipped with a warning; only a target with
-  none readable fails); nothing reads the generation job's log, so the registry row has no
-  generation window and no link to that job, and a model the launch adjusted
-  (ADR 0038) is not seen. Each landing table is read whole: with the DAG's
+  none readable fails); nothing reads the generation job's log: `generation_job_id` is passed as the
+  launch's identity and the evaluator reads only the Dataflow job resource
+  (needs `roles/dataflow.viewer`; without it a warning and no window), so the
+  row carries the job id and window and is listed in
+  `evaluation_latest_per_job`. The window pins the source as of the job's
+  create time (within its time-travel window). The launch's own record of
+  its tables, run ids and reference digest, and a model the launch adjusted
+  (ADR 0038), are not seen. Each landing table is read whole: with the DAG's
   `write_disposition` overwrite that is this launch's rows, with append it
   includes earlier launches' rows. A landing table named differently from its
   source is not found. It is a CPU job (no

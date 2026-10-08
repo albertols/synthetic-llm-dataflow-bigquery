@@ -81,10 +81,17 @@ does not name it, the folder holds no model file, or
 landed tables are read from `landing_dataset` (the generation's own) under
 their sources' names, and compared with the tables of `reference_dataset`
 (the `source_dataset` param, else the dataset of `table_fqn`). The evaluation
-therefore reads neither the job's log nor BigQuery job labels, and the service
-account needs no `roles/logging.viewer`. The cost: the registry row carries
-no generation window and no link to the generation job, and a model the
-launch adjusted (ADR 0038) is not seen.
+therefore reads neither the job's log, BigQuery job labels nor
+`validation_runs`, and the service account needs no `roles/logging.viewer`
+and no `roles/bigquery.resourceViewer`. The launch also passes the generation
+job's id as the launch's IDENTITY: the evaluator reads the Dataflow job
+resource and nothing else about it, so the registry row carries the job id and
+its start and end (and `evaluation_latest_per_job` lists the run); that read
+needs `roles/dataflow.viewer`, and without it the evaluation goes on with a
+warning and no window. The cost: the launch's own record of its tables, run
+ids and reference digest, and a model the launch adjusted (ADR 0038), are not
+seen. With a window the source is pinned as of the job's create time (a
+snapshot clone, within the source's time-travel window).
 
 The evaluation passes `scope=manual`, so it reads each landing table WHOLE:
 with this DAG's `write_disposition` "overwrite" that is exactly this launch's
@@ -862,10 +869,13 @@ with models.DAG(
               "parameters": {
                   "sdfb_job":
                       "evaluation",
-                  # No job lookup, so no read of the job's log: the launched
-                  # table and the relationship model name the tables, the
-                  # landing dataset is the generation's own, the source
-                  # dataset a param.
+                  # The launched table and the relationship model name the
+                  # tables, the landing dataset is the generation's own, the
+                  # source dataset a param. The job id is the launch's
+                  # identity: the evaluator reads the Dataflow job for its
+                  # window and nothing else about it (no log).
+                  "generation_job_id":
+                      generation_job_id,
                   "seed_table":
                       "{{ params.table_fqn.rsplit('.', 1)[-1] }}",
                   # an isolated generation (false) is evaluated as one table

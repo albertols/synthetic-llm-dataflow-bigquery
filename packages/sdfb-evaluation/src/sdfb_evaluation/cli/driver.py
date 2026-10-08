@@ -521,8 +521,9 @@ def _derive_targets(args: argparse.Namespace, bq: Any) -> list[str]:
       table, or no table can be read (every problem is listed).
   """
   seed = getattr(args, "seed_table", None)
-  if (args.tables or args.job_id or args.run_id or args.fixture_dir or
-      not (seed or args.relationships_uri)):
+  # a job id is a target of its own, unless it accompanies the seed
+  if (args.tables or (args.job_id and not seed) or args.run_id or
+      args.fixture_dir or not (seed or args.relationships_uri)):
     return []
   if seed:
     names, notes = _seed_tables(args)
@@ -569,7 +570,10 @@ def _resolve(args: argparse.Namespace, env: Env, bq: Any) -> LaunchContext:
       project=args.project,
       region=args.region or "",
       job_id=job_id,
-      manual=manual)
+      manual=manual,
+      # the job is the identity of a launch the seed names: read nothing
+      # else about it (no log, no BigQuery labels, no validation_runs)
+      job_only=bool(job_id and getattr(args, "seed_table", None)))
 
 
 # `context.relationships.load_models` raises this sentence when a folder holds

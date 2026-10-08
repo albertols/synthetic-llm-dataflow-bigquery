@@ -45,7 +45,7 @@
     {
       "name": "generation_job_id",
       "label": "Generation job id",
-      "helpText": "Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
+      "helpText": "Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; the one exception is a seed_table, which generation_job_id may accompany: it is then the identity of the launch the seed names, and only the Dataflow job is read (for its window; never its log, BigQuery job labels or validation_runs), a job that cannot be read costing the window and a warning. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -218,7 +218,7 @@
     {
       "name": "seed_table",
       "label": "Seed table",
-      "helpText": "Target: the table a launch targeted; evaluates what that launch generated: its enabled component in the relationship model (relationships_uri), or the table alone when no model names it or none is given. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone.",
+      "helpText": "Target: the table a launch targeted; evaluates what that launch generated: its enabled component in the relationship model (relationships_uri), or the table alone when no model names it or none is given. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; generation_job_id may accompany a seed_table (it then says which generation job the row belongs to, and the row takes the job's start and end from the Dataflow API).",
       "paramType": "TEXT",
       "isOptional": true
     },

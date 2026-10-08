@@ -396,18 +396,35 @@ returned HTTP 403 (the deployment's service account has no
 log. The labelled BigQuery writes need a BigQuery location that only the log
 or a landing table gives, and `validation_runs` needs the launch's
 `validation_runs_table`, which only the log gives. So the generation DAG's
-`trigger_evaluation` no longer passes the job. It passes `seed_table` (the
+`trigger_evaluation` no longer names the tables by the job. It passes `seed_table` (the
 launched table), `relationships_uri` (empty when `generate_fk_relationships`
 is false), `landing_dataset` and `reference_dataset`, and the evaluator
 (`--seed_table`) evaluates what that launch generated: the table's enabled
 component in the model, parents first, or the table alone when no model names
 it or the folder holds no model file (a warning says so). The generator's own
-rule is mirrored by `relationships.component`. The cost: the registry row has
-no generation window and no job link (the view `evaluation_latest_per_job`
-lists only rows with one), and a model the launch adjusted under
-[ADR 0038](0038-measured-conflicts-adjust-the-model.md) is not seen. Runs
+rule is mirrored by `relationships.component`. The chained evaluation reads each landing table
+whole (`scope=manual`): this launch's rows with `write_disposition`
+"overwrite", the rows of earlier launches too with "append". The cost of not
+reading the log: the launch's own record of its tables, run ids and
+reference digest, and a model the launch adjusted under
+[ADR 0038](0038-measured-conflicts-adjust-the-model.md), are not seen. Runs
 named by job id (`--job_id`, the standalone DAG) are unchanged and still need
 the job roles.
+
+The job id still travels, as the launch's identity (ruling R134). A
+first version of this note left it out; the row then had no
+`generation_job_id` and no window, so the view `evaluation_latest_per_job`
+(which lists only rows with a job id) never showed a chained run. The owner
+asked for it back, and `--generation_job_id` may now accompany `--seed_table`:
+the seed still names the tables, and the evaluator reads the Dataflow job
+resource (`jobs.get`: id, name, region, start and end) and nothing else about
+the job: not its log, not BigQuery job labels, not `validation_runs`. That
+needs `roles/dataflow.viewer` and no more; a job that cannot be read (not
+found, past retention, no role) costs the window and one warning, never the
+evaluation. What the window changes: the source is pinned as of the job's
+create time (a snapshot clone, within the source's time-travel window, as for
+any evaluation by job id), and the row's `source_drifted` and generation
+columns are filled; the scope stays `manual`.
 
 ## Sources
 

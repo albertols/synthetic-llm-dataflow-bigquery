@@ -211,7 +211,10 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       "--job_id",
       dest="job_id",
       type=_text,
-      help="the generation job's Dataflow id; a template launch passes it "
+      help="the generation job's Dataflow id; with --seed_table it is not a "
+      "second target but the identity of the launch the seed names: only the "
+      "Dataflow job is read (its window; never its log), and the row keeps "
+      "the job id. A template launch passes it "
       "as --generation_job_id, because the template launcher does not pass "
       "a parameter named job_id (ADR 0041)")
   group.add_argument(
@@ -458,12 +461,14 @@ def public_run_flags() -> list[str]:
 # --------------------------------------------------------------------------
 def _check_target(parser: argparse.ArgumentParser,
                   args: argparse.Namespace) -> None:
+  # a job id next to a seed table is not a second target: the seed names
+  # the tables, the job id says which generation job the row belongs to
+  accompanies = bool(args.job_id and args.seed_table)
   targets = [
-      flag for flag, value in (("--job_id", args.job_id), ("--run_id",
-                                                           args.run_id),
-                               ("--tables", args.tables), ("--seed_table",
-                                                           args.seed_table))
-      if value
+      flag for flag, value in (("--job_id", args.job_id and not accompanies),
+                               ("--run_id", args.run_id), ("--tables",
+                                                           args.tables),
+                               ("--seed_table", args.seed_table)) if value
   ]
   if args.fixture_dir:
     if targets:
@@ -473,8 +478,8 @@ def _check_target(parser: argparse.ArgumentParser,
   if len(targets) != 1 and not derived:
     given = ", ".join(targets) or "none"
     parser.error("name exactly one of --job_id, --run_id, --tables, "
-                 "--seed_table, or --relationships_uri alone "
-                 f"(given: {given})")
+                 "--seed_table (which --job_id may accompany), or "
+                 f"--relationships_uri alone (given: {given})")
   if not args.project:
     parser.error("--project is required")
   if args.job_id and not args.region:

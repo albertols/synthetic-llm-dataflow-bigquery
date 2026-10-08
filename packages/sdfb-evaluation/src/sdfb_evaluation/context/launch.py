@@ -33,6 +33,11 @@ manual value that disagrees with a resolved one is ignored and warned
 about. Every fallback taken is a warning on the context — nothing is
 dropped silently.
 
+One path reads less: `resolve_launch(job_only=True)`, for a job id given
+next to hand-named tables (`--seed_table T --generation_job_id J`), reads
+only source 3's job resource for the job's id, name, region and window — no
+log, no JOBS labels, no `validation_runs` — and takes the rest from `manual`.
+
 `tables_in_order` never silently narrows a relational launch to its
 `--landing_table` target:
 
@@ -821,6 +826,31 @@ def _read_runs(bq: Any, params: Mapping[str, Any], tables: Sequence[str],
     return []
 
 
+# The slice of a Dataflow job resource that says which job it is and when it
+# ran. Its display data, which `DataflowJobs.params` reads, is left out: on
+# the job-only path the tables and parameters are the caller's.
+_JOB_IDENTITY_KEYS = ("id", "name", "location", "createTime", "currentState",
+                      "currentStateTime")
+
+
+def _job_identity(jobs: DataflowJobs, job_id: str, region: str,
+                  manual: Mapping[str, Any] | None) -> LaunchContext:
+  """The launch named by `manual`, belonging to the Dataflow job `job_id`:
+  only the job resource is read (its id, name, region and window); a job
+  that cannot be read costs the window and one warning, never the launch."""
+  notes: list[str] = []
+  job: dict[str, Any] = {"id": job_id, "location": region}
+  try:
+    read = jobs.get(job_id)
+    job = {k: read[k] for k in _JOB_IDENTITY_KEYS if k in read}
+  except (JobNotFoundError, PermissionError, GcpApiError) as exc:
+    notes.append(f"Dataflow job {job_id} could not be read, so the "
+                 f"generation window is unknown (the source is then read as "
+                 f"it is now, not as the job saw it): {exc}")
+  return LaunchContext.from_sources(
+      job=job, launch_config=None, writes=(), manual=manual, warnings=notes)
+
+
 def resolve_launch(*,
                    bq: Any,
                    session_factory: Callable[[str], Any] | None,
@@ -828,7 +858,8 @@ def resolve_launch(*,
                    region: str,
                    job_id: str | None = None,
                    manual: Mapping[str, Any] | None = None,
-                   log_pages: int = 10) -> LaunchContext:
+                   log_pages: int = 10,
+                   job_only: bool = False) -> LaunchContext:
   """Resolve a generation launch from its Dataflow `job_id`.
 
   Order: the Dataflow job (window, parameters) → the job log
@@ -847,6 +878,13 @@ def resolve_launch(*,
     job_id: the Dataflow job id; None resolves from `manual` alone.
     manual: operator-supplied values (see `LaunchContext.from_sources`).
     log_pages: page budget per Cloud Logging list call.
+    job_only: `job_id` is the identity of a launch `manual` already names
+      (`sdfb-eval --seed_table T --generation_job_id J`): read ONLY the
+      Dataflow job, for its id, name, region and window — not its log,
+      BigQuery JOBS labels or `validation_runs`, not even as calls that may
+      fail — and take everything else from `manual`. A job that cannot be
+      read is a warning and no window. Needs `job_id` and tables in
+      `manual`; `params_source` is then `manual`.
 
   Raises:
     JobNotFoundError: the job is not in `region` (or past Dataflow's
@@ -870,6 +908,8 @@ def resolve_launch(*,
   notes: list[str] = []
   session = session_factory(project)
   jobs = DataflowJobs(session, project, region)
+  if job_only:
+    return _job_identity(jobs, job_id, region, manual)
   missing: JobNotFoundError | None = None
   try:
     job: dict | None = jobs.get(job_id)

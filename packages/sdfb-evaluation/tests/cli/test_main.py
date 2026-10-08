@@ -35,6 +35,7 @@ from apache_beam.options.pipeline_options import (
     StandardOptions,
     WorkerOptions,
 )
+from unit.context.conftest import FakeResponse
 from unit.context.plan_fakes import (
     BASE,
     DS,
@@ -63,6 +64,7 @@ from sdfb_evaluation.schemas import CLUSTERING, TABLES as EVAL_TABLES
 from .conftest import catalogue
 from .helpers import (
     NOW,
+    check_row,
     make_env,
 )
 
@@ -680,9 +682,8 @@ def test_a_seed_table_is_a_target_with_both_datasets(capsys):
   datasets = ["--landing_dataset", "d", "--reference_dataset", "s"]
   args, _ = parse_args([*base, *datasets])
   assert args.seed_table == "orders"
-  for other in (["--tables", "orders"], ["--run_id", "r1"],
-                ["--job_id", JOB_ID, "--region", "europe-west1"
-                ], ["--generation_job_id", JOB_ID, "--region", "europe-west1"]):
+  # a job id may accompany a seed (R134, below); a second target may not
+  for other in (["--tables", "orders"], ["--run_id", "r1"]):
     err = _usage_error([*base, *datasets, *other], capsys)
     assert "name exactly one of" in err and "--seed_table" in err
   err = _usage_error(base, capsys)
@@ -854,6 +855,116 @@ def test_a_seed_plan_with_a_reference_rows_limit_plans_the_panel(bq, tmp_path):
   planned = _seed_plan(bq, "orders", folder, "--reference_rows_limit", "40")
   assert not [w for w in planned.warnings if note in w]
   assert [t.name for t in planned.tables if t.panel is not None]
+
+
+def test_a_job_id_may_accompany_a_seed_table(capsys):
+  seed = [
+      "run", "--project", PROJECT, "--seed_table", "orders",
+      "--landing_dataset", "d", "--reference_dataset", "s"
+  ]
+  for name in ("--generation_job_id", "--job_id"):
+    args, _ = parse_args([*seed, name, JOB_ID, "--region", REGION])
+    assert (args.job_id, args.seed_table) == (JOB_ID, "orders")
+  # the job is read in a region
+  assert "--region" in _usage_error([*seed, "--job_id", JOB_ID], capsys)
+  # empty: not given, so no region is needed either
+  args, _ = parse_args([*seed, "--generation_job_id="])
+  assert args.job_id is None
+  # still no second target
+  for other in (["--tables", "orders"], ["--run_id", "r1"]):
+    err = _usage_error([*seed, "--job_id", JOB_ID, "--region", REGION, *other],
+                       capsys)
+    assert "name exactly one of" in err
+  # a job id with a model is the job id's own target, as before
+  args, _ = parse_args(["run", *TARGET, "--relationships_uri", "gs://b/m.yaml"])
+  assert args.job_id == JOB_ID and args.seed_table is None
+
+
+class _JobOnlySession:
+  """Dataflow `jobs.get` over the recorded job, recording every call; a
+  Cloud Logging call (a POST) fails the test."""
+
+  def __init__(self, job: dict | None):
+    self.job = job
+    self.calls: list[tuple[str, str]] = []
+    self.headers: dict[str, str] = {}
+
+  def get(self, url: str, params=None, timeout=None):
+    del params, timeout
+    self.calls.append(("GET", url))
+    if self.job is None:
+      return FakeResponse(404, {"error": {"message": "not found"}})
+    if self.job == "denied":
+      return FakeResponse(403, {"error": {"message": "denied"}})
+    return FakeResponse(200, self.job)
+
+  def post(self, url: str, *args, **kwargs):
+    del args, kwargs
+    self.calls.append(("POST", url))
+    raise AssertionError(f"Cloud Logging was called: {url}")
+
+
+def _job_plan(bq, load_fixture, tmp_path, session=None):
+  """A seed plan with the generation job's id next to it, over the real
+  `resolve_launch` and a session that serves only `jobs.get`."""
+  job = load_fixture("context/dataflow_job.json")
+  session = session or _JobOnlySession(job)
+  model = tmp_path / "thelook.yaml"
+  model.write_text(MODEL_YAML)
+  args, _ = parse_args([
+      "run", "--project", PROJECT, "--region", REGION, "--seed_table", "orders",
+      "--generation_job_id", JOB_ID, "--landing_dataset", "thelook_synthetic",
+      "--reference_dataset", SRC, "--relationships_uri",
+      str(model), "--scope", "manual", "--trigger", "chained"
+  ])
+  env = make_env(bq, session_factory=lambda project: session)
+  planned, _ = driver.plan(args, env)
+  return planned, session
+
+
+def test_a_seed_with_a_job_id_keeps_the_job_and_reads_nothing_else(
+    bq, load_fixture, tmp_path):
+  planned, session = _job_plan(bq, load_fixture, tmp_path)
+  job = load_fixture("context/dataflow_job.json")
+  assert [m for m, _ in session.calls] == ["GET"]  # no Cloud Logging
+  assert not [
+      sql for sql, _ in bq.queries
+      if "INFORMATION_SCHEMA.JOBS" in sql or "validation_runs" in sql
+  ]
+  launch = planned.launch
+  assert (launch.generation_job_id, launch.region) == (JOB_ID, REGION)
+  assert (launch.started_at, launch.finished_at) == (job["createTime"],
+                                                     job["currentStateTime"])
+  assert _evaluated(planned) == ["users", "orders", "order_items"]
+  assert {t.scope.mode for t in planned.tables if t.evaluated} == {"manual"}
+  # what the window changes: the source is pinned as of the job's create
+  # time, within its time-travel window
+  assert all(t.source_pin and t.source_pin.pinned
+             for t in planned.tables
+             if t.evaluated)
+  row = planned.registry_seed()
+  assert row["generation_job_id"] == JOB_ID and row["trigger"] == "chained"
+  assert row["generation_started_at"] and row["generation_finished_at"]
+  assert row["params_source"] == "manual"
+  check_row("evaluation_data_history", row, ordered=False)
+
+
+@pytest.mark.parametrize("failure", ["not found", "denied"])
+def test_a_seed_with_an_unreadable_job_is_planned_without_a_window(
+    bq, load_fixture, tmp_path, failure):
+  session = _JobOnlySession(None if failure == "not found" else "denied")
+  planned, session = _job_plan(bq, load_fixture, tmp_path, session)
+  assert [m for m, _ in session.calls] == ["GET"]
+  launch = planned.launch
+  assert launch.generation_job_id == JOB_ID
+  assert (launch.started_at, launch.finished_at) == (None, None)
+  assert _evaluated(planned) == ["users", "orders", "order_items"]
+  (note,) = [w for w in planned.warnings if JOB_ID in w]
+  assert "window" in note and "unknown" in note
+  row = planned.registry_seed()
+  assert row["generation_job_id"] == JOB_ID
+  assert row["generation_started_at"] is None and note in row["warnings"]
+  check_row("evaluation_data_history", row, ordered=False)
 
 
 def test_a_run_id_target_reads_validation_runs(bq, capsys):

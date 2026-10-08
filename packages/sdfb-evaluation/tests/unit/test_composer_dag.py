@@ -1130,17 +1130,23 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
   values = dict(zip(keys, parameters.values, strict=True))
   assert set(values) == {
-      "sdfb_job", "seed_table", "relationships_uri", "landing_dataset",
-      "reference_dataset", "scope", "reference_rows_limit", "trigger", "mode",
-      "output_dataset", "disk_size_gb"
+      "sdfb_job", "generation_job_id", "seed_table", "relationships_uri",
+      "landing_dataset", "reference_dataset", "scope", "reference_rows_limit",
+      "trigger", "mode", "output_dataset", "disk_size_gb"
   }
   # a hand-named target has no write disposition: without this every table
   # would be planned as "not evaluated"
   assert _value(tree, values["scope"]) == "manual"
   assert _value(tree, values["sdfb_job"]) == "evaluation"
-  # the tables come from the launched table and the model, not from the job:
-  # no log read, no lookup
-  assert "generation_job_id" not in values and "job_id" not in values
+  # the tables come from the launched table and the model; the job id is the
+  # launch's identity (the evaluator reads only the Dataflow job for it, R134),
+  # the one the sensor waits on
+  assert "job_id" not in values
+  assert _value(tree, values["generation_job_id"]) == _JOB_ID_XCOM
+  sensor = _one(tree, "DataflowJobStatusSensor")
+  assert _value(tree,
+                values["generation_job_id"]) == _value(tree,
+                                                       _kw(sensor, "job_id"))
   seed = _value(tree, values["seed_table"])
   assert "params.table_fqn" in seed and "rsplit('.', 1)[-1]" in seed
   uri = _value(tree, values["relationships_uri"])

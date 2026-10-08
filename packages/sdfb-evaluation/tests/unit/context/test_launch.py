@@ -672,3 +672,66 @@ def test_manual_timestamps_and_flags_accepted():
       })
   assert ctx.started_at == "2026-09-13T13:10:16Z"
   assert ctx.model_adjusted is False
+
+
+# --------------------------------------------------------------------------
+# the job as the launch's identity (R134): the Dataflow job and nothing else
+# --------------------------------------------------------------------------
+_HAND_NAMED = {
+    "tables_in_order": list(TABLES),
+    "params": {
+        "reference_rows_limit": 10_000
+    },
+}
+
+
+def _no_log_no_bigquery(session, bq) -> None:
+  """The sources a deployment without `logging.viewer` cannot read: not
+  called at all, rather than called and tolerated."""
+  assert all(method == "GET" and "/jobs/" in url
+             for method, url, _ in session.calls), session.calls
+  assert bq.queries == [] and bq.stats_calls == []
+
+
+def test_job_only_reads_the_dataflow_job_and_nothing_else(
+    fake_session, fake_bq, fixture_data):
+  session, bq = fake_session(), fake_bq()
+  ctx = _resolve(session, bq, job_id=JOB_ID, manual=_HAND_NAMED, job_only=True)
+  job = fixture_data("dataflow_job")
+  assert len(session.calls) == 1
+  _no_log_no_bigquery(session, bq)
+  assert (ctx.generation_job_id, ctx.region) == (JOB_ID, REGION)
+  assert (ctx.started_at, ctx.finished_at) == DataflowJobs.window(job)
+  assert ctx.job_name == job["name"]
+  # the tables and parameters are the command line's, not the job's
+  # display data (which names the generation's own landing table)
+  assert ctx.tables_in_order == TABLES
+  assert ctx.params == _HAND_NAMED["params"]
+  assert ctx.params_source == "manual" and not ctx.writes and not ctx.runs
+  assert not ctx.warnings or all("window" not in w for w in ctx.warnings)
+
+
+@pytest.mark.parametrize("failure", ["not found", "permission"])
+def test_job_only_survives_an_unreadable_job_with_one_warning(
+    fake_session, fake_bq, failure):
+  session = fake_session(jobs={}) if failure == "not found" else fake_session(
+      status_script=[403])
+  bq = fake_bq()
+  ctx = _resolve(session, bq, job_id=JOB_ID, manual=_HAND_NAMED, job_only=True)
+  _no_log_no_bigquery(session, bq)
+  assert ctx.generation_job_id == JOB_ID
+  assert (ctx.started_at, ctx.finished_at) == (None, None)
+  assert ctx.tables_in_order == TABLES
+  (warning,) = [w for w in ctx.warnings if JOB_ID in w]
+  assert "window" in warning and "unknown" in warning
+  if failure == "permission":
+    assert "roles/dataflow.viewer" in warning
+
+
+def test_a_job_id_alone_still_reads_the_log_and_bigquery(fake_session, fake_bq):
+  session, bq = fake_session(), fake_bq()
+  ctx = _resolve(session, bq, job_id=JOB_ID)
+  assert any(method == "POST" for method, _, _ in session.calls)  # the log
+  assert any("JOBS_BY_PROJECT" in sql for sql, _ in bq.queries)
+  assert any("validation_runs" in sql for sql, _ in bq.queries)
+  assert ctx.params_source == "jobs_labels+logs"
