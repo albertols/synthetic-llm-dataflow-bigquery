@@ -2159,7 +2159,10 @@ flowchart LR
   stated as not deferrable. It reads the state every two minutes for at
   most a day.
 - **The launch** is a second launch of the generation template, with
-  `sdfb_job=evaluation`, `seed_table` (the launched table), `relationships_uri`
+  `sdfb_job=evaluation`, `scope=manual` (each landing table read whole: this
+  launch's rows under `overwrite`, earlier launches' too under `append`),
+  `reference_rows_limit` (the generation's, so the privacy panel is planned),
+  `seed_table` (the launched table), `relationships_uri`
   (empty when `generate_fk_relationships` is false), `landing_dataset`,
   `reference_dataset` (the `source_dataset` parameter), `trigger=chained`
   and the boot disk; it reads no job log, so the registry row has no generation

@@ -120,12 +120,13 @@ def test_run_flags_default_to_the_brief():
   assert {
       "--project", "--region", "--generation_job_id", "--run_id",
       "--relationships_uri", "--tables", "--seed_table", "--reference_dataset",
-      "--landing_dataset", "--mode", "--scope", "--allow_contaminated",
-      "--sample_rows", "--privacy_sample_rows", "--detection_sample_rows",
-      "--pair_max_columns", "--row_flags_top_k", "--row_flags_source_keys",
-      "--max_bytes_billed", "--max_shuffle_gb", "--output_dataset",
-      "--temp_dataset", "--sink", "--output_local", "--thresholds_uri",
-      "--fail_on", "--trigger", "--label_key_uri", "--runner"
+      "--reference_rows_limit", "--landing_dataset", "--mode", "--scope",
+      "--allow_contaminated", "--sample_rows", "--privacy_sample_rows",
+      "--detection_sample_rows", "--pair_max_columns", "--row_flags_top_k",
+      "--row_flags_source_keys", "--max_bytes_billed", "--max_shuffle_gb",
+      "--output_dataset", "--temp_dataset", "--sink", "--output_local",
+      "--thresholds_uri", "--fail_on", "--trigger", "--label_key_uri",
+      "--runner"
   } == set(flags)
   assert "--fixture_dir" not in flags  # hidden
   assert "--evaluation_id" not in flags  # minted, never passed (R88c)
@@ -606,27 +607,18 @@ tables:
   assert driver.derived_tables(models) == ["parent", "child"]
 
 
-def test_derived_tables_are_checked_against_their_sources(bq, tmp_path):
+def test_derived_tables_with_nothing_readable_raise_and_list_everything(
+    bq, tmp_path):
   model = tmp_path / "thelook.yaml"
   model.write_text(MODEL_YAML)
-
-  def planned():
-    args, _ = parse_args(_derived_argv(model))
-    return driver.plan(args, make_env(bq))
-
-  del bq.tables[f"{DS}.orders"]  # a landing table that was never written
-  bq.tables[f"{DS}.users"]["numRows"] = 0  # one that is empty
-  del bq.tables[f"{SRC}.order_items"]  # a source that cannot be read
-  bq.tables[f"{DS}.users"]["schema"] = bq.tables[f"{DS}.users"][
-      "schema"][:1]  # a landing table with columns missing
+  for name in ("users", "orders", "order_items"):
+    del bq.tables[f"{DS}.{name}"]  # nothing landed
+  args, _ = parse_args(_derived_argv(model))
   with pytest.raises(driver.TargetCheckError) as raised:
-    planned()
+    driver.plan(args, make_env(bq))
   message = str(raised.value)
-  assert "orders: the landing table" in message and "not found" in message.lower(
-  )
-  assert "users: the landing table is empty" in message
-  assert "order_items: the source table" in message
-  assert "users: the landing table lacks source column(s)" in message
+  for name in ("users", "orders", "order_items"):
+    assert f"{name}: the landing table" in message
 
 
 def test_relationships_uri_alone_needs_both_datasets(capsys):
@@ -655,6 +647,8 @@ def _seed_args(seed: str, uri: str | None, *extra: str):
       "plan", "--project", PROJECT, "--seed_table", seed, "--landing_dataset",
       "thelook_synthetic", "--reference_dataset", SRC, *extra
   ]
+  if "--scope" not in extra:  # a hand-named target has no write disposition
+    argv += ["--scope", "manual"]
   if uri is not None:
     argv += ["--relationships_uri", uri]
   args, _ = parse_args(argv)
@@ -667,7 +661,10 @@ def _seed_plan(bq, seed: str, uri: str | None, *extra: str):
 
 
 def _evaluated(planned) -> list[str]:
-  return [t.name for t in planned.tables if t.role != "external"]
+  """The launch's tables planning will evaluate (not merely plan)."""
+  return [
+      t.name for t in planned.tables if t.role != "external" and t.evaluated
+  ]
 
 
 def _two_groups(tmp_path: Path) -> str:
@@ -770,16 +767,93 @@ def test_a_uri_with_no_model_file_still_raises_for_every_other_target(
     driver.plan(args, make_env(bq))
 
 
-def test_the_check_lists_every_problem_of_the_seeds_tables_only(bq, tmp_path):
+def test_one_unreadable_table_is_skipped_by_planning_and_warned(bq, tmp_path):
+  """R61/R132: the component's other tables are still evaluated, and the
+  pre-flight's finding reaches the plan's and the registry row's warnings."""
+  folder = _two_groups(tmp_path)
+  del bq.tables[f"{DS}.order_items"]  # a child that never landed
+  planned = _seed_plan(bq, "orders", folder)
+  assert _evaluated(planned) == ["users", "orders"]
+  (note,) = [
+      w for w in planned.warnings
+      if w.startswith("order_items: the landing table")
+  ]
+  assert note in planned.registry_seed()["warnings"]
+
+
+def test_a_seed_with_nothing_readable_raises_naming_only_its_tables(
+    bq, tmp_path):
   folder = _two_groups(tmp_path)  # alpha and beta have no tables at all
-  del bq.tables[f"{DS}.orders"]
-  bq.tables[f"{DS}.users"]["numRows"] = 0
+  for name in ("users", "orders", "order_items"):
+    del bq.tables[f"{DS}.{name}"]
   with pytest.raises(driver.TargetCheckError) as raised:
     _seed_plan(bq, "orders", folder)
   message = str(raised.value)
-  assert "orders: the landing table" in message
-  assert "users: the landing table is empty" in message
+  for name in ("users", "orders", "order_items"):
+    assert f"{name}: the landing table" in message
   assert "alpha" not in message and "beta" not in message
+
+
+def test_an_empty_table_and_a_missing_column_are_left_to_planning(bq, tmp_path):
+  folder = _two_groups(tmp_path)
+  bq.tables[f"{DS}.users"]["numRows"] = 0
+  bq.tables[f"{DS}.orders"]["schema"] = bq.tables[f"{DS}.orders"]["schema"][:2]
+  planned = _seed_plan(bq, "orders", folder)  # no TargetCheckError
+  assert not [w for w in planned.warnings if "is empty" in w]
+  assert not [w for w in planned.warnings if "lacks source column" in w]
+
+
+@pytest.mark.parametrize("name", ["demo-project.ds.orders", "or ders/x", "a:b"])
+def test_a_malformed_seed_name_names_the_value(bq, name):
+  with pytest.raises(driver.TargetCheckError) as raised:
+    _seed_plan(bq, name, None)
+  assert repr(name) in str(raised.value) and "--seed_table" in str(raised.value)
+
+
+def test_a_seed_plan_without_scope_manual_evaluates_nothing_and_says_why(
+    bq, tmp_path):
+  """The reason the chained launch passes `scope=manual`: a hand-named
+  target has no write disposition to derive a scope from."""
+  folder = _two_groups(tmp_path)
+  args = _seed_args("orders", folder)
+  args.scope = "auto"
+  planned, _ = driver.plan(args, make_env(bq))
+  assert _evaluated(planned) == []
+  assert any("scope unknown" in w and "--scope" in w for w in planned.warnings)
+
+
+def test_a_reference_rows_limit_is_a_positive_integer(capsys):
+  base = ["run", *TARGET]
+  assert parse_args(base)[0].reference_rows_limit is None
+  assert parse_args([
+      *base,
+      "--reference_rows_limit=",
+  ])[0] == parse_args(base)[0]
+  assert parse_args([*base, "--reference_rows_limit",
+                     "10000"])[0].reference_rows_limit == 10_000
+  for bad in ("0", "-5", "ten", "1.5"):
+    err = _usage_error([*base, f"--reference_rows_limit={bad}"], capsys)
+    assert "--reference_rows_limit" in err
+
+
+def test_a_reference_rows_limit_fills_the_manual_params():
+  args, _ = parse_args([
+      "run", "--project", PROJECT, "--tables", "users", "--landing_dataset",
+      "d", "--reference_dataset", "s", "--reference_rows_limit", "10000"
+  ])
+  _, manual = driver.launch_request(args)
+  assert manual["params"]["reference_rows_limit"] == 10_000
+
+
+def test_a_seed_plan_with_a_reference_rows_limit_plans_the_panel(bq, tmp_path):
+  folder = _two_groups(tmp_path)
+  note = "reference_rows_limit unknown"
+  without = _seed_plan(bq, "orders", folder)
+  assert [w for w in without.warnings if note in w]
+  assert all(t.panel is None for t in without.tables)
+  planned = _seed_plan(bq, "orders", folder, "--reference_rows_limit", "40")
+  assert not [w for w in planned.warnings if note in w]
+  assert [t.name for t in planned.tables if t.panel is not None]
 
 
 def test_a_run_id_target_reads_validation_runs(bq, capsys):

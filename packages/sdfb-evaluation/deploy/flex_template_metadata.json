@@ -135,6 +135,13 @@
       "isOptional": true
     },
     {
+      "name": "reference_rows_limit",
+      "label": "Reference rows LIMIT",
+      "helpText": "The generation's reference sample size (a positive integer; empty means not given). It sizes the reference panel behind the privacy metrics, which an evaluation named by seed_table, tables or relationships_uri cannot read from the launch's records: without it those metrics are not evaluated.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
       "name": "relationships_uri",
       "label": "Relationships URI",
       "helpText": "The relationship model file or directory (gs://). Given alone (with landing_dataset and reference_dataset) it names the tables: every enabled table of the model, parents first. With seed_table it names the model the seed's component is read from; a URI that holds no model file evaluates the seed alone, with a warning. By generation_job_id it is read only when the launch's own records name none.",

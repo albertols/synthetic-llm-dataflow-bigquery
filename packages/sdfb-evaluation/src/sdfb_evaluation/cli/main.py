@@ -158,6 +158,17 @@ def _text(value: str) -> str | None:
   return value.strip() or None
 
 
+def _positive(value: str) -> int | None:
+  """A count flag: a positive integer; empty means not given."""
+  text = value.strip()
+  if not text:
+    return None
+  if not text.isdigit() or int(text) < 1:
+    raise argparse.ArgumentTypeError(
+        f"expected a positive integer, got {value!r}")
+  return int(text)
+
+
 def _flag(value: str) -> bool:
   lowered = value.strip().lower()
   if lowered in _TRUE:
@@ -230,6 +241,13 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       type=_text,
       help="with --tables: the dataset (or project.dataset) of their "
       "sources, same table names")
+  group.add_argument(
+      "--reference_rows_limit",
+      type=_positive,
+      help="the generation's reference sample size (its "
+      "--reference_rows_limit): it sizes the reference panel behind the "
+      "privacy metrics, which a hand-named target cannot read from the "
+      "launch's records. Without it those metrics are not evaluated")
   group.add_argument(
       "--relationships_uri",
       type=_text,

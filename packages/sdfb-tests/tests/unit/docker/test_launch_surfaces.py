@@ -71,7 +71,8 @@ _EVALUATOR_METADATA = (
 # stay reachable only from a direct launch (ADR 0024 §3c precedent).
 _UNDECLARED = frozenset({"pool_pattern_guidance"})
 # The names both jobs use. Each appears once in the template.
-_SHARED = frozenset({"relationships_uri", "run_id", "thresholds_uri"})
+_SHARED = frozenset(
+    {"reference_rows_limit", "relationships_uri", "run_id", "thresholds_uri"})
 _SELECTOR = "sdfb_job"
 # Beam's own option, declared so a launch may pass it: both entries hand
 # what they do not parse to Beam. The evaluation job runs on this same
@@ -382,7 +383,7 @@ def test_a_shared_name_says_what_it_means_for_each_job():
   for name in sorted(_SHARED):
     text = template[name]["helpText"]
     assert "Generation:" in text and "Evaluation:" in text, name
-    # Both parsers take any text for these three (and Composer passes an
+    # Both parsers take any text for these (and Composer passes an
     # unset evaluation parameter as an empty string), so a pattern here
     # could only refuse a value one of the entries accepts.
     assert "regexes" not in template[name], name

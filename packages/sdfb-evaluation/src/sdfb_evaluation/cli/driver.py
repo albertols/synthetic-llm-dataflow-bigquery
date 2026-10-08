@@ -204,6 +204,7 @@ from sdfb_evaluation.context.bq import (
     Bq,
     BqApiError,
     is_refusal,
+    normalize_fqn,
 )
 from sdfb_evaluation.context.gcp import make_session
 from sdfb_evaluation.context.launch import LaunchContext, resolve_launch
@@ -410,9 +411,10 @@ def launch_request(
   target flags: `--job_id`, or the tables of `--tables` in
   `--landing_dataset` with their sources in `--reference_dataset`
   (`reference_table` names the first one: the planner takes its dataset
-  for every table), plus `--relationships_uri` and `--run_id` wherever
-  they are given. Manual values only fill what the launch's own records
-  leave open."""
+  for every table), plus `--relationships_uri`, `--run_id` and
+  `--reference_rows_limit` (the generation's reference sample size, which
+  decides the privacy panel) wherever they are given. Manual values only
+  fill what the launch's own records leave open."""
   manual: dict[str, Any] = {}
   params: dict[str, Any] = {}
   if args.relationships_uri:
@@ -421,6 +423,8 @@ def launch_request(
   if args.run_id:
     manual["base_run_id"] = args.run_id
     params["run_id"] = args.run_id
+  if getattr(args, "reference_rows_limit", None):
+    params["reference_rows_limit"] = args.reference_rows_limit
   if args.tables:
     landing = qualified_dataset(args.landing_dataset, args.project)
     manual["tables_in_order"] = [f"{landing}.{name}" for name in args.tables]
@@ -432,12 +436,9 @@ def launch_request(
 
 
 class TargetCheckError(ValueError):
-  """The tables a relationship model names cannot be evaluated: a landing
-  or source table is missing, empty or does not match its twin. The
-  message lists every problem, so one run shows them all."""
-
-
-_TARGET_PROBLEMS_SHOWN = 5
+  """The tables a target names cannot be evaluated: a name is not a table
+  name, or none of the tables can be read. The message lists every
+  problem, so one run shows them all."""
 
 
 def derived_tables(models: Sequence[RelModel]) -> list[str]:
@@ -448,31 +449,36 @@ def derived_tables(models: Sequence[RelModel]) -> list[str]:
   return list(generation_order(models, enabled))
 
 
-def _column_names(meta: Mapping[str, Any]) -> set[str]:
-  return {str(f["name"]) for f in meta.get("schema") or ()}
-
-
 def _table_problems(bq: Any, name: str, landing: str, source: str) -> list[str]:
-  """What is wrong with one landing/source pair, as sentences."""
-  found: dict[str, Mapping[str, Any]] = {}
+  """Why one landing/source pair cannot be read, as sentences. An empty
+  table or a column one side lacks is not a problem here: planning notes
+  the first and compares the columns both sides have."""
   problems: list[str] = []
   for role, fqn in (("landing", landing), ("source", source)):
     try:
-      found[role] = bq.table(fqn)
+      bq.table(fqn)
     except (PermissionError, LookupError, BqApiError) as exc:
       problems.append(f"{name}: the {role} table {fqn} could not be read "
                       f"({exc})")
-  for role, meta in found.items():
-    if meta.get("numRows") == 0:
-      problems.append(f"{name}: the {role} table is empty")
-  if "landing" in found and "source" in found:
-    missing = sorted(
-        _column_names(found["source"]) - _column_names(found["landing"]))
-    if missing:
-      shown = ", ".join(missing[:_TARGET_PROBLEMS_SHOWN])
-      problems.append(f"{name}: the landing table lacks source column(s) "
-                      f"{shown}")
   return problems
+
+
+def _checked_names(args: argparse.Namespace, names: Sequence[str], landing: str,
+                   reference: str) -> None:
+  """Every name is a table name (it is about to go into SQL).
+
+  Raises:
+    TargetCheckError: one is not, naming it."""
+  flag = "--seed_table" if getattr(args, "seed_table", None) else "the model"
+  for name in names:
+    try:
+      if "." in name:
+        raise ValueError("a bare table name, not a qualified one")
+      normalize_fqn(f"{landing}.{name}")
+      normalize_fqn(f"{reference}.{name}")
+    except ValueError as exc:
+      raise TargetCheckError(f"{flag} {name!r} is not a table name: "
+                             f"{exc}") from exc
 
 
 def _seed_tables(args: argparse.Namespace) -> tuple[list[str], list[str]]:
@@ -501,16 +507,18 @@ def _seed_tables(args: argparse.Namespace) -> tuple[list[str], list[str]]:
 def _derive_targets(args: argparse.Namespace, bq: Any) -> list[str]:
   """`--seed_table`, or `--relationships_uri` alone, names the tables
   (module docstring): sets `args.tables` — the seed's component
-  (`_seed_tables`), or all the model's enabled tables, parents first — after
-  checking each landing table against its source twin in
+  (`_seed_tables`), or all the model's enabled tables, parents first —
+  after reading each landing table and its source twin in
   `--reference_dataset`. Any other target is left alone. Returns the notes
-  the plan should carry.
+  the plan should carry: the seed's, and a sentence for every table that
+  could not be read, which planning then skips on its own (R61) while the
+  others are evaluated.
 
   Raises:
     RelationshipError: the URI holds no usable model (for `--seed_table`
       only a model that is malformed).
-    TargetCheckError: the model enables no table, or a table fails the
-      check (every problem is listed).
+    TargetCheckError: a name is not a table name, the model enables no
+      table, or no table can be read (every problem is listed).
   """
   seed = getattr(args, "seed_table", None)
   if (args.tables or args.job_id or args.run_id or args.fixture_dir or
@@ -525,16 +533,18 @@ def _derive_targets(args: argparse.Namespace, bq: Any) -> list[str]:
         f"{args.relationships_uri}: the relationship model enables no table")
   landing = qualified_dataset(args.landing_dataset, args.project)
   reference = qualified_dataset(args.reference_dataset, args.project)
-  problems = [
-      problem for name in names for problem in _table_problems(
-          bq, name, f"{landing}.{name}", f"{reference}.{name}")
-  ]
-  if problems:
-    raise TargetCheckError(
-        "the tables of the relationship model cannot be evaluated: " +
-        "; ".join(problems))
+  _checked_names(args, names, landing, reference)
+  found = {
+      name:
+          _table_problems(bq, name, f"{landing}.{name}", f"{reference}.{name}")
+      for name in names
+  }
+  problems = [problem for listed in found.values() for problem in listed]
+  if all(found.values()):
+    raise TargetCheckError("none of the tables of the target can be read: " +
+                           "; ".join(problems))
   args.tables = names
-  return notes
+  return [*notes, *problems]
 
 
 def _resolve(args: argparse.Namespace, env: Env, bq: Any) -> LaunchContext:

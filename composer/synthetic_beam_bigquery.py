@@ -86,6 +86,14 @@ account needs no `roles/logging.viewer`. The cost: the registry row carries
 no generation window and no link to the generation job, and a model the
 launch adjusted (ADR 0038) is not seen.
 
+The evaluation passes `scope=manual`, so it reads each landing table WHOLE:
+with this DAG's `write_disposition` "overwrite" that is exactly this launch's
+rows, with "append" it includes the rows of earlier launches. It passes the
+generation's `reference_rows_limit`, so the reference panel behind the privacy
+metrics is planned. A landing table named differently from its source (a
+custom `SDFB_LANDING_TABLE` name) is not found: the evaluation looks for the
+source's name in the landing dataset.
+
 `trigger_evaluation` submits the job and does not wait: the evaluation job
 writes its own FINAL registry row. A job that dies after it was launched
 leaves its RUNNING row open; `composer/evaluation_framework.py`, the
@@ -534,7 +542,9 @@ default_dag_params = {
             "what it generated: the launched table's enabled component in "
             "the relationship model, or that table alone (no model names it, "
             "or generate_fk_relationships is false), the landed tables under "
-            "their sources' names in the landing dataset. This DAG waits for "
+            "their sources' names in the landing dataset, read whole (with "
+            "write_disposition append that includes earlier launches' rows). "
+            "This DAG waits for "
             "the job, then launches the evaluation as "
             "a second, CPU-only Dataflow job from the same template. While it "
             "waits the run holds the DAG's only active-run slot "
@@ -575,7 +585,8 @@ default_dag_params = {
             "compares the landed ones against: the launched table and, with "
             "generate_fk_relationships true, the rest of its component in "
             "the relationship model, each under the name it landed with in "
-            "the landing dataset. Empty: the dataset of table_fqn.",
+            "the landing dataset (a landing table named differently from its "
+            "source is not found). Empty: the dataset of table_fqn.",
         ),
     "evaluation_output_dataset":
         Param(
@@ -807,10 +818,11 @@ with models.DAG(
   )
 
   # The evaluation: a second Dataflow job from the SAME template as the
-  # generation above. `sdfb_job` selects the evaluator's entry in the image;
-  # the job id names what to evaluate (the evaluator reads the launch's own
-  # records for the rest, the relationship models included). Submitted and not
-  # waited for, like the generation: the job writes its own FINAL row.
+  # generation above. `sdfb_job` selects the evaluator's entry in the image.
+  # What to evaluate is named by the launched table and the relationship model
+  # and read whole (scope manual): no job id, no read of the job's log.
+  # Submitted and not waited for, like the generation: the job writes its own
+  # FINAL row.
   trigger_evaluation = DataflowStartFlexTemplateOperator(
       task_id="trigger_evaluation",
       project_id=project_id,
@@ -867,6 +879,14 @@ with models.DAG(
                       "{{ '{{SDFB_LANDING_TABLE}}'.rsplit('.', 1)[0] }}",
                   "reference_dataset":
                       "{{ params.source_dataset or params.table_fqn.rsplit('.', 1)[0] }}",
+                  # a hand-named target has no write disposition to derive a
+                  # scope from: each landing table is read whole
+                  "scope":
+                      "manual",
+                  # the generation's reference sample size (start_sdfb passes
+                  # the same value): it sizes the privacy panel
+                  "reference_rows_limit":
+                      "10000",
                   "trigger":
                       "chained",
                   "mode":

@@ -331,7 +331,8 @@ a sensor in [reschedule mode](https://airflow.apache.org/docs/apache-airflow/sta
 which holds no worker slot between two reads of the job's state and needs no
 triggerer; it is stated as not deferrable because the environment may have
 none. `trigger_evaluation` launches the same template with
-`sdfb_job=evaluation` and the generation job's id, as a CPU job in the
+`sdfb_job=evaluation` and the generation job's id (superseded for how the
+tables are named by the second note of 2026-10-08), as a CPU job in the
 generation job's network, and does not wait. It also passes Beam's own
 [`disk_size_gb`](https://docs.cloud.google.com/dataflow/docs/reference/pipeline-options):
 the evaluation job's workers unpack the same multi-GB image and the evaluator

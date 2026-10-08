@@ -102,7 +102,12 @@ A target is exactly one of:
 `config/relationships/gcp_public_fk_example.yaml`) may accompany any of
 them; it supplies the relationship model when the launch's own records name
 none, and with `--seed_table` it is where the seed's component is read. A hand-named target carries no write disposition, so pass
-`--scope manual` to evaluate the tables as they are now.
+`--scope manual` to evaluate the tables as they are now (without it every
+table is planned as not evaluated, "scope unknown"). A manual scope reads
+each landing table whole, and a hand-named target cannot read the generation's
+reference sample size from the launch's records, so pass
+`--reference_rows_limit` (the generation's) or the reference-based privacy
+metrics are not evaluated.
 
 ### 3. Run on the DirectRunner
 
@@ -423,6 +428,7 @@ flowchart LR
 | `evaluation_mode` | empty (`exact`, `sampled`) | template `mode`; empty is the evaluator's default |
 | `evaluation_machine_type`, `evaluation_max_workers` | `e2-standard-8`, 4 | the evaluation launch's environment |
 | `evaluation_output_dataset` | the dataset of the DAG's validation-runs table (`synthetic_data_quality` when that value is not `project.dataset.table`) | template `output_dataset` |
+| `source_dataset` | empty (the dataset of `table_fqn`) | template `reference_dataset`: the dataset of the source tables, same names as the landed ones |
 
 - `wait_for_generation` is a `DataflowJobStatusSensor` on the job id the
   launch pushed to XCom, in **reschedule mode**: it reads the job's state
@@ -431,16 +437,21 @@ flowchart LR
   job that fails or is cancelled is expected to fail the sensor, and nothing
   is evaluated.
 - `trigger_evaluation` launches the same template as `start_sdfb` with
-  `sdfb_job=evaluation`, `seed_table` (the last part of `table_fqn`),
+  `sdfb_job=evaluation`, `scope=manual`, `reference_rows_limit` (the
+  generation's own value), `seed_table` (the last part of `table_fqn`),
   `relationships_uri` (empty when `generate_fk_relationships` is false),
   `landing_dataset` (the generation's own), `reference_dataset` (the
   `source_dataset` param, else the dataset of `table_fqn`), `trigger=chained`,
   the mode, the output dataset and `disk_size_gb=200`. The tables are what
   the launch generated: the seed's enabled component in the model, parents
-  first, or the seed alone, checked against their sources before the job
-  starts; nothing reads the generation job's log, so the registry row has no
+  first, or the seed alone, each read with its source before the job starts
+  (a table that cannot be read is skipped with a warning; only a target with
+  none readable fails); nothing reads the generation job's log, so the registry row has no
   generation window and no link to that job, and a model the launch adjusted
-  (ADR 0038) is not seen. It is a CPU job (no
+  (ADR 0038) is not seen. Each landing table is read whole: with the DAG's
+  `write_disposition` overwrite that is this launch's rows, with append it
+  includes earlier launches' rows. A landing table named differently from its
+  source is not found. It is a CPU job (no
   accelerator) in the generation job's subnetwork, under the same service
   account, which therefore needs the evaluator's roles, but not the three
   that read a job ([`DEPLOYMENT_PREREQUISITES.md`](../../docs/DEPLOYMENT_PREREQUISITES.md)).

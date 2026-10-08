@@ -23,11 +23,8 @@
     {
       "name": "reference_rows_limit",
       "label": "Reference rows LIMIT",
-      "helpText": "Cap on rows pulled by SELECT ... LIMIT N. Default 10000.",
-      "isOptional": true,
-      "regexes": [
-        "^[0-9]+$"
-      ]
+      "helpText": "Generation: cap on rows pulled by SELECT ... LIMIT N. Default 10000; a positive integer. Evaluation: the generation's reference sample size (a positive integer; empty means not given). It sizes the reference panel behind the privacy metrics, which an evaluation named by seed_table, tables or relationships_uri cannot read from the launch's records: without it those metrics are not evaluated.",
+      "isOptional": true
     },
     {
       "name": "landing_table",

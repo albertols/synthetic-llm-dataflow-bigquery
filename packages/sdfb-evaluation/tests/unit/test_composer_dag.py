@@ -1131,8 +1131,12 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   values = dict(zip(keys, parameters.values, strict=True))
   assert set(values) == {
       "sdfb_job", "seed_table", "relationships_uri", "landing_dataset",
-      "reference_dataset", "trigger", "mode", "output_dataset", "disk_size_gb"
+      "reference_dataset", "scope", "reference_rows_limit", "trigger", "mode",
+      "output_dataset", "disk_size_gb"
   }
+  # a hand-named target has no write disposition: without this every table
+  # would be planned as "not evaluated"
+  assert _value(tree, values["scope"]) == "manual"
   assert _value(tree, values["sdfb_job"]) == "evaluation"
   # the tables come from the launched table and the model, not from the job:
   # no log read, no lookup
@@ -1166,6 +1170,15 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   for key, value in values.items():
     refs = re.findall(r"params\.(\w+)", str(_value(tree, value)))
     assert set(refs) <= declared, (key, refs)
+
+
+def test_both_launches_pass_the_same_reference_rows_limit():
+  tree = _tree(GENERATION_DAG)
+  generation = _entry(_launch(tree, "start_sdfb"), "parameters")
+  evaluation = _entry(_launch(tree, "trigger_evaluation"), "parameters")
+  given = _value(tree, _entry(generation, "reference_rows_limit"))
+  assert given.isdigit() and int(given) > 0
+  assert _value(tree, _entry(evaluation, "reference_rows_limit")) == given
 
 
 def test_trigger_evaluation_is_a_cpu_job_in_the_generation_jobs_network():
