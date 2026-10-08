@@ -361,18 +361,20 @@ def test_the_bridge_file_adds_the_evaluator_source_when_it_exists(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# no new build argument
+# the evaluator brings no build argument
 # --------------------------------------------------------------------------
 def test_both_worker_image_variables_read_the_one_build_argument():
-  instructions = _dockerfile()
-  arguments = sorted(
+  """A deployment's Dockerfile may declare arguments of its own (a registry
+    mirror, the build's environment); none of them is the evaluator's. Its
+    worker-image variable reads the argument the generator's already reads,
+    so a build passes nothing new."""
+  arguments = {
       re.match(r"ARG (\w+)", i).group(1)
-      for i in instructions
-      if i.startswith("ARG "))
-  assert arguments == [
-      "BEAM_SDK_IMAGE", "GIT_COMMIT_ARG", "LAUNCHER_IMAGE",
-      "SDFB_SDK_CONTAINER_IMAGE_ARG"
-  ]
+      for i in _dockerfile()
+      if i.startswith("ARG ")
+  }
+  assert "SDFB_SDK_CONTAINER_IMAGE_ARG" in arguments
+  assert not [a for a in arguments if "EVAL" in a.upper()]
   assert _env("SDFB_SDK_CONTAINER_IMAGE") == "$SDFB_SDK_CONTAINER_IMAGE_ARG"
   assert _env(
       "SDFB_EVAL_SDK_CONTAINER_IMAGE") == "$SDFB_SDK_CONTAINER_IMAGE_ARG"
