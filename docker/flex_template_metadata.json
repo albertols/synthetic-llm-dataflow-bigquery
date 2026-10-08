@@ -161,11 +161,8 @@
     {
       "name": "validation_runs_table",
       "label": "validation_runs table FQN",
-      "helpText": "Destination BigQuery table for the run-level summary row. project.dataset.table. Optional; empty skips the write.",
-      "isOptional": true,
-      "regexes": [
-        "^([a-z0-9_-]+\\.[a-zA-Z0-9_]+\\.[a-zA-Z0-9_]+)?$"
-      ]
+      "helpText": "Generation: destination BigQuery table for the run-level summary row. project.dataset.table. Optional; empty skips the write. Evaluation: the generator's validation-runs table (project.dataset.table; empty means not given). With generation_job_id next to seed_table, this launch's rows of it, found by landing table and the job's window, give the digest that verifies the reference sample, so the metrics that compare with it are evaluated; without it, or when the job's window cannot be read, those metrics are not evaluated and the row says why.",
+      "isOptional": true
     },
     {
       "name": "env",

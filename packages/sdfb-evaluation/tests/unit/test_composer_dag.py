@@ -1132,7 +1132,8 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   assert set(values) == {
       "sdfb_job", "generation_job_id", "seed_table", "relationships_uri",
       "landing_dataset", "reference_dataset", "scope", "reference_rows_limit",
-      "trigger", "mode", "output_dataset", "disk_size_gb"
+      "validation_runs_table", "trigger", "mode", "output_dataset",
+      "disk_size_gb"
   }
   # a hand-named target has no write disposition: without this every table
   # would be planned as "not evaluated"
@@ -1176,6 +1177,15 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   for key, value in values.items():
     refs = re.findall(r"params\.(\w+)", str(_value(tree, value)))
     assert set(refs) <= declared, (key, refs)
+
+
+def test_both_launches_pass_the_same_validation_runs_table():
+  tree = _tree(GENERATION_DAG)
+  generation = _entry(_launch(tree, "start_sdfb"), "parameters")
+  evaluation = _entry(_launch(tree, "trigger_evaluation"), "parameters")
+  given = _value(tree, _entry(generation, "validation_runs_table"))
+  assert given
+  assert _value(tree, _entry(evaluation, "validation_runs_table")) == given
 
 
 def test_both_launches_pass_the_same_reference_rows_limit():

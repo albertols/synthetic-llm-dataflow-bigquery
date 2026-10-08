@@ -106,9 +106,13 @@ none, and with `--seed_table` it is where the seed's component is read. A hand-n
 `--scope manual` to evaluate the tables as they are now (without it every
 table is planned as not evaluated, "scope unknown"). A manual scope reads
 each landing table whole, and a hand-named target cannot read the generation's
-reference sample size from the launch's records, so pass
-`--reference_rows_limit` (the generation's) or the reference-based privacy
-metrics are not evaluated.
+reference sample size or digest from the launch's records. Pass
+`--reference_rows_limit` (the generation's) AND `--validation_runs_table`
+(the generator's table, `project.dataset.table`), with `--generation_job_id`
+next to `--seed_table` so the job's window is known: this launch's rows of that
+table then verify the rebuilt sample and the reference-based privacy metrics
+(the nearest-neighbour ones and the panel-based match rates and lifts) are
+evaluated. Without any of the three they are `not_evaluated`, with the reason.
 
 ### 3. Run on the DirectRunner
 
@@ -439,7 +443,8 @@ flowchart LR
   is evaluated.
 - `trigger_evaluation` launches the same template as `start_sdfb` with
   `sdfb_job=evaluation`, `generation_job_id`, `scope=manual`, `reference_rows_limit` (the
-  generation's own value), `seed_table` (the last part of `table_fqn`),
+  generation's own value), `validation_runs_table` (the same table the
+  generation launch passes), `seed_table` (the last part of `table_fqn`),
   `relationships_uri` (empty when `generate_fk_relationships` is false),
   `landing_dataset` (the generation's own), `reference_dataset` (the
   `source_dataset` param, else the dataset of `table_fqn`), `trigger=chained`,
@@ -448,13 +453,17 @@ flowchart LR
   first, or the seed alone, each read with its source before the job starts
   (a table that cannot be read is skipped with a warning; only a target with
   none readable fails); nothing reads the generation job's log: `generation_job_id` is passed as the
-  launch's identity and the evaluator reads only the Dataflow job resource
-  (needs `roles/dataflow.viewer`; without it a warning and no window), so the
+  launch's identity and the evaluator reads the Dataflow job resource (needs
+  `roles/dataflow.viewer`; without it a warning and no window), so the
   row carries the job id and window and is listed in
-  `evaluation_latest_per_job`. The window pins the source as of the job's
-  create time (within its time-travel window). The launch's own record of
-  its tables, run ids and reference digest, and a model the launch adjusted
-  (ADR 0038), are not seen. Each landing table is read whole: with the DAG's
+  `evaluation_latest_per_job`. With the window it runs one query on the
+  generator's `validation_runs` table for this launch's rows (needs read on
+  it): their digest verifies the reference sample, so the reference-based
+  privacy metrics are evaluated; without the table or the window they are
+  `not_evaluated` with the reason. The window pins the source as of the job's
+  create time (within its time-travel window). A model the launch adjusted
+  (ADR 0038) is not seen, and the table list is the seed's, not the launch's
+  own record. Each landing table is read whole: with the DAG's
   `write_disposition` overwrite that is this launch's rows, with append it
   includes earlier launches' rows. A landing table named differently from its
   source is not found. It is a CPU job (no

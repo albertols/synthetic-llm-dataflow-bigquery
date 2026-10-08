@@ -71,8 +71,10 @@ _EVALUATOR_METADATA = (
 # stay reachable only from a direct launch (ADR 0024 §3c precedent).
 _UNDECLARED = frozenset({"pool_pattern_guidance"})
 # The names both jobs use. Each appears once in the template.
-_SHARED = frozenset(
-    {"reference_rows_limit", "relationships_uri", "run_id", "thresholds_uri"})
+_SHARED = frozenset({
+    "reference_rows_limit", "relationships_uri", "run_id", "thresholds_uri",
+    "validation_runs_table"
+})
 _SELECTOR = "sdfb_job"
 # Beam's own option, declared so a launch may pass it: both entries hand
 # what they do not parse to Beam. The evaluation job runs on this same

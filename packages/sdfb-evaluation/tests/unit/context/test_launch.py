@@ -735,3 +735,134 @@ def test_a_job_id_alone_still_reads_the_log_and_bigquery(fake_session, fake_bq):
   assert any("JOBS_BY_PROJECT" in sql for sql, _ in bq.queries)
   assert any("validation_runs" in sql for sql, _ in bq.queries)
   assert ctx.params_source == "jobs_labels+logs"
+
+
+# --------------------------------------------------------------------------
+# the job as identity, plus the generator's validation_runs rows (R136)
+# --------------------------------------------------------------------------
+_RUNS_TABLE = f"{QDS}.validation_runs"
+
+
+def _with_runs_table(**extra):
+  return {
+      "tables_in_order": list(TABLES),
+      "params": {
+          "reference_rows_limit": 10_000,
+          "validation_runs_table": _RUNS_TABLE,
+          **extra
+      },
+  }
+
+
+def _runs_queries(bq):
+  return [(sql, p) for sql, p in bq.queries if "validation_runs" in sql]
+
+
+def test_job_only_reads_this_launchs_validation_runs_in_the_jobs_window(
+    fake_session, fake_bq, fixture_data):
+  session, bq = fake_session(), fake_bq()
+  ctx = _resolve(
+      session, bq, job_id=JOB_ID, manual=_with_runs_table(), job_only=True)
+  # one query on the generator's table; no log, no JOBS labels
+  assert len(session.calls) == 1 and len(bq.queries) == 1
+  ((sql, bound),) = _runs_queries(bq)
+  assert f"`{_RUNS_TABLE}`" in sql and "JOBS_BY_PROJECT" not in sql
+  assert bound["landing_tables"] == sorted(TABLES)
+  assert "base" not in bound  # the run id is not known here
+  assert "start" in bound and "end" in bound  # the job's window, padded
+  assert ctx.base_run_id == BASE and ctx.run_ids == RUN_IDS
+  # the fixture also holds a second launch's orders row: it is ignored
+  expected = {
+      r["landing_table"]: r
+      for r in fixture_data("validation_runs")
+      if r["run_id"].startswith(BASE)
+  }
+  assert {
+      r.landing_table: r.reference_digest for r in ctx.runs
+  } == {
+      t: expected[t]["reference_digest"] for t in TABLES
+  }
+  # the tables stay the caller's; the parameters too
+  assert ctx.tables_in_order == TABLES and ctx.params_source == "manual"
+  assert ctx.params["validation_runs_table"] == _RUNS_TABLE
+  assert not ctx.writes
+
+
+def test_job_only_keeps_the_callers_tables_when_a_table_has_no_run_row(
+    fake_session, fake_bq):
+  extra = f"{DS}.not_generated"
+  manual = _with_runs_table()
+  manual["tables_in_order"] = [*TABLES, extra]
+  ctx = _resolve(
+      fake_session(), fake_bq(), job_id=JOB_ID, manual=manual, job_only=True)
+  assert ctx.tables_in_order == (*TABLES, extra)
+  assert ctx.run_for(extra) is None and ctx.run_for(TABLES[0]) is not None
+  assert not [w for w in ctx.warnings if w.startswith("manual")]
+
+
+def test_job_only_without_a_window_does_not_read_validation_runs(
+    fake_session, fake_bq):
+  session, bq = fake_session(jobs={}), fake_bq()
+  ctx = _resolve(
+      session, bq, job_id=JOB_ID, manual=_with_runs_table(), job_only=True)
+  assert bq.queries == [] and ctx.runs == ()
+  (warning,) = [w for w in ctx.warnings if JOB_ID in w]
+  assert "window" in warning and "not evaluated" in warning
+  assert "reference sample" in warning
+
+
+def test_job_only_without_a_runs_table_reads_no_validation_runs(
+    fake_session, fake_bq):
+  bq = fake_bq()
+  ctx = _resolve(
+      fake_session(),
+      bq,
+      job_id=JOB_ID,
+      manual={"tables_in_order": list(TABLES)},
+      job_only=True)
+  assert bq.queries == [] and ctx.runs == ()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [PermissionError("Access Denied"),
+     BqApiError("404 Not found", status=404)])
+def test_job_only_survives_an_unreadable_validation_runs(
+    fake_session, fake_bq, failure):
+  bq = fake_bq()
+  bq.failures["validation_runs"] = failure
+  ctx = _resolve(
+      fake_session(),
+      bq,
+      job_id=JOB_ID,
+      manual=_with_runs_table(),
+      job_only=True)
+  assert ctx.runs == () and ctx.tables_in_order == TABLES
+  (warning,) = [w for w in ctx.warnings if "validation_runs" in w]
+  assert _RUNS_TABLE in warning and "could not be read" in warning
+
+
+def _table_name(row) -> str:
+  return row["landing_table"].rsplit(".", 1)[1]
+
+
+def test_job_only_takes_the_latest_launch_when_the_window_holds_two(
+    fake_session, fake_bq, fixture_data):
+  rows = list(fixture_data("validation_runs"))
+  later = [
+      dict(
+          r,
+          run_id=f"other-0913-ffffff-{i:02d}-{_table_name(r)}",
+          reference_digest=f"{i:064x}",
+          created_at="2026-09-13T14:01:00.000000Z") for i, r in enumerate(rows)
+  ]
+  bq = fake_bq(responses=[("validation_runs", rows + later)])
+  ctx = _resolve(
+      fake_session(),
+      bq,
+      job_id=JOB_ID,
+      manual=_with_runs_table(),
+      job_only=True)
+  assert ctx.base_run_id == "other-0913-ffffff"
+  assert all(r.run_id.startswith("other-0913-ffffff") for r in ctx.runs)
+  assert [w for w in ctx.warnings if "launches" in w and "latest" in w]

@@ -36,7 +36,10 @@ dropped silently.
 One path reads less: `resolve_launch(job_only=True)`, for a job id given
 next to hand-named tables (`--seed_table T --generation_job_id J`), reads
 only source 3's job resource for the job's id, name, region and window — no
-log, no JOBS labels, no `validation_runs` — and takes the rest from `manual`.
+log, no JOBS labels — and takes the rest from `manual`. Given the
+generator's `validation_runs_table` and with the window known, it also reads
+this launch's rows of that table (source 4, one query), which carry the
+reference digests.
 
 `tables_in_order` never silently narrows a relational launch to its
 `--landing_table` target:
@@ -67,6 +70,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
@@ -833,22 +837,52 @@ _JOB_IDENTITY_KEYS = ("id", "name", "location", "createTime", "currentState",
                       "currentStateTime")
 
 
-def _job_identity(jobs: DataflowJobs, job_id: str, region: str,
+def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
                   manual: Mapping[str, Any] | None) -> LaunchContext:
   """The launch named by `manual`, belonging to the Dataflow job `job_id`:
-  only the job resource is read (its id, name, region and window); a job
-  that cannot be read costs the window and one warning, never the launch."""
+  the job resource is read (its id, name, region and window); a job that
+  cannot be read costs the window and one warning, never the launch.
+
+  With the generator's `validation_runs_table` in `manual` params and the
+  window known, this launch's rows of that table are read too — the one
+  query, `runs_for` over the landing tables and the window, no run-id base
+  — and carry the reference digests the privacy panel is verified against.
+  They are attached to the context, not given to `from_sources`: the run
+  rows must not decide the table list (`_order` would narrow it to the
+  tables that have a row); the caller's tables stay the tables."""
   notes: list[str] = []
   job: dict[str, Any] = {"id": job_id, "location": region}
+  window: tuple[str | None, str | None] = (None, None)
   try:
     read = jobs.get(job_id)
     job = {k: read[k] for k in _JOB_IDENTITY_KEYS if k in read}
+    window = jobs.window(job)
   except (JobNotFoundError, PermissionError, GcpApiError) as exc:
     notes.append(f"Dataflow job {job_id} could not be read, so the "
                  f"generation window is unknown (the source is then read as "
-                 f"it is now, not as the job saw it): {exc}")
-  return LaunchContext.from_sources(
+                 f"it is now, not as the job saw it; validation_runs is not "
+                 f"read without a window, so the reference sample cannot be "
+                 f"verified and the metrics that compare with it are not "
+                 f"evaluated): {exc}")
+  fields, params = _manual(manual)
+  tables = [_dotted(str(t)) for t in fields.get("tables_in_order") or ()]
+  records: list[RunRecord] = []
+  if window[0] and "validation_runs_table" in params:
+    records = [
+        RunRecord.from_row(r)
+        for r in _read_runs(bq, params, tables, window, None, notes)
+    ]
+  base, own = _pick_runs(records, None, notes)
+  position = {t: i for i, t in enumerate(tables)}
+  own.sort(key=lambda r: position.get(r.landing_table, len(tables)))
+  _check_positions(own, len(tables), notes)
+  context = LaunchContext.from_sources(
       job=job, launch_config=None, writes=(), manual=manual, warnings=notes)
+  return dataclasses.replace(
+      context,
+      base_run_id=base,
+      runs=tuple(own),
+      run_ids=tuple(r.run_id for r in own))
 
 
 def resolve_launch(*,
@@ -879,12 +913,15 @@ def resolve_launch(*,
     manual: operator-supplied values (see `LaunchContext.from_sources`).
     log_pages: page budget per Cloud Logging list call.
     job_only: `job_id` is the identity of a launch `manual` already names
-      (`sdfb-eval --seed_table T --generation_job_id J`): read ONLY the
-      Dataflow job, for its id, name, region and window — not its log,
-      BigQuery JOBS labels or `validation_runs`, not even as calls that may
-      fail — and take everything else from `manual`. A job that cannot be
-      read is a warning and no window. Needs `job_id` and tables in
-      `manual`; `params_source` is then `manual`.
+      (`sdfb-eval --seed_table T --generation_job_id J`): read the Dataflow
+      job, for its id, name, region and window — not its log or BigQuery
+      JOBS labels, not even as calls that may fail — and take everything
+      else from `manual`. The one exception: with `validation_runs_table`
+      in the manual params and the window known, this launch's rows of that
+      table are read (one query) for the reference digests. A job that
+      cannot be read is a warning and no window (and no `validation_runs`
+      read). Needs `job_id` and tables in `manual`; `params_source` is
+      then `manual`.
 
   Raises:
     JobNotFoundError: the job is not in `region` (or past Dataflow's
@@ -909,7 +946,7 @@ def resolve_launch(*,
   session = session_factory(project)
   jobs = DataflowJobs(session, project, region)
   if job_only:
-    return _job_identity(jobs, job_id, region, manual)
+    return _job_identity(bq, jobs, job_id, region, manual)
   missing: JobNotFoundError | None = None
   try:
     job: dict | None = jobs.get(job_id)

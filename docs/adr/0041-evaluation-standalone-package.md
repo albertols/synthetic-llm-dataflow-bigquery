@@ -405,8 +405,8 @@ it or the folder holds no model file (a warning says so). The generator's own
 rule is mirrored by `relationships.component`. The chained evaluation reads each landing table
 whole (`scope=manual`): this launch's rows with `write_disposition`
 "overwrite", the rows of earlier launches too with "append". The cost of not
-reading the log: the launch's own record of its tables, run ids and
-reference digest, and a model the launch adjusted under
+reading the log: the launch's own record of its tables, and a model the
+launch adjusted under
 [ADR 0038](0038-measured-conflicts-adjust-the-model.md), are not seen. Runs
 named by job id (`--job_id`, the standalone DAG) are unchanged and still need
 the job roles.
@@ -418,13 +418,34 @@ first version of this note left it out; the row then had no
 asked for it back, and `--generation_job_id` may now accompany `--seed_table`:
 the seed still names the tables, and the evaluator reads the Dataflow job
 resource (`jobs.get`: id, name, region, start and end) and nothing else about
-the job: not its log, not BigQuery job labels, not `validation_runs`. That
-needs `roles/dataflow.viewer` and no more; a job that cannot be read (not
+the job: not its log, not BigQuery job labels. That needs
+`roles/dataflow.viewer`; a job that cannot be read (not
 found, past retention, no role) costs the window and one warning, never the
 evaluation. What the window changes: the source is pinned as of the job's
 create time (a snapshot clone, within the source's time-travel window, as for
 any evaluation by job id), and the row's `source_drifted` and generation
 columns are filled; the scope stays `manual`.
+
+The reference sample is verified from `validation_runs` (ruling R136). With
+the job's window known and the generator's `validation_runs_table` passed
+(`--validation_runs_table`, the value the generation launch passes), the
+evaluator runs the one query `runs_for` already defines, for this launch's
+rows: the landing tables of the seed's group, created inside the job's
+window, the latest launch if the window holds several. Their
+`reference_digest` is what makes the rebuilt reference sample (R) `verified`;
+without it the panel is unverified and every reference-based metric is
+`not_evaluated` with the reason: the nearest-neighbour metrics
+(`row.dcr_train_holdout_share`, `row.dcr_p5_ratio`, `row.nndr_p5_ratio`,
+`row.density`, `row.coverage`) and the panel-based match rates and lifts
+(`row.memorization_lift` and `row.exposure_lift` among them). R133 had passed
+`reference_rows_limit` so the panel was planned, but a planned panel is not
+a verified one. The run rows are attached to the launch context and do not
+decide the table list: the seed's tables stay the tables, so a table with no
+row is evaluated, only without a digest. The query needs read on the table;
+a table that cannot be read, or an unknown window (the job could not be
+read), costs a warning and those metrics, never the evaluation. This partly
+reverses R134, which had the job-only path read no `validation_runs`, on the
+owner's word.
 
 ## Sources
 

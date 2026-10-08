@@ -81,26 +81,36 @@ say, for every parameter, where the value comes from and what the evaluator
 does with it, and the block above the operator lists the evaluator's options
 this DAG leaves at their defaults. In short:
 
-- It reads neither the generation job's log, BigQuery job labels nor
-  `validation_runs`, so its service account needs no `roles/logging.viewer`
-  and no `roles/bigquery.resourceViewer`. The generation job's id is passed as
-  the launch's identity: the evaluator reads the Dataflow job resource and
-  nothing else about it (needs `roles/dataflow.viewer`; without it the run
-  goes on with a warning and no window).
+- It reads neither the generation job's log nor BigQuery job labels, so its
+  service account needs no `roles/logging.viewer` and no
+  `roles/bigquery.resourceViewer`. The generation job's id is passed as the
+  launch's identity: the evaluator reads the Dataflow job resource and
+  nothing else about the job (needs `roles/dataflow.viewer`; without it the
+  run goes on with a warning and no window). With the window it also runs
+  ONE query on the generator's `validation_runs` table (below).
 - `scope=manual` reads each landing table WHOLE: with this DAG's
   `write_disposition` "overwrite" that is this launch's rows, with "append"
   it also includes the rows of earlier launches.
 - `reference_rows_limit` limits nothing that is compared. It is the size of
   the sample the generator learned from, passed so the evaluator can rebuild
-  that sample for the row-level privacy metrics. As this DAG stands those
-  metrics come out "not evaluated": the rebuilt sample can only be trusted
-  when it matches the digest in the generator's `validation_runs` row, which
-  this path does not read. Every other metric is evaluated on all rows.
+  that sample (and an equal-size holdout) for the reference-based privacy
+  metrics: the nearest-neighbour ones (row.dcr_train_holdout_share,
+  row.dcr_p5_ratio, row.nndr_p5_ratio, row.density, row.coverage) and the
+  panel-based match rates and lifts (row.memorization_lift,
+  row.exposure_lift among them). The rebuilt sample is only trusted when it
+  matches the digest the generator recorded in its `validation_runs` row, so
+  the launch also passes `validation_runs_table`: the evaluator reads this
+  launch's rows of it (landing table and the job's window, one query) and
+  those metrics are evaluated. Without that table, or when the job's window
+  cannot be read, they come out "not evaluated" with the reason on the row.
+  Every other metric is evaluated on all rows either way.
 - A landing table named differently from its source (a custom
   `SDFB_LANDING_TABLE` name) is not found: the evaluation looks for the
   source's name in the landing dataset.
-- What stays lost: the launch's own record of its tables, run ids and
-  reference digest, and a model the launch adjusted (ADR 0038).
+- What stays lost: the launch's log, so a model the launch adjusted
+  (ADR 0038) is not seen and the table list is the seed's, not the launch's
+  own record. The service account also needs read on the generator's
+  `validation_runs` table.
 
 `trigger_evaluation` submits the job and does not wait: the evaluation job
 writes its own FINAL registry row. A job that dies after it was launched
@@ -929,7 +939,8 @@ with models.DAG(
                   # pins each source table as of the job's create time (a
                   # snapshot, within the table's time-travel window). If the
                   # job cannot be read (no roles/dataflow.viewer, or past
-                  # retention) the run goes on with a warning and no window.
+                  # retention) the run goes on with a warning and no window
+                  # (and then validation_runs is not read either).
                   "generation_job_id":
                       generation_job_id,
                   # The launched table: the last part of the DAG param
@@ -976,16 +987,34 @@ with models.DAG(
                   # compared: in exact mode every landed row is compared with
                   # every source row. The evaluator uses it to rebuild that
                   # sample (R) and an equal-size holdout (H) from the source,
-                  # for the row-level privacy metrics (nearest-record
-                  # distances, density, coverage, memorization and exposure
-                  # lifts). Each of R and H needs at least 2000 rows, and the
-                  # value must equal the generation's. Today those metrics
-                  # come out "not evaluated" on this path: the rebuilt sample
-                  # is only trusted when its digest equals the one in the
-                  # generator's validation_runs row, and this launch does not
-                  # read that table. Every other metric is unaffected.
+                  # for the reference-based privacy metrics: the
+                  # nearest-neighbour ones (row.dcr_train_holdout_share,
+                  # row.dcr_p5_ratio, row.nndr_p5_ratio, row.density,
+                  # row.coverage) and the panel-based match rates and lifts
+                  # (row.memorization_lift and row.exposure_lift among them).
+                  # Each of R and H needs at least 2000 rows, and the value
+                  # must equal the generation's. The rebuilt sample is only
+                  # trusted when it matches the generator's recorded digest;
+                  # see validation_runs_table below.
                   "reference_rows_limit":
                       "10000",
+                  # The generator's validation-runs table: the same value
+                  # start_sdfb passes (the marker SDFB_VALIDATION_RUNS_TABLE).
+                  # With the job's window known, the evaluator reads THIS
+                  # launch's rows of it (the rows created for the landing
+                  # tables inside the window): one query, no log. The
+                  # reference_digest on a row is what verifies the rebuilt
+                  # sample, which is what lets the reference-based privacy
+                  # metrics (listed at reference_rows_limit) be evaluated;
+                  # it also brings the run ids. Needs read on this table.
+                  # If the table cannot be read, or the window is unknown
+                  # (the Dataflow job could not be read), the run goes on
+                  # with a warning and those metrics are "not evaluated"
+                  # with the reason on the row. If the window holds rows of
+                  # several launches, the latest launch's rows are used and
+                  # a warning says so.
+                  "validation_runs_table":
+                      validation_runs_table,
                   # Recorded in the registry row: what started the
                   # evaluation (cli | composer | chained | agent).
                   "trigger":

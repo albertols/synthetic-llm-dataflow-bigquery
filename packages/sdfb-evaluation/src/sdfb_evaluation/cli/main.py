@@ -169,6 +169,22 @@ def _positive(value: str) -> int | None:
   return int(text)
 
 
+_TABLE_RE = re.compile(r"([a-z][a-z0-9-]{4,28}[a-z0-9])\.([A-Za-z0-9_]{1,1024})"
+                       r"\.([A-Za-z0-9_$-]{1,1024})")
+
+
+def _bq_table(value: str) -> str | None:
+  """A BigQuery table as `project.dataset.table` (`project:dataset.table`
+  accepted, normalised); empty means not given."""
+  text = value.strip().replace(":", ".", 1)
+  if not text:
+    return None
+  if _TABLE_RE.fullmatch(text) is None:
+    raise argparse.ArgumentTypeError(
+        f"expected a table as project.dataset.table, got {value!r}")
+  return text
+
+
 def _flag(value: str) -> bool:
   lowered = value.strip().lower()
   if lowered in _TRUE:
@@ -251,6 +267,14 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       "--reference_rows_limit): it sizes the reference panel behind the "
       "privacy metrics, which a hand-named target cannot read from the "
       "launch's records. Without it those metrics are not evaluated")
+  group.add_argument(
+      "--validation_runs_table",
+      type=_bq_table,
+      help="the generator's validation-runs table, project.dataset.table: "
+      "with --generation_job_id next to --seed_table, this launch's rows of "
+      "it (in the job's window) give the digest that verifies the reference "
+      "sample, so the metrics that compare with it are evaluated. Fills what "
+      "the launch's own records leave open")
   group.add_argument(
       "--relationships_uri",
       type=_text,

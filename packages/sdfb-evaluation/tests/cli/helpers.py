@@ -39,6 +39,7 @@ from beam.acceptance_data import (
     users_rows,
 )
 from beam.row_checks import check_rows
+from unit.context.conftest import FakeResponse
 from unit.context.plan_fakes import PlanBq, thelook_rows
 
 from sdfb_evaluation.beam.assemble import final_row, finish_time
@@ -239,6 +240,30 @@ class FakeJob(FakeResult):
 
   def job_id(self) -> str:
     return self.job
+
+
+class JobOnlySession:
+  """Dataflow `jobs.get` over the recorded job, recording every call; a
+  Cloud Logging call (a POST) fails the test."""
+
+  def __init__(self, job: dict | None):
+    self.job = job
+    self.calls: list[tuple[str, str]] = []
+    self.headers: dict[str, str] = {}
+
+  def get(self, url: str, params=None, timeout=None):
+    del params, timeout
+    self.calls.append(("GET", url))
+    if self.job is None:
+      return FakeResponse(404, {"error": {"message": "not found"}})
+    if self.job == "denied":
+      return FakeResponse(403, {"error": {"message": "denied"}})
+    return FakeResponse(200, self.job)
+
+  def post(self, url: str, *args, **kwargs):
+    del args, kwargs
+    self.calls.append(("POST", url))
+    raise AssertionError(f"Cloud Logging was called: {url}")
 
 
 def make_env(bq: Any,

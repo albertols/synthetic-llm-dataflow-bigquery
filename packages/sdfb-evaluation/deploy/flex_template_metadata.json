@@ -252,6 +252,13 @@
       "regexes": [
         "^(cli|composer|chained|agent)?$"
       ]
+    },
+    {
+      "name": "validation_runs_table",
+      "label": "validation_runs table FQN",
+      "helpText": "The generator's validation-runs table (project.dataset.table; empty means not given). With generation_job_id next to seed_table, this launch's rows of it, found by landing table and the job's window, give the digest that verifies the reference sample, so the metrics that compare with it are evaluated; without it, or when the job's window cannot be read, those metrics are not evaluated and the row says why.",
+      "paramType": "TEXT",
+      "isOptional": true
     }
   ]
 }

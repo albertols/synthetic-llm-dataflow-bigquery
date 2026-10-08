@@ -35,7 +35,6 @@ from apache_beam.options.pipeline_options import (
     StandardOptions,
     WorkerOptions,
 )
-from unit.context.conftest import FakeResponse
 from unit.context.plan_fakes import (
     BASE,
     DS,
@@ -64,6 +63,7 @@ from sdfb_evaluation.schemas import CLUSTERING, TABLES as EVAL_TABLES
 from .conftest import catalogue
 from .helpers import (
     NOW,
+    JobOnlySession,
     check_row,
     make_env,
 )
@@ -122,13 +122,13 @@ def test_run_flags_default_to_the_brief():
   assert {
       "--project", "--region", "--generation_job_id", "--run_id",
       "--relationships_uri", "--tables", "--seed_table", "--reference_dataset",
-      "--reference_rows_limit", "--landing_dataset", "--mode", "--scope",
-      "--allow_contaminated", "--sample_rows", "--privacy_sample_rows",
-      "--detection_sample_rows", "--pair_max_columns", "--row_flags_top_k",
-      "--row_flags_source_keys", "--max_bytes_billed", "--max_shuffle_gb",
-      "--output_dataset", "--temp_dataset", "--sink", "--output_local",
-      "--thresholds_uri", "--fail_on", "--trigger", "--label_key_uri",
-      "--runner"
+      "--reference_rows_limit", "--validation_runs_table", "--landing_dataset",
+      "--mode", "--scope", "--allow_contaminated", "--sample_rows",
+      "--privacy_sample_rows", "--detection_sample_rows", "--pair_max_columns",
+      "--row_flags_top_k", "--row_flags_source_keys", "--max_bytes_billed",
+      "--max_shuffle_gb", "--output_dataset", "--temp_dataset", "--sink",
+      "--output_local", "--thresholds_uri", "--fail_on", "--trigger",
+      "--label_key_uri", "--runner"
   } == set(flags)
   assert "--fixture_dir" not in flags  # hidden
   assert "--evaluation_id" not in flags  # minted, never passed (R88c)
@@ -846,6 +846,33 @@ def test_a_reference_rows_limit_fills_the_manual_params():
   assert manual["params"]["reference_rows_limit"] == 10_000
 
 
+def test_a_validation_runs_table_is_a_table_name(capsys):
+  base = ["run", *TARGET]
+  assert parse_args(base)[0].validation_runs_table is None
+  assert parse_args([*base,
+                     "--validation_runs_table="])[0] == parse_args(base)[0]
+  ok = f"{PROJECT}.synthetic_data_quality.validation_runs"
+  assert parse_args([*base, "--validation_runs_table",
+                     ok])[0].validation_runs_table == ok
+  colon = f"{PROJECT}:synthetic_data_quality.validation_runs"
+  assert parse_args([*base, "--validation_runs_table",
+                     colon])[0].validation_runs_table == ok
+  for bad in ("validation_runs", "ds.validation_runs", "a.b.c.d",
+              f"{PROJECT}.ds.run s", "`x`.y.z"):
+    err = _usage_error([*base, f"--validation_runs_table={bad}"], capsys)
+    assert "--validation_runs_table" in err
+
+
+def test_a_validation_runs_table_fills_the_manual_params():
+  table = f"{PROJECT}.synthetic_data_quality.validation_runs"
+  args, _ = parse_args([
+      "run", "--project", PROJECT, "--tables", "users", "--landing_dataset",
+      "d", "--reference_dataset", "s", "--validation_runs_table", table
+  ])
+  _, manual = driver.launch_request(args)
+  assert manual["params"]["validation_runs_table"] == table
+
+
 def test_a_seed_plan_with_a_reference_rows_limit_plans_the_panel(bq, tmp_path):
   folder = _two_groups(tmp_path)
   note = "reference_rows_limit unknown"
@@ -880,35 +907,11 @@ def test_a_job_id_may_accompany_a_seed_table(capsys):
   assert args.job_id == JOB_ID and args.seed_table is None
 
 
-class _JobOnlySession:
-  """Dataflow `jobs.get` over the recorded job, recording every call; a
-  Cloud Logging call (a POST) fails the test."""
-
-  def __init__(self, job: dict | None):
-    self.job = job
-    self.calls: list[tuple[str, str]] = []
-    self.headers: dict[str, str] = {}
-
-  def get(self, url: str, params=None, timeout=None):
-    del params, timeout
-    self.calls.append(("GET", url))
-    if self.job is None:
-      return FakeResponse(404, {"error": {"message": "not found"}})
-    if self.job == "denied":
-      return FakeResponse(403, {"error": {"message": "denied"}})
-    return FakeResponse(200, self.job)
-
-  def post(self, url: str, *args, **kwargs):
-    del args, kwargs
-    self.calls.append(("POST", url))
-    raise AssertionError(f"Cloud Logging was called: {url}")
-
-
 def _job_plan(bq, load_fixture, tmp_path, session=None):
   """A seed plan with the generation job's id next to it, over the real
   `resolve_launch` and a session that serves only `jobs.get`."""
   job = load_fixture("context/dataflow_job.json")
-  session = session or _JobOnlySession(job)
+  session = session or JobOnlySession(job)
   model = tmp_path / "thelook.yaml"
   model.write_text(MODEL_YAML)
   args, _ = parse_args([
@@ -952,7 +955,7 @@ def test_a_seed_with_a_job_id_keeps_the_job_and_reads_nothing_else(
 @pytest.mark.parametrize("failure", ["not found", "denied"])
 def test_a_seed_with_an_unreadable_job_is_planned_without_a_window(
     bq, load_fixture, tmp_path, failure):
-  session = _JobOnlySession(None if failure == "not found" else "denied")
+  session = JobOnlySession(None if failure == "not found" else "denied")
   planned, session = _job_plan(bq, load_fixture, tmp_path, session)
   assert [m for m, _ in session.calls] == ["GET"]
   launch = planned.launch

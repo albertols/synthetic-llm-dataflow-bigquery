@@ -413,7 +413,8 @@ def launch_request(
   (`reference_table` names the first one: the planner takes its dataset
   for every table), plus `--relationships_uri`, `--run_id` and
   `--reference_rows_limit` (the generation's reference sample size, which
-  decides the privacy panel) wherever they are given. Manual values only
+  decides the privacy panel) and `--validation_runs_table` (whose rows verify
+  it) wherever they are given. Manual values only
   fill what the launch's own records leave open."""
   manual: dict[str, Any] = {}
   params: dict[str, Any] = {}
@@ -425,6 +426,8 @@ def launch_request(
     params["run_id"] = args.run_id
   if getattr(args, "reference_rows_limit", None):
     params["reference_rows_limit"] = args.reference_rows_limit
+  if getattr(args, "validation_runs_table", None):
+    params["validation_runs_table"] = args.validation_runs_table
   if args.tables:
     landing = qualified_dataset(args.landing_dataset, args.project)
     manual["tables_in_order"] = [f"{landing}.{name}" for name in args.tables]

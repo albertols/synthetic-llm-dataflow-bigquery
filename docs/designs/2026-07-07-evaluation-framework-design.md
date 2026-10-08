@@ -2162,13 +2162,15 @@ flowchart LR
   `sdfb_job=evaluation`, `generation_job_id` (the launch's identity: only the
   Dataflow job is read, for its window), `scope=manual` (each landing table read whole: this
   launch's rows under `overwrite`, earlier launches' too under `append`),
-  `reference_rows_limit` (the generation's, so the privacy panel is planned),
+  `reference_rows_limit` and `validation_runs_table` (the generation's: the
+  panel is rebuilt and verified against the digest on this launch's
+  `validation_runs` rows, found by landing table and the job's window),
   `seed_table` (the launched table), `relationships_uri`
   (empty when `generate_fk_relationships` is false), `landing_dataset`,
   `reference_dataset` (the `source_dataset` parameter), `trigger=chained`
-  and the boot disk; it reads no job log, BigQuery job labels or `validation_runs`; the row
-  carries the job id and window, the launch's own record of its tables, run
-  ids and reference digest and a model the launch adjusted are not seen; it is a CPU job in the generation job's subnetwork,
+  and the boot disk; it reads no job log or BigQuery job labels, and one query on
+  `validation_runs`; the row carries the job id and window, and a model the
+  launch adjusted is not seen; it is a CPU job in the generation job's subnetwork,
   under the same service account. It does not wait: the evaluation job
   writes its own `FINAL` row.
 - **Five new parameters**, all read only when `run_evaluation` is true:
