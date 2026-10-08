@@ -53,6 +53,7 @@ from sdfb_evaluation.beam import pipeline as beam_pipeline
 from sdfb_evaluation.beam.label_key import is_label_key_uri
 from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.main import main, parse_args, public_run_flags
+from sdfb_evaluation.context import relationships
 from sdfb_evaluation.context.plan import (
     Knobs,
     build_plan,
@@ -557,6 +558,84 @@ def test_plan_of_a_manual_target_resolves_and_plans(bq, tmp_path, capsys):
   ]
   # no panel: a manual launch carries no reference_rows_limit
   assert tables["users"]["panel"] is None
+
+
+def _derived_argv(model: Path, *extra: str) -> list[str]:
+  return [
+      "plan", "--project", PROJECT, "--landing_dataset", "thelook_synthetic",
+      "--reference_dataset", SRC, "--relationships_uri",
+      str(model), "--scope", "manual", *extra
+  ]
+
+
+def test_relationships_uri_alone_names_the_tables(bq, tmp_path, capsys):
+  """No job, no log, no `--tables`: the model's enabled tables, parents
+  first, plan exactly as the same list given by hand."""
+  model = tmp_path / "thelook.yaml"
+  model.write_text(MODEL_YAML)
+  assert main(_derived_argv(model, "--format", "json"), make_env(bq)) == 0
+  derived = json.loads(capsys.readouterr().out)
+  by_hand = [
+      "plan", "--project", PROJECT, "--tables", "users,orders,order_items",
+      "--landing_dataset", "thelook_synthetic", "--reference_dataset", SRC,
+      "--relationships_uri",
+      str(model), "--scope", "manual", "--format", "json"
+  ]
+  assert main(by_hand, make_env(bq)) == 0
+  listed = json.loads(capsys.readouterr().out)
+  assert derived["launch"]["generation_job_id"] is None
+  assert [t["name"] for t in derived["tables"]
+         ] == [t["name"] for t in listed["tables"]]
+  assert derived["tables"][1]["source_table"] == f"{SRC}.users"
+
+
+def test_derived_tables_skip_a_disabled_table_and_put_parents_first():
+  models = relationships.from_sources([("m.yaml", """
+model: m
+tables:
+  child:
+    pk: [id]
+    fk:
+      - {cols: [p], ref: parent, ref_cols: [id]}
+  parent:
+    pk: [id]
+  parked:
+    pk: [id]
+    enabled: false
+""")])
+  assert driver.derived_tables(models) == ["parent", "child"]
+
+
+def test_derived_tables_are_checked_against_their_sources(bq, tmp_path):
+  model = tmp_path / "thelook.yaml"
+  model.write_text(MODEL_YAML)
+
+  def planned():
+    args, _ = parse_args(_derived_argv(model))
+    return driver.plan(args, make_env(bq))
+
+  del bq.tables[f"{DS}.orders"]  # a landing table that was never written
+  bq.tables[f"{DS}.users"]["numRows"] = 0  # one that is empty
+  del bq.tables[f"{SRC}.order_items"]  # a source that cannot be read
+  bq.tables[f"{DS}.users"]["schema"] = bq.tables[f"{DS}.users"][
+      "schema"][:1]  # a landing table with columns missing
+  with pytest.raises(driver.TargetCheckError) as raised:
+    planned()
+  message = str(raised.value)
+  assert "orders: the landing table" in message and "not found" in message.lower(
+  )
+  assert "users: the landing table is empty" in message
+  assert "order_items: the source table" in message
+  assert "users: the landing table lacks source column(s)" in message
+
+
+def test_relationships_uri_alone_needs_both_datasets(capsys):
+  err = _usage_error(
+      ["run", "--project", PROJECT, "--relationships_uri", "gs://b/m.yaml"],
+      capsys)
+  assert "--landing_dataset and --reference_dataset" in err
+  err = _usage_error(["run", "--project", PROJECT], capsys)
+  assert "name exactly one of" in err
 
 
 def test_a_run_id_target_reads_validation_runs(bq, capsys):

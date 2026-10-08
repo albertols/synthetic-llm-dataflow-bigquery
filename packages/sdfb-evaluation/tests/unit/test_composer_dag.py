@@ -1130,11 +1130,18 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
   values = dict(zip(keys, parameters.values, strict=True))
   assert set(values) == {
-      "sdfb_job", "generation_job_id", "trigger", "mode", "output_dataset",
-      "disk_size_gb"
+      "sdfb_job", "relationships_uri", "landing_dataset", "reference_dataset",
+      "trigger", "mode", "output_dataset", "disk_size_gb"
   }
   assert _value(tree, values["sdfb_job"]) == "evaluation"
-  assert _value(tree, values["generation_job_id"]) == _JOB_ID_XCOM
+  # the tables come from the model, not from the job: no log read, no lookup
+  assert "generation_job_id" not in values and "job_id" not in values
+  assert _value(tree,
+                values["relationships_uri"]) == "{{ params.relationships_uri }}"
+  assert "SDFB_LANDING_TABLE" in _value(tree, values["landing_dataset"])
+  source = _value(tree, values["reference_dataset"])
+  assert "params.source_dataset" in source and "params.table_fqn" in source
+  assert "source_dataset" in _params(tree)
   assert _value(tree, values["trigger"]) == "chained"
   assert _value(tree, values["mode"]) == "{{ params.evaluation_mode }}"
   assert _value(

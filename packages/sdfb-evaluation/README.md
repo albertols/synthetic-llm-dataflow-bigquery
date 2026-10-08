@@ -429,13 +429,18 @@ flowchart LR
   job that fails or is cancelled is expected to fail the sensor, and nothing
   is evaluated.
 - `trigger_evaluation` launches the same template as `start_sdfb` with
-  `sdfb_job=evaluation`, `job_id` (the generation job), `trigger=chained`,
-  the mode, the output dataset and `disk_size_gb=200`. It is a CPU job (no
+  `sdfb_job=evaluation`, `relationships_uri`, `landing_dataset` (the
+  generation's own), `reference_dataset` (the `source_dataset` param, else the
+  dataset of `table_fqn`), `trigger=chained`, the mode, the output dataset
+  and `disk_size_gb=200`. The tables are the model's enabled tables, parents
+  first, checked against their sources before the job starts; nothing reads
+  the generation job's log, so the registry row has no generation window and
+  no link to that job. It is a CPU job (no
   accelerator) in the generation job's subnetwork, under the same service
   account, which therefore needs the evaluator's roles
   ([`DEPLOYMENT_PREREQUISITES.md`](../../docs/DEPLOYMENT_PREREQUISITES.md)).
-  The evaluator finds the relationship models through the generation job's
-  own records; the default folder is in the same image.
+  The relationship models are read from `relationships_uri`; the default
+  folder is in the same image.
 - It submits the job and does not wait: the evaluation job writes its own
   FINAL row. **A chained evaluation that dies after it was launched leaves
   its RUNNING row open**; nothing in this DAG closes it. Run the standalone

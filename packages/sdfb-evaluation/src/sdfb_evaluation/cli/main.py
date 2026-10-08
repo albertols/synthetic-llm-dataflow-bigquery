@@ -211,7 +211,9 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
   group.add_argument(
       "--tables",
       type=_csv,
-      help="landing table names, comma-separated, parents first")
+      help="landing table names, comma-separated, parents first (omit them "
+      "and pass --relationships_uri alone to evaluate every enabled table "
+      "of the relationship model, parents first)")
   group.add_argument(
       "--landing_dataset",
       type=_text,
@@ -225,7 +227,8 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       "--relationships_uri",
       type=_text,
       help="the relationship model file or directory (local or gs://), "
-      "when the launch's own records name none")
+      "when the launch's own records name none; alone (with "
+      "--landing_dataset and --reference_dataset) it also names the tables")
   group.add_argument("--fixture_dir", type=_text, help=argparse.SUPPRESS)
 
 
@@ -439,21 +442,23 @@ def _check_target(parser: argparse.ArgumentParser,
     if targets:
       parser.error("--fixture_dir is its own target")
     return
-  if len(targets) != 1:
+  derived = not targets and bool(args.relationships_uri)
+  if len(targets) != 1 and not derived:
     given = ", ".join(targets) or "none"
-    parser.error("name exactly one of --job_id, --run_id, --tables "
-                 f"(given: {given})")
+    parser.error("name exactly one of --job_id, --run_id, --tables, or "
+                 f"--relationships_uri alone (given: {given})")
   if not args.project:
     parser.error("--project is required")
   if args.job_id and not args.region:
     parser.error("--job_id needs --region: a Dataflow job is only visible "
                  "in the region it ran in")
   datasets = (args.landing_dataset, args.reference_dataset)
-  if args.tables and not all(datasets):
-    parser.error("--tables needs --landing_dataset and --reference_dataset")
-  if not args.tables and any(datasets):
+  if (args.tables or derived) and not all(datasets):
+    parser.error("--tables, or --relationships_uri alone, needs "
+                 "--landing_dataset and --reference_dataset")
+  if not (args.tables or derived) and any(datasets):
     parser.error("--landing_dataset and --reference_dataset apply to "
-                 "--tables only")
+                 "--tables, or to --relationships_uri alone, only")
 
 
 def _check_planning(parser: argparse.ArgumentParser,

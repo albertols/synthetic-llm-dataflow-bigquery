@@ -216,6 +216,7 @@ from sdfb_evaluation.context.plan import (
 from sdfb_evaluation.context.relationships import (
     RelationshipError,
     RelModel,
+    generation_order,
     load_models,
 )
 from sdfb_evaluation.context.runs import runs_for
@@ -429,6 +430,81 @@ def launch_request(
   return args.job_id, (manual or None)
 
 
+class TargetCheckError(ValueError):
+  """The tables a relationship model names cannot be evaluated: a landing
+  or source table is missing, empty or does not match its twin. The
+  message lists every problem, so one run shows them all."""
+
+
+_TARGET_PROBLEMS_SHOWN = 5
+
+
+def derived_tables(models: Sequence[RelModel]) -> list[str]:
+  """The ENABLED tables of `models`, parents first (the order the
+  generation ran them): what `--relationships_uri` alone evaluates."""
+  enabled = tuple(name for model in models
+                  for name, rel in model.tables.items() if rel.enabled)
+  return list(generation_order(models, enabled))
+
+
+def _column_names(meta: Mapping[str, Any]) -> set[str]:
+  return {str(f["name"]) for f in meta.get("schema") or ()}
+
+
+def _table_problems(bq: Any, name: str, landing: str, source: str) -> list[str]:
+  """What is wrong with one landing/source pair, as sentences."""
+  found: dict[str, Mapping[str, Any]] = {}
+  problems: list[str] = []
+  for role, fqn in (("landing", landing), ("source", source)):
+    try:
+      found[role] = bq.table(fqn)
+    except (PermissionError, LookupError, BqApiError) as exc:
+      problems.append(f"{name}: the {role} table {fqn} could not be read "
+                      f"({exc})")
+  for role, meta in found.items():
+    if meta.get("numRows") == 0:
+      problems.append(f"{name}: the {role} table is empty")
+  if "landing" in found and "source" in found:
+    missing = sorted(
+        _column_names(found["source"]) - _column_names(found["landing"]))
+    if missing:
+      shown = ", ".join(missing[:_TARGET_PROBLEMS_SHOWN])
+      problems.append(f"{name}: the landing table lacks source column(s) "
+                      f"{shown}")
+  return problems
+
+
+def _derive_targets(args: argparse.Namespace, bq: Any) -> None:
+  """`--relationships_uri` alone names the tables (module docstring): sets
+  `args.tables` to the model's enabled tables, parents first, after
+  checking each landing table against its source twin in
+  `--reference_dataset`. Any other target is left alone.
+
+  Raises:
+    RelationshipError: the URI holds no usable model.
+    TargetCheckError: the model enables no table, or a table fails the
+      check (every problem is listed).
+  """
+  if (args.tables or args.job_id or args.run_id or args.fixture_dir or
+      not args.relationships_uri):
+    return
+  names = derived_tables(load_models(args.relationships_uri))
+  if not names:
+    raise TargetCheckError(
+        f"{args.relationships_uri}: the relationship model enables no table")
+  landing = qualified_dataset(args.landing_dataset, args.project)
+  reference = qualified_dataset(args.reference_dataset, args.project)
+  problems = [
+      problem for name in names for problem in _table_problems(
+          bq, name, f"{landing}.{name}", f"{reference}.{name}")
+  ]
+  if problems:
+    raise TargetCheckError(
+        "the tables of the relationship model cannot be evaluated: " +
+        "; ".join(problems))
+  args.tables = names
+
+
 def _resolve(args: argparse.Namespace, env: Env, bq: Any) -> LaunchContext:
   job_id, manual = launch_request(args)
   if args.run_id and not args.job_id and not args.tables:
@@ -558,6 +634,7 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
         runner=args.runner,
         now=attempt.now,
         evaluation_id=attempt.evaluation_id)
+  _derive_targets(args, bq)
   attempt.launch = _resolve(args, env, bq)
   planning_bq = bq
   if getattr(args, "no_planning_snapshots", False):

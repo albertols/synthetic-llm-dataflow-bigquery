@@ -73,6 +73,14 @@ generation job ends (the sensor waits for it, hours), and the DAG has
 generation at a time. `max_active_runs` is the knob; raising it lets several
 generation jobs run at once (mind the GPU quota). It is unchanged here.
 
+`trigger_evaluation` names the tables from the relationship model
+(`relationships_uri`) and says where they are: `landing_dataset` is the
+generation's own, `reference_dataset` the `source_dataset` param (else the
+dataset of `table_fqn`). The evaluation therefore reads neither the job's log
+nor BigQuery job labels, and the service account needs no
+`roles/logging.viewer`; the cost is that the registry row carries no
+generation window and no link to the generation job.
+
 `trigger_evaluation` submits the job and does not wait: the evaluation job
 writes its own FINAL registry row. A job that dies after it was launched
 leaves its RUNNING row open; `composer/evaluation_framework.py`, the
@@ -549,6 +557,16 @@ default_dag_params = {
             description="Only with run_evaluation. maxWorkers of the "
             "evaluation job.",
         ),
+    "source_dataset":
+        Param(
+            default="",
+            type="string",
+            description="Only with run_evaluation. The dataset (or "
+            "project.dataset) holding the SOURCE tables the evaluation "
+            "compares the landed ones against; every table of the "
+            "relationship model must have its source there under the same "
+            "name. Empty: the dataset of table_fqn.",
+        ),
     "evaluation_output_dataset":
         Param(
             default=evaluation_output_dataset_default,
@@ -820,12 +838,27 @@ with models.DAG(
               # The launcher supplies runner, project and region itself and
               # the image carries its worker image coordinate.
               "parameters": {
-                  "sdfb_job": "evaluation",
-                  "generation_job_id": generation_job_id,
-                  "trigger": "chained",
-                  "mode": "{{ params.evaluation_mode }}",
-                  "output_dataset": "{{ params.evaluation_output_dataset }}",
-                  "disk_size_gb": EVALUATION_WORKER_DISK_GB,
+                  "sdfb_job":
+                      "evaluation",
+                  # No job lookup, so no read of the job's log: the
+                  # relationship model names the tables, the landing dataset
+                  # is the generation's own, the source dataset a param.
+                  "relationships_uri":
+                      "{{ params.relationships_uri }}",
+                  # the dataset of the generation's landing table, whatever
+                  # table name that placeholder ends in
+                  "landing_dataset":
+                      "{{ '{{SDFB_LANDING_TABLE}}'.rsplit('.', 1)[0] }}",
+                  "reference_dataset":
+                      "{{ params.source_dataset or params.table_fqn.rsplit('.', 1)[0] }}",
+                  "trigger":
+                      "chained",
+                  "mode":
+                      "{{ params.evaluation_mode }}",
+                  "output_dataset":
+                      "{{ params.evaluation_output_dataset }}",
+                  "disk_size_gb":
+                      EVALUATION_WORKER_DISK_GB,
               },
           }
       },
