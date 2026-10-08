@@ -827,7 +827,8 @@ with models.DAG(
   # The evaluation: a second Dataflow job from the SAME template as the
   # generation above. `sdfb_job` selects the evaluator's entry in the image.
   # What to evaluate is named by the launched table and the relationship model
-  # and read whole (scope manual): no job id, no read of the job's log.
+  # and read whole (scope manual). The job id is only the launch's identity:
+  # the evaluator reads the Dataflow job for its window, never the job's log.
   # Submitted and not waited for, like the generation: the job writes its own
   # FINAL row.
   trigger_evaluation = DataflowStartFlexTemplateOperator(

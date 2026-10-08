@@ -459,8 +459,10 @@ flowchart LR
   includes earlier launches' rows. A landing table named differently from its
   source is not found. It is a CPU job (no
   accelerator) in the generation job's subnetwork, under the same service
-  account, which therefore needs the evaluator's roles, but not the three
-  that read a job ([`DEPLOYMENT_PREREQUISITES.md`](../../docs/DEPLOYMENT_PREREQUISITES.md)).
+  account, which therefore needs the evaluator's roles; of the three that
+  read a job, only `roles/dataflow.viewer`, for the generation window
+  (without it the run still works, with a warning and no window)
+  ([`DEPLOYMENT_PREREQUISITES.md`](../../docs/DEPLOYMENT_PREREQUISITES.md)).
   The relationship models are read from `relationships_uri`; the default
   folder is in the same image.
 - It submits the job and does not wait: the evaluation job writes its own
