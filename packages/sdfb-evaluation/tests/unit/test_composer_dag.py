@@ -761,7 +761,10 @@ def test_a_conf_is_the_runs_params_with_its_one_id_and_no_list():
   for conf, job_id in zip(confs, [_A, _B, _C], strict=True):
     assert conf["generation_job_id"] == job_id
     assert conf["generation_job_ids"] == []  # a child never fans out again
-    others = set(run) - {"generation_job_id", "generation_job_ids"}
+    assert conf["seed_table"] == ""  # ... and never inherits the seed
+    others = set(run) - {
+        "generation_job_id", "generation_job_ids", "seed_table"
+    }
     assert {
         name: conf[name] for name in others
     } == {
@@ -772,6 +775,7 @@ def test_a_conf_is_the_runs_params_with_its_one_id_and_no_list():
   # the run's own params are not touched
   assert run["generation_job_ids"] == [_A, _B]
   assert run["generation_job_id"] == _C
+  assert run["seed_table"] == "orders"
   # ... and a child's conf, fed back, proceeds on the single-target path
   for conf in confs:
     assert _fan_out_scope()["_fan_out_confs"](conf) == []
@@ -1482,6 +1486,7 @@ def test_a_marker_that_is_not_a_table_gives_empty_defaults():
     assert defaults["seed_table"] == ""
     assert defaults["landing_dataset"] == ""
     assert defaults["source_dataset"] == ""
+    assert defaults["validation_runs_table"] == ""
   _, scope = _standalone_scope(**_MARKERS)
   assert scope["_dataset_of"]("a.b.c") == "a.b"
   assert scope["_table_name_of"]("a.b.c") == "c"
@@ -1534,6 +1539,29 @@ def test_shape_4_a_run_id_or_tables_beat_the_default_seed():
   assert by_tables.seed_table is None and by_tables.scope == "manual"
   assert by_tables.landing_dataset == "demo-project.thelook_synthetic"
   assert by_tables.reference_dataset == "demo-project.thelook_source"
+
+
+def test_a_run_id_or_tables_next_to_a_job_id_is_refused_by_the_evaluator():
+  """The DAG renders what was typed; which combinations are legal is the
+  evaluator's own rule, and it refuses two targets."""
+  for given in ({"run_id": "thelook-0913-a1b2c3"}, {"tables": "users,orders"}):
+    with pytest.raises(SystemExit):
+      _parsed(_rendered_launch(generation_job_id=_A, **given))
+
+
+def test_a_fanned_out_run_is_the_full_lookup_of_its_own_job():
+  """The jobs of a list may have launched different tables, so a started
+  run does not inherit the default seed: it is shape 3 for its one job,
+  never every job against the same table."""
+  run = {**_default_params(**_MARKERS), "generation_job_ids": [_A, _B]}
+  assert run["seed_table"] == "orders"
+  confs = _fan_out_scope()["_fan_out_confs"](run)
+  assert [conf["seed_table"] for conf in confs] == ["", ""]
+  for conf, job_id in zip(confs, [_A, _B], strict=True):
+    args = _parsed(_rendered_launch(**conf))
+    assert (args.job_id, args.seed_table) == (job_id, None)
+    assert args.landing_dataset is None and args.reference_dataset is None
+    assert args.scope == "auto"
 
 
 def test_explicit_values_beat_the_defaults():

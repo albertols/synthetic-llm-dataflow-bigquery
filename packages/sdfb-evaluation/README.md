@@ -566,23 +566,34 @@ flowchart LR
 
 | Param | Default | Goes to |
 |---|---|---|
-| `generation_job_id` | empty | template `job_id`; the sensor's job |
+| `generation_job_id` | empty | template `generation_job_id`; the sensor's job |
 | `generation_job_ids` | empty list | `fan_out`: one run of this DAG per id |
-| `run_id`, `tables`, `landing_dataset`, `reference_dataset`, `relationships_uri` | empty | the template parameter of the same name |
+| `seed_table` | the table name of `{{SDFB_DEFAULT_TABLE_FQN}}` | template `seed_table`; not passed when `run_id` or `tables` is given |
+| `run_id`, `tables`, `relationships_uri` | empty | the template parameter of the same name |
+| `landing_dataset` | the `project.dataset` of `{{SDFB_LANDING_TABLE}}` | template `landing_dataset`, only with a seed or `tables` |
+| `source_dataset` | the `project.dataset` of `{{SDFB_DEFAULT_TABLE_FQN}}` | template `reference_dataset`, only with a seed or `tables` |
+| `reference_dataset` | empty | when set, it replaces `source_dataset` |
+| `scope` | empty | template `scope`: the value, else `manual` with a seed or `tables`, else left to the evaluator (`auto`) |
+| `reference_rows_limit` | 10000 (the generation DAG's) | template `reference_rows_limit` |
+| `validation_runs_table` | `{{SDFB_VALIDATION_RUNS_TABLE}}` | template `validation_runs_table` |
 | `mode` | empty (`exact`, `sampled`) | template `mode` |
 | `allow_contaminated` | false | template `allow_contaminated` (lower-case) |
 | `output_dataset` | `synthetic_data_quality` | template `output_dataset`; the registry the callback writes |
 | `trigger` | `composer` (`chained`) | template `trigger` |
 | `wait_for_generation` | false | the `wait_gate` short-circuit |
-| `machine_type`, `max_workers` | `e2-standard-8`, 4 | the launch environment, not the template |
+| `machine_type`, `max_workers` | `e2-standard-8`, 4 | the launch environment (the workers), not the template |
+| `launcher_machine_type` | `e2-standard-8` | the launch environment (`launcherMachineType`, the launcher VM), not the template |
 
-Exactly one of `generation_job_id`, `run_id`, `tables` names the target; the
-launcher refuses otherwise. The DAG never passes `runner`, `project`,
-`region`, `sdk_container_image`, `experiments` or `fail_on`.
+The target is one of the four shapes above: a seed (with or without the job
+id that gives it its identity), a job id alone, a `run_id`, or `tables`. The
+evaluator's own parser decides what is legal and refuses the rest (a
+`run_id` or `tables` next to a `generation_job_id` is two targets). The DAG
+never passes `runner`, `project`, `region`, `sdk_container_image`,
+`experiments` or `fail_on`.
 
-With `wait_for_generation` true (and a `generation_job_id`) a deferrable
-`DataflowJobStatusSensor` waits for `JOB_STATE_DONE` first; with it false the
-gate skips the sensor and the launch still runs.
+With `wait_for_generation` true (and a `generation_job_id`) a
+`DataflowJobStatusSensor` in `reschedule` mode waits for `JOB_STATE_DONE`
+first; with it false the gate skips the sensor and the launch still runs.
 
 **Several jobs in one go.** Give `generation_job_ids` on one manual run (a
 list of Dataflow job ids; in the trigger form, one id per line):
@@ -592,10 +603,14 @@ list of Dataflow job ids; in the trigger form, one id per line):
 | empty | empty or one id | evaluates its one target, as a run always did |
 | one id or more | empty or one id | `fan_out` starts one run of this DAG per id (the list, then the single id; blanks and repeats dropped) and skips the rest of its own run |
 
-Each started run gets the triggering run's other params unchanged, its one
-id as `generation_job_id` and an empty list, so it is a plain single-job run:
-one Dataflow job per id, with the sensor, the launch and the failure
-callback described here. Leave `run_id` and `tables` empty with a list (the
+Each started run gets its one id as `generation_job_id`, an empty list, an
+EMPTY `seed_table` and the triggering run's other params unchanged, so it is
+a plain single-job run: one Dataflow job per id, with the sensor, the launch
+and the failure callback described here. The seed is not handed down because
+the jobs of a list may have launched different tables: each started run is
+the full lookup of its own job (shape 3, with the roles that needs). To
+evaluate several jobs by the seed path, trigger one run per job. Leave
+`run_id` and `tables` empty with a list (the
 started runs would carry them and the launcher refuses two targets). The run
 ids are `fan_out__<logical date>__<job id>`, so clearing `fan_out` does not
 start a job's run twice.
@@ -606,12 +621,13 @@ evaluation Dataflow jobs at the same time, each with its own workers, and
 two runs on the same target can then close each other's registry row. Like
 the rest of the DAG, the fan-out has not been parsed or run by Airflow.
 
-**Failure callback.** The launch task waits for the job (deferrably). The
+**Failure callback.** The launch task waits for the job
+(`wait_until_finished=True`; it holds a worker slot meanwhile). The
 launcher writes the RUNNING registry row before submitting and mints the
 `evaluation_id`; a job that dies afterwards leaves only that row. The task's
 `on_failure_callback` closes it, but only when the job cannot close it
-itself. A task can fail on the Airflow side (a deferral timeout, a lost
-trigger) while its Dataflow job runs on and later writes its own FINAL row,
+itself. A task can fail on the Airflow side (a killed or timed-out task, a
+lost worker) while its Dataflow job runs on and later writes its own FINAL row,
 so the callback first reads the job's state through the provider's
 `DataflowHook.get_job`, with the job id the launch pushed to XCom (the
 task's return value, else the `dataflow_job_config` entry the operator
@@ -652,8 +668,9 @@ Limits to know before the first launch:
 - Unverified until a real launch: `maxWorkers` is passed as the rendered string
   of `max_workers` (and of `evaluation_max_workers` in the generation DAG;
   proto3 JSON should accept a numeric string for an int32; native rendering
-  DAG-wide would turn digit-only run ids into ints), the deferrable wait
-  semantics of the installed provider, the DML on real BigQuery,
+  DAG-wide would turn digit-only run ids into ints), what
+  `wait_until_finished=True` does in the installed provider when the job
+  fails, the DML on real BigQuery,
   `BigQueryHook().insert_job(configuration=, project_id=)` and the job's
   `result()` in the failure callback (written from the operator's documented
   behaviour; the provider was not available to read), a trigger's conf
@@ -672,7 +689,7 @@ Limits to know before the first launch:
   started runs queueing behind `max_active_runs`. A list of job ids together
   with `run_id` or `tables` fails the first task with one message.
 - Also unverified until Composer, for the callback's job-state check: that a
-  failed deferrable launch has pushed the job to XCom by the time the
+  failed launch has pushed the job to XCom by the time the
   callback runs (as `{"job_id": ...}` under the key `dataflow_job_config`;
   the key and shape are unverified against a real provider, and the return
   value's `id` is most likely absent for a task that raised), that `DataflowHook().get_job(job_id=, project_id=,

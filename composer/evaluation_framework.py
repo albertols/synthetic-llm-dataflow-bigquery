@@ -119,11 +119,16 @@ Task graph::
 
 Several generation jobs in one go: give `generation_job_ids` (a list) on one
 manual run. `fan_out`, the first task, then starts one run of THIS DAG per
-id (each with that id as its `generation_job_id` and the run's other params
-unchanged) and skips the rest of its own run. Every job is so evaluated by
-its own run, one Dataflow job per id, on the single-target path above: the
-sensor, the launch and the failure callback never see a list. Without the
-list `fan_out` passes and the run is the single-target run it always was.
+id (each with that id as its `generation_job_id`, `seed_table` EMPTIED and
+the run's other params unchanged) and skips the rest of its own run. Every
+job is so evaluated by its own run, one Dataflow job per id, on the
+single-target path above: the sensor, the launch and the failure callback
+never see a list. The seed is not handed down because the jobs of a list may
+have launched different tables: each started run is the full lookup (shape
+3: the job's own tables, read from its log; it needs the roles that read a
+job). To evaluate several jobs by the seed path, trigger one run per job.
+Without the list `fan_out` passes and the run is the single-target run it
+always was.
 
     generation_job_ids   generation_job_id    what the run does
     ───────────────────  ───────────────────  ──────────────────────────────
@@ -145,9 +150,9 @@ The launcher writes the RUNNING registry row, mints the evaluation id and
 submits the job; the pipeline writes the FINAL row. A job that dies after
 submission leaves only the RUNNING row, so a failed launch task closes it
 with a FAILED row (`_close_running_row`) — but only when the job cannot
-write its own: the task can fail on the Airflow side (a deferral timeout, a
-lost trigger, a cleared task) while the Dataflow job runs on, and a FAILED
-row written then would be followed by the job's FINAL row. The callback
+write its own: the task can fail on the Airflow side (a killed or timed-out
+task, a lost worker, a cleared task) while the Dataflow job runs on, and a
+FAILED row written then would be followed by the job's FINAL row. The callback
 reads the job's state first (`_job_state`) and writes nothing while the job
 is not in a terminal state other than done (`_callback_closes_row`).
 """
@@ -293,7 +298,10 @@ def _fan_out_confs(params):
   the list there is nothing to fan out and the result is empty: the run is a
   single-target run (by `generation_job_id`, `run_id` or `tables`). Otherwise
   each conf is the run's params with `generation_job_id` set to its one id
-  and `generation_job_ids` emptied, so the run it starts never fans out again.
+  and `generation_job_ids` emptied, so the run it starts never fans out again,
+  and with `seed_table` emptied: the jobs of a list may have launched
+  different tables, so each is evaluated by the full lookup (its own tables,
+  from its own records), never all of them against the one default seed.
 
   A list together with `run_id` or `tables` is refused with one message
   (ValueError): each child run would otherwise start and its launcher refuse
@@ -320,7 +328,8 @@ def _fan_out_confs(params):
   shared = {name: params[name] for name in params}
   return [{
       **shared, "generation_job_id": job_id,
-      "generation_job_ids": []
+      "generation_job_ids": [],
+      "seed_table": ""
   } for job_id in job_ids]
 
 
@@ -535,7 +544,9 @@ default_dag_params = {
             items={"type": "string"},
             description="Several generation jobs' Dataflow ids. Each id is "
             "evaluated by its own run of this DAG, one Dataflow job per id, "
-            "one after another; this run only starts them. Leave run_id and "
+            "one after another; this run only starts them. seed_table is not "
+            "handed to them: each is the full lookup of its own job (shape "
+            "3, needs the roles that read a job's log). Leave run_id and "
             "tables empty with it.",
         ),
     "seed_table":
@@ -553,7 +564,8 @@ default_dag_params = {
             default="",
             type="string",
             description="Shape 4: the generation launch's base run id, read "
-            "from validation_runs. Overrides seed_table.",
+            "from validation_runs. Overrides seed_table. Leave "
+            "generation_job_id empty with it (one target).",
         ),
     "tables":
         Param(
@@ -561,7 +573,8 @@ default_dag_params = {
             type="string",
             description="Shape 4: landing table names, comma-separated, "
             "parents first, read in landing_dataset and compared with "
-            "reference_dataset (or source_dataset). Overrides seed_table.",
+            "reference_dataset (or source_dataset). Overrides seed_table. "
+            "Leave generation_job_id empty with it (one target).",
         ),
     "landing_dataset":
         Param(

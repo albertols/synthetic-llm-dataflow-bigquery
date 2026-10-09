@@ -2156,7 +2156,7 @@ flowchart LR
 - **The wait** is a sensor on the generation job's id (from the launch
   task's XCom) in reschedule mode: between two reads of the job's state
   the task holds no worker slot, and no triggerer is needed. It is
-  stated as not deferrable. It reads the state every two minutes for at
+  not deferrable. It reads the state every two minutes for at
   most a day.
 - **The launch** is a second launch of the generation template, with
   `sdfb_job=evaluation`, `generation_job_id` (the launch's identity: only the
@@ -2225,10 +2225,12 @@ flowchart LR
 - **Several jobs in one go.** `generation_job_ids` is a list. With an id
   in it, the first task starts one run of this same DAG per id (the
   list, then the single `generation_job_id`; blanks and repeats dropped;
-  each run gets the other parameters unchanged and an empty list) and
-  skips the rest of its own run. Every job is so evaluated by its own
-  run on the single-job path, which the sensor, the launch and the
-  callback never see as a list. The runs go one after another, because
+  each run gets an empty list, an empty `seed_table` and the other
+  parameters unchanged) and skips the rest of its own run. Every job is
+  so evaluated by its own run on the single-job path, which the sensor,
+  the launch and the callback never see as a list. The seed is not handed
+  down: the jobs of a list may have launched different tables, so each
+  started run is the full lookup of its own job. The runs go one after another, because
   the DAG allows one active run; raising that limit runs several
   evaluation jobs at the same time.
 - **The failure callback closes the open row, when the job cannot.** The
@@ -2249,8 +2251,9 @@ flowchart LR
 
 Unverified until a real environment: the reschedule-mode sensor and what
 it does when the generation job fails or is cancelled (the provider's
-source was not available to read), the deferrable wait of the standalone
-DAG, the DML, the callback's operator call, the job id in XCom and the
+source was not available to read), the launch task's wait
+(`wait_until_finished`) of the standalone DAG, the DML, the callback's
+operator call, the job id in XCom and the
 hook's job read that the callback's state check relies on, a worker count
 rendered as a string, how a trigger's configuration reaches the task, and
 the DAG re-triggering itself. The README lists them.
