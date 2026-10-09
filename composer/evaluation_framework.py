@@ -21,8 +21,38 @@ DAG params — operators never re-import the DAG to change them.
 The deployment does not need this DAG to evaluate a run: the generation DAG
 (`composer/synthetic_beam_bigquery.py`) evaluates its own run when
 `run_evaluation` is True. Import this one to evaluate a run that has already
-finished (by job id, by run id, or by tables), and to have a launch that
-waits for its job and closes the registry row when the job dies.
+landed ON ITS OWN: to re-evaluate it for any reason, or because the generation
+DAG ran without `run_evaluation`; and to have a launch that waits for its job
+and closes the registry row when the job dies. Nothing is generated again.
+
+It evaluates the way the generation DAG's chained launch does (the "seed
+path"): the launched table (`seed_table`) and its enabled group of tables in
+the relationship model, or that table alone, each landing table read whole
+(`scope=manual`), compared with the table of the same name in the source
+dataset. That path reads NO job log and no BigQuery job metadata, so its
+service account needs no `roles/logging.viewer` and no
+`roles/bigquery.resourceViewer`. Four shapes of trigger, each a legal launch:
+
+    1. re-evaluate a landed run without reading logs: leave `seed_table` and
+       the datasets as the import filled them, and give `generation_job_id`
+       when it is known. The job id is then only the launch's identity: the
+       evaluator reads the Dataflow job for its window (needs
+       `roles/dataflow.viewer`; without it, a warning and no window) and one
+       query on `validation_runs_table` for this launch's rows, whose digest
+       verifies the reference sample.
+    2. a landed run whose job id is unknown: `seed_table` alone. No identity,
+       no window, so the reference sample cannot be verified and the metrics
+       that compare with it are "not evaluated" (the reason is on the row).
+    3. the full lookup: `generation_job_id` alone, `seed_table` EMPTIED. The
+       evaluator then reads the job's log and BigQuery job metadata (needs
+       `roles/logging.viewer`, `roles/dataflow.viewer` and
+       `roles/bigquery.resourceViewer`).
+    4. `run_id`, or `tables` (with the datasets): the older shapes. A
+       `run_id` or `tables` typed means the seed is not passed; the rendered
+       launch is legal without blanking anything.
+
+The evaluator's own parser decides which combinations are legal
+(`sdfb-eval run --help`); this DAG only renders the values.
 
 One image, one template (ADR 0041, amendment of 2026-10-06). The evaluation
 launches from the SAME Flex Template as generation,
@@ -48,10 +78,37 @@ substitutes for the generation DAG; run the same substitution on this file):
   {{ENV}}                     dev | uat | prd
   {{GCS_DATAFLOW_STAGING}}    <env>-…-dataflow-staging bucket name
   {{GCS_DATAFLOW_TEMPLATES}}  <env>-…-dataflow-templates bucket name
+  {{SDFB_DEFAULT_TABLE_FQN}}  project.dataset.table: the default of
+                              `seed_table` (its last part) and of
+                              `source_dataset` (the rest)
+  {{SDFB_LANDING_TABLE}}      project.synthetic_data.<table>: the default of
+                              `landing_dataset` (its project.dataset)
+  {{SDFB_VALIDATION_RUNS_TABLE}} project.synthetic_data_quality.validation_runs:
+                              the default of `validation_runs_table`
+A marker that is not a three-part table name (this file before the import)
+gives an empty default, not a wrong one.
 
 Runtime values: Airflow DAG params ({{ params.* }}) + Airflow Variables for
 infra (PROJECT_ID, REGION, DATAFLOW_SUBNET, SA_DATAFLOW, and the optional
 DATAFLOW_NETWORK_TAGS).
+
+Only arguments known to work: no task passes `deferrable` (a constructor
+argument of recent Google provider releases, and it needs a triggerer: an
+environment without either rejects the DAG when it parses it). The sensor
+waits in `reschedule` mode, and the launch keeps `wait_until_finished=True`
+so a job that fails after launch fails the task and the failure callback
+closes the RUNNING row. The cost: the launch task holds a worker slot while
+the evaluation job runs. No triggerer is needed.
+
+The launcher: a Flex Template launch has 12 minutes in total, the pull of
+the (multi-GB) image included ("By default, the Flex Template launch process
+has a timeout of 12 mins",
+https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates,
+"Polling timeout errors"), and everything before the Dataflow job exists runs
+on the launcher VM, planning included. `launcher_machine_type` (REST field
+`environment.launcherMachineType`) picks that VM; a larger one pulls faster.
+The public REST description has no field for the launcher's timeout (gcloud
+has `--launcher-vm-timeout-secs`), so it cannot be set from this DAG.
 
 Task graph::
 
@@ -148,6 +205,34 @@ _job_name_prefix = f"{app_name}-evaluation-v{project_version.replace('.', '-').l
 # no disk size, so the launch passes Beam's own --disk_size_gb. 200 is what
 # the generator pins for its own workers on that image.
 EVALUATION_WORKER_DISK_GB = "200"
+
+# The generation's tables, from markers the generation DAG already uses. The
+# defaults of `seed_table`, `source_dataset`, `landing_dataset` and
+# `validation_runs_table` come from them.
+default_table_fqn = "{{SDFB_DEFAULT_TABLE_FQN}}"  # project.dataset.table
+landing_table = "{{SDFB_LANDING_TABLE}}"  # project.synthetic_data.<table>
+validation_runs_table = "{{SDFB_VALIDATION_RUNS_TABLE}}"
+_QUALIFIED_TABLE_PARTS = 3  # project, dataset, table
+
+
+def _dataset_of(table):
+  """`project.dataset` of a `project.dataset.table`, else "" (a marker the
+  import has not substituted is not a table)."""
+  parts = table.split(".")
+  return ".".join(parts[:2]) if len(parts) == _QUALIFIED_TABLE_PARTS else ""
+
+
+def _table_name_of(table):
+  """The last part of a `project.dataset.table`, else ""."""
+  parts = table.split(".")
+  return parts[2] if len(parts) == _QUALIFIED_TABLE_PARTS else ""
+
+
+# How the sensor waits: one status read every two minutes, for at most a day
+# (the longest generation runs take hours); between reads the task is
+# rescheduled and holds no worker slot.
+GENERATION_POKE_SECONDS = 120
+GENERATION_TIMEOUT_SECONDS = 86400
 
 network_tag_experiments = ([
     f"use_network_tags={network_tags}",
@@ -424,9 +509,10 @@ def _close_running_row(context):
 
 
 # -----------------------------------------------------------------------------
-# DAG params — runtime-overridable on every trigger. Exactly one target
-# (generation_job_id | run_id | tables) must be non-empty; the launcher refuses
-# otherwise. Empty means "not given" for the optional template parameters.
+# DAG params — runtime-overridable on every trigger. The target is one of the
+# four shapes of the header; the launch renders each param (see `parameters`
+# below) so that a plain trigger of any shape is a legal launch. Empty means
+# "not given" for the optional template parameters.
 # `generation_job_ids` is not a target of a launch: it makes the run start one
 # single-target run per id (header).
 # -----------------------------------------------------------------------------
@@ -435,8 +521,12 @@ default_dag_params = {
         Param(
             default="",
             type="string",
-            description="Target: the generation job's Dataflow id. Empty when "
-            "targeting by run_id or tables.",
+            description="The generation job's Dataflow id. Shape 1: with "
+            "seed_table it is only the launch's identity: its window and "
+            "the job it belongs to (needs roles/dataflow.viewer; no job log "
+            "is read). Shape 3, the full lookup: alone, with seed_table "
+            "EMPTIED (needs the roles that read a job's log). Empty when the "
+            "job is unknown (shape 2) or targeting by run_id or tables.",
         ),
     "generation_job_ids":
         Param(
@@ -448,37 +538,102 @@ default_dag_params = {
             "one after another; this run only starts them. Leave run_id and "
             "tables empty with it.",
         ),
+    "seed_table":
+        Param(
+            default=_table_name_of(default_table_fqn),
+            type="string",
+            description="Shapes 1 and 2: the table a generation launched "
+            "(default: the import's default table). Evaluates its enabled "
+            "group of tables in the relationship model (relationships_uri), "
+            "or that table alone. EMPTY it for the full lookup (shape 3). "
+            "Ignored when run_id or tables is given.",
+        ),
     "run_id":
         Param(
             default="",
             type="string",
-            description="Target: the generation launch's base run id.",
+            description="Shape 4: the generation launch's base run id, read "
+            "from validation_runs. Overrides seed_table.",
         ),
     "tables":
         Param(
             default="",
             type="string",
-            description="Target: landing table names, comma-separated, parents "
-            "first. Needs landing_dataset and reference_dataset.",
+            description="Shape 4: landing table names, comma-separated, "
+            "parents first, read in landing_dataset and compared with "
+            "reference_dataset (or source_dataset). Overrides seed_table.",
         ),
     "landing_dataset":
         Param(
-            default="",
+            default=_dataset_of(landing_table),
             type="string",
-            description="With tables: the dataset the tables landed in.",
+            description="Where the synthetic tables landed, dataset or "
+            "project.dataset (default: the import's landing dataset). Each "
+            "table is read as <landing_dataset>.<its source name>, so a "
+            "landing table named differently from its source is not found. "
+            "Used with seed_table or tables.",
+        ),
+    "source_dataset":
+        Param(
+            default=_dataset_of(default_table_fqn),
+            type="string",
+            description="Where the SOURCE tables are, dataset or "
+            "project.dataset (default: the import's default table's "
+            "dataset). Each landed table is compared with the table of the "
+            "same name here. Used with seed_table or tables; "
+            "reference_dataset, when set, wins.",
         ),
     "reference_dataset":
         Param(
             default="",
             type="string",
-            description="With tables: the dataset of their sources.",
+            description="An explicit override of source_dataset (the same "
+            "meaning). Empty: source_dataset is used.",
         ),
     "relationships_uri":
         Param(
             default="",
             type="string",
-            description="The relationship model file or directory (gs://), "
-            "when the launch's own cannot be found.",
+            description="The relationship model file or directory (gs://). "
+            "With seed_table it is where the seed's group of tables is read; "
+            "empty, or a folder with no model file, evaluates the seed "
+            "alone. For a multi-table run, give the model the generation "
+            "used.",
+        ),
+    "scope":
+        Param(
+            default="",
+            type="string",
+            enum=[
+                "", "auto", "table", "as_of", "appends", "as_of_diff", "manual"
+            ],
+            description="How the landing rows are isolated. Empty (default): "
+            "manual when seed_table or tables is used (each landing table is "
+            "read WHOLE: with write_disposition append that includes earlier "
+            "launches' rows), else the evaluator's own choice (auto) for a "
+            "job id alone.",
+        ),
+    "reference_rows_limit":
+        Param(
+            default=10000,
+            type="integer",
+            minimum=1,
+            description="The generation's reference sample size (the value "
+            "the generation DAG passes): it sizes the reference panel behind "
+            "the privacy metrics and limits nothing that is compared. It "
+            "must equal the generation's.",
+        ),
+    "validation_runs_table":
+        Param(
+            default=validation_runs_table
+            if _dataset_of(validation_runs_table) else "",
+            type="string",
+            description="The generator's validation-runs table "
+            "(project.dataset.table). With a known job (shape 1), this "
+            "launch's rows of it verify the rebuilt reference sample, so the "
+            "reference-based privacy metrics are evaluated; without it, or "
+            "without the job's window, they are not evaluated and the row "
+            "says why. Needs read on the table.",
         ),
     "mode":
         Param(
@@ -517,22 +672,34 @@ default_dag_params = {
         Param(
             default=False,
             type="boolean",
-            description="Wait (deferrable sensor) for the generation job to "
-            "reach JOB_STATE_DONE before launching. Needs generation_job_id.",
+            description="Wait (a sensor in reschedule mode) for the "
+            "generation job to reach JOB_STATE_DONE before launching. Needs "
+            "generation_job_id.",
         ),
     "machine_type":
         Param(
             default="e2-standard-8",
             type="string",
             description="Dataflow worker machine type (CPU; the evaluator "
-            "needs no GPU).",
+            "needs no GPU). Default e2-standard-8.",
+        ),
+    "launcher_machine_type":
+        Param(
+            default="e2-standard-8",
+            type="string",
+            description="Machine type of the Flex Template LAUNCHER VM, which "
+            "pulls the multi-GB image and plans the evaluation before the "
+            "Dataflow job exists, all inside Google's 12-minute launch "
+            "limit. A larger one pulls faster. The limit itself cannot be "
+            "set from a DAG. Default e2-standard-8.",
         ),
     "max_workers":
         Param(
             default=4,
             type="integer",
             minimum=1,
-            description="Dataflow maxWorkers.",
+            description="Dataflow maxWorkers: the most workers the "
+            "evaluation job may use. Default 4.",
         ),
 }
 
@@ -569,7 +736,9 @@ with models.DAG(
       expected_statuses={"JOB_STATE_DONE"},
       project_id=project_id,
       location=region,
-      deferrable=True,
+      mode="reschedule",
+      poke_interval=GENERATION_POKE_SECONDS,
+      timeout=GENERATION_TIMEOUT_SECONDS,
   )
 
   start_evaluation = DataflowStartFlexTemplateOperator(
@@ -598,7 +767,13 @@ with models.DAG(
                       "env": env_name,
                       "dag": DAG_ID,
                   },
+                  # How Dataflow runs the job. machineType / maxWorkers are
+                  # the WORKERS; launcherMachineType is the launcher VM that
+                  # pulls the image and plans before the job exists (the
+                  # 12-minute launch limit includes both; no field sets the
+                  # limit itself in the public REST description).
                   "machineType": "{{ params.machine_type }}",
+                  "launcherMachineType": "{{ params.launcher_machine_type }}",
                   "maxWorkers": "{{ params.max_workers }}",
                   "workerRegion": region,
               },
@@ -611,20 +786,56 @@ with models.DAG(
                   # The image's one entry runs generation unless told otherwise.
                   "sdfb_job":
                       "evaluation",
+                  # Beam's own --disk_size_gb, passed through: the workers'
+                  # boot disk in GB (the evaluator pins none; the image is
+                  # multi-GB).
                   "disk_size_gb":
                       EVALUATION_WORKER_DISK_GB,
+                  # The generation job's Dataflow id. Next to a seed it is the
+                  # launch's IDENTITY (the evaluator reads the Dataflow job for
+                  # its window, never the log); alone, with the seed emptied,
+                  # it makes the evaluator do the FULL lookup (the job's log
+                  # and BigQuery job metadata).
                   "generation_job_id":
                       "{{ params.generation_job_id }}",
                   "run_id":
                       "{{ params.run_id }}",
                   "tables":
                       "{{ params.tables }}",
+                  # The launched table. A run_id or tables typed means the
+                  # seed is not passed, so a plain trigger of either shape is
+                  # a legal launch without blanking the default seed.
+                  "seed_table":
+                      "{{ '' if (params.run_id or params.tables) "
+                      "else params.seed_table }}",
+                  # Where the synthetic tables landed, and where their sources
+                  # are (reference_dataset, when set, beats source_dataset).
+                  # Passed only for a seed or tables: the evaluator refuses
+                  # them next to a job id alone or a run id.
                   "landing_dataset":
-                      "{{ params.landing_dataset }}",
+                      "{{ params.landing_dataset if (params.tables or "
+                      "(params.seed_table and not params.run_id)) else '' }}",
                   "reference_dataset":
-                      "{{ params.reference_dataset }}",
+                      "{{ (params.reference_dataset or params.source_dataset) "
+                      "if (params.tables or (params.seed_table and not "
+                      "params.run_id)) else '' }}",
                   "relationships_uri":
                       "{{ params.relationships_uri }}",
+                  # How the landing rows are isolated: a named target has no
+                  # write disposition to derive a scope from, so empty means
+                  # manual (each landing table read WHOLE) for a seed or
+                  # tables, and the evaluator's own choice for a job id alone.
+                  "scope":
+                      "{{ params.scope or ('manual' if (params.tables or "
+                      "(params.seed_table and not params.run_id)) else '') }}",
+                  # The generation's reference sample size (limits nothing
+                  # that is compared; it sizes the reference panel) and the
+                  # generator's validation-runs table, whose rows for this
+                  # launch verify that sample (needs the job's window).
+                  "reference_rows_limit":
+                      "{{ params.reference_rows_limit }}",
+                  "validation_runs_table":
+                      "{{ params.validation_runs_table }}",
                   "mode":
                       "{{ params.mode }}",
                   "allow_contaminated":
@@ -636,10 +847,10 @@ with models.DAG(
               },
           }
       },
-      # Wait (deferrably) so a job that fails after launch fails this task and
-      # reaches the callback; the job's own FINAL row is written by the pipeline.
+      # Wait so a job that fails after launch fails this task and reaches the
+      # callback; the job's own FINAL row is written by the pipeline. The
+      # task holds a worker slot meanwhile; no triggerer is needed.
       wait_until_finished=True,
-      deferrable=True,
       do_xcom_push=True,
       # The sensor branch may be skipped; the launch needs fan_out's success.
       trigger_rule="none_failed_min_one_success",

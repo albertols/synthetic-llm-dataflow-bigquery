@@ -509,15 +509,50 @@ flowchart LR
 
 `composer/evaluation_framework.py` is the DAG `sdfb_evaluation_framework`
 (`schedule_interval=None`, manual). Import it to evaluate a run that has
-already finished. It is a template: run the import workflow's substitution
-on it, the markers are ones that workflow already substitutes for the
-generation DAG (`{{PROJECT_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}`
-and `{{GCS_DATAFLOW_TEMPLATES}}`); it reads the Variables `PROJECT_ID`,
+already landed ON ITS OWN: to re-evaluate it, or because the generation DAG
+ran without `run_evaluation`. It evaluates the way the chained launch does
+(the seed path, no job log): the launched table (`seed_table`) and its group
+of tables in the relationship model, each landing table read whole
+(`scope=manual`), compared with the same-named table in the source dataset.
+Four shapes of trigger, each a legal launch:
+
+| Shape | Trigger | Reads | Roles |
+|---|---|---|---|
+| 1. re-evaluate without logs | `seed_table` and the datasets as the import filled them, plus `generation_job_id` when known | the Dataflow job (window) and this launch's `validation_runs` rows | `roles/dataflow.viewer` (else a warning, no window) |
+| 2. job id unknown | `seed_table` alone | neither: no identity, no window, the reference sample is not verified | none for a job |
+| 3. the full lookup | `generation_job_id` alone, `seed_table` emptied | the job's log and BigQuery job metadata | `roles/logging.viewer`, `roles/dataflow.viewer`, `roles/bigquery.resourceViewer` |
+| 4. older shapes | `run_id`, or `tables` (with the datasets) | `validation_runs` / the tables | as before |
+
+A typed `run_id` or `tables` means the seed is not passed; the rendered launch
+is legal without blanking anything. Both sensor and launch avoid `deferrable`
+(it needs a recent provider and a triggerer): the sensor waits in `reschedule`
+mode and the launch keeps `wait_until_finished=True`, so a job that fails
+after launch fails the task and the failure callback closes the RUNNING row;
+the cost is a worker slot held while the evaluation job runs. It is a
+template: run the import workflow's substitution on it. Its markers are ones
+that workflow already substitutes for the generation DAG
+(`{{PROJECT_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}`,
+`{{GCS_DATAFLOW_TEMPLATES}}`, and three tables: `{{SDFB_DEFAULT_TABLE_FQN}}`,
+`{{SDFB_LANDING_TABLE}}`, `{{SDFB_VALIDATION_RUNS_TABLE}}`, which give the
+defaults of `seed_table`, `source_dataset`, `landing_dataset` and
+`validation_runs_table`); it reads the Variables `PROJECT_ID`,
 `REGION`, `SA_DATAFLOW` and `DATAFLOW_SUBNET` (optional
 `DATAFLOW_NETWORK_TAGS`). It launches the deployment's template,
 `gs://<templates>/synthetic/sdfb-<version>-template.json`, with
 `sdfb_job=evaluation`. To launch an evaluator-only template instead, change
 the one constant `flex_template` in the file (its header says how).
+
+**The launcher and its 12 minutes.** A Flex Template launch has 12 minutes in
+all, the pull of the multi-GB image included, and everything before the
+Dataflow job exists (planning too) runs on the launcher VM ("By default, the
+Flex Template launch process has a timeout of 12 mins",
+[Google's troubleshooting page](https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates),
+"Polling timeout errors"). Both evaluation launches take a launcher machine
+type (`launcher_machine_type` here, `evaluation_launcher_machine_type` in the
+generation DAG, default `e2-standard-8`, REST field
+`environment.launcherMachineType`); a larger one pulls faster. The public REST
+description has no field for the limit itself (gcloud has
+`--launcher-vm-timeout-secs`), so it cannot be set from a DAG.
 
 ```mermaid
 flowchart LR

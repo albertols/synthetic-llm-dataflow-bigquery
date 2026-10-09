@@ -601,6 +601,7 @@ deployment has one, chains the two when its `run_evaluation` parameter is true
 (the evaluation is given the launched table and the relationship model, and the
 job only as the launch's identity: it reads the Dataflow job for its window, one query on the generator's
 `validation_runs` for the digest that verifies the reference sample, and no job log);
+the standalone DAG evaluates an already-landed run on its own by the same seed path; both launches take a launcher machine type (the launch has 12 minutes in all, the image pull included);
 it and the evaluator package stay in the source repository.
 
 Four tables in `synthetic_data_quality` (`evaluation_data_history`,

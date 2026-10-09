@@ -2188,9 +2188,15 @@ flowchart LR
 
 **The standalone DAG** (`composer/evaluation_framework.py`, DAG id
 `sdfb_evaluation_framework`) is optional: it evaluates a run that has
-already finished, by job id, run id or tables. It launches from the same
-template (the marker it reads is one the import workflow already
-substitutes) and passes `sdfb_job=evaluation`.
+already landed, on its own, by the seed path of the chain (no job log):
+`seed_table` and the datasets, plus `generation_job_id` as the launch's
+identity when known; the older shapes (job id alone with the seed emptied, run
+id, tables) stay. Its markers are ones the import workflow already
+substitutes for the generation DAG, three of them table names that give the
+defaults. Neither `deferrable` nor a triggerer is used (a reschedule sensor
+and `wait_until_finished`); both evaluation launches take a launcher machine
+type, because the launch has 12 minutes in all, the image pull included. It
+launches from the same template and passes `sdfb_job=evaluation`.
 
 ```mermaid
 flowchart LR

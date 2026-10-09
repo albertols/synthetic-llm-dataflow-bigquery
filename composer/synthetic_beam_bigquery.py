@@ -585,6 +585,17 @@ default_dag_params = {
             "evaluation job's workers. CPU only: the evaluator needs no GPU. "
             "Default e2-standard-8.",
         ),
+    "evaluation_launcher_machine_type":
+        Param(
+            default="e2-standard-8",
+            type="string",
+            description="Only with run_evaluation. Machine type of the Flex "
+            "Template LAUNCHER VM of the evaluation launch: it pulls the "
+            "multi-GB image and plans the evaluation before the Dataflow job "
+            "exists, all inside Google's 12-minute launch limit. A larger one "
+            "pulls faster. The limit itself cannot be set from a DAG. "
+            "Default e2-standard-8.",
+        ),
     "evaluation_max_workers":
         Param(
             default=4,
@@ -891,14 +902,19 @@ with models.DAG(
                   # Dataflow's scratch and staging locations; the staging
                   # bucket also receives the job graph, which embeds the
                   # reference panel rows of every table.
-                  "tempLocation": f"gs://{bucket_path}/temp/",
-                  "stagingLocation": f"gs://{bucket_path}/staging",
+                  "tempLocation":
+                      f"gs://{bucket_path}/temp/",
+                  "stagingLocation":
+                      f"gs://{bucket_path}/staging",
                   # The generation job's network, with private worker IPs.
-                  "subnetwork": subnetwork,
-                  "ipConfiguration": "WORKER_IP_PRIVATE",
+                  "subnetwork":
+                      subnetwork,
+                  "ipConfiguration":
+                      "WORKER_IP_PRIVATE",
                   # The generation job's service account (Variable
                   # SA_DATAFLOW): it needs the evaluator's roles.
-                  "serviceAccountEmail": service_account,
+                  "serviceAccountEmail":
+                      service_account,
                   # A CPU job: no accelerator, no reservation, no
                   # SDK-container pin. The evaluator adds its own
                   # launch experiments. use_runner_v2 and enable_secure_boot
@@ -917,9 +933,19 @@ with models.DAG(
                       "dag": dag_id,
                   },
                   # DAG params evaluation_machine_type / evaluation_max_workers
-                  "machineType": "{{ params.evaluation_machine_type }}",
-                  "maxWorkers": "{{ params.evaluation_max_workers }}",
-                  "workerRegion": region,
+                  # are the WORKERS. launcherMachineType is the launcher VM
+                  # that pulls the image and plans before the Dataflow job
+                  # exists; Google gives a launch 12 minutes in all, the pull
+                  # included, and the public REST description has no field
+                  # for that limit (gcloud has --launcher-vm-timeout-secs).
+                  "launcherMachineType":
+                      "{{ params.evaluation_launcher_machine_type }}",
+                  "machineType":
+                      "{{ params.evaluation_machine_type }}",
+                  "maxWorkers":
+                      "{{ params.evaluation_max_workers }}",
+                  "workerRegion":
+                      region,
               },
               # Names are the template's (docker/flex_template_metadata.json).
               # The launcher supplies runner, project and region itself and

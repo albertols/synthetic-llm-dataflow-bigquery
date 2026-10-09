@@ -39,7 +39,10 @@ import sys
 import types
 from pathlib import Path
 
+import jinja2
 import pytest
+
+from sdfb_evaluation.cli.main import parse_args
 
 PACKAGE = Path(__file__).resolve().parents[2]
 REPO_ROOT = PACKAGE.parents[1]
@@ -232,12 +235,17 @@ def _task(tree: ast.Module, variable: str) -> ast.Call:
   return call
 
 
-def test_wait_for_generation_is_a_deferrable_sensor_behind_a_short_circuit():
+def test_wait_for_generation_is_a_reschedule_sensor_behind_a_short_circuit():
   tree = _tree(EVALUATION_DAG)
   sensor = _one(tree, "DataflowJobStatusSensor")
   assert ast.literal_eval(_kw(sensor,
                               "expected_statuses")) == {"JOB_STATE_DONE"}
-  assert ast.literal_eval(_kw(sensor, "deferrable")) is True
+  # `deferrable` needs a recent provider and a triggerer: an environment
+  # without either rejects the DAG at parse time
+  assert "deferrable" not in {k.arg for k in sensor.keywords}
+  assert ast.literal_eval(_kw(sensor, "mode")) == "reschedule"
+  assert _value(tree, _kw(sensor, "poke_interval")) >= 60
+  assert 12 <= _value(tree, _kw(sensor, "timeout")) / 3600 <= 48
   gate = _task(tree, "wait_gate")
   assert _name(gate.func) == "ShortCircuitOperator"
   callable_name = _kw(gate, "python_callable")
@@ -284,7 +292,9 @@ def test_launch_points_at_the_one_template_the_generation_dag_launches():
 def test_the_import_workflow_needs_no_marker_it_does_not_already_substitute():
   markers = _markers(EVALUATION_DAG)
   assert markers == {
-      "PROJECT_VERSION", "ENV", "GCS_DATAFLOW_STAGING", "GCS_DATAFLOW_TEMPLATES"
+      "PROJECT_VERSION", "ENV", "GCS_DATAFLOW_STAGING",
+      "GCS_DATAFLOW_TEMPLATES", "SDFB_DEFAULT_TABLE_FQN", "SDFB_LANDING_TABLE",
+      "SDFB_VALIDATION_RUNS_TABLE"
   }
   assert markers <= _GENERATION_MARKERS
   assert _variables(_tree(EVALUATION_DAG)) == _HOUSE_VARIABLES
@@ -629,15 +639,21 @@ _PARAMS = {
     "generation_job_ids": [],
     "run_id": "",
     "tables": "",
-    "landing_dataset": "",
+    "seed_table": "orders",
+    "landing_dataset": "demo-project.thelook_synthetic",
+    "source_dataset": "demo-project.thelook_source",
     "reference_dataset": "",
     "relationships_uri": "",
+    "scope": "",
+    "reference_rows_limit": 10000,
+    "validation_runs_table": "demo-project.synthetic_data_quality.runs",
     "mode": "sampled",
     "allow_contaminated": False,
     "output_dataset": "synthetic_data_quality",
     "trigger": "composer",
     "wait_for_generation": True,
     "machine_type": "e2-standard-8",
+    "launcher_machine_type": "e2-standard-8",
     "max_workers": 4,
 }
 _A, _B, _C = ("2026-09-14_01_00_00-111", "2026-09-14_02_00_00-222",
@@ -931,11 +947,11 @@ def test_the_per_job_path_never_sees_the_list():
       },
       "wait_for_generation_job": {
           "task_id", "job_id", "expected_statuses", "project_id", "location",
-          "deferrable"
+          "mode", "poke_interval", "timeout"
       },
       "start_evaluation": {
           "task_id", "project_id", "location", "body", "wait_until_finished",
-          "deferrable", "do_xcom_push", "trigger_rule", "on_failure_callback"
+          "do_xcom_push", "trigger_rule", "on_failure_callback"
       },
   }
   for variable, keywords in arguments.items():
@@ -1230,7 +1246,8 @@ def test_generation_dag_gains_four_evaluation_params_and_nothing_else():
   about_evaluation = {n for n in params if "evaluation" in n}
   assert about_evaluation == {
       "run_evaluation", "evaluation_mode", "evaluation_machine_type",
-      "evaluation_max_workers", "evaluation_output_dataset"
+      "evaluation_launcher_machine_type", "evaluation_max_workers",
+      "evaluation_output_dataset"
   }
 
   def default(name: str):
@@ -1343,3 +1360,232 @@ def test_generation_dag_default_path_is_unchanged():
   assert {b for _, b in _edges(tree)} == set(_CHAIN[1:])
   launch = ast.unparse(_entry(start, "launchParameter"))
   assert "evaluation" not in launch and "sdfb_job" not in launch
+
+
+# --------------------------------------------------------------------------- #
+# The standalone DAG evaluates a landed run on its own (R139)
+# --------------------------------------------------------------------------- #
+#
+# The same seed path the generation DAG's chained launch uses: the launched
+# table, the relationship model, the landing and source datasets, scope
+# manual, the reference sample's size and the validation-runs table, and the
+# generation job's id (when known) as the launch's identity. Real Jinja
+# renders each shape of trigger into the launch's `parameters`, and the
+# evaluator's own parser says which target they make.
+
+_FQN = "demo-project.thelook_source.orders"
+_LANDING = "demo-project.thelook_synthetic.orders"
+_RUNS = "demo-project.synthetic_data_quality.validation_runs"
+_NAMES = ("app_name", "project_version", "default_table_fqn", "landing_table",
+          "validation_runs_table", "_QUALIFIED_TABLE_PARTS", "_dataset_of",
+          "_table_name_of")
+
+
+def _standalone_scope(**markers: str) -> tuple[ast.Module, dict]:
+  """The standalone DAG with its markers substituted, and its module-level
+  defaults executed (no Airflow)."""
+  text = _as_imported(EVALUATION_DAG, PROJECT_VERSION="latest", **markers)
+  tree = ast.parse(text)
+  return tree, _pure(tree, *_NAMES)
+
+
+def _default_params(**markers: str) -> dict:
+  """The DAG's params as Airflow hands them to Jinja: each Param's default,
+  an expression of the file's own module-level names."""
+  tree, scope = _standalone_scope(**markers)
+  defaults = {}
+  for name, call in _params(tree).items():
+    statement = ast.Assign(
+        targets=[ast.Name("value", ast.Store())],
+        value=_kw(call, "default"),
+        lineno=1)
+    module = ast.fix_missing_locations(
+        ast.Module(body=[statement], type_ignores=[]))
+    local = dict(scope)
+    code = compile(module, str(EVALUATION_DAG), "exec")
+    exec(code, local)  # pylint: disable=exec-used  # a default of the DAG file
+    defaults[name] = local["value"]
+  return defaults
+
+
+_MARKERS = {
+    "SDFB_DEFAULT_TABLE_FQN": _FQN,
+    "SDFB_LANDING_TABLE": _LANDING,
+    "SDFB_VALIDATION_RUNS_TABLE": _RUNS,
+}
+
+
+def _rendered_launch(**given) -> dict[str, str]:
+  """The launch's `parameters` for a trigger that sets `given` on top of
+  the defaults, rendered by Jinja as Airflow does."""
+  tree, _ = _standalone_scope(**_MARKERS)
+  parameters = _entry(
+      _one(tree, "DataflowStartFlexTemplateOperator"), "parameters")
+  params = {**_default_params(**_MARKERS), **given}
+  env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+  return {
+      key.value: env.from_string(_value(tree, value)).render(params=params)
+      for key, value in zip(parameters.keys, parameters.values, strict=True)
+  }
+
+
+def _parsed(rendered: dict[str, str]):
+  """The evaluator's parser on a rendered launch, as the flex entry gives
+  it: `--name=value`, the selector and Beam's disk size left out."""
+  flags = [
+      f"--{name}={value}" for name, value in rendered.items()
+      if name not in ("sdfb_job", "disk_size_gb")
+  ]
+  args, _ = parse_args([
+      "run", "--runner=DataflowRunner", "--project=demo-project",
+      "--region=europe-west1", *flags
+  ])
+  return args
+
+
+def test_the_standalone_dags_params_and_their_defaults():
+  params = _params(_tree(EVALUATION_DAG))
+  assert set(params) == {
+      "generation_job_id", "generation_job_ids", "run_id", "tables",
+      "seed_table", "landing_dataset", "source_dataset", "reference_dataset",
+      "relationships_uri", "scope", "reference_rows_limit",
+      "validation_runs_table", "mode", "allow_contaminated", "output_dataset",
+      "trigger", "wait_for_generation", "machine_type", "launcher_machine_type",
+      "max_workers"
+  }
+  defaults = _default_params(**_MARKERS)
+  assert defaults["seed_table"] == "orders"
+  assert defaults["landing_dataset"] == "demo-project.thelook_synthetic"
+  assert defaults["source_dataset"] == "demo-project.thelook_source"
+  assert defaults["validation_runs_table"] == _RUNS
+  assert defaults["reference_rows_limit"] == 10_000
+  assert defaults["scope"] == "" and defaults["reference_dataset"] == ""
+  assert defaults["launcher_machine_type"] == "e2-standard-8"
+  # the generation's own value, typed once there
+  generation = _tree(GENERATION_DAG)
+  passed = _entry(_launch(generation, "start_sdfb"), "parameters")
+  assert str(defaults["reference_rows_limit"]) == _value(
+      generation, _entry(passed, "reference_rows_limit"))
+  assert ast.literal_eval(_kw(params["scope"], "enum")) == [
+      "", "auto", "table", "as_of", "appends", "as_of_diff", "manual"
+  ]
+  # every param says in its description what it is
+  for name, call in params.items():
+    assert len(ast.literal_eval(_kw(call, "description"))) > 30, name
+
+
+def test_a_marker_that_is_not_a_table_gives_empty_defaults():
+  """The repository's file, before the import substitutes anything, and a
+  placeholder: the DAG still parses and the defaults are empty, not wrong."""
+  for markers in ({}, {k: "x" for k in _MARKERS}):
+    defaults = _default_params(**markers)
+    assert defaults["seed_table"] == ""
+    assert defaults["landing_dataset"] == ""
+    assert defaults["source_dataset"] == ""
+  _, scope = _standalone_scope(**_MARKERS)
+  assert scope["_dataset_of"]("a.b.c") == "a.b"
+  assert scope["_table_name_of"]("a.b.c") == "c"
+  assert scope["_dataset_of"]("a.b") == "" and scope["_table_name_of"]("") == ""
+
+
+def test_the_standalone_launch_passes_exactly_these_parameters():
+  tree = _tree(EVALUATION_DAG)
+  parameters = _entry(
+      _one(tree, "DataflowStartFlexTemplateOperator"), "parameters")
+  assert {k.value for k in parameters.keys} == {
+      "sdfb_job", "disk_size_gb", "generation_job_id", "run_id", "tables",
+      "seed_table", "landing_dataset", "reference_dataset", "relationships_uri",
+      "scope", "reference_rows_limit", "validation_runs_table", "mode",
+      "allow_contaminated", "output_dataset", "trigger"
+  }
+
+
+def test_shape_1_re_evaluates_a_landed_run_without_reading_logs():
+  """The seed and the datasets from the import, plus the job id: its
+  identity (the evaluator reads only the Dataflow job)."""
+  args = _parsed(_rendered_launch(generation_job_id=_A))
+  assert (args.seed_table, args.job_id) == ("orders", _A)
+  assert args.landing_dataset == "demo-project.thelook_synthetic"
+  assert args.reference_dataset == "demo-project.thelook_source"
+  assert args.scope == "manual" and args.reference_rows_limit == 10_000
+  assert args.validation_runs_table == _RUNS and args.trigger == "composer"
+
+
+def test_shape_2_a_landed_run_whose_job_id_is_unknown():
+  args = _parsed(_rendered_launch())
+  assert (args.seed_table, args.job_id) == ("orders", None)
+  assert args.scope == "manual" and args.landing_dataset
+
+
+def test_shape_3_the_full_lookup_is_the_job_id_alone_with_the_seed_emptied():
+  args = _parsed(_rendered_launch(generation_job_id=_A, seed_table=""))
+  assert (args.job_id, args.seed_table) == (_A, None)
+  # no datasets and the evaluator's own scope: they belong to a named target
+  assert args.landing_dataset is None and args.reference_dataset is None
+  assert args.scope == "auto"
+
+
+def test_shape_4_a_run_id_or_tables_beat_the_default_seed():
+  by_run = _parsed(_rendered_launch(run_id="thelook-0913-a1b2c3"))
+  assert by_run.run_id == "thelook-0913-a1b2c3" and by_run.seed_table is None
+  assert by_run.landing_dataset is None and by_run.scope == "auto"
+  by_tables = _parsed(_rendered_launch(tables="users,orders"))
+  assert by_tables.tables == ["users", "orders"]
+  assert by_tables.seed_table is None and by_tables.scope == "manual"
+  assert by_tables.landing_dataset == "demo-project.thelook_synthetic"
+  assert by_tables.reference_dataset == "demo-project.thelook_source"
+
+
+def test_explicit_values_beat_the_defaults():
+  args = _parsed(
+      _rendered_launch(
+          reference_dataset="other_source",
+          scope="appends",
+          relationships_uri="gs://b/models/",
+          reference_rows_limit=20_000))
+  assert args.reference_dataset == "other_source" and args.scope == "appends"
+  assert args.relationships_uri == "gs://b/models/"
+  assert args.reference_rows_limit == 20_000
+
+
+def test_the_standalone_dags_tasks_pass_only_arguments_known_to_work():
+  """The same rule the generation DAG's tasks are held to: `deferrable` is a
+  constructor argument of recent providers and needs a triggerer."""
+  tree = _tree(EVALUATION_DAG)
+  assert not [
+      call for call in ast.walk(tree) if isinstance(call, ast.Call) and
+      "deferrable" in {k.arg for k in call.keywords}
+  ]
+  launch = _task(tree, "start_evaluation")
+  assert ast.literal_eval(_kw(launch, "wait_until_finished")) is True
+  assert {k.arg for k in launch.keywords} == {
+      "task_id", "project_id", "location", "body", "wait_until_finished",
+      "do_xcom_push", "trigger_rule", "on_failure_callback"
+  }
+  docstring = ast.get_docstring(tree) or ""
+  assert "worker slot" in docstring and "triggerer" in docstring
+
+
+def test_both_evaluation_launches_name_the_launcher_machine():
+  generation = _tree(GENERATION_DAG)
+  ours = _entry(
+      _launch(generation, "trigger_evaluation"), "launcherMachineType")
+  assert ast.literal_eval(
+      ours) == "{{ params.evaluation_launcher_machine_type }}"
+  assert "launcherMachineType" not in ast.unparse(
+      _launch(generation, "start_sdfb"))
+  standalone = _tree(EVALUATION_DAG)
+  theirs = _entry(
+      _one(standalone, "DataflowStartFlexTemplateOperator"),
+      "launcherMachineType")
+  assert ast.literal_eval(theirs) == "{{ params.launcher_machine_type }}"
+  for tree, name in ((generation, "evaluation_launcher_machine_type"),
+                     (standalone, "launcher_machine_type")):
+    param = _params(tree)[name]
+    assert ast.literal_eval(_kw(param, "default")) == "e2-standard-8"
+    description = ast.literal_eval(_kw(param, "description"))
+    assert "launcher" in description.lower() and "12" in description
+  # no timeout field exists in the public API: none is invented
+  for launch in (_launch(generation, "trigger_evaluation"),
+                 _one(standalone, "DataflowStartFlexTemplateOperator")):
+    assert "timeout" not in ast.unparse(_entry(launch, "environment")).lower()

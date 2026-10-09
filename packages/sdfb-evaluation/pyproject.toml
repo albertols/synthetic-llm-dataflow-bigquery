@@ -34,7 +34,7 @@ dependencies = [
 sdfb-eval = "sdfb_evaluation.cli.main:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-timeout>=2.3", "hypothesis>=6.100", "mypy>=1.11", "types-PyYAML", "types-requests"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3", "hypothesis>=6.100", "mypy>=1.11", "types-PyYAML", "types-requests", "jinja2>=3.1"]
 
 [tool.uv]
 # Beam 2.74 → envoy-data-plane → betterproto==2.0.0b6 (pre-release): same pin as the root workspace.

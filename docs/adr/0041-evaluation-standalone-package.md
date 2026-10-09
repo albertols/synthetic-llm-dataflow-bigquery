@@ -447,6 +447,26 @@ read), costs a warning and those metrics, never the evaluation. This partly
 reverses R134, which had the job-only path read no `validation_runs`, on the
 owner's word.
 
+**Note (2026-10-09): the standalone DAG evaluates a landed run by the same
+path, and both launches name a launcher machine.** The owner's service account
+cannot launch with gcloud and cannot read Cloud Logging, and the third real
+launch of the chain showed that the image pull (almost eight minutes) left
+planning too little of the Flex Template launch's 12 minutes ("By default, the
+Flex Template launch process has a timeout of 12 mins",
+[Google](https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates),
+"Polling timeout errors"). So `composer/evaluation_framework.py` now takes the
+seed path of the chain (`seed_table`, the datasets, `scope=manual`,
+`reference_rows_limit`, `validation_runs_table`, and `generation_job_id` as the
+identity), with the job id alone and the seed emptied as the explicit way to
+the full lookup, and it drops `deferrable` (a recent provider argument that
+needs a triggerer). Both evaluation launches pass
+`environment.launcherMachineType` (default `e2-standard-8`): a larger launcher
+pulls faster. The timeout itself cannot be set from a DAG: the public REST
+description of the launch has no such field (gcloud has
+`--launcher-vm-timeout-secs`). The image stays the generator's: a CPU-only
+image would pull faster but is a second image, and that stays the owner's
+decision.
+
 ## Sources
 
 [Lin, Lucas & Shmueli 2013](https://doi.org/10.1287/isre.2013.0480) (p-values at scale) ·
