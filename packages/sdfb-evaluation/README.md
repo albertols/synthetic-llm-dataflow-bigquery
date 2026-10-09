@@ -465,7 +465,11 @@ flowchart LR
   (ADR 0038) is not seen, and the table list is the seed's, not the launch's
   own record. Each landing table is read whole: with the DAG's
   `write_disposition` overwrite that is this launch's rows, with append it
-  includes earlier launches' rows. A landing table named differently from its
+  includes earlier launches' rows (the row count then differs from what
+  this launch wrote, so the run reads PARTIAL; the metrics are still
+  computed). The nearest-neighbour metrics also need the source table to
+  hold at least twice `reference_rows_limit` rows: the sample and its
+  holdout must be the same size. A landing table named differently from its
   source is not found. It is a CPU job (no
   accelerator) in the generation job's subnetwork, under the same service
   account, which therefore needs the evaluator's roles; of the three that

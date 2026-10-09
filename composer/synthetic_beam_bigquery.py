@@ -992,8 +992,11 @@ with models.DAG(
                   # row.dcr_p5_ratio, row.nndr_p5_ratio, row.density,
                   # row.coverage) and the panel-based match rates and lifts
                   # (row.memorization_lift and row.exposure_lift among them).
-                  # Each of R and H needs at least 2000 rows, and the value
-                  # must equal the generation's. The rebuilt sample is only
+                  # R and H must be the same size, so the source table needs
+                  # at least twice this many rows; with fewer, the
+                  # nearest-neighbour metrics are not evaluated. Each half
+                  # needs at least 2000 rows, and the value must equal the
+                  # generation's. The rebuilt sample is only
                   # trusted when it matches the generator's recorded digest;
                   # see validation_runs_table below.
                   "reference_rows_limit":

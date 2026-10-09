@@ -431,7 +431,7 @@
     {
       "name": "generation_job_id",
       "label": "Evaluation: Generation job id",
-      "helpText": "Evaluation only. Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; the one exception is a seed_table, which generation_job_id may accompany: it is then the identity of the launch the seed names, and only the Dataflow job is read (for its window; never its log, BigQuery job labels or validation_runs), a job that cannot be read costing the window and a warning. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
+      "helpText": "Evaluation only. Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; the one exception is a seed_table, which generation_job_id may accompany: it is then the identity of the launch the seed names, and only the Dataflow job is read (for its window; never its log or BigQuery job labels; with validation_runs_table given and the window known, this launch's rows of that table are read as well, to verify the reference sample), a job that cannot be read costing the window and a warning. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
       "paramType": "TEXT",
       "isOptional": true
     },
