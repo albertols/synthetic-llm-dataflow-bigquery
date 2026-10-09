@@ -608,7 +608,7 @@ EMPTY `seed_table` and the triggering run's other params unchanged, so it is
 a plain single-job run: one Dataflow job per id, with the sensor, the launch
 and the failure callback described here. The seed is not handed down because
 the jobs of a list may have launched different tables: each started run is
-the full lookup of its own job (shape 3, with the roles that needs). To
+the full lookup of its own job (shape 3, with the roles it needs). To
 evaluate several jobs by the seed path, trigger one run per job. Leave
 `run_id` and `tables` empty with a list (the
 started runs would carry them and the launcher refuses two targets). The run
