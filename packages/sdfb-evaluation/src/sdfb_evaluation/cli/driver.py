@@ -156,6 +156,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -166,7 +167,8 @@ import secrets
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -253,6 +255,21 @@ _TOKEN_BYTES = 4
 _FORBIDDEN_EXPERIMENT = "enable_data_sampling"
 _WORKER_IMAGE_ENV = "SDFB_EVAL_SDK_CONTAINER_IMAGE"
 _LOGGER = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _timed(evaluation_id: str, step: str) -> Iterator[None]:
+  """Log one finished step of the launch around planning (the lookup
+  before it, the registry row, the prepare statements and the submission
+  after it) and its seconds, in the planner's line shape."""
+  began = time.monotonic()
+  try:
+    yield
+  finally:
+    _LOGGER.info("evaluation %s: %s %.2fs", evaluation_id, step,
+                 time.monotonic() - began)
+
+
 _DATAFLOW = "dataflow"
 _LOCAL = "local_json"
 _FINAL = "FINAL"
@@ -683,8 +700,10 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
         runner=args.runner,
         now=attempt.now,
         evaluation_id=attempt.evaluation_id)
-  notes = _derive_targets(args, bq)
-  attempt.launch = _resolve(args, env, bq)
+  with _timed(attempt.evaluation_id, "target check"):
+    notes = _derive_targets(args, bq)
+  with _timed(attempt.evaluation_id, "launch lookup"):
+    attempt.launch = _resolve(args, env, bq)
   if notes:
     attempt.launch = dataclasses.replace(
         attempt.launch, warnings=(*attempt.launch.warnings, *notes))
@@ -692,8 +711,9 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
   if getattr(args, "no_planning_snapshots", False):
     planning_bq = _ReadOnlyPlanning(bq)
     attempt.refused = planning_bq.refused
-  models, attempt.launch = _models(
-      attempt.launch, explicit_uri=getattr(args, "relationships_uri", None))
+  with _timed(attempt.evaluation_id, "relationship models"):
+    models, attempt.launch = _models(
+        attempt.launch, explicit_uri=getattr(args, "relationships_uri", None))
   return build_plan(
       launch=attempt.launch,
       models=models,
@@ -1402,10 +1422,13 @@ def _drive(this: _Run, beam_args: Sequence[str], wait: bool,
       thresholds_uri=thresholds_uri,
       thresholds_digest=digest)
   try:
-    registry.append(running_row(planned), "driver-running")
+    with _timed(planned.evaluation_id, "RUNNING row"):
+      registry.append(running_row(planned), "driver-running")
     if this.fixture is None:
-      planned = prepare_evaluation(planned, this.bq)
-    result = this.submit(planned, beam_args)
+      with _timed(planned.evaluation_id, "prepare statements"):
+        planned = prepare_evaluation(planned, this.bq)
+    with _timed(planned.evaluation_id, "submission"):
+      result = this.submit(planned, beam_args)
   except BaseException as exc:  # no job is running: the driver's to close
     registry.record_failure(_failed, planned, exc, this.env.now())
     raise

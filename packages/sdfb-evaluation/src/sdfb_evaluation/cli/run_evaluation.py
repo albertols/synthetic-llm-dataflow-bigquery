@@ -51,7 +51,7 @@ from collections.abc import Sequence
 
 from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.driver import Env
-from sdfb_evaluation.cli.main import parse_args
+from sdfb_evaluation.cli.main import parse_args, show_progress
 
 __all__ = ["main"]
 
@@ -60,6 +60,7 @@ def main(argv: Sequence[str] | None = None, env: Env | None = None) -> int:
   """Submit one evaluation (module docstring); returns 0 once the
   pipeline is submitted, whatever `--fail_on` says — or, when it waited
   (a local sink), 3 if the FINAL row reads FAILED."""
+  show_progress()
   flags = list(sys.argv[1:] if argv is None else argv)
   args, extras = parse_args(["run", *flags])
   return driver.run(args, extras, env, wait=args.sink != "bq", gated=False)

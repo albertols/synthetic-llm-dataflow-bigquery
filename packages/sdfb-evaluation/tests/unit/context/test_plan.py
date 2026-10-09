@@ -67,6 +67,7 @@ from .plan_fakes import (
     NOW,
     QDS,
     REFERENCE_N,
+    RUN_IDS,
     SRC,
     TABLES,
     thelook_bq,
@@ -1537,3 +1538,52 @@ def test_predict_shuffle_counts_census_relational_and_null_patterns():
   bare = predict_shuffle_gb(
       [dataclasses.replace(items, columns=tuple(unsampled))])
   assert bare < alone
+
+
+# --------------------------------------------------------------------------
+# planning says where its time goes (R138)
+# --------------------------------------------------------------------------
+_PLAN_LINE = re.compile(r"planning (?P<id>\S+) (?P<table>[^:]+): "
+                        r"(?P<step>[a-z ]+) (?P<seconds>\d+\.\d+)s")
+_SUMMARY = re.compile(
+    r"planning (?P<id>\S+): done in (?P<seconds>\d+\.\d+)s: "
+    r"(?P<tables>\d+) tables, (?P<total>\d+) BigQuery statements "
+    r"\((?P<meta>\d+) metadata reads, (?P<queries>\d+) queries, "
+    r"(?P<dry>\d+) dry runs, (?P<ddl>\d+) DDL\)")
+
+
+def test_planning_logs_every_step_of_every_table_and_a_summary(caplog):
+  bq = thelook_bq()
+  launch = thelook_launch(bq, tables=TABLES[:2], run_ids=RUN_IDS[:2])
+  with caplog.at_level("INFO", logger="sdfb_evaluation.context.plan"):
+    plan, _ = _plan(bq, launch)
+  lines = [r.getMessage() for r in caplog.records]
+  steps = [m for m in map(_PLAN_LINE.fullmatch, lines) if m]
+  scans = ("planning statistics", "scope verification", "reference panel",
+           "sampling")
+  assert [(m["table"], m["step"]) for m in steps] == [
+      ("users", "locate"),
+      ("users", "source pin"),
+      ("users", "planning tables"),
+      ("orders", "locate"),
+      ("orders", "source pin"),
+      ("orders", "planning tables"),
+      ("(all tables)", "dry runs"),
+      *[("users", step) for step in scans],
+      *[("orders", step) for step in scans],
+      ("(all tables)", "census"),
+  ]
+  assert all(m["id"] == plan.evaluation_id for m in steps)
+  assert all(float(m["seconds"]) >= 0 for m in steps)
+  (summary,) = [m for m in map(_SUMMARY.fullmatch, lines) if m]
+  assert summary["id"] == plan.evaluation_id and summary["tables"] == "2"
+  # the counts agree with what the fake saw
+  assert int(summary["queries"]) == len(bq.queries)
+  assert int(summary["dry"]) == len(bq.dry_runs)
+  assert int(summary["ddl"]) == len(bq.executed)
+  assert int(summary["meta"]) > 0
+  assert int(summary["total"]) == sum(
+      int(summary[k]) for k in ("meta", "queries", "dry", "ddl"))
+  # the summary is the last line; no SQL text and no row value is logged
+  assert _SUMMARY.fullmatch(lines[-1])
+  assert not [m for m in lines if "SELECT" in m or "example.com" in m]

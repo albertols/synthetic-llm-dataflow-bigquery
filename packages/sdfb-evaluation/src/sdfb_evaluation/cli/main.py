@@ -95,6 +95,7 @@ import argparse
 import contextlib
 import io
 import json
+import logging
 import re
 import sys
 import traceback
@@ -126,7 +127,9 @@ from sdfb_evaluation.report.store import Evaluation, read_bq, read_local
 from sdfb_evaluation.schemas import TABLES, bq_mk_commands, table_ddl, view_sql
 from sdfb_evaluation.version import EVALUATOR_VERSION
 
-__all__ = ["build_parser", "main", "parse_args", "public_run_flags"]
+__all__ = [
+    "build_parser", "main", "parse_args", "public_run_flags", "show_progress"
+]
 
 _DEFAULT_DATASET = "synthetic_data_quality"
 _DEFAULT_RUNNER = "DirectRunner"
@@ -804,9 +807,36 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace, Env], int]] = {
 }
 
 
+class _StderrProgress(logging.StreamHandler):
+  """A handler on whatever `sys.stderr` is when a line is written."""
+
+  def __init__(self) -> None:
+    super().__init__()
+    self.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+
+  @property
+  def stream(self) -> Any:
+    return sys.stderr
+
+  @stream.setter
+  def stream(self, value: Any) -> None:
+    """The stream is always the current `sys.stderr`."""
+
+
+def show_progress() -> None:
+  """Let this package's INFO lines (planning's steps and seconds, the
+  driver's) reach stderr, which is what a launcher's console log and a
+  terminal show: Python drops INFO records when no handler is set up."""
+  package = logging.getLogger("sdfb_evaluation")
+  if not any(isinstance(h, _StderrProgress) for h in package.handlers):
+    package.addHandler(_StderrProgress())
+  package.setLevel(logging.INFO)
+
+
 def main(argv: Sequence[str] | None = None, env: Env | None = None) -> int:
   """The `sdfb-eval` entry point; returns the exit code (module
   docstring). `env` replaces the outside world (tests)."""
+  show_progress()
   args, extras = parse_args(argv)
   env = env or Env()
   if args.command == "run":

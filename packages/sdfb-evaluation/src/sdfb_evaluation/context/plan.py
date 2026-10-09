@@ -116,12 +116,16 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
+import logging
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections import Counter
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, NamedTuple
@@ -1439,6 +1443,44 @@ def _unreadable(landing: str, reason: str) -> ScopePlan:
       expected_rows=None)
 
 
+_LOGGER = logging.getLogger(__name__)
+_ALL_TABLES = "(all tables)"
+# The `Bq` calls planning counts, by what they are (the summary line).
+_STATEMENT_KINDS = {
+    "table": "metadata reads",
+    "query": "queries",
+    "dry_run_bytes": "dry runs",
+    "execute": "DDL",
+}
+
+
+class _CountedBq:
+  """The planner's `Bq`, counting the statements it sends by kind
+  (`_STATEMENT_KINDS`); everything else passes through."""
+
+  def __init__(self, bq: Any):
+    self._bq = bq
+    self.counts: Counter[str] = Counter()
+
+  def __getattr__(self, name: str) -> Any:
+    attribute = getattr(self._bq, name)
+    kind = _STATEMENT_KINDS.get(name)
+    if kind is None or not callable(attribute):
+      return attribute
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+      self.counts[kind] += 1
+      return attribute(*args, **kwargs)
+
+    return counted
+
+  def summary(self) -> str:
+    """`N BigQuery statements (a metadata reads, b queries, …)`."""
+    kinds = ", ".join(
+        f"{self.counts[kind]} {kind}" for kind in _STATEMENT_KINDS.values())
+    return f"{sum(self.counts.values())} BigQuery statements ({kinds})"
+
+
 class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one build_plan call's state
   """One `build_plan` call (see its docstring)."""
 
@@ -1447,7 +1489,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
                evaluation_id: str, salt: str, temp_dataset: str):
     self.launch = launch
     self.models = tuple(models)
-    self.bq = bq
+    self.bq = _CountedBq(bq)
+    self.started = time.monotonic()
     self.knobs = knobs
     self.budget = knobs.budget
     self.mode = mode
@@ -1460,6 +1503,17 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     self.samples: list[PrepareStatement] = []
     self.planning_ddl: list[PrepareStatement] = []  # run in phase A (R57)
     self.multi = len(launch.tables_in_order) > 1
+
+  @contextlib.contextmanager
+  def timed(self, table: str, step: str) -> Iterator[None]:
+    """Log one finished planning step and the seconds it took (table
+    names only: no SQL, no value)."""
+    began = time.monotonic()
+    try:
+      yield
+    finally:
+      _LOGGER.info("planning %s %s: %s %.2fs", self.evaluation_id, table, step,
+                   time.monotonic() - began)
 
   # --- tables ----------------------------------------------------------------
   def targets(self) -> list[_Work]:
@@ -1618,13 +1672,23 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
   # --- per launch table ------------------------------------------------------
   def locate(self, work: _Work) -> None:
     """Scope, source pin and provisional columns of one launch table."""
+    with self.timed(work.name, "locate"):
+      land_meta = self._locate_landing(work)
+    if land_meta is not None:
+      with self.timed(work.name, "source pin"):
+        self._pin_and_columns(work, land_meta)
+
+  def _locate_landing(self, work: _Work) -> Mapping[str, Any] | None:
+    """The landing table's metadata and the scope of one launch table, or
+    None when the table is skipped (its reason is on `work`)."""
+    land_meta: Mapping[str, Any]
     try:
       land_meta = self.bq.table(work.landing)
     except _BQ_ERRORS as exc:
       work.scope = _unreadable(work.landing,
                                f"the landing table could not be read ({exc})")
       work.skip_with(work.scope.reason or "")
-      return
+      return None
     work.run = self.launch.run_for(work.landing)
     work.table_rows["syn"] = int(land_meta.get("numRows") or 0)
     work.scope = resolve_scope(
@@ -1642,7 +1706,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
         table_created=land_meta.get("created"))
     if not work.scope.readable:
       work.skip_with(f"scope {work.scope.status}: {work.scope.reason}")
-      return
+      return None
     if not work.scope.ok:
       work.notes.append(f"{work.landing}: scope {work.scope.status} — "
                         f"{work.scope.reason}")
@@ -1651,8 +1715,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       work.skip_with("no source table is known (validation_runs has no "
                      "reference_table for it and the launch named no "
                      "--reference_table); pass manual reference_table")
-      return
-    self._pin_and_columns(work, land_meta)
+      return None
+    return land_meta
 
   def locate_table(self, work: _Work) -> None:
     """One phase-A launch table: `locate`, then (still active)
@@ -1669,7 +1733,8 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     try:
       self.locate(work)
       if work.active:
-        self.create_planning_tables(work)
+        with self.timed(work.name, "planning tables"):
+          self.create_planning_tables(work)
     except PlanError:
       # PlanError IS a ValueError (create_planning_tables' own 409
       # Already Exists, R58): that one must still escape, planning_ddl
@@ -1941,19 +2006,26 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     R/E/H panel."""
     assert work.scope is not None and work.pin is not None
     cap = self.budget.max_bytes_billed
-    src_rows = [
-        self._one(sql, read_params(work.pin), cap) for sql in work.src_queries
-    ]
-    syn_rows = [
-        self._one(sql, work.scope.params, cap) for sql in work.syn_queries
-    ]
-    work.src_stats = parse_planning(src_rows, work.cols_src)
-    work.syn_stats = parse_planning(syn_rows, work.cols_syn)
-    verified = work.scope.verify(int(work.syn_stats["rows"]))
-    if verified.status != work.scope.status:
-      work.notes.append(f"{work.landing}: scope {verified.status} — "
-                        f"{verified.reason}")
-    work.scope = verified
+    with self.timed(work.name, "planning statistics"):
+      src_rows = [
+          self._one(sql, read_params(work.pin), cap) for sql in work.src_queries
+      ]
+      syn_rows = [
+          self._one(sql, work.scope.params, cap) for sql in work.syn_queries
+      ]
+      work.src_stats = parse_planning(src_rows, work.cols_src)
+      work.syn_stats = parse_planning(syn_rows, work.cols_syn)
+    with self.timed(work.name, "scope verification"):
+      verified = work.scope.verify(int(work.syn_stats["rows"]))
+      if verified.status != work.scope.status:
+        work.notes.append(f"{work.landing}: scope {verified.status} — "
+                          f"{verified.reason}")
+      work.scope = verified
+    with self.timed(work.name, "reference panel"):
+      self._read_panel(work, cap)
+
+  def _read_panel(self, work: _Work, cap: int) -> None:
+    assert work.pin is not None
     n = self.panel_n()
     if n is None:
       work.notes.append(f"{work.landing}: reference_rows_limit unknown — no "
@@ -2239,24 +2311,34 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
       planner.locate_table(work)
   active = [w for w in works if w.active]
   try:
-    planner.dry_run(active)
+    with planner.timed(_ALL_TABLES, "dry runs"):
+      planner.dry_run(active)
     active = [w for w in active if w.active]  # a failed dry run skips a table
     for work in active:
       planner.scan(work)
-      planner.sample(work)
+      with planner.timed(work.name, "sampling"):
+        planner.sample(work)
     planner.budget.check_bytes(planner.bytes)
   except BudgetExceededError as exc:
     # R58: phase A (create_planning_tables, above) already ran in full —
     # attach what it created so the CLI can report or clean it up.
     raise _BudgetExceededWithDdlError(str(exc),
                                       tuple(planner.planning_ddl)) from exc
-  planner.census(active)
+  with planner.timed(_ALL_TABLES, "census"):
+    planner.census(active)
   for work in works:
     if work.role == "external":
-      planner.locate_parent(work)
+      with planner.timed(work.name, "read-only parent"):
+        planner.locate_parent(work)
   tables = tuple(planner.table_plan(w) for w in works)
-  return _assemble(planner, tables, key, evaluated_at, catalogue_version,
+  plan = _assemble(planner, tables, key, evaluated_at, catalogue_version,
                    trigger, runner)
+  _LOGGER.info("planning %s: done in %.2fs: %d tables, %s",
+               planner.evaluation_id,
+               time.monotonic() - planner.started,
+               sum(1 for t in tables if t.role != "external"),
+               planner.bq.summary())
+  return plan
 
 
 def _assemble(planner: _Planner, tables: tuple[TablePlan, ...], key: str,

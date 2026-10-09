@@ -140,6 +140,45 @@ def test_run_passes_the_prepared_plan_to_options_and_pipeline(
   capsys.readouterr()
 
 
+def test_the_driver_logs_the_steps_around_planning(bq, resolved, monkeypatch,
+                                                   caplog, capsys):
+  """The launch lookup before planning and the RUNNING row, the prepare
+  statements and the submission after it say how long they took, in the
+  planner's line shape; the planner's own lines sit between them."""
+  del resolved
+  monkeypatch.setattr(driver, "build_evaluation_pipeline",
+                      tiny_pipeline(fast=True))
+  with caplog.at_level("INFO", logger="sdfb_evaluation"):
+    assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
+  capsys.readouterr()
+  lines = [r.getMessage() for r in caplog.records]
+  steps = [
+      m["step"] for m in (re.fullmatch(
+          r"evaluation (?P<id>\S+): (?P<step>[A-Za-z ]+) "
+          r"(?P<seconds>\d+\.\d+)s", line) for line in lines) if m
+  ]
+  assert steps == [
+      "target check", "launch lookup", "relationship models", "RUNNING row",
+      "prepare statements", "submission"
+  ]
+  planning = [i for i, line in enumerate(lines) if line.startswith("planning ")]
+  running = lines.index(next(x for x in lines if "RUNNING row" in x))
+  assert planning and max(planning) < running  # planning finished first
+
+
+def test_progress_lines_reach_stderr_once_the_command_asks_for_them(capsys):
+  """Python drops INFO records without a handler: the console log of a
+  launch would never show the planner's lines."""
+  import logging  # pylint: disable=import-outside-toplevel  # only here
+
+  from sdfb_evaluation.cli.main import show_progress  # pylint: disable=import-outside-toplevel  # only here
+  show_progress()
+  show_progress()  # idempotent: one handler
+  logging.getLogger("sdfb_evaluation.context.plan").info("planning x: probe")
+  err = capsys.readouterr().err
+  assert err.count("planning x: probe") == 1
+
+
 def test_a_fresh_evaluation_id_per_attempt(bq, resolved, monkeypatch, capsys):
   monkeypatch.setattr(driver, "build_evaluation_pipeline",
                       tiny_pipeline(fast=True))
